@@ -14,7 +14,9 @@ from agent_runtime.mission_chat_turns import (
 from agent_runtime.models import PersonaInstance
 from agent_runtime.persona_assignments import PersonaInstanceStore
 from agent_runtime.persona_chat_continuity import (
+    CLARIFY_TICKET_TTL_SECONDS,
     PersonaChatBusyError,
+    PersonaChatClarifyTicketStore,
     PersonaChatMintReceiptStore,
     PersonaChatRuntimeRegistry,
     current_tool_execution_scope,
@@ -338,3 +340,942 @@ def test_31_resident_finish_detaches_turn_handles_without_erasing_history():
     assert agent._stream_callback is None
     assert agent._persona_chat_client_message_id is None
     assert agent._persona_chat_turn_id is None
+
+
+def test_orphan_sweep_repairs_only_lease_free_sessions(isolate_agent_runtime_root):
+    """Live incident 2026-07-25: a reaped Launcher killed the serve child
+    mid-turn and the QA record froze at ``executing``. The boot sweep must
+    settle exactly the sessions whose root lease is acquirable (dead
+    executor) and leave lease-held sessions (live turns) alone."""
+
+    from agent_runtime.events import EventLog
+    from agent_runtime.persona_chat_continuity import repair_orphaned_chat_turns
+
+    for root in ("root_dead", "root_live"):
+        transition_mission_chat_turn(
+            session_id=root,
+            client_message_id="m1",
+            turn_id="t1",
+            state="pending",
+            metadata={"root_chat_session_id": root},
+        )
+        transition_mission_chat_turn(
+            session_id=root,
+            client_message_id="m1",
+            turn_id="t1",
+            state="executing",
+        )
+
+    with persona_chat_root_lease("root_live"):
+        repaired = repair_orphaned_chat_turns()
+
+    assert repaired == ["root_dead"]
+    dead = mission_chat_turn_record(session_id="root_dead", client_message_id="m1")
+    assert dead["state"] == "interrupted"
+    live = mission_chat_turn_record(session_id="root_live", client_message_id="m1")
+    assert live["state"] == "executing"
+    # The repair is a store mutation: watermark-gated consumers must converge.
+    tail = EventLog().tail(1)
+    assert tail and tail[0].type == "state.reconciled"
+    assert tail[0].payload["source"] == "chat_orphan_sweep"
+
+
+def test_orphan_sweep_without_orphans_appends_no_event(isolate_agent_runtime_root):
+    from agent_runtime.events import EventLog
+    from agent_runtime.persona_chat_continuity import repair_orphaned_chat_turns
+
+    for state in ("pending", "executing", "native_committed", "projected"):
+        transition_mission_chat_turn(
+            session_id="root_settled",
+            client_message_id="m1",
+            turn_id="t1",
+            state=state,
+            metadata={"root_chat_session_id": "root_settled"},
+        )
+
+    assert repair_orphaned_chat_turns() == []
+    assert EventLog().tail(1) == []
+
+
+# ── clarify tickets: the answer's binding to its question's thread ──────────
+
+
+_CLARIFY_ROOT = "persona_chat_personainst_dev_abcdef123456"
+
+
+def _clarify_ticket(store: PersonaChatClarifyTicketStore, **overrides) -> str:
+    values = {
+        "chat_session_id": _CLARIFY_ROOT,
+        "persona_instance_id": "personainst_dev",
+        "persona_id": "dev",
+        "asked_by_client_message_id": "agent-relay-aaaaaaaaaaaa",
+    }
+    values.update(overrides)
+    token = store.mint(**values)
+    assert token
+    return token
+
+
+def test_clarify_ticket_round_trips_a_token_to_its_session(isolate_agent_runtime_root):
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+
+    assert token.startswith("clarify-")
+    record = store.resolve(token)
+    assert record["chat_session_id"] == _CLARIFY_ROOT
+    assert record["persona_instance_id"] == "personainst_dev"
+    assert record["state"] == "open"
+
+
+def test_an_unknown_clarify_token_resolves_to_nothing_instead_of_raising(
+    isolate_agent_runtime_root,
+):
+    # The degrade path. A pruned or fabricated token must be an ordinary "no",
+    # because the caller turns it into a fallthrough, not a refusal.
+    store = PersonaChatClarifyTicketStore()
+    assert store.resolve("clarify-deadbeefdead") is None
+    assert store.resolve(None) is None
+    assert store.resolve("") is None
+    assert store.settle("clarify-deadbeefdead", client_message_id="cm-1") is None
+
+
+def test_the_clarify_token_never_appears_in_a_filename(isolate_agent_runtime_root):
+    """The token is a caller-supplied string from a model.
+
+    Interpolating one into a path is traversal, so the filename is the digest —
+    the same precedent the mint receipt store set."""
+
+    import hashlib
+
+    from agent_runtime import paths
+
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+
+    files = list((paths.store_root() / "persona_chat_clarify_tickets").glob("*.json"))
+    assert len(files) == 1
+    assert files[0].stem == hashlib.sha256(token.encode("utf-8")).hexdigest()
+    assert token not in files[0].name
+
+
+def test_settling_the_same_message_twice_is_idempotent(isolate_agent_runtime_root):
+    # A lease re-entry or a relay retry re-presents the SAME client_message_id.
+    # It is one answer, presented twice — never a second one.
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+
+    first = store.settle(token, client_message_id="cm-answer")
+    second = store.settle(token, client_message_id="cm-answer")
+
+    assert first["state"] == "answered"
+    assert second["state"] == "answered"
+    assert second["answered_by_client_message_id"] == "cm-answer"
+    assert second["answered_at"] == first["answered_at"]
+
+
+def test_a_second_distinct_answer_is_reported_as_a_rebind(isolate_agent_runtime_root):
+    # A spent token still BINDS — a follow-up after the answer belongs in the
+    # same conversation — so single-use governs accounting, not permission.
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+
+    store.settle(token, client_message_id="cm-answer")
+    again = store.settle(token, client_message_id="cm-follow-up")
+
+    assert again["state"] == "rebound"
+    assert store.resolve(token)["chat_session_id"] == _CLARIFY_ROOT
+
+
+def test_an_expired_ticket_still_binds_until_it_is_swept(isolate_agent_runtime_root):
+    # TTL governs GC only. One rule, no cliff: a ticket that outlived its TTL
+    # keeps working until a sweep actually removes the file.
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+    path = store._path(token)
+    stale = json.loads(path.read_text(encoding="utf-8"))
+    stale["created_at"] = time.time() - (CLARIFY_TICKET_TTL_SECONDS * 2)
+    path.write_text(json.dumps(stale), encoding="utf-8")
+
+    assert store.resolve(token)["chat_session_id"] == _CLARIFY_ROOT
+    assert store.sweep() == 1
+    assert store.resolve(token) is None
+
+
+def test_the_sweep_keeps_tickets_inside_their_ttl(isolate_agent_runtime_root):
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+
+    assert store.sweep() == 0
+    assert store.resolve(token) is not None
+
+
+def test_minting_a_ticket_reclaims_the_expired_ones(isolate_agent_runtime_root):
+    """The GC has a CALLER — the defect a defined-but-uncalled TTL hides.
+
+    ``sweep`` existed with no call site, so nothing ever pruned: the directory
+    grew for the life of the runtime. That is not merely disk, because
+    ``open_ticket_for_session`` reads EVERY file in it and the tokenless
+    settlement runs that on every mission-chat turn — so an unpruned store makes
+    each turn pay for every question ever asked. Pinned on the mint, the lane's
+    only cold seam: asking a question is rare, taking a turn is not."""
+
+    store = PersonaChatClarifyTicketStore()
+    expired = [_clarify_ticket(store) for _ in range(3)]
+    for token in expired:
+        path = store._path(token)
+        record = json.loads(path.read_text(encoding="utf-8"))
+        record["created_at"] = time.time() - (CLARIFY_TICKET_TTL_SECONDS * 2)
+        path.write_text(json.dumps(record), encoding="utf-8")
+    fresh = _clarify_ticket(store)
+
+    # Minting the NEXT question reclaimed all three, and never itself.
+    assert [store.resolve(token) for token in expired] == [None, None, None]
+    assert store.resolve(fresh)["chat_session_id"] == _CLARIFY_ROOT
+    # …so the per-turn lookup only ever walks the live window.
+    assert store.open_ticket_for_session(_CLARIFY_ROOT)["clarify_token"] == fresh
+
+
+def test_the_open_ticket_for_a_session_is_the_newest_unanswered_one(
+    isolate_agent_runtime_root,
+):
+    # Settlement without a token rides this lookup: any turn landing in a
+    # session with an open question answers it. Without it, every parent that
+    # complied via session_id would leave a permanently-open ticket and the
+    # adoption metric would read pessimistically forever.
+    store = PersonaChatClarifyTicketStore()
+    other = _clarify_ticket(store, chat_session_id="persona_chat_personainst_qa_bbbbbbbbbbbb")
+    older = _clarify_ticket(store)
+    newer = _clarify_ticket(store)
+
+    found = store.open_ticket_for_session(_CLARIFY_ROOT)
+    assert found["clarify_token"] == newer
+
+    store.settle(newer, client_message_id="cm-answer", bound_via="session_id")
+    assert store.open_ticket_for_session(_CLARIFY_ROOT)["clarify_token"] == older
+    # …and a different session's question was never touched.
+    assert store.resolve(other)["state"] == "open"
+    assert store.open_ticket_for_session(None) is None
+
+
+def test_a_ticket_with_no_session_is_never_minted(isolate_agent_runtime_root):
+    # Nothing to bind to is not an error, it is an absence: the question still
+    # ships, the answer just falls through to today's precedence.
+    assert PersonaChatClarifyTicketStore().mint(chat_session_id="") is None
+
+
+# ── the open-ticket lookup is O(1), and is never its own authority ──────────
+
+
+def _files_read(monkeypatch) -> list[str]:
+    """Every file the next call actually opens."""
+
+    from pathlib import Path
+
+    opened: list[str] = []
+    original = Path.read_text
+
+    def counting_read_text(self, *args, **kwargs):
+        # Counted on SUCCESS: a probe for a file that is not there costs a
+        # failed stat, not a read, and is exactly what "no open tickets for this
+        # session" is supposed to cost.
+        payload = original(self, *args, **kwargs)
+        opened.append(self.name)
+        return payload
+
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+    return opened
+
+
+def test_the_open_ticket_lookup_does_not_read_every_ticket(
+    isolate_agent_runtime_root, monkeypatch
+):
+    """The per-turn cost must not scale with the store.
+
+    ``open_ticket_for_session`` runs on nearly every mission-chat turn (the
+    tokenless settlement rides it). Globbing the ticket directory made each turn
+    pay for every question ever asked inside the live TTL window — an O(store)
+    read on the hot path of a store that is meant to be write-rare. The
+    by-session index answers it in a bounded number of reads: the index file,
+    then the one ticket it names."""
+
+    store = PersonaChatClarifyTicketStore()
+    for index in range(12):
+        _clarify_ticket(store, chat_session_id=f"persona_chat_personainst_dev_{index:012d}")
+    wanted = _clarify_ticket(store)
+
+    opened = _files_read(monkeypatch)
+    found = store.open_ticket_for_session(_CLARIFY_ROOT)
+
+    assert found["clarify_token"] == wanted
+    # One index file + one ticket file. Thirteen tickets exist; twelve of them
+    # were never touched.
+    assert len(opened) == 2, opened
+
+
+def test_a_session_with_no_ticket_costs_no_reads(isolate_agent_runtime_root, monkeypatch):
+    # The common shape by far: a turn in a session that never asked anything.
+    # "No index file for this session" has to MEAN "no open tickets" — that is
+    # what the marker buys — or the fallback scan would run on every turn and
+    # nothing would have been fixed.
+    store = PersonaChatClarifyTicketStore()
+    _clarify_ticket(store)
+
+    opened = _files_read(monkeypatch)
+    assert store.open_ticket_for_session("persona_chat_personainst_qa_ffffffffffff") is None
+    assert opened == []
+
+
+def test_a_pre_existing_ticket_store_is_indexed_on_first_use(isolate_agent_runtime_root):
+    """A store written before the index existed must still be found.
+
+    The rebuild is the migration: it reads the tickets themselves, so a
+    directory that predates this code (or a crash that lost the index) converges
+    on the first call rather than needing a repair pass."""
+
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+    for path in store._index_dir().glob("*.json"):
+        path.unlink()
+
+    assert store.open_ticket_for_session(_CLARIFY_ROOT)["clarify_token"] == token
+    assert store._index_state_path().exists()
+
+
+def test_a_stale_index_entry_degrades_to_a_miss_never_a_wrong_binding(
+    isolate_agent_runtime_root,
+):
+    """The index is a cache of POINTERS, never a second source of truth.
+
+    Every token it hands back is re-read from its own ticket file and verified
+    against that record's own state and session before it can bind anything. So
+    a hand-edited, half-written, or simply outdated entry can only ever cost a
+    wasted read — it can never bind a turn onto a thread the ticket does not
+    name."""
+
+    store = PersonaChatClarifyTicketStore()
+    live = _clarify_ticket(store)
+    foreign = _clarify_ticket(
+        store, chat_session_id="persona_chat_personainst_qa_bbbbbbbbbbbb"
+    )
+
+    # Forge the index: a token for ANOTHER session, plus one that resolves to
+    # nothing, both ranked newer than the real ticket.
+    now = time.time()
+    store._write_index(
+        _CLARIFY_ROOT,
+        [
+            {"clarify_token": "clarify-deadbeefdead", "created_at": now + 20},
+            {"clarify_token": foreign, "created_at": now + 10},
+            {"clarify_token": live, "created_at": now},
+        ],
+    )
+
+    found = store.open_ticket_for_session(_CLARIFY_ROOT)
+
+    assert found["clarify_token"] == live
+    # …and the two entries that failed verification are gone, so the index
+    # converges without a repair pass.
+    assert [entry["clarify_token"] for entry in store._index_entries(_CLARIFY_ROOT)] == [live]
+
+
+def test_settling_a_ticket_takes_it_out_of_the_index(isolate_agent_runtime_root):
+    store = PersonaChatClarifyTicketStore()
+    older = _clarify_ticket(store)
+    newer = _clarify_ticket(store)
+
+    store.settle(newer, client_message_id="cm-answer", bound_via="session_id")
+
+    assert [entry["clarify_token"] for entry in store._index_entries(_CLARIFY_ROOT)] == [older]
+    store.settle(older, client_message_id="cm-answer-2", bound_via="session_id")
+    assert store._index_entries(_CLARIFY_ROOT) == []
+    assert store.open_ticket_for_session(_CLARIFY_ROOT) is None
+
+
+def _age_clarify_store(store, token: str, seconds: float) -> None:
+    """Make the store look like it really sat for *seconds*.
+
+    Both the ticket's own ``created_at`` and the pointer the index recorded
+    for it, because in production those two ARE the same number — the index
+    copies it off the record at mint and off the record again at rebuild.
+    Aging only one of them would be testing a store shape the runtime cannot
+    produce."""
+
+    path = store._path(token)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    aged = time.time() - seconds
+    record["created_at"] = aged
+    path.write_text(json.dumps(record), encoding="utf-8")
+    root = str(record["chat_session_id"])
+    store._write_index(
+        root,
+        [
+            {**entry, "created_at": aged if entry["clarify_token"] == token else entry["created_at"]}
+            for entry in store._index_entries(root)
+        ],
+    )
+
+
+def test_the_sweep_reclaims_index_files_it_can_prove_are_dead(isolate_agent_runtime_root):
+    """By the file's OWN record of the newest ticket it names.
+
+    If every token an index file names is expired, the ticket loop already
+    unlinked all of them, so the file can only name the dead — that is the
+    whole safety argument, and it now rests on the file's content instead of
+    on the filesystem's clock."""
+
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+    _age_clarify_store(store, token, CLARIFY_TICKET_TTL_SECONDS * 2)
+    index_path = store._index_path(_CLARIFY_ROOT)
+
+    assert store.sweep() == 1
+    assert not index_path.exists()
+
+    # A live pointer survives the same sweep.
+    fresh = _clarify_ticket(store)
+    assert store.sweep() == 0
+    assert store.open_ticket_for_session(_CLARIFY_ROOT)["clarify_token"] == fresh
+
+
+def test_the_index_file_records_the_newest_ticket_it_names(isolate_agent_runtime_root):
+    """The recorded fact the sweep reads, written by BOTH writers.
+
+    ``_write_index`` (the add/drop path) and ``_rebuild_index`` (the migration
+    and crash-recovery path) used to hand-build the same dict in two places.
+    One of them gaining a field the other did not is precisely how the sweep
+    would end up reading ``None`` off half the store."""
+
+    store = PersonaChatClarifyTicketStore()
+    older = _clarify_ticket(store)
+    newer = _clarify_ticket(store)
+    index_path = store._index_path(_CLARIFY_ROOT)
+
+    written = json.loads(index_path.read_text(encoding="utf-8"))
+    entries = {entry["clarify_token"]: entry["created_at"] for entry in written["open_tokens"]}
+    assert written["newest_created_at"] == max(entries.values())
+    assert written["newest_created_at"] == entries[newer] > entries[older]
+
+    # …and the rebuild agrees, field for field, because there is one writer of
+    # the shape now.
+    store._invalidate_index()
+    assert store._rebuild_index() is True
+    rebuilt = json.loads(index_path.read_text(encoding="utf-8"))
+    assert rebuilt["newest_created_at"] == written["newest_created_at"]
+    assert rebuilt["schema_version"] == written["schema_version"]
+
+
+def test_a_fresh_mtime_cannot_keep_a_dead_index_file_alive(isolate_agent_runtime_root):
+    """The benign direction of the mtime lie, and it must still be retired.
+
+    A restore, a sync, or an ordinary file copy rewrites mtime without
+    touching a byte of content. Under the old rule that alone re-dated an
+    index file naming nothing but expired tickets, and the sweep would never
+    reclaim it again — the file survives every future sweep because each one
+    re-reads the same fresh mtime."""
+
+    import os
+
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+    _age_clarify_store(store, token, CLARIFY_TICKET_TTL_SECONDS * 2)
+    index_path = store._index_path(_CLARIFY_ROOT)
+    os.utime(index_path, None)  # the copy tool's fingerprint: mtime = now
+
+    assert store.sweep() == 1
+    assert not index_path.exists(), "the sweep believed an mtime over the file's own record"
+
+
+def test_a_stale_mtime_cannot_delete_a_live_index_file(isolate_agent_runtime_root):
+    """The direction that is NOT survivable, which is why this changed.
+
+    A copy that preserves source mtimes — or any restore of an archive — can
+    land an ancient mtime on an index file whose content is entirely live.
+    Deleting it does not merely cost a read: the marker goes on swearing the
+    index is complete, so the tokenless settlement never looks for the ticket
+    again and nothing rebuilds. That is the silent permanent miss this store
+    already fixed once, arriving through the filesystem instead of through a
+    swallowed write."""
+
+    import os
+
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+    index_path = store._index_path(_CLARIFY_ROOT)
+    aged = time.time() - (CLARIFY_TICKET_TTL_SECONDS * 2)
+    os.utime(index_path, (aged, aged))
+
+    assert store.sweep() == 0
+    assert index_path.exists()
+    # …and the pointer still answers, which is the thing that was at stake.
+    assert store.open_ticket_for_session(_CLARIFY_ROOT)["clarify_token"] == token
+
+
+def test_an_index_file_that_predates_the_recorded_field_still_sweeps(
+    isolate_agent_runtime_root,
+):
+    """The migration is free: no rebuild owed, no repair pass.
+
+    A ``schema_version`` 1 file has no ``newest_created_at``, but the same
+    fact is derivable from the entries it names — still the file's own
+    content. Treating its absence as "unknown, keep forever" would leak every
+    index file written before this code for the life of the store."""
+
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+    _age_clarify_store(store, token, CLARIFY_TICKET_TTL_SECONDS * 2)
+    index_path = store._index_path(_CLARIFY_ROOT)
+
+    legacy = json.loads(index_path.read_text(encoding="utf-8"))
+    legacy.pop("newest_created_at")
+    legacy["schema_version"] = 1
+    index_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+    assert store.sweep() == 1
+    assert not index_path.exists()
+
+
+def test_an_unreadable_index_file_is_never_swept(isolate_agent_runtime_root):
+    """UNREADABLE IS NOT DEAD, and the sweep only ever deletes on proof.
+
+    The failure this guards is not corruption, it is the ordinary Windows
+    case the add path already documents: an AV or indexer holding the file for
+    the instant the sweep reads it. Answering "could not read" with "therefore
+    expired" would delete a fully live index file — pointers and all — over a
+    transient lock. Keeping an inert file costs one small file; deleting a
+    live one costs a ticket nothing will ever look for again."""
+
+    import os
+
+    store = PersonaChatClarifyTicketStore()
+    _clarify_ticket(store)
+    index_path = store._index_path(_CLARIFY_ROOT)
+    index_path.write_text("{not json", encoding="utf-8")
+    aged = time.time() - (CLARIFY_TICKET_TTL_SECONDS * 2)
+    os.utime(index_path, (aged, aged))
+
+    store.sweep()
+
+    assert index_path.exists()
+    assert store._index_newest_created_at(index_path) is None
+
+
+def test_the_ticket_loop_and_the_index_sweep_share_one_cutoff(
+    isolate_agent_runtime_root,
+):
+    """One cutoff authority, not two constants that agree by coincidence.
+
+    The index sweep is only safe because "this file names nothing the ticket
+    loop did not just unlink" is TRUE, and that holds only while both sides
+    ask the same question of the same number. Pinned at the boundary: one TTL
+    either side of the ticket's age must move BOTH, together."""
+
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+    _age_clarify_store(store, token, 1_000.0)
+    index_path = store._index_path(_CLARIFY_ROOT)
+
+    # A TTL longer than the ticket's age: neither is expired.
+    assert store.sweep(ttl_seconds=5_000.0) == 0
+    assert index_path.exists()
+    assert store.resolve(token) is not None
+
+    # A TTL shorter than it: both go, on the same pass, from the same cutoff.
+    assert store.sweep(ttl_seconds=100.0) == 1
+    assert not index_path.exists()
+    assert store.resolve(token) is None
+
+
+def test_a_pointer_that_could_not_be_written_retracts_the_marker(
+    isolate_agent_runtime_root, monkeypatch
+):
+    """A lost ADD may not leave the index still claiming to be complete.
+
+    The marker is what lets "no index file for this session" be read as "no open
+    tickets". If the pointer write fails — a full store, or the ordinary Windows
+    case of an AV or indexer holding the replace target — the ticket is on disk
+    and OPEN while the marker goes on swearing the index knows about it. Nothing
+    rebuilds, so the tokenless settlement never finds it again: a silent,
+    permanent miss, landing on exactly the number the adoption readout exists to
+    report. Taking the claim back costs one rebuild and heals it."""
+
+    import agent_runtime.persona_chat_continuity as continuity
+
+    store = PersonaChatClarifyTicketStore()
+    _clarify_ticket(store)  # establishes the index + marker
+    index_dir = store._index_dir()
+    real_atomic = continuity._atomic_json
+
+    def failing_pointer_write(path, value):
+        if path.parent == index_dir and path.name != "_index_state.json":
+            raise OSError(32, "the process cannot access the file")
+        return real_atomic(path, value)
+
+    monkeypatch.setattr(continuity, "_atomic_json", failing_pointer_write)
+    lost = _clarify_ticket(store)
+    monkeypatch.setattr(continuity, "_atomic_json", real_atomic)
+
+    # The ticket itself was never in doubt — only the pointer to it.
+    assert store.resolve(lost)["state"] == "open"
+    # The completeness claim is gone, so the next lookup rebuilds instead of
+    # answering "no open tickets" from an index that silently lost one…
+    assert not store._index_state_path().exists()
+    assert store.open_ticket_for_session(_CLARIFY_ROOT)["clarify_token"] == lost
+    # …and having healed once, it is back on the O(1) path.
+    assert store._index_state_path().exists()
+    assert store._index_entries(_CLARIFY_ROOT)[0]["clarify_token"] == lost
+
+
+def test_a_pointer_read_that_failed_cannot_erase_the_pointers_it_missed(
+    isolate_agent_runtime_root, monkeypatch
+):
+    """The third seam of one bug: unreadable answered as empty, then written back.
+
+    ``_index_add`` is a read-modify-WRITE, so a read that returned "nothing
+    recorded" for a file that is merely unreadable hands it a blank slate and
+    the whole list is replaced by the one new pointer. The failure is the same
+    ordinary Windows one the sweep now refuses to treat as death and the add
+    path already documents for its write — an AV or indexer holding the file
+    for the instant it is read. The cost is not symmetric with a lost read:
+    the marker goes on swearing the index is complete, so the tokenless
+    settlement never looks for the erased tickets again and nothing rebuilds.
+
+    Retracting the claim is the same answer a swallowed write already gets,
+    and it heals the same way: one rebuild re-derives every pointer from the
+    ticket files, which are the authority the index only ever cached."""
+
+    import pathlib
+
+    store = PersonaChatClarifyTicketStore()
+    first = _clarify_ticket(store)
+    second = _clarify_ticket(store)
+    index_path = store._index_path(_CLARIFY_ROOT)
+    real_read = pathlib.Path.read_text
+
+    def locked_index(self, *args, **kwargs):
+        if self == index_path:
+            raise PermissionError(13, "the process cannot access the file")
+        return real_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", locked_index)
+    third = _clarify_ticket(store)
+    monkeypatch.setattr(pathlib.Path, "read_text", real_read)
+
+    # Unreadable is not empty: the earlier pointers were not overwritten with
+    # a list built from a read that never happened.
+    assert not store._index_state_path().exists(), (
+        "an unreadable index was treated as an empty one and written back"
+    )
+    for token in (first, second, third):
+        assert store.resolve(token)["state"] == "open"
+
+    # The retracted claim heals on the next lookup, and every ticket is back —
+    # including the two the blank-slate write would have erased for good.
+    assert store.open_ticket_for_session(_CLARIFY_ROOT)["clarify_token"] == third
+    recorded = {entry["clarify_token"] for entry in store._index_entries(_CLARIFY_ROOT)}
+    assert recorded == {first, second, third}
+
+    # …and settling the newest still finds the next one down, which is the
+    # observable the erasure destroyed.
+    store.settle(third)
+    assert store.open_ticket_for_session(_CLARIFY_ROOT)["clarify_token"] == second
+
+
+def test_a_rebuild_cannot_drop_a_pointer_minted_while_it_scanned(
+    isolate_agent_runtime_root,
+):
+    """The rebuild's scan is a snapshot; its write must not act like a truth.
+
+    A rebuild reads every ticket, then writes each session's pointers. A mint
+    landing between those two steps is invisible to the scan, and a write that
+    REPLACED the file would erase the pointer that mint had already recorded —
+    permanently, because the marker the rebuild writes last stops any later
+    rebuild from recovering it. The damage is not merely a miss: the lookup goes
+    on answering with an OLDER open ticket, so the tokenless settlement closes a
+    question that was already superseded — something the pre-index glob never
+    did. Unioning is safe precisely because the index is a cache: an entry the
+    ticket files do not back is verified away on the read path."""
+
+    store = PersonaChatClarifyTicketStore()
+    earlier = _clarify_ticket(store)
+    # A store with no marker: first use after this code arrives, or any crash
+    # that left a rebuild unfinished.
+    store._invalidate_index()
+
+    concurrent: list[str] = []
+    fired: list[bool] = []
+    real_iter = PersonaChatClarifyTicketStore._iter_records
+
+    def scan_then_let_a_mint_land(self):
+        records = list(real_iter(self))
+        if not fired:
+            # Guard set BEFORE the nested mint: that mint scans too (sweep, and
+            # its own rebuild), and re-entering here would recurse forever.
+            fired.append(True)
+            # The concurrent turn: it mints, and records its own pointer, while
+            # the rebuild above is holding a scan that predates it.
+            concurrent.append(_clarify_ticket(PersonaChatClarifyTicketStore()))
+        return iter(records)
+
+    PersonaChatClarifyTicketStore._iter_records = scan_then_let_a_mint_land
+    try:
+        assert PersonaChatClarifyTicketStore()._rebuild_index() is True
+    finally:
+        PersonaChatClarifyTicketStore._iter_records = real_iter
+
+    minted = concurrent[0]
+    tokens = [entry["clarify_token"] for entry in store._index_entries(_CLARIFY_ROOT)]
+    assert minted in tokens, "the rebuild replaced a pointer it never scanned"
+    assert earlier in tokens
+    # …and the lookup answers with the NEWEST open ticket, which is what the
+    # pre-index glob would have returned.
+    assert store.open_ticket_for_session(_CLARIFY_ROOT)["clarify_token"] == minted
+
+
+# ── a mint for a target that can never be served writes nothing ─────────────
+
+
+def _retired_placement(store: PersonaInstanceStore) -> tuple[PersonaInstance, dict]:
+    placement = store.add_instance(
+        persona_id="dev", placement_id="dev_agent_2", display_name="Dev (2)"
+    )
+    return placement, store.retire(placement.id, reason="placement deleted")
+
+
+def test_mint_refuses_a_retired_target_before_its_first_durable_write(
+    isolate_agent_runtime_root, tmp_path
+):
+    """The litter bug at its source.
+
+    ``mint`` bound the instance LAST — reserve receipt, create session, write
+    meta, write title, then ``open_chat``. For a retired placement that final
+    bind is a refusal, so the lane always ran to completion first and left a
+    titled thread in Mission Control for a dispatch that could never be served.
+    The refusal is decidable from the store before any of it, so it is."""
+
+    from agent_runtime import paths
+    from agent_runtime.persona_assignments import RetiredPersonaInstanceError
+    from agent_runtime.persona_chat_history import PERSONA_CHAT_SESSION_SOURCE
+
+    db = SessionDB(tmp_path / "state.db")
+    store = PersonaInstanceStore()
+    placement, archived = _retired_placement(store)
+
+    with pytest.raises(RetiredPersonaInstanceError) as excinfo:
+        PersonaChatMintReceiptStore().mint(
+            instance_store=store,
+            session_db=db,
+            persona_id="dev",
+            persona_instance_id=placement.id,
+            idempotency_key="dispatch-to-a-retired-placement",
+            title="triage the flaky login test",
+        )
+
+    assert excinfo.value.code == "retired_persona_instance"
+    assert excinfo.value.persona_instance_id == placement.id
+    assert str(excinfo.value.archive_path) == archived["archive_path"]
+    # Nothing durable survives the refusal: no session row, and not even the
+    # receipt directory the reserve step would have created.
+    assert db.list_sessions_rich(source=PERSONA_CHAT_SESSION_SOURCE, limit=50) == []
+    assert not (paths.store_root() / "persona_chat_mint_receipts").exists()
+    # And the tombstone is still a tombstone — the refusal never revives the row.
+    assert placement.id not in {row.id for row in store.list_all()}
+
+
+def test_mint_for_a_live_target_is_untouched_by_the_retirement_precondition(
+    isolate_agent_runtime_root, tmp_path
+):
+    """The precondition must not answer "retired" for a first-ever instance.
+
+    A brand-new instance has no live row either — retirement is that absence
+    PLUS a tombstone — so a predicate that keyed on absence alone would refuse
+    every first mint in the product."""
+
+    db = SessionDB(tmp_path / "state.db")
+    store = PersonaInstanceStore()
+    _retired_placement(store)  # a tombstone exists, for a DIFFERENT id
+
+    receipt = PersonaChatMintReceiptStore().mint(
+        instance_store=store,
+        session_db=db,
+        persona_id="dev",
+        persona_instance_id="personainst_dev",
+        idempotency_key="first-ever",
+        title="Dev chat",
+    )
+
+    root = receipt["root_chat_session_id"]
+    assert receipt["state"] == "completed"
+    assert db.get_session(root) is not None
+    assert store.get("personainst_dev").default_chat_session_id == root
+
+
+def test_a_flaky_tombstone_probe_cannot_escape_the_mint_lane_untyped(
+    isolate_agent_runtime_root, tmp_path, monkeypatch, caplog
+):
+    """The untyped escape this fix exists to kill, one layer down.
+
+    The precondition's answer comes from filesystem I/O — ``exists`` /
+    ``iterdir`` / ``is_file`` over an archive root that in production can be a
+    UNC share. This call site handles exactly ONE typed error, so an ``OSError``
+    from a flaky root would sail straight past it and reach the operator as the
+    traceback the whole fix was about, just with a different exception class.
+
+    The predicate owns the posture so both call sites inherit it: a probe that
+    cannot READ the archive cannot PROVE retirement, so it answers "not
+    retired" — the pre-flight's existing fail-open — and warns rather than
+    failing silently. ``open_chat`` is still the write chokepoint that refuses,
+    so the cost of failing open is the litter, never the guarantee.
+    """
+
+    import logging
+
+    from agent_runtime import persona_assignments
+
+    db = SessionDB(tmp_path / "state.db")
+    store = PersonaInstanceStore()
+
+    def _flaky(_instance_id):
+        raise OSError("the store root went away mid-probe")
+
+    monkeypatch.setattr(
+        persona_assignments, "_retired_persona_instance_archive_path", _flaky
+    )
+
+    with caplog.at_level(logging.WARNING, logger=persona_assignments.__name__):
+        assert store.retired_instance_archive_path("personainst_dev") is None
+    assert any(
+        "retirement tombstone probe failed" in record.getMessage()
+        for record in caplog.records
+    ), "failing open must not be silent"
+
+    # …and the lane that used to traceback now runs to completion.
+    receipt = PersonaChatMintReceiptStore().mint(
+        instance_store=store,
+        session_db=db,
+        persona_id="dev",
+        persona_instance_id="personainst_dev",
+        idempotency_key="flaky-probe",
+        title="Dev chat",
+    )
+
+    assert db.get_session(receipt["root_chat_session_id"]) is not None
+
+
+def test_a_retire_that_lands_mid_mint_still_leaves_no_titled_thread(
+    isolate_agent_runtime_root, tmp_path
+):
+    """The race the entry precondition could not close, forced open.
+
+    ``retire`` refuses only on a live run/worker binding or an active
+    assignment, and a chat mint holds neither until it binds — so a retirement
+    landing AFTER the precondition passed used to let the lane reserve, create,
+    write meta and TITLE the session before the bind refused, leaving a titled
+    thread in Mission Control for a placement that no longer existed. Binding
+    before the first session-visible write is what closes it, and this pins the
+    ordering rather than the symptom: a bind moved back to the end of the lane
+    fails here."""
+
+    from agent_runtime.persona_assignments import RetiredPersonaInstanceError
+    from agent_runtime.persona_chat_history import PERSONA_CHAT_SESSION_SOURCE
+
+    class _RetiringMidLaneStore(PersonaInstanceStore):
+        """Retires the target the instant the mint's precondition passes.
+
+        Armed only after setup: ``add_instance`` binds through ``open_chat``,
+        which asks this same seam."""
+
+        armed = False
+
+        def assert_bindable(self, **kwargs):
+            resolved = super().assert_bindable(**kwargs)
+            if self.armed:
+                self.armed = False
+                super().retire(resolved, reason="placement deleted mid-dispatch")
+            return resolved
+
+    db = SessionDB(tmp_path / "state.db")
+    store = _RetiringMidLaneStore()
+    placement = store.add_instance(
+        persona_id="dev", placement_id="dev_agent_2", display_name="Dev (2)"
+    )
+    store.armed = True
+
+    with pytest.raises(RetiredPersonaInstanceError):
+        PersonaChatMintReceiptStore().mint(
+            instance_store=store,
+            session_db=db,
+            persona_id="dev",
+            persona_instance_id=placement.id,
+            idempotency_key="retired-while-minting",
+            title="triage the flaky login test",
+        )
+
+    assert db.list_sessions_rich(source=PERSONA_CHAT_SESSION_SOURCE, limit=50) == []
+    assert placement.id not in {row.id for row in PersonaInstanceStore().list_all()}
+
+
+def test_the_mint_binds_before_it_creates_the_session_row(
+    isolate_agent_runtime_root, tmp_path
+):
+    # The same ordering, stated positively so the invariant is readable without
+    # a fault: nothing a reader would see in Mission Control is written until
+    # the target has been proven bindable BY BINDING.
+    order: list[str] = []
+
+    class _OrderedStore(PersonaInstanceStore):
+        def open_chat(self, **kwargs):
+            order.append("bind")
+            return super().open_chat(**kwargs)
+
+    class _OrderedDB(SessionDB):
+        def create_session(self, *args, **kwargs):
+            order.append("create_session")
+            return super().create_session(*args, **kwargs)
+
+        def set_session_title(self, *args, **kwargs):
+            order.append("title")
+            return super().set_session_title(*args, **kwargs)
+
+    PersonaChatMintReceiptStore().mint(
+        instance_store=_OrderedStore(),
+        session_db=_OrderedDB(tmp_path / "state.db"),
+        persona_id="dev",
+        persona_instance_id="personainst_dev",
+        idempotency_key="ordering",
+        title="Dev chat",
+    )
+
+    assert order == ["bind", "create_session", "title"]
+
+
+def test_the_mint_refusal_names_its_target_the_way_every_other_refusal_does(
+    isolate_agent_runtime_root, tmp_path
+):
+    """One refusal, three enforcement points, ONE spelling of the target id.
+
+    ``mint`` reported the caller's raw token while the dispatch pre-flight and
+    ``open_chat`` both report the id the canonical derivation resolved — so a
+    caller that spelled the target with a drifted actor token got the same
+    refusal under two different names depending on which point happened to
+    fire. ``persona_instance_id`` is the field an operator (and the archived
+    history it points at) is keyed off; it cannot depend on which guard won.
+    """
+
+    from agent_runtime.persona_assignments import RetiredPersonaInstanceError
+
+    db = SessionDB(tmp_path / "state.db")
+    store = PersonaInstanceStore()
+    placement, archived = _retired_placement(store)
+
+    with pytest.raises(RetiredPersonaInstanceError) as excinfo:
+        PersonaChatMintReceiptStore().mint(
+            instance_store=store,
+            session_db=db,
+            persona_id="dev",
+            persona_instance_id=f"persona_{placement.id}",
+            idempotency_key="drifted-actor-token",
+            title="triage the flaky login test",
+        )
+
+    assert excinfo.value.persona_instance_id == placement.id
+    assert str(excinfo.value.archive_path) == archived["archive_path"]

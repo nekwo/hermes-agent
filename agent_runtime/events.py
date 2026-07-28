@@ -19,6 +19,12 @@ from .serde import from_jsonable, to_jsonable
 
 EVENT_PAYLOAD_LIMIT_BYTES = 4096
 
+# Match compact-JSON top-level id tokens while still treating the parsed event
+# as authoritative. Payload copies may add candidates, but never false results.
+_INDEXED_EVENT_ID_TOKEN_RE = re.compile(
+    r'"(?:task_id|session_id)":(?:(?:"(?:\\.|[^"\\])*")|null)'
+)
+
 # Env override for the rotation cap (operator/test knob). When unset the
 # config-derived cap is used, memoized per store root so the hot append path
 # does not re-parse config on every event.
@@ -48,9 +54,9 @@ def _rotation_cap_bytes() -> int:
         return cached
     cap = event_rotation.DEFAULT_ROTATION_CAP_BYTES
     try:
-        from .config import load_agent_runtime_config
+        from .config import load_root_runtime_config
 
-        raw = getattr(getattr(load_agent_runtime_config(), "event_log", None), "rotation_cap_bytes", None)
+        raw = getattr(getattr(load_root_runtime_config(), "event_log", None), "rotation_cap_bytes", None)
         if raw is not None:
             cap = max(0, int(raw))
     except Exception:
@@ -432,6 +438,7 @@ class CachedEventLog(EventLog):
     def __init__(self) -> None:
         super().__init__()
         self._lines: list[str] | None = None
+        self._lines_by_id_token: dict[str, list[str]] | None = None
 
     def _cached_lines(self) -> list[str]:
         if self._lines is None:
@@ -440,6 +447,11 @@ class CachedEventLog(EventLog):
                 if source.exists():
                     lines.extend(source.read_text(encoding="utf-8").splitlines())
             self._lines = lines
+            indexed: dict[str, list[str]] = {}
+            for line in lines:
+                for match in _INDEXED_EVENT_ID_TOKEN_RE.finditer(line):
+                    indexed.setdefault(match.group(0), []).append(line)
+            self._lines_by_id_token = indexed
         return self._lines
 
     def _scan(
@@ -453,7 +465,9 @@ class CachedEventLog(EventLog):
     ) -> list[Event]:
         type_tokens = _type_json_tokens(types)
         selected: list[Event] = []
-        for line in reversed(self._cached_lines()):
+        self._cached_lines()
+        candidates = (self._lines_by_id_token or {}).get(token, ())
+        for line in reversed(candidates):
             if token not in line:
                 continue
             if type_tokens is not None and not any(type_token in line for type_token in type_tokens):

@@ -52,6 +52,7 @@ from .dev_discipline import validate_dev_progress_gate
 from .proof_runner import CommandProofRunner
 from .proof_command_policy import validate_request_test_run_policy
 from .proof_recipes import normalize_request_test_run_decision, proof_recipe_metadata
+from .profile_context import mcp_owner_profile_name
 from .preflight import open_preflight_blocker, record_preflight_pass, run_preflight
 from .progress import RunProgressSink
 from .proof_batches import ProofBatchStore
@@ -947,6 +948,7 @@ class TickEngine:
                         proof_workdir_task = copy.deepcopy(pre_context_task)
                         current_run = self.run_store.get(run.id)
                         _attach_stage_self_heal_to_run_progress(current_run, task)
+                        _pin_visual_request_to_mcp_owner_profile(decision)
                         validate_dev_progress_gate(persona, current_run, decision)
                         if _record_failed_proof_auto_attachment(current_run, task, decision, actor=persona.id):
                             self.run_store.update(current_run)
@@ -2648,6 +2650,17 @@ def _set_stage_status(task: Task, stage_id: str, status: StageStatus) -> None:
             stage.status = status
             stage.updated_at = now()
             break
+
+
+def _pin_visual_request_to_mcp_owner_profile(decision: AgentDecision) -> None:
+    """Make the launch pin follow the MCP server owner, not the caller."""
+
+    if decision.type not in {DecisionType.REQUEST_SCREENSHOT, DecisionType.REQUEST_VIDEO}:
+        return
+    pins = decision.payload.get("required_launch_pins")
+    if not isinstance(pins, dict):
+        return
+    pins["hermes_profile"] = mcp_owner_profile_name(str(decision.payload.get("mcp_server") or ""))
 
 
 def _validate_visual_request_not_redundant(task: Task, decision, *, proof_store: ProofStore) -> None:

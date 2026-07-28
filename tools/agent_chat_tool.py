@@ -15,6 +15,26 @@ In-process matters: one Hermes process shelling out to another can hit the
 ``agent.log`` rotation lock (see mission_goal_tool.py), and the operator lane
 must never fork a second, slightly different chat pipeline.
 
+Thread contract (V3 — task-scoped dispatch, 2026-07-27): a send that names no
+thread opens a FRESH one per dispatched task (``agent_runtime.mission_chat.
+dispatch_session_policy``, default ``new_per_dispatch``); continuation is
+explicit — pass back the ``session_id`` the reply returned, or ``new_session:
+false`` to continue the target's CURRENT default thread (the most recently
+established one: every dispatch mint repoints that pointer through
+``open_chat``, so it is NOT a stable per-pair thread — naming the ``session_id``
+is the only way to continue a SPECIFIC conversation). Every reply carries
+``session_established`` {fresh, reason, predecessor_session_id}, and a fresh
+thread records its predecessor in the session meta (``_dispatched_from``). The
+decision itself belongs to ``agent_runtime.dispatch_session_policy``; this tool
+only forwards the caller's tri-state intent uncoerced.
+
+Clarify continuity (2026-07-27): a ``clarify_request`` carries a
+``clarify_token``. Echoing it on the reply binds the answer to the thread the
+question was asked in — outranking policy AND a stale ``session_id`` — so the
+one exchange that MUST stay threaded no longer depends on a model reproducing an
+opaque session id. The token resolves in the handler (one ticket-store
+authority); this tool forwards it and reports the resulting ``clarify_binding``.
+
 Scope contract (V2 — chained relays enabled 2026-07-08):
 - relays may chain (operator -> Alice -> Neko -> Dev). Depth, cycle, and
   budget decisions are owned by ONE authority — ``agent_runtime.relay_policy``
@@ -45,6 +65,7 @@ import uuid
 from types import SimpleNamespace
 
 from agent_runtime import relay_policy
+from agent_runtime.dispatch_session_policy import coerce_optional_flag
 from tools.registry import registry
 
 logger = logging.getLogger(__name__)
@@ -55,7 +76,7 @@ _MESSAGE_LIMIT = 12000
 AGENT_CHAT_SEND_SCHEMA = {
     "name": "agent_chat_send",
     "description": (
-        "Send a conversational message to ANOTHER Harness persona (persona id e.g. neko_supervisor/dev/qa, or a @personainst_* handle for a specific instance; display names refused). Omit session_id to continue the durable pair thread; new_session=true starts a fresh one. Disambiguator: does NOT start tracked work -- use mission_goal_create for that."
+        "Send a conversational message to ANOTHER Harness persona (persona id e.g. neko_supervisor/dev/qa, or a @personainst_* handle for a specific instance; display names refused). Each new task you dispatch starts a FRESH thread by default; to continue an exchange (an in-task follow-up) pass back the session_id their reply returned. Answering their clarifying question: pass back the clarify_token from their clarify_request and your answer lands in that question's thread. new_session=false continues the target's CURRENT default thread (the most recent one) instead. Disambiguator: does NOT start tracked work -- use mission_goal_create for that."
     ),
     "parameters": {
         "type": "object",
@@ -78,19 +99,37 @@ AGENT_CHAT_SEND_SCHEMA = {
             "session_id": {
                 "type": "string",
                 "description": (
-                    "Optional target chat session id. Omit to continue the target's default chat "
-                    "session (repeated sends thread into one conversation). Mutually exclusive with "
-                    "new_session."
+                    "Continue THIS exact thread — pass back the session_id a previous reply "
+                    "returned to answer their clarifying question or send an in-task follow-up. "
+                    "Omit when dispatching a new task. Cannot be combined with new_session=true."
+                ),
+            },
+            "clarify_token": {
+                "type": "string",
+                "description": (
+                    "Answering a teammate's clarifying question: pass back the clarify_token that "
+                    "came inside their clarify_request. It puts your answer in the thread the "
+                    "question was asked in, so you do not have to get session_id right. Omit for "
+                    "anything else. Cannot be combined with new_session=true."
                 ),
             },
             "new_session": {
                 "type": "boolean",
                 "description": (
-                    "Start a FRESH clean thread with the target instead of continuing the default "
-                    "one. Use sparingly — one durable thread per pair is the norm. Cannot be combined "
-                    "with session_id."
+                    "Omit this: a new task dispatch already gets its own fresh thread. Pass false to "
+                    "continue the target's CURRENT default thread instead — that is the most "
+                    "recently established one, not a stable per-pair thread, so name the session_id "
+                    "when you mean a SPECIFIC conversation. Pass true to force a fresh thread where "
+                    "the default would not. Cannot be combined with session_id."
                 ),
-                "default": False,
+            },
+            "title": {
+                "type": "string",
+                "description": (
+                    "Optional short name for the thread this dispatch opens (e.g. 'Flaky login "
+                    "test triage'). Defaults to the opening words of your message. Ignored when "
+                    "you continue an existing thread."
+                ),
             },
             "max_seconds": {
                 "type": "number",
@@ -122,7 +161,9 @@ def agent_chat_send(
     persona_id,
     message,
     session_id=None,
-    new_session=False,
+    clarify_token=None,
+    new_session=None,
+    title=None,
     max_seconds=240,
     requested_by_session=None,
 ):
@@ -135,20 +176,40 @@ def agent_chat_send(
     persona_id = (persona_id or "").strip()
     message = (message or "").strip()
     resolved_session_id = (str(session_id).strip() or None) if session_id else None
-    new_session = bool(new_session)
+    resolved_clarify_token = (str(clarify_token).strip() or None) if clarify_token else None
+    # TRI-STATE, not a bool: True = fresh thread, False = continue the target's
+    # current default thread, UNSET = let agent_runtime.mission_chat.dispatch_session_policy
+    # decide (default: one fresh thread per dispatched task). `bool()` here would
+    # collapse "unset" into an explicit "sticky" and silently pin every caller to
+    # the old mega-thread behavior.
+    new_session = coerce_optional_flag(new_session)
+    resolved_title = (str(title).strip() or None) if title else None
     if not persona_id:
         return _refusal("agent_chat_send requires a persona_id.")
     if not message:
         return _refusal("agent_chat_send requires a non-empty message.")
     if len(message) > _MESSAGE_LIMIT:
         return _refusal(f"message exceeds the {_MESSAGE_LIMIT}-character relay limit; send a briefing, not a dump.")
-    if new_session and resolved_session_id:
+    if new_session is True and resolved_session_id:
         # Contradictory: new_session asks for a fresh thread; session_id names an
         # existing one. Refuse rather than silently picking one — the caller must
         # decide which thread they mean.
         return _refusal(
             "agent_chat_send: new_session=true and session_id are contradictory — omit session_id "
             "to start a fresh thread, or drop new_session to continue that specific thread.",
+            error_kind="contradictory_thread_target",
+        )
+    if new_session is True and resolved_clarify_token:
+        # The symmetric contradiction, and the ONE clarify case with no correct
+        # reading: a clarify token means "put this answer where the question
+        # was", new_session=true means "put it somewhere new". A stale
+        # session_id alongside a token is NOT this — the token deliberately wins
+        # that one downstream, because getting session_id wrong is exactly the
+        # failure the token exists to absorb.
+        return _refusal(
+            "agent_chat_send: new_session=true and clarify_token are contradictory — a clarify "
+            "answer belongs in the thread its question was asked in. Drop new_session to answer "
+            "them, or drop clarify_token to dispatch something new.",
             error_kind="contradictory_thread_target",
         )
 
@@ -193,13 +254,22 @@ def agent_chat_send(
         persona_id=persona_id,
         persona_instance_id=target_instance_id,
         session_id=resolved_session_id,
+        # Clarify continuity: the handler resolves this token to the thread the
+        # question was asked in and outranks everything else with it. Forwarded
+        # verbatim — the tool never resolves it (one ticket-store authority, and
+        # it lives with the handler that owns the session lane).
+        clarify_token=resolved_clarify_token,
         # Fresh-thread lane: the handler mints a new canonical session through the
         # SAME default-session chokepoint (mint= mode), never a tool-side mint —
         # keeping ONE minting authority (the orphaned-relay fix's whole point).
+        # Forwarded UNCOERCED (None stays None) so the handler's policy resolver
+        # can tell "the caller said nothing" from "the caller said continue".
         new_session=new_session,
         task_id=None,
         goal_id=None,
-        title=f"Agent relay to {persona_id}",
+        # Names the thread only when this send mints one; the handler derives a
+        # title from the message when the caller offered none.
+        title=resolved_title,
         message=message,
         provider=None,
         model=None,
@@ -211,6 +281,10 @@ def agent_chat_send(
         stream=False,
         max_seconds=wall_budget,
         json=True,
+        # Sender provenance (envelope field, not guard logic): the sender's
+        # chat-root session id lets the handler's target chokepoint scope
+        # bare-persona resolution to the SENDER's workspace.
+        requested_by_session=source_token or None,
         # Explicit relay envelope — the handler's chokepoint guard reads
         # these; ambient ContextVars never cross a transport boundary.
         relay_chain=list(chain),
@@ -255,10 +329,22 @@ def agent_chat_send(
         "total_tokens": payload.get("total_tokens"),
         "requested_by": requested_by,
     }
+    # Thread lineage: whether this send opened a fresh task-scoped thread, the
+    # typed reason, and the thread it superseded. The caller needs it to know
+    # that continuing THIS exchange means passing `session_id` back — under the
+    # new_per_dispatch default, omitting it opens another fresh thread.
+    if payload.get("session_established") is not None:
+        result["session_established"] = payload.get("session_established")
+    # Where a clarify answer actually landed, and why. Present only when this
+    # send carried a token or settled an open question; `overrode_session_id`
+    # names a session_id the token outranked, so the override is never silent.
+    if payload.get("clarify_binding") is not None:
+        result["clarify_binding"] = payload.get("clarify_binding")
     # Clarify-back: the briefed agent asked a question instead of answering
     # (it holds context you don't — e.g. "which dev, launcher or backend?").
-    # Forward the structured question so you can answer it by sending the choice
-    # back into this same session_id; that continues the exchange as chat.
+    # Forwarded WHOLESALE, which is why the `clarify_token` inside it needs no
+    # code here: answer by sending the choice back with that token (or this
+    # session_id) and the exchange continues as one conversation.
     if payload.get("clarify_request") is not None:
         result["clarify_request"] = payload.get("clarify_request")
     if payload.get("relay_chain") is not None:
@@ -315,7 +401,9 @@ AGENT_CHAT_THREADS_SCHEMA = {
                 "type": "string",
                 "description": (
                     "Optional filter: a single persona id or personainst_* handle to list just that "
-                    "teammate's thread. Omit to list every reachable teammate."
+                    "teammate's thread. Omit to list your addressable teammates on this level — each "
+                    "persona's deliberate placement, with the plumbing canonical row shown only when "
+                    "the persona has no placement on your level."
                 ),
             },
         },
@@ -327,7 +415,7 @@ AGENT_CHAT_THREADS_SCHEMA = {
 AGENT_CHAT_OPEN_SCHEMA = {
     "name": "agent_chat_open",
     "description": (
-        "Read the recent message tail of your shared thread with ONE teammate (persona id, or a @personainst_* handle for a specific instance). Read-only; never creates a session. Disambiguator: agent_chat_open READS a thread; agent_chat_send replies; agent_chat_threads lists your threads."
+        "Review the recent message tail of a thread with ONE teammate (persona id, or a @personainst_* handle for a specific instance) — 'what did we last say to each other?' before you continue it or inspect what a dispatched task actually said. Reviews their current default thread, or the session_id you name. Read-only; never creates a session. Disambiguator: agent_chat_open READS a thread; agent_chat_send replies; agent_chat_threads lists your threads."
     ),
     "parameters": {
         "type": "object",
@@ -335,9 +423,10 @@ AGENT_CHAT_OPEN_SCHEMA = {
             "persona_id": {
                 "type": "string",
                 "description": (
-                    "Target teammate: a persona id (e.g. 'dev', reaches the canonical primary "
-                    "instance) or a personainst_* handle (reaches THAT specific instance). "
-                    "Display names are not accepted."
+                    "Target teammate: a persona id (e.g. 'dev' — reaches the persona's deliberate "
+                    "placement on your level, or the canonical channel when it has none) or a "
+                    "personainst_* handle (reaches THAT specific instance). Display names are not "
+                    "accepted."
                 ),
             },
             "session_id": {
@@ -368,19 +457,22 @@ def _canonical_persona_token(value) -> str:
     return safe_assignment_token(value)
 
 
-def agent_chat_threads(*, persona_id=None):
+def agent_chat_threads(*, persona_id=None, requested_by_session=None):
     if _scope_off():
         return _refusal(
             "agent_chat is disabled on this runtime (HERMES_AGENT_CHAT_SCOPE=off). "
             "Tell the operator instead of retrying."
         )
 
+    from agent_runtime import workspace_scope
     from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
     from agent_runtime.persona_assignments import (
         PersonaInstanceStore,
         canonical_persona_instance_id,
+        is_canonical_persona_channel,
         resolve_default_chat_session_id_for_instance,
         safe_assignment_text,
+        sender_scope_workspace_id,
     )
     from agent_runtime.persona_chat_history import persona_chat_history_summary
     from agent_runtime.worker_sessions import WorkerSessionStore
@@ -404,6 +496,25 @@ def agent_chat_threads(*, persona_id=None):
     store = PersonaInstanceStore()
     store.derive_from_workers(list(ensure_persisted_personas(cfg)), WorkerSessionStore().list_all())
     instances = store.list_all()
+
+    # The DEFAULT / bare-persona listing is the sender-scoped ADDRESSABLE roster:
+    # each persona's canonical row is shadowed behind an in-scope placement, and
+    # out-of-scope placements are hidden — so an agent is offered the deliberate
+    # placements on its own level, not the plumbing canonical rows. Sender scope
+    # comes from the caller's chat-root session (threaded from the registry
+    # handler), falling back to the active workspace. An explicit personainst_*
+    # filter (wanted_instance_id) is deliberate targeting and BYPASSES the shadow:
+    # that exact instance stays listable cross-workspace (ruling — explicit handle
+    # targeting is never shadowed).
+    if wanted_instance_id is None:
+        scope_workspace_id = sender_scope_workspace_id(
+            requested_by_session, instance_store=store
+        )
+        instances = workspace_scope.addressable_roster(
+            instances,
+            scope_workspace_id=scope_workspace_id,
+            is_canonical=is_canonical_persona_channel,
+        )
 
     # Title / last-activity / message-count come from the SAME projection the
     # persona-chat-history frame uses; keyed by the session the row renders under.
@@ -487,19 +598,22 @@ def _session_belongs_to_chat_lane(session_id: str, *, handle: str, default_sessi
     return len(tail) == 12 and all(ch in "0123456789abcdef" for ch in tail.lower())
 
 
-def agent_chat_open(*, persona_id, session_id=None, limit=20):
+def agent_chat_open(*, persona_id, session_id=None, limit=20, requested_by_session=None):
     if _scope_off():
         return _refusal(
             "agent_chat is disabled on this runtime (HERMES_AGENT_CHAT_SCOPE=off). "
             "Tell the operator instead of retrying."
         )
 
+    from agent_runtime import workspace_scope
     from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
     from agent_runtime.persona_assignments import (
         PersonaInstanceStore,
         canonical_chat_instance_id,
+        is_canonical_persona_channel,
         resolve_default_chat_session_id_for_instance,
         safe_assignment_text,
+        sender_scope_workspace_id,
     )
     from agent_runtime.persona_chat_history import (
         MAX_PERSONA_CHAT_MESSAGE_TAIL,
@@ -516,8 +630,9 @@ def agent_chat_open(*, persona_id, session_id=None, limit=20):
     except ValueError as exc:
         return _refusal(safe_assignment_text(str(exc), limit=240), error_kind="unsupported_persona")
     # A personainst_* handle targets THAT specific instance's thread (a persona may
-    # run several); a bare persona id targets the canonical primary. Preserved by
-    # canonical_persona_instance_id (placement-backed sibling ids survive).
+    # run several) and is used as-is; a BARE persona id is resolved through the
+    # sender-scoped addressable roster below (placements shadow canonical), not
+    # collapsed straight onto the canonical channel.
     target_instance_id = target if _looks_like_instance_handle(target) else None
 
     try:
@@ -528,6 +643,34 @@ def agent_chat_open(*, persona_id, session_id=None, limit=20):
     cfg = load_agent_runtime_config()
     store = PersonaInstanceStore()
     store.derive_from_workers(list(ensure_persisted_personas(cfg)), WorkerSessionStore().list_all())
+
+    # A BARE persona resolves through the sender-scoped ADDRESSABLE roster: a
+    # single in-scope placement is the target (placements shadow canonical), so
+    # "open your thread with qa" reviews the deliberate placement's lane, not the
+    # plumbing canonical channel. With no in-scope placement (or two — which the
+    # send guard would refuse) the canonical channel is the fallback. An explicit
+    # personainst_* handle is deliberate targeting and is used as-is, never
+    # shadowed.
+    if target_instance_id is None:
+        scope_workspace_id = sender_scope_workspace_id(
+            requested_by_session, instance_store=store
+        )
+        addressable = workspace_scope.addressable_roster(
+            (
+                instance
+                for instance in store.list_all()
+                if getattr(instance, "persona_id", None) == resolved_persona
+            ),
+            scope_workspace_id=scope_workspace_id,
+            is_canonical=is_canonical_persona_channel,
+        )
+        placements = [
+            instance
+            for instance in addressable
+            if not is_canonical_persona_channel(instance)
+        ]
+        if len(placements) == 1:
+            target_instance_id = placements[0].id
 
     handle = canonical_chat_instance_id(resolved_persona, target_instance_id)
     default_session = resolve_default_chat_session_id_for_instance(
@@ -594,7 +737,11 @@ registry.register(
         persona_id=args.get("persona_id"),
         message=args.get("message"),
         session_id=args.get("session_id"),
-        new_session=args.get("new_session", False),
+        clarify_token=args.get("clarify_token"),
+        # No `False` default: an omitted new_session must reach the policy
+        # resolver as "unset", not as an explicit request to continue.
+        new_session=args.get("new_session"),
+        title=args.get("title"),
         max_seconds=args.get("max_seconds", 240),
         requested_by_session=kw.get("session_id"),
     ),
@@ -606,7 +753,10 @@ registry.register(
     name="agent_chat_threads",
     toolset="agent_chat",
     schema=AGENT_CHAT_THREADS_SCHEMA,
-    handler=lambda args, **kw: agent_chat_threads(persona_id=args.get("persona_id")),
+    handler=lambda args, **kw: agent_chat_threads(
+        persona_id=args.get("persona_id"),
+        requested_by_session=kw.get("session_id"),
+    ),
     description="List your agent-to-agent chat threads with reachable teammates (read-only, no mint).",
     emoji="🧵",
 )
@@ -619,6 +769,7 @@ registry.register(
         persona_id=args.get("persona_id"),
         session_id=args.get("session_id"),
         limit=args.get("limit", 20),
+        requested_by_session=kw.get("session_id"),
     ),
     description="Review the recent message tail of your shared thread with a teammate (read-only, no mint).",
     emoji="📖",

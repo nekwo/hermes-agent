@@ -18,9 +18,9 @@ def normalize_redaction_mode(value: Any, *, fallback: str = STRICT) -> str:
 def redaction_mode(config: Any | None = None) -> str:
     if config is None:
         try:
-            from .config import load_agent_runtime_config
+            from .config import load_root_runtime_config
 
-            config = load_agent_runtime_config()
+            config = load_root_runtime_config()
         except Exception:
             return STRICT
     return normalize_redaction_mode(getattr(config, "redaction_mode", STRICT))

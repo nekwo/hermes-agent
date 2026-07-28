@@ -26,7 +26,7 @@ from .blueprints.instantiate import instantiate_blueprint
 from .blueprints.resolve import BindingResolver
 from .blueprints.store import BlueprintStore
 from .cli_format import task_summary
-from .config import load_agent_runtime_config
+from .config import load_agent_runtime_config, load_root_runtime_config
 from .default_plan import ensure_default_mission_plan, specialize_default_plan_for_task
 from .delivery_directive import DeliveryDirectiveInvalid, normalize_delivery_directive
 from .events import EventLog
@@ -333,7 +333,7 @@ def _attach_requested_blueprint_plan(
 ) -> dict[str, Any] | None:
     blueprint_id = str(requested_blueprint_id or "").strip()
     if not blueprint_id or selection_mode != "explicit":
-        if bool(getattr(config or load_agent_runtime_config(), "root_node_mode", False)):
+        if bool(getattr(config or load_root_runtime_config(), "root_node_mode", False)):
             try:
                 bp = BlueprintStore().get("neko_default_script")
                 plan = instantiate_blueprint(

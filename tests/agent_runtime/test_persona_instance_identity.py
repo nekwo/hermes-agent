@@ -586,3 +586,213 @@ def test_snapshot_emits_orphan_and_no_warning_for_real_agent(monkeypatch):
     assert not [
         w for w in healed["parity"]["warnings"] if w.get("code") == "orphaned_persona_instance"
     ]
+
+
+# --- Phase 4: stale chat-session bindings (the ``session_not_in_db`` class) ----
+#
+# Live evidence 2026-07-25 (home X:\Eternia\.hermes, profile alice): the
+# persona_chat_history projection accounted 10 permanent ``session_not_in_db``
+# drops — instances still pointing at chat sessions SessionDB no longer had.
+# The projection is READ-ONLY and can only hide those rows, so each orphan was
+# one amber unit on Mission Control's parity pill forever. These cover the
+# write-path repair.
+
+
+class _FakeSessionDB:
+    """Minimal SessionDB stand-in: knows a set of live session ids."""
+
+    def __init__(self, session_ids=(), *, get_raises: bool = False, list_raises: bool = False):
+        self.session_ids = list(session_ids)
+        self.get_raises = get_raises
+        self.list_raises = list_raises
+
+    def list_sessions_rich(self, **kwargs):
+        if self.list_raises:
+            raise RuntimeError("session db unreadable")
+        limit = int(kwargs.get("limit") or 20)
+        return [{"id": session_id} for session_id in self.session_ids][:limit]
+
+    def get_session(self, session_id):
+        if self.get_raises:
+            raise RuntimeError("session db unreadable")
+        return {"id": session_id} if session_id in self.session_ids else None
+
+
+def _binding_cleared_events() -> list:
+    return [
+        event
+        for event in EventLog().tail(200)
+        if _event_type(event) == "persona_instance.chat_binding_cleared"
+    ]
+
+
+def _bind(instance_id: str, *, persona_id: str, session_id: str, mode: str = "chat"):
+    instance = _seed_row(
+        instance_id,
+        persona_id=persona_id,
+        display_name=instance_id,
+        mode=mode,
+        session_id=session_id,
+    )
+    stored = PersonaInstanceStore().get(instance.id)
+    stored.default_chat_session_id = session_id
+    PersonaInstanceStore().update(stored)
+    return stored
+
+
+def test_repair_missing_chat_session_bindings_clears_only_the_dangling_pointer():
+    _bind("personainst_gone", persona_id="dev", session_id="persona_chat_gone")
+    _bind("personainst_live", persona_id="backend_dev", session_id="persona_chat_live")
+    store = PersonaInstanceStore()
+
+    report = store.repair_missing_chat_session_bindings(
+        session_db=_FakeSessionDB(["persona_chat_live"])
+    )
+
+    assert report["applied"] is True
+    assert report["repaired_count"] == 1
+    assert report["repaired"][0]["persona_instance_id"] == "personainst_gone"
+    assert report["repaired"][0]["session_id"] == "persona_chat_gone"
+    assert sorted(report["repaired"][0]["cleared_fields"]) == [
+        "default_chat_session_id",
+        "session_id",
+    ]
+
+    healed = PersonaInstanceStore().get("personainst_gone")
+    assert healed.default_chat_session_id is None
+    assert healed.session_id is None
+    assert healed.mode == "configured"  # demoted once it holds no chat
+    untouched = PersonaInstanceStore().get("personainst_live")
+    assert untouched.default_chat_session_id == "persona_chat_live"
+    assert untouched.mode == "chat"
+
+    # Store mutations always emit an event.
+    events = _binding_cleared_events()
+    assert len(events) == 1
+    payload = events[0].payload if hasattr(events[0], "payload") else events[0]["payload"]
+    assert payload["session_id"] == "persona_chat_gone"
+    assert payload["reason"] == "session_missing_from_session_db"
+
+
+def test_repair_missing_chat_session_bindings_dry_run_writes_nothing():
+    _bind("personainst_gone", persona_id="dev", session_id="persona_chat_gone")
+    store = PersonaInstanceStore()
+
+    report = store.repair_missing_chat_session_bindings(
+        apply=False,
+        session_db=_FakeSessionDB(["persona_chat_other"]),
+    )
+
+    assert report["applied"] is False
+    assert report["dry_run"] is True
+    assert report["repaired_count"] == 1
+    assert report["repaired"][0]["persona_instance_id"] == "personainst_gone"
+    # Reported, not repaired: the row and the event log are untouched.
+    still_bound = PersonaInstanceStore().get("personainst_gone")
+    assert still_bound.default_chat_session_id == "persona_chat_gone"
+    assert still_bound.session_id == "persona_chat_gone"
+    assert still_bound.mode == "chat"
+    assert _binding_cleared_events() == []
+
+
+def test_repair_missing_chat_session_bindings_skips_task_bound_mission_sessions():
+    instance = _bind(
+        "personainst_worker",
+        persona_id="dev",
+        session_id="mission_run_session",
+        mode="task_bound",
+    )
+    stored = PersonaInstanceStore().get(instance.id)
+    stored.current_task_id = "task_live"
+    PersonaInstanceStore().update(stored)
+
+    report = PersonaInstanceStore().repair_missing_chat_session_bindings(
+        session_db=_FakeSessionDB(["persona_chat_other"])
+    )
+
+    # A mission turn runs in a session that lives in the run/event stream, not
+    # the operator SessionDB — absent there is normal, not stale.
+    assert report["repaired_count"] == 0
+    assert PersonaInstanceStore().get("personainst_worker").session_id == "mission_run_session"
+    assert _binding_cleared_events() == []
+
+
+def test_repair_missing_chat_session_bindings_refuses_on_blind_database():
+    _bind("personainst_gone", persona_id="dev", session_id="persona_chat_gone")
+    store = PersonaInstanceStore()
+
+    empty = store.repair_missing_chat_session_bindings(session_db=_FakeSessionDB([]))
+    assert empty["skipped"] == "session_db_empty"
+    assert empty["repaired_count"] == 0
+
+    unreadable = store.repair_missing_chat_session_bindings(
+        session_db=_FakeSessionDB([], list_raises=True)
+    )
+    assert unreadable["skipped"] == "session_db_unavailable"
+    assert unreadable["repaired_count"] == 0
+
+    # Enumerates, but every row probe raises: "unknown" is never "absent".
+    blind_probe = store.repair_missing_chat_session_bindings(
+        session_db=_FakeSessionDB(["persona_chat_other"], get_raises=True)
+    )
+    assert blind_probe["repaired_count"] == 0
+
+    assert PersonaInstanceStore().get("personainst_gone").session_id == "persona_chat_gone"
+    assert _binding_cleared_events() == []
+
+
+def test_repair_skips_when_head_home_is_not_authoritative(monkeypatch):
+    """The self-resolved SessionDB is only trustworthy under an explicit head
+    authority. Without HERMES_HEAD_HOME, a maintenance verb run under a
+    profile home probes that profile's (populated!) database and reads every
+    operator chat as absent — the live 2026-07-25 reconcile cleared 10 live
+    bindings exactly this way. Fail closed with a typed skip instead."""
+
+    from agent_runtime import persona_chat_history
+
+    _bind("personainst_gone", persona_id="dev", session_id="persona_chat_gone")
+    monkeypatch.delenv("HERMES_HEAD_HOME", raising=False)
+    monkeypatch.setattr(
+        persona_chat_history,
+        "_default_session_db",
+        lambda: (_ for _ in ()).throw(AssertionError("guard must refuse before resolving the DB")),
+    )
+
+    report = PersonaInstanceStore().repair_missing_chat_session_bindings()
+
+    assert report["skipped"] == "head_home_not_authoritative"
+    assert report["repaired_count"] == 0
+    assert PersonaInstanceStore().get("personainst_gone").session_id == "persona_chat_gone"
+    assert _binding_cleared_events() == []
+
+
+def test_reconcile_repairs_stale_chat_bindings_and_dry_run_is_inert(monkeypatch):
+    import os
+
+    from agent_runtime import persona_chat_history
+
+    _bind("personainst_gone", persona_id="dev", session_id="persona_chat_gone")
+    # The presence probe fails closed without an explicit head authority; the
+    # repair path under test assumes correctly-routed maintenance.
+    monkeypatch.setenv("HERMES_HEAD_HOME", os.environ.get("HERMES_HOME", ""))
+    monkeypatch.setattr(
+        persona_chat_history,
+        "_default_session_db",
+        lambda: _FakeSessionDB(["persona_chat_live"]),
+    )
+
+    dry = reconcile_persona_instances(apply=False, event_log=EventLog())
+    assert dry["session_binding_repaired_count"] == 1
+    assert PersonaInstanceStore().get("personainst_gone").default_chat_session_id == (
+        "persona_chat_gone"
+    )
+    assert _binding_cleared_events() == []
+
+    applied = reconcile_persona_instances(event_log=EventLog())
+    assert applied["session_binding_repaired_count"] == 1
+    assert PersonaInstanceStore().get("personainst_gone").default_chat_session_id is None
+    assert len(_binding_cleared_events()) == 1
+
+    # Idempotent: the second pass has nothing left to repair.
+    again = reconcile_persona_instances(event_log=EventLog())
+    assert again["session_binding_repaired_count"] == 0

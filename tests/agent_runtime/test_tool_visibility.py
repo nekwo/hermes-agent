@@ -262,6 +262,94 @@ def test_turn_tool_context_does_not_persist_requested_blocked_tool_names(tmp_pat
     assert "blocked_tool_names" not in context["last_actual"]["tool_schema"]
 
 
+def test_turn_tool_context_never_labels_another_session_as_last_actual(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    persona = _persona("dev")
+
+    persist_tool_turn_actual(
+        persona_id=persona.id,
+        session_id="session_other",
+        turn_id="turn_other",
+        model_input={
+            "tool_schema": {
+                "schema_version": 1,
+                "kind": "actual_model_tools",
+                "final_model_tools": ["read_file"],
+                "tool_count": 1,
+            },
+        },
+    )
+
+    context = turn_tool_context_for_persona(
+        persona,
+        ToolVisibilityOptions(session_id="session_current"),
+    )
+
+    assert context["last_actual"] is None
+    assert context["last_actual_session_match"] is False
+    assert context["latest_persona_actual"]["session_id"] == "session_other"
+
+
+def test_turn_tool_context_keeps_exact_session_and_latest_persona_provenance_separate(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    persona = _persona("dev")
+    for session_id, turn_id in (
+        ("session_current", "turn_current"),
+        ("session_newer", "turn_newer"),
+    ):
+        persist_tool_turn_actual(
+            persona_id=persona.id,
+            session_id=session_id,
+            turn_id=turn_id,
+            model_input={"tool_schema": {"final_model_tools": ["read_file"]}},
+        )
+
+    context = turn_tool_context_for_persona(
+        persona,
+        ToolVisibilityOptions(session_id="session_current"),
+    )
+
+    assert context["last_actual"]["session_id"] == "session_current"
+    assert context["last_actual_session_match"] is True
+    assert context["latest_persona_actual"]["session_id"] == "session_newer"
+
+
+def test_scoped_context_partitions_session_withheld_policy_and_excluded_toolsets():
+    persona = _persona("neko_supervisor")
+    preview = _scoped_preview(persona)
+
+    callable_names = set(preview["final_model_tools"])
+    withheld_names = {item["name"] for item in preview["withheld_tools"]}
+    policy_names = {item["name"] for item in preview["policy_tools"]}
+    candidate_names = set(preview["persona_candidate_tools"])
+
+    assert callable_names.isdisjoint(withheld_names)
+    assert withheld_names == candidate_names - callable_names
+    assert policy_names.isdisjoint(candidate_names)
+    assert preview["availability_counts"] == {
+        "configured_toolsets": len(preview["configured_toolsets"]),
+        "effective_toolsets": len(preview["effective_toolsets"]),
+        "callable": len(callable_names),
+        "withheld": len(withheld_names),
+        "policy": len(policy_names),
+        "excluded_toolsets": len(preview["excluded_toolsets"]),
+    }
+    assert preview["model_tool_token_estimate"]["exact"] is False
+    assert preview["resolution_id"].startswith("toolres_")
+    assert preview["resolved_at"].endswith("Z")
+
+
+def test_registry_hygiene_is_not_mislabeled_as_persona_safety_policy():
+    preview = _scoped_preview(_persona("neko_supervisor"))
+    blocked = {item["name"]: item["reason"] for item in preview["blocked_tools"]}
+
+    assert blocked["kanban_create"] == "registry_hygiene"
+    assert blocked["feishu_doc_read"] == "registry_hygiene"
+    assert blocked["skill_manage"] == "session_tool_policy"
+
+
 # --- T9b: chat-lane preview parity ------------------------------------------
 # The permission-preview resolver historically showed ``effective_toolsets``
 # (the persona's raw configured set), so it omitted BOTH the operator-chat
@@ -317,8 +405,9 @@ def test_chat_lane_preview_matches_actual_lane_default_scoped():
     assert "terminal" not in final
     assert "execute_code" not in final
     assert "skill_manage" not in final
-    # ...while the operator-chat capability augmentation IS present...
-    assert "mission_goal_create" in final
+    # ...while direct teammate messaging stays present and unfinished goal
+    # creation is absent from standard Neko chat.
+    assert "mission_goal_create" not in final
     assert "agent_chat_send" in final
     # ...including clarify, which PERSONA_BLOCKED_TOOLS blocks on autonomous
     # runs but the chat bridge unblocks — the old preview wrongly hid it.

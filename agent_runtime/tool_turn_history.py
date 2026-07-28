@@ -61,13 +61,37 @@ def persist_tool_turn_actual(
 def load_tool_turn_history(*, persona_id: str, session_id: str | None, limit: int = 10) -> dict[str, Any]:
     persona = _safe_token(persona_id)
     if not persona:
-        return {"last_actual": None, "history": []}
+        return {
+            "last_actual": None,
+            "latest_persona_actual": None,
+            "last_actual_session_match": False,
+            "history": [],
+        }
+    session_path = None
     candidates = []
     if session_id:
-        candidates.append(_history_path(_history_key(persona_id=persona, session_id=session_id)))
+        session_path = _history_path(_history_key(persona_id=persona, session_id=session_id))
+        candidates.append(session_path)
     root = _history_root()
+    latest_persona_actual: dict[str, Any] | None = None
     if root.exists():
-        candidates.extend(sorted(root.glob(f"{persona}__*.json"), key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True))
+        persona_paths = sorted(
+            root.glob(f"{persona}__*.json"),
+            key=lambda item: item.stat().st_mtime if item.exists() else 0,
+            reverse=True,
+        )
+        candidates.extend(persona_paths)
+        latest_recorded_at = ""
+        for path in persona_paths:
+            payload_actual = _read_history(path).get("last_actual")
+            recorded_at = str(
+                payload_actual.get("recorded_at") if isinstance(payload_actual, dict) else ""
+            )
+            if isinstance(payload_actual, dict) and (
+                latest_persona_actual is None or recorded_at > latest_recorded_at
+            ):
+                latest_persona_actual = payload_actual
+                latest_recorded_at = recorded_at
     seen: set[str] = set()
     history: list[dict[str, Any]] = []
     last_actual: dict[str, Any] | None = None
@@ -77,8 +101,18 @@ def load_tool_turn_history(*, persona_id: str, session_id: str | None, limit: in
             continue
         seen.add(key)
         payload = _read_history(path)
-        if last_actual is None and isinstance(payload.get("last_actual"), dict):
-            last_actual = payload["last_actual"]
+        payload_actual = payload.get("last_actual")
+        # `last_actual` is deliberately strict: it is the last actual for the
+        # requested session, never a silent fallback from another chat. The
+        # cross-session value remains available as `latest_persona_actual` for a
+        # clearly-labelled history lane in Mission Control.
+        if (
+            last_actual is None
+            and session_path is not None
+            and path == session_path
+            and isinstance(payload_actual, dict)
+        ):
+            last_actual = payload_actual
         for item in list(payload.get("history") or []):
             if isinstance(item, dict):
                 history.append(item)
@@ -86,7 +120,12 @@ def load_tool_turn_history(*, persona_id: str, session_id: str | None, limit: in
                 break
         if len(history) >= limit:
             break
-    return {"last_actual": last_actual, "history": history[:limit]}
+    return {
+        "last_actual": last_actual,
+        "latest_persona_actual": latest_persona_actual,
+        "last_actual_session_match": last_actual is not None,
+        "history": history[:limit],
+    }
 
 
 def _history_root():

@@ -625,6 +625,44 @@ def test_qa_review_cross_stack_gap_routes_to_neko():
     )
 
 
+def test_qa_verdict_wraps_one_scalar_finding_without_changing_its_text():
+    verdict = decision(
+        DecisionType.QA_VERDICT,
+        {
+            "verdict": "needs_fixes",
+            "findings": "  Mission Control still projects duplicate QA markers.  ",
+            "proof_ids": ["proof_visual"],
+        },
+    )
+
+    validate_planning_decision(verdict)
+
+    assert verdict.payload["findings"] == [
+        "  Mission Control still projects duplicate QA markers.  "
+    ]
+
+
+def test_qa_verdict_serializes_structured_findings_and_drops_empty_rows():
+    verdict = decision(
+        DecisionType.QA_VERDICT,
+        {
+            "verdict": "blocked",
+            "findings": [
+                {"code": "profile_pin_missing", "proof_id": "proof_visual"},
+                "",
+                "  ",
+            ],
+            "proof_ids": ["proof_visual"],
+        },
+    )
+
+    validate_planning_decision(verdict)
+
+    assert verdict.payload["findings"] == [
+        '{"code":"profile_pin_missing","proof_id":"proof_visual"}'
+    ]
+
+
 def test_qa_review_normalizes_notes_metadata_so_skill_shape_stays_strict():
     packet = qa_review(notes="looks good")
 

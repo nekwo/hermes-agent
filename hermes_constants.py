@@ -96,14 +96,39 @@ def get_hermes_head_home() -> Path:
     """Return the operator/head Hermes home — the home the Mission Control
     projection reads — IGNORING any active persona profile-home override.
 
-    When a profile-home override is active this returns the recorded outermost
-    home; at the true top level (no override, nothing recorded) it falls back to
-    the ordinary resolved home, so behavior is unchanged off the relay path.
+    The launcher may provide ``HERMES_HEAD_HOME`` to keep the Mission Control
+    transcript store stable while ``HERMES_HOME`` selects a different runtime
+    profile. A context-local relay head still wins so nested persona execution
+    cannot escape the operator that started it. With neither authority present,
+    behavior falls back to the ordinary resolved home.
     """
     head = _HERMES_HEAD_HOME.get()
     if head is not _UNSET and head:
         return Path(head)
+    configured = os.environ.get("HERMES_HEAD_HOME", "").strip()
+    if configured:
+        return Path(configured).expanduser()
     return get_hermes_home()
+
+
+def hermes_head_home_is_authoritative() -> bool:
+    """True when :func:`get_hermes_head_home` answers from an explicit head
+    authority — the context-recorded outermost home (relay nesting) or the
+    operator-supplied ``HERMES_HEAD_HOME`` environment value.
+
+    False means the head has degenerated to the ambient :func:`get_hermes_home`
+    resolution, so under an active profile-home override the "head" IS the
+    override and the real operator home is unknown. Operator-visible stores
+    must fail closed in that state instead of writing a transcript into a
+    profile-local DB the Mission Control projection never reads. When the head
+    is authoritative, it may legitimately EQUAL the active override (a persona
+    bound to the operator's own head profile, e.g. the seeded base agent) —
+    that is the same database, not a divergence.
+    """
+    head = _HERMES_HEAD_HOME.get()
+    if head is not _UNSET and head:
+        return True
+    return bool(os.environ.get("HERMES_HEAD_HOME", "").strip())
 
 
 def _get_platform_default_hermes_home() -> Path:

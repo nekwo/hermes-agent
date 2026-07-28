@@ -22,8 +22,9 @@ The key:
     fallback order among themselves but always land after the operator row
     and before the terminal row.
   - ``TURN_SEQ_TERMINAL`` (1000000) — the turn's terminal row: the recorded
-    reply, or the ``turn_interrupted`` marker (a turn has one or the other,
-    never both).
+    reply, or a terminal-turn marker (``turn_interrupted`` /
+    ``budget_exhausted``; see ``persona_chat_history.TERMINAL_TURN_MARKERS``).
+    A turn has one or the other, never both.
 
 Rows that predate the key (pre-C8 persisted history) carry no anchor/seq and
 order by the caller's existing fallback — honest fallback, never a fabricated

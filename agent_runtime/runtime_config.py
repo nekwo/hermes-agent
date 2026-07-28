@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from agent_runtime.dispatch_session_policy import DEFAULT_DISPATCH_SESSION_POLICY
+
 
 @dataclass(slots=True)
 class ContinuousRoleSessionConfig:
@@ -170,6 +172,141 @@ class CoordinatorPermissionConfig:
 
 
 @dataclass(slots=True)
+class MissionChatConfig:
+    """Harness-wide defaults for the canonical Mission Control chat lane.
+
+    ``default_max_seconds`` is the wall budget a mission-chat turn gets when the
+    caller passes no ``--max-seconds``. It defaults to **240 s** — the value the
+    CLI parser hardcoded before this block existed, so an absent stanza keeps
+    today's behavior exactly.
+
+    Why it is configurable: the mission-chat lane is the primary home for agent
+    work, but 240 s is a *conversation*-shaped window (the last
+    ``max(60s, 15%)`` is reserved for the graceful checkpoint, so a default turn
+    has ~180 s of tool-using time — see ``turn_budget`` and G10 of
+    ``docs/agent-runtime-harness/mission-chat-lane-gap-audit.md``). A deployment
+    that runs real work here raises the floor once, in one place, instead of
+    teaching every caller to pass a flag.
+
+    An explicit ``--max-seconds`` on a turn ALWAYS wins over this default — the
+    config sets the budget for callers that express no opinion, it caps nobody.
+    The configured value itself is clamped to ``[30 s, 86400 s]``: below the
+    clamp the checkpoint reserve leaves no working window at all, and above it
+    one conversational turn outlives the mission wall-clock deadline.
+
+    ``dispatch_session_policy`` decides which chat session an agent→agent
+    dispatch lands in when the caller states no thread target. It defaults to
+    ``new_per_dispatch``: each dispatched task starts a fresh, task-scoped
+    thread (with typed lineage back to its predecessor) instead of accumulating
+    in one sticky mega-thread per pair, which re-fed the whole transcript to the
+    provider on every turn. ``sticky`` restores the previous behavior
+    deployment-wide. The same precedence rule applies — an explicit
+    ``session_id`` or ``new_session`` on the send always wins. The decision
+    itself lives in :mod:`agent_runtime.dispatch_session_policy`.
+
+    Root ``config.yaml`` shape::
+
+        agent_runtime:
+          mission_chat:
+            # Wall budget for a mission-chat turn when --max-seconds is absent.
+            # Default 240; clamped to [30, 86400]. An explicit --max-seconds
+            # always wins. The last max(60s, 15%) of the window is reserved for
+            # the turn's graceful checkpoint reply.
+            default_max_seconds: 1800
+            # Thread target for a dispatch that names none: new_per_dispatch
+            # (default — one thread per task) or sticky (one durable thread
+            # per pair). An explicit session_id / new_session always wins.
+            dispatch_session_policy: new_per_dispatch
+            # Bind a clarify ANSWER to the thread its QUESTION was asked in,
+            # via an echoed clarify_token, instead of trusting the replier to
+            # reproduce the session_id. Default true.
+            clarify_token_binding: true
+    """
+
+    default_max_seconds: float = 240.0
+    dispatch_session_policy: str = DEFAULT_DISPATCH_SESSION_POLICY
+    #: Whether the mission-chat lane mints a ``clarify_token`` alongside a
+    #: ``clarify_request`` and binds a reply that echoes one back to the thread
+    #: the question was asked in. Defaults to **True**: the failure it retires
+    #: (a clarify answer opening a THIRD thread, leaving the child reading a
+    #: bare choice with no question attached) is silent and lossy, and both
+    #: directions are additive — a caller that never echoes hits exactly
+    #: today's precedence. Flipping it to ``false`` IS the rollback: no token is
+    #: minted, none is resolved, ticket files go inert and the TTL sweep
+    #: reclaims them. Loaded through ``load_root_runtime_config`` for the same
+    #: reason ``dispatch_session_policy`` is — one profile's own config must not
+    #: change how every other profile threads.
+    clarify_token_binding: bool = True
+
+
+@dataclass(slots=True)
+class McpAdmissionConfig:
+    """Which personas may have their declared MCP servers registered for a run.
+
+    ``enabled`` is the single kill switch and defaults to **False**: admission is
+    the first path on which an autonomous mission-chat agent can spawn a local
+    executable, so it stays off until an operator turns it on deliberately.
+    ``roles`` is deny-by-default with no wildcard — a role with no entry, or a
+    lane with no entry under that role, admits nothing.
+
+    ``max_tool_calls_per_run`` is the per-run MCP call budget (design §3's
+    residual-risk mitigation, §7's ``mcp_admission_budget_exhausted`` row): once
+    a run has spent it, further admitted MCP calls are refused with a typed row
+    instead of dispatched. It bounds a LOOPING admitted agent, which single-flight
+    (one admission at a time) and the wall/AS0 watchdogs (bound the turn's clock,
+    not its call count) cannot. There is deliberately no "unlimited" spelling —
+    a non-positive or unparseable value falls back to the default and the parser
+    caps it, because an unbounded admitted MCP surface is the exact failure this
+    budget exists to prevent.
+
+    Root ``config.yaml`` shape (see
+    ``docs/agent-runtime-harness/mission-chat-mcp-admission.md``)::
+
+        agent_runtime:
+          mcp_admission:
+            enabled: true
+            connect_timeout_seconds: 20
+            max_tool_calls_per_run: 120
+            roles:
+              qa:
+                mission_chat: [launcher_qa]
+    """
+
+    enabled: bool = False
+    connect_timeout_seconds: float = 20.0
+    max_tool_calls_per_run: int = 120
+    roles: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
+class TerminalEnvelopeConfig:
+    """Which envelope-gated command classes a role may run on a governed lane.
+
+    There is deliberately NO ``enabled`` kill switch: enforcement is
+    unconditional, and the deny-by-default property comes from the grant table
+    being EMPTY rather than from a flag. One authority, no double negative — an
+    operator revokes a grant by deleting the class from the list.
+
+    ``grants`` is deny-by-default with no wildcard and no inheritance: a role
+    with no entry, or a lane with no entry under that role, grants nothing. The
+    classes an operator may name at all are bounded by
+    ``agent_runtime.terminal_envelope.GRANTABLE_COMMAND_CLASSES``; anything
+    else is a typed config error rather than a silent grant.
+
+    Root ``config.yaml`` shape (see
+    ``docs/agent-runtime-harness/mission-chat-terminal-envelope-grants.md``)::
+
+        agent_runtime:
+          terminal_envelope:
+            grants:
+              dev:
+                mission_chat: [git_push]
+    """
+
+    grants: dict[str, dict[str, list[str]]] = field(default_factory=dict)
+
+
+@dataclass(slots=True)
 class RuntimeConfig:
     schema_version: int = 1
     heartbeat_ttl_seconds: int = 900
@@ -220,3 +357,6 @@ class RuntimeConfig:
     swarm: SwarmConfig = field(default_factory=SwarmConfig)
     supervision: SupervisionConfig = field(default_factory=SupervisionConfig)
     coordinator_permissions: CoordinatorPermissionConfig = field(default_factory=CoordinatorPermissionConfig)
+    mission_chat: MissionChatConfig = field(default_factory=MissionChatConfig)
+    mcp_admission: McpAdmissionConfig = field(default_factory=McpAdmissionConfig)
+    terminal_envelope: TerminalEnvelopeConfig = field(default_factory=TerminalEnvelopeConfig)

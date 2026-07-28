@@ -56,7 +56,7 @@ from typing import Any, Iterable
 
 from hermes_time import now
 
-from .config import AgentRuntimeConfig, load_agent_runtime_config
+from .config import AgentRuntimeConfig, load_root_runtime_config
 from .events import EVENT_PAYLOAD_LIMIT_BYTES, EventLog
 from .models import Event
 from .serde import to_jsonable
@@ -181,7 +181,7 @@ def delta_patches_enabled(config: AgentRuntimeConfig | None = None) -> bool:
     cfg = config
     if cfg is None:
         try:
-            cfg = load_agent_runtime_config()
+            cfg = load_root_runtime_config()
         except Exception:
             return False
     read_model = getattr(cfg, "read_model", None)

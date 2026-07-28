@@ -39,8 +39,14 @@ def test_ready_line_and_exit_frames():
 
     frames = _run([_request("r1", ["harness", "status", "--json"]), SHUTDOWN], dispatch=dispatch)
 
-    assert frames[0]["event"] == "ready"
+    # ``booting`` is the FIRST frame, before any heavy boot work — the
+    # launcher's supervisor tells a live cold boot from a wedged child by it
+    # (2026-07-26 kill-loop incident). ``ready`` still follows once boot
+    # completes; consumers that predate ``booting`` ignore unknown events.
+    assert frames[0]["event"] == "booting"
     assert frames[0]["schema_version"] == 1
+    assert frames[1]["event"] == "ready"
+    assert frames[1]["schema_version"] == 1
     lines = [f for f in frames if f.get("event") == "line" and f.get("id") == "r1"]
     assert [f["line"] for f in lines] == ["hello --json", "tail without newline"]
     exits = [f for f in frames if f.get("event") == "exit"]
@@ -75,6 +81,54 @@ def test_concurrent_requests_do_not_bleed_output():
         assert frame["line"].startswith(f"{rid}:"), frame
     exit_codes = {f["id"]: f["code"] for f in frames if f.get("event") == "exit"}
     assert exit_codes == {"a": 0, "b": 0}
+
+
+def test_liveness_pump_emits_busy_frames_while_a_turn_runs_unprompted():
+    # Regression (2026-07-23 live incident): with pool workers deep in
+    # chat-turn work the launcher saw NO frames for the whole turn and raised
+    # the loud "Runtime offline" banner twice inside one healthy 4-minute
+    # turn. The serve must prove life on its own cadence — nothing polls it
+    # here (no ping op), yet typed `busy` frames must keep appearing while
+    # the synthetic chat turn blocks a worker.
+    import time
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def dispatch(argv):
+        started.set()
+        assert release.wait(10)
+        return 0
+
+    def requests():
+        yield _request(
+            "chat-1",
+            ["harness", "mission-chat", "message", "--persona", "dev", "--message", "hi"],
+        )
+        assert started.wait(10)
+        # Hold the turn across many pump intervals before letting it finish.
+        time.sleep(0.5)
+        release.set()
+        yield SHUTDOWN
+
+    out = io.StringIO()
+    assert (
+        serve_loop(
+            requests(),
+            out,
+            dispatch=dispatch,
+            liveness_pump_interval_seconds=0.05,
+        )
+        == 0
+    )
+    frames = _frames(out)
+
+    busy = [f for f in frames if f.get("event") == "busy"]
+    assert len(busy) >= 2, f"expected unprompted busy frames, got: {frames}"
+    assert busy[0]["chat_turns"] == 1 and busy[0]["pending"] == 1
+    # The turn still completes and the loop still shuts down cleanly.
+    assert any(f.get("event") == "exit" and f.get("id") == "chat-1" for f in frames)
+    assert frames[-1]["event"] == "shutdown"
 
 
 def test_ping_reports_in_flight_chat_turns():
@@ -423,3 +477,49 @@ def test_cancel_of_running_or_unknown_request_is_denied():
     assert errors and errors[0]["error"] == "invalid_request"
     exits = {frame["id"]: frame for frame in frames if frame.get("event") == "exit"}
     assert exits["r1"]["code"] == 0 and "cancelled" not in exits["r1"]
+
+
+def test_cancel_of_running_runtime_stream_is_cooperative_and_frees_worker():
+    """The infinite read stream is the one running request that must cancel.
+
+    With a one-worker pool, a cancelled stream must release the worker so a
+    following status request runs; otherwise four Launcher reconnects exhaust
+    the production pool permanently.
+    """
+
+    from agent_runtime.request_control import request_cancelled
+
+    started = threading.Event()
+    status_ran = threading.Event()
+
+    def dispatch(argv):
+        if argv[:2] == ["harness", "stream"]:
+            started.set()
+            while not request_cancelled():
+                threading.Event().wait(0.01)
+            return 0
+        status_ran.set()
+        return 0
+
+    def requests():
+        yield _request("stream-1", ["harness", "stream"])
+        assert started.wait(10)
+        yield json.dumps({"op": "cancel", "id": "stream-1"}) + "\n"
+        yield _request("status-1", ["harness", "status", "--json"])
+        assert status_ran.wait(10)
+        yield SHUTDOWN
+
+    out = io.StringIO()
+    assert serve_loop(requests(), out, pool_size=1, dispatch=dispatch) == 0
+    frames = _frames(out)
+
+    accepted = [
+        frame
+        for frame in frames
+        if frame.get("id") == "stream-1"
+        and frame.get("event") == "cancel_accepted"
+    ]
+    assert accepted and accepted[0]["state"] == "running"
+    exits = {frame["id"]: frame for frame in frames if frame.get("event") == "exit"}
+    assert exits["stream-1"]["code"] == 0
+    assert exits["status-1"]["code"] == 0

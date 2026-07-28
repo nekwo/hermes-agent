@@ -3,10 +3,12 @@
 Status: **shipped and superseded by MC-CHAT-CONTINUITY (2026-07-20).** This
 document retains the original incremental durability design and its hardening
 history. The production state machine is now `pending | executing |
-outcome_unknown | native_committed | projected | abandoned`; native structured
-SessionDB history is the sole continuation authority. Sibling design:
-`harness-serve-design.md` (§Follow-up slices item 2 is this document,
-expanded).
+outcome_unknown | native_committed | projected | abandoned | budget_exhausted`;
+native structured SessionDB history is the sole continuation authority. Sibling
+design: `harness-serve-design.md` (§Follow-up slices item 2 is this document,
+expanded). The `budget_exhausted` terminal and the graceful wall-budget
+checkpoint that produces it are specified in **Wall-budget checkpoint
+(2026-07-26)** below.
 
 The current recovery contract is stricter than the original
 `running/completed/failed/interrupted` design below:
@@ -15,6 +17,8 @@ The current recovery contract is stricter than the original
 - the provider boundary is recorded immediately before submission;
 - an unprovable in-flight result becomes `outcome_unknown` and is never
   automatically resubmitted;
+- a turn that ran out of WALL CLOCK is not unprovable — it becomes
+  `budget_exhausted`, which is terminal and needs no operator resolution;
 - `native_committed` retries repair projections without calling the provider;
 - explicit abandon requires an exact tuple match, after which resend uses a
   fresh client message ID;
@@ -23,6 +27,235 @@ The current recovery contract is stricter than the original
 
 Use the persona-chat commands in
 `harness-skills/harness-runtime-model/SKILL.md` for the current operator path.
+
+## Wall-budget checkpoint (2026-07-26)
+
+**Incident.** An operator sent a Neko mission-chat turn with `--max-seconds
+540`. Neko relayed to Dev via `agent_chat_send`; the whole chain runs in ONE
+process sharing one wall. At exhaustion the harness killed mid-API-call (`⚡
+Interrupted during API call`, blocker `live run budget exceeded:
+wall_seconds=540`, `error_kind=chat_turn_outcome_unknown`) and **both** turns
+froze as `outcome_unknown`, each needing a manual `turn-resolve --action
+abandon` plus a full re-brief — the native context was gone.
+
+Two structural gaps, fixed as one slice:
+
+### 1. Budget visibility
+
+`agent_runtime/turn_budget.py` is the single authority for a turn's wall
+window (`TurnWallBudget`: `total_seconds`, absolute `deadline_epoch`, `shared`).
+`resolve_turn_wall_budget` folds `--max-seconds` and the shared
+`--relay-deadline-epoch` into ONE object; the mission-chat command resolves it
+once and uses it for **both** the agent-visible HUD line and the wall the runner
+enforces, so the two can never drift.
+
+- The line rides the runtime-context envelope's **volatile tail**
+  (`render_runtime_context_envelope(volatile_content=…)`), which is emitted on
+  *every* delivery — `snapshot`, `unchanged`, and `unavailable`. A cached
+  `unchanged` body would otherwise show the agent a stale countdown.
+- `turn_budget` is declared `volatile` on its `runtime_hud.HUD_FIELDS` row,
+  which is the ONE declaration both `situational_hud_revision` and
+  `render_situational_hud_block` derive from (`stable_hud_fields`), so a
+  per-turn countdown never re-snapshots the whole stable HUD block *and* cannot
+  be rendered into the hashed body by a later edit. It still rides the resolved
+  HUD dict, so the operator's CONTEXT peek and the observability row show the
+  same number the agent saw.
+- A relayed hop inherits the chain deadline, so the **target's** HUD shows the
+  shared remaining budget: a supervisor can see what window a dispatch has
+  instead of briefing 50 minutes of work into a 9-minute hop.
+
+### 2. Graceful checkpoint
+
+Reserve at the end of a turn: `max(60s, 15% of the original budget)`, capped so
+at least `CHECKPOINT_MIN_WORKING_SECONDS` (30s) of working window survives. A
+budget too small to reserve anything has **no** graceful phase (`supports_
+checkpoint == False`) and keeps only the hard wall — honest, not silently
+degraded.
+
+`profile_runner.WallBudgetCheckpoint` engages once, from whichever fires first:
+
+- the **tool gate** — checked before each tool execution via the existing
+  tool-start progress seam (deterministic, unit-testable without sleeping);
+- a **timer** armed at `deadline - reserve` (backstop for a turn stuck in a long
+  provider call with no tool events).
+
+Engaging does three things and never interrupts:
+
+1. `agent.steer(nudge)` injects a system-side "produce your final checkpoint
+   reply now; report state honestly" into the next tool result — in-band, so the
+   model actually sees it;
+2. `turn_budget.drain_iteration_budget(agent)` consumes the agent's remaining
+   loop iterations through the documented `IterationBudget.consume()` API. The
+   upstream loop therefore launches **no new tool executions** and exits at its
+   next iteration boundary, and its finalizer takes exactly ONE toolless
+   "summarise" call — the final checkpoint reply — reusing the mechanism upstream
+   already has for iteration exhaustion. **No upstream file is modified.** The
+   in-flight tool batch is deliberately allowed to finish: aborting a running
+   tool is precisely the mid-kill this replaces;
+3. emits a typed `run.progress` event (`phase=wall_budget_checkpoint`,
+   `step=wall_budget_checkpoint_opened`).
+
+The old hard wall stays armed at the real deadline as the **last resort** — it is
+no longer the first thing that happens when a turn runs long. When it fires,
+`RunBudgetExceeded` now carries a typed `wall_budget` block so the caller can
+still settle the turn as `budget_exhausted`.
+
+Granularity note: the stop lands at a loop-iteration boundary, which is the
+honest boundary — "before starting each provider call or tool execution" means
+before the next batch, not mid-tool.
+
+### Terminal state + CLI contract
+
+`budget_exhausted` transitions:
+
+| from | to |
+| --- | --- |
+| `pending` / `executing` / `outcome_unknown` | `budget_exhausted` |
+| `budget_exhausted` | `budget_exhausted`, `native_committed` |
+
+- It is **not** in `INFLIGHT_TURN_STATES`: no repair sweep reopens it, no
+  next-send flip turns it into `interrupted`.
+- It does **not** resurrect to `pending`; a retry uses a new
+  `client_message_id`, like any settled turn.
+- `budget_exhausted → native_committed` preserves the legacy-interrupted
+  convention: a reply proven durable *after* the settle still wins, and can then
+  project.
+- `turn-resolve` still accepts **only** `outcome_unknown`. A budget-settled turn
+  is not resolvable and does not need to be.
+
+CLI JSON (`harness mission-chat message`), documented shape:
+
+- **Graceful checkpoint that produced a reply** — `ok: true`, exit `0`,
+  `execution_state: "budget_exhausted"`, `budget_exhausted: true`,
+  `turn_resolution_required: false`, `wall_budget: {…}`. `ok` stays true because
+  a real reply was produced and committed; a relay caller must not treat it as an
+  error. The journal keeps its normal `native_committed → projected` walk (the
+  reply must project like any other) and carries `budget_exhausted` /
+  `budget_trigger` / `budget_summary` metadata for provenance.
+- **Hard wall — not even the final call fit** — `ok: false`, exit `2`,
+  `execution_state: "budget_exhausted"`, `error_kind:
+  "chat_turn_budget_exhausted"`, `turn_resolution_required: false`,
+  `checkpoint_summary` naming the tool calls that DID complete. The record
+  settles at `budget_exhausted`.
+- **Resend of an already-budget-settled `client_message_id`** — `ok: false`,
+  exit `2`, same typed kind, `error: "…settled and needs no resolution"`.
+
+In every case `next_expected` points at a **new `client_message_id`** and never
+at `turn-resolve` (guarded by `tests/hermes_cli/test_mission_chat_budget_payload.py`).
+
+Tests: `tests/agent_runtime/test_turn_budget_checkpoint.py` (threshold math,
+relay clamp, loop gate, state machine, HUD lane) and
+`tests/hermes_cli/test_mission_chat_budget_payload.py` (CLI payload contract).
+
+### Terminal marker rows + tool settlement (2026-07-26)
+
+A terminal state has a second obligation the state machine above does not
+express: **it must say so in the transcript**, because the marker row is what
+settles the turn's still-running tool rows.
+
+The chain, and where it broke. `persona_chat_history._terminal_turn_marker_rows`
+synthesizes a typed system row for a turn that settled terminally **without a
+recorded reply**; `operator_channels._settle_terminal_tool_calls` reads those
+marker rows and flips every still-`running` `tool_call` of the same turn to a
+settled status. Both halves keyed on the legacy `interrupted` state alone. So
+the hard-wall case above — which lands `budget_exhausted` and never writes an
+assistant row — emitted **no marker**, settled **nothing**, and left any
+`tool_started`-without-`tool_finished` row spinning in the Mission Control
+cockpit forever, for a turn that had been over for minutes.
+
+Both halves are now **table-driven**, so a third terminal state settles its
+tools by construction rather than by remembering to update two string
+comparisons in two modules:
+
+| turn state | marker `kind` | row id slug | conversation `status` / title |
+| --- | --- | --- | --- |
+| `interrupted` | `turn_interrupted` | `turn-interrupted` | `interrupted` / "Turn interrupted" |
+| `budget_exhausted` | `budget_exhausted` | `turn-budget-exhausted` | `budget_exhausted` / "Wall budget reached" |
+
+Producer: `persona_chat_history.TERMINAL_TURN_MARKERS`, guarded at import
+against declaring a state the turn store does not call terminal (a marker on an
+in-flight state would announce a LIVE turn as over — the worse failure).
+Presenter: `operator_channels._TERMINAL_TURN_MARKER_PRESENTATION`, whose keys
+are pinned equal to the producer's kinds.
+
+Three deliberate choices:
+
+- **No new marker vocabulary.** The Launcher already consumes both kinds
+  (`mission_agent_chat_adapter.dart`: `_turnInterruptedFlowMessage` → retry
+  affordance, `_budgetExhaustedFlowMessage` → graceful-checkpoint marker).
+  **No launcher change is required** for either half of this fix.
+- **The prose distinguishes the two.** The budget marker must not say "Retry the
+  message" — the turn settled gracefully and its work may be committed, so
+  telling the operator to re-run is a lie that costs a full re-run.
+- **The settled tool status stays `interrupted`; the reason rides beside it.**
+  `interrupted` describes the CALL (cut off, will never finish) and is the only
+  settled-tool vocabulary the Launcher's trace renderer already recognises
+  (`mission_trace_content_renderer.dart`:
+  `interrupted|cancelled|canceled|aborted` → stop glyph). Inventing a
+  `budget_exhausted` tool status would stop the spinner but render as an unknown
+  state. The turn-level reason travels as the additive typed `settled_reason`
+  (and `settled_state` on the marker), carrying the turn store's own state name
+  — so a settled call never has to lie about **why** in order to stop spinning.
+
+Tests: `tests/agent_runtime/test_terminal_turn_settlement.py` (both layers, both
+states, the table guards, the graceful-reply case that must synthesize nothing,
+the in-flight turn that must never be marked over, the pre-`settled_state`
+archive row, and the finished call that must keep its real outcome).
+
+### One vocabulary, three buckets, guarded (2026-07-27)
+
+The section above fixed the same defect **twice**, in two modules ~700 lines
+apart. Recurrence is the finding: the bug was never either literal, it was that
+a consumer was free to spell one. So the vocabulary is now a single owned table
+in `agent_runtime/mission_chat_turns.py`, and every consumer reads it.
+
+Every known state belongs to **exactly one** lifecycle bucket:
+
+| bucket | states | meaning |
+| --- | --- | --- |
+| `INFLIGHT_TURN_STATES` | `pending`, `executing`, `outcome_unknown`, `running` | an executor still owes a settlement; repair sweeps flip these, retention/GC protect them |
+| `SETTLING_TURN_STATES` | `native_committed` | the reply is durable, the projection is not: never repair-flipped (a flip would destroy a recorded reply), not yet terminal |
+| `TERMINAL_TURN_STATES` | `projected`, `abandoned`, `budget_exhausted`, `completed`, `failed`, `interrupted` | settled; no repair, no operator resolution |
+
+`SETTLING_TURN_STATES` is new **as a name only**. `native_committed` had always
+been in neither set — an unclassified state no guard could see, which is
+precisely the shape of the wall-budget bug. Naming it makes the partition
+provable; it changes no decision.
+
+Three decision sets sit on top, each one a question a consumer actually asks:
+
+| set | states | asked by |
+| --- | --- | --- |
+| `REPLY_RECOVERABLE_TURN_STATES` | `executing`, `outcome_unknown`, `budget_exhausted` | a resend that finds a durable reply promotes to `native_committed` from these |
+| `RESEND_BLOCKING_TURN_STATES` | `executing`, `outcome_unknown` | …and with no such proof, a resend from these is refused pending resolution |
+| `OPERATOR_RESOLVABLE_TURN_STATES` | `outcome_unknown` | the only state `turn-resolve --action abandon` accepts |
+
+Import-time guards (raised, not asserted, so `python -O` cannot strip them —
+same convention as `TERMINAL_TURN_MARKERS`): every set names only known states;
+the three buckets are pairwise disjoint AND cover the known universe; the
+refusal ladder is nested (`resolvable ⊆ blocking ⊆ recoverable`);
+`REPLY_RECOVERABLE_TURN_STATES` equals the set of states from which
+`_JOURNAL_TRANSITIONS` accepts a promotion to `native_committed` (it is a VIEW
+of the transition table, not a second opinion); and the transition table plus
+the legacy→journal alias map name only real states.
+
+Consumers hold no literals. `hermes_cli/harness_parts/persona_commands.py` runs
+inside `harness.py`'s globals, so a vocabulary name it uses but `harness.py`
+does not import is a `NameError` on a live chat turn rather than an import
+error — an AST guard covers that seam too.
+
+Tests: `tests/agent_runtime/test_turn_state_vocabulary.py` — the full state ×
+bucket classification asserted through the real store functions (repair sweep,
+boot sweep, retention cap, `abandon`), the journal transition acceptance
+matrix, an independent copy of the classification table that must agree with
+the runtime one, and one case per import guard proving each can actually fail.
+
+Known gap, deliberately unchanged: the marker synthesizer produces rows for
+`interrupted` and `budget_exhausted` only. `projected` / `completed` have a
+reply and `abandoned` was resolved by the operator, so those need none — but
+`failed` is terminal, reply-less, and marker-less, which is a real hole. Closing
+it is a behavior change and was out of scope for a consolidation pass; it is
+recorded here rather than left silent.
 
 ## Problem
 
@@ -66,6 +299,17 @@ launcher-visible history by `agent_runtime/persona_chat_history.py` (~line
   different client id flips to `interrupted`; returns flipped client ids.
   This is repair-on-next-write: a killed turn is visibly `interrupted` no
   later than the next send in that session.
+  - 2026-07-25 extension: renamed `mark_stale_inflight_turns_interrupted` and
+    widened to every in-flight state (`running`, `pending`, `executing`,
+    `outcome_unknown`) after a live incident left a journal record frozen at
+    `executing` when its executor process was killed mid-turn — the old
+    `running`-only filter never repaired journal-lane corpses. A serve-boot
+    orphan sweep (`repair_orphaned_chat_turns` in `persona_chat_continuity`)
+    additionally probes each in-flight session's root lease non-blocking and
+    repairs sessions whose lease is free — kernel lease release on process
+    death makes "in-flight record + acquirable lease" proof of a dead
+    executor, so a launcher restart settles frozen turns with no operator
+    action.
 
 ### Emitter — `_ChatProtocolV2Emitter` (persona_commands.py ~1535)
 

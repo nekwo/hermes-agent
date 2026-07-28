@@ -75,27 +75,100 @@ def _cmd_persona_tool_diff(args) -> int:
         data = {"ok": False, "error": f"persona not found: {args.persona_id}"}
         print(emit_json(data) if args.json else data["error"])
         return 2
+    permission_mode = str(args.permission_mode or "profile_default")
     visibility = resolve_tool_visibility(
         persona,
         ToolVisibilityOptions(
-            permission_mode=str(args.permission_mode or "profile_default"),
+            permission_mode=permission_mode,
             permission_source="cli_preview",
             repo_scope=args.repo_scope,
             workdir=args.workdir,
             session_id=args.session_id,
             task_id=args.task_id,
             goal_id=args.goal_id,
+            # This command IS the harness lane; say so rather than letting the
+            # lane be inferred from argv.
+            entry_point_lane=HARNESS_LANE,
+            # G5: account for what the CHAT lane takes AWAY from this persona,
+            # under the mode the operator is asking about (``--permission-mode
+            # unbounded`` genuinely bypasses the cost policy and so honestly
+            # reports no drops). Accounting only — the resolved tool list is
+            # unchanged; these rows explain absences it would otherwise show as
+            # nothing at all.
+            chat_lane_capability_drops=chat_lane_capability_drops(
+                persona,
+                session_id=args.session_id,
+                permission_mode=permission_mode,
+            ),
+            mission_chat_workdir=mission_chat_workdir_for_persona(persona),
         ),
     )
     data = {"ok": True, "tool_visibility": visibility}
+    # Inspection only: resolve_mcp_admission is pure policy — it never connects
+    # to or registers an MCP server — so an operator can read exactly what a
+    # persona WOULD be admitted before the kill switch is ever flipped.
+    if getattr(args, "explain_mcp", False):
+        data["mcp_admission"] = resolve_mcp_admission(
+            persona,
+            lane=LANE_MISSION_CHAT,
+            permission_mode=permission_mode,
+        ).explain()
+    # Same shape, same guarantee, the other gate: what the TERMINAL safety
+    # envelope will do to this persona's mission-chat lane. Rendered entirely
+    # from the canonical envelope authorities (``explain_terminal_envelope`` +
+    # ``hard_floor_command_classes``) — no parallel derivation of the taxonomy,
+    # the stage floor, or the grant table lives here.
+    if getattr(args, "explain_envelope", False):
+        from agent_runtime.terminal_envelope_explain import (
+            explain_persona_terminal_envelope,
+        )
+
+        data["terminal_envelope"] = explain_persona_terminal_envelope(persona)
     if args.json:
         print(emit_json(data))
     else:
         print(f"{visibility['persona_id']}: {visibility['final_tool_count']} tools")
+        envelope = data.get("terminal_envelope")
+        if envelope is not None:
+            from agent_runtime.terminal_envelope_explain import (
+                render_terminal_envelope_explanation,
+            )
+
+            for line in render_terminal_envelope_explanation(envelope):
+                print(line)
+        admission = data.get("mcp_admission")
+        if admission is not None:
+            print(
+                f"mcp admission ({admission['lane']}, role={admission['role']}, "
+                f"mode={admission['permission_mode']}): "
+                f"{'enabled' if admission['enabled'] else 'DISABLED'}"
+            )
+            print(f"  requested: {', '.join(admission['requested']) or '-'}")
+            print(f"  admitted:  {', '.join(admission['admitted']) or '-'}")
+            # What would actually REGISTER. An empty include is the launcher's
+            # full-capability glob ("everything this server advertises"), not an
+            # empty admission — say which, or the operator has to infer it.
+            for server, include in sorted((admission.get("tool_include") or {}).items()):
+                shape = (
+                    f"{len(include)} tool(s): {', '.join(include)}"
+                    if include
+                    else "every tool the server advertises (no include filter)"
+                )
+                print(f"  include {server}: {shape}")
+            for row in admission["denied"]:
+                print(f"  denied {row['server']} ({row['code']}): {row['summary']}")
         if visibility["blocked_tools"]:
             print("blocked:")
             for item in visibility["blocked_tools"]:
                 print(f"  {item['name']} ({item['reason']})")
+        # A declared-but-unregistered capability is a real gap in what this
+        # persona can do here. Printing it beside the tool count is what stops
+        # the count from being read as the whole story.
+        for failure in visibility.get("requirement_failures") or []:
+            print(f"requirement failure: {failure.get('code')}")
+            print(f"  {failure.get('summary')}")
+            if failure.get("fix_hint"):
+                print(f"  fix: {failure['fix_hint']}")
     return 0
 
 
@@ -375,6 +448,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
             persona_id=persona_id,
             coordinator_scope=coordinator_scope,
         )
+    previous_instance = None
     try:
         if bool(getattr(args, "add_instance", False)):
             placement_id = safe_assignment_token(getattr(args, "placement_id", None))
@@ -382,6 +456,12 @@ def _cmd_persona_instance_open_chat(args) -> int:
                 data = {"ok": False, "error": "placement_id is required when add_instance is true"}
                 print(emit_json(data) if args.json else data["error"])
                 return 2
+            try:
+                previous_instance = PersonaInstanceStore().get(
+                    persona_instance_id_for_placement(placement_id)
+                )
+            except Exception:
+                previous_instance = None
             # A deliberately-placed additional instance ("QA Agent (2)") carries
             # its distinct name so the operator's placement cue survives into the
             # store, the launcher conversational fold (keyed on
@@ -409,9 +489,35 @@ def _cmd_persona_instance_open_chat(args) -> int:
                 data = {"ok": False, "error": "session_id is required unless add_instance is true"}
                 print(emit_json(data) if args.json else data["error"])
                 return 2
+            # RETIREMENT, asked before the session-existence cutoff below.
+            # Retiring a placement archives the row but deliberately leaves its
+            # chat on disk, so an operator (or a stale launcher frame) re-opening
+            # that thread is asking about something that HAS a typed end-of-life
+            # answer — the tombstone and "history preserved". It used to get
+            # `unknown_chat_session` instead, which names the wrong fact and
+            # offers the wrong next step ("open a server-minted chat root").
+            #
+            # The owner comes from the session id itself (`persona_chat_<
+            # instance>_<hex>` encodes it), so this answers even when the row is
+            # archived and no SessionDB entry survives — precisely the case that
+            # read as "unknown". Read-only, through the ONE bind seam, so a live
+            # row always wins and a legitimately re-created placement is never
+            # refused by its own history. A bare persona resolves to the
+            # canonical channel, which cannot be retired.
+            PersonaInstanceStore().assert_bindable(
+                persona_id=persona_id,
+                # No session_id: the sibling-steal refusal is a ValueError, and
+                # the `foreign_chat_session` guard below already owns that answer
+                # with the envelope the operator needs.
+                persona_instance_id=(
+                    safe_assignment_token(getattr(args, "persona_instance_id", None))
+                    or chat_session_owner_instance_id(args.session_id)
+                    or None
+                ),
+            )
             session_db = _default_persona_session_db()
             if (
-                session_db.__class__.__module__ == "hermes_state"
+                is_canonical_session_persistence(session_db)
                 and session_db.get_session(args.session_id) is None
             ):
                 data = {
@@ -424,7 +530,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
             target_instance_id = safe_assignment_token(
                 getattr(args, "persona_instance_id", None)
             ) or None
-            if session_db.__class__.__module__ == "hermes_state":
+            if is_canonical_session_persistence(session_db):
                 session_owner = _persona_chat_session_owner(session_db, args.session_id)
                 try:
                     owner_instance = (
@@ -450,6 +556,12 @@ def _cmd_persona_instance_open_chat(args) -> int:
                     print(emit_json(data) if args.json else data["error"])
                     return 2
                 target_instance_id = session_owner
+            try:
+                previous_instance = PersonaInstanceStore().get(
+                    target_instance_id or persona_instance_id_for(persona_id)
+                )
+            except Exception:
+                previous_instance = None
             try:
                 instance = PersonaInstanceStore().open_chat(
                     persona_id=persona_id,
@@ -497,6 +609,23 @@ def _cmd_persona_instance_open_chat(args) -> int:
         }
         print(emit_json(data) if args.json else data["error"])
         return 2
+    previous_session_id = (
+        safe_assignment_text(
+            getattr(previous_instance, "default_chat_session_id", None)
+            or getattr(previous_instance, "session_id", None),
+            limit=200,
+        )
+        if previous_instance is not None
+        else None
+    )
+    instance_updated_at = _persona_instance_updated_at(instance)
+    previous_updated_at = _persona_instance_updated_at(previous_instance)
+    binding_changed = (
+        previous_instance is None
+        or previous_session_id != instance.default_chat_session_id
+        or getattr(previous_instance, "mode", None) != instance.mode
+        or previous_updated_at != instance_updated_at
+    )
     data = {
         "ok": True,
         "persona_instance_id": instance.id,
@@ -504,6 +633,15 @@ def _cmd_persona_instance_open_chat(args) -> int:
         "mode": instance.mode,
         "default_chat_session_id": instance.default_chat_session_id,
         "session_id": instance.default_chat_session_id,
+        "previous_session_id": previous_session_id,
+        "binding_receipt": {
+            "schema_version": 1,
+            "persona_instance_id": instance.id,
+            "session_id": instance.default_chat_session_id,
+            "previous_session_id": previous_session_id,
+            "changed": binding_changed,
+            "instance_updated_at": instance_updated_at,
+        },
         "chat_busy": False,
         "killed_previous": bool(getattr(args, "kill_active", False)),
         "add_instance": bool(getattr(args, "add_instance", False)),
@@ -513,6 +651,17 @@ def _cmd_persona_instance_open_chat(args) -> int:
     }
     print(emit_json(data) if args.json else f"opened {instance.id} on chat {instance.default_chat_session_id}")
     return 0
+
+
+def _persona_instance_updated_at(instance) -> str | None:
+    if instance is None:
+        return None
+    value = getattr(instance, "updated_at", None)
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return safe_assignment_text(value, limit=80) or None
 
 
 def _cmd_persona_instance_open_new_chat(args, *, persona_id: str, coordinator_scope) -> int:
@@ -831,12 +980,20 @@ def _cmd_persona_chat_delete(args) -> int:
     except Exception:
         pass
     closed_assignment_ids: list[str] = []
+    # Unbind EVERY instance still pointing at the session that was just deleted —
+    # on either pointer, and regardless of which identity was named on the
+    # request. Ownership was already enforced above (a foreign request is refused
+    # with ``foreign_chat_session``), so anything still holding this session id is
+    # by definition a dangling pointer: id-scheme drift, a sibling steal, or the
+    # legacy ``session_id`` mirror. Leaving one behind is exactly how a permanent
+    # ``session_not_in_db`` parity drop is minted — the projection can only hide
+    # the row, it can never repair the binding.
     for instance in instance_store.list_all():
-        if safe_assignment_text(getattr(instance, "default_chat_session_id", None), limit=200) != session_id:
-            continue
-        if requested_instance and instance.id != requested_instance:
-            continue
-        if requested_persona and instance.persona_id != requested_persona:
+        bound_here = session_id in {
+            safe_assignment_text(getattr(instance, "default_chat_session_id", None), limit=200),
+            safe_assignment_text(getattr(instance, "session_id", None), limit=200),
+        }
+        if not bound_here:
             continue
 
         assignment_id = safe_assignment_token(getattr(instance, "current_assignment_id", None))
@@ -857,12 +1014,16 @@ def _cmd_persona_chat_delete(args) -> int:
             except Exception:
                 pass
 
-        instance.default_chat_session_id = None
-        instance.session_id = None
-        if instance.mode in {"chat", "free_floating"}:
-            instance.mode = "configured"
-        instance_store.update(instance)
-        cleared_bindings.append(instance.id)
+        # One write path for every unbind (delete verb + reconcile sweep): it
+        # nulls only the pointers that name THIS session, demotes the mode, and
+        # emits ``persona_instance.chat_binding_cleared``.
+        record = instance_store.clear_chat_session_binding(
+            instance,
+            session_id=session_id,
+            reason=CHAT_BINDING_CLEARED_REASON_DELETED,
+        )
+        if record is not None:
+            cleared_bindings.append(instance.id)
 
     if not deleted_session and not cleared_bindings:
         data = {
@@ -928,16 +1089,36 @@ def _chat_busy_payload(exc: ChatBusyError) -> dict[str, object]:
 def _retired_persona_instance_payload(
     exc: RetiredPersonaInstanceError,
 ) -> dict[str, object]:
+    return _retired_persona_instance_refusal(
+        persona_instance_id=exc.persona_instance_id,
+        archive_path=exc.archive_path,
+        error_kind=exc.code,
+    )
+
+
+def _retired_persona_instance_refusal(
+    *,
+    persona_instance_id: str,
+    archive_path: object,
+    error_kind: str = "retired_persona_instance",
+) -> dict[str, object]:
+    """ONE retired-target refusal body, whether or not an exception carried it.
+
+    A pre-flight that refuses BEFORE the write lane has no exception to render,
+    but the caller must not be able to tell the difference: same ``error_kind``,
+    same fields, same ``next_expected``. Two spellings of this payload would be
+    two contracts."""
+
     return {
         "ok": False,
         "execution_state": "refused",
-        "error_kind": exc.code,
+        "error_kind": error_kind,
         "error": (
-            f"persona instance {exc.persona_instance_id} was retired with its "
+            f"persona instance {persona_instance_id} was retired with its "
             "placement and cannot be reopened as a live agent"
         ),
-        "persona_instance_id": exc.persona_instance_id,
-        "archive_path": str(exc.archive_path),
+        "persona_instance_id": persona_instance_id,
+        "archive_path": str(archive_path),
         "history_preserved": True,
         "next_expected": (
             "view the preserved chat history read-only, or create a fresh "
@@ -1078,7 +1259,7 @@ def _publish_persona_chat_projection_event(
         session_id=session_id,
         client_message_id=client_message_id,
     ) or {}
-    if record.get("state") != "projected" or record.get(
+    if record.get("state") != TURN_STATE_PROJECTED or record.get(
         "projection_event_emitted"
     ):
         return False
@@ -1111,7 +1292,7 @@ def _publish_persona_chat_projection_event(
         session_id=session_id,
         client_message_id=client_message_id,
         turn_id=turn_id,
-        state="projected",
+        state=TURN_STATE_PROJECTED,
         metadata={"projection_event_emitted": True},
         elements=record.get("elements") or [],
     )
@@ -1237,10 +1418,101 @@ def _cmd_mission_chat_message(args) -> int:
     # Canonicalize a caller-supplied instance id at THIS boundary (the same
     # chokepoint open_chat uses), so an instance-shaped target can never mint a
     # variant row.
+    #
+    # An instance-shaped `--persona` (`personainst_qa_agent_f24601ba`) IS a
+    # caller pin, and it arrives in the persona slot constantly (Mission Control
+    # payloads, agent @handle targeting, legacy SessionDB rows).
+    # `_resolve_mission_chat_persona_id` above canonicalizes it DOWN to the
+    # persona id so every persona-keyed lookup works — and the instance half
+    # used to be dropped right here, leaving the caller's explicit pin to be
+    # re-decided by the bare-persona placement resolver below. Recover the pin
+    # at this same chokepoint (no second resolver: `canonical_persona_instance_id`
+    # remains the one derivation authority) so an explicit @handle is
+    # authoritative BEFORE "placements shadow canonical" runs — which is what
+    # that ruling already documents: it never fires when the caller already
+    # disambiguated with a `personainst_*` target.
+    requested_instance_id = getattr(args, "persona_instance_id", None)
+    if not safe_assignment_token(requested_instance_id):
+        raw_persona_target = safe_assignment_token(getattr(args, "persona_id", None))
+        if raw_persona_target.startswith(PERSONA_INSTANCE_ID_PREFIX):
+            requested_instance_id = raw_persona_target
     persona_instance_id = canonical_persona_instance_id(
-        getattr(args, "persona_instance_id", None), persona_id=normalized_persona
+        requested_instance_id, persona_id=normalized_persona
     )
     session_id = safe_assignment_text(getattr(args, "session_id", None), limit=200)
+    # What the CALLER named, before anything on this turn overwrites it. Kept so
+    # the settlement can tell "they answered in the right thread because they
+    # named it" from "they inherited it" — the adoption signal this whole
+    # binding is measured by. Carried on `args` for the same reason
+    # `_dispatch_session_established` is: by the lease re-entry BOTH the clarify
+    # bind and the omitted-session mint have written a session back onto
+    # `args.session_id`, so a second pass would read every sticky continuation
+    # as a thread the caller had named.
+    stated_session_id = getattr(args, "_stated_session_id", None)
+    if stated_session_id is None:
+        stated_session_id = session_id
+        args._stated_session_id = stated_session_id
+    # CLARIFY CONTINUITY. Resolved HERE — after the caller's session id is read,
+    # BEFORE the target decision below — and both consequences are free:
+    #
+    #   1. a ticket-supplied session flows through the EXISTING
+    #      `unknown_chat_session` / `foreign_chat_session` guards below, so a
+    #      token can never smuggle in a session the caller could not have named
+    #      legitimately (a token for another instance's thread is refused as
+    #      `foreign_chat_session`, reached without a line of new guard code);
+    #   2. a bound turn never reaches the omitted-session branch, so it never
+    #      mints, never repoints the instance's default-thread pointer, and
+    #      never runs the pre-mint gate.
+    #
+    # Stashed on `args` for exactly the reason `_dispatch_session_established`
+    # is: this handler RE-ENTERS itself once to take the chat-root lease, and by
+    # then `args.session_id` has been rewritten — a second pass would rediscover
+    # "the caller named a session", report the turn as a plain
+    # `explicit_session_id` continuation, and settle the ticket twice.
+    clarify_binding = getattr(args, "_clarify_binding", None)
+    if clarify_binding is None:
+        clarify_binding = _resolve_mission_chat_clarify_binding(args, session_id=session_id)
+        args._clarify_binding = clarify_binding
+    clarify_session_id = (
+        safe_assignment_text((clarify_binding or {}).get("bound_session_id"), limit=240)
+        if (clarify_binding or {}).get("bound_via") == "clarify_token"
+        else ""
+    )
+    if clarify_session_id:
+        session_id = clarify_session_id
+        args.session_id = clarify_session_id
+    # How this turn's thread was established — typed, and carried in the reply
+    # envelope so a dispatching agent can tell "this is a fresh task thread,
+    # here is the one it superseded" from "this continued what we had". Decided
+    # here for the explicit-session lane; re-decided by policy below when the
+    # caller named no session.
+    #
+    # Carried on `args` because this handler RE-ENTERS itself once to take the
+    # chat-root lease (see `_persona_chat_root_lease_acquired` below), and by
+    # then the resolved session has been written back onto `args.session_id` —
+    # so a second pass would rediscover "the caller named a session" and report
+    # every freshly minted dispatch thread as a plain continuation.
+    session_established = getattr(args, "_dispatch_session_established", None)
+    if session_established is None and session_id:
+        # No `policy=`: an explicit session id outranks deployment policy, and
+        # the resolver short-circuits before loading it — this lane runs on
+        # every mission-chat turn and `mission_chat_dispatch_session_policy()`
+        # parses the root config.yaml UNCACHED, to fill a field the
+        # `explicit_session_id` reason never reads.
+        session_established = session_established_payload(
+            resolve_dispatch_session_decision(
+                clarify_session_id=clarify_session_id or None, session_id=session_id
+            ),
+            fresh=False,
+            predecessor_session_id=None,
+        )
+        args._dispatch_session_established = session_established
+    # Sender identity for workspace-scoped target resolution: the chat-root
+    # session of the agent that requested this send (agent-to-agent relay
+    # threads it through the envelope; a bare operator CLI send omits it).
+    requested_by_session = safe_assignment_text(
+        getattr(args, "requested_by_session", None), limit=200
+    )
     client_message_id = safe_assignment_text(
         getattr(args, "client_message_id", None), limit=200
     ) or f"agent-chat-send-{uuid.uuid4().hex[:12]}"
@@ -1267,6 +1539,7 @@ def _cmd_mission_chat_message(args) -> int:
         persona_instance_id=persona_instance_id,
         session_id=session_id,
         relay_chain=turn_relay_chain,
+        requested_by_session=requested_by_session,
     )
     if not target_decision.allowed:
         data = {
@@ -1290,7 +1563,7 @@ def _cmd_mission_chat_message(args) -> int:
 
     if (
         session_id
-        and session_db.__class__.__module__ == "hermes_state"
+        and is_canonical_session_persistence(session_db)
         and session_db.get_session(session_id) is None
     ):
         data = {
@@ -1307,7 +1580,7 @@ def _cmd_mission_chat_message(args) -> int:
         else:
             print(emit_json(data) if args.json else data["error"])
         return 2
-    if session_id and session_db.__class__.__module__ == "hermes_state":
+    if session_id and is_canonical_session_persistence(session_db):
         owner = _persona_chat_session_owner(session_db, session_id)
         owner_instance = None
         try:
@@ -1340,44 +1613,181 @@ def _cmd_mission_chat_message(args) -> int:
             return 2
         persona_instance_id = owner
     if not session_id:
-        # Omitted session (agent_chat_send relay lane, and any first-turn open):
-        # CONTINUE the target's default chat session so repeated relays thread
-        # into ONE conversation — the tool contract's "omit to continue the
-        # target's default chat session". Resolve the canonical instance's
-        # current chat session (mint a fresh one only when it has never
-        # chatted); never a new random session per send, which orphaned the
-        # relay lane (unpointed session, invisible to the snapshot projection).
+        # Omitted session (agent_chat_send dispatch lane, and any first-turn
+        # open): the thread target is decided by policy below, not by this
+        # branch. Under the default `new_per_dispatch` a dispatch MINTS its own
+        # task-scoped thread; under `sticky` (or an explicit new_session=False)
+        # it continues the target's current default thread. Either way the
+        # session comes from the canonical resolve-or-mint chokepoint — never a
+        # new random session per send, which orphaned the relay lane in
+        # 2026-07-18 (unpointed session, invisible to the snapshot projection).
+        # `open_chat` below repoints the instance's default pointer onto
+        # whatever thread this turn established.
         #
-        # new_session=True (agent_chat_send's clean-thread lane) forces a fresh
-        # canonical mint through the SAME chokepoint (mint= mode), never a
-        # parallel pipeline; open_chat then repoints the instance so the pair's
-        # new thread becomes the default going forward.
-        resolved_instance_id = persona_instance_id or canonical_chat_instance_id(
-            normalized_persona, None
+        # BARE persona (no pin, no session): route through the "placements shadow
+        # canonical" ruling — a single in-scope placement is the default target,
+        # so the send lands on the deliberate placement instead of the plumbing
+        # canonical row. The guard above already refused two-or-more in-scope
+        # placements, so this resolves to at most one; with none it returns None
+        # and the canonical channel is the reachability fallback.
+        #
+        # ONE instance identity for the turn: whatever resolves the root/mint
+        # here is the instance `open_chat` BINDS below, so it is assigned back
+        # onto `persona_instance_id` rather than kept as a second local. Keeping
+        # them apart meant the bind received the RAW pin (`None` for a bare or
+        # instance-shaped send), fell back to the canonical channel, and the
+        # sibling-steal guard correctly refused the root this very turn had just
+        # minted for the placement ("chat session
+        # 'persona_chat_personainst_qa_agent_f24601ba_...' belongs to instance
+        # 'personainst_qa_agent_f24601ba'; it cannot be bound onto
+        # 'personainst_qa'") — refusing every placement-routed send, new-session
+        # and continue alike. The explicit-session branch above already adopts
+        # its resolved owner the same way; this is the omitted-session mirror.
+        persona_instance_id = (
+            persona_instance_id
+            or _mission_chat_bare_persona_target(
+                instance_store,
+                normalized_persona=normalized_persona,
+                requested_by_session=requested_by_session,
+            )
+            or canonical_chat_instance_id(normalized_persona, None)
         )
-        existing_root = None
-        if not bool(getattr(args, "new_session", False)):
-            existing_root = resolve_default_chat_session_id_for_instance(
+        # Fresh-vs-continue is decided by ONE authority
+        # (agent_runtime.dispatch_session_policy), not by an inline
+        # `not args.new_session` boolean: the flag is tri-state now (True /
+        # False / unset) and "unset" must be answerable by deployment policy.
+        # Default policy is new_per_dispatch — a dispatched task gets its own
+        # task-scoped thread instead of accumulating in one mega-thread per
+        # pair (which re-fed the whole transcript every turn). The CLI/serve
+        # lane's argparse `--new-session` is store_true, so an operator console
+        # send arrives as an explicit False and keeps continuing the target's
+        # current default thread, exactly as before this policy existed.
+        dispatch_decision = resolve_dispatch_session_decision(
+            session_id=None,
+            new_session=getattr(args, "new_session", None),
+        )
+        # Resolved UNCONDITIONALLY, even when we are about to mint: the thread
+        # this dispatch supersedes is the lineage a later reader follows back
+        # (recorded as `_dispatched_from`, reported as `predecessor_session_id`).
+        # Read-only — `resolve_…` never mints.
+        existing_root = resolve_default_chat_session_id_for_instance(
+            instance_store,
+            persona_id=normalized_persona,
+            persona_instance_id=persona_instance_id,
+        )
+        if existing_root and not dispatch_decision.mint:
+            session_id = existing_root
+            session_established = session_established_payload(
+                dispatch_decision, fresh=False, predecessor_session_id=None
+            )
+        else:
+            # PRE-MINT GATE. The mint below is this turn's first DURABLE side
+            # effect: a titled session row, and — once `open_chat` binds it —
+            # a REPOINT of the instance's default-thread pointer. Under the
+            # new_per_dispatch default, running it before the caller's own
+            # arguments have been checked meant every refused or retried
+            # dispatch littered an empty task thread AND stole the pointer that
+            # `new_session:false` follows. So the refusals decidable from
+            # `args` alone are evaluated FIRST. They need no session id, so
+            # ordering them here costs nothing; their original, session-bearing
+            # sites below stay put as defense in depth for the explicit-session
+            # lane (which never mints).
+            #
+            # A RETIRED target is the same defect one layer out: `open_chat`
+            # refuses it by raising, but the mint reaches `open_chat` only after
+            # creating and titling the row, so the refusal landed one durable
+            # thread too late — and outside the typed handler below, so it also
+            # escaped as a traceback. It needs the store rather than `args`, so
+            # it is its own read-only pre-flight, evaluated through the same gate.
+            premint_refusal = _mission_chat_caller_refusal(
+                args,
+                persona_id=normalized_persona,
+                persona_instance_id=persona_instance_id,
+            ) or _mission_chat_retired_target_refusal(
                 instance_store,
                 persona_id=normalized_persona,
-                persona_instance_id=resolved_instance_id,
+                persona_instance_id=persona_instance_id,
             )
-        if existing_root:
-            session_id = existing_root
-        else:
-            receipt = PersonaChatMintReceiptStore().mint(
-                instance_store=instance_store,
-                session_db=session_db,
-                persona_id=normalized_persona,
-                persona_instance_id=resolved_instance_id,
-                idempotency_key=(
-                    safe_assignment_text(getattr(args, "idempotency_key", None), limit=240)
-                    or f"send:{client_message_id}"
-                ),
-                title=f"{safe_assignment_text(getattr(persona, 'display_name', None), limit=120) or normalized_persona} chat",
+            if premint_refusal is not None:
+                if getattr(args, "stream", False):
+                    _emit_chat_final(premint_refusal)
+                else:
+                    print(
+                        emit_json(premint_refusal)
+                        if args.json
+                        else premint_refusal["error"]
+                    )
+                return 2
+            # A fresh thread is only navigable if it is NAMED: nine identical
+            # "QA Agent chat" rows are worse than the mega-thread they replaced.
+            # An explicit --title/`title` wins; otherwise a deliberate fresh
+            # dispatch is titled after the task it carries. A first-ever STICKY
+            # mint (the operator console's first message) keeps the durable
+            # per-persona title, so that lane is unchanged.
+            persona_thread_title = (
+                f"{safe_assignment_text(getattr(persona, 'display_name', None), limit=120) or normalized_persona} chat"
             )
+            requested_title = safe_assignment_text(getattr(args, "title", None), limit=120)
+            mint_title = persona_thread_title
+            if dispatch_decision.mint:
+                mint_title = (
+                    requested_title
+                    or derive_dispatch_title(getattr(args, "message", None))
+                    or persona_thread_title
+                )
+            try:
+                receipt = PersonaChatMintReceiptStore().mint(
+                    instance_store=instance_store,
+                    session_db=session_db,
+                    persona_id=normalized_persona,
+                    persona_instance_id=persona_instance_id,
+                    idempotency_key=(
+                        safe_assignment_text(getattr(args, "idempotency_key", None), limit=240)
+                        or f"send:{client_message_id}"
+                    ),
+                    title=mint_title,
+                    dispatched_from={
+                        "predecessor_chat_session_id": existing_root,
+                        "requested_by_session": requested_by_session,
+                    },
+                )
+            except RetiredPersonaInstanceError as exc:
+                # What this handler guarantees is the TYPE. An unhandled raise
+                # here was the untyped traceback the operator saw instead of a
+                # refusal.
+                #
+                # What reaches it: a target already retired when the mint began
+                # (a caller that skipped the pre-flight above by another road,
+                # or a `retire` that landed in the gap between the pre-flight
+                # and the mint), AND a `retire` that lands inside the mint lane
+                # itself. Both now arrive with nothing left behind: the mint
+                # asserts bindability before its first durable write and BINDS
+                # before its first session-visible one, so a refusal from either
+                # point precedes the titled row that used to survive it.
+                data = _retired_persona_instance_payload(exc)
+                if getattr(args, "stream", False):
+                    _emit_chat_final(data)
+                else:
+                    print(emit_json(data) if args.json else data["error"])
+                return 2
             session_id = str(receipt["root_chat_session_id"])
+            session_established = session_established_payload(
+                dispatch_decision,
+                fresh=True,
+                # The mint reports the lineage it actually RECORDED, so the
+                # envelope and `_dispatched_from` cannot disagree. It matters on
+                # a RETRY of the same client_message_id: that resolves the same
+                # idempotency-keyed receipt, by which time `existing_root` has
+                # become this very thread — reporting it here would claim "A
+                # superseded A", and reporting nothing would lose the real
+                # predecessor the first pass established.
+                predecessor_session_id=(receipt.get("dispatched_from") or {}).get(
+                    "predecessor_chat_session_id"
+                ),
+            )
         args.session_id = session_id
+        # Survives the lease re-entry above, which sees args.session_id set.
+        args._dispatch_session_established = session_established
     display_name = safe_assignment_text(getattr(persona, "display_name", None), limit=120) or _display_name_for_profile(normalized_persona)
     try:
         instance = instance_store.open_chat(
@@ -1394,6 +1804,13 @@ def _cmd_mission_chat_message(args) -> int:
             kill_active=False,
         )
     except RetiredPersonaInstanceError as exc:
+        # A placement retired between this turn's thread being established and
+        # this bind. Defense in depth rather than the litter site it used to be:
+        # the mint now binds before its first session-visible write, so a
+        # retirement that beats the mint leaves nothing behind, and one that
+        # lands after it archives a row that legitimately owned the thread
+        # (`retire` preserves chat history by contract). This still refuses, and
+        # still refuses with the same typed error.
         data = _retired_persona_instance_payload(exc)
         if getattr(args, "stream", False):
             _emit_chat_final(data)
@@ -1463,16 +1880,12 @@ def _cmd_mission_chat_message(args) -> int:
             instance=instance,
         )
     except ValueError as exc:
-        data = {
-            "ok": False,
-            "error_kind": "invalid_chat_model_override",
-            "error": safe_assignment_text(str(exc), limit=320),
-            "persona_instance_id": instance.id,
-            "persona_id": normalized_persona,
-            "session_id": session_id,
-            "chat_session_id": session_id,
-            "next_expected": "choose a valid provider/model id or clear the chat-scoped override; Hermes profile defaults were not changed",
-        }
+        data = _invalid_chat_model_override_payload(
+            exc,
+            persona_id=normalized_persona,
+            persona_instance_id=instance.id,
+            session_id=session_id,
+        )
         if getattr(args, "stream", False):
             _emit_chat_final(data)
         else:
@@ -1529,7 +1942,7 @@ def _cmd_mission_chat_message(args) -> int:
     persona = apply_instance_model_overrides(persona, instance)
     message = safe_assignment_text(getattr(args, "message", None), limit=12000)
     if not message:
-        data = {"ok": False, "error": "message is required"}
+        data = _missing_chat_message_payload()
         if getattr(args, "stream", False):
             _emit_chat_final(data)
         else:
@@ -1545,9 +1958,11 @@ def _cmd_mission_chat_message(args) -> int:
         session_id=session_id, client_message_id=client_message_id
     ) or {}
     journal_state = safe_assignment_token(journal.get("state"))
-    if journal_state in {"executing", "outcome_unknown"} and replay.get(
-        "assistant"
-    ):
+    # A durable reply already in SessionDB outranks whatever the journal thinks
+    # happened. The recoverable set is the turn store's (a view of its own
+    # transition table), never a literal spelled here — the wall-budget state
+    # was invisible to exactly this kind of inline set until 2026-07-26.
+    if journal_state in REPLY_RECOVERABLE_TURN_STATES and replay.get("assistant"):
         recovered_reply = _redact_persona_chat_text(
             replay["assistant"].get("content"), limit=PERSONA_CHAT_REPLY_LIMIT
         )
@@ -1555,7 +1970,7 @@ def _cmd_mission_chat_message(args) -> int:
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=journal.get("turn_id") or client_message_id,
-            state="native_committed",
+            state=TURN_STATE_NATIVE_COMMITTED,
             metadata={
                 "root_chat_session_id": session_id,
                 "active_session_id": _persona_chat_native_tip(
@@ -1573,7 +1988,8 @@ def _cmd_mission_chat_message(args) -> int:
             session_id=session_id, client_message_id=client_message_id
         ) or {}
         journal_state = safe_assignment_token(journal.get("state"))
-    if journal_state == "native_committed":
+    # Settling: the reply is durable, the projection is not. Finish the walk.
+    if journal_state in SETTLING_TURN_STATES:
         stored_reply = journal.get("stored_reply")
         if stored_reply is None and replay.get("assistant"):
             stored_reply = _redact_persona_chat_text(
@@ -1584,7 +2000,7 @@ def _cmd_mission_chat_message(args) -> int:
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=journal.get("turn_id") or client_message_id,
-            state="projected",
+            state=TURN_STATE_PROJECTED,
             metadata={
                 "stored_reply": stored_reply,
                 "projection_committed": True,
@@ -1594,14 +2010,42 @@ def _cmd_mission_chat_message(args) -> int:
         journal = mission_chat_turn_record(
             session_id=session_id, client_message_id=client_message_id
         ) or {}
-        journal_state = "projected"
-    if journal_state in {"executing", "outcome_unknown"}:
-        if journal_state == "executing":
+        journal_state = TURN_STATE_PROJECTED
+    if journal_state == TURN_STATE_BUDGET_EXHAUSTED:
+        # Settled, NOT ambiguous: this turn ended on its wall clock and the
+        # harness knows it. Never route the operator to turn-resolve (that verb
+        # exists only for genuinely unknown provider outcomes) and never block
+        # the lane — just say plainly that this id is spent.
+        data = {
+            "ok": False,
+            "capability_id": "mission.chat.message",
+            "execution_state": "budget_exhausted",
+            "error_kind": "chat_turn_budget_exhausted",
+            "budget_exhausted": True,
+            "turn_resolution_required": False,
+            "journal_state": TURN_STATE_BUDGET_EXHAUSTED,
+            "root_chat_session_id": session_id,
+            "session_id": session_id,
+            "client_message_id": client_message_id,
+            "turn_id": journal.get("turn_id") or client_message_id,
+            "budget_summary": journal.get("budget_summary"),
+            "error": "this turn already ended on its wall-clock budget; it is settled and needs no resolution",
+            "next_expected": "send a new client_message_id to continue; no turn-resolve is required",
+        }
+        if getattr(args, "stream", False):
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if args.json else data["error"])
+        return 2
+    # No proven reply and the journal says a provider call may still be
+    # outstanding: refuse the resend and route to the resolve verb.
+    if journal_state in RESEND_BLOCKING_TURN_STATES:
+        if journal_state == TURN_STATE_EXECUTING:
             transition_mission_chat_turn(
                 session_id=session_id,
                 client_message_id=client_message_id,
                 turn_id=journal.get("turn_id") or client_message_id,
-                state="outcome_unknown",
+                state=TURN_STATE_OUTCOME_UNKNOWN,
                 metadata={"provider_submitted": True},
             )
         data = {
@@ -1621,7 +2065,7 @@ def _cmd_mission_chat_message(args) -> int:
         else:
             print(emit_json(data) if args.json else data["error"])
         return 2
-    if journal_state == "projected" and journal.get("stored_reply") is not None:
+    if journal_state == TURN_STATE_PROJECTED and journal.get("stored_reply") is not None:
         _publish_persona_chat_projection_event(
             session_id=session_id,
             client_message_id=client_message_id,
@@ -1646,12 +2090,19 @@ def _cmd_mission_chat_message(args) -> int:
             "active_session_id": journal.get("active_session_id") or _persona_chat_native_tip(session_db, session_id),
             "session_id": session_id,
             "chat_session_id": session_id,
+            # Same lineage the live envelope reports. A replay is the SAME turn
+            # answered again (the mint receipt is idempotency-keyed, so a
+            # retried dispatch lands back in the thread it established), so it
+            # must report the same {fresh, reason, predecessor_session_id} —
+            # a caller that reads `session_established` to decide where its
+            # follow-up goes cannot have that answer disappear on a retry.
+            "session_established": session_established,
             "client_message_id": client_message_id,
             "turn_id": journal.get("turn_id") or client_message_id,
             "execution_state": "completed",
             "reply": reply_text,
             "idempotent_replay": True,
-            "journal_state": "projected",
+            "journal_state": TURN_STATE_PROJECTED,
         }
         if getattr(args, "stream", False):
             _emit_chat_final(data)
@@ -1666,28 +2117,28 @@ def _cmd_mission_chat_message(args) -> int:
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=client_message_id,
-            state="pending",
+            state=TURN_STATE_PENDING,
             metadata={"root_chat_session_id": session_id, "pending_user_message": message},
         )
         transition_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=client_message_id,
-            state="executing",
+            state=TURN_STATE_EXECUTING,
             metadata={"provider_submitted": True},
         )
         transition_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=client_message_id,
-            state="native_committed",
+            state=TURN_STATE_NATIVE_COMMITTED,
             metadata={"native_committed": True, "stored_reply": reply_text},
         )
         transition_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=client_message_id,
-            state="projected",
+            state=TURN_STATE_PROJECTED,
             metadata={"projection_committed": True, "stored_reply": reply_text},
         )
         _publish_persona_chat_projection_event(
@@ -1708,6 +2159,9 @@ def _cmd_mission_chat_message(args) -> int:
             "persona_id": normalized_persona,
             "session_id": session_id,
             "chat_session_id": session_id,
+            # See the projected-replay envelope above: a replay reports the same
+            # thread lineage the original turn did.
+            "session_established": session_established,
             "task_id": task_id,
             "goal_id": goal_id,
             "client_message_id": client_message_id,
@@ -1744,7 +2198,7 @@ def _cmd_mission_chat_message(args) -> int:
     abandoned_ids = {
         str(record.get("client_message_id") or "")
         for record in mission_chat_turn_records(session_id=session_id)
-        if record.get("state") == "abandoned"
+        if record.get("state") == TURN_STATE_ABANDONED
     }
     native_history = safe_native_history(
         [
@@ -1762,113 +2216,54 @@ def _cmd_mission_chat_message(args) -> int:
     native_revision_before = _persona_chat_native_revision(session_db, session_id)
     runtime_registry = persona_chat_runtime_registry()
     chat_message = message
-    queued_skills = consume_skills_for_next_turn(
-        persona_id=normalized_persona,
+    from agent_runtime import turn_budget as _turn_budget
+    from agent_runtime.mission_chat_turn_context import build_mission_chat_turn_context
+    from agent_runtime.profile_runner import RunBudgetExceeded
+    # Function-local on purpose: this file is exec'd into harness.py's globals,
+    # so a module-level name here would need a matching harness.py import or it
+    # is a NameError on a LIVE turn (nothing a test run would notice). A local
+    # import binds in this function's scope and needs no harness cooperation.
+    from agent_runtime.run_budget import turn_run_budget_metadata
+
+    # The WHOLE per-turn context — wall budget, capability account, situational
+    # HUD + delivery, skill preload envelope, workspace AGENTS.md, runtime
+    # signature, volatile tail — is assembled by one unit-testable builder
+    # (`agent_runtime.mission_chat_turn_context`). This command part is exec'd
+    # into harness.py's globals rather than imported, so anything assembled HERE
+    # can only ever be guarded by AST source-shape assertions; assembled there it
+    # is guarded by tests that assert the composed bytes. What remains here is
+    # composition: gather the turn's inputs, call the builder, send.
+    #
+    # G10: an explicit --max-seconds ALWAYS wins; only its absence (None) falls
+    # through to the operator's configured lane default
+    # (agent_runtime.mission_chat.default_max_seconds, itself 240s when unset),
+    # so the deployment sets the work-shaped window once instead of every caller
+    # remembering a flag.
+    turn_context = build_mission_chat_turn_context(
+        persona=persona,
+        instance=instance,
+        config=cfg,
         session_id=session_id,
+        native_history=native_history,
+        model_selection=model_selection,
+        session_model_config=_session_model_config(session_db, session_id),
+        max_seconds=resolve_mission_chat_max_seconds(getattr(args, "max_seconds", None)),
+        relay_deadline_epoch=relay_deadline,
+        relay_chain=turn_relay_chain,
+        min_relay_seconds=relay_policy.MIN_RELAY_BUDGET_SECONDS,
+        agents_file=getattr(args, "agents_file", None),
+        surface_prompt=getattr(args, "surface_prompt", "") or "",
     )
-    from agent.skill_utils import required_preload_skill_ids
-
-    required_preload_skills = required_preload_skill_ids(
-        list(getattr(persona, "skills", []) or []),
-        surface="mission_chat",
-        root_node_mode=False,
-    )
-    skills_to_preload = list(
-        dict.fromkeys([*required_preload_skills, *queued_skills])
-    )
-    preloaded_skill_prompt = ""
-    preloaded_skills_loaded: list[str] = []
-    preloaded_skills_missing: list[str] = []
-    if skills_to_preload:
-        try:
-            from agent.skill_commands import build_preloaded_skills_prompt
-
-            preload_kwargs = (
-                {"required_skill_names": set(required_preload_skills)}
-                if required_preload_skills
-                else {}
-            )
-            preloaded_skill_prompt, preloaded_skills_loaded, preloaded_skills_missing = (
-                build_preloaded_skills_prompt(
-                    skills_to_preload,
-                    task_id=session_id,
-                    **preload_kwargs,
-                )
-            )
-        except Exception:
-            preloaded_skill_prompt = ""
-            preloaded_skills_loaded = []
-            preloaded_skills_missing = list(skills_to_preload)
-    workspace_agents = load_workspace_agents_context(
-        getattr(args, "agents_file", None)
-    )
-    workspace_agents_receipt = (
-        dict(workspace_agents.receipt) if workspace_agents is not None else None
-    )
-    if workspace_agents_receipt is not None:
-        workspace_agents_receipt.pop("preview", None)
-    # A resident actor is reusable only while every prompt/provider/tool input
-    # remains identical.  Hash config objects before including them so the
-    # signature never becomes an observability channel for prompt/config text.
-    runtime_signature = hashlib.sha256(
-        emit_json(
-            {
-                "persona_revision": hashlib.sha256(
-                    emit_json(asdict(persona)).encode("utf-8")
-                ).hexdigest(),
-                "instance_revision": hashlib.sha256(
-                    emit_json(asdict(instance)).encode("utf-8")
-                ).hexdigest(),
-                "root": session_id,
-                "root_model_config_revision": hashlib.sha256(
-                    emit_json(_session_model_config(session_db, session_id)).encode(
-                        "utf-8"
-                    )
-                ).hexdigest(),
-                "provider": model_selection.get("effective_provider"),
-                "model": model_selection.get("effective_model"),
-                "api_mode": model_selection.get("effective_api_mode")
-                or getattr(persona, "api_mode", None),
-                "reasoning_effort": model_selection.get(
-                    "effective_reasoning_effort"
-                ),
-                "profile": getattr(persona, "hermes_profile", None),
-                "tool_contract": chat_runtime_tool_contract(
-                    persona, session_id=session_id
-                ),
-                "permissions": permission_state_for_chat(
-                    persona, session_id=session_id
-                ),
-                "relevant_config_revision": hashlib.sha256(
-                    emit_json(asdict(cfg)).encode("utf-8")
-                ).hexdigest(),
-                "workspace_agents": workspace_agents_receipt,
-                "surface_prompt_sha256": hashlib.sha256(
-                    (getattr(args, "surface_prompt", "") or "").encode("utf-8")
-                ).hexdigest(),
-                "runtime_root": str(paths.store_root()),
-                "prompt_contract_revision": "mc-chat-continuity-v1",
-            }
-        ).encode("utf-8")
-    ).hexdigest()
+    # The same object the runner's checkpoint clamp is armed from below, so the
+    # number the agent was told and the number the runtime enforces cannot drift.
+    wall_budget = turn_context.wall_budget
     workspace_id = safe_assignment_token(getattr(args, "workspace_id", None))
     workspace_name = safe_assignment_text(
         getattr(args, "workspace_name", None), limit=120
     )
-    # Runtime situational HUD for this lane — the same projection the
-    # operator's Mission Control runtime HUD strip renders, fed into the chat
-    # turn so the operator and the agent share one view. Resolved ONCE here so
-    # the fed block and every observability row this turn persists (the
-    # write-ahead row below and the post-turn row) record the same object —
-    # record-at-injection, never a later re-derivation. Best-effort ({} / ''
-    # when unavailable); never blocks the turn.
-    from agent_runtime.runtime_hud import (
-        render_situational_hud_block,
-        situational_hud_for_instance,
-    )
-
-    situational_hud = situational_hud_for_instance(instance)
-    situational_hud_content = render_situational_hud_block(situational_hud)
+    # Record-at-injection: the observability row carries the very HUD dict that
+    # was rendered into the fed block, so the operator's CONTEXT peek shows
+    # exactly what the agent was told — never a later re-derivation.
     prompt_context = mission_chat_prompt_observability(
         persona=persona,
         persona_instance_id=instance.id,
@@ -1883,17 +2278,24 @@ def _cmd_mission_chat_message(args) -> int:
         model_selection=model_selection,
         workspace_id=workspace_id,
         workspace_name=workspace_name,
-        workspace_agents=workspace_agents,
-        situational_hud=situational_hud,
-        queued_skills=queued_skills,
-        required_preload_skills=required_preload_skills,
-        preloaded_skills_loaded=preloaded_skills_loaded,
-        preloaded_skills_missing=preloaded_skills_missing,
+        workspace_agents=turn_context.workspace_agents,
+        situational_hud=turn_context.situational_hud,
+        situational_hud_revision=turn_context.situational_hud_revision,
+        situational_hud_delivery=turn_context.situational_hud_delivery,
+        queued_skills=list(turn_context.skills.queued),
+        required_preload_skills=list(turn_context.skills.required),
+        preloaded_skills_loaded=list(turn_context.skills.loaded),
+        preloaded_skills_missing=list(turn_context.skills.missing),
         instance_skill_overrides=(
             list(instance.skill_overrides)
             if instance.skill_overrides is not None
             else None
         ),
+    )
+    # The envelope is rendered last because it needs the observability row's
+    # context_id; body and volatile tail both come from the one built context.
+    situational_hud_content = turn_context.runtime_context_envelope(
+        context_id=str(prompt_context["context_id"])
     )
     instance.skill_manifest_hash = safe_assignment_token(
         prompt_context.get("skill_manifest_hash")
@@ -1940,7 +2342,7 @@ def _cmd_mission_chat_message(args) -> int:
 
     provider_submitted = False
     try:
-        mark_stale_running_turns_interrupted(
+        mark_stale_inflight_turns_interrupted(
             session_id=session_id,
             active_client_message_id=client_message_id,
         )
@@ -1948,7 +2350,7 @@ def _cmd_mission_chat_message(args) -> int:
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=stream_emitter.turn_id,
-            state="pending",
+            state=TURN_STATE_PENDING,
             elements=stream_emitter.elements,
             metadata={
                 "root_chat_session_id": session_id,
@@ -1960,19 +2362,20 @@ def _cmd_mission_chat_message(args) -> int:
         )
         # Chained relays share one deadline: this hop's wall budget is capped
         # by the time left on the chain, and the deadline is seeded (root
-        # turns mint it) so deeper hops inherit the same clock.
-        relay_wall_seconds = float(getattr(args, "max_seconds", 240.0) or 240.0)
-        _relay_remaining = relay_policy.remaining_budget_seconds(relay_deadline)
-        if _relay_remaining is not None:
-            relay_wall_seconds = max(
-                relay_policy.MIN_RELAY_BUDGET_SECONDS,
-                min(relay_wall_seconds, _relay_remaining),
-            )
+        # turns mint it) so deeper hops inherit the same clock. Both facts come
+        # from the ONE `wall_budget` object resolved above — the same object the
+        # agent's HUD line was rendered from, so the number the model was told
+        # and the number the runner enforces can never drift apart.
+        # Relative window handed to the runner: time from NOW to the same
+        # absolute deadline the agent's HUD line quoted, so prompt assembly
+        # cannot let the enforced wall outlive the shared chain deadline.
+        relay_wall_seconds = max(
+            relay_policy.MIN_RELAY_BUDGET_SECONDS,
+            wall_budget.remaining_seconds(),
+        )
         _relay_chain_token = relay_policy.RELAY_CHAIN.set(turn_relay_chain)
         _relay_deadline_token = relay_policy.RELAY_DEADLINE.set(
-            relay_deadline
-            if relay_deadline is not None
-            else _relay_time.time() + relay_wall_seconds
+            wall_budget.deadline_epoch
         )
         # situational_hud / situational_hud_content were resolved once above
         # (record-at-injection): the write-ahead row, the fed block here, and
@@ -1993,7 +2396,7 @@ def _cmd_mission_chat_message(args) -> int:
                 session_id=session_id,
                 client_message_id=client_message_id,
                 turn_id=stream_emitter.turn_id,
-                state="executing",
+                state=TURN_STATE_EXECUTING,
                 metadata={
                     "provider_submitted": True,
                     "provider_request_fingerprint": request_fingerprint,
@@ -2023,12 +2426,12 @@ def _cmd_mission_chat_message(args) -> int:
                 permission_session_id=session_id,
                 conversation_history=native_history,
                 reuse_current_user_message=(
-                    journal_state == "pending" and bool(replay.get("operator"))
+                    journal_state == TURN_STATE_PENDING and bool(replay.get("operator"))
                 ),
                 root_chat_session_id=session_id,
                 client_message_id=client_message_id,
                 runtime_registry=runtime_registry,
-                runtime_signature=runtime_signature,
+                runtime_signature=turn_context.runtime_signature,
                 native_revision=native_revision_before,
                 compression_threshold_tokens_override=getattr(
                     args, "compression_threshold_tokens", None
@@ -2045,6 +2448,7 @@ def _cmd_mission_chat_message(args) -> int:
                 # inherit the runtime default). Applied to the model call by the
                 # transport; unsupported/absent values fall back to the default.
                 reasoning_effort=getattr(instance, "reasoning_effort", None),
+                allow_mission_goal=bool(getattr(args, "allow_mission_goal", False)),
                 surface_prompt=getattr(args, "surface_prompt", "") or "",
                 max_wall_seconds=relay_wall_seconds,
                 stream_callback=_stream_delta if getattr(args, "stream", False) else None,
@@ -2054,10 +2458,13 @@ def _cmd_mission_chat_message(args) -> int:
                 pre_trace_callback=stream_emitter.ack,
                 trace_callback=_stream_progress,
                 agent_ready_callback=_agent_ready_for_steer,
-                preloaded_skill_prompt=preloaded_skill_prompt,
-                workspace_agents_content=(
-                    workspace_agents.content if workspace_agents is not None else None
-                ),
+                preloaded_skill_prompt=turn_context.skill_preload_prompt,
+                workspace_agents_content=turn_context.workspace_agents_content,
+                # The workspace POINTER (G6): the loaded AGENTS.md's own path, from
+                # the receipt the loader already produced. Only a file that actually
+                # LOADED points at a real workspace root — an invalid/missing/too
+                # large selection must not ground the turn somewhere it never read.
+                workspace_agents_path=turn_context.workspace_agents_path,
                 situational_hud_content=situational_hud_content,
                 turn_id=safe_assignment_token(client_message_id),
             )
@@ -2079,14 +2486,14 @@ def _cmd_mission_chat_message(args) -> int:
             turn_usage=turn_usage_from_result(chat_result),
             trace_events=trace_payloads,
         )
-        if preloaded_skills_missing:
+        if turn_context.skills.missing:
             prompt_context["queued_skill_load_errors"] = [
                 {
                     "name": safe_assignment_token(skill) or str(skill),
                     "status": "missing",
                     "source": "queued_next_turn_skill",
                 }
-                for skill in preloaded_skills_missing
+                for skill in turn_context.skills.missing
             ]
         persist_tool_turn_actual(
             persona_id=normalized_persona,
@@ -2105,26 +2512,75 @@ def _cmd_mission_chat_message(args) -> int:
             }
     except Exception as exc:
         stream_emitter.finish(state="failed")
+        # A wall-budget death is NOT an ambiguous provider outcome: the harness
+        # knows exactly why the turn stopped. Settle it as the typed terminal
+        # `budget_exhausted` (no operator turn-resolve, never a frozen console
+        # row) and hand back an honest synthesized account of what did run —
+        # the live 2026-07-26 failure mode this replaces froze both ends of a
+        # relay at `outcome_unknown` and cost a full re-brief.
+        wall_budget_exceeded = bool(
+            provider_submitted
+            and isinstance(exc, RunBudgetExceeded)
+            and getattr(exc, "wall_budget", None)
+        )
         failed_outcome = None
-        if provider_submitted:
+        if wall_budget_exceeded:
+            budget_block = dict(getattr(exc, "wall_budget", None) or {})
+            checkpoint_summary = _turn_budget.synthesize_checkpoint_summary(
+                None, tool_names=_chat_turn_tool_names(stream_emitter.elements)
+            )
             failed_outcome = transition_mission_chat_turn(
                 session_id=session_id,
                 client_message_id=client_message_id,
                 turn_id=stream_emitter.turn_id,
                 elements=stream_emitter.elements,
-                state="outcome_unknown",
-                metadata={"provider_submitted": True},
+                state=TURN_STATE_BUDGET_EXHAUSTED,
+                metadata={
+                    "provider_submitted": True,
+                    "budget_exhausted": True,
+                    "budget_trigger": safe_assignment_token(
+                        budget_block.get("trigger")
+                    )
+                    or "wall_budget_hard_wall",
+                    "budget_summary": safe_assignment_text(str(exc), limit=400),
+                    "stored_reply": checkpoint_summary,
+                    # The WHOLE accounting block, verbatim. A raised run has no
+                    # result to carry it, so it rides the exception — and this
+                    # is the only place it can become durable, because a pure
+                    # chat turn writes no run record.
+                    **turn_run_budget_metadata(error=exc),
+                },
+            )
+        elif provider_submitted:
+            failed_outcome = transition_mission_chat_turn(
+                session_id=session_id,
+                client_message_id=client_message_id,
+                turn_id=stream_emitter.turn_id,
+                elements=stream_emitter.elements,
+                state=TURN_STATE_OUTCOME_UNKNOWN,
+                # A non-wall budget trip (read/search loop, api calls, tokens)
+                # settles here, and it is bounded just as knowably. Yields {}
+                # for any other exception, so absence stays absence.
+                metadata={"provider_submitted": True, **turn_run_budget_metadata(error=exc)},
             )
         if runtime_registry is not None:
             runtime_registry.transition(session_id, "failed")
         data = {
             "ok": False,
             "capability_id": "mission.chat.message",
-            "execution_state": "blocked" if provider_submitted else "failed",
+            "execution_state": (
+                "budget_exhausted"
+                if wall_budget_exceeded
+                else ("blocked" if provider_submitted else "failed")
+            ),
             "error_kind": (
-                "chat_turn_outcome_unknown"
-                if provider_submitted
-                else "chat_turn_not_submitted"
+                "chat_turn_budget_exhausted"
+                if wall_budget_exceeded
+                else (
+                    "chat_turn_outcome_unknown"
+                    if provider_submitted
+                    else "chat_turn_not_submitted"
+                )
             ),
             "persona_instance_id": instance.id,
             "persona_id": normalized_persona,
@@ -2138,11 +2594,27 @@ def _cmd_mission_chat_message(args) -> int:
             "prompt_observability": slim_chat_final_observability(prompt_context),
             "model_selection": model_selection,
             "next_expected": (
-                "resolve the exact outcome_unknown turn with action=abandon, then send a new client_message_id"
-                if provider_submitted
-                else "retry this client_message_id; Hermes did not cross the provider boundary"
+                "send a new client_message_id with a smaller scope or a larger --max-seconds; this turn is settled and needs NO turn-resolve"
+                if wall_budget_exceeded
+                else (
+                    "resolve the exact outcome_unknown turn with action=abandon, then send a new client_message_id"
+                    if provider_submitted
+                    else "retry this client_message_id; Hermes did not cross the provider boundary"
+                )
             ),
         }
+        if wall_budget_exceeded:
+            data.update(
+                {
+                    "budget_exhausted": True,
+                    "turn_resolution_required": False,
+                    "journal_state": TURN_STATE_BUDGET_EXHAUSTED,
+                    "wall_budget": dict(getattr(exc, "wall_budget", None) or {}),
+                    "checkpoint_summary": _turn_budget.synthesize_checkpoint_summary(
+                        None, tool_names=_chat_turn_tool_names(stream_emitter.elements)
+                    ),
+                }
+            )
         if failed_outcome is not None and failed_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
             data["turn_persist_outcome"] = failed_outcome.value
         if getattr(args, "stream", False):
@@ -2154,6 +2626,42 @@ def _cmd_mission_chat_message(args) -> int:
     reply_text = _redact_persona_chat_text(getattr(chat_result, "final_response", "") or "", limit=PERSONA_CHAT_REPLY_LIMIT)
     active_session_id = _persona_chat_native_tip(session_db, session_id)
     native_revision = _persona_chat_native_revision(session_db, session_id)
+    # Graceful checkpoint: the wall budget ended this turn, but it ended it at a
+    # boundary and the agent still produced a real, durable reply. That reply
+    # MUST project like any other (the whole point of the checkpoint), so the
+    # journal keeps its normal native_committed -> projected walk; the
+    # budget provenance rides the record metadata and the terminal frame so
+    # "why is this reply a checkpoint?" is answerable from the record.
+    budget_checkpoint = (getattr(chat_result, "raw", None) or {}).get(
+        "wall_budget_checkpoint"
+    )
+    budget_checkpoint = budget_checkpoint if isinstance(budget_checkpoint, dict) else None
+    budget_engaged = bool(budget_checkpoint and budget_checkpoint.get("engaged"))
+    budget_metadata: dict[str, object] = {
+        # UNCONDITIONAL, unlike the checkpoint provenance below: the accounting
+        # block is the answer to "what bounded this turn?" and an UNTRIPPED turn
+        # answers it too ("nothing did, and here is the headroom"). Gating it on
+        # `budget_engaged` would keep exactly the pre-2026-07-27 blindness — a
+        # turn that stopped at its bound and one that finished with room to
+        # spare would again be indistinguishable from the record. Yields {} when
+        # the run declared no budget at all, so absence still means absence.
+        **turn_run_budget_metadata(result=chat_result),
+        **(
+            {
+                "budget_exhausted": True,
+                "budget_trigger": safe_assignment_token(budget_checkpoint.get("trigger"))
+                or "wall_budget_checkpoint",
+                "budget_summary": safe_assignment_text(
+                    f"wall budget checkpoint: "
+                    f"{budget_checkpoint.get('remaining_at_checkpoint_seconds')}s left of "
+                    f"{budget_checkpoint.get('total_seconds')}s when new tool work stopped",
+                    limit=400,
+                ),
+            }
+            if budget_engaged
+            else {}
+        ),
+    }
     if runtime_registry is not None:
         runtime_registry.finish(
             session_id,
@@ -2164,7 +2672,7 @@ def _cmd_mission_chat_message(args) -> int:
         session_id=session_id,
         client_message_id=client_message_id,
         turn_id=stream_emitter.turn_id,
-        state="native_committed",
+        state=TURN_STATE_NATIVE_COMMITTED,
         elements=stream_emitter.elements,
         metadata={
             "root_chat_session_id": session_id,
@@ -2180,6 +2688,7 @@ def _cmd_mission_chat_message(args) -> int:
             "native_revision": native_revision,
             "native_committed": True,
             "stored_reply": reply_text,
+            **budget_metadata,
         },
     )
     # The native reply is durable. Projection/bookkeeping failures deliberately
@@ -2188,11 +2697,16 @@ def _cmd_mission_chat_message(args) -> int:
     terminal_outcome: MissionChatTurnPersistOutcome | None = None
     try:
         _persona_chat_fault_injection("after_native_commit")
-        _update_persona_chat_token_counts(
-            session_db=session_db,
-            session_id=session_id,
-            result=chat_result,
-        )
+        # Token accounting: NONE here, on purpose. This lane runs the agent
+        # natively bound to the chat session (mission_chat_reply receives
+        # session_id=active_session_id with persist_agent_session=True), so
+        # conversation_loop/codex_runtime already record every API call's usage
+        # onto the bound session row. Adding the turn totals again via
+        # _update_persona_chat_token_counts double-counted every counter
+        # (input/output/cache/reasoning/api_call_count) at exactly 2x — the
+        # per-call runtime writes are the single usage authority on this lane.
+        # The scratch-session assignment lane (session_id=None) keeps its
+        # explicit post-turn write.
         try:
             instance.active_run_id = None
             instance.current_assignment_id = None
@@ -2201,6 +2715,27 @@ def _cmd_mission_chat_message(args) -> int:
             instance_store.update(instance)
         except Exception:
             pass
+
+        # Clarify accounting, in this order and only now that the reply is
+        # durable: SETTLE the question this turn answered before MINTING a
+        # ticket for any question it asks. Reversed, the tokenless settlement
+        # would find the ticket this very turn just created and mark a brand-new
+        # question answered by the turn that asked it.
+        clarify_binding = _settle_mission_chat_clarify_binding(
+            clarify_binding,
+            session_id=session_id,
+            client_message_id=client_message_id,
+            explicit_session_id=stated_session_id,
+        )
+        clarify_request = _mission_chat_clarify_request_payload(
+            chat_result,
+            session_id=session_id,
+            persona_id=normalized_persona,
+            persona_instance_id=instance.id,
+            client_message_id=client_message_id,
+            turn_id=stream_emitter.turn_id,
+            requested_by_session=requested_by_session,
+        )
 
         data = {
             "ok": True,
@@ -2212,12 +2747,41 @@ def _cmd_mission_chat_message(args) -> int:
             "session_id": session_id,
             "chat_session_id": session_id,
             "root_chat_session_id": session_id,
+            # How this turn's thread was established: {fresh, reason,
+            # predecessor_session_id}. A dispatching agent reads it to know
+            # whether it just opened a task-scoped thread (and which thread that
+            # supersedes) or continued an existing one — the same lineage the
+            # session meta records as `_dispatched_from`.
+            "session_established": session_established,
+            # Clarify binding — a TOP-LEVEL SIBLING of session_established, not a
+            # field inside it: that block's shape is pinned by contract, and
+            # nesting here would break it. Present only when this turn presented
+            # a clarify token or settled an open ticket; absent means neither
+            # happened, which is the whole normal path. `bound_via` is the
+            # adoption signal (`clarify_token` = the runtime bound it,
+            # `session_id` = the caller named the right thread themselves,
+            # `none` = they landed there by inheritance).
+            **({"clarify_binding": clarify_binding} if clarify_binding else {}),
             "active_session_id": active_session_id,
             "task_id": task_id,
             "goal_id": goal_id,
             "relay_chain": list(turn_relay_chain),
             "client_message_id": client_message_id,
-            "execution_state": "completed",
+            # A checkpointed turn is a SUCCESS with a truncated scope, not a
+            # failure: a real reply was produced and committed. `ok` stays true
+            # so relay callers do not treat it as an error; the typed
+            # `execution_state` + `budget_exhausted` flag carry the truncation,
+            # and the operator is never told to run turn-resolve.
+            "execution_state": "budget_exhausted" if budget_engaged else "completed",
+            **(
+                {
+                    "budget_exhausted": True,
+                    "turn_resolution_required": False,
+                    "wall_budget": budget_checkpoint,
+                }
+                if budget_engaged
+                else {}
+            ),
             "kind": "mission_chat_message",
             "intent_hint": safe_assignment_token(getattr(args, "intent_hint", None)) or "chat",
             "surface_prompt": safe_assignment_text(getattr(args, "surface_prompt", ""), limit=4000) or "",
@@ -2228,7 +2792,10 @@ def _cmd_mission_chat_message(args) -> int:
             # operator's / caller's next message in this same session. The HUD
             # renders `choices` as pickable rows; agent_chat_send forwards it up
             # the relay so a briefed child can surface context only it has.
-            "clarify_request": (getattr(chat_result, "raw", {}) or {}).get("clarify_request"),
+            # `clarify_token` rides inside it: echo that token back on the reply
+            # and the runtime — not the model's memory for opaque ids — puts the
+            # answer in this thread.
+            "clarify_request": clarify_request,
             "turn_id": safe_assignment_token(client_message_id),
             "run_ids": [],
             "input_tokens": getattr(chat_result, "input_tokens", None),
@@ -2257,10 +2824,16 @@ def _cmd_mission_chat_message(args) -> int:
             # off the live frame; the complete row stays on disk (persisted +
             # archived). Same slim shape on stream and non-stream (one dict).
             "prompt_observability": slim_chat_final_observability(prompt_context),
-            "queued_skills_loaded": preloaded_skills_loaded,
-            "queued_skills_missing": preloaded_skills_missing,
+            "queued_skills_loaded": list(turn_context.skills.loaded),
+            "queued_skills_missing": list(turn_context.skills.missing),
             "model_selection": model_selection,
-            "next_expected": "agent replied through the canonical Mission Control chat path; refresh Harness snapshot for transcript and Initial Chat Context",
+            "next_expected": (
+                "wall budget ran out: this is the agent's final checkpoint reply, "
+                "already committed. Send a new client_message_id to continue "
+                "(no turn-resolve required); raise --max-seconds or narrow the ask"
+                if budget_engaged
+                else "agent replied through the canonical Mission Control chat path; refresh Harness snapshot for transcript and Initial Chat Context"
+            ),
         }
         stream_emitter.finish(
             state="completed",
@@ -2273,7 +2846,7 @@ def _cmd_mission_chat_message(args) -> int:
             client_message_id=client_message_id,
             turn_id=stream_emitter.turn_id,
             elements=stream_emitter.elements,
-            state="projected",
+            state=TURN_STATE_PROJECTED,
             metadata={
                 "projection_committed": True,
                 "stored_reply": reply_text,
@@ -2440,6 +3013,124 @@ def _cmd_mission_chat_queue_skill(args) -> int:
     return 0
 
 
+#: The three ways a clarify question's answer can have reached its thread, plus
+#: the bucket for a question that has not been answered at all. ORDERED, because
+#: the histogram is read as a ladder: `clarify_token` is the runtime owning the
+#: binding, `session_id` is a caller that complied with the prompt, `none` is the
+#: bug still happening, and `unsettled` is a question nobody answered yet.
+CLARIFY_BOUND_VIA_BUCKETS = ("clarify_token", "session_id", "none", "unsettled")
+
+
+def _clarify_ticket_row(record: dict, *, now: float, ttl_seconds: float) -> dict:
+    created_at = float(record.get("created_at") or 0.0)
+    answered_at = record.get("answered_at")
+    return {
+        # The token is a LOOKUP KEY validated against a stored record, never a
+        # capability secret (see PersonaChatClarifyTicketStore), so printing it
+        # is what makes this readout actionable: an operator can hand a stuck
+        # agent the token its answer should have carried.
+        "id": safe_assignment_text(record.get("clarify_token"), limit=240) or None,
+        "state": str(record.get("state") or "") or None,
+        "bound_via": record.get("bound_via") or None,
+        "age_seconds": round(max(now - created_at, 0.0), 3) if created_at else None,
+        # Orthogonal to state, and deliberately so: TTL governs GC only, so an
+        # expired ticket is one the sweep MAY prune — it still binds until the
+        # file is actually gone. Reporting it as a state would claim a cliff the
+        # store does not have.
+        "expired": bool(created_at and (now - created_at) > ttl_seconds),
+        "chat_session_id": safe_assignment_text(record.get("chat_session_id"), limit=240)
+        or None,
+        "persona_id": record.get("persona_id") or None,
+        "persona_instance_id": record.get("persona_instance_id") or None,
+        "asked_by_client_message_id": record.get("asked_by_client_message_id") or None,
+        "answered_by_client_message_id": record.get("answered_by_client_message_id") or None,
+        "requested_by_session": record.get("requested_by_session") or None,
+        "answered_age_seconds": (
+            round(max(now - float(answered_at), 0.0), 3) if answered_at else None
+        ),
+    }
+
+
+def _cmd_mission_chat_clarify_tickets(args) -> int:
+    """Read-only adoption readout for the clarify-token binding.
+
+    The design's rollout step: watch echo adoption climb, WITHOUT new event
+    kinds (telemetry is not the EventLog here). Everything below is read from
+    state the binding already records — the per-turn ``clarify_binding.bound_via``
+    is mirrored onto the ticket at settle, so the ticket files alone answer it.
+
+    ``bound_via: "none"`` is the number that matters. It counts questions whose
+    answer landed in a thread the caller neither named nor bound — the original
+    defect, still happening. ``clarify_token`` climbing against it is the whole
+    point of the feature; ``unsettled`` is a question nobody has answered yet and
+    is not evidence either way.
+
+    Strictly read-only: no mint, no settle, and NO SWEEP. A readout that pruned
+    would silently change the very population it is reporting on, and an operator
+    checking adoption twice would get two different denominators."""
+
+    store = PersonaChatClarifyTicketStore()
+    now = time.time()
+    ttl_seconds = float(CLARIFY_TICKET_TTL_SECONDS)
+    try:
+        records = store.list_tickets()
+    except OSError:
+        records = []
+    wanted_session = safe_assignment_text(getattr(args, "session_id", None), limit=240)
+    wanted_state = safe_assignment_token(getattr(args, "state", None))
+    rows = [_clarify_ticket_row(record, now=now, ttl_seconds=ttl_seconds) for record in records]
+
+    # Counts are computed over the WHOLE store, before --session-id/--state/
+    # --limit narrow the listing. A filtered view is a lens on the population,
+    # not a redefinition of it: an adoption ratio that moved because the operator
+    # asked to see fewer rows would be a lying metric.
+    states: dict[str, int] = {}
+    bound_via: dict[str, int] = {bucket: 0 for bucket in CLARIFY_BOUND_VIA_BUCKETS}
+    expired = 0
+    for row in rows:
+        states[str(row["state"] or "unknown")] = states.get(str(row["state"] or "unknown"), 0) + 1
+        bucket = str(row["bound_via"] or "unsettled")
+        bound_via[bucket] = bound_via.get(bucket, 0) + 1
+        if row["expired"]:
+            expired += 1
+
+    listed = rows
+    if wanted_session:
+        listed = [row for row in listed if row["chat_session_id"] == wanted_session]
+    if wanted_state:
+        listed = [row for row in listed if row["state"] == wanted_state]
+    listed = _sort_rows(listed, getattr(args, "sort", None))
+    limit = getattr(args, "limit", None)
+    truncated = False
+    if limit is not None and limit >= 0 and len(listed) > limit:
+        listed = listed[:limit]
+        truncated = True
+
+    data = _list_envelope("clarify_ticket", listed, cursor=None, truncated=truncated)
+    data.update(
+        {
+            "ok": True,
+            "capability_id": "mission.chat.clarify_tickets",
+            # The gate's CURRENT setting, which is not the same question as
+            # whether the tickets below were minted under it: turning the gate
+            # off stops minting but leaves the store readable, and those tickets
+            # are exactly what an operator wants to see after a rollback.
+            "binding_enabled": bool(mission_chat_clarify_token_binding()),
+            "ttl_seconds": ttl_seconds,
+            "total": len(rows),
+            "states": states,
+            "bound_via": bound_via,
+            "expired": expired,
+            "next_expected": (
+                "watch bound_via.none — every one of those is a clarify answer that "
+                "opened a fresh thread instead of returning to the question"
+            ),
+        }
+    )
+    _print_stage42(data, args=args, default_output="json")
+    return 0
+
+
 def _cmd_mission_chat_turn_resolve(args) -> int:
     session_id = safe_assignment_text(getattr(args, "session_id", None), limit=240)
     client_message_id = safe_assignment_text(
@@ -2536,7 +3227,7 @@ def _cmd_mission_chat_turn_resolve(args) -> int:
         "ok": outcome is MissionChatTurnPersistOutcome.PERSISTED,
         "capability_id": "mission.chat.turn.resolve",
         "resolution": "abandon",
-        "journal_state": "abandoned",
+        "journal_state": TURN_STATE_ABANDONED,
         "root_chat_session_id": session_id,
         "session_id": session_id,
         "client_message_id": client_message_id,
@@ -3204,7 +3895,6 @@ def _cmd_persona_instance_run_once(args) -> int:
     seed = active[-1] if active else None
     message = args.message or (seed.message if seed else "Run one bounded free-floating persona sandbox turn.")
     title = args.title or (seed.title if seed else "Free-floating persona run")
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
     try:
         result = PersonaDiagnosticController(
             config=cfg,
@@ -3665,6 +4355,11 @@ class _ChatProtocolV2Emitter:
             "status": _safe_stream_text(payload.get("status")),
             "summary": _safe_stream_text(payload.get("summary")),
         }
+        # Generic input record (already scrubbed/bounded at the progress sink).
+        # Block-preserving: key-per-line structure is the rendering contract.
+        tool_input = _safe_stream_block(payload.get("tool_input"), limit=1200)
+        if tool_input:
+            tool["tool_input"] = tool_input
         self.elements.append(tool)
         self._active_tools.setdefault(name, []).append(tool)
         self._emit_chat_frame(
@@ -3677,6 +4372,7 @@ class _ChatProtocolV2Emitter:
                 "name": name,
                 "args": _safe_stream_text(payload.get("summary")),
                 "command": command,
+                "tool_input": tool.get("tool_input"),
             }
         )
 
@@ -3729,6 +4425,15 @@ class _ChatProtocolV2Emitter:
         todo_state = payload.get("todo_state")
         if isinstance(todo_state, list):
             tool["todo_state"] = todo_state
+        # Generic input/result record (scrubbed/bounded at the progress sink;
+        # block-preserving). Input carries through from the started element when
+        # the finished payload omits it, mirroring the command carry-through.
+        tool_input = _safe_stream_block(payload.get("tool_input"), limit=1200) or tool.get("tool_input")
+        if tool_input:
+            tool["tool_input"] = tool_input
+        tool_result = _safe_stream_block(payload.get("tool_result"), limit=1800)
+        if tool_result:
+            tool["tool_result"] = tool_result
         self._emit_chat_frame(
             {
                 "type": "tool.finished",
@@ -3744,6 +4449,8 @@ class _ChatProtocolV2Emitter:
                 "detail": tool.get("detail"),
                 "output": tool.get("output"),
                 "exit_code": tool.get("exit_code"),
+                "tool_input": tool.get("tool_input"),
+                "tool_result": tool.get("tool_result"),
                 **({"todo_state": tool["todo_state"]} if "todo_state" in tool else {}),
             }
         )
@@ -3799,6 +4506,22 @@ class _ChatProtocolV2Emitter:
 
 def _safe_stream_text(value: object, *, limit: int = 800) -> str | None:
     return safe_assignment_text(value, limit=limit) or None
+
+
+def _safe_stream_block(value: object, *, limit: int) -> str | None:
+    """Newline-PRESERVING stream text for the tool input/result record.
+
+    ``safe_assignment_text`` whitespace-collapses, which would fold the
+    key-per-line block (the rendering contract for the console's Input/Result
+    dropdowns) into one unreadable line. The value was already secret-scrubbed
+    and bounded at the progress sink; this only re-bounds and strips NULs."""
+
+    text = str(value or "").replace("\x00", " ").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return None
+    if len(text) > limit:
+        text = f"{text[:limit]}\n…(rest truncated)…"
+    return text
 
 
 def _safe_exit_code_value(value: object) -> int | None:
@@ -3857,23 +4580,37 @@ def _persona_chat_persistence_failed(
 
 def _default_persona_session_db():
     try:
-        from hermes_state import SessionDB
-        from hermes_constants import get_hermes_head_home, get_hermes_home_override
+        from hermes_constants import get_hermes_home_override
+
+        from agent_runtime.chat_session_scope import (
+            open_chat_session_db,
+            resolve_chat_session_scope,
+        )
 
         # The persona-chat SessionDB is the OPERATOR-visible transcript store —
         # the exact DB ``persona_chat_history`` (the snapshot projection) reads.
         # Under an in-process persona profile override it must bind to the
-        # recorded outermost/operator home, never the active profile DB. If no
-        # outermost home was recorded, both paths resolve to the override and we
-        # must fail closed rather than create a transcript invisible to Mission
-        # Control.
+        # operator home, never the active profile DB, or one shared
+        # persona-instance pointer splits across profile-local SessionDBs (the
+        # 2026-07-27 cockpit read-lane gap: bindings in the shared runtime root
+        # pointing at transcripts minted in ``profiles/alice/state.db``).
+        #
+        # Fail closed ONLY when NO authority resolved a head at all: with an
+        # override active and an AMBIENT scope, the "head" degenerates to the
+        # override itself and the operator home is unknown. An authoritative
+        # head that happens to EQUAL the override is the legitimate same-DB
+        # case — a persona bound to the head profile (e.g. Neko on the seeded
+        # base profile) relaying in-process. The former path-equality check
+        # conflated the two and killed every relay such a persona sent (live
+        # 2026-07-23, chat_session_db_unavailable).
+        scope = resolve_chat_session_scope()
         override = get_hermes_home_override()
-        if override is not None:
-            head_home = get_hermes_head_home()
-            if head_home == Path(override):
-                raise PersonaChatPersistenceError("session_db_acquire")
-            return SessionDB(db_path=head_home / "state.db")
-        return SessionDB()
+        if override is not None and not scope.authoritative:
+            raise PersonaChatPersistenceError("session_db_acquire")
+        db = open_chat_session_db(scope)
+        if db is None:
+            raise PersonaChatPersistenceError("session_db_acquire")
+        return db
     except PersonaChatPersistenceError:
         raise
     except Exception as exc:
@@ -3921,15 +4658,282 @@ def _requested_chat_model_override(args) -> dict[str, object] | None:
     }
 
 
-def _session_model_config(session_db, session_id: str | None) -> dict[str, object]:
+def _missing_chat_message_payload() -> dict[str, object]:
+    """Refusal for a send that carries no message text.
+
+    One spelling for two call sites: the pre-mint gate and the post-lease check
+    that has always owned it."""
+
+    return {"ok": False, "error": "message is required"}
+
+
+def _invalid_chat_model_override_payload(
+    exc: Exception,
+    *,
+    persona_id: str,
+    persona_instance_id: str | None,
+    session_id: str | None,
+) -> dict[str, object]:
+    """Refusal for a provider/model override the caller stated wrongly.
+
+    Built here rather than inline because the same refusal is now reachable
+    from TWO points of one turn — the pre-mint gate (no session exists yet, so
+    the session fields are honestly null) and the post-``open_chat`` resolve —
+    and one envelope with two spellings is how ``error_kind`` drifts."""
+
+    return {
+        "ok": False,
+        "error_kind": "invalid_chat_model_override",
+        "error": safe_assignment_text(str(exc), limit=320),
+        "persona_instance_id": persona_instance_id,
+        "persona_id": persona_id,
+        "session_id": session_id,
+        "chat_session_id": session_id,
+        "next_expected": "choose a valid provider/model id or clear the chat-scoped override; Hermes profile defaults were not changed",
+    }
+
+
+def _mission_chat_caller_refusal(
+    args,
+    *,
+    persona_id: str,
+    persona_instance_id: str | None,
+) -> dict[str, object] | None:
+    """The refusals decidable from the caller's arguments alone, or ``None``.
+
+    Exists so they can run BEFORE a dispatch mints its task-scoped thread: a
+    mint is durable (a titled row in Mission Control) and a repoint (the
+    instance's default-thread pointer), so a send that was always going to be
+    refused must not leave either behind. Both checks are pure functions of
+    ``args``, so evaluating them here AND at their original sites is free and
+    keeps those sites intact for the explicit-session lane."""
+
+    if not safe_assignment_text(getattr(args, "message", None), limit=12000):
+        return _missing_chat_message_payload()
+    try:
+        _requested_chat_model_override(args)
+    except ValueError as exc:
+        return _invalid_chat_model_override_payload(
+            exc,
+            persona_id=persona_id,
+            persona_instance_id=persona_instance_id,
+            session_id=None,
+        )
+    return None
+
+
+def _clarify_ticket_store_populated() -> bool:
+    """Cheap probe: has this runtime ever minted a clarify ticket?
+
+    The tokenless settlement below (a turn landing in a session that has an open
+    ticket) has to run on turns that present NO token, which is nearly all of
+    them. Gating it on ``mission_chat_clarify_token_binding()`` would put an
+    UNCACHED root-``config.yaml`` parse on every mission-chat turn — the exact
+    cost ``resolve_dispatch_session_decision``'s lazy-config note exists to
+    avoid. One ``exists()`` answers it instead: with the gate off nothing ever
+    mints, so the directory never appears and no ticket work (and no config
+    read) happens at all."""
+
+    try:
+        return (paths.store_root() / "persona_chat_clarify_tickets").exists()
+    except OSError:  # pragma: no cover - defensive; a store probe must not fail a turn
+        return False
+
+
+def _resolve_mission_chat_clarify_binding(
+    args, *, session_id: str | None
+) -> dict[str, object] | None:
+    """Resolve an echoed ``clarify_token`` into the thread it was asked in.
+
+    Returns the turn's ``clarify_binding`` report block, or ``None`` when the
+    caller presented no token (the overwhelmingly common case, and the one that
+    must cost nothing — no store read, no config parse).
+
+    **The token beats a conflicting ``session_id``, loudly.** Refusing would
+    defeat the purpose: this binding exists precisely because agents are
+    unreliable about session arguments, so a reply that echoes the token AND
+    attaches a stale session id must still land correctly. Silence would be the
+    other half of the same failure, so the override is reported in
+    ``overrode_session_id``.
+
+    **An unknown or pruned token degrades, it does not refuse.** Tickets are
+    swept on a TTL; turning a GC'd ticket into a hard failure would punish a
+    parent that did exactly the right thing. The turn falls through to normal
+    precedence and says so (``state: "unknown_token"``)."""
+
+    token = safe_assignment_text(getattr(args, "clarify_token", None), limit=240)
+    if not token:
+        return None
+    if not mission_chat_clarify_token_binding():
+        return None
+    ticket = PersonaChatClarifyTicketStore().resolve(token)
+    bound_session_id = safe_assignment_text(
+        (ticket or {}).get("chat_session_id"), limit=240
+    )
+    if not bound_session_id:
+        return {
+            "token": token,
+            "state": "unknown_token",
+            "bound_via": "none",
+            "bound_session_id": None,
+            "overrode_session_id": None,
+        }
+    stated = safe_assignment_text(session_id, limit=200)
+    return {
+        "token": token,
+        "state": "bound",
+        "bound_via": "clarify_token",
+        "bound_session_id": bound_session_id,
+        "overrode_session_id": stated if stated and stated != bound_session_id else None,
+    }
+
+
+def _settle_mission_chat_clarify_binding(
+    binding: dict[str, object] | None,
+    *,
+    session_id: str | None,
+    client_message_id: str | None,
+    explicit_session_id: str | None,
+) -> dict[str, object] | None:
+    """Close out this turn's clarify accounting and return the report block.
+
+    Two settlements, one chokepoint. A turn that BOUND through a token settles
+    that ticket (``bound``, or ``rebound`` when a different message answers the
+    same question again). A turn that presented NO token but landed in a session
+    that HAS an open ticket settles it anyway — ``bound_via: "session_id"`` when
+    the caller named the thread, ``"none"`` when they merely inherited it. That
+    tokenless half is not bookkeeping pedantry: without it every
+    prompt-compliant parent leaves a permanently-open ticket and the adoption
+    metric lies in the pessimistic direction, which is the direction that would
+    argue for building more machinery than this needs.
+
+    Called only after the turn's reply is durable — a refused turn answered
+    nothing and must not mark a question answered."""
+
+    store = PersonaChatClarifyTicketStore()
+    if binding is not None:
+        if binding.get("bound_via") != "clarify_token":
+            return binding
+        record = store.settle(
+            binding.get("token"),
+            client_message_id=client_message_id,
+            bound_via="clarify_token",
+        )
+        if record is not None and record.get("state") == "rebound":
+            binding = {**binding, "state": "rebound"}
+        return binding
+    if not _clarify_ticket_store_populated():
+        return None
+    ticket = store.open_ticket_for_session(session_id)
+    if ticket is None:
+        return None
+    bound_via = "session_id" if safe_assignment_text(explicit_session_id, limit=200) else "none"
+    store.settle(
+        ticket.get("clarify_token"),
+        client_message_id=client_message_id,
+        bound_via=bound_via,
+    )
+    return {
+        "token": safe_assignment_text(ticket.get("clarify_token"), limit=240) or None,
+        "state": "answered",
+        "bound_via": bound_via,
+        "bound_session_id": safe_assignment_text(ticket.get("chat_session_id"), limit=240)
+        or None,
+        "overrode_session_id": None,
+    }
+
+
+def _mission_chat_clarify_request_payload(
+    chat_result,
+    *,
+    session_id: str | None,
+    persona_id: str,
+    persona_instance_id: str | None,
+    client_message_id: str | None,
+    turn_id: str | None,
+    requested_by_session: str | None,
+) -> dict[str, object] | None:
+    """The turn's ``clarify_request``, with a freshly minted binding token.
+
+    The token is minted HERE — where the question is materialized into the turn
+    payload — and never inside :class:`MissionChatClarifyCapture`, which is
+    deliberately a pure dataclass with no store and no session id. No clarify,
+    no ticket: the normal path pays nothing.
+
+    A mint failure is not a turn failure. The question still ships (without a
+    token), the answering parent falls through to today's precedence, and the
+    only thing lost is the structural binding — which is exactly the state the
+    lane was in before this existed."""
+
+    raw = (getattr(chat_result, "raw", None) or {}).get("clarify_request")
+    if not isinstance(raw, dict) or not raw:
+        # Passed through verbatim, exactly as before this seam existed: no
+        # question asked, nothing to bind.
+        return raw
+    if not mission_chat_clarify_token_binding():
+        return dict(raw)
+    token = PersonaChatClarifyTicketStore().mint(
+        chat_session_id=session_id,
+        persona_instance_id=persona_instance_id,
+        persona_id=persona_id,
+        asked_by_client_message_id=client_message_id,
+        asked_turn_id=turn_id,
+        requested_by_session=requested_by_session,
+    )
+    payload = dict(raw)
+    if token:
+        payload["clarify_token"] = token
+    return payload
+
+
+def _mission_chat_retired_target_refusal(
+    instance_store: PersonaInstanceStore,
+    *,
+    persona_id: str,
+    persona_instance_id: str | None,
+) -> dict[str, object] | None:
+    """Refusal when the dispatch target's placement was RETIRED, or ``None``.
+
+    The sibling of :func:`_mission_chat_caller_refusal` for the one refusal that
+    is not a function of ``args``: it needs the store. Same reason for being
+    here rather than only at its original site — ``open_chat`` surfaces this
+    refusal by raising, but the mint below binds through ``open_chat`` only
+    AFTER creating and titling the session row, so a dispatch to a target that
+    can never be served used to leave a permanent empty thread behind (and
+    escape as an untyped traceback, because this call site's typed handler
+    wraps the LATER bind, not the mint).
+
+    Read-only: the store predicate never writes, and a store that cannot answer
+    returns ``None`` rather than fabricating a refusal — the mint lane and
+    ``open_chat`` both still refuse a retired target, so failing open here costs
+    the litter, never the guarantee."""
+
+    try:
+        archive_path = instance_store.retired_instance_archive_path(
+            persona_instance_id, persona_id=persona_id
+        )
+    except Exception:
+        return None
+    if archive_path is None:
+        return None
+    return _retired_persona_instance_refusal(
+        persona_instance_id=canonical_chat_instance_id(persona_id, persona_instance_id),
+        archive_path=archive_path,
+    )
+
+
+def _session_row(session_db, session_id: str | None) -> dict[str, object]:
     if session_db is None or not session_id:
         return {}
     try:
         raw = session_db.get_session(session_id)
     except Exception:
         return {}
-    if not isinstance(raw, dict):
-        return {}
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def _session_model_config(session_db, session_id: str | None) -> dict[str, object]:
+    raw = _session_row(session_db, session_id)
     model_config = raw.get("model_config")
     if isinstance(model_config, dict):
         return dict(model_config)
@@ -3944,10 +4948,48 @@ def _session_model_config(session_db, session_id: str | None) -> dict[str, objec
 
 
 def _persona_chat_session_owner(session_db, session_id: str | None) -> str | None:
-    config = _session_model_config(session_db, session_id)
-    if safe_assignment_token(config.get("source")) != PERSONA_CHAT_SESSION_SOURCE:
+    """Resolve the immutable owner of a canonical persona-chat transcript.
+
+    SessionDB's typed ``source`` column is the authority that makes a row a
+    persona chat.  Older rows predate the duplicated ownership fields in
+    ``model_config``; their server-minted id still carries the exact instance
+    owner.  Requiring the duplicate field made those rows visible through the
+    history projection but impossible to open or message.
+
+    New rows persist both forms.  If both are present they must agree, so a
+    corrupt metadata write cannot reassign another instance's transcript.
+    """
+
+    raw = _session_row(session_db, session_id)
+    if safe_assignment_token(raw.get("source")) != PERSONA_CHAT_SESSION_SOURCE:
         return None
-    return safe_assignment_token(config.get("persona_instance_id")) or None
+    config = _session_model_config(session_db, session_id)
+    config_source = safe_assignment_token(config.get("source"))
+    if config_source and config_source != PERSONA_CHAT_SESSION_SOURCE:
+        return None
+
+    metadata_owner = safe_assignment_token(config.get("persona_instance_id")) or None
+    structural_owner = chat_session_owner_instance_id(session_id)
+    if metadata_owner and structural_owner and metadata_owner != structural_owner:
+        return None
+    owner = metadata_owner or structural_owner
+    if not owner:
+        return None
+
+    # Retired singleton/operator ids are recorded as durable aliases during
+    # persona-instance reconciliation.  Resolve those aliases here so history,
+    # open and send all name the same current instance authority.
+    try:
+        from agent_runtime.persona_instance_identity import load_persona_instance_aliases
+
+        aliases = load_persona_instance_aliases()
+    except Exception:
+        aliases = {}
+    seen: set[str] = set()
+    while owner in aliases and owner not in seen:
+        seen.add(owner)
+        owner = aliases[owner]
+    return canonical_persona_instance_id(owner) or owner
 
 
 def _persona_chat_bound_owner(session_id: str | None) -> str | None:
@@ -4117,11 +5159,19 @@ def _ensure_persona_chat_session(
         normalized_persona = _normalize_cli_persona_or_template_id(persona_id or "persona")
     except Exception:
         normalized_persona = safe_assignment_token(persona_id) or "persona"
+    owner_instance_id = chat_session_owner_instance_id(session_id)
+    ownership = {
+        "source": PERSONA_CHAT_SESSION_SOURCE,
+        "persona_id": normalized_persona,
+    }
+    if owner_instance_id:
+        ownership["persona_instance_id"] = owner_instance_id
     try:
         session_db.create_session(
             session_id=session_id,
             source=PERSONA_CHAT_SESSION_SOURCE,
             model=None,
+            model_config=ownership,
             system_prompt=f"Mission Control persona chat for {normalized_persona}",
         )
     except Exception as exc:
@@ -4240,6 +5290,24 @@ def _safe_persona_chat_body_text(value, *, limit: int) -> str:
         # Truncation must be visible, never silent.
         normalized = normalized[:limit].rstrip() + " … [truncated]"
     return normalized
+
+
+def _chat_turn_tool_names(elements) -> list[str]:
+    """Tool names this turn actually ran, in emitter order.
+
+    Feeds the synthesized budget-exhausted summary: when not even the final
+    checkpoint call fits, the operator still gets an honest account of what DID
+    execute instead of a blank blocked turn.
+    """
+
+    names: list[str] = []
+    for element in elements or ():
+        if not isinstance(element, dict) or element.get("kind") != "tool":
+            continue
+        name = safe_assignment_token(element.get("name"))
+        if name:
+            names.append(name)
+    return names
 
 
 def _persona_chat_existing_turn(
@@ -4421,14 +5489,21 @@ def _append_persona_assistant_text(
 
 
 def _update_persona_chat_token_counts(*, session_db, session_id: str, result) -> None:
-    """Record this turn's canonical token usage onto the bound chat session.
+    """Record this turn's canonical token usage onto the bound chat session —
+    SCRATCH-SESSION LANES ONLY.
 
-    Mission Control runs each persona-chat turn under a fresh runtime with an
-    ephemeral scratch session (``session_id=None``), so ``conversation_loop``'s
-    own per-call token writes land on the throwaway scratch row, never here. This
-    is the *only* writer of the bound session the Launcher reads, and each turn's
-    ``result`` carries that turn's totals (the runtime is per-turn), so the
-    increment is a true cumulative — no double count.
+    Valid only where the runtime ran with an ephemeral scratch session
+    (``mission_chat_reply(session_id=None)``, e.g. the assignment relay lane):
+    there ``conversation_loop``'s per-call token writes land on the throwaway
+    scratch row, so this explicit post-turn write is the sole writer of the
+    bound session the Launcher reads.
+
+    It must NEVER run on the native-continuity chat lane, where the runtime is
+    bound to the real chat session (``session_id=active_session_id`` with
+    ``persist_agent_session=True``): the per-call runtime writes already land on
+    the bound row, and stacking this turn-total write on top double-counts every
+    counter at exactly 2x (the 2026-07 "in 20,208 for a bare hi" Runtime-card
+    bug). One lane, one usage writer.
 
     It forwards the COMPLETE canonical usage (cache reads/writes and reasoning,
     not just input/output). ``input_tokens`` is already the uncached, full-price
@@ -4574,7 +5649,6 @@ def _run_free_floating_assignment_once(
     never writes stdout, so the title cannot be run post-emit from in here.
     """
 
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
     session_id: str | None = None
     try:
         session_db = _default_persona_session_db()
@@ -4639,7 +5713,7 @@ def _run_free_floating_assignment_once(
             client_message_id=client_message_id,
             turn_id=emitter.turn_id,
             elements=emitter.elements,
-            state="running",
+            state=TURN_STATE_RUNNING,
         ),
     )
 
@@ -4651,7 +5725,7 @@ def _run_free_floating_assignment_once(
         stream_emitter.progress(payload)
 
     try:
-        mark_stale_running_turns_interrupted(
+        mark_stale_inflight_turns_interrupted(
             session_id=session_id,
             active_client_message_id=client_message_id,
         )
@@ -4660,7 +5734,7 @@ def _run_free_floating_assignment_once(
             client_message_id=client_message_id,
             turn_id=stream_emitter.turn_id,
             elements=stream_emitter.elements,
-            state="running",
+            state=TURN_STATE_RUNNING,
             write_ahead=True,
         )
         # Keep the model run out of SessionDB. The canonical operator transcript
@@ -4691,7 +5765,7 @@ def _run_free_floating_assignment_once(
             client_message_id=client_message_id,
             turn_id=stream_emitter.turn_id,
             elements=stream_emitter.elements,
-            state="failed",
+            state=TURN_STATE_FAILED,
         )
         PersonaAssignmentStore().complete(assignment_id, state="blocked", error=safe_assignment_text(str(exc), limit=240))
         data = {
@@ -4781,7 +5855,7 @@ def _run_free_floating_assignment_once(
             client_message_id=client_message_id,
             turn_id=stream_emitter.turn_id,
             elements=stream_emitter.elements,
-            state="completed",
+            state=TURN_STATE_COMPLETED,
         )
         if terminal_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
             data["turn_persist_outcome"] = terminal_outcome.value
@@ -4802,7 +5876,7 @@ def _run_free_floating_assignment_once(
             client_message_id=client_message_id,
             turn_id=stream_emitter.turn_id,
             elements=stream_emitter.elements,
-            state="failed",
+            state=TURN_STATE_FAILED,
         )
         if not assignment_completed:
             try:
@@ -4876,22 +5950,49 @@ def _mission_chat_target_decision(
     persona_instance_id,
     session_id,
     relay_chain,
+    requested_by_session=None,
 ):
     """Decide the ``ambiguous_target`` refusal for a mission-chat send.
 
     Reads the persona's live instances from the store (the roster's
-    on-the-level set — retired instances are archived out of ``list_all``) and
-    computes whether the caller already pinned a specific instance, then defers
-    the actual decision to the pure ``target_policy.evaluate_target`` authority
-    (unit-testable in isolation, no store).
+    on-the-level set — retired instances are archived out of ``list_all``),
+    NARROWS them to the sender's workspace, and computes whether the caller
+    already pinned a specific instance, then defers the actual decision to the
+    pure ``target_policy.evaluate_target`` authority (unit-testable in
+    isolation, no store).
 
     ``caller_pinned`` is True whenever the send is NOT on the silent-fallback
     path — an explicit ``persona_instance_id``, a ``personainst_*`` target, or
     ANY caller-chosen ``session_id`` (the operator console always carries an
     instance-bearing session id, so its sends never trip this). Only the
     omitted-session + no-instance path can be ambiguous.
+
+    ``requested_by_session`` is the SENDER's chat-root session id (threaded from
+    the relay envelope). A BARE persona id is resolved only among the placements
+    in the sender's own workspace, so a persona placed into several workspace
+    scenes does not fan a two-agent order out onto duplicate placements in
+    unrelated workspaces. Runtime-global PLACEMENT rows (no workspace pointer)
+    stay in scope everywhere, but runtime-global CANONICAL rows are excluded
+    from the candidate list under a real scope (instance = in-level placement)
+    — an unplaced persona then has zero candidates, which ``evaluate_target``
+    allows through to today's canonical-channel fallback (retiring that
+    fallback is gated on the global-row adoption migration). An operator CLI
+    invocation with no sender session falls back to the active workspace.
+
+    "Placements shadow canonical": when an in-scope PLACEMENT of the persona
+    exists, its auto-derived CANONICAL row is dropped from the candidate list —
+    so a bare persona id with one in-scope placement resolves to that single
+    placement (``evaluate_target`` auto-routes on one candidate, retiring the
+    ambiguity prompt) instead of the plumbing canonical row, while TWO in-scope
+    placements stay genuinely ambiguous. The scope + shadow is the one shared
+    ``workspace_scope.addressable_roster`` authority; the count-based policy is
+    unchanged.
     """
-    from agent_runtime import target_policy
+    from agent_runtime import target_policy, workspace_scope
+    from agent_runtime.persona_assignments import (
+        is_canonical_persona_channel,
+        sender_scope_workspace_id,
+    )
 
     is_profile = normalized_persona.startswith("profile:")
     raw_token = safe_assignment_token(raw_persona_id)
@@ -4900,6 +6001,22 @@ def _mission_chat_target_decision(
         or raw_token.startswith(PERSONA_INSTANCE_ID_PREFIX)
         or safe_assignment_text(session_id, limit=200)
     )
+    # Derive the sender's workspace scope (session → owner instance → its
+    # workspace pointer; bare operator CLI send falls back to the active
+    # workspace), then scope + shadow the persona's rows through the one shared
+    # addressable-roster authority.
+    scope_workspace_id = sender_scope_workspace_id(
+        requested_by_session, instance_store=instance_store
+    )
+    addressable = workspace_scope.addressable_roster(
+        (
+            instance
+            for instance in instance_store.list_all()
+            if getattr(instance, "persona_id", None) == normalized_persona
+        ),
+        scope_workspace_id=scope_workspace_id,
+        is_canonical=is_canonical_persona_channel,
+    )
     candidates = sorted(
         (
             target_policy.TargetCandidate(
@@ -4907,8 +6024,7 @@ def _mission_chat_target_decision(
                 display_name=safe_assignment_text(getattr(instance, "display_name", None), limit=120)
                 or instance.id,
             )
-            for instance in instance_store.list_all()
-            if getattr(instance, "persona_id", None) == normalized_persona
+            for instance in addressable
         ),
         key=lambda candidate: candidate.instance_id,
     )
@@ -4919,6 +6035,50 @@ def _mission_chat_target_decision(
         is_profile_target=is_profile,
         relay_chain=relay_chain,
     )
+
+
+def _mission_chat_bare_persona_target(
+    instance_store,
+    *,
+    normalized_persona: str,
+    requested_by_session=None,
+):
+    """Resolve a BARE persona id to its single in-scope PLACEMENT id, or ``None``.
+
+    The routing counterpart to the ambiguous-target guard: both read the one
+    ``workspace_scope.addressable_roster`` authority with the same sender scope,
+    so they never disagree. When exactly one placement of the persona is in the
+    sender's scope, a bare persona send threads onto THAT placement (the
+    "placements shadow canonical" ruling — the plumbing canonical row is not the
+    default target while a deliberate placement is on the level). Returns
+    ``None`` when there is no in-scope placement (the caller falls back to the
+    canonical channel, reachability fallback) or when the guard would already
+    have refused two-or-more in-scope placements.
+    """
+    from agent_runtime import workspace_scope
+    from agent_runtime.persona_assignments import (
+        is_canonical_persona_channel,
+        sender_scope_workspace_id,
+    )
+
+    scope_workspace_id = sender_scope_workspace_id(
+        requested_by_session, instance_store=instance_store
+    )
+    addressable = workspace_scope.addressable_roster(
+        (
+            instance
+            for instance in instance_store.list_all()
+            if getattr(instance, "persona_id", None) == normalized_persona
+        ),
+        scope_workspace_id=scope_workspace_id,
+        is_canonical=is_canonical_persona_channel,
+    )
+    placements = [
+        instance for instance in addressable if not is_canonical_persona_channel(instance)
+    ]
+    if len(placements) == 1:
+        return placements[0].id
+    return None
 
 
 def _persona_id_from_instance_id(persona_instance_id: str) -> str:
@@ -4959,7 +6119,6 @@ def _resolve_mission_chat_persona_id(persona_id, persona_instance_id) -> str:
 
 def _cmd_persona_diagnose(args) -> int:
     cfg = load_agent_runtime_config()
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
     try:
         result = PersonaDiagnosticController(
             config=cfg,

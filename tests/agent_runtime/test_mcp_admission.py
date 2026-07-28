@@ -1,0 +1,1051 @@
+"""Selective MCP admission (R1) — policy, isolation, and bounded execution.
+
+``mcp_lane`` (R0) made the harness lane's MCP drop honest. R1 lets a NARROW,
+declared, config-flagged set of personas actually register their declared
+servers for one run. Design:
+``docs/agent-runtime-harness/mission-chat-mcp-admission.md``.
+
+These tests pin the security floor first and the happy path second, because the
+failure modes are asymmetric: denying costs a QA agent the
+``qa.request_screenshot`` fallback that already works, while over-admitting hands
+an autonomous agent process-control tools. In particular they pin that
+
+* nothing is admitted with the flag off (the default),
+* nothing is admitted for a role outside the stage floor, even if config says so,
+* nothing is admitted for a persona that declares nothing,
+* ``unbounded`` can never widen the admitted set (cross-persona isolation),
+* ``read_only`` subtracts the mutating tools,
+* resolution NEVER spawns — a registrar that is called at resolve time fails the
+  test.
+
+No test here may spawn a real MCP server: registration is always exercised
+through an injected fake registrar.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import threading
+import time
+import types
+
+import pytest
+
+from agent_runtime.mcp_admission import (
+    LANE_MISSION_CHAT,
+    McpAdmissionOutcome,
+    MCP_ADMISSION_DISABLED,
+    MCP_ADMISSION_LANE_BUSY,
+    MCP_ADMISSION_TIMEOUT,
+    MCP_NOT_ADMITTED_FOR_ROLE,
+    MCP_NOT_REGISTERED_ON_LANE,
+    MCP_READ_ONLY_SUBSET_UNKNOWN,
+    MCP_SERVER_NOT_CONFIGURED,
+    R1_ADMISSIBLE_ROLES,
+    READ_ONLY_EXCLUDED_TOOLS,
+    admission_requirement_failures,
+    admit_mcp_servers,
+    resolve_mcp_admission,
+    scope_toolsets_to_admission,
+)
+from agent_runtime.machine_roots import ISSUE_PLATFORM_UNSUPPORTED
+from agent_runtime.personas import default_personas
+from agent_runtime.runtime_config import McpAdmissionConfig
+
+_QA_ALLOW = {"qa": {LANE_MISSION_CHAT: ["launcher_qa"]}}
+
+
+# ── fixtures / helpers ──────────────────────────────────────────────────────
+
+
+def _persona(persona_id: str):
+    return {persona.id: persona for persona in default_personas()}[persona_id]
+
+
+def _declaring(persona_id: str, *servers: str):
+    return dataclasses.replace(_persona(persona_id), required_mcp_servers=list(servers))
+
+
+def _cfg(**kwargs) -> types.SimpleNamespace:
+    """A stand-in runtime config carrying only the admission block."""
+
+    return types.SimpleNamespace(mcp_admission=McpAdmissionConfig(**kwargs))
+
+
+def _bind_profile(monkeypatch, profile_home):
+    """Point BOTH declaration probes at one profile home.
+
+    ``profile_readiness`` resolves the binding for the declaration union and
+    ``mcp_admission`` resolves it again for the server configs; patching only one
+    would let a test pass against a half-wired persona.
+    """
+
+    from agent_runtime import profile_context, profile_readiness
+    from agent_runtime.profile_context import PersonaProfileBinding
+
+    binding = lambda persona: PersonaProfileBinding(  # noqa: E731 - one-line stub
+        persona_id=persona.id,
+        hermes_profile="launcher-qa",
+        profile_home=profile_home,
+        readiness="ready",
+        summary="profile exists",
+    )
+    monkeypatch.setattr(profile_readiness, "resolve_persona_profile", binding)
+    monkeypatch.setattr(profile_context, "resolve_persona_profile", binding)
+
+
+def _profile_home(tmp_path, config_yaml: str):
+    home = tmp_path / "profile"
+    home.mkdir(exist_ok=True)
+    (home / "config.yaml").write_text(config_yaml, encoding="utf-8")
+    return home
+
+
+_LAUNCHER_QA_CONFIG = """
+mcp_servers:
+  launcher_qa:
+    command: stagec_qa_mcp_server.exe
+    args: ["--stdio"]
+    connect_timeout: 60
+    timeout: 260
+"""
+
+
+@pytest.fixture
+def qa_profile(tmp_path, monkeypatch):
+    home = _profile_home(tmp_path, _LAUNCHER_QA_CONFIG)
+    _bind_profile(monkeypatch, home)
+    return home
+
+
+@pytest.fixture
+def fake_registered_launcher_qa():
+    """Register a fake ``mcp-launcher_qa`` toolset the way MCP registration does.
+
+    Same shape ``tools/mcp_tool._register_server_tools`` produces — a prefixed
+    tool under the ``mcp-<server>`` toolset plus the bare-server-name alias — so
+    the isolation tests exercise the real registry lookup rather than a mock.
+    """
+
+    from tools.registry import registry
+
+    name = "mcp__launcher_qa__mcp_launcher_qa_get_runtime_state"
+    registry.register(
+        name=name,
+        toolset="mcp-launcher_qa",
+        schema={"name": name, "description": "fake", "parameters": {"type": "object", "properties": {}}},
+        handler=lambda **_kwargs: "{}",
+        check_fn=lambda: True,
+        description="fake",
+    )
+    registry.register_toolset_alias("launcher_qa", "mcp-launcher_qa")
+    try:
+        yield name
+    finally:
+        registry.deregister(name)
+
+
+# ── deny-by-default floor ───────────────────────────────────────────────────
+
+
+def test_flag_off_admits_nothing(qa_profile):
+    admission = resolve_mcp_admission(_persona("qa"), cfg=_cfg(roles=_QA_ALLOW))
+
+    assert admission.enabled is False
+    assert admission.server_names == ()
+    assert [row["code"] for row in admission.denial_rows()] == [MCP_ADMISSION_DISABLED]
+    assert admission.denied[0].fix_hint
+
+
+def test_flag_off_is_the_default_config():
+    # The kill switch defaults closed. A deployment that never mentions
+    # mcp_admission must never admit anything.
+    assert McpAdmissionConfig().enabled is False
+    assert McpAdmissionConfig().roles == {}
+
+
+def test_persona_with_no_declaration_admits_nothing(tmp_path, monkeypatch):
+    _bind_profile(monkeypatch, _profile_home(tmp_path, "model:\n  default: gpt-5\n"))
+
+    admission = resolve_mcp_admission(
+        _persona("qa"), cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+    )
+
+    assert admission.requested == ()
+    assert admission.server_names == ()
+    assert admission.denied == ()
+
+
+def test_role_outside_the_stage_floor_admits_nothing_even_when_configured(
+    tmp_path, monkeypatch
+):
+    # R1 ships admission to ONE role. A config that names another role is not a
+    # way around that — widening the floor is a deliberate product decision.
+    _bind_profile(monkeypatch, _profile_home(tmp_path, _LAUNCHER_QA_CONFIG))
+    dev = _declaring("dev", "launcher_qa")
+
+    admission = resolve_mcp_admission(
+        dev,
+        cfg=_cfg(enabled=True, roles={"dev": {LANE_MISSION_CHAT: ["launcher_qa"]}}),
+    )
+
+    assert "dev" not in R1_ADMISSIBLE_ROLES
+    assert admission.server_names == ()
+    assert [row["code"] for row in admission.denial_rows()] == [MCP_NOT_ADMITTED_FOR_ROLE]
+
+
+def test_role_absent_from_config_admits_nothing(qa_profile):
+    admission = resolve_mcp_admission(_persona("qa"), cfg=_cfg(enabled=True, roles={}))
+
+    assert admission.server_names == ()
+    assert [row["code"] for row in admission.denial_rows()] == [MCP_NOT_ADMITTED_FOR_ROLE]
+
+
+def test_lane_absent_from_the_role_admits_nothing(qa_profile):
+    admission = resolve_mcp_admission(
+        _persona("qa"),
+        lane=LANE_MISSION_CHAT,
+        cfg=_cfg(enabled=True, roles={"qa": {"some_other_lane": ["launcher_qa"]}}),
+    )
+
+    assert admission.server_names == ()
+    assert [row["code"] for row in admission.denial_rows()] == [MCP_NOT_ADMITTED_FOR_ROLE]
+
+
+def test_unknown_lane_admits_nothing(qa_profile):
+    admission = resolve_mcp_admission(
+        _persona("qa"), lane="worker", cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+    )
+
+    assert admission.server_names == ()
+
+
+def test_there_is_no_wildcard(qa_profile):
+    admission = resolve_mcp_admission(
+        _persona("qa"), cfg=_cfg(enabled=True, roles={"qa": {LANE_MISSION_CHAT: ["*"]}})
+    )
+
+    assert admission.server_names == ()
+
+
+def test_a_declared_server_outside_the_role_allowlist_is_denied(tmp_path, monkeypatch):
+    _bind_profile(
+        monkeypatch,
+        _profile_home(
+            tmp_path,
+            "mcp_servers:\n  playwright:\n    command: npx\n",
+        ),
+    )
+
+    admission = resolve_mcp_admission(
+        _persona("qa"), cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+    )
+
+    assert admission.requested == ("playwright",)
+    assert admission.server_names == ()
+    assert [(row["server"], row["code"]) for row in admission.denial_rows()] == [
+        ("playwright", MCP_NOT_ADMITTED_FOR_ROLE)
+    ]
+
+
+def test_an_allowed_but_undeclared_server_is_never_admitted(tmp_path, monkeypatch):
+    # Config names what a role MAY have; the persona's own declaration is what it
+    # asks for. Admission is the intersection — config alone never grants.
+    _bind_profile(monkeypatch, _profile_home(tmp_path, "model:\n  default: gpt-5\n"))
+
+    admission = resolve_mcp_admission(
+        _persona("qa"), cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+    )
+
+    assert admission.server_names == ()
+
+
+# ── resolution reuses the existing resolvers ────────────────────────────────
+
+
+def test_admitted_but_unconfigured_server_is_typed(tmp_path, monkeypatch):
+    _bind_profile(monkeypatch, _profile_home(tmp_path, "model:\n  default: gpt-5\n"))
+
+    admission = resolve_mcp_admission(
+        _declaring("qa", "launcher_qa"), cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+    )
+
+    assert admission.server_names == ()
+    assert [row["code"] for row in admission.denial_rows()] == [MCP_SERVER_NOT_CONFIGURED]
+
+
+def test_unresolvable_server_reuses_the_machine_roots_taxonomy(tmp_path, monkeypatch):
+    # Proving REUSE, not a parallel resolver: the denial carries machine_roots'
+    # own code for a server gated to another OS.
+    other_os = "linux" if __import__("sys").platform.startswith("win") else "windows"
+    _bind_profile(
+        monkeypatch,
+        _profile_home(
+            tmp_path,
+            f"mcp_servers:\n  launcher_qa:\n    command: noop\n    platforms: [{other_os}]\n",
+        ),
+    )
+
+    admission = resolve_mcp_admission(
+        _persona("qa"), cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+    )
+
+    assert admission.server_names == ()
+    assert [row["code"] for row in admission.denial_rows()] == [ISSUE_PLATFORM_UNSUPPORTED]
+
+
+def test_resolution_performs_zero_spawns(qa_profile, monkeypatch):
+    import tools.mcp_tool as mcp_tool
+
+    def _explode(*_args, **_kwargs):
+        raise AssertionError("resolve_mcp_admission must never register anything")
+
+    monkeypatch.setattr(mcp_tool, "register_mcp_servers", _explode)
+
+    admission = resolve_mcp_admission(
+        _persona("qa"), cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+    )
+
+    assert admission.server_names == ("launcher_qa",)
+
+
+# ── happy path ──────────────────────────────────────────────────────────────
+
+
+def test_declared_server_is_admitted_with_a_compiled_config(qa_profile):
+    admission = resolve_mcp_admission(
+        _persona("qa"), cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+    )
+
+    assert admission.enabled is True
+    assert admission.requested == ("launcher_qa",)
+    assert admission.server_names == ("launcher_qa",)
+    assert admission.denied == ()
+    compiled = admission.server_configs["launcher_qa"]
+    assert compiled["command"] == "stagec_qa_mcp_server.exe"
+    assert compiled["args"] == ["--stdio"]
+
+
+def test_the_servers_own_connect_timeout_is_clamped_to_the_admission_budget(qa_profile):
+    # launcher_qa declares connect_timeout: 60. A mission-chat turn cannot spend
+    # that on a capability probe, so the compiled config self-bounds.
+    admission = resolve_mcp_admission(
+        _persona("qa"),
+        cfg=_cfg(enabled=True, connect_timeout_seconds=20.0, roles=_QA_ALLOW),
+    )
+
+    assert admission.server_configs["launcher_qa"]["connect_timeout"] == 20.0
+
+
+def test_required_mcp_servers_and_profile_config_both_count_as_declared(
+    qa_profile,
+):
+    admission = resolve_mcp_admission(
+        _declaring("qa", "launcher_qa"), cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+    )
+
+    assert admission.requested == ("launcher_qa",)
+    assert admission.server_names == ("launcher_qa",)
+
+
+def test_explain_is_stable_and_machine_readable(qa_profile):
+    explained = resolve_mcp_admission(
+        _persona("qa"), cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+    ).explain()
+
+    assert set(explained) == {
+        "lane",
+        "role",
+        "permission_mode",
+        "enabled",
+        "requested",
+        "admitted",
+        "denied",
+        "tool_include",
+        "blocked_tool_names",
+        "connect_timeout_seconds",
+        "max_tool_calls_per_run",
+    }
+    assert explained["admitted"] == ["launcher_qa"]
+    assert explained["role"] == "qa"
+    # profile_default compiles no include filter: the launcher's full-capability
+    # rows are a glob, and a 25-name list would deny the next tool it ships.
+    assert explained["tool_include"] == {"launcher_qa": []}
+
+
+# ── permission-mode composition ─────────────────────────────────────────────
+
+
+def test_read_only_subtracts_the_mutating_tools(qa_profile):
+    admission = resolve_mcp_admission(
+        _persona("qa"), permission_mode="read_only", cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+    )
+
+    assert admission.server_names == ("launcher_qa",)
+    excluded = set(admission.server_configs["launcher_qa"]["tools"]["exclude"])
+    assert {
+        "mcp_launcher_qa_kill_launcher",
+        "mcp_launcher_qa_launch_or_attach",
+        "mcp_launcher_qa_click_button",
+    } <= excluded
+    # Belt and braces for a WARM process, where a previous profile_default
+    # admission already registered the full surface and register_mcp_servers
+    # short-circuits: the mutators are also removed from the model's tool list.
+    assert (
+        "mcp__launcher_qa__mcp_launcher_qa_kill_launcher" in admission.blocked_tool_names
+    )
+
+
+def test_read_only_keeps_the_read_only_tools(qa_profile):
+    # R2 narrowed this to the launcher YAML's `reviewer` row verbatim, so
+    # screenshot_window / capture_screenshot / wait_for_state — all of which
+    # drive a LIVE launcher window — are no longer kept. See
+    # tests/agent_runtime/test_mcp_admission_r2.py for the parity fixture.
+    admission = resolve_mcp_admission(
+        _persona("qa"), permission_mode="read_only", cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+    )
+
+    excluded = set(admission.server_configs["launcher_qa"]["tools"]["exclude"])
+    for kept in (
+        "mcp_launcher_qa_get_runtime_state",
+        "mcp_launcher_qa_read_trace",
+        "mcp_launcher_qa_run_redaction_scan",
+        "mcp_launcher_qa_read_artifact_index",
+    ):
+        assert kept not in excluded
+
+
+def test_profile_default_admits_the_full_declared_surface(qa_profile):
+    admission = resolve_mcp_admission(
+        _persona("qa"), permission_mode="profile_default", cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+    )
+
+    assert "tools" not in admission.server_configs["launcher_qa"]
+    assert admission.blocked_tool_names == ()
+
+
+def test_read_only_narrows_a_profile_authored_include_list(tmp_path, monkeypatch):
+    _bind_profile(
+        monkeypatch,
+        _profile_home(
+            tmp_path,
+            "mcp_servers:\n"
+            "  launcher_qa:\n"
+            "    command: noop\n"
+            "    tools:\n"
+            "      include: [mcp_launcher_qa_get_auth_state, mcp_launcher_qa_kill_launcher]\n",
+        ),
+    )
+
+    admission = resolve_mcp_admission(
+        _persona("qa"), permission_mode="read_only", cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+    )
+
+    assert admission.server_configs["launcher_qa"]["tools"]["include"] == [
+        "mcp_launcher_qa_get_auth_state"
+    ]
+
+
+def test_read_only_refuses_a_server_it_cannot_subtract(tmp_path, monkeypatch):
+    _bind_profile(
+        monkeypatch,
+        _profile_home(tmp_path, "mcp_servers:\n  playwright:\n    command: npx\n"),
+    )
+
+    admission = resolve_mcp_admission(
+        _persona("qa"),
+        permission_mode="read_only",
+        cfg=_cfg(enabled=True, roles={"qa": {LANE_MISSION_CHAT: ["playwright"]}}),
+    )
+
+    assert "playwright" not in READ_ONLY_EXCLUDED_TOOLS
+    assert admission.server_names == ()
+    assert [row["code"] for row in admission.denial_rows()] == [
+        MCP_READ_ONLY_SUBSET_UNKNOWN
+    ]
+
+
+# ── cross-persona isolation: `unbounded` must never widen ───────────────────
+
+
+def test_unbounded_never_widens_the_admitted_set(fake_registered_launcher_qa):
+    # THE security acceptance property. `unbounded` resolves
+    # all_registered_toolsets(), which in a warm multi-persona process contains
+    # another persona's live admission.
+    from agent_runtime.personas import all_registered_toolsets
+
+    everything = all_registered_toolsets()
+    assert "mcp-launcher_qa" in everything
+
+    scoped = scope_toolsets_to_admission(everything, admitted_servers=())
+
+    assert "mcp-launcher_qa" not in scoped
+    assert "launcher_qa" not in scoped
+    assert "file" in scoped or "search" in scoped  # non-MCP toolsets untouched
+
+
+def test_the_toolset_alias_is_scoped_too(fake_registered_launcher_qa):
+    # tools/mcp_tool registers `mcp-<server>` AND a bare `<server>` alias. Scoping
+    # only the canonical name would leak the whole surface through the alias.
+    scoped = scope_toolsets_to_admission(
+        ["file", "launcher_qa", "mcp-launcher_qa"], admitted_servers=()
+    )
+
+    assert scoped == ["file"]
+
+
+def test_an_admitted_run_keeps_its_own_server(fake_registered_launcher_qa):
+    scoped = scope_toolsets_to_admission(
+        ["file", "mcp-launcher_qa"], admitted_servers=["launcher_qa"]
+    )
+
+    assert scoped == ["file", "mcp-launcher_qa"]
+
+
+def test_admission_adds_its_toolset_when_the_lane_did_not_ask_for_it():
+    # The persona's configured toolsets predate the server; admission is what
+    # puts it on the lane.
+    scoped = scope_toolsets_to_admission(["file"], admitted_servers=["launcher_qa"])
+
+    assert scoped == ["file", "mcp-launcher_qa"]
+
+
+def test_scoping_is_a_no_op_when_nothing_mcp_is_registered():
+    scoped = scope_toolsets_to_admission(["file", "search", "skills"], admitted_servers=())
+
+    assert scoped == ["file", "search", "skills"]
+
+
+def test_unbounded_chat_lane_resolution_is_scoped_end_to_end(
+    fake_registered_launcher_qa, monkeypatch, tmp_path
+):
+    # Through the real chat-lane chokepoint, with the permission store forced to
+    # `unbounded`: a persona with no admission sees no MCP toolset at all.
+    from agent_runtime import persona_runtime
+    from agent_runtime.tool_visibility import ToolVisibilityOptions
+
+    monkeypatch.setattr(
+        persona_runtime,
+        "permission_options_for_chat",
+        lambda persona, session_id=None, **_kwargs: ToolVisibilityOptions(
+            permission_mode="unbounded"
+        ),
+    )
+    _bind_profile(monkeypatch, _profile_home(tmp_path, "model:\n  default: gpt-5\n"))
+
+    resolved = persona_runtime._enabled_toolsets_for_chat(_persona("dev"), session_id="s1")
+
+    assert "mcp-launcher_qa" not in resolved
+    assert "launcher_qa" not in resolved
+    assert "mission_goal" not in resolved
+    assert "mission_goal" not in persona_runtime._enabled_toolsets_for_chat(
+        _persona("dev"),
+        session_id="s1",
+        allow_mission_goal=True,
+    )
+
+
+# ── bounded, single-flight execution ────────────────────────────────────────
+
+
+def _admission(qa_profile, **cfg_kwargs):
+    return resolve_mcp_admission(
+        _persona("qa"), cfg=_cfg(enabled=True, roles=_QA_ALLOW, **cfg_kwargs)
+    )
+
+
+def test_admission_registers_the_admitted_subset_only(
+    qa_profile, fake_registered_launcher_qa
+):
+    seen: list[dict] = []
+
+    outcome = admit_mcp_servers(
+        _admission(qa_profile), register=lambda servers: seen.append(dict(servers)) or ["t"]
+    )
+
+    assert list(seen[0]) == ["launcher_qa"]
+    assert outcome.admitted == ("launcher_qa",)
+    assert outcome.attempted is True
+
+
+def test_admission_reports_a_server_that_did_not_register(qa_profile):
+    # No fake registry entry: the registrar "succeeded" but nothing landed.
+    outcome = admit_mcp_servers(_admission(qa_profile), register=lambda _servers: [])
+
+    assert outcome.admitted == ()
+    assert [row["code"] for row in outcome.denial_rows()] == [MCP_NOT_REGISTERED_ON_LANE]
+
+
+def test_a_registrar_that_raises_is_typed_not_propagated(qa_profile):
+    def _boom(_servers):
+        raise RuntimeError("spawn failed")
+
+    outcome = admit_mcp_servers(_admission(qa_profile), register=_boom)
+
+    assert outcome.admitted == ()
+    assert [row["code"] for row in outcome.denial_rows()] == [MCP_NOT_REGISTERED_ON_LANE]
+
+
+def test_a_stalled_registrar_yields_a_typed_timeout_and_the_turn_continues(qa_profile):
+    release = threading.Event()
+
+    def _stall(_servers):
+        release.wait(30)
+        return []
+
+    started = time.perf_counter()
+    try:
+        outcome = admit_mcp_servers(
+            _admission(qa_profile), register=_stall, timeout_seconds=0.3
+        )
+        elapsed = time.perf_counter() - started
+
+        assert elapsed < 5
+        assert outcome.admitted == ()
+        assert [row["code"] for row in outcome.denial_rows()] == [MCP_ADMISSION_TIMEOUT]
+    finally:
+        release.set()
+
+
+def test_concurrent_admission_is_refused_not_interleaved(qa_profile):
+    # Registration mutates the PROCESS-GLOBAL registry; two personas admitting at
+    # once must serialize, never interleave.
+    in_flight = threading.Event()
+    release = threading.Event()
+
+    def _hold(_servers):
+        in_flight.set()
+        release.wait(30)
+        return []
+
+    first: dict = {}
+    worker = threading.Thread(
+        target=lambda: first.update(
+            outcome=admit_mcp_servers(_admission(qa_profile), register=_hold)
+        )
+    )
+    worker.start()
+    try:
+        assert in_flight.wait(5)
+        second = admit_mcp_servers(
+            _admission(qa_profile), register=lambda _servers: ["should not run"]
+        )
+
+        assert second.admitted == ()
+        assert [row["code"] for row in second.denial_rows()] == [MCP_ADMISSION_LANE_BUSY]
+    finally:
+        release.set()
+        worker.join(30)
+
+
+def test_the_single_flight_mutex_is_released_after_a_completed_admission(qa_profile):
+    for _ in range(3):
+        outcome = admit_mcp_servers(_admission(qa_profile), register=lambda _servers: [])
+        assert outcome.attempted is True
+
+
+def test_nothing_admitted_means_nothing_executed(tmp_path, monkeypatch):
+    _bind_profile(monkeypatch, _profile_home(tmp_path, "model:\n  default: gpt-5\n"))
+
+    outcome = admit_mcp_servers(
+        resolve_mcp_admission(_persona("qa"), cfg=_cfg(enabled=True, roles=_QA_ALLOW)),
+        register=lambda _servers: pytest.fail("must not register"),
+    )
+
+    assert outcome.attempted is False
+    assert outcome.admitted == ()
+
+
+# ── visibility is truthful BOTH ways ────────────────────────────────────────
+
+
+def test_a_successful_admission_suppresses_the_r0_drop_row(qa_profile):
+    admission = _admission(qa_profile)
+
+    rows = admission_requirement_failures(
+        admission,
+        declared_servers=["launcher_qa"],
+        lane="harness",
+        registered_servers=["launcher_qa"],
+    )
+
+    assert rows == []
+
+
+def test_another_personas_live_admission_does_not_silence_this_ones_drop(
+    tmp_path, monkeypatch
+):
+    # launcher_qa is registered in this process (someone else's admission) but
+    # THIS persona was never admitted it. Reporting "no problem" would be the
+    # original lie in a new costume.
+    _bind_profile(monkeypatch, _profile_home(tmp_path, _LAUNCHER_QA_CONFIG))
+    dev = _declaring("dev", "launcher_qa")
+    admission = resolve_mcp_admission(dev, cfg=_cfg(enabled=True, roles=_QA_ALLOW))
+
+    rows = admission_requirement_failures(
+        admission,
+        declared_servers=["launcher_qa"],
+        lane="harness",
+        registered_servers=["launcher_qa"],
+    )
+
+    assert [row["code"] for row in rows] == [MCP_NOT_ADMITTED_FOR_ROLE]
+
+
+def test_an_admitted_but_unregistered_server_still_reports_the_r0_row(qa_profile):
+    rows = admission_requirement_failures(
+        _admission(qa_profile),
+        declared_servers=["launcher_qa"],
+        lane="harness",
+        registered_servers=[],
+    )
+
+    assert [row["code"] for row in rows] == [MCP_NOT_REGISTERED_ON_LANE]
+
+
+def test_with_admission_disabled_the_rows_are_exactly_the_r0_rows(qa_profile):
+    from agent_runtime.mcp_lane import mcp_lane_requirement_failures
+
+    disabled = resolve_mcp_admission(_persona("qa"), cfg=_cfg(roles=_QA_ALLOW))
+
+    assert admission_requirement_failures(
+        disabled, declared_servers=["launcher_qa"], lane="harness", registered_servers=[]
+    ) == mcp_lane_requirement_failures(
+        declared_servers=["launcher_qa"], lane="harness", registered_servers=[]
+    )
+
+
+def test_no_admission_object_is_the_r0_answer():
+    from agent_runtime.mcp_lane import mcp_lane_requirement_failures
+
+    assert admission_requirement_failures(
+        None, declared_servers=["launcher_qa"], lane="harness", registered_servers=[]
+    ) == mcp_lane_requirement_failures(
+        declared_servers=["launcher_qa"], lane="harness", registered_servers=[]
+    )
+
+
+def _enable_root_admission(monkeypatch, **kwargs):
+    """Flip the REAL kill switch for one test, via the root-config loader."""
+
+    from agent_runtime import config as agent_config
+
+    monkeypatch.setattr(
+        agent_config,
+        "load_root_runtime_config",
+        lambda: _cfg(enabled=True, roles=_QA_ALLOW, **kwargs),
+    )
+
+
+def test_tool_visibility_stops_reporting_the_drop_once_admission_works(
+    qa_profile, fake_registered_launcher_qa, monkeypatch
+):
+    # The operator-facing surface, end to end: with the flag on, the persona
+    # admitted, and the server actually registered, the R0 row is gone.
+    from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
+
+    _enable_root_admission(monkeypatch)
+
+    visibility = resolve_tool_visibility(
+        _persona("qa"), ToolVisibilityOptions(entry_point_lane="harness")
+    )
+
+    assert visibility["requirement_failures"] == []
+
+
+def test_tool_visibility_keeps_reporting_the_drop_with_the_flag_off(qa_profile):
+    # The default deployment: admission off, nothing registered, R0's answer
+    # unchanged. Adding admission must not quiet the honest row it was built on.
+    from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
+
+    visibility = resolve_tool_visibility(
+        _persona("qa"), ToolVisibilityOptions(entry_point_lane="harness")
+    )
+
+    assert [row["code"] for row in visibility["requirement_failures"]] == [
+        MCP_NOT_REGISTERED_ON_LANE
+    ]
+
+
+def test_with_the_flag_off_the_registry_still_answers_r0_verbatim(
+    qa_profile, fake_registered_launcher_qa
+):
+    # With admission off there is no per-persona admitted set to intersect, so
+    # the R0 rule stands verbatim: a server registered in THIS process suppresses
+    # the row. That can only happen on a lane that ran discovery — which R0
+    # short-circuits anyway — so it is not a hole; pinning it here keeps the
+    # flag-off path provably identical to pre-admission behavior.
+    from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
+
+    visibility = resolve_tool_visibility(
+        _persona("qa"), ToolVisibilityOptions(entry_point_lane="harness")
+    )
+
+    assert visibility["requirement_failures"] == []
+
+
+def test_tool_visibility_reports_the_typed_denial_for_a_non_admitted_role(
+    tmp_path, monkeypatch, fake_registered_launcher_qa
+):
+    from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
+
+    _bind_profile(monkeypatch, _profile_home(tmp_path, _LAUNCHER_QA_CONFIG))
+    _enable_root_admission(monkeypatch)
+
+    visibility = resolve_tool_visibility(
+        _declaring("dev", "launcher_qa"), ToolVisibilityOptions(entry_point_lane="harness")
+    )
+
+    assert [row["code"] for row in visibility["requirement_failures"]] == [
+        MCP_NOT_ADMITTED_FOR_ROLE
+    ]
+
+
+def test_denial_rows_match_the_typed_issue_contract(qa_profile):
+    admission = resolve_mcp_admission(_persona("qa"), cfg=_cfg(roles=_QA_ALLOW))
+
+    assert {"code", "server", "summary", "fix_hint"} == set(admission.denial_rows()[0])
+
+
+# ── config parsing ──────────────────────────────────────────────────────────
+
+
+def test_config_block_parses_the_documented_shape(tmp_path):
+    from agent_runtime.config import load_agent_runtime_config
+
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "agent_runtime:\n"
+        "  mcp_admission:\n"
+        "    enabled: true\n"
+        "    connect_timeout_seconds: 20\n"
+        "    roles:\n"
+        "      qa:\n"
+        "        mission_chat: [launcher_qa]\n",
+        encoding="utf-8",
+    )
+
+    cfg = load_agent_runtime_config(path)
+
+    assert cfg.mcp_admission.enabled is True
+    assert cfg.mcp_admission.connect_timeout_seconds == 20.0
+    assert cfg.mcp_admission.roles == {"qa": {"mission_chat": ["launcher_qa"]}}
+
+
+def test_absent_config_block_is_disabled(tmp_path):
+    from agent_runtime.config import load_agent_runtime_config
+
+    path = tmp_path / "config.yaml"
+    path.write_text("agent_runtime:\n  store_root: x\n", encoding="utf-8")
+
+    assert load_agent_runtime_config(path).mcp_admission.enabled is False
+
+
+def test_a_malformed_roles_block_never_reads_as_allow(tmp_path):
+    from agent_runtime.config import load_agent_runtime_config
+
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "agent_runtime:\n"
+        "  mcp_admission:\n"
+        "    enabled: true\n"
+        "    roles: 'qa'\n",
+        encoding="utf-8",
+    )
+
+    assert load_agent_runtime_config(path).mcp_admission.roles == {}
+
+
+def test_the_connect_budget_is_clamped(tmp_path):
+    from agent_runtime.config import load_agent_runtime_config
+
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "agent_runtime:\n  mcp_admission:\n    connect_timeout_seconds: 9000\n",
+        encoding="utf-8",
+    )
+
+    assert load_agent_runtime_config(path).mcp_admission.connect_timeout_seconds == 120.0
+
+
+# ── the agent-construction chokepoint ───────────────────────────────────────
+
+
+class _CapturingAgent:
+    """Minimal fake agent that records the kwargs it was constructed with."""
+
+    last_kwargs: dict | None = None
+
+    def __init__(self, **kwargs):
+        _CapturingAgent.last_kwargs = kwargs
+        self.session_id = kwargs.get("session_id") or "session_admission"
+        self.provider = kwargs.get("provider")
+        self.model = kwargs.get("model")
+        self.base_url = None
+        self.tools = []
+
+    def run_conversation(self, user_message, system_message=None, task_id=None):
+        return {
+            "final_response": "ok",
+            "session_id": self.session_id,
+            "messages": [],
+            "api_calls": 1,
+            "total_tokens": 1,
+        }
+
+
+def _run_capturing(**request_kwargs):
+    from agent_runtime.profile_runner import AgentRunRequest, ProfileAgentRunner
+
+    ProfileAgentRunner(agent_factory=_CapturingAgent).run(
+        AgentRunRequest(profile=None, user_message="hi", **request_kwargs)
+    )
+    return _CapturingAgent.last_kwargs
+
+
+def test_a_run_without_admission_gets_no_mcp_toolset(fake_registered_launcher_qa):
+    # Every lane today. Even with a live registration in the process, a run that
+    # was not admitted cannot resolve it.
+    kwargs = _run_capturing(enabled_toolsets=["file", "mcp-launcher_qa", "launcher_qa"])
+
+    assert kwargs["enabled_toolsets"] == ["file"]
+
+
+def test_an_admitted_run_carries_its_toolset_and_blocks(qa_profile, monkeypatch):
+    import agent_runtime.profile_runner as profile_runner
+
+    admission = resolve_mcp_admission(
+        _persona("qa"), permission_mode="read_only", cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+    )
+    monkeypatch.setattr(
+        profile_runner.ProfileAgentRunner,
+        "_admit_mcp_servers",
+        lambda self, request, timing, **_kwargs: McpAdmissionOutcome(
+            attempted=True, admitted=tuple(request.mcp_admission.server_names)
+        ),
+    )
+
+    kwargs = _run_capturing(enabled_toolsets=["file"], mcp_admission=admission)
+
+    assert kwargs["enabled_toolsets"] == ["file", "mcp-launcher_qa"]
+    assert (
+        "mcp__launcher_qa__mcp_launcher_qa_kill_launcher" in kwargs["blocked_tool_names"]
+    )
+
+
+def test_a_failed_admission_does_not_leave_the_toolset_on_the_run(qa_profile, monkeypatch):
+    # The registration timed out / never landed: the run must not advertise a
+    # toolset that resolves to nothing.
+    import agent_runtime.profile_runner as profile_runner
+
+    admission = resolve_mcp_admission(
+        _persona("qa"), cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+    )
+    monkeypatch.setattr(
+        profile_runner.ProfileAgentRunner,
+        "_admit_mcp_servers",
+        lambda self, request, timing, **_kwargs: McpAdmissionOutcome(attempted=True),
+    )
+
+    kwargs = _run_capturing(enabled_toolsets=["file"], mcp_admission=admission)
+
+    assert kwargs["enabled_toolsets"] == ["file"]
+
+
+def test_registry_hygiene_still_applies_alongside_admission(qa_profile, monkeypatch):
+    from agent_runtime.personas import REGISTRY_HYGIENE_BLOCKED_TOOLS
+    import agent_runtime.profile_runner as profile_runner
+
+    admission = resolve_mcp_admission(
+        _persona("qa"), permission_mode="read_only", cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+    )
+    monkeypatch.setattr(
+        profile_runner.ProfileAgentRunner,
+        "_admit_mcp_servers",
+        lambda self, request, timing, **_kwargs: McpAdmissionOutcome(
+            attempted=True, admitted=tuple(request.mcp_admission.server_names)
+        ),
+    )
+
+    kwargs = _run_capturing(blocked_tool_names=[], mcp_admission=admission)
+
+    assert REGISTRY_HYGIENE_BLOCKED_TOOLS.issubset(set(kwargs["blocked_tool_names"]))
+
+
+def test_explain_mcp_is_stable_machine_readable_and_registers_nothing(
+    qa_profile, monkeypatch, capsys
+):
+    # The operator's pre-flip inspection surface. It must answer without
+    # connecting to anything — a preview that spawns is not a preview.
+    import argparse
+    import json
+
+    import tools.mcp_tool as mcp_tool
+    from hermes_cli.harness import build_parser
+
+    monkeypatch.setattr(
+        mcp_tool,
+        "register_mcp_servers",
+        lambda *_a, **_k: pytest.fail("--explain-mcp must not register anything"),
+    )
+    _enable_root_admission(monkeypatch)
+
+    parser = argparse.ArgumentParser()
+    build_parser(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(
+        ["harness", "persona", "tool-diff", "qa", "--explain-mcp", "--json"]
+    )
+
+    assert args.func(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["mcp_admission"]["enabled"] is True
+    assert payload["mcp_admission"]["requested"] == ["launcher_qa"]
+    assert payload["mcp_admission"]["admitted"] == ["launcher_qa"]
+    assert payload["mcp_admission"]["lane"] == LANE_MISSION_CHAT
+
+
+def test_tool_diff_without_the_flag_explains_the_disabled_state(qa_profile, capsys):
+    import argparse
+    import json
+
+    from hermes_cli.harness import build_parser
+
+    parser = argparse.ArgumentParser()
+    build_parser(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(
+        ["harness", "persona", "tool-diff", "qa", "--explain-mcp", "--json"]
+    )
+
+    assert args.func(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["mcp_admission"]["enabled"] is False
+    assert payload["mcp_admission"]["admitted"] == []
+    assert [row["code"] for row in payload["mcp_admission"]["denied"]] == [
+        MCP_ADMISSION_DISABLED
+    ]
+
+
+def test_tool_diff_stays_silent_about_mcp_without_the_flag(qa_profile, capsys):
+    # No --explain-mcp: the payload is unchanged from before this feature.
+    import argparse
+    import json
+
+    from hermes_cli.harness import build_parser
+
+    parser = argparse.ArgumentParser()
+    build_parser(parser.add_subparsers(dest="command"))
+    args = parser.parse_args(["harness", "persona", "tool-diff", "qa", "--json"])
+
+    assert args.func(args) == 0
+
+    assert "mcp_admission" not in json.loads(capsys.readouterr().out)
+
+
+def test_enabled_toolsets_none_is_passed_through_untouched():
+    # `None` means "everything the agent resolves by default"; narrowing it here
+    # would change what an unscoped run gets.
+    kwargs = _run_capturing(enabled_toolsets=None)
+
+    assert kwargs["enabled_toolsets"] is None

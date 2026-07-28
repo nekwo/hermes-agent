@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import shutil
 import uuid
 from dataclasses import dataclass, field
@@ -37,6 +38,81 @@ from .tool_permissions import permission_options_for_chat
 
 TERMINAL_ASSIGNMENT_STATES = frozenset({"completed", "blocked", "cancelled"})
 _RELEASABLE_OWNER_TASK_STATES = frozenset({"done", "cancelled", "failed"})
+
+# Modes that only exist because the instance is holding a chat open; once its
+# last chat pointer is cleared the row demotes back to a plain configured agent.
+_CHAT_MODES = frozenset({"chat", "free_floating"})
+
+# Typed reasons carried on ``persona_instance.chat_binding_cleared``.
+_BINDING_REPAIR_REASON = "session_missing_from_session_db"
+CHAT_BINDING_CLEARED_REASON_DELETED = "chat_deleted"
+
+
+def _session_presence_probe(session_db: Any | None = None) -> tuple[Any | None, str | None]:
+    """Return ``(probe, skip_reason)`` for chat-session existence checks.
+
+    The probe answers ``"present" | "absent" | "unknown"`` — tri-state on
+    purpose. ``get_session`` swallowing an error and returning ``None`` would
+    make an unreadable database indistinguishable from a deleted chat, and a
+    repair built on that would reap live pointers on a transient failure.
+
+    Three preconditions must hold before ANY binding may be called stale, and
+    all fail closed (probe ``None`` + a typed skip reason):
+
+    * when the database is self-resolved, the head home must be EXPLICITLY
+      named by this process — relay context or ``HERMES_HEAD_HOME``
+      (``head_home_not_authoritative``). ``chat_session_scope`` otherwise falls
+      back to the shared runtime root's recorded head pointer and, failing
+      that, to the ambient ``HERMES_HOME``; both are fine for reading or
+      minting a transcript and neither may decide that a live binding is
+      stale. Without that rule a maintenance verb run under a profile home
+      probes that profile's database and reads every operator chat as absent —
+      a POPULATED wrong database sails straight past the empty-DB guard (live
+      2026-07-25: a reconcile under the alice profile home cleared 10 live
+      chat bindings on a false ``session_missing_from_session_db`` verdict).
+      A caller that passes ``session_db`` explicitly owns its own routing;
+    * a database must resolve at all (``session_db_unavailable``);
+    * it must positively enumerate at least one session (``session_db_empty``).
+      A zero-row database is indistinguishable from a fresh or misrouted
+      ``HERMES_HOME``, and "the home moved" must never present as "every chat
+      was deleted".
+    """
+
+    db = session_db
+    if db is None:
+        try:
+            from .chat_session_scope import resolve_chat_session_scope
+
+            from .persona_chat_history import _default_session_db
+
+            # DESTRUCTIVE posture: a head RECORDED for the shared runtime root
+            # is enough to read or mint a transcript, and deliberately NOT
+            # enough to clear a live binding. This lane still requires that THIS
+            # process named the head — byte-identical to the shipped 8c3942a21
+            # guard. The acquisition itself stays on the shared
+            # ``_default_session_db`` delegate, so there is still exactly one.
+            if not resolve_chat_session_scope().explicitly_named:
+                return None, "head_home_not_authoritative"
+            db = _default_session_db()
+        except Exception:
+            db = None
+    if db is None:
+        return None, "session_db_unavailable"
+    try:
+        sample = db.list_sessions_rich(limit=1, include_archived=True)
+    except Exception:
+        return None, "session_db_unavailable"
+    if not sample:
+        return None, "session_db_empty"
+
+    def probe(session_id: str) -> str:
+        try:
+            row = db.get_session(session_id)
+        except Exception:
+            return "unknown"
+        return "present" if row else "absent"
+
+    return probe, None
 
 
 def _owning_task_release_state(task_id: str) -> str | None:
@@ -676,6 +752,163 @@ class PersonaInstanceStore:
             "repaired_count": len(repairs),
         }
 
+    def clear_chat_session_binding(
+        self,
+        instance: PersonaInstance,
+        *,
+        session_id: str,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        """THE write path that unbinds one instance from a chat session.
+
+        Nulls only the pointers that actually reference ``session_id``, demotes a
+        conversational mode back to ``configured`` once the instance is left with
+        no chat, persists once, and emits ``persona_instance.chat_binding_cleared``
+        (store mutations always emit an event). Returns the repair record, or
+        ``None`` when the instance never pointed at that session.
+
+        Every unbind — the operator ``persona chat delete`` verb and the
+        ``repair_missing_chat_session_bindings`` reconcile sweep — goes through
+        here so a stale binding can never be cleared silently by one path and
+        loudly by another.
+        """
+
+        target = safe_assignment_text(session_id, limit=200)
+        if not target:
+            return None
+        cleared: list[str] = []
+        if safe_assignment_text(instance.default_chat_session_id, limit=200) == target:
+            instance.default_chat_session_id = None
+            cleared.append("default_chat_session_id")
+        if safe_assignment_text(instance.session_id, limit=200) == target:
+            instance.session_id = None
+            cleared.append("session_id")
+        if not cleared:
+            return None
+        mode_before = instance.mode
+        if (
+            not instance.default_chat_session_id
+            and not instance.session_id
+            and (instance.mode or "").lower() in _CHAT_MODES
+        ):
+            instance.mode = "configured"
+        updated = self.update(instance)
+        payload = {
+            "persona_id": updated.persona_id,
+            "session_id": target,
+            "cleared_fields": cleared,
+            "mode_before": mode_before,
+            "mode_after": updated.mode,
+            "reason": reason,
+        }
+        self._event("persona_instance.chat_binding_cleared", updated, payload)
+        return {"persona_instance_id": updated.id, **payload}
+
+    def repair_missing_chat_session_bindings(
+        self,
+        *,
+        apply: bool = True,
+        session_db: Any | None = None,
+    ) -> dict[str, Any]:
+        """Clear chat-session bindings whose session SessionDB no longer has.
+
+        A persona instance can outlive its chat: the operator deletes the
+        conversation through a path that does not own the instance store (the
+        generic ``hermes sessions delete``, a gateway/web delete, a scrub), and
+        the pointer is left dangling. The snapshot's persona-chat projection is
+        READ-ONLY, so it can only hide the row and account a ``session_not_in_db``
+        drop — one permanent parity anomaly per orphan, forever. This is the
+        write-path repair that retires them.
+
+        Fail-safe by construction:
+
+        * a binding is cleared ONLY on a positive "absent" answer from a
+          positively-enumerating SessionDB; an unavailable, unreadable or empty
+          database repairs nothing at all (see :func:`_session_presence_probe`),
+          because a blind read must never reap a live pointer;
+        * ``task_bound`` instances are skipped entirely — a mission turn runs in
+          a session that lives in the run/event stream and is legitimately absent
+          from the operator SessionDB;
+        * an instance with a live worker/run binding is held;
+        * ``apply=False`` is a pure report: no writes, no events.
+        """
+
+        probe, skip_reason = _session_presence_probe(session_db)
+        if probe is None:
+            return {
+                "applied": False,
+                "dry_run": not apply,
+                "skipped": skip_reason,
+                "repaired": [],
+                "repaired_count": 0,
+                "held": [],
+                "held_count": 0,
+            }
+
+        repairs: list[dict[str, Any]] = []
+        held: list[dict[str, Any]] = []
+        for instance in self.list_all():
+            pointers = {
+                safe_assignment_text(instance.default_chat_session_id, limit=200),
+                safe_assignment_text(instance.session_id, limit=200),
+            }
+            pointers.discard(None)
+            if not pointers:
+                continue
+            if (instance.mode or "").lower() == "task_bound" or safe_optional_token(
+                instance.current_task_id
+            ):
+                # Mission sessions live in the run/event stream, not SessionDB.
+                continue
+            missing = sorted(session_id for session_id in pointers if probe(session_id) == "absent")
+            if not missing:
+                continue
+            if self._has_live_binding(instance):
+                held.extend(
+                    {
+                        "persona_instance_id": instance.id,
+                        "persona_id": instance.persona_id,
+                        "session_id": session_id,
+                        "reason": "active-binding",
+                    }
+                    for session_id in missing
+                )
+                continue
+            for session_id in missing:
+                if not apply:
+                    repairs.append(
+                        {
+                            "persona_instance_id": instance.id,
+                            "persona_id": instance.persona_id,
+                            "session_id": session_id,
+                            "cleared_fields": [
+                                field_name
+                                for field_name, value in (
+                                    ("default_chat_session_id", instance.default_chat_session_id),
+                                    ("session_id", instance.session_id),
+                                )
+                                if safe_assignment_text(value, limit=200) == session_id
+                            ],
+                            "reason": _BINDING_REPAIR_REASON,
+                        }
+                    )
+                    continue
+                record = self.clear_chat_session_binding(
+                    instance,
+                    session_id=session_id,
+                    reason=_BINDING_REPAIR_REASON,
+                )
+                if record is not None:
+                    repairs.append(record)
+        return {
+            "applied": bool(apply),
+            "dry_run": not apply,
+            "repaired": repairs,
+            "repaired_count": len(repairs),
+            "held": held,
+            "held_count": len(held),
+        }
+
     def _release_parent_references(self, parent_instance_id: str) -> list[str]:
         """Transactionally release every child backlink before owner removal."""
         released: list[str] = []
@@ -929,6 +1162,36 @@ class PersonaInstanceStore:
                     if after_patch_fields[field_name] != before_patch_fields.get(field_name)
                 },
             )
+        return self.get(instance.id)
+
+    def set_backing_profile(self, persona_instance_id: str, profile_id: str | None) -> PersonaInstance:
+        """Re-point one instance's ``profile_id`` at a new backing Hermes profile.
+
+        Deliberately NOT part of :meth:`update_profile`: everything that method
+        writes is an operator-editable RUNTIME override that belongs to the
+        instance. ``profile_id`` is not — it is a PROJECTION of the owning
+        persona's ``hermes_profile``. Folding it into ``update_profile`` would
+        create a second, instance-local rebind authority competing with the
+        persona record.
+
+        The ONE sanctioned caller is
+        :func:`agent_runtime.persona_profile_binding.rebind_persona_profile`,
+        which moves the persona authority and cascades every instance row in the
+        same operation, refuses while any instance is in flight, and emits the
+        single typed ``persona.profile_rebound`` event that accounts for every
+        row this method touched. That is why no event is appended here: the
+        operation's event names each moved row, and it is deliberately an
+        UNCOVERED type (see ``patch_coverage``) so the batch degrades to a full
+        core rather than shipping a patch frame that folds nothing.
+        """
+
+        instance = self.get(persona_instance_id)
+        value = safe_optional_token(profile_id)
+        if instance.profile_id == value:
+            return instance
+        instance.profile_id = value
+        instance.updated_at = now()
+        self._write(instance)
         return self.get(instance.id)
 
     def _validate_no_steering_cycle(self, persona_instance_id: str, parent_instance_id: str) -> None:
@@ -1269,6 +1532,141 @@ class PersonaInstanceStore:
         self._write(instance)
         return self.get(instance.id)
 
+    def retired_instance_archive_path(
+        self,
+        persona_instance_id: str | None,
+        *,
+        persona_id: str | None = None,
+    ) -> Path | None:
+        """The retirement tombstone for *persona_instance_id*, or ``None``.
+
+        THE read-only retirement predicate. Retirement is not a flag on a row —
+        it is the ABSENCE of a live row PLUS the presence of a ``*_retire``
+        archive — so every caller that needs the answer has to compose those two
+        facts. Composing them inline at each site is how a second, subtly
+        different retirement rule gets born (one that reads a reconcile/prune
+        archive as a tombstone, say, and makes a legitimate future mint
+        impossible), so the composition lives here and :meth:`open_chat` — the
+        write chokepoint that refuses a retired placement — asks this same
+        method instead of re-deriving it.
+
+        It exists because ``open_chat`` answers the question only by RAISING,
+        and by then a caller like ``PersonaChatMintReceiptStore.mint`` has
+        already created a titled session row. A refusal decidable without
+        writing anything must be decidable WITHOUT writing anything.
+
+        Never creates, mutates, or resurrects a row. Pass ``persona_id`` to
+        resolve a caller-supplied (or omitted) instance id through the same
+        :func:`canonical_chat_instance_id` derivation ``open_chat`` uses;
+        without it the id is taken as already canonical.
+
+        NEVER RAISES for a storage failure. Both callers ask this before their
+        first durable write, and the mint's caller handles exactly one typed
+        error (:class:`RetiredPersonaInstanceError`) — so an ``OSError`` from a
+        flaky/UNC store root escaping here would reach the operator as the
+        untyped traceback this predicate exists to retire. A probe that cannot
+        read the archive cannot PROVE retirement, so it reports ``None`` (the
+        pre-flight's posture, now shared by construction) and logs; the write
+        chokepoint ``open_chat`` still refuses a retired target, so failing open
+        costs the litter, never the guarantee.
+        """
+        instance_id = (
+            canonical_chat_instance_id(persona_id, persona_instance_id)
+            if persona_id
+            else safe_assignment_token(persona_instance_id)
+        )
+        if not instance_id:
+            return None
+        try:
+            self.get(instance_id)
+        except Exception:
+            pass
+        else:
+            # A live row always wins: the archive is history, and an id carried by a
+            # live placement is live — never a tombstone.
+            return None
+        try:
+            return _retired_persona_instance_archive_path(instance_id)
+        except OSError:
+            # The tombstone probe is filesystem I/O (``exists`` / ``iterdir`` /
+            # ``is_file``) over the archive root. Loud in the log, quiet in the
+            # answer: a caller must not be handed a refusal the store never
+            # actually proved, nor a traceback from a lane that has a typed
+            # refusal contract.
+            logging.getLogger(__name__).warning(
+                "retirement tombstone probe failed for %s; "
+                "treating the target as NOT retired",
+                instance_id,
+                exc_info=True,
+            )
+            return None
+
+    def assert_bindable(
+        self,
+        *,
+        persona_id: str,
+        session_id: str | None = None,
+        persona_instance_id: str | None = None,
+    ) -> str:
+        """Everything :meth:`open_chat` refuses, asserted WITHOUT writing anything.
+
+        Returns the canonical instance id the bind would target, so a caller that
+        needs to act before the bind derives that id ONCE, here, rather than
+        re-deriving it and drifting.
+
+        This exists because ``open_chat`` answers "may this bind happen?" only by
+        RAISING at the end of whatever the caller already did. For
+        :meth:`PersonaChatMintReceiptStore.mint` that end came after a session row
+        had been created, meta written and a title set — so a dispatch to a target
+        that could never be served left a permanent titled thread in Mission
+        Control, and the refusal arrived one durable write too late. A refusal
+        decidable without writing must be decidable WITHOUT writing, and it must be
+        the SAME refusal: one derivation, one spelling of the target id, one
+        retirement rule (:meth:`retired_instance_archive_path`).
+
+        ``session_id`` is optional so a caller can ask "is this instance bindable
+        at all?" before it has minted a root; when present it is checked for the
+        sibling-steal the bind refuses. ``open_chat`` calls this first and is the
+        write chokepoint, so this costs one extra row read on the bind path and
+        buys the pre-flight callers an answer they can trust.
+        """
+
+        normalized_persona = _normalize_instance_source_persona(persona_id)
+        if not normalized_persona:
+            raise ValueError("persona_id is required")
+        normalized_instance = (
+            canonical_persona_instance_id(persona_instance_id, persona_id=normalized_persona)
+            if persona_instance_id
+            else None
+        )
+        instance_id = normalized_instance or persona_instance_id_for(normalized_persona)
+        # A chat session encodes the instance it was minted for; binding one
+        # instance's session onto ANOTHER instance's pointer is the sibling steal
+        # that overwrote ``personainst_qa``'s default-chat pointer with a
+        # placement sibling's session (live 2026-07-18: the console's open-chat of
+        # a sibling bound its session onto the canonical primary, then a
+        # bare-persona relay adopted the poisoned pointer — both instances folded
+        # onto ONE operator channel). Refuse loudly at the write chokepoint every
+        # send/open flows through — the existing ``_session_owned_by_other_instance``
+        # guard only covered ``add_instance``. Legacy/opaque ``persona_chat_*``
+        # sessions (no encoded owner) and the instance's own sessions bind freely.
+        normalized_session = safe_assignment_text(session_id, limit=200)
+        if normalized_session and chat_session_is_foreign_to_instance(
+            normalized_session, instance_id
+        ):
+            owner = chat_session_owner_instance_id(normalized_session)
+            raise ValueError(
+                f"chat session {normalized_session!r} belongs to instance {owner!r}; "
+                f"it cannot be bound onto {instance_id!r} — open that instance's own "
+                "chat lane instead of adopting a sibling's session"
+            )
+        # ONE retirement rule, composed in one place (absence of a live row PLUS a
+        # ``*_retire`` tombstone) and asked here by every caller that needs it.
+        retired_archive = self.retired_instance_archive_path(instance_id)
+        if retired_archive is not None:
+            raise RetiredPersonaInstanceError(instance_id, archive_path=retired_archive)
+        return instance_id
+
     def open_chat(
         self,
         *,
@@ -1300,43 +1698,23 @@ class PersonaInstanceStore:
         if not normalized_session:
             raise ValueError("session_id is required")
 
-        normalized_instance = (
-            canonical_persona_instance_id(persona_instance_id, persona_id=normalized_persona)
-            if persona_instance_id
-            else None
+        # The bind's refusals — sibling steal and retirement — live in ONE
+        # read-only seam so a pre-flight caller and the bind itself cannot
+        # disagree about who this is or whether it may be bound.
+        instance_id = self.assert_bindable(
+            persona_id=persona_id,
+            session_id=normalized_session,
+            persona_instance_id=persona_instance_id,
         )
-        instance_id = normalized_instance or persona_instance_id_for(normalized_persona)
-        # A chat session encodes the instance it was minted for; binding one
-        # instance's session onto ANOTHER instance's pointer is the sibling steal
-        # that overwrote ``personainst_qa``'s default-chat pointer with a
-        # placement sibling's session (live 2026-07-18: the console's open-chat of
-        # a sibling bound its session onto the canonical primary, then a
-        # bare-persona relay adopted the poisoned pointer — both instances folded
-        # onto ONE operator channel). Refuse loudly at the write chokepoint every
-        # send/open flows through — the existing ``_session_owned_by_other_instance``
-        # guard only covered ``add_instance``. Legacy/opaque ``persona_chat_*``
-        # sessions (no encoded owner) and the instance's own sessions bind freely.
-        if chat_session_is_foreign_to_instance(normalized_session, instance_id):
-            owner = chat_session_owner_instance_id(normalized_session)
-            raise ValueError(
-                f"chat session {normalized_session!r} belongs to instance {owner!r}; "
-                f"it cannot be bound onto {instance_id!r} — open that instance's own "
-                "chat lane instead of adopting a sibling's session"
-            )
         safe_display_name = safe_assignment_text(display_name, limit=120) if display_name is not None else None
         safe_default_display_name = (
             safe_assignment_text(default_display_name, limit=120) if default_display_name is not None else None
         )
         safe_profile_id = safe_assignment_token(profile_id) if profile_id is not None else None
+        created = False
         try:
             instance = self.get(instance_id)
         except Exception:
-            retired_archive = _retired_persona_instance_archive_path(instance_id)
-            if retired_archive is not None:
-                raise RetiredPersonaInstanceError(
-                    instance_id,
-                    archive_path=retired_archive,
-                )
             ts = now()
             role = "profile" if normalized_persona.startswith("profile:") else normalized_persona
             instance = PersonaInstance(
@@ -1349,10 +1727,21 @@ class PersonaInstanceStore:
                 state=WorkerSessionState.IDLE,
                 updated_at=ts,
             )
+            created = True
         else:
             # Worker/run ownership is orthogonal to operator chat ownership.
             # Opening another chat root must not cancel or rebind live work.
             pass
+
+        before = None if created else (
+            instance.display_name,
+            instance.profile_id,
+            instance.workspace_id,
+            instance.realm_id,
+            instance.mode,
+            instance.default_chat_session_id,
+            instance.session_id,
+        )
 
         # An explicit ``display_name`` is AUTHORITATIVE — an operator naming this
         # chat (create_operator_chat) or a deliberate placement (add_instance,
@@ -1390,6 +1779,22 @@ class PersonaInstanceStore:
         # Read-compatible mirror for v1 consumers. Worker writers never touch
         # this field; default_chat_session_id is the sole new authority.
         instance.session_id = normalized_session
+        after = (
+            instance.display_name,
+            instance.profile_id,
+            instance.workspace_id,
+            instance.realm_id,
+            instance.mode,
+            instance.default_chat_session_id,
+            instance.session_id,
+        )
+        if not created and before == after:
+            # Idempotent re-open is an observation, not a mutation. Rewriting the
+            # row would advance directory fingerprints and emitting
+            # persona_instance.chat_opened would force a full-core stream delta.
+            # One first-turn path legitimately reaches this chokepoint multiple
+            # times; no-op calls must stay invisible to the event/read model.
+            return instance
         updated = self.update(instance)
         self._event("persona_instance.chat_opened", updated, {"session_id": normalized_session})
         return updated
@@ -2036,6 +2441,52 @@ def chat_session_owner_instance_id(session_id: str | None) -> str | None:
     return None
 
 
+def sender_scope_workspace_id(
+    session_id: str | None,
+    *,
+    instance_store: "PersonaInstanceStore | None" = None,
+    active_workspace_id: str | None = None,
+) -> str | None:
+    """The workspace scope a chat SENDER addresses a target from.
+
+    The single impure derivation shared by every addressable-roster surface that
+    resolves a target for a SENDER (mission-chat target guard, ``agent_chat``
+    threads/open): session → the owning instance → that instance's own workspace
+    pointer (falling back to the active workspace for a runtime-global sender).
+    A session with no derivable owner, or no session at all (a bare operator/CLI
+    invocation), scopes to the active workspace — so the resolver degrades to the
+    active scene rather than hiding the whole roster.
+
+    Pairs with the pure :mod:`agent_runtime.workspace_scope` filters: this
+    answers "which workspace am I addressing FROM"; those answer "which rows are
+    addressable from that workspace". ``active_workspace_id`` /
+    ``instance_store`` are injectable for tests and to reuse a caller's store.
+    """
+
+    from .workspace_scope import effective_workspace_id
+
+    if active_workspace_id is None:
+        from .store import WorkspaceStore
+
+        active_workspace_id = WorkspaceStore().active_id()
+    scope_workspace_id = active_workspace_id
+    sender_session = safe_assignment_text(session_id, limit=200)
+    if not sender_session:
+        return scope_workspace_id
+    sender_instance_id = chat_session_owner_instance_id(sender_session)
+    if not sender_instance_id:
+        return scope_workspace_id
+    if instance_store is None:
+        instance_store = PersonaInstanceStore()
+    try:
+        sender_instance = instance_store.get(sender_instance_id)
+    except Exception:
+        sender_instance = None
+    if sender_instance is None:
+        return scope_workspace_id
+    return effective_workspace_id(sender_instance, active_workspace_id=active_workspace_id)
+
+
 def chat_session_is_foreign_to_instance(session_id: str | None, instance_id: str | None) -> bool:
     """True when ``session_id`` is a chat session MINTED FOR a DIFFERENT instance.
 
@@ -2239,7 +2690,12 @@ def persona_assignment_store_enabled(config) -> bool:
     return bool(getattr(enterprise, "enabled", False) and getattr(enterprise, "persona_assignment_store", False))
 
 
-def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | None = None) -> dict[str, Any]:
+def persona_instance_summary(
+    instance: PersonaInstance,
+    persona: AgentPersona | None = None,
+    *,
+    profile_readiness: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     state = instance.state.value if hasattr(instance.state, "value") else str(instance.state)
     visibility_persona = persona or _profile_visibility_persona(instance)
     profile_id = instance.profile_id or getattr(visibility_persona, "hermes_profile", None)
@@ -2338,7 +2794,11 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
         # single HUD authority now). The always-visible agents drawer renders only
         # the head SCALARS below, derived at emit from the same tool-visibility
         # resolution (never from the retired hud state).
-        tool_resolution = resolve_tool_visibility(visibility_persona, tool_options)
+        tool_resolution = resolve_tool_visibility(
+            visibility_persona,
+            tool_options,
+            profile_readiness=profile_readiness,
+        )
         summary["permission_mode"] = tool_resolution.get("permission_mode") or "profile_default"
         summary["mutation_boundary"] = tool_resolution["mutation_boundary"]
         summary["tool_count"] = tool_resolution["final_tool_count"]
@@ -2411,8 +2871,12 @@ def persona_instance_tool_detail(
         "persona_id": instance.persona_id,
         "display_name": instance.display_name,
         "tool_resolution": tool_resolution,
-        "turn_tool_context": turn_tool_context_for_persona(visibility_persona, tool_options),
-        "permission_state": permission_state_for_persona(visibility_persona, tool_options),
+        "turn_tool_context": turn_tool_context_for_persona(
+            visibility_persona, tool_options, visibility=tool_resolution
+        ),
+        "permission_state": permission_state_for_persona(
+            visibility_persona, tool_options, visibility=tool_resolution
+        ),
         "blocked_tools": tool_resolution["blocked_tools"],
     }
 
@@ -2420,10 +2884,12 @@ def persona_instance_tool_detail(
 def active_persona_instance_agent_summaries(
     instances: list[PersonaInstance],
     personas_by_id: dict[str, AgentPersona] | None = None,
+    readiness_by_persona_id: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     personas_by_id = personas_by_id or {}
+    readiness_by_persona_id = readiness_by_persona_id or {}
     for instance in instances:
         instance_id = safe_assignment_token(getattr(instance, "id", None))
         if not instance_id or instance_id in seen:
@@ -2431,7 +2897,11 @@ def active_persona_instance_agent_summaries(
         if not _persona_instance_is_active_lane(instance):
             continue
         persona_id = safe_assignment_token(getattr(instance, "persona_id", None)) or instance_id
-        row = persona_instance_summary(instance, personas_by_id.get(persona_id))
+        row = persona_instance_summary(
+            instance,
+            personas_by_id.get(persona_id),
+            profile_readiness=readiness_by_persona_id.get(persona_id),
+        )
         row["runtime_agent_kind"] = "persona_instance"
         row["source_persona_id"] = persona_id
         row["persona_id"] = instance_id

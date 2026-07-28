@@ -5,7 +5,7 @@ import json
 from typing import Any
 
 from .context_requests import fulfilled_context_bundles
-from .config import load_agent_runtime_config
+from .config import load_root_runtime_config
 from .decision_contract_registry import (
     context_expansion_shape_ids as registry_context_expansion_shape_ids,
     contract_hash,
@@ -19,7 +19,7 @@ from .models import AgentRun, Event, Proof, Task, TaskStage
 from .mission_plan import task_stage_records
 from .objective_templates import render_objective
 from .packets import HANDOFF_MODES, HANDOFF_OWNERS, HANDOFF_REPOS, QA_NEXT_OWNERS, latest_packet, latest_packets_for_task
-from .profile_context import active_profile_name
+from .profile_context import mcp_owner_profile_name
 from .repo_bundles import RepoBundleStore, bundle_queue_summary, qa_waiting_on, repo_bundle_delivery_summary, repo_bundle_summary, simplified_phase_for_task
 from .repo_context import repo_execution_context_for_task, safe_affected_repo_labels
 from .role_checklists import stage_checklist_hud
@@ -444,7 +444,7 @@ def _repair_hint_for_message(message: str) -> dict[str, Any]:
         }
     if _is_visual_proof_repair_message(text):
         invalid_field = _visual_proof_invalid_field(text)
-        head_profile = active_profile_name()
+        owner_profile = mcp_owner_profile_name("launcher_qa")
         hint: dict[str, Any] = {
             "required_payload_keys": [
                 "stage_id",
@@ -457,10 +457,10 @@ def _repair_hint_for_message(message: str) -> dict[str, Any]:
             "recommended_values": {
                 "target": "mission_control",
                 "mcp_server": "launcher_qa",
-                "required_launch_pins.hermes_profile": head_profile,
+                "required_launch_pins.hermes_profile": owner_profile,
                 "required_launch_pins.runtime_root_id": "agent-runtime",
             },
-            "shape_hint": f'For request_screenshot/request_video, return payload {{"stage_id":"<current stage>","target":"mission_control","proof_requirement":"<exact visual claim>","mcp_server":"launcher_qa","required_launch_pins":{{"hermes_profile":"{head_profile}","runtime_root_id":"agent-runtime"}}}}. Use the active head-agent profile, not a hard-coded Alice profile; use a redaction-safe runtime_root_id token, never an absolute path.',
+            "shape_hint": f'For request_screenshot/request_video, return payload {{"stage_id":"<current stage>","target":"mission_control","proof_requirement":"<exact visual claim>","mcp_server":"launcher_qa","required_launch_pins":{{"hermes_profile":"{owner_profile}","runtime_root_id":"agent-runtime"}}}}. Use the persisted profile of the worker that owns the request; use a redaction-safe runtime_root_id token, never an absolute path.',
         }
         if invalid_field:
             hint["invalid_field"] = invalid_field
@@ -798,7 +798,7 @@ def _mission_hud(task: Task, run: AgentRun, packets: dict[str, dict[str, Any]], 
     handoff = handoff if isinstance(handoff, dict) else {}
     stage_state = _stage_self_heal_state(task, run.stage_id or task.current_stage_id)
     role = _hud_owner(run)
-    config = config or load_agent_runtime_config()
+    config = config or load_root_runtime_config()
     simplified_contract = getattr(config, "simplified_agent_contract", None)
     simplified_contract_enabled = bool(getattr(simplified_contract, "enabled", False))
     worker_actions = worker_actions_for_role(role, task, run, config=config, proof_store=proof_store)
@@ -1365,7 +1365,7 @@ def _next_required_move(task: Task, run: AgentRun, *, handoff: dict[str, Any], s
                     "target": "mission_control",
                     "proof_requirement": "fullscreen Mission Control visual proof for the current stage",
                     "mcp_server": "launcher_qa",
-                    "required_launch_pins": {"hermes_profile": active_profile_name(), "runtime_root_id": "agent-runtime"},
+                    "required_launch_pins": {"hermes_profile": mcp_owner_profile_name("launcher_qa"), "runtime_root_id": "agent-runtime"},
                 },
             }
         commands = _current_stage_command_hints(task, run, role=role)
@@ -1403,7 +1403,7 @@ def _next_required_move(task: Task, run: AgentRun, *, handoff: dict[str, Any], s
                     "target": "mission_control",
                     "proof_requirement": "fullscreen Mission Control visual proof for the current stage",
                     "mcp_server": "launcher_qa",
-                    "required_launch_pins": {"hermes_profile": active_profile_name(), "runtime_root_id": "agent-runtime"},
+                    "required_launch_pins": {"hermes_profile": mcp_owner_profile_name("launcher_qa"), "runtime_root_id": "agent-runtime"},
                 },
             }
         return {
@@ -1432,7 +1432,7 @@ def _registry_decision_shape_index(role: str, task: Task, run: AgentRun, *, hand
                 {
                     "<current stage>": stage_id,
                     "<target_repo>": target_repo,
-                    "<head_agent_profile>": active_profile_name(),
+                    "<head_agent_profile>": mcp_owner_profile_name("launcher_qa"),
                 },
             )
     return shape_index

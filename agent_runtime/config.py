@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -10,10 +11,30 @@ import yaml
 from hermes_constants import get_config_path
 from hermes_cli.profiles import profile_exists
 
+from .dispatch_session_policy import normalize_dispatch_session_policy
 from .personas import BUNDLED_PERSONA_IDS, BUNDLED_PERSONA_PROFILES, DEFAULT_PERSONA_IDS, PROFILE_ROLE_SENTINEL, coerce_agent_role, default_personas, seed_personas, validate_toolsets, AgentRole
 from .profile_context import active_profile_name
 from .redaction_mode import normalize_redaction_mode
-from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, EventLogConfig, MissionPlanConfig, NormalWorkerFlowConfig, PersonaChatConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig
+from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, EventLogConfig, McpAdmissionConfig, MissionChatConfig, MissionPlanConfig, NormalWorkerFlowConfig, PersonaChatConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig, TerminalEnvelopeConfig
+
+logger = logging.getLogger(__name__)
+
+#: Bounds for ``agent_runtime.mission_chat.default_max_seconds``. Below the
+#: floor the graceful checkpoint reserve (``turn_budget``: ``max(60s, 15%)``,
+#: capped so 30 s of work survives) consumes the whole window and the turn can
+#: run no tool at all; above the ceiling one conversational turn outlives the
+#: mission wall-clock deadline (``mission_wall_clock_deadline_seconds``, 86400).
+MISSION_CHAT_MIN_MAX_SECONDS = 30.0
+MISSION_CHAT_MAX_MAX_SECONDS = 86_400.0
+
+#: Hard ceiling for ``agent_runtime.mcp_admission.max_tool_calls_per_run``.
+#: A per-run MCP call budget only bounds a looping agent while it is actually
+#: reachable, so "effectively unlimited" must not be spellable in config — a
+#: mistyped ``1000000`` clamps here instead of silently retiring the bound. The
+#: value is far above any honest QA drill (the 6-row Stage C acceptance matrix
+#: costs ~60 admitted calls) and far below a loop worth paying for.
+MCP_ADMISSION_MAX_TOOL_CALLS_CEILING = 1_000
+
 
 @dataclass(slots=True)
 class AgentRuntimeConfig(RuntimeConfig):
@@ -103,6 +124,9 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
     swarm = _swarm_config(raw.get("swarm") or {})
     supervision = _supervision_config(raw.get("supervision") or {})
     coordinator_permissions = _coordinator_permission_config(raw.get("coordinator_permissions") or {})
+    mission_chat = _mission_chat_config(raw.get("mission_chat") or {})
+    mcp_admission = _mcp_admission_config(raw.get("mcp_admission") or {})
+    terminal_envelope = _terminal_envelope_config(raw.get("terminal_envelope") or {})
     continuous_role_sessions = _apply_enterprise_role_session_compat(
         continuous_role_sessions,
         enterprise_worker_sessions=enterprise_worker_sessions,
@@ -160,6 +184,9 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
         swarm=swarm,
         supervision=supervision,
         coordinator_permissions=coordinator_permissions,
+        mission_chat=mission_chat,
+        mcp_admission=mcp_admission,
+        terminal_envelope=terminal_envelope,
         personas=raw.get("personas", {}) or {},
         default_model_source=default_model_source,
         default_provider_source=default_provider_source,
@@ -246,12 +273,61 @@ def describe_runtime_default_authority(config_path: Path | None = None) -> dict[
     }
 
 
+def harness_root_config_path() -> Path:
+    """The harness-global ``config.yaml`` under the Hermes ROOT home.
+
+    Harness-wide operator policy must resolve against the ROOT config no
+    matter which profile is sticky-active. The CLI bootstrap redirects a bare
+    invocation into the active profile's home
+    (``hermes_cli.main._apply_profile_override``), so ``get_config_path()`` —
+    and therefore ``load_agent_runtime_config()`` with no argument — silently
+    reads THAT profile's ``config.yaml``. Live proof 2026-07-23: with
+    ``alice`` sticky-active, the mission-chat lane resolved
+    ``chat_lane_restore_toolsets`` against ``profiles/alice/config.yaml``,
+    so the operator's root-config ruling (Neko ``file`` restore, 2026-07-18)
+    was dead on arrival. Policy readers that must be immune to that redirect
+    load through this path instead of ``get_config_path()``.
+    """
+
+    from hermes_constants import get_default_hermes_root
+
+    return get_default_hermes_root() / "config.yaml"
+
+
+def load_root_runtime_config() -> AgentRuntimeConfig:
+    """Load the harness-global runtime config from the ROOT ``config.yaml``.
+
+    Convenience for harness-wide policy readers that must be immune to the CLI
+    profile redirect. A bare invocation runs
+    ``hermes_cli.main._apply_profile_override`` at import time, which reads
+    ``<root>/active_profile`` and points ``HERMES_HOME`` at
+    ``<root>/profiles/<name>``. From that point ``get_config_path()`` — and so
+    ``load_agent_runtime_config()`` with no argument — silently resolves against
+    THAT profile's ``config.yaml``, letting whichever profile is sticky-active
+    shadow harness-global operator policy (live proof 2026-07-23: with ``alice``
+    active, the mission-chat lane resolved ``chat_lane_restore_toolsets`` off
+    ``profiles/alice/config.yaml``, so the root-config ruling was dead on
+    arrival — see :func:`harness_root_config_path`).
+
+    Policy that is a property of the harness as a whole — not of any one
+    profile — loads through this instead of the bare
+    ``load_agent_runtime_config()``. Per-profile facts (``personas``, the
+    ``default_model`` / ``default_provider`` / ``default_api_mode`` resolution,
+    skills) must NOT use this; they stay on ``load_agent_runtime_config()`` so
+    the active profile's own overrides apply.
+    """
+
+    return load_agent_runtime_config(harness_root_config_path())
+
+
 def chat_lane_restore_toolsets(persona_id: str, cfg: AgentRuntimeConfig | None = None) -> list[str]:
     """Per-persona operator override for the chat-lane toolset cost policy.
 
     Read from ``agent_runtime.personas.<id>.chat_lane_restore_toolsets`` in
-    ``config.yaml``: a list of toolsets to RESTORE onto that persona's operator /
-    mission chat lane after the default policy
+    the ROOT ``config.yaml`` (see :func:`harness_root_config_path` — this is
+    harness-global operator policy, and an active profile's own config must
+    not shadow it): a list of toolsets to RESTORE onto that persona's
+    operator / mission chat lane after the default policy
     (``chat_lane_toolsets.DEFAULT_CHAT_LANE_EXCLUDED_TOOLSETS``) would exclude
     them (browser / vision / heavy-dev). Restore is un-exclusion, not a grant —
     a restored toolset is only kept if the persona's role/permission layer
@@ -264,7 +340,7 @@ def chat_lane_restore_toolsets(persona_id: str, cfg: AgentRuntimeConfig | None =
     persona_id = str(persona_id or "").strip()
     if not persona_id:
         return []
-    cfg = cfg or load_agent_runtime_config()
+    cfg = cfg or load_agent_runtime_config(harness_root_config_path())
     personas = cfg.personas if isinstance(getattr(cfg, "personas", None), dict) else {}
     keys = [persona_id]
     if persona_id == "neko_supervisor":
@@ -276,6 +352,28 @@ def chat_lane_restore_toolsets(persona_id: str, cfg: AgentRuntimeConfig | None =
         if isinstance(raw, dict) and "chat_lane_restore_toolsets" in raw:
             return _string_list(raw.get("chat_lane_restore_toolsets"))
     return []
+
+
+def _expand_machine_root_tokens(value, *, field: str):
+    """Expand ``${roots.…}`` in a persona path field at config-load time.
+
+    Unresolvable tokens are left LITERAL on purpose: substituting a guess would
+    hand a persona a fabricated workdir, and blanking the field would look like
+    "no repo scope configured". The literal token is the signal
+    ``profile_readiness`` turns into a typed ``mcp_attention`` row with the
+    exact `hermes harness roots set …` fix, and it can never be mistaken for a
+    real path. Values with no token are returned unchanged.
+    """
+
+    from .machine_roots import MachineRootError, contains_path_tokens, expand_config_paths
+
+    if not contains_path_tokens(value):
+        return value
+    try:
+        return expand_config_paths(value, field=field)
+    except MachineRootError as exc:
+        logger.error("Persona path field %s is unresolved: %s | fix: %s", field, exc.summary, exc.fix_hint)
+        return value
 
 
 def persona_records_from_config(cfg: AgentRuntimeConfig | None = None):
@@ -311,7 +409,10 @@ def persona_records_from_config(cfg: AgentRuntimeConfig | None = None):
         p.soul_overlay_path = overrides.get("soul_overlay_path", p.soul_overlay_path)
         p.include_profile_memory = bool(overrides.get("include_profile_memory", p.include_profile_memory))
         p.include_core_context_files = bool(overrides.get("include_core_context_files", p.include_core_context_files))
-        p.repo_scope = overrides.get("repo_scope", p.repo_scope)
+        p.repo_scope = _expand_machine_root_tokens(
+            overrides.get("repo_scope", p.repo_scope),
+            field=f"agent_runtime.personas.{persona_id}.repo_scope",
+        )
         p.repo_scope_label = overrides.get("repo_scope_label", p.repo_scope_label)
         p.iteration_budget = _optional_int(overrides.get("iteration_budget", p.iteration_budget))
         p.max_wall_seconds = _optional_float(overrides.get("max_wall_seconds", p.max_wall_seconds))
@@ -651,6 +752,168 @@ def _persona_chat_config(raw: dict[str, Any]) -> PersonaChatConfig:
     )
 
 
+def _mission_chat_config(raw: dict[str, Any]) -> MissionChatConfig:
+    """Parse ``agent_runtime.mission_chat`` (see :class:`MissionChatConfig`).
+
+    An absent / malformed value keeps the historical 240 s CLI default, and a
+    present one is clamped to a window that can actually host a turn — the
+    checkpoint reserve eats the whole budget below ~30 s, and above a day a
+    single turn outlives the mission deadline. Clamping (rather than rejecting)
+    keeps a fat-fingered stanza from failing every turn on the lane."""
+
+    raw = raw if isinstance(raw, dict) else {}
+    defaults = MissionChatConfig()
+    return MissionChatConfig(
+        default_max_seconds=_clamped_positive_float(
+            raw.get("default_max_seconds"),
+            defaults.default_max_seconds,
+            minimum=MISSION_CHAT_MIN_MAX_SECONDS,
+            maximum=MISSION_CHAT_MAX_MAX_SECONDS,
+        ),
+        dispatch_session_policy=normalize_dispatch_session_policy(
+            raw.get("dispatch_session_policy"),
+            defaults.dispatch_session_policy,
+        ),
+        clarify_token_binding=bool(
+            raw.get("clarify_token_binding", defaults.clarify_token_binding)
+        ),
+    )
+
+
+def mission_chat_clarify_token_binding(cfg: AgentRuntimeConfig | None = None) -> bool:
+    """Whether a clarify answer is bound to its question's thread by token.
+
+    Mirrors :func:`mission_chat_dispatch_session_policy` exactly, and for the
+    same reason: this decides how EVERY profile's clarify round-trips thread, so
+    it is harness-wide operator policy read from the ROOT config, and a config
+    fault degrades to the built-in default (``True``) rather than failing the
+    turn. The gate is checked at the two seams that matter — minting a ticket
+    when a turn asks a question, and resolving an echoed token when a turn
+    answers one — so flipping it off returns the lane to today's precedence with
+    no migration and nothing to unwind."""
+
+    if cfg is not None:
+        return bool(
+            getattr(cfg.mission_chat, "clarify_token_binding", MissionChatConfig().clarify_token_binding)
+        )
+    try:
+        return bool(load_root_runtime_config().mission_chat.clarify_token_binding)
+    except Exception:  # pragma: no cover - defensive; a config fault must not kill a turn
+        logger.debug("mission_chat clarify-token gate load failed; using the built-in default", exc_info=True)
+        return MissionChatConfig().clarify_token_binding
+
+
+def mission_chat_dispatch_session_policy(cfg: AgentRuntimeConfig | None = None) -> str:
+    """Which thread a dispatch lands in when the caller names none.
+
+    Harness-wide operator policy, so it loads through
+    :func:`load_root_runtime_config` for the same reason the budget default
+    does — a sticky-active profile's own ``config.yaml`` must not be able to
+    change how every OTHER profile's dispatches thread. A config fault degrades
+    to the built-in default rather than failing the turn.
+
+    The precedence rule (explicit ``session_id`` / ``new_session`` always wins
+    over this) is decided in one place:
+    :func:`agent_runtime.dispatch_session_policy.resolve_dispatch_session_decision`."""
+
+    if cfg is not None:
+        return normalize_dispatch_session_policy(
+            getattr(cfg.mission_chat, "dispatch_session_policy", None),
+            MissionChatConfig().dispatch_session_policy,
+        )
+    try:
+        return normalize_dispatch_session_policy(
+            load_root_runtime_config().mission_chat.dispatch_session_policy,
+            MissionChatConfig().dispatch_session_policy,
+        )
+    except Exception:  # pragma: no cover - defensive; a config fault must not kill a turn
+        logger.debug("mission_chat dispatch policy load failed; using the built-in default", exc_info=True)
+        return MissionChatConfig().dispatch_session_policy
+
+
+def mission_chat_default_max_seconds(cfg: AgentRuntimeConfig | None = None) -> float:
+    """The wall budget a mission-chat turn gets when ``--max-seconds`` is absent.
+
+    Harness-wide operator policy, so it loads through
+    :func:`load_root_runtime_config` — a sticky-active profile's own
+    ``config.yaml`` must not be able to shorten (or extend) every other
+    profile's turns (the same shadowing bug :func:`harness_root_config_path`
+    documents for ``chat_lane_restore_toolsets``). A config fault degrades to
+    the historical default rather than failing the turn."""
+
+    if cfg is not None:
+        return float(getattr(cfg.mission_chat, "default_max_seconds", MissionChatConfig().default_max_seconds))
+    try:
+        return float(load_root_runtime_config().mission_chat.default_max_seconds)
+    except Exception:  # pragma: no cover - defensive; a config fault must not kill a turn
+        logger.debug("mission_chat default budget load failed; using the built-in default", exc_info=True)
+        return MissionChatConfig().default_max_seconds
+
+
+def resolve_mission_chat_max_seconds(
+    requested: float | None, cfg: AgentRuntimeConfig | None = None
+) -> float:
+    """The wall budget one mission-chat turn gets — the precedence chokepoint.
+
+    An explicit request (the CLI's ``--max-seconds``, a relay hop's chosen
+    window) ALWAYS wins, including a value outside the config clamp: the clamp
+    guards a deployment-wide default from a fat-fingered stanza, it is not a cap
+    on a caller who states a number. Only ``None`` — "no opinion" — falls through
+    to :func:`mission_chat_default_max_seconds`.
+
+    One function so the precedence is decided in one place; the parser default is
+    ``None`` precisely so "absent" and "explicitly 240" remain distinguishable.
+    """
+
+    if requested is None:
+        return mission_chat_default_max_seconds(cfg)
+    try:
+        value = float(requested)
+    except (TypeError, ValueError):
+        return mission_chat_default_max_seconds(cfg)
+    return value if value > 0 else mission_chat_default_max_seconds(cfg)
+
+
+def mission_chat_workdir(persona_id: str, cfg: AgentRuntimeConfig | None = None) -> str | None:
+    """Per-persona repo grounding for the mission-chat lane.
+
+    Read from ``agent_runtime.personas.<id>.workdir`` in the ROOT
+    ``config.yaml`` (see :func:`harness_root_config_path`): an absolute
+    directory the persona's chat turns run in, so its ``terminal`` / ``file``
+    tools resolve relative paths against a real repo instead of whatever cwd the
+    serve process happens to hold (G6). ``${roots.…}`` machine tokens are
+    expanded here, exactly like ``repo_scope``, so the stanza stays portable
+    across machines; an unresolvable token is left literal and surfaces as a
+    typed ``mission_chat_workdir_unresolved`` row rather than a fabricated path.
+
+    Honors the legacy ``alice_supervisor`` ⇄ ``neko_supervisor`` alias.
+    Absent / blank → ``None`` (the lane keeps the process cwd, unchanged).
+    Resolution of the whole ladder (config → workspace pointer → repo_scope →
+    cwd) lives in :mod:`agent_runtime.mission_chat_workdir`; this only reads the
+    key."""
+
+    persona_id = str(persona_id or "").strip()
+    if not persona_id:
+        return None
+    cfg = cfg or load_agent_runtime_config(harness_root_config_path())
+    personas = cfg.personas if isinstance(getattr(cfg, "personas", None), dict) else {}
+    keys = [persona_id]
+    if persona_id == "neko_supervisor":
+        keys.append("alice_supervisor")
+    elif persona_id == "alice_supervisor":
+        keys.append("neko_supervisor")
+    for key in keys:
+        raw = personas.get(key)
+        if isinstance(raw, dict) and "workdir" in raw:
+            value = _clean_config_str(raw.get("workdir"))
+            if value is None:
+                return None
+            return _expand_machine_root_tokens(
+                value, field=f"agent_runtime.personas.{key}.workdir"
+            )
+    return None
+
+
 def _event_log_config(raw: dict[str, Any]) -> EventLogConfig:
     raw = raw if isinstance(raw, dict) else {}
     defaults = EventLogConfig()
@@ -702,6 +965,89 @@ def _coordinator_permission_config(raw: dict[str, Any]) -> CoordinatorPermission
     )
 
 
+def _mcp_admission_config(raw: dict[str, Any]) -> McpAdmissionConfig:
+    """Parse ``agent_runtime.mcp_admission`` — deny-by-default at every step.
+
+    A malformed block must never read as "allow": a non-mapping ``roles``, a
+    non-mapping lane map, or a non-list server list all collapse to the empty
+    allowlist, and any parse fault leaves ``enabled`` False. The connect budget
+    is clamped so a config typo cannot park a chat turn behind a capability
+    probe (or make the probe useless by rounding to zero).
+
+    ``max_tool_calls_per_run`` is clamped the same way and for the same reason,
+    with one extra property: there is no way to spell "unlimited". A missing,
+    zero, negative or unparseable value falls back to the default, and the upper
+    clamp refuses a fat-fingered ``1000000`` — an admitted MCP surface with no
+    call bound is precisely the failure the budget exists to prevent, so it must
+    not be reachable by a config typo either.
+    """
+
+    raw = raw if isinstance(raw, dict) else {}
+    defaults = McpAdmissionConfig()
+    roles: dict[str, dict[str, list[str]]] = {}
+    raw_roles = raw.get("roles")
+    if isinstance(raw_roles, dict):
+        for role, lanes in raw_roles.items():
+            if not isinstance(lanes, dict):
+                continue
+            parsed_lanes = {
+                str(lane): _string_list(servers)
+                for lane, servers in lanes.items()
+                if _string_list(servers)
+            }
+            if parsed_lanes:
+                roles[str(role)] = parsed_lanes
+    timeout = _optional_float(raw.get("connect_timeout_seconds"))
+    if timeout is None or timeout <= 0:
+        timeout = defaults.connect_timeout_seconds
+    return McpAdmissionConfig(
+        enabled=bool(raw.get("enabled", defaults.enabled)),
+        connect_timeout_seconds=min(120.0, max(1.0, float(timeout))),
+        max_tool_calls_per_run=_clamped_positive_int(
+            raw.get("max_tool_calls_per_run"),
+            defaults.max_tool_calls_per_run,
+            minimum=1,
+            maximum=MCP_ADMISSION_MAX_TOOL_CALLS_CEILING,
+        ),
+        roles=roles,
+    )
+
+
+def _terminal_envelope_config(raw: dict[str, Any]) -> TerminalEnvelopeConfig:
+    """Parse ``agent_runtime.terminal_envelope`` — deny-by-default at every step.
+
+    Structural parsing only: this keeps well-shaped ``<role>.<lane>: [classes]``
+    entries and drops anything else. Whether a *named* class is a real class,
+    and whether it is grantable at all, is decided by
+    ``terminal_envelope.resolve_terminal_envelope_grants`` so an unknown or
+    non-grantable class produces a TYPED config issue at decision time instead
+    of vanishing silently here. A malformed block must never read as "allow": a
+    non-mapping ``grants`` or a non-mapping lane map collapses to the empty
+    grant table, and a non-list class list is carried through verbatim so the
+    resolver can report the shape fault rather than leave the operator staring
+    at a stanza that appears to be in force.
+    """
+
+    raw = raw if isinstance(raw, dict) else {}
+    grants: dict[str, dict[str, Any]] = {}
+    raw_grants = raw.get("grants")
+    if isinstance(raw_grants, dict):
+        for role, lanes in raw_grants.items():
+            if not isinstance(lanes, dict):
+                continue
+            parsed_lanes: dict[str, Any] = {}
+            for lane, classes in lanes.items():
+                if not isinstance(classes, (list, tuple, set, frozenset)):
+                    parsed_lanes[str(lane)] = classes
+                    continue
+                names = _string_list(classes)
+                if names:
+                    parsed_lanes[str(lane)] = names
+            if parsed_lanes:
+                grants[str(role)] = parsed_lanes
+    return TerminalEnvelopeConfig(grants=grants)
+
+
 def _mission_plan_config(raw: dict[str, Any]) -> MissionPlanConfig:
     raw = raw if isinstance(raw, dict) else {}
     defaults = MissionPlanConfig()
@@ -748,6 +1094,13 @@ def _positive_int(value: Any, default: int) -> int:
 def _clamped_positive_int(value: Any, default: int, *, minimum: int, maximum: int) -> int:
     number = _positive_int(value, default)
     return max(minimum, min(maximum, number))
+
+
+def _clamped_positive_float(value: Any, default: float, *, minimum: float, maximum: float) -> float:
+    number = _optional_float(value)
+    if number is None:
+        number = default
+    return max(minimum, min(maximum, float(number)))
 
 
 

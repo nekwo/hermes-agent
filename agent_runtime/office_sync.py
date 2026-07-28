@@ -96,6 +96,10 @@ class OfficePullSummary:
     archived: int = 0
     conflicts: int = 0
     workspaces: list[str] = None  # type: ignore[assignment]
+    #: Entities the admission guard would not admit (secret-shaped content, or a
+    #: machine-shaped WIRING value — a ``backing_profile`` holding an absolute
+    #: path, say). Per-entity isolation: one bad actor never aborts a pull.
+    refused: list[dict[str, str]] = None  # type: ignore[assignment]
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -105,6 +109,7 @@ class OfficePullSummary:
             "archived": self.archived,
             "conflicts": self.conflicts,
             "workspaces": list(self.workspaces or []),
+            "refused": list(self.refused or []),
         }
 
 
@@ -162,9 +167,11 @@ def apply_office_pull(realm_id: str, subtree: Path, *, event_log: EventLog | Non
     sidecars. Never a silent overwrite of local changes.
     """
 
+    from .sync_admission import refuse_entity
+
     store = OfficeStore(event_log=event_log)
     baseline = read_office_baseline(realm_id)
-    summary = OfficePullSummary(workspaces=[])
+    summary = OfficePullSummary(workspaces=[], refused=[])
     office_root = subtree / "store" / "office"
     if not office_root.exists():
         return summary
@@ -174,6 +181,25 @@ def apply_office_pull(realm_id: str, subtree: Path, *, event_log: EventLog | Non
         if remote_surface is None:
             continue
         workspace_id = remote_surface.workspace_id
+        # Admission scan (defect (b), 2026-07-25): office files are excluded from
+        # the generic pull loop, so ``_assert_no_secret_artifacts`` never saw
+        # them. A surface that will not pass the door refuses WHOLE; a single bad
+        # actor refuses alone and is EXCLUDED from the reconcile below — treating
+        # it as "absent remotely" would archive the member's own placement,
+        # turning a hostile payload into a local deletion.
+        surface_refusal = refuse_entity(_surface_key(workspace_id), payload=to_jsonable(remote_surface))
+        if surface_refusal is not None:
+            summary.refused.append(surface_refusal.as_dict())
+            continue
+        refused_actor_keys: set[str] = set()
+        for actor_key in sorted(remote_actors):
+            actor_refusal = refuse_entity(
+                _actor_key(workspace_id, actor_key), payload=to_jsonable(remote_actors[actor_key])
+            )
+            if actor_refusal is not None:
+                summary.refused.append(actor_refusal.as_dict())
+                refused_actor_keys.add(actor_key)
+                remote_actors.pop(actor_key, None)
         summary.workspaces.append(workspace_id)
 
         local_surface = store.get_surface(workspace_id) if store.surface_exists(workspace_id) else None
@@ -196,8 +222,9 @@ def apply_office_pull(realm_id: str, subtree: Path, *, event_log: EventLog | Non
             )
             baseline[surface_key] = remote_surface_hash
 
-        # Actors: the union of local-active, remote, and locally archived keys.
-        for actor_key in sorted(set(local_actors) | set(remote_actors) | archived_keys):
+        # Actors: the union of local-active, remote, and locally archived keys,
+        # minus anything the door refused (see above).
+        for actor_key in sorted((set(local_actors) | set(remote_actors) | archived_keys) - refused_actor_keys):
             local_actor = local_actors.get(actor_key)
             remote_actor = remote_actors.get(actor_key)
             local_hash = office_models.office_content_hash(local_actor) if local_actor is not None else None

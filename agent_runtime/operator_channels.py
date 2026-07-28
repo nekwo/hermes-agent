@@ -6,10 +6,16 @@ from typing import Any, Iterable
 
 from .models import PersonaInstance, Task
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
+from .redaction import TEXT_SECRET_ASSIGNMENT_RE
+from .run_budget import ACCOUNTING_KEY as RUN_BUDGET_ACCOUNTING_KEY
 from .persona_chat_history import (
     _canonical_persona_id,
+    canonical_persona_chat_turn_id,
+    logical_persona_chat_client_message_id,
     PERSONA_PRE_TRACE_ACK_KIND,
     PERSONA_RELAYED_MESSAGE_KIND,
+    PERSONA_TURN_BUDGET_EXHAUSTED_KIND,
+    PERSONA_TURN_INTERRUPTED_KIND,
 )
 from .simplified_contract import public_decision_type_value
 from .transcript_order import TURN_SEQ_CONTENT, order_transcript_rows
@@ -29,9 +35,38 @@ _TOOL_OK_STATUSES = {"passed", "ok", "completed", "success", "succeeded", "done"
 _TOOL_FAILED_STATUSES = {"failed", "error", "blocked", "crashed", "timeout"}
 
 _CHAT_INSTANCE_MODES = {"chat", "free_floating"}
-_SECRET_RE = re.compile(
-    r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|bearer)\s*[:=]\s*\S+"
-)
+
+# ── terminal turn markers, as the conversation contract renders them ─────────
+#
+# Keyed on the marker kind ``persona_chat_history`` synthesizes (see
+# ``TERMINAL_TURN_MARKERS`` there — that table is the producer, this one the
+# presenter). ``status`` and ``display_title`` are the wire values the Launcher
+# adapter already reads (``mission_agent_chat_adapter.dart``:
+# ``_turnInterruptedFlowMessage`` / ``_budgetExhaustedFlowMessage``), so no
+# launcher change is required to render either marker.
+_TERMINAL_TURN_MARKER_PRESENTATION = {
+    PERSONA_TURN_INTERRUPTED_KIND: {
+        "status": "interrupted",
+        "display_title": "Turn interrupted",
+    },
+    PERSONA_TURN_BUDGET_EXHAUSTED_KIND: {
+        "status": "budget_exhausted",
+        "display_title": "Wall budget reached",
+    },
+}
+# The status a still-``running`` tool_call is settled to when its turn ended.
+# ``interrupted`` describes the CALL — it was cut off and will never finish —
+# and is the only settled-tool vocabulary the Launcher's trace renderer already
+# knows (``mission_trace_content_renderer.dart``: interrupted|cancelled|
+# canceled|aborted → stop glyph). The turn-level reason (graceful wall-budget
+# checkpoint vs. a killed turn) is carried separately as ``settled_reason``, so
+# a settled call never has to lie about WHY to stop spinning.
+_SETTLED_TOOL_CALL_STATUS = "interrupted"
+
+# Single-homed in ``agent_runtime.redaction`` — see the header there for the
+# JSON blind spot every local spelling shared. Detection only here (a matching
+# line is dropped whole), so the shared pattern's group(2) is inert.
+_SECRET_RE = TEXT_SECRET_ASSIGNMENT_RE
 _TELEMETRY_SUMMARY_RE = re.compile(
     r"(?i)\b("
     r"agent init|provider client|provider responses|provider stream|provider call|"
@@ -53,6 +88,7 @@ def operator_channel_summary(
     tasks: Iterable[Task] | None = None,
     run_summaries: list[dict[str, Any]] | None = None,
     accountant: Any = None,
+    intentionally_omitted_history_session_ids: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Project the Agent Console's single render contract.
 
@@ -68,6 +104,11 @@ def operator_channel_summary(
 
     task_lookup = _TaskLookup(tasks or [])
     run_lookup = _RunLookup(run_summaries or [])
+    omitted_history_session_ids = {
+        session_id
+        for item in (intentionally_omitted_history_session_ids or [])
+        if (session_id := _safe_session(item))
+    }
     channels: dict[str, _OperatorChannelBuilder] = {}
     by_session: dict[str, _OperatorChannelBuilder] = {}
     by_instance: dict[str, _OperatorChannelBuilder] = {}
@@ -136,6 +177,7 @@ def operator_channel_summary(
                 run_lookup=run_lookup,
                 accountant=accountant,
                 display_names=display_names,
+                omitted_history_session_ids=omitted_history_session_ids,
             )
             for builder in channels.values()
         )
@@ -201,6 +243,7 @@ class _OperatorChannelBuilder:
         run_lookup: "_RunLookup | None" = None,
         accountant: Any = None,
         display_names: dict[str, str] | None = None,
+        omitted_history_session_ids: set[str] | None = None,
     ) -> dict[str, Any] | None:
         history = self._bound_history() or _latest_history(self.history_rows)
         trace = _merged_trace(self.trace_rows)
@@ -307,6 +350,14 @@ class _OperatorChannelBuilder:
                     "entity_id": channel_id,
                 }
             )
+        if _turn_identity_mismatched(conversation.get("messages") or []):
+            warnings.append(
+                {
+                    "code": "operator_conversations.turn_identity_mismatched",
+                    "detail": "a projected terminal reply turn_id disagrees with its typed assistant client_message_id",
+                    "entity_id": channel_id,
+                }
+            )
         # session_without_history and trace_empty are both evaluated AFTER the
         # conversation is built: a channel whose goal turns already flow as
         # canonical messages is not an empty channel, even when the legacy trace
@@ -333,7 +384,12 @@ class _OperatorChannelBuilder:
         # session_without_history is the genuine projection-loss signal: real
         # content flowed (conversation messages or a trace) but no curated
         # history row backs it. A newborn — nothing has flowed yet — stays silent.
-        if history is None and session_id and not is_newborn_channel:
+        if (
+            history is None
+            and session_id
+            and not is_newborn_channel
+            and session_id not in (omitted_history_session_ids or set())
+        ):
             warnings.append(
                 {
                     "code": "session_without_history",
@@ -464,13 +520,6 @@ def _row_runtime_ids(row: dict[str, Any]) -> set[str]:
 
 
 def _turn_identity_dropped(entries: list[Any], messages: list[Any]) -> bool:
-    has_trace_turn_id = any(
-        isinstance(entry, dict)
-        and bool(safe_assignment_text(entry.get("turn_id"), limit=160))
-        for entry in entries
-    )
-    if not has_trace_turn_id:
-        return False
     for message in messages:
         if not isinstance(message, dict):
             continue
@@ -479,7 +528,43 @@ def _turn_identity_dropped(entries: list[Any], messages: list[Any]) -> bool:
         refs = message.get("refs")
         if not isinstance(refs, dict) or refs.get("source") != "persona_chat_trace":
             continue
-        if not safe_assignment_text(message.get("turn_id"), limit=160):
+        if safe_assignment_text(message.get("turn_id"), limit=160):
+            continue
+        timestamp = safe_assignment_text(message.get("timestamp"), limit=200)
+        tool_name = safe_assignment_text(refs.get("tool_name"), limit=160)
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if safe_assignment_text(entry.get("ts"), limit=200) != timestamp:
+                continue
+            if tool_name and safe_assignment_text(entry.get("tool_name"), limit=160) != tool_name:
+                continue
+            if safe_assignment_text(entry.get("turn_id"), limit=160):
+                return True
+            break
+    return False
+
+
+def _turn_identity_mismatched(messages: list[Any]) -> bool:
+    """Detect a projector regression without relying on reply body matching."""
+
+    for message in messages:
+        if not isinstance(message, dict):
+            continue
+        if safe_assignment_token(message.get("role")) != "agent":
+            continue
+        client_message_id = safe_assignment_text(
+            message.get("client_message_id"), limit=240
+        )
+        expected_turn_id = canonical_persona_chat_turn_id(client_message_id)
+        if (
+            not expected_turn_id
+            or client_message_id
+            == logical_persona_chat_client_message_id(client_message_id)
+        ):
+            continue
+        actual_turn_id = safe_assignment_token(message.get("turn_id"))
+        if actual_turn_id != expected_turn_id:
             return True
     return False
 
@@ -619,7 +704,7 @@ def _conversation_contract(
         )
     )
 
-    _settle_interrupted_tool_calls(messages, history=history)
+    _settle_terminal_tool_calls(messages, history=history)
 
     messages = _order_conversation_messages(messages)
     messages = _dedupe_conversation_messages(messages)
@@ -664,44 +749,66 @@ def _conversation_contract(
     }
 
 
-def _settle_interrupted_tool_calls(
+def _settle_terminal_tool_calls(
     messages: list[dict[str, Any]],
     *,
     history: dict[str, Any] | None,
 ) -> None:
-    """Flip still-``running`` tool_call rows of interrupted turns to ``interrupted``.
+    """Settle still-``running`` tool_call rows of TERMINALLY-ended turns.
 
-    A turn killed mid-flight leaves ``tool_started`` trace entries with no
-    finish row, so the paired tool_call projects ``running`` forever. The
-    turn store's terminal marker (surfaced as ``turn_interrupted`` history
-    rows) is the truth that those calls will never finish; settle them at the
-    contract source so every consumer stops rendering a live spinner.
-    Interrupted turn ids come from the history SOURCE rows, not the projected
-    messages, so a capped/deduped marker still settles its tools.
+    A turn that ends mid-flight — killed (``turn_interrupted``) or landed at the
+    wall-budget checkpoint (``budget_exhausted``) — leaves ``tool_started``
+    trace entries with no finish row, so the paired tool_call projects
+    ``running`` forever. The turn store's terminal marker is the truth that
+    those calls will never finish; settle them at the contract source so every
+    consumer stops rendering a live spinner.
+
+    This keyed on ``turn_interrupted`` ALONE until 2026-07-26, which is exactly
+    why a wall-budget turn spun in the cockpit after it was over: a second
+    terminal state existed and only one marker was consumed. The recognised set
+    is now driven by ``_TERMINAL_TURN_MARKER_PRESENTATION``, so a new terminal
+    marker settles its tools by construction.
+
+    Terminal turn ids come from the history SOURCE rows, not the projected
+    messages, so a capped/deduped marker still settles its tools. The settled
+    status is uniform (``interrupted`` — the call was cut off); ``settled_reason``
+    carries WHICH terminal state ended the turn, typed, on both the message and
+    its tool payload.
     """
 
-    interrupted_turn_ids: set[str] = set()
+    settled_reason_by_turn: dict[str, str] = {}
     for row in (history or {}).get("messages") or []:
         if not isinstance(row, dict):
             continue
-        if safe_assignment_token(row.get("kind")) != "turn_interrupted":
+        kind = safe_assignment_token(row.get("kind"))
+        if kind not in _TERMINAL_TURN_MARKER_PRESENTATION:
             continue
         turn_id = safe_assignment_token(row.get("turn_id")) or safe_assignment_token(
             row.get("client_message_id")
         )
-        if turn_id:
-            interrupted_turn_ids.add(turn_id)
-    if not interrupted_turn_ids:
+        if not turn_id:
+            continue
+        # The turn-store state the marker settled at, with the marker kind as
+        # the fallback for a pre-``settled_state`` row (archive-never-delete).
+        settled_reason_by_turn[turn_id] = (
+            safe_assignment_token(row.get("settled_state")) or kind
+        )
+    if not settled_reason_by_turn:
         return
     for message in messages:
         if message.get("kind") != "tool_call" or message.get("status") != "running":
             continue
-        if safe_assignment_token(message.get("turn_id")) not in interrupted_turn_ids:
+        reason = settled_reason_by_turn.get(
+            safe_assignment_token(message.get("turn_id")) or ""
+        )
+        if reason is None:
             continue
-        message["status"] = "interrupted"
+        message["status"] = _SETTLED_TOOL_CALL_STATUS
+        message["settled_reason"] = reason
         tool = message.get("tool")
         if isinstance(tool, dict):
-            tool["status"] = "interrupted"
+            tool["status"] = _SETTLED_TOOL_CALL_STATUS
+            tool["settled_reason"] = reason
 
 
 def _conversation_goal_input(
@@ -768,12 +875,18 @@ def _conversation_history_message(
     if redaction_status in {"redacted", "unsafe"}:
         text = "Message hidden by redaction boundary."
     client_message_id = safe_assignment_text(row.get("client_message_id"), limit=240)
-    if safe_assignment_token(row.get("kind")) == "turn_interrupted":
+    marker_kind = safe_assignment_token(row.get("kind")) or ""
+    presentation = _TERMINAL_TURN_MARKER_PRESENTATION.get(marker_kind)
+    if presentation is not None:
         # Terminal turn-status marker synthesized by persona_chat_history for a
-        # turn that died without a recorded reply. Keep the typed kind + turn
-        # identity so the Launcher can render a retry affordance and settle any
-        # still-"running" tool rows of the same turn.
-        turn_id = safe_assignment_token(row.get("turn_id")) or safe_assignment_token(client_message_id)
+        # turn that ended without a recorded reply — killed
+        # (``turn_interrupted``) or landed at the wall-budget checkpoint
+        # (``budget_exhausted``). Keep the typed kind + turn identity so the
+        # Launcher renders the right affordance (retry vs. graceful checkpoint)
+        # and so the still-"running" tool rows of the same turn get settled.
+        turn_id = canonical_persona_chat_turn_id(
+            client_message_id
+        ) or safe_assignment_token(row.get("turn_id"))
         message = {
             "id": safe_assignment_text(row.get("id"), limit=180) or f"{channel_id}:history:{index}",
             "seq": 0,
@@ -781,18 +894,22 @@ def _conversation_history_message(
             "actor_persona_id": persona_id,
             "actor_instance_id": persona_instance_id,
             "role": "system",
-            "kind": "turn_interrupted",
-            "status": "interrupted",
-            "display_title": "Turn interrupted",
+            "kind": marker_kind,
+            "status": presentation["status"],
+            "display_title": presentation["display_title"],
             "display_text": text,
             "redaction_status": "redacted" if redaction_status in {"redacted", "unsafe"} else "safe",
             "refs": {"source": "persona_chat_history"},
         }
+        settled_state = safe_assignment_token(row.get("settled_state"))
+        if settled_state:
+            message["settled_state"] = settled_state
         if client_message_id:
             message["client_message_id"] = client_message_id
         if turn_id:
             message["turn_id"] = turn_id
         _carry_turn_seq(message, row)
+        _carry_history_run_budget(message, row)
         return message
     # A canned pre-trace ack keeps its typed kind end-to-end so the Launcher
     # collapses/drops it structurally (never as a settled reply bubble ahead of
@@ -843,6 +960,13 @@ def _conversation_history_message(
         "redaction_status": "redacted" if redaction_status in {"redacted", "unsafe"} else "safe",
         "refs": {"source": "persona_chat_history"},
     }
+    runtime_context = row.get("runtime_context")
+    if role == "operator" and isinstance(runtime_context, dict):
+        message["runtime_context"] = {
+            key: value
+            for key in ("context_id", "revision", "delivery")
+            if (value := safe_assignment_text(runtime_context.get(key), limit=200))
+        }
     # Name the sending agent ONLY when its instance id resolves in the roster —
     # never fabricate a name for an instance we cannot see.
     if is_relayed_message and relay_sender_instance_id:
@@ -851,13 +975,17 @@ def _conversation_history_message(
             message["actor_display_name"] = resolved_name
     if role == "operator" and client_message_id:
         message["client_message_id"] = client_message_id
+        message["turn_id"] = canonical_persona_chat_turn_id(client_message_id)
     if role == "agent" and client_message_id:
-        message["turn_id"] = safe_assignment_token(client_message_id) or client_message_id
+        message["turn_id"] = canonical_persona_chat_turn_id(
+            client_message_id
+        ) or safe_assignment_token(row.get("turn_id"))
         message["client_message_id"] = client_message_id
     # C8 ordering key: the history projection stamps the intra-turn position
     # (operator opens, terminal reply/interrupt closes); carry it through this
     # contract unchanged so every representation sorts on the same key.
     _carry_turn_seq(message, row)
+    _carry_history_run_budget(message, row)
     return message
 
 
@@ -865,6 +993,17 @@ def _carry_turn_seq(message: dict[str, Any], row: dict[str, Any]) -> None:
     turn_seq = row.get("turn_seq")
     if isinstance(turn_seq, int) and not isinstance(turn_seq, bool):
         message["turn_seq"] = turn_seq
+
+
+def _carry_history_run_budget(message: dict[str, Any], row: dict[str, Any]) -> None:
+    # The turn's run_budget accounting block, decorated onto the history row by
+    # persona_chat_history._carry_run_budget. Verbatim and absence-preserving:
+    # the store already bounded it through run_budget.safe_accounting_block,
+    # and a row without the block projects without the key so "nobody
+    # accounted this turn" stays distinguishable from "nothing bounded it".
+    block = row.get(RUN_BUDGET_ACCOUNTING_KEY)
+    if isinstance(block, dict) and block:
+        message[RUN_BUDGET_ACCOUNTING_KEY] = block
 
 
 def _conversation_trace_message(
@@ -1083,6 +1222,9 @@ def _conversation_turn_messages(
             if emitted:
                 accountant.include(emitted)
             else:
+                # Anomalous: a run that produced no renderable turn signal is a
+                # run whose activity the operator can never see — lost data, not
+                # a bound this projection chose to apply.
                 accountant.drop("run_without_turn_signal", entity_id=run_id)
     return messages
 
@@ -1278,6 +1420,9 @@ _TOOL_DETAIL_STR_FIELDS = (
     # full order, carried onto the tool{} payload under the same names the
     # launcher reads. Already operator-sanitized upstream; straight newest-wins.
     "dispatch_target", "dispatch_order",
+    # Generic tool input/result record (tools with no dedicated detail field) —
+    # feeds the console's collapsed Input/Result dropdowns.
+    "tool_input", "tool_result",
 )
 _TOOL_DETAIL_INT_FIELDS = ("duration_ms", "exit_code")
 
@@ -1345,7 +1490,14 @@ def _apply_conversation_cap(
         "refs": {"collapsed_count": len(dropped)},
     }
     if accountant is not None:
-        accountant.drop("turn_cap_trimmed", count=len(dropped), entity_id=channel_id)
+        # Deliberate bound: the channel keeps the newest turns and the trimmed
+        # span is disclosed in-band by the ``turns_collapsed`` marker above.
+        accountant.drop(
+            "turn_cap_trimmed",
+            count=len(dropped),
+            entity_id=channel_id,
+            by_design=True,
+        )
         accountant.mark_truncated()
     return _order_conversation_messages([*protected, marker, *kept])
 
@@ -1416,7 +1568,7 @@ def _order_conversation_messages(
 ) -> list[dict[str, Any]]:
     """C8: order the conversation by the ONE turn-scoped key.
 
-    Turn-anchored rows (anchor = token(client_message_id | turn_id), position =
+    Turn-anchored rows (anchor = token(turn_id | logical client_message_id), position =
     ``turn_seq``) sort inside their turn by the stamped position — operator row
     first, content band between, terminal reply/interrupt last — immune to the
     two-clock skew between SessionDB stamps and trace ``ts`` values (F17). Rows
@@ -1426,10 +1578,10 @@ def _order_conversation_messages(
 
     return order_transcript_rows(
         messages,
-        anchor=lambda message: safe_assignment_token(
-            message.get("client_message_id") or message.get("turn_id")
-        )
-        or None,
+        anchor=lambda message: (
+            safe_assignment_token(message.get("turn_id"))
+            or canonical_persona_chat_turn_id(message.get("client_message_id"))
+        ),
         turn_seq=lambda message: message.get("turn_seq")
         if isinstance(message.get("turn_seq"), int)
         and not isinstance(message.get("turn_seq"), bool)

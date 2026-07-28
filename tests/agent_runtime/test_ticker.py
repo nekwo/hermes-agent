@@ -1241,6 +1241,35 @@ def test_qa_review_coverage_repair_event_names_exact_invalid_field():
     assert progress["summary"] == "qa_review.coverage missing ['backend_contract']"
 
 
+def test_dev_visual_request_pin_is_corrected_to_qa_owned_mcp_profile(monkeypatch):
+    from agent_runtime.decision_schema import AgentDecision, DecisionType
+    from agent_runtime import ticker
+
+    request = AgentDecision(
+        type=DecisionType.REQUEST_SCREENSHOT,
+        summary="capture",
+        rationale="proof required",
+        payload={
+            "stage_id": "visual_verify",
+            "target": "mission_control",
+            "proof_requirement": "loaded Mission Control",
+            "mcp_server": "launcher_qa",
+            "required_launch_pins": {
+                "hermes_profile": "default",
+                "runtime_root_id": "agent-runtime",
+            },
+        },
+    )
+    monkeypatch.setattr(ticker, "mcp_owner_profile_name", lambda mcp_server: "launcher-qa")
+
+    ticker._pin_visual_request_to_mcp_owner_profile(request)
+
+    assert request.payload["required_launch_pins"] == {
+        "hermes_profile": "launcher-qa",
+        "runtime_root_id": "agent-runtime",
+    }
+
+
 class DuplicateScreenshotThenVerdictRuntime:
     def __init__(self):
         self.contexts = []

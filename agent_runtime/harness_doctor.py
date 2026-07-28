@@ -130,6 +130,7 @@ def run_harness_doctor(
         "event_log_compactable_rows": int(event_compaction.get("removed_event_count") or 0),
     }
     model_authority = _model_authority_report()
+    persona_binding = _persona_binding_report()
     return {
         "schema_version": 1,
         "generated_at": ref,
@@ -167,7 +168,42 @@ def run_harness_doctor(
         # rewrite (config.yaml's single writer is upstream save_config). Doctor
         # detects and labels; the operator edits.
         "model_authority": model_authority,
+        # Same posture for persona ⇄ Hermes-profile bindings: when config.yaml
+        # and the agent store disagree, `ensure_persisted_personas` resolves it
+        # store-wins and says nothing, so a config edit alone is silently inert.
+        # Doctor names the disagreement; the operator decides which side is
+        # right (`harness agent set-profile` moves the store, editing
+        # config.yaml moves the declaration). `--fix` deliberately does NOT
+        # touch it — silently "repairing" one side is how the divergence became
+        # invisible in the first place.
+        "persona_binding": persona_binding,
         "repairs": repairs,
+    }
+
+
+def _persona_binding_report() -> dict[str, Any]:
+    """Config-vs-store persona⇄profile binding disagreements, made visible.
+
+    Read-only and never repaired here: which side is right is operator
+    judgment. ``resolved_by`` states the rule that actually applies at runtime
+    (``ensure_persisted_personas`` merges ``{**catalog, **stored}``, so a
+    persisted row wins wholesale and a ``config.yaml`` edit alone is inert).
+    """
+
+    try:
+        from .persona_profile_binding import binding_index
+
+        index = binding_index()
+    except Exception as exc:  # noqa: BLE001 — doctor never fails on a diagnostic section
+        return {"ok": False, "error": str(exc)[:320], "diverged": []}
+    diverged = [binding.as_row() for binding in index.values() if binding.diverged]
+    return {
+        "ok": True,
+        "resolved_by": "store_wins",
+        "agent_count": len(index),
+        "diverged_count": len(diverged),
+        "diverged": sorted(diverged, key=lambda row: row["persona_id"]),
+        "remediation": "harness agent set-profile <persona_id> --profile <name> (moves the store) or edit config.yaml (moves the declaration)",
     }
 
 

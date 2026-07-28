@@ -28,6 +28,8 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+from .skill_publishability import REASON_SHARED_ROOT
+
 SCHEMA = "hermes.skills_inventory/v1"
 
 
@@ -115,6 +117,15 @@ def build_shared_catalog() -> tuple[Path | None, bool, list[dict[str, Any]]]:
                 "multi_file": len(files) > 1,
                 "file_count": len(files),
                 "content_hash": _content_hash(skill_dir, files),
+                # Publishability is a CONSTANT for this walk — every row here is
+                # by construction in the shared root, the sole source realm sync
+                # publishes from. Stated explicitly rather than left implicit in
+                # "we only walked the shared root", so the field carries the same
+                # meaning here as on the ``resolvable_skills`` rows below (where
+                # it is false for most packages) and a consumer never infers it.
+                "source_kind": "shared_core",
+                "publishable": True,
+                "publishable_reason": REASON_SHARED_ROOT,
                 # Populated in build_skills_inventory once personas are known.
                 "shadowed_by": [],
             }
@@ -170,6 +181,8 @@ def build_realm_publish_states() -> list[dict[str, Any]]:
                 # and already loaded) — the picker mode + current selection.
                 "skill_publish_mode": getattr(realm, "skill_publish_mode", "all") or "all",
                 "skill_selection": sorted(getattr(realm, "skill_selection", None) or []),
+                "agent_publish_mode": getattr(realm, "agent_publish_mode", "workspace") or "workspace",
+                "agent_selection": sorted(getattr(realm, "agent_selection", None) or []),
                 "last_publish": sidecar.get("last_publish"),
                 "last_pull": sidecar.get("last_pull"),
                 "checked_at": sidecar.get("checked_at"),
@@ -181,8 +194,20 @@ def build_realm_publish_states() -> list[dict[str, Any]]:
 
 def build_skills_inventory(cfg=None) -> dict[str, Any]:
     """Assemble the full ``skills_inventory/v1`` payload: shared catalog,
-    per-persona grant matrix, and per-realm publish/drift state."""
+    per-persona grant matrix, per-realm publish/drift state, and the
+    machine-wide publishability sweep.
+
+    ``resolvable_skills`` is the honest answer to "which skills exist, and can
+    they reach a realm": one typed row per resolvable package across ALL three
+    resolver tiers (``profile_local`` / ``shared_core`` / ``external``), each
+    carrying ``publishable`` + a typed ``publishable_reason`` and, when it
+    cannot be promoted, a typed ``promotion_block_reason``. The pre-existing
+    ``skills`` list is unchanged in meaning (shared root only) — a consumer that
+    reads only ``skills`` sees exactly what it saw before, additively enriched.
+    """
     from agent_runtime.config import ensure_persisted_personas
+
+    from .skill_publishability import build_publishability_rows
 
     root, exists, catalog = build_shared_catalog()
     catalog_slugs = {entry["slug"] for entry in catalog}
@@ -208,6 +233,7 @@ def build_skills_inventory(cfg=None) -> dict[str, Any]:
     for entry in catalog:
         entry["shadowed_by"] = sorted(shadowed_by.get(entry["slug"], set()))
 
+    resolvable = build_publishability_rows()
     return {
         "schema": SCHEMA,
         "shared_root": str(root) if root is not None else None,
@@ -215,4 +241,27 @@ def build_skills_inventory(cfg=None) -> dict[str, Any]:
         "skills": catalog,
         "personas": persona_rows,
         "realms": build_realm_publish_states(),
+        "resolvable_skills": resolvable,
+        # Counters so a consumer can render "N of M skills cannot reach a realm"
+        # without re-deriving the rule, and so an empty/failed sweep is visibly
+        # empty rather than silently indistinguishable from "all publishable".
+        "publishability_summary": {
+            "total": len(resolvable),
+            "publishable": sum(1 for row in resolvable if row["publishable"]),
+            "unpublishable": sum(1 for row in resolvable if not row["publishable"]),
+            "promotable": sum(1 for row in resolvable if row["promotable"]),
+            "blocked_by_reason": _count_by(resolvable, "promotion_block_reason"),
+        },
     }
+
+
+def _count_by(rows: list[dict[str, Any]], key: str) -> dict[str, int]:
+    """``{value: count}`` over a row key, skipping ``None`` — the typed tally
+    that lets a UI name every offender class instead of showing a bare total."""
+    counts: dict[str, int] = {}
+    for row in rows:
+        value = row.get(key)
+        if value is None:
+            continue
+        counts[str(value)] = counts.get(str(value), 0) + 1
+    return dict(sorted(counts.items()))

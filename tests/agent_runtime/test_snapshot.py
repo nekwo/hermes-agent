@@ -8,10 +8,10 @@ from agent_runtime.models import AgentPersona, Event, Incident, MissionIntent, M
 from agent_runtime.persona_assignments import PersonaAssignmentSpec, PersonaAssignmentStore, PersonaInstanceStore
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
-from agent_runtime.snapshot import AGENT_TOPOLOGY_NODE_ID_CAP, _agent_topology, _agent_topology_node, _archived_task_summaries, _parity_warnings, build_snapshot, goal_detail_for_task, write_snapshot
+from agent_runtime.snapshot import AGENT_TOPOLOGY_NODE_ID_CAP, _agent_topology, _agent_topology_node, _archived_task_summaries, _parity_warnings, _workspace_summary, build_snapshot, goal_detail_for_task, write_snapshot
 from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.steering import execute_steer_action
-from agent_runtime.store import IncidentStore, ProofStore, RunStore, TaskStore
+from agent_runtime.store import IncidentStore, ProofStore, RunStore, TaskStore, WorkspaceStore
 from agent_runtime.events import EventLog
 from agent_runtime.serde import to_jsonable
 
@@ -76,6 +76,43 @@ def test_snapshot_contains_task_summary_and_no_raw_logs(isolate_agent_runtime_ro
     assert snap["dirty_state"]["runtime"]["open_task_ids"] == ["t"]
     write_snapshot(snap)
     assert (isolate_agent_runtime_root / "snapshot.json").exists()
+
+
+def test_workspace_summary_distinguishes_roster_from_exact_live_scope_instances(
+    isolate_agent_runtime_root,
+):
+    workspace = WorkspaceStore().create(
+        name="Default",
+        agent_ids=["dev", "qa", "stale_roster_only"],
+    )
+    instances = [
+        SimpleNamespace(id="personainst_dev_one", workspace_id=workspace.id),
+        SimpleNamespace(id="personainst_qa_one", workspace_id=workspace.id),
+        SimpleNamespace(id="personainst_global", workspace_id=None),
+        SimpleNamespace(id="personainst_other", workspace_id="ws_other"),
+    ]
+
+    row = _workspace_summary(
+        workspace,
+        tasks=[],
+        persona_instances=instances,
+    )
+
+    assert row["agents"] == 2
+    assert row["live_scoped_agent_count"] == 2
+    assert row["live_scoped_agent_ids"] == [
+        "personainst_dev_one",
+        "personainst_qa_one",
+    ]
+    # The compatibility id list must match the live count.  Roster persona ids
+    # here would cause pointerless canonical rows to be inferred into the
+    # workspace alongside these exact scoped instances.
+    assert row["agent_ids"] == [
+        "personainst_dev_one",
+        "personainst_qa_one",
+    ]
+    assert row["roster_agent_count"] == 3
+    assert row["roster_agent_ids"] == ["dev", "qa", "stale_roster_only"]
 
 
 def test_snapshot_parity_warns_on_legacy_operator_event_without_summary(isolate_agent_runtime_root):

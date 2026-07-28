@@ -937,7 +937,11 @@ def test_persona_instance_steer_store_rejects_cycles(isolate_agent_runtime_root)
     assert store.get("personainst_dev").spawned_by == "personainst_neko_supervisor"
 
 
-def test_persona_instance_open_chat_binds_old_chat_without_ticking(monkeypatch, isolate_agent_runtime_root):
+def test_persona_instance_open_chat_binds_old_chat_without_ticking(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
     from argparse import Namespace
     from hermes_cli import harness
 
@@ -945,6 +949,11 @@ def test_persona_instance_open_chat_binds_old_chat_without_ticking(monkeypatch, 
     session_db = _TranscriptDB()
     monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
     monkeypatch.setattr(harness, "_default_persona_session_db", lambda: session_db)
+    previous = PersonaInstanceStore().create_operator_chat(
+        persona_id="dev",
+        display_name="dev worker",
+        session_id="chat_current_123",
+    )
 
     code = harness._cmd_persona_instance_open_chat(
         Namespace(
@@ -965,6 +974,28 @@ def test_persona_instance_open_chat_binds_old_chat_without_ticking(monkeypatch, 
     assert RunStore().list_all() == []
     assert session_db.get_session(instance.session_id) is not None
     assert session_db.get_session_title(instance.session_id) == f"{instance.display_name} chat"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["previous_session_id"] == previous.session_id
+    assert payload["binding_receipt"] == {
+        "schema_version": 1,
+        "persona_instance_id": instance.id,
+        "session_id": "chat_old_123",
+        "previous_session_id": previous.session_id,
+        "changed": True,
+        "instance_updated_at": instance.updated_at.isoformat(),
+    }
+
+    assert harness._cmd_persona_instance_open_chat(
+        Namespace(
+            persona_id="launcher-dev",
+            session_id="chat_old_123",
+            kill_active=False,
+            json=True,
+        )
+    ) == 0
+    replay = json.loads(capsys.readouterr().out)
+    assert replay["binding_receipt"]["changed"] is False
+    assert replay["binding_receipt"]["previous_session_id"] == "chat_old_123"
 
 
 def test_persona_instance_open_chat_new_session_mints_exact_instance_and_replays(
@@ -1246,6 +1277,44 @@ def test_open_chat_default_display_name_never_renames_an_existing_named_instance
             default_display_name="QA Agent",  # the persona default the send path passes
         )
     assert store.get("personainst_qa_agent_2").display_name == "QA Agent (2)"
+
+
+def test_open_chat_same_authoritative_binding_is_a_true_no_op(
+    isolate_agent_runtime_root,
+):
+    """Repeated first-turn binding must not rewrite the row or fan out another
+    full-core stream event when every authoritative field is already equal."""
+
+    from agent_runtime.events import EventLog
+
+    events = EventLog()
+    store = PersonaInstanceStore(event_log=events)
+    session_id = "persona_chat_personainst_dev_aaaaaaaaaaaa"
+    first = store.open_chat(
+        persona_id="dev",
+        session_id=session_id,
+        default_display_name="Dev",
+    )
+    opened_before = [
+        event
+        for event in events.tail(20)
+        if event.type == "persona_instance.chat_opened"
+    ]
+
+    reopened = store.open_chat(
+        persona_id="dev",
+        session_id=session_id,
+        default_display_name="Dev",
+    )
+    opened_after = [
+        event
+        for event in events.tail(20)
+        if event.type == "persona_instance.chat_opened"
+    ]
+
+    assert reopened.updated_at == first.updated_at
+    assert len(opened_before) == 1
+    assert len(opened_after) == 1
 
 
 def test_open_chat_default_display_name_names_a_first_ever_holder(isolate_agent_runtime_root):
@@ -1532,6 +1601,45 @@ def test_persona_chat_history_summary_projects_bound_sessions_redaction_safe(iso
             "last_resumed_at": None,
         }
     ]
+
+
+def test_persona_chat_history_parity_separates_the_bound_limit_from_lost_sessions(
+    isolate_agent_runtime_root,
+):
+    """The directory's ``limit`` is a bound; ``session_not_in_db`` is a defect.
+
+    Live 2026-07-25 the same envelope carried both (103 + 10) and the Launcher,
+    reading only ``dropped``, showed a permanent amber "projection drops 113".
+    The classification now travels WITH the envelope.
+    """
+
+    from agent_runtime.parity import ProjectionAccountant
+
+    store = PersonaInstanceStore()
+    newer = store.open_chat(persona_id="dev", session_id="chat_new")
+    older = store.open_chat(persona_id="backend_dev", session_id="chat_old")
+    ghost = store.open_chat(persona_id="qa", session_id="chat_ghost")
+    accountant = ProjectionAccountant("persona_chat_history")
+
+    rows = persona_chat_history_summary(
+        persona_instances=[newer, older, ghost],
+        session_db=_FakeSessionDB(
+            [
+                {"id": "chat_new", "title": "new", "started_at": 20},
+                {"id": "chat_old", "title": "old", "started_at": 10},
+            ]
+        ),
+        limit=1,
+        accountant=accountant,
+    )
+
+    assert len(rows) == 1
+    summary = accountant.summary()
+    assert summary["reasons"]["limit"] == 1
+    assert summary["reasons"]["session_not_in_db"] == 1
+    # Only the deliberate bound is declared by-design; the orphaned binding is
+    # a real anomaly an operator can act on (harness persona-instance reconcile).
+    assert summary["by_design"] == ["limit"]
 
 
 def test_persona_chat_history_emits_cache_policy_for_known_provider(isolate_agent_runtime_root):
@@ -1946,12 +2054,53 @@ def _mission_chat_test_args(client_message_id: str, *, stream: bool = False):
         message="please answer",
         surface_prompt="",
         intent_hint="chat",
+        allow_mission_goal=False,
         requested_by="test",
         client_message_id=client_message_id,
         stream=stream,
         max_seconds=5.0,
         json=True,
     )
+
+
+def test_mission_chat_threads_explicit_goal_opt_in_only_when_requested(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from hermes_cli import harness
+
+    db = _TranscriptDB()
+    seen = []
+
+    class _ProviderSpy:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def mission_chat_reply(self, persona, message, **kwargs):
+            seen.append(kwargs["allow_mission_goal"])
+            return SimpleNamespace(
+                final_response="provider reply",
+                input_tokens=1,
+                output_tokens=2,
+                total_tokens=3,
+                raw={},
+            )
+
+    monkeypatch.setattr(harness, "load_agent_runtime_config", _assignment_config)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _ProviderSpy)
+
+    normal = _mission_chat_test_args("client_chat_only")
+    assert harness._cmd_mission_chat_message(normal) == 0
+    capsys.readouterr()
+
+    opted_in = _mission_chat_test_args("client_goal_opt_in")
+    opted_in.allow_mission_goal = True
+    assert harness._cmd_mission_chat_message(opted_in) == 0
+    capsys.readouterr()
+
+    assert seen == [False, True]
 
 
 @pytest.mark.parametrize("operation", ["session_create"])
@@ -2241,6 +2390,104 @@ def test_persona_chat_delete_clears_stale_binding_when_session_already_missing(
     assert payload["deleted_session"] is False
     assert payload["cleared_bindings"] == [instance.id]
     assert PersonaInstanceStore().get(instance.id).session_id is None
+
+
+def test_persona_chat_delete_unbinds_every_row_pointing_at_the_deleted_session(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    """Delete is the moment the pointer becomes dangling — clear ALL of them.
+
+    A drifted/sibling row holding the same session id used to survive the
+    owner-filtered loop, and the projection could then only hide it and account
+    a permanent ``session_not_in_db`` parity drop (live 2026-07-25: 10 of them).
+    """
+
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+
+    store = PersonaInstanceStore()
+    owner = store.create_operator_chat(persona_id="profile:reviewer", display_name="Reviewer")
+    db.create_session(owner.session_id, "agent_runtime_persona_chat")
+
+    sibling = store.open_chat(persona_id="qa", session_id="persona_chat_sibling_seed")
+    sibling.default_chat_session_id = owner.session_id
+    sibling.session_id = owner.session_id
+    store.update(sibling)
+
+    code = harness._cmd_persona_chat_delete(
+        SimpleNamespace(
+            session_id=owner.session_id,
+            persona_id=owner.persona_id,
+            persona_instance_id=owner.id,
+            requested_by="test",
+            json=True,
+        )
+    )
+
+    assert code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert sorted(payload["cleared_bindings"]) == sorted([owner.id, sibling.id])
+    healed = PersonaInstanceStore()
+    assert healed.get(owner.id).default_chat_session_id is None
+    assert healed.get(sibling.id).default_chat_session_id is None
+    assert healed.get(sibling.id).session_id is None
+    # Store mutations always emit an event.
+    cleared = [
+        event
+        for event in EventLog().tail(200)
+        if getattr(event, "type", None) == "persona_instance.chat_binding_cleared"
+    ]
+    assert {event.payload["persona_instance_id"] for event in cleared} == {owner.id, sibling.id}
+    assert {event.payload["reason"] for event in cleared} == {"chat_deleted"}
+
+
+def test_persona_chat_delete_leaves_a_pointer_to_another_session_alone(
+    monkeypatch, capsys, isolate_agent_runtime_root
+):
+    """Only the pointers naming THIS session are nulled.
+
+    The old delete blanked ``session_id`` unconditionally, so deleting one chat
+    could silently drop an unrelated live pointer.
+    """
+
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    db = _TranscriptDB()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+
+    store = PersonaInstanceStore()
+    instance = store.create_operator_chat(persona_id="profile:reviewer", display_name="Reviewer")
+    deleted_session = instance.default_chat_session_id
+    db.create_session(deleted_session, "agent_runtime_persona_chat")
+    instance.session_id = "persona_chat_other_live"
+    store.update(instance)
+
+    code = harness._cmd_persona_chat_delete(
+        SimpleNamespace(
+            session_id=deleted_session,
+            persona_id=instance.persona_id,
+            persona_instance_id=instance.id,
+            requested_by="test",
+            json=True,
+        )
+    )
+
+    assert code == 0
+    json.loads(capsys.readouterr().out)
+    updated = PersonaInstanceStore().get(instance.id)
+    # The deleted session is gone from BOTH pointers, and the unrelated live
+    # session survives (the v1 back-fill in PersonaInstance.__post_init__ then
+    # re-derives the default pointer from it — the instance keeps its real chat).
+    assert deleted_session not in {updated.default_chat_session_id, updated.session_id}
+    assert updated.session_id == "persona_chat_other_live"  # untouched
+    assert updated.default_chat_session_id == "persona_chat_other_live"
+    assert updated.mode == "chat"  # still holds a chat pointer
 
 
 def test_persona_chat_delete_reports_missing_without_silent_success(
@@ -2633,7 +2880,16 @@ def test_mission_chat_queues_skill_for_next_turn_once(
 
     assert harness._cmd_mission_chat_message(_message_args("client_skill_1")) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert captured_prompts == ["PRELOADED SKILL PROMPT"]
+    # The preload reaches the runtime inside its structural envelope so the
+    # transcript projection can strip it from the displayed operator text.
+    from agent_runtime.runtime_hud import render_skill_preload_envelope
+
+    expected_preload = render_skill_preload_envelope(
+        skill_names=["deep-audit"],
+        skill_preload_content="PRELOADED SKILL PROMPT",
+    )
+    assert captured_prompts == [expected_preload]
+    assert "PRELOADED SKILL PROMPT" in expected_preload
     assert payload["queued_skills_loaded"] == ["deep-audit"]
     used = payload["prompt_observability"]["used_skills"]
     assert used[0]["name"] == "deep-audit"
@@ -2648,7 +2904,8 @@ def test_mission_chat_queues_skill_for_next_turn_once(
 
     assert harness._cmd_mission_chat_message(_message_args("client_skill_2")) == 0
     json.loads(capsys.readouterr().out)
-    assert captured_prompts == ["PRELOADED SKILL PROMPT", ""]
+    # No skill queued on the second turn -> no envelope at all.
+    assert captured_prompts == [expected_preload, ""]
 
 
 def test_queue_skill_rejects_missing_skill_without_pending_state(
@@ -3349,10 +3606,11 @@ def test_mission_chat_post_native_projection_crash_stays_repairable(
     monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
     monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
 
-    def _boom(**_kwargs):
-        raise RuntimeError("transcript write exploded")
-
-    monkeypatch.setattr(harness, "_update_persona_chat_token_counts", _boom)
+    # The native lane no longer calls _update_persona_chat_token_counts (the
+    # per-call runtime writes are its sole usage authority - see the
+    # single-writer guard in test_mission_chat_usage_single_writer.py), so the
+    # post-native crash is injected at the lane's own fault seam instead.
+    monkeypatch.setenv("HERMES_PERSONA_CHAT_FAULT_INJECTION", "after_native_commit")
 
     class _FakeRuntime:
         def __init__(self, *args, **kwargs):
@@ -3394,7 +3652,7 @@ def test_mission_chat_post_native_projection_crash_stays_repairable(
     assert payload["ok"] is False
     assert payload["error_kind"] == "chat_projection_incomplete"
     assert payload["reply"] == "The reply that must not vanish."
-    assert "transcript write exploded" in payload["blocker"]
+    assert "injected persona chat fault at after_native_commit" in payload["blocker"]
     record = mission_chat_turn_record(
         session_id="persona_chat_personainst_dev",
         client_message_id="client_post_crash",
@@ -4503,9 +4761,9 @@ def test_profile_persona_instance_summary_includes_tool_visibility(isolate_agent
     assert "read_file" not in final_tools
     assert "terminal" not in final_tools
     assert "execute_code" not in final_tools
-    # ...while the operator-chat capability augmentation (mission_goal / agent_chat
-    # / clarify) is present, matching what the chat lane actually ships.
-    assert "mission_goal_create" in final_tools
+    # ...while ordinary chat keeps the heavy mission route absent globally and
+    # retains the non-task chat capabilities.
+    assert "mission_goal_create" not in final_tools
     assert "agent_chat_send" in final_tools
     assert "clarify" in final_tools
     assert "send_message" in detail["tool_resolution"]["blocked_tool_names"]
@@ -4913,7 +5171,113 @@ def test_retired_placement_cannot_be_resurrected_from_its_saved_chat(
     assert instance.id not in {row.id for row in store.list_all()}
 
 
-def test_open_chat_cli_rejects_unpersisted_retired_root_at_cutoff(
+def test_retirement_is_answerable_read_only_before_anything_is_written(
+    isolate_agent_runtime_root,
+):
+    """``open_chat`` answers "is this target retired?" only by RAISING, which is
+    too late for a caller whose durable writes come first (the chat mint created
+    and titled a session row, then bound). The same rule — no live row PLUS a
+    ``*_retire`` tombstone — is available as a read-only predicate, and the rule
+    itself has exactly one home: ``open_chat`` asks the predicate too."""
+
+    store = PersonaInstanceStore()
+    live = _placement_instance(placement_id="dev_agent_3")
+    retired = _placement_instance(placement_id="dev_agent_2")
+    result = store.retire(retired.id, reason="placement deleted")
+
+    assert str(store.retired_instance_archive_path(retired.id)) == result["archive_path"]
+    # A live placement is never a tombstone, and neither is an id that never
+    # existed — retirement is absence PLUS a tombstone, not absence alone, or
+    # every first-ever mint in the product would refuse.
+    assert store.retired_instance_archive_path(live.id) is None
+    assert store.retired_instance_archive_path("personainst_never_placed") is None
+    assert store.retired_instance_archive_path(None) is None
+    # The predicate is READ-ONLY: asking must not resurrect, create, or evict.
+    assert {row.id for row in store.list_all()} == {live.id}
+    # ``persona_id`` resolves a caller-supplied id through the same derivation
+    # ``open_chat`` uses, so a drifted actor token gets the same answer.
+    assert str(
+        store.retired_instance_archive_path(f"persona_{retired.id}", persona_id="dev")
+    ) == result["archive_path"]
+
+
+def test_a_live_row_outranks_a_stale_retire_tombstone_for_the_same_id(
+    isolate_agent_runtime_root,
+):
+    """The predicate's live-row-wins branch, pinned on a CONSTRUCTED state.
+
+    No public verb can produce this state today: ``retire`` archives the row in
+    the same breath as it writes the tombstone, so live-row-AND-tombstone is
+    unreachable through the store's API — which is exactly why this branch
+    survives every realistic scenario untested and reads like dead weight to
+    the next person holding a knife.
+
+    It is armor for the verb this design invites next. Tombstones are permanent,
+    so an un-retire / re-placement that writes an id back into the live roster
+    would leave precisely this shape behind — and a predicate that consulted
+    only the archive would then call that live placement retired and refuse
+    every chat it ever opened. So the state is built by hand: the archived row
+    put back on disk, the tombstone deliberately left where it is.
+    """
+
+    from agent_runtime import paths
+
+    store = PersonaInstanceStore()
+    retired = _placement_instance(placement_id="dev_agent_2")
+    result = store.retire(retired.id, reason="placement deleted")
+    tombstone = Path(result["archive_path"])
+    assert str(store.retired_instance_archive_path(retired.id)) == result["archive_path"]
+
+    live_path = paths.persona_instance_path(retired.id)
+    live_path.parent.mkdir(parents=True, exist_ok=True)
+    live_path.write_text(tombstone.read_text(encoding="utf-8"), encoding="utf-8")
+
+    # Both facts hold at once now, and the LIVE one is the one that decides.
+    assert store.get(retired.id).id == retired.id
+    assert tombstone.is_file(), "the tombstone must survive for this to prove anything"
+    assert store.retired_instance_archive_path(retired.id) is None
+
+def test_assert_bindable_answers_the_binds_refusals_without_writing(
+    isolate_agent_runtime_root,
+):
+    """The seam that lets a lane refuse BEFORE its first durable write.
+
+    ``open_chat`` answers "may this bind happen?" only by raising at the end
+    of whatever the caller already did, which is why a mint could reach it
+    with a titled session row already on disk. Same refusals, same typed
+    error, same canonical target id — asserted without touching the store."""
+
+    from agent_runtime import paths
+    from agent_runtime.persona_assignments import RetiredPersonaInstanceError
+
+    store = PersonaInstanceStore()
+    live = _placement_instance(placement_id="dev_agent_2")
+
+    # A live placement is bindable, and the canonical id comes back once.
+    assert store.assert_bindable(persona_id="dev", persona_instance_id=live.id) == live.id
+    # A first-ever canonical channel is bindable too: retirement is the
+    # ABSENCE of a live row PLUS a tombstone, never absence alone.
+    assert store.assert_bindable(persona_id="qa") == "personainst_qa"
+    assert not paths.persona_instance_path("personainst_qa").exists()
+
+    # A sibling's session is the same ValueError the bind raises.
+    with pytest.raises(ValueError):
+        store.assert_bindable(
+            persona_id="dev",
+            persona_instance_id="personainst_dev",
+            session_id=f"persona_chat_{live.id}_abcdef123456",
+        )
+
+    archived = store.retire(live.id, reason="placement deleted")
+    with pytest.raises(RetiredPersonaInstanceError) as excinfo:
+        store.assert_bindable(persona_id="dev", persona_instance_id=live.id)
+    assert excinfo.value.persona_instance_id == live.id
+    assert str(excinfo.value.archive_path) == archived["archive_path"]
+    # …and the refusal never revived the row it refused.
+    assert live.id not in {row.id for row in PersonaInstanceStore().list_all()}
+
+
+def test_open_chat_cli_reports_a_retired_root_as_retired_not_unknown(
     monkeypatch,
     capsys,
     isolate_agent_runtime_root,
@@ -4941,10 +5305,53 @@ def test_open_chat_cli_rejects_unpersisted_retired_root_at_cutoff(
     assert code == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["ok"] is False
-    assert payload["error_kind"] == "unknown_chat_session"
+    # `retired_persona_instance`, not `unknown_chat_session`. Retiring a
+    # placement archives the row and deliberately PRESERVES its chat on disk,
+    # so re-opening that thread has a typed end-of-life answer: the tombstone
+    # path and "history preserved". "unknown chat session" named the wrong
+    # fact (the root is known; its owner ended) and offered the wrong next
+    # step. The genuinely-unknown case is a different case, pinned below.
+    assert payload["persona_instance_id"] == instance.id
+    assert payload["history_preserved"] is True
+    assert payload["error_kind"] == "retired_persona_instance"
     assert instance.id not in {
         row.id for row in PersonaInstanceStore().list_all()
     }
+
+
+def test_open_chat_cli_still_rejects_a_genuinely_unknown_root(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    """The case `unknown_chat_session` is actually for, kept distinct.
+
+    A LIVE instance whose named root was never persisted: nothing was
+    retired, nothing has an archive to point at, and "open a server-minted
+    chat root before sending" is the right next step. The retirement
+    pre-flight must not swallow it."""
+
+    from argparse import Namespace
+    from hermes_cli import harness
+
+    cfg = _assignment_config()
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    instance = _placement_instance(placement_id="dev_agent_3")
+    assert instance.id in {row.id for row in PersonaInstanceStore().list_all()}
+
+    code = harness._cmd_persona_instance_open_chat(
+        Namespace(
+            persona_id=instance.persona_id,
+            session_id=f"persona_chat_{instance.id}_abcdef123456",
+            kill_active=False,
+            add_instance=False,
+            json=True,
+        )
+    )
+
+    assert code == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["error_kind"] == "unknown_chat_session"
 
 
 def test_retire_refuses_canonical_persona_channel(isolate_agent_runtime_root):

@@ -69,7 +69,8 @@ def test_flag_off_is_inert(isolate_agent_runtime_root, monkeypatch):
     import agent_runtime.snapshot as snapshot_mod
 
     cfg = AgentRuntimeConfig(read_model=ReadModelConfig(enabled=False))
-    monkeypatch.setattr(snapshot_mod, "load_agent_runtime_config", lambda: cfg)
+    # write_snapshot reads read_model.enabled from the ROOT config (pinned).
+    monkeypatch.setattr(snapshot_mod, "load_root_runtime_config", lambda: cfg)
 
     snapshot = write_snapshot(build_snapshot())
 
@@ -82,7 +83,8 @@ def test_flag_on_dual_writes_read_model(isolate_agent_runtime_root, monkeypatch)
     import agent_runtime.snapshot as snapshot_mod
 
     cfg = AgentRuntimeConfig(read_model=ReadModelConfig(enabled=True))
-    monkeypatch.setattr(snapshot_mod, "load_agent_runtime_config", lambda: cfg)
+    # write_snapshot reads read_model.enabled from the ROOT config (pinned).
+    monkeypatch.setattr(snapshot_mod, "load_root_runtime_config", lambda: cfg)
 
     snapshot = write_snapshot(build_snapshot())
 
@@ -95,8 +97,12 @@ def test_harness_snapshot_serves_from_read_model_when_enabled(isolate_agent_runt
     import hermes_cli.harness as harness
 
     cfg = AgentRuntimeConfig(read_model=ReadModelConfig(enabled=True, serve_snapshot_from_db=True))
-    monkeypatch.setattr(snapshot_mod, "load_agent_runtime_config", lambda: cfg)
-    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
+    # Both read_model policy reads are pinned to the ROOT config: write_snapshot
+    # binds snapshot_mod.load_root_runtime_config at import; _cmd_snapshot does a
+    # function-local `from agent_runtime.config import load_root_runtime_config`
+    # resolved from the config module at call time.
+    monkeypatch.setattr(snapshot_mod, "load_root_runtime_config", lambda: cfg)
+    monkeypatch.setattr("agent_runtime.config.load_root_runtime_config", lambda: cfg)
 
     assert harness._cmd_snapshot(Namespace(json=True)) == 0
 

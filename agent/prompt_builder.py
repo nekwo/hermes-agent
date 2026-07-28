@@ -17,12 +17,14 @@ from typing import Optional
 
 from agent.runtime_cwd import resolve_agent_cwd
 from agent.skill_utils import (
+    current_skill_runtime_context,
     extract_skill_conditions,
     extract_skill_description,
     get_all_skills_dirs,
     get_disabled_skill_names,
     iter_skill_index_files,
     parse_frontmatter,
+    skill_frontmatter_runtime_compatibility,
     skill_matches_platform,
 )
 try:
@@ -1320,7 +1322,7 @@ def drain_truncation_warnings() -> list:
 _SKILLS_PROMPT_CACHE_MAX = 8
 _SKILLS_PROMPT_CACHE: OrderedDict[tuple, str] = OrderedDict()
 _SKILLS_PROMPT_CACHE_LOCK = threading.Lock()
-_SKILLS_SNAPSHOT_VERSION = 1
+_SKILLS_SNAPSHOT_VERSION = 2
 
 
 def _skills_prompt_snapshot_path() -> Path:
@@ -1408,6 +1410,22 @@ def _build_snapshot_entry(
     if isinstance(platforms, str):
         platforms = [platforms]
 
+    metadata = frontmatter.get("metadata") if isinstance(frontmatter, dict) else {}
+    hermes = metadata.get("hermes") if isinstance(metadata, dict) else {}
+    runtime = {}
+    if isinstance(hermes, dict):
+        surfaces = hermes.get("surfaces") or []
+        modes = hermes.get("modes") or []
+        if not isinstance(surfaces, (str, list, tuple, set)):
+            surfaces = []
+        if not isinstance(modes, (str, list, tuple, set)):
+            modes = []
+        runtime = {
+            "surfaces": [surfaces] if isinstance(surfaces, str) else list(surfaces),
+            "modes": [modes] if isinstance(modes, str) else list(modes),
+            "load_policy": str(hermes.get("load_policy") or "explicit"),
+        }
+
     return {
         "skill_name": skill_name,
         "category": category,
@@ -1415,6 +1433,7 @@ def _build_snapshot_entry(
         "description": description,
         "platforms": [str(p).strip() for p in platforms if str(p).strip()],
         "conditions": extract_skill_conditions(frontmatter),
+        "runtime": runtime,
     }
 
 
@@ -1483,6 +1502,8 @@ def build_skills_system_prompt(
     available_tools: "set[str] | None" = None,
     available_toolsets: "set[str] | None" = None,
     compact_categories: "frozenset[str] | None" = None,
+    skill_surface: str | None = None,
+    skill_root_node_mode: bool | None = None,
 ) -> str:
     """Build a compact skill index for the system prompt.
 
@@ -1500,10 +1521,16 @@ def build_skills_system_prompt(
 
     ``compact_categories`` (e.g. from the coding posture — see
     agent/coding_context.py) demotes whole categories to a names-only line in
-    the rendered index. Nothing is ever hidden: every skill name stays
-    visible and loadable via ``skill_view`` / ``skills_list``; only the
-    descriptions are dropped, and a footer note explains the demotion.
+    the rendered index. Category demotion never hides a skill; it only drops
+    descriptions. When a runtime surface is active, skills whose
+    ``metadata.hermes`` policy excludes that surface or mode are omitted
+    entirely.
     """
+    ambient_surface, ambient_root_node_mode = current_skill_runtime_context()
+    if skill_surface is None:
+        skill_surface = ambient_surface
+    if skill_root_node_mode is None:
+        skill_root_node_mode = ambient_root_node_mode
     skills_dir = get_skills_dir()
     external_dirs = get_all_skills_dirs()[1:]  # skip local (index 0)
 
@@ -1528,6 +1555,8 @@ def build_skills_system_prompt(
         _platform_hint,
         tuple(sorted(disabled)),
         tuple(sorted(compact_categories or ())),
+        skill_surface or "",
+        bool(skill_root_node_mode),
     )
     with _SKILLS_PROMPT_CACHE_LOCK:
         cached = _SKILLS_PROMPT_CACHE.get(cache_key)
@@ -1554,6 +1583,12 @@ def build_skills_system_prompt(
                 continue
             if frontmatter_name in disabled or skill_name in disabled:
                 continue
+            if skill_surface and not skill_frontmatter_runtime_compatibility(
+                {"metadata": {"hermes": entry.get("runtime") or {}}},
+                surface=skill_surface,
+                root_node_mode=bool(skill_root_node_mode),
+            ).get("compatible"):
+                continue
             if not _skill_should_show(
                 entry.get("conditions") or {},
                 available_tools,
@@ -1578,6 +1613,12 @@ def build_skills_system_prompt(
                 continue
             skill_name = entry["skill_name"]
             if entry["frontmatter_name"] in disabled or skill_name in disabled:
+                continue
+            if skill_surface and not skill_frontmatter_runtime_compatibility(
+                frontmatter,
+                surface=skill_surface,
+                root_node_mode=bool(skill_root_node_mode),
+            ).get("compatible"):
                 continue
             if not _skill_should_show(
                 extract_skill_conditions(frontmatter),
@@ -1633,6 +1674,12 @@ def build_skills_system_prompt(
                 if frontmatter_name in seen_skill_names:
                     continue
                 if frontmatter_name in disabled or skill_name in disabled:
+                    continue
+                if skill_surface and not skill_frontmatter_runtime_compatibility(
+                    frontmatter,
+                    surface=skill_surface,
+                    root_node_mode=bool(skill_root_node_mode),
+                ).get("compatible"):
                     continue
                 if not _skill_should_show(
                     extract_skill_conditions(frontmatter),

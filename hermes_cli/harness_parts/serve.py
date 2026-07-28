@@ -31,6 +31,8 @@ Protocol (NDJSON, one frame per line):
              answers ``{"id":…,"event":"cancel_denied","state":
              "running"|"unknown"}`` — its side effects may still happen, so
              mutation verbs carry their own replay guard (``--issued-at``).
+             A RUNNING read-only ``harness stream`` is cooperatively cancelled
+             and releases its pool worker; it is the sole running exception.
 - errors:    ``{"id":…,"event":"error","error":"invalid_request"|…,"detail":…}``
 
 Per-request stdout: handlers ``print()`` directly and streaming turns emit
@@ -215,9 +217,19 @@ def _runtime_state_fingerprint() -> tuple | None:
     # would serve stale turn elements.
     _stat_turn_store_tree(root, _stat)
     try:
-        from hermes_state import SessionDB
+        # Fingerprint the database the CHAT LANE actually writes, not the one
+        # ambient HERMES_HOME resolution happens to hand this process. A bare
+        # ``SessionDB()`` keyed the cache on ``HERMES_HOME/state.db`` while every
+        # chat write goes to the resolved chat scope; whenever the two diverge a
+        # cached snapshot could serve a frozen Chat History for the life of the
+        # serve process (defect D1 in
+        # ``docs/agent-runtime-harness/chat-session-presence-authority.md``,
+        # the serve twin of the stream-lane fix 639242901). Resolving the PATH
+        # also stops the poll loop from opening — and potentially creating — a
+        # database just to read its own filename.
+        from agent_runtime.chat_session_scope import chat_session_db_path
 
-        db_path = str(SessionDB().db_path)
+        db_path = str(chat_session_db_path())
         for suffix in ("", "-wal", "-journal"):
             _stat(db_path + suffix)
     except Exception:
@@ -356,7 +368,7 @@ class _LineFrameProxy(io.TextIOBase):
 
 
 class _ArgvRequest:
-    __slots__ = ("rid", "argv", "is_chat_turn")
+    __slots__ = ("rid", "argv", "is_chat_turn", "is_runtime_stream", "cancel_event")
 
     def __init__(self, rid: str, argv: list[str]):
         self.rid = rid
@@ -365,6 +377,8 @@ class _ArgvRequest:
         self.is_chat_turn = any(
             tuple(tail[: len(shape)]) == shape for shape in _CHAT_TURN_COMMANDS
         )
+        self.is_runtime_stream = bool(tail and tail[0] == "stream")
+        self.cancel_event = threading.Event()
 
 
 def _build_harness_parser() -> argparse.ArgumentParser:
@@ -438,21 +452,46 @@ def serve_loop(
     dispatch: Callable[[list[str]], int] = dispatch_argv,
     fingerprint: Callable[[], tuple | None] = _runtime_state_fingerprint,
     read_cache_max_age: float = _READ_CACHE_MAX_AGE_SECONDS,
+    liveness_pump_interval_seconds: float = 5.0,
 ) -> int:
     """Core dispatch loop over explicit streams. stdio is transport #1; a
     future remote lane feeds the same loop (design doc §Future)."""
+    frames = _FrameWriter(writer)
+    # Emitted before ANY heavy boot work (the agent_runtime import, root
+    # config load, registry init, and the pre-ready orphan sweep below): a
+    # supervising launcher can tell a live cold boot from a wedged child by
+    # this frame alone. A cold-cache boot can run past any short watchdog
+    # before ``ready``; killing it mid-boot respawns into another cold boot
+    # forever (2026-07-26 launcher kill-loop incident). Consumers that
+    # predate this frame ignore unknown events, so it is purely additive.
+    frames.emit(
+        {
+            "event": "booting",
+            "pid": os.getpid(),
+            "schema_version": SERVE_SCHEMA_VERSION,
+        }
+    )
     from agent_runtime.persona_chat_continuity import (
         initialize_persona_chat_runtime_registry,
     )
-    from agent_runtime.config import load_agent_runtime_config
+    from agent_runtime.config import load_root_runtime_config
 
-    persona_chat_cfg = load_agent_runtime_config().persona_chat
+    persona_chat_cfg = load_root_runtime_config().persona_chat
     initialize_persona_chat_runtime_registry(
         enabled=persona_chat_cfg.hot_sessions_enabled,
         max_entries=persona_chat_cfg.max_hot_sessions,
         ttl_seconds=persona_chat_cfg.idle_ttl_seconds,
     )
-    frames = _FrameWriter(writer)
+    # Publish this process's EXPLICIT chat head home into the shared runtime
+    # store root — the ONE writer of that pointer. The Launcher always starts
+    # serve with HERMES_HEAD_HOME; a plain CLI turn started later names no head
+    # and, without the pointer, degrades to its own profile database, minting
+    # the transcript where the cockpit never looks while writing the binding
+    # into the shared store (the 2026-07-27 read-lane gap). No-op when this
+    # process named no head of its own, and best effort by contract.
+    from agent_runtime.chat_session_scope import publish_chat_head_home
+
+    publish_chat_head_home()
     stdout_proxy = _LineFrameProxy(frames, "line")
     stderr_proxy = _LineFrameProxy(frames, "stderr")
     read_cache = _ReadModelCache(read_cache_max_age)
@@ -472,6 +511,8 @@ def serve_loop(
         return {"event": "busy", "chat_turns": chat_turns, "pending": pending}
 
     def _run(request: _ArgvRequest) -> None:
+        from agent_runtime.request_control import request_cancel_scope
+
         token = _request_id.set(request.rid)
         code = 1
         cache_key = _CACHEABLE_ARGV.get(tuple(request.argv))
@@ -499,7 +540,8 @@ def serve_loop(
                 stdout_proxy.begin_capture(request.rid)
                 capturing = True
             try:
-                code = dispatch(list(request.argv))
+                with request_cancel_scope(request.cancel_event):
+                    code = dispatch(list(request.argv))
             except SystemExit as exc:  # argparse usage errors land here
                 raw = exc.code
                 code = raw if isinstance(raw, int) else (0 if raw is None else 2)
@@ -555,14 +597,28 @@ def serve_loop(
             runtime_root = str(_paths.store_root())
         except Exception:
             runtime_root = None
-        frames.emit(
-            {
-                "event": "ready",
-                "pid": os.getpid(),
-                "schema_version": SERVE_SCHEMA_VERSION,
-                "runtime_root": runtime_root,
-            }
-        )
+        # Orphaned-turn sweep BEFORE the ready frame: serve boot is the moment
+        # a launcher restart replaces a dead runtime, and the first hydrate is
+        # only requested after ready — so records a dead executor left frozen
+        # in-flight (lease provably free) already project as typed
+        # ``turn_interrupted`` markers in that hydrate instead of a console
+        # stuck "running" forever. Bounded (≤50 session files) and fail-open.
+        orphaned_repaired: list[str] = []
+        try:
+            from agent_runtime.persona_chat_continuity import repair_orphaned_chat_turns
+
+            orphaned_repaired = repair_orphaned_chat_turns()
+        except Exception:
+            orphaned_repaired = []
+        ready_frame: dict[str, Any] = {
+            "event": "ready",
+            "pid": os.getpid(),
+            "schema_version": SERVE_SCHEMA_VERSION,
+            "runtime_root": runtime_root,
+        }
+        if orphaned_repaired:
+            ready_frame["orphaned_turns_repaired"] = len(orphaned_repaired)
+        frames.emit(ready_frame)
         # Prewarm the first chat turn's one-time costs in the background:
         # lazy OpenAI SDK import (~1.7s), shared SSL context / CA-guard
         # verification (~0.7s), and the tool-definition module imports +
@@ -574,6 +630,35 @@ def serve_loop(
         threading.Thread(
             target=_prewarm_provider_runtime,
             name="harness-serve-prewarm",
+            daemon=True,
+        ).start()
+        # A busy serve must never look dead. The launcher's stream watchdog
+        # keys on "no frames for N seconds", and when pool workers are deep in
+        # chat-turn work the infinite `stream` request's generator can starve
+        # past that budget — Mission Control then raised the loud "Runtime
+        # offline" banner DURING healthy turns (live incident 2026-07-23,
+        # two flaps inside one 4-minute Neko turn). This dedicated thread
+        # emits the same typed `busy` frame the `ping` op returns whenever
+        # requests are in flight: pure liveness telemetry on the shared
+        # stdout, independent of every pool worker, so the launcher can
+        # distinguish "busy running your turn" from "gone".
+        liveness_stop = threading.Event()
+
+        def _liveness_pump() -> None:
+            while not liveness_stop.wait(liveness_pump_interval_seconds):
+                with inflight_lock:
+                    busy = bool(inflight)
+                if not busy:
+                    continue
+                try:
+                    frames.emit(_busy_frame())
+                except Exception:
+                    # Writer gone — the main loop is on its way down too.
+                    return
+
+        threading.Thread(
+            target=_liveness_pump,
+            name="harness-serve-liveness",
             daemon=True,
         ).start()
         with ThreadPoolExecutor(
@@ -646,7 +731,8 @@ def serve_loop(
                         continue
                     with inflight_lock:
                         future = inflight_futures.get(cancel_id)
-                        known = cancel_id in inflight
+                        running_request = inflight.get(cancel_id)
+                        known = running_request is not None
                     if future is not None and future.cancel():
                         with inflight_lock:
                             inflight.pop(cancel_id, None)
@@ -657,6 +743,20 @@ def serve_loop(
                                 "event": "exit",
                                 "code": 130,
                                 "cancelled": True,
+                            }
+                        )
+                    elif running_request is not None and running_request.is_runtime_stream:
+                        # The state stream is read-only and infinite. Unlike a
+                        # mutation, it has a cooperative cancellation seam and
+                        # MUST release its worker when the Launcher reconnects;
+                        # otherwise four watchdog cycles exhaust the entire
+                        # serve pool with abandoned streams.
+                        running_request.cancel_event.set()
+                        frames.emit(
+                            {
+                                "id": cancel_id,
+                                "event": "cancel_accepted",
+                                "state": "running",
                             }
                         )
                     else:
@@ -710,6 +810,7 @@ def serve_loop(
                     if request.rid in inflight:
                         inflight_futures[request.rid] = future
             # Context-manager exit drains in-flight work before shutdown.
+        liveness_stop.set()
         frames.emit({"event": "shutdown", "pid": os.getpid()})
         return 0
     finally:

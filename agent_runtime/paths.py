@@ -175,6 +175,17 @@ def office_baseline_path(realm_id: str) -> Path:
     return store_root() / "realm_sync" / _safe_path_token(realm_id) / "office_baseline.json"
 
 
+def persona_config_baseline_path(realm_id: str) -> Path:
+    # realm-sync baseline sidecar; NEVER synced, NEVER published
+    return store_root() / "realm_sync" / _safe_path_token(realm_id) / "persona_config_baseline.json"
+
+
+def profile_artifact_baseline_path(realm_id: str) -> Path:
+    # realm-sync baseline sidecar for the per-profile FILE family (MEMORY.md,
+    # core-context files, persona prompts); NEVER synced, NEVER published.
+    return store_root() / "realm_sync" / _safe_path_token(realm_id) / "profile_artifact_baseline.json"
+
+
 def repo_bundles_task_dir(task_id: str) -> Path:
     return repo_bundles_dir() / _safe_path_token(task_id)
 

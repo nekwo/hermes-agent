@@ -203,6 +203,35 @@ def test_stream_backstop_reconciles_eventless_write():
     assert reconcile["core"]["active_realm_id"] == realm.id
 
 
+def test_scope_fingerprint_covers_head_home_session_db():
+    """Persona-chat truth (Chat History) is derived from the head-home
+    SessionDB, whose writers emit no EventLog events. Without the DB in the
+    fingerprint, the S6 patch lane keeps a stream's hydrate-time chat list
+    for the stream's whole lifetime (live incident 2026-07-25: the Launcher's
+    Chat History froze for ~36h until a restart re-hydrated)."""
+
+    import sqlite3
+    import time as _time
+
+    from hermes_constants import get_hermes_head_home
+
+    from agent_runtime.stream import _scope_fingerprint
+
+    db_path = get_hermes_head_home() / "state.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    with sqlite3.connect(db_path) as con:
+        con.execute("CREATE TABLE IF NOT EXISTS probe (payload TEXT)")
+
+    before = _scope_fingerprint()
+
+    _time.sleep(0.02)  # NTFS mtime granularity guard
+    with sqlite3.connect(db_path) as con:
+        # A page-sized payload so size moves even if the mtime tick doesn't.
+        con.execute("INSERT INTO probe (payload) VALUES (?)", ("x" * 4096,))
+
+    assert _scope_fingerprint() != before
+
+
 def test_eventless_write_coincident_with_evented_batch_still_converges():
     """Live-proof regression (2026-07-09): the watchdog memo must be taken
     BEFORE the delta batch. A memo taken after the batch absorbed any

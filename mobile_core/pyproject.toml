@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=77,<83"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-mobile-core"
+version = "0.2.0"
+description = "Mobile-safe Hermes provider request and streaming core"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = "MIT"
+authors = [{name = "Arcadia Labs"}]
+dependencies = [
+  "anyio==4.12.1",
+  "certifi==2026.5.20",
+  "h11==0.16.0",
+  "httpcore==1.0.9",
+  "httpx==0.28.1",
+  "idna==3.15",
+  "typing-extensions==4.15.0; python_version < '3.13'",
+]
+
+[project.optional-dependencies]
+test = [
+  "build>=1.3,<2",
+  "pytest>=9.0,<10",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+hermes_mobile_core = ["_vendor/VENDOR_STAMP", "provider_catalog.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

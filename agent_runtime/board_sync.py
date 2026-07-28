@@ -114,6 +114,11 @@ class BoardPullSummary:
     archived: int = 0
     conflicts: int = 0
     boards: list[str] = None  # type: ignore[assignment]
+    #: Entities the admission guard would not admit (secret-shaped content, or a
+    #: machine-shaped WIRING value). Per-entity isolation: one bad card can never
+    #: abort a pull. Prose (title / description / checklist) is never
+    #: portability-scanned — see ``sync_admission``.
+    refused: list[dict[str, str]] = None  # type: ignore[assignment]
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -123,6 +128,7 @@ class BoardPullSummary:
             "archived": self.archived,
             "conflicts": self.conflicts,
             "boards": list(self.boards or []),
+            "refused": list(self.refused or []),
         }
 
 
@@ -170,9 +176,11 @@ def apply_board_pull(realm_id: str, subtree: Path, *, event_log: EventLog | None
     silent overwrite of local changes.
     """
 
+    from .sync_admission import refuse_entity
+
     store = BoardStore(event_log=event_log)
     baseline = read_board_baseline(realm_id)
-    summary = BoardPullSummary(boards=[])
+    summary = BoardPullSummary(boards=[], refused=[])
     boards_root = subtree / "store" / "boards"
     if not boards_root.exists():
         return summary
@@ -182,6 +190,21 @@ def apply_board_pull(realm_id: str, subtree: Path, *, event_log: EventLog | None
         if remote_board is None:
             continue
         board_id = remote_board.board_id
+        # Admission scan (defect (b), 2026-07-25): board files are excluded from
+        # the generic pull loop, so ``_assert_no_secret_artifacts`` never saw
+        # them. A board def that will not pass the door refuses WHOLE (its cards
+        # have nowhere to live); a single bad card refuses alone.
+        board_refusal = refuse_entity(_board_key(board_id), payload=to_jsonable(remote_board))
+        if board_refusal is not None:
+            summary.refused.append(board_refusal.as_dict())
+            continue
+        refused_card_ids: set[str] = set()
+        for card_id in sorted(remote_cards):
+            card_refusal = refuse_entity(_card_key(board_id, card_id), payload=to_jsonable(remote_cards[card_id]))
+            if card_refusal is not None:
+                summary.refused.append(card_refusal.as_dict())
+                refused_card_ids.add(card_id)
+                remote_cards.pop(card_id, None)
         summary.boards.append(board_id)
 
         local_board = store.get(board_id) if store.exists(board_id) else None
@@ -202,8 +225,10 @@ def apply_board_pull(realm_id: str, subtree: Path, *, event_log: EventLog | None
             atomic_json_write(paths.board_def_path(board_id), to_jsonable(remote_board), indent=2, sort_keys=True)
             baseline[board_key] = remote_board_hash
 
-        # Cards: the union of local-active and remote card ids.
-        for card_id in sorted(set(local_cards) | set(remote_cards) | archived_ids):
+        # Cards: the union of local-active and remote card ids. A REFUSED card is
+        # excluded outright — treating it as "absent remotely" would archive the
+        # member's own copy, turning a hostile payload into a local deletion.
+        for card_id in sorted((set(local_cards) | set(remote_cards) | archived_ids) - refused_card_ids):
             local_card = local_cards.get(card_id)
             remote_card = remote_cards.get(card_id)
             local_hash = board_models.board_content_hash(local_card) if local_card is not None else None

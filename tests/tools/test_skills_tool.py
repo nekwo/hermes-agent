@@ -374,6 +374,44 @@ class TestSkillView:
         assert result["name"] == "my-skill"
         assert "Step 1" in result["content"]
 
+    def test_view_rejects_root_node_only_skill_in_mission_chat(self, tmp_path):
+        from agent.skill_utils import skill_runtime_scope
+
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(
+                tmp_path,
+                "root-only",
+                frontmatter_extra=(
+                    "metadata:\n  hermes:\n    surfaces: [mission_worker]\n"
+                    "    modes: [root_node]\n"
+                ),
+            )
+            with skill_runtime_scope(surface="mission_chat", root_node_mode=False):
+                raw = skill_view("root-only")
+
+        result = json.loads(raw)
+        assert result["success"] is False
+        assert result["reason"] == "surface_not_supported"
+
+    def test_mission_chat_cannot_list_root_node_only_skill(self, tmp_path):
+        from agent.skill_utils import skill_runtime_scope
+
+        with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
+            _make_skill(
+                tmp_path,
+                "root-only",
+                frontmatter_extra=(
+                    "metadata:\n  hermes:\n    surfaces: [mission_worker]\n"
+                    "    modes: [root_node]\n"
+                ),
+            )
+            _make_skill(tmp_path, "general-skill")
+            with skill_runtime_scope(surface="mission_chat", root_node_mode=False):
+                raw = skills_list()
+
+        result = json.loads(raw)
+        assert [skill["name"] for skill in result["skills"]] == ["general-skill"]
+
     def test_view_skill_by_frontmatter_name_when_dir_differs(self, tmp_path):
         # The on-disk directory ("alias-dir") differs from the skill's
         # frontmatter name ("real-skill-name"). skills_list() exposes the

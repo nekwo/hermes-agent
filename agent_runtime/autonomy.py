@@ -17,6 +17,7 @@ from .mission_plan import current_plan_stage
 from .models import AgentPersona, Event
 from .personas import role_from_persona
 from .proof_recipes import RECIPES
+from .redaction import ENV_SECRET_ASSIGNMENT_RE
 from .repo_context import safe_affected_repo_labels
 from .serde import to_jsonable
 from .stage_intent import no_product_edit_recipe_id, stage_requires_product_edit
@@ -628,9 +629,9 @@ def _handoff_shape(persona: AgentPersona, ctx: AgentContext) -> str:
 
 def _simplified_contract_active() -> bool:
     try:
-        from .config import load_agent_runtime_config
+        from .config import load_root_runtime_config
 
-        cfg = load_agent_runtime_config()
+        cfg = load_root_runtime_config()
     except Exception:
         return False
     simplified = getattr(cfg, "simplified_agent_contract", None)
@@ -766,11 +767,10 @@ def _safe_text(value: Any) -> str:
     text = " ".join(str(value or "").split())
     if not text:
         return ""
-    text = re.sub(
-        r"(?i)\b((?:[A-Za-z0-9]+_)*(?:SECRET|TOKEN|PASSWORD|PASS|CREDENTIAL|API_?KEY|KEY)(?:_[A-Za-z0-9]+)*)\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s'\"]+)",
-        r"\1=[REDACTED]",
-        text,
-    )
+    # Single-homed in ``agent_runtime.redaction`` — see the header there for the
+    # JSON blind spot every local spelling shared. group(1) is still the full
+    # key, so the ``\1=[REDACTED]`` rebuild is unchanged.
+    text = ENV_SECRET_ASSIGNMENT_RE.sub(r"\1=[REDACTED]", text)
     text = re.sub(r"(?i)\bbearer\s+[A-Za-z0-9._\-+/=]{12,}", "bearer [REDACTED]", text)
     text = re.sub(r"(?i)\b[A-Z]:(?:[\\/]+[^\"'<>|\r\n]+)+", lambda match: _path_label(match.group(0)), text)
     text = re.sub(r"(?i)\b[A-Z]:(?:[\\/]+[^\\/\s\"'<>|:]+)+", lambda match: _path_label(match.group(0)), text)

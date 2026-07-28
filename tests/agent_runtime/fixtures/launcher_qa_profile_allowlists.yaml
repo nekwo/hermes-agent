@@ -1,0 +1,248 @@
+# Stage C — per-profile launcher_qa tool allowlists (2026-05-17)
+#
+# Stage 20 deliverable of STAGEC_HERMES_FIRSTCLASS_PLAN_2026-05-17.md.
+# Machine-readable convention for which launcher_qa MCP tools each
+# Hermes profile may invoke. The MCP server does NOT enforce this
+# (Hermes does not natively gate per-tool); workers consume the file
+# as an advisory allowlist and log warnings when a denied tool is
+# invoked. Native enforcement is a separate Hermes-core initiative.
+#
+# Schema:
+#   profiles:
+#     <profile_name>:
+#       description: <one-line role>
+#       allowed:                  # array of tool names or globs
+#         - mcp_launcher_qa_*    # glob: every tool
+#         - mcp_launcher_qa_get_*  # glob: every read-only get_*
+#         - mcp_launcher_qa_set_tab  # literal
+#       denied:                   # array — denied wins over allowed
+#         - mcp_launcher_qa_kill_launcher
+#
+# Resolution rule per tool name:
+#   1. If any pattern in `denied` matches → DENIED.
+#   2. Else if any pattern in `allowed` matches → ALLOWED.
+#   3. Else → DENIED (default-deny when profile is in this file).
+#   4. Profiles NOT in this file fall back to ALLOWED for every tool
+#      (back-compat with profiles configured before this rollout).
+#
+# Glob semantics: trailing `*` only. No regex, no character classes.
+# A literal `*` matches everything.
+
+version: 1
+generated_at: 2026-05-17
+
+profiles:
+
+  # ---------------------------------------------------------------------
+  # Full QA lane — drives every flow including launch/login/scroll/kill.
+  # ---------------------------------------------------------------------
+  launcher-qa-direct:
+    description: Reference profile; full QA capability.
+    allowed:
+      - mcp_launcher_qa_*
+    denied: []
+
+  launcher-qa:
+    description: Generic Launcher QA worker; mirrors launcher-qa-direct.
+    allowed:
+      - mcp_launcher_qa_*
+    denied: []
+
+  # Worker profiles (one per shape). Same capability as launcher-qa.
+  gpt_launcher:
+    description: GPT-shaped Launcher worker.
+    allowed:
+      - mcp_launcher_qa_*
+    denied: []
+
+  claude_launcher_qa:
+    description: Claude-shaped Launcher worker.
+    allowed:
+      - mcp_launcher_qa_*
+    denied: []
+
+  # Reserved for future Spark lane.
+  spark_launcher_qa:
+    description: Spark-shaped Launcher worker (future).
+    allowed:
+      - mcp_launcher_qa_*
+    denied: []
+
+  # ---------------------------------------------------------------------
+  # PM / Alice — verification + final-state screenshots only.
+  # Forbidden: launch / kill / set_tab / scroll mutators / dismiss_*.
+  # PM verifies a card, doesn't drive the Launcher.
+  # ---------------------------------------------------------------------
+  alice:
+    description: PM driver persona; compact probes + final screenshots.
+    allowed:
+      - mcp_launcher_qa_get_*
+      - mcp_launcher_qa_wait_for_state
+      - mcp_launcher_qa_capture_screenshot
+      # t_b066b2ab (2026-05-18): primitive PrintWindow capture of an
+      # already-open window. PM driver may capture final-state evidence
+      # with the same authority as capture_screenshot.
+      - mcp_launcher_qa_screenshot_window
+      - mcp_launcher_qa_run_redaction_scan
+      - mcp_launcher_qa_read_artifact_index
+      - mcp_launcher_qa_read_trace
+      - mcp_launcher_qa_get_window_metrics
+      - mcp_launcher_qa_get_buttons
+    denied:
+      - mcp_launcher_qa_launch_or_attach
+      - mcp_launcher_qa_open_app_tab
+      - mcp_launcher_qa_set_tab
+      - mcp_launcher_qa_scroll
+      - mcp_launcher_qa_scroll_to
+      - mcp_launcher_qa_scroll_to_fixture
+      - mcp_launcher_qa_dismiss_hashtag_onboarding
+      - mcp_launcher_qa_begin_pkce_login
+      - mcp_launcher_qa_kill_launcher
+      # Stage 19 (t_c07ef450, 2026-05-17 — granular control / semantic
+      # buttons): click_button is a mutator (dispatches an onPressed
+      # against the live shell). PM driver verifies state, doesn't
+      # drive the UI; get_buttons stays in the allowed read-only set.
+      - mcp_launcher_qa_click_button
+      # Stage C batched-drill addendum (2026-07-26): run_actions is a
+      # capability MULTIPLEXER — the allowlist matches tool NAMES, so a
+      # batch would let this profile execute verbs it is denied
+      # individually (set_tab / click_button / scroll ...). Denied here
+      # by construction; the restricted profiles keep calling the
+      # single read-only tools they are allowed.
+      - mcp_launcher_qa_run_actions
+
+  pm:
+    description: PM hat; same convention as alice.
+    allowed:
+      - mcp_launcher_qa_get_*
+      - mcp_launcher_qa_wait_for_state
+      - mcp_launcher_qa_capture_screenshot
+      # t_b066b2ab (2026-05-18): primitive PrintWindow capture of an
+      # already-open window. Same authority as capture_screenshot.
+      - mcp_launcher_qa_screenshot_window
+      - mcp_launcher_qa_run_redaction_scan
+      - mcp_launcher_qa_read_artifact_index
+      - mcp_launcher_qa_read_trace
+      - mcp_launcher_qa_get_window_metrics
+      - mcp_launcher_qa_get_buttons
+    denied:
+      - mcp_launcher_qa_launch_or_attach
+      - mcp_launcher_qa_open_app_tab
+      - mcp_launcher_qa_set_tab
+      - mcp_launcher_qa_scroll
+      - mcp_launcher_qa_scroll_to
+      - mcp_launcher_qa_scroll_to_fixture
+      - mcp_launcher_qa_dismiss_hashtag_onboarding
+      - mcp_launcher_qa_begin_pkce_login
+      - mcp_launcher_qa_kill_launcher
+      # Stage 19 (t_c07ef450, 2026-05-17): same rationale as alice —
+      # click_button mutates the live shell.
+      - mcp_launcher_qa_click_button
+      # Stage C batched-drill addendum (2026-07-26): run_actions is a
+      # capability MULTIPLEXER — the allowlist matches tool NAMES, so a
+      # batch would let this profile execute verbs it is denied
+      # individually (set_tab / click_button / scroll ...). Denied here
+      # by construction; the restricted profiles keep calling the
+      # single read-only tools they are allowed.
+      - mcp_launcher_qa_run_actions
+
+  # ---------------------------------------------------------------------
+  # Reviewer — post-hoc evidence review against captured artifacts.
+  # Reviewer reads what others captured. wait_for_state is read-only by
+  # contract (Stage 10 lean shape: polling only, no setTab pre-step)
+  # but it still drives a live polling loop against a running Launcher,
+  # which is QA-worker territory, not reviewer territory. Reviewer
+  # inspects the trace NDJSON instead.
+  # ---------------------------------------------------------------------
+  reviewer:
+    description: Code / PR reviewer; strictly read-only probes + artifact reads.
+    allowed:
+      - mcp_launcher_qa_get_runtime_state
+      - mcp_launcher_qa_get_auth_state
+      - mcp_launcher_qa_get_navigation_state
+      - mcp_launcher_qa_get_widget_state
+      - mcp_launcher_qa_get_feed_fixture_state
+      - mcp_launcher_qa_get_media_playback_state
+      - mcp_launcher_qa_get_window_metrics
+      - mcp_launcher_qa_get_buttons
+      # VOICE_QA_MCP_PLAN_2026-07-12 §5.E: read-only redaction-safe
+      # voice-session snapshot. Reviewer may inspect voice state.
+      - mcp_launcher_qa_get_voice_state
+      - mcp_launcher_qa_read_artifact_index
+      - mcp_launcher_qa_read_trace
+      - mcp_launcher_qa_run_redaction_scan
+    denied:
+      - mcp_launcher_qa_launch_or_attach
+      - mcp_launcher_qa_open_app_tab
+      - mcp_launcher_qa_set_tab
+      - mcp_launcher_qa_scroll
+      - mcp_launcher_qa_scroll_to
+      - mcp_launcher_qa_scroll_to_fixture
+      - mcp_launcher_qa_capture_screenshot
+      # t_b066b2ab (2026-05-18): same rationale as capture_screenshot —
+      # the primitive screenshot_window drives a live window (restore +
+      # foreground + PrintWindow against an attached Launcher). Reviewer
+      # inspects captured PNGs via read_artifact_index instead.
+      - mcp_launcher_qa_screenshot_window
+      # wait_for_state: read-only by contract but drives a live polling
+      # loop against a running Launcher and counts against the fixture
+      # mutex's queue depth from a non-worker profile. Reviewer uses
+      # read_trace against captured trace.safe.ndjson instead.
+      - mcp_launcher_qa_wait_for_state
+      - mcp_launcher_qa_dismiss_hashtag_onboarding
+      - mcp_launcher_qa_begin_pkce_login
+      - mcp_launcher_qa_kill_launcher
+      # Stage 19 (t_c07ef450, 2026-05-17): click_button mutates state.
+      - mcp_launcher_qa_click_button
+      # Stage C batched-drill addendum (2026-07-26): run_actions is a
+      # capability MULTIPLEXER — the allowlist matches tool NAMES, so a
+      # batch would let this profile execute verbs it is denied
+      # individually (set_tab / click_button / scroll ...). Denied here
+      # by construction; the restricted profiles keep calling the
+      # single read-only tools they are allowed.
+      - mcp_launcher_qa_run_actions
+
+# Notes:
+#
+# 1. denied wins over allowed. A glob in allowed cannot resurrect a
+#    literal in denied.
+#
+# 2. The five tools added in Stage 18 (run_redaction_scan,
+#    read_artifact_index, get_window_metrics, kill_launcher, read_trace)
+#    are:
+#      * COVERED BY THE GLOB `mcp_launcher_qa_*` in full-access profiles
+#        (launcher-qa-direct, launcher-qa, gpt_launcher,
+#        claude_launcher_qa, spark_launcher_qa). No explicit listing
+#        needed there.
+#      * EXPLICITLY LISTED in restricted profiles (alice, pm, reviewer)
+#        so a future tool added under Stage 19+ does not silently fall
+#        into the restricted profiles via a missing entry. The drift
+#        test in Stage 22 fails CI if a tool in `kStageCQaMcpTools`
+#        is unrepresented in a restricted profile.
+#
+# 3. Profiles NOT listed here fall back to ALLOWED for every tool.
+#    This preserves back-compat: dev profiles configured before this
+#    rollout keep working unchanged.
+#
+# 4. Drift test in Stage 22 fails CI if a tool name appears in
+#    `kStageCQaMcpTools` but is not represented (allowed-or-denied) in
+#    every listed profile. This forces conscious profile review when a
+#    new tool lands.
+#
+# 5. Stage 19 (t_c07ef450, 2026-05-17 — granular control / semantic
+#    buttons) split:
+#      * get_buttons is read-only — added to the allowed set of every
+#        restricted profile (alice / pm / reviewer).
+#      * click_button mutates app state — added to the denied set of
+#        every restricted profile. Full-access profiles continue to
+#        get it via the `mcp_launcher_qa_*` glob.
+#
+# 6. Batched-drill addendum (2026-07-26 — mcp_launcher_qa_run_actions):
+#    the batch tool executes an ordered list of other verbs in one
+#    call. Because this allowlist resolves per tool NAME, allowing
+#    run_actions in a restricted profile would hand that profile every
+#    batchable verb it is otherwise denied. It is therefore DENIED in
+#    alice / pm / reviewer and reaches full-access profiles through the
+#    `mcp_launcher_qa_*` glob. Destructive / confirmation-contract
+#    verbs (kill_launcher) and the process-spawning composers are not
+#    batchable at all — the server refuses the whole batch.

@@ -14,6 +14,7 @@ from agent_runtime.profile_runner import (
     _agent_chat_target_label,
     _progress_adapter,
     _tool_finished_payload,
+    _tool_started_payload,
     _todo_items_from,
     _todo_state_payload,
     _TODO_STATE_MAX_CONTENT,
@@ -154,6 +155,38 @@ def test_runner_passes_toolsets_and_blocked_tools_to_ai_agent(monkeypatch):
     ]
 
 
+def test_runner_binds_and_resets_skill_runtime_surface():
+    from agent.skill_utils import current_skill_runtime_context
+
+    seen = []
+
+    class ContextAgent(FakeAgent):
+        def __init__(self, **kwargs):
+            seen.append(current_skill_runtime_context())
+            super().__init__(**kwargs)
+
+        def run_conversation(self, user_message, system_message=None, task_id=None):
+            seen.append(current_skill_runtime_context())
+            return super().run_conversation(
+                user_message,
+                system_message=system_message,
+                task_id=task_id,
+            )
+
+    result = ProfileAgentRunner(agent_factory=ContextAgent).run(
+        AgentRunRequest(
+            profile=None,
+            user_message="route skills",
+            skill_surface="mission_chat",
+            skill_root_node_mode=False,
+        )
+    )
+
+    assert result.final_response == "ok"
+    assert seen == [("mission_chat", False), ("mission_chat", False)]
+    assert current_skill_runtime_context() == (None, False)
+
+
 def test_persona_chat_runner_forces_native_compression_tip_rotation():
     class CompressionAgent(FakeAgent):
         def __init__(self, **kwargs):
@@ -254,6 +287,72 @@ def test_runner_attaches_redaction_safe_model_input(monkeypatch):
     assert "should-not-leak" not in model_input["messages"][0]["content"]
     assert model_input["messages"][1]["role"] == "user"
     assert model_input["messages"][1]["content"] == "hello"
+
+
+def test_system_prompt_section_receipts_address_exact_three_tiers(monkeypatch):
+    from types import SimpleNamespace
+
+    from agent_runtime.profile_runner import _system_prompt_section_receipts
+    import agent.system_prompt as system_prompt_module
+
+    parts = {
+        "stable": "stable foundation",
+        "context": "mission context\nwith two lines",
+        "volatile": "volatile profile",
+    }
+    monkeypatch.setattr(
+        system_prompt_module,
+        "build_system_prompt_parts",
+        lambda agent, system_message=None: parts,
+    )
+    joined = "\n\n".join(parts.values())
+
+    sections = _system_prompt_section_receipts(
+        agent=SimpleNamespace(),
+        system_message="mission context",
+        system_prompt=joined,
+        captured_content=joined,
+    )
+
+    assert [section["kind"] for section in sections] == [
+        "stable",
+        "context",
+        "volatile",
+    ]
+    assert [
+        joined[section["start_char"] : section["end_char"]]
+        for section in sections
+    ] == list(parts.values())
+    assert all(section["truncated"] is False for section in sections)
+
+
+def test_system_prompt_section_receipts_fail_closed_on_cached_prompt_drift(
+    monkeypatch,
+):
+    from types import SimpleNamespace
+
+    from agent_runtime.profile_runner import _system_prompt_section_receipts
+    import agent.system_prompt as system_prompt_module
+
+    monkeypatch.setattr(
+        system_prompt_module,
+        "build_system_prompt_parts",
+        lambda agent, system_message=None: {
+            "stable": "new stable",
+            "context": "new context",
+            "volatile": "new volatile",
+        },
+    )
+
+    assert (
+        _system_prompt_section_receipts(
+            agent=SimpleNamespace(),
+            system_message="new context",
+            system_prompt="cached prompt from an older turn",
+            captured_content="cached prompt from an older turn",
+        )
+        == []
+    )
 
 
 def test_runner_attaches_agent_owned_final_cache_routing_observability(monkeypatch):
@@ -706,6 +805,9 @@ def test_progress_adapter_marks_string_error_lifecycle_result_failed():
             "summary": "Finished tool terminal: failed",
             "command_label": "pytest",
             "command_full": "pytest",
+            # A string lifecycle result is the error itself — real signal for
+            # the console's Result dropdown (scrubbed + bounded like all IO).
+            "tool_result": "ERROR: command failed",
         }
     ]
 
@@ -1153,6 +1255,9 @@ def test_tool_lifecycle_finished_marks_timeout_exit_code_as_failed():
             "summary": "Finished tool terminal: failed",
             "command_label": "pytest",
             "command_full": "pytest",
+            # No output tail came back; the envelope remainder (minus the
+            # exit_code echo) is the honest result record for the dropdown.
+            "tool_result": "timed_out: true",
         }
     ]
 
@@ -1340,6 +1445,161 @@ def test_tool_finished_payload_omits_todo_state_for_other_tools():
     assert "todo_state" not in payload
 
 
+# Generic tool input/result record (2026-07-23): every tool call gets a bounded
+# key-per-line rendering of its raw invocation/result when no dedicated field
+# (command_full / output / dispatch_order) captured it — the fix for the
+# console's "No input or result detail was emitted for this tool call" rows.
+
+
+def test_tool_started_payload_records_generic_input():
+    payload = _tool_started_payload(
+        "run.tool.started",
+        "agent_chat_open",
+        invocation={"persona_id": "dev", "instance_id": "abc"},
+    )
+    assert payload["tool_input"] == 'persona_id: "dev"\ninstance_id: "abc"'
+    assert "command_full" not in payload
+
+
+def test_tool_finished_payload_records_generic_input_and_result():
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "agent_chat_threads",
+        duration=None,
+        is_error=False,
+        result={"ok": True, "threads": [{"id": "t1"}], "exit_code": 0},
+        invocation={"limit": 5},
+    )
+    assert payload["tool_input"] == "limit: 5"
+    # exit_code is echoed by its dedicated payload field, not the record.
+    assert payload["tool_result"] == 'ok: true\nthreads: [{"id": "t1"}]'
+    assert payload["exit_code"] == 0
+    assert "output" not in payload
+
+
+def test_tool_io_defers_to_dedicated_terminal_fields():
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "terminal",
+        duration=None,
+        is_error=False,
+        result={"output": "42 tests passed", "exit_code": 0},
+        invocation={"command": "pytest -q"},
+    )
+    # command_full IS the input record; output IS the result record.
+    assert payload["command_full"] == "pytest -q"
+    assert payload["output"] == "42 tests passed"
+    assert "tool_input" not in payload
+    assert "tool_result" not in payload
+
+
+def test_tool_input_redacts_secret_pairs_line_by_line():
+    payload = _tool_started_payload(
+        "run.tool.started",
+        "web_fetch",
+        invocation={"url": "https://example.com", "api_key": "sk-12345"},
+    )
+    lines = payload["tool_input"].split("\n")
+    assert lines[0] == 'url: "https://example.com"'
+    assert lines[1] == "[redacted line — contained a secret]"
+    assert "sk-12345" not in payload["tool_input"]
+
+
+def test_agent_chat_send_finished_keeps_result_but_not_duplicate_input():
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "agent_chat_send",
+        duration=None,
+        is_error=False,
+        result={"ok": True, "delivered": True},
+        invocation={"persona_id": "dev", "message": "run the check"},
+    )
+    # The order already rides dispatch_order on the started event.
+    assert "tool_input" not in payload
+    assert payload["tool_result"] == "ok: true\ndelivered: true"
+
+
+def test_dev_work_finished_payload_never_records_raw_tool_io():
+    # Dev-work policy: changed_paths/changed_files ARE the record; the raw
+    # invocation (diff body, machine-absolute paths) never rides the payload.
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "patch",
+        duration=None,
+        is_error=False,
+        result={"ok": True, "diff": "raw diff body"},
+        invocation={"patch": "*** Update File: lib/a.dart\n+x"},
+    )
+    assert payload["phase"] == "dev_work"
+    assert "tool_input" not in payload
+    assert "tool_result" not in payload
+
+
+def test_tool_input_dropped_when_every_line_is_secret():
+    payload = _tool_started_payload(
+        "run.tool.started",
+        "web_fetch",
+        invocation={"api_key": "sk-12345"},
+    )
+    # A record of only redaction markers carries zero operator signal.
+    assert "tool_input" not in payload
+
+
+def test_tool_io_newline_in_key_cannot_split_a_secret_marker():
+    # Review finding (2026-07-23): a hostile/foreign dict KEY carrying a raw
+    # newline used to split the marker word across two rendered lines
+    # ("pass" / "word: <secret>"), defeating every per-line scrub layer.
+    # Keys are now newline-STRIPPED (removed, not spaced) so the marker
+    # reconstitutes on one line and the pair redacts.
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "mcp__srv__do_thing",
+        duration=None,
+        is_error=False,
+        result={"pass\nword": "hunter2-Xy9", "ok": True},
+        invocation={"limit": 1},
+    )
+    assert "hunter2-Xy9" not in payload.get("tool_result", "")
+    assert "[redacted line — contained a secret]" in payload["tool_result"]
+    assert "ok: true" in payload["tool_result"]
+
+
+def test_tool_io_pathological_result_never_kills_the_tool_event():
+    # Review finding (2026-07-23): a result json.dumps AND str() both choke on
+    # (deeply nested containers → RecursionError) must lose only the IO
+    # record, never the whole run.tool.finished event.
+    deep: list = []
+    tail = deep
+    for _ in range(4000):
+        nested: list = []
+        tail.append(nested)
+        tail = nested
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "parser",
+        duration=None,
+        is_error=False,
+        result=deep,
+        invocation={"path": "x"},
+    )
+    assert payload["tool_name"] == "parser"
+    assert payload["status"] == "passed"
+    assert "tool_result" not in payload
+
+
+def test_tool_result_bounded_head_with_marker():
+    payload = _tool_finished_payload(
+        "run.tool.finished",
+        "read_file",
+        duration=None,
+        is_error=False,
+        result={"content": "z" * 5000},
+        invocation={"path": "lib/a.dart"},
+    )
+    assert payload["tool_result"].endswith("…(rest truncated)…")
+    assert len(payload["tool_result"]) <= 1600 + len("\n…(rest truncated)…")
+
+
 # T8 (2026-07-18): the rendered skills-index chars captured on final_model_input.
 
 
@@ -1470,3 +1730,41 @@ def test_default_agent_factory_applies_cache_scope_without_ctor_kwarg(monkeypatc
     agent2 = pr._default_agent_factory(session_id="worker-1", cache_scope_id=None)
     assert getattr(agent2, "cache_scope_id", None) is None
     assert "cache_scope_id" not in seen_kwargs
+
+
+# --------------------------------------------------------------------------- #
+# Status honesty: the ok:false harness envelope must project as failed.
+# --------------------------------------------------------------------------- #
+def test_tool_finished_status_fails_on_ok_false_envelope_dict():
+    from agent_runtime.profile_runner import _is_error_result
+
+    assert _is_error_result({"ok": False, "target_persona": "@personainst_dev"})
+    assert not _is_error_result({"ok": True, "reply": "done"})
+
+
+def test_tool_finished_status_fails_on_serialized_ok_false_envelope():
+    # Regression (2026-07-23): agent_chat_send failures return a serialized
+    # {"ok": false, ...} envelope. _is_error_result missed it, so the turn
+    # store recorded status="passed" and the operator console rendered green
+    # OK chips for dispatches that never reached their target.
+    from agent_runtime.profile_runner import _is_error_result
+
+    failed_send = json.dumps(
+        {"ok": False, "target_persona": "@personainst_dev", "reply": ""}
+    )
+    assert _is_error_result(failed_send)
+
+    payload = _tool_finished_payload(
+        "tool.finished", "agent_chat_send", duration=1.2,
+        is_error=_is_error_result(failed_send), result=failed_send,
+    )
+    assert payload["status"] == "failed"
+
+
+def test_tool_result_merely_containing_ok_false_text_is_not_a_failure():
+    # A read_file of a JSON fixture may CONTAIN '"ok": false' — only a
+    # top-level envelope counts, parse-confirmed.
+    from agent_runtime.profile_runner import _is_error_result
+
+    assert not _is_error_result('The fixture body was: {"data": {"ok": false}} etc.')
+    assert not _is_error_result(json.dumps({"content": '{"ok": false}', "path": "x.json"}))

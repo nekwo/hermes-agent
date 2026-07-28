@@ -16,6 +16,7 @@ from typing import Any
 from hermes_time import now
 
 from . import paths
+from .redaction import TEXT_SECRET_VALUE_ASSIGNMENT_RE
 
 HARNESS_WORKTREE_GC_TTL_SECONDS = 24 * 60 * 60
 # Bound same-day churn: keep at most this many clean worktrees per source repo.
@@ -387,6 +388,45 @@ def existing_run_worktrees(repo_label: str, *, task_id: str, run_id: str) -> lis
     return [candidate for candidate in candidates if candidate.is_dir() and _git_root_for(candidate) is not None]
 
 
+def existing_run_worktrees_in_bases(
+    repo_label: str, *, task_id: str, run_id: str, base_dirs: list[Path]
+) -> list[Path]:
+    """Deterministic run worktrees across explicitly selected managed bases."""
+
+    source_root = resolve_affected_repo_workdir(repo_label)
+    git_root = _git_root_for(source_root) if source_root is not None else None
+    if git_root is None:
+        return []
+    token_label = _safe_repo_label(source_root.resolve().name)
+    found: list[Path] = []
+    seen: set[Path] = set()
+    for base_dir in base_dirs:
+        if _path_is_reparse_point(base_dir):
+            continue
+        try:
+            resolved_base = Path(base_dir).resolve()
+        except OSError:
+            continue
+        base = Path(base_dir) / _worktree_token(
+            git_root, task_id=task_id, run_id=run_id, repo_label=token_label
+        )
+        for candidate in [base, *[base.with_name(f"{base.name}_{idx}") for idx in range(1, 4)]]:
+            if _path_is_reparse_point(candidate):
+                continue
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if resolved.parent != resolved_base:
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if candidate.is_dir() and _git_root_for(candidate) is not None:
+                found.append(candidate)
+    return found
+
+
 def worktree_patch_text(worktree: Path, *, include_untracked: bool = True, timeout_seconds: int = 60) -> str:
     """Binary-safe unified patch of a worktree's changes vs HEAD.
 
@@ -423,6 +463,53 @@ def worktree_patch_text(worktree: Path, *, include_untracked: bool = True, timeo
     return text
 
 
+def worktree_patch_size_estimate(worktree: Path, *, timeout_seconds: int = 60) -> int:
+    """Estimate capture bytes without changing the worktree or its index.
+
+    Tracked changes use the exact binary-diff byte count. Untracked content is
+    represented by its file bytes plus a small per-path patch-header allowance;
+    this is deliberately an estimate because producing the exact add-file patch
+    would require ``git add --intent-to-add``, which is forbidden on preview.
+    """
+
+    root = _git_root_for(Path(worktree).expanduser())
+    if root is None:
+        return 0
+    try:
+        tracked = subprocess.run(
+            ["git", "diff", "--binary", "--no-ext-diff", "HEAD"],
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_seconds,
+            check=False,
+        )
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except Exception:
+        return 0
+    if tracked.returncode not in {0, 1} or untracked.returncode != 0:
+        return 0
+    estimate = len(tracked.stdout or b"")
+    for raw_path in (untracked.stdout or b"").split(b"\0"):
+        if not raw_path:
+            continue
+        relative = raw_path.decode("utf-8", errors="surrogateescape")
+        candidate = root / relative
+        try:
+            content_bytes = candidate.stat().st_size if candidate.is_file() else 0
+        except OSError:
+            content_bytes = 0
+        estimate += content_bytes + len(raw_path) + 128
+    return estimate
+
+
 def remove_harness_worktree_for_repo(repo_label: str, worktree: Path, *, reason: str) -> bool:
     """Public reap for a harness-managed worktree, followed by prune."""
 
@@ -451,6 +538,77 @@ def harness_worktree_dirs() -> list[Path]:
             return 0.0
 
     return sorted(entries, key=_mtime)
+
+
+def legacy_harness_worktree_base_dir() -> Path:
+    """Canonical pre-short-root fallback used by older Harness releases."""
+
+    return Path(tempfile.gettempdir()) / "hermes-agent-wt"
+
+
+def current_harness_worktree_base_dir() -> Path:
+    return _worktree_base_dir()
+
+
+def harness_worktree_inventory(
+    *, include_legacy_temp: bool = False
+) -> list[tuple[Path, Path, str, str | None]]:
+    """Managed worktree directories with typed base provenance, deduplicated."""
+
+    bases = [(_worktree_base_dir(), "current")]
+    if include_legacy_temp:
+        bases.append((legacy_harness_worktree_base_dir(), "legacy_temp"))
+    rows: list[tuple[Path, Path, str, str | None]] = []
+    seen: set[Path] = set()
+    for base, source in bases:
+        if _path_is_reparse_point(base):
+            rows.append((base, base, source, "base_reparse_alias"))
+            continue
+        if not base.is_dir():
+            continue
+        try:
+            resolved_base = base.resolve()
+        except OSError:
+            rows.append((base, base, source, "base_unresolvable"))
+            continue
+        for worktree in base.iterdir():
+            if _path_is_reparse_point(worktree):
+                rows.append((worktree, base, source, "candidate_reparse_alias"))
+                continue
+            if not worktree.is_dir():
+                continue
+            try:
+                resolved = worktree.resolve()
+            except OSError:
+                rows.append((worktree, base, source, "candidate_unresolvable"))
+                continue
+            if resolved.parent != resolved_base:
+                rows.append((worktree, base, source, "candidate_outside_base"))
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            rows.append((worktree, base, source, None))
+    return sorted(rows, key=lambda row: _safe_mtime(row[0]))
+
+
+def _path_is_reparse_point(path: Path) -> bool:
+    try:
+        if path.is_symlink():
+            return True
+        if os.name != "nt":
+            return False
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+        return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    except OSError:
+        return False
+
+
+def _safe_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def worktree_source_root(worktree: Path) -> Path | None:
@@ -1091,7 +1249,7 @@ def _sanitize_context_text(raw: str) -> tuple[str, bool]:
     for line in raw.replace("\x00", "").splitlines():
         clean = line.rstrip()
         if _SECRET_ASSIGNMENT_RE.search(clean):
-            clean = _SECRET_ASSIGNMENT_RE.sub(r"\1<redacted>", clean)
+            clean = _SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}=<redacted>", clean)
         if len(clean) > _MAX_CONTEXT_LINE_CHARS:
             clean = f"{clean[:_MAX_CONTEXT_LINE_CHARS].rstrip()} ... [truncated]"
             truncated = True
@@ -1191,10 +1349,16 @@ _REPO_ALIAS_DISPLAY_LABELS = {
 _MAX_CONTEXT_FILE_CHARS = 2500
 _MAX_CONTEXT_TOTAL_CHARS = 7000
 _MAX_CONTEXT_LINE_CHARS = 500
-_SECRET_ASSIGNMENT_RE = re.compile(
-    r"((?:api[_-]?key|token|secret|password|authorization|bearer|credential)\s*[:=]\s*)[^,\s]+",
-    re.IGNORECASE,
-)
+# Single-homed in ``agent_runtime.redaction`` (see the header there: every
+# local spelling of this rule was blind to JSON). The surgical value shape is
+# deliberate — a repo-context excerpt is fed back to an agent, so the text
+# around a removed value must stay readable.
+#
+# Group contract changed with the move: group(1) is now the KEY ALONE, where
+# the retired local spelling captured "key + separator". The substitution below
+# re-emits the ``=`` explicitly, so the rendered output is unchanged for the
+# ``KEY=value`` form and normalized (``:`` -> ``=``) for the ``key: value`` one.
+_SECRET_ASSIGNMENT_RE = TEXT_SECRET_VALUE_ASSIGNMENT_RE
 
 
 def _repo_alias_display_label(alias: str) -> str | None:

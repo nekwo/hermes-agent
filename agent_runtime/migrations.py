@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from . import paths
-from .config import AgentRuntimeConfig, persona_records_from_config, load_agent_runtime_config
+from .config import AgentRuntimeConfig, persona_records_from_config, load_agent_runtime_config, load_root_runtime_config
 from .production_envelope import production_envelope_status
 
 CURRENT_RUNTIME_SCHEMA_VERSION = 1
@@ -28,7 +28,7 @@ def effective_config_summary(
 
 
 def validate_runtime_config(cfg: AgentRuntimeConfig | None = None) -> dict[str, Any]:
-    cfg = cfg or load_agent_runtime_config()
+    cfg = cfg or load_root_runtime_config()
     errors: list[dict[str, str]] = []
 
     _positive(errors, "heartbeat_ttl_seconds", cfg.heartbeat_ttl_seconds)

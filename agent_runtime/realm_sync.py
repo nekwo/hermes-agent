@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 import subprocess
@@ -10,7 +11,9 @@ from datetime import timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from agent.skill_utils import EXCLUDED_SKILL_DIRS
+import yaml
+
+from agent.skill_utils import EXCLUDED_SKILL_DIRS, SKILL_SUPPORT_DIRS
 from hermes_constants import get_config_path, get_hermes_home, get_shared_skills_dir
 from hermes_time import now
 from utils import atomic_json_write
@@ -21,10 +24,14 @@ if TYPE_CHECKING:
 from . import paths
 from .config import ensure_persisted_personas, load_agent_runtime_config
 from .events import EventLog
+from .machine_roots import MACHINE_ROOTS_FILENAME
 from .models import AgentPersona, Event, Realm, Workspace
 from .profile_context import active_profile_name, resolve_persona_profile
+from .redaction import SECRET_ASSIGNMENT_RE
 from .skill_install import HARNESS_SKILLS, install_harness_skills, install_harness_skills_for_personas
 from .store import RealmStore, WorkspaceStore
+
+logger = logging.getLogger(__name__)
 
 
 SYNC_STATES = {"in_sync", "behind", "ahead", "conflict", "publishing"}
@@ -42,19 +49,33 @@ SECRET_PATH_MARKERS = {
     "token",
     "tokens",
 }
+# The machine seed every free Hermes profile forks from. Its RAW settings never
+# travel through realm sync (Office layout realm-sync plan §5.1) — only the
+# allowlisted persona definitions bound to it do. Same spelling as
+# ``personas.BASE_PERSONA_ID``; kept as its own constant here because the guard
+# is about the profile HOME, which is what the original persona-id guard missed.
+BASE_PROFILE_NAME = "base"
 HARD_EXCLUDED_PATH_PARTS = {
     "blueprints",
     "blueprint_runs",
+    # The machine-root registry binds logical roots to absolute paths on THIS
+    # box. It is the half of the portable-config split that must never travel —
+    # publishing it would push one member's drive layout onto everyone else.
+    MACHINE_ROOTS_FILENAME,
     "packet_artifacts",
     "proofs",
     "runs",
     "state.db",
     "worker_sessions",
 }
-SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(api[_-]?key|authorization|bearer|client[_-]?secret|oauth[_-]?token|password|private[_-]?key|secret|token)\b"
-    r"\s*[:=]\s*['\"]?[A-Za-z0-9_./+=:-]{16,}"
-)
+# ``SECRET_ASSIGNMENT_RE`` — the publish gate's secret rule — is imported from
+# ``agent_runtime.redaction``, the ONE home for every spelling of "secret-ish
+# key + separator + value". Read the header there for the JSON blind spot that
+# consolidation retired (``{"token": "…"}`` matched none of the twelve
+# copies). It stays re-exported from this module under its historical name, so
+# ``office_store``/``sync_admission`` keep importing it from here; both may now
+# do so eagerly if they wish, since ``redaction`` is stdlib-only and carries
+# none of this module's weight.
 
 # Canonical line-ending policy for the realm sync repo. The publisher already
 # canonicalizes every artifact to LF (see ``_canonicalize_text_bytes``); this
@@ -86,6 +107,30 @@ class RealmSyncArtifact:
     source: Path
     relative_path: str
     destination: Path
+    #: Synthesized published bytes. When set, THESE are what publish writes and
+    #: ``source`` degrades to provenance (the file the projection was derived
+    #: from). Added for the portable persona-config projection: the one artifact
+    #: family that must never ship a raw file verbatim still rides the single
+    #: publish lane — manifest, secret scan, EOL canonicalization, change
+    #: detection — instead of growing a side channel.
+    content: bytes | None = None
+    #: The persona this artifact was resolved FOR, when it has one. Attribution
+    #: only, never authority. ``sync_artifacts_for_workspace_agent`` used to
+    #: infer it from a ``/<persona_token>/`` substring of the published path; the
+    #: profile-file family publishes at a destination-shaped path
+    #: (``store/profile_files/<profile>/…``) where that token no longer appears,
+    #: so attribution is carried explicitly instead of guessed.
+    persona_id: str | None = None
+
+    def read_bytes(self) -> bytes:
+        """The bytes this artifact publishes: synthesized content when present,
+        otherwise the source file. Every publish-side reader MUST go through
+        here — reading ``source`` directly would publish the raw file a
+        synthesized artifact exists precisely to avoid."""
+
+        if self.content is not None:
+            return self.content
+        return self.source.read_bytes()
 
     def row(self) -> dict[str, str]:
         return {
@@ -127,10 +172,27 @@ def realm_sync_status(
     repo = _ensure_sync_repo(realm, credential=credential)
     git = _git_state(repo)
     artifacts = resolve_realm_sync_artifacts(realm_id)
+    agent_state = realm_agent_selection_state(realm_id)
+    workspaces = _workspaces_for_realm(realm)
     workspace_statuses = _workspace_sync_statuses(realm, repo)
-    skills_drift = _skills_drift_for_artifacts(artifacts)
+    skills_drift = _held_skill_packages_for_realm(realm)
     state = _sync_state(git)
-    _write_sync_sidecar(realm, repo=repo, git=git, skills_drift=skills_drift, artifacts=artifacts)
+    # Local store drift vs the never-synced baseline sidecar: the git state above
+    # only knows the checked-out realm repo, so a local board card add — which
+    # never touches the repo until publish — leaves git ``in_sync`` while real
+    # unpublished changes sit in the store. This surfaces that honestly (pure
+    # hash/baseline compare — no extra git/network on the status path).
+    board_drift = _board_store_drift(realm.id, workspaces)
+    store_drift = {"boards": board_drift}
+    profile_artifacts_held = _held_profile_artifacts(realm, repo)
+    _write_sync_sidecar(
+        realm,
+        repo=repo,
+        git=git,
+        skills_drift=skills_drift,
+        artifacts=artifacts,
+        profile_artifacts_held=profile_artifacts_held,
+    )
     return {
         "schema_version": 1,
         "id": realm.id,
@@ -142,12 +204,25 @@ def realm_sync_status(
         "skill_publish_mode": realm.skill_publish_mode,
         "skill_selection": sorted(realm.skill_selection or []),
         "skills_published": _distinct_skill_package_count(artifacts),
+        "agent_publish_mode": agent_state["mode"],
+        "agent_selection": agent_state["selection"],
+        "agents_published": len(agent_state["published"]),
         "conflicts": git["conflicts"],
         "last_pull": _timestamp_file(repo, "last_pull.txt"),
         "last_publish": _timestamp_file(repo, "last_publish.txt"),
         "artifacts": len(artifacts),
         "sync_repo": _safe_display_path(repo),
         "workspace_statuses": workspace_statuses,
+        # Additive honesty fields (launcher consumes these; absent-tolerant).
+        # ``state``/``ahead``/``behind`` are UNCHANGED — other consumers key off
+        # them — this only ADDS store-vs-baseline drift accounting on top.
+        "store_drift": store_drift,
+        "unpublished_changes": _any_store_drift(store_drift),
+        # Held profile FILES (MEMORY.md / core context / persona prompts whose
+        # member copy diverged from the realm's). A hold the operator cannot see
+        # is the same as a loss, so it is surfaced here and resolvable with
+        # ``hermes harness realm sync resolve <realm> --key <k> --take …``.
+        "profile_artifacts_held": profile_artifacts_held,
     }
 
 
@@ -166,10 +241,18 @@ def publish_realm_sync(
         raise RealmSyncError("sync_conflict", "Realm sync repo has unresolved git conflicts.", safe_details={"conflicts": git["conflicts"]})
     if git["behind"] > 0:
         raise RealmSyncError("sync_behind", "Realm sync repo is behind its upstream; pull before publishing.", retryable=True, safe_details={"behind": git["behind"]})
-    artifacts = resolve_realm_sync_artifacts(realm_id)
+    resolved = _resolve_artifacts_with_projection(realm_id)
+    artifacts = resolved.artifacts
+    projection = resolved.projection
+    profile_files_withheld = resolved.profile_files_withheld
     _assert_no_secret_artifacts(artifacts)
+    _assert_no_raw_profile_config(artifacts)
+    _assert_portable_artifacts(artifacts)
     if dry_run:
-        return _sync_result(realm, "publish", "dry_run", artifacts, repo=repo, git=git, changed=False)
+        result = _sync_result(realm, "publish", "dry_run", artifacts, repo=repo, git=git, changed=False)
+        result["persona_projection"] = _persona_projection_row(projection, resolved.bound_profiles)
+        result["profile_files"] = _profile_files_row(artifacts, profile_files_withheld)
+        return result
 
     subtree = _realm_subtree(repo, realm.id)
     subtree_rel = f"realms/{_safe_token(realm.id)}"
@@ -179,7 +262,7 @@ def publish_realm_sync(
     # the pull lane writes LF; copying those raw bytes made every publish a
     # whole-file EOL churn and reported changed=true on no-op runs.
     desired = {
-        artifact.relative_path.replace("\\", "/"): _canonicalize_text_bytes(artifact.source.read_bytes())
+        artifact.relative_path.replace("\\", "/"): _canonicalize_text_bytes(artifact.read_bytes())
         for artifact in artifacts
     }
     # Content-aware change detection: only (re)write the subtree when the
@@ -249,12 +332,30 @@ def publish_realm_sync(
             update_office_baseline_after_sync(realm.id, published_office_workspaces)
         except Exception:  # noqa: BLE001 — baseline is best-effort; never fail publish
             pass
+    # Persona definitions: same baseline discipline as boards/office, so my own
+    # publish never comes back as a pull conflict.
+    from .persona_config_sync import update_persona_config_baseline_after_publish
+
+    try:
+        update_persona_config_baseline_after_publish(realm.id, projection)
+    except Exception:  # noqa: BLE001 — baseline is best-effort; never fail publish
+        pass
+    # Profile files (MEMORY.md / core context / persona prompts): same baseline
+    # discipline, so my own publish never comes back as a pull hold.
+    from .profile_artifact_sync import update_profile_artifact_baseline_after_publish
+
+    try:
+        update_profile_artifact_baseline_after_publish(realm.id, _published_profile_file_hashes(artifacts))
+    except Exception:  # noqa: BLE001 — baseline is best-effort; never fail publish
+        pass
     warnings = _notify_publish(realm, repo=repo, artifacts=artifacts, credential=credential) if changed else []
     git_after = _git_state(repo)
     result = _sync_result(realm, "publish", "published", artifacts, repo=repo, git=git_after, changed=changed)
+    result["persona_projection"] = _persona_projection_row(projection, resolved.bound_profiles)
+    result["profile_files"] = _profile_files_row(artifacts, profile_files_withheld)
     if warnings:
         result["warnings"] = warnings
-    _write_sync_sidecar(realm, repo=repo, git=git_after, skills_drift=_skills_drift_for_artifacts(artifacts), artifacts=artifacts)
+    _write_sync_sidecar(realm, repo=repo, git=git_after, skills_drift=_held_skill_packages_for_realm(realm), artifacts=artifacts)
     _append_realm_sync_event(
         "realm.sync.published",
         realm,
@@ -284,9 +385,6 @@ def pull_realm_sync(
     _assert_no_secret_artifacts(artifacts)
     if dry_run:
         return _sync_result(realm, "pull", "dry_run", artifacts, repo=repo, git=_git_state(repo), changed=False)
-    # W-H4 typed accounting: named profiles materialized by this pull are
-    # reported, never a silent side effect (plan §5.1).
-    pulled_profile_tokens, created_profiles = _pulled_profile_tokens(artifacts)
     changed = False
     for artifact in artifacts:
         artifact.destination.parent.mkdir(parents=True, exist_ok=True)
@@ -313,6 +411,35 @@ def pull_realm_sync(
     office_summary = apply_office_pull(realm.id, subtree)
     if office_summary.adopted or office_summary.converged or office_summary.archived:
         changed = True
+    # Realm skills: excluded from the generic loop too (skills/* →
+    # _destination_for_sync_path None). Mirror them into the resolver-invisible
+    # per-realm inbox and admit them to the canonical root only through the one
+    # guarded promotion door (auto-adopt new, converge identical, hold divergent).
+    skill_summary = apply_skill_inbox_pull(realm, subtree)
+    if skill_summary.adopted or skill_summary.removed:
+        changed = True
+    # Persona definitions: excluded from the generic loop too
+    # (profiles/<name>/config.yaml → _destination_for_sync_path None). The member's
+    # config is merged key-wise against a never-synced baseline — the realm owns
+    # the shared persona surface, the member keeps every machine section they
+    # authored, and divergent definitions are HELD, never clobbered.
+    from .persona_config_sync import apply_persona_config_pull
+
+    persona_summary = apply_persona_config_pull(realm.id, subtree)
+    if persona_summary.changed:
+        changed = True
+    # Profile FILES (MEMORY.md, core context, persona prompts): excluded from the
+    # generic loop too (``profiles/*`` and ``store/profile_files/*`` →
+    # ``_destination_for_sync_path`` None). These were the last four kinds still
+    # overwritten wholesale — a member's accumulated MEMORY.md included. The lane
+    # merges per DESTINATION against a never-synced baseline: adopt when the
+    # member has nothing (or an untouched copy), converge when identical, HOLD
+    # whenever their content diverged, and never delete.
+    from .profile_artifact_sync import apply_profile_artifact_pull
+
+    profile_files_summary = apply_profile_artifact_pull(realm.id, subtree)
+    if profile_files_summary.changed:
+        changed = True
     # Workspace deletions: honor the pulled realm's deleted_workspace_ids
     # resurrection-guard ledger so a member's surviving local copy neither
     # lingers nor republishes a workspace another member deleted.
@@ -328,19 +455,35 @@ def pull_realm_sync(
     result = _sync_result(realm, "pull", "pulled", artifacts, repo=repo, git=git_after, changed=changed)
     result["board_sync"] = board_summary.as_dict()
     result["office_sync"] = office_summary.as_dict()
+    result["skill_sync"] = skill_summary.as_dict()
+    result["profile_artifact_sync"] = profile_files_summary.as_dict()
     if tombstone_summary["deleted"] or tombstone_summary["archived"] or tombstone_summary["warnings"]:
         result["workspace_tombstones"] = tombstone_summary
-    if pulled_profile_tokens:
+    # ``profile_sync`` carries the W-H4 rows (which profile homes this pull
+    # touched/materialized) PLUS the persona-definition merge accounting PLUS the
+    # profile-FILE merge accounting. Emitted whenever any half has something to
+    # say — a realm that publishes persona definitions but no per-profile files
+    # must still report its merge, and vice versa.
+    if profile_files_summary.source is not None or persona_summary.source is not None:
         result["profile_sync"] = {
-            "profiles": pulled_profile_tokens,
-            "created": created_profiles,
+            "profiles": sorted(set(profile_files_summary.profiles)),
+            "created": sorted(set(profile_files_summary.created_profiles)),
+            "personas": persona_summary.as_dict(),
+            "files": profile_files_summary.as_dict(),
         }
     result["skill_reconcile"] = {
         "installed": [item.skill for item in install_results],
         "changed": [item.skill for item in install_results if item.changed],
         "ok": all(item.ok for item in install_results),
     }
-    _write_sync_sidecar(realm, repo=repo, git=git_after, skills_drift=_skills_drift_for_artifacts(artifacts), artifacts=artifacts)
+    _write_sync_sidecar(
+        realm,
+        repo=repo,
+        git=git_after,
+        skills_drift=skill_summary.held,
+        artifacts=artifacts,
+        profile_artifacts_held=sorted(set(profile_files_summary.held)),
+    )
     _append_realm_sync_event(
         "realm.sync.pulled",
         realm,
@@ -426,21 +569,44 @@ def _apply_workspace_tombstones(realm_id: str) -> dict[str, list]:
     return summary
 
 
+@dataclass(frozen=True, slots=True)
+class _ResolvedPublish:
+    """Everything ONE resolution pass of "what does this realm publish" yields.
+
+    The publish lane needs the projection's ACCOUNTING (which keys the allowlist
+    dropped, which definitions came purely from a store record, which config keys
+    the record shadowed, which wanted personas had no definition at all)
+    alongside the artifacts. Resolving them in one pass keeps a single authority
+    for "what does this realm publish" — a second independent computation could
+    drift from the bytes actually written.
+
+    - ``profile_files_withheld`` — the same discipline for the profile-FILE
+      family: a prompt that could not travel is a typed row, never a silent
+      omission.
+    - ``bound_profiles`` — the profile HOMES this publish resolved persona files
+      out of, taken from ``resolve_persona_profile`` (the binding authority
+      ``_persona_artifacts`` itself uses). ``profiles_withheld`` used to be
+      re-derived by reading ``hermes_profile`` back out of the projected bodies,
+      which went blind for the same reason the projection did: a partial body
+      reported the wrong profile set and ``base_seed_guarded: false``. A derived
+      artifact is not an authority.
+    """
+
+    artifacts: list[RealmSyncArtifact]
+    projection: Any
+    profile_files_withheld: list[dict[str, str]]
+    bound_profiles: list[str]
+
+
 def resolve_realm_sync_artifacts(realm_id: str) -> list[RealmSyncArtifact]:
+    return _resolve_artifacts_with_projection(realm_id).artifacts
+
+
+def _resolve_artifacts_with_projection(realm_id: str) -> _ResolvedPublish:
     realm = RealmStore().get(realm_id)
-    workspace_store = WorkspaceStore()
-    workspace_ids = set(realm.workspace_ids or [])
-    for workspace in workspace_store.list_all(include_archived=True):
-        if workspace.realm_id == realm.id:
-            workspace_ids.add(workspace.id)
-    # Tombstoned workspaces never publish (defense-in-depth: the pull already
-    # deletes local copies, but a publish racing ahead of its pull must not
-    # resurrect a deleted workspace into the realm subtree).
-    workspace_ids -= set(realm.deleted_workspace_ids or [])
-    workspaces = [workspace_store.get(workspace_id) for workspace_id in sorted(workspace_ids) if paths.workspace_path(workspace_id).exists()]
+    workspaces = _workspaces_for_realm(realm)
     cfg = load_agent_runtime_config()
     personas = {persona.id: persona for persona in ensure_persisted_personas(cfg)}
-    wanted_persona_ids = list(dict.fromkeys(persona_id for ws in workspaces for persona_id in (ws.agent_ids or [])))
     artifacts: list[RealmSyncArtifact] = []
     artifacts.extend(_skill_artifacts(realm))
     artifacts.extend(_workspace_realm_artifacts(realm, workspaces))
@@ -450,13 +616,109 @@ def resolve_realm_sync_artifacts(realm_id: str) -> list[RealmSyncArtifact]:
     # (plan §5): an office-only persona must be materializable on pull. The
     # wanted set was workspace.agent_ids only, which would sync a placement
     # referencing a persona the member cannot resolve.
-    wanted_persona_ids = list(dict.fromkeys([*wanted_persona_ids, *_office_wanted_persona_ids(workspaces)]))
+    required_persona_ids = _required_realm_persona_ids(workspaces)
+    selected_persona_ids = (
+        list(realm.agent_selection or [])
+        if getattr(realm, "agent_publish_mode", "workspace") == "selected"
+        else []
+    )
+    wanted_persona_ids = list(
+        dict.fromkeys([*required_persona_ids, *selected_persona_ids])
+    )
+    published_persona_ids: list[str] = []
+    profile_files_withheld: list[dict[str, str]] = []
+    bound_profiles: set[str] = set()
     for persona_id in wanted_persona_ids:
         persona = personas.get(persona_id)
         if persona is None:
             continue
-        artifacts.extend(_persona_artifacts(persona))
-    return _dedupe_artifacts(artifacts)
+        published_persona_ids.append(persona_id)
+        bound_profiles.add(_bound_profile_name(persona))
+        persona_artifacts, withheld = _persona_artifacts(persona)
+        artifacts.extend(persona_artifacts)
+        profile_files_withheld.extend(withheld)
+    # ONE synthesized, portable persona-definition document for the whole realm,
+    # pruned to exactly the personas above. Replaces the per-profile raw
+    # ``config.yaml`` artifact that used to leak the base seed and every
+    # machine-shaped MCP/env/path value on it.
+    from .persona_config_sync import project_persona_definitions
+
+    projection = project_persona_definitions(
+        published_persona_ids,
+        raw_config=_raw_active_config(),
+        records=personas,
+    )
+    if projection.personas:
+        artifacts.append(_persona_config_artifact(projection))
+    return _ResolvedPublish(
+        artifacts=_dedupe_artifacts(artifacts),
+        projection=projection,
+        profile_files_withheld=profile_files_withheld,
+        bound_profiles=sorted(bound_profiles),
+    )
+
+
+def _workspaces_for_realm(realm: Realm) -> list[Workspace]:
+    workspace_store = WorkspaceStore()
+    workspace_ids = set(realm.workspace_ids or [])
+    for workspace in workspace_store.list_all(include_archived=True):
+        if workspace.realm_id == realm.id:
+            workspace_ids.add(workspace.id)
+    # Tombstoned workspaces never publish (defense-in-depth: the pull already
+    # deletes local copies, but a publish racing ahead of its pull must not
+    # resurrect a deleted workspace into the realm subtree).
+    workspace_ids -= set(realm.deleted_workspace_ids or [])
+    return [
+        workspace_store.get(workspace_id)
+        for workspace_id in sorted(workspace_ids)
+        if paths.workspace_path(workspace_id).exists()
+    ]
+
+
+def _required_realm_persona_ids(workspaces: list[Workspace]) -> list[str]:
+    """Persona definitions required by synchronized references.
+
+    These rows are pinned regardless of the explicit Realm selection: a
+    pulled workspace roster or Office placement must never reference a persona
+    definition the same publish deliberately omitted.
+    """
+    workspace_ids = [
+        persona_id
+        for workspace in workspaces
+        for persona_id in (workspace.agent_ids or [])
+    ]
+    return list(
+        dict.fromkeys([*workspace_ids, *_office_wanted_persona_ids(workspaces)])
+    )
+
+
+def realm_agent_selection_state(realm_id: str) -> dict[str, Any]:
+    """Return the local catalog and effective Realm persona selection.
+
+    Pure with respect to Realm selection: unknown ids are preserved and
+    reported, while required workspace/Office references remain pinned in the
+    effective published set.
+    """
+    realm = RealmStore().get(realm_id)
+    workspaces = _workspaces_for_realm(realm)
+    catalog_personas = ensure_persisted_personas(load_agent_runtime_config())
+    catalog = sorted({persona.id for persona in catalog_personas})
+    required = sorted(set(_required_realm_persona_ids(workspaces)))
+    selection = sorted(set(getattr(realm, "agent_selection", None) or []))
+    mode = getattr(realm, "agent_publish_mode", "workspace") or "workspace"
+    effective = set(required)
+    if mode == "selected":
+        effective.update(selection)
+    published = sorted(effective & set(catalog))
+    missing = sorted(effective - set(catalog))
+    return {
+        "mode": mode,
+        "selection": selection,
+        "catalog": catalog,
+        "required": required,
+        "published": published,
+        "missing": missing,
+    }
 
 
 def sync_artifacts_for_workspace_agent(workspace_id: str, persona_id: str) -> list[dict[str, str]]:
@@ -465,79 +727,137 @@ def sync_artifacts_for_workspace_agent(workspace_id: str, persona_id: str) -> li
         return []
     artifacts = resolve_realm_sync_artifacts(workspace.realm_id)
     needle = f"/{_safe_token(persona_id)}/"
-    return [artifact.row() for artifact in artifacts if needle in f"/{artifact.relative_path}"]
+    # Explicit attribution first (the profile-file family publishes at a
+    # destination-shaped path where the persona token no longer appears), path
+    # substring second (skills and everything else that still encodes it).
+    return [
+        artifact.row()
+        for artifact in artifacts
+        if artifact.persona_id == persona_id or needle in f"/{artifact.relative_path}"
+    ]
 
 
 def _skill_artifacts(realm: Realm) -> list[RealmSyncArtifact]:
     # Publish the shared canonical skills root (see get_shared_skills_dir) —
     # the one physical dir every persona references. Walk each skill package
     # WHOLE (not just SKILL.md) so multi-file skills — references/, scripts/,
-    # assets/, templates/ — travel intact to every realm member. Only the
-    # top-level skill directory name is tokenized; sub-path filenames are kept
-    # verbatim (rglob cannot emit ``..``) so files like ``__init__.py`` are not
-    # mangled. Junk/VCS/cache/dot components are pruned; the shared secret/state
-    # validation still runs over the result (_assert_no_secret_artifacts).
+    # assets/, templates/ — travel intact to every realm member. Sub-path
+    # filenames are kept verbatim (rglob cannot emit ``..``) so files like
+    # ``__init__.py`` are not mangled. Junk/VCS/cache/dot components are pruned;
+    # the shared secret/state validation still runs over the result
+    # (_assert_no_secret_artifacts).
     #
-    # Per-realm selection: mode "all" (default) publishes every catalog skill;
-    # mode "selected" publishes only skills whose directory name is in
-    # realm.skill_selection. Because publish rebuilds the realm subtree from
-    # scratch, filtering here naturally prunes deselected skills on the next
-    # publish — no extra deletion pass. The selection is matched against the
-    # RAW directory name (== the skills_inventory catalog slug), so it lines up
-    # with what the Launcher picker offers the operator.
+    # Package shapes (C5): a top-level dir WITH a SKILL.md publishes as a bare
+    # slug; a top-level dir WITHOUT one is a category whose immediate child dirs
+    # with a SKILL.md publish as ``<parent>/<child>`` (one level only). A
+    # categorized skill such as ``software-development/hermes-agent`` — selected
+    # BY PATH by personas — otherwise never reaches a realm.
+    #
+    # Per-realm selection: mode "all" (default) publishes every catalog package;
+    # mode "selected" publishes a package whose slug — or, for a categorized
+    # package, the bare child name — is in realm.skill_selection. Because publish
+    # rebuilds the realm subtree from scratch, filtering here naturally prunes
+    # deselected skills on the next publish. Bare slugs line up with what the
+    # Launcher picker offers; categorized selection by bare child name works
+    # today (the picker doesn't yet offer categorized slugs — documented
+    # follow-up), and the categorized id itself is honored too.
     root = get_shared_skills_dir()
     artifacts: list[RealmSyncArtifact] = []
     if not root.exists():
         return artifacts
     selected_only = realm.skill_publish_mode == "selected"
     selection = set(realm.skill_selection or [])
-    for skill_dir in sorted(p for p in root.iterdir() if p.is_dir()):
-        skill = skill_dir.name
-        # Skip dotdirs (.archive/.hub/.curator_backups/…) and any folder
-        # without a SKILL.md manifest — housekeeping, not a skill.
-        if skill.startswith(".") or not (skill_dir / "SKILL.md").is_file():
+    for slug, package_dir in _iter_publishable_skill_packages(root):
+        if selected_only and not _skill_slug_selected(slug, selection):
             continue
-        if selected_only and skill not in selection:
-            continue
-        from agent.skill_utils import resolve_skill
+        _append_skill_package_artifacts(artifacts, root, slug, package_dir)
+    return artifacts
 
-        resolution = resolve_skill(skill)
-        selected = resolution.candidate
-        if (
-            resolution.status != "resolved"
-            or selected is None
-            or selected.source_kind != "shared_core"
-        ):
-            raise RealmSyncError(
-                "skill_authority_conflict",
-                f"Skill cannot publish until shared authority resolves uniquely: {skill}",
-                safe_details={
-                    "skill": skill,
-                    "resolution_status": resolution.status,
-                    "candidate_count": len(resolution.candidates),
-                },
-            )
-        skill_dir = selected.skill_dir or selected.skill_md.parent
-        safe_skill = _safe_token(skill)
-        for source in sorted(skill_dir.rglob("*")):
-            if not source.is_file():
-                continue
-            rel_parts = source.relative_to(skill_dir).parts
-            if any(
-                part.startswith(".") or part in EXCLUDED_SKILL_DIRS
-                for part in rel_parts
+
+def _iter_publishable_skill_packages(root: Path):
+    """Yield ``(slug, package_dir)`` for every publishable canonical skill package.
+
+    A top-level dir with a ``SKILL.md`` is a bare package (slug = its name). A
+    top-level dir WITHOUT a ``SKILL.md`` is a category: each immediate child dir
+    with a ``SKILL.md`` publishes as ``<parent>/<child>`` (one level only —
+    multi-level nesting is out of scope). Dot-prefixed dirs (the
+    resolver-invisible ``.realm_inbox`` / ``.provenance`` / ``.archive`` live
+    here), excluded housekeeping dirs, and — under a category — support dirs are
+    skipped, so quarantine and provenance are publish-invisible for free.
+    """
+
+    for top in sorted(p for p in root.iterdir() if p.is_dir()):
+        name = top.name
+        if name.startswith(".") or name in EXCLUDED_SKILL_DIRS:
+            continue
+        if (top / "SKILL.md").is_file():
+            yield name, top
+            continue
+        for child in sorted(p for p in top.iterdir() if p.is_dir()):
+            cname = child.name
+            if (
+                cname.startswith(".")
+                or cname in EXCLUDED_SKILL_DIRS
+                or cname in SKILL_SUPPORT_DIRS
             ):
                 continue
-            rel_within = "/".join(rel_parts)
-            artifacts.append(
-                RealmSyncArtifact(
-                    kind="skill",
-                    source=source,
-                    relative_path=f"skills/{safe_skill}/{rel_within}",
-                    destination=root / safe_skill / Path(*rel_parts),
-                )
+            if (child / "SKILL.md").is_file():
+                yield f"{name}/{cname}", child
+
+
+def _skill_slug_selected(slug: str, selection: set[str]) -> bool:
+    """``selected``-mode match: the package slug itself, or — for a categorized
+    ``<parent>/<child>`` slug — the bare child name (C5)."""
+
+    if slug in selection:
+        return True
+    if "/" in slug:
+        return slug.split("/", 1)[1] in selection
+    return False
+
+
+def _append_skill_package_artifacts(
+    artifacts: list[RealmSyncArtifact], root: Path, slug: str, package_dir: Path
+) -> None:
+    from agent.skill_utils import resolve_skill
+
+    resolution = resolve_skill(slug)
+    selected = resolution.candidate
+    if (
+        resolution.status != "resolved"
+        or selected is None
+        or selected.source_kind != "shared_core"
+    ):
+        raise RealmSyncError(
+            "skill_authority_conflict",
+            f"Skill cannot publish until shared authority resolves uniquely: {slug}",
+            safe_details={
+                "skill": slug,
+                "resolution_status": resolution.status,
+                "candidate_count": len(resolution.candidates),
+            },
+        )
+    skill_dir = selected.skill_dir or selected.skill_md.parent
+    safe_parts = [_safe_token(part) for part in slug.split("/")]
+    prefix = "/".join(safe_parts)
+    dest_root = root.joinpath(*safe_parts)
+    for source in sorted(skill_dir.rglob("*")):
+        if not source.is_file():
+            continue
+        rel_parts = source.relative_to(skill_dir).parts
+        if any(
+            part.startswith(".") or part in EXCLUDED_SKILL_DIRS for part in rel_parts
+        ):
+            continue
+        rel_within = "/".join(rel_parts)
+        artifacts.append(
+            RealmSyncArtifact(
+                kind="skill",
+                source=source,
+                relative_path=f"skills/{prefix}/{rel_within}",
+                destination=dest_root / Path(*rel_parts),
             )
-    return artifacts
+        )
 
 
 def _workspace_realm_artifacts(realm: Realm, workspaces: list[Workspace]) -> list[RealmSyncArtifact]:
@@ -601,6 +921,63 @@ def _board_artifacts(workspaces: list[Workspace]) -> list[RealmSyncArtifact]:
                     )
                 )
     return artifacts
+
+
+def _board_store_drift(realm_id: str, workspaces: list[Workspace]) -> dict[str, int]:
+    """Board content drift vs the never-synced baseline sidecar, for boards whose
+    ``workspace_id`` belongs to this realm's workspaces.
+
+    Compares CURRENT ``BoardStore`` semantic content hashes (``board_content_hash``
+    — revision/timestamps excluded) against ``read_board_baseline(realm_id)``: the
+    exact hash/baseline machinery the publish and pull lanes already use. A
+    missing/empty baseline on a server-bound realm means nothing has been
+    published yet, so every board+card counts as unpublished — that is honest.
+
+    Pure and read-only: no git, no network, no new merge rules (office plan §10
+    simplicity budget). ``boards_changed`` counts board defs whose hash drifted;
+    ``cards_changed`` counts active cards whose hash drifted from a known
+    baseline; ``cards_added`` counts active cards with no baseline entry; and
+    ``cards_removed`` counts baseline cards no longer active locally (archived /
+    deleted since the last publish).
+    """
+
+    from . import board_models
+    from .board_store import BoardStore
+    from .board_sync import read_board_baseline
+
+    workspace_ids = {ws.id for ws in workspaces}
+    baseline = read_board_baseline(realm_id)
+    store = BoardStore()
+    boards_changed = cards_changed = cards_added = cards_removed = 0
+    for board in store.list_all():
+        if board.workspace_id not in workspace_ids:
+            continue
+        if baseline.get(f"{board.board_id}:board") != board_models.board_content_hash(board):
+            boards_changed += 1
+        card_prefix = f"{board.board_id}:card:"
+        baseline_card_ids = {key[len(card_prefix):] for key in baseline if key.startswith(card_prefix)}
+        current_card_ids: set[str] = set()
+        for card in store.list_cards(board.board_id):
+            current_card_ids.add(card.card_id)
+            base_hash = baseline.get(f"{card_prefix}{card.card_id}")
+            if base_hash is None:
+                cards_added += 1
+            elif base_hash != board_models.board_content_hash(card):
+                cards_changed += 1
+        cards_removed += len(baseline_card_ids - current_card_ids)
+    return {
+        "boards_changed": boards_changed,
+        "cards_changed": cards_changed,
+        "cards_added": cards_added,
+        "cards_removed": cards_removed,
+    }
+
+
+def _any_store_drift(store_drift: dict[str, dict[str, int]]) -> bool:
+    """True iff any drift family reports a nonzero count (drives the additive
+    ``unpublished_changes`` status flag)."""
+
+    return any(count for family in store_drift.values() for count in family.values())
 
 
 def _office_artifacts(workspaces: list[Workspace]) -> list[RealmSyncArtifact]:
@@ -672,53 +1049,127 @@ def _office_wanted_persona_ids(workspaces: list[Workspace]) -> list[str]:
     return persona_ids
 
 
-def _pulled_profile_tokens(artifacts: list[RealmSyncArtifact]) -> tuple[list[str], list[str]]:
-    """(all profile tokens in the pulled artifact set, the subset that does not
-    exist locally yet). The pull write-loop's ``mkdir(parents=True)``
-    materializes missing profile homes; this makes that adoption a typed row
-    (W-H4, plan §5.1), never a silent side effect."""
+def _published_profile_file_hashes(artifacts: list[RealmSyncArtifact]) -> dict[str, str]:
+    """``{entity key: content hash}`` for the profile FILES this publish wrote.
 
-    tokens = sorted(
-        {
-            Path(artifact.relative_path).parts[1]
-            for artifact in artifacts
-            if len(Path(artifact.relative_path).parts) > 1 and Path(artifact.relative_path).parts[0] == "profiles"
-        }
+    Feeds the publish-side baseline update so a member who publishes then pulls
+    sees local == baseline (no self-inflicted hold)."""
+
+    from .profile_artifact_sync import (
+        PROFILE_FILES_ROOT,
+        classify_destination,
+        content_hash,
+        entity_key,
     )
-    if not tokens:
-        return [], []
-    created: list[str] = []
-    active_token = _safe_token(active_profile_name())
-    for token in tokens:
-        if token == active_token:
+
+    prefix = f"{PROFILE_FILES_ROOT}/"
+    hashes: dict[str, str] = {}
+    for artifact in artifacts:
+        rel = artifact.relative_path.replace("\\", "/")
+        if not rel.startswith(prefix):
+            continue
+        tail = rel[len(prefix):].split("/", 1)
+        if len(tail) != 2 or classify_destination(tail[1]) is None:
             continue
         try:
-            from hermes_cli.profiles import normalize_profile_name, profile_exists
-
-            if not profile_exists(normalize_profile_name(token)):
-                created.append(token)
-        except Exception:
+            hashes[entity_key(tail[0], tail[1])] = content_hash(artifact.read_bytes())
+        except OSError:
             continue
-    return tokens, created
+    return hashes
 
 
-def _persona_artifacts(persona: AgentPersona) -> list[RealmSyncArtifact]:
+def _profile_files_row(
+    artifacts: list[RealmSyncArtifact], withheld: list[dict[str, str]]
+) -> dict[str, Any]:
+    """Typed publish accounting for the profile-FILE family.
+
+    ``published`` names every destination that travels (keyed exactly as the pull
+    side reconciles it, so a publish row and a pull hold are the same string);
+    ``withheld`` names every file that deliberately did not — today only
+    repository-bundled prompts, which already ship with every member's hermes.
+    """
+
+    from .profile_artifact_sync import PROFILE_FILES_ROOT
+
+    prefix = f"{PROFILE_FILES_ROOT}/"
+    published = sorted(
+        {
+            artifact.relative_path.replace("\\", "/")[len(prefix):].replace("/", ":", 1)
+            for artifact in artifacts
+            if artifact.relative_path.replace("\\", "/").startswith(prefix)
+        }
+    )
+    return {"published": published, "withheld": list(withheld)}
+
+
+def _persona_artifacts(persona: AgentPersona) -> tuple[list[RealmSyncArtifact], list[dict[str, str]]]:
+    """Per-profile FILES a persona carries: prompts, soul overlay, memory, core
+    context. Returns ``(artifacts, withheld rows)``.
+
+    The bound profile home's RAW ``config.yaml`` is deliberately NOT here any
+    more. It used to publish as ``profiles/<profile>/config.yaml`` and overwrite
+    the member's file wholesale on pull, which (a) clobbered the base fork seed
+    whenever a persona bound to ``hermes_profile: base`` (Office plan §5.1 ruled
+    that must never happen) and (b) shipped machine-shaped ``mcp_servers``
+    commands/env and absolute Windows paths that resolve to nothing on any other
+    machine. The persona DEFINITIONS that were the only shareable part of that
+    file now travel as one synthesized, allowlisted projection
+    (``persona_config_sync.project_persona_definitions``).
+
+    The published PATH changed on 2026-07-25 (see
+    ``profile_artifact_sync``): these files now publish at
+    ``store/profile_files/<profile>/<profile-relative destination>``, so the
+    published tail IS the destination. That (a) makes a prompt round-trip to the
+    exact path the persona definition names — the basename-keyed destination did
+    not, and left an orphan — and (b) is a path an older hermes does not map, so
+    an old member degrades to "no profile files" instead of having their
+    accumulated ``MEMORY.md`` overwritten wholesale.
+
+    A prompt that resolves OUTSIDE the bound profile home (a repository-bundled
+    role prompt) is deliberately withheld and accounted: it already ships with
+    every member's hermes, and publishing it would write a file into the member's
+    profile home that no persona definition addresses.
+    """
+
+    from .profile_artifact_sync import (
+        CORE_CONTEXT_FILENAMES,
+        MEMORY_DESTINATION,
+        classify_destination,
+        published_relative_path,
+    )
+    from .prompt_sources import resolve_persona_system_prompt_path
+
     binding = resolve_persona_profile(persona)
     profile_home = binding.profile_home or get_hermes_home()
     profile = _safe_token(binding.hermes_profile or active_profile_name() or "default")
-    persona_token = _safe_token(persona.id)
     artifacts: list[RealmSyncArtifact] = []
-    config = profile_home / "config.yaml"
-    if config.exists():
+    withheld: list[dict[str, str]] = []
+
+    def _add(kind: str, source: Path, dest_rel: str) -> None:
+        # Publish through the SAME admissibility authority the pull side applies.
+        # Without it the two sides can disagree and a file publishes into a realm
+        # that every member then refuses — a silent one-way loss. That shipped for
+        # a profile-root ``soul.md`` and was caught by the rebind-delta suite on
+        # 2026-07-25; this call is why it cannot recur.
+        if classify_destination(dest_rel) is None:
+            withheld.append(
+                {
+                    "persona_id": persona.id,
+                    "kind": kind,
+                    "reason": "destination_not_publishable",
+                    "message": f"{dest_rel} is not an admissible profile-file destination; members would refuse it",
+                }
+            )
+            return
         artifacts.append(
             RealmSyncArtifact(
-                kind="persona_config",
-                source=config,
-                relative_path=f"profiles/{profile}/config.yaml",
-                destination=config,
+                kind=kind,
+                source=source,
+                relative_path=published_relative_path(profile, dest_rel),
+                destination=source,
+                persona_id=persona.id,
             )
         )
-    from .prompt_sources import resolve_persona_system_prompt_path
 
     for label, raw in (("system_prompt", persona.system_prompt_path), ("soul_overlay", persona.soul_overlay_path)):
         path = (
@@ -726,39 +1177,43 @@ def _persona_artifacts(persona: AgentPersona) -> list[RealmSyncArtifact]:
             if label == "system_prompt"
             else _profile_relative_file(profile_home, raw)
         )
-        if path is not None and path.exists():
-            artifacts.append(
-                RealmSyncArtifact(
-                    kind=label,
-                    source=path,
-                    relative_path=f"profiles/{profile}/personas/{persona_token}/{label}/{path.name}",
-                    destination=path,
-                )
+        if path is None or not path.exists():
+            continue
+        dest_rel = _profile_relative_destination(profile_home, path)
+        if dest_rel is None:
+            withheld.append(
+                {
+                    "persona_id": persona.id,
+                    "kind": label,
+                    "reason": "not_profile_owned",
+                    "message": "prompt resolves outside the bound profile home (repository-bundled); it ships with hermes and is not republished",
+                }
             )
+            continue
+        _add(label, path, dest_rel)
     if persona.include_profile_memory:
         memory = profile_home / "memories" / "MEMORY.md"
         if memory.exists():
-            artifacts.append(
-                RealmSyncArtifact(
-                    kind="profile_memory",
-                    source=memory,
-                    relative_path=f"profiles/{profile}/personas/{persona_token}/memories/MEMORY.md",
-                    destination=memory,
-                )
-            )
+            _add("profile_memory", memory, MEMORY_DESTINATION)
     if persona.include_core_context_files:
-        for name in ("AGENTS.md", "CLAUDE.md", "GEMINI.md"):
+        for name in CORE_CONTEXT_FILENAMES:
             context = profile_home / name
             if context.exists():
-                artifacts.append(
-                    RealmSyncArtifact(
-                        kind="core_context",
-                        source=context,
-                        relative_path=f"profiles/{profile}/personas/{persona_token}/context/{name}",
-                        destination=context,
-                    )
-                )
-    return artifacts
+                _add("core_context", context, name)
+    return artifacts, withheld
+
+
+def _profile_relative_destination(profile_home: Path, path: Path) -> str | None:
+    """``path`` expressed relative to ``profile_home``, or ``None`` when it lives
+    outside it. The returned POSIX string is BOTH the published tail and the
+    member's destination, which is what makes the round trip exact."""
+
+    try:
+        rel = path.resolve().relative_to(profile_home.resolve())
+    except (OSError, ValueError):
+        return None
+    text = rel.as_posix()
+    return text or None
 
 
 def _profile_relative_file(profile_home: Path, raw: str | None) -> Path | None:
@@ -768,6 +1223,159 @@ def _profile_relative_file(profile_home: Path, raw: str | None) -> Path | None:
     if path.is_absolute() or ".." in path.parts:
         return None
     return profile_home / path
+
+
+def _raw_active_config() -> dict[str, Any]:
+    """The parsed ``config.yaml`` persona definitions are authored in.
+
+    ``agent_runtime.personas.<id>`` is read by ``load_agent_runtime_config()``
+    from ``get_config_path()`` — the ACTIVE profile's config — not from each
+    persona's bound profile home. The projection is sourced from the same file
+    the runtime resolves definitions out of, so publish and pull are symmetric.
+    """
+
+    from .persona_config_sync import load_raw_config
+
+    return load_raw_config()
+
+
+def _persona_config_artifact(projection) -> RealmSyncArtifact:
+    """The single synthesized ``persona_config`` artifact.
+
+    Published at ``store/personas.yaml``, NOT ``profiles/<name>/config.yaml``:
+    an older hermes maps the latter onto ``<profile_home>/config.yaml`` and would
+    overwrite a member's real config with this personas-only document. The new
+    path is unknown to every older client (``_destination_for_sync_path`` →
+    ``None`` → skipped), so an old member degrades to "no persona definitions"
+    instead of losing their configuration.
+    """
+
+    from .persona_config_sync import PROJECTION_RELATIVE_PATH
+
+    config = get_config_path()
+    return RealmSyncArtifact(
+        kind="persona_config",
+        source=config,
+        relative_path=PROJECTION_RELATIVE_PATH,
+        destination=config,
+        content=projection.to_bytes(),
+    )
+
+
+def _persona_projection_row(projection, bound_profiles: list[str]) -> dict[str, Any]:
+    """Typed publish accounting for the projection — including the explicit
+    base-seed guard (Office plan §5.1).
+
+    ``profiles_withheld`` names every profile home whose RAW settings this
+    publish deliberately did not ship; ``base_seed_guarded`` is the §5.1 answer
+    specifically. The guard is reported even though (and precisely because) the
+    projection makes the clobber structurally impossible — a silent skip is not
+    accounting.
+
+    ``bound_profiles`` arrives from the resolution pass, which reads it off the
+    binding authority. It used to be recovered by reading ``hermes_profile`` back
+    out of the projected bodies — so when the projection published partial
+    bodies (2026-07-25) this row reported ``profiles_withheld: ["default"]`` and
+    ``base_seed_guarded: false``, a false all-clear on the §5.1 guard produced by
+    the very defect it was meant to watch. Accounting derived from the artifact
+    it is accounting for cannot detect that the artifact is wrong.
+    """
+
+    return {
+        **projection.as_dict(),
+        "profiles_withheld": list(bound_profiles),
+        "base_seed_guarded": BASE_PROFILE_NAME in bound_profiles,
+    }
+
+
+def _bound_profile_name(persona: AgentPersona) -> str:
+    """The profile HOME this persona's files publish out of.
+
+    Same authority and same fallback chain ``_persona_artifacts`` uses
+    (``resolve_persona_profile`` → declared binding, else the active profile), so
+    "profiles whose raw config.yaml was withheld" is exactly the set of profile
+    homes this publish actually read from. Un-tokenized on purpose: this names a
+    profile, not a published path segment.
+    """
+
+    binding = resolve_persona_profile(persona)
+    return str(binding.hermes_profile or active_profile_name() or "default")
+
+
+def _assert_no_raw_profile_config(artifacts: list[RealmSyncArtifact]) -> None:
+    """Structural base-seed guard (Office plan §5.1), enforced for EVERY profile.
+
+    §5.1 ruled the base profile — the machine seed every free profile forks from
+    — must never travel: overwriting a member's fork seed changes every agent
+    they create afterwards, including outside this realm. The original guard was
+    written against the base PERSONA id (``personas.BASE_PERSONA_ID``), so a
+    persona merely *bound to* ``hermes_profile: base`` walked past it and
+    published ``profiles/base/config.yaml`` anyway.
+
+    The rule is now structural and profile-agnostic: no raw profile
+    ``config.yaml`` may ever be an artifact. Only allowlisted persona definitions
+    leave, via the synthesized projection.
+    """
+
+    offenders = sorted(
+        artifact.relative_path.replace("\\", "/")
+        for artifact in artifacts
+        if _is_raw_profile_config_path(artifact.relative_path.replace("\\", "/"))
+    )
+    if offenders:
+        raise RealmSyncError(
+            "sync_profile_config_excluded",
+            "Realm sync refused to publish a raw profile config.yaml; only the "
+            "portable persona-definition projection may travel.",
+            safe_details={"paths": offenders, "base_profile": BASE_PROFILE_NAME},
+        )
+
+
+def _is_raw_profile_config_path(rel: str) -> bool:
+    parts = Path(rel).parts
+    return len(parts) == 3 and parts[0] == "profiles" and parts[2] == "config.yaml"
+
+
+def _assert_portable_artifacts(artifacts: list[RealmSyncArtifact]) -> None:
+    """Refuse to publish machine/installation-shaped values in CONFIGURATION.
+
+    Scope is deliberate. This runs over the STRUCTURED persona-definition
+    projection — parsed, key by key — not over free text. A skill's SKILL.md, a
+    profile ``MEMORY.md``, or an ``AGENTS.md`` legitimately mentions absolute
+    paths as prose; refusing those would brick every publish on this machine
+    without protecting anything, and "a refusal that bricks a publish over a
+    false positive" is a failure class this file has already paid for. What
+    matters is that no absolute path ends up as live WIRING on another member's
+    machine — and wiring only ever comes from the projection.
+
+    Refuse rather than warn: the projection is synthesized under our own
+    allowlist, so a machine-shaped value in it is a genuine authoring defect, and
+    shipping it silently is exactly the bug being retired. ALL offenders are
+    named in one typed error so an operator fixes them in a single pass.
+    """
+
+    from .persona_config_sync import NONPORTABLE_HINT, find_nonportable_values, raw_persona_overrides
+
+    offenders: list[dict[str, str]] = []
+    for artifact in artifacts:
+        if artifact.kind != "persona_config":
+            continue
+        try:
+            data = yaml.safe_load(artifact.read_bytes().decode("utf-8"))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            continue
+        personas = data.get("personas") if isinstance(data, dict) else None
+        if not isinstance(personas, dict):
+            personas = raw_persona_overrides(data)
+        for row in find_nonportable_values(personas, prefix="personas"):
+            offenders.append({**row, "value": _redact_text(row["value"])})
+    if offenders:
+        raise RealmSyncError(
+            "sync_nonportable_path",
+            "Realm sync refused to publish machine-shaped values that cannot "
+            "resolve on another member's machine.",
+            safe_details={"offenders": offenders, "hint": NONPORTABLE_HINT},
+        )
 
 
 def _artifacts_from_subtree(subtree: Path) -> list[RealmSyncArtifact]:
@@ -818,16 +1426,15 @@ def _pulled_artifact_bytes(artifact: RealmSyncArtifact, *, realm: Realm) -> byte
 
 def _destination_for_sync_path(rel: str) -> Path | None:
     parts = Path(rel).parts
-    if len(parts) >= 3 and parts[0] == "skills":
-        sub = parts[1:]
-        # Untrusted remote path: refuse traversal / absolute / drive-letter
-        # components so a hostile realm repo can't escape the shared root.
-        if any(
-            p in ("", ".", "..") or ":" in p or p.startswith(("/", "\\"))
-            for p in sub
-        ):
-            return None
-        return get_shared_skills_dir().joinpath(*sub)
+    if parts and parts[0] == "skills":
+        # Skills no longer overwrite the canonical shared root through the generic
+        # pull loop. ``apply_skill_inbox_pull`` mirrors them into the
+        # resolver-invisible per-realm inbox and admits them to the canonical root
+        # only through the one guarded promotion door (C3) — same board/office
+        # exclusion precedent (store/boards/*, store/office/* → None). Returning
+        # None here keeps a realm pull from silently clobbering a local canonical
+        # skill of the same id.
+        return None
     if len(parts) == 3 and parts[0] == "store" and parts[1] == "workspaces":
         return paths.workspaces_dir() / parts[2]
     if len(parts) == 3 and parts[0] == "store" and parts[1] == "realms":
@@ -835,18 +1442,27 @@ def _destination_for_sync_path(rel: str) -> Path | None:
     # store/boards/* and store/office/* deliberately fall through to None: the
     # generic overwrite loop never touches them — board_sync.apply_board_pull /
     # office_sync.apply_office_pull own those pulls (3-way baseline merge).
+    if parts and parts[0] == "store" and len(parts) == 2 and parts[1] == "personas.yaml":
+        # The portable persona-definition projection. Owned by
+        # ``persona_config_sync.apply_persona_config_pull`` (key-wise merge
+        # against a never-synced baseline), never the generic overwrite loop —
+        # same exclusion precedent as store/boards/*, store/office/*, skills/*.
+        return None
+    if len(parts) > 2 and parts[0] == "store" and parts[1] == "profile_files":
+        # The per-profile FILE family (MEMORY.md, core context, persona prompts).
+        # Owned by ``profile_artifact_sync.apply_profile_artifact_pull``.
+        return None
     if parts and parts[0] == "profiles" and len(parts) > 1:
-        profile_home = _profile_home_for_token(parts[1])
-        if profile_home is None:
-            return None
-        if len(parts) == 3 and parts[2] == "config.yaml":
-            return profile_home / "config.yaml"
-        if "memories" in parts and parts[-1] == "MEMORY.md":
-            return profile_home / "memories" / "MEMORY.md"
-        if "context" in parts:
-            return profile_home / parts[-1]
-        if "system_prompt" in parts or "soul_overlay" in parts:
-            return profile_home / "personas" / parts[-1]
+        # EVERY legacy ``profiles/…`` artifact is now owned by an applier, none
+        # by the generic overwrite loop:
+        #   - ``config.yaml``            → persona_config_sync (allowlisted merge)
+        #   - memories / context / prompts → profile_artifact_sync (baseline merge)
+        # Before 2026-07-25 the last four were written wholesale here, which
+        # DESTROYED a member's accumulated ``MEMORY.md`` on every pull and keyed
+        # prompt destinations by filename only (two personas on one profile
+        # clobbered each other — Office plan §5.1). Same exclusion precedent as
+        # store/boards/*, store/office/*, skills/*, store/personas.yaml.
+        return None
     return None
 
 
@@ -886,6 +1502,15 @@ def _kind_for_sync_path(rel: str) -> str:
         return "realm"
     if rel.startswith("store/office/"):
         return "office_actor" if "/actors/" in rel else "office"
+    if rel == "store/personas.yaml":
+        return "persona_config"
+    if rel.startswith("store/profile_files/"):
+        # Kind is derived from the DESTINATION the published tail names — the
+        # same authority the pull applier uses, never a second spelling.
+        from .profile_artifact_sync import classify_destination
+
+        tail = rel.split("/", 3)
+        return (classify_destination(tail[3]) if len(tail) > 3 else None) or "artifact"
     if rel.endswith("config.yaml"):
         return "persona_config"
     if "/memories/" in rel:
@@ -903,7 +1528,7 @@ def _assert_no_secret_artifacts(artifacts: list[RealmSyncArtifact]) -> None:
     blocked: list[str] = []
     for artifact in artifacts:
         rel = artifact.relative_path.replace("\\", "/")
-        if _is_secretish_path(rel) or _is_hard_excluded_path(rel) or _file_contains_secret_assignment(artifact.source):
+        if _is_secretish_path(rel) or _is_hard_excluded_path(rel) or _artifact_contains_secret_assignment(artifact):
             blocked.append(rel)
     if blocked:
         raise RealmSyncError("sync_secret_excluded", "Realm sync refused to include excluded secret/state artifacts.", safe_details={"paths": blocked[:20]})
@@ -917,6 +1542,20 @@ def _is_secretish_path(rel: str) -> bool:
 def _is_hard_excluded_path(rel: str) -> bool:
     parts = {part.lower() for part in Path(rel).parts}
     return bool(parts & HARD_EXCLUDED_PATH_PARTS)
+
+
+def _artifact_contains_secret_assignment(artifact: RealmSyncArtifact) -> bool:
+    """Scan what actually publishes.
+
+    A synthesized artifact must be scanned by its CONTENT — scanning its
+    provenance ``source`` would test a file whose secrets the projection already
+    filtered out, and (worse) could refuse a publish over a secret that never
+    leaves the machine. The secret-exclusion path itself is unchanged.
+    """
+
+    if artifact.content is not None:
+        return bool(SECRET_ASSIGNMENT_RE.search(artifact.content.decode("utf-8", errors="ignore")))
+    return _file_contains_secret_assignment(artifact.source)
 
 
 def _file_contains_secret_assignment(path: Path) -> bool:
@@ -1131,16 +1770,48 @@ def read_realm_sync_sidecar(realm_id: str) -> dict[str, Any] | None:
         "skill_publish_mode": raw.get("skill_publish_mode") or "all",
         "skill_selection": raw.get("skill_selection") or [],
         "skills_published": raw.get("skills_published") or 0,
+        "agent_publish_mode": raw.get("agent_publish_mode") or "workspace",
+        "agent_selection": raw.get("agent_selection") or [],
+        "agents_published": raw.get("agents_published") or 0,
         "conflicts": raw.get("conflicts") or [],
         "last_pull": raw.get("last_pull"),
         "last_publish": raw.get("last_publish"),
         "artifacts": raw.get("artifacts"),
         "checked_at": raw.get("checked_at"),
         "workspace_statuses": raw.get("workspace_statuses") or [],
+        # Additive + absent-tolerant: a sidecar written before the profile-file
+        # lane existed simply reports no holds.
+        "profile_artifacts_held": raw.get("profile_artifacts_held") or [],
     }
 
 
-def _write_sync_sidecar(realm: Realm, *, repo: Path, git: dict[str, Any], skills_drift: list[str], artifacts: list[RealmSyncArtifact]) -> None:
+def _held_profile_artifacts(realm: Realm, repo: Path) -> list[str]:
+    """Profile-file entity keys currently HELD for this realm.
+
+    A classify-only (``dry_run``) pass through the ONE applier — never a second
+    decision table, and never a write from the status path.
+    """
+
+    from .profile_artifact_sync import apply_profile_artifact_pull
+
+    try:
+        summary = apply_profile_artifact_pull(realm.id, _realm_subtree(repo, realm.id), dry_run=True)
+    except Exception:  # noqa: BLE001 — status must never fail over an evidence field
+        logger.exception("held profile-artifact classification failed for realm %s", realm.id)
+        return []
+    return sorted(set(summary.held))
+
+
+def _write_sync_sidecar(
+    realm: Realm,
+    *,
+    repo: Path,
+    git: dict[str, Any],
+    skills_drift: list[str],
+    artifacts: list[RealmSyncArtifact],
+    profile_artifacts_held: list[str] | None = None,
+) -> None:
+    agent_state = realm_agent_selection_state(realm.id)
     payload = {
         "schema_version": 2,
         "realm_id": realm.id,
@@ -1151,12 +1822,16 @@ def _write_sync_sidecar(realm: Realm, *, repo: Path, git: dict[str, Any], skills
         "skill_publish_mode": realm.skill_publish_mode,
         "skill_selection": sorted(realm.skill_selection or []),
         "skills_published": _distinct_skill_package_count(artifacts),
+        "agent_publish_mode": agent_state["mode"],
+        "agent_selection": agent_state["selection"],
+        "agents_published": len(agent_state["published"]),
         "conflicts": git["conflicts"],
         "last_pull": _timestamp_file(repo, "last_pull.txt"),
         "last_publish": _timestamp_file(repo, "last_publish.txt"),
         "artifacts": len(artifacts),
         "checked_at": now().astimezone(timezone.utc).isoformat(),
         "workspace_statuses": _workspace_sync_statuses(realm, repo),
+        "profile_artifacts_held": list(profile_artifacts_held or []),
     }
     try:
         atomic_json_write(realm_sync_sidecar_path(realm.id), payload)
@@ -1233,19 +1908,245 @@ def _workspace_sync_statuses(realm: Realm, repo: Path) -> list[dict[str, str]]:
     return rows
 
 
-def _skills_drift_for_artifacts(artifacts: list[RealmSyncArtifact]) -> list[str]:
-    drift: list[str] = []
-    for artifact in artifacts:
-        if artifact.kind != "skill":
+@dataclass(frozen=True, slots=True)
+class SkillSyncSummary:
+    """Outcome of :func:`apply_skill_inbox_pull` — the per-package reconcile
+    verdicts for one realm pull. ``adopted`` were promoted new into the canonical
+    root, ``converged`` already matched canonical (no write), ``held`` diverge and
+    were quarantined without touching canonical (an operator resolves them via
+    ``hermes harness skills promote --adopt-divergent``), ``removed`` were pruned
+    from the inbox because the realm no longer publishes them, and ``refused`` are
+    packages the guarded door would not admit — an invalid/hostile/reserved slug,
+    a canonical slot occupied by a non-skill-package (a bare-slug landing on an
+    existing category dir, or a categorized child whose parent is a bare skill),
+    or a per-package error — isolated so ONE bad package can never abort the pull.
+    Refused packages are deliberately kept OUT of ``skills_drift`` (which stays the
+    held-divergent set the operator resolves); they are surfaced only here. All
+    lists are sorted, de-duplicated skill slugs (bare or ``<category>/<name>``)."""
+
+    adopted: list[str]
+    converged: list[str]
+    held: list[str]
+    removed: list[str]
+    refused: list[str]
+
+    def as_dict(self) -> dict[str, list[str]]:
+        return {
+            "adopted": list(self.adopted),
+            "converged": list(self.converged),
+            "held": list(self.held),
+            "removed": list(self.removed),
+            "refused": list(self.refused),
+        }
+
+
+def apply_skill_inbox_pull(realm: Realm, subtree: Path) -> SkillSyncSummary:
+    """Mirror the pulled ``subtree/skills/**`` into the realm's resolver-invisible
+    inbox, then reconcile each package through the one guarded promotion door.
+
+    Mirrors the board/office pull-applier precedent (``apply_board_pull`` /
+    ``apply_office_pull``): the generic overwrite loop no longer touches
+    ``skills/…`` (``_destination_for_sync_path`` returns ``None``), so this owns
+    the whole skill lane. The inbox is a byte-faithful, LF-canonical copy of that
+    realm's current skill packages that the resolver never sees
+    (``EXCLUDED_SKILL_DIRS`` — C1). Each package is then classified against the
+    canonical shared root:
+
+    - ``promote_new`` (no canonical copy) → auto-adopted, provenance recorded
+      (``source={"kind": "realm", "realm_id": realm.id}``); the inbox mirror is
+      **never** moved (``move_source=False``).
+    - ``noop_identical`` → converged; canonical untouched.
+    - ``hold_divergent`` → held; canonical untouched, surfaced as drift.
+
+    Never called on a dry-run pull (``pull_realm_sync`` returns before this),
+    so the mirror — itself a mutation — is skipped when ``dry_run=True``.
+    """
+
+    from .skill_promotion import (
+        _iter_packages,
+        classify_promotion,
+        execute_promotion,
+        realm_inbox_dir,
+    )
+
+    inbox = realm_inbox_dir(realm.id)
+    removed, reserved_refused = _mirror_realm_skill_inbox(subtree / "skills", inbox)
+
+    adopted: list[str] = []
+    converged: list[str] = []
+    held: list[str] = []
+    # Packages the mirror skipped (a reserved device-name component would crash a
+    # Windows write) start the refused set; each is already NOT on disk.
+    refused: list[str] = list(reserved_refused)
+    # Iterate the mirrored inbox package-by-package with per-package isolation:
+    # a package that refuses OR raises (a malformed source, a TOCTOU-occupied
+    # canonical slot, an unexpected I/O error) must never abort the whole pull —
+    # it is recorded as ``refused`` and reconciliation continues (F1c).
+    from .sync_admission import refuse_package
+
+    for slug, source_dir in _iter_packages(inbox):
+        try:
+            # Admission scan (defect (b), 2026-07-25): the generic pull loop's
+            # ``_assert_no_secret_artifacts`` only covers artifacts it MAPS, and
+            # ``skills/…`` maps to None — so a pulled package was never scanned
+            # on the way in. Per-package isolation: one hostile package is
+            # refused, the rest of the pull continues. Portability is
+            # deliberately NOT scanned here — a skill's documentation
+            # legitimately names absolute paths (see ``sync_admission``).
+            refusal = refuse_package(slug, source_dir)
+            if refusal is not None:
+                logger.warning("skill package refused at the realm door: %s (%s)", slug, refusal.code)
+                refused.append(slug)
+                continue
+            plan = classify_promotion(slug, source_dir)
+            if plan.action == "promote_new":
+                result = execute_promotion(
+                    plan,
+                    source={"kind": "realm", "realm_id": realm.id},
+                    move_source=False,
+                )
+                if result.action == "promoted":
+                    adopted.append(slug)
+                elif result.action == "held":
+                    held.append(slug)
+                else:  # 'refused' / anything non-terminal — never became canonical
+                    refused.append(slug)
+            elif plan.action == "noop_identical":
+                converged.append(slug)
+            elif plan.action == "hold_divergent":
+                held.append(slug)
+            else:  # refuse_invalid / refuse_ambiguous_source
+                refused.append(slug)
+        except Exception:  # noqa: BLE001 — one bad package must not abort the pull
+            logger.exception(
+                "skill inbox reconcile raised for %r (realm %s); refusing package",
+                slug,
+                realm.id,
+            )
+            refused.append(slug)
+    return SkillSyncSummary(
+        adopted=sorted(set(adopted)),
+        converged=sorted(set(converged)),
+        held=sorted(set(held)),
+        removed=sorted(set(removed)),
+        refused=sorted(set(refused)),
+    )
+
+
+def _mirror_realm_skill_inbox(source_skills: Path, inbox: Path) -> tuple[list[str], list[str]]:
+    """Mirror ``source_skills`` (the pulled ``subtree/skills``) into ``inbox`` as
+    an LF-canonical, resolver-invisible copy.
+
+    Returns ``(removed, reserved_refused)``: ``removed`` are the top-level packages
+    pruned (present in the inbox, gone from the subtree); ``reserved_refused`` are
+    the top-level packages skipped WITHOUT any write because a relative path
+    component maps to a Windows reserved device name (``con`` / ``nul`` /
+    ``com1`` … — a realm publishing such a package would otherwise crash the
+    mirror on Windows, a pull DoS). Reserved packages are skipped on every
+    platform for deterministic behaviour (a reserved slug can never be promoted
+    anyway — ``_validate_slug`` refuses it) and reported so the caller can record
+    them as ``refused``.
+
+    Text is LF-normalized at this write chokepoint (matching the publisher's
+    ``_canonicalize_text_bytes``) so a package converges against an LF canonical
+    regardless of the incoming EOL; binary assets (NUL byte) pass through
+    byte-for-byte. A file whose only difference from the existing inbox copy is
+    its line endings is left untouched, so a no-op pull neither rewrites bytes nor
+    churns mtimes (the content-hash cache stays warm — same discipline as the
+    publish EOL guard, ``test_realm_sync_eol.py``).
+    """
+
+    from .skill_promotion import is_windows_reserved_component
+
+    # First pass: collect legal source files and the set of top-level package
+    # families that contain a reserved-device-name component anywhere in their
+    # subtree. Any file under such a family is skipped BEFORE a write is attempted
+    # (creating a dir/file named ``con`` on Windows fails), and the whole family
+    # is quarantined out so a package is never partially mirrored.
+    reserved_tops: set[str] = set()
+    candidates: list[tuple[tuple[str, ...], Path]] = []
+    if source_skills.is_dir():
+        for src in sorted(p for p in source_skills.rglob("*") if p.is_file()):
+            rel_parts = src.relative_to(source_skills).parts
+            # Untrusted remote tree: a mirror path must never escape the inbox
+            # (rglob cannot emit ``..``, but guard defensively regardless).
+            if any(part in ("", ".", "..") for part in rel_parts):
+                continue
+            if any(is_windows_reserved_component(part) for part in rel_parts):
+                reserved_tops.add(rel_parts[0])
+                continue
+            candidates.append((rel_parts, src))
+
+    desired: dict[str, bytes] = {}
+    for rel_parts, src in candidates:
+        # A sibling file of a reserved path within the same top-level family is
+        # dropped too, so the family is quarantined whole (never half-written).
+        if rel_parts[0] in reserved_tops:
             continue
-        if (
-            artifact.destination.exists()
-            and artifact.source.exists()
-            and _canonicalize_text_bytes(artifact.destination.read_bytes())
-            != _canonicalize_text_bytes(artifact.source.read_bytes())
-        ):
-            drift.append(Path(artifact.relative_path).parts[1])
-    return sorted(set(drift))
+        desired["/".join(rel_parts)] = _canonicalize_text_bytes(src.read_bytes())
+
+    existing: dict[str, bytes] = {}
+    if inbox.is_dir():
+        for path in sorted(p for p in inbox.rglob("*") if p.is_file()):
+            existing[path.relative_to(inbox).as_posix()] = path.read_bytes()
+
+    desired_top = {rel.split("/", 1)[0] for rel in desired}
+    existing_top = {rel.split("/", 1)[0] for rel in existing}
+    removed = sorted(existing_top - desired_top - reserved_tops)
+
+    for rel, data in desired.items():
+        prior = existing.get(rel)
+        if prior is not None and _canonicalize_text_bytes(prior) == data:
+            continue  # EOL-only (or no) difference — leave it to avoid churn
+        target = inbox.joinpath(*rel.split("/"))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+
+    for rel in existing:
+        if rel not in desired:
+            inbox.joinpath(*rel.split("/")).unlink()
+    _prune_empty_dirs(inbox)
+    return removed, sorted(reserved_tops)
+
+
+def _prune_empty_dirs(root: Path) -> None:
+    """Remove now-empty subdirectories left behind by inbox pruning (deepest
+    first). ``root`` itself is preserved even when empty — it is the realm's
+    inbox anchor."""
+
+    if not root.is_dir():
+        return
+    for directory in sorted(
+        (p for p in root.rglob("*") if p.is_dir()),
+        key=lambda p: len(p.parts),
+        reverse=True,
+    ):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass  # not empty (or vanished) — leave it
+
+
+def _held_skill_packages_for_realm(realm: Realm) -> list[str]:
+    """``skills_drift`` = the realm's inbox packages whose canonical copy diverges.
+
+    Scans this realm's resolver-invisible inbox and returns the sorted slugs
+    classified ``hold_divergent`` against the current canonical root — the set an
+    operator must explicitly resolve (``promote --adopt-divergent``). Redefines
+    the historic drift meaning (formerly a source-vs-destination byte compare over
+    publish artifacts, which was structurally always empty since publish source
+    and destination were the same canonical file) while keeping the sidecar/result
+    key name and ``list[str]`` shape stable (Launcher realm-sync sheet compat)."""
+
+    from .skill_promotion import list_inbox_packages
+
+    return sorted(
+        {
+            row["skill"]
+            for row in list_inbox_packages(realm.id)
+            if row["action"] == "hold_divergent"
+        }
+    )
 
 
 def _distinct_skill_package_count(artifacts: list[RealmSyncArtifact]) -> int:
@@ -1314,7 +2215,10 @@ def _published_artifacts_differ(subtree: Path, desired: dict[str, bytes]) -> boo
 def _dedupe_artifacts(artifacts: list[RealmSyncArtifact]) -> list[RealmSyncArtifact]:
     deduped: dict[str, RealmSyncArtifact] = {}
     for artifact in artifacts:
-        if not artifact.source.exists():
+        # A synthesized artifact has no file to exist — its bytes ARE the
+        # artifact. Only file-backed artifacts are dropped when their source
+        # vanished between resolution and publish.
+        if artifact.content is None and not artifact.source.exists():
             continue
         rel = artifact.relative_path.replace("\\", "/")
         if _is_hard_excluded_path(rel):

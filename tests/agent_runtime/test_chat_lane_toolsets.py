@@ -135,6 +135,48 @@ def test_config_restore_absent_is_empty():
     assert chat_lane_restore_toolsets("neko_supervisor", cfg) == []
 
 
+def test_config_restore_resolves_root_config_under_profile_home(monkeypatch, tmp_path):
+    # Regression (2026-07-23): the CLI bootstrap redirects a bare invocation
+    # into the sticky active profile's home, so a cfg-less call used to read
+    # THAT profile's config.yaml and the operator's root-config restore
+    # rulings were silently dead (live: alice active → dev lane lost its
+    # restored file/terminal toolsets). The restore knob is harness-global
+    # operator policy: with no explicit cfg it must resolve against the ROOT
+    # config.yaml even when the process home points into a profile.
+    import textwrap as _tw
+
+    root = tmp_path / "hermes-root"
+    profile_home = root / "profiles" / "tester"
+    profile_home.mkdir(parents=True)
+    (root / "config.yaml").write_text(
+        _tw.dedent(
+            """
+            agent_runtime:
+              personas:
+                dev:
+                  chat_lane_restore_toolsets: [file, terminal]
+            """
+        ),
+        encoding="utf-8",
+    )
+    # The profile's own config both omits the key for `dev` and tries to
+    # shadow it for `qa` — neither may influence the cfg-less resolution.
+    (profile_home / "config.yaml").write_text(
+        _tw.dedent(
+            """
+            agent_runtime:
+              personas:
+                qa:
+                  chat_lane_restore_toolsets: [browser]
+            """
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HERMES_HOME", str(profile_home))
+    assert chat_lane_restore_toolsets("dev") == ["file", "terminal"]
+    assert chat_lane_restore_toolsets("qa") == []
+
+
 # --------------------------------------------------------------------------- #
 # Request-assembly integration at the single chokepoint.
 # --------------------------------------------------------------------------- #
@@ -160,7 +202,8 @@ def test_default_neko_chat_lane_excludes_dev_toolkit():
     # browser/vision/code_execution (T3) + file/terminal (T6a) all drop.
     assert not {"browser", "vision", "code_execution", "file", "terminal"} & set(enabled)
     # The supervision capabilities the lane legitimately keeps are still present.
-    assert {"session_search", "mission_goal", "skills"}.issubset(set(enabled))
+    assert {"session_search", "agent_chat", "skills"}.issubset(set(enabled))
+    assert "mission_goal" not in enabled
 
 
 def test_chat_lane_scopes_dev_toolkit_when_persona_carries_it():
@@ -191,6 +234,7 @@ def test_unbounded_permission_mode_is_not_scoped(monkeypatch):
     )
     enabled = PR._enabled_toolsets_for_chat(_persona_with_dev_toolkit(), session_id="s1")
     assert {"browser", "vision", "file", "terminal"}.issubset(set(enabled))
+    assert "mission_goal" not in enabled
 
 
 # --------------------------------------------------------------------------- #

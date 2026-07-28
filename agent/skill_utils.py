@@ -10,9 +10,11 @@ import logging
 import os
 import re
 import sys
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
 from hermes_constants import (
     CANONICAL_SHARED_SKILL_IDS,
@@ -23,6 +25,34 @@ from hermes_constants import (
 )
 
 logger = logging.getLogger(__name__)
+
+_SKILL_RUNTIME_SURFACE: ContextVar[str | None] = ContextVar(
+    "hermes_skill_runtime_surface", default=None
+)
+_SKILL_RUNTIME_ROOT_NODE_MODE: ContextVar[bool] = ContextVar(
+    "hermes_skill_runtime_root_node_mode", default=False
+)
+
+
+@contextmanager
+def skill_runtime_scope(
+    *, surface: str | None, root_node_mode: bool = False
+) -> Iterator[None]:
+    """Bind the active skill surface/mode for prompt and tool enforcement."""
+
+    surface_token = _SKILL_RUNTIME_SURFACE.set(surface)
+    mode_token = _SKILL_RUNTIME_ROOT_NODE_MODE.set(bool(root_node_mode))
+    try:
+        yield
+    finally:
+        _SKILL_RUNTIME_ROOT_NODE_MODE.reset(mode_token)
+        _SKILL_RUNTIME_SURFACE.reset(surface_token)
+
+
+def current_skill_runtime_context() -> tuple[str | None, bool]:
+    """Return the active surface/mode, or ``(None, False)`` outside a lane."""
+
+    return _SKILL_RUNTIME_SURFACE.get(), _SKILL_RUNTIME_ROOT_NODE_MODE.get()
 
 # ── Platform mapping ──────────────────────────────────────────────────────
 
@@ -38,6 +68,14 @@ EXCLUDED_SKILL_DIRS = frozenset(
         ".github",
         ".hub",
         ".archive",
+        # Realm-skill quarantine + promotion provenance live under the shared
+        # skills root but must stay resolver-invisible: ``.realm_inbox`` is a
+        # byte-faithful mirror of each realm's skill packages (never live), and
+        # ``.provenance`` holds promotion sidecars that live OUTSIDE any skill
+        # package so they cannot change a package content hash. Neither ever
+        # resolves a skill nor turns a canonical skill into a collision.
+        ".realm_inbox",
+        ".provenance",
         ".venv",
         "venv",
         "node_modules",
@@ -723,10 +761,34 @@ def _skill_resolution_status(
     return "resolved"
 
 
-def skill_package_content_hash(skill_dir: Path | None, skill_md: Path) -> str:
-    """Stable content hash for the exact skill package the resolver selected."""
+# Aggregate-mtime keyed cache for skill package content hashes.
+#
+# ``skill_package_content_hash`` was measured at 653 calls / 2.44s across one
+# snapshot core (2026-07-23) — every candidate re-rglob'd + re-read from disk.
+# The returned digest here is byte-identical to the uncached computation (same
+# relpath+bytes algorithm); the cache only skips re-reading files that have not
+# changed. INVALIDATION KEY: ``(base_dir, ((relpath, mtime_ns, size), ...))`` for
+# every member file. A content edit changes ``mtime_ns``/``size`` and misses the
+# cache — the same identity+mtime+size contract as ``_RAW_CONFIG_CACHE`` and
+# ``parse_cache``. It cannot go stale silently on a nested content change: a
+# directory-mtime-only key would (editing a nested file leaves the containing
+# dir's mtime untouched), which is exactly why every member file is stamped.
+_CONTENT_HASH_CACHE: Dict[Tuple[Any, ...], str] = {}
+_CONTENT_HASH_CACHE_MAX = 4096
 
-    digest = hashlib.sha256()
+
+def _content_hash_cache_clear() -> None:
+    """Test hook — drop the skill package content-hash cache."""
+    _CONTENT_HASH_CACHE.clear()
+
+
+def skill_package_content_hash(skill_dir: Path | None, skill_md: Path) -> str:
+    """Stable content hash for the exact skill package the resolver selected.
+
+    mtime-cached (see ``_CONTENT_HASH_CACHE``): the returned digest is identical
+    to an uncached run; repeats within a build skip re-reading unchanged files.
+    """
+
     if skill_dir is None:
         files = [skill_md]
         base = skill_md.parent
@@ -741,11 +803,28 @@ def skill_package_content_hash(skill_dir: Path | None, skill_md: Path) -> str:
             )
         ]
         base = skill_dir
-    for source in files:
+
+    def _relative(source: Path) -> str:
         try:
-            relative = "/".join(source.relative_to(base).parts)
+            return "/".join(source.relative_to(base).parts)
         except ValueError:
-            relative = source.name
+            return source.name
+
+    entries: list[tuple[str, Path]] = [(_relative(source), source) for source in files]
+    stamps: list[tuple[str, int | None, int | None]] = []
+    for relative, source in entries:
+        try:
+            st = source.stat()
+            stamps.append((relative, st.st_mtime_ns, st.st_size))
+        except OSError:
+            stamps.append((relative, None, None))
+    cache_key = (str(base), tuple(stamps))
+    cached = _CONTENT_HASH_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+
+    digest = hashlib.sha256()
+    for relative, source in entries:
         digest.update(relative.encode("utf-8", errors="replace"))
         digest.update(b"\x00")
         try:
@@ -753,27 +832,40 @@ def skill_package_content_hash(skill_dir: Path | None, skill_md: Path) -> str:
         except OSError:
             digest.update(b"<unreadable>")
         digest.update(b"\x00")
-    return digest.hexdigest()
+    value = digest.hexdigest()
+    if len(_CONTENT_HASH_CACHE) >= _CONTENT_HASH_CACHE_MAX:
+        _CONTENT_HASH_CACHE.clear()
+    _CONTENT_HASH_CACHE[cache_key] = value
+    return value
 
 
-def skill_runtime_compatibility(
-    candidate: SkillResolutionCandidate | None,
+def skill_frontmatter_runtime_compatibility(
+    frontmatter: dict[str, Any] | None,
     *,
     surface: str,
     root_node_mode: bool = False,
 ) -> dict[str, Any]:
-    """Evaluate declared surface/mode compatibility for a resolved skill."""
+    """Evaluate surface/mode compatibility from parsed skill frontmatter."""
 
-    if candidate is None:
-        return {"compatible": False, "reason": "unresolved"}
-    try:
-        frontmatter, _ = parse_frontmatter(candidate.skill_md.read_text(encoding="utf-8"))
-    except Exception:
-        frontmatter = {}
+    frontmatter = frontmatter if isinstance(frontmatter, dict) else {}
     metadata = frontmatter.get("metadata") if isinstance(frontmatter, dict) else {}
     hermes = metadata.get("hermes") if isinstance(metadata, dict) else {}
-    surfaces = hermes.get("surfaces") if isinstance(hermes, dict) else None
-    modes = hermes.get("modes") if isinstance(hermes, dict) else None
+    if not isinstance(hermes, dict):
+        # A skill authored for another runtime (metadata present, hermes block
+        # absent or None) must degrade to defaults; this function runs for every
+        # skill in the shared root on every prompt-observability build, so one
+        # foreign manifest must not take down the whole lane.
+        hermes = {}
+    surfaces = hermes.get("surfaces")
+    modes = hermes.get("modes")
+    if isinstance(surfaces, str):
+        surfaces = [surfaces]
+    elif not isinstance(surfaces, (list, tuple, set)):
+        surfaces = []
+    if isinstance(modes, str):
+        modes = [modes]
+    elif not isinstance(modes, (list, tuple, set)):
+        modes = []
     allowed_surfaces = {str(item) for item in surfaces or []}
     allowed_modes = {str(item) for item in modes or []}
     load_policy = str(hermes.get("load_policy") or "explicit")
@@ -797,6 +889,45 @@ def skill_runtime_compatibility(
         "mode": active_mode,
         "load_policy": load_policy,
     }
+
+
+def _cached_skill_frontmatter(skill_md: Path) -> Dict[str, Any]:
+    """mtime-cached frontmatter parse for a SKILL.md manifest.
+
+    ``skill_runtime_compatibility`` is evaluated per skill, per surface, per
+    persona across a snapshot build (~12.9k ``parse_frontmatter`` calls / ~3.8s
+    measured 2026-07-23), yet a manifest's bytes only change when the file
+    changes on disk. Cache the (read_text + parse_frontmatter) by the file's
+    identity+mtime+size (``parse_cache.cached_by_mtime``) so repeats within a
+    build are free while an on-disk edit invalidates the entry. Behavior is
+    identical to the inline parse on a cache miss; the result is read-only, never
+    mutated, so sharing the cached dict is safe.
+    """
+    from agent_runtime.parse_cache import cached_by_mtime
+
+    def _load(path: Path) -> Dict[str, Any]:
+        frontmatter, _ = parse_frontmatter(path.read_text(encoding="utf-8"))
+        return frontmatter if isinstance(frontmatter, dict) else {}
+
+    return cached_by_mtime(skill_md, _load, default={})
+
+
+def skill_runtime_compatibility(
+    candidate: SkillResolutionCandidate | None,
+    *,
+    surface: str,
+    root_node_mode: bool = False,
+) -> dict[str, Any]:
+    """Evaluate declared surface/mode compatibility for a resolved skill."""
+
+    if candidate is None:
+        return {"compatible": False, "reason": "unresolved"}
+    frontmatter = _cached_skill_frontmatter(candidate.skill_md)
+    return skill_frontmatter_runtime_compatibility(
+        frontmatter,
+        surface=surface,
+        root_node_mode=root_node_mode,
+    )
 
 
 def required_preload_skill_ids(

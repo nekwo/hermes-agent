@@ -112,7 +112,12 @@ def build_gate_commands(
             GateCommand("hermes_cli_pytest", [python, "-m", "pytest", "tests/hermes_cli", "-q"], repo_root),
             GateCommand(
                 "harness_no_model_smoke",
-                [python, "-m", "hermes_cli.main", "harness", "smoke", "--json", "--temp-root", "--no-model"],
+                # `--temp-root` was retired 2026-07-27 (env-determinism audit
+                # §7.3): a smoke run is synthetic and ALWAYS uses a temp runtime
+                # root, so the flag could only ever be ignored. Passing it now
+                # is a parse error, which would fail this gate on the flag
+                # instead of on the smoke.
+                [python, "-m", "hermes_cli.main", "harness", "smoke", "--json", "--no-model"],
                 repo_root,
             ),
         ]

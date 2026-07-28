@@ -1525,6 +1525,36 @@ class TestBuildSkillsSystemPromptConditional:
         )
         assert "nested-null" in result
 
+    def test_mission_chat_hides_root_node_only_skills(self, monkeypatch, tmp_path):
+        from agent.skill_utils import skill_runtime_scope
+
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        root_only = tmp_path / "skills" / "harness" / "harness-mission-lead"
+        root_only.mkdir(parents=True)
+        (root_only / "SKILL.md").write_text(
+            "---\nname: harness-mission-lead\ndescription: Root mission lead\n"
+            "metadata:\n  hermes:\n    surfaces: [mission_worker]\n"
+            "    modes: [root_node]\n---\n",
+            encoding="utf-8",
+        )
+        chat_skill = tmp_path / "skills" / "harness" / "harness-continuity"
+        chat_skill.mkdir(parents=True)
+        (chat_skill / "SKILL.md").write_text(
+            "---\nname: harness-continuity\ndescription: Chat-safe continuity\n"
+            "metadata:\n  hermes:\n    surfaces: [mission_chat, mission_worker]\n"
+            "    modes: [standard, root_node]\n---\n",
+            encoding="utf-8",
+        )
+
+        with skill_runtime_scope(surface="mission_chat", root_node_mode=False):
+            result = build_skills_system_prompt()
+        with skill_runtime_scope(surface="mission_worker", root_node_mode=True):
+            root_result = build_skills_system_prompt()
+
+        assert "harness-continuity" in result
+        assert "harness-mission-lead" not in result
+        assert "harness-mission-lead" in root_result
+
 
 # =========================================================================
 # Tool-use enforcement guidance

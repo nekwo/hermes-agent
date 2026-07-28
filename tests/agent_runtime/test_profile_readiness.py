@@ -1,3 +1,5 @@
+import os
+
 from agent_runtime.models import AgentPersona
 from agent_runtime.profile_readiness import profile_readiness_for_persona
 from agent_runtime.models import Task
@@ -205,3 +207,78 @@ def test_profile_readiness_injects_launcher_qa_only_for_visual_scope(monkeypatch
     assert plain["effective_required_mcp_servers"] == []
     assert visual["effective_required_mcp_servers"] == ["launcher_qa"]
     assert visual["missing_mcp_servers"] == ["launcher_qa"]
+
+
+def test_readiness_missing_set_is_single_source_derivation(tmp_path, monkeypatch):
+    """Item 1: profile_readiness derives the missing-skill set from the ONE
+    resolution it already computed (no redundant second resolver walk). The
+    derived set must equal both the rows' ``status == 'missing'`` ids and the
+    re-resolving compatibility wrapper — proving the removal is behavior-identical
+    including duplicate occurrences and order."""
+    import agent.skill_utils as skill_utils
+    from agent_runtime.profile_readiness import (
+        _missing_skill_ids,
+        _missing_skill_names,
+        _resolve_skill_names,
+    )
+
+    shared = tmp_path / "shared"
+    (shared / "present-skill").mkdir(parents=True)
+    (shared / "present-skill" / "SKILL.md").write_text(
+        "---\nname: present-skill\n---\nbody\n", encoding="utf-8"
+    )
+    monkeypatch.setattr(skill_utils, "get_shared_skills_dir", lambda: shared)
+    monkeypatch.setattr(skill_utils, "get_all_skills_dirs", lambda: [shared])
+
+    names = ["present-skill", "absent-one", "absent-two", "present-skill"]
+    rows = _resolve_skill_names(names)
+    # One row per occurrence, original order preserved (dedup would drop the dup).
+    assert [row["skill_id"] for row in rows] == names
+    derived = _missing_skill_ids(rows)
+    assert derived == ["absent-one", "absent-two"]
+    # The compat wrapper (which re-resolves) agrees with the single-source
+    # derivation from the already-computed rows.
+    assert derived == _missing_skill_names(names)
+
+
+def test_provider_issue_memo_is_scoped_per_profile_home(monkeypatch):
+    # The memo runs inside persona_profile_context, which diverts HERMES_HOME /
+    # HERMES_AUTH_HOME so the resolver reads PER-PROFILE config and secrets.
+    # Keyed on (provider, model) alone, profile A's verdict would leak to
+    # profile B within the TTL (adversarial review of 7f6ac5208, finding 1).
+    from agent_runtime import profile_readiness
+
+    profile_readiness._provider_issue_cache_clear()
+    calls: list[str] = []
+
+    def _resolver(requested=None, target_model=None):
+        calls.append(os.environ.get("HERMES_HOME") or "")
+        if (os.environ.get("HERMES_HOME") or "").endswith("bob"):
+            raise profile_readiness.AuthError("no credential for bob")
+
+    monkeypatch.setattr(profile_readiness, "resolve_runtime_provider", _resolver)
+    persona = AgentPersona(
+        id="dev",
+        display_name="Dev",
+        role="dev",
+        model="gpt-5",
+        provider="openai",
+        api_mode=None,
+        toolsets=[],
+        system_prompt_path="personas/dev/system.md",
+        hermes_profile=None,
+        skills=[],
+    )
+
+    monkeypatch.setenv("HERMES_HOME", r"X:\fake\profiles\alice")
+    assert profile_readiness._provider_issue(persona) is None
+    # Same (provider, model) from a DIFFERENT profile home must re-resolve and
+    # surface ITS OWN verdict, never alice's cached "ready".
+    monkeypatch.setenv("HERMES_HOME", r"X:\fake\profiles\bob")
+    issue = profile_readiness._provider_issue(persona)
+    assert issue is not None and issue[0] == "auth_attention"
+    assert len(calls) == 2
+    # Within the same profile home the TTL memo still deduplicates.
+    assert profile_readiness._provider_issue(persona)[0] == "auth_attention"
+    assert len(calls) == 2
+    profile_readiness._provider_issue_cache_clear()

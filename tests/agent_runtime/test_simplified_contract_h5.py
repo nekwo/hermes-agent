@@ -5,13 +5,14 @@ from hermes_time import now
 
 from agent_runtime.blueprints import BlueprintStore, instantiate_blueprint
 from agent_runtime.context_builder import build_context
+from agent_runtime.decision_contracts import validate_planning_decision
 from agent_runtime.decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
 from agent_runtime.events import EventLog
 from agent_runtime.models import AgentRun, MissionIntent, MissionPlan, MissionPlanStage, Proof, Task
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.repo_context import capture_repo_baseline, isolated_repo_context_for_run, RepoExecutionContext
 from agent_runtime.runtime_config import NormalWorkerFlowConfig, RuntimeConfig, SimplifiedAgentContractConfig
-from agent_runtime.simplified_contract import project_decision_for_execution
+from agent_runtime.simplified_contract import legacy_qa_review_decision_from_qa_verdict, project_decision_for_execution
 from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.store import ProofStore, RunStore, TaskStore
 from agent_runtime.ticker import TickEngine
@@ -202,6 +203,33 @@ def test_simplified_projection_maps_hand_off_and_rejects_pruned_legacy_decisions
     assert rejected.public_type == DecisionType.REQUEST_TEST_RUN
     assert rejected.blocked_reason
     assert "not in the collapsed signal set" in rejected.blocked_reason
+
+
+def test_simplified_qa_verdict_expands_partial_coverage_for_legacy_packet():
+    verdict = AgentDecision(
+        type=DecisionType.QA_VERDICT,
+        summary="Stage-C proof reviewed.",
+        rationale="The Harness screenshot proof is attached.",
+        payload={
+            "verdict": "approved",
+            "proof_ids": ["proof_visual"],
+            "findings": [],
+            "coverage": {
+                "command_gate": "reviewed",
+                "visual_or_mcp": "reviewed",
+            },
+        },
+    )
+
+    projected = legacy_qa_review_decision_from_qa_verdict(verdict)
+    validate_planning_decision(projected)
+
+    assert projected.payload["qa_review"]["coverage"] == {
+        "backend_contract": "not_required",
+        "launcher_integration": "not_required",
+        "visual_or_mcp": "reviewed",
+        "cross_stack_join": "not_required",
+    }
 
 
 def test_rollback_disabled_flag_leaves_legacy_decision_unprojected(isolate_agent_runtime_root):

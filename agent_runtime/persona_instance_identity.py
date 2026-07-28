@@ -368,6 +368,11 @@ def reconcile_persona_instances(*, apply: bool = True, event_log: EventLog | Non
     action emits ``persona_instance.reconciled``. Aliases are recorded in the
     durable registry regardless, so the ``identity_map`` keeps resolving old
     ids in archived history. Running twice is a no-op the second time.
+
+    Four phases run in order: (1) legacy-id fold, (2) orphan / legacy-role
+    prune, (3) missing steering-parent repair, (4) missing chat-session-binding
+    repair. ``apply=False`` (the CLI's ``--dry-run``) reports every phase and
+    writes nothing — no store rows, no events.
     """
     store = PersonaInstanceStore(event_log=event_log)
     instances = store.list_all()
@@ -470,6 +475,14 @@ def reconcile_persona_instances(*, apply: bool = True, event_log: EventLog | Non
     # retain a random missing owner.
     steering_repairs = store.repair_missing_steering_references(apply=apply)
 
+    # Phase 4 — chat-session referential integrity. Same class, different
+    # pointer: a row can still name a chat session SessionDB no longer has
+    # (deleted through a path that does not own the instance store, or scrubbed).
+    # The snapshot projection is READ-ONLY, so it can only hide the row and
+    # account a permanent ``session_not_in_db`` parity drop — one amber unit per
+    # orphan, forever. This is the write-path repair that retires them.
+    session_binding_repairs = store.repair_missing_chat_session_bindings(apply=apply)
+
     return {
         "applied": bool(apply),
         "actions": actions,
@@ -482,6 +495,10 @@ def reconcile_persona_instances(*, apply: bool = True, event_log: EventLog | Non
         "held_count": len(held_actions),
         "steering_repairs": steering_repairs["repaired"],
         "steering_repaired_count": steering_repairs["repaired_count"],
+        "session_binding_repairs": session_binding_repairs["repaired"],
+        "session_binding_repaired_count": session_binding_repairs["repaired_count"],
+        "session_binding_held": session_binding_repairs.get("held") or [],
+        "session_binding_skipped": session_binding_repairs.get("skipped"),
         "alias_count": len(aliases),
         "archive_dir": str(archive_dir) if apply and actions else None,
         "prune_archive_dir": str(prune_archive_dir) if apply and pruned_actions else None,

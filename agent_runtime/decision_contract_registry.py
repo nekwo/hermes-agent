@@ -1222,6 +1222,7 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "persona_instance.reaped": EventContract("persona_instance.reaped", "Stale persona instance reaped from the live graph", ("persona_instance_id", "reason"), ("task_id", "goal_id", "owner_state")),
     "persona_instance.reconciled": EventContract("persona_instance.reconciled", "Legacy-id persona instance row folded onto its canonical channel", ("persona_instance_id", "from_id", "to_id", "action"), ("persona_id",)),
     "persona_instance.pruned": EventContract("persona_instance.pruned", "Orphaned/legacy-role persona instance archived from the live graph", ("persona_instance_id", "reason"), ("persona_id", "role", "profile_id", "updated_at")),
+    "persona_instance.chat_binding_cleared": EventContract("persona_instance.chat_binding_cleared", "Persona instance unbound from a chat session (operator delete, or a binding whose session SessionDB no longer has)", ("persona_instance_id", "session_id", "reason"), ("persona_id", "cleared_fields", "mode_before", "mode_after")),
     "persona_instance.retired": EventContract("persona_instance.retired", "Placement-backed persona instance retired (end-of-life) to the archive on placement removal", ("persona_instance_id", "reason"), ("persona_id", "mode", "requested_by", "archive_dir")),
     "steer.requested": EventContract("steer.requested", "Steer requested", ("action_id", "verb", "source_node_id", "target_node_id"), ("requested_by", "reason")),
     "steer.started": EventContract("steer.started", "Steer started", ("action_id", "verb", "source_node_id", "target_node_id"), ("requested_by", "reason")),
@@ -1324,6 +1325,33 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "office.actor.conflict_resolved": EventContract("office.actor.conflict_resolved", "Office actor sync conflict resolved", ("workspace_id", "actor_key", "take"), ("revision",)),
     "blueprint.saved": EventContract("blueprint.saved", "Blueprint saved", ("blueprint_id",), ("version", "title")),
     "persona.updated": EventContract("persona.updated", "Persona updated", ("persona_id",), ("display_name",)),
+    # The persona ⇄ Hermes-profile rebind chokepoint
+    # (``persona_profile_binding.rebind_persona_profile``). ONE event per
+    # operation: it moves the persona authority through ``AgentStore.save`` AND
+    # cascades every ``persona_instance.profile_id`` projection, so the payload
+    # names each moved row (bounded; the overflow is accounted in
+    # ``instances_truncated``, never dropped silently). Deliberately NOT added to
+    # ``patch_coverage.COVERED_DOMAIN_EVENT_TYPES`` — a rebind batch must degrade
+    # to a full core, not ship a patch frame that folds nothing.
+    "persona.profile_rebound": EventContract(
+        "persona.profile_rebound",
+        "Persona rebound to a different Hermes profile",
+        ("persona_id", "from_profile", "to_profile"),
+        (
+            "actor",
+            "instance_count",
+            "instances",
+            "instances_truncated",
+            # Partial-apply accounting: the persona authority moved but these
+            # projection rows did not. Emitted ON the run that stranded them —
+            # the `_agent_*` placement rows have no self-heal, so this event is
+            # the only durable record that they need a retry.
+            "status",
+            "failed_count",
+            "failed",
+            "failed_truncated",
+        ),
+    ),
     # Synthetic watchdog event: appended by stream_frames when the scope/catalog
     # fingerprint changed while the EventLog offset did not — an event-less write
     # slipped the Stage 12 rule. Advances the watermark so gated consumers

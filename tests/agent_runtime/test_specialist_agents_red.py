@@ -72,8 +72,11 @@ def test_persona_records_from_config_support_collection_specialists_without_drop
 
 
 def test_specialist_agents_snapshot_is_collection_based_redaction_safe_and_repo_scoped(monkeypatch):
+    # _agent_summary sources readiness through the shared TTL-memoized
+    # _profile_readiness_for_visibility seam (one compute per agent per build),
+    # so stub that rather than the raw profile_readiness_for_persona.
     monkeypatch.setattr(
-        "agent_runtime.snapshot.profile_readiness_for_persona",
+        "agent_runtime.snapshot._profile_readiness_for_visibility",
         lambda persona: {
             "readiness": "ready",
             "summary": "ready",

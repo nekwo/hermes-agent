@@ -115,7 +115,9 @@ def _enable_root_node_mode(monkeypatch):
     # change); enable it for these root-node recorder tests.
     import agent_runtime.progress as progress
 
-    monkeypatch.setattr(progress, "load_agent_runtime_config", lambda *a, **k: AgentRuntimeConfig(root_node_mode=True))
+    # progress's root_node_mode gate is pinned to the ROOT config
+    # (load_root_runtime_config); patch that symbol to enable the recorder.
+    monkeypatch.setattr(progress, "load_root_runtime_config", lambda *a, **k: AgentRuntimeConfig(root_node_mode=True))
 
 
 def test_launcher_qa_screenshot_trace_records_proof(monkeypatch, tmp_path, isolate_agent_runtime_root):

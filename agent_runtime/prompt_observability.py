@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,7 +14,12 @@ from hermes_cli.profiles import get_profile_dir
 from utils import atomic_json_write
 
 from . import paths
-from .persona_assignments import safe_assignment_text, safe_assignment_token
+from .redaction import TEXT_SECRET_VALUE_ASSIGNMENT_RE
+from .persona_assignments import (
+    is_canonical_persona_channel,
+    safe_assignment_text,
+    safe_assignment_token,
+)
 from .serde import to_jsonable
 
 
@@ -122,11 +128,14 @@ def mission_chat_prompt_observability(
     workspace_agents: WorkspaceAgentsContext | None = None,
     mission_hud: dict[str, Any] | None = None,
     situational_hud: dict[str, Any] | None = None,
+    situational_hud_revision: str | None = None,
+    situational_hud_delivery: str | None = None,
     queued_skills: Iterable[str] | None = None,
     required_preload_skills: Iterable[str] | None = None,
     preloaded_skills_loaded: Iterable[str] | None = None,
     preloaded_skills_missing: Iterable[str] | None = None,
     instance_skill_overrides: Iterable[str] | None = None,
+    skill_resolver: "_SkillObservabilityResolver | None" = None,
 ) -> dict[str, Any]:
     """Build redaction-safe prompt/context observability for Mission Control.
 
@@ -184,18 +193,50 @@ def mission_chat_prompt_observability(
         )
     except Exception:
         skill_profile_context = nullcontext()
+    skill_resolver = skill_resolver or _SkillObservabilityResolver()
     with skill_profile_context:
-        accessible_skills = _accessible_skills_context(
-            persona,
+        skill_cache_key = (
             profile,
-            loaded_skill_names=set(loaded_names),
-            queued_skill_names=set(queued_names),
-            instance_override_names=override_names,
+            persona_id,
+            tuple(str(item) for item in (getattr(persona, "skills", None) or [])),
+            tuple(sorted(loaded_names)),
+            tuple(sorted(queued_names)),
+            tuple(sorted(override_names)),
         )
-        skill_assignment_removals = _persona_skill_assignment_removals(persona)
-        available_skills = available_skills_context(
-            accessible_skills=accessible_skills
-        )
+        cached_skill_rows = skill_resolver.skill_context(skill_cache_key)
+        if cached_skill_rows is None:
+            installed_names = [
+                safe_assignment_token(item.get("name"))
+                for item in _installed_skill_catalog()
+                if isinstance(item, dict) and safe_assignment_token(item.get("name"))
+            ]
+            skill_resolver.resolve([
+                *installed_names,
+                *(getattr(persona, "skills", None) or []),
+            ])
+            accessible_skills = _accessible_skills_context(
+                persona,
+                profile,
+                loaded_skill_names=set(loaded_names),
+                queued_skill_names=set(queued_names),
+                instance_override_names=override_names,
+                skill_resolver=skill_resolver,
+            )
+            skill_assignment_removals = _persona_skill_assignment_removals(persona)
+            available_skills = available_skills_context(
+                accessible_skills=accessible_skills,
+                skill_resolver=skill_resolver,
+            )
+            skill_resolver.remember_skill_context(
+                skill_cache_key,
+                accessible_skills=accessible_skills,
+                available_skills=available_skills,
+                assignment_removals=skill_assignment_removals,
+            )
+        else:
+            accessible_skills, available_skills, skill_assignment_removals = (
+                cached_skill_rows
+            )
         used_skills = used_skills_context(
             final_model_input=final_model_input,
             trace_events=trace_events,
@@ -217,14 +258,19 @@ def mission_chat_prompt_observability(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
-    # T8 per-item in-prompt attribution — the parts reachable at THIS pre-turn
-    # seam (T5 made the surface-message parts explicit). The persona-identity
-    # layer counts the identity+rules TEMPLATE only (soul/memory ride file rows);
+    # Per-item in-prompt attribution — the parts reachable at THIS pre-turn
+    # seam. Runtime identity and operator-channel rules are separate typed
+    # layers; soul/memory continue to ride their provenance file rows so token
+    # accounting has one owner and never double-counts.
     # SOUL.md / workspace-AGENTS.md rows get their pasted-part chars; config.yaml
     # gets a deliberate 0. .skills_prompt_snapshot.json is attached post-turn.
-    persona_template_chars = _mission_chat_template_prompt_chars(persona)
+    runtime_identity_chars = _mission_chat_identity_prompt_chars(persona)
+    operator_rules_chars = _mission_chat_operative_rules_chars()
+    runtime_identity_content = _mission_chat_identity_prompt_content(persona)
+    operator_rules_content = _mission_chat_operative_rules_content()
     soul_prompt_chars = _soul_overlay_prompt_chars(persona)
     workspace_prompt_chars = _workspace_agents_prompt_chars(workspace_agents)
+    memory_loaded = _mission_chat_memory_loaded(persona)
     context_files: list[dict[str, Any]] = [
         *_profile_context_files(profile),
         *([workspace_agents.receipt] if workspace_agents is not None else []),
@@ -233,14 +279,18 @@ def mission_chat_prompt_observability(
         context_files,
         soul_chars=soul_prompt_chars,
         workspace_chars=workspace_prompt_chars,
+        memory_loaded=memory_loaded,
     )
+    soul_row = next((row for row in context_files if row.get("name") == "SOUL.md"), None)
+    soul_loaded = soul_prompt_chars is not None
+    display_name = safe_assignment_text(getattr(persona, "display_name", None), limit=120) or persona_id
     return {
         "context_id": context_id,
         "prompt_mode": prompt_mode,
         "persona_id": persona_id,
         "persona_instance_id": safe_assignment_token(persona_instance_id),
         "profile": profile,
-        "display_name": safe_assignment_text(getattr(persona, "display_name", None), limit=120) or persona_id,
+        "display_name": display_name,
         "role": safe_assignment_token(getattr(persona, "role", None)) or "agent",
         "session_id": safe_assignment_text(session_id, limit=200),
         "chat_id": chat.get("id"),
@@ -259,74 +309,108 @@ def mission_chat_prompt_observability(
         # and agent share one view. Empty until threaded (snapshot path); the
         # chat lane feeds the same projection into the model. See runtime_hud.py.
         "situational_hud": situational_hud if isinstance(situational_hud, dict) else {},
+        "situational_hud_revision": safe_assignment_token(situational_hud_revision),
+        "situational_hud_delivery": safe_assignment_token(situational_hud_delivery),
         "workspace_id": safe_assignment_token(workspace_id),
         "workspace_name": safe_assignment_text(workspace_name, limit=120),
         "turn_id": safe_assignment_token(turn_id),
         "surface_prompt": surface,
         "surface_prompt_is_blank": surface == "",
         "limiting_wrapper_active": bool(limiting_wrapper_active),
+        "prompt_stack_schema_version": 2,
         "prompt_layers": [
-            {
-                "name": "Persona identity",
-                "kind": "persona_identity",
-                "status": "loaded",
-                "summary": (
-                    "First-person 'you are "
-                    + (safe_assignment_text(getattr(persona, "display_name", None), limit=120) or persona_id)
-                    + "' identity block. The persona's OWN configured soul overlay "
-                    "(config soul_overlay_path, resolved in its profile home) IS "
-                    "loaded since hermes deafb825e; the OPERATOR profile's SOUL is "
-                    "not. Names the persona and forbids self-relay. The per-layer "
-                    "estimate counts the identity + operative-rules TEMPLATE only; "
-                    "the soul overlay and any profile memory are attributed to "
-                    "their own SOUL.md / MEMORY.md / USER.md rows so nothing is "
-                    "double-counted (T8, 2026-07-18)."
-                ),
-                # T8: the identity + operative-rules TEMPLATE is measurable at the
-                # T5 surface-message seam, so this layer now carries its own
-                # per-layer estimate (template only). system_core text is still
-                # assembled later in the turn and folds into the residual; the
-                # soul overlay / memory ride their file rows (never double-counted
-                # — the launcher sums this non-mirror layer AND those file rows).
-                **(
-                    {
-                        "chars": persona_template_chars,
-                        "token_estimate": persona_template_chars // 4,
-                    }
-                    if persona_template_chars is not None
-                    else {}
-                ),
-            },
             {
                 "name": "Hermes core prompt",
                 "kind": "system_core",
                 "status": "loaded_by_profile_runner",
-                "summary": "Normal Hermes profile chat system stack.",
+                "summary": "Universal Hermes identity fallback, tool guidance, skills index, environment guidance, and model/session metadata.",
+                "owner": "hermes",
+                "group": "hermes_core",
+                "order": 10,
+                "injection_location": "system_stable",
+                "included": True,
+                "token_attribution": "residual",
             },
             {
-                "name": "Mission Control surface prompt",
-                "kind": "surface",
-                "status": "blank" if surface == "" else "configured",
-                "summary": "Blank by default; no limiting wrapper is applied.",
-                "preview": surface[:SAFE_PREVIEW_LIMIT],
-                **_layer_text_size(surface),
-            },
-            {
-                "name": "Profile memory",
-                "kind": "profile_context",
-                "status": "loaded" if _mission_chat_memory_loaded(persona) else "skipped",
-                "summary": (
-                    "Profile MEMORY.md / USER.md loaded (persona opts in via include_profile_memory)."
-                    if _mission_chat_memory_loaded(persona)
-                    else "Profile memory skipped; this persona does not opt into its bound profile's memory."
+                "name": "Runtime identity",
+                "kind": "runtime_identity",
+                "status": "loaded",
+                "summary": f"Identifies this channel as {display_name}, names its Mission Control persona id, and prevents self-relay.",
+                "owner": "mission_control",
+                "group": "mission_control_persona",
+                "order": 20,
+                "injection_location": "system_context",
+                "included": True,
+                "token_attribution": "direct",
+                **(
+                    {"content": runtime_identity_content}
+                    if runtime_identity_content is not None
+                    else {}
                 ),
-                # Its bytes are attributed via the MEMORY.md / USER.md context-file
-                # rows; no per-layer estimate here so the launcher never double-counts.
+                **(
+                    {
+                        "chars": runtime_identity_chars,
+                        "token_estimate": runtime_identity_chars // 4,
+                    }
+                    if runtime_identity_chars is not None
+                    else {}
+                ),
+            },
+            {
+                "name": "Profile SOUL",
+                "kind": "profile_soul",
+                "status": "loaded" if soul_loaded else "not_configured",
+                "summary": (
+                    f"Durable identity and voice from the {profile} Hermes profile."
+                    if soul_loaded
+                    else f"No SOUL overlay resolved for the {profile} Hermes profile."
+                ),
+                "owner": "profile",
+                "group": "mission_control_persona",
+                "order": 30,
+                "injection_location": "system_context",
+                "included": soul_loaded,
+                "token_attribution": "context_file",
+                "source_context_file": "SOUL.md",
+                **(
+                    {
+                        "source_path": soul_row.get("path"),
+                        "source_sha256": soul_row.get("sha256"),
+                        "source_prompt_token_estimate": soul_prompt_chars // 4,
+                    }
+                    if soul_loaded and isinstance(soul_row, dict)
+                    else {}
+                ),
+            },
+            {
+                "name": "Operator-channel rules",
+                "kind": "operator_channel_rules",
+                "status": "loaded",
+                "summary": "Mission Control behavior for real tool use, permissions, clarification, goals, agent threads, and anti-fabrication.",
+                "owner": "mission_control",
+                "group": "mission_control_persona",
+                "order": 40,
+                "injection_location": "system_context",
+                "included": True,
+                "token_attribution": "direct",
+                **(
+                    {"content": operator_rules_content}
+                    if operator_rules_content is not None
+                    else {}
+                ),
+                **(
+                    {
+                        "chars": operator_rules_chars,
+                        "token_estimate": operator_rules_chars // 4,
+                    }
+                    if operator_rules_chars is not None
+                    else {}
+                ),
             },
             *(
                 [
                     {
-                        "name": "Workspace AGENTS.md",
+                        "name": "Workspace instructions",
                         "kind": "workspace_context",
                         "status": workspace_agents.receipt.get("status", "unknown"),
                         "summary": (
@@ -334,35 +418,85 @@ def mission_chat_prompt_observability(
                             if workspace_agents.content is not None
                             else "Workspace instructions were not injected; see the file receipt."
                         ),
+                        "owner": "workspace",
+                        "group": "session_context",
+                        "order": 50,
+                        "injection_location": "system_context",
+                        "included": workspace_agents.content is not None,
+                        "token_attribution": "context_file",
+                        "source_context_file": "AGENTS.md",
+                        "source_path": workspace_agents.receipt.get("path"),
+                        "source_sha256": workspace_agents.receipt.get("sha256"),
                         # Its bytes are attributed via the AGENTS.md context-file
-                        # row (which carries the token_estimate), so this layer
-                        # deliberately carries no per-layer estimate — no double count.
+                        # row, so this layer deliberately carries no estimate.
                     }
                 ]
                 if workspace_agents is not None
                 else []
             ),
             {
+                "name": "Session surface override",
+                "kind": "surface",
+                "status": "blank" if surface == "" else "configured",
+                "summary": (
+                    "No per-session override is configured; the standard persona and channel rules apply."
+                    if surface == ""
+                    else "Additional session-specific instructions supplied by the Mission Control surface."
+                ),
+                "owner": "mission_control",
+                "group": "session_context",
+                "order": 60,
+                "injection_location": "system_context",
+                "included": surface != "",
+                "token_attribution": "direct",
+                "preview": surface[:SAFE_PREVIEW_LIMIT],
+                **_layer_text_size(surface),
+            },
+            {
+                "name": "Profile memory",
+                "kind": "profile_context",
+                "status": "loaded" if memory_loaded else "skipped",
+                "summary": (
+                    "Profile MEMORY.md / USER.md loaded (persona opts in via include_profile_memory)."
+                    if memory_loaded
+                    else "Profile memory skipped; this persona does not opt into its bound profile's memory."
+                ),
+                "owner": "profile",
+                "group": "profile_context",
+                "order": 70,
+                "injection_location": "system_volatile",
+                "included": memory_loaded,
+                "token_attribution": "context_file",
+                # Its bytes are attributed via the MEMORY.md / USER.md context-file
+                # rows; no per-layer estimate here so the launcher never double-counts.
+            },
+            {
                 "name": "Chat history context",
                 "kind": "conversation",
                 "status": "loaded" if history else "empty",
                 "summary": f"{len(history)} prior redaction-safe chat message(s) supplied before this turn.",
+                "owner": "conversation",
+                "group": "runtime_context",
+                "order": 80,
+                "injection_location": "conversation_history",
+                "included": bool(history),
+                "token_attribution": "history_rows",
             },
             {
                 "name": "Runtime Situation HUD",
                 "kind": "situational_hud",
                 "status": "loaded" if (isinstance(situational_hud, dict) and situational_hud) else "empty",
                 "summary": (
-                    "Runtime situational HUD (runtime · scope · mission · lane · "
-                    "roster) injected as per-turn context on the operator's user "
-                    "turn — NOT the system prompt. Its roster/scope/mission state "
-                    "rotates every turn, so keeping it out of the codex "
-                    "instructions preserves the byte-stable cross-turn "
-                    "prompt-cache prefix (T5, 2026-07-18)."
+                    "Live runtime, scope, mission, lane, and roster state added to the operator's user turn."
                     if (isinstance(situational_hud, dict) and situational_hud)
-                    else "No runtime situational HUD resolved for this lane this "
-                    "turn; nothing injected."
+                    else "No runtime situation resolved for this turn."
                 ),
+                "owner": "mission_control",
+                "group": "runtime_context",
+                "order": 90,
+                "injection_location": "user_turn",
+                "included": bool(isinstance(situational_hud, dict) and situational_hud),
+                "token_attribution": "final_model_input",
                 # Its bytes ride in the operator user-turn message
                 # (``final_model_input`` messages), so this layer carries no
                 # per-layer token estimate — the launcher already counts them via
@@ -399,10 +533,12 @@ def mission_chat_prompt_observability(
         "prompt_flags": {
             "skip_context_files": not bool(getattr(persona, "include_core_context_files", False)),
             "skip_memory": not _mission_chat_memory_loaded(persona),
-            # The isolated chat lane runs with skip_context_files=True and never
-            # sets load_soul_identity, so the profile SOUL is NOT the identity —
-            # the first-person persona-identity layer is. Report that honestly.
+            # Legacy profile-runner flag: this lane does not ask Hermes core to
+            # substitute SOUL as its base identity. The independently assembled
+            # profile_soul layer below is the authoritative overlay signal.
             "load_soul_identity": False,
+            "soul_overlay_loaded": soul_loaded,
+            "profile_memory_loaded": memory_loaded,
             "surface_prompt_blank": surface == "",
             "limiting_wrapper_active": bool(limiting_wrapper_active),
             "workspace_agents_injected": bool(
@@ -493,6 +629,8 @@ CHAT_FINAL_OBSERVABILITY_FIELDS: tuple[str, ...] = (
     "model_selection",
     "context_budget",
     "situational_hud",
+    "situational_hud_revision",
+    "situational_hud_delivery",
     "used_skills",
 )
 
@@ -685,6 +823,13 @@ def _final_model_input_stub(final_model_input: dict[str, Any], context_id: Any) 
         # only one-way fingerprints. Keep it in the frame stub so operators can
         # compare a cold turn with adjacent warm turns without a disk fetch.
         stub["cache_routing"] = cache_routing
+    sections = _safe_system_prompt_sections(
+        final_model_input.get("system_prompt_sections")
+    )
+    if sections:
+        # Tiny address metadata only. The actual prompt remains evicted and is
+        # fetched on demand when the operator opens a section.
+        stub["system_prompt_sections"] = sections
     return stub
 
 
@@ -734,10 +879,14 @@ def snapshot_prompt_observability(
     daemon: dict[str, Any] | None = None,
     realm: str | None = None,
     workspace: str | None = None,
+    active_workspace_id: str | None = None,
+    catalog_sink: dict[str, list[dict[str, Any]]] | None = None,
+    skill_resolver: "_SkillObservabilityResolver | None" = None,
 ) -> dict[str, Any]:
     # Deferred import: context_builder pulls a large dependency graph, and this
     # module is imported very early. A function-local import keeps module load
     # order robust while still giving the preview a single-authority HUD builder.
+    from . import workspace_scope
     from .context_builder import mission_hud_preview
     from .runtime_hud import resolve_situational_hud
 
@@ -764,12 +913,29 @@ def snapshot_prompt_observability(
     def _situational_for(instance: Any, task_id: str | None) -> dict[str, Any]:
         try:
             goal_id = getattr(instance, "goal_id", None)
+            # Scope the ADDRESSABLE roster to this lane's own workspace so the
+            # recorded snapshot advertises the exact same "On level" set the
+            # live mission-chat turn feeds — a placement in another workspace
+            # must not appear here, runtime-global canonical plumbing rows are
+            # excluded (instance = in-level placement), and a surviving
+            # canonical row shadowed by an in-scope placement is dropped too
+            # (parity envelope). Identity (steering) resolves against the full,
+            # unscoped roster, matching the HUD wrapper.
+            scope_workspace_id = workspace_scope.effective_workspace_id(
+                instance, active_workspace_id=active_workspace_id
+            )
+            scoped_roster = workspace_scope.addressable_roster(
+                roster,
+                scope_workspace_id=scope_workspace_id,
+                is_canonical=is_canonical_persona_channel,
+            )
             return resolve_situational_hud(
                 instance,
                 daemon=daemon,
                 realm=realm,
                 workspace=workspace,
-                roster=roster,
+                roster=scoped_roster,
+                identity_roster=roster,
                 task=tasks_by_id.get(safe_assignment_token(task_id) or ""),
                 goal_task=tasks_by_id.get(safe_assignment_token(goal_id) or ""),
                 proof_store=proof_store,
@@ -780,6 +946,12 @@ def snapshot_prompt_observability(
             return {}
 
     contexts: list[dict[str, Any]] = []
+    # One build-scoped resolver owns filesystem skill discovery + package hashes
+    # for every projected persona.  The active profile context is part of its
+    # cache key, so profile-specific roots never bleed into another persona,
+    # while the normal shared-install case pays one registry walk for the whole
+    # snapshot instead of one recursive walk per skill, per persona.
+    skill_resolver = skill_resolver or _SkillObservabilityResolver()
     by_persona = {
         safe_assignment_token(getattr(persona, "id", None)): persona
         for persona in personas
@@ -811,6 +983,7 @@ def snapshot_prompt_observability(
                     if getattr(instance, "skill_overrides", None) is not None
                     else None
                 ),
+                skill_resolver=skill_resolver,
             )
         )
     if not contexts:
@@ -823,6 +996,7 @@ def snapshot_prompt_observability(
                         surface_prompt="",
                         limiting_wrapper_active=False,
                         session_db=session_db,
+                        skill_resolver=skill_resolver,
                     )
                 )
                 break
@@ -871,6 +1045,14 @@ def snapshot_prompt_observability(
     # RULING-0: no inline legacy fallback).
     skills_catalogs: dict[str, Any] = {}
     _hoist_skills_catalogs(chat_contexts, skills_catalogs)
+    # The steady-state frame still carries hashes only.  The explicit
+    # ``skills catalog --hash`` detail fetch may provide a sink to capture the
+    # exact bodies from this same projection and materialize its immutable
+    # cache on demand.  A normal snapshot passes no sink and remains write-free.
+    if catalog_sink is not None:
+        for ref, rows in skills_catalogs.items():
+            if isinstance(rows, list):
+                catalog_sink.setdefault(ref, to_jsonable(rows))
     _evict_final_model_input(chat_contexts)
     # C1: ref-shaped persisted rows reach the frame already carrying their
     # ``*_ref`` hashes (no inline lists for the hoist to fold) — the frame's
@@ -942,10 +1124,13 @@ def skills_catalog_by_hash(content_hash: str) -> list[dict[str, Any]] | None:
     (``prompt_observability_catalogs/<hash>.json``) and read back directly. The
     pre-C1 walk over the newest persisted rows remains as the LEGACY-ROW
     fallback — rows persisted before the store existed still carry inline lists
-    (archive-never-delete means they exist) and still resolve. Read-only: the
-    store is written only by the persist chokepoint. Returns ``None`` on an
-    honest miss (the launcher renders a pending state and retries next frame),
-    never a fake empty catalog."""
+    (archive-never-delete means they exist) and still resolve. A configured
+    agent can have a freshly projected prompt context before its first persisted
+    chat row; on that final miss the explicit detail fetch rebuilds the live
+    projection once and materializes its immutable catalog bodies. Ordinary
+    snapshot reads remain write-free. Returns ``None`` on an honest miss (the
+    launcher renders a pending state and retries next frame), never a fake empty
+    catalog."""
 
     token = str(content_hash or "").strip()
     if not token:
@@ -960,7 +1145,34 @@ def skills_catalog_by_hash(content_hash: str) -> list[dict[str, Any]] | None:
             value = row.get(field)
             if isinstance(value, list) and _skills_list_content_hash(value) == token:
                 return value
-    return None
+    live_catalogs = _materialize_live_skills_catalogs()
+    value = live_catalogs.get(token)
+    return value if isinstance(value, list) else None
+
+
+def _materialize_live_skills_catalogs() -> dict[str, list[dict[str, Any]]]:
+    """Capture and cache the current live projection's immutable catalogs.
+
+    This runs only behind the explicit on-demand detail verb after the O(1)
+    store and legacy-row reads miss.  Capturing through ``build_snapshot``
+    guarantees that every body is byte-identical to the hash the live frame
+    advertised; caching all captured bodies makes a second hash from the same
+    dialog an immediate store hit.
+    """
+
+    catalogs: dict[str, list[dict[str, Any]]] = {}
+    try:
+        from .snapshot import build_snapshot
+
+        build_snapshot(prompt_skills_catalogs=catalogs)
+    except Exception:
+        return {}
+    verified: dict[str, list[dict[str, Any]]] = {}
+    for ref, rows in catalogs.items():
+        if isinstance(rows, list) and _skills_list_content_hash(rows) == ref:
+            _store_skills_catalog(ref, rows)
+            verified[ref] = rows
+    return verified
 
 
 def load_skills_catalog_from_store(content_hash: str) -> list[dict[str, Any]] | None:
@@ -1850,6 +2062,124 @@ def _profile_snapshot_skill_names(profile: str) -> list[str]:
     return names
 
 
+class _SkillObservabilityResolver:
+    """Build-scoped skill registry + content-receipt cache.
+
+    ``resolve_skill`` intentionally performs an exhaustive collision-safe walk.
+    Calling it in a nested persona×skill loop turned one snapshot into hundreds
+    of recursive walks.  This resolver preserves the exact same authoritative
+    resolver semantics through ``resolve_skills`` while batching every name
+    known for one effective root set.  A different profile/root set gets an
+    isolated registry entry; package hashes are memoized only for this build.
+    """
+
+    def __init__(self) -> None:
+        self._resolutions_by_roots: dict[tuple[str, ...], dict[str, Any]] = {}
+        self._hashes: dict[tuple[str, str], str | None] = {}
+        self._skill_contexts: dict[
+            tuple[Any, ...],
+            tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]],
+        ] = {}
+        self._shared_catalog: dict[str, dict[str, Any]] | None = None
+        self._realm_rows: list[dict[str, Any]] | None = None
+
+    def skill_context(
+        self, key: tuple[Any, ...]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]] | None:
+        return self._skill_contexts.get(key)
+
+    def remember_skill_context(
+        self,
+        key: tuple[Any, ...],
+        *,
+        accessible_skills: list[dict[str, Any]],
+        available_skills: list[dict[str, Any]],
+        assignment_removals: list[str],
+    ) -> None:
+        self._skill_contexts[key] = (
+            accessible_skills,
+            available_skills,
+            assignment_removals,
+        )
+
+    def shared_catalog(self) -> dict[str, dict[str, Any]]:
+        """Build-scoped ``{slug: catalog_row}`` for the canonical shared skills
+        root.  ``build_shared_catalog`` walks + content-hashes every shared skill;
+        without this memo it re-ran once per projected persona (measured 12× per
+        build, 2026-07-23).  Read-only for callers — the same dict is shared."""
+        if self._shared_catalog is None:
+            catalog: list[dict[str, Any]] = []
+            try:
+                from .skills_inventory import build_shared_catalog
+
+                _, _, catalog = build_shared_catalog()
+            except Exception:
+                catalog = []
+            self._shared_catalog = {
+                str(item.get("slug") or ""): item
+                for item in catalog
+                if isinstance(item, dict)
+            }
+        return self._shared_catalog
+
+    def realm_publish_states(self) -> list[dict[str, Any]]:
+        """Build-scoped realm publish/drift rows.  ``build_realm_publish_states``
+        also re-ran once per projected persona; memoize it for the build."""
+        if self._realm_rows is None:
+            try:
+                from .skills_inventory import build_realm_publish_states
+
+                self._realm_rows = build_realm_publish_states()
+            except Exception:
+                self._realm_rows = []
+        return self._realm_rows
+
+    def resolve(self, identifiers: Iterable[str]) -> dict[str, Any]:
+        from agent.skill_utils import get_all_skills_dirs, resolve_skills
+
+        names = list(
+            dict.fromkeys(
+                str(item or "").strip() for item in identifiers if str(item or "").strip()
+            )
+        )
+        if not names:
+            return {}
+        roots = list(get_all_skills_dirs())
+        root_key = tuple(str(root.resolve()) for root in roots)
+        cached = self._resolutions_by_roots.get(root_key, {})
+        if root_key not in self._resolutions_by_roots:
+            names = list(dict.fromkeys([
+                *names,
+                *(
+                    safe_assignment_token(item.get("name"))
+                    for item in _installed_skill_catalog()
+                    if isinstance(item, dict)
+                    and safe_assignment_token(item.get("name"))
+                ),
+            ]))
+        missing = [name for name in names if name not in cached]
+        if missing:
+            # Rebuild the root-local registry for the union.  This stays one
+            # filesystem walk and keeps collision results deterministic if a
+            # later persona introduces a name absent from the first subset.
+            requested = list(dict.fromkeys([*cached.keys(), *missing]))
+            cached = resolve_skills(requested, roots=roots)
+            self._resolutions_by_roots[root_key] = cached
+        return {name: cached[name] for name in names if name in cached}
+
+    def content_hash(self, candidate: Any | None) -> str | None:
+        if candidate is None:
+            return None
+        from agent.skill_utils import skill_package_content_hash
+
+        key = (str(candidate.skill_dir or ""), str(candidate.skill_md))
+        if key not in self._hashes:
+            self._hashes[key] = skill_package_content_hash(
+                candidate.skill_dir, candidate.skill_md
+            )
+        return self._hashes[key]
+
+
 def _accessible_skills_context(
     persona: Any,
     profile: str,
@@ -1857,6 +2187,7 @@ def _accessible_skills_context(
     loaded_skill_names: set[str] | None = None,
     queued_skill_names: set[str] | None = None,
     instance_override_names: set[str] | None = None,
+    skill_resolver: _SkillObservabilityResolver | None = None,
 ) -> list[dict[str, Any]]:
     """Redaction-safe list of skills accessible to this persona/profile.
 
@@ -1916,8 +2247,7 @@ def _accessible_skills_context(
     except Exception:
         pass
     from agent.skill_utils import (
-        resolve_skill,
-        skill_package_content_hash,
+        resolve_skills,
         skill_runtime_compatibility,
     )
 
@@ -1925,9 +2255,17 @@ def _accessible_skills_context(
     loaded_skill_names = loaded_skill_names or set()
     queued_skill_names = queued_skill_names or set()
     instance_override_names = instance_override_names or set()
-    for name in declared[:80]:
+    bounded_declared = declared[:80]
+    resolutions = (
+        skill_resolver.resolve(bounded_declared)
+        if skill_resolver is not None
+        else resolve_skills(bounded_declared)
+    )
+    for name in bounded_declared:
         token = safe_assignment_token(name) or name
-        resolution = resolve_skill(name)
+        resolution = resolutions.get(name)
+        if resolution is None:
+            continue
         selected = resolution.candidate
         compatibility = skill_runtime_compatibility(
             selected, surface="mission_chat", root_node_mode=False
@@ -1953,9 +2291,9 @@ def _accessible_skills_context(
         else:
             status = load_state
         content_hash = (
-            skill_package_content_hash(selected.skill_dir, selected.skill_md)
-            if selected
-            else None
+            skill_resolver.content_hash(selected)
+            if skill_resolver is not None
+            else _skill_candidate_content_hash(selected)
         )
         skills.append(
             {
@@ -2058,6 +2396,7 @@ def available_skills_context(
     *,
     accessible_skills: list[dict[str, Any]] | None = None,
     limit: int = 160,
+    skill_resolver: _SkillObservabilityResolver | None = None,
 ) -> list[dict[str, Any]]:
     """Redaction-safe installed skill catalog for Mission Control.
 
@@ -2073,22 +2412,28 @@ def available_skills_context(
     rows: list[dict[str, Any]] = []
     shared_by_name: dict[str, dict[str, Any]] = {}
     realm_rows: list[dict[str, Any]] = []
-    try:
-        from .skills_inventory import build_realm_publish_states, build_shared_catalog
+    if skill_resolver is not None:
+        # Hoisted to once-per-build: the build-scoped resolver memoizes both
+        # walks, so every projected persona shares one shared-catalog walk + one
+        # realm publish-state read instead of repeating both per persona.
+        shared_by_name = skill_resolver.shared_catalog()
+        realm_rows = skill_resolver.realm_publish_states()
+    else:
+        try:
+            from .skills_inventory import build_realm_publish_states, build_shared_catalog
 
-        _, _, catalog = build_shared_catalog()
-        shared_by_name = {
-            str(item.get("slug") or ""): item
-            for item in catalog
-            if isinstance(item, dict)
-        }
-        realm_rows = build_realm_publish_states()
-    except Exception:
-        pass
+            _, _, catalog = build_shared_catalog()
+            shared_by_name = {
+                str(item.get("slug") or ""): item
+                for item in catalog
+                if isinstance(item, dict)
+            }
+            realm_rows = build_realm_publish_states()
+        except Exception:
+            pass
     installed = _installed_skill_catalog()
     from agent.skill_utils import (
         resolve_skills,
-        skill_package_content_hash,
         skill_runtime_compatibility,
     )
 
@@ -2097,7 +2442,11 @@ def available_skills_context(
         for item in installed
         if isinstance(item, dict) and safe_assignment_token(item.get("name"))
     ]
-    resolutions = resolve_skills(installed_names)
+    resolutions = (
+        skill_resolver.resolve(installed_names)
+        if skill_resolver is not None
+        else resolve_skills(installed_names)
+    )
     if isinstance(installed, list):
         for skill in installed:
             if not isinstance(skill, dict):
@@ -2118,11 +2467,28 @@ def available_skills_context(
             )
             shared = shared_by_name.get(name)
             realm_sync = _skill_realm_sync(name, realm_rows) if shared else []
-            content_hash = (
-                skill_package_content_hash(selected.skill_dir, selected.skill_md)
-                if selected
-                else None
+            # A skill resolved from a profile-local / external root is
+            # STRUCTURALLY unable to reach a realm — realm publish reads the
+            # shared root only. Such a row previously carried an empty
+            # ``realm_sync`` list, which reads as "no realms configured" rather
+            # than "cannot travel": a silent omission. Say it, with a typed
+            # reason. Only the CHEAP source-kind verdict is computed here; the
+            # installer-ownership / promotability classification hashes package
+            # trees and belongs to the on-demand ``skills inventory`` /
+            # ``skills publishable`` surfaces, never this per-persona build.
+            publishable, publishable_reason = _skill_publishability(
+                selected.source_kind if selected else None
             )
+            # Assigned rows already carry their resolver receipt; canonical
+            # shared rows reuse the shared catalog's content hash. Avoid hashing
+            # every unassigned profile-local package during every snapshot.
+            content_hash = (
+                accessible.get("content_hash")
+                if accessible
+                else shared.get("content_hash") if shared else None
+            )
+            if content_hash is None and skill_resolver is None:
+                content_hash = _skill_candidate_content_hash(selected)
             rows.append(
                 {
                     "name": name,
@@ -2150,6 +2516,8 @@ def available_skills_context(
                     ),
                     "realm_sync": realm_sync,
                     "shared_catalog": shared is not None,
+                    "publishable": publishable,
+                    "publishable_reason": publishable_reason,
                     "compatibility": compatibility,
                 }
             )
@@ -2178,6 +2546,35 @@ def available_skills_context(
         if len(deduped) >= limit:
             break
     return deduped
+
+
+def _skill_publishability(source_kind: str | None) -> tuple[bool, str]:
+    """``(publishable, typed_reason)`` for one resolved skill's source root.
+
+    Delegates the vocabulary to :mod:`agent_runtime.skill_publishability` so
+    this row and the ``skills_inventory/v1`` rows can never disagree about what
+    "publishable" means. An UNRESOLVED skill (no candidate) is reported as
+    not publishable with an explicit ``unresolved`` reason rather than being
+    silently defaulted either way.
+    """
+
+    from .skill_publishability import (
+        REASON_EXTERNAL_DIR_ONLY,
+        REASON_PROFILE_LOCAL_ONLY,
+        REASON_SHARED_ROOT,
+        REASON_UNKNOWN_ROOT,
+    )
+
+    if source_kind is None:
+        return False, "unresolved"
+    return (
+        source_kind == "shared_core",
+        {
+            "shared_core": REASON_SHARED_ROOT,
+            "profile_local": REASON_PROFILE_LOCAL_ONLY,
+            "external": REASON_EXTERNAL_DIR_ONLY,
+        }.get(source_kind, REASON_UNKNOWN_ROOT),
+    )
 
 
 def _skill_realm_sync(
@@ -2281,6 +2678,14 @@ def _resolved_skill_receipt(name: str) -> dict[str, Any]:
         "content_hash": content_hash,
         "hash_tracked": content_hash is not None,
     }
+
+
+def _skill_candidate_content_hash(candidate: Any | None) -> str | None:
+    if candidate is None:
+        return None
+    from agent.skill_utils import skill_package_content_hash
+
+    return skill_package_content_hash(candidate.skill_dir, candidate.skill_md)
 
 
 def _generated_prompt_contract_hash() -> str:
@@ -2423,7 +2828,7 @@ def _layer_text_size(text: str | None) -> dict[str, int]:
     """``{chars, token_estimate}`` for a prompt-layer's actual text.
 
     Returns an EMPTY dict when the layer's text is not available at this seam
-    (e.g. the persona-identity / Hermes-core blocks are assembled later in the
+    (e.g. the Hermes-core block is assembled later in the
     turn) — the launcher then attributes those layers to the residual instead of
     inventing a number. A present-but-empty layer (a blank surface prompt) is a
     real ``0``, distinct from absent.
@@ -2465,12 +2870,9 @@ def _soul_overlay_prompt_chars(persona: Any) -> int | None:
     SOUL.md row's in-prompt number is exact, not a re-derivation."""
 
     try:
-        from .persona_runtime import _safe_read_soul_overlay
+        from .persona_runtime import _mission_chat_soul_overlay
 
-        soul = _safe_read_soul_overlay(
-            getattr(persona, "soul_overlay_path", None),
-            hermes_profile=getattr(persona, "hermes_profile", None),
-        )
+        soul = _mission_chat_soul_overlay(persona)
         return len(soul) if isinstance(soul, str) and soul else None
     except Exception:
         return None
@@ -2496,14 +2898,15 @@ def _workspace_agents_prompt_chars(
 
 
 def _mission_chat_template_prompt_chars(persona: Any) -> int | None:
-    """Chars of the persona-identity + operative-rules TEMPLATE fed into the
+    """Compatibility helper for runtime-identity + operative-rules characters.
+
+    Returns the combined size of those two independently reported layers,
+    excluding the profile SOUL and memory context-file rows. Retained for
+    callers that predate prompt-stack schema v2.
+
+    The two blocks are fed into the
     surface message (the codex ``instructions``), EXCLUDING the soul overlay and
-    any profile memory — those ride their own file rows. This is the
-    ``persona_identity`` prompt layer's own contribution: the launcher resolver
-    sums it as a non-mirror layer, so it MUST be template-only or it would
-    double-count the SOUL.md / MEMORY.md / USER.md rows. Reachable because T5
-    made the surface-message parts explicit. ``None`` on any failure (the layer
-    then folds into the residual, as before)."""
+    any profile memory — those ride their own file rows. ``None`` on failure."""
 
     try:
         from .persona_runtime import (
@@ -2518,19 +2921,64 @@ def _mission_chat_template_prompt_chars(persona: Any) -> int | None:
         return None
 
 
+def _mission_chat_identity_prompt_chars(persona: Any) -> int | None:
+    """Exact chars of the generated Mission Control runtime-identity block."""
+
+    try:
+        from .persona_runtime import _mission_chat_identity_prompt
+
+        return len(_mission_chat_identity_prompt(persona))
+    except Exception:
+        return None
+
+
+def _mission_chat_identity_prompt_content(persona: Any) -> str | None:
+    """Captured text of the generated Mission Control identity layer."""
+
+    try:
+        from .persona_runtime import _mission_chat_identity_prompt
+
+        return _mission_chat_identity_prompt(persona)
+    except Exception:
+        return None
+
+
+def _mission_chat_operative_rules_chars() -> int | None:
+    """Exact chars of the stable Mission Control operator-channel rules."""
+
+    try:
+        from .persona_runtime import _mission_chat_operative_rules
+
+        return len(_mission_chat_operative_rules())
+    except Exception:
+        return None
+
+
+def _mission_chat_operative_rules_content() -> str | None:
+    """Captured text of the stable Mission Control channel-rules layer."""
+
+    try:
+        from .persona_runtime import _mission_chat_operative_rules
+
+        return _mission_chat_operative_rules()
+    except Exception:
+        return None
+
+
 def _attach_context_file_prompt_contributions(
     context_files: list[dict[str, Any]],
     *,
     soul_chars: int | None,
     workspace_chars: int | None,
+    memory_loaded: bool = False,
 ) -> None:
     """Attach the per-file in-prompt contribution to the rows reachable at this
     PRE-turn seam: SOUL.md (soul overlay), the workspace AGENTS.md row (workspace
     part), and config.yaml (a deliberate 0 — consumed as configuration, never
-    pasted). MEMORY.md / USER.md are left untouched: their in-prompt text is
-    rendered later through the memory tool's dedup/sanitize pipeline and is not
-    reproducible here, so the launcher keeps their loaded-file chip rather than a
-    guess. ``.skills_prompt_snapshot.json`` is attached POST-turn (it needs the
+    pasted). MEMORY.md / USER.md receive an inclusion status here, while their
+    token estimate remains the loaded-file estimate because the later memory
+    dedup/sanitize pipeline is not reproducible at this seam.
+    ``.skills_prompt_snapshot.json`` is attached POST-turn (it needs the
     constructed agent's resolved tool set — see
     ``attach_prompt_observability_turn_results``)."""
 
@@ -2539,12 +2987,24 @@ def _attach_context_file_prompt_contributions(
             continue
         if row.get("kind") == "workspace_context":
             _set_row_prompt_contribution(row, workspace_chars)
+            row["prompt_included"] = workspace_chars is not None
+            row["prompt_status"] = "injected" if workspace_chars is not None else "not_injected"
             continue
         name = row.get("name")
         if name == "SOUL.md":
             _set_row_prompt_contribution(row, soul_chars)
+            row["prompt_included"] = soul_chars is not None
+            row["prompt_status"] = "injected" if soul_chars is not None else "not_injected"
+        elif name in {"MEMORY.md", "USER.md"}:
+            has_content = bool(row.get("included")) and int(row.get("bytes") or 0) > 0
+            row["prompt_included"] = bool(memory_loaded and has_content)
+            row["prompt_status"] = (
+                "injected" if memory_loaded and has_content else "empty" if memory_loaded else "skipped"
+            )
         elif name == "config.yaml":
             _set_row_prompt_contribution(row, 0)
+            row["prompt_included"] = False
+            row["prompt_status"] = "observed_only"
 
 
 def _attach_skills_prompt_contribution(
@@ -2567,6 +3027,8 @@ def _attach_skills_prompt_contribution(
     for row in files:
         if isinstance(row, dict) and row.get("name") == ".skills_prompt_snapshot.json":
             _set_row_prompt_contribution(row, chars)
+            row["prompt_included"] = chars > 0
+            row["prompt_status"] = "injected" if chars > 0 else "empty"
             break
 
 
@@ -2626,7 +3088,7 @@ def _safe_final_model_input(value: dict[str, Any] | None) -> dict[str, Any] | No
     for message in messages:
         if not isinstance(message, dict):
             continue
-        content = safe_assignment_text(message.get("content"), limit=65000) or ""
+        content = _safe_prompt_body(message.get("content"), limit=65000)
         safe_messages.append(
             {
                 "role": safe_assignment_token(message.get("role")) or "message",
@@ -2649,6 +3111,9 @@ def _safe_final_model_input(value: dict[str, Any] | None) -> dict[str, Any] | No
         "system_message_supplied": bool(value.get("system_message_supplied")),
         "message_count": _safe_int(value.get("message_count")) or len(safe_messages),
         "messages": safe_messages,
+        "system_prompt_sections": _safe_system_prompt_sections(
+            value.get("system_prompt_sections")
+        ),
         # Tool schemas ship in full on every API call and are the largest fixed
         # slice of the prompt after the system prompt. This whitelist previously
         # dropped them, which is why the context budget could not see (or
@@ -2656,6 +3121,58 @@ def _safe_final_model_input(value: dict[str, Any] | None) -> dict[str, Any] | No
         "tool_schema": _safe_tool_schema(value.get("tool_schema")),
         "cache_routing": _safe_cache_routing(value.get("cache_routing")),
     }
+
+
+# The assignment rule is single-homed in ``agent_runtime.redaction`` (see the
+# header there for the JSON blind spot every local spelling shared). Two-group
+# contract preserved — the substitution below branches on ``lastindex >= 2``.
+_OBSERVABILITY_PROMPT_SECRET_PATTERNS = [
+    TEXT_SECRET_VALUE_ASSIGNMENT_RE,
+    re.compile(r"(?i)\b(sk-[A-Za-z0-9_-]{12,})\b"),
+    re.compile(r"(?i)\b(xox[baprs]-[A-Za-z0-9-]{12,})\b"),
+]
+
+
+def _safe_prompt_body(value: Any, *, limit: int) -> str:
+    """Redact prompt text while preserving its readable line structure."""
+
+    text = str(value or "").replace("\x00", " ")
+    for pattern in _OBSERVABILITY_PROMPT_SECRET_PATTERNS:
+        text = pattern.sub(
+            lambda match: (
+                f"{match.group(1)}=<redacted>"
+                if match.lastindex and match.lastindex >= 2
+                else "<redacted>"
+            ),
+            text,
+        )
+    return text[:limit]
+
+
+def _safe_system_prompt_sections(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for item in value[:3]:
+        if not isinstance(item, dict):
+            continue
+        start = _safe_int(item.get("start_char"))
+        end = _safe_int(item.get("end_char"))
+        chars = _safe_int(item.get("chars"))
+        if start is None or end is None or start < 0 or end < start:
+            continue
+        result.append(
+            {
+                "kind": safe_assignment_token(item.get("kind")) or "section",
+                "name": safe_assignment_text(item.get("name"), limit=80)
+                or "Prompt section",
+                "start_char": start,
+                "end_char": end,
+                "chars": chars,
+                "truncated": item.get("truncated") is True,
+            }
+        )
+    return result
 
 
 def _safe_cache_routing(value: Any) -> dict[str, Any] | None:

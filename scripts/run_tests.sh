@@ -73,6 +73,24 @@ fi
 # ── Run in hermetic env ──────────────────────────────────────────────────────
 # env -i: start with empty environment, opt-in only what we need.
 # No credential var can leak — you'd have to explicitly add it here.
+#
+# The Windows platform vars below are opt-in for the same reason PATH/HOME are:
+# they are not credentials, they are how the OS answers "where is the user, and
+# where is scratch space". Without USERPROFILE/LOCALAPPDATA/APPDATA, CPython's
+# ``Path.home()`` has nothing to resolve against and every import that touches
+# it dies at COLLECTION time — a baseline run on Windows reported ~56 files
+# failing for reasons no source change caused, which makes the failure-set diff
+# (the only honest "is this mine?" signal) unreadable. SYSTEMROOT is required by
+# the socket/ssl/subprocess machinery on Windows, and TEMP/TMP keep tempfile off
+# a fabricated path. All six are absent-safe: `${VAR:+VAR="$VAR"}` expands to
+# nothing on POSIX, so Linux/macOS/CI runs are byte-for-byte unchanged.
+#
+# SYSTEMROOT is read UPPERCASE on purpose. Windows treats env var names as
+# case-insensitive; the shell reading them here does not. git-bash exports the
+# variable as `SYSTEMROOT`, so the mixed-case `${SystemRoot:+…}` this line used
+# to carry expanded to NOTHING and the var was silently dropped from the
+# hermetic env — the exact class of dead guard it was written to prevent. The
+# child is still handed it under the spelling Windows itself uses.
 echo "▶ running per-file parallel test suite via run_tests_parallel.py"
 echo "  (TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)"
 
@@ -90,6 +108,12 @@ fi
 exec env -i \
   PATH="$PATH" \
   HOME="$HOME" \
+  ${USERPROFILE:+USERPROFILE="$USERPROFILE"} \
+  ${LOCALAPPDATA:+LOCALAPPDATA="$LOCALAPPDATA"} \
+  ${APPDATA:+APPDATA="$APPDATA"} \
+  ${SYSTEMROOT:+SystemRoot="$SYSTEMROOT"} \
+  ${TEMP:+TEMP="$TEMP"} \
+  ${TMP:+TMP="$TMP"} \
   TZ=UTC \
   LANG=C.UTF-8 \
   LC_ALL=C.UTF-8 \

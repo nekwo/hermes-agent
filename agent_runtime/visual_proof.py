@@ -13,7 +13,7 @@ from . import paths
 from .models import Proof, Task
 from .proof_capture import ScreenshotRequest, VideoRequest, VisualCaptureProvider
 from .proof_rules import ProofType
-from .stagec_mcp_visual_provider import default_launcher_qa_visual_provider
+from .stagec_mcp_visual_provider import StageCMcpError, default_launcher_qa_visual_provider
 from .store import ProofStore
 
 
@@ -44,7 +44,17 @@ class VisualProofRunner:
                 proof_type = ProofType.SCREENSHOT
         except Exception as exc:
             summary = _safe_visual_failure_summary(exc)
-            proof = self._blocked_proof(task, stage_id=stage_id, run_id=run_id, actor=actor, request=request, summary=summary, failure_class=type(exc).__name__)
+            provider_metadata = exc.provider_metadata if isinstance(exc, StageCMcpError) else None
+            proof = self._blocked_proof(
+                task,
+                stage_id=stage_id,
+                run_id=run_id,
+                actor=actor,
+                request=request,
+                summary=summary,
+                failure_class=type(exc).__name__,
+                provider_metadata=provider_metadata if isinstance(provider_metadata, dict) else None,
+            )
             return VisualProofResult(proof=proof, environment_blocker=True, blocker_summary=summary)
 
         relative_path, artifact_exists, artifact_bytes = self._materialize_artifact(task, capture.path)
@@ -83,8 +93,31 @@ class VisualProofRunner:
         )
         return VisualProofResult(proof=self.proof_store.attach(proof), environment_blocker=not passed, blocker_summary=None if passed else "visual capture artifact was blank, stale, or missing launch pins")
 
-    def _blocked_proof(self, task: Task, *, stage_id: str | None, run_id: str | None, actor: str, request: dict[str, Any], summary: str, failure_class: str | None = None) -> Proof:
+    def _blocked_proof(
+        self,
+        task: Task,
+        *,
+        stage_id: str | None,
+        run_id: str | None,
+        actor: str,
+        request: dict[str, Any],
+        summary: str,
+        failure_class: str | None = None,
+        provider_metadata: dict[str, Any] | None = None,
+    ) -> Proof:
         proof_id = f"visual_blocker_{_safe_token(task.id)}_{_safe_token(stage_id or 'stage')}_{uuid.uuid4().hex[:8]}"
+        metadata = {
+            "actor_requested": actor,
+            "run_id": run_id,
+            "kind": "visual_mcp_environment_blocker",
+            "status": "failed",
+            "mcp_server": str(request.get("mcp_server") or ""),
+            "target": str(request.get("target") or "")[:160],
+            "summary": summary[:280],
+            "failure_class": str(failure_class or "")[:120],
+        }
+        if provider_metadata:
+            metadata["provider_metadata"] = provider_metadata
         proof = Proof(
             id=proof_id,
             task_id=task.id,
@@ -94,16 +127,7 @@ class VisualProofRunner:
             path_or_value="visual_capture:blocked",
             created_by="harness",
             created_at=now(),
-            metadata={
-                "actor_requested": actor,
-                "run_id": run_id,
-                "kind": "visual_mcp_environment_blocker",
-                "status": "failed",
-                "mcp_server": str(request.get("mcp_server") or ""),
-                "target": str(request.get("target") or "")[:160],
-                "summary": summary[:280],
-                "failure_class": str(failure_class or "")[:120],
-            },
+            metadata=metadata,
             redaction_status="safe",
         )
         return self.proof_store.attach(proof)

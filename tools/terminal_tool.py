@@ -2074,21 +2074,71 @@ def _harness_network_block_reason(command: str) -> str | None:
     return None
 
 
-def _log_harness_blocked_attempt(command: str, reason: str) -> None:
-    root = os.getenv("HERMES_AGENT_RUNTIME_ROOT", "").strip()
-    if not root:
-        return
+def _harness_envelope_block(command: str) -> Optional[Dict[str, Any]]:
+    """The single envelope decision for this command, or ``None`` to proceed.
+
+    Two layers, in order:
+
+    1. **The governed-lane policy** (``agent_runtime.terminal_envelope``). When
+       a run has bound a :class:`TerminalEnvelopeScope` for a governed lane
+       (today: mission-chat only), that module is the ONE decision point: an
+       ungranted gated command is a typed refusal that names the ROOT-config
+       key which would grant it, and a granted one runs with its provenance
+       recorded. This layer does NOT consult ``HERMES_AGENT_RUNTIME_ROOT``,
+       which is what closes the historical fail-open branch — a mission-chat
+       persona that binds no Hermes profile never exported that variable, so
+       the envelope was inert and ``tools/approval.py``'s non-interactive
+       fail-open default let ``git push`` through, unrecorded (both branches
+       observed live 2026-07-26; see the module docstring of
+       ``agent_runtime/terminal_envelope.py``).
+    2. **The legacy envelope** — unchanged, and reached on every ungoverned
+       lane (worker ticks, free-chat, ``hermes chat``, cron, gateway, acp) plus
+       whenever the policy module cannot be imported. Import failure falls back
+       to the hard block: fail CLOSED, never open.
+    """
+
     try:
-        path = Path(root).expanduser() / "blocked_tool_attempts.jsonl"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        event = {
-            "ts": time.time(),
-            "tool": "terminal",
-            "reason": reason,
-            "command_preview": command[:500],
-        }
-        with path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(json.dumps(event, ensure_ascii=False, sort_keys=True) + "\n")
+        from agent_runtime.terminal_envelope import (
+            blocked_result,
+            envelope_decision,
+            record_envelope_decision,
+        )
+
+        decision = envelope_decision(command)
+    except Exception:
+        # Fail closed: an unavailable policy module means the legacy envelope
+        # below decides, exactly as it did before this seam existed.
+        logger.debug("Terminal envelope policy unavailable; using legacy envelope", exc_info=True)
+        decision = None
+    else:
+        if decision is not None:
+            record_envelope_decision(decision, command)
+            if decision.refused:
+                return blocked_result(decision)
+            # Granted, or not an envelope-gated command at all. Either way the
+            # governed lane has spoken and the legacy pattern table must not
+            # re-block what an operator grant just allowed.
+            return None
+
+    reason = _harness_safety_block(command)
+    if reason is None:
+        return None
+    _log_harness_blocked_attempt(command, reason)
+    return {
+        "output": "",
+        "exit_code": -1,
+        "error": f"BLOCKED by Harness execution safety envelope: {reason}",
+        "status": "blocked",
+        "blocked_by": "harness_execution_safety",
+        "block_reason": reason,
+    }
+
+
+def _log_harness_blocked_attempt(command: str, reason: str) -> None:
+    try:
+        from agent_runtime.terminal_envelope import record_legacy_block
+
+        record_legacy_block(command, reason)
     except Exception:
         logger.warning("Failed to write Harness blocked-command audit", exc_info=True)
 
@@ -2148,17 +2198,9 @@ def terminal_tool(
                 "error": f"Invalid command: expected string, got {type(command).__name__}",
                 "status": "error",
             }, ensure_ascii=False)
-        harness_block = _harness_safety_block(command)
+        harness_block = _harness_envelope_block(command)
         if harness_block is not None:
-            _log_harness_blocked_attempt(command, harness_block)
-            return json.dumps({
-                "output": "",
-                "exit_code": -1,
-                "error": f"BLOCKED by Harness execution safety envelope: {harness_block}",
-                "status": "blocked",
-                "blocked_by": "harness_execution_safety",
-                "block_reason": harness_block,
-            }, ensure_ascii=False)
+            return json.dumps(harness_block, ensure_ascii=False)
 
         # Get configuration
         config = _get_env_config()

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import subprocess
@@ -12,14 +13,20 @@ import uuid
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Optional
 
 from hermes_time import now
 from hermes_constants import get_hermes_home
 from hermes_cli.profiles import list_profiles
 
 from agent_runtime.cli_format import emit_json, human_task_line, task_summary
-from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config, provision_bundled_personas
+from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config, mission_chat_clarify_token_binding, provision_bundled_personas, resolve_mission_chat_max_seconds
 from agent_runtime.continuity import return_summary_to_parent_session
+from agent_runtime.dispatch_session_policy import (
+    derive_dispatch_title,
+    resolve_dispatch_session_decision,
+    session_established_payload,
+)
 from agent_runtime.operator_control import operator_takeover_worker
 from agent_runtime.coordinator_permissions import (
     CoordinatorPermissionScope,
@@ -30,10 +37,15 @@ from agent_runtime.decision_contract_examples import verify_harness_skill_exampl
 from agent_runtime.decision_contract_registry import canonical_role_value, contract_manifest, hud_shape_index_for_stage, verify_registry
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.default_plan import ensure_default_mission_plan
-from agent_runtime.default_scope import ensure_default_scope
+from agent_runtime.default_scope import (
+    ensure_default_scope,
+    preview_default_scope_migration,
+    reconcile_default_scope_to_legacy,
+)
 from agent_runtime.errors import (
     AgentRuntimeError,
     AlreadyExists,
+    DefaultScopeReconciliationRequired,
     EventPayloadTooLarge,
     InvalidTransition,
     NotFound,
@@ -61,6 +73,7 @@ from agent_runtime.launcher_process_hygiene import launcher_visual_cleanup_neede
 from agent_runtime.models import AgentPersona, Event, Task, apply_instance_model_overrides
 from agent_runtime import paths
 from agent_runtime.persona_assignments import (
+    CHAT_BINDING_CLEARED_REASON_DELETED,
     ChatBusyError,
     PERSONA_INSTANCE_ID_PREFIX,
     PersonaAssignmentSpec,
@@ -94,6 +107,7 @@ from agent_runtime.realm_sync import (
     RealmSyncError,
     publish_realm_sync,
     pull_realm_sync,
+    realm_agent_selection_state,
     realm_sync_status,
     sync_artifacts_for_workspace_agent,
 )
@@ -102,15 +116,31 @@ from agent_runtime.burn_in import STAGE47_CASES, STAGE47_SUITE, burn_in_status, 
 from agent_runtime.migrations import effective_config_summary, migration_status
 from agent_runtime.mission_chat_turns import (
     MissionChatTurnPersistOutcome,
+    OPERATOR_RESOLVABLE_TURN_STATES,
+    REPLY_RECOVERABLE_TURN_STATES,
+    RESEND_BLOCKING_TURN_STATES,
+    SETTLING_TURN_STATES,
+    TURN_STATE_ABANDONED,
+    TURN_STATE_BUDGET_EXHAUSTED,
+    TURN_STATE_COMPLETED,
+    TURN_STATE_EXECUTING,
+    TURN_STATE_FAILED,
+    TURN_STATE_NATIVE_COMMITTED,
+    TURN_STATE_OUTCOME_UNKNOWN,
+    TURN_STATE_PENDING,
+    TURN_STATE_PROJECTED,
+    TURN_STATE_RUNNING,
     abandon_mission_chat_turn,
-    mark_stale_running_turns_interrupted,
+    mark_stale_inflight_turns_interrupted,
     mission_chat_turn_record,
     mission_chat_turn_records,
     persist_mission_chat_turn,
     transition_mission_chat_turn,
 )
 from agent_runtime.persona_chat_continuity import (
+    CLARIFY_TICKET_TTL_SECONDS,
     PersonaChatBusyError,
+    PersonaChatClarifyTicketStore,
     PersonaChatMintReceiptStore,
     PERSONA_CHAT_SESSION_SOURCE,
     native_history_revision,
@@ -119,12 +149,15 @@ from agent_runtime.persona_chat_continuity import (
     persona_chat_runtime_registry,
     safe_native_history,
 )
+from agent_runtime.chat_session_scope import is_canonical_session_persistence
+from agent_runtime.mcp_admission import LANE_MISSION_CHAT, resolve_mcp_admission
+from agent_runtime.mcp_lane import HARNESS_LANE
 from agent_runtime.mission_chat_steer import start_active_mission_chat_turn, submit_mission_chat_steer
+from agent_runtime.mission_chat_workdir import mission_chat_workdir_for_persona
 from agent_runtime.observability import build_observability
-from agent_runtime.persona_runtime import GPTPersonaRuntime, chat_runtime_tool_contract
+from agent_runtime.persona_runtime import GPTPersonaRuntime, chat_lane_capability_drops
 from agent_runtime.personas import profile_chat_toolsets, seed_personas
-from agent_runtime.prompt_observability import attach_prompt_observability_turn_results, load_workspace_agents_context, mission_chat_prompt_observability, persist_prompt_observability_context, slim_chat_final_observability, turn_usage_from_result
-from agent_runtime.queued_skills import consume_skills_for_next_turn
+from agent_runtime.prompt_observability import attach_prompt_observability_turn_results, mission_chat_prompt_observability, persist_prompt_observability_context, slim_chat_final_observability, turn_usage_from_result
 from agent_runtime.provider_health import provider_health_for_personas
 from agent_runtime.skill_install import install_harness_skills, install_harness_skills_for_personas
 from agent_runtime.snapshot import build_snapshot, write_snapshot
@@ -141,8 +174,25 @@ from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_vi
 from agent_runtime.tool_permissions import ChatToolPermissionStore, permission_state_for_chat
 from agent_runtime.tool_turn_history import persist_tool_turn_actual
 from agent_runtime.worker_sessions import WorkerSessionStore, worker_session_summary
+from agent_runtime.workspace_scope import exact_scoped_instance_ids
 
 PERSONA_CHAT_SESSION_SOURCE = "agent_runtime_persona_chat"
+
+# --- `hermes harness usage` (account-usage lanes) contract ---------------------
+# Typed per-provider account-limit snapshot the Launcher's Mission Control
+# console consumes instead of scraping the human /usage text. v1 envelope is
+# emitted next to `providers`; the same failure-isolation discipline applies —
+# nothing in `_cmd_usage` may raise (worst case: envelope with empty lanes).
+USAGE_SCHEMA = "hermes.account_usage/v1"
+DEFAULT_USAGE_TIMEOUT = 20.0
+# Candidate lanes, in stable emission order. A lane is only emitted when the
+# operator is detected as signed-in / holding credentials for that provider.
+_USAGE_LANE_PROVIDERS: tuple[str, ...] = (
+    "openai-codex",
+    "anthropic",
+    "openrouter",
+    "nous",
+)
 
 
 STAGE42_SCHEMA_VERSION = 1
@@ -191,6 +241,7 @@ ERROR_EXIT_CODES = {
     "proof_missing": 6,
     "proof_gate_failed": 6,
     "needs_operator_confirm": 6,
+    "default_scope_reconciliation_required": 6,
     # Skills / readiness (6)
     "skill_hash_mismatch": 6,
     "missing_skill": 6,
@@ -221,6 +272,39 @@ ERROR_EXIT_CODES = {
 
 
 def _add_stage42_global_args(parser, *, mutation: bool = False) -> None:
+    """The flags EVERY stage42 verb accepts.
+
+    A flag registered here is a PROMISE made on every one of ~60 verbs at
+    once, which is exactly why an unconsumed one is worse here than anywhere
+    else: it is advertised in `--help` across the whole surface, accepted
+    without complaint, and does nothing. An operator who reaches for it gets
+    the unfiltered answer and no signal that the flag was ignored — the
+    failure mode is a WRONG ANSWER believed, not an error seen.
+
+    ``--filter`` and ``--watch`` were both that (removed 2026-07-28). Neither
+    had a reader anywhere in the stack, and ``--filter`` was not merely
+    unimplemented but undefined: no grammar, no documented contract, no
+    consumer. Wiring it would have meant inventing one — and standing a
+    generic untyped key=value filter beside the typed, domain-aware filters
+    the list verbs already carry (``goal list --state/--workspace``,
+    ``run list --state``, ``checkpoint --classes``), i.e. a SECOND filtering
+    authority answering the same question, with the two free to disagree.
+    There is also no honest shared place to apply it: the one point every
+    list verb passes through, ``_print_stage42``, runs AFTER ``--limit`` has
+    already truncated, so filtering there would filter the PAGE and call it
+    the set. Removing the advertisement is the complete fix; the typed
+    per-verb filters remain the real surface, and an unknown flag now fails
+    loudly instead of being silently swallowed.
+
+    ``--no-color`` is deliberately kept with no reader: nothing on this lane
+    emits ANSI, so the flag's contract is already satisfied by construction.
+    That is a no-op that tells the truth, not one that lies.
+
+    `tests/hermes_cli/test_harness_cli.py::test_every_stage42_global_flag_is_honored`
+    pins this — a new flag here must be read somewhere on the lane, or be
+    declared satisfied-by-construction like ``--no-color``.
+    """
+
     def add(*flags, **kwargs):
         if any(flag in parser._option_string_actions for flag in flags):  # noqa: SLF001 - argparse has no public query
             return
@@ -232,10 +316,8 @@ def _add_stage42_global_args(parser, *, mutation: bool = False) -> None:
     add("--no-color", action="store_true")
     add("--fields", default=None)
     add("--sort", default=None)
-    add("--filter", action="append", default=[])
     add("--limit", type=int, default=None)
     add("--cursor", default=None)
-    add("--watch", "-w", action="store_true")
     add("--since", default=None)
     if mutation:
         add("--dry-run", action="store_true")
@@ -266,6 +348,34 @@ def build_parser(parent_subparsers) -> None:
     )
     init.add_argument("--json", action="store_true")
     init.set_defaults(func=_cmd_init)
+
+    roots = subs.add_parser(
+        "roots",
+        help="Machine-local logical roots that make ${roots.<name>} config paths portable",
+    )
+    roots_subs = roots.add_subparsers(dest="roots_command", required=True)
+    roots_list = roots_subs.add_parser("list", help="Show this machine's logical-root bindings (read-only)")
+    _add_stage42_global_args(roots_list)
+    roots_list.set_defaults(func=_cmd_roots_list)
+    roots_set = roots_subs.add_parser("set", help="Bind a logical root to an absolute local path")
+    roots_set.add_argument("name", help="Logical root name, e.g. eternia_launcher")
+    roots_set.add_argument("path", help="Absolute path to the checkout on THIS machine")
+    roots_set.add_argument("--allow-missing", action="store_true", help="Bind even when the path does not exist yet")
+    _add_stage42_global_args(roots_set, mutation=True)
+    roots_set.set_defaults(func=_cmd_roots_set)
+    roots_unset = roots_subs.add_parser("unset", help="Remove a logical-root binding")
+    roots_unset.add_argument("name")
+    _add_stage42_global_args(roots_unset, mutation=True)
+    roots_unset.set_defaults(func=_cmd_roots_unset)
+    roots_migrate = roots_subs.add_parser(
+        "migrate",
+        help="Rewrite machine-local absolute paths in profile configs into ${roots.<name>} token form",
+    )
+    roots_migrate.add_argument("configs", nargs="*", help="config.yaml paths to migrate (default: every Hermes profile config)")
+    roots_migrate.add_argument("--root", action="append", default=[], metavar="NAME=PATH", help="Explicit root binding; repeatable. Omit to auto-derive from .git ancestors.")
+    roots_migrate.add_argument("--no-platform-gates", action="store_true", help="Do not add platforms:[windows] to PowerShell/.ps1-only MCP entries")
+    _add_stage42_global_args(roots_migrate, mutation=True)
+    roots_migrate.set_defaults(func=_cmd_roots_migrate)
 
     goal = subs.add_parser("goal", help="Create and run Harness goals in-process")
     goal_subs = goal.add_subparsers(dest="goal_command")
@@ -541,6 +651,25 @@ def build_parser(parent_subparsers) -> None:
     )
     _add_stage42_global_args(realm_use, mutation=True)
     realm_use.set_defaults(func=_cmd_realm_use)
+    realm_default_scope = realm_subs.add_parser(
+        "default-scope",
+        help="Preview default-scope adoption/reconciliation without mutating persisted state",
+    )
+    realm_default_scope.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Inventory only; never mutates persisted state",
+    )
+    realm_default_scope.add_argument("--winner-realm", default=None)
+    realm_default_scope.add_argument("--winner-workspace", default=None)
+    realm_default_scope.add_argument(
+        "--yes",
+        "-y",
+        action="store_true",
+        help="Apply the explicitly selected recoverable reconciliation",
+    )
+    _add_stage42_global_args(realm_default_scope)
+    realm_default_scope.set_defaults(func=_cmd_realm_default_scope)
     realm_sync = realm_subs.add_parser("sync", help="Git-backed selective sync for non-source-controlled realm artifacts")
     realm_sync_subs = realm_sync.add_subparsers(dest="realm_sync_command", required=True)
     realm_sync_status_cmd = realm_sync_subs.add_parser("status", help="Show realm sync state")
@@ -558,6 +687,22 @@ def build_parser(parent_subparsers) -> None:
     realm_sync_publish.add_argument("--credential-file", default=None, help="Launcher-brokered realm sync credential JSON (fallback: HERMES_REALM_SYNC_CREDENTIAL)")
     _add_stage42_global_args(realm_sync_publish, mutation=True)
     realm_sync_publish.set_defaults(func=_cmd_realm_sync_publish)
+    realm_sync_held = realm_sync_subs.add_parser(
+        "held",
+        help="List profile files (MEMORY.md / core context / persona prompts) a pull HELD because the member's copy diverged from the realm's",
+    )
+    realm_sync_held.add_argument("realm_id")
+    _add_stage42_global_args(realm_sync_held)
+    realm_sync_held.set_defaults(func=_cmd_realm_sync_held)
+    realm_sync_resolve = realm_sync_subs.add_parser(
+        "resolve",
+        help="Resolve one held profile file: --take local keeps the member's content, --take remote adopts the realm's",
+    )
+    realm_sync_resolve.add_argument("realm_id")
+    realm_sync_resolve.add_argument("--key", required=True, help="Entity key from `realm sync held` (e.g. alice:memories/MEMORY.md)")
+    realm_sync_resolve.add_argument("--take", required=True, choices=["local", "remote"])
+    _add_stage42_global_args(realm_sync_resolve, mutation=True)
+    realm_sync_resolve.set_defaults(func=_cmd_realm_sync_resolve)
 
     realm_skills = realm_subs.add_parser("skills", help="Per-realm selection of which shared skills publish to a realm")
     realm_skills_subs = realm_skills.add_subparsers(dest="realm_skills_command", required=True)
@@ -575,6 +720,44 @@ def build_parser(parent_subparsers) -> None:
     realm_skills_set.add_argument("--none", dest="publish_none", action="store_true", help="Publish no skills (mode=selected, empty selection)")
     _add_stage42_global_args(realm_skills_set, mutation=True)
     realm_skills_set.set_defaults(func=_cmd_realm_skills_set)
+
+    realm_agents = realm_subs.add_parser(
+        "agents", help="Per-realm selection of which persona definitions publish to a realm"
+    )
+    realm_agents_subs = realm_agents.add_subparsers(
+        dest="realm_agents_command", required=True
+    )
+    realm_agents_show = realm_agents_subs.add_parser(
+        "show", help="Show a realm's persona-definition publish selection"
+    )
+    realm_agents_show.add_argument("realm_id")
+    _add_stage42_global_args(realm_agents_show)
+    realm_agents_show.set_defaults(func=_cmd_realm_agents_show)
+    realm_agents_set = realm_agents_subs.add_parser(
+        "set",
+        help="Set a realm's persona-definition selection (required workspace/Office references remain pinned)",
+    )
+    realm_agents_set.add_argument("realm_id")
+    realm_agents_set.add_argument(
+        "--workspace",
+        dest="publish_workspace",
+        action="store_true",
+        help="Publish only definitions required by workspace rosters and Office placements",
+    )
+    realm_agents_set.add_argument(
+        "--agents",
+        dest="agents",
+        default=None,
+        help="Comma-separated persona ids to publish in addition to required references",
+    )
+    realm_agents_set.add_argument(
+        "--none",
+        dest="publish_none",
+        action="store_true",
+        help="Clear the explicit selection; required references remain pinned",
+    )
+    _add_stage42_global_args(realm_agents_set, mutation=True)
+    realm_agents_set.set_defaults(func=_cmd_realm_agents_set)
 
     flow = subs.add_parser("flow", help="Operator flow-graph documents: ingest the Launcher's authored agent map whole and set the referenced instances' steering relations")
     flow_subs = flow.add_subparsers(dest="flow_command", required=True)
@@ -636,6 +819,47 @@ def build_parser(parent_subparsers) -> None:
     skills_catalog_cmd.add_argument("--hash", dest="content_hash", required=True, help="The content hash carried by a chat_contexts row's available_skills_ref / accessible_skills_ref")
     skills_catalog_cmd.add_argument("--json", action="store_true")
     skills_catalog_cmd.set_defaults(func=_cmd_skills_catalog)
+
+    skills_publishable_cmd = skills_subs.add_parser(
+        "publishable",
+        help="List every resolvable skill with whether it can reach a realm, and if not, the typed reason (read-only)",
+    )
+    skills_publishable_cmd.add_argument(
+        "--source-kind",
+        dest="source_kind",
+        default=None,
+        choices=["profile_local", "shared_core", "external"],
+        help="Restrict to one resolver tier (default: all three)",
+    )
+    skills_publishable_cmd.add_argument(
+        "--unpublishable-only",
+        dest="unpublishable_only",
+        action="store_true",
+        help="Show only packages that cannot reach a realm as they stand",
+    )
+    _add_stage42_global_args(skills_publishable_cmd)
+    skills_publishable_cmd.set_defaults(func=_cmd_skills_publishable)
+
+    skills_inbox_cmd = skills_subs.add_parser(
+        "inbox",
+        help="List quarantined per-realm inbox skill packages and how each would reconcile (read-only)",
+    )
+    skills_inbox_cmd.add_argument("--realm", default=None, help="Restrict to one realm id (default: all realms)")
+    _add_stage42_global_args(skills_inbox_cmd)
+    skills_inbox_cmd.set_defaults(func=_cmd_skills_inbox)
+
+    skills_promote_cmd = skills_subs.add_parser(
+        "promote",
+        help="Promote a held / authored / profile-local skill package into the canonical shared root (hash-guarded, never-delete)",
+    )
+    skills_promote_cmd.add_argument("skill", help="Canonical skill slug (bare name or <category>/<name>)")
+    skills_promote_cmd.add_argument("--from-realm", dest="from_realm", default=None, help="Promote from this realm's inbox mirror")
+    skills_promote_cmd.add_argument("--from-profile", dest="from_profile", default=None, help="Promote from a profile's skills/ (implies --move-source)")
+    skills_promote_cmd.add_argument("--from-path", dest="from_path", default=None, help="Promote from an explicit package directory")
+    skills_promote_cmd.add_argument("--adopt-divergent", dest="adopt_divergent", action="store_true", help="Adopt over a divergent canonical (archives the previous copy)")
+    skills_promote_cmd.add_argument("--move-source", dest="move_source", action="store_true", help="Archive the source package after a successful promotion (retire the duplicate)")
+    _add_stage42_global_args(skills_promote_cmd, mutation=True)
+    skills_promote_cmd.set_defaults(func=_cmd_skills_promote)
 
     prompt_context = subs.add_parser(
         "prompt-context",
@@ -925,6 +1149,26 @@ def build_parser(parent_subparsers) -> None:
     persona_tool_diff.add_argument("--permission-mode", default="profile_default")
     persona_tool_diff.add_argument("--repo-scope", default=None)
     persona_tool_diff.add_argument("--workdir", default=None)
+    persona_tool_diff.add_argument(
+        "--explain-mcp",
+        action="store_true",
+        help=(
+            "Explain MCP admission for this persona (requested / admitted / denied, "
+            "with typed reasons). Inspection only — resolves policy without "
+            "connecting to or registering any MCP server."
+        ),
+    )
+    persona_tool_diff.add_argument(
+        "--explain-envelope",
+        action="store_true",
+        help=(
+            "Explain the terminal safety envelope for this persona's mission-chat "
+            "lane: whether the lane binds an envelope scope, which command classes "
+            "are operator-grantable vs a hard floor no config lifts, which grants "
+            "are active from the ROOT config, and any typed grant-config issues. "
+            "Inspection only — resolves policy without running a command."
+        ),
+    )
     persona_tool_diff.add_argument("--json", action="store_true")
     persona_tool_diff.set_defaults(func=_cmd_persona_tool_diff)
     persona_permission = persona_subs.add_parser("permission", help="Preview or set chat-scoped persona tool permissions")
@@ -983,9 +1227,10 @@ def build_parser(parent_subparsers) -> None:
     persona_chat_delete.add_argument("--requested-by", default="cli")
     persona_chat_delete.add_argument("--json", action="store_true")
     persona_chat_delete.set_defaults(func=_cmd_persona_chat_delete)
-    persona_chat_history = persona_chat_subs.add_parser("history", help="Fetch a persona chat session's redaction-safe message tail (the tail S2 evicts from the frame)")
+    persona_chat_history = persona_chat_subs.add_parser("history", help="Page a persona chat session's complete redaction-safe transcript")
     persona_chat_history.add_argument("--session-id", dest="session_id", required=True)
-    persona_chat_history.add_argument("--limit", type=int, default=40, help="Message tail size (clamped 1..40)")
+    persona_chat_history.add_argument("--limit", type=int, default=40, help="Page size (clamped 1..40)")
+    persona_chat_history.add_argument("--before", default=None, help="Opaque cursor returned by the previous page")
     persona_chat_history.add_argument("--json", action="store_true")
     persona_chat_history.set_defaults(func=_cmd_persona_chat_history)
 
@@ -1151,10 +1396,26 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_message.add_argument("--persona", dest="persona_id", required=True)
     mission_chat_message.add_argument("--persona-instance-id", default=None)
     mission_chat_message.add_argument("--session-id", default=None)
+    # store_true (absent → False) is deliberate on THIS lane: False is now an
+    # explicit "continue the target's current default thread", so the operator
+    # console and any bare CLI send keep threading exactly as before (that
+    # pointer follows the most recently established thread — it is not a
+    # separate durable pair thread), while a caller that omits
+    # the flag entirely (the agent_chat_send dispatch lane, which forwards
+    # None) falls through to agent_runtime.mission_chat.dispatch_session_policy.
     mission_chat_message.add_argument("--new-session", dest="new_session", action="store_true", help="Force a fresh canonical chat session for the target instead of continuing the default thread (agent_chat_send new_session lane); ignored when --session-id is given")
+    # The echo half of the clarify binding. A reply that carries the token the
+    # question shipped down lands in the question's OWN thread — outranking both
+    # the policy default and a stale --session-id (reported, never silent, in the
+    # turn's clarify_binding block). Unknown/pruned tokens degrade to normal
+    # precedence rather than refusing.
+    mission_chat_message.add_argument("--clarify-token", dest="clarify_token", default=None, help="Answer a clarify question by its token (clarify_request.clarify_token from the asking turn); binds this reply to the thread the question was asked in")
     mission_chat_message.add_argument("--task", dest="task_id", default=None)
     mission_chat_message.add_argument("--goal", dest="goal_id", default=None)
-    mission_chat_message.add_argument("--title", default="Operator message")
+    # Default None = "no title opinion": consumed as the fresh thread's title
+    # when this send mints one, otherwise the durable "<persona> chat" title
+    # stands. A literal default would name every freshly minted thread after it.
+    mission_chat_message.add_argument("--title", default=None, help="Title for a chat session this send MINTS (a fresh --new-session thread, or a dispatch under the new_per_dispatch policy); ignored when continuing an existing thread")
     mission_chat_message.add_argument("--message", required=True)
     mission_chat_message.add_argument("--provider", default=None, help="Provider override for this persona chat session only")
     mission_chat_message.add_argument("--model", default=None, help="Model override for this persona chat session only")
@@ -1164,11 +1425,21 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_message.add_argument("--workspace-id", default=None)
     mission_chat_message.add_argument("--workspace-name", default=None)
     mission_chat_message.add_argument("--intent-hint", default="chat")
+    mission_chat_message.add_argument(
+        "--allow-mission-goal",
+        action="store_true",
+        help="Explicitly admit mission_goal_create for this one turn. Normal persona chat is chat-only and never creates a mission/task/graph by default.",
+    )
     mission_chat_message.add_argument("--requested-by", default="cli")
     mission_chat_message.add_argument("--client-message-id", default=None)
     mission_chat_message.add_argument("--idempotency-key", default=None)
     mission_chat_message.add_argument("--stream", action="store_true", help="Emit operator-chat deltas and the final payload as NDJSON")
-    mission_chat_message.add_argument("--max-seconds", type=float, default=240.0)
+    # Default is resolved at RUN time (agent_runtime.mission_chat.default_max_seconds
+    # in the ROOT config.yaml, itself defaulting to 240s) rather than pinned in the
+    # parser: an argparse default cannot be told apart from an explicit flag, and
+    # "explicit --max-seconds always wins over the configured default" has to be
+    # decidable. `None` here IS "the caller expressed no opinion".
+    mission_chat_message.add_argument("--max-seconds", type=float, default=None, help="Wall budget for this turn (default: agent_runtime.mission_chat.default_max_seconds, or 240s when unset). The agent is told how much remains, and the last max(60s, 15%%) is reserved for a final checkpoint reply; the turn then settles as budget_exhausted (terminal, no turn-resolve)")
     mission_chat_message.add_argument("--compression-threshold-tokens", type=int, default=None, help="One-turn native-compression proof seam; overrides the compressor token threshold without changing profile config")
     mission_chat_message.add_argument("--compression-protect-first-n", type=int, default=None, help="One-turn native-compression proof seam; override protected head messages")
     mission_chat_message.add_argument("--compression-protect-last-n", type=int, default=None, help="One-turn native-compression proof seam; override protected tail messages")
@@ -1202,6 +1473,19 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_resolve.add_argument("--action", choices=["abandon"], required=True)
     mission_chat_resolve.add_argument("--json", action="store_true")
     mission_chat_resolve.set_defaults(func=_cmd_mission_chat_turn_resolve)
+    # Read-only adoption readout for the clarify-token binding. Registered with
+    # the NON-mutating stage42 args on purpose: it never mints, settles, or
+    # sweeps, so it has no --dry-run to honor and nothing to confirm. Whether
+    # agents are echoing the token is answered from state the binding already
+    # records, with no new event kinds (telemetry is not the EventLog here).
+    mission_chat_clarify_tickets = mission_chat_subs.add_parser(
+        "clarify-tickets",
+        help="Clarify-token adoption readout: live tickets with state/age/session binding, and the bound_via histogram",
+    )
+    _add_stage42_global_args(mission_chat_clarify_tickets)
+    mission_chat_clarify_tickets.add_argument("--session-id", default=None, help="Only list tickets bound to this chat root (counts still cover the whole store)")
+    mission_chat_clarify_tickets.add_argument("--state", default=None, choices=["open", "answered", "rebound"], help="Only list tickets in this lifecycle state (counts still cover the whole store)")
+    mission_chat_clarify_tickets.set_defaults(func=_cmd_mission_chat_clarify_tickets)
 
     status = subs.add_parser("status", help="Show harness status")
     status.add_argument("--json", action="store_true")
@@ -1213,6 +1497,24 @@ def build_parser(parent_subparsers) -> None:
     )
     providers.add_argument("--json", action="store_true")
     providers.set_defaults(func=_cmd_providers)
+
+    usage = subs.add_parser(
+        "usage",
+        help="Per-provider account usage/limit windows (machine-readable via --json)",
+    )
+    usage.add_argument("--json", action="store_true")
+    usage.add_argument(
+        "--provider",
+        default=None,
+        help="Restrict to a single provider lane (still emits the full envelope)",
+    )
+    usage.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_USAGE_TIMEOUT,
+        help="Overall wall-clock bound (seconds) for the concurrent lane fetches",
+    )
+    usage.set_defaults(func=_cmd_usage)
 
     doctor = subs.add_parser("doctor", help="Show Harness runtime diagnostics and stale-state report")
     doctor.add_argument("--json", action="store_true")
@@ -1271,6 +1573,16 @@ def build_parser(parent_subparsers) -> None:
         help="Capture-then-reap orphan worktrees not owned by any open task run",
     )
     worktree_reap.add_argument("--min-age-seconds", type=int, default=3600)
+    worktree_reap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview typed reap/keep decisions without removing worktrees, capturing patches, or emitting events",
+    )
+    worktree_reap.add_argument(
+        "--include-legacy-temp",
+        action="store_true",
+        help="Also inventory the canonical legacy system-temp hermes-agent-wt base",
+    )
     worktree_reap.add_argument("--json", action="store_true")
     worktree_reap.set_defaults(func=_cmd_worktree_reap)
 
@@ -1284,7 +1596,9 @@ def build_parser(parent_subparsers) -> None:
         "reconcile",
         help=(
             "Archive-and-fold legacy-id persona-instance rows onto their canonical "
-            "channel (duplicate agent cards repair); records identity_map aliases"
+            "channel (duplicate agent cards repair); records identity_map aliases; "
+            "prunes orphan rows; repairs missing steering parents and chat-session "
+            "bindings whose session SessionDB no longer has"
         ),
     )
     persona_instance_reconcile.add_argument(
@@ -1307,12 +1621,22 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_detail.add_argument("--json", action="store_true")
     persona_instance_detail.set_defaults(func=_cmd_persona_instance_detail)
 
-    agent = subs.add_parser("agent", help="List harness agent definitions")
+    agent = subs.add_parser("agent", help="Inspect and rebind harness agent definitions")
     agent_subs = agent.add_subparsers(dest="agent_command", required=True)
     agent_list = agent_subs.add_parser("list", help="List persisted/configured agent definitions")
     agent_list.add_argument("--all-profiles", action="store_true")
     _add_stage42_global_args(agent_list)
     agent_list.set_defaults(func=_cmd_agent_list)
+
+    agent_set_profile = agent_subs.add_parser(
+        "set-profile",
+        help="Rebind an agent to a different Hermes profile (the ONE door; cascades every instance projection)",
+    )
+    agent_set_profile.add_argument("persona_id", help="Store-persisted agent id (e.g. neko_supervisor)")
+    agent_set_profile.add_argument("--profile", required=True, help="Target Hermes profile name; must exist and resolve ready")
+    agent_set_profile.add_argument("--requested-by", default="operator")
+    _add_stage42_global_args(agent_set_profile, mutation=True)
+    agent_set_profile.set_defaults(func=_cmd_agent_set_profile)
 
     agents = subs.add_parser("agents", help="Deprecated alias for `agent list`")
     agents.add_argument("--all-profiles", action="store_true")
@@ -1327,7 +1651,6 @@ def build_parser(parent_subparsers) -> None:
 
     smoke = subs.add_parser("smoke", help="Run a safe Mission Control smoke goal")
     smoke.add_argument("--json", action="store_true")
-    smoke.add_argument("--temp-root", action="store_true", default=False)
     smoke.add_argument("--no-model", action="store_true", default=False)
     smoke.set_defaults(func=_cmd_smoke)
 
@@ -1443,6 +1766,8 @@ def emit_harness_error(exc: BaseException, *, args=None, code: str | None = None
         safe_details.update(exc.safe_details)
     if isinstance(exc, WorkspaceDeleteBlocked):
         safe_details.update(exc.safe_details)
+    if isinstance(exc, DefaultScopeReconciliationRequired):
+        safe_details.update(exc.safe_details)
     envelope = _error_envelope(
         error_code,
         message or _safe_error_message(exc),
@@ -1474,6 +1799,7 @@ def _error_code_for_exception(exc: BaseException) -> str:
         (StaleRun, "stale_run"),
         (ProofMissing, "proof_missing"),
         (StoreCorrupt, "store_corrupt"),
+        (DefaultScopeReconciliationRequired, "default_scope_reconciliation_required"),
         (EventPayloadTooLarge, "event_payload_too_large"),
         (RuntimeRootMismatch, "wrong_runtime_root"),
         (StaleRevision, "stale_revision"),
@@ -1514,6 +1840,7 @@ def _error_hint(code: str) -> str:
         "goal_not_found": "Run `hermes harness goal list --json` and retry with a listed id.",
         "workspace_not_found": "Run `hermes harness workspace list --json` and retry with a listed id.",
         "realm_not_found": "Run `hermes harness realm list --json` and retry with a listed id.",
+        "default_scope_reconciliation_required": "Run `hermes harness realm default-scope --dry-run --json`; no identities will change without explicit approval.",
         "sync_conflict": "Resolve conflicts in the realm sync git repo, then retry.",
         "sync_behind": "Run `hermes harness realm sync pull <realm> --json` before publishing.",
         "sync_secret_excluded": "Remove secrets/state from the realm sync allowlist source before retrying.",
@@ -1564,6 +1891,120 @@ def _load_request_json(raw: str) -> dict:
             # Not a usable path — fall through and parse the literal as JSON.
             pass
     return json.loads(candidate)
+
+
+def _machine_root_config_paths(explicit: list[str] | None) -> list[Path]:
+    """Config files the migration targets: explicit args, else every profile."""
+
+    if explicit:
+        return [Path(item) for item in explicit]
+    from hermes_constants import get_default_hermes_root
+
+    root = get_default_hermes_root()
+    paths: list[Path] = []
+    default_config = root / "config.yaml"
+    if default_config.is_file():
+        paths.append(default_config)
+    profiles_dir = root / "profiles"
+    if profiles_dir.is_dir():
+        for child in sorted(profiles_dir.iterdir()):
+            candidate = child / "config.yaml"
+            if candidate.is_file():
+                paths.append(candidate)
+    return paths
+
+
+def _cmd_roots_list(args) -> int:
+    from agent_runtime.machine_roots import load_machine_roots, machine_roots_registry_paths
+
+    roots = load_machine_roots(refresh=True)
+    payload = roots.row()
+    payload["registry_paths"] = [str(path) for path in machine_roots_registry_paths()]
+    _print_stage42(_object_envelope("machine_roots", payload), args=args, default_output="json")
+    return 0
+
+
+def _cmd_roots_set(args) -> int:
+    from agent_runtime.machine_roots import load_machine_roots, write_machine_roots
+
+    path = Path(str(args.path)).expanduser()
+    if not path.is_absolute():
+        return emit_harness_error(
+            ValueError(f"'{args.path}' is not absolute"),
+            args=args,
+            code="invalid_payload",
+            message="A machine root must be an ABSOLUTE local path — relative bindings are exactly the portability bug this replaces.",
+        )
+    if not path.exists() and not getattr(args, "allow_missing", False):
+        return emit_harness_error(
+            FileNotFoundError(str(path)),
+            args=args,
+            code="not_found",
+            message=f"{path} does not exist on this machine. Re-run with --allow-missing to bind it anyway.",
+        )
+    roots = dict(load_machine_roots(refresh=True).roots)
+    roots[str(args.name)] = str(path)
+    result = write_machine_roots(roots, dry_run=bool(getattr(args, "dry_run", False)))
+    _print_stage42(_object_envelope("machine_roots", result), args=args, default_output="json")
+    return 0
+
+
+def _cmd_roots_unset(args) -> int:
+    from agent_runtime.machine_roots import load_machine_roots, write_machine_roots
+
+    roots = dict(load_machine_roots(refresh=True).roots)
+    if str(args.name) not in roots:
+        return emit_harness_error(
+            NotFound(str(args.name)), args=args, message=f"Machine root '{args.name}' is not bound."
+        )
+    roots.pop(str(args.name))
+    result = write_machine_roots(roots, dry_run=bool(getattr(args, "dry_run", False)))
+    _print_stage42(_object_envelope("machine_roots", result), args=args, default_output="json")
+    return 0
+
+
+def _cmd_roots_migrate(args) -> int:
+    from agent_runtime.machine_roots import MachineRoots, load_machine_roots
+    from agent_runtime.machine_roots_migration import (
+        apply_config_migration,
+        plan_config_migration,
+        suggest_roots_from_configs,
+        unmapped_absolute_paths,
+    )
+
+    if not _require_yes(args):
+        return 8
+    config_paths = _machine_root_config_paths(list(getattr(args, "configs", []) or []))
+    if not config_paths:
+        return emit_harness_error(
+            NotFound("config.yaml"), args=args, message="No profile config.yaml files found to migrate."
+        )
+
+    explicit: dict[str, str] = {}
+    for item in getattr(args, "root", []) or []:
+        if "=" not in str(item):
+            return emit_harness_error(
+                ValueError(str(item)), args=args, code="invalid_payload", message=f"--root expects NAME=PATH, got '{item}'"
+            )
+        name, _sep, value = str(item).partition("=")
+        explicit[name.strip()] = str(Path(value.strip()).expanduser())
+
+    bindings = dict(load_machine_roots(refresh=True).roots)
+    bindings.update(suggest_roots_from_configs(config_paths))
+    bindings.update(explicit)
+    roots = MachineRoots(roots=bindings)
+
+    plan = plan_config_migration(
+        config_paths,
+        roots,
+        add_platform_gates=not bool(getattr(args, "no_platform_gates", False)),
+    )
+    outcome = apply_config_migration(plan, dry_run=bool(getattr(args, "dry_run", False)))
+    payload = plan.row()
+    payload["applied"] = outcome
+    payload["unmapped_absolute_paths"] = unmapped_absolute_paths(config_paths, roots)
+    _print_stage42(_object_envelope("machine_roots_migration", payload), args=args, default_output="json")
+    return 0 if plan.safe else 1
 
 
 def _list_envelope(item_kind: str, items: list[dict], *, cursor: str | None = None, truncated: bool = False) -> dict:
@@ -1838,6 +2279,239 @@ def _cmd_skills_catalog(args) -> int:
     return 0
 
 
+def _rel_to_shared_skills(path) -> str | None:
+    """Render a shared-skills path relative to the shared root (never leak the
+    absolute runtime root). Falls back to the basename for outside paths."""
+
+    if path is None:
+        return None
+    from hermes_constants import get_shared_skills_dir
+
+    path = Path(path)
+    try:
+        return path.relative_to(get_shared_skills_dir()).as_posix()
+    except ValueError:
+        return path.name
+
+
+def _cmd_skills_publishable(args) -> int:
+    """Read-only: every resolvable skill package, whether it can reach a realm,
+    and — when it cannot be promoted into the shared root — the typed reason.
+
+    Names ALL offenders in one listing with a per-row typed code; a surface that
+    reported only the shared root is exactly how "resolvable but structurally
+    unable to travel" stayed invisible."""
+
+    from agent_runtime.skill_publishability import build_publishability_rows
+
+    source_kind = str(getattr(args, "source_kind", "") or "").strip() or None
+    unpublishable_only = bool(getattr(args, "unpublishable_only", False))
+
+    rows = build_publishability_rows()
+    if source_kind is not None:
+        rows = [row for row in rows if row["source_kind"] == source_kind]
+    if unpublishable_only:
+        rows = [row for row in rows if not row["publishable"]]
+    _print_stage42(_list_envelope("skill_publishability", rows), args=args, default_output="json")
+    return 0
+
+
+def _cmd_skills_inbox(args) -> int:
+    """C4: read-only listing of quarantined per-realm inbox skill packages and
+    how each would reconcile against the canonical shared root."""
+
+    from agent_runtime.skill_promotion import list_inbox_packages
+
+    realm_token = str(getattr(args, "realm", "") or "").strip() or None
+    rows = list_inbox_packages(realm_token)
+    items = [
+        {
+            "skill": row["skill"],
+            "realm": row["realm"],
+            "action": row["action"],
+            "source_hash": row["source_hash"],
+            "canonical_hash": row["canonical_hash"],
+            "promotion_block_reason": row["promotion_block_reason"],
+            "promotion_block_detail": row["promotion_block_detail"],
+        }
+        for row in rows
+    ]
+    _print_stage42(_list_envelope("inbox_package", items), args=args, default_output="json")
+    return 0
+
+
+def _resolve_promotion_source(args, skill: str):
+    """Resolve exactly one promotion source.
+
+    Returns ``(source_dir, source_meta, move_source)`` on success, or an
+    ``(error_code, message, safe_details)`` triple wrapped in a
+    :class:`_PromotionSourceError` on failure.
+    """
+
+    from agent_runtime.skill_promotion import list_inbox_packages, realm_inbox_dir
+
+    from_realm = str(getattr(args, "from_realm", "") or "").strip() or None
+    from_profile = str(getattr(args, "from_profile", "") or "").strip() or None
+    from_path = str(getattr(args, "from_path", "") or "").strip() or None
+    provided = [flag for flag, value in (("--from-realm", from_realm), ("--from-profile", from_profile), ("--from-path", from_path)) if value]
+    slug_parts = skill.split("/")
+
+    if len(provided) > 1:
+        raise _PromotionSourceError("invalid_request", "Provide exactly one of --from-realm / --from-profile / --from-path.", {"skill": skill, "provided": provided})
+
+    if not provided:
+        # Implied source: exactly one realm inbox must hold the skill.
+        matches = [row for row in list_inbox_packages() if row["skill"] == skill]
+        if not matches:
+            raise _PromotionSourceError("not_found", "Skill not held in any realm inbox — specify --from-realm / --from-profile / --from-path.", {"skill": skill})
+        if len(matches) > 1:
+            raise _PromotionSourceError("invalid_request", "Skill present in multiple realm inboxes — specify --from-realm <id>.", {"skill": skill, "candidates": sorted(row["realm"] for row in matches)})
+        row = matches[0]
+        return Path(row["source_dir"]), {"kind": "realm", "realm_id": row["realm"]}, False
+
+    if from_realm:
+        source_dir = realm_inbox_dir(from_realm).joinpath(*slug_parts)
+        if not (source_dir / "SKILL.md").is_file():
+            raise _PromotionSourceError("not_found", "Skill not present in that realm's inbox.", {"skill": skill, "realm": from_realm})
+        # An inbox is a byte-faithful realm mirror — promotion never moves it.
+        return source_dir, {"kind": "realm", "realm_id": from_realm}, False
+
+    if from_profile:
+        from hermes_cli.profiles import get_profile_dir, normalize_profile_name
+
+        skills_root = get_profile_dir(normalize_profile_name(from_profile)) / "skills"
+        candidate = skills_root.joinpath(*slug_parts)
+        if (candidate / "SKILL.md").is_file():
+            source_dir = candidate
+        elif "/" not in skill:
+            nested = [
+                child / skill
+                for child in sorted(skills_root.iterdir(), key=lambda p: p.name)
+                if child.is_dir() and not child.name.startswith(".") and (child / skill / "SKILL.md").is_file()
+            ] if skills_root.is_dir() else []
+            if not nested:
+                raise _PromotionSourceError("not_found", "Skill not found in that profile's skills directory.", {"skill": skill, "profile": from_profile})
+            if len(nested) > 1:
+                raise _PromotionSourceError("invalid_request", "Skill found under multiple categories in that profile — use <category>/<name>.", {"skill": skill, "profile": from_profile, "candidates": sorted(p.parent.name for p in nested)})
+            source_dir = nested[0]
+        else:
+            raise _PromotionSourceError("not_found", "Skill not found in that profile's skills directory.", {"skill": skill, "profile": from_profile})
+        # Promoting from a profile retires the duplicate (the collision guard).
+        return source_dir, {"kind": "profile", "profile": from_profile}, True
+
+    # from_path
+    source_dir = Path(from_path).expanduser()
+    if not (source_dir / "SKILL.md").is_file():
+        raise _PromotionSourceError("not_found", "No SKILL.md at that path.", {"skill": skill})
+    return source_dir, {"kind": "path", "path": str(source_dir)}, bool(getattr(args, "move_source", False))
+
+
+class _PromotionSourceError(Exception):
+    def __init__(self, code: str, message: str, safe_details: dict):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.safe_details = safe_details
+
+
+def _cmd_skills_promote(args) -> int:
+    """C4: hash-guarded promotion of a held / authored / profile-local package
+    into the canonical shared root. Honors --dry-run (stage42 gate); never
+    deletes (displaced content is archived)."""
+
+    from agent_runtime.skill_promotion import classify_promotion, execute_promotion
+
+    skill = str(getattr(args, "skill", "") or "").strip()
+    dry_run = bool(getattr(args, "dry_run", False))
+    adopt_divergent = bool(getattr(args, "adopt_divergent", False))
+
+    try:
+        source_dir, source_meta, move_source = _resolve_promotion_source(args, skill)
+    except _PromotionSourceError as exc:
+        _print_stage42(_error_envelope(exc.code, exc.message, safe_details=exc.safe_details), args=args, default_output="json")
+        return ERROR_EXIT_CODES.get(exc.code, 1)
+
+    plan = classify_promotion(skill, source_dir)
+
+    # Installer-ownership policy, consulted BEFORE the divergence branch below.
+    # The door enforces this too (``execute_promotion`` refuses without writing),
+    # but reporting it here keeps the operator from being told "re-run with
+    # --adopt-divergent" for a promotion that adopting could never make legal.
+    # Same seam, one authority — the CLI adds only the exit code and hint.
+    if plan.action in ("promote_new", "hold_divergent"):
+        from agent_runtime.skill_publishability import promotion_refusal
+
+        refusal = promotion_refusal(skill, source_dir)
+        if refusal is not None:
+            _print_stage42(
+                _error_envelope(
+                    "invalid_request",
+                    refusal.message,
+                    safe_details={
+                        "skill": skill,
+                        "reason_code": refusal.code,
+                        "manifest_name": refusal.manifest_name,
+                        "profile": refusal.profile,
+                        "source_hash": plan.source_hash,
+                        "canonical_hash": plan.canonical_hash,
+                    },
+                    hint=(
+                        "The hermes installer owns this skill package. Promote a "
+                        "package of your own under a distinct slug instead — see "
+                        "`hermes harness skills publishable --json`."
+                    ),
+                ),
+                args=args,
+                default_output="json",
+            )
+            return ERROR_EXIT_CODES.get("invalid_request", 1)
+
+    # A real (non-dry-run) divergent promotion without --adopt-divergent is a
+    # hold: surface BOTH hashes in a typed payload and exit non-zero.
+    if not dry_run and plan.action == "hold_divergent" and not adopt_divergent:
+        _print_stage42(
+            _error_envelope(
+                "sync_conflict",
+                "Canonical differs from source — re-run with --adopt-divergent to adopt (archives the previous copy).",
+                safe_details={"skill": skill, "source_hash": plan.source_hash, "canonical_hash": plan.canonical_hash},
+                hint="Re-run with --adopt-divergent to adopt the source over the divergent canonical (the previous copy is archived, never deleted).",
+            ),
+            args=args,
+            default_output="json",
+        )
+        return ERROR_EXIT_CODES.get("sync_conflict", 1)
+
+    result = execute_promotion(
+        plan,
+        source=source_meta,
+        adopt_divergent=adopt_divergent,
+        dry_run=dry_run,
+        move_source=move_source,
+    )
+
+    envelope = _object_envelope(
+        "skill_promotion",
+        {
+            "skill": skill,
+            "source": source_meta,
+            "classification": plan.action,
+            "action": result.action,
+            "source_hash": plan.source_hash,
+            "canonical_hash": plan.canonical_hash,
+            "archived_previous_to": _rel_to_shared_skills(result.archived_previous_to),
+            "provenance_path": _rel_to_shared_skills(result.provenance_path),
+            "reason": result.reason,
+            # Machine-readable companion to ``reason`` when the guarded door
+            # refuses on installer-ownership policy, so a UI branches on a code
+            # instead of pattern-matching prose (None otherwise).
+            "reason_code": result.reason_code,
+            "dry_run": dry_run,
+        },
+    )
+    _print_stage42(envelope, args=args, default_output="json")
+    return 2 if result.action == "refused" else 0
+
+
 def _cmd_run_list(args) -> int:
     """S8: paged run history — the frame ships only ACTIVE runs; historical/
     terminal runs are fetched here (newest-first, id/state filtered)."""
@@ -2027,11 +2701,21 @@ def _cmd_goal_archive(args) -> int:
 
 def _workspace_row(workspace, *, full: bool = False) -> dict:
     tasks = TaskStore().list_for_workspace(workspace.id)
+    roster_agent_ids = list(workspace.agent_ids or [])
+    live_scoped_agent_ids = exact_scoped_instance_ids(
+        PersonaInstanceStore().list_all(),
+        workspace_id=workspace.id,
+    )
     row = {
         "id": workspace.id,
         "name": workspace.name,
         "realm_id": workspace.realm_id,
-        "agents": len(workspace.agent_ids or []),
+        "agents": len(live_scoped_agent_ids),
+        "agent_ids": live_scoped_agent_ids,
+        "live_scoped_agent_count": len(live_scoped_agent_ids),
+        "live_scoped_agent_ids": live_scoped_agent_ids,
+        "roster_agent_count": len(roster_agent_ids),
+        "roster_agent_ids": roster_agent_ids,
         "goals": len(tasks),
         "isolation": workspace.isolation,
         "updated_at": workspace.updated_at,
@@ -2041,7 +2725,6 @@ def _workspace_row(workspace, *, full: bool = False) -> dict:
             {
                 "kind": "workspace",
                 "slug": workspace.slug,
-                "agent_ids": list(workspace.agent_ids or []),
                 "default_blueprint_id": workspace.default_blueprint_id,
                 "max_concurrent_lanes": workspace.max_concurrent_lanes,
                 "goal_ids": [getattr(task, "goal_id", None) or task.id for task in tasks],
@@ -2285,7 +2968,9 @@ def _cmd_workspace_add_agent(args) -> int:
     if getattr(args, "dry_run", False):
         item = WorkspaceStore().get(args.workspace_id)
         row = _workspace_row(item)
-        row["agents"] = len(set([*item.agent_ids, args.persona_id]))
+        roster_agent_ids = list(dict.fromkeys([*item.agent_ids, args.persona_id]))
+        row["roster_agent_ids"] = roster_agent_ids
+        row["roster_agent_count"] = len(roster_agent_ids)
         warnings = _workspace_agent_sync_warnings(item.id, args.persona_id)
         _print_stage42(_object_envelope("workspace", row, warnings=warnings), args=args, default_output="json")
         return 0
@@ -2414,6 +3099,41 @@ def _cmd_realm_use(args) -> int:
     return 0
 
 
+def _cmd_realm_default_scope(args) -> int:
+    if getattr(args, "dry_run", False):
+        _print_stage42(
+            preview_default_scope_migration(),
+            args=args,
+            default_output="json",
+        )
+        return 0
+    if not getattr(args, "yes", False):
+        return emit_harness_error(
+            ValueError("default-scope reconciliation requires --dry-run or --yes"),
+            args=args,
+            code="confirmation_required",
+        )
+    winner_realm_id = str(getattr(args, "winner_realm", "") or "").strip()
+    winner_workspace_id = str(
+        getattr(args, "winner_workspace", "") or ""
+    ).strip()
+    if not winner_realm_id or not winner_workspace_id:
+        return emit_harness_error(
+            ValueError("--winner-realm and --winner-workspace are required with --yes"),
+            args=args,
+            code="invalid_request",
+        )
+    _print_stage42(
+        reconcile_default_scope_to_legacy(
+            winner_realm_id=winner_realm_id,
+            winner_workspace_id=winner_workspace_id,
+        ),
+        args=args,
+        default_output="json",
+    )
+    return 0
+
+
 def _reconcile_active_workspace_to_realm(realm, *, issued_at: str | None = None) -> None:
     """Switching realms must not leave the active workspace pointing into
     another realm. Keep it when it already belongs; otherwise fall to the
@@ -2505,6 +3225,56 @@ def _cmd_realm_sync_publish(args) -> int:
     return 0
 
 
+def _realm_sync_subtree(realm_id: str):
+    """The checked-out realm subtree the profile-file lane reconciles against.
+
+    Read-only: never clones, never fetches, never mutates the repo — the resolve
+    verb operates on what the last pull already put on disk.
+    """
+    from agent_runtime.realm_sync import _realm_subtree, _sync_repo_path
+
+    realm = RealmStore().get(realm_id)
+    return _realm_subtree(_sync_repo_path(realm), realm.id)
+
+
+def _cmd_realm_sync_held(args) -> int:
+    from agent_runtime.profile_artifact_sync import apply_profile_artifact_pull
+
+    summary = apply_profile_artifact_pull(args.realm_id, _realm_sync_subtree(args.realm_id), dry_run=True)
+    rows = [
+        {"id": key, "kind": "profile_artifact_hold", "realm_id": args.realm_id, "take_hint": "--take local|remote"}
+        for key in sorted(set(summary.held))
+    ]
+    _print_stage42(_list_envelope("profile_artifact_hold", rows), args=args, default_output="json")
+    return 0
+
+
+def _cmd_realm_sync_resolve(args) -> int:
+    from agent_runtime.profile_artifact_sync import (
+        ProfileArtifactResolveError,
+        resolve_profile_artifact,
+    )
+
+    if not _require_yes(args):
+        return 8
+    dry_run = bool(getattr(args, "dry_run", False))
+    try:
+        row = resolve_profile_artifact(
+            args.realm_id,
+            _realm_sync_subtree(args.realm_id),
+            args.key,
+            take=args.take,
+            dry_run=dry_run,
+        )
+    except ProfileArtifactResolveError as exc:
+        return emit_harness_error(exc, args=args, code=exc.code)
+    envelope = _object_envelope("profile_artifact_hold", {"id": row["key"], **row})
+    if dry_run:
+        envelope["dry_run"] = True
+    _print_stage42(envelope, args=args, default_output="json")
+    return 0
+
+
 def _realm_skill_selection_envelope(realm) -> dict:
     """The realm_skill_selection/v1 envelope (design §5): current mode +
     selection, the shared-catalog slugs on THIS machine, and the honest
@@ -2566,36 +3336,190 @@ def _cmd_realm_skills_set(args) -> int:
     return 0
 
 
+def _realm_agent_selection_envelope(realm_id: str) -> dict:
+    state = realm_agent_selection_state(realm_id)
+    return {
+        "schema_version": 1,
+        "id": realm_id,
+        "kind": "realm_agent_selection",
+        **state,
+    }
+
+
+def _cmd_realm_agents_show(args) -> int:
+    # RealmStore lookup occurs inside the state resolver, so a missing id keeps
+    # the same typed command error behavior as every other Realm read verb.
+    _print_stage42(
+        _realm_agent_selection_envelope(args.realm_id),
+        args=args,
+        default_output="json",
+    )
+    return 0
+
+
+def _cmd_realm_agents_set(args) -> int:
+    chosen = [
+        name
+        for name, present in (
+            ("--workspace", bool(getattr(args, "publish_workspace", False))),
+            ("--agents", getattr(args, "agents", None) is not None),
+            ("--none", bool(getattr(args, "publish_none", False))),
+        )
+        if present
+    ]
+    if len(chosen) != 1:
+        return emit_harness_error(
+            ValueError("exactly one of --workspace, --agents, or --none is required"),
+            args=args,
+            code="invalid_request",
+        )
+    if getattr(args, "publish_workspace", False):
+        mode, selection = "workspace", []
+    elif getattr(args, "publish_none", False):
+        mode, selection = "selected", []
+    else:
+        mode = "selected"
+        selection = [
+            persona_id.strip()
+            for persona_id in str(args.agents).split(",")
+            if persona_id.strip()
+        ]
+    dry_run = bool(getattr(args, "dry_run", False))
+    RealmStore().set_agent_selection(
+        args.realm_id,
+        mode=mode,
+        selection=selection,
+        dry_run=dry_run,
+    )
+    envelope = _realm_agent_selection_envelope(args.realm_id)
+    if dry_run:
+        # The state resolver reads disk, so reflect the validated would-be
+        # selection in the preview without mutating RealmStore.
+        preview = RealmStore().set_agent_selection(
+            args.realm_id,
+            mode=mode,
+            selection=selection,
+            dry_run=True,
+        )
+        envelope["mode"] = preview.agent_publish_mode
+        envelope["selection"] = sorted(preview.agent_selection or [])
+        effective = set(envelope["required"])
+        if preview.agent_publish_mode == "selected":
+            effective.update(envelope["selection"])
+        catalog = set(envelope["catalog"])
+        envelope["published"] = sorted(effective & catalog)
+        envelope["missing"] = sorted(effective - catalog)
+        envelope["dry_run"] = True
+    _print_stage42(envelope, args=args, default_output="json")
+    return 0
+
+
 def _cmd_agent_list(args) -> int:
+    from agent_runtime.persona_profile_binding import binding_index
+
     rows: list[dict] = []
     if getattr(args, "all_profiles", False):
         for profile in list_profiles():
             try:
                 cfg = load_agent_runtime_config(Path(profile.path) / "config.yaml")
                 personas = ensure_persisted_personas(cfg)
+                # Same asymmetry `ensure_persisted_personas(cfg)` already has:
+                # the config side comes from the ENUMERATED profile's
+                # config.yaml, the store side from the ACTIVE runtime root
+                # (there is one agent store per runtime root, not per profile).
+                # The binding columns therefore describe exactly the merge the
+                # row above came from.
+                bindings = binding_index(cfg)
             except Exception:
                 continue
             for persona in personas:
-                rows.append(_agent_definition_row(persona, profile_name=profile.name))
+                rows.append(_agent_definition_row(persona, source_profile=profile.name, bindings=bindings))
     else:
-        for persona in ensure_persisted_personas(load_agent_runtime_config()):
-            rows.append(_agent_definition_row(persona, profile_name=active_profile_name()))
+        cfg = load_agent_runtime_config()
+        try:
+            bindings = binding_index(cfg)
+        except Exception:
+            bindings = {}
+        for persona in ensure_persisted_personas(cfg):
+            rows.append(_agent_definition_row(persona, source_profile=active_profile_name(), bindings=bindings))
     deduped: dict[tuple[str, str | None], dict] = {}
     for row in rows:
-        deduped[(row["id"], row.get("profile"))] = row
+        # Dedup on the ENUMERATED Hermes profile the definition was read from,
+        # not on `profile` — `profile` is now the agent's own binding, and two
+        # agents in different profile homes can legitimately share one binding.
+        deduped[(row["id"], row.get("source_profile"))] = row
     _print_stage42(_list_envelope("agent", _sort_rows(list(deduped.values()), getattr(args, "sort", None))), args=args)
     return 0
 
 
-def _agent_definition_row(persona: AgentPersona, *, profile_name: str | None) -> dict:
-    return {
+def _agent_definition_row(persona: AgentPersona, *, source_profile: str | None, bindings: dict | None = None) -> dict:
+    """One `agent list` row.
+
+    ``profile`` is the agent's OWN ``hermes_profile`` binding — the thing the
+    column name promises. It used to be filled with ``active_profile_name()``,
+    so every row printed the operator's current profile (live evidence
+    2026-07-25: all five agents printed ``alice`` both before AND after a real
+    rebind — a first-class surface that structurally could not answer the
+    question it appeared to answer). The enumeration source keeps its own,
+    honestly-named ``source_profile`` column, and the config-vs-store
+    disagreement that ``ensure_persisted_personas`` silently resolves
+    store-wins is surfaced rather than hidden.
+    """
+
+    binding = (bindings or {}).get(persona.id)
+    row = {
         "id": persona.id,
         "name": persona.display_name,
         "role": str(persona.role),
-        "profile": profile_name or persona.hermes_profile,
+        "profile": persona.hermes_profile,
+        "source_profile": source_profile,
         "state": "available",
         "updated_at": None,
     }
+    if binding is not None:
+        row["config_profile"] = binding.config_profile
+        row["store_profile"] = binding.store_profile
+        row["binding_source"] = binding.source
+        row["binding_diverged"] = binding.diverged
+    return row
+
+
+def _cmd_agent_set_profile(args) -> int:
+    """`harness agent set-profile` — the ONE persona⇄profile rebind door.
+
+    ``_add_stage42_global_args(mutation=True)`` auto-registers ``--dry-run``;
+    it is READ here and threaded into the store chokepoint, which validates
+    fully, writes nothing and emits nothing on a preview. A mutation verb that
+    ignores the flag silently mutates on a preview — this repo has shipped that
+    bug twice (the 2026-07-17 office verb family).
+    """
+
+    from agent_runtime.persona_profile_binding import PersonaProfileRebindError, rebind_persona_profile
+
+    dry_run = bool(getattr(args, "dry_run", False))
+    try:
+        result = rebind_persona_profile(
+            str(getattr(args, "persona_id", "") or ""),
+            profile=str(getattr(args, "profile", "") or ""),
+            dry_run=dry_run,
+            actor=str(getattr(args, "requested_by", None) or "operator"),
+        )
+    except PersonaProfileRebindError as exc:
+        data = {
+            "ok": False,
+            "error_code": exc.code,
+            "error": str(exc),
+            **exc.details,
+            "dry_run": dry_run,
+            "next_expected": "fix the arguments and retry; no agent binding was changed",
+        }
+        _print_stage42(_object_envelope("agent_profile_rebind", data), args=args, default_output="json")
+        return 2
+    _print_stage42(_object_envelope("agent_profile_rebind", result), args=args, default_output="json")
+    # A partial apply moved the persona authority but stranded projection rows.
+    # Placement rows have no self-heal, so exiting 0 would tell a script the
+    # binding is fully consistent when it is not.
+    return 0 if result.get("ok", True) else 2
 
 
 def _cmd_pets_gallery(args) -> int:
@@ -3051,7 +3975,10 @@ def _cmd_init(args) -> int:
     else:
         personas = ensure_persisted_personas(cfg)
     persona_ids = [p.id for p in personas]
-    scope = ensure_default_scope(agent_ids=persona_ids)
+    try:
+        scope = ensure_default_scope(agent_ids=persona_ids)
+    except DefaultScopeReconciliationRequired as exc:
+        return emit_harness_error(exc, args=args, code=exc.code)
     data = {
         "personas": persona_ids,
         "default_realm_id": scope.realm.id,
@@ -3266,6 +4193,397 @@ def _cmd_providers(args) -> int:
     return 0
 
 
+# --- `hermes harness usage` implementation ------------------------------------
+#
+# Structure mirrors build_provider_visibility: every seam is failure-isolated so
+# a broken probe on one provider can NEVER sink the envelope or another lane.
+# The reusable fetch/render primitives live upstream in agent/account_usage.py
+# (which this module must not modify) — snapshot → dict serialization lives HERE.
+
+
+def _usage_provider_label(provider_id: str) -> str:
+    """Human display name for a provider id, degrading to the id itself."""
+    try:
+        from hermes_cli.models import provider_label
+
+        return provider_label(provider_id)
+    except Exception:
+        return provider_id
+
+
+def _usage_iso(dt) -> Optional[str]:
+    """Serialize a datetime as ISO-8601 UTC, or None. Fail-open → None."""
+    if dt is None:
+        return None
+    try:
+        aware = dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+        return aware.astimezone(timezone.utc).isoformat()
+    except Exception:
+        return None
+
+
+def _resolve_active_provider_id() -> Optional[str]:
+    """Normalized effective provider id, mirroring the CLI runtime resolution
+    seam (`hermes_cli/status.py::_effective_provider_label`) but emitting the id
+    rather than a label. Fail-open → None; ``auto`` (unresolved) also maps to
+    None so callers get a concrete id or nothing.
+    """
+    try:
+        from hermes_cli.auth import AuthError, resolve_provider
+        from hermes_cli.runtime_provider import resolve_requested_provider
+
+        requested = resolve_requested_provider()
+        try:
+            effective = resolve_provider(requested)
+        except AuthError:
+            effective = requested or None
+        normalized = str(effective or "").strip().lower() or None
+        if normalized in {"", "auto"}:
+            return None
+        return normalized
+    except Exception:
+        return None
+
+
+def _codex_usage_login_detected() -> bool:
+    """Codex lane detected when the OAuth status is logged-in OR the credential
+    pool holds any openai-codex entry."""
+    try:
+        from hermes_cli.auth import get_codex_auth_status
+
+        if bool((get_codex_auth_status() or {}).get("logged_in")):
+            return True
+    except Exception:
+        pass
+    try:
+        from agent.credential_pool import load_pool
+
+        return bool(load_pool("openai-codex").entries())
+    except Exception:
+        return False
+
+
+def _openrouter_usage_login_detected() -> bool:
+    """OpenRouter lane detected when the pool holds an entry OR the runtime
+    resolver finds a usable key."""
+    try:
+        from agent.credential_pool import load_pool
+
+        if load_pool("openrouter").entries():
+            return True
+    except Exception:
+        pass
+    try:
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+
+        runtime = resolve_runtime_provider(requested="openrouter")
+        return bool(str(runtime.get("api_key", "") or "").strip())
+    except Exception:
+        return False
+
+
+def _usage_lane_detected(provider_id: str) -> bool:
+    """True iff the operator is signed-in / holds credentials for ``provider_id``.
+    Only detected lanes are ever emitted (undetected providers are omitted).
+    Fail-open per provider → False."""
+    try:
+        if provider_id == "openai-codex":
+            return _codex_usage_login_detected()
+        if provider_id == "anthropic":
+            from agent.anthropic_adapter import resolve_anthropic_token
+
+            return bool((resolve_anthropic_token() or "").strip())
+        if provider_id == "openrouter":
+            return _openrouter_usage_login_detected()
+        if provider_id == "nous":
+            from hermes_cli.auth import get_provider_auth_state
+
+            tok = (get_provider_auth_state("nous") or {}).get("access_token")
+            return bool(isinstance(tok, str) and tok.strip())
+    except Exception:
+        return False
+    return False
+
+
+def _fetch_usage_lane(provider_id: str):
+    """Fetch the account-usage snapshot for one provider (may return None or
+    raise; callers isolate failures). Nous flows through the portal-account +
+    credits-snapshot path; the rest through the shared usage-API fetcher."""
+    if provider_id == "nous":
+        from agent.account_usage import build_nous_credits_snapshot
+        from hermes_cli.nous_account import get_nous_portal_account_info
+
+        account = get_nous_portal_account_info(force_fresh=True)
+        return build_nous_credits_snapshot(account)
+    from agent.account_usage import fetch_account_usage
+
+    return fetch_account_usage(provider_id)
+
+
+def _serialize_usage_window(window) -> Optional[dict]:
+    """Serialize one usage window into a lane-window dict, or return None to DROP
+    the window.
+
+    A non-finite ``used_percent`` (NaN / inf leaking out of an upstream fetcher)
+    would serialize through ``emit_json`` — which is ``json.dumps`` with the
+    default ``allow_nan=True`` — as the bare tokens ``NaN`` / ``Infinity``. That
+    is invalid JSON, and the Launcher's strict parser drops the ENTIRE envelope
+    into its failure state. So a non-finite percent drops just this window (never
+    nulled, never clamped) rather than corrupting the whole payload. A genuinely
+    unknown percent (``None``) is still a valid window and is kept.
+    """
+    used = window.used_percent
+    if used is not None:
+        try:
+            used = float(used)
+        except (TypeError, ValueError):
+            # Non-numeric percent (shouldn't happen for a typed snapshot): treat
+            # as unknown rather than crash the whole envelope.
+            used = None
+        else:
+            if not math.isfinite(used):
+                return None
+    return {
+        "label": window.label,
+        # Raw float, not clamped — the console decides how to present overage.
+        "used_percent": used,
+        "reset_at": _usage_iso(window.reset_at),
+        "detail": window.detail,
+    }
+
+
+def _unavailable_usage_lane(provider_id: str, reason: str, *, active: bool) -> dict:
+    return {
+        "provider": provider_id,
+        "display_name": _usage_provider_label(provider_id),
+        "active": active,
+        "available": False,
+        "plan": None,
+        "source": None,
+        "fetched_at": None,
+        "windows": [],
+        "details": [],
+        "unavailable_reason": reason,
+    }
+
+
+def _serialize_usage_lane(provider_id: str, snapshot, *, active: bool) -> dict:
+    """Serialize an AccountUsageSnapshot (or None) into a lane dict. A None
+    snapshot on a detected login lane is emitted as ``no usage data``."""
+    if snapshot is None:
+        return _unavailable_usage_lane(provider_id, "no usage data", active=active)
+    return {
+        "provider": provider_id,
+        "display_name": _usage_provider_label(provider_id),
+        "active": active,
+        "available": bool(snapshot.available),
+        "plan": snapshot.plan,
+        "source": snapshot.source,
+        "fetched_at": _usage_iso(snapshot.fetched_at),
+        # A window whose percent is non-finite serializes to None and is dropped
+        # here — an empty windows list on an otherwise-available lane is honest.
+        "windows": [
+            w
+            for w in (_serialize_usage_window(win) for win in snapshot.windows)
+            if w is not None
+        ],
+        "details": [str(d) for d in snapshot.details],
+        "unavailable_reason": snapshot.unavailable_reason,
+    }
+
+
+def _detect_usage_candidates(only_provider: Optional[str]) -> list[str]:
+    providers = _USAGE_LANE_PROVIDERS
+    if only_provider:
+        norm = str(only_provider).strip().lower()
+        providers = tuple(p for p in providers if p == norm)
+    return [p for p in providers if _usage_lane_detected(p)]
+
+
+def _fetch_usage_lanes(
+    candidates: list[str],
+    *,
+    active_provider: Optional[str],
+    timeout: float,
+) -> list[dict]:
+    """Fetch every candidate lane CONCURRENTLY, bounded by an overall wall-clock
+    deadline. Per-lane timeout/failure degrades to an unavailable lane carrying a
+    CLASS-NAME-ONLY reason (never an exception message, which could leak a token
+    or URL). Never blocks process exit on a hung fetch."""
+    import concurrent.futures
+
+    lanes_by_provider: dict[str, dict] = {}
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(candidates)))
+    try:
+        future_map = {pool.submit(_fetch_usage_lane, p): p for p in candidates}
+        for future, provider_id in future_map.items():
+            active = provider_id == active_provider
+            # Deadline-derived remaining bound: forwarding a shared deadline as
+            # each future's result timeout keeps the OVERALL wall clock ≈timeout
+            # even though the futures run concurrently.
+            remaining = max(0.0, deadline - time.monotonic())
+            try:
+                snapshot = future.result(timeout=remaining)
+            except concurrent.futures.TimeoutError:
+                lanes_by_provider[provider_id] = _unavailable_usage_lane(
+                    provider_id, "usage fetch failed (TimeoutError)", active=active
+                )
+            except Exception as exc:  # noqa: BLE001 — class name only, fail-open
+                lanes_by_provider[provider_id] = _unavailable_usage_lane(
+                    provider_id,
+                    f"usage fetch failed ({type(exc).__name__})",
+                    active=active,
+                )
+            else:
+                lanes_by_provider[provider_id] = _serialize_usage_lane(
+                    provider_id, snapshot, active=active
+                )
+    finally:
+        # Don't let the context-manager shutdown(wait=True) block on a hung
+        # provider fetch — each underlying fetch already carries its own HTTP
+        # timeout, and cancel_futures drops anything not yet started.
+        pool.shutdown(wait=False, cancel_futures=True)
+    return [lanes_by_provider[p] for p in candidates if p in lanes_by_provider]
+
+
+def build_account_usage(
+    *,
+    only_provider: Optional[str] = None,
+    timeout: float = DEFAULT_USAGE_TIMEOUT,
+) -> dict:
+    """Build the ``hermes.account_usage/v1`` envelope: one lane per detected
+    provider login (codex / anthropic / openrouter / nous), fetched concurrently
+    under an overall wall-clock bound. Fail-open at every seam — worst case the
+    envelope carries empty lanes."""
+    try:
+        active_provider = _resolve_active_provider_id()
+    except Exception:
+        active_provider = None
+    payload: dict = {
+        "schema": USAGE_SCHEMA,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "active_provider": active_provider,
+        "lanes": [],
+    }
+    try:
+        candidates = _detect_usage_candidates(only_provider)
+    except Exception:
+        return payload
+    if not candidates:
+        return payload
+    try:
+        payload["lanes"] = _fetch_usage_lanes(
+            candidates, active_provider=active_provider, timeout=timeout
+        )
+    except Exception:
+        payload["lanes"] = []
+    return payload
+
+
+def _render_account_usage_human(payload: dict) -> None:
+    """Render the envelope as human lines, reusing the shared
+    ``render_account_usage_lines`` per available lane."""
+    from agent.account_usage import (
+        AccountUsageSnapshot,
+        AccountUsageWindow,
+        render_account_usage_lines,
+    )
+
+    print(f"Active provider: {payload.get('active_provider') or '(none)'}")
+    lanes = payload.get("lanes") or []
+    if not lanes:
+        print("No account-usage lanes (no signed-in providers detected).")
+        return
+    for lane in lanes:
+        marker = " *" if lane.get("active") else ""
+        print("")
+        print(f"{lane.get('display_name') or lane.get('provider')}{marker}")
+        if not lane.get("available"):
+            print(f"  Unavailable: {lane.get('unavailable_reason') or 'no usage data'}")
+            continue
+        windows = tuple(
+            AccountUsageWindow(
+                label=w.get("label"),
+                used_percent=w.get("used_percent"),
+                reset_at=_parse_usage_iso(w.get("reset_at")),
+                detail=w.get("detail"),
+            )
+            for w in lane.get("windows") or []
+        )
+        snapshot = AccountUsageSnapshot(
+            provider=lane.get("provider") or "",
+            source=lane.get("source") or "",
+            fetched_at=datetime.now(timezone.utc),
+            plan=lane.get("plan"),
+            windows=windows,
+            details=tuple(lane.get("details") or []),
+        )
+        for line in render_account_usage_lines(snapshot):
+            print(f"  {line}")
+
+
+def _parse_usage_iso(value) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def _empty_usage_envelope() -> dict:
+    """Minimal, always-serializable ``hermes.account_usage/v1`` envelope with no
+    lanes — the guaranteed fallback whenever a richer build or serialization step
+    fails."""
+    return {
+        "schema": USAGE_SCHEMA,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "active_provider": None,
+        "lanes": [],
+    }
+
+
+def _emit_usage_json(payload: dict) -> None:
+    """Print the envelope as JSON, guaranteeing the ``--json`` branch NEVER
+    raises. The verb's contract is total failure isolation, but ``emit_json`` (or
+    the stdout write itself) can still fail; if it does, fall back to a minimal
+    always-valid empty envelope serialized with the stdlib ``json.dumps`` so the
+    fallback does not depend on the possibly-broken ``emit_json``. If even that
+    write fails there is nothing more we can do, so it is swallowed and the verb
+    still exits 0."""
+    try:
+        print(emit_json(payload))
+        return
+    except Exception:
+        pass
+    try:
+        print(json.dumps(_empty_usage_envelope()))
+    except Exception:
+        pass
+
+
+def _cmd_usage(args) -> int:
+    """`hermes harness usage` — typed per-provider account-usage envelope. Total
+    failure isolation: nothing here may raise; worst case is a valid envelope
+    with empty lanes."""
+    only_provider = getattr(args, "provider", None)
+    timeout = float(getattr(args, "timeout", DEFAULT_USAGE_TIMEOUT) or DEFAULT_USAGE_TIMEOUT)
+    try:
+        payload = build_account_usage(only_provider=only_provider, timeout=timeout)
+    except Exception:
+        payload = _empty_usage_envelope()
+    if getattr(args, "json", False):
+        _emit_usage_json(payload)
+        return 0
+    try:
+        _render_account_usage_human(payload)
+    except Exception:
+        # Human rendering must not crash the verb either.
+        _emit_usage_json(payload)
+    return 0
+
+
 def _cmd_skills_inventory(args) -> int:
     from agent_runtime.skills_inventory import build_skills_inventory
 
@@ -3373,7 +4691,6 @@ def _cmd_doctor(args) -> int:
 
 def _cmd_goal_run(args) -> int:
     cfg = load_agent_runtime_config()
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
     try:
         bindings = _parse_blueprint_bindings(list(args.bind or []))
     except Exception as exc:

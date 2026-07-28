@@ -186,6 +186,14 @@ class Realm:
     # catalog are preserved, never stripped, on an unrelated save.
     skill_publish_mode: str = "all"  # "all" | "selected"
     skill_selection: list[str] = field(default_factory=list)
+    # Which persona definitions publish to this realm. ``workspace`` preserves
+    # the pre-selection behavior: every persona required by a workspace roster
+    # or Office placement travels. ``selected`` adds the explicit
+    # ``agent_selection`` set while required references remain pinned so a
+    # pulled workspace/office can never point at an absent persona definition.
+    # The explicit list is preserved when switching back to workspace mode.
+    agent_publish_mode: str = "workspace"  # "workspace" | "selected"
+    agent_selection: list[str] = field(default_factory=list)
     sync_manifest_ref: str | None = None
     archived: bool = False
     schema_version: int = 1

@@ -39,6 +39,11 @@ from .errors import NotFound, StaleRevision, SyncConflict
 from .events import EventLog
 from .locks import office_lock
 from .models import Event, OfficeActor, OfficeItem, OfficeSurface
+# Eager, not lazy: the rule now lives in stdlib-only ``agent_runtime.redaction``,
+# so importing it costs nothing. The old lazy ``from .realm_sync import …`` was
+# dodging ``realm_sync``'s weight — the tell that ``realm_sync`` was the wrong
+# home for a constant four other modules needed.
+from .redaction import SECRET_ASSIGNMENT_RE
 from .serde import from_jsonable, to_jsonable
 
 ARCHIVED_LEDGER_CAP = 5000
@@ -80,8 +85,6 @@ def _assert_display_name_publishable(name: str) -> None:
     WHOLE realm publish on a content match; rejecting at the write chokepoint
     keeps that scan defense-in-depth instead of the primary gate.
     """
-
-    from .realm_sync import SECRET_ASSIGNMENT_RE  # lazy: avoid import weight/cycles
 
     if SECRET_ASSIGNMENT_RE.search(name):
         raise ValueError("invalid_request: display_name looks like a secret assignment")

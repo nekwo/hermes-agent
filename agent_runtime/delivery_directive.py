@@ -22,6 +22,7 @@ Steps, in contract order:
 from __future__ import annotations
 
 import subprocess
+import os
 import uuid
 import hashlib
 from pathlib import Path
@@ -37,6 +38,7 @@ from .repo_context import (
     existing_run_worktrees,
     remove_harness_worktree_for_repo,
     resolve_affected_repo_workdir,
+    worktree_patch_size_estimate,
     worktree_patch_text,
 )
 from .states import TaskState
@@ -388,6 +390,7 @@ def reap_orphan_worktrees(
     min_age_seconds: int = 3600,
     event_log: EventLog | None = None,
     dry_run: bool = False,
+    include_legacy_temp: bool = False,
 ) -> dict[str, Any]:
     """Capture-then-reap harness worktrees no open task run owns.
 
@@ -401,13 +404,19 @@ def reap_orphan_worktrees(
     import time as _time
 
     from .repo_context import (
-        harness_worktree_dirs,
+        harness_worktree_inventory,
+        current_harness_worktree_base_dir,
+        legacy_harness_worktree_base_dir,
         remove_orphan_worktree,
         worktree_source_root,
+        existing_run_worktrees_in_bases,
     )
     from .store import RunStore, TaskStore
 
     protected: set[Path] = set()
+    candidate_bases = [current_harness_worktree_base_dir()]
+    if include_legacy_temp:
+        candidate_bases.append(legacy_harness_worktree_base_dir())
     try:
         task_store = TaskStore()
         run_store = RunStore()
@@ -415,7 +424,12 @@ def reap_orphan_worktrees(
             repos = list(getattr(task, "affected_repos", None) or [])
             for run in run_store.list_for_task(task.id):
                 for repo in repos:
-                    for worktree in existing_run_worktrees(repo, task_id=task.id, run_id=run.id):
+                    for worktree in existing_run_worktrees_in_bases(
+                        repo,
+                        task_id=task.id,
+                        run_id=run.id,
+                        base_dirs=candidate_bases,
+                    ):
                         protected.add(worktree.resolve())
     except Exception:
         # If ownership cannot be established, protect everything: reap nothing.
@@ -425,8 +439,17 @@ def reap_orphan_worktrees(
     now_ts = _time.time()
     reaped: list[dict[str, Any]] = []
     kept: list[dict[str, Any]] = []
-    for worktree in harness_worktree_dirs():
-        entry: dict[str, Any] = {"worktree": worktree.name}
+    for worktree, candidate_base, source, unsafe_reason in harness_worktree_inventory(
+        include_legacy_temp=include_legacy_temp
+    ):
+        entry: dict[str, Any] = {
+            "worktree": worktree.name,
+            "base": str(candidate_base),
+            "source": source,
+        }
+        if unsafe_reason is not None:
+            kept.append({**entry, "reason": unsafe_reason})
+            continue
         try:
             resolved = worktree.resolve()
         except OSError:
@@ -459,26 +482,29 @@ def reap_orphan_worktrees(
             else:
                 kept.append({**entry, "reason": "not_a_git_worktree_with_files"})
             continue
+        if dry_run:
+            patch_bytes_estimate = worktree_patch_size_estimate(worktree)
+            if patch_bytes_estimate > 0:
+                entry["would_capture_patch"] = True
+                entry["patch_bytes_estimate"] = patch_bytes_estimate
+            entry["dry_run"] = True
+            reaped.append(entry)
+            continue
         patch = worktree_patch_text(worktree)
         if patch.strip():
-            if dry_run:
-                entry["would_capture_patch"] = True
-                entry["patch_bytes_estimate"] = len(patch.encode("utf-8", errors="replace"))
-                entry["dry_run"] = True
-                reaped.append(entry)
-                continue
-            capture_dir.mkdir(parents=True, exist_ok=True)
-            capture_path = capture_dir / f"{worktree.name}.patch"
-            try:
-                capture_path.write_text(patch, encoding="utf-8", newline="")
-            except OSError:
+            capture_path = _write_reap_patch_exclusive(
+                capture_dir,
+                patch,
+                source=source,
+                candidate_base=candidate_base,
+                worktree=worktree,
+            )
+            if capture_path is None:
                 kept.append({**entry, "reason": "capture_write_failed"})
                 continue
             entry["captured_patch"] = capture_path.name
             entry["patch_bytes"] = capture_path.stat().st_size
-        if dry_run:
-            reaped.append({**entry, "dry_run": True})
-        elif remove_orphan_worktree(worktree, reason="orphan_reap"):
+        if remove_orphan_worktree(worktree, reason="orphan_reap"):
             reaped.append(entry)
         else:
             kept.append({**entry, "reason": "remove_failed"})
@@ -500,7 +526,64 @@ def reap_orphan_worktrees(
             )
         except Exception:
             pass
-    return {"reaped": reaped, "kept": kept, "capture_dir": str(capture_dir), "dry_run": dry_run}
+    return {
+        "reaped": reaped,
+        "kept": kept,
+        "capture_dir": str(capture_dir),
+        "dry_run": dry_run,
+        "include_legacy_temp": include_legacy_temp,
+    }
+
+
+def _write_reap_patch_exclusive(
+    capture_dir: Path,
+    patch: str,
+    *,
+    source: str,
+    candidate_base: Path,
+    worktree: Path,
+) -> Path | None:
+    """Create one collision-proof capture without truncating any prior artifact."""
+
+    try:
+        capture_dir.mkdir(parents=True, exist_ok=True)
+        identity = hashlib.sha256(
+            f"{source}|{candidate_base.resolve()}|{worktree.resolve()}".encode(
+                "utf-8", errors="replace"
+            )
+        ).hexdigest()[:12]
+    except OSError:
+        return None
+    safe_name = "".join(
+        char if char.isalnum() or char in {"-", "_"} else "_"
+        for char in worktree.name
+    )[:80]
+    stamp = now().strftime("%Y%m%dT%H%M%S%fZ")
+    payload = patch.encode("utf-8")
+    for collision in range(100):
+        name = f"{source}_{safe_name}_{identity}_{stamp}_{collision:02d}.patch"
+        capture_path = capture_dir / name
+        try:
+            descriptor = os.open(
+                capture_path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
+                0o600,
+            )
+        except FileExistsError:
+            continue
+        except OSError:
+            return None
+        try:
+            with os.fdopen(descriptor, "wb") as handle:
+                handle.write(payload)
+            return capture_path
+        except OSError:
+            try:
+                capture_path.unlink()
+            except OSError:
+                pass
+            return None
+    return None
 
 
 def _promote_patch_to_repo(

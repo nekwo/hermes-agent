@@ -424,8 +424,63 @@ def test_mission_chat_operative_rules_teach_the_chat_session_verbs():
     assert "session_id" in verbs_bullet
 
 
+def test_mission_chat_operative_rules_route_named_agents_without_creating_goals():
+    from agent_runtime.persona_runtime import _mission_chat_operative_rules
+
+    rules = _mission_chat_operative_rules()
+    assert (
+        "When the operator asks you to send, brief, or coordinate named agents, use "
+        "`agent_chat_send` for each agent. Do not create a goal unless the operator "
+        "explicitly asks for a goal, mission, or task. Investigations and multi-agent "
+        "work do not imply goal creation."
+    ) in rules
+
+
+def test_mission_chat_operative_rules_preserve_media_lines_verbatim():
+    # A MEDIA:<path> line standing alone is a DECLARATION the operator console
+    # renders as a titled image card. The two failure modes are NOT the same:
+    # backticking or fencing that line un-declares it and nothing paints at all,
+    # while retyping the path loose in a sentence still previews the image and
+    # merely demotes it (untitled, raw path left in the prose). The rules must
+    # teach the verbatim relay AND a WHY that survives contact with the console —
+    # a lead who watches a backticked path render fine must not catch the rule
+    # overstating its own mechanism, because that discredits it exactly where it
+    # is right. It must also read as the explicit carve-out to the clean-prose
+    # rule that precedes it (not as a competing instruction).
+    from agent_runtime.persona_runtime import _mission_chat_operative_rules
+
+    rules = _mission_chat_operative_rules()
+    bullets = [line for line in rules.splitlines() if line.startswith("- ")]
+
+    media_bullet = next((line for line in bullets if "MEDIA:" in line), None)
+    assert media_bullet is not None, "operative rules must teach the MEDIA-verbatim relay"
+    assert "VERBATIM" in media_bullet
+    assert "never wrap it in backticks or a code fence" in media_bullet
+    assert "bare absolute screenshot path" in media_bullet
+
+    # The WHY ships with the rule — a rule without its reason gets rationalized away.
+    assert "WHY:" in media_bullet
+    # ...and it names both outcomes honestly rather than collapsing them into
+    # "any rewrap loses the image", which is checkably false for a bare path.
+    assert "un-declares it" in media_bullet
+    assert "NOTHING renders" in media_bullet
+    assert "still previews" in media_bullet
+
+    # The rule must not demonstrate the form it forbids. Models imitate exemplar
+    # surface forms, so the bullet that bans backticking a MEDIA line carries no
+    # backticks of its own — the placeholder is plain prose.
+    assert "`" not in media_bullet, "the MEDIA rule must not model the formatting it forbids"
+
+    # It is the carve-out to the clean-prose bullet, so it must follow it.
+    prose_index = next(
+        i for i, line in enumerate(bullets) if "Keep replies as clean teammate prose" in line
+    )
+    assert bullets.index(media_bullet) == prose_index + 1
+
+
 def test_persona_soul_overlay_layers_between_identity_and_rules(tmp_path, monkeypatch):
-    # A profile-backed persona configured with `soul_overlay_path` reads its
+    # A profile-backed persona reads its canonical SOUL.md by default (an
+    # explicit `soul_overlay_path` remains an override) from
     # soul from ITS OWN profile home (single source — realm sync already models
     # soul_overlay as profile-home-relative) and layers it into BOTH chat lanes
     # — after the identity hat, before the operative rules on the mission-chat
@@ -446,7 +501,7 @@ def test_persona_soul_overlay_layers_between_identity_and_rules(tmp_path, monkey
     )
 
     neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
-    souled = replace(neko, soul_overlay_path="SOUL.md", hermes_profile="neko")
+    souled = replace(neko, soul_overlay_path=None, hermes_profile="neko")
 
     composed = pr._mission_chat_surface_message(souled, "")
     identity = pr._mission_chat_identity_prompt(souled)
@@ -467,14 +522,13 @@ def test_persona_soul_overlay_layers_between_identity_and_rules(tmp_path, monkey
     assert soul_marker in chat_prompt
     assert chat_prompt.index("operator-channel agent") < chat_prompt.index(soul_marker)
 
-    # No soul configured -> byte-identical legacy composition.
-    assert (
-        pr._mission_chat_surface_message(neko, "")
-        == pr._mission_chat_identity_prompt(neko) + "\n\n" + rules
-    )
-    # A bogus path degrades to no soul, never an error.
+    # A bogus explicit path degrades to no soul, never an error or an implicit
+    # fallback that hides the bad override.
     bogus = replace(neko, soul_overlay_path="does_not_exist.md", hermes_profile="neko")
-    assert pr._mission_chat_surface_message(bogus, "") == pr._mission_chat_surface_message(neko, "")
+    assert (
+        pr._mission_chat_surface_message(bogus, "")
+        == pr._mission_chat_identity_prompt(bogus) + "\n\n" + rules
+    )
 
 
 def test_profile_backed_soul_never_falls_through_to_operator_home(tmp_path, monkeypatch):
@@ -796,11 +850,12 @@ def test_mission_chat_reply_runs_for_profile_persona(tmp_path, monkeypatch):
         # profile on disk; the role="profile" sentinel still drives toolset resolution.
         hermes_profile=None,
     )
-    captured = {}
+    captured = {"requests": []}
 
     class CapturingRunner:
         def run(self, request):
             captured["request"] = request
+            captured["requests"].append(request)
             return AgentRunResult(
                 final_response="hi from alice",
                 session_id="session_profile_chat",
@@ -820,9 +875,9 @@ def test_mission_chat_reply_runs_for_profile_persona(tmp_path, monkeypatch):
 
     assert result.final_response == "hi from alice"
     request = captured["request"]
-    # Toolsets resolved through the supervisor ceiling; mission_goal augmentation
-    # (the operator-channel goal capability) is available to the profile chat.
-    assert "mission_goal" in request.enabled_toolsets
+    # Toolsets resolve through the supervisor ceiling, but ordinary profile chat
+    # is globally chat-only and cannot create a durable mission by default.
+    assert "mission_goal" not in request.enabled_toolsets
     # The chat lane keeps the supervision toolsets; the T6a cost policy drops the
     # `file` dev toolkit (patch/read/write/search_files) from the conversational
     # lane, so it is no longer present even though the persona configured it.
@@ -830,6 +885,14 @@ def test_mission_chat_reply_runs_for_profile_persona(tmp_path, monkeypatch):
         set(request.enabled_toolsets)
     )
     assert "file" not in request.enabled_toolsets
+
+    runtime.mission_chat_reply(
+        profile,
+        "start the explicitly requested goal",
+        permission_session_id="session_profile_chat",
+        allow_mission_goal=True,
+    )
+    assert "mission_goal" in captured["requests"][-1].enabled_toolsets
 
 
 def test_mission_chat_reply_has_no_api_call_cap_and_keeps_iteration_failsafe(

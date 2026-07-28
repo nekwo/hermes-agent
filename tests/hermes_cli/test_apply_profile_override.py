@@ -199,6 +199,79 @@ class TestApplyProfileOverrideHermesHomeGuard:
         assert os.environ.get("HERMES_HOME") is None
         assert sys.argv == argv
 
+    def test_harness_agent_set_profile_argument_is_not_consumed(
+        self, tmp_path, monkeypatch
+    ):
+        """The Harness rebind target must reach its owning subcommand parser."""
+        hermes_root = tmp_path / ".hermes"
+        hermes_root.mkdir(parents=True, exist_ok=True)
+        argv = [
+            "hermes",
+            "harness",
+            "agent",
+            "set-profile",
+            "qa",
+            "--profile",
+            "launcher-qa",
+            "--dry-run",
+            "--json",
+        ]
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.delenv("HERMES_HOME", raising=False)
+        monkeypatch.setattr(sys, "argv", list(argv))
+
+        from hermes_cli.main import _apply_profile_override
+        _apply_profile_override()
+
+        assert os.environ.get("HERMES_HOME") is None
+        assert sys.argv == argv
+
+    def test_global_profile_is_consumed_but_harness_rebind_target_survives(
+        self, tmp_path, monkeypatch
+    ):
+        """A global selector and the Harness target can coexist in one argv."""
+        from hermes_cli import profiles
+
+        monkeypatch.setattr(
+            profiles,
+            "resolve_profile_env",
+            lambda name: str(tmp_path / ".hermes" / "profiles" / name),
+        )
+        result = _run_apply_profile_override(
+            tmp_path,
+            monkeypatch,
+            hermes_home=None,
+            active_profile="base",
+            argv=[
+                "hermes",
+                "--profile",
+                "base",
+                "harness",
+                "agent",
+                "set-profile",
+                "qa",
+                "--profile",
+                "launcher-qa",
+                "--dry-run",
+                "--json",
+            ],
+        )
+
+        assert result is not None
+        assert result.endswith("base")
+        assert sys.argv == [
+            "hermes",
+            "harness",
+            "agent",
+            "set-profile",
+            "qa",
+            "--profile",
+            "launcher-qa",
+            "--dry-run",
+            "--json",
+        ]
+
     def test_profile_after_chat_subcommand_is_still_consumed(self, tmp_path, monkeypatch):
         """Profile flags historically work after normal Hermes subcommands."""
         result = _run_apply_profile_override(

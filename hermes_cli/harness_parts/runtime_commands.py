@@ -4,14 +4,21 @@
 def _cmd_worktree_reap(args) -> int:
     from agent_runtime.delivery_directive import reap_orphan_worktrees
 
-    data = reap_orphan_worktrees(min_age_seconds=int(getattr(args, "min_age_seconds", 3600) or 3600))
+    data = reap_orphan_worktrees(
+        min_age_seconds=int(getattr(args, "min_age_seconds", 3600) or 3600),
+        dry_run=bool(getattr(args, "dry_run", False)),
+        include_legacy_temp=bool(getattr(args, "include_legacy_temp", False)),
+    )
     if getattr(args, "json", False):
         print(emit_json(data))
     else:
-        print(f"reaped {len(data.get('reaped') or [])} worktree(s); kept {len(data.get('kept') or [])}")
+        dry_run = bool(data.get("dry_run"))
+        action = "preview: would reap" if dry_run else "reaped"
+        print(f"{action} {len(data.get('reaped') or [])} worktree(s); kept {len(data.get('kept') or [])}")
         for item in data.get("reaped") or []:
             captured = f" (diff -> {item['captured_patch']})" if item.get("captured_patch") else ""
-            print(f"  - {item['worktree']}{captured}")
+            prefix = "would reap: " if dry_run else ""
+            print(f"  - {prefix}{item['worktree']}{captured}")
     return 0
 
 
@@ -28,6 +35,7 @@ def _cmd_persona_instance_reconcile(args) -> int:
             f"renamed={data['renamed_count']} skipped={data['skipped_count']} "
             f"pruned={data.get('pruned_count', 0)} held={data.get('held_count', 0)} "
             f"steering_repaired={data.get('steering_repaired_count', 0)} "
+            f"chat_bindings_cleared={data.get('session_binding_repaired_count', 0)} "
             f"aliases={data['alias_count']}"
         )
         for item in data["actions"]:
@@ -41,6 +49,18 @@ def _cmd_persona_instance_reconcile(args) -> int:
                 f"  - steering repaired: {item['persona_instance_id']} "
                 f"removed {item['missing_parent_ids']}"
             )
+        for item in data.get("session_binding_repairs") or []:
+            print(
+                f"  - chat binding cleared: {item['persona_instance_id']} "
+                f"-> missing session {item['session_id']} ({', '.join(item.get('cleared_fields') or [])})"
+            )
+        for item in data.get("session_binding_held") or []:
+            print(
+                f"  - chat binding held ({item['reason']}): {item['persona_instance_id']} "
+                f"-> {item['session_id']}"
+            )
+        if data.get("session_binding_skipped"):
+            print(f"  - chat binding repair skipped: {data['session_binding_skipped']}")
     return 0
 
 
@@ -466,7 +486,9 @@ def _write_swarm_state(data: dict) -> None:
 
 
 def _cmd_swarm_status(args) -> int:
-    cfg = load_agent_runtime_config()
+    from agent_runtime.config import load_root_runtime_config
+
+    cfg = load_root_runtime_config()
     swarm_cfg = getattr(cfg, "swarm", None)
     allowed, certification = swarm_certification_allows_production(
         requires_certification=bool(getattr(swarm_cfg, "requires_certification", True)),
@@ -479,7 +501,9 @@ def _cmd_swarm_status(args) -> int:
 
 
 def _cmd_swarm_enable(args) -> int:
-    cfg = load_agent_runtime_config()
+    from agent_runtime.config import load_root_runtime_config
+
+    cfg = load_root_runtime_config()
     swarm_cfg = getattr(cfg, "swarm", None)
     allowed, certification = swarm_certification_allows_production(
         requires_certification=bool(getattr(swarm_cfg, "requires_certification", True)),
@@ -559,7 +583,6 @@ def _cmd_lane_control(args) -> int:
 
 def _cmd_tick(args) -> int:
     cfg = load_agent_runtime_config()
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
     result = TickEngine(
         config=cfg,
         persona_runtime=GPTPersonaRuntime(default_provider=cfg.default_provider, default_model=cfg.default_model),
@@ -570,7 +593,6 @@ def _cmd_tick(args) -> int:
 
 def _cmd_run_until_settled(args) -> int:
     cfg = load_agent_runtime_config()
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
     result = TickEngine(
         config=cfg,
         persona_runtime=GPTPersonaRuntime(default_provider=cfg.default_provider, default_model=cfg.default_model),
@@ -593,7 +615,6 @@ def _cmd_burn_in_create(args) -> int:
 
 def _cmd_burn_in_run(args) -> int:
     cfg = load_agent_runtime_config()
-    os.environ.setdefault("HERMES_AGENT_RUNTIME_ROOT", str(paths.store_root()))
     manifest = run_burn_in_case(
         args.case_id,
         burn_id=getattr(args, "burn_id", None),
@@ -1015,7 +1036,7 @@ def _cmd_agents(args) -> int:
 
 
 def _cmd_smoke(args) -> int:
-    data = run_smoke(temp_root=args.temp_root, no_model=args.no_model)
+    data = run_smoke(no_model=args.no_model)
     if args.json:
         print(emit_json(data))
     else:
@@ -1179,7 +1200,11 @@ def _cmd_persona_chat_history(args) -> int:
     from agent_runtime.persona_chat_history import persona_chat_session_messages
 
     limit = max(1, min(40, int(getattr(args, "limit", 40) or 40)))
-    data = persona_chat_session_messages(session_id=args.session_id, limit=limit)
+    data = persona_chat_session_messages(
+        session_id=args.session_id,
+        limit=limit,
+        before=getattr(args, "before", None),
+    )
     if getattr(args, "json", False):
         print(emit_json(data))
     else:
@@ -1189,7 +1214,7 @@ def _cmd_persona_chat_history(args) -> int:
             head = text[0][:120] if text else ""
             lines.append(f"{message.get('timestamp') or '-'} {message.get('role')}: {head}")
         print("\n".join(lines) if lines else f"no messages for {args.session_id}")
-    return 0
+    return 0 if data.get("ok") is not False else 2
 
 
 def _cmd_incident_close(args) -> int:
@@ -1200,7 +1225,9 @@ def _cmd_incident_close(args) -> int:
 
 
 def _cmd_snapshot(args) -> int:
-    cfg = load_agent_runtime_config()
+    from agent_runtime.config import load_root_runtime_config
+
+    cfg = load_root_runtime_config()
     snap = write_snapshot(build_snapshot())
     read_model_cfg = getattr(cfg, "read_model", None)
     if bool(getattr(read_model_cfg, "enabled", False)) and bool(getattr(read_model_cfg, "serve_snapshot_from_db", True)):
@@ -1240,9 +1267,10 @@ def _cmd_stream(args) -> int:
 def _cmd_rebuild_read_model(args) -> int:
     from agent_runtime.projector import Projector
     from agent_runtime.read_model import ReadModel
+    from agent_runtime.config import load_root_runtime_config
 
     read_model = ReadModel()
-    Projector(read_model, config=load_agent_runtime_config()).full_rebuild()
+    Projector(read_model, config=load_root_runtime_config()).full_rebuild()
     watermark = read_model.projection_watermark("snapshot")
     payload = {"ok": True, "watermark": watermark, "db_path": str(read_model.db_path)}
     print(emit_json(payload) if args.json else f"read model rebuilt: {read_model.db_path}")

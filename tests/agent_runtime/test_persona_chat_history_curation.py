@@ -16,7 +16,7 @@ from hermes_time import now
 from agent_runtime.events import EventLog
 from agent_runtime.models import Event, PersonaAssignment, PersonaInstance
 from agent_runtime.mission_chat_turns import (
-    mark_stale_running_turns_interrupted,
+    mark_stale_inflight_turns_interrupted,
     mission_chat_turn_elements,
     mission_chat_turn_record,
     persist_mission_chat_turn,
@@ -137,6 +137,83 @@ def test_clean_operator_message_is_kept():
     assert rows[0]["text"] == "hi neko"
 
 
+def test_operator_row_strips_skill_preload_and_runtime_context_envelopes():
+    # The required-skill preload and the Runtime Situation HUD ride the
+    # operator's persisted user turn for prompt-cache stability. Both travel in
+    # structural envelopes, and the projection strips both — the operator must
+    # see exactly what they typed, never the injected turn context (live
+    # 2026-07-23: the full harness-runtime-model skill body rendered as the
+    # operator's own message).
+    from agent_runtime.runtime_hud import (
+        render_runtime_context_envelope,
+        render_skill_preload_envelope,
+    )
+
+    skill_envelope = render_skill_preload_envelope(
+        skill_names=["harness-runtime-model"],
+        skill_preload_content=(
+            '[IMPORTANT: Runtime policy requires the "harness-runtime-model" skill '
+            "on this surface.]\n# Harness Runtime Model\nfull skill body"
+        ),
+    )
+    hud_envelope = render_runtime_context_envelope(
+        context_id="ctx_operator_turn",
+        revision="hud_0123456789abcdef",
+        delivery="snapshot",
+        situational_hud_content="## Runtime Situation\n- Scope: realm default",
+    )
+    composed = "\n\n".join(["message launcher dev say hi", skill_envelope, hud_envelope])
+    db = FakeSessionDB([{"role": "user", "content": composed}])
+
+    rows, status = _safe_recent_messages(db, session_id="s1")
+
+    assert status == "safe"
+    assert len(rows) == 1
+    assert rows[0]["role"] == "operator"
+    assert rows[0]["text"] == "message launcher dev say hi"
+    assert rows[0]["skill_preload"]["skills"] == ["harness-runtime-model"]
+    assert rows[0]["skill_preload"]["delivery"] == "snapshot"
+    assert rows[0]["runtime_context"]["revision"] == "hud_0123456789abcdef"
+
+
+def test_operator_row_strips_skill_preload_envelope_without_hud():
+    from agent_runtime.runtime_hud import render_skill_preload_envelope
+
+    skill_envelope = render_skill_preload_envelope(
+        skill_names=["deep-audit"],
+        skill_preload_content="skill body",
+    )
+    db = FakeSessionDB([{"role": "user", "content": f"run the audit\n\n{skill_envelope}"}])
+
+    rows, _ = _safe_recent_messages(db, session_id="s1")
+
+    assert rows[0]["text"] == "run the audit"
+    assert rows[0]["skill_preload"]["skills"] == ["deep-audit"]
+
+
+def test_operator_row_strips_unchanged_skill_preload_stub():
+    # Later turns carry the compact "unchanged" stub instead of the full body;
+    # the projection strips it the same way.
+    from agent_runtime.runtime_hud import (
+        render_skill_preload_envelope,
+        skill_preload_revision,
+    )
+
+    body = "# Harness Runtime Model\nfull skill body"
+    stub = render_skill_preload_envelope(
+        skill_names=["harness-runtime-model"],
+        skill_preload_content=body,
+        revision=skill_preload_revision(body),
+        delivery="unchanged",
+    )
+    db = FakeSessionDB([{"role": "user", "content": f"and the next step?\n\n{stub}"}])
+
+    rows, _ = _safe_recent_messages(db, session_id="s1")
+
+    assert rows[0]["text"] == "and the next step?"
+    assert rows[0]["skill_preload"]["delivery"] == "unchanged"
+
+
 def test_long_markdown_agent_message_is_not_preview_truncated():
     body = "\n\n".join(
         [
@@ -255,6 +332,49 @@ def test_history_row_timestamps_are_iso_utc_at_projection_boundary():
     assert rows[0]["updated_at"] == "2026-06-22T21:00:02.500000Z"
 
 
+def test_history_row_activity_uses_latest_message_when_raw_session_has_no_last_active():
+    class RawSessionDB(FakeHistorySessionDB):
+        def get_session(self, session_id):
+            row = super().get_session(session_id)
+            if row is not None:
+                row.pop("last_active", None)
+            return row
+
+    db = RawSessionDB(
+        [
+            {
+                "id": "chat_neko",
+                "title": "Neko briefing",
+                "message_count": 2,
+                "started_at": 1782162000.25,
+                # list_sessions_rich computes this, while get_session does not.
+                "last_active": 1782162002.5,
+            }
+        ],
+        messages=[
+            {"id": "m1", "role": "user", "content": "hi", "timestamp": 1782162001.0},
+            {
+                "id": "m2",
+                "role": "assistant",
+                "content": "hello",
+                "timestamp": 1782162064.0,
+            },
+        ],
+    )
+
+    rows = persona_chat_history_summary(
+        persona_instances=[
+            _chat_persona_instance(
+                "personainst_neko", "neko_supervisor", "chat_neko"
+            )
+        ],
+        session_db=db,
+    )
+
+    assert rows[0]["created_at"] == "2026-06-22T21:00:00.250000Z"
+    assert rows[0]["updated_at"] == "2026-06-22T21:01:04.000000Z"
+
+
 def test_history_row_normalizes_iso_and_drops_garbage_timestamps():
     db = FakeHistorySessionDB(
         [
@@ -274,6 +394,53 @@ def test_history_row_normalizes_iso_and_drops_garbage_timestamps():
 
     assert rows[0]["created_at"] == "2026-07-07T09:00:40.000000Z"
     assert rows[0]["updated_at"] is None
+
+
+def test_history_uses_persisted_instance_binding_and_creation_order():
+    instance_id = "personainst_neko_supervisor_agent_f6f7a51b"
+    older_session = f"persona_chat_{instance_id}_111111111111"
+    newer_session = f"persona_chat_{instance_id}_222222222222"
+    db = FakeHistorySessionDB(
+        [
+            {
+                "id": older_session,
+                "source": "agent_runtime_persona_chat",
+                "title": "Older but recently active",
+                "started_at": "2026-07-22T04:16:30Z",
+                "last_active": "2026-07-22T10:00:00Z",
+                "model_config": json.dumps({"persona_instance_id": instance_id}),
+            },
+            {
+                "id": newer_session,
+                "source": "agent_runtime_persona_chat",
+                "title": "Newest conversation",
+                "started_at": "2026-07-22T05:49:48Z",
+                "last_active": "2026-07-22T05:49:48Z",
+                # The real Mission Control session carries the complete persona
+                # prompt, not the old short identity marker. The persisted
+                # instance binding is therefore the authoritative join.
+                "system_prompt": "Full persona prompt without legacy marker",
+                "model_config": json.dumps({"persona_instance_id": instance_id}),
+            },
+        ]
+    )
+
+    rows = persona_chat_history_summary(
+        persona_instances=[
+            _chat_persona_instance(
+                instance_id,
+                "neko_supervisor",
+                older_session,
+            )
+        ],
+        session_db=db,
+        limit=1,
+    )
+
+    assert [row["session_id"] for row in rows] == [newer_session]
+    assert rows[0]["persona_id"] == "neko_supervisor"
+    assert rows[0]["persona_instance_id"] == instance_id
+    assert rows[0]["created_at"] == "2026-07-22T05:49:48.000000Z"
 
 
 def test_persona_chat_history_rows_always_emit_kind():
@@ -720,7 +887,7 @@ def test_mission_chat_turn_marks_stale_running_turns_interrupted(isolate_agent_r
         state="running",
     )
 
-    flipped = mark_stale_running_turns_interrupted(
+    flipped = mark_stale_inflight_turns_interrupted(
         session_id="s1",
         active_client_message_id="client_active",
     )
@@ -1102,6 +1269,74 @@ def test_trace_entry_carries_operator_detail_fields():
     ]
     read = by_tool["read_file"]
     assert read["target"] == "lib/main.dart"
+
+
+def test_trace_entry_carries_generic_tool_io():
+    events = EventLog()
+    ts = now()
+    events.append(
+        Event(
+            ts=ts,
+            type="run.tool.finished",
+            task_id="task_tool_io",
+            run_id="run_dev",
+            persona_id="dev",
+            payload={
+                "tool_name": "agent_chat_threads",
+                "status": "passed",
+                "summary": "Finished tool agent_chat_threads: passed",
+                "tool_input": "limit: 5",
+                "tool_result": 'ok: true\nthreads: [{"id": "t1"}]',
+            },
+        )
+    )
+
+    rows = persona_chat_trace_summary(
+        persona_instances=[_persona_instance("personainst_dev", "dev", "task_tool_io")],
+        event_log=events,
+    )
+
+    entry = rows[0]["entries"][0]
+    assert entry["tool_input"] == "limit: 5"
+    # Newline structure survives into the projection (block scrub, not line).
+    assert entry["tool_result"] == 'ok: true\nthreads: [{"id": "t1"}]'
+
+
+def test_trace_entry_never_retruncates_a_sink_ceiling_tool_io_block():
+    # Review finding (2026-07-23): the trace limits used to EQUAL the
+    # progress-sink ceiling, so a sink-inflated block (redaction markers can
+    # grow the producer bound) got tail-truncated here — cutting the HEAD (the
+    # record's operator signal) and garbling the truncation marker. The trace
+    # limits now sit above the sink ceiling (1120/1720), so a maximal block
+    # passes through byte-identical.
+    max_result = "\n".join(["r" * 85 for _ in range(20)])  # 1719 chars, 20 lines
+    assert len(max_result) == 1719
+    events = EventLog()
+    events.append(
+        Event(
+            ts=now(),
+            type="run.tool.finished",
+            task_id="task_tool_io_max",
+            run_id="run_dev",
+            persona_id="dev",
+            payload={
+                "tool_name": "agent_chat_threads",
+                "status": "passed",
+                "tool_result": max_result,
+            },
+        )
+    )
+
+    rows = persona_chat_trace_summary(
+        persona_instances=[
+            _persona_instance("personainst_dev", "dev", "task_tool_io_max")
+        ],
+        event_log=events,
+    )
+
+    entry = rows[0]["entries"][0]
+    assert entry["tool_result"] == max_result
+    assert "truncated" not in entry["tool_result"]
 
 
 def test_trace_entry_projects_turn_id():

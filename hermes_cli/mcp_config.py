@@ -234,6 +234,11 @@ def _resolve_mcp_server_config(config: dict) -> dict:
     resolved them, so the discovery probe sent the literal placeholder and
     auth-requiring servers (e.g. n8n) returned 401 — while runtime tool
     loading worked because it interpolates. (#37792)
+
+    ``${roots.<name>}`` / ``${exe_suffix}`` are resolved the same way and for
+    the same reason: without it, ``hermes mcp test <name>`` on a token-form
+    entry would spawn the literal token and report a confusing "command not
+    found" instead of the real "machine root is unbound here".
     """
     from tools.mcp_tool import _interpolate_env_vars
 
@@ -242,7 +247,16 @@ def _resolve_mcp_server_config(config: dict) -> dict:
         load_hermes_dotenv()
     except Exception:  # pragma: no cover — defensive
         pass
-    return _interpolate_env_vars(config)
+    resolved = config
+    try:
+        from agent_runtime.machine_roots import contains_path_tokens, expand_config_paths
+    except Exception:  # pragma: no cover — agent_runtime is optional at this layer
+        contains_path_tokens = expand_config_paths = None
+    if expand_config_paths is not None and contains_path_tokens(config):
+        # Raises MachineRootError with the typed reason + fix; the probe callers
+        # surface it verbatim. Never fall through to spawning the literal token.
+        resolved = expand_config_paths(config)
+    return _interpolate_env_vars(resolved)
 
 
 def _probe_single_server(

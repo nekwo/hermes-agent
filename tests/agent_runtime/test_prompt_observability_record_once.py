@@ -256,6 +256,40 @@ def test_skills_catalog_by_hash_is_an_o1_store_read(isolate_agent_runtime_root):
     assert po.skills_catalog_by_hash(ref) == row["available_skills"]
 
 
+def test_skills_catalog_by_hash_materializes_a_live_projection_miss(
+    isolate_agent_runtime_root, monkeypatch
+):
+    """A hash advertised for a configured agent may have no chat-time row yet.
+
+    The explicit fetch verb must rebuild that live projection once, cache its
+    immutable bodies, and make the next lookup an O(1) store hit.  Ordinary
+    snapshot reads remain write-free; only the operator-requested detail fetch
+    is allowed to materialize this derived cache.
+    """
+
+    catalog = _catalog(3)
+    ref = po._skills_list_content_hash(catalog)
+    calls = []
+
+    def fake_build_snapshot(*, prompt_skills_catalogs=None, **_kwargs):
+        calls.append(True)
+        assert prompt_skills_catalogs is not None
+        prompt_skills_catalogs[ref] = copy.deepcopy(catalog)
+        return {}
+
+    monkeypatch.setattr("agent_runtime.snapshot.build_snapshot", fake_build_snapshot)
+
+    assert po.load_skills_catalog_from_store(ref) is None
+    assert po.skills_catalog_by_hash(ref) == catalog
+    assert calls == [True]
+    assert po.load_skills_catalog_from_store(ref) == catalog
+
+    # The immutable body is now a direct store hit.  A second lookup must not
+    # rebuild the live projection.
+    assert po.skills_catalog_by_hash(ref) == catalog
+    assert calls == [True]
+
+
 def test_corrupt_catalog_store_file_is_a_typed_miss(isolate_agent_runtime_root):
     # Sabotage (C1 acceptance): a corrupt/tampered store file must be a MISS —
     # never fake content served under a hash it doesn't match.

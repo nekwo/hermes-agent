@@ -104,11 +104,19 @@ def test_publish_dry_run_is_allowlisted_and_excludes_state(isolate_agent_runtime
     assert f"skills/demo-skill/SKILL.md" in paths
     assert any(path.startswith("store/workspaces/") for path in paths)
     assert f"store/realms/{realm.id}.json" in paths
-    assert any(
-        path.startswith("profiles/")
-        and path.endswith("/personas/dev/system_prompt/dev.md")
-        for path in paths
-    )
+    # ``dev``'s role prompt is REPOSITORY-bundled
+    # (``agent_runtime/prompts/dev.md``): it already ships with every member's
+    # hermes and no persona definition addresses a copy inside a profile home, so
+    # publishing it only ever wrote a dead file there. It is now withheld — and
+    # ACCOUNTED, never silently omitted. Nothing publishes under ``profiles/``
+    # any more; the persona definitions travel as the projection.
+    assert all(not path.startswith("profiles/") for path in paths)
+    assert "store/personas.yaml" in paths
+    withheld = {
+        (row["persona_id"], row["kind"], row["reason"])
+        for row in result["profile_files"]["withheld"]
+    }
+    assert ("dev", "system_prompt", "not_profile_owned") in withheld
     assert all("blueprint" not in path.lower() for path in paths)
     assert all("state.db" not in path.lower() for path in paths)
     assert all("\\" not in path for path in paths)
@@ -192,16 +200,46 @@ def test_publish_refuses_duplicate_profile_skill_authority(
     assert exc.value.safe_details["resolution_status"] == "collision"
 
 
-def test_sync_destination_maps_nested_skill_and_blocks_traversal(isolate_agent_runtime_root):
-    from agent_runtime.realm_sync import _destination_for_sync_path
+def test_sync_destination_routes_skills_to_inbox_not_shared_root(isolate_agent_runtime_root, tmp_path):
+    from agent_runtime.realm_sync import _destination_for_sync_path, _mirror_realm_skill_inbox
+    from agent_runtime.skill_promotion import classify_promotion, realm_inbox_dir
 
-    root = get_shared_skills_dir()
-    assert (
-        _destination_for_sync_path("skills/foo/references/guide.md")
-        == root / "foo" / "references" / "guide.md"
+    # C3: skills no longer pull straight into the canonical shared root through
+    # the generic overwrite loop. Every skills/* path leaves the loop (returns
+    # None) — apply_skill_inbox_pull mirrors them into the resolver-invisible
+    # per-realm inbox and promotes through the one guarded door, so a realm pull
+    # can never silently clobber a local canonical skill of the same id.
+    assert _destination_for_sync_path("skills/foo/references/guide.md") is None
+    assert _destination_for_sync_path("skills/foo/SKILL.md") is None
+
+    # Real (non-vacuous) traversal proof: the INBOX MIRROR route confines every
+    # write strictly UNDER the realm inbox — a hostile source tree can never
+    # escape it — and the guarded promotion door refuses traversal / absolute /
+    # drive-letter / multi-level slugs so none can become canonical. (The old
+    # ``_destination_for_sync_path("skills/foo/../evil.md") is None`` assertion was
+    # vacuous: EVERY skills/* path returns None regardless of traversal.)
+    source_skills = tmp_path / "subtree" / "skills"
+    (source_skills / "legit").mkdir(parents=True)
+    (source_skills / "legit" / "SKILL.md").write_text(
+        "---\nname: legit\n---\n# L\n", encoding="utf-8"
     )
-    # A hostile realm repo must not escape the shared root.
-    assert _destination_for_sync_path("skills/foo/../evil.md") is None
+    inbox = realm_inbox_dir("hostile-realm")
+    removed, reserved = _mirror_realm_skill_inbox(source_skills, inbox)
+    assert removed == [] and reserved == []
+    written = [p for p in inbox.rglob("*") if p.is_file()]
+    assert written, "mirror should have written the legit package"
+    inbox_resolved = inbox.resolve()
+    for path in written:
+        # Every mirrored file is strictly contained under the inbox root — no
+        # write escapes to a parent/sibling location.
+        assert inbox_resolved in path.resolve().parents
+    assert not (inbox.parent / "evil.md").exists()
+
+    # The guarded promotion door refuses hostile slugs outright — never promoted,
+    # so never written to the canonical root.
+    for hostile in ("../x", "a/../../x", "/abs/x", "C:evil", "skills/../x"):
+        plan = classify_promotion(hostile, source_skills / "legit")
+        assert plan.action == "refuse_invalid", hostile
 
 
 def test_realm_sync_status_cli_uses_stage42_envelope(isolate_agent_runtime_root, tmp_path):
@@ -577,6 +615,25 @@ def _resolved_skill_packages(realm_id: str) -> set[str]:
     return packages
 
 
+def _resolved_persona_packages(realm_id: str) -> set[str]:
+    """Persona ids this realm publishes.
+
+    Reads the persona-definition PROJECTION plus any profile FILE attributed to a
+    persona. It used to scrape ``…/personas/<id>/…`` out of the published path;
+    since 2026-07-25 the profile-file family publishes at destination-shaped
+    paths where the persona id is not a path segment, and a repository-bundled
+    prompt is deliberately withheld — so the path scrape would now report nothing
+    and quietly turn these assertions vacuous.
+    """
+
+    from agent_runtime.realm_sync import _resolve_artifacts_with_projection
+
+    resolved = _resolve_artifacts_with_projection(realm_id)
+    return set(resolved.projection.personas) | {
+        artifact.persona_id for artifact in resolved.artifacts if artifact.persona_id
+    }
+
+
 def test_skill_selection_defaults_to_publish_all(isolate_agent_runtime_root, tmp_path):
     # Back-compat lock: a realm with no selection publishes every shared skill.
     for slug in ("alpha", "beta"):
@@ -653,6 +710,8 @@ def test_selection_travels_on_pull_while_authority_preserved(isolate_agent_runti
         # Realm-wide truth authored by another member (travels on pull).
         "skill_publish_mode": "selected",
         "skill_selection": ["alpha"],
+        "agent_publish_mode": "selected",
+        "agent_selection": ["qa"],
         # Stale authority fields must NOT roll our backend-owned pointer back.
         "default_workspace_id": "ws_stale",
         "default_workspace_name": "Stale Office",
@@ -668,6 +727,8 @@ def test_selection_travels_on_pull_while_authority_preserved(isolate_agent_runti
     # Selection is NOT an authority field → it adopts the incoming realm truth.
     assert pulled.skill_publish_mode == "selected"
     assert pulled.skill_selection == ["alpha"]
+    assert pulled.agent_publish_mode == "selected"
+    assert pulled.agent_selection == ["qa"]
     # Authority fields are still preserved against the stale incoming copy.
     assert pulled.default_workspace_id == "ws_backend_default"
     assert pulled.default_workspace_name == "Backend Office"
@@ -863,3 +924,266 @@ def test_realm_skills_set_cli_requires_exactly_one_flag(isolate_agent_runtime_ro
     neither = _run_harness("realm", "skills", "set", realm.id, "--json")
     assert neither.returncode == 2
     assert json.loads(neither.stdout)["error"]["code"] == "invalid_request"
+
+
+# ── per-realm persona-definition selection (Agent Sync) ────────────────────
+
+
+def test_agent_selection_defaults_to_required_workspace_personas(
+    isolate_agent_runtime_root, tmp_path
+):
+    realm, _repo = _realm_with_repo(tmp_path)
+    WorkspaceStore().create(name="Launcher", realm_id=realm.id, agent_ids=["dev"])
+
+    stored = RealmStore().get(realm.id)
+    assert stored.agent_publish_mode == "workspace"
+    assert stored.agent_selection == []
+    packages = _resolved_persona_packages(realm.id)
+    assert "dev" in packages
+    assert "qa" not in packages
+
+
+def test_selected_agents_add_to_required_references_and_prune_when_removed(
+    isolate_agent_runtime_root, tmp_path
+):
+    realm, _repo = _realm_with_repo(tmp_path)
+    WorkspaceStore().create(name="Launcher", realm_id=realm.id, agent_ids=["dev"])
+
+    RealmStore().set_agent_selection(
+        realm.id, mode="selected", selection=["qa", "qa"]
+    )
+    packages = _resolved_persona_packages(realm.id)
+    assert {"dev", "qa"} <= packages  # dev is pinned by the workspace
+
+    RealmStore().set_agent_selection(realm.id, mode="selected", selection=[])
+    packages = _resolved_persona_packages(realm.id)
+    assert "dev" in packages
+    assert "qa" not in packages
+
+
+def test_agent_selection_preserves_unknown_ids_and_emits_event(
+    isolate_agent_runtime_root, tmp_path
+):
+    realm, _repo = _realm_with_repo(tmp_path)
+    RealmStore().set_agent_selection(
+        realm.id,
+        mode="selected",
+        selection=["profile:remote", "qa", "qa"],
+    )
+
+    stored = RealmStore().get(realm.id)
+    assert stored.agent_selection == ["profile:remote", "qa"]
+    events = [event for event in EventLog().tail(20) if event.type == "realm.updated"]
+    match = next(
+        event for event in events if event.payload.get("change") == "agent_selection"
+    )
+    assert match.payload["mode"] == "selected"
+    assert match.payload["selection_count"] == 2
+
+
+def test_agent_selection_rejects_malformed_ids_without_partial_write(
+    isolate_agent_runtime_root, tmp_path
+):
+    realm, _repo = _realm_with_repo(tmp_path)
+    with pytest.raises(ValueError) as excinfo:
+        RealmStore().set_agent_selection(
+            realm.id,
+            mode="selected",
+            selection=["qa", "bad/id", "bad id"],
+        )
+    assert "bad/id" in str(excinfo.value)
+    assert "bad id" in str(excinfo.value)
+    assert RealmStore().get(realm.id).agent_publish_mode == "workspace"
+
+
+def test_realm_agents_cli_show_and_set(isolate_agent_runtime_root, tmp_path):
+    realm, _repo = _realm_with_repo(tmp_path)
+    WorkspaceStore().create(name="Launcher", realm_id=realm.id, agent_ids=["dev"])
+
+    proc = _run_harness(
+        "realm", "agents", "set", realm.id, "--agents", "qa,profile:remote,qa", "--json"
+    )
+    payload = json.loads(proc.stdout)
+    assert proc.returncode == 0
+    assert payload["kind"] == "realm_agent_selection"
+    assert payload["mode"] == "selected"
+    assert payload["selection"] == ["profile:remote", "qa"]
+    assert "dev" in payload["required"]
+    assert {"dev", "qa"} <= set(payload["published"])
+    assert payload["missing"] == ["profile:remote"]
+
+    proc = _run_harness("realm", "agents", "show", realm.id, "--json")
+    shown = json.loads(proc.stdout)
+    assert proc.returncode == 0
+    assert shown["selection"] == ["profile:remote", "qa"]
+
+
+def test_realm_agents_cli_none_and_workspace_preserve_selection(
+    isolate_agent_runtime_root, tmp_path
+):
+    realm, _repo = _realm_with_repo(tmp_path)
+    _run_harness("realm", "agents", "set", realm.id, "--agents", "qa", "--json")
+
+    none = _run_harness("realm", "agents", "set", realm.id, "--none", "--json")
+    assert none.returncode == 0
+    assert json.loads(none.stdout)["selection"] == []
+
+    _run_harness("realm", "agents", "set", realm.id, "--agents", "qa", "--json")
+    workspace = _run_harness(
+        "realm", "agents", "set", realm.id, "--workspace", "--json"
+    )
+    payload = json.loads(workspace.stdout)
+    assert workspace.returncode == 0
+    assert payload["mode"] == "workspace"
+    assert payload["selection"] == ["qa"]  # retained for switching back
+
+
+def test_realm_agents_cli_dry_run_and_flag_validation(
+    isolate_agent_runtime_root, tmp_path
+):
+    realm, _repo = _realm_with_repo(tmp_path)
+    preview = _run_harness(
+        "realm", "agents", "set", realm.id, "--agents", "qa", "--dry-run", "--json"
+    )
+    payload = json.loads(preview.stdout)
+    assert preview.returncode == 0
+    assert payload["dry_run"] is True
+    assert payload["mode"] == "selected"
+    assert payload["selection"] == ["qa"]
+    assert RealmStore().get(realm.id).agent_publish_mode == "workspace"
+
+    both = _run_harness(
+        "realm", "agents", "set", realm.id, "--workspace", "--none", "--json"
+    )
+    assert both.returncode == 2
+    assert json.loads(both.stdout)["error"]["code"] == "invalid_request"
+
+
+def test_status_and_sidecar_carry_agent_selection_fields(
+    isolate_agent_runtime_root, tmp_path
+):
+    realm, _repo = _realm_with_repo(tmp_path)
+    WorkspaceStore().create(name="Launcher", realm_id=realm.id, agent_ids=["dev"])
+    RealmStore().set_agent_selection(realm.id, mode="selected", selection=["qa"])
+
+    status = realm_sync_status(realm.id)
+    assert status["agent_publish_mode"] == "selected"
+    assert status["agent_selection"] == ["qa"]
+    assert status["agents_published"] >= 2
+
+    sidecar = read_realm_sync_sidecar(realm.id)
+    assert sidecar["agent_publish_mode"] == "selected"
+    assert sidecar["agent_selection"] == ["qa"]
+    assert sidecar["agents_published"] >= 2
+
+
+# ── H1: store-drift honesty surfaced in `realm sync status` ────────────────
+
+
+def test_status_surfaces_store_drift_and_unpublished_changes(
+    isolate_agent_runtime_root, tmp_path
+):
+    from agent_runtime import board_models
+    from agent_runtime.board_store import BoardStore
+    from agent_runtime.board_sync import update_board_baseline_after_sync
+
+    realm, _repo = _realm_with_repo(tmp_path)
+    ws = WorkspaceStore().create(name="Board WS", realm_id=realm.id)
+    BoardStore().add_card(workspace_id=ws.id, title="Unpublished card")
+
+    status = realm_sync_status(realm.id)
+    boards = status["store_drift"]["boards"]
+    assert set(boards) == {"boards_changed", "cards_changed", "cards_added", "cards_removed"}
+    # A fresh local board add never touched the repo, so git state is otherwise
+    # in_sync — but the store drift is honest about the unpublished changes.
+    assert boards["cards_added"] >= 1
+    assert boards["boards_changed"] >= 1
+    assert status["unpublished_changes"] is True
+    # The additive fields never disturb the git-derived state vocabulary.
+    assert status["state"] in {"in_sync", "ahead", "behind", "conflict"}
+
+    # After recording the baseline (as a publish/pull would), drift clears.
+    update_board_baseline_after_sync(realm.id, [board_models.default_board_id(ws.id)])
+    cleared = realm_sync_status(realm.id)
+    assert cleared["unpublished_changes"] is False
+    assert cleared["store_drift"]["boards"] == {
+        "boards_changed": 0,
+        "cards_changed": 0,
+        "cards_added": 0,
+        "cards_removed": 0,
+    }
+
+
+# ── H3: publish no-diff no-op is graceful (launcher auto-publishes) ────────
+
+
+def test_publish_no_diff_second_run_is_graceful_noop(isolate_agent_runtime_root, tmp_path):
+    realm, _repo = _realm_with_remote(tmp_path)
+    WorkspaceStore().create(name="WS", realm_id=realm.id, agent_ids=["dev"])
+
+    first = publish_realm_sync(realm.id)
+    assert first["changed"] is True
+    assert first["state"] == "published"
+
+    # Second publish with nothing changed: no crash, no error, no empty
+    # commit/push loop. changed=False proves the commit/push block was skipped.
+    second = publish_realm_sync(realm.id)
+    assert second["changed"] is False
+    assert second["state"] == "published"
+    assert second["conflicts"] == []
+    assert second["ahead"] == 0
+
+
+# ── held profile files: the operator resolution path ───────────────────────
+
+
+def _publish_profile_file(repo: Path, realm_id: str, profile: str, dest_rel: str, body: str) -> None:
+    from agent_runtime.profile_artifact_sync import PROFILE_FILES_ROOT
+    from agent_runtime.realm_sync import _realm_subtree
+
+    path = _realm_subtree(repo, realm_id).joinpath(*PROFILE_FILES_ROOT.split("/"), profile, *dest_rel.split("/"))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(body.encode("utf-8"))
+
+
+def test_held_profile_file_is_listed_and_resolvable_and_honors_dry_run(
+    isolate_agent_runtime_root, tmp_path
+):
+    """A held ``MEMORY.md`` must be visible AND actionable, and the mutation verb
+    must honor ``--dry-run``.
+
+    ``_add_stage42_global_args(mutation=True)`` auto-registers ``--dry-run``; a
+    verb that does not READ ``args.dry_run`` silently mutates on a preview — a
+    defect that has recurred twice in this repo. Pinned here at the CLI boundary
+    (the store-level chokepoint is pinned in ``test_profile_artifact_sync.py``).
+    """
+
+    from agent_runtime.profile_artifact_sync import entity_key
+    from agent_runtime.realm_sync import _safe_token, active_profile_name
+
+    realm, repo = _realm_with_repo(tmp_path)
+    profile = _safe_token(active_profile_name())
+    _publish_profile_file(repo, realm.id, profile, "memories/MEMORY.md", "realm memories\n")
+    local = get_hermes_home() / "memories" / "MEMORY.md"
+    local.parent.mkdir(parents=True, exist_ok=True)
+    local.write_bytes(b"the member's accumulated memories\n")
+
+    result = pull_realm_sync(realm.id)
+    key = entity_key(profile, "memories/MEMORY.md")
+    assert result["profile_artifact_sync"]["held"] == [key]
+    assert local.read_bytes() == b"the member's accumulated memories\n"
+    assert realm_sync_status(realm.id)["profile_artifacts_held"] == [key]
+
+    listed = _run_harness("realm", "sync", "held", realm.id, "--json")
+    assert listed.returncode == 0
+    assert [row["id"] for row in json.loads(listed.stdout)["items"]] == [key]
+
+    preview = _run_harness("realm", "sync", "resolve", realm.id, "--key", key, "--take", "remote", "--dry-run", "--json")
+    assert preview.returncode == 0
+    assert json.loads(preview.stdout)["dry_run"] is True
+    assert local.read_bytes() == b"the member's accumulated memories\n"  # untouched
+
+    applied = _run_harness("realm", "sync", "resolve", realm.id, "--key", key, "--take", "remote", "--yes", "--json")
+    assert applied.returncode == 0
+    assert local.read_bytes() == b"realm memories\n"
+    assert realm_sync_status(realm.id)["profile_artifacts_held"] == []

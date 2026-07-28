@@ -73,6 +73,46 @@ Fields:
 - `drops`: copied from `core.parity.drops` when present; otherwise `[]`.
 - `parity_warnings`: copied from `core.parity.warnings` when present; otherwise `[]`.
 
+### `completeness` row shape
+
+`completeness` is keyed by projection name (`persona_chat_history`,
+`persona_chat_trace`, `operator_conversation`, `stage_verification`,
+`mission_flow_timeline`). Every row is one `ProjectionAccountant.summary()`:
+
+```json
+{
+  "persona_chat_history": {
+    "considered": 163,
+    "included": 50,
+    "dropped": 113,
+    "reasons": {"limit": 103, "session_not_in_db": 10},
+    "truncated": true,
+    "by_design": ["limit"]
+  }
+}
+```
+
+`by_design` (additive; the parity `envelope_version` is unchanged) lists the
+reason codes this projection declared as **deliberate bounds** — caps, tail
+windows, page limits, collapse markers. Their data is still reachable through
+the lane's paging/detail fetch and a nonzero count is the steady state on a
+healthy runtime. Every other reason discloses **lost or inconsistent data**
+(a join that did not resolve, a row missing from its store, an unrenderable
+entry) and is worth an operator's attention.
+
+`dropped` still counts EVERY drop, so a reader computes the anomaly count
+itself:
+
+```
+anomalous = dropped - sum(reasons[code] for code in by_design)
+```
+
+Do not reimplement the classification with a local reason allowlist: that copy
+goes stale every time a new bounded lane ships (it already did twice —
+`flow_item_cap`, then the persona-chat `limit`, each pinning Mission Control's
+"projection drops" pill permanently amber). A reader that predates the key sees
+no `by_design` and behaves exactly as before.
+
 `identity_map` is a best-effort alias map. For persona instances, aliases may come from `persona_instance_id`, `instance_id`, `id`, `agent_profile_id`, and `persona_id` values that begin with `profile:`. For operator channels, aliases may come from `persona_instance_id`, `channel_id`, `id`, and `session_id`.
 
 ## `delta` frame

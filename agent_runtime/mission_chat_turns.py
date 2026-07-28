@@ -11,6 +11,10 @@ from typing import Any, Callable, Iterator, TypeVar
 
 from . import paths
 from .persona_assignments import safe_assignment_text, safe_assignment_token
+from .run_budget import (
+    ACCOUNTING_KEY as RUN_BUDGET_ACCOUNTING_KEY,
+    safe_accounting_block as safe_run_budget_accounting,
+)
 
 # ---------------------------------------------------------------------------
 # Storage layout (one file per chat session)
@@ -63,25 +67,253 @@ _MAX_TEXT = 20000
 _RETENTION_MAX_TURNS_PER_SESSION = 100
 _RETENTION_MAX_SESSIONS = 50
 _SENSITIVE_FILE_MARKERS = ("private_token", "secret_token", "api_key", "apikey", "credential")
-JOURNAL_TURN_STATES = {
-    "pending",
-    "executing",
-    "outcome_unknown",
-    "native_committed",
-    "projected",
-    "abandoned",
+# ═══ turn-lifecycle vocabulary — ONE table, and it decides everything ═══════
+#
+# This module OWNS the turn states. Every consumer — in this file, in the
+# history projection, in the operator-conversation contract, in the CLI chat
+# lane — asks this table instead of re-spelling a state literal.
+#
+# The rule exists because the same defect landed twice, ~700 lines apart. Both
+# times a consumer wrote "which turn states are over" as its own string:
+# ``state != "interrupted"`` in the marker synthesizer and again in the
+# tool-call settler. When ``budget_exhausted`` was added (2026-07-26) neither
+# spelling knew about it, so a turn that had been over for minutes still
+# rendered a live spinner in the cockpit. Recurrence was the finding: the bug
+# is not either literal, it is that a consumer was free to invent one. Adding
+# a state must extend a TABLE here, never require finding every comparison.
+#
+# ── the states ──────────────────────────────────────────────────────────────
+# Journal states — the exactly-once lane driven by
+# ``transition_mission_chat_turn``.
+TURN_STATE_PENDING = "pending"
+TURN_STATE_EXECUTING = "executing"
+TURN_STATE_OUTCOME_UNKNOWN = "outcome_unknown"
+TURN_STATE_NATIVE_COMMITTED = "native_committed"
+TURN_STATE_PROJECTED = "projected"
+TURN_STATE_ABANDONED = "abandoned"
+# Wall-budget terminal (2026-07-26). A turn that ran out of wall clock is NOT
+# an ambiguous provider outcome — the harness knows exactly why it stopped — so
+# it settles here instead of freezing at ``outcome_unknown`` and demanding an
+# operator ``turn-resolve --action abandon``. Terminal, needs no resolution,
+# and never blocks the next send.
+TURN_STATE_BUDGET_EXHAUSTED = "budget_exhausted"
+# Legacy streaming vocabulary. Written by the pre-journal persist lane and by
+# the repair sweep; never produced by ``transition_mission_chat_turn``.
+TURN_STATE_RUNNING = "running"
+TURN_STATE_COMPLETED = "completed"
+TURN_STATE_FAILED = "failed"
+TURN_STATE_INTERRUPTED = "interrupted"
+
+JOURNAL_TURN_STATES = frozenset(
+    {
+        TURN_STATE_PENDING,
+        TURN_STATE_EXECUTING,
+        TURN_STATE_OUTCOME_UNKNOWN,
+        TURN_STATE_NATIVE_COMMITTED,
+        TURN_STATE_PROJECTED,
+        TURN_STATE_ABANDONED,
+        TURN_STATE_BUDGET_EXHAUSTED,
+    }
+)
+LEGACY_TURN_STATES = frozenset(
+    {
+        TURN_STATE_RUNNING,
+        TURN_STATE_COMPLETED,
+        TURN_STATE_FAILED,
+        TURN_STATE_INTERRUPTED,
+    }
+)
+# The known universe. A state outside it is not a turn state and is rejected at
+# the store boundary (``_safe_turn_state``).
+ALL_TURN_STATES = JOURNAL_TURN_STATES | LEGACY_TURN_STATES
+
+# ── lifecycle buckets: every known state belongs to EXACTLY one ─────────────
+# A record here has an executor that has not settled it: the legacy streaming
+# state plus every non-terminal journal state. Retention never evicts them, GC
+# never archives their session file, and the stale-turn repairs (next-send +
+# serve-boot orphan sweep) flip exactly this set. ``budget_exhausted`` is
+# deliberately ABSENT: it is settled, so no repair may reopen it and no sweep
+# may flip it to ``interrupted``.
+INFLIGHT_TURN_STATES = frozenset(
+    {
+        TURN_STATE_RUNNING,
+        TURN_STATE_PENDING,
+        TURN_STATE_EXECUTING,
+        TURN_STATE_OUTCOME_UNKNOWN,
+    }
+)
+# The provider's reply is durable but the Mission Control projection has not
+# committed yet. NEITHER in-flight (a repair flip here would destroy a recorded
+# reply) NOR terminal (the projection walk still owes work). This bucket had no
+# name before the consolidation — ``native_committed`` simply fell out of both
+# sets, which is exactly the kind of silent gap the coverage guard below now
+# makes impossible to reintroduce.
+SETTLING_TURN_STATES = frozenset({TURN_STATE_NATIVE_COMMITTED})
+# States that are settled and require NO operator resolution. ``turn-resolve``
+# still accepts only ``outcome_unknown`` (the genuinely ambiguous case).
+TERMINAL_TURN_STATES = frozenset(
+    {
+        TURN_STATE_PROJECTED,
+        TURN_STATE_ABANDONED,
+        TURN_STATE_BUDGET_EXHAUSTED,
+        TURN_STATE_COMPLETED,
+        TURN_STATE_FAILED,
+        TURN_STATE_INTERRUPTED,
+    }
+)
+
+# ── decision sets: what a consumer actually asks ────────────────────────────
+# A resend of the SAME client_message_id that finds a durable reply already in
+# SessionDB promotes the record to ``native_committed`` from these states — the
+# reply is proven, so it must be projected rather than lost. Read by the CLI
+# chat lane; mirrors the ``native_committed`` column of ``_JOURNAL_TRANSITIONS``
+# (guarded below).
+REPLY_RECOVERABLE_TURN_STATES = frozenset(
+    {
+        TURN_STATE_EXECUTING,
+        TURN_STATE_OUTCOME_UNKNOWN,
+        TURN_STATE_BUDGET_EXHAUSTED,
+    }
+)
+# ...and with no such proof, a resend from these states is REFUSED: the prior
+# provider outcome cannot be proven, so the operator must resolve the turn
+# first. ``budget_exhausted`` is deliberately absent — it is settled, gets its
+# own honest refusal, and never routes anyone to ``turn-resolve``.
+RESEND_BLOCKING_TURN_STATES = frozenset(
+    {TURN_STATE_EXECUTING, TURN_STATE_OUTCOME_UNKNOWN}
+)
+# The only states ``turn-resolve --action abandon`` accepts: the genuinely
+# ambiguous provider outcome, and nothing else.
+OPERATOR_RESOLVABLE_TURN_STATES = frozenset({TURN_STATE_OUTCOME_UNKNOWN})
+
+# A legacy record entering the journal lane is read as its journal equivalent.
+_LEGACY_TO_JOURNAL_STATE = {
+    TURN_STATE_RUNNING: TURN_STATE_PENDING,
+    TURN_STATE_COMPLETED: TURN_STATE_PROJECTED,
 }
-_LEGACY_TURN_STATES = {"running", "completed", "failed", "interrupted"}
-_VALID_TURN_STATES = JOURNAL_TURN_STATES | _LEGACY_TURN_STATES
 _JOURNAL_TRANSITIONS = {
-    None: {"pending"},
-    "pending": {"pending", "executing", "abandoned"},
-    "executing": {"native_committed", "outcome_unknown"},
-    "outcome_unknown": {"abandoned", "native_committed"},
-    "native_committed": {"native_committed", "projected"},
-    "projected": {"projected"},
-    "abandoned": {"abandoned"},
+    None: {TURN_STATE_PENDING},
+    TURN_STATE_PENDING: {
+        TURN_STATE_PENDING,
+        TURN_STATE_EXECUTING,
+        TURN_STATE_ABANDONED,
+        TURN_STATE_BUDGET_EXHAUSTED,
+    },
+    TURN_STATE_EXECUTING: {
+        TURN_STATE_NATIVE_COMMITTED,
+        TURN_STATE_OUTCOME_UNKNOWN,
+        TURN_STATE_BUDGET_EXHAUSTED,
+    },
+    TURN_STATE_OUTCOME_UNKNOWN: {
+        TURN_STATE_ABANDONED,
+        TURN_STATE_NATIVE_COMMITTED,
+        TURN_STATE_BUDGET_EXHAUSTED,
+    },
+    # A durable reply proven AFTER the budget settled the turn still wins — the
+    # same legacy-interrupted convention that lets ``outcome_unknown`` promote
+    # to ``native_committed`` (a recorded reply must never be lost to a repair
+    # flip). Nothing else may leave this state: it does not resurrect to
+    # ``pending``, so a retry uses a NEW client_message_id like any other
+    # settled turn.
+    TURN_STATE_BUDGET_EXHAUSTED: {
+        TURN_STATE_BUDGET_EXHAUSTED,
+        TURN_STATE_NATIVE_COMMITTED,
+    },
+    TURN_STATE_NATIVE_COMMITTED: {TURN_STATE_NATIVE_COMMITTED, TURN_STATE_PROJECTED},
+    TURN_STATE_PROJECTED: {TURN_STATE_PROJECTED},
+    TURN_STATE_ABANDONED: {TURN_STATE_ABANDONED},
 }
+
+
+# ── import-time contract guards ─────────────────────────────────────────────
+#
+# Raised, not asserted, so ``python -O`` cannot strip the contract (same
+# convention as ``persona_chat_history.TERMINAL_TURN_MARKERS``). Each guard
+# encodes a failure that has already cost real time: a state nobody classified
+# (the wall-budget spinner), a decision set naming a state the store cannot
+# hold (a typo that silently never matches), or a transition table drifting
+# away from the decision set derived from it.
+def _guard_turn_state_vocabulary() -> None:  # pragma: no cover - import contract
+    buckets = {
+        "INFLIGHT_TURN_STATES": INFLIGHT_TURN_STATES,
+        "SETTLING_TURN_STATES": SETTLING_TURN_STATES,
+        "TERMINAL_TURN_STATES": TERMINAL_TURN_STATES,
+    }
+    decisions = {
+        "REPLY_RECOVERABLE_TURN_STATES": REPLY_RECOVERABLE_TURN_STATES,
+        "RESEND_BLOCKING_TURN_STATES": RESEND_BLOCKING_TURN_STATES,
+        "OPERATOR_RESOLVABLE_TURN_STATES": OPERATOR_RESOLVABLE_TURN_STATES,
+    }
+    for name, states in {**buckets, **decisions}.items():
+        unknown = sorted(states - ALL_TURN_STATES)
+        if unknown:
+            raise RuntimeError(f"{name} names non-existent turn state(s): {unknown}")
+
+    # Exactly one bucket per state: pairwise disjoint...
+    names = sorted(buckets)
+    for index, left in enumerate(names):
+        for right in names[index + 1 :]:
+            overlap = sorted(buckets[left] & buckets[right])
+            if overlap:
+                raise RuntimeError(
+                    f"turn state(s) in both {left} and {right}: {overlap}"
+                )
+    # ...and no state left behind. An unclassified state is the wall-budget
+    # spinner waiting to happen again.
+    unclassified = sorted(ALL_TURN_STATES - set().union(*buckets.values()))
+    if unclassified:
+        raise RuntimeError(
+            "turn state(s) belong to no lifecycle bucket: " f"{unclassified}"
+        )
+
+    # The refusal ladder narrows: what an operator may resolve is a subset of
+    # what blocks a resend, which is a subset of what a proven reply recovers.
+    if not (
+        OPERATOR_RESOLVABLE_TURN_STATES
+        <= RESEND_BLOCKING_TURN_STATES
+        <= REPLY_RECOVERABLE_TURN_STATES
+    ):
+        raise RuntimeError(
+            "turn-state refusal ladder is not nested: "
+            f"resolvable={sorted(OPERATOR_RESOLVABLE_TURN_STATES)} "
+            f"blocking={sorted(RESEND_BLOCKING_TURN_STATES)} "
+            f"recoverable={sorted(REPLY_RECOVERABLE_TURN_STATES)}"
+        )
+    # ``REPLY_RECOVERABLE`` is a VIEW of the transition table, not a second
+    # opinion: it must be exactly the states from which the journal accepts a
+    # promotion to ``native_committed``, minus that state itself (a record
+    # already there has nothing to recover).
+    derived = {
+        state
+        for state, allowed in _JOURNAL_TRANSITIONS.items()
+        if state is not None
+        and state != TURN_STATE_NATIVE_COMMITTED
+        and TURN_STATE_NATIVE_COMMITTED in allowed
+    }
+    if derived != REPLY_RECOVERABLE_TURN_STATES:
+        raise RuntimeError(
+            "REPLY_RECOVERABLE_TURN_STATES disagrees with _JOURNAL_TRANSITIONS: "
+            f"table={sorted(derived)} set={sorted(REPLY_RECOVERABLE_TURN_STATES)}"
+        )
+
+    # The transition table and the legacy alias map may only name real states.
+    for state, allowed in _JOURNAL_TRANSITIONS.items():
+        if state is not None and state not in JOURNAL_TURN_STATES:
+            raise RuntimeError(f"_JOURNAL_TRANSITIONS keys a non-journal state: {state}")
+        unknown = sorted(allowed - JOURNAL_TURN_STATES)
+        if unknown:
+            raise RuntimeError(
+                f"_JOURNAL_TRANSITIONS[{state}] targets non-journal state(s): {unknown}"
+            )
+    for legacy, journal in _LEGACY_TO_JOURNAL_STATE.items():
+        if legacy not in LEGACY_TURN_STATES or journal not in JOURNAL_TURN_STATES:
+            raise RuntimeError(
+                f"_LEGACY_TO_JOURNAL_STATE maps {legacy!r} -> {journal!r}, "
+                "which is not legacy -> journal"
+            )
+
+
+_guard_turn_state_vocabulary()
 
 _T = TypeVar("_T")
 
@@ -121,16 +353,16 @@ def next_turn_state(
       is stale and is rejected.
     """
 
-    if current in JOURNAL_TURN_STATES and requested in _LEGACY_TURN_STATES:
+    if current in JOURNAL_TURN_STATES and requested in LEGACY_TURN_STATES:
         return None
     if requested is None:
-        return current or "running"
-    if requested not in _VALID_TURN_STATES:
+        return current or TURN_STATE_RUNNING
+    if requested not in ALL_TURN_STATES:
         return None
-    if requested != "running":
+    if requested != TURN_STATE_RUNNING:
         return requested
-    if write_ahead or current is None or current == "running":
-        return "running"
+    if write_ahead or current is None or current == TURN_STATE_RUNNING:
+        return TURN_STATE_RUNNING
     return None
 
 
@@ -227,8 +459,8 @@ def transition_mission_chat_turn(
     def _mutate(session: dict[str, Any]) -> tuple[bool, MissionChatTurnPersistOutcome]:
         existing = session.get(message_key)
         current = _record_state(existing) if isinstance(existing, dict) else None
-        if current in _LEGACY_TURN_STATES:
-            current = {"running": "pending", "completed": "projected"}.get(current)
+        if current in LEGACY_TURN_STATES:
+            current = _LEGACY_TO_JOURNAL_STATE.get(current)
         if requested not in _JOURNAL_TRANSITIONS.get(current, set()):
             return False, MissionChatTurnPersistOutcome.REJECTED_STALE_TRANSITION
         now_iso = _utc_now_iso()
@@ -278,14 +510,14 @@ def abandon_mission_chat_turn(
         if not isinstance(existing, dict):
             return False, MissionChatTurnPersistOutcome.REJECTED_STALE_TRANSITION
         if (
-            _record_state(existing) != "outcome_unknown"
+            _record_state(existing) not in OPERATOR_RESOLVABLE_TURN_STATES
             or safe_assignment_token(existing.get("turn_id")) != exact_turn
         ):
             return False, MissionChatTurnPersistOutcome.REJECTED_STALE_TRANSITION
         record = dict(existing)
         record.update(
             {
-                "state": "abandoned",
+                "state": TURN_STATE_ABANDONED,
                 "updated_at": _utc_now_iso(),
                 "resolved_at": _utc_now_iso(),
                 "resolution": "abandon",
@@ -373,11 +605,26 @@ def mission_chat_turn_records(
     )
 
 
-def mark_stale_running_turns_interrupted(
+def mark_stale_inflight_turns_interrupted(
     *,
     session_id: str | None,
     active_client_message_id: str | None,
 ) -> list[str]:
+    """Flip a session's dead in-flight turn records to ``interrupted``.
+
+    Callers MUST guarantee no live executor on the session: hold its root
+    lease (``persona_chat_root_lease`` — held for a native turn's entire
+    execution and released by the kernel when the executor dies), or run from
+    a lane that already serializes sends per session (the free-floating
+    assignment queue). Under that guarantee every OTHER in-flight record —
+    journal ``pending``/``executing``/``outcome_unknown`` as much as legacy
+    ``running`` — is a corpse that can no longer settle itself (live incident
+    2026-07-25: a reaped Launcher took its serve child down mid-turn and the
+    QA relay record froze at ``executing`` forever, a permanently "running"
+    console). ``interrupted`` is the one repair state the history projection
+    renders as a typed ``turn_interrupted`` marker row.
+    """
+
     session_key = safe_assignment_text(session_id, limit=240)
     active_key = safe_assignment_text(active_client_message_id, limit=240)
     if not session_key:
@@ -390,9 +637,9 @@ def mark_stale_running_turns_interrupted(
             safe_key = safe_assignment_text(message_key, limit=240)
             if not safe_key or safe_key == active_key or not isinstance(record, dict):
                 continue
-            if _record_state(record) != "running":
+            if _record_state(record) not in INFLIGHT_TURN_STATES:
                 continue
-            record["state"] = "interrupted"
+            record["state"] = TURN_STATE_INTERRUPTED
             record["updated_at"] = now_iso
             flipped.append(safe_key)
         return bool(flipped), flipped
@@ -405,6 +652,36 @@ def mark_stale_running_turns_interrupted(
         timeout_result=[],
         protected_message=active_key,
     )
+
+
+def inflight_chat_session_roots() -> list[str]:
+    """Root chat session ids of sessions holding at least one in-flight record.
+
+    Read-only scan feeding the serve-boot orphan sweep. The root id comes from
+    record metadata (``root_chat_session_id``, then ``active_session_id``) —
+    the session file stem is a one-way digest and cannot be reversed, so a
+    record that predates the metadata stays invisible here and keeps relying
+    on the next-send repair. Torn/unreadable files are skipped; the sweep is
+    best-effort and retries on the next boot.
+    """
+
+    _migrate_legacy_if_present()
+    roots: list[str] = []
+    seen: set[str] = set()
+    for path in _iter_session_files():
+        for record in _read_session_map(path).values():
+            if not isinstance(record, dict):
+                continue
+            if _record_state(record) not in INFLIGHT_TURN_STATES:
+                continue
+            root = safe_assignment_text(
+                record.get("root_chat_session_id") or record.get("active_session_id"),
+                limit=240,
+            )
+            if root and root not in seen:
+                seen.add(root)
+                roots.append(root)
+    return roots
 
 
 def _mutate_session(
@@ -477,7 +754,7 @@ def _apply_session_turn_cap(
         for message_key, record in session.items()
         if not (
             str(message_key) == str(protected_message)
-            or _record_state(record) in {"running", "pending", "executing", "outcome_unknown"}
+            or _record_state(record) in INFLIGHT_TURN_STATES
         )
     )
     for _, message_key in evictable[:excess]:
@@ -521,7 +798,7 @@ def _gc_session_files(*, protected_session_key: str | None = None) -> None:
                         continue
                     session = _read_session_map(path)
                     if any(
-                        _record_state(record) in {"running", "pending", "executing", "outcome_unknown"}
+                        _record_state(record) in INFLIGHT_TURN_STATES
                         for record in session.values()
                     ):
                         continue
@@ -796,7 +1073,7 @@ def _safe_record(
     safe = {
         "client_message_id": client_message_id,
         "turn_id": turn_id,
-        "state": _record_state(record) or "completed",
+        "state": _record_state(record) or TURN_STATE_COMPLETED,
         "updated_at": safe_assignment_text(record.get("updated_at"), limit=80),
         # C8 turn-start anchor (write-ahead stamp). Absent on pre-C8 records —
         # consumers fall back to `updated_at`, never fabricate a start.
@@ -822,7 +1099,33 @@ _JOURNAL_TEXT_FIELDS = {
     "resolution_reason": 320,
     "resolved_at": 80,
     "pending_user_message": 12000,
+    # Wall-budget provenance. ``budget_trigger`` is the typed reason the
+    # graceful checkpoint (or the last-resort hard wall) ended the turn;
+    # ``budget_summary`` is the one-line window description an operator reads
+    # without re-deriving the arithmetic.
+    "budget_trigger": 80,
+    "budget_summary": 400,
 }
+
+
+#: The ONE structured entry on a turn record, carried verbatim from
+#: ``run_budget.RunBudgetLedger.accounting()`` — the whole "what bounded this
+#: turn?" block (``bounded_by`` / ``trip_reason`` / ``enforcement`` /
+#: ``tripped`` / ``budgets``), documented in
+#: ``docs/agent-runtime-harness/run-budget-accounting.md`` §3.
+#:
+#: A pure chat turn produces NO run record (``runs/`` is the goal/task lane), so
+#: before this the ledger reached the live envelope and then evaporated: the
+#: cockpit had nowhere to read "this reply is short because the wall closed"
+#: after the turn settled. The turn journal IS the chat lane's run record, so
+#: the block lives here, under the same key and in the same shape every other
+#: carrier uses.
+#:
+#: ABSENT STAYS ABSENT. Older records and turns that declared no budget get no
+#: key — never an empty dict, because "nothing bounded this turn" and "nobody
+#: accounted this turn" are different facts and a reader must be able to tell
+#: them apart.
+_JOURNAL_RUN_BUDGET_FIELD = RUN_BUDGET_ACCOUNTING_KEY
 
 
 def _safe_journal_metadata(value: Any) -> dict[str, Any]:
@@ -833,11 +1136,18 @@ def _safe_journal_metadata(value: Any) -> dict[str, Any]:
         text = safe_assignment_text(value.get(key), limit=limit)
         if text:
             result[key] = text
+    run_budget = safe_run_budget_accounting(value.get(_JOURNAL_RUN_BUDGET_FIELD))
+    if run_budget is not None:
+        result[_JOURNAL_RUN_BUDGET_FIELD] = run_budget
     for key in (
         "provider_submitted",
         "native_committed",
         "projection_committed",
         "projection_event_emitted",
+        # True on any turn the wall budget ended — including the graceful case
+        # that still projected a real reply, so "why is this reply short?" is
+        # answerable from the record instead of from the operator's memory.
+        "budget_exhausted",
     ):
         if key in value:
             result[key] = bool(value.get(key))
@@ -846,14 +1156,17 @@ def _safe_journal_metadata(value: Any) -> dict[str, Any]:
 
 def _safe_turn_state(value: Any) -> str | None:
     state = safe_assignment_token(value)
-    return state if state in _VALID_TURN_STATES else None
+    return state if state in ALL_TURN_STATES else None
 
 
 def _record_state(record: Any) -> str | None:
     if not isinstance(record, dict):
         return None
     state = _safe_turn_state(record.get("state"))
-    return state or "completed"
+    # A record whose state is missing/unrecognized predates the vocabulary (or
+    # was written by something that is not this store). Read it as settled —
+    # never as in-flight, which would hand it to the repair sweep.
+    return state or TURN_STATE_COMPLETED
 
 
 def _utc_now_iso() -> str:
@@ -911,6 +1224,12 @@ def _safe_elements(value: Any) -> list[dict[str, Any]]:
                     "duration_ms": _safe_int(raw.get("duration_ms")),
                     "files": [item for item in safe_files if item],
                     "redacted": bool(raw.get("redacted")),
+                    # Generic tool input/result record — block-preserving bound
+                    # (safe_assignment_text would fold the key-per-line contract
+                    # the console dropdown renders into one line). Scrubbed and
+                    # bounded upstream at the progress sink.
+                    "tool_input": _safe_block_text(raw.get("tool_input"), limit=1200),
+                    "tool_result": _safe_block_text(raw.get("tool_result"), limit=1800),
                 }
             )
             # T7: preserve the todo tool's structured checklist (id/content/status)
@@ -934,6 +1253,19 @@ def _safe_elements(value: Any) -> list[dict[str, Any]]:
 _TODO_STATE_MAX_ITEMS = 64
 _TODO_STATE_MAX_CONTENT = 240
 _TODO_STATE_VALID_STATUS = {"pending", "in_progress", "completed", "cancelled"}
+
+
+def _safe_block_text(value: Any, *, limit: int) -> str | None:
+    """Newline-preserving bounded text for the tool input/result record (the
+    whitespace-collapsing ``safe_assignment_text`` would destroy the
+    key-per-line structure the console dropdown renders)."""
+
+    text = str(value or "").replace("\x00", " ").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if not text:
+        return None
+    if len(text) > limit:
+        text = f"{text[:limit]}\n…(rest truncated)…"
+    return text
 
 
 def _safe_todo_state(value: Any) -> list[dict[str, str]] | None:

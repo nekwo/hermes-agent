@@ -1,15 +1,28 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import re
+from dataclasses import dataclass
 from typing import Any, Iterable
 
 from .models import PersonaInstance
-from .mission_chat_turns import mission_chat_turn_elements, mission_chat_turn_records
+from .mission_chat_turns import (
+    TERMINAL_TURN_STATES,
+    mission_chat_turn_elements,
+    mission_chat_turn_records,
+)
 from .parity import ProjectionAccountant
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
+from .redaction import TEXT_SECRET_ASSIGNMENT_RE
 from .redaction_mode import redaction_observe_enabled
 from .relay_policy import parse_relay_sender_marker
+from .run_budget import ACCOUNTING_KEY as RUN_BUDGET_ACCOUNTING_KEY
+from .runtime_hud import (
+    extract_runtime_context_envelope,
+    extract_skill_preload_envelope,
+)
 from .transcript_order import (
     TURN_SEQ_CONTENT,
     TURN_SEQ_OPERATOR,
@@ -32,6 +45,75 @@ PERSONA_PRE_TRACE_ACK_KIND = "pre_trace_ack"
 # conversation projection keys on this to attribute the message to the sending
 # AGENT instead of the operator. See agent_runtime/relay_policy.py.
 PERSONA_RELAYED_MESSAGE_KIND = "relayed_message"
+
+# ── terminal-turn marker vocabulary (ONE table, keyed on the turn state) ─────
+#
+# A turn that settles TERMINALLY without a recorded reply synthesizes a typed
+# system marker row. The marker is what tells every downstream projection the
+# turn is over — most concretely, it is the input
+# ``operator_channels._settle_terminal_tool_calls`` reads to stop a
+# ``tool_started``-without-``tool_finished`` row rendering a live spinner
+# forever.
+#
+# The table exists because the filter used to be ``state != "interrupted"``: one
+# hardcoded legacy state. When the wall-budget work (2026-07-26) added the
+# ``budget_exhausted`` terminal state, that single-state filter silently
+# excluded it — no marker, no settlement, and the launcher cockpit spun a tool
+# row for a turn that had been over for minutes. Adding a terminal state must
+# extend a TABLE, not require finding every string comparison.
+#
+# ``kind`` values are the wire vocabulary the Launcher already consumes
+# (``mission_agent_chat_adapter.dart``: ``turn_interrupted`` →
+# retry affordance, ``budget_exhausted`` → graceful-checkpoint marker). Do not
+# mint a new kind for a state the Launcher already renders.
+PERSONA_TURN_INTERRUPTED_KIND = "turn_interrupted"
+PERSONA_TURN_BUDGET_EXHAUSTED_KIND = "budget_exhausted"
+
+
+@dataclass(frozen=True, slots=True)
+class TerminalTurnMarker:
+    """How one terminal turn state presents when it recorded no reply."""
+
+    kind: str
+    id_slug: str
+    text: str
+
+
+TERMINAL_TURN_MARKERS: dict[str, TerminalTurnMarker] = {
+    "interrupted": TerminalTurnMarker(
+        kind=PERSONA_TURN_INTERRUPTED_KIND,
+        id_slug="turn-interrupted",
+        text=(
+            "Agent turn interrupted before a reply was recorded. Retry the message "
+            "to run a fresh turn."
+        ),
+    ),
+    "budget_exhausted": TerminalTurnMarker(
+        kind=PERSONA_TURN_BUDGET_EXHAUSTED_KIND,
+        id_slug="turn-budget-exhausted",
+        text=(
+            "Agent turn reached its wall budget and settled at a graceful checkpoint "
+            "before a reply was recorded. Any work it committed stands; send a new "
+            "message to continue from there."
+        ),
+    ),
+}
+# Guard, not decoration: a marker may only be declared for a state the turn
+# store itself calls terminal. A typo, or a state that is still in flight, would
+# otherwise mark a LIVE turn as over — the opposite failure of the one this
+# table fixes, and a worse one. Raised (not asserted) so ``python -O`` cannot
+# strip the contract. The turn store's own vocabulary guards
+# (``mission_chat_turns._guard_turn_state_vocabulary``) already prove
+# ``TERMINAL_TURN_STATES`` partitions the known universe with the in-flight and
+# settling buckets, so this check is the last link of one chain, not a second
+# opinion about which states are terminal.
+_UNKNOWN_MARKER_STATES = sorted(set(TERMINAL_TURN_MARKERS) - TERMINAL_TURN_STATES)
+if _UNKNOWN_MARKER_STATES:  # pragma: no cover - import-time contract guard
+    raise RuntimeError(
+        "TERMINAL_TURN_MARKERS declares non-terminal turn state(s): "
+        f"{_UNKNOWN_MARKER_STATES}"
+    )
+
 _CHAT_INSTANCE_MODES = {"chat", "free_floating"}
 DEFAULT_PERSONA_CHAT_MESSAGE_TAIL = 40
 MAX_PERSONA_CHAT_MESSAGE_TAIL = 40
@@ -50,9 +132,29 @@ _TRACE_EVENT_TYPES = {
 _TRACE_FETCH_HEADROOM = 6
 _TRACE_FETCH_CEILING = 2000
 
-_SECRET_RE = re.compile(
-    r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|bearer)\s*[:=]\s*\S+"
-)
+# Single-homed in ``agent_runtime.redaction`` — see the header there for the
+# JSON blind spot every local spelling shared. Detection here (a matching line
+# is dropped/blocked whole), so the shared pattern's group(2) is inert.
+# ``snapshot`` imports this name; it stays a module attribute on purpose.
+_SECRET_RE = TEXT_SECRET_ASSIGNMENT_RE
+_ASSISTANT_CLIENT_MESSAGE_ID_RE = re.compile(r"^(.+):assistant:\d+$")
+
+
+def logical_persona_chat_client_message_id(value: Any) -> str | None:
+    """Return the durable operator-turn identity for a persisted chat row."""
+
+    client_message_id = safe_assignment_text(value, limit=240)
+    if not client_message_id:
+        return None
+    match = _ASSISTANT_CLIENT_MESSAGE_ID_RE.fullmatch(client_message_id)
+    return match.group(1) if match else client_message_id
+
+
+def canonical_persona_chat_turn_id(value: Any) -> str | None:
+    """Return the tokenized turn id shared by operator and assistant rows."""
+
+    logical_id = logical_persona_chat_client_message_id(value)
+    return safe_assignment_token(logical_id) or None
 
 
 def persona_chat_history_summary(
@@ -63,6 +165,7 @@ def persona_chat_history_summary(
     message_tail: int = DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
     accountant: ProjectionAccountant | None = None,
     persona_assignments: Iterable[Any] | None = None,
+    omitted_session_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Return redaction-safe persona chat-history rows for Harness snapshots.
 
@@ -78,14 +181,31 @@ def persona_chat_history_summary(
     """
 
     bound_by_session: dict[str, PersonaInstance] = {}
+    instances_by_id: dict[str, PersonaInstance] = {}
     instances_by_persona: dict[str, PersonaInstance] = {}
     for instance in persona_instances:
+        instance_id = safe_assignment_text(getattr(instance, "id", None), limit=160)
+        if instance_id:
+            instances_by_id[instance_id] = instance
         persona_id = _canonical_persona_id(getattr(instance, "persona_id", None))
         if persona_id:
             instances_by_persona[persona_id] = instance
         session_id = safe_assignment_text(
             getattr(instance, "default_chat_session_id", None), limit=200
         )
+        active_session_id = safe_assignment_text(
+            getattr(instance, "session_id", None), limit=200
+        )
+        # A task-bound mission mirrors its live run id into the default-chat
+        # pointer. That id belongs to the mission/event lane, not SessionDB;
+        # the synthetic mission row below is its authoritative projection.
+        if (
+            safe_assignment_token(getattr(instance, "mode", None)) == "task_bound"
+            and getattr(instance, "current_task_id", None)
+            and session_id
+            and session_id == active_session_id
+        ):
+            session_id = None
         if session_id:
             bound_by_session[session_id] = instance
 
@@ -134,9 +254,16 @@ def persona_chat_history_summary(
             continue
         if accountant is not None:
             accountant.consider(1)
+        persisted_instance_id = _persisted_persona_instance_id(raw)
         inferred_persona = _infer_persona_id(raw, session_id=session_id)
-        instance = bound_by_session.get(session_id) or (
-            instances_by_persona.get(inferred_persona) if is_source_chat and inferred_persona else None
+        instance = (
+            bound_by_session.get(session_id)
+            or instances_by_id.get(persisted_instance_id or "")
+            or (
+                instances_by_persona.get(inferred_persona)
+                if is_source_chat and inferred_persona
+                else None
+            )
         )
         if instance is None:
             if accountant is not None:
@@ -148,12 +275,6 @@ def persona_chat_history_summary(
         row = _history_row(raw, instance, session_id=session_id, session_db=db, message_tail=message_tail)
         rows.append(row)
         seen.add(session_id)
-        if accountant is not None:
-            accountant.include(1)
-        if len(rows) >= limit:
-            if accountant is not None:
-                accountant.mark_truncated()
-            break
 
     # Create/open paths now persist persona chat sessions before exposing them.
     # If the active instance still points at a session that SessionDB no longer
@@ -166,6 +287,12 @@ def persona_chat_history_summary(
         raw = _get_session_row(db, session_id)
         if raw is None:
             if accountant is not None:
+                # Anomalous on purpose: the instance still points at a session
+                # SessionDB no longer has. Hiding the row is correct here (this
+                # projection is READ-ONLY), but the stale binding is a real
+                # defect a write path must clear —
+                # ``PersonaInstanceStore.repair_missing_chat_session_bindings``
+                # via ``harness persona-instance reconcile``.
                 accountant.consider(1)
                 accountant.drop("session_not_in_db", entity_id=session_id)
             continue
@@ -173,9 +300,6 @@ def persona_chat_history_summary(
         seen.add(session_id)
         if accountant is not None:
             accountant.consider(1)
-            accountant.include(1)
-        if len(rows) >= limit:
-            break
 
     # Live mission sessions. A task-bound instance runs its mission turns in a
     # session that lives in the run/event stream, not the operator SessionDB, so
@@ -228,27 +352,49 @@ def persona_chat_history_summary(
         seen.add(session_id)
         if accountant is not None:
             accountant.consider(1)
-            accountant.include(1)
-        if len(rows) >= limit:
-            break
 
-    return rows
+    # The directory contract is creation order, not activity order. Opening or
+    # continuing an older chat may advance ``updated_at`` but must never move it
+    # above a conversation created later. Resolve every eligible row first, then
+    # sort and truncate so an active old chat cannot crowd a newer chat out of
+    # the bounded projection. Session id is the deterministic tie-breaker for
+    # legacy rows whose creation timestamp is missing.
+    rows.sort(key=_persona_chat_creation_sort_key, reverse=True)
+    visible = rows[: max(0, limit)]
+    if omitted_session_ids is not None:
+        omitted_session_ids.update(
+            session_id
+            for row in rows[len(visible):]
+            if (session_id := safe_assignment_text(row.get("session_id"), limit=200))
+        )
+    if accountant is not None:
+        accountant.include(len(visible))
+        omitted = len(rows) - len(visible)
+        if omitted > 0:
+            # Deliberate bound: the directory keeps the newest ``limit`` rows by
+            # creation order and every omitted row stays fetchable per-session.
+            # A busy runtime drops here on EVERY build — steady state, not a
+            # symptom — so it is declared by-design; a reader that counts it as
+            # an anomaly pins its health pill amber forever.
+            accountant.drop("limit", count=omitted, by_design=True)
+            accountant.mark_truncated()
+    return visible
 
 
 def persona_chat_session_messages(
     *,
     session_id: str,
     limit: int = DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
+    before: str | None = None,
     session_db: Any | None = None,
 ) -> dict[str, Any]:
-    """Paged on-demand read of one persona chat session's message tail.
+    """Paged on-demand read of one persona chat session's complete transcript.
 
     Backs ``harness persona chat history`` — the fetch that replaces the message
-    tail S2 evicts from the steady-state frame. Reuses the exact curation the
-    in-frame projection used (``_safe_recent_messages``), so the fetched tail is
-    identical to what ``persona_chat_history[].messages`` used to carry. The log
-    IS the history: no new storage, just a per-session read of the durable
-    SessionDB the frame previously projected inline.
+    tail S2 evicts from the steady-state frame. Each page is bounded, but the
+    opaque ``before`` cursor can walk all curated rows across the root's native
+    compression lineage. The log IS the history: no new storage, just a
+    per-session read of the durable SessionDB the frame previously projected.
     """
 
     bounded = _bounded_message_tail(limit)
@@ -259,17 +405,55 @@ def persona_chat_session_messages(
             "session_id": session_id,
             "limit": bounded,
             "count": 0,
+            "total_count": 0,
+            "has_more": False,
+            "next_before": None,
+            "history_revision": _history_revision(session_id, []),
             "redaction_status": "safe",
             "messages": [],
         }
-    messages, status = _safe_recent_messages(db, session_id=session_id, limit=bounded)
+    messages, status = _safe_curated_messages(db, session_id=session_id)
+    end = len(messages)
+    if before:
+        cursor = _decode_history_cursor(before)
+        if cursor is None or cursor.get("session_id") != session_id:
+            return {
+                "ok": False,
+                "error_kind": "invalid_history_cursor",
+                "error": "history cursor is malformed or belongs to another session",
+                "session_id": session_id,
+            }
+        before_id = safe_assignment_text(cursor.get("before_id"), limit=160)
+        match = next(
+            (index for index, row in enumerate(messages) if row.get("id") == before_id),
+            None,
+        )
+        if match is None:
+            return {
+                "ok": False,
+                "error_kind": "invalid_history_cursor",
+                "error": "history cursor no longer resolves in this session",
+                "session_id": session_id,
+            }
+        end = match
+    start = max(0, end - bounded)
+    page = messages[start:end]
+    has_more = start > 0
     return {
         "ok": True,
         "session_id": session_id,
         "limit": bounded,
-        "count": len(messages),
+        "count": len(page),
+        "total_count": len(messages),
+        "has_more": has_more,
+        "next_before": (
+            _encode_history_cursor(session_id, page[0]["id"])
+            if has_more and page
+            else None
+        ),
+        "history_revision": _history_revision(session_id, messages, session_db=db),
         "redaction_status": status,
-        "messages": messages,
+        "messages": page,
     }
 
 
@@ -455,7 +639,13 @@ class _TraceAccumulator:
                 accountant.drop("unrenderable_entry", count=unrenderable, entity_id=self.instance_id)
             truncated = len(rendered) - len(kept)
             if truncated > 0:
-                accountant.drop("tail_truncated", count=truncated, entity_id=self.instance_id)
+                # Deliberate bound: the trace lane keeps a tail window.
+                accountant.drop(
+                    "tail_truncated",
+                    count=truncated,
+                    entity_id=self.instance_id,
+                    by_design=True,
+                )
                 accountant.mark_truncated()
         return kept
 
@@ -515,7 +705,9 @@ def _list_sessions(
                 limit=limit,
                 include_children=include_children,
                 min_message_count=0,
-                order_by_last_active=True,
+                # Chat History is a conversation directory, not an inbox.
+                # Creation order is immutable; activity must not reshuffle it.
+                order_by_last_active=False,
                 include_archived=True,
             )
             or []
@@ -545,12 +737,15 @@ def _get_session_row(db: Any, session_id: str) -> dict[str, Any] | None:
 
 
 def _default_session_db() -> Any | None:
-    try:
-        from hermes_state import SessionDB
+    # History pointers, on-demand message tails, open/send validation and
+    # transcript writes must all resolve the same operator-visible database.
+    # A Launcher-selected profile changes HERMES_HOME, but not the chat scope:
+    # ``chat_session_scope`` is the ONE place that decides which database that
+    # is (relay context > HERMES_HEAD_HOME > the shared runtime root's recorded
+    # head pointer > the degraded ambient home).
+    from .chat_session_scope import open_chat_session_db
 
-        return SessionDB()
-    except Exception:
-        return None
+    return open_chat_session_db()
 
 
 def _mission_assignment_for(
@@ -734,6 +929,29 @@ def _lineage_aggregate(
         )
         for row in rows
     ]
+    # Some SessionDB implementations omit computed activity fields from
+    # ``get_session``. Only in that case derive a fallback from durable message
+    # timestamps; an explicit session activity value remains authoritative.
+    if not any(row.get("last_active") or row.get("ended_at") for row in rows):
+        try:
+            lineage_loader = getattr(session_db, "get_messages_as_conversation", None)
+            native_messages = (
+                lineage_loader(active_session_id, include_ancestors=True)
+                if callable(lineage_loader)
+                else session_db.get_messages(root_session_id)
+            )
+        except Exception:
+            native_messages = []
+        activity.extend(
+            _iso_timestamp(
+                message.get("created_at")
+                or message.get("timestamp")
+                or message.get("time")
+                or message.get("updated_at")
+            )
+            for message in native_messages or []
+            if isinstance(message, dict)
+        )
     result["last_active"] = max((item for item in activity if item), default=None)
     return result
 
@@ -795,6 +1013,31 @@ def _model_config(value: Any) -> dict[str, Any]:
         if isinstance(decoded, dict):
             return decoded
     return {}
+
+
+def _persisted_persona_instance_id(raw: dict[str, Any]) -> str | None:
+    """Read the session's authoritative owning instance binding.
+
+    Modern Mission Control sessions persist this in ``model_config``. It must
+    outrank persona inference from a display prompt or session-id shape: prompts
+    legitimately contain the complete persona system prompt, and placement ids
+    such as ``personainst_neko_supervisor_agent_f6f7a51b`` are intentionally not
+    reducible to a bare persona id without the instance registry.
+    """
+
+    return safe_assignment_text(
+        _model_config(raw.get("model_config")).get("persona_instance_id"),
+        limit=160,
+    )
+
+
+def _persona_chat_creation_sort_key(row: dict[str, Any]) -> tuple[bool, str, str]:
+    created_at = _iso_timestamp(row.get("created_at"))
+    return (
+        created_at is not None,
+        created_at or "",
+        safe_assignment_text(row.get("session_id"), limit=200),
+    )
 
 
 def _token_usage_fields(raw: dict[str, Any]) -> dict[str, int]:
@@ -875,6 +1118,22 @@ def _safe_recent_messages(
     session_id: str,
     limit: int = DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
 ) -> tuple[list[dict[str, Any]], str]:
+    rows, status = _safe_curated_messages(session_db, session_id=session_id)
+    return rows[-_bounded_message_tail(limit):], status
+
+
+def _safe_curated_messages(
+    session_db: Any | None,
+    *,
+    session_id: str,
+) -> tuple[list[dict[str, Any]], str]:
+    """Return every redaction-safe operator-facing row for one logical chat.
+
+    Snapshot callers continue to take a bounded tail through
+    :func:`_safe_recent_messages`; the on-demand authority pages this complete
+    ordered list with opaque cursors.
+    """
+
     if session_db is None:
         return [], "safe"
     try:
@@ -894,6 +1153,14 @@ def _safe_recent_messages(
     redacted = False
     assistant_client_message_ids: set[str] = set()
     seen_logical_rows: set[tuple[str, str, str]] = set()
+    # ONE read of this chat's turn journal, shared by the reply rows below and
+    # by the terminal-marker rows appended after them. The journal is a
+    # per-session file with no read cache, so fetching it again per row — just
+    # to add one small key — would have turned a bounded page into N file reads.
+    turn_records = mission_chat_turn_records(session_id=session_id)
+    turn_records_by_message = {
+        str(record.get("client_message_id") or ""): record for record in turn_records
+    }
     # Curate the agent's raw working transcript into an operator-facing one.
     # The bound session is the agent's internal session, so its raw rows are
     # verbose tick-context prompts (role=user) and serialized decision dicts
@@ -911,11 +1178,22 @@ def _safe_recent_messages(
             or raw.get("client_message_id"),
             limit=240,
         )
-        if role == "agent" and client_message_id:
-            assistant_client_message_ids.add(client_message_id)
-        curated = _curate_chat_message_text(
-            role, raw.get("content") or raw.get("text")
+        logical_client_message_id = logical_persona_chat_client_message_id(
+            client_message_id
         )
+        turn_id = canonical_persona_chat_turn_id(client_message_id)
+        if role == "agent" and logical_client_message_id:
+            assistant_client_message_ids.add(logical_client_message_id)
+        raw_content = raw.get("content") or raw.get("text")
+        runtime_context = None
+        skill_preload = None
+        if role == "operator":
+            # Composition order is message · skill_preload · runtime_context,
+            # so strip the end-anchored HUD envelope first; the skill-preload
+            # envelope is end-anchored on the remainder.
+            raw_content, runtime_context = extract_runtime_context_envelope(raw_content)
+            raw_content, skill_preload = extract_skill_preload_envelope(raw_content)
+        curated = _curate_chat_message_text(role, raw_content)
         if not curated:
             continue
         text, status = _safe_display_body_text(
@@ -940,6 +1218,10 @@ def _safe_recent_messages(
             ),
             "redaction_status": status,
         }
+        if runtime_context is not None:
+            row["runtime_context"] = runtime_context
+        if skill_preload is not None:
+            row["skill_preload"] = skill_preload
         # PRE-C8 RESIDUE PATH: acks stopped entering SessionDB with C8 (they
         # are a presentation-only `turn.ack` stream frame now), but rows
         # persisted before that still carry the finish_reason marker
@@ -967,13 +1249,14 @@ def _safe_recent_messages(
                 row["relay_sender_persona_id"] = relay_sender.persona_id
                 row["relay_sender_instance_id"] = relay_sender.instance_id
         if client_message_id:
-            logical_client_id = re.sub(r":assistant:\d+$", "", client_message_id)
-            logical_key = (role, logical_client_id, text)
+            logical_key = (role, logical_client_message_id or client_message_id, text)
             if logical_key in seen_logical_rows:
                 continue
             seen_logical_rows.add(logical_key)
             row["client_message_id"] = client_message_id
-            # C8 ordering key: the turn anchor is the client_message_id; the
+            if turn_id:
+                row["turn_id"] = turn_id
+            # C8 ordering key: the turn anchor is the canonical logical turn id;
             # intra-turn position is stamped HERE (one authority) — the
             # operator message opens its turn, the recorded reply closes it.
             # Elements between them carry the emitter's 1..N seq. Pre-C8 ack
@@ -985,30 +1268,121 @@ def _safe_recent_messages(
         if role == "agent" and client_message_id:
             elements = mission_chat_turn_elements(
                 session_id=session_id,
-                client_message_id=client_message_id,
+                client_message_id=logical_client_message_id,
             )
             if elements:
                 row["turn_elements"] = elements
+            # "What bounded this turn?" — carried verbatim off the turn record
+            # (see mission_chat_turns._JOURNAL_RUN_BUDGET_FIELD). The row shapes
+            # here are an explicit allowlist, so an unknown key does NOT ride
+            # through on its own; this is the additive extension that lets the
+            # cockpit read the block the settle point persisted. Read-only: the
+            # projection reads the journal, it never writes it.
+            _carry_run_budget(
+                row, turn_records_by_message.get(str(logical_client_message_id or ""))
+            )
         rows.append(row)
     rows.extend(
-        _interrupted_turn_rows(
+        _terminal_turn_marker_rows(
             session_id=session_id,
             assistant_client_message_ids=assistant_client_message_ids,
+            records=turn_records,
         )
     )
     rows = _ordered_message_rows(rows)
-    rows = rows[-_bounded_message_tail(limit):]
     return rows, "redacted" if redacted else "safe"
 
 
-def _interrupted_turn_rows(
+def _history_revision(
+    session_id: str,
+    messages: list[dict[str, Any]],
+    *,
+    session_db: Any | None = None,
+) -> str:
+    """Stable revision for cache invalidation without exposing transcript text."""
+
+    if session_db is not None:
+        try:
+            from .persona_chat_continuity import native_history_revision
+
+            return native_history_revision(session_db, session_id)
+        except Exception:
+            pass
+    payload = json.dumps(messages, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+    return f"{session_id}:{digest}"
+
+
+def _encode_history_cursor(session_id: str, before_id: str) -> str:
+    payload = json.dumps(
+        {"v": 1, "session_id": session_id, "before_id": before_id},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def _decode_history_cursor(value: str) -> dict[str, Any] | None:
+    try:
+        token = str(value or "").strip()
+        padded = token + "=" * (-len(token) % 4)
+        decoded = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+        if not isinstance(decoded, dict) or decoded.get("v") != 1:
+            return None
+        if not safe_assignment_text(decoded.get("before_id"), limit=160):
+            return None
+        return decoded
+    except Exception:
+        return None
+
+
+def _carry_run_budget(row: dict[str, Any], record: dict[str, Any] | None) -> None:
+    """Ride the turn record's accounting block onto a projected row, or nothing.
+
+    Absence-preserving in both directions: a record with no block (an older
+    turn, or one that declared no budget) leaves the row untouched, so a reader
+    can still tell "nothing bounded this turn" from "nobody accounted it". The
+    block is copied verbatim — the store already bounded it through the one
+    ``run_budget.safe_accounting_block`` reader.
+    """
+
+    block = (record or {}).get(RUN_BUDGET_ACCOUNTING_KEY)
+    if isinstance(block, dict) and block:
+        row[RUN_BUDGET_ACCOUNTING_KEY] = block
+
+
+def _terminal_turn_marker_rows(
     *,
     session_id: str,
     assistant_client_message_ids: set[str],
+    records: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
+    """Synthesize the typed marker row for every terminally-settled, reply-less turn.
+
+    Driven by ``TERMINAL_TURN_MARKERS`` — one table, one row shape, one code
+    path per terminal state. This used to test ``state != "interrupted"``, which
+    made ``budget_exhausted`` (the wall-budget terminal state, 2026-07-26) a
+    turn that ended and never said so: no marker, so
+    ``operator_channels._settle_terminal_tool_calls`` never fired and a
+    ``tool_started`` row with no finish spun in the cockpit forever.
+
+    ``settled_state`` rides along so downstream projections carry the REASON the
+    turn is over without re-deriving it from the marker kind or the prose.
+
+    ``records`` lets the caller hand in the journal read it already did; left
+    None (direct callers, tests) this reads the journal itself. The marker row
+    is the ONLY row a reply-less budget-exhausted turn gets, so the accounting
+    block has to ride here too — otherwise the exact turns whose bound is worth
+    reading are the ones that carry no bound.
+    """
+
     rows: list[dict[str, Any]] = []
-    for record in mission_chat_turn_records(session_id=session_id):
-        if safe_assignment_token(record.get("state")) != "interrupted":
+    if records is None:
+        records = mission_chat_turn_records(session_id=session_id)
+    for record in records:
+        state = safe_assignment_token(record.get("state"))
+        marker = TERMINAL_TURN_MARKERS.get(state or "")
+        if marker is None:
             continue
         client_message_id = safe_assignment_text(record.get("client_message_id"), limit=240)
         if not client_message_id or client_message_id in assistant_client_message_ids:
@@ -1016,29 +1390,31 @@ def _interrupted_turn_rows(
         turn_id = safe_assignment_token(record.get("turn_id")) or safe_assignment_token(client_message_id)
         if not turn_id:
             continue
-        rows.append(
-            {
-                "id": f"{session_id}:turn-interrupted:{client_message_id}",
-                "role": "system",
-                # Typed marker: downstream projections (operator conversation,
-                # Mission Control tiles) key on this instead of matching text.
-                "kind": "turn_interrupted",
-                "text": "Agent turn interrupted before a reply was recorded. Retry the message to run a fresh turn.",
-                "timestamp": _iso_timestamp(record.get("updated_at")),
-                "redaction_status": "safe",
-                "client_message_id": client_message_id,
-                "turn_id": turn_id,
-                # C8 ordering key: the interrupt marker is the turn's terminal
-                # row (a turn has a reply or an interrupt, never both).
-                "turn_seq": TURN_SEQ_TERMINAL,
-            }
-        )
+        marker_row: dict[str, Any] = {
+            "id": f"{session_id}:{marker.id_slug}:{client_message_id}",
+            "role": "system",
+            # Typed marker: downstream projections (operator conversation,
+            # Mission Control tiles) key on this instead of matching text.
+            "kind": marker.kind,
+            "text": marker.text,
+            "timestamp": _iso_timestamp(record.get("updated_at")),
+            "redaction_status": "safe",
+            "client_message_id": client_message_id,
+            "turn_id": turn_id,
+            # The canonical turn-store state, not a second vocabulary.
+            "settled_state": state,
+            # C8 ordering key: the terminal marker IS the turn's terminal
+            # row (a turn has a reply or a marker, never both).
+            "turn_seq": TURN_SEQ_TERMINAL,
+        }
+        _carry_run_budget(marker_row, record)
+        rows.append(marker_row)
     return rows
 
 
 def _ordered_message_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     # C8: ONE ordering authority. Rows carrying the turn key (anchor =
-    # client_message_id, position = turn_seq) sort by that key inside their
+    # canonical turn_id, position = turn_seq) sort by that key inside their
     # turn — the operator row first, elements by emitter seq, the terminal
     # reply/interrupt last — regardless of clock skew between SessionDB stamps
     # and turn-store settle times (the F17 reorder seam). Rows that predate the
@@ -1055,7 +1431,10 @@ def _ordered_message_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         rows,
         # Token-normalized so the anchor is byte-equal to the `turn_id` the
         # emitter/turn store mint from the same client_message_id.
-        anchor=lambda row: safe_assignment_token(row.get("client_message_id")) or None,
+        anchor=lambda row: (
+            safe_assignment_token(row.get("turn_id"))
+            or canonical_persona_chat_turn_id(row.get("client_message_id"))
+        ),
         turn_seq=lambda row: row.get("turn_seq")
         if isinstance(row.get("turn_seq"), int)
         else None,
@@ -1185,6 +1564,15 @@ def _trace_entry(event: Any) -> dict[str, Any] | None:
         "dispatch_order": _safe_trace_operator_block(payload.get("dispatch_order"), limit=1500),
         "detail": _safe_trace_operator_line(payload.get("detail"), limit=500),
         "output": _safe_trace_operator_block(payload.get("output"), limit=1600),
+        # Generic tool input/result record (tools with no dedicated field):
+        # key-per-line blocks; block scrub keeps line structure so the console
+        # dropdown renders one key per line. Limits sit ABOVE the progress-sink
+        # ceiling (1100/1700 + its truncation marker, which can inflate the
+        # producer bound by re-redacting lines with the broader marker set) so
+        # this tail-bounded scrub never truncates — a truncation here would cut
+        # the HEAD, which is this record's operator signal.
+        "tool_input": _safe_trace_operator_block(payload.get("tool_input"), limit=1200),
+        "tool_result": _safe_trace_operator_block(payload.get("tool_result"), limit=1800),
         "paths": _safe_trace_operator_paths(payload.get("changed_paths")),
         "duration_ms": _safe_trace_int(payload.get("duration_ms")),
         "exit_code": _safe_trace_int(payload.get("exit_code")),

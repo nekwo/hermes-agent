@@ -338,14 +338,33 @@ def test_read_only_companions_are_registered_on_the_agent_chat_toolset():
 
 
 def test_send_schema_teaches_the_verb_set():
-    # The scope addition: the send description teaches the whole verb set + the
-    # @handle addressing model, and exposes the new_session parameter.
+    # The scope addition: the send description teaches the @handle addressing
+    # model and the thread contract, and exposes the thread-target parameters.
     text = AGENT_CHAT_SEND_SCHEMA["description"]
     assert "new_session" in text
-    assert "agent_chat_threads" in text and "agent_chat_open" in text
+    assert "session_id" in text
     assert "personainst_" in text  # @handle addressing is taught
     props = AGENT_CHAT_SEND_SCHEMA["parameters"]["properties"]
     assert "new_session" in props and props["new_session"]["type"] == "boolean"
+    assert "title" in props and props["title"]["type"] == "string"
+
+
+def test_send_schema_teaches_the_task_scoped_thread_contract():
+    # The model reads this description to decide whether to pass a session_id.
+    # It must say a NEW task gets a fresh thread and that continuing an exchange
+    # means passing the returned session back — otherwise the agent keeps the old
+    # "omit to continue" habit and every follow-up opens another empty thread.
+    text = AGENT_CHAT_SEND_SCHEMA["description"].lower()
+    assert "fresh" in text
+    assert "session_id" in text and "continue" in text
+
+
+def test_new_session_has_no_schema_default_so_unset_stays_unset():
+    # A `"default": false` here (or in the registry handler) collapses the
+    # tri-state: providers fill declared defaults, so "the caller said nothing"
+    # would arrive as an explicit "continue the durable thread" and silently pin
+    # every dispatch to the pre-policy mega-thread behavior.
+    assert "default" not in AGENT_CHAT_SEND_SCHEMA["parameters"]["properties"]["new_session"]
 
 
 def test_read_tool_descriptions_say_when_to_use_them():
@@ -357,8 +376,9 @@ def test_read_tool_descriptions_say_when_to_use_them():
 
 
 def test_new_session_flag_is_forwarded_to_the_handler(monkeypatch):
-    # The tool forwards new_session; the handler owns the mint (through the
-    # default-session chokepoint). The tool must NOT invent a session id here.
+    # The tool forwards new_session as a TRI-STATE and never decides the thread
+    # itself; the handler's policy resolver owns the answer and the mint (through
+    # the default-session chokepoint). The tool must NOT invent a session id.
     seen = {}
 
     def fake_handler(args):
@@ -370,13 +390,126 @@ def test_new_session_flag_is_forwarded_to_the_handler(monkeypatch):
     import hermes_cli.harness as harness
 
     monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
-    # Default: new_session absent → forwarded as False, session omitted.
+    # Absent → forwarded as None ("no opinion"), NOT False. Coercing to False
+    # here would answer the policy question inside the tool and pin every
+    # dispatch to the durable pair thread.
     assert json.loads(agent_chat_send(persona_id="qa", message="hi"))["ok"]
-    assert seen["new_session"] is False and seen["session_id"] is None
+    assert seen["new_session"] is None and seen["session_id"] is None
     # new_session=True forwarded; session stays None so the handler mints via the
     # chokepoint (one minting authority), not a tool-side mint.
     assert json.loads(agent_chat_send(persona_id="qa", message="hi", new_session=True))["ok"]
     assert seen["new_session"] is True and seen["session_id"] is None
+    # Explicit False is a real answer of its own: continue the durable thread.
+    assert json.loads(agent_chat_send(persona_id="qa", message="hi", new_session=False))["ok"]
+    assert seen["new_session"] is False and seen["session_id"] is None
+
+
+def test_registry_handler_does_not_default_new_session_to_false(monkeypatch):
+    # The registry lambda is the real model-facing entry point; a `False`
+    # default there would defeat the tri-state just as thoroughly as a schema
+    # default. Drive it exactly as the tool dispatcher does.
+    seen = {}
+
+    def fake_handler(args):
+        seen["new_session"] = getattr(args, "new_session", None)
+        print(json.dumps({"ok": True, "reply": "ack"}))
+        return 0
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    entry = registry.get_entry("agent_chat_send")
+    assert json.loads(entry.handler({"persona_id": "qa", "message": "hi"}))["ok"]
+    assert seen["new_session"] is None
+
+
+def test_string_boolean_new_session_is_not_inverted(monkeypatch):
+    # bool("false") is True. A provider that serializes booleans as text would
+    # have turned "continue our thread" into "start a fresh one".
+    seen = {}
+
+    def fake_handler(args):
+        seen["new_session"] = getattr(args, "new_session", None)
+        print(json.dumps({"ok": True, "reply": "ack"}))
+        return 0
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    assert json.loads(agent_chat_send(persona_id="qa", message="hi", new_session="false"))["ok"]
+    assert seen["new_session"] is False
+
+
+def test_title_names_the_thread_this_dispatch_opens(monkeypatch):
+    # Task-scoped threads are only navigable when named. The tool forwards the
+    # caller's title; deriving one from the message when absent is the handler's
+    # job (it is the side that knows whether this send actually mints).
+    seen = {}
+
+    def fake_handler(args):
+        seen["title"] = getattr(args, "title", None)
+        print(json.dumps({"ok": True, "reply": "ack"}))
+        return 0
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    assert json.loads(
+        agent_chat_send(persona_id="qa", message="triage this", title="Flaky login triage")
+    )["ok"]
+    assert seen["title"] == "Flaky login triage"
+    # No title → None forwarded, never a placeholder like "Agent relay to qa",
+    # which would name every dispatch thread after the plumbing.
+    assert json.loads(agent_chat_send(persona_id="qa", message="triage this"))["ok"]
+    assert seen["title"] is None
+    assert json.loads(agent_chat_send(persona_id="qa", message="triage this", title="   "))["ok"]
+    assert seen["title"] is None
+
+
+def test_session_established_lineage_is_returned_to_the_caller(monkeypatch):
+    # The dispatching agent must be able to tell "I opened a fresh task thread
+    # (superseding this one)" from "I continued what we had" — and it needs the
+    # session id to continue THIS exchange rather than opening another thread.
+    def fake_handler(args):
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "reply": "ack",
+                    "session_id": "persona_chat_personainst_qa_ffffffffffff",
+                    "session_established": {
+                        "fresh": True,
+                        "reason": "policy_new_per_dispatch",
+                        "predecessor_session_id": "persona_chat_personainst_qa_aaaaaaaaaaaa",
+                    },
+                }
+            )
+        )
+        return 0
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    data = json.loads(agent_chat_send(persona_id="qa", message="hi"))
+    assert data["session_established"] == {
+        "fresh": True,
+        "reason": "policy_new_per_dispatch",
+        "predecessor_session_id": "persona_chat_personainst_qa_aaaaaaaaaaaa",
+    }
+    assert data["session_id"] == "persona_chat_personainst_qa_ffffffffffff"
+
+
+def test_result_stays_compact_when_the_handler_reports_no_lineage(monkeypatch):
+    # The compact result is the whole point of this lane (the handler payload is
+    # ~75KB); an absent block must not become a null key on every reply.
+    def fake_handler(args):
+        print(json.dumps({"ok": True, "reply": "ack"}))
+        return 0
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    assert "session_established" not in json.loads(agent_chat_send(persona_id="qa", message="hi"))
 
 
 def test_new_session_with_explicit_session_is_a_typed_refusal(monkeypatch):
@@ -396,6 +529,120 @@ def test_new_session_with_explicit_session_is_a_typed_refusal(monkeypatch):
     )
     assert data["ok"] is False
     assert data["error_kind"] == "contradictory_thread_target"
+
+
+def test_clarify_token_is_offered_and_forwarded_verbatim(monkeypatch):
+    # The echo half of the clarify binding. The tool never RESOLVES the token —
+    # one ticket-store authority, and it lives with the handler that owns the
+    # session lane — so all this surface owes is an honest schema slot and an
+    # untouched forward.
+    assert "clarify_token" in AGENT_CHAT_SEND_SCHEMA["parameters"]["properties"]
+    assert "clarify_token" not in AGENT_CHAT_SEND_SCHEMA["parameters"]["required"]
+
+    seen = {}
+
+    def fake_handler(args):
+        seen["clarify_token"] = args.clarify_token
+        print(json.dumps({"ok": True, "reply": "ack"}))
+        return 0
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    assert json.loads(
+        agent_chat_send(persona_id="qa", message="launcher", clarify_token="clarify-9f2c4ab17d03")
+    )["ok"]
+    assert seen["clarify_token"] == "clarify-9f2c4ab17d03"
+    # An omitted token reaches the handler as None, never as an empty string a
+    # store lookup would have to special-case.
+    assert json.loads(agent_chat_send(persona_id="qa", message="hi"))["ok"]
+    assert seen["clarify_token"] is None
+
+
+def test_the_registry_handler_passes_the_clarify_token_through(monkeypatch):
+    # The model calls this tool through the registry, not the Python function;
+    # a kwarg the registry lambda forgets is a kwarg the model can never use.
+    seen = {}
+
+    def fake_handler(args):
+        seen["clarify_token"] = args.clarify_token
+        print(json.dumps({"ok": True, "reply": "ack"}))
+        return 0
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    entry = registry.get_entry("agent_chat_send")
+    entry.handler(
+        {"persona_id": "qa", "message": "launcher", "clarify_token": "clarify-abcdef123456"}
+    )
+    assert seen["clarify_token"] == "clarify-abcdef123456"
+
+
+def test_clarify_token_with_new_session_is_a_typed_refusal(monkeypatch):
+    # The ONE clarify combination with no correct reading: "put this answer
+    # where the question was" and "put it somewhere new" cannot both hold. A
+    # stale session_id alongside a token is NOT this case — the token
+    # deliberately wins that one downstream, because getting session_id wrong is
+    # the exact failure the token absorbs.
+    def fake_handler(args):  # pragma: no cover - must not be reached
+        raise AssertionError("contradictory thread target must refuse before dispatch")
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    data = json.loads(
+        agent_chat_send(
+            persona_id="qa",
+            message="launcher",
+            new_session=True,
+            clarify_token="clarify-9f2c4ab17d03",
+        )
+    )
+    assert data["ok"] is False
+    assert data["error_kind"] == "contradictory_thread_target"
+    assert "clarify_token" in data["error"]
+
+
+def test_clarify_binding_is_returned_to_the_answering_agent(monkeypatch):
+    # Where the answer actually landed, and why — including a session_id the
+    # token outranked, so the override is never silent to the caller either.
+    def fake_handler(args):
+        print(
+            json.dumps(
+                {
+                    "ok": True,
+                    "reply": "ack",
+                    "session_id": "persona_chat_personainst_qa_ffffffffffff",
+                    "clarify_binding": {
+                        "token": "clarify-9f2c4ab17d03",
+                        "state": "bound",
+                        "bound_via": "clarify_token",
+                        "bound_session_id": "persona_chat_personainst_qa_ffffffffffff",
+                        "overrode_session_id": "persona_chat_personainst_qa_aaaaaaaaaaaa",
+                    },
+                }
+            )
+        )
+        return 0
+
+    import hermes_cli.harness as harness
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", fake_handler)
+    data = json.loads(agent_chat_send(persona_id="qa", message="launcher"))
+    assert data["clarify_binding"]["bound_via"] == "clarify_token"
+    assert (
+        data["clarify_binding"]["overrode_session_id"]
+        == "persona_chat_personainst_qa_aaaaaaaaaaaa"
+    )
+
+    # Absent on every ordinary turn — the compact result must not grow a null key.
+    def quiet_handler(args):
+        print(json.dumps({"ok": True, "reply": "ack"}))
+        return 0
+
+    monkeypatch.setattr(harness, "_cmd_mission_chat_message", quiet_handler)
+    assert "clarify_binding" not in json.loads(agent_chat_send(persona_id="qa", message="hi"))
 
 
 def test_threads_lists_default_thread_without_minting_for_never_chatted(isolate_agent_runtime_root):
@@ -476,31 +723,46 @@ def test_send_forwards_a_personainst_handle_as_the_target_instance(monkeypatch):
     assert seen["persona_instance_id"] is None
 
 
-def test_threads_lists_each_instance_of_a_persona_distinctly(isolate_agent_runtime_root):
+def test_threads_lists_each_placement_distinctly_and_shadows_canonical(isolate_agent_runtime_root):
+    # Placements shadow canonical: two in-scope placements are listed distinctly,
+    # each by its own handle + own thread, and the plumbing canonical row is NOT
+    # advertised (the agent addresses the deliberate placements on its level).
     from agent_runtime.persona_assignments import PersonaInstanceStore
 
-    sibling = PersonaInstanceStore().add_instance(
-        persona_id="qa", placement_id="qa_agent_2", display_name="QA Agent 2"
-    )
-    primary_session = _seed_persona_chat("qa", [("primary hi", "primary ack")])
-    sibling_session = _seed_persona_chat(
-        "qa", [("sibling hi", "sibling ack")], persona_instance_id=sibling.id
-    )
-    assert primary_session != sibling_session
+    store = PersonaInstanceStore()
+    sib2 = store.add_instance(persona_id="qa", placement_id="qa_agent_2", display_name="QA Agent 2")
+    sib3 = store.add_instance(persona_id="qa", placement_id="qa_agent_3", display_name="QA Agent 3")
+    # The canonical row even has its own thread — but it is still shadowed.
+    _seed_persona_chat("qa", [("primary hi", "primary ack")])
+    s2 = _seed_persona_chat("qa", [("s2 hi", "s2 ack")], persona_instance_id=sib2.id)
+    s3 = _seed_persona_chat("qa", [("s3 hi", "s3 ack")], persona_instance_id=sib3.id)
+    assert s2 != s3
 
     data = json.loads(agent_chat_threads(persona_id="qa"))
     by_handle = {row["handle"]: row for row in data["threads"] if row["persona_id"] == "qa"}
-    assert {"personainst_qa", "personainst_qa_agent_2"} <= set(by_handle)
-    assert by_handle["personainst_qa"]["session_id"] == primary_session
-    assert by_handle["personainst_qa_agent_2"]["session_id"] == sibling_session
+    assert set(by_handle) == {"personainst_qa_agent_2", "personainst_qa_agent_3"}
+    assert "personainst_qa" not in by_handle  # canonical shadowed by the placements
+    assert by_handle["personainst_qa_agent_2"]["session_id"] == s2
+    assert by_handle["personainst_qa_agent_3"]["session_id"] == s3
 
-    # A handle filter narrows to that one instance.
-    only = json.loads(agent_chat_threads(persona_id=sibling.id))
+    # A handle filter is explicit targeting and narrows to that one instance.
+    only = json.loads(agent_chat_threads(persona_id=sib2.id))
     handles = [row["handle"] for row in only["threads"]]
     assert handles == ["personainst_qa_agent_2"]
 
 
-def test_open_targets_the_specific_instance_not_the_canonical_channel(isolate_agent_runtime_root):
+def test_threads_shows_canonical_when_no_placement_shadows_it(isolate_agent_runtime_root):
+    # Reachability fallback: a persona with only its canonical row (no placement)
+    # is still listed — the canonical channel stays addressable.
+    primary_session = _seed_persona_chat("qa", [("primary hi", "primary ack")])
+
+    data = json.loads(agent_chat_threads(persona_id="qa"))
+    by_handle = {row["handle"]: row for row in data["threads"] if row["persona_id"] == "qa"}
+    assert "personainst_qa" in by_handle
+    assert by_handle["personainst_qa"]["session_id"] == primary_session
+
+
+def test_open_bare_persona_routes_to_the_in_scope_placement(isolate_agent_runtime_root):
     from agent_runtime.persona_assignments import PersonaInstanceStore
 
     sibling = PersonaInstanceStore().add_instance(
@@ -511,17 +773,26 @@ def test_open_targets_the_specific_instance_not_the_canonical_channel(isolate_ag
         "qa", [("sibling hi", "sibling ack")], persona_instance_id=sibling.id
     )
 
-    # The handle reviews the SIBLING's thread; the bare persona reviews the primary.
+    # An explicit handle reviews the SIBLING's thread (deliberate targeting).
     opened_sibling = json.loads(agent_chat_open(persona_id=sibling.id))
     assert opened_sibling["session_id"] == sibling_session
     assert [m["text"] for m in opened_sibling["messages"]] == ["sibling hi", "sibling ack"]
 
-    opened_primary = json.loads(agent_chat_open(persona_id="qa"))
-    assert opened_primary["session_id"] == primary_session
+    # A BARE persona now resolves through addressability: qa_agent_2 is the single
+    # in-scope placement, so "open qa" reviews the PLACEMENT's lane (placements
+    # shadow canonical), not the plumbing canonical channel.
+    opened_bare = json.loads(agent_chat_open(persona_id="qa"))
+    assert opened_bare["handle"] == "personainst_qa_agent_2"
+    assert opened_bare["session_id"] == sibling_session
 
-    # The primary must NOT be able to open the sibling's session (prefix-collision
+    # The explicit CANONICAL handle still reaches the canonical thread (explicit
+    # targeting bypasses the shadow)...
+    opened_canonical = json.loads(agent_chat_open(persona_id="personainst_qa"))
+    assert opened_canonical["session_id"] == primary_session
+
+    # ...and it must NOT be able to open the sibling's session (prefix-collision
     # guard: personainst_qa must not swallow personainst_qa_agent_2's session).
-    refused = json.loads(agent_chat_open(persona_id="qa", session_id=sibling_session))
+    refused = json.loads(agent_chat_open(persona_id="personainst_qa", session_id=sibling_session))
     assert refused["ok"] is False and refused["error_kind"] == "foreign_session"
 
 

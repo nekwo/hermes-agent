@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from .decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
 from .decision_payload_contracts import validate_payload_keys
 from .packets import validate_decision_packets
@@ -23,8 +25,40 @@ def _list_of_strings(payload: dict, key: str, *, required: bool = False) -> list
     return [item.strip() for item in value]
 
 
+def _normalize_qa_verdict_formatter(decision: AgentDecision) -> None:
+    """Losslessly flatten common QA finding formatter drift to string rows.
+
+    The contract remains a list of non-empty strings. Scalar strings are
+    wrapped unchanged, structured JSON findings are serialized unchanged in
+    meaning, and empty formatter rows are discarded. Unsupported primitives
+    remain invalid and enter bounded contract repair.
+    """
+
+    if decision.type != DecisionType.QA_VERDICT:
+        return
+    findings = decision.payload.get("findings")
+    if isinstance(findings, str) and findings.strip():
+        decision.payload["findings"] = [findings]
+        return
+    if isinstance(findings, dict):
+        decision.payload["findings"] = [json.dumps(findings, sort_keys=True, separators=(",", ":"))] if findings else []
+        return
+    if isinstance(findings, list):
+        normalized: list[object] = []
+        for finding in findings:
+            if isinstance(finding, str):
+                if finding.strip():
+                    normalized.append(finding)
+            elif isinstance(finding, (dict, list)) and finding:
+                normalized.append(json.dumps(finding, sort_keys=True, separators=(",", ":")))
+            else:
+                normalized.append(finding)
+        decision.payload["findings"] = normalized
+
+
 def validate_planning_decision(decision: AgentDecision) -> None:
     p = decision.payload
+    _normalize_qa_verdict_formatter(decision)
     validate_payload_keys(decision)
     validate_decision_packets(decision)
     if decision.type == DecisionType.PROPOSE_ACCEPTANCE:

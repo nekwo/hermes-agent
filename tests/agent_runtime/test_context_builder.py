@@ -712,7 +712,11 @@ def test_render_context_caps_proof_id_list_but_preserves_context_ids():
     assert "+8 earlier proof id(s) omitted" in rendered
 
 
-def test_validation_repair_hud_teaches_visual_screenshot_packet_shape():
+def test_validation_repair_hud_teaches_visual_screenshot_packet_shape(monkeypatch):
+    monkeypatch.setattr(
+        "agent_runtime.context_builder.mcp_owner_profile_name",
+        lambda mcp_server: "launcher-qa",
+    )
     run = make_run()
     run.persona_id = "qa"
     ctx = build_context(
@@ -728,6 +732,7 @@ def test_validation_repair_hud_teaches_visual_screenshot_packet_shape():
     assert repair_hud["allowed_values"] == ["launcher_qa"]
     assert repair_hud["recommended_value"] == "launcher_qa"
     assert repair_hud["recommended_values"]["target"] == "mission_control"
+    assert repair_hud["recommended_values"]["required_launch_pins.hermes_profile"] == "launcher-qa"
     assert repair_hud["required_payload_keys"] == [
         "stage_id",
         "target",

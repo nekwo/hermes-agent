@@ -7,6 +7,8 @@ from agent_runtime.prompt_observability import (
     _backfill_derived_fields,
     _context_file_summary,
     _layer_text_size,
+    _mission_chat_identity_prompt_chars,
+    _mission_chat_operative_rules_chars,
     _mission_chat_template_prompt_chars,
     _set_row_prompt_contribution,
     _workspace_agents_prompt_chars,
@@ -33,11 +35,9 @@ def test_prompt_observability_preserves_profile_persona_identity():
     assert context["profile"] == "alice"
 
 
-def test_prompt_observability_reports_persona_identity_layer_and_memory_flag():
-    # The mission-chat lane injects a first-person identity block and (post-fix)
-    # does NOT load the profile SOUL as identity; memory tracks
-    # include_profile_memory. The observability report must reflect that honestly
-    # so the launcher CONTEXT peek does not claim SOUL/memory that isn't loaded.
+def test_prompt_observability_reports_typed_persona_envelope_and_memory_flag():
+    # Runtime identity, the optional profile SOUL, and operator-channel rules
+    # are distinct layers. Memory independently tracks include_profile_memory.
     no_memory = mission_chat_prompt_observability(
         persona=SimpleNamespace(
             id="neko_supervisor",
@@ -49,8 +49,15 @@ def test_prompt_observability_reports_persona_identity_layer_and_memory_flag():
         session_id="persona_chat_neko",
     )
     layers = {layer["kind"]: layer for layer in no_memory["prompt_layers"]}
-    assert "persona_identity" in layers
-    assert "Neko Mission Lead" in layers["persona_identity"]["summary"]
+    assert no_memory["prompt_stack_schema_version"] == 2
+    assert "persona_identity" not in layers
+    assert "Neko Mission Lead" in layers["runtime_identity"]["summary"]
+    assert "You are Neko Mission Lead" in layers["runtime_identity"]["content"]
+    assert layers["runtime_identity"]["owner"] == "mission_control"
+    assert layers["runtime_identity"]["group"] == "mission_control_persona"
+    assert layers["profile_soul"]["owner"] == "profile"
+    assert layers["operator_channel_rules"]["owner"] == "mission_control"
+    assert "Mission Control operator-chat rules" in layers["operator_channel_rules"]["content"]
     assert layers["profile_context"]["status"] == "skipped"
     assert no_memory["prompt_flags"]["skip_memory"] is True
     assert no_memory["prompt_flags"]["load_soul_identity"] is False
@@ -65,10 +72,51 @@ def test_prompt_observability_reports_persona_identity_layer_and_memory_flag():
         ),
         session_id="persona_chat_neko",
     )
-    memory_layer = {layer["kind"]: layer for layer in with_memory["prompt_layers"]}["profile_context"]
+    memory_layer = {layer["kind"]: layer for layer in with_memory["prompt_layers"]}[
+        "profile_context"
+    ]
     assert memory_layer["status"] == "loaded"
+    assert memory_layer["included"] is True
     assert with_memory["prompt_flags"]["skip_memory"] is False
 
+
+def test_safe_final_model_input_preserves_prompt_lines_and_section_receipts():
+    from agent_runtime.prompt_observability import _safe_final_model_input
+
+    safe = _safe_final_model_input(
+        {
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "stable line\ncontext line\npassword: should-not-leak",
+                }
+            ],
+            "system_prompt_sections": [
+                {
+                    "kind": "stable",
+                    "name": "Stable Hermes foundation",
+                    "start_char": 0,
+                    "end_char": 11,
+                    "chars": 11,
+                    "truncated": False,
+                }
+            ],
+        }
+    )
+
+    assert safe is not None
+    assert "stable line\ncontext line" in safe["messages"][0]["content"]
+    assert "should-not-leak" not in safe["messages"][0]["content"]
+    assert safe["system_prompt_sections"] == [
+        {
+            "kind": "stable",
+            "name": "Stable Hermes foundation",
+            "start_char": 0,
+            "end_char": 11,
+            "chars": 11,
+            "truncated": False,
+        }
+    ]
 
 def test_prompt_layers_situational_hud_reports_operator_turn_placement():
     # T5 observability coherence: after the HUD moved out of the system prompt,
@@ -93,7 +141,8 @@ def test_prompt_layers_situational_hud_reports_operator_turn_placement():
     hud_layer = layers["situational_hud"]
     assert hud_layer["status"] == "loaded"
     assert "user turn" in hud_layer["summary"]
-    assert "NOT the system prompt" in hud_layer["summary"]
+    assert hud_layer["injection_location"] == "user_turn"
+    assert hud_layer["included"] is True
     assert "token_estimate" not in hud_layer
     # The block still carries the full dict for the launcher's HUD peek.
     assert with_hud["situational_hud"] == hud
@@ -103,6 +152,7 @@ def test_prompt_layers_situational_hud_reports_operator_turn_placement():
     )
     empty_layer = {layer["kind"]: layer for layer in without_hud["prompt_layers"]}["situational_hud"]
     assert empty_layer["status"] == "empty"
+    assert empty_layer["included"] is False
 
 
 def test_prompt_observability_names_live_task_bound_chat_without_session_row():
@@ -151,8 +201,15 @@ def test_workspace_agents_context_is_loaded_and_reported_from_selected_file(tmp_
     assert context["workspace_name"] == "Launcher"
     assert receipt["path"] == str(agents_file.resolve())
     assert receipt["sha256"]
+    workspace_layer = next(
+        layer for layer in context["prompt_layers"] if layer["kind"] == "workspace_context"
+    )
+    assert workspace_layer["source_path"] == str(agents_file.resolve())
+    assert workspace_layer["source_sha256"] == receipt["sha256"]
     # Per-item token attribution: the workspace receipt carries bytes // 4.
     assert receipt["token_estimate"] == receipt["bytes"] // 4
+    layer_kinds = [layer["kind"] for layer in context["prompt_layers"]]
+    assert layer_kinds.index("workspace_context") < layer_kinds.index("surface")
 
 
 def test_context_file_summary_carries_bytes_over_four_token_estimate(tmp_path):
@@ -235,13 +292,14 @@ def test_prompt_layers_without_available_text_degrade_to_no_estimate():
         assert kind in layers
         assert "token_estimate" not in layers[kind]
         assert "chars" not in layers[kind]
-    # T8: persona_identity now carries its own template (identity + rules)
-    # estimate — measurable at the T5 surface-message seam.
-    assert layers["persona_identity"]["token_estimate"] is not None
-    assert layers["persona_identity"]["chars"] > 0
+    # Runtime identity and channel rules are independently measurable at the
+    # surface-message assembly seam.
+    for kind in ("runtime_identity", "operator_channel_rules"):
+        assert layers[kind]["token_estimate"] is not None
+        assert layers[kind]["chars"] > 0
 
 
-def test_persona_identity_summary_reflects_own_soul_overlay():
+def test_prompt_layer_order_reflects_actual_assembly_order():
     context = mission_chat_prompt_observability(
         persona=SimpleNamespace(
             id="neko_supervisor",
@@ -250,16 +308,22 @@ def test_persona_identity_summary_reflects_own_soul_overlay():
             role="alice_supervisor",
         ),
     )
-    identity = {layer["kind"]: layer for layer in context["prompt_layers"]}[
-        "persona_identity"
+    layers = context["prompt_layers"]
+    assert [layer["order"] for layer in layers] == sorted(
+        layer["order"] for layer in layers
+    )
+    assert [layer["kind"] for layer in layers] == [
+        "system_core",
+        "runtime_identity",
+        "profile_soul",
+        "operator_channel_rules",
+        "surface",
+        "profile_context",
+        "conversation",
+        "situational_hud",
     ]
-    summary = identity["summary"]
-    # Post-deafb825e: a persona's OWN configured soul overlay IS loaded; only the
-    # OPERATOR profile's SOUL is not. The stale "does not load the profile SOUL"
-    # absolute must be gone.
-    assert "does not load the profile SOUL" not in summary
-    assert "soul_overlay_path" in summary
-    assert "OPERATOR profile's SOUL is" in summary
+    assert layers[0]["injection_location"] == "system_stable"
+    assert layers[-1]["injection_location"] == "user_turn"
 
 
 def test_workspace_agents_context_refuses_oversized_file_without_blocking_receipt(tmp_path):
@@ -560,11 +624,16 @@ def test_attach_context_file_prompt_contributions_reachable_only():
     assert by_name["SOUL.md"]["prompt_chars"] == 2823
     assert by_name["SOUL.md"]["prompt_token_estimate"] == 705
     assert by_name["SOUL.md"]["token_estimate"] == 710  # loaded-file field kept
+    assert by_name["SOUL.md"]["prompt_included"] is True
+    assert by_name["SOUL.md"]["prompt_status"] == "injected"
     # Workspace part (preamble + body).
     assert by_name["AGENTS.md"]["prompt_chars"] == 1694
     assert by_name["AGENTS.md"]["prompt_token_estimate"] == 423
+    assert by_name["AGENTS.md"]["prompt_status"] == "injected"
     # config.yaml: consumed as configuration, never pasted -> a deliberate 0.
     assert by_name["config.yaml"]["prompt_token_estimate"] == 0
+    assert by_name["config.yaml"]["prompt_included"] is False
+    assert by_name["config.yaml"]["prompt_status"] == "observed_only"
     # Unreachable rows are untouched -- the launcher keeps their loaded-file chip.
     for name in ("MEMORY.md", "USER.md", ".skills_prompt_snapshot.json"):
         assert "prompt_chars" not in by_name[name]
@@ -576,6 +645,8 @@ def test_attach_context_file_contributions_none_soul_omits_field():
     _attach_context_file_prompt_contributions(files, soul_chars=None, workspace_chars=None)
     assert "prompt_chars" not in files[0]
     assert "prompt_token_estimate" not in files[0]
+    assert files[0]["prompt_included"] is False
+    assert files[0]["prompt_status"] == "not_injected"
 
 
 def test_workspace_agents_prompt_chars_is_preamble_plus_body(tmp_path):
@@ -608,27 +679,26 @@ def test_config_yaml_row_carries_deliberate_zero_in_prompt():
     assert config["prompt_chars"] == 0
 
 
-def test_persona_identity_layer_carries_template_estimate():
+def test_persona_envelope_layers_carry_separate_estimates():
     persona = SimpleNamespace(
         id="dev", hermes_profile="dev", display_name="Launcher Dev", role="dev"
     )
     context = mission_chat_prompt_observability(persona=persona)
-    identity = {layer["kind"]: layer for layer in context["prompt_layers"]}[
-        "persona_identity"
-    ]
-    template_chars = _mission_chat_template_prompt_chars(persona)
-    assert template_chars is not None and template_chars > 0
-    # The layer estimate is the identity + operative-rules TEMPLATE only.
-    assert identity["chars"] == template_chars
-    assert identity["token_estimate"] == template_chars // 4
+    layers = {layer["kind"]: layer for layer in context["prompt_layers"]}
+    identity_chars = _mission_chat_identity_prompt_chars(persona)
+    rules_chars = _mission_chat_operative_rules_chars()
+    assert identity_chars is not None and identity_chars > 0
+    assert rules_chars is not None and rules_chars > 0
+    assert layers["runtime_identity"]["chars"] == identity_chars
+    assert layers["runtime_identity"]["token_estimate"] == identity_chars // 4
+    assert layers["operator_channel_rules"]["chars"] == rules_chars
+    assert layers["operator_channel_rules"]["token_estimate"] == rules_chars // 4
+    assert _mission_chat_template_prompt_chars(persona) == identity_chars + rules_chars
 
 
-def test_persona_section_reconciles_template_plus_soul_no_overlap():
-    # The persona-identity layer estimate (template) + the SOUL.md row
-    # (soul overlay) + memory MUST sum to the whole surface-message persona
-    # section with no overlap and no gap beyond the two joiners -- the
-    # double-count guard the launcher resolver depends on (persona_identity is
-    # a NON-mirror layer summed alongside the SOUL.md file row).
+def test_persona_section_reconciles_identity_rules_and_soul_no_overlap():
+    # Runtime identity + SOUL context-file attribution + operator rules must
+    # reconcile to the surface-message persona section with no overlap.
     from agent_runtime import persona_runtime as PR
     from agent_runtime.models import AgentPersona
 
@@ -677,6 +747,8 @@ def test_skills_row_attached_from_final_model_input_post_turn():
     )
     assert skills["prompt_chars"] == 8989
     assert skills["prompt_token_estimate"] == 2247  # ~4.4x under the loaded 41 KB
+    assert skills["prompt_included"] is True
+    assert skills["prompt_status"] == "injected"
 
 
 def test_skills_row_untouched_when_final_model_input_lacks_chars():

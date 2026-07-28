@@ -79,6 +79,68 @@ def test_skill_catalog_memo_caches_empty_catalog(monkeypatch):
     assert len(calls) == 1
 
 
+def test_skill_observability_resolver_is_linear_across_production_shaped_roster(
+    monkeypatch, tmp_path
+):
+    """Eight personas × sixty assigned skills must still perform one registry
+    walk and one package hash per skill, not 480 exhaustive walks/hashes.
+
+    This is a deterministic complexity gate for the live 2026-07-22 regression;
+    it avoids a flaky wall-clock assertion while pinning the operation count that
+    made a snapshot exceed the Launcher's 30-second liveness budget.
+    """
+
+    from types import SimpleNamespace
+
+    import agent.skill_utils as skill_utils
+
+    root = tmp_path / "shared"
+    names = [f"skill-{index}" for index in range(60)]
+    for name in names:
+        manifest = root / name / "SKILL.md"
+        manifest.parent.mkdir(parents=True)
+        manifest.write_text(
+            f"---\nname: {name}\nmetadata:\n  hermes:\n"
+            "    surfaces: [mission_chat]\n    modes: [standard]\n---\nbody\n",
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(skill_utils, "get_all_skills_dirs", lambda: [root])
+    real_resolve_skills = skill_utils.resolve_skills
+    real_content_hash = skill_utils.skill_package_content_hash
+    resolve_calls = 0
+    hash_calls = 0
+
+    def counting_resolve(identifiers, *, roots=None):
+        nonlocal resolve_calls
+        resolve_calls += 1
+        return real_resolve_skills(identifiers, roots=roots)
+
+    def counting_hash(skill_dir, skill_md):
+        nonlocal hash_calls
+        hash_calls += 1
+        return real_content_hash(skill_dir, skill_md)
+
+    monkeypatch.setattr(skill_utils, "resolve_skills", counting_resolve)
+    monkeypatch.setattr(skill_utils, "skill_package_content_hash", counting_hash)
+
+    resolver = po._SkillObservabilityResolver()
+    for index in range(8):
+        rows = po._accessible_skills_context(
+            SimpleNamespace(
+                id=f"persona-{index}",
+                hermes_profile="base",
+                skills=names,
+            ),
+            "base",
+            skill_resolver=resolver,
+        )
+        assert len(rows) == 60
+
+    assert resolve_calls == 1
+    assert hash_calls == 60
+
+
 def test_profile_template_memo_collapses_repeat_reads(monkeypatch):
     calls: list[int] = []
 

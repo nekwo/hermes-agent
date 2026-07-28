@@ -12,8 +12,14 @@ if TYPE_CHECKING:
 from hermes_constants import get_hermes_home
 
 from . import paths
-from .chat_lane_toolsets import chat_lane_blocked_tools, scope_chat_lane_toolsets
-from .config import chat_lane_restore_toolsets, load_agent_runtime_config
+from .chat_lane_toolsets import (
+    ChatLaneDrop,
+    chat_lane_blocked_tools,
+    chat_lane_tool_drops,
+    chat_lane_toolset_drops,
+    scope_chat_lane_toolsets,
+)
+from .config import chat_lane_restore_toolsets, load_root_runtime_config
 from .context_builder import AgentContext, build_context, render_context
 from .decision_contract_registry import prompt_contract_markdown
 from .decision_schema import (
@@ -25,12 +31,26 @@ from .decision_schema import (
     validate_decision_for_role,
 )
 from .decision_contracts import validate_planning_decision
+from .mcp_admission import (
+    LANE_MISSION_CHAT,
+    admission_enabled,
+    render_mcp_admission_line,
+    resolve_mcp_admission,
+    scope_toolsets_to_admission,
+)
+from .mcp_lane import mission_chat_mcp_lane_line
 from .models import AgentPersona, AgentRun
 from .mission_chat_clarify import MissionChatClarifyCapture
+from .mission_chat_workdir import mission_chat_workdir_for_persona
 from .mission_plan import current_plan_stage
 from .personas import ALLOWED_TOOLSETS_BY_ROLE, all_registered_toolsets, blocked_tool_names, effective_toolsets, load_bundled_prompt, role_from_persona
 from .profile_context import resolve_persona_profile
 from .provider_health import assert_provider_health_for_persona
+from .terminal_envelope import (
+    LANE_MISSION_WORKER as TERMINAL_ENVELOPE_LANE_MISSION_WORKER,
+    LANE_PERSONA_CHAT as TERMINAL_ENVELOPE_LANE_PERSONA_CHAT,
+    scope_for_persona as terminal_envelope_scope_for_persona,
+)
 from .profile_runner import (
     AgentRunRequest,
     AgentRunResult,
@@ -149,6 +169,19 @@ class GPTPersonaRuntime:
                 "timing_key": "provider_call_ms",
             },
         )
+        # Audit Q2: a worker tick is a HARNESS-CONSTRUCTED run, so it binds a
+        # scope. Before this, the worker lane fell through to the legacy
+        # pattern table in ``tools/terminal_tool.py``, whose gate is the mere
+        # presence of ``HERMES_AGENT_RUNTIME_ROOT`` — so whether ``rm -rf`` was
+        # blocked on a tick depended on process ancestry. The lane is not in
+        # GOVERNED_LANES (no grant table applies), so every gated class here is
+        # the legacy HARD BLOCK — the same answer, now reached deterministically.
+        envelope_scope = terminal_envelope_scope_for_persona(
+            persona,
+            lane=TERMINAL_ENVELOPE_LANE_MISSION_WORKER,
+            session_id=run.session_id,
+            runtime_root=paths.store_root(),
+        )
         try:
             result = self._runner.run(
                 AgentRunRequest(
@@ -156,6 +189,7 @@ class GPTPersonaRuntime:
                     provider=persona.provider or self._default_provider,
                     model=persona.model or self._default_model or "",
                     api_mode=persona.api_mode,
+                    terminal_envelope_scope=envelope_scope,
                     enabled_toolsets=effective_toolsets(persona),
                     blocked_tool_names=_blocked_tool_names_for_run(persona, ctx),
                     quiet_mode=True,
@@ -167,6 +201,11 @@ class GPTPersonaRuntime:
                     skip_context_files=not bool(getattr(persona, "include_core_context_files", False)),
                     skip_memory=not _persona_run_uses_memory(persona, ctx),
                     platform="agent_runtime",
+                    skill_surface="mission_worker",
+                    skill_root_node_mode=bool(
+                        isinstance(getattr(ctx.task, "harness_self_heal", None), dict)
+                        and ctx.task.harness_self_heal.get("root_node_mode")
+                    ),
                     session_id=run.session_id,
                     max_iterations=run.iteration_budget,
                     max_wall_seconds=run.max_wall_seconds,
@@ -235,12 +274,27 @@ class GPTPersonaRuntime:
             raise ValueError(binding.summary)
         assert_provider_health_for_persona(persona)
         clarify_capture = MissionChatClarifyCapture()
+        # Audit Q2: free-chat is harness-constructed, so it binds a scope and
+        # stops being decided by whether HERMES_AGENT_RUNTIME_ROOT happens to be
+        # exported. Its lane is NOT governed by the grant table — free-chat is a
+        # conversational surface, not the primary work lane — so gated classes
+        # keep the legacy hard block, now reached by construction.
+        #
+        # This is NOT ``hermes chat``: that is the operator's own shell, never
+        # reaches AgentRunRequest, and must never carry an envelope.
+        envelope_scope = terminal_envelope_scope_for_persona(
+            persona,
+            lane=TERMINAL_ENVELOPE_LANE_PERSONA_CHAT,
+            session_id=session_id,
+            runtime_root=paths.store_root(),
+        )
         result = self._runner.run(
             AgentRunRequest(
                 profile=binding.hermes_profile,
                 provider=persona.provider or self._default_provider,
                 model=persona.model or self._default_model or "",
                 api_mode=persona.api_mode,
+                terminal_envelope_scope=envelope_scope,
                 enabled_toolsets=_enabled_toolsets_for_chat(persona, session_id=session_id),
                 blocked_tool_names=_blocked_tool_names_for_chat(persona, session_id=session_id),
                 quiet_mode=True,
@@ -255,6 +309,8 @@ class GPTPersonaRuntime:
                 # binding is its own; it drops a borrowed profile's memory.
                 skip_memory=not bool(getattr(persona, "include_profile_memory", False)),
                 platform=PERSONA_CHAT_SCRATCH_SOURCE,
+                skill_surface="mission_chat",
+                skill_root_node_mode=False,
                 session_id=session_id,
                 cache_scope_id=cache_scope_id,
                 max_wall_seconds=max_wall_seconds,
@@ -307,6 +363,12 @@ class GPTPersonaRuntime:
         agent_ready_callback: Callable[[object], Callable[[], None] | None] | None = None,
         preloaded_skill_prompt: str | None = None,
         workspace_agents_content: str | None = None,
+        # Absolute path of the operator-selected workspace ``AGENTS.md`` (the
+        # ``--agents-file`` receipt). Content and PATH are threaded separately on
+        # purpose: the content is prompt material, the path is the workspace
+        # POINTER rung of the workdir ladder (G6) — the directory the operator
+        # aimed this turn at. Never read for content here.
+        workspace_agents_path: str | None = None,
         situational_hud_content: str | None = None,
         conversation_history: list[dict] | None = None,
         reuse_current_user_message: bool = False,
@@ -318,6 +380,7 @@ class GPTPersonaRuntime:
         compression_threshold_tokens_override: int | None = None,
         compression_protect_first_n_override: int | None = None,
         compression_protect_last_n_override: int | None = None,
+        allow_mission_goal: bool = False,
     ) -> AgentRunResult:
         """Run the canonical Mission Control chat path.
 
@@ -355,6 +418,48 @@ class GPTPersonaRuntime:
         # spawn does not have. Read back after the run and threaded to the
         # caller as a structured clarify_request.
         clarify_capture = MissionChatClarifyCapture()
+        # Resolve MCP admission ONCE per turn (pure policy — no spawn, no
+        # registration) and thread the same answer through the toolset scope and
+        # the runner, so the tools the turn asks for and the servers the runner
+        # registers can never disagree. Disabled by default: with the flag off
+        # this resolves to "nothing admitted" and the request is byte-identical
+        # to what it was before admission existed.
+        admission = resolve_mcp_admission(
+            persona,
+            lane=LANE_MISSION_CHAT,
+            permission_mode=permission_options_for_chat(
+                persona, session_id=perm_session_id
+            ).permission_mode,
+        )
+        # Repo grounding for this turn (G6). Resolved ONCE, here, and handed to
+        # the EXISTING ``AgentRunRequest.workdir`` seam the worker lane already
+        # uses — ``profile_runner`` chdirs and exports ``TERMINAL_CWD`` under its
+        # workdir lock, which is what puts a real repo in front of the terminal /
+        # file tools. ``None`` (nothing configured, nothing derivable) keeps the
+        # pre-G6 behavior exactly: the turn runs in the process cwd. A configured
+        # path that does not exist degrades to that same safe cwd and is reported
+        # as a typed row on the preview lane — it never fails the turn.
+        workdir = mission_chat_workdir_for_persona(
+            persona, workspace_agents_path=workspace_agents_path
+        )
+        # Lane/role identity for the terminal safety envelope. Bound for the
+        # WHOLE run so envelope enforcement on this lane is deterministic and
+        # operator-governed instead of keyed on whether the persona happens to
+        # bind a Hermes profile (the historical fail-open/fail-closed split —
+        # see agent_runtime/terminal_envelope.py). Carrying the runtime root on
+        # the scope also means the decision receipt lands even for a persona
+        # that never exports HERMES_AGENT_RUNTIME_ROOT.
+        #
+        # Note how G6 and this slice compose: the workdir above puts a REAL repo
+        # in front of the terminal tool, which is exactly what makes the envelope
+        # gate load-bearing rather than theoretical — a grounded turn can now
+        # actually reach a git remote.
+        envelope_scope = terminal_envelope_scope_for_persona(
+            persona,
+            lane=LANE_MISSION_CHAT,
+            session_id=perm_session_id,
+            runtime_root=paths.store_root(),
+        )
         result = self._runner.run(
             AgentRunRequest(
                 profile=binding.hermes_profile,
@@ -362,7 +467,14 @@ class GPTPersonaRuntime:
                 model=runtime_model,
                 api_mode=persona.api_mode,
                 reasoning_effort=reasoning_effort,
-                enabled_toolsets=_enabled_toolsets_for_chat(persona, session_id=perm_session_id),
+                terminal_envelope_scope=envelope_scope,
+                mcp_admission=admission,
+                enabled_toolsets=_enabled_toolsets_for_chat(
+                    persona,
+                    session_id=perm_session_id,
+                    admission=admission,
+                    allow_mission_goal=allow_mission_goal,
+                ),
                 blocked_tool_names=_blocked_tool_names_for_chat(persona, session_id=perm_session_id),
                 quiet_mode=True,
                 # Operator chat honors the persona's core-context-file opt-in like
@@ -384,6 +496,8 @@ class GPTPersonaRuntime:
                 # binding is its own; it drops a borrowed profile's memory.
                 skip_memory=not bool(getattr(persona, "include_profile_memory", False)),
                 platform=PERSONA_CHAT_SCRATCH_SOURCE,
+                skill_surface="mission_chat",
+                skill_root_node_mode=False,
                 session_id=session_id,
                 # session_id stays None on this lane (the transcript is already
                 # baked into the message), but the ChatGPT-Codex prompt cache is
@@ -440,11 +554,18 @@ class GPTPersonaRuntime:
                     on_trace=trace_callback,
                 ),
                 runtime_root=paths.store_root(),
+                workdir=Path(workdir.path) if workdir.grounded else None,
             )
         )
         ChatToolPermissionStore().consume_turn(persona_id=persona.id, session_id=perm_session_id)
         if clarify_capture.requested and isinstance(result.raw, dict):
             result.raw["clarify_request"] = clarify_capture.request
+        if isinstance(result.raw, dict):
+            # Per-turn receipt of where the turn actually ran (and of any
+            # configured-but-unusable path it degraded past). The caller records
+            # it beside the turn's other receipts; the persona-level preview
+            # carries the same typed rows in ``requirement_failures``.
+            result.raw["mission_chat_workdir"] = workdir.receipt()
         return result
 
 
@@ -486,12 +607,8 @@ def _persona_chat_system_prompt(persona: AgentPersona) -> str:
         "something specific from a past session you can't already see, and consult your durable memory only when it actually "
         "bears on the reply — don't fish."
     )
-    # Same soul lane as the mission-chat surface: the persona's own configured
-    # soul overlay rides along; absent for personas that don't set one.
-    soul = _safe_read_soul_overlay(
-        getattr(persona, "soul_overlay_path", None),
-        hermes_profile=getattr(persona, "hermes_profile", None),
-    )
+    # Same profile-owned SOUL lane as the mission-chat surface.
+    soul = _mission_chat_soul_overlay(persona)
     return f"{base}\n\n{soul}" if soul else base
 
 
@@ -533,13 +650,25 @@ def _mission_chat_operative_rules() -> str:
         "Acknowledge, then act, then report the result.\n"
         "- You are talking directly to your operator — a trusted teammate, not an end user.\n"
         "- You have real tools. When the operator asks you to do something — run a command, read or edit a file, check or "
-        "change state — actually use your tools and report the real result. The operator's current permission grant is the "
-        "only gate on what you can do; there is no separate 'hand it off first' step.\n"
+        "change state — actually use your tools and report the real result; there is no separate 'hand it off first' step.\n"
+        "- Exactly TWO things gate what you can do, and both name themselves when they refuse: (1) the operator's current "
+        "permission grant, and (2) the terminal safety envelope, which requires a per-role operator grant in the ROOT "
+        "config.yaml for a small set of command classes (git push, destructive git, recursive delete, network egress) and "
+        "hard-blocks a few others outright. An envelope refusal tells you the class, the exact config key that would grant "
+        "it, and whether a grant is even possible. Relay that to the operator — do not retry, reword, or split the command, "
+        "and never claim a capability gap you have not actually hit.\n"
         "- Never fabricate. Do not claim to have run a command, read a file, opened a path, or produced output unless you "
         "actually invoked the tool and are reporting its real result. If a capability isn't available, or your permission "
         "grant blocks it, say so plainly instead of inventing output.\n"
-        "- When the operator asks you to start, trigger, kick off, or run a goal/mission/task, create a REAL one with the "
-        "mission_goal_create tool (it returns a tracked task_id and starts the Mission Daemon so it self-drives). Do NOT "
+        "- When the operator asks you to send, brief, or coordinate named agents, use `agent_chat_send` for each agent. "
+        "Ordinary persona chat is chat-only for every role: investigations, verification, MCP calls, and multi-agent work "
+        "never imply goal creation. The `mission_goal_create` tool is absent unless the CALLER explicitly opted this turn "
+        "into heavy mission routing with `--allow-mission-goal`; never infer or work around that opt-in. If the operator asks "
+        "for a goal/mission/task and the tool is absent, explain that the explicit opt-in is required instead of creating a "
+        "task through terminal, a worker, or another tool.\n"
+        "- Only when `mission_goal_create` is actually present AND the operator explicitly asks to start, trigger, kick off, "
+        "or run a goal/mission/task, create a REAL one with it (it returns a tracked task_id and starts the Mission Daemon "
+        "so it self-drives). Do NOT "
         "run the no-model smoke test (or any temp/throwaway graph validation) as a stand-in for a real goal — the smoke "
         "never appears in Mission Control. Only fall back to the smoke if the operator explicitly asks to validate the "
         "graph without creating real work.\n"
@@ -550,34 +679,43 @@ def _mission_chat_operative_rules() -> str:
         "message in this same conversation. This is the operator channel, not an autonomous goal run: here, ask. Reach for it "
         "especially when you hold context the asker can't see (e.g. which of several same-role agents they mean).\n"
         "- When an agent you briefed replies with a clarifying question of their own, answer it by sending the choice back to "
-        "them (agent_chat_send into that same session) so the exchange continues as one conversation — don't drop their "
-        "question or answer it by guessing.\n"
-        "- Teammates on your level are addressable by the `@personainst_*` handles in your Runtime Situation HUD. With "
-        "`agent_chat_send`: omit the session to continue your durable pair thread (the norm — one thread per teammate); pass "
-        "`session_id` to continue a specific thread; pass `new_session: true` only to start a clean thread (sparingly). Use "
-        "`agent_chat_open` to review a teammate's recent thread before continuing it, and `agent_chat_threads` to list your threads.\n"
+        "them with `agent_chat_send` carrying the `clarify_token` that came inside their `clarify_request` — that lands your "
+        "answer in the thread the question was asked in, so you don't have to get `session_id` right. Their reply's "
+        "`session_id` still works too. Don't drop their question or answer it by guessing, and don't send the answer with "
+        "neither (a send with no clarify_token and no session_id opens a NEW thread and they lose the question's context).\n"
+        "- Teammates on your level are addressable by the `@personainst_*` handles in your Runtime Situation HUD. Threads are "
+        "TASK-SCOPED with `agent_chat_send`: each new task you dispatch starts a fresh thread by default — just send, no flag. "
+        "To continue an exchange you already started (their clarifying question, an in-task follow-up, a correction), pass the "
+        "`session_id` that came back in their reply; the reply's `session_established` block tells you which thread you are in "
+        "and which one it superseded. Optionally pass a short `title` to name the thread after the task. `new_session: false` "
+        "continues that teammate's CURRENT thread — the most recently established one, which every fresh dispatch repoints, so "
+        "it is not a stable per-pair home; to continue a SPECIFIC conversation, name its `session_id`. To recall "
+        "earlier work with a teammate, search past sessions (`session_search`) or read a thread with `agent_chat_open` — do not "
+        "keep an unrelated task thread alive just to preserve memory. `agent_chat_threads` lists your threads.\n"
         "- When a persona runs more than one instance on your level, a BARE persona id is ambiguous and the send is refused "
         "(`ambiguous_target`) with the candidate @personainst_* handles — address the exact instance you mean by its @handle.\n"
         "- Keep replies as clean teammate prose. Don't paste decision JSON, task scopes, acceptance criteria, handoff "
-        "packets, or raw tool/tick scaffolding into the message — your tool calls are tracked separately in the trace lane."
+        "packets, or raw tool/tick scaffolding into the message — your tool calls are tracked separately in the trace lane.\n"
+        "- One carve-out to that: image lines are content, not scaffolding. When you relay, quote, or summarize a "
+        "teammate's reply that carries a MEDIA:<absolute image path> line, reproduce that line VERBATIM on a line of "
+        "its own — never wrap it in backticks or a code fence, never fold it into a sentence, never retype or shorten "
+        "the path. Same for a bare absolute screenshot path standing alone on its own line. WHY: a MEDIA: line alone "
+        "on its own line is a DECLARATION, and the operator's console renders it as a titled image attachment card. "
+        "Wrapping that line in backticks or a code fence un-declares it — the console never sees the prefix, and "
+        "NOTHING renders. Retyping the path into a sentence, or dropping the prefix, is the quieter loss: the image "
+        "still previews, but untitled, with the raw path left sitting in your prose, and it competes for the small "
+        "per-message preview budget a declared line claims first. Either way the operator stops seeing the picture "
+        "the way it was meant to be seen — so copy the line through exactly as it arrived, and put your provenance "
+        "prose around it, never inside it."
     )
 
 
 def _mission_chat_identity_prompt(persona: AgentPersona) -> str:
     """First-person identity block for the canonical Mission Control chat lane.
 
-    The mission-chat lane deliberately runs isolated (``skip_context_files``),
-    so the bound profile's SOUL.md is NOT loaded as the stable-tier identity —
-    the model falls back to the generic ``DEFAULT_AGENT_IDENTITY`` and, without
-    this block, never learns *which* persona it is. That was the root cause of
-    the "Neko messages itself" incident: a persona bound to a supervisor
-    profile (Alice) inherited that profile's "Neko is a separate agent I brief"
-    memory model with no counter-vailing "you ARE Neko" hat, and relayed the
-    operator's question to its own persona id via ``agent_chat_send``.
-
-    This asserts the persona's own identity first, names the persona id so the
-    model can recognize a self-directed relay, and states plainly that the
-    persona is already the one speaking in this channel."""
+    This runtime-owned envelope names the selected Mission Control persona and
+    makes self-relay impossible. It is distinct from the profile-owned SOUL
+    overlay, which is resolved and inserted immediately after this block."""
 
     display = str(getattr(persona, "display_name", None) or getattr(persona, "id", "the agent")).strip()
     persona_id = str(getattr(persona, "id", "") or "").strip()
@@ -593,9 +731,8 @@ def _mission_chat_identity_prompt(persona: AgentPersona) -> str:
     return (
         f"You are {display}{id_clause}. {voice} You are already the persona speaking in this "
         "channel — the operator is talking to you right now, so respond directly in your own "
-        f"voice.{never_self} Dev, Backend Dev, QA, and profile agents are the separate personas "
-        "you may brief with `agent_chat_send`; you are not any of them and you are not your own "
-        "relay target."
+        f"voice.{never_self} Other runtime personas are teammates you may brief with "
+        "`agent_chat_send`; you are not your own relay target."
     )
 
 
@@ -619,10 +756,10 @@ def _mission_chat_surface_message(
     """Compose the operator-chat system message (the codex ``instructions``):
     the persona's first-person identity block first, then the non-negotiable
     operative rules, then the operator's optional per-session surface prompt.
-    The identity block gives the isolated chat lane a "you ARE <persona>" hat
-    (the profile SOUL is not loaded here); the rules always apply so the
-    anti-fabrication invariant holds even when the operator supplies their own
-    surface prompt.
+    The identity block gives the channel its selected runtime persona, the
+    profile's own SOUL overlay supplies durable character and voice, and the
+    rules always apply so the anti-fabrication invariant holds even when the
+    operator supplies a session surface override.
 
     BYTE-STABILITY INVARIANT (T5, 2026-07-18): every part of this string must be
     byte-identical across every turn of a conversation, so the codex transport's
@@ -645,15 +782,14 @@ def _mission_chat_surface_message(
     operator_surface = (surface_prompt or "").strip()
     workspace_agents = (workspace_agents_content or "").strip()
     rules = _mission_chat_operative_rules()
-    # The persona's OWN soul overlay (config `soul_overlay_path`) is the one
-    # identity document this isolated lane does load — who-you-are sits between
-    # the identity hat and the surface rules. For a profile-backed persona it
-    # resolves inside that persona's own profile home (single source), so this
-    # IS the persona's SOUL.md — the OPERATOR profile's SOUL stays not-loaded.
-    soul = _safe_read_soul_overlay(
-        getattr(persona, "soul_overlay_path", None),
-        hermes_profile=getattr(persona, "hermes_profile", None),
-    )
+    # The persona's OWN SOUL is the profile-owned identity layer between the
+    # Mission Control identity hat and the channel rules. Profile personas used
+    # to require a duplicated `soul_overlay_path: SOUL.md` binding on the
+    # Mission Control persona row; profile-derived/free personas do not carry
+    # that field, so a perfectly valid profile SOUL could be observed yet not
+    # injected. `_mission_chat_soul_overlay` makes the profile's canonical
+    # SOUL.md the default while preserving explicit safe relative overrides.
+    soul = _mission_chat_soul_overlay(persona)
     parts = [identity, soul or "", rules]
     if workspace_agents:
         parts.append(MISSION_CHAT_WORKSPACE_AGENTS_PREAMBLE + workspace_agents)
@@ -881,27 +1017,156 @@ def _chat_trace_callback(
     return sink.callback()
 
 
-def _enabled_toolsets_for_chat(persona: AgentPersona, *, session_id: str | None) -> list[str]:
+def _enabled_toolsets_for_chat(
+    persona: AgentPersona,
+    *,
+    session_id: str | None,
+    admission=None,
+    allow_mission_goal: bool = False,
+) -> list[str]:
     """The single chat-lane toolset chokepoint (both the free-chat and operator/
     mission chat call sites funnel through here).
 
     Resolution order: permission mode → role/persona toolset resolution → chat
     capability augmentation → the chat-lane cost policy
     (``scope_chat_lane_toolsets``) that drops browser / vision / heavy-dev from a
-    conversational lane. ``unbounded`` permission mode is the operator's explicit
-    "full capability" escape hatch and is returned unfiltered; a persona that
-    wants a specific excluded toolset back on its *bounded* chat lane restores it
-    via ``agent_runtime.personas.<id>.chat_lane_restore_toolsets`` (see
+    conversational lane → the explicit mission-goal guard → the MCP admission
+    scope. ``unbounded`` permission mode bypasses the cost policy, but never the
+    global chat-only default. A persona that wants a
+    specific cost-excluded toolset back on its *bounded* chat lane restores it via
+    ``agent_runtime.personas.<id>.chat_lane_restore_toolsets`` (see
     ``config.chat_lane_restore_toolsets``). Worker/dev task lanes never call this
-    — they resolve toolsets via ``effective_toolsets`` directly."""
+    — they resolve toolsets via ``effective_toolsets`` directly.
+
+    The MCP admission scope is applied LAST, after permission-mode resolution, on
+    purpose: ``unbounded`` resolves ``all_registered_toolsets()``, which in a warm
+    multi-persona process can contain another persona's admitted ``mcp-*``
+    toolsets. Scoping after the mode is what makes "no permission mode can widen
+    the admitted MCP set" true rather than aspirational. The same pure helper
+    runs again at agent construction (``profile_runner._enabled_toolsets_for_run``)
+    so no lane can bypass it; running it here keeps the operator-facing preview
+    honest about the same boundary."""
 
     options = permission_options_for_chat(persona, session_id=session_id)
     if permission_mode_is_unbounded(options.permission_mode):
-        return all_registered_toolsets()
-    resolved = _augment_chat_capabilities(persona, list(effective_toolsets(persona)))
-    return scope_chat_lane_toolsets(
-        resolved, restore=chat_lane_restore_toolsets(persona.id)
+        resolved = all_registered_toolsets()
+    else:
+        resolved = _augment_chat_capabilities(persona, list(effective_toolsets(persona)))
+        resolved = scope_chat_lane_toolsets(
+            resolved, restore=chat_lane_restore_toolsets(persona.id)
+        )
+    # Ordinary persona chat is globally chat-only. The mission/task/graph lane
+    # creates durable work, workers, retries, and proof state, so permission mode
+    # and role capability must never imply admission. Only the dedicated caller
+    # opt-in for this exact Mission Control turn can retain this toolset.
+    mission_goal_role_allowed = "mission_goal" in ALLOWED_TOOLSETS_BY_ROLE.get(
+        role_from_persona(persona), frozenset()
     )
+    if not allow_mission_goal or not mission_goal_role_allowed:
+        resolved = [toolset for toolset in resolved if toolset != "mission_goal"]
+    admitted = admission.server_names if admission is not None else ()
+    if admission is None and admission_enabled():
+        # Only pay the policy resolve when the kill switch is on. With it off the
+        # answer is always "nothing admitted" — and the scope below still strips
+        # any MCP toolset that reached the resolved set, which is what keeps the
+        # isolation property independent of the flag.
+        admitted = resolve_mcp_admission(
+            persona, lane=LANE_MISSION_CHAT, permission_mode=options.permission_mode
+        ).server_names
+    return scope_toolsets_to_admission(resolved, admitted_servers=admitted)
+
+
+def chat_lane_capability_drops(
+    persona: AgentPersona,
+    *,
+    session_id: str | None = None,
+    permission_mode: str | None = None,
+) -> tuple[ChatLaneDrop, ...]:
+    """What the chat-lane cost policy REMOVES for this persona, typed (G5).
+
+    The accounting twin of :func:`_enabled_toolsets_for_chat`: it walks the same
+    resolution in the same order — permission mode, role/persona resolution,
+    chat capability augmentation — and then asks the same droppers what they
+    took out instead of what they left in. Same inputs, same policy, one
+    authority; the kept list and the drop list cannot disagree.
+
+    ``unbounded`` returns no drops because that mode genuinely bypasses the cost
+    policy (``_enabled_toolsets_for_chat`` resolves the full registry) — a row
+    there would report a drop that did not happen. ``permission_mode`` may be
+    passed to account for a HYPOTHETICAL mode (the ``persona tool-diff
+    --permission-mode`` preview); left ``None`` the stored chat permission for
+    ``session_id`` is resolved, exactly as a live turn would.
+
+    Pure accounting: it registers nothing, restores nothing, and is never
+    consulted to decide what a turn ships.
+    """
+
+    mode = str(permission_mode or "").strip() or permission_options_for_chat(
+        persona, session_id=session_id
+    ).permission_mode
+    if permission_mode_is_unbounded(mode):
+        return ()
+    restore = chat_lane_restore_toolsets(persona.id)
+    resolved = _augment_chat_capabilities(persona, list(effective_toolsets(persona)))
+    kept = scope_chat_lane_toolsets(resolved, restore=restore)
+    # Local import: the tool→toolset map is the REGISTRY's answer, never a mirror
+    # kept here (a silently drifting mirror is the bug class ``mcp_lane`` needed a
+    # guard test for), and importing it lazily keeps ``persona_runtime``'s module
+    # import free of ``model_tools``.
+    from model_tools import get_toolset_for_tool
+
+    return chat_lane_toolset_drops(
+        resolved, restore=restore, persona_id=persona.id
+    ) + chat_lane_tool_drops(
+        restore=restore,
+        persona_id=persona.id,
+        enabled_toolsets=kept,
+        toolset_for_tool=get_toolset_for_tool,
+    )
+
+
+def mission_chat_admission_line(
+    persona: AgentPersona, *, session_id: str | None
+) -> str:
+    """The agent-visible MCP line for this turn's volatile envelope tail.
+
+    ONE slot on the tail, two producers behind it, because the agent must hear
+    one voice about MCP:
+
+    * **Admission ON** — design §D3. Resolves the SAME pure policy the turn
+      itself resolves (same function, same inputs, so the line and the turn's
+      admission can never disagree) and renders the compact denial line.
+    * **Admission OFF** — the R0 half (``mcp_lane``). Admission is inert with
+      the flag off, so this used to return ``""`` and a declared-but-dark server
+      was reported to the OPERATOR (``requirement_failures``) and to NOBODY the
+      agent could hear. That blind spot was G5: the agent saw a tool list with
+      no ``mcp__<server>__*`` entries and no explanation, and improvised — the
+      exact W3 failure the design says is cheaper to prevent by telling the
+      truth. It now renders the same honest fact from the same rows the operator
+      reads.
+
+    The kill switch still gates ADMISSION, not honesty. The flag-off path pays
+    neither a root-config load nor a persona-profile read (see
+    ``mcp_lane.mission_chat_mcp_lane_line`` for how that is preserved), and a
+    persona that declares no MCP server pays nothing and renders nothing — so
+    the envelope stays byte-identical for every turn that had nothing to be told.
+
+    Returns ``""`` when there is nothing to say.
+    """
+
+    if not admission_enabled():
+        return mission_chat_mcp_lane_line(persona)
+    try:
+        admission = resolve_mcp_admission(
+            persona,
+            lane=LANE_MISSION_CHAT,
+            permission_mode=permission_options_for_chat(
+                persona, session_id=session_id
+            ).permission_mode,
+        )
+    except Exception:  # pragma: no cover - a context line must never fail a turn
+        return ""
+    return render_mcp_admission_line(admission)
 
 
 def chat_runtime_tool_contract(
@@ -942,20 +1207,42 @@ def apply_chat_lane_tool_scope(
     ``clarify`` unblock the chat bridge grants). ``resolve_tool_visibility`` then
     emits ``final_model_tools`` byte-identical to the schema the chat lane ships.
     Display-parity only — no policy change, no parallel resolver.
+
+    G5: it also threads the TYPED account of what that scoping removed
+    (:func:`chat_lane_capability_drops`) and of this persona's repo grounding
+    (``mission_chat_workdir_for_persona``), so one preview reports what SURVIVED
+    *and* what was taken away and why. A list of survivors was never an account
+    of the removals — which is how "I have no terminal" read as an unexplained
+    absence instead of a by-design, restorable cost cut.
     """
 
+    permission = permission_options_for_chat(persona, session_id=session_id)
+    if permission_mode_is_unbounded(permission.permission_mode):
+        configured = all_registered_toolsets()
+    else:
+        configured = _augment_chat_capabilities(
+            persona, list(effective_toolsets(persona))
+        )
+    options.configured_toolsets = configured
     options.enabled_toolsets = _enabled_toolsets_for_chat(persona, session_id=session_id)
     options.chat_lane_blocked_tool_names = _blocked_tool_names_with_registry_hygiene(
         _blocked_tool_names_for_chat(persona, session_id=session_id)
     )
+    options.chat_lane_capability_drops = chat_lane_capability_drops(
+        persona, session_id=session_id
+    )
+    # Preview scope: the CONFIG rung of the workdir ladder only. A live turn also
+    # offers the workspace pointer (``--agents-file``), which is a per-turn fact
+    # this persona-level preview has no honest access to.
+    options.mission_chat_workdir = mission_chat_workdir_for_persona(persona)
     return options
 
 
-# Operator-chat-only first-class capabilities that a persona's role is allowed to
-# use but which a persisted/config toolset list (created before the capability
-# existed) may not yet enumerate. Without this, a deployment whose supervisor
-# toolsets were persisted before ``mission_goal`` shipped could never trigger a
-# real Mission Control goal from chat — the very thing the tool exists for.
+# Operator-chat first-class capabilities that a persona's role is allowed to use
+# but which an older persisted/config toolset list may not enumerate. The
+# ``mission_goal`` augmentation is capability discovery only: the global guard in
+# ``_enabled_toolsets_for_chat`` removes it again unless the caller explicitly
+# opts that exact turn into heavy mission routing.
 _CHAT_CAPABILITY_TOOLSETS = ("mission_goal", "agent_chat", "board")
 
 
@@ -1055,10 +1342,25 @@ def _apply_llm_metadata(run: AgentRun, result: AgentRunResult, *, timing: dict[s
     for key, value in (timing or {}).items():
         _record_timing_value(timing_map, key, value)
     profile_timing = getattr(result, "profile_timing", None)
+    run_budget = None
     if isinstance(profile_timing, dict):
+        # ``run_budget`` is the ONE structured entry in an otherwise
+        # ``_ms``/``_count`` integer map, so ``_record_timing_value`` filters it
+        # out by design — and the run record therefore lost the only answer to
+        # "what bounded this run?". Lift it onto ``run.llm`` as its own key: the
+        # timing map keeps its integer contract, and nothing has to smuggle a
+        # nested dict through a filter written for scalars.
+        run_budget = _safe_run_budget_block(profile_timing.get("run_budget"))
         for key, value in profile_timing.items():
             timing_key = key if str(key).startswith("profile_") else f"profile_{key}"
             _record_timing_value(timing_map, timing_key, value)
+    if run_budget is None:
+        # A later result without an accounting block must not erase the block an
+        # earlier one recorded — the same carry-forward the timing map gets.
+        previous = getattr(run, "llm", None)
+        if isinstance(previous, dict):
+            run_budget = _safe_run_budget_block(previous.get("run_budget"))
+    llm["run_budget"] = run_budget
     if result.latency_ms is not None:
         _record_timing_value(timing_map, "profile_runner_ms", result.latency_ms)
         if "provider_call_ms" not in timing_map:
@@ -1118,6 +1420,22 @@ def _record_timing_value(timing_map: dict[str, int], key: object, value: object)
         timing_map[total_key] = previous_total + parsed
         timing_map[max_key] = max(previous_max, parsed)
     timing_map[safe_key] = parsed
+
+
+def _safe_run_budget_block(value: object) -> dict[str, object] | None:
+    """The run's WHOLE budget accounting block, kept structured.
+
+    Delegates to ``run_budget.safe_accounting_block`` — ONE reader for the block
+    at every persistence boundary (run record, mission-chat turn journal,
+    chat-history projection). This used to be a local copy of that bounding
+    logic; a second copy is how the two boundaries start disagreeing about what
+    the block IS, which is the defect ``run_budget`` exists to retire. Kept as a
+    module-local seam because callers/tests patch it here.
+    """
+
+    from .run_budget import safe_accounting_block
+
+    return safe_accounting_block(value)
 
 
 def _safe_timing_map(value: object) -> dict[str, int]:
@@ -1212,7 +1530,7 @@ def build_system_prompt(
     role = role_from_persona(persona)
     compact_schema = json.dumps(DECISION_SCHEMA, separators=(",", ":"))
     try:
-        cfg = load_agent_runtime_config()
+        cfg = load_root_runtime_config()
     except Exception:
         cfg = None
     simplified_prompt = _simplified_contract_prompt_enabled(cfg)
@@ -1389,7 +1707,7 @@ def _specialist_dev_guidance(persona: AgentPersona) -> str:
 
 def _normal_worker_flow_guidance(persona: AgentPersona) -> str:
     try:
-        cfg = load_agent_runtime_config()
+        cfg = load_root_runtime_config()
     except Exception:
         return ""
     flow = getattr(cfg, "normal_worker_flow", None)
@@ -1545,6 +1863,22 @@ def _safe_read_soul_overlay(
         except OSError:
             continue
     return None
+
+
+def _mission_chat_soul_overlay(persona: AgentPersona) -> str | None:
+    """Resolve the profile-owned SOUL text used by Mission Control chat.
+
+    A profile-backed persona owns ``SOUL.md`` by convention.  An explicit safe
+    relative ``soul_overlay_path`` still wins, while an unbound legacy persona
+    keeps the old opt-in behavior.  Resolution remains profile-isolated through
+    :func:`_safe_read_soul_overlay`, so a missing persona profile can never fall
+    through to the operator's SOUL.
+    """
+
+    hermes_profile = getattr(persona, "hermes_profile", None)
+    configured_path = getattr(persona, "soul_overlay_path", None)
+    path_value = configured_path or ("SOUL.md" if hermes_profile else None)
+    return _safe_read_soul_overlay(path_value, hermes_profile=hermes_profile)
 
 
 def _persona_profile_home(name: str) -> Path | None:

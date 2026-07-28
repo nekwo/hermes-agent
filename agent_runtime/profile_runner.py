@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import hashlib
 import json
 import os
@@ -14,8 +14,20 @@ import re
 from hermes_cli.profiles import get_profile_dir, normalize_profile_name, profile_exists
 from hermes_cli.runtime_provider import resolve_runtime_provider
 
+from . import turn_budget
 from .personas import REGISTRY_HYGIENE_BLOCKED_TOOLS
 from .profile_context import PersonaProfileBinding, persona_profile_context
+from .redaction import TEXT_SECRET_VALUE_ASSIGNMENT_RE
+from .run_budget import (
+    UNIT_CALLS,
+    UNIT_SECONDS,
+    UNIT_TOKENS,
+    RunBudgetEnforcement,
+    RunBudgetKind,
+    RunBudgetLedger,
+    RunBudgetTripReason,
+)
+from .turn_budget import TurnWallBudget
 
 
 def _blocked_tool_names_with_registry_hygiene(requested: list[str] | None) -> list[str]:
@@ -38,17 +50,87 @@ def _blocked_tool_names_with_registry_hygiene(requested: list[str] | None) -> li
     return names
 
 
+def _blocked_tool_names_for_run(request: "AgentRunRequest") -> list[str]:
+    """Registry hygiene plus this run's admission-scoped MCP tool block."""
+
+    names = _blocked_tool_names_with_registry_hygiene(request.blocked_tool_names)
+    admission = request.mcp_admission
+    if admission is None:
+        return names
+    seen = set(names)
+    for name in admission.blocked_tool_names:
+        if name not in seen:
+            names.append(name)
+            seen.add(name)
+    return names
+
+
+def _enabled_toolsets_for_run(
+    request: "AgentRunRequest", admitted_servers: tuple[str, ...] = ()
+) -> list[str] | None:
+    """Scope this run's toolsets to the MCP servers it was ADMITTED.
+
+    The second fork-owned chokepoint at agent construction, and the one that
+    makes the cross-persona isolation property hold on every lane rather than
+    only on the chat lane: MCP registration is process-global, so in a warm
+    multi-persona harness process any run whose toolsets were resolved from the
+    live registry (``unbounded`` resolves ``all_registered_toolsets()``) would
+    otherwise inherit another persona's admitted ``mcp-*`` toolsets. Applied
+    here, no call site can opt out.
+
+    With no admission on the request — every lane today except an admitted
+    mission-chat turn — this strips any MCP toolset the run did not earn, which
+    is a no-op while the harness lane registers nothing at all.
+    ``enabled_toolsets=None`` (the "everything" sentinel) is passed through
+    untouched: narrowing it would change what a default run resolves.
+    """
+
+    from .mcp_admission import scope_toolsets_to_admission
+
+    if request.enabled_toolsets is None:
+        return None
+    return scope_toolsets_to_admission(
+        request.enabled_toolsets, admitted_servers=admitted_servers
+    )
+
+
 class ProfileRunnerError(RuntimeError):
     """Raised before agent construction when a profile-bound run cannot start."""
 
 
 class RunBudgetExceeded(ProfileRunnerError):
-    """Raised when a live persona run exceeds its configured budget."""
+    """Raised when a live persona run exceeds its configured budget.
 
-    def __init__(self, message: str, *, session_id: str | None = None):
+    ``wall_budget`` carries the typed budget projection when the WALL budget
+    (not the api-call / token / read-search budgets) is what tripped, so the
+    caller can settle the turn as ``budget_exhausted`` — a known, terminal
+    outcome — instead of the ambiguous ``outcome_unknown``.
+
+    ``run_budget`` carries the run's WHOLE budget accounting block (see
+    ``run_budget.RunBudgetLedger.accounting``) — the same block the completed
+    path writes into ``profile_timing``. Without it a tripped run is the one
+    case where the accounting is unreadable after the fact, because the result
+    that would have carried it is never returned.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        session_id: str | None = None,
+        wall_budget: dict[str, Any] | None = None,
+        run_budget: dict[str, Any] | None = None,
+    ):
         super().__init__(message)
         self.session_id = session_id
+        self.wall_budget = wall_budget
+        self.run_budget = run_budget
 
+
+# Stand-in "budget" for runs that carry no wall budget at all. The checkpoint is
+# still constructed (one unconditional shape for the tool-start gate) but with a
+# deadline it can never reach, so it never engages and never arms a timer.
+_NO_WALL_BUDGET_SECONDS = 3650.0 * 24 * 3600
 
 READ_SEARCH_TOOLS = frozenset({"read_file", "search_files", "session_search", "browser_snapshot"})
 PATCH_TOOLS = frozenset({"patch", "apply_patch", "write_file", "edit_file", "file.write", "file.edit"})
@@ -97,6 +179,8 @@ class AgentRunRequest:
     compression_protect_first_n_override: int | None = None
     compression_protect_last_n_override: int | None = None
     platform: str = "agent_runtime"
+    skill_surface: str | None = None
+    skill_root_node_mode: bool = False
     quiet_mode: bool = True
     skip_context_files: bool = True
     skip_memory: bool = True
@@ -119,6 +203,20 @@ class AgentRunRequest:
     workdir: Path | None = None
     stop_on_repeated_read_search: bool = False
     tool_budget_limits: dict[str, Any] | None = None
+    # Resolved, side-effect-free MCP admission for this run (agent_runtime.
+    # mcp_admission.resolve_mcp_admission). Unset on every lane that declares no
+    # MCP servers or runs with the admission flag off — which is all of them
+    # until an operator enables it. The RUNNER performs the registration, inside
+    # the persona profile context and before agent construction, so the decision
+    # (policy) and the side effect (spawn) stay separable and separately tested.
+    mcp_admission: Any | None = None
+    # Lane/role identity for the terminal safety envelope
+    # (agent_runtime.terminal_envelope.TerminalEnvelopeScope). Set ONLY by
+    # lanes the envelope grant policy governs — mission-chat today. Left None
+    # everywhere else, which is how "no other lane changes" is enforced
+    # structurally: with no scope bound, ``envelope_decision`` returns None and
+    # the terminal tool keeps its legacy pattern-table behavior byte-for-byte.
+    terminal_envelope_scope: Any | None = None
 
 
 @dataclass(slots=True)
@@ -149,8 +247,167 @@ class AgentRunResult:
     # Written at the accrual sites (agent.usage_pricing.record_api_call_usage).
     usage_ledger: list[dict[str, Any]] = field(default_factory=list)
     latency_ms: int | None = None
-    profile_timing: dict[str, int] = field(default_factory=dict)
+    # Mostly ``_ms`` / ``_count`` integers, plus the one structured entry
+    # ``run_budget`` (the accounting block from ``run_budget.RunBudgetLedger``).
+    # Downstream readers either copy the dict wholesale or filter to
+    # ``_ms``/``_count`` keys (``persona_runtime._record_timing_value``), so the
+    # structured entry is additive for every existing consumer.
+    profile_timing: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
+
+
+class WallBudgetCheckpoint:
+    """Graceful end-of-turn checkpoint for a run's wall-clock budget.
+
+    Retires the mid-API-call kill as the FIRST thing that happens when a turn
+    runs out of wall clock (live incident 2026-07-26). When the reserved window
+    opens — see ``turn_budget.checkpoint_reserve_seconds`` — this:
+
+    1. steers a system-side nudge into the agent's next tool result, so the
+       model is told, in-band, to produce its final checkpoint reply;
+    2. drains the agent's iteration budget, so the tool-calling loop launches NO
+       further tool executions and exits at its next iteration boundary. The
+       upstream finalizer then takes exactly ONE toolless provider call — the
+       final reply — using the mechanism it already has for iteration
+       exhaustion. No upstream edit, no private attribute, no mid-flight abort
+       of an already-running tool (aborting that is the very kill we replace).
+
+    The old hard wall stays armed at the real deadline as the last resort: if
+    even the final call cannot fit, the run still dies — but it dies with a
+    typed ``wall_budget`` on the exception, so the turn settles as
+    ``budget_exhausted`` instead of ``outcome_unknown``.
+
+    Thread-safe and idempotent: the timer thread and the tool-start gate race
+    freely; exactly one of them engages.
+    """
+
+    def __init__(
+        self,
+        budget: TurnWallBudget,
+        *,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        clock: Callable[[], float] | None = None,
+        ledger: RunBudgetLedger | None = None,
+    ):
+        self.budget = budget
+        self._progress_callback = progress_callback
+        self._clock = clock or time.time
+        # The run's budget ledger, for accounting only — the checkpoint's own
+        # decision path is untouched by it. Defaulted so a directly-constructed
+        # checkpoint (tests, and any future caller) still records somewhere.
+        self.ledger = ledger or RunBudgetLedger()
+        self._lock = RLock()
+        self._agent: Any | None = None
+        self._engaged = False
+        self._trigger: str | None = None
+        self._remaining_at_engage: float | None = None
+        self._iterations_drained = 0
+
+    # -- wiring ---------------------------------------------------------
+    def bind(self, agent: Any) -> None:
+        """Bind the agent AFTER any resident-registry swap, so the nudge and the
+        iteration drain land on the object that actually runs the turn."""
+        with self._lock:
+            self._agent = agent
+
+    @property
+    def engaged(self) -> bool:
+        with self._lock:
+            return self._engaged
+
+    # -- decision -------------------------------------------------------
+    def gate(self) -> bool:
+        """Pre-work check: engage when the reserved window has opened.
+
+        Called before each tool execution (via the tool-start progress seam) so
+        the stop lands deterministically at a tool boundary rather than waiting
+        on the timer thread. Returns True when new work may still start.
+        """
+
+        if self.engaged:
+            return False
+        if not self.budget.supports_checkpoint:
+            return True
+        if self.budget.may_start_new_work(now=self._clock()):
+            return True
+        self.engage(trigger=turn_budget.CHECKPOINT_TRIGGER_TOOL_GATE)
+        return False
+
+    def engage(self, *, trigger: str) -> bool:
+        """Open the checkpoint exactly once. Returns True if this call did it."""
+
+        with self._lock:
+            if self._engaged or self._agent is None:
+                return False
+            self._engaged = True
+            self._trigger = trigger
+            self._remaining_at_engage = self.budget.remaining_seconds(now=self._clock())
+            agent = self._agent
+        nudge = turn_budget.checkpoint_nudge_text(self.budget, now=self._clock())
+        steer = getattr(agent, "steer", None)
+        if callable(steer):
+            try:
+                steer(nudge)
+            except Exception:
+                pass
+        drained = turn_budget.drain_iteration_budget(agent)
+        with self._lock:
+            self._iterations_drained = drained
+        # Accounting only — the wall bound LANDS the turn, and recording that
+        # here is what makes "the reply you are reading is a checkpoint reply"
+        # readable from the run record instead of only from the progress lane.
+        self.ledger.trip(
+            RunBudgetKind.WALL,
+            RunBudgetTripReason.WALL_CHECKPOINT_ENGAGED,
+            consumed=self.consumed_seconds(),
+            detail=f"trigger={trigger}",
+        )
+        self._emit_progress()
+        return True
+
+    def consumed_seconds(self) -> float:
+        """Wall spent so far, from the same budget the enforcement reads."""
+
+        return max(0.0, self.budget.total_seconds - self.budget.remaining_seconds(now=self._clock()))
+
+    def summary(self) -> dict[str, Any]:
+        with self._lock:
+            block = self.budget.hud_block(now=self._clock())
+            block.update(
+                {
+                    "engaged": self._engaged,
+                    "trigger": self._trigger,
+                    "iterations_reclaimed": self._iterations_drained,
+                }
+            )
+            if self._remaining_at_engage is not None:
+                block["remaining_at_checkpoint_seconds"] = round(
+                    max(0.0, self._remaining_at_engage), 1
+                )
+            return block
+
+    def _emit_progress(self) -> None:
+        callback = self._progress_callback
+        if callback is None:
+            return
+        try:
+            callback(
+                {
+                    "type": "run.progress",
+                    "phase": "wall_budget_checkpoint",
+                    "severity": "warning",
+                    "step": "wall_budget_checkpoint_opened",
+                    "status": "warning",
+                    "summary": (
+                        "Wall budget nearly exhausted — no further tool calls will run; "
+                        "asking the agent for a final checkpoint reply "
+                        f"({self.budget.summary(now=self._clock())})."
+                    ),
+                    "wall_budget": self.summary(),
+                }
+            )
+        except Exception:
+            return
 
 
 @dataclass(slots=True)
@@ -164,16 +421,41 @@ class _ToolBudgetGuard:
     has_patch_progress: bool = False
     tripped_reason: str | None = None
     interrupt_callback: Callable[[str], None] | None = None
+    # Wall-clock checkpoint consulted before each tool execution. Distinct from
+    # the tool-count budgets above: those TRIP the run, this one lands it.
+    wall_checkpoint: WallBudgetCheckpoint | None = None
+    # The run's budget ledger. Accounting only: every enforcement decision below
+    # is made exactly where it was before, then declared here.
+    ledger: RunBudgetLedger = field(default_factory=RunBudgetLedger)
 
     @classmethod
-    def from_limits(cls, *, stop_on_repeated_read_search: bool, tool_budget_limits: dict[str, Any] | None):
+    def from_limits(
+        cls,
+        *,
+        stop_on_repeated_read_search: bool,
+        tool_budget_limits: dict[str, Any] | None,
+        ledger: RunBudgetLedger | None = None,
+    ):
         limits = tool_budget_limits or {}
-        return cls(
+        guard = cls(
             stop_on_repeated_read_search=stop_on_repeated_read_search,
             read_search_limit=_positive_limit(limits.get("read_search_limit"), fallback=6),
             skill_load_limit=_positive_limit(limits.get("skill_load_limit"), fallback=2),
             has_patch_progress=bool(limits.get("has_patch_progress")),
+            ledger=ledger or RunBudgetLedger(),
         )
+        if stop_on_repeated_read_search:
+            # Declared only when the bound is actually enforced: a run that does
+            # not stop on read/search loops is not bounded by one, and a row
+            # claiming otherwise would be a bound that does not exist.
+            guard.ledger.declare(
+                RunBudgetKind.READ_SEARCH,
+                enforcement=RunBudgetEnforcement.TRIPS_RUN,
+                unit=UNIT_CALLS,
+                limit=guard.read_search_limit,
+                consumed_provider=lambda: guard.aggregate_read_search_count,
+            )
+        return guard
 
     @property
     def skill_warning_threshold(self) -> int:
@@ -182,9 +464,23 @@ class _ToolBudgetGuard:
     def set_interrupt_callback(self, callback: Callable[[str], None]) -> None:
         self.interrupt_callback = callback
 
-    def trip(self, reason: str) -> None:
+    def trip(
+        self,
+        reason: str,
+        *,
+        kind: RunBudgetKind = RunBudgetKind.READ_SEARCH,
+        trip_reason: RunBudgetTripReason = RunBudgetTripReason.AGGREGATE_READ_SEARCH_EXCEEDED,
+    ) -> None:
+        """Trip this run. ``reason`` stays the exception's message, verbatim.
+
+        ``kind`` / ``trip_reason`` are the typed half of the SAME fact, recorded
+        for the accounting block so no downstream reader has to parse the
+        message string to learn which bound fired.
+        """
+
         if not self.tripped_reason:
             self.tripped_reason = reason
+            self.ledger.trip(kind, trip_reason, detail=reason)
         if self.interrupt_callback is None:
             return
         try:
@@ -263,9 +559,13 @@ class ProfileAgentRunner:
             request.persona_chat_runtime_registry is not None
             and request.root_chat_session_id
         )
+        # ONE ledger per run, minted here so the post-run budgets enforced below
+        # land in the same accounting block as the in-run ones. Every mechanism
+        # keeps its own enforcement; only the bookkeeping is shared.
+        ledger = RunBudgetLedger()
         try:
             raw_result, agent, profile_timing = self._execute_agent_run(
-                binding, request
+                binding, request, ledger=ledger
             )
         except Exception:
             if resident:
@@ -283,24 +583,199 @@ class ProfileAgentRunner:
             if resident:
                 _finish_resident_persona_chat_agent(agent)
         result.latency_ms = _elapsed_ms(started)
+        profile_timing["run_budget"] = ledger.accounting()
         result.profile_timing = profile_timing
         if isinstance(result.raw, dict):
             result.raw["profile_timing"] = dict(profile_timing)
         budget_started = time.perf_counter()
         _emit_budget_pressure_warning(result, request)
-        _enforce_result_budgets(result, request)
+        _enforce_result_budgets(result, request, ledger=ledger)
         profile_timing["budget_checks_ms"] = _emit_request_timing(request, "budget_checks", budget_started)
+        # Re-rendered AFTER the post-run budgets so the block an operator reads
+        # covers every bound this turn had, not only the in-run ones.
+        profile_timing["run_budget"] = ledger.accounting()
         result.profile_timing = profile_timing
         if isinstance(result.raw, dict):
             result.raw["profile_timing"] = dict(profile_timing)
         if result.raw.get("failed") and result.raw.get("error"):
             raise ProfileRunnerError(str(result.raw.get("error")))
         return result
-    def _execute_agent_run(self, binding: PersonaProfileBinding, request: AgentRunRequest) -> tuple[Any, Any, dict[str, int]]:
-        timing: dict[str, int] = {}
-        from .persona_chat_continuity import tool_execution_scope
 
-        with _WORKDIR_LOCK, persona_profile_context(binding, runtime_root=request.runtime_root), _agent_workdir(request.workdir), tool_execution_scope(request.tool_execution_scope_id):
+    def _admit_mcp_servers(
+        self,
+        request: AgentRunRequest,
+        timing: dict[str, Any],
+        *,
+        ledger: RunBudgetLedger | None = None,
+    ):
+        """Register this run's admitted MCP servers; return the typed outcome.
+
+        Never raises and never blocks past the admission budget — the outcome is
+        typed either way, and an empty ``admitted`` simply means "this run gets
+        no MCP tools", which is the state every run is in today.
+
+        ``ledger`` is accounting only, and only for the ONE fact this function
+        can observe that the caller cannot: the per-run MCP call budget trips
+        mid-turn, on whichever thread dispatched the tool, so its trip has to be
+        recorded from the exhaustion callback installed here. The budget's
+        limit/consumption rows are declared by the caller.
+        """
+
+        admission = request.mcp_admission
+        if admission is None or getattr(admission, "is_empty", True):
+            return None
+        from .mcp_admission import admit_mcp_servers
+
+        started = time.perf_counter()
+        try:
+            outcome = admit_mcp_servers(
+                admission,
+                # The per-run MCP call budget trips DURING the turn, long after
+                # this function has returned, so the operator-facing half of that
+                # event rides this callback rather than the outcome. The
+                # agent-facing half is the refused tool's own typed result — the
+                # one surface a looping model cannot miss.
+                on_budget_exhausted=lambda denial, snapshot: _on_mcp_budget_exhausted(
+                    request, denial, snapshot, ledger=ledger
+                ),
+            )
+        except Exception:  # pragma: no cover - admit_mcp_servers already swallows
+            timing["mcp_admission_ms"] = _emit_request_timing(
+                request, "mcp_admission", started, status="failed"
+            )
+            return None
+        timing["mcp_admission_ms"] = _emit_request_timing(request, "mcp_admission", started)
+        timing["mcp_admitted_servers"] = len(outcome.admitted)
+        timing["mcp_call_budget"] = int(getattr(admission, "max_tool_calls_per_run", 0) or 0)
+        if request.progress_callback is not None and (outcome.admitted or outcome.denied):
+            try:
+                request.progress_callback(
+                    {
+                        "type": "run.progress",
+                        "phase": "mcp_admission",
+                        "severity": "info" if outcome.admitted else "warning",
+                        "step": "mcp_admission_resolved",
+                        "status": "ok" if outcome.admitted else "warning",
+                        "summary": (
+                            "MCP admission: "
+                            + (", ".join(outcome.admitted) if outcome.admitted else "nothing admitted")
+                        ),
+                        "mcp_admission": {
+                            "admitted": list(outcome.admitted),
+                            "denied": outcome.denial_rows(),
+                            "duration_ms": outcome.duration_ms,
+                        },
+                    }
+                )
+            except Exception:
+                pass
+        return outcome
+
+    def _teardown_mcp_admission(
+        self,
+        request: AgentRunRequest,
+        servers: tuple[str, ...],
+        timing: dict[str, Any],
+        budget: Any | None = None,
+    ) -> None:
+        """Remove this run's MCP registry scope. Advisory — never fails the turn.
+
+        Runs on the way out of ``_execute_agent_run`` for BOTH the completed and
+        the raised path, while the run still holds ``_WORKDIR_LOCK`` and is still
+        inside ``persona_profile_context``, so no other persona's run can observe
+        the scope between the last tool call and its removal. The transport stays
+        warm; only the registry entries and the toolset alias go.
+
+        ``budget`` is this run's call meter, read here for its final accounting:
+        the meter dies with the scope, so end-of-run is the last moment "how many
+        admitted MCP calls did this turn actually make" is answerable.
+        """
+
+        if not servers:
+            return
+        if budget is not None:
+            try:
+                snapshot = budget.snapshot()
+                timing["mcp_calls_spent"] = int(snapshot.get("spent") or 0)
+                timing["mcp_calls_refused"] = int(snapshot.get("refused") or 0)
+            except Exception:  # pragma: no cover - accounting must never fail a turn
+                pass
+        from .mcp_admission import teardown_mcp_admission
+
+        started = time.perf_counter()
+        try:
+            outcome = teardown_mcp_admission(servers)
+        except Exception:  # pragma: no cover - teardown_mcp_admission already swallows
+            timing["mcp_teardown_ms"] = _emit_request_timing(
+                request, "mcp_teardown", started, status="failed"
+            )
+            return
+        timing["mcp_teardown_ms"] = _emit_request_timing(
+            request, "mcp_teardown", started, status="ok" if outcome.ok else "warning"
+        )
+        timing["mcp_teardown_tools"] = len(outcome.removed_tool_names)
+        if request.progress_callback is None:
+            return
+        try:
+            request.progress_callback(
+                {
+                    "type": "run.progress",
+                    "phase": "mcp_admission",
+                    "severity": "info" if outcome.ok else "warning",
+                    "step": "mcp_admission_torn_down",
+                    "status": "ok" if outcome.ok else "warning",
+                    "summary": (
+                        "MCP admission scope removed: "
+                        + ", ".join(outcome.servers)
+                        + f" ({len(outcome.removed_tool_names)} tool(s))"
+                    ),
+                    "mcp_teardown": {
+                        "servers": list(outcome.servers),
+                        "removed_tool_names": list(outcome.removed_tool_names),
+                        "failures": outcome.failure_rows(),
+                        "duration_ms": outcome.duration_ms,
+                    },
+                }
+            )
+        except Exception:
+            pass
+
+    def _execute_agent_run(
+        self,
+        binding: PersonaProfileBinding,
+        request: AgentRunRequest,
+        *,
+        ledger: RunBudgetLedger | None = None,
+    ) -> tuple[Any, Any, dict[str, Any]]:
+        timing: dict[str, Any] = {}
+        ledger = ledger if ledger is not None else RunBudgetLedger()
+        from .persona_chat_continuity import tool_execution_scope
+        from .terminal_envelope import terminal_envelope_scope
+        from agent.skill_utils import skill_runtime_scope
+
+        with (
+            _WORKDIR_LOCK,
+            persona_profile_context(binding, runtime_root=request.runtime_root),
+            _agent_workdir(request.workdir),
+            tool_execution_scope(request.tool_execution_scope_id),
+            # Bound for the whole run so the terminal tool can resolve which
+            # lane/role it is executing under. Deliberately INSIDE
+            # persona_profile_context but independent of it: the envelope's
+            # historical activation signal (HERMES_AGENT_RUNTIME_ROOT, exported
+            # only when the persona binds a Hermes profile) is exactly what made
+            # enforcement nondeterministic on this lane.
+            terminal_envelope_scope(request.terminal_envelope_scope),
+            skill_runtime_scope(
+                surface=request.skill_surface,
+                root_node_mode=request.skill_root_node_mode,
+            ),
+            # The admitted MCP registry scope belongs to THIS run. Entered last
+            # so it unwinds FIRST — teardown therefore runs while the run still
+            # holds _WORKDIR_LOCK and is still inside persona_profile_context,
+            # on the raised path as well as the returned one. Using a stack
+            # rather than a try/finally keeps the (large) run body unindented.
+            ExitStack() as mcp_scope,
+        ):
             try:
                 runtime_started = time.perf_counter()
                 runtime = _resolve_request_runtime(request)
@@ -313,7 +788,76 @@ class ProfileAgentRunner:
             budget_guard = _ToolBudgetGuard.from_limits(
                 stop_on_repeated_read_search=request.stop_on_repeated_read_search,
                 tool_budget_limits=request.tool_budget_limits,
+                ledger=ledger,
             )
+            # Wall-clock checkpoint. Built even when the run carries no wall
+            # budget (deadline in the far future ⇒ it never engages) so the
+            # tool-start gate below has one unconditional shape. The clock
+            # starts HERE — agent construction and the resident-registry probe
+            # are on the turn's wall, so the countdown the agent sees must
+            # include them.
+            wall_checkpoint = WallBudgetCheckpoint(
+                turn_budget.TurnWallBudget(
+                    total_seconds=_positive_float(request.max_wall_seconds) or _NO_WALL_BUDGET_SECONDS,
+                    deadline_epoch=time.time()
+                    + (_positive_float(request.max_wall_seconds) or _NO_WALL_BUDGET_SECONDS),
+                ),
+                progress_callback=request.progress_callback,
+                ledger=ledger,
+            )
+            budget_guard.wall_checkpoint = wall_checkpoint
+            # Declared only for a run that HAS a wall budget — the stand-in
+            # above exists to give the tool-start gate one unconditional shape,
+            # and accounting a 115-year "limit" would be a bound nobody has.
+            if _positive_float(request.max_wall_seconds) is not None:
+                ledger.declare(
+                    RunBudgetKind.WALL,
+                    enforcement=RunBudgetEnforcement.LANDS_TURN,
+                    unit=UNIT_SECONDS,
+                    limit=wall_checkpoint.budget.total_seconds,
+                    consumed_provider=wall_checkpoint.consumed_seconds,
+                )
+            # MCP admission. Inside persona_profile_context (so HERMES_HOME
+            # already points at the persona's own profile) and before agent
+            # construction (so the admitted tools exist in the registry by the
+            # time the factory resolves tool definitions). Bounded and
+            # non-raising: a capability probe must never be able to fail a turn,
+            # so every degradation comes back as a typed row and the turn
+            # continues on the fallback lane.
+            admission_outcome = self._admit_mcp_servers(request, timing, ledger=ledger)
+            admitted_servers = admission_outcome.admitted if admission_outcome else ()
+            if admitted_servers:
+                # Declared only for a run that actually got MCP tools: a run with
+                # nothing admitted has no MCP calls to bound. The MCP meter is
+                # its own authority for the count, so the ledger READS it rather
+                # than keeping a second tally that could disagree with the one
+                # the refusal itself used.
+                call_budget = getattr(admission_outcome, "call_budget", None)
+                ledger.declare(
+                    RunBudgetKind.MCP_CALLS,
+                    enforcement=RunBudgetEnforcement.REFUSES_CALL,
+                    unit=UNIT_CALLS,
+                    limit=(
+                        getattr(call_budget, "limit", None)
+                        if call_budget is not None
+                        else _positive_int(
+                            getattr(request.mcp_admission, "max_tool_calls_per_run", None)
+                        )
+                    ),
+                    consumed=0 if call_budget is None else None,
+                    consumed_provider=(
+                        None
+                        if call_budget is None
+                        else lambda: (call_budget.snapshot() or {}).get("spent")
+                    ),
+                )
+                mcp_scope.callback(
+                    self._teardown_mcp_admission,
+                    request,
+                    admitted_servers,
+                    timing,
+                    budget=call_budget,
+                )
             status_callback = _profile_status_callback(request, timing)
             construct_started = time.perf_counter()
             # Per-run reasoning override → agent reasoning_config. Only passed
@@ -334,9 +878,9 @@ class ProfileAgentRunner:
                 base_url=runtime.get("base_url"),
                 api_key=runtime.get("api_key"),
                 **reasoning_kwargs,
-                enabled_toolsets=request.enabled_toolsets,
+                enabled_toolsets=_enabled_toolsets_for_run(request, admitted_servers),
                 disabled_toolsets=request.disabled_toolsets,
-                blocked_tool_names=_blocked_tool_names_with_registry_hygiene(request.blocked_tool_names),
+                blocked_tool_names=_blocked_tool_names_for_run(request),
                 quiet_mode=request.quiet_mode,
                 skip_context_files=request.skip_context_files,
                 skip_memory=request.skip_memory,
@@ -398,6 +942,7 @@ class ProfileAgentRunner:
                             0, int(request.compression_protect_last_n_override)
                         )
             timing["agent_construct_ms"] = _emit_request_timing(request, "agent_construct", construct_started)
+            _steer_mcp_admission_notice(agent, request, admission_outcome)
             budget_guard.set_interrupt_callback(lambda reason: _interrupt_agent_for_budget(agent, reason))
             agent_ready_cleanup = _notify_agent_ready(request, agent)
             max_wall_seconds = _positive_float(request.max_wall_seconds)
@@ -419,15 +964,33 @@ class ProfileAgentRunner:
                     _attach_model_input_observability(raw_result, agent=agent, request=request)
                     timing["conversation_call_ms"] = _emit_request_timing(request, "conversation_call", conversation_started)
                     if budget_guard.tripped_reason:
-                        raise RunBudgetExceeded(budget_guard.tripped_reason, session_id=getattr(agent, "session_id", None))
+                        raise RunBudgetExceeded(
+                            budget_guard.tripped_reason,
+                            session_id=getattr(agent, "session_id", None),
+                            run_budget=ledger.accounting(),
+                        )
+                    timing["run_budget"] = ledger.accounting()
                     return raw_result, agent, timing
                 finally:
                     _cleanup_agent_ready(agent_ready_cleanup, request)
 
             expired = Event()
+            wall_checkpoint.bind(agent)
 
             def interrupt_for_budget() -> None:
                 expired.set()
+                # Recorded where the bound actually FIRED (the timer thread), so
+                # the accounting is already true by the time the main thread
+                # raises. An ESCALATION: if the graceful checkpoint had already
+                # opened, this replaces the `lands_turn` row with the hard kill
+                # that followed it — both happened, and the kill is the fact.
+                ledger.trip(
+                    RunBudgetKind.WALL,
+                    RunBudgetTripReason.WALL_CLOCK_EXCEEDED,
+                    consumed=wall_checkpoint.consumed_seconds(),
+                    detail=f"wall_seconds={max_wall_seconds:g}",
+                    enforcement=RunBudgetEnforcement.TRIPS_RUN,
+                )
                 if hasattr(agent, "interrupt"):
                     try:
                         agent.interrupt("live run budget exceeded")
@@ -445,6 +1008,20 @@ class ProfileAgentRunner:
                         }
                     )
 
+            # The graceful checkpoint opens BEFORE the hard wall (by the
+            # reserved window). The hard wall below stays armed at the real
+            # deadline as the last resort — it is no longer the first thing that
+            # happens when a turn runs long.
+            checkpoint_timer: Timer | None = None
+            if wall_checkpoint.budget.supports_checkpoint:
+                checkpoint_timer = Timer(
+                    wall_checkpoint.budget.seconds_until_checkpoint(),
+                    lambda: wall_checkpoint.engage(
+                        trigger=turn_budget.CHECKPOINT_TRIGGER_TIMER
+                    ),
+                )
+                checkpoint_timer.daemon = True
+                checkpoint_timer.start()
             timer = Timer(max_wall_seconds, interrupt_for_budget)
             timer.daemon = True
             timer.start()
@@ -467,29 +1044,196 @@ class ProfileAgentRunner:
             except BaseException:
                 timing["conversation_call_ms"] = _emit_request_timing(request, "conversation_call", conversation_started, status="failed")
                 if expired.is_set():
-                    raise RunBudgetExceeded(f"live run budget exceeded: wall_seconds={max_wall_seconds:g}", session_id=getattr(agent, "session_id", None))
+                    raise RunBudgetExceeded(
+                        f"live run budget exceeded: wall_seconds={max_wall_seconds:g}",
+                        session_id=getattr(agent, "session_id", None),
+                        wall_budget=wall_checkpoint.summary(),
+                        run_budget=ledger.accounting(),
+                    )
                 raise
             finally:
+                if checkpoint_timer is not None:
+                    checkpoint_timer.cancel()
                 timer.cancel()
                 _cleanup_agent_ready(agent_ready_cleanup, request)
             if expired.is_set():
-                raise RunBudgetExceeded(f"live run budget exceeded: wall_seconds={max_wall_seconds:g}", session_id=getattr(agent, "session_id", None))
+                raise RunBudgetExceeded(
+                    f"live run budget exceeded: wall_seconds={max_wall_seconds:g}",
+                    session_id=getattr(agent, "session_id", None),
+                    wall_budget=wall_checkpoint.summary(),
+                    run_budget=ledger.accounting(),
+                )
             if budget_guard.tripped_reason:
-                raise RunBudgetExceeded(budget_guard.tripped_reason, session_id=getattr(agent, "session_id", None))
+                raise RunBudgetExceeded(
+                    budget_guard.tripped_reason,
+                    session_id=getattr(agent, "session_id", None),
+                    run_budget=ledger.accounting(),
+                )
+            # The checkpoint fired and the turn still landed a reply: hand the
+            # caller the typed provenance so it settles the turn as a
+            # budget-ended turn instead of a plain completion.
+            if wall_checkpoint.engaged and isinstance(raw_result, dict):
+                raw_result["wall_budget_checkpoint"] = wall_checkpoint.summary()
+            timing["run_budget"] = ledger.accounting()
             return raw_result, agent, timing
 
 
-def _enforce_result_budgets(result: AgentRunResult, request: AgentRunRequest) -> None:
+def _enforce_result_budgets(
+    result: AgentRunResult,
+    request: AgentRunRequest,
+    *,
+    ledger: RunBudgetLedger | None = None,
+) -> None:
+    """The two POST-run bounds. Same order, same messages, same exception.
+
+    ``ledger`` is accounting only: each bound declares its limit and actual
+    consumption whether or not it trips, so an operator can read the headroom of
+    a turn that finished as easily as the bound of one that did not.
+    """
+
+    ledger = ledger if ledger is not None else RunBudgetLedger()
     max_api_calls = _positive_int(request.max_api_calls)
     if max_api_calls is not None:
         api_calls = _positive_int(result.api_calls)
+        ledger.declare(
+            RunBudgetKind.API_CALLS,
+            enforcement=RunBudgetEnforcement.TRIPS_RUN,
+            unit=UNIT_CALLS,
+            limit=max_api_calls,
+            consumed=api_calls,
+        )
         if api_calls is not None and api_calls > max_api_calls:
-            raise RunBudgetExceeded(f"live run budget exceeded: api_calls={api_calls}/{max_api_calls}", session_id=result.session_id)
+            message = f"live run budget exceeded: api_calls={api_calls}/{max_api_calls}"
+            ledger.trip(
+                RunBudgetKind.API_CALLS,
+                RunBudgetTripReason.API_CALLS_EXCEEDED,
+                consumed=api_calls,
+                detail=message,
+            )
+            raise RunBudgetExceeded(
+                message, session_id=result.session_id, run_budget=ledger.accounting()
+            )
     max_total_tokens = _positive_int(request.max_total_tokens)
     if max_total_tokens is not None:
         total_tokens = _positive_int(result.total_tokens)
+        ledger.declare(
+            RunBudgetKind.TOTAL_TOKENS,
+            enforcement=RunBudgetEnforcement.TRIPS_RUN,
+            unit=UNIT_TOKENS,
+            limit=max_total_tokens,
+            consumed=total_tokens,
+        )
         if total_tokens is not None and total_tokens > max_total_tokens:
-            raise RunBudgetExceeded(f"live run budget exceeded: total_tokens={total_tokens}/{max_total_tokens}", session_id=result.session_id)
+            message = f"live run budget exceeded: total_tokens={total_tokens}/{max_total_tokens}"
+            ledger.trip(
+                RunBudgetKind.TOTAL_TOKENS,
+                RunBudgetTripReason.TOTAL_TOKENS_EXCEEDED,
+                consumed=total_tokens,
+                detail=message,
+            )
+            raise RunBudgetExceeded(
+                message, session_id=result.session_id, run_budget=ledger.accounting()
+            )
+
+
+def _steer_mcp_admission_notice(agent: Any, request: AgentRunRequest, outcome: Any) -> bool:
+    """In-band backstop for admission failures the turn's ENVELOPE could not carry.
+
+    Design §D3 says the agent's own turn context must state a denial, and the
+    guaranteed lane for that is the runtime-context envelope's volatile tail —
+    rendered before the turn by the mission-chat command, which is why it can
+    only carry RESOLUTION-time denials (``mcp_not_admitted_for_role``,
+    ``mcp_server_not_configured``, the machine-roots codes).
+
+    EXECUTION-time degradations (``mcp_admission_timeout``,
+    ``mcp_admission_lane_busy``, and "admitted but did not register") are only
+    known here, after that envelope was sealed. They ride ``agent.steer`` — the
+    same in-band lane ``turn_budget``'s checkpoint nudge uses, appended to the
+    next tool result — so an agent that starts reaching for tools it does not
+    have is told why on its next iteration instead of improvising. An agent that
+    calls no tool never needed them.
+    """
+
+    if outcome is None or not getattr(outcome, "degraded", False):
+        return False
+    steer = getattr(agent, "steer", None)
+    if not callable(steer):
+        return False
+    from .mcp_admission import render_mcp_admission_line
+
+    # ``admission=None`` on purpose: only the EXECUTION half belongs here. The
+    # policy half is already on this turn's envelope, and repeating it in a
+    # second voice teaches the model to discount both.
+    line = render_mcp_admission_line(None, outcome=outcome)
+    if not line:
+        return False
+    try:
+        steer(f"[harness] {line.removeprefix('- ')}")
+    except Exception:  # pragma: no cover - a notice must never fail a turn
+        return False
+    return True
+
+
+def _on_mcp_budget_exhausted(
+    request: AgentRunRequest,
+    denial: Any,
+    snapshot: dict[str, Any],
+    *,
+    ledger: RunBudgetLedger | None = None,
+) -> None:
+    """First refusal of an admitted MCP call: record it, then tell the operator.
+
+    Fires once per run (``_metered_handler`` gates on ``refused == 1``) from the
+    dispatching thread. The ledger record is what makes a refusal readable from
+    the run record afterwards — the refusal itself only ever reached the agent's
+    tool result and one progress warning, both of which are gone by the time
+    anyone asks "why did that turn stop driving the launcher?".
+    """
+
+    if ledger is not None:
+        try:
+            ledger.trip(
+                RunBudgetKind.MCP_CALLS,
+                RunBudgetTripReason.MCP_CALLS_EXHAUSTED,
+                consumed=(snapshot or {}).get("spent"),
+                detail=getattr(denial, "code", None) or None,
+            )
+        except Exception:  # pragma: no cover - accounting must never fail a tool call
+            pass
+    _emit_mcp_budget_exhausted(request, denial, snapshot)
+
+
+def _emit_mcp_budget_exhausted(request: AgentRunRequest, denial: Any, snapshot: dict[str, Any]) -> None:
+    """Operator-facing half of ``mcp_admission_budget_exhausted``. Never raises.
+
+    Fires ONCE per run, on the first refused call, from whichever thread
+    dispatched the tool. It is deliberately a ``run.progress`` WARNING and not an
+    interrupt: the agent keeps its non-MCP tools and can still land a reply, and
+    a turn that lands honestly beats a turn that dies at the bound.
+    """
+
+    callback = request.progress_callback
+    if callback is None:
+        return
+    try:
+        callback(
+            {
+                "type": "run.progress",
+                "phase": "mcp_admission",
+                "severity": "warning",
+                "step": "mcp_admission_budget_exhausted",
+                "status": "warning",
+                "summary": (
+                    "MCP call budget exhausted "
+                    f"({snapshot.get('spent')}/{snapshot.get('limit')} admitted call(s)); "
+                    "further MCP calls are refused for this turn."
+                ),
+                "mcp_call_budget": dict(snapshot),
+                "mcp_admission": {"denied": [denial.row()]},
+            }
+        )
+    except Exception:  # pragma: no cover - accounting must never fail a tool call
+        return
 
 
 def _notify_agent_ready(request: AgentRunRequest, agent: Any) -> Callable[[], None] | None:
@@ -641,7 +1385,7 @@ def _emit_request_timing(request: AgentRunRequest, timing_key: str, started: flo
     return duration_ms
 
 
-def _profile_status_callback(request: AgentRunRequest, timing: dict[str, int]):
+def _profile_status_callback(request: AgentRunRequest, timing: dict[str, Any]):
     def emit(payload: Any) -> None:
         if isinstance(payload, dict):
             timing_key = payload.get("timing_key")
@@ -753,6 +1497,13 @@ def _progress_adapter(
             tool_name = str(payload.get("tool_name") or "")
             step = str(payload.get("step") or payload.get("type") or "")
             key = (step, tool_name)
+            # Wall-budget gate, evaluated BEFORE a tool execution starts. Unlike
+            # every other guard here it does not raise: engaging the checkpoint
+            # lands the turn (final reply, typed terminal state) rather than
+            # tripping it. The already-signalled tool still runs — this stops
+            # the NEXT loop iteration from launching more.
+            if guard.wall_checkpoint is not None and step == "tool_started":
+                guard.wall_checkpoint.gate()
             _update_guard_progress(guard, payload)
             _enforce_aggregate_read_search_budget(guard, callback, tool_name=tool_name)
             if event_type == "run.progress" and tool_name and step in {"tool_started", "tool_finished"}:
@@ -789,8 +1540,15 @@ def _progress_adapter(
                         summary=f"Repeated {tool_name} calls indicate a read/search loop without proof, verdict, patch, or test progress; stop and produce a bounded verdict, proof handoff, Neko slicing request, or exact blocker.",
                     )
                     callback(warning)
-                    guard.trip(f"repeated read/search loop: {tool_name}")
-                    raise RunBudgetExceeded(f"repeated read/search loop: {tool_name}")
+                    guard.trip(
+                        f"repeated read/search loop: {tool_name}",
+                        kind=RunBudgetKind.READ_SEARCH,
+                        trip_reason=RunBudgetTripReason.REPEATED_READ_SEARCH_LOOP,
+                    )
+                    raise RunBudgetExceeded(
+                        f"repeated read/search loop: {tool_name}",
+                        run_budget=guard.ledger.accounting(),
+                    )
                 if guard.repeated_counts[key] >= 6 and key not in guard.warned:
                     guard.warned.add(key)
                     callback(
@@ -842,8 +1600,12 @@ def _enforce_aggregate_read_search_budget(guard: _ToolBudgetGuard, callback: Cal
     )
     callback(warning)
     reason = f"aggregate read/search budget exceeded: {guard.aggregate_read_search_count}/{guard.read_search_limit}"
-    guard.trip(reason)
-    raise RunBudgetExceeded(reason)
+    guard.trip(
+        reason,
+        kind=RunBudgetKind.READ_SEARCH,
+        trip_reason=RunBudgetTripReason.AGGREGATE_READ_SEARCH_EXCEEDED,
+    )
+    raise RunBudgetExceeded(reason, run_budget=guard.ledger.accounting())
 
 
 def _read_search_warning_payload(event_type: str, *, tool_name: str, read_search_count: int, read_search_limit: int, summary: str) -> dict[str, Any]:
@@ -996,6 +1758,7 @@ def _tool_started_payload(event_type: str, tool_name: str | None, *, invocation:
     skill_name = _safe_skill_tool_name(tool_name, invocation)
     if skill_name:
         payload["skill_name"] = skill_name
+    _attach_tool_io(payload, invocation=invocation)
     return payload
 
 
@@ -1015,8 +1778,10 @@ def _tool_finished_payload(event_type: str, tool_name: str | None, *, duration: 
         payload["skill_name"] = skill_name
     dev_work_payload = _dev_work_payload(tool_name, status=status, result=result, invocation=invocation)
     if dev_work_payload:
-        # No target echo for dev-work tools: changed_paths/changed_files ARE
-        # the target, and the raw invocation path may be machine-absolute.
+        # No target echo and NO generic tool_input/tool_result for dev-work
+        # tools: changed_paths/changed_files ARE the record, and the raw
+        # invocation/result carry the diff body and machine-absolute paths
+        # that this lane deliberately never persists.
         payload.update(dev_work_payload)
         return payload
     target_label = (
@@ -1044,6 +1809,14 @@ def _tool_finished_payload(event_type: str, tool_name: str | None, *, duration: 
     todo_state = _todo_state_payload(tool_name, result, invocation)
     if todo_state is not None:
         payload["todo_state"] = todo_state
+    # agent_chat_send input is already first-class (dispatch_target/dispatch_order
+    # on the started event) — re-attaching the order as tool_input would spend
+    # the same bytes twice against the event cap. Its RESULT still attaches.
+    _attach_tool_io(
+        payload,
+        invocation=None if tool_name == "agent_chat_send" else invocation,
+        result=result,
+    )
     return payload
 
 
@@ -1249,6 +2022,123 @@ def _safe_operator_output(tool_name: str | None, result: Any) -> str | None:
     return text
 
 
+# Generic tool-call input/result record (the "what was it called with / what
+# came back" lane). Terminal-class calls keep their dedicated fields
+# (command_full / output) and dev-work calls keep changed_paths; every tool
+# call additionally gets a bounded, secret-scrubbed rendering of its raw
+# invocation and result when no dedicated field captured them — so the
+# operator console never has to show a bare "no detail was emitted" row.
+# Dict payloads render one `key: <json>` line per top-level key so the
+# per-line secret scrub drops only the offending pair, never the whole record.
+_OPERATOR_TOOL_INPUT_MAX = 1000
+_OPERATOR_TOOL_RESULT_MAX = 1600
+# Result-envelope keys that dedicated payload fields already carry.
+_TOOL_RESULT_ECHO_KEYS = ("exit_code",)
+
+
+def _render_kv_line_token(value: Any) -> str:
+    """One-line rendering of a dict KEY (or the last-resort repr). Newlines and
+    NULs are REMOVED (not replaced with spaces) — the per-line secret scrub
+    keys on contiguous marker words, so a hostile key like ``"pass\\nword"``
+    must reconstitute to ``password`` on ONE line rather than split the marker
+    across two lines and defeat every scrub layer downstream."""
+
+    return re.sub(r"[\r\n\x00]+", "", str(value))
+
+
+def _render_operator_kv_block(value: Any) -> str | None:
+    try:
+        if isinstance(value, dict):
+            text = "\n".join(
+                f"{_render_kv_line_token(key)}: {json.dumps(item, ensure_ascii=False, sort_keys=True, default=str)}"
+                for key, item in value.items()
+            )
+        elif isinstance(value, str):
+            text = value
+        else:
+            text = json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+    except Exception:
+        # Last-resort repr, itself guarded: str() can re-raise on pathological
+        # values (RecursionError on deep nesting). Losing the IO record is
+        # acceptable; losing the WHOLE tool event (via the sink's best-effort
+        # boundary swallowing the raise) is not.
+        try:
+            text = _render_kv_line_token(value)
+        except Exception:
+            return None
+    text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
+    return text or None
+
+
+def _scrub_operator_block_head(text: str, *, limit: int) -> str | None:
+    """Per-line secret scrub, HEAD-bounded: the leading keys/fields are the
+    operator signal (unlike command output, where the tail is), so truncation
+    keeps the front and marks the cut explicitly. A record whose EVERY line was
+    redacted carries zero signal — dropped whole rather than persisted as a
+    marker-only blob."""
+
+    kept_any = False
+    lines: list[str] = []
+    for line in text.split("\n"):
+        if _line_has_secret(line):
+            lines.append("[redacted line — contained a secret]")
+        else:
+            lines.append(line)
+            if line.strip():
+                kept_any = True
+    if not kept_any:
+        return None
+    out = "\n".join(lines).strip()
+    if not out:
+        return None
+    if len(out) > limit:
+        out = f"{out[:limit]}\n…(rest truncated)…"
+    return out
+
+
+def _safe_operator_tool_input(invocation: Any) -> str | None:
+    if not isinstance(invocation, dict) or not invocation:
+        return None
+    rendered = _render_operator_kv_block(invocation)
+    if rendered is None:
+        return None
+    return _scrub_operator_block_head(rendered, limit=_OPERATOR_TOOL_INPUT_MAX)
+
+
+def _safe_operator_tool_result(result: Any) -> str | None:
+    if result is None:
+        return None
+    if isinstance(result, dict):
+        slim = {key: item for key, item in result.items() if key not in _TOOL_RESULT_ECHO_KEYS}
+        if not slim:
+            return None
+        rendered = _render_operator_kv_block(slim)
+    else:
+        rendered = _render_operator_kv_block(result)
+    if rendered is None:
+        return None
+    return _scrub_operator_block_head(rendered, limit=_OPERATOR_TOOL_RESULT_MAX)
+
+
+def _attach_tool_io(payload: dict[str, Any], *, invocation: Any, result: Any = None) -> None:
+    """Attach the generic ``tool_input`` / ``tool_result`` record to a tool payload.
+
+    Dedicated fields stay authoritative and are never duplicated against the
+    4KB event cap: a call whose input already surfaced as a command keeps
+    command_full as its input record, and a terminal-class call's result IS its
+    ``output`` tail. Everything else gets the generic record.
+    """
+
+    if "command_full" not in payload and "command_label" not in payload:
+        tool_input = _safe_operator_tool_input(invocation)
+        if tool_input:
+            payload["tool_input"] = tool_input
+    if result is not None and "output" not in payload:
+        tool_result = _safe_operator_tool_result(result)
+        if tool_result:
+            payload["tool_result"] = tool_result
+
+
 _OPERATOR_TARGET_MAX = 300
 _OPERATOR_TARGET_PATH_KEYS = ("path", "file_path", "target_path", "file", "filename", "directory", "dir")
 _OPERATOR_TARGET_QUERY_KEYS = ("pattern", "query", "glob", "regex", "search", "name")
@@ -1421,12 +2311,29 @@ def _is_error_result(result: Any) -> bool:
     if isinstance(result, dict):
         if result.get("error") or result.get("success") is False:
             return True
+        # Harness tool envelope: a top-level ok:false IS the failure verdict
+        # (agent_chat_send, harness verbs). Missing this projected failed
+        # dispatches as status="passed" → green OK chips on the operator
+        # console for sends that never reached their target (2026-07-23).
+        if result.get("ok") is False:
+            return True
         exit_code = _safe_exit_code(result.get("exit_code"))
         if exit_code is not None:
             return exit_code != 0
     if isinstance(result, str):
         lowered = result.strip().lower()
-        return lowered.startswith(("error", "traceback", "exception")) or '"success": false' in lowered
+        if lowered.startswith(("error", "traceback", "exception")) or '"success": false' in lowered:
+            return True
+        # Serialized harness envelope. Parse-confirm before trusting the
+        # substring so a tool result that merely CONTAINS such text (e.g. a
+        # read_file of a JSON fixture) can never be misread as a failure —
+        # only a top-level {"ok": false, ...} object counts.
+        if lowered.startswith("{") and ('"ok": false' in lowered or '"ok":false' in lowered):
+            try:
+                parsed = json.loads(result)
+            except (ValueError, TypeError):
+                return False
+            return isinstance(parsed, dict) and parsed.get("ok") is False
     return False
 
 
@@ -1622,8 +2529,18 @@ def _model_input_observability(*, agent, request: AgentRunRequest) -> dict[str, 
         except Exception:
             system_prompt = request.system_message or ""
     messages: list[dict[str, Any]] = []
+    system_prompt_sections: list[dict[str, Any]] = []
     if system_prompt:
-        messages.append(_message_preview("system", str(system_prompt), source="hermes_system_prompt"))
+        system_preview = _message_preview(
+            "system", str(system_prompt), source="hermes_system_prompt"
+        )
+        messages.append(system_preview)
+        system_prompt_sections = _system_prompt_section_receipts(
+            agent=agent,
+            system_message=request.system_message,
+            system_prompt=str(system_prompt),
+            captured_content=system_preview["content"],
+        )
     messages.append(_message_preview("user", request.user_message, source="mission_chat_user_message"))
     cache_routing = _agent_cache_routing_observability(agent)
     return {
@@ -1652,6 +2569,11 @@ def _model_input_observability(*, agent, request: AgentRunRequest) -> dict[str, 
         "system_message_supplied": request.system_message is not None,
         "message_count": len(messages),
         "messages": messages,
+        **(
+            {"system_prompt_sections": system_prompt_sections}
+            if system_prompt_sections
+            else {}
+        ),
         # T8 (2026-07-18): the rendered compact skills-index text's char count —
         # what ``.skills_prompt_snapshot.json`` ACTUALLY contributed to the
         # prompt this turn, distinct from the loaded-file byte estimate the
@@ -1666,6 +2588,66 @@ def _model_input_observability(*, agent, request: AgentRunRequest) -> dict[str, 
             else {}
         ),
     }
+
+
+def _system_prompt_section_receipts(
+    *,
+    agent: Any,
+    system_message: str | None,
+    system_prompt: str,
+    captured_content: str,
+) -> list[dict[str, Any]]:
+    """Return exact offsets for Hermes' stable/context/volatile prompt tiers.
+
+    The profile runner may restore a cached system prompt from SessionDB.  We
+    therefore re-render the three canonical parts only to prove byte equality;
+    if they do not join to the exact prompt sent this turn, no section metadata
+    is emitted.  Offsets target the already-redacted captured message so the
+    Launcher can slice it without duplicating the full prompt on the wire.
+    """
+
+    try:
+        from agent.system_prompt import build_system_prompt_parts
+
+        parts = build_system_prompt_parts(agent, system_message=system_message)
+    except Exception:
+        return []
+    ordered = [
+        ("stable", "Stable Hermes foundation", str(parts.get("stable") or "")),
+        ("context", "Mission Control context", str(parts.get("context") or "")),
+        ("volatile", "Volatile profile context", str(parts.get("volatile") or "")),
+    ]
+    nonempty = [(kind, name, value) for kind, name, value in ordered if value]
+    if "\n\n".join(value for _, _, value in nonempty) != system_prompt:
+        return []
+
+    safe_parts = [
+        (kind, name, _redact_prompt_text(value)) for kind, name, value in nonempty
+    ]
+    safe_joined = "\n\n".join(value for _, _, value in safe_parts)
+    if not safe_joined.startswith(captured_content):
+        return []
+
+    receipts: list[dict[str, Any]] = []
+    cursor = 0
+    capture_length = len(captured_content)
+    for kind, name, value in safe_parts:
+        start = cursor
+        end = start + len(value)
+        if start < capture_length:
+            captured_end = min(end, capture_length)
+            receipts.append(
+                {
+                    "kind": kind,
+                    "name": name,
+                    "start_char": start,
+                    "end_char": captured_end,
+                    "chars": len(value),
+                    "truncated": captured_end < end,
+                }
+            )
+        cursor = end + 2
+    return receipts
 
 
 def _agent_cache_routing_observability(agent) -> dict[str, Any] | None:
@@ -1779,8 +2761,14 @@ def _message_preview(role: str, content: str, *, source: str) -> dict[str, Any]:
     }
 
 
+# The assignment rule is single-homed in ``agent_runtime.redaction`` (see the
+# header there for the JSON blind spot every local spelling shared). This lane
+# captures the FINAL MODEL PROMPT for observability, so a JSON-encoded
+# credential inside a prompt used to be persisted verbatim. The two-group
+# contract is preserved — ``_redact_prompt_text`` branches on ``lastindex >= 2``
+# to decide between ``key=<redacted>`` and a whole-match ``<redacted>``.
 _PROMPT_SECRET_PATTERNS = [
-    re.compile(r"(?i)(api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|authorization|bearer|password|secret)\s*[:=]\s*([^\s,;]+)"),
+    TEXT_SECRET_VALUE_ASSIGNMENT_RE,
     re.compile(r"(?i)\b(sk-[A-Za-z0-9_-]{12,})\b"),
     re.compile(r"(?i)\b(xox[baprs]-[A-Za-z0-9-]{12,})\b"),
 ]

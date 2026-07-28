@@ -22,7 +22,10 @@ from agent_runtime.board_sync import (
 )
 from agent_runtime.realm_sync import (
     RealmSyncError,
+    _any_store_drift,
     _assert_no_secret_artifacts,
+    _board_store_drift,
+    _workspaces_for_realm,
     resolve_realm_sync_artifacts,
 )
 from agent_runtime.serde import to_jsonable
@@ -221,3 +224,124 @@ def test_apply_pull_remote_removal_archives_local(tmp_path):
     assert keep.card_id in active_ids
     # archived, never deleted
     assert paths.board_archived_card_path(board_id, gone.card_id).exists()
+
+
+# ── H1: store-drift honesty (_board_store_drift) ──────────────────────────
+
+
+def _realm_workspaces(realm_id: str):
+    return _workspaces_for_realm(RealmStore().get(realm_id))
+
+
+def test_board_store_drift_zero_when_baseline_matches_store():
+    realm_id, ws = _make_realm_workspace()
+    store = BoardStore()
+    store.add_card(workspace_id=ws, title="One")
+    board_id = board_models.default_board_id(ws)
+    update_board_baseline_after_sync(realm_id, [board_id])  # baseline == current store
+
+    drift = _board_store_drift(realm_id, _realm_workspaces(realm_id))
+    assert drift == {"boards_changed": 0, "cards_changed": 0, "cards_added": 0, "cards_removed": 0}
+    assert _any_store_drift({"boards": drift}) is False
+
+
+def test_board_store_drift_counts_changed_and_added_cards():
+    realm_id, ws = _make_realm_workspace()
+    store = BoardStore()
+    store.add_card(workspace_id=ws, title="Keep")
+    changing = store.add_card(workspace_id=ws, title="Will change")
+    board_id = board_models.default_board_id(ws)
+    update_board_baseline_after_sync(realm_id, [board_id])
+
+    store.edit_card(changing.card_id, title="Changed title")  # 1 changed card
+    store.add_card(workspace_id=ws, title="Brand new")  # 1 added card (no baseline)
+
+    drift = _board_store_drift(realm_id, _realm_workspaces(realm_id))
+    assert drift["boards_changed"] == 0  # board def (columns/ledger) unchanged
+    assert drift["cards_changed"] == 1
+    assert drift["cards_added"] == 1
+    assert drift["cards_removed"] == 0
+    assert _any_store_drift({"boards": drift}) is True
+
+
+def test_board_store_drift_counts_removed_card_and_board_ledger_change():
+    realm_id, ws = _make_realm_workspace()
+    store = BoardStore()
+    store.add_card(workspace_id=ws, title="Keep")
+    removing = store.add_card(workspace_id=ws, title="Remove me")
+    board_id = board_models.default_board_id(ws)
+    update_board_baseline_after_sync(realm_id, [board_id])
+
+    store.archive_card(removing.card_id)  # baseline card no longer active locally
+
+    drift = _board_store_drift(realm_id, _realm_workspaces(realm_id))
+    assert drift["cards_removed"] == 1
+    # archiving appends to the board's archived_card_ids ledger, which IS synced
+    # board-def content → the board def is now unpublished too (honest).
+    assert drift["boards_changed"] == 1
+
+
+def test_board_store_drift_never_synced_counts_everything_unpublished():
+    realm_id, ws = _make_realm_workspace()
+    store = BoardStore()
+    store.add_card(workspace_id=ws, title="A")
+    store.add_card(workspace_id=ws, title="B")
+    assert read_board_baseline(realm_id) == {}  # never published or pulled
+
+    drift = _board_store_drift(realm_id, _realm_workspaces(realm_id))
+    assert drift["boards_changed"] == 1  # board def has no baseline entry
+    assert drift["cards_added"] == 2  # both cards have no baseline entry
+    assert drift["cards_changed"] == 0
+    assert drift["cards_removed"] == 0
+    assert _any_store_drift({"boards": drift}) is True
+
+
+def test_board_store_drift_excludes_boards_outside_realm():
+    realm_id, ws = _make_realm_workspace()
+    store = BoardStore()
+    store.add_card(workspace_id=ws, title="In realm")
+    board_id = board_models.default_board_id(ws)
+    update_board_baseline_after_sync(realm_id, [board_id])  # in-realm board is clean
+
+    # A second workspace NOT bound to this realm, with its own brand-new board.
+    other_ws = WorkspaceStore().create(name="Other")
+    store.add_card(workspace_id=other_ws.id, title="Out of realm")
+
+    drift = _board_store_drift(realm_id, _realm_workspaces(realm_id))
+    # The out-of-realm board's unpublished card must not count for this realm.
+    assert drift == {"boards_changed": 0, "cards_changed": 0, "cards_added": 0, "cards_removed": 0}
+
+
+# ── H2: snapshot honesty flag (_boards_summary) ───────────────────────────
+
+
+def test_boards_summary_rows_carry_unpublished_flag_when_realm_bound():
+    from agent_runtime.snapshot import _boards_summary
+
+    realm_id, ws = _make_realm_workspace()
+    store = BoardStore()
+    synced = store.add_card(workspace_id=ws, title="Synced")
+    board_id = board_models.default_board_id(ws)
+    update_board_baseline_after_sync(realm_id, [board_id])  # synced card + board published
+    drifted = store.add_card(workspace_id=ws, title="Not yet published")  # no baseline
+
+    rows = _boards_summary(store, _realm_workspaces(realm_id))
+    board_row = next(r for r in rows if r["board_id"] == board_id)
+    assert board_row["unpublished"] is False  # board def matches baseline
+    by_id = {c["card_id"]: c for c in board_row["cards"]}
+    assert by_id[synced.card_id]["unpublished"] is False
+    assert by_id[drifted.card_id]["unpublished"] is True
+
+
+def test_boards_summary_omits_unpublished_flag_without_realm():
+    from agent_runtime.snapshot import _boards_summary
+
+    store = BoardStore()
+    ws = WorkspaceStore().create(name="Local only")  # no realm_id → not sync-bound
+    store.add_card(workspace_id=ws.id, title="Local card")
+    board_id = board_models.default_board_id(ws.id)
+
+    rows = _boards_summary(store, [ws])
+    board_row = next(r for r in rows if r["board_id"] == board_id)
+    assert "unpublished" not in board_row
+    assert all("unpublished" not in c for c in board_row["cards"])

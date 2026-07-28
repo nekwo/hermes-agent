@@ -142,6 +142,16 @@ def test_final_model_input_evicted_to_typed_stub():
             "scope_headers_match": True,
             "raw_values_omitted": True,
         },
+        "system_prompt_sections": [
+            {
+                "kind": "stable",
+                "name": "Stable Hermes foundation",
+                "start_char": 0,
+                "end_char": 6,
+                "chars": 6,
+                "truncated": False,
+            }
+        ],
     }
     rows = [_row("ctx_a", available=[], accessible=[], fmi=fmi)]
 
@@ -164,6 +174,7 @@ def test_final_model_input_evicted_to_typed_stub():
         == f"sha256:{'a' * 64}"
     )
     assert stub["cache_routing"]["scope_headers_match"] is True
+    assert stub["system_prompt_sections"] == fmi["system_prompt_sections"]
 
 
 def test_final_model_input_stub_omits_absent_tool_schema():
@@ -274,6 +285,47 @@ def test_snapshot_prompt_observability_hoists_by_default(isolate_agent_runtime_r
     assert row["final_model_input"]["bytes"] > 0
     # …but still fetchable on demand from disk.
     assert po.load_final_model_input_for_context("ctx_alice") is not None
+
+
+def test_fresh_live_context_advertises_only_collectable_catalog_refs(
+    isolate_agent_runtime_root,
+):
+    """Configured agents can have a prompt preview before their first chat row.
+
+    Those fresh rows still publish hash pointers.  The detail-fetch lane must
+    be able to collect the exact bodies from the same projection without
+    making the ordinary snapshot path write to the catalog store.
+    """
+
+    from types import SimpleNamespace
+
+    persona = SimpleNamespace(
+        id="dev",
+        hermes_profile="dev",
+        display_name="Dev Agent",
+        role="dev",
+        skills=["alpha"],
+    )
+    instance = SimpleNamespace(
+        id="personainst_dev",
+        persona_id="dev",
+        session_id="sess_fresh",
+        current_task_id=None,
+        goal_id=None,
+    )
+    catalogs = {}
+
+    section = po.snapshot_prompt_observability(
+        personas=[persona],
+        persona_instances=[instance],
+        tasks=[],
+        catalog_sink=catalogs,
+    )
+
+    advertised = set(section["skills_catalogs_ref"]["hashes"])
+    assert advertised
+    assert advertised <= set(catalogs)
+    assert all(po.load_skills_catalog_from_store(ref) is None for ref in advertised)
 
 
 def test_hoisted_refs_resolve_to_the_persisted_lists(isolate_agent_runtime_root):

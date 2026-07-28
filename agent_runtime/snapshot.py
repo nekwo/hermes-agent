@@ -6,6 +6,7 @@ import re
 import threading
 import time
 import hashlib
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 # The snapshot roster does not render per-profile model/provider settings. Use
@@ -19,7 +20,7 @@ from . import paths
 from .board_store import BoardStore
 from .office_store import OfficeStore
 from .budget_approval import budget_incident_can_continue, budget_incident_needs_scope_recovery
-from .config import ensure_persisted_personas, load_agent_runtime_config
+from .config import ensure_persisted_personas, load_agent_runtime_config, load_root_runtime_config
 from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash
 from .delivery_directive import task_delivery_directive
 from .dirty_state import build_dirty_state
@@ -45,6 +46,7 @@ from .persona_assignments import (
     persona_instance_visibility_ref,
 )
 from .persona_chat_history import DEFAULT_PERSONA_CHAT_MESSAGE_TAIL, _SECRET_RE, _canonical_persona_id, persona_chat_history_summary, persona_chat_trace_summary
+from .redaction import TEXT_SECRET_ASSIGNMENT_RE
 from .persona_instance_identity import (
     backed_persona_identity,
     classify_orphan_persona_instances,
@@ -55,8 +57,7 @@ from .parity import PARITY_ENVELOPE_VERSION, ProjectionAccountant, events_waterm
 from .parse_cache import cached_by_mtime
 from .resolution import resolution_payload, resolve_runtime, suspect_default_root
 from .personas import blocked_tool_names, effective_toolsets, seed_personas
-from .prompt_observability import snapshot_prompt_observability
-from .profile_readiness import profile_readiness_for_persona
+from .prompt_observability import _SkillObservabilityResolver, snapshot_prompt_observability
 from .proof_gates import task_verdict_proof_satisfied
 from .realm_sync import read_realm_sync_sidecar
 from .repo_bundles import RepoBundleStore, bundle_queue_summary, qa_waiting_on, repo_bundle_delivery_summary, repo_bundle_summary, simplified_phase_for_task
@@ -73,7 +74,11 @@ from .self_test_evidence import SelfTestEvidenceStore, self_test_summary
 from .states import RunState, StageStatus, TaskState
 from .steering import build_steer_actions
 from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, ProofStore, RealmStore, RunStore, TaskStore, WorkspaceStore
-from .tool_visibility import resolve_tool_visibility
+from .tool_visibility import (
+    _profile_readiness_for_visibility,
+    resolve_tool_visibility,
+)
+from .workspace_scope import exact_scoped_instance_ids
 from .worker_sessions import WorkerSessionStore, worker_session_summary
 
 AGENT_TOPOLOGY_NODE_ID_CAP = 20
@@ -289,9 +294,12 @@ def snapshot_section_bytes(data: dict, key: str) -> int:
         )
     except Exception:
         return 0
-_ARCHIVED_CONVERSATION_SECRET_RE = re.compile(
-    r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|bearer)\s*[:=]\s*\S+"
-)
+# Single-homed in ``agent_runtime.redaction`` — see the header there for the
+# JSON blind spot every local spelling shared. This is the same rule as
+# ``persona_chat_history._SECRET_RE`` (also imported into this module); both now
+# resolve to the one shared object. group(1) is still the key, so the
+# ``f"{m.group(1)}: [redacted]"`` rebuild below is unchanged.
+_ARCHIVED_CONVERSATION_SECRET_RE = TEXT_SECRET_ASSIGNMENT_RE
 
 
 def _runtime_paths_diagnostic(available_personas: list) -> dict:
@@ -346,7 +354,31 @@ _build_coalesce_state: dict = {
 }
 
 
-def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_store=None, incident_store=None, event_log=None, worker_session_store=None) -> dict:
+@contextmanager
+def _timed_section(sink: dict[str, int], key: str):
+    """Accumulate wall time (ms) for a build section into ``sink[key]``.
+
+    Additive/observability only — powers the parity envelope's ``sections_ms``
+    next to ``build_ms``. Accumulates (``+=``) so a section timed across more than
+    one span sums rather than overwrites. Keys are stable and lowercase.
+    """
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        sink[key] = sink.get(key, 0) + int(max(0.0, (time.perf_counter() - start)) * 1000)
+
+
+def build_snapshot(
+    task_store=None,
+    run_store=None,
+    agent_store=None,
+    proof_store=None,
+    incident_store=None,
+    event_log=None,
+    worker_session_store=None,
+    prompt_skills_catalogs=None,
+) -> dict:
     custom_stores = any(
         value is not None
         for value in (
@@ -359,9 +391,12 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
             worker_session_store,
         )
     )
-    if custom_stores:
+    if custom_stores or prompt_skills_catalogs is not None:
         # Injected stores (tests, doctors) must observe exactly their own
         # fixtures — never a coalesced result built from the default stores.
+        # A detail-fetch catalog capture likewise needs the exact build's
+        # transient bodies; the shared result intentionally contains hashes
+        # only, so it cannot satisfy that internal projection request.
         return _build_snapshot_uncoalesced(
             task_store=task_store,
             run_store=run_store,
@@ -370,6 +405,7 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
             incident_store=incident_store,
             event_log=event_log,
             worker_session_store=worker_session_store,
+            prompt_skills_catalogs=prompt_skills_catalogs,
         )
     state = _build_coalesce_state
     with _BUILD_COALESCE:
@@ -412,8 +448,18 @@ def build_snapshot(task_store=None, run_store=None, agent_store=None, proof_stor
             _BUILD_COALESCE.notify_all()
 
 
-def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=None, proof_store=None, incident_store=None, event_log=None, worker_session_store=None) -> dict:
+def _build_snapshot_uncoalesced(
+    task_store=None,
+    run_store=None,
+    agent_store=None,
+    proof_store=None,
+    incident_store=None,
+    event_log=None,
+    worker_session_store=None,
+    prompt_skills_catalogs=None,
+) -> dict:
     _build_started = time.perf_counter()
+    _sections_ms: dict[str, int] = {}
     task_store = task_store or TaskStore()
     run_store = run_store or RunStore()
     agent_store = agent_store or AgentStore()
@@ -422,6 +468,12 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
     # A snapshot calls for_task/for_session/tail dozens of times on the same log;
     # CachedEventLog reads events.jsonl once and serves all of them from memory.
     event_log = event_log or CachedEventLog()
+    # Force + time the one-shot CachedEventLog materialization here (the ~1s
+    # event-log read, measured 2026-07-23) before other consumers warm it, so
+    # ``sections_ms.events`` honestly attributes that cost. ``recent_events`` is
+    # a pure read reused later (build_observability / parity watermark).
+    with _timed_section(_sections_ms, "events"):
+        recent_events = event_log.tail(20)
     worker_session_store = worker_session_store or WorkerSessionStore(event_log=event_log)
     tasks = task_store.list_all()
     runs = run_store.list_all()
@@ -468,14 +520,32 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         (getattr(r, "name", None) for r in realms if getattr(r, "id", None) == realm_store.active_id()),
         None,
     )
-    agent_summaries = [_agent_summary(a, include_tool_details=True) for a in agents]
+    skill_resolver = _SkillObservabilityResolver()
+    with _timed_section(_sections_ms, "agents_readiness"):
+        from .profile_readiness import profile_readiness_for_persona
+
+        readiness_by_persona_id = {
+            str(getattr(agent, "id", "") or ""): profile_readiness_for_persona(
+                agent, skill_resolver=skill_resolver
+            )
+            for agent in agents
+        }
+        agent_summaries = [
+            _agent_summary(
+                agent,
+                include_tool_details=True,
+                readiness=readiness_by_persona_id.get(
+                    str(getattr(agent, "id", "") or "")
+                ),
+            )
+            for agent in agents
+        ]
     available_personas = _available_persona_summary(agents)
     proofs = []
     self_tests = []
     for task in tasks:
         proofs.extend(proof_store.list_for_task(task.id))
         self_tests.extend(SelfTestEvidenceStore(event_log=event_log).list_for_task(task.id))
-    recent_events = event_log.tail(20)
     active_runs = [run for run in runs if run.state in ACTIVE_RUN_STATES]
     active_workers = worker_session_store.find_active()
     running_runs = [run for run in active_runs if run.state == RunState.RUNNING]
@@ -494,7 +564,9 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         topology_persona_instances = persona_instances
         agent_summaries = [
             *agent_summaries,
-            *active_persona_instance_agent_summaries(persona_instances, personas_by_id),
+            *active_persona_instance_agent_summaries(
+                persona_instances, personas_by_id, readiness_by_persona_id
+            ),
         ]
         if persona_assignment_store_enabled(cfg):
             persona_assignments = PersonaAssignmentStore(event_log=event_log).list_all()
@@ -518,6 +590,32 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
     frame_run_rows = [row for row in run_rows if row.get("run_id") in active_run_id_set]
     incident_rows = [_incident_summary(i) for i in incident_frame_rows]
     migration = migration_status()
+    # Hoisted out of the ``data`` literal so their cost is attributable in
+    # ``sections_ms`` (both were profiled hot: prompt_observability ~5s, the
+    # skills-catalog walks inside it; boards/offices are local-only reads).
+    with _timed_section(_sections_ms, "prompt_observability"):
+        prompt_observability_section = snapshot_prompt_observability(
+            personas=agents,
+            persona_instances=persona_instances,
+            session_db=session_db,
+            tasks=tasks,
+            proof_store=proof_store,
+            daemon=None,
+            realm=active_realm_name,
+            workspace=active_workspace_name,
+            active_workspace_id=workspace_store.active_id(),
+            catalog_sink=prompt_skills_catalogs,
+            skill_resolver=skill_resolver,
+        )
+    with _timed_section(_sections_ms, "boards_offices"):
+        boards_section = _keyed(
+            _boards_summary(BoardStore(event_log=event_log), workspaces),
+            "board_id",
+        )
+        offices_section = _keyed(
+            _offices_summary(OfficeStore(event_log=event_log), workspaces),
+            "workspace_id",
+        )
     data = {
         "schema_version": 2,
         "decision_contract_version": CONTRACT_SCHEMA_VERSION,
@@ -552,16 +650,7 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         },
         "runtime_config": effective_config_summary(cfg, migration=migration),
         "migration": migration,
-        "prompt_observability": snapshot_prompt_observability(
-            personas=agents,
-            persona_instances=persona_instances,
-            session_db=session_db,
-            tasks=tasks,
-            proof_store=proof_store,
-            daemon=None,
-            realm=active_realm_name,
-            workspace=active_workspace_name,
-        ),
+        "prompt_observability": prompt_observability_section,
         "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=None, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
         "repo_scopes": _repo_scopes_summary(),
         # S4: ONE keyed ``goals`` map is the wire entity (operator decision:
@@ -608,7 +697,12 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         # ``active_*_id`` keys — consumers (launcher scope switcher) key
         # selection off the row flag and must not re-derive it.
         "workspaces": [
-            _workspace_summary(item, tasks=tasks, active_id=workspace_store.active_id())
+            _workspace_summary(
+                item,
+                tasks=tasks,
+                persona_instances=topology_persona_instances,
+                active_id=workspace_store.active_id(),
+            )
             for item in workspaces
         ],
         "realms": [
@@ -620,18 +714,12 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         # snapshot path (conflict state comes from local sidecar files, never a
         # git call). Cards never carry goal state; a linked_goal_id is resolved
         # against the snapshot's goals at render time on the client.
-        "boards": _keyed(
-            _boards_summary(BoardStore(event_log=event_log), {getattr(w, "id", None) for w in workspaces}),
-            "board_id",
-        ),
+        "boards": boards_section,
         # Mission Office projection: surface defs + bounded actor rows, keyed by
         # workspace. Local reads only — conflict state comes from local sidecar
         # files and the `unpublished` honesty flag from the local baseline
         # sidecar; NEVER a git call in the snapshot path.
-        "offices": _keyed(
-            _offices_summary(OfficeStore(event_log=event_log), workspaces),
-            "workspace_id",
-        ),
+        "offices": offices_section,
         "active_workspace_id": workspace_store.active_id(),
         "active_realm_id": realm_store.active_id(),
         "warnings": _snapshot_warnings(persona_assignments),
@@ -681,7 +769,13 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         # ROW LIST is built first because the identity_map alias resolver derives
         # from the ordered rows; the frame then keys it by ``persona_instance_id``.
         persona_instance_rows = [
-            persona_instance_summary(instance, personas_by_id.get(str(getattr(instance, "persona_id", "") or "")))
+            persona_instance_summary(
+                instance,
+                personas_by_id.get(str(getattr(instance, "persona_id", "") or "")),
+                profile_readiness=readiness_by_persona_id.get(
+                    str(getattr(instance, "persona_id", "") or "")
+                ),
+            )
             for instance in persona_instances
         ]
         # Legacy persona-instance id -> canonical id aliases (durable
@@ -695,12 +789,15 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         # operator_channels conversations (their tail slimming is S4's concern).
         # The FRAME carries recency pointers only (S2) — the tail bytes leave, the
         # anchors stay.
+        _persona_chat_started = time.perf_counter()
+        omitted_history_session_ids: set[str] = set()
         persona_chat_history_full = persona_chat_history_summary(
             persona_instances=persona_instances,
             session_db=session_db,
             message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
             accountant=history_accountant,
             persona_assignments=persona_assignments,
+            omitted_session_ids=omitted_history_session_ids,
         )
         data["persona_chat_history"] = _persona_chat_history_frame(persona_chat_history_full)
         data["persona_chat_trace"] = persona_chat_trace_summary(
@@ -717,6 +814,10 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
             tasks=tasks,
             run_summaries=run_rows,
             accountant=conversation_accountant,
+            intentionally_omitted_history_session_ids=omitted_history_session_ids,
+        )
+        _sections_ms["persona_chat"] = int(
+            max(0.0, (time.perf_counter() - _persona_chat_started)) * 1000
         )
         live_channel_task_ids = {
             str(channel.get("task_id") or "")
@@ -777,6 +878,18 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
     drop_samples.extend(stage_verification_accountant.drop_samples())
     completeness["mission_flow_timeline"] = flow_timeline_accountant.summary()
     drop_samples.extend(flow_timeline_accountant.drop_samples())
+    # Guarantee the documented section keys exist even when a lane was skipped
+    # (e.g. persona_chat when persona-instance runtime is disabled) so consumers
+    # can rely on a stable shape.
+    for _section_key in (
+        "agents_readiness",
+        "prompt_observability",
+        "events",
+        "persona_chat",
+        "boards_offices",
+    ):
+        _sections_ms.setdefault(_section_key, 0)
+    _parity_started = time.perf_counter()
     data["parity"] = _parity_envelope(
         data,
         build_started=_build_started,
@@ -784,11 +897,15 @@ def _build_snapshot_uncoalesced(task_store=None, run_store=None, agent_store=Non
         recent_events=recent_events,
         completeness=completeness,
         drop_samples=drop_samples,
+        sections_ms=_sections_ms,
     )
+    # ``_sections_ms`` is stored by reference in the envelope, so recording the
+    # parity section's own duration after the call is reflected in the frame.
+    _sections_ms["parity"] = int(max(0.0, (time.perf_counter() - _parity_started)) * 1000)
     return data
 
 
-def _parity_envelope(data, *, build_started, last_event, completeness, drop_samples, recent_events=None):
+def _parity_envelope(data, *, build_started, last_event, completeness, drop_samples, recent_events=None, sections_ms=None):
     """The S0 observability envelope: provenance + completeness + parity warnings.
 
     Additive and self-describing — turns the snapshot's silent drops into reported
@@ -837,6 +954,11 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
         "redaction_observed": _redaction_observed(data),
         "build_ms": int(max(0.0, (time.perf_counter() - build_started)) * 1000),
+        # Additive per-section wall-time breakdown (ms) alongside build_ms — a
+        # small, stable, lowercase-keyed dict so a reader can see where a slow
+        # build spent its time. Held BY REFERENCE so the caller can record the
+        # parity section's own duration after this envelope is assembled.
+        "sections_ms": sections_ms if sections_ms is not None else {},
         "snapshot_bytes": _snapshot_payload_size(data),
         "event_log_bytes": int(watermark.get("event_offset") or 0),
         "projection_age_ms": _projection_age_ms(last_ts),
@@ -926,12 +1048,12 @@ def _mask_board_secrets(text) -> str:
     return _ARCHIVED_CONVERSATION_SECRET_RE.sub(lambda m: f"{m.group(1)}: [redacted]", str(text))
 
 
-def _board_card_row(card) -> dict:
+def _board_card_row(card, *, unpublished: bool | None = None) -> dict:
     description = card.description or ""
     truncated = len(description) > BOARD_CARD_DESC_LIMIT
     if truncated:
         description = description[:BOARD_CARD_DESC_LIMIT]
-    return {
+    row = {
         "card_id": card.card_id,
         "board_id": card.board_id,
         "column_id": card.column_id,
@@ -954,6 +1076,11 @@ def _board_card_row(card) -> dict:
         "updated_by": card.updated_by,
         "revision": card.revision,
     }
+    # Publication honesty is only meaningful for realm-bound boards; omit the
+    # flag entirely otherwise (mirrors the office ``unpublished=None`` posture).
+    if unpublished is not None:
+        row["unpublished"] = unpublished
+    return row
 
 
 def _board_conflict_card_ids(board_id: str) -> list[str]:
@@ -966,32 +1093,64 @@ def _board_conflict_card_ids(board_id: str) -> list[str]:
     return sorted(ids)
 
 
-def _boards_summary(board_store, workspace_ids: set) -> list[dict]:
+def _boards_summary(board_store, workspaces) -> list[dict]:
+    """Mission Board projection rows, keyed by board_id. Local reads only:
+    conflict card ids from local sidecar files, ``unpublished`` (per board and
+    per card) from the local realm-sync baseline sidecar — a pure file read, the
+    same Decision-7 posture and baseline machinery ``_offices_summary`` uses."""
+
+    from .board_models import board_content_hash
+    from .board_sync import read_board_baseline
+
+    workspace_ids = {getattr(w, "id", None) for w in workspaces}
+    realm_by_workspace = {getattr(w, "id", None): getattr(w, "realm_id", None) for w in workspaces}
+    baselines: dict[str, dict[str, str]] = {}
     boards: list[dict] = []
     for board in board_store.list_all():
         cards = board_store.list_cards(board.board_id)  # active, (order_key, card_id) sorted
         projected = cards[:MAX_BOARD_CARDS_PROJECTED]
-        boards.append(
-            {
-                "board_id": board.board_id,
-                "workspace_id": board.workspace_id,
-                "title": board.title,
-                "revision": board.revision,
-                "updated_at": to_jsonable(board.updated_at),
-                "columns": [
-                    {"column_id": c.column_id, "title": c.title, "kind": c.kind, "wip_limit": c.wip_limit}
-                    for c in board.columns
-                ],
-                "cards": [_board_card_row(c) for c in projected],
-                "active_card_count": len(cards),
-                "cards_truncated": max(0, len(cards) - len(projected)),
-                "conflict_card_ids": _board_conflict_card_ids(board.board_id),
-                "archived_card_ids": list(board.archived_card_ids),
-                # A board whose workspace no longer resolves is accounted, never
-                # silently hidden (repair via archive) — parity warning below.
-                "orphaned": board.workspace_id not in workspace_ids,
-            }
-        )
+        realm_id = realm_by_workspace.get(board.workspace_id)
+        baseline: dict[str, str] | None = None
+        if realm_id:
+            if realm_id not in baselines:
+                try:
+                    baselines[realm_id] = read_board_baseline(realm_id)
+                except Exception:
+                    baselines[realm_id] = {}
+            baseline = baselines[realm_id]
+
+        def _card_unpublished(card) -> bool | None:
+            # Publication honesty is only meaningful for realm-bound boards.
+            if baseline is None:
+                return None
+            return baseline.get(f"{board.board_id}:card:{card.card_id}") != board_content_hash(card)
+
+        board_unpublished: bool | None = None
+        if baseline is not None:
+            board_unpublished = baseline.get(f"{board.board_id}:board") != board_content_hash(board)
+
+        row = {
+            "board_id": board.board_id,
+            "workspace_id": board.workspace_id,
+            "title": board.title,
+            "revision": board.revision,
+            "updated_at": to_jsonable(board.updated_at),
+            "columns": [
+                {"column_id": c.column_id, "title": c.title, "kind": c.kind, "wip_limit": c.wip_limit}
+                for c in board.columns
+            ],
+            "cards": [_board_card_row(c, unpublished=_card_unpublished(c)) for c in projected],
+            "active_card_count": len(cards),
+            "cards_truncated": max(0, len(cards) - len(projected)),
+            "conflict_card_ids": _board_conflict_card_ids(board.board_id),
+            "archived_card_ids": list(board.archived_card_ids),
+            # A board whose workspace no longer resolves is accounted, never
+            # silently hidden (repair via archive) — parity warning below.
+            "orphaned": board.workspace_id not in workspace_ids,
+        }
+        if board_unpublished is not None:
+            row["unpublished"] = board_unpublished
+        boards.append(row)
     return boards
 
 
@@ -1418,7 +1577,7 @@ def _parity_warnings(data) -> list[dict]:
             }
         )
     try:
-        threshold = int(getattr(load_agent_runtime_config(), "open_incident_warning_threshold", 100))
+        threshold = int(getattr(load_root_runtime_config(), "open_incident_warning_threshold", 100))
     except Exception:
         threshold = 100
     try:
@@ -1538,7 +1697,7 @@ def write_snapshot(snapshot: dict | None = None) -> dict:
         sort_keys=True,
     )
     _sweep_stale_snapshot_tmp_files()
-    cfg = load_agent_runtime_config()
+    cfg = load_root_runtime_config()
     read_model_cfg = getattr(cfg, "read_model", None)
     if bool(getattr(read_model_cfg, "enabled", False)):
         from .read_model import ReadModel
@@ -1549,12 +1708,11 @@ def write_snapshot(snapshot: dict | None = None) -> dict:
 
 
 def _default_persona_session_db():
-    try:
-        from hermes_state import SessionDB
+    # Same acquisition as the projection lane it feeds — see
+    # ``chat_session_scope`` for the resolution ladder.
+    from .chat_session_scope import open_chat_session_db
 
-        return SessionDB()
-    except Exception:
-        return None
+    return open_chat_session_db()
 
 
 def _archived_task_summaries(limit: int = 25) -> list[dict]:
@@ -2718,11 +2876,13 @@ def _stage_verification(task, proofs: list, *, accountant: ProjectionAccountant 
     selected = items[-STAGE_VERIFICATION_STAGE_CAP:]
     if len(items) > len(selected):
         if accountant is not None:
+            # Deliberate bound: the lane keeps the latest N stage rows.
             accountant.drop(
                 "stage_cap",
                 count=len(items) - len(selected),
                 entity_id=getattr(task, "id", None),
                 detail=f"kept latest {STAGE_VERIFICATION_STAGE_CAP} stage verification rows",
+                by_design=True,
             )
             accountant.mark_truncated()
 
@@ -2757,7 +2917,10 @@ def _stage_verification(task, proofs: list, *, accountant: ProjectionAccountant 
         )
         source_diff_truncated = bool(diff.get("truncated"))
         if source_diff_truncated and accountant is not None:
-            accountant.drop("source_diff_truncated", entity_id=stage_id)
+            # Deliberate bound, applied upstream at capture time (the repo-diff
+            # capture is char-capped) and mirrored honestly into the envelope —
+            # the diff is bounded, not lost.
+            accountant.drop("source_diff_truncated", entity_id=stage_id, by_design=True)
             accountant.mark_truncated()
         lane_truncated = observed_truncated or authoritative_truncated or excluded_truncated
         if lane_truncated and accountant is not None:
@@ -2822,11 +2985,24 @@ def _stage_owner_by_id(task) -> dict[str, str]:
 
 
 def _bounded_projection_strings(raw, *, cap: int, accountant: ProjectionAccountant | None, drop_code: str, entity_id: str) -> tuple[list[str], bool]:
+    """Cap a string list and account the overflow.
+
+    Every caller of this helper IS a deliberate cap (proof-id / excluded-path
+    windows), so the drop it records is declared by-design. Do not route an
+    identity/consistency drop through here.
+    """
+
     values = [str(value).strip()[:160] for value in (raw or []) if str(value or "").strip()] if isinstance(raw, list) else []
     if len(values) <= cap:
         return values, False
     if accountant is not None:
-        accountant.drop(drop_code, count=len(values) - cap, entity_id=entity_id, detail=f"kept {cap}")
+        accountant.drop(
+            drop_code,
+            count=len(values) - cap,
+            entity_id=entity_id,
+            detail=f"kept {cap}",
+            by_design=True,
+        )
     return values[:cap], True
 
 
@@ -3008,8 +3184,12 @@ def _agent_tool_detail(agent) -> dict:
         "persona_id": agent.id,
         "display_name": agent.display_name,
         "tool_resolution": tool_resolution,
-        "turn_tool_context": turn_tool_context_for_persona(agent),
-        "permission_state": permission_state_for_persona(agent),
+        "turn_tool_context": turn_tool_context_for_persona(
+            agent, visibility=tool_resolution
+        ),
+        "permission_state": permission_state_for_persona(
+            agent, visibility=tool_resolution
+        ),
         "blocked_tools": tool_resolution["blocked_tools"],
     }
 
@@ -3048,16 +3228,37 @@ def persona_instance_detail_for_id(entity_id: str, *, event_log=None) -> dict | 
     return None
 
 
-def _workspace_summary(workspace, *, tasks, active_id: str | None = None) -> dict:
+def _workspace_summary(
+    workspace,
+    *,
+    tasks,
+    persona_instances=(),
+    active_id: str | None = None,
+) -> dict:
     goals = [task for task in tasks if getattr(task, "workspace_id", None) == workspace.id]
+    roster_agent_ids = list(workspace.agent_ids or [])
+    live_scoped_agent_ids = exact_scoped_instance_ids(
+        persona_instances,
+        workspace_id=workspace.id,
+    )
     return {
         "id": workspace.id,
         "kind": "workspace",
         "name": workspace.name,
         "slug": workspace.slug,
         "realm_id": workspace.realm_id,
-        "agents": len(workspace.agent_ids or []),
-        "agent_ids": list(workspace.agent_ids or []),
+        # Keep the legacy ``agents``/``agent_ids`` pair internally coherent:
+        # both describe exact live rows placed in this workspace.  Emitting
+        # roster persona ids here made pointerless canonical operator rows look
+        # workspace-scoped to older consumers, duplicating each real placement.
+        # Persisted roster metadata remains available under the explicit
+        # ``roster_agent_*`` contract.
+        "agents": len(live_scoped_agent_ids),
+        "agent_ids": live_scoped_agent_ids,
+        "live_scoped_agent_count": len(live_scoped_agent_ids),
+        "live_scoped_agent_ids": live_scoped_agent_ids,
+        "roster_agent_count": len(roster_agent_ids),
+        "roster_agent_ids": roster_agent_ids,
         "goals": len(goals),
         "isolation": workspace.isolation,
         "max_concurrent_lanes": workspace.max_concurrent_lanes,
@@ -3713,11 +3914,14 @@ def _mission_flow_timeline(task, events, *, accountant: ProjectionAccountant | N
     if accountant is not None:
         accountant.include(len(selected))
         if evicted:
+            # Deliberate bound: the front window is kept and the evicted tail is
+            # disclosed with a typed fetch pointer below.
             accountant.drop(
                 "flow_item_cap",
                 count=evicted,
                 entity_id=getattr(task, "id", None),
                 detail=f"kept front {MISSION_FLOW_TIMELINE_ITEM_CAP} flow items",
+                by_design=True,
             )
             accountant.mark_truncated()
     result = {
@@ -4010,7 +4214,7 @@ def _run_blocked_reason(task, active_runs, open_incidents, *, run_store=None) ->
         return "mission is terminal"
     if open_incidents:
         runs = run_store or RunStore()
-        cfg = load_agent_runtime_config()
+        cfg = load_root_runtime_config()
         if any(budget_incident_needs_scope_recovery(incident, runs) for incident in open_incidents):
             return "Dev exhausted read/search without patch or proof; Neko must split or narrow the stage before retry"
         if any(budget_incident_can_continue(incident, runs, cap=cfg.neko_extension_cap) for incident in open_incidents):
@@ -4026,7 +4230,7 @@ def _run_blocked_reason(task, active_runs, open_incidents, *, run_store=None) ->
 def _next_action_summary(task, open_incidents, *, run_store=None, event_log=None):
     if open_incidents:
         runs = run_store or RunStore()
-        cfg = load_agent_runtime_config()
+        cfg = load_root_runtime_config()
         if any(budget_incident_needs_scope_recovery(incident, runs) for incident in open_incidents):
             return {**_stopped_progress(task, open_incidents, "self_heal_pending", "neko_supervisor"), "action": "run_slot", "reason": "Dev exhausted read/search without patch or proof; Neko must split or narrow the stage before retry"}
         if any(budget_incident_can_continue(incident, runs, cap=cfg.neko_extension_cap) for incident in open_incidents):
@@ -4036,7 +4240,7 @@ def _next_action_summary(task, open_incidents, *, run_store=None, event_log=None
         return {**_stopped_progress(task, open_incidents, reason, "human"), "action": "blocked_by_incident", "reason": message}
     if task.state in {TaskState.DONE, TaskState.CANCELLED}:
         return {**_stopped_progress(task, [], "settled", "harness"), "action": "terminal", "reason": "mission is terminal"}
-    cfg = load_agent_runtime_config()
+    cfg = load_root_runtime_config()
     action = MissionStateMachine(config=cfg, event_log=event_log).next_action(task)
     reason = "settled" if action.type.value == "noop" else "retry_authorized" if "retry" in action.reason else "self_heal_pending" if "Neko" in action.reason else "waiting_for_preflight"
     return {**_stopped_progress(task, [], reason, _owner_for_action(action, task=task, run_store=run_store)), "action": action.type.value, "reason": action.reason}
@@ -4356,9 +4560,15 @@ def _event_display_title(event_type: str, payload: dict, kind: str) -> str:
     return event_type
 
 
-def _agent_summary(agent, *, include_tool_details: bool = False):
-    readiness = profile_readiness_for_persona(agent)
-    tool_resolution = resolve_tool_visibility(agent)
+def _agent_summary(agent, *, include_tool_details: bool = False, readiness=None):
+    # Route through the same TTL-memoized readiness resolve_tool_visibility uses
+    # (below) instead of a direct profile_readiness_for_persona call, so one build
+    # computes readiness at most once per agent instead of twice. Identical result
+    # for this path: readiness is task/stage-independent here, and the memo shares
+    # the exact inputs (id/profile/skills/mcp/provider/model/api_mode).
+    if readiness is None:
+        readiness = _profile_readiness_for_visibility(agent)
+    tool_resolution = resolve_tool_visibility(agent, profile_readiness=readiness)
     summary = {
         "persona_id": agent.id,
         "display_name": agent.display_name,

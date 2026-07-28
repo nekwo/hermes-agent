@@ -146,8 +146,8 @@ def _lock_timeout_seconds(value: float | None) -> float:
         except (TypeError, ValueError):
             return 15.0
     try:
-        from .config import load_agent_runtime_config
+        from .config import load_root_runtime_config
 
-        return max(0.01, float(getattr(load_agent_runtime_config(), "lock_acquire_timeout_seconds", 15) or 15))
+        return max(0.01, float(getattr(load_root_runtime_config(), "lock_acquire_timeout_seconds", 15) or 15))
     except Exception:
         return 15.0
