@@ -1,4 +1,5 @@
 import argparse
+import ast
 import json
 import os
 import subprocess
@@ -712,10 +713,363 @@ def _stage42_lane_sources():
 
     root = Path(__file__).resolve().parents[2]
     yield root / "hermes_cli" / "harness.py"
-    for directory in (root / "hermes_cli" / "harness_parts", root / "agent_runtime"):
-        for path in sorted(directory.rglob("*.py")):
-            if "__pycache__" not in path.parts:
-                yield path
+    parts = root / "hermes_cli" / "harness_parts"
+    for filename in (
+        "persona_commands.py",
+        "runtime_commands.py",
+        "board.py",
+        "office.py",
+        "flow_commands.py",
+        "checkpoint_commands.py",
+    ):
+        yield parts / filename
+
+
+def _stage42_source_module(path: Path) -> str:
+    # These files are compiled into hermes_cli.harness globals in this exact
+    # order by _load_command_parts; they are not independent Python modules.
+    if path.parent.name == "harness_parts" or path.name == "harness.py":
+        return "hermes_cli.harness"
+    return ".".join(path.with_suffix("").parts[-2:])
+
+
+def _argument_dest(call: ast.Call) -> str | None:
+    explicit = next((kw.value for kw in call.keywords if kw.arg == "dest"), None)
+    if isinstance(explicit, ast.Constant) and isinstance(explicit.value, str):
+        return explicit.value
+    flags = [arg.value for arg in call.args if isinstance(arg, ast.Constant) and isinstance(arg.value, str)]
+    option = next((flag for flag in reversed(flags) if flag.startswith("--")), None)
+    return option[2:].replace("-", "_") if option else None
+
+
+_FunctionId = tuple[str, str]
+_STAGE42_SHARED_CONSUMERS: dict[str, _FunctionId] = {
+    "output": ("hermes_cli.harness", "_print_stage42"),
+    "json": ("hermes_cli.harness", "_print_stage42"),
+    "quiet": ("hermes_cli.harness", "_print_stage42"),
+    "fields": ("hermes_cli.harness", "_print_stage42"),
+    "yes": ("hermes_cli.harness", "_require_yes"),
+    "dry_run": ("hermes_cli.harness", "_require_yes"),
+}
+_STAGE42_DESTINATION_OWNERS: dict[str, _FunctionId] = {
+    **_STAGE42_SHARED_CONSUMERS,
+    "sort": ("hermes_cli.harness", "_cmd_goal_list"),
+    "limit": ("hermes_cli.harness", "_cmd_goal_list"),
+    "cursor": ("hermes_cli.harness", "_cmd_goal_list"),
+    "since": ("hermes_cli.harness", "_cmd_goal_history"),
+    "idempotency_key": ("hermes_cli.harness", "_cmd_goal_create"),
+}
+
+
+def _stage42_handlers(*names: str) -> set[_FunctionId]:
+    return {("hermes_cli.harness", name) for name in names}
+
+
+# Independent semantic applicability contract. This is deliberately data, not
+# a projection of the AST reader graph: changing a handler read cannot add or
+# remove an obligation. The envelope category is the bounded set of commands
+# whose result is emitted through the Stage 42 envelope; confirmation is the
+# bounded set of destructive commands sharing _require_yes. Domain controls
+# name the one parser path whose promise they currently implement.
+_STAGE42_ENVELOPE_HANDLERS = _stage42_handlers(
+    "_cmd_agent_list", "_cmd_agent_set_profile", "_cmd_board_card_add",
+    "_cmd_board_card_archive", "_cmd_board_card_edit", "_cmd_board_card_move",
+    "_cmd_board_card_restore", "_cmd_board_create", "_cmd_board_escalate",
+    "_cmd_board_list", "_cmd_board_resolve_conflict", "_cmd_board_show",
+    "_cmd_board_update", "_cmd_goal_archive", "_cmd_goal_cancel",
+    "_cmd_goal_create", "_cmd_goal_history", "_cmd_goal_list", "_cmd_goal_run",
+    "_cmd_goal_show", "_cmd_goal_unblock", "_cmd_lane_list", "_cmd_lane_show",
+    "_cmd_mission_chat_clarify_tickets", "_cmd_office_actor_remove",
+    "_cmd_office_actor_restore", "_cmd_office_actor_upsert",
+    "_cmd_office_resolve_conflict", "_cmd_office_set_folders", "_cmd_office_show",
+    "_cmd_realm_adopt", "_cmd_realm_agents_set", "_cmd_realm_agents_show",
+    "_cmd_realm_bind_server", "_cmd_realm_create", "_cmd_realm_list",
+    "_cmd_realm_show", "_cmd_realm_skills_set", "_cmd_realm_skills_show",
+    "_cmd_realm_sync_held", "_cmd_realm_sync_publish", "_cmd_realm_sync_pull",
+    "_cmd_realm_sync_resolve", "_cmd_realm_sync_status", "_cmd_realm_use",
+    "_cmd_roots_list", "_cmd_roots_migrate", "_cmd_roots_set", "_cmd_roots_unset",
+    "_cmd_skills_inbox", "_cmd_skills_promote", "_cmd_skills_publishable",
+    "_cmd_worker_list", "_cmd_worker_show", "_cmd_workspace_actors",
+    "_cmd_workspace_add_agent", "_cmd_workspace_archive", "_cmd_workspace_create",
+    "_cmd_workspace_delete", "_cmd_workspace_list", "_cmd_workspace_remove_agent",
+    "_cmd_workspace_rename", "_cmd_workspace_show", "_cmd_workspace_use",
+)
+_STAGE42_CONFIRMATION_HANDLERS = _stage42_handlers(
+    "_cmd_goal_archive", "_cmd_goal_cancel", "_cmd_realm_sync_publish",
+    "_cmd_realm_sync_resolve", "_cmd_roots_migrate", "_cmd_workspace_archive",
+    "_cmd_workspace_delete", "_cmd_workspace_remove_agent",
+)
+_STAGE42_HANDLER_SCOPES: dict[str, set[_FunctionId]] = {
+    **{dest: set(_STAGE42_ENVELOPE_HANDLERS) for dest in ("output", "json", "quiet", "fields")},
+    **{dest: set(_STAGE42_CONFIRMATION_HANDLERS) for dest in ("yes", "dry_run")},
+    "sort": _stage42_handlers("_cmd_goal_list"),
+    "limit": _stage42_handlers("_cmd_goal_list"),
+    "cursor": _stage42_handlers("_cmd_goal_list"),
+    "since": _stage42_handlers("_cmd_goal_history"),
+    "idempotency_key": _stage42_handlers("_cmd_goal_create"),
+}
+
+# Local --json registrations predate Stage 42 and are the identical store_true
+# alias, not a second semantic flag. Non-json local replacements must be named
+# exactly here; adding a same-spelled option no longer silently erases evidence.
+_STAGE42_DELIBERATE_LOCAL_OVERRIDES: dict[tuple[_FunctionId, str], str] = {
+    (("hermes_cli.harness", "_cmd_goal_history"), "limit"): "typed history page size",
+}
+
+
+def _stage42_parser_ownership(
+    source: str,
+    common_dests: set[str],
+    mutation_dests: set[str],
+):
+    """Return each Stage 42 handler's flags and per-verb destination collisions."""
+
+    tree = ast.parse(source)
+    build = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "build_parser")
+    registrations: dict[str, set[str]] = {}
+    local_dests: dict[str, set[str]] = {}
+    equivalent_local_overrides: dict[str, set[str]] = {}
+    handlers: dict[str, str] = {}
+    for node in ast.walk(build):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute) or not isinstance(node.func.value, ast.Name):
+            continue
+        parser_name = node.func.value.id
+        if node.func.attr == "add_argument":
+            dest = _argument_dest(node)
+            if dest:
+                local_dests.setdefault(parser_name, set()).add(dest)
+                options = {
+                    arg.value
+                    for arg in node.args
+                    if isinstance(arg, ast.Constant)
+                    and isinstance(arg.value, str)
+                    and arg.value.startswith("-")
+                }
+                action = next((kw.value for kw in node.keywords if kw.arg == "action"), None)
+                if (
+                    dest == "json"
+                    and options == {"--json"}
+                    and isinstance(action, ast.Constant)
+                    and action.value == "store_true"
+                ):
+                    equivalent_local_overrides.setdefault(parser_name, set()).add(dest)
+        elif node.func.attr == "set_defaults":
+            func = next((kw.value for kw in node.keywords if kw.arg == "func"), None)
+            if isinstance(func, ast.Name):
+                handlers[parser_name] = func.id
+    for node in ast.walk(build):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name) or node.func.id != "_add_stage42_global_args":
+            continue
+        if not node.args or not isinstance(node.args[0], ast.Name):
+            continue
+        mutation = any(kw.arg == "mutation" and isinstance(kw.value, ast.Constant) and kw.value.value is True for kw in node.keywords)
+        parser_name = node.args[0].id
+        candidates = mutation_dests if mutation else common_dests
+        registrations[parser_name] = set(candidates)
+
+    return [
+        (
+            ("hermes_cli.harness", handlers[parser_name]),
+            set(owned_dests),
+            (owned_dests & local_dests.get(parser_name, set()))
+            - equivalent_local_overrides.get(parser_name, set()),
+        )
+        for parser_name, owned_dests in registrations.items()
+        if parser_name in handlers
+    ]
+
+
+class _Stage42FunctionVisitor(ast.NodeVisitor):
+    """Collect one function body without crediting nested definitions."""
+
+    def __init__(self, module: str, qualname: str) -> None:
+        self.module = module
+        self.qualname = qualname
+        self.reads: set[str] = set()
+        self.calls: set[_FunctionId] = set()
+
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+        return
+
+    visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_ClassDef(self, node: ast.ClassDef) -> None:
+        return
+
+    def visit_Attribute(self, node: ast.Attribute) -> None:
+        if isinstance(node.value, ast.Name) and node.value.id == "args":
+            self.reads.add(node.attr)
+        self.generic_visit(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "getattr"
+            and len(node.args) >= 2
+            and isinstance(node.args[0], ast.Name)
+            and node.args[0].id == "args"
+            and isinstance(node.args[1], ast.Constant)
+            and isinstance(node.args[1].value, str)
+        ):
+            self.reads.add(node.args[1].value)
+        if isinstance(node.func, ast.Name):
+            self.calls.add((self.module, node.func.id))
+        elif isinstance(node.func, ast.Attribute) and isinstance(node.func.value, ast.Name):
+            owner = node.func.value.id
+            if owner == "self" and "." in self.qualname:
+                self.calls.add((self.module, f"{self.qualname.rsplit('.', 1)[0]}.{node.func.attr}"))
+            else:
+                self.calls.add((owner, node.func.attr))
+        self.generic_visit(node)
+
+
+def _stage42_function_facts(sources: list[tuple[str, str]]):
+    reads: dict[_FunctionId, set[str]] = {}
+    calls: dict[_FunctionId, set[_FunctionId]] = {}
+
+    def collect(module: str, node: ast.FunctionDef | ast.AsyncFunctionDef, prefix: str = "") -> None:
+        qualname = f"{prefix}.{node.name}" if prefix else node.name
+        visitor = _Stage42FunctionVisitor(module, qualname)
+        for statement in node.body:
+            visitor.visit(statement)
+        identity = (module, qualname)
+        reads[identity] = visitor.reads
+        calls[identity] = visitor.calls
+        for statement in node.body:
+            if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                collect(module, statement, qualname)
+            elif isinstance(statement, ast.ClassDef):
+                for member in statement.body:
+                    if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        collect(module, member, f"{qualname}.{statement.name}")
+
+    for module, source in sources:
+        tree = ast.parse(source)
+        for node in tree.body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                collect(module, node)
+            elif isinstance(node, ast.ClassDef):
+                for member in node.body:
+                    if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        collect(module, member, node.name)
+    return reads, calls
+
+
+def _stage42_unhonored_registrations(
+    registrations: list[tuple[_FunctionId, set[str], set[str]]],
+    *,
+    reads: dict[_FunctionId, set[str]],
+    calls: dict[_FunctionId, set[_FunctionId]],
+    required_consumers: dict[str, _FunctionId] | None = None,
+) -> list[tuple[_FunctionId, str]]:
+    unhonored: list[tuple[_FunctionId, str]] = []
+    for handler, dests, collisions in registrations:
+        reachable = {handler}
+        pending = [handler]
+        while pending:
+            for callee in calls.get(pending.pop(), set()):
+                if callee in reads and callee not in reachable:
+                    reachable.add(callee)
+                    pending.append(callee)
+        for dest in dests:
+            if dest in _STAGE42_SATISFIED_BY_CONSTRUCTION:
+                continue
+            if dest in collisions:
+                unhonored.append((handler, dest))
+                continue
+            consumer = (required_consumers or {}).get(dest)
+            if consumer is not None:
+                honored = consumer in reachable and dest in reads.get(consumer, set())
+            else:
+                honored = any(dest in reads.get(function, set()) for function in reachable)
+            if not honored:
+                unhonored.append((handler, dest))
+    return sorted(unhonored)
+
+
+def _stage42_reachable(
+    handler: _FunctionId,
+    reads: dict[_FunctionId, set[str]],
+    calls: dict[_FunctionId, set[_FunctionId]],
+) -> set[_FunctionId]:
+    reachable = {handler}
+    pending = [handler]
+    while pending:
+        for callee in calls.get(pending.pop(), set()):
+            if callee in reads and callee not in reachable:
+                reachable.add(callee)
+                pending.append(callee)
+    return reachable
+
+
+def _stage42_shared_scope_drift(
+    registrations: list[tuple[_FunctionId, set[str], set[str]]],
+    reads: dict[_FunctionId, set[str]],
+    calls: dict[_FunctionId, set[_FunctionId]],
+    *,
+    envelope_scope: set[_FunctionId] = _STAGE42_ENVELOPE_HANDLERS,
+    confirmation_scope: set[_FunctionId] = _STAGE42_CONFIRMATION_HANDLERS,
+) -> dict[str, tuple[set[_FunctionId], set[_FunctionId]]]:
+    """Compare maintained shared scopes with reality; never create scope."""
+
+    envelope_owner = _STAGE42_DESTINATION_OWNERS["output"]
+    confirmation_owner = _STAGE42_DESTINATION_OWNERS["yes"]
+    observed_envelope = {
+        handler
+        for handler, dests, _ in registrations
+        if "output" in dests and envelope_owner in _stage42_reachable(handler, reads, calls)
+    }
+    observed_confirmation = {
+        handler
+        for handler, dests, _ in registrations
+        if "yes" in dests and confirmation_owner in _stage42_reachable(handler, reads, calls)
+    }
+    return {
+        "envelope": (observed_envelope - envelope_scope, envelope_scope - observed_envelope),
+        "confirmation": (
+            observed_confirmation - confirmation_scope,
+            confirmation_scope - observed_confirmation,
+        ),
+    }
+
+
+def _stage42_applicable_registrations(
+    registrations: list[tuple[_FunctionId, set[str], set[str]]],
+    all_dests: set[str],
+    *,
+    owners: dict[str, _FunctionId] = _STAGE42_DESTINATION_OWNERS,
+    handler_scope: dict[str, set[_FunctionId]] | None = None,
+    allowed_local_overrides: dict[tuple[_FunctionId, str], str] = _STAGE42_DELIBERATE_LOCAL_OVERRIDES,
+) -> list[tuple[_FunctionId, set[str], set[str]]]:
+    """Project the maintained ownership contract; never infer it from reads."""
+
+    applicable: list[tuple[_FunctionId, set[str], set[str]]] = []
+    registered_by_dest = {
+        dest: {handler for handler, dests, _ in registrations if dest in dests}
+        for dest in all_dests
+    }
+    for dest in all_dests:
+        if dest in _STAGE42_SATISFIED_BY_CONSTRUCTION:
+            continue
+        scoped_handlers = (handler_scope or {}).get(dest)
+        if scoped_handlers is not None:
+            for handler in scoped_handlers:
+                identity = (
+                    handler
+                    if handler in registered_by_dest[dest]
+                    else ("stage42", f"<unregistered:{handler}>")
+                )
+                applicable.append((identity, {dest}, set()))
+        elif dest in owners:
+            applicable.append((owners[dest], {dest}, set()))
+        else:
+            applicable.append((('stage42', '<missing-owner>'), {dest}, set()))
+
+    for handler, registered_dests, collisions in registrations:
+        for dest in registered_dests & collisions:
+            if (handler, dest) not in allowed_local_overrides:
+                applicable.append((handler, {dest}, {dest}))
+    return applicable
 
 
 def test_every_stage42_global_flag_is_honored():
@@ -727,31 +1081,320 @@ def test_every_stage42_global_flag_is_honored():
     `--filter` specifically, it was that nothing connected ADVERTISING a flag
     to HONORING it, so the two could drift silently and did, twice."""
 
-    import re
-
     from hermes_cli.harness import _add_stage42_global_args
 
-    probe = argparse.ArgumentParser()
-    _add_stage42_global_args(probe, mutation=True)
-    dests = sorted(
+    common_probe = argparse.ArgumentParser()
+    _add_stage42_global_args(common_probe)
+    common_dests = {
         action.dest
-        for action in probe._actions
+        for action in common_probe._actions
         if action.dest not in ("help", argparse.SUPPRESS)
-    )
-    assert "output" in dests and "dry_run" in dests, "the probe stopped seeing the flags"
+    }
+    mutation_probe = argparse.ArgumentParser()
+    _add_stage42_global_args(mutation_probe, mutation=True)
+    mutation_dests = {
+        action.dest
+        for action in mutation_probe._actions
+        if action.dest not in ("help", argparse.SUPPRESS)
+    }
+    assert "output" in common_dests and "dry_run" in mutation_dests, "the probe stopped seeing the flags"
 
-    lane = "\n".join(path.read_text(encoding="utf-8") for path in _stage42_lane_sources())
-    unhonored = [
-        dest
-        for dest in dests
-        if dest not in _STAGE42_SATISFIED_BY_CONSTRUCTION
-        and not re.search(rf"args\.{dest}\b|args,\s*[\"']{dest}[\"']", lane)
-    ]
+    paths = list(_stage42_lane_sources())
+    sources = [(_stage42_source_module(path), path.read_text(encoding="utf-8")) for path in paths]
+    registrations = _stage42_parser_ownership(
+        sources[0][1],
+        common_dests,
+        mutation_dests,
+    )
+    reads, calls = _stage42_function_facts(sources)
+    assert _stage42_shared_scope_drift(registrations, reads, calls) == {
+        "envelope": (set(), set()),
+        "confirmation": (set(), set()),
+    }, "maintained Stage 42 shared-handler scopes drifted from registered reachability"
+    applicable = _stage42_applicable_registrations(
+        registrations,
+        mutation_dests,
+        handler_scope=_STAGE42_HANDLER_SCOPES,
+    )
+    unhonored = _stage42_unhonored_registrations(
+        applicable,
+        reads=reads,
+        calls=calls,
+        required_consumers=_STAGE42_DESTINATION_OWNERS,
+    )
 
     assert unhonored == [], (
-        "these stage42 global flags are advertised on every verb and read by "
-        f"nothing — wire them or stop registering them: {unhonored}"
+        "these stage42 global flags are advertised on every verb without an "
+        f"owning consumer — wire them or stop registering them: {unhonored}"
     )
+
+
+def test_stage42_honored_gate_rejects_a_per_verb_destination_collision():
+    module = "fixture.cli"
+    reads = {
+        (module, "global_handler"): {"output"},
+        (module, "local_handler"): {"cursor"},
+        (module, "shared_output"): {"quiet"},
+    }
+    calls = {
+        (module, "global_handler"): {(module, "shared_output")},
+        (module, "local_handler"): set(),
+        (module, "shared_output"): set(),
+    }
+
+    old_unhonored = sorted(
+        dest
+        for dest in {"output", "quiet", "cursor", "no_color"}
+        if dest not in _STAGE42_SATISFIED_BY_CONSTRUCTION
+        and not any(dest in function_reads for function_reads in reads.values())
+    )
+    assert old_unhonored == [], "the fixture must reproduce the old whole-lane false pass"
+
+    assert _stage42_unhonored_registrations(
+        [
+            ((module, "global_handler"), {"output", "quiet", "no_color"}, set()),
+            ((module, "local_handler"), {"cursor"}, {"cursor"}),
+        ],
+        reads=reads,
+        calls=calls,
+    ) == [((module, "local_handler"), "cursor")]
+
+
+def test_stage42_honored_gate_requires_each_registered_handler_to_consume():
+    module = "hermes_cli.harness"
+    handler_one = (module, "handler_one")
+    handler_two = (module, "handler_two")
+    registrations = _stage42_parser_ownership(
+        """
+def build_parser():
+    one = subs.add_parser('one')
+    _add_stage42_global_args(one)
+    one.set_defaults(func=handler_one)
+    two = subs.add_parser('two')
+    _add_stage42_global_args(two)
+    two.set_defaults(func=handler_two)
+""",
+        {"limit"},
+        {"limit"},
+    )
+    applicable = _stage42_applicable_registrations(
+        registrations,
+        {"limit"},
+        owners={},
+        handler_scope={"limit": {handler_one, handler_two}},
+    )
+    assert _stage42_unhonored_registrations(
+        applicable,
+        reads={handler_one: {"limit"}, handler_two: set()},
+        calls={handler_one: set(), handler_two: set()},
+        required_consumers={"limit": handler_one},
+    ) == [(handler_two, "limit")]
+
+
+def test_stage42_honored_gate_rejects_a_same_option_local_reregistration():
+    module = "hermes_cli.harness"
+    handler = (module, "handler")
+    registrations = _stage42_parser_ownership(
+        """
+def build_parser():
+    command = subs.add_parser('command')
+    command.add_argument('--limit', type=int, default=7)
+    _add_stage42_global_args(command)
+    command.set_defaults(func=handler)
+""",
+        {"limit"},
+        {"limit"},
+    )
+    applicable = _stage42_applicable_registrations(
+        registrations,
+        {"limit"},
+        owners={"limit": handler},
+        allowed_local_overrides={},
+    )
+    assert _stage42_unhonored_registrations(
+        applicable,
+        reads={handler: {"limit"}},
+        calls={handler: set()},
+        required_consumers={"limit": handler},
+    ) == [(handler, "limit")]
+
+
+def test_stage42_honored_gate_does_not_merge_duplicate_helpers_across_modules():
+    handler = ("fixture.cli", "handler")
+    local_helper = ("fixture.cli", "consume")
+    unrelated_helper = ("fixture.other", "consume")
+    assert _stage42_unhonored_registrations(
+        [(handler, {"since"}, set())],
+        reads={handler: set(), local_helper: set(), unrelated_helper: {"since"}},
+        calls={handler: {local_helper}, local_helper: set(), unrelated_helper: set()},
+    ) == [(handler, "since")]
+
+
+def test_stage42_honored_gate_does_not_derive_ownership_from_an_unrelated_leaf_read():
+    module = "hermes_cli.harness"
+    handler = (module, "handler")
+    designated = (module, "designated_cursor_owner")
+    registrations = _stage42_parser_ownership(
+        """
+def build_parser():
+    command = subs.add_parser('command')
+    _add_stage42_global_args(command)
+    command.set_defaults(func=handler)
+""",
+        {"cursor"},
+        {"cursor"},
+    )
+    applicable = _stage42_applicable_registrations(
+        registrations,
+        {"cursor"},
+        owners={"cursor": designated},
+    )
+    assert _stage42_unhonored_registrations(
+        applicable,
+        reads={handler: {"cursor"}, designated: set()},
+        calls={handler: set(), designated: set()},
+        required_consumers={"cursor": designated},
+    ) == [(designated, "cursor")]
+
+
+def test_stage42_honored_gate_ignores_uncalled_nested_readers():
+    reads, calls = _stage42_function_facts(
+        [
+            (
+                "fixture.cli",
+                """
+def handler(args):
+    def hidden():
+        return args.cursor
+    return 0
+""",
+            )
+        ]
+    )
+    handler = ("fixture.cli", "handler")
+    assert reads[handler] == set()
+    assert _stage42_unhonored_registrations(
+        [(handler, {"cursor"}, set())],
+        reads=reads,
+        calls=calls,
+    ) == [(handler, "cursor")]
+
+
+def test_stage42_honored_gate_accepts_a_supported_qualified_shared_consumer():
+    reads, calls = _stage42_function_facts(
+        [
+            (
+                "hermes_cli.harness",
+                """
+def handler_one(args):
+    return shared.consume(args)
+
+def handler_two(args):
+    return shared.consume(args)
+""",
+            ),
+            ("shared", "def consume(args):\n    return args.output\n"),
+        ]
+    )
+    handler_one = ("hermes_cli.harness", "handler_one")
+    handler_two = ("hermes_cli.harness", "handler_two")
+    registrations = _stage42_parser_ownership(
+        """
+def build_parser():
+    one = subs.add_parser('one')
+    _add_stage42_global_args(one)
+    one.set_defaults(func=handler_one)
+    two = subs.add_parser('two')
+    _add_stage42_global_args(two)
+    two.set_defaults(func=handler_two)
+""",
+        {"output"},
+        {"output"},
+    )
+    applicable = _stage42_applicable_registrations(
+        registrations,
+        {"output", "no_color"},
+        owners={},
+        handler_scope={"output": {handler_one, handler_two}},
+    )
+    assert _stage42_unhonored_registrations(
+        applicable,
+        reads=reads,
+        calls=calls,
+        required_consumers={"output": ("shared", "consume")},
+    ) == []
+
+
+def test_stage42_envelope_scope_completeness_rejects_an_omitted_new_handler():
+    handler = ("hermes_cli.harness", "new_envelope_handler")
+    registrations = _stage42_parser_ownership(
+        """
+def build_parser():
+    command = subs.add_parser('new')
+    _add_stage42_global_args(command)
+    command.set_defaults(func=new_envelope_handler)
+""",
+        {"output"},
+        {"output", "yes"},
+    )
+    reads, calls = _stage42_function_facts(
+        [
+            (
+                "hermes_cli.harness",
+                """
+def new_envelope_handler(args):
+    return _print_stage42({}, args=args)
+
+def _print_stage42(data, *, args):
+    return args.output
+""",
+            )
+        ]
+    )
+    drift = _stage42_shared_scope_drift(
+        registrations,
+        reads,
+        calls,
+        envelope_scope=set(),
+        confirmation_scope=set(),
+    )
+    assert drift["envelope"] == ({handler}, set())
+
+
+def test_stage42_confirmation_scope_completeness_rejects_an_omitted_new_handler():
+    handler = ("hermes_cli.harness", "new_confirmation_handler")
+    registrations = _stage42_parser_ownership(
+        """
+def build_parser():
+    command = subs.add_parser('new')
+    _add_stage42_global_args(command, mutation=True)
+    command.set_defaults(func=new_confirmation_handler)
+""",
+        {"output"},
+        {"output", "yes", "dry_run"},
+    )
+    reads, calls = _stage42_function_facts(
+        [
+            (
+                "hermes_cli.harness",
+                """
+def new_confirmation_handler(args):
+    return _require_yes(args)
+
+def _require_yes(args):
+    return args.yes or args.dry_run
+""",
+            )
+        ]
+    )
+    drift = _stage42_shared_scope_drift(
+        registrations,
+        reads,
+        calls,
+        envelope_scope=set(),
+        confirmation_scope=set(),
+    )
+    assert drift["confirmation"] == ({handler}, set())
 
 
 def test_a_stage42_flag_nothing_implements_is_refused_not_swallowed():
