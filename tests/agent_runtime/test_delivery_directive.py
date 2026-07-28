@@ -347,6 +347,18 @@ def test_reap_orphan_worktrees_dry_run_is_a_write_free_typed_preview(
     os.utime(orphan, (old, old))
     event_log = EventLog()
     events_before = event_log.tail(100)
+    status_before = subprocess.run(
+        ["git", "status", "--porcelain=v1", "-z"],
+        cwd=orphan,
+        stdout=subprocess.PIPE,
+        check=True,
+    ).stdout
+    index_before = subprocess.run(
+        ["git", "diff", "--cached", "--binary", "HEAD"],
+        cwd=orphan,
+        stdout=subprocess.PIPE,
+        check=True,
+    ).stdout
 
     result = reap_orphan_worktrees(
         min_age_seconds=3600, event_log=event_log, dry_run=True
@@ -366,3 +378,17 @@ def test_reap_orphan_worktrees_dry_run_is_a_write_free_typed_preview(
     assert orphan.exists(), "dry-run must not remove the candidate worktree"
     assert not Path(result["capture_dir"]).exists(), "dry-run must not write patches"
     assert event_log.tail(100) == events_before, "dry-run must not emit reap events"
+    status_after = subprocess.run(
+        ["git", "status", "--porcelain=v1", "-z"],
+        cwd=orphan,
+        stdout=subprocess.PIPE,
+        check=True,
+    ).stdout
+    index_after = subprocess.run(
+        ["git", "diff", "--cached", "--binary", "HEAD"],
+        cwd=orphan,
+        stdout=subprocess.PIPE,
+        check=True,
+    ).stdout
+    assert status_after == status_before, "dry-run must preserve tracked and untracked status bytes"
+    assert index_after == index_before, "dry-run must not add intent-to-add index entries"

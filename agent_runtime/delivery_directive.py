@@ -37,6 +37,7 @@ from .repo_context import (
     existing_run_worktrees,
     remove_harness_worktree_for_repo,
     resolve_affected_repo_workdir,
+    worktree_patch_size_estimate,
     worktree_patch_text,
 )
 from .states import TaskState
@@ -459,14 +460,16 @@ def reap_orphan_worktrees(
             else:
                 kept.append({**entry, "reason": "not_a_git_worktree_with_files"})
             continue
+        if dry_run:
+            patch_bytes_estimate = worktree_patch_size_estimate(worktree)
+            if patch_bytes_estimate > 0:
+                entry["would_capture_patch"] = True
+                entry["patch_bytes_estimate"] = patch_bytes_estimate
+            entry["dry_run"] = True
+            reaped.append(entry)
+            continue
         patch = worktree_patch_text(worktree)
         if patch.strip():
-            if dry_run:
-                entry["would_capture_patch"] = True
-                entry["patch_bytes_estimate"] = len(patch.encode("utf-8", errors="replace"))
-                entry["dry_run"] = True
-                reaped.append(entry)
-                continue
             capture_dir.mkdir(parents=True, exist_ok=True)
             capture_path = capture_dir / f"{worktree.name}.patch"
             try:
@@ -476,9 +479,7 @@ def reap_orphan_worktrees(
                 continue
             entry["captured_patch"] = capture_path.name
             entry["patch_bytes"] = capture_path.stat().st_size
-        if dry_run:
-            reaped.append({**entry, "dry_run": True})
-        elif remove_orphan_worktree(worktree, reason="orphan_reap"):
+        if remove_orphan_worktree(worktree, reason="orphan_reap"):
             reaped.append(entry)
         else:
             kept.append({**entry, "reason": "remove_failed"})

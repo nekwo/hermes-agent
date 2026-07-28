@@ -424,6 +424,53 @@ def worktree_patch_text(worktree: Path, *, include_untracked: bool = True, timeo
     return text
 
 
+def worktree_patch_size_estimate(worktree: Path, *, timeout_seconds: int = 60) -> int:
+    """Estimate capture bytes without changing the worktree or its index.
+
+    Tracked changes use the exact binary-diff byte count. Untracked content is
+    represented by its file bytes plus a small per-path patch-header allowance;
+    this is deliberately an estimate because producing the exact add-file patch
+    would require ``git add --intent-to-add``, which is forbidden on preview.
+    """
+
+    root = _git_root_for(Path(worktree).expanduser())
+    if root is None:
+        return 0
+    try:
+        tracked = subprocess.run(
+            ["git", "diff", "--binary", "--no-ext-diff", "HEAD"],
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_seconds,
+            check=False,
+        )
+        untracked = subprocess.run(
+            ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except Exception:
+        return 0
+    if tracked.returncode not in {0, 1} or untracked.returncode != 0:
+        return 0
+    estimate = len(tracked.stdout or b"")
+    for raw_path in (untracked.stdout or b"").split(b"\0"):
+        if not raw_path:
+            continue
+        relative = raw_path.decode("utf-8", errors="surrogateescape")
+        candidate = root / relative
+        try:
+            content_bytes = candidate.stat().st_size if candidate.is_file() else 0
+        except OSError:
+            content_bytes = 0
+        estimate += content_bytes + len(raw_path) + 128
+    return estimate
+
+
 def remove_harness_worktree_for_repo(repo_label: str, worktree: Path, *, reason: str) -> bool:
     """Public reap for a harness-managed worktree, followed by prune."""
 

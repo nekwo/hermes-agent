@@ -11,10 +11,13 @@ def _cmd_worktree_reap(args) -> int:
     if getattr(args, "json", False):
         print(emit_json(data))
     else:
-        print(f"reaped {len(data.get('reaped') or [])} worktree(s); kept {len(data.get('kept') or [])}")
+        dry_run = bool(data.get("dry_run"))
+        action = "preview: would reap" if dry_run else "reaped"
+        print(f"{action} {len(data.get('reaped') or [])} worktree(s); kept {len(data.get('kept') or [])}")
         for item in data.get("reaped") or []:
             captured = f" (diff -> {item['captured_patch']})" if item.get("captured_patch") else ""
-            print(f"  - {item['worktree']}{captured}")
+            prefix = "would reap: " if dry_run else ""
+            print(f"  - {prefix}{item['worktree']}{captured}")
     return 0
 
 
