@@ -37,6 +37,8 @@ PROFILE_CONTEXT_NO_PROFILE_BINDING = "persona_profile_context_no_profile_binding
 #: remaining path to an unset variable, and it is now named.
 PROFILE_CONTEXT_RUNTIME_ROOT_UNRESOLVED = "persona_profile_context_runtime_root_unresolved"
 
+MCP_SERVER_PERSONA_OWNERS = {"launcher_qa": "qa"}
+
 
 @dataclass(frozen=True, slots=True)
 class ProfileContextRow:
@@ -135,6 +137,36 @@ def active_profile_name() -> str:
     except OSError:
         active = ""
     return normalize_profile_name(active or "default")
+
+
+def persona_bound_profile_name(persona_id: str | None) -> str:
+    """Return the persisted persona binding used by its Harness worker.
+
+    Visual proof requests run on the owning worker's MCP lane, so their
+    ``hermes_profile`` pin must follow that persona binding rather than the
+    operator process' active profile.  Falling back keeps generic/unbound
+    profiles compatible while making a configured QA worker deterministic.
+    """
+
+    resolved_id = str(persona_id or "").strip()
+    if resolved_id:
+        try:
+            from .config import get_persisted_persona
+
+            persona = get_persisted_persona(resolved_id)
+            bound = str(getattr(persona, "hermes_profile", None) or "").strip()
+            if bound:
+                return normalize_profile_name(bound)
+        except (OSError, StopIteration, ValueError):
+            logger.debug("Persona profile binding unavailable for %s", resolved_id, exc_info=True)
+    return active_profile_name()
+
+
+def mcp_owner_profile_name(mcp_server: str) -> str:
+    """Resolve an MCP server's persisted owner profile, not its caller's."""
+
+    owner_persona_id = MCP_SERVER_PERSONA_OWNERS.get(str(mcp_server or "").strip())
+    return persona_bound_profile_name(owner_persona_id)
 
 
 def resolve_persona_profile(persona) -> PersonaProfileBinding:

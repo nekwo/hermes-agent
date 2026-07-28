@@ -7,7 +7,7 @@ from .decision_schema import DecisionType
 from .mission_plan import current_plan_stage, mission_plan_hud_enabled
 from .models import AgentRun, Task, TaskStage
 from .mission_plan import task_stage_records
-from .profile_context import active_profile_name
+from .profile_context import mcp_owner_profile_name
 from .runtime_config import RuntimeConfig
 from .simplified_contract import expose_only_simplified_actions
 from .stage_intent import no_product_edit_recipe_for_stage, no_product_edit_recipe_id, stage_requires_product_edit
@@ -117,7 +117,7 @@ def _collapsed_actions(role: str, task: Task, run: AgentRun) -> list[WorkerActio
                         "target": "mission_control",
                         "proof_requirement": "fullscreen visual proof for the current stage",
                         "mcp_server": "launcher_qa",
-                        "required_launch_pins": {"hermes_profile": active_profile_name(), "runtime_root_id": "agent-runtime"},
+                        "required_launch_pins": {"hermes_profile": mcp_owner_profile_name("launcher_qa"), "runtime_root_id": "agent-runtime"},
                     },
                 ),
                 _block_action(reason="Use when launcher_qa visual proof cannot run with current environment evidence."),
@@ -153,7 +153,7 @@ def _collapsed_actions(role: str, task: Task, run: AgentRun) -> list[WorkerActio
                         "target": "mission_control",
                         "proof_requirement": "fullscreen visual proof for the current stage",
                         "mcp_server": "launcher_qa",
-                        "required_launch_pins": {"hermes_profile": active_profile_name(), "runtime_root_id": "agent-runtime"},
+                        "required_launch_pins": {"hermes_profile": mcp_owner_profile_name("launcher_qa"), "runtime_root_id": "agent-runtime"},
                     },
                 ),
                 _block_action(reason="Use when launcher_qa visual proof cannot run with current environment evidence."),
@@ -242,7 +242,7 @@ def _typed_actions(role: str, task: Task, run: AgentRun, *, proof_store=None) ->
                         "target": "mission_control",
                         "proof_requirement": "fullscreen visual proof for the typed mission stage",
                         "mcp_server": "launcher_qa",
-                        "required_launch_pins": {"hermes_profile": active_profile_name(), "runtime_root_id": "agent-runtime"},
+                        "required_launch_pins": {"hermes_profile": mcp_owner_profile_name("launcher_qa"), "runtime_root_id": "agent-runtime"},
                     },
                 ),
                 WorkerAction("qa_verdict", DecisionType.QA_VERDICT, "qa.verdict", "QA Verdict"),
@@ -289,7 +289,7 @@ def _typed_actions(role: str, task: Task, run: AgentRun, *, proof_store=None) ->
                         "target": "mission_control",
                         "proof_requirement": "fullscreen visual proof for the typed mission stage",
                         "mcp_server": "launcher_qa",
-                        "required_launch_pins": {"hermes_profile": active_profile_name(), "runtime_root_id": "agent-runtime"},
+                        "required_launch_pins": {"hermes_profile": mcp_owner_profile_name("launcher_qa"), "runtime_root_id": "agent-runtime"},
                     },
                 ),
                 WorkerAction("request_context", DecisionType.REQUEST_FILE_READS, "common.request_file_reads", "Request Context"),
@@ -522,7 +522,7 @@ def _dev_actions(task: Task, run: AgentRun, *, proof_store=None) -> list[WorkerA
                     "target": "mission_control",
                     "proof_requirement": "fullscreen visual proof for the current stage",
                     "mcp_server": "launcher_qa",
-                    "required_launch_pins": {"hermes_profile": active_profile_name(), "runtime_root_id": "agent-runtime"},
+                    "required_launch_pins": {"hermes_profile": mcp_owner_profile_name("launcher_qa"), "runtime_root_id": "agent-runtime"},
                 },
             ),
             WorkerAction("request_context", DecisionType.REQUEST_FILE_READS, "common.request_file_reads", "Request Context"),
@@ -621,7 +621,7 @@ def _qa_actions(task: Task, run: AgentRun, *, proof_store=None) -> list[WorkerAc
                     "target": "mission_control",
                     "proof_requirement": "fullscreen visual proof for the current stage",
                     "mcp_server": "launcher_qa",
-                    "required_launch_pins": {"hermes_profile": active_profile_name(), "runtime_root_id": "agent-runtime"},
+                    "required_launch_pins": {"hermes_profile": mcp_owner_profile_name("launcher_qa"), "runtime_root_id": "agent-runtime"},
                 },
             ),
             WorkerAction("qa_verdict", DecisionType.QA_VERDICT, "qa.verdict", "QA Verdict"),

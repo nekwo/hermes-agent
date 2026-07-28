@@ -23,8 +23,25 @@ def _list_of_strings(payload: dict, key: str, *, required: bool = False) -> list
     return [item.strip() for item in value]
 
 
+def _normalize_qa_verdict_formatter(decision: AgentDecision) -> None:
+    """Accept the common single-finding formatter drift without weakening QA.
+
+    The QA verdict contract is still a list of non-empty strings. A model may
+    format one truthful finding as a scalar string; wrapping that exact string
+    is lossless. Other malformed shapes remain invalid and enter bounded
+    contract repair.
+    """
+
+    if decision.type != DecisionType.QA_VERDICT:
+        return
+    findings = decision.payload.get("findings")
+    if isinstance(findings, str) and findings.strip():
+        decision.payload["findings"] = [findings]
+
+
 def validate_planning_decision(decision: AgentDecision) -> None:
     p = decision.payload
+    _normalize_qa_verdict_formatter(decision)
     validate_payload_keys(decision)
     validate_decision_packets(decision)
     if decision.type == DecisionType.PROPOSE_ACCEPTANCE:
