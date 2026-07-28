@@ -326,3 +326,43 @@ def test_reap_orphan_worktrees_capture_age_and_ownership(source_repo, tmp_path, 
     assert reaped_entry.get("captured_patch")
     captured = Path(result["capture_dir"]) / reaped_entry["captured_patch"]
     assert captured.is_file() and captured.stat().st_size > 0
+
+
+def test_reap_orphan_worktrees_dry_run_is_a_write_free_typed_preview(
+    source_repo, isolate_agent_runtime_root, tmp_path, monkeypatch
+):
+    import os
+    import time
+
+    from agent_runtime import repo_context as repo_context_mod
+    from agent_runtime.delivery_directive import reap_orphan_worktrees
+    from agent_runtime.events import EventLog
+
+    wt_base = tmp_path / "wtbase"
+    monkeypatch.setattr(repo_context_mod, "_worktree_base_dir", lambda: wt_base)
+    orphan = _worktree_with_changes(
+        source_repo, task_id="task_dry_run_gone", run_id="run_dry_run_gone"
+    )
+    old = time.time() - 7200
+    os.utime(orphan, (old, old))
+    event_log = EventLog()
+    events_before = event_log.tail(100)
+
+    result = reap_orphan_worktrees(
+        min_age_seconds=3600, event_log=event_log, dry_run=True
+    )
+
+    preview = next(
+        item for item in result["reaped"] if item["worktree"] == orphan.name
+    )
+    assert result["dry_run"] is True
+    assert preview == {
+        "worktree": orphan.name,
+        "would_capture_patch": True,
+        "patch_bytes_estimate": preview["patch_bytes_estimate"],
+        "dry_run": True,
+    }
+    assert preview["patch_bytes_estimate"] > 0
+    assert orphan.exists(), "dry-run must not remove the candidate worktree"
+    assert not Path(result["capture_dir"]).exists(), "dry-run must not write patches"
+    assert event_log.tail(100) == events_before, "dry-run must not emit reap events"

@@ -4,7 +4,10 @@
 def _cmd_worktree_reap(args) -> int:
     from agent_runtime.delivery_directive import reap_orphan_worktrees
 
-    data = reap_orphan_worktrees(min_age_seconds=int(getattr(args, "min_age_seconds", 3600) or 3600))
+    data = reap_orphan_worktrees(
+        min_age_seconds=int(getattr(args, "min_age_seconds", 3600) or 3600),
+        dry_run=bool(getattr(args, "dry_run", False)),
+    )
     if getattr(args, "json", False):
         print(emit_json(data))
     else:

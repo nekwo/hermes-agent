@@ -1542,6 +1542,11 @@ def build_parser(parent_subparsers) -> None:
         help="Capture-then-reap orphan worktrees not owned by any open task run",
     )
     worktree_reap.add_argument("--min-age-seconds", type=int, default=3600)
+    worktree_reap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Preview typed reap/keep decisions without removing worktrees, capturing patches, or emitting events",
+    )
     worktree_reap.add_argument("--json", action="store_true")
     worktree_reap.set_defaults(func=_cmd_worktree_reap)
 
