@@ -667,14 +667,39 @@ class PersonaChatClarifyTicketStore:
         return self._index_dir() / "_index_state.json"
 
     def _index_entries(self, chat_session_id: str) -> list[dict[str, Any]]:
-        """The open-token pointers recorded for *chat_session_id*, newest first."""
+        """The open-token pointers recorded for *chat_session_id*, newest first.
+
+        "Could not read" collapses to "none recorded" here, which is the right
+        answer for every caller that only READS the result — the lookup misses
+        once and re-reads next turn, a cost it pays rather than a pointer it
+        drops. It is the wrong answer for a caller about to write the list back,
+        and that caller must use :meth:`_read_index` instead."""
+
+        return self._read_index(chat_session_id) or []
+
+    def _read_index(self, chat_session_id: str) -> list[dict[str, Any]] | None:
+        """The recorded pointers, or ``None`` when the file could not be read.
+
+        UNREADABLE IS NOT EMPTY, exactly as unreadable is not dead in
+        :meth:`_sweep_index`. A file that is simply absent legitimately means
+        "no pointers recorded" and answers ``[]``; a file that IS there but
+        would not read has told us nothing, and answering ``[]`` for it hands a
+        read-modify-write caller a blank slate to overwrite live pointers with.
+        The failure is the ordinary Windows one the add path already documents
+        for its WRITE — an AV or indexer holding the file for the instant we
+        touch it — not corruption, and not crash-only."""
 
         try:
-            payload = json.loads(
-                self._index_path(chat_session_id).read_text(encoding="utf-8")
-            )
-        except Exception:
+            text = self._index_path(chat_session_id).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            # The one failure that IS an answer: nothing was ever recorded.
             return []
+        except Exception:
+            return None
+        try:
+            payload = json.loads(text)
+        except Exception:
+            return None
         raw = payload.get("open_tokens") if isinstance(payload, dict) else None
         entries = [
             {
@@ -850,7 +875,21 @@ class PersonaChatClarifyTicketStore:
             pass
 
     def _index_add(self, chat_session_id: str, token: str, created_at: float) -> None:
-        entries = self._index_entries(chat_session_id)
+        entries = self._read_index(chat_session_id)
+        if entries is None:
+            # A READ WE COULD NOT MAKE IS NOT AN EMPTY INDEX, and this is the
+            # one caller where the difference costs a ticket: the list is about
+            # to be written back WHOLESALE, so treating an unreadable file as
+            # "nothing recorded" replaces every pointer it held with just this
+            # one — while the marker goes on swearing the index is complete, so
+            # the tokenless settlement never looks for the others again and
+            # nothing rebuilds. Same silent permanent miss as a swallowed add,
+            # same answer: retract the claim and let ONE rebuild re-derive every
+            # pointer from the ticket files, which are the authority the index
+            # only ever cached. Deliberately no write — a list we know is
+            # missing entries is not a better record than the one on disk.
+            self._invalidate_index()
+            return
         if any(entry["clarify_token"] == token for entry in entries):
             return
         entries.append({"clarify_token": token, "created_at": float(created_at)})

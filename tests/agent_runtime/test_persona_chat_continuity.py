@@ -925,6 +925,61 @@ def test_a_pointer_that_could_not_be_written_retracts_the_marker(
     assert store._index_entries(_CLARIFY_ROOT)[0]["clarify_token"] == lost
 
 
+def test_a_pointer_read_that_failed_cannot_erase_the_pointers_it_missed(
+    isolate_agent_runtime_root, monkeypatch
+):
+    """The third seam of one bug: unreadable answered as empty, then written back.
+
+    ``_index_add`` is a read-modify-WRITE, so a read that returned "nothing
+    recorded" for a file that is merely unreadable hands it a blank slate and
+    the whole list is replaced by the one new pointer. The failure is the same
+    ordinary Windows one the sweep now refuses to treat as death and the add
+    path already documents for its write — an AV or indexer holding the file
+    for the instant it is read. The cost is not symmetric with a lost read:
+    the marker goes on swearing the index is complete, so the tokenless
+    settlement never looks for the erased tickets again and nothing rebuilds.
+
+    Retracting the claim is the same answer a swallowed write already gets,
+    and it heals the same way: one rebuild re-derives every pointer from the
+    ticket files, which are the authority the index only ever cached."""
+
+    import pathlib
+
+    store = PersonaChatClarifyTicketStore()
+    first = _clarify_ticket(store)
+    second = _clarify_ticket(store)
+    index_path = store._index_path(_CLARIFY_ROOT)
+    real_read = pathlib.Path.read_text
+
+    def locked_index(self, *args, **kwargs):
+        if self == index_path:
+            raise PermissionError(13, "the process cannot access the file")
+        return real_read(self, *args, **kwargs)
+
+    monkeypatch.setattr(pathlib.Path, "read_text", locked_index)
+    third = _clarify_ticket(store)
+    monkeypatch.setattr(pathlib.Path, "read_text", real_read)
+
+    # Unreadable is not empty: the earlier pointers were not overwritten with
+    # a list built from a read that never happened.
+    assert not store._index_state_path().exists(), (
+        "an unreadable index was treated as an empty one and written back"
+    )
+    for token in (first, second, third):
+        assert store.resolve(token)["state"] == "open"
+
+    # The retracted claim heals on the next lookup, and every ticket is back —
+    # including the two the blank-slate write would have erased for good.
+    assert store.open_ticket_for_session(_CLARIFY_ROOT)["clarify_token"] == third
+    recorded = {entry["clarify_token"] for entry in store._index_entries(_CLARIFY_ROOT)}
+    assert recorded == {first, second, third}
+
+    # …and settling the newest still finds the next one down, which is the
+    # observable the erasure destroyed.
+    store.settle(third)
+    assert store.open_ticket_for_session(_CLARIFY_ROOT)["clarify_token"] == second
+
+
 def test_a_rebuild_cannot_drop_a_pointer_minted_while_it_scanned(
     isolate_agent_runtime_root,
 ):
