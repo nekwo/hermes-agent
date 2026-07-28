@@ -88,6 +88,7 @@ def operator_channel_summary(
     tasks: Iterable[Task] | None = None,
     run_summaries: list[dict[str, Any]] | None = None,
     accountant: Any = None,
+    intentionally_omitted_history_session_ids: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Project the Agent Console's single render contract.
 
@@ -103,6 +104,11 @@ def operator_channel_summary(
 
     task_lookup = _TaskLookup(tasks or [])
     run_lookup = _RunLookup(run_summaries or [])
+    omitted_history_session_ids = {
+        session_id
+        for item in (intentionally_omitted_history_session_ids or [])
+        if (session_id := _safe_session(item))
+    }
     channels: dict[str, _OperatorChannelBuilder] = {}
     by_session: dict[str, _OperatorChannelBuilder] = {}
     by_instance: dict[str, _OperatorChannelBuilder] = {}
@@ -171,6 +177,7 @@ def operator_channel_summary(
                 run_lookup=run_lookup,
                 accountant=accountant,
                 display_names=display_names,
+                omitted_history_session_ids=omitted_history_session_ids,
             )
             for builder in channels.values()
         )
@@ -236,6 +243,7 @@ class _OperatorChannelBuilder:
         run_lookup: "_RunLookup | None" = None,
         accountant: Any = None,
         display_names: dict[str, str] | None = None,
+        omitted_history_session_ids: set[str] | None = None,
     ) -> dict[str, Any] | None:
         history = self._bound_history() or _latest_history(self.history_rows)
         trace = _merged_trace(self.trace_rows)
@@ -376,7 +384,12 @@ class _OperatorChannelBuilder:
         # session_without_history is the genuine projection-loss signal: real
         # content flowed (conversation messages or a trace) but no curated
         # history row backs it. A newborn — nothing has flowed yet — stays silent.
-        if history is None and session_id and not is_newborn_channel:
+        if (
+            history is None
+            and session_id
+            and not is_newborn_channel
+            and session_id not in (omitted_history_session_ids or set())
+        ):
             warnings.append(
                 {
                     "code": "session_without_history",
@@ -507,13 +520,6 @@ def _row_runtime_ids(row: dict[str, Any]) -> set[str]:
 
 
 def _turn_identity_dropped(entries: list[Any], messages: list[Any]) -> bool:
-    has_trace_turn_id = any(
-        isinstance(entry, dict)
-        and bool(safe_assignment_text(entry.get("turn_id"), limit=160))
-        for entry in entries
-    )
-    if not has_trace_turn_id:
-        return False
     for message in messages:
         if not isinstance(message, dict):
             continue
@@ -522,8 +528,20 @@ def _turn_identity_dropped(entries: list[Any], messages: list[Any]) -> bool:
         refs = message.get("refs")
         if not isinstance(refs, dict) or refs.get("source") != "persona_chat_trace":
             continue
-        if not safe_assignment_text(message.get("turn_id"), limit=160):
-            return True
+        if safe_assignment_text(message.get("turn_id"), limit=160):
+            continue
+        timestamp = safe_assignment_text(message.get("timestamp"), limit=200)
+        tool_name = safe_assignment_text(refs.get("tool_name"), limit=160)
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if safe_assignment_text(entry.get("ts"), limit=200) != timestamp:
+                continue
+            if tool_name and safe_assignment_text(entry.get("tool_name"), limit=160) != tool_name:
+                continue
+            if safe_assignment_text(entry.get("turn_id"), limit=160):
+                return True
+            break
     return False
 
 

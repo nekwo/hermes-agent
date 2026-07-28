@@ -57,7 +57,7 @@ from .parity import PARITY_ENVELOPE_VERSION, ProjectionAccountant, events_waterm
 from .parse_cache import cached_by_mtime
 from .resolution import resolution_payload, resolve_runtime, suspect_default_root
 from .personas import blocked_tool_names, effective_toolsets, seed_personas
-from .prompt_observability import snapshot_prompt_observability
+from .prompt_observability import _SkillObservabilityResolver, snapshot_prompt_observability
 from .proof_gates import task_verdict_proof_satisfied
 from .realm_sync import read_realm_sync_sidecar
 from .repo_bundles import RepoBundleStore, bundle_queue_summary, qa_waiting_on, repo_bundle_delivery_summary, repo_bundle_summary, simplified_phase_for_task
@@ -520,8 +520,26 @@ def _build_snapshot_uncoalesced(
         (getattr(r, "name", None) for r in realms if getattr(r, "id", None) == realm_store.active_id()),
         None,
     )
+    skill_resolver = _SkillObservabilityResolver()
     with _timed_section(_sections_ms, "agents_readiness"):
-        agent_summaries = [_agent_summary(a, include_tool_details=True) for a in agents]
+        from .profile_readiness import profile_readiness_for_persona
+
+        readiness_by_persona_id = {
+            str(getattr(agent, "id", "") or ""): profile_readiness_for_persona(
+                agent, skill_resolver=skill_resolver
+            )
+            for agent in agents
+        }
+        agent_summaries = [
+            _agent_summary(
+                agent,
+                include_tool_details=True,
+                readiness=readiness_by_persona_id.get(
+                    str(getattr(agent, "id", "") or "")
+                ),
+            )
+            for agent in agents
+        ]
     available_personas = _available_persona_summary(agents)
     proofs = []
     self_tests = []
@@ -546,7 +564,9 @@ def _build_snapshot_uncoalesced(
         topology_persona_instances = persona_instances
         agent_summaries = [
             *agent_summaries,
-            *active_persona_instance_agent_summaries(persona_instances, personas_by_id),
+            *active_persona_instance_agent_summaries(
+                persona_instances, personas_by_id, readiness_by_persona_id
+            ),
         ]
         if persona_assignment_store_enabled(cfg):
             persona_assignments = PersonaAssignmentStore(event_log=event_log).list_all()
@@ -585,6 +605,7 @@ def _build_snapshot_uncoalesced(
             workspace=active_workspace_name,
             active_workspace_id=workspace_store.active_id(),
             catalog_sink=prompt_skills_catalogs,
+            skill_resolver=skill_resolver,
         )
     with _timed_section(_sections_ms, "boards_offices"):
         boards_section = _keyed(
@@ -748,7 +769,13 @@ def _build_snapshot_uncoalesced(
         # ROW LIST is built first because the identity_map alias resolver derives
         # from the ordered rows; the frame then keys it by ``persona_instance_id``.
         persona_instance_rows = [
-            persona_instance_summary(instance, personas_by_id.get(str(getattr(instance, "persona_id", "") or "")))
+            persona_instance_summary(
+                instance,
+                personas_by_id.get(str(getattr(instance, "persona_id", "") or "")),
+                profile_readiness=readiness_by_persona_id.get(
+                    str(getattr(instance, "persona_id", "") or "")
+                ),
+            )
             for instance in persona_instances
         ]
         # Legacy persona-instance id -> canonical id aliases (durable
@@ -763,12 +790,14 @@ def _build_snapshot_uncoalesced(
         # The FRAME carries recency pointers only (S2) — the tail bytes leave, the
         # anchors stay.
         _persona_chat_started = time.perf_counter()
+        omitted_history_session_ids: set[str] = set()
         persona_chat_history_full = persona_chat_history_summary(
             persona_instances=persona_instances,
             session_db=session_db,
             message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
             accountant=history_accountant,
             persona_assignments=persona_assignments,
+            omitted_session_ids=omitted_history_session_ids,
         )
         data["persona_chat_history"] = _persona_chat_history_frame(persona_chat_history_full)
         data["persona_chat_trace"] = persona_chat_trace_summary(
@@ -785,6 +814,7 @@ def _build_snapshot_uncoalesced(
             tasks=tasks,
             run_summaries=run_rows,
             accountant=conversation_accountant,
+            intentionally_omitted_history_session_ids=omitted_history_session_ids,
         )
         _sections_ms["persona_chat"] = int(
             max(0.0, (time.perf_counter() - _persona_chat_started)) * 1000
@@ -4530,14 +4560,15 @@ def _event_display_title(event_type: str, payload: dict, kind: str) -> str:
     return event_type
 
 
-def _agent_summary(agent, *, include_tool_details: bool = False):
+def _agent_summary(agent, *, include_tool_details: bool = False, readiness=None):
     # Route through the same TTL-memoized readiness resolve_tool_visibility uses
     # (below) instead of a direct profile_readiness_for_persona call, so one build
     # computes readiness at most once per agent instead of twice. Identical result
     # for this path: readiness is task/stage-independent here, and the memo shares
     # the exact inputs (id/profile/skills/mcp/provider/model/api_mode).
-    readiness = _profile_readiness_for_visibility(agent)
-    tool_resolution = resolve_tool_visibility(agent)
+    if readiness is None:
+        readiness = _profile_readiness_for_visibility(agent)
+    tool_resolution = resolve_tool_visibility(agent, profile_readiness=readiness)
     summary = {
         "persona_id": agent.id,
         "display_name": agent.display_name,

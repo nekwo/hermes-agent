@@ -100,7 +100,12 @@ class ToolVisibilityOptions:
     turns_remaining: int | None = None
 
 
-def resolve_tool_visibility(persona: AgentPersona, options: ToolVisibilityOptions | None = None) -> dict[str, Any]:
+def resolve_tool_visibility(
+    persona: AgentPersona,
+    options: ToolVisibilityOptions | None = None,
+    *,
+    profile_readiness: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     opts = options or ToolVisibilityOptions()
     role = role_from_persona(persona)
     unbounded = _is_unbounded(opts)
@@ -140,7 +145,7 @@ def resolve_tool_visibility(persona: AgentPersona, options: ToolVisibilityOption
         for name in configured_toolsets
         if name not in set(resolved_toolsets)
     ]
-    readiness = _profile_readiness_for_visibility(persona)
+    readiness = profile_readiness or _profile_readiness_for_visibility(persona)
     entry_point_lane = str(opts.entry_point_lane or "").strip() or current_entry_point_lane()
     requirement_failures = _requirement_failures(
         persona,

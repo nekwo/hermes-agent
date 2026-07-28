@@ -2690,7 +2690,12 @@ def persona_assignment_store_enabled(config) -> bool:
     return bool(getattr(enterprise, "enabled", False) and getattr(enterprise, "persona_assignment_store", False))
 
 
-def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | None = None) -> dict[str, Any]:
+def persona_instance_summary(
+    instance: PersonaInstance,
+    persona: AgentPersona | None = None,
+    *,
+    profile_readiness: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     state = instance.state.value if hasattr(instance.state, "value") else str(instance.state)
     visibility_persona = persona or _profile_visibility_persona(instance)
     profile_id = instance.profile_id or getattr(visibility_persona, "hermes_profile", None)
@@ -2789,7 +2794,11 @@ def persona_instance_summary(instance: PersonaInstance, persona: AgentPersona | 
         # single HUD authority now). The always-visible agents drawer renders only
         # the head SCALARS below, derived at emit from the same tool-visibility
         # resolution (never from the retired hud state).
-        tool_resolution = resolve_tool_visibility(visibility_persona, tool_options)
+        tool_resolution = resolve_tool_visibility(
+            visibility_persona,
+            tool_options,
+            profile_readiness=profile_readiness,
+        )
         summary["permission_mode"] = tool_resolution.get("permission_mode") or "profile_default"
         summary["mutation_boundary"] = tool_resolution["mutation_boundary"]
         summary["tool_count"] = tool_resolution["final_tool_count"]
@@ -2875,10 +2884,12 @@ def persona_instance_tool_detail(
 def active_persona_instance_agent_summaries(
     instances: list[PersonaInstance],
     personas_by_id: dict[str, AgentPersona] | None = None,
+    readiness_by_persona_id: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
     personas_by_id = personas_by_id or {}
+    readiness_by_persona_id = readiness_by_persona_id or {}
     for instance in instances:
         instance_id = safe_assignment_token(getattr(instance, "id", None))
         if not instance_id or instance_id in seen:
@@ -2886,7 +2897,11 @@ def active_persona_instance_agent_summaries(
         if not _persona_instance_is_active_lane(instance):
             continue
         persona_id = safe_assignment_token(getattr(instance, "persona_id", None)) or instance_id
-        row = persona_instance_summary(instance, personas_by_id.get(persona_id))
+        row = persona_instance_summary(
+            instance,
+            personas_by_id.get(persona_id),
+            profile_readiness=readiness_by_persona_id.get(persona_id),
+        )
         row["runtime_agent_kind"] = "persona_instance"
         row["source_persona_id"] = persona_id
         row["persona_id"] = instance_id

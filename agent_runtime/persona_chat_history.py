@@ -165,6 +165,7 @@ def persona_chat_history_summary(
     message_tail: int = DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
     accountant: ProjectionAccountant | None = None,
     persona_assignments: Iterable[Any] | None = None,
+    omitted_session_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Return redaction-safe persona chat-history rows for Harness snapshots.
 
@@ -192,6 +193,19 @@ def persona_chat_history_summary(
         session_id = safe_assignment_text(
             getattr(instance, "default_chat_session_id", None), limit=200
         )
+        active_session_id = safe_assignment_text(
+            getattr(instance, "session_id", None), limit=200
+        )
+        # A task-bound mission mirrors its live run id into the default-chat
+        # pointer. That id belongs to the mission/event lane, not SessionDB;
+        # the synthetic mission row below is its authoritative projection.
+        if (
+            safe_assignment_token(getattr(instance, "mode", None)) == "task_bound"
+            and getattr(instance, "current_task_id", None)
+            and session_id
+            and session_id == active_session_id
+        ):
+            session_id = None
         if session_id:
             bound_by_session[session_id] = instance
 
@@ -347,6 +361,12 @@ def persona_chat_history_summary(
     # legacy rows whose creation timestamp is missing.
     rows.sort(key=_persona_chat_creation_sort_key, reverse=True)
     visible = rows[: max(0, limit)]
+    if omitted_session_ids is not None:
+        omitted_session_ids.update(
+            session_id
+            for row in rows[len(visible):]
+            if (session_id := safe_assignment_text(row.get("session_id"), limit=200))
+        )
     if accountant is not None:
         accountant.include(len(visible))
         omitted = len(rows) - len(visible)

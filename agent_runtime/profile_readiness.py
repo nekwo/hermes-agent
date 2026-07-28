@@ -23,6 +23,8 @@ READINESS_SKILL_INVALID_SOURCE = "skill_invalid_source"
 READINESS_SKILL_HASH_MISMATCH = "skill_hash_mismatch"
 READINESS_RUNTIME_DEPENDENCY_MISSING = "runtime_dependency_missing"
 
+_RUNTIME_PROVIDER_RESOLVER = resolve_runtime_provider
+
 _SEVERITY = {
     READINESS_MISSING_PROFILE: 60,
     READINESS_RUNTIME_DEPENDENCY_MISSING: 50,
@@ -37,7 +39,9 @@ _SEVERITY = {
 }
 
 
-def profile_readiness_for_persona(persona, *, task=None, stage=None) -> dict[str, Any]:
+def profile_readiness_for_persona(
+    persona, *, task=None, stage=None, skill_resolver=None
+) -> dict[str, Any]:
     binding = resolve_persona_profile(persona)
     issues: list[tuple[str, str]] = []
     missing_mcp: list[str] = []
@@ -53,7 +57,9 @@ def profile_readiness_for_persona(persona, *, task=None, stage=None) -> dict[str
     elif binding.profile_home is not None:
         try:
             with persona_profile_context(binding):
-                skill_resolutions = _resolve_skill_names(list(persona.skills))
+                skill_resolutions = _resolve_skill_names(
+                    list(persona.skills), skill_resolver=skill_resolver
+                )
                 missing_skills = _missing_skill_ids(skill_resolutions)
                 skill_hash_mismatches = harness_skill_hash_mismatches(list(persona.skills), hermes_home=binding.profile_home)
                 cfg_path = binding.profile_home / "config.yaml"
@@ -80,7 +86,9 @@ def profile_readiness_for_persona(persona, *, task=None, stage=None) -> dict[str
         except Exception as exc:  # pragma: no cover - defensive, covered by behavior tests with monkeypatch
             issues.append((READINESS_CONFIG_ERROR, f"Profile config read failed: {type(exc).__name__}"))
     else:
-        skill_resolutions = _resolve_skill_names(list(persona.skills))
+        skill_resolutions = _resolve_skill_names(
+            list(persona.skills), skill_resolver=skill_resolver
+        )
         missing_skills = _missing_skill_ids(skill_resolutions)
         skill_hash_mismatches = harness_skill_hash_mismatches(list(persona.skills))
         if effective_required_mcp:
@@ -206,12 +214,38 @@ def _provider_issue(persona) -> tuple[str, str] | None:
 
 
 def _compute_provider_issue(resolver, provider, model) -> tuple[str, str] | None:
+    if resolver is _RUNTIME_PROVIDER_RESOLVER and provider == "openai-codex":
+        return _pooled_provider_issue(provider)
     try:
         resolver(requested=provider, target_model=model)
     except AuthError as exc:
         return (READINESS_AUTH_ATTENTION, _safe_provider_summary(str(exc)))
     except Exception as exc:
         return (READINESS_CONFIG_ERROR, f"Provider readiness check failed: {type(exc).__name__}")
+    return None
+
+
+def _pooled_provider_issue(provider: str) -> tuple[str, str] | None:
+    """Inspect cached Codex credentials without refreshing during a snapshot."""
+
+    try:
+        from agent.credential_pool import load_pool
+
+        pool = load_pool(provider)
+        entry = pool.peek()
+        if entry is None or not (
+            getattr(entry, "runtime_api_key", None)
+            or getattr(entry, "access_token", None)
+        ):
+            return (
+                READINESS_AUTH_ATTENTION,
+                "Provider credential attention required",
+            )
+    except Exception as exc:
+        return (
+            READINESS_CONFIG_ERROR,
+            f"Provider readiness check failed: {type(exc).__name__}",
+        )
     return None
 
 
@@ -304,7 +338,9 @@ def _persona_path_token_issues(persona) -> list[dict[str, Any]]:
     ]
 
 
-def _resolve_skill_names(skill_names: list[str]) -> list[dict[str, Any]]:
+def _resolve_skill_names(
+    skill_names: list[str], *, skill_resolver=None
+) -> list[dict[str, Any]]:
     from agent.skill_utils import (
         resolve_skills,
         skill_package_content_hash,
@@ -324,7 +360,11 @@ def _resolve_skill_names(skill_names: list[str]) -> list[dict[str, Any]]:
     # (2026-07-23). Iterate over ``cleaned`` (not the deduped resolver keys) so
     # a name repeated in ``persona.skills`` still yields one row per occurrence,
     # exactly as the old per-name loop did.
-    resolutions = resolve_skills(cleaned)
+    resolutions = (
+        skill_resolver.resolve(cleaned)
+        if skill_resolver is not None
+        else resolve_skills(cleaned)
+    )
     rows: list[dict[str, Any]] = []
     for clean in cleaned:
         resolution = resolutions.get(clean)
@@ -339,11 +379,13 @@ def _resolve_skill_names(skill_names: list[str]) -> list[dict[str, Any]]:
         root_node = skill_runtime_compatibility(
             selected, surface="mission_worker", root_node_mode=True
         )
-        installed_hash = (
-            skill_package_content_hash(selected.skill_dir, selected.skill_md)
-            if selected
-            else None
-        )
+        installed_hash = None
+        if selected:
+            installed_hash = (
+                skill_resolver.content_hash(selected)
+                if skill_resolver is not None
+                else skill_package_content_hash(selected.skill_dir, selected.skill_md)
+            )
         expected_hash = None
         if clean in CANONICAL_SHARED_SKILL_IDS:
             expected_manifest = harness_skill_source(clean)
@@ -354,8 +396,12 @@ def _resolve_skill_names(skill_names: list[str]) -> list[dict[str, Any]]:
         candidate_receipts = [
             {
                 "source_kind": candidate.source_kind,
-                "content_hash": skill_package_content_hash(
-                    candidate.skill_dir, candidate.skill_md
+                "content_hash": (
+                    skill_resolver.content_hash(candidate)
+                    if skill_resolver is not None
+                    else skill_package_content_hash(
+                        candidate.skill_dir, candidate.skill_md
+                    )
                 ),
             }
             for candidate in resolution.candidates

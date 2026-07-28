@@ -195,19 +195,48 @@ def mission_chat_prompt_observability(
         skill_profile_context = nullcontext()
     skill_resolver = skill_resolver or _SkillObservabilityResolver()
     with skill_profile_context:
-        accessible_skills = _accessible_skills_context(
-            persona,
+        skill_cache_key = (
             profile,
-            loaded_skill_names=set(loaded_names),
-            queued_skill_names=set(queued_names),
-            instance_override_names=override_names,
-            skill_resolver=skill_resolver,
+            persona_id,
+            tuple(str(item) for item in (getattr(persona, "skills", None) or [])),
+            tuple(sorted(loaded_names)),
+            tuple(sorted(queued_names)),
+            tuple(sorted(override_names)),
         )
-        skill_assignment_removals = _persona_skill_assignment_removals(persona)
-        available_skills = available_skills_context(
-            accessible_skills=accessible_skills,
-            skill_resolver=skill_resolver,
-        )
+        cached_skill_rows = skill_resolver.skill_context(skill_cache_key)
+        if cached_skill_rows is None:
+            installed_names = [
+                safe_assignment_token(item.get("name"))
+                for item in _installed_skill_catalog()
+                if isinstance(item, dict) and safe_assignment_token(item.get("name"))
+            ]
+            skill_resolver.resolve([
+                *installed_names,
+                *(getattr(persona, "skills", None) or []),
+            ])
+            accessible_skills = _accessible_skills_context(
+                persona,
+                profile,
+                loaded_skill_names=set(loaded_names),
+                queued_skill_names=set(queued_names),
+                instance_override_names=override_names,
+                skill_resolver=skill_resolver,
+            )
+            skill_assignment_removals = _persona_skill_assignment_removals(persona)
+            available_skills = available_skills_context(
+                accessible_skills=accessible_skills,
+                skill_resolver=skill_resolver,
+            )
+            skill_resolver.remember_skill_context(
+                skill_cache_key,
+                accessible_skills=accessible_skills,
+                available_skills=available_skills,
+                assignment_removals=skill_assignment_removals,
+            )
+        else:
+            accessible_skills, available_skills, skill_assignment_removals = (
+                cached_skill_rows
+            )
         used_skills = used_skills_context(
             final_model_input=final_model_input,
             trace_events=trace_events,
@@ -852,6 +881,7 @@ def snapshot_prompt_observability(
     workspace: str | None = None,
     active_workspace_id: str | None = None,
     catalog_sink: dict[str, list[dict[str, Any]]] | None = None,
+    skill_resolver: "_SkillObservabilityResolver | None" = None,
 ) -> dict[str, Any]:
     # Deferred import: context_builder pulls a large dependency graph, and this
     # module is imported very early. A function-local import keeps module load
@@ -921,7 +951,7 @@ def snapshot_prompt_observability(
     # cache key, so profile-specific roots never bleed into another persona,
     # while the normal shared-install case pays one registry walk for the whole
     # snapshot instead of one recursive walk per skill, per persona.
-    skill_resolver = _SkillObservabilityResolver()
+    skill_resolver = skill_resolver or _SkillObservabilityResolver()
     by_persona = {
         safe_assignment_token(getattr(persona, "id", None)): persona
         for persona in personas
@@ -2046,8 +2076,31 @@ class _SkillObservabilityResolver:
     def __init__(self) -> None:
         self._resolutions_by_roots: dict[tuple[str, ...], dict[str, Any]] = {}
         self._hashes: dict[tuple[str, str], str | None] = {}
+        self._skill_contexts: dict[
+            tuple[Any, ...],
+            tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]],
+        ] = {}
         self._shared_catalog: dict[str, dict[str, Any]] | None = None
         self._realm_rows: list[dict[str, Any]] | None = None
+
+    def skill_context(
+        self, key: tuple[Any, ...]
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[str]] | None:
+        return self._skill_contexts.get(key)
+
+    def remember_skill_context(
+        self,
+        key: tuple[Any, ...],
+        *,
+        accessible_skills: list[dict[str, Any]],
+        available_skills: list[dict[str, Any]],
+        assignment_removals: list[str],
+    ) -> None:
+        self._skill_contexts[key] = (
+            accessible_skills,
+            available_skills,
+            assignment_removals,
+        )
 
     def shared_catalog(self) -> dict[str, dict[str, Any]]:
         """Build-scoped ``{slug: catalog_row}`` for the canonical shared skills
@@ -2094,6 +2147,16 @@ class _SkillObservabilityResolver:
         roots = list(get_all_skills_dirs())
         root_key = tuple(str(root.resolve()) for root in roots)
         cached = self._resolutions_by_roots.get(root_key, {})
+        if root_key not in self._resolutions_by_roots:
+            names = list(dict.fromkeys([
+                *names,
+                *(
+                    safe_assignment_token(item.get("name"))
+                    for item in _installed_skill_catalog()
+                    if isinstance(item, dict)
+                    and safe_assignment_token(item.get("name"))
+                ),
+            ]))
         missing = [name for name in names if name not in cached]
         if missing:
             # Rebuild the root-local registry for the union.  This stays one
@@ -2416,11 +2479,16 @@ def available_skills_context(
             publishable, publishable_reason = _skill_publishability(
                 selected.source_kind if selected else None
             )
+            # Assigned rows already carry their resolver receipt; canonical
+            # shared rows reuse the shared catalog's content hash. Avoid hashing
+            # every unassigned profile-local package during every snapshot.
             content_hash = (
-                skill_resolver.content_hash(selected)
-                if skill_resolver is not None
-                else _skill_candidate_content_hash(selected)
+                accessible.get("content_hash")
+                if accessible
+                else shared.get("content_hash") if shared else None
             )
+            if content_hash is None and skill_resolver is None:
+                content_hash = _skill_candidate_content_hash(selected)
             rows.append(
                 {
                     "name": name,
