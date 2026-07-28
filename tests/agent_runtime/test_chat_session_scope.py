@@ -426,27 +426,37 @@ def test_no_guard_hand_spells_the_module_sniff_any_more():
     glob is exactly as wrong and exactly as invisible.
 
     WHAT THIS GATE DOES NOT CATCH, recorded here so the limit is never silent —
-    a gate believed to be total is worse than one known to be partial. It
-    matches TEXT inside a bounded window, so it sees the sniff however it is
-    wrapped, spaced, or ordered; it cannot see one taken apart across
-    statements::
+    a gate believed to be total is worse than one known to be partial, and a
+    gate whose limit is written down WRONG is worse still, because the next
+    reader trusts the wrong boundary. It matches TEXT inside a bounded window,
+    so it sees the sniff however it is wrapped, spaced, or ordered, AND across
+    statements while the two halves stay within the window::
 
-        module = type(session_db).__module__     # neither line carries both
-        ...                                      # halves inside the window
+        module = type(session_db).__module__     # caught: both halves land
+        if module == "hermes_state":             # inside the 160-char window
+
+    The gap is DISTANCE, not statement structure: the same indirect spelling
+    escapes once anything pushes the halves further apart than the window —
+    a bind at the top of a function and a comparison forty lines down::
+
+        module = type(session_db).__module__
+        ...                                      # more than 160 chars of it
         if module == "hermes_state":
 
     Closing that needs dataflow, not text: an AST pass would have to bind the
     name, follow it through the function, and re-derive the comparison — real
     machinery with a standing maintenance cost, bought to catch a form nobody
-    reaches by accident.
+    reaches by accident. Widening the window instead only moves the boundary
+    and buys false positives on the way.
 
-    THAT GAP IS ACCEPTED, DELIBERATELY. The single-line and formatter-wrapped
-    spellings are the ones that arrive by accident, and both are covered. The
-    indirect spelling is a rewrite somebody has to sit down and choose, and it
-    is backstopped by the behavior tests above, which pin what the predicate
-    must ANSWER no matter who asks it. If a hand-rolled sniff is ever found in
-    the wild through this gap, THAT is the evidence that buys the AST pass —
-    not a hypothetical, and not this paragraph."""
+    THAT GAP IS ACCEPTED, DELIBERATELY. The single-line, formatter-wrapped,
+    and compact indirect spellings are the ones that arrive by accident, and
+    all three are covered. What escapes is an indirect sniff spread far enough
+    apart to leave the window, which is a rewrite somebody has to sit down and
+    choose, and it is backstopped by the behavior tests above, which pin what
+    the predicate must ANSWER no matter who asks it. If a hand-rolled sniff is
+    ever found in the wild through this gap, THAT is the evidence that buys the
+    AST pass — not a hypothetical, and not this paragraph."""
 
     from pathlib import Path
 
@@ -484,12 +494,23 @@ def test_the_gate_itself_sees_a_sniff_a_formatter_wrapped():
     single_line = 'if session_db.__class__.__module__ == "hermes_state":'
     wrapped = 'if (\n    session_db.__class__.__module__\n    == "hermes_state"\n):'
     reversed_order = 'if "hermes_state" == type(db).__module__:'
-    indirect = 'module = type(db).__module__\n' + ("padding = 1\n" * 40) + 'if module == "hermes_state":'
+    indirect_compact = 'module = type(db).__module__\nif module == "hermes_state":'
+    indirect_distant = (
+        'module = type(db).__module__\n' + ("padding = 1\n" * 40) + 'if module == "hermes_state":'
+    )
 
     assert _MODULE_SNIFF.search(single_line)
     assert _MODULE_SNIFF.search(wrapped), "a formatter-wrapped sniff walked past the gate"
     assert _MODULE_SNIFF.search(reversed_order)
-    assert _MODULE_SNIFF.search(indirect) is None, (
+    # The gap is DISTANCE, not statement structure — pinned in both directions
+    # so the docstring can state the boundary the gate actually has. A compact
+    # bind-then-compare is caught…
+    assert _MODULE_SNIFF.search(indirect_compact), (
+        "the docstring claims the compact indirect spelling is caught; it is not"
+    )
+    # …and the same spelling stops being caught once the halves are pushed
+    # further apart than the window, which is the whole of what is accepted.
+    assert _MODULE_SNIFF.search(indirect_distant) is None, (
         "the accepted gap has closed — this gate now catches more than its "
         "docstring claims, so the docstring is stale"
     )
