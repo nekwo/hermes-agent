@@ -642,6 +642,27 @@ def test_qa_verdict_wraps_one_scalar_finding_without_changing_its_text():
     ]
 
 
+def test_qa_verdict_serializes_structured_findings_and_drops_empty_rows():
+    verdict = decision(
+        DecisionType.QA_VERDICT,
+        {
+            "verdict": "blocked",
+            "findings": [
+                {"code": "profile_pin_missing", "proof_id": "proof_visual"},
+                "",
+                "  ",
+            ],
+            "proof_ids": ["proof_visual"],
+        },
+    )
+
+    validate_planning_decision(verdict)
+
+    assert verdict.payload["findings"] == [
+        '{"code":"profile_pin_missing","proof_id":"proof_visual"}'
+    ]
+
+
 def test_qa_review_normalizes_notes_metadata_so_skill_shape_stays_strict():
     packet = qa_review(notes="looks good")
 
