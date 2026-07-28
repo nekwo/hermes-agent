@@ -54,7 +54,10 @@ def product_promotion_required(task: Task) -> bool:
     """Return true when a task edits product code that must pass release promotion."""
 
     stages = list(getattr(getattr(task, "mission_plan", None), "stages", []) or [])
+    explicitly_typed_stage_ids: set[str] = set()
     for stage in stages:
+        if getattr(stage, "requires_product_edit", None) is not None:
+            explicitly_typed_stage_ids.add(str(getattr(stage, "id", "") or "").strip())
         repo = str(getattr(stage, "repo", "") or "").strip()
         if (
             repo in _PRODUCT_REPOS
@@ -63,6 +66,8 @@ def product_promotion_required(task: Task) -> bool:
         ):
             return True
     for stage in list(task_stage_records(task)):
+        if str(getattr(stage, "id", "") or "").strip() in explicitly_typed_stage_ids:
+            continue
         if stage_requires_product_edit(task, stage) and not _stage_is_non_release_path_only(stage):
             repos = {str(repo).strip() for repo in (getattr(task, "affected_repos", []) or []) if str(repo).strip()}
             return not repos or bool(repos.intersection(_PRODUCT_REPOS))

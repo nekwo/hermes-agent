@@ -5,7 +5,7 @@ from hermes_time import now
 import pytest
 
 from agent_runtime.decision_schema import DecisionPayloadInvalid
-from agent_runtime.models import MissionIntent, MissionPlan, MissionPlanStage, Proof, Task
+from agent_runtime.models import MissionIntent, MissionPlan, MissionPlanStage, Proof, Task, TaskStage
 from agent_runtime.planning import _apply_implementation_review
 from agent_runtime.promotion_gates import product_promotion_required, satisfied_promotion_lanes, validate_product_promotion_gate
 from agent_runtime.proof_rules import ProofType
@@ -106,6 +106,34 @@ def test_docs_scratch_launcher_probe_does_not_require_product_promotion(isolate_
 
     assert product_promotion_required(task) is False
     validate_product_promotion_gate(task, [proof.id], proof_store=ProofStore())
+
+
+def test_explicit_no_edit_plan_stage_overrides_implementation_shaped_compat_projection(isolate_agent_runtime_root):
+    task = make_product_task("task_explicit_no_edit")
+    task.affected_repos = ["EterniaLauncher"]
+    task.description = "No product edits; capture Stage-C Mission Control proof."
+    task.mission_plan.stages = [
+        MissionPlanStage(
+            id="implement_ui",
+            title="Implement UI",
+            objective="Capture Stage-C visual proof without product edits.",
+            owner="qa",
+            repo="EterniaLauncher",
+            kind="implementation",
+            status=StageStatus.PASSED,
+            requires_product_edit=False,
+        )
+    ]
+    task.stages = [
+        TaskStage(
+            id="implement_ui",
+            title="Implement UI",
+            objective="Implement the UI change and attach visual proof.",
+            status=StageStatus.PASSED,
+        )
+    ]
+
+    assert product_promotion_required(task) is False
 
 
 def test_product_promotion_gate_rejects_local_only(isolate_agent_runtime_root):
