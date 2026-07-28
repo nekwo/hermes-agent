@@ -368,12 +368,11 @@ def test_reap_orphan_worktrees_dry_run_is_a_write_free_typed_preview(
         item for item in result["reaped"] if item["worktree"] == orphan.name
     )
     assert result["dry_run"] is True
-    assert preview == {
-        "worktree": orphan.name,
-        "would_capture_patch": True,
-        "patch_bytes_estimate": preview["patch_bytes_estimate"],
-        "dry_run": True,
-    }
+    assert preview["worktree"] == orphan.name
+    assert preview["source"] == "current"
+    assert preview["base"] == str(wt_base)
+    assert preview["would_capture_patch"] is True
+    assert preview["dry_run"] is True
     assert preview["patch_bytes_estimate"] > 0
     assert orphan.exists(), "dry-run must not remove the candidate worktree"
     assert not Path(result["capture_dir"]).exists(), "dry-run must not write patches"
@@ -392,3 +391,138 @@ def test_reap_orphan_worktrees_dry_run_is_a_write_free_typed_preview(
     ).stdout
     assert status_after == status_before, "dry-run must preserve tracked and untracked status bytes"
     assert index_after == index_before, "dry-run must not add intent-to-add index entries"
+
+
+def test_reap_orphan_worktrees_legacy_temp_is_opt_in_protected_and_write_free(
+    source_repo, isolate_agent_runtime_root, tmp_path, monkeypatch
+):
+    import os
+    import time
+
+    from agent_runtime import repo_context as repo_context_mod
+    from agent_runtime.delivery_directive import reap_orphan_worktrees
+    from agent_runtime.events import EventLog
+    from agent_runtime.store import RunStore
+
+    current_base = tmp_path / "current-wt"
+    legacy_base = tmp_path / "hermes-agent-wt"
+    monkeypatch.setattr(repo_context_mod, "_worktree_base_dir", lambda: legacy_base)
+    monkeypatch.setattr(
+        repo_context_mod, "legacy_harness_worktree_base_dir", lambda: legacy_base
+    )
+    orphan = _worktree_with_changes(
+        source_repo, task_id="task_legacy_gone", run_id="run_legacy_gone"
+    )
+    owned_task = _task(task_id="task_legacy_open", state=TaskState.CREATED)
+    owned_task.affected_repos = [str(source_repo)]
+    TaskStore().create(owned_task)
+    run = RunStore().open_run("dev", owned_task.id)
+    owned = _worktree_with_changes(
+        source_repo, task_id=owned_task.id, run_id=run.id
+    )
+    old = time.time() - 7200
+    os.utime(orphan, (old, old))
+    os.utime(owned, (old, old))
+    monkeypatch.setattr(repo_context_mod, "_worktree_base_dir", lambda: current_base)
+
+    ignored = reap_orphan_worktrees(min_age_seconds=3600, dry_run=True)
+    assert ignored["reaped"] == [] and ignored["kept"] == []
+
+    event_log = EventLog()
+    events_before = event_log.tail(100)
+    status_before = subprocess.run(
+        ["git", "status", "--porcelain=v1", "-z"],
+        cwd=orphan,
+        stdout=subprocess.PIPE,
+        check=True,
+    ).stdout
+    result = reap_orphan_worktrees(
+        min_age_seconds=3600,
+        event_log=event_log,
+        dry_run=True,
+        include_legacy_temp=True,
+    )
+
+    preview = next(item for item in result["reaped"] if item["worktree"] == orphan.name)
+    assert preview["source"] == "legacy_temp"
+    assert preview["base"] == str(legacy_base)
+    assert preview["would_capture_patch"] is True
+    assert preview["patch_bytes_estimate"] > 0
+    assert orphan.exists() and owned.exists()
+    assert any(
+        item["worktree"] == owned.name
+        and item["reason"] == "owned_by_open_task_run"
+        and item["source"] == "legacy_temp"
+        for item in result["kept"]
+    )
+    assert subprocess.run(
+        ["git", "status", "--porcelain=v1", "-z"],
+        cwd=orphan,
+        stdout=subprocess.PIPE,
+        check=True,
+    ).stdout == status_before
+    assert event_log.tail(100) == events_before
+    assert not Path(result["capture_dir"]).exists()
+
+
+def test_reap_orphan_worktrees_dedupes_same_current_and_legacy_base(
+    source_repo, isolate_agent_runtime_root, tmp_path, monkeypatch
+):
+    import os
+    import time
+
+    from agent_runtime import repo_context as repo_context_mod
+    from agent_runtime.delivery_directive import reap_orphan_worktrees
+
+    shared_base = tmp_path / "hermes-agent-wt"
+    monkeypatch.setattr(repo_context_mod, "_worktree_base_dir", lambda: shared_base)
+    monkeypatch.setattr(
+        repo_context_mod, "legacy_harness_worktree_base_dir", lambda: shared_base
+    )
+    orphan = _worktree_with_changes(
+        source_repo, task_id="task_dedupe_gone", run_id="run_dedupe_gone"
+    )
+    old = time.time() - 7200
+    os.utime(orphan, (old, old))
+
+    result = reap_orphan_worktrees(
+        min_age_seconds=3600, dry_run=True, include_legacy_temp=True
+    )
+
+    matching = [item for item in result["reaped"] if item["worktree"] == orphan.name]
+    assert len(matching) == 1
+    assert matching[0]["source"] == "current"
+
+
+def test_reap_orphan_worktrees_opted_in_legacy_destructive_keeps_capture_contract(
+    source_repo, isolate_agent_runtime_root, tmp_path, monkeypatch
+):
+    import os
+    import time
+
+    from agent_runtime import repo_context as repo_context_mod
+    from agent_runtime.delivery_directive import reap_orphan_worktrees
+
+    current_base = tmp_path / "current-wt"
+    legacy_base = tmp_path / "hermes-agent-wt"
+    monkeypatch.setattr(repo_context_mod, "_worktree_base_dir", lambda: legacy_base)
+    monkeypatch.setattr(
+        repo_context_mod, "legacy_harness_worktree_base_dir", lambda: legacy_base
+    )
+    orphan = _worktree_with_changes(
+        source_repo, task_id="task_legacy_reap", run_id="run_legacy_reap"
+    )
+    old = time.time() - 7200
+    os.utime(orphan, (old, old))
+    monkeypatch.setattr(repo_context_mod, "_worktree_base_dir", lambda: current_base)
+
+    result = reap_orphan_worktrees(
+        min_age_seconds=3600, include_legacy_temp=True
+    )
+
+    reaped = next(item for item in result["reaped"] if item["worktree"] == orphan.name)
+    assert reaped["source"] == "legacy_temp"
+    assert reaped["captured_patch"].startswith("legacy_temp_")
+    captured = Path(result["capture_dir"]) / reaped["captured_patch"]
+    assert captured.is_file() and captured.stat().st_size > 0
+    assert not orphan.exists()

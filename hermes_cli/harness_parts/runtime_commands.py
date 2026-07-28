@@ -7,6 +7,7 @@ def _cmd_worktree_reap(args) -> int:
     data = reap_orphan_worktrees(
         min_age_seconds=int(getattr(args, "min_age_seconds", 3600) or 3600),
         dry_run=bool(getattr(args, "dry_run", False)),
+        include_legacy_temp=bool(getattr(args, "include_legacy_temp", False)),
     )
     if getattr(args, "json", False):
         print(emit_json(data))

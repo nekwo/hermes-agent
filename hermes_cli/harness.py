@@ -1547,6 +1547,11 @@ def build_parser(parent_subparsers) -> None:
         action="store_true",
         help="Preview typed reap/keep decisions without removing worktrees, capturing patches, or emitting events",
     )
+    worktree_reap.add_argument(
+        "--include-legacy-temp",
+        action="store_true",
+        help="Also inventory the canonical legacy system-temp hermes-agent-wt base",
+    )
     worktree_reap.add_argument("--json", action="store_true")
     worktree_reap.set_defaults(func=_cmd_worktree_reap)
 

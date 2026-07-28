@@ -388,6 +388,35 @@ def existing_run_worktrees(repo_label: str, *, task_id: str, run_id: str) -> lis
     return [candidate for candidate in candidates if candidate.is_dir() and _git_root_for(candidate) is not None]
 
 
+def existing_run_worktrees_in_bases(
+    repo_label: str, *, task_id: str, run_id: str, base_dirs: list[Path]
+) -> list[Path]:
+    """Deterministic run worktrees across explicitly selected managed bases."""
+
+    source_root = resolve_affected_repo_workdir(repo_label)
+    git_root = _git_root_for(source_root) if source_root is not None else None
+    if git_root is None:
+        return []
+    token_label = _safe_repo_label(source_root.resolve().name)
+    found: list[Path] = []
+    seen: set[Path] = set()
+    for base_dir in base_dirs:
+        base = Path(base_dir) / _worktree_token(
+            git_root, task_id=task_id, run_id=run_id, repo_label=token_label
+        )
+        for candidate in [base, *[base.with_name(f"{base.name}_{idx}") for idx in range(1, 4)]]:
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            if candidate.is_dir() and _git_root_for(candidate) is not None:
+                found.append(candidate)
+    return found
+
+
 def worktree_patch_text(worktree: Path, *, include_untracked: bool = True, timeout_seconds: int = 60) -> str:
     """Binary-safe unified patch of a worktree's changes vs HEAD.
 
@@ -499,6 +528,48 @@ def harness_worktree_dirs() -> list[Path]:
             return 0.0
 
     return sorted(entries, key=_mtime)
+
+
+def legacy_harness_worktree_base_dir() -> Path:
+    """Canonical pre-short-root fallback used by older Harness releases."""
+
+    return Path(tempfile.gettempdir()) / "hermes-agent-wt"
+
+
+def current_harness_worktree_base_dir() -> Path:
+    return _worktree_base_dir()
+
+
+def harness_worktree_inventory(*, include_legacy_temp: bool = False) -> list[tuple[Path, Path, str]]:
+    """Managed worktree directories with typed base provenance, deduplicated."""
+
+    bases = [(_worktree_base_dir(), "current")]
+    if include_legacy_temp:
+        bases.append((legacy_harness_worktree_base_dir(), "legacy_temp"))
+    rows: list[tuple[Path, Path, str]] = []
+    seen: set[Path] = set()
+    for base, source in bases:
+        if not base.is_dir():
+            continue
+        for worktree in base.iterdir():
+            if not worktree.is_dir():
+                continue
+            try:
+                resolved = worktree.resolve()
+            except OSError:
+                continue
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            rows.append((worktree, base, source))
+    return sorted(rows, key=lambda row: _safe_mtime(row[0]))
+
+
+def _safe_mtime(path: Path) -> float:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def worktree_source_root(worktree: Path) -> Path | None:

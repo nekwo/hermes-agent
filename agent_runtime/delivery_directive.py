@@ -389,6 +389,7 @@ def reap_orphan_worktrees(
     min_age_seconds: int = 3600,
     event_log: EventLog | None = None,
     dry_run: bool = False,
+    include_legacy_temp: bool = False,
 ) -> dict[str, Any]:
     """Capture-then-reap harness worktrees no open task run owns.
 
@@ -402,13 +403,19 @@ def reap_orphan_worktrees(
     import time as _time
 
     from .repo_context import (
-        harness_worktree_dirs,
+        harness_worktree_inventory,
+        current_harness_worktree_base_dir,
+        legacy_harness_worktree_base_dir,
         remove_orphan_worktree,
         worktree_source_root,
+        existing_run_worktrees_in_bases,
     )
     from .store import RunStore, TaskStore
 
     protected: set[Path] = set()
+    candidate_bases = [current_harness_worktree_base_dir()]
+    if include_legacy_temp:
+        candidate_bases.append(legacy_harness_worktree_base_dir())
     try:
         task_store = TaskStore()
         run_store = RunStore()
@@ -416,7 +423,12 @@ def reap_orphan_worktrees(
             repos = list(getattr(task, "affected_repos", None) or [])
             for run in run_store.list_for_task(task.id):
                 for repo in repos:
-                    for worktree in existing_run_worktrees(repo, task_id=task.id, run_id=run.id):
+                    for worktree in existing_run_worktrees_in_bases(
+                        repo,
+                        task_id=task.id,
+                        run_id=run.id,
+                        base_dirs=candidate_bases,
+                    ):
                         protected.add(worktree.resolve())
     except Exception:
         # If ownership cannot be established, protect everything: reap nothing.
@@ -426,8 +438,14 @@ def reap_orphan_worktrees(
     now_ts = _time.time()
     reaped: list[dict[str, Any]] = []
     kept: list[dict[str, Any]] = []
-    for worktree in harness_worktree_dirs():
-        entry: dict[str, Any] = {"worktree": worktree.name}
+    for worktree, candidate_base, source in harness_worktree_inventory(
+        include_legacy_temp=include_legacy_temp
+    ):
+        entry: dict[str, Any] = {
+            "worktree": worktree.name,
+            "base": str(candidate_base),
+            "source": source,
+        }
         try:
             resolved = worktree.resolve()
         except OSError:
@@ -471,7 +489,12 @@ def reap_orphan_worktrees(
         patch = worktree_patch_text(worktree)
         if patch.strip():
             capture_dir.mkdir(parents=True, exist_ok=True)
-            capture_path = capture_dir / f"{worktree.name}.patch"
+            capture_name = (
+                f"{worktree.name}.patch"
+                if source == "current"
+                else f"{source}_{worktree.name}.patch"
+            )
+            capture_path = capture_dir / capture_name
             try:
                 capture_path.write_text(patch, encoding="utf-8", newline="")
             except OSError:
@@ -501,7 +524,13 @@ def reap_orphan_worktrees(
             )
         except Exception:
             pass
-    return {"reaped": reaped, "kept": kept, "capture_dir": str(capture_dir), "dry_run": dry_run}
+    return {
+        "reaped": reaped,
+        "kept": kept,
+        "capture_dir": str(capture_dir),
+        "dry_run": dry_run,
+        "include_legacy_temp": include_legacy_temp,
+    }
 
 
 def _promote_patch_to_repo(
