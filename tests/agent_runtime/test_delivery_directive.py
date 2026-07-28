@@ -526,3 +526,201 @@ def test_reap_orphan_worktrees_opted_in_legacy_destructive_keeps_capture_contrac
     captured = Path(result["capture_dir"]) / reaped["captured_patch"]
     assert captured.is_file() and captured.stat().st_size > 0
     assert not orphan.exists()
+
+
+def test_reap_inventory_unsafe_candidate_is_kept_before_any_git_or_delete(
+    isolate_agent_runtime_root, tmp_path, monkeypatch
+):
+    from agent_runtime import delivery_directive as directive
+    from agent_runtime import repo_context as repo_context_mod
+
+    base = tmp_path / "hermes-agent-wt"
+    external = tmp_path / "external-target"
+    external.mkdir()
+    marker = external / "marker.txt"
+    marker.write_text("untouched", encoding="utf-8")
+    monkeypatch.setattr(
+        repo_context_mod,
+        "harness_worktree_inventory",
+        lambda **_: [(external, base, "legacy_temp", "candidate_outside_base")],
+    )
+    monkeypatch.setattr(
+        repo_context_mod,
+        "worktree_source_root",
+        lambda *_: pytest.fail("unsafe candidate reached git inspection"),
+    )
+    monkeypatch.setattr(
+        directive,
+        "worktree_patch_size_estimate",
+        lambda *_: pytest.fail("unsafe candidate reached patch estimation"),
+    )
+    monkeypatch.setattr(
+        repo_context_mod,
+        "remove_orphan_worktree",
+        lambda *_args, **_kwargs: pytest.fail("unsafe candidate reached removal"),
+    )
+
+    result = directive.reap_orphan_worktrees(
+        min_age_seconds=0, include_legacy_temp=True
+    )
+
+    assert result["reaped"] == []
+    assert result["kept"] == [
+        {
+            "worktree": external.name,
+            "base": str(base),
+            "source": "legacy_temp",
+            "reason": "candidate_outside_base",
+        }
+    ]
+    assert marker.read_text(encoding="utf-8") == "untouched"
+
+
+def test_reap_inventory_reparse_base_is_kept_without_traversal(
+    isolate_agent_runtime_root, tmp_path, monkeypatch
+):
+    from agent_runtime import repo_context as repo_context_mod
+    from agent_runtime.delivery_directive import reap_orphan_worktrees
+
+    current_base = tmp_path / "current-wt"
+    legacy_base = tmp_path / "hermes-agent-wt"
+    external_child = legacy_base / "must-not-be-visited"
+    current_base.mkdir()
+    external_child.mkdir(parents=True)
+    marker = external_child / "marker.txt"
+    marker.write_text("untouched", encoding="utf-8")
+    monkeypatch.setattr(repo_context_mod, "_worktree_base_dir", lambda: current_base)
+    monkeypatch.setattr(
+        repo_context_mod, "legacy_harness_worktree_base_dir", lambda: legacy_base
+    )
+    monkeypatch.setattr(
+        repo_context_mod,
+        "_path_is_reparse_point",
+        lambda path: Path(path) == legacy_base,
+    )
+
+    result = reap_orphan_worktrees(
+        min_age_seconds=0, include_legacy_temp=True
+    )
+
+    assert any(
+        item["base"] == str(legacy_base)
+        and item["reason"] == "base_reparse_alias"
+        for item in result["kept"]
+    )
+    assert marker.read_text(encoding="utf-8") == "untouched"
+
+
+def test_reap_inventory_reparse_child_cannot_escape_base_when_supported(
+    isolate_agent_runtime_root, tmp_path, monkeypatch
+):
+    import os
+
+    from agent_runtime import repo_context as repo_context_mod
+    from agent_runtime.delivery_directive import reap_orphan_worktrees
+
+    current_base = tmp_path / "current-wt"
+    legacy_base = tmp_path / "hermes-agent-wt"
+    external = tmp_path / "external"
+    current_base.mkdir()
+    legacy_base.mkdir()
+    external.mkdir()
+    marker = external / "marker.txt"
+    marker.write_text("external", encoding="utf-8")
+    link = legacy_base / "escaped"
+    try:
+        os.symlink(external, link, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlink/junction creation unsupported: {exc}")
+    monkeypatch.setattr(repo_context_mod, "_worktree_base_dir", lambda: current_base)
+    monkeypatch.setattr(
+        repo_context_mod, "legacy_harness_worktree_base_dir", lambda: legacy_base
+    )
+
+    preview = reap_orphan_worktrees(
+        min_age_seconds=0, dry_run=True, include_legacy_temp=True
+    )
+    destructive = reap_orphan_worktrees(
+        min_age_seconds=0, include_legacy_temp=True
+    )
+
+    assert any(item["reason"] == "candidate_outside_base" for item in preview["kept"])
+    assert any(item["reason"] == "candidate_outside_base" for item in destructive["kept"])
+    assert marker.read_text(encoding="utf-8") == "external"
+    assert link.exists()
+
+
+def test_reap_patch_capture_names_are_exclusive_across_sources_and_collisions(
+    isolate_agent_runtime_root, tmp_path, monkeypatch
+):
+    from datetime import datetime, timezone
+
+    from agent_runtime import delivery_directive as directive
+
+    capture_dir = tmp_path / "captures"
+    current_base = tmp_path / "current"
+    legacy_base = tmp_path / "legacy"
+    current = current_base / "legacy_temp_foo"
+    legacy = legacy_base / "foo"
+    current.mkdir(parents=True)
+    legacy.mkdir(parents=True)
+    monkeypatch.setattr(
+        directive,
+        "now",
+        lambda: datetime(2026, 7, 28, 12, 0, tzinfo=timezone.utc),
+    )
+
+    current_capture = directive._write_reap_patch_exclusive(
+        capture_dir,
+        "current patch",
+        source="current",
+        candidate_base=current_base,
+        worktree=current,
+    )
+    legacy_capture = directive._write_reap_patch_exclusive(
+        capture_dir,
+        "legacy patch",
+        source="legacy_temp",
+        candidate_base=legacy_base,
+        worktree=legacy,
+    )
+    collision_capture = directive._write_reap_patch_exclusive(
+        capture_dir,
+        "second current patch",
+        source="current",
+        candidate_base=current_base,
+        worktree=current,
+    )
+
+    assert current_capture and legacy_capture and collision_capture
+    assert len({current_capture.name, legacy_capture.name, collision_capture.name}) == 3
+    assert current_capture.read_text(encoding="utf-8") == "current patch"
+    assert legacy_capture.read_text(encoding="utf-8") == "legacy patch"
+    assert collision_capture.read_text(encoding="utf-8") == "second current patch"
+
+
+def test_reap_capture_create_failure_keeps_candidate(
+    source_repo, isolate_agent_runtime_root, tmp_path, monkeypatch
+):
+    import os
+    import time
+
+    from agent_runtime import delivery_directive as directive
+    from agent_runtime import repo_context as repo_context_mod
+
+    wt_base = tmp_path / "wtbase"
+    monkeypatch.setattr(repo_context_mod, "_worktree_base_dir", lambda: wt_base)
+    orphan = _worktree_with_changes(
+        source_repo, task_id="task_capture_fail", run_id="run_capture_fail"
+    )
+    old = time.time() - 7200
+    os.utime(orphan, (old, old))
+    monkeypatch.setattr(directive, "_write_reap_patch_exclusive", lambda *_a, **_k: None)
+
+    result = directive.reap_orphan_worktrees(min_age_seconds=3600)
+
+    assert orphan.exists()
+    assert any(
+        item["worktree"] == orphan.name and item["reason"] == "capture_write_failed"
+        for item in result["kept"]
+    )

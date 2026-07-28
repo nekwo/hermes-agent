@@ -401,6 +401,12 @@ def existing_run_worktrees_in_bases(
     found: list[Path] = []
     seen: set[Path] = set()
     for base_dir in base_dirs:
+        if _path_is_reparse_point(base_dir):
+            continue
+        try:
+            resolved_base = Path(base_dir).resolve()
+        except OSError:
+            continue
         base = Path(base_dir) / _worktree_token(
             git_root, task_id=task_id, run_id=run_id, repo_label=token_label
         )
@@ -408,6 +414,8 @@ def existing_run_worktrees_in_bases(
             try:
                 resolved = candidate.resolve()
             except OSError:
+                continue
+            if resolved.parent != resolved_base:
                 continue
             if resolved in seen:
                 continue
@@ -540,16 +548,26 @@ def current_harness_worktree_base_dir() -> Path:
     return _worktree_base_dir()
 
 
-def harness_worktree_inventory(*, include_legacy_temp: bool = False) -> list[tuple[Path, Path, str]]:
+def harness_worktree_inventory(
+    *, include_legacy_temp: bool = False
+) -> list[tuple[Path, Path, str, str | None]]:
     """Managed worktree directories with typed base provenance, deduplicated."""
 
     bases = [(_worktree_base_dir(), "current")]
     if include_legacy_temp:
         bases.append((legacy_harness_worktree_base_dir(), "legacy_temp"))
-    rows: list[tuple[Path, Path, str]] = []
+    rows: list[tuple[Path, Path, str, str | None]] = []
     seen: set[Path] = set()
     for base, source in bases:
+        if _path_is_reparse_point(base):
+            rows.append((base, base, source, "base_reparse_alias"))
+            continue
         if not base.is_dir():
+            continue
+        try:
+            resolved_base = base.resolve()
+        except OSError:
+            rows.append((base, base, source, "base_unresolvable"))
             continue
         for worktree in base.iterdir():
             if not worktree.is_dir():
@@ -557,12 +575,28 @@ def harness_worktree_inventory(*, include_legacy_temp: bool = False) -> list[tup
             try:
                 resolved = worktree.resolve()
             except OSError:
+                rows.append((worktree, base, source, "candidate_unresolvable"))
+                continue
+            if resolved.parent != resolved_base:
+                rows.append((worktree, base, source, "candidate_outside_base"))
                 continue
             if resolved in seen:
                 continue
             seen.add(resolved)
-            rows.append((worktree, base, source))
+            rows.append((worktree, base, source, None))
     return sorted(rows, key=lambda row: _safe_mtime(row[0]))
+
+
+def _path_is_reparse_point(path: Path) -> bool:
+    try:
+        if path.is_symlink():
+            return True
+        if os.name != "nt":
+            return False
+        attributes = getattr(path.lstat(), "st_file_attributes", 0)
+        return bool(attributes & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    except OSError:
+        return False
 
 
 def _safe_mtime(path: Path) -> float:
