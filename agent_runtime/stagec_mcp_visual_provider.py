@@ -24,7 +24,9 @@ from .proof_capture import CapturedArtifact, ScreenshotRequest, VideoRequest
 
 
 class StageCMcpError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, provider_metadata: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.provider_metadata = dict(provider_metadata or {})
 
 
 _MARIONETTE_KERNEL_MARKERS = (
@@ -121,7 +123,13 @@ class StageCMcpJsonRpcClient:
     def tools_list(self) -> dict[str, Any]:
         return self.request("tools/list", timeout_seconds=min(self.config.connect_timeout_seconds, 30.0))
 
-    def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def call_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        allow_error_envelope: bool = False,
+    ) -> dict[str, Any]:
         response = self.request(
             "tools/call",
             params={"name": name, "arguments": arguments},
@@ -130,12 +138,12 @@ class StageCMcpJsonRpcClient:
         result = response.get("result")
         if not isinstance(result, dict):
             raise StageCMcpError("launcher_qa MCP tool returned no result object")
-        if result.get("isError") is True:
-            envelope = _decode_tool_envelope(result)
+        envelope = _decode_tool_envelope(result)
+        if result.get("isError") is True and not allow_error_envelope:
             failure = str(envelope.get("failure_class") or "mcp_tool_error")
             message = str(envelope.get("message_safe") or envelope.get("summary") or "tool error")
             raise StageCMcpError(f"{failure}: {message[:240]}")
-        return _decode_tool_envelope(result)
+        return envelope
 
     def request(self, method: str, *, params: dict[str, Any] | None = None, timeout_seconds: float) -> dict[str, Any]:
         if self._proc is None:
@@ -273,6 +281,12 @@ class StageCLauncherMcpVisualCaptureProvider:
         semantic = envelope.get("semantic")
         if isinstance(semantic, dict):
             provider_metadata["stagec_semantic_envelope"] = semantic
+        screenshot_evidence = _stagec_screenshot_evidence(screenshot)
+        if screenshot_evidence:
+            provider_metadata["stagec_screenshot_envelope"] = screenshot_evidence
+        external_failure = envelope.get("external_capture_failure")
+        if isinstance(external_failure, dict):
+            provider_metadata["stagec_external_capture_failure"] = external_failure
         return CapturedArtifact(
             path=image_path,
             capture_provider="launcher_qa",
@@ -347,6 +361,8 @@ class StageCLauncherMcpVisualCaptureProvider:
                     "semantic_state_changed_before_capture: Mission Control was not settled at the final semantic probe"
                 )
 
+            semantic = _settled_mission_control_envelope(wait, navigation_data, widget_data)
+
             screenshot = client.call_tool(
                 "mcp_launcher_qa_screenshot_window",
                 {
@@ -354,18 +370,88 @@ class StageCLauncherMcpVisualCaptureProvider:
                     "max_retries": int(args.get("screenshot_max_retries") or 8),
                     "retry_delay_ms": int(args.get("screenshot_retry_delay_ms") or 750),
                 },
+                allow_error_envelope=True,
             )
-            _require_stagec_envelope_ok(screenshot, fallback="screenshot_window_failed")
+            if screenshot.get("ok") is not True:
+                external_failure = _stagec_capture_failure_evidence(screenshot, fallback="screenshot_window_failed")
+                if _is_semantic_pixel_capture_failure(screenshot):
+                    fallback_args = {
+                        **args,
+                        "screenshot": True,
+                        "force_relaunch": False,
+                        "reap_stale": False,
+                        "relaunch_on_dead_process": False,
+                    }
+                    fallback_envelope = client.call_tool(
+                        "mcp_launcher_qa_open_app_tab",
+                        fallback_args,
+                        allow_error_envelope=True,
+                    )
+                    if fallback_envelope.get("ok") is not True:
+                        fallback_failure = _stagec_capture_failure_evidence(
+                            fallback_envelope,
+                            fallback="marionette_internal_fallback_failed",
+                        )
+                        failure = str(fallback_envelope.get("failure_class") or "marionette_internal_fallback_failed")
+                        message = str(
+                            fallback_envelope.get("message_safe")
+                            or "Marionette internal screenshot fallback did not produce proof"
+                        )
+                        raise StageCMcpError(
+                            f"{failure}: {message[:240]}",
+                            provider_metadata={
+                                "stagec_semantic_envelope": semantic,
+                                "stagec_external_capture_failure": external_failure,
+                                "stagec_internal_fallback_failure": fallback_failure,
+                            },
+                        )
+                    fallback_screenshot = (
+                        fallback_envelope.get("screenshot")
+                        if isinstance(fallback_envelope.get("screenshot"), dict)
+                        else {}
+                    )
+                    image_path = str(fallback_screenshot.get("path") or "").strip()
+                    if not image_path:
+                        raise StageCMcpError(
+                            "marionette_internal_fallback_missing_artifact: fallback returned no screenshot path",
+                            provider_metadata={
+                                "stagec_semantic_envelope": semantic,
+                                "stagec_external_capture_failure": external_failure,
+                                "stagec_internal_fallback_failure": {
+                                    "failure_class": "marionette_internal_fallback_missing_artifact"
+                                },
+                            },
+                        )
+                    return {
+                        "ok": True,
+                        "screenshot": fallback_screenshot,
+                        "redaction": fallback_envelope.get("redaction"),
+                        "semantic": semantic,
+                        "external_capture_failure": external_failure,
+                    }
+                failure = str(screenshot.get("failure_class") or "screenshot_window_failed")
+                message = str(screenshot.get("message_safe") or "screenshot_window failed")
+                raise StageCMcpError(
+                    f"{failure}: {message[:240]}",
+                    provider_metadata={
+                        "stagec_semantic_envelope": semantic,
+                        "stagec_external_capture_failure": external_failure,
+                    },
+                )
             bounds = screenshot.get("bounds") if isinstance(screenshot.get("bounds"), dict) else {}
+            window_identity = _stagec_window_identity_evidence(screenshot.get("window_identity"))
             return {
                 "ok": True,
                 "screenshot": {
                     "path": screenshot.get("image_path"),
                     "width": bounds.get("width"),
                     "height": bounds.get("height"),
+                    "method": screenshot.get("capture_method_used") or screenshot.get("capture_method"),
+                    "byte_count": screenshot.get("byte_count"),
+                    "window_identity": window_identity or None,
                 },
                 "redaction": screenshot.get("redaction"),
-                "semantic": _settled_mission_control_envelope(wait, navigation_data, widget_data),
+                "semantic": semantic,
             }
 
 
@@ -889,6 +975,69 @@ def _require_stagec_envelope_ok(envelope: dict[str, Any], *, fallback: str) -> N
     failure = str(envelope.get("failure_class") or fallback)
     message = str(envelope.get("message_safe") or fallback.replace("_", " "))
     raise StageCMcpError(f"{failure}: {message[:240]}")
+
+
+def _is_semantic_pixel_capture_failure(envelope: dict[str, Any]) -> bool:
+    return str(envelope.get("failure_class") or "").strip() in {
+        "helper_blank_capture",
+        "helper_low_information_capture",
+    }
+
+
+def _stagec_capture_failure_evidence(envelope: dict[str, Any], *, fallback: str) -> dict[str, Any]:
+    helper = envelope.get("helper_response_safe")
+    helper_data = helper if isinstance(helper, dict) else {}
+    screenshot = envelope.get("screenshot")
+    screenshot_data = screenshot if isinstance(screenshot, dict) else {}
+    diagnostics = screenshot_data.get("helper_diagnostics")
+    diagnostic_data = diagnostics if isinstance(diagnostics, dict) else {}
+    internal = diagnostic_data.get("internal_screenshot_fallback")
+    internal_data = internal if isinstance(internal, dict) else {}
+    evidence = {
+        "failure_class": str(envelope.get("failure_class") or fallback)[:120],
+        "helper_failure_class": str(helper_data.get("failure_class") or "")[:120],
+        "helper_exit": _optional_int(envelope.get("helper_exit")),
+        "original_screenshot_failure_class": str(
+            diagnostic_data.get("original_screenshot_failure_class") or ""
+        )[:120],
+        "internal_fallback_failure_class": str(internal_data.get("failure_class") or "")[:120],
+    }
+    return {key: value for key, value in evidence.items() if value not in {None, ""}}
+
+
+def _stagec_screenshot_evidence(screenshot: dict[str, Any]) -> dict[str, Any]:
+    keys = (
+        "method",
+        "byte_count",
+        "width",
+        "height",
+        "fallback_from",
+        "fallback_reason",
+        "acceptance_mode",
+        "acceptance_reason",
+        "window_identity",
+    )
+    return {key: screenshot.get(key) for key in keys if screenshot.get(key) is not None}
+
+
+def _stagec_window_identity_evidence(value: Any) -> dict[str, Any]:
+    identity = value if isinstance(value, dict) else {}
+    keys = (
+        "hwnd",
+        "pid",
+        "class",
+        "visible",
+        "iconic_at_match",
+        "cloaked",
+        "selection_rule",
+        "selection_mode",
+        "requested_pid",
+        "pid_matches_requested",
+        "title_matches_prefix",
+        "observed_image_name",
+        "expected_image_name",
+    )
+    return {key: identity.get(key) for key in keys if identity.get(key) is not None}
 
 
 def _stagec_envelope_data(envelope: dict[str, Any]) -> dict[str, Any]:

@@ -85,9 +85,55 @@ def _stagec_mission_control_result(name, artifact, *, width=2560, height=1400):
             "ok": True,
             "image_path": str(artifact),
             "bounds": {"width": width, "height": height},
+            "byte_count": 123456,
+            "capture_method": "printwindow",
+            "capture_method_used": "printwindow",
+            "window_identity": {
+                "pid": 4242,
+                "selection_mode": "pid",
+                "requested_pid": 4242,
+                "pid_matches_requested": True,
+                "observed_image_name": "eternia_launcher.exe",
+                "expected_image_name": "eternia_launcher.exe",
+            },
             "redaction": {"safe": True},
         }
     raise AssertionError(f"unexpected Stage-C tool: {name}")
+
+
+def test_stagec_jsonrpc_client_can_preserve_mcp_error_envelope(monkeypatch):
+    import json
+    import pytest
+
+    from agent_runtime import stagec_mcp_visual_provider as stagec
+
+    response = {
+        "result": {
+            "isError": True,
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "ok": False,
+                            "failure_class": "helper_low_information_capture",
+                            "message_safe": "Screenshot capture failed after 8 attempt(s).",
+                        }
+                    ),
+                }
+            ],
+        }
+    }
+    client = stagec.StageCMcpJsonRpcClient(
+        stagec.StageCMcpServerConfig(name="launcher_qa", command="fake")
+    )
+    monkeypatch.setattr(client, "request", lambda *args, **kwargs: response)
+
+    envelope = client.call_tool("mcp_launcher_qa_screenshot_window", {}, allow_error_envelope=True)
+
+    assert envelope["failure_class"] == "helper_low_information_capture"
+    with pytest.raises(stagec.StageCMcpError, match="helper_low_information_capture"):
+        client.call_tool("mcp_launcher_qa_screenshot_window", {})
 
 
 def test_visual_runner_returns_environment_blocker_without_provider():
@@ -166,7 +212,7 @@ def test_stagec_provider_rebuilds_stale_marionette_before_capture(tmp_path, monk
         def initialize(self):
             return {}
 
-        def call_tool(self, name, arguments):
+        def call_tool(self, name, arguments, *, allow_error_envelope=False):
             assert all(marker in kernel.read_bytes() for marker in stagec._MARIONETTE_KERNEL_MARKERS)
             return _stagec_mission_control_result(name, artifact)
 
@@ -216,7 +262,7 @@ def test_stagec_provider_retries_after_wrong_marionette_target_error(tmp_path, m
         def initialize(self):
             return {}
 
-        def call_tool(self, name, arguments):
+        def call_tool(self, name, arguments, *, allow_error_envelope=False):
             calls.append(name)
             if name == "mcp_launcher_qa_open_app_tab" and calls.count(name) == 1:
                 raise stagec.StageCMcpError(
@@ -276,7 +322,7 @@ def test_stagec_provider_waits_for_settled_mission_control_before_capture(tmp_pa
         def initialize(self):
             return {}
 
-        def call_tool(self, name, arguments):
+        def call_tool(self, name, arguments, *, allow_error_envelope=False):
             if name in {
                 "mcp_launcher_qa_get_navigation_state",
                 "mcp_launcher_qa_get_widget_state",
@@ -335,6 +381,199 @@ def test_stagec_provider_waits_for_settled_mission_control_before_capture(tmp_pa
             }
         ],
     }
+    assert capture.provider_metadata["stagec_screenshot_envelope"] == {
+        "method": "printwindow",
+        "byte_count": 123456,
+        "width": 2560,
+        "height": 1400,
+        "window_identity": {
+            "pid": 4242,
+            "selection_mode": "pid",
+            "requested_pid": 4242,
+            "pid_matches_requested": True,
+            "observed_image_name": "eternia_launcher.exe",
+            "expected_image_name": "eternia_launcher.exe",
+        },
+    }
+
+
+def test_stagec_provider_uses_internal_fallback_after_settled_helper_failure(tmp_path, monkeypatch):
+    from agent_runtime import stagec_mcp_visual_provider as stagec
+
+    artifact = tmp_path / "mission_control_marionette_internal.png"
+    artifact.write_bytes(b"png")
+    calls = []
+
+    class FakeClient:
+        def __init__(self, config):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def initialize(self):
+            return {}
+
+        def call_tool(self, name, arguments, *, allow_error_envelope=False):
+            calls.append((name, dict(arguments), allow_error_envelope))
+            if name == "mcp_launcher_qa_screenshot_window":
+                return {
+                    "ok": False,
+                    "failure_class": "helper_low_information_capture",
+                    "message_safe": "Screenshot capture failed after 8 attempt(s).",
+                    "helper_exit": 23,
+                    "helper_response_safe": {"failure_class": "low_information_capture"},
+                }
+            if name == "mcp_launcher_qa_open_app_tab" and arguments.get("screenshot") is True:
+                return {
+                    "ok": True,
+                    "screenshot": {
+                        "method": "MarionetteInternalFlutter",
+                        "path": str(artifact),
+                        "byte_count": artifact.stat().st_size,
+                        "width": 1920,
+                        "height": 1080,
+                        "fallback_from": "PrintWindow",
+                        "fallback_reason": "helper_low_information_capture",
+                        "acceptance_mode": "marionette_internal_fallback",
+                    },
+                    "redaction": {"safe": True},
+                }
+            return _stagec_mission_control_result(name, artifact, width=1920, height=1080)
+
+    monkeypatch.setattr(stagec, "StageCMcpJsonRpcClient", FakeClient)
+    monkeypatch.setattr(stagec, "_marionette_preflight_enabled_for_config", lambda metadata, config: False)
+    provider = stagec.StageCLauncherMcpVisualCaptureProvider(
+        stagec.StageCMcpServerConfig(name="launcher_qa", command="fake")
+    )
+
+    capture = provider.capture_screenshot(
+        ScreenshotRequest(
+            task_id="task_stagec_fallback",
+            stage_id="stage_1",
+            scenario="mission_control",
+            metadata=_request(),
+        )
+    )
+
+    assert [name for name, _, _ in calls] == [
+        "mcp_launcher_qa_open_app_tab",
+        "mcp_launcher_qa_wait_for_state",
+        "mcp_launcher_qa_get_navigation_state",
+        "mcp_launcher_qa_get_widget_state",
+        "mcp_launcher_qa_screenshot_window",
+        "mcp_launcher_qa_open_app_tab",
+    ]
+    assert calls[-2][2] is True
+    assert calls[-1][2] is True
+    fallback_args = calls[-1][1]
+    assert fallback_args["screenshot"] is True
+    assert fallback_args["force_relaunch"] is False
+    assert fallback_args["reap_stale"] is False
+    assert fallback_args["relaunch_on_dead_process"] is False
+    assert capture.path == str(artifact)
+    assert capture.provider_metadata["stagec_semantic_envelope"]["widget"]["mounted"] is True
+    assert capture.provider_metadata["stagec_external_capture_failure"] == {
+        "failure_class": "helper_low_information_capture",
+        "helper_failure_class": "low_information_capture",
+        "helper_exit": 23,
+    }
+    assert capture.provider_metadata["stagec_screenshot_envelope"] == {
+        "method": "MarionetteInternalFlutter",
+        "byte_count": 3,
+        "width": 1920,
+        "height": 1080,
+        "fallback_from": "PrintWindow",
+        "fallback_reason": "helper_low_information_capture",
+        "acceptance_mode": "marionette_internal_fallback",
+    }
+
+
+def test_stagec_runner_preserves_settled_semantics_when_internal_fallback_fails(
+    tmp_path, monkeypatch, isolate_agent_runtime_root
+):
+    from agent_runtime import stagec_mcp_visual_provider as stagec
+
+    artifact = tmp_path / "unused.png"
+
+    class FakeClient:
+        def __init__(self, config):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def initialize(self):
+            return {}
+
+        def call_tool(self, name, arguments, *, allow_error_envelope=False):
+            if name == "mcp_launcher_qa_screenshot_window":
+                return {
+                    "ok": False,
+                    "failure_class": "helper_blank_capture",
+                    "message_safe": "Screenshot capture failed after 8 attempt(s).",
+                    "helper_exit": 23,
+                    "helper_response_safe": {"failure_class": "blank_capture"},
+                }
+            if name == "mcp_launcher_qa_open_app_tab" and arguments.get("screenshot") is True:
+                return {
+                    "ok": False,
+                    "failure_class": "visual_render_mismatch",
+                    "message_safe": "Internal Flutter screenshot fallback did not produce proof.",
+                    "screenshot": {
+                        "method": "PrintWindow",
+                        "failure_class": "visual_render_mismatch",
+                        "helper_diagnostics": {
+                            "original_screenshot_failure_class": "helper_blank_capture",
+                            "internal_screenshot_fallback": {
+                                "ok": False,
+                                "failure_class": "internal_screenshot_vm_service_unavailable",
+                                "message_safe": "VM service did not expose the screenshot extension.",
+                            },
+                        },
+                    },
+                }
+            return _stagec_mission_control_result(name, artifact)
+
+    monkeypatch.setattr(stagec, "StageCMcpJsonRpcClient", FakeClient)
+    monkeypatch.setattr(stagec, "_marionette_preflight_enabled_for_config", lambda metadata, config: False)
+    provider = stagec.StageCLauncherMcpVisualCaptureProvider(
+        stagec.StageCMcpServerConfig(name="launcher_qa", command="fake")
+    )
+
+    result = VisualProofRunner(provider=provider).capture(
+        _task(),
+        stage_id="stage_1",
+        run_id="run_fallback_failed",
+        actor="qa",
+        request=_request(),
+        kind="screenshot",
+    )
+
+    assert result.environment_blocker is True
+    assert result.proof.type == ProofType.LOG
+    metadata = result.proof.metadata["provider_metadata"]
+    assert metadata["stagec_semantic_envelope"]["navigation"] == {
+        "selected_tab": "missionControl",
+        "route_name": "/shell",
+        "blocking_modal": {"present": False},
+    }
+    assert metadata["stagec_external_capture_failure"]["failure_class"] == "helper_blank_capture"
+    assert metadata["stagec_internal_fallback_failure"]["failure_class"] == "visual_render_mismatch"
+    assert (
+        metadata["stagec_internal_fallback_failure"]["internal_fallback_failure_class"]
+        == "internal_screenshot_vm_service_unavailable"
+    )
+    assert (
+        metadata["stagec_internal_fallback_failure"]["original_screenshot_failure_class"]
+        == "helper_blank_capture"
+    )
 
 
 def test_stagec_provider_reports_exact_semantic_settle_timeout_without_capture(tmp_path, monkeypatch):
@@ -355,7 +594,7 @@ def test_stagec_provider_reports_exact_semantic_settle_timeout_without_capture(t
         def initialize(self):
             return {}
 
-        def call_tool(self, name, arguments):
+        def call_tool(self, name, arguments, *, allow_error_envelope=False):
             calls.append(name)
             if name == "mcp_launcher_qa_open_app_tab":
                 return {"ok": True, "redaction": {"safe": True}}
@@ -510,7 +749,7 @@ def test_stagec_provider_derives_launcher_helpers_from_configured_repo(tmp_path,
         def initialize(self):
             return {}
 
-        def call_tool(self, name, arguments):
+        def call_tool(self, name, arguments, *, allow_error_envelope=False):
             if name == "mcp_launcher_qa_open_app_tab":
                 seen["args"] = dict(arguments)
             return _stagec_mission_control_result(name, artifact, width=1920, height=1080)
