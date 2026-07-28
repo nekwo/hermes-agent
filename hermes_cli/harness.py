@@ -1399,6 +1399,11 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_message.add_argument("--workspace-id", default=None)
     mission_chat_message.add_argument("--workspace-name", default=None)
     mission_chat_message.add_argument("--intent-hint", default="chat")
+    mission_chat_message.add_argument(
+        "--allow-mission-goal",
+        action="store_true",
+        help="Explicitly admit mission_goal_create for this one turn. Normal persona chat is chat-only and never creates a mission/task/graph by default.",
+    )
     mission_chat_message.add_argument("--requested-by", default="cli")
     mission_chat_message.add_argument("--client-message-id", default=None)
     mission_chat_message.add_argument("--idempotency-key", default=None)

@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 MISSION_GOAL_CREATE_SCHEMA = {
     "name": "mission_goal_create",
     "description": (
-        "Create a REAL Mission Control goal: a live self-driving Neko -> Dev -> QA task with proof gates and a tracked task_id. Use when the operator asks to start/kick off a goal. Disambiguator: NOT the no-model smoke test and NOT agent_chat_send -- this starts real tracked work and parks other open goals."
+        "Create a REAL Mission Control goal: a live self-driving Neko -> Dev -> QA task with proof gates and a tracked task_id. This tool is admitted to persona chat only when the caller explicitly opts that turn in with --allow-mission-goal and the operator asks to start/kick off a goal. It is never available to ordinary one-off chat. Disambiguator: NOT the no-model smoke test and NOT agent_chat_send -- this starts real tracked work and parks other open goals."
     ),
     "parameters": {
         "type": "object",

@@ -1,3 +1,4 @@
+import argparse
 import json
 
 import agent_runtime.mission_goal as mission_goal_mod
@@ -330,13 +331,15 @@ def test_mission_goal_create_is_available_and_unblocked_for_supervisor():
     assert "mission_goal_create" not in blocked_tool_names(neko)
 
 
-def test_supervisor_chat_toolset_gains_mission_goal_even_if_persona_list_omits_it(tmp_path, monkeypatch):
+def test_supervisor_chat_toolset_requires_explicit_mission_goal_opt_in(tmp_path, monkeypatch):
     # The live operator persona (profile:alice) carries a persisted/config toolset
-    # list that predates mission_goal. The chat resolver must still grant it so a
-    # real goal can be triggered from the operator channel.
+    # list that predates mission_goal. Ordinary one-off chat must not inherit the
+    # heavy mission route merely because the role is capable of it.
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+    from agent_runtime import persona_runtime
     from agent_runtime.models import AgentPersona
     from agent_runtime.persona_runtime import _enabled_toolsets_for_chat
+    from agent_runtime.tool_visibility import ToolVisibilityOptions
 
     supervisor = AgentPersona(
         id="profile:alice",
@@ -348,9 +351,34 @@ def test_supervisor_chat_toolset_gains_mission_goal_even_if_persona_list_omits_i
         toolsets=["file", "search", "terminal", "code_execution"],
         system_prompt_path="",
     )
-    supervisor_toolsets = _enabled_toolsets_for_chat(supervisor, session_id="sess_x")
-    assert "mission_goal" in supervisor_toolsets
-    assert not {"web", "browser", "vision", "todo"} & set(supervisor_toolsets)
+    normal_toolsets = _enabled_toolsets_for_chat(supervisor, session_id="sess_x")
+    assert "mission_goal" not in normal_toolsets
+    assert not {"web", "browser", "vision", "todo"} & set(normal_toolsets)
+
+    opted_in_toolsets = _enabled_toolsets_for_chat(
+        supervisor,
+        session_id="sess_x",
+        allow_mission_goal=True,
+    )
+    assert "mission_goal" in opted_in_toolsets
+    assert not {"web", "browser", "vision", "todo"} & set(opted_in_toolsets)
+
+    monkeypatch.setattr(
+        persona_runtime,
+        "permission_options_for_chat",
+        lambda persona, session_id=None, **_kwargs: ToolVisibilityOptions(
+            permission_mode="unbounded"
+        ),
+    )
+    assert "mission_goal" not in _enabled_toolsets_for_chat(
+        supervisor,
+        session_id="sess_x",
+    )
+    assert "mission_goal" in _enabled_toolsets_for_chat(
+        supervisor,
+        session_id="sess_x",
+        allow_mission_goal=True,
+    )
 
     # A non-supervisor role is not granted the supervisor-only capability.
     dev = AgentPersona(
@@ -364,6 +392,30 @@ def test_supervisor_chat_toolset_gains_mission_goal_even_if_persona_list_omits_i
         system_prompt_path="",
     )
     assert "mission_goal" not in _enabled_toolsets_for_chat(dev, session_id="sess_x")
+    assert "mission_goal" not in _enabled_toolsets_for_chat(
+        dev,
+        session_id="sess_x",
+        allow_mission_goal=True,
+    )
+
+
+def test_mission_chat_parser_requires_dedicated_goal_opt_in():
+    from hermes_cli.harness import build_parser
+
+    parser = argparse.ArgumentParser()
+    build_parser(parser.add_subparsers(dest="command"))
+    base = [
+        "harness",
+        "mission-chat",
+        "message",
+        "--persona",
+        "profile:alice",
+        "--message",
+        "start the requested mission",
+    ]
+
+    assert parser.parse_args(base).allow_mission_goal is False
+    assert parser.parse_args([*base, "--allow-mission-goal"]).allow_mission_goal is True
 
 
 def test_create_from_request_default_daemon_mode_still_defers_to_config(tmp_path, monkeypatch):

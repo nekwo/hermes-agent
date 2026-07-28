@@ -43,7 +43,7 @@ from .models import AgentPersona, AgentRun
 from .mission_chat_clarify import MissionChatClarifyCapture
 from .mission_chat_workdir import mission_chat_workdir_for_persona
 from .mission_plan import current_plan_stage
-from .personas import ALLOWED_TOOLSETS_BY_ROLE, DEFAULT_SUPERVISOR_PERSONA_ID, all_registered_toolsets, blocked_tool_names, effective_toolsets, load_bundled_prompt, role_from_persona
+from .personas import ALLOWED_TOOLSETS_BY_ROLE, all_registered_toolsets, blocked_tool_names, effective_toolsets, load_bundled_prompt, role_from_persona
 from .profile_context import resolve_persona_profile
 from .provider_health import assert_provider_health_for_persona
 from .terminal_envelope import (
@@ -380,6 +380,7 @@ class GPTPersonaRuntime:
         compression_threshold_tokens_override: int | None = None,
         compression_protect_first_n_override: int | None = None,
         compression_protect_last_n_override: int | None = None,
+        allow_mission_goal: bool = False,
     ) -> AgentRunResult:
         """Run the canonical Mission Control chat path.
 
@@ -469,7 +470,10 @@ class GPTPersonaRuntime:
                 terminal_envelope_scope=envelope_scope,
                 mcp_admission=admission,
                 enabled_toolsets=_enabled_toolsets_for_chat(
-                    persona, session_id=perm_session_id, admission=admission
+                    persona,
+                    session_id=perm_session_id,
+                    admission=admission,
+                    allow_mission_goal=allow_mission_goal,
                 ),
                 blocked_tool_names=_blocked_tool_names_for_chat(persona, session_id=perm_session_id),
                 quiet_mode=True,
@@ -657,10 +661,14 @@ def _mission_chat_operative_rules() -> str:
         "actually invoked the tool and are reporting its real result. If a capability isn't available, or your permission "
         "grant blocks it, say so plainly instead of inventing output.\n"
         "- When the operator asks you to send, brief, or coordinate named agents, use `agent_chat_send` for each agent. "
-        "Do not create a goal unless the operator explicitly asks for a goal, mission, or task. Investigations and "
-        "multi-agent work do not imply goal creation.\n"
-        "- When the operator asks you to start, trigger, kick off, or run a goal/mission/task, create a REAL one with the "
-        "mission_goal_create tool (it returns a tracked task_id and starts the Mission Daemon so it self-drives). Do NOT "
+        "Ordinary persona chat is chat-only for every role: investigations, verification, MCP calls, and multi-agent work "
+        "never imply goal creation. The `mission_goal_create` tool is absent unless the CALLER explicitly opted this turn "
+        "into heavy mission routing with `--allow-mission-goal`; never infer or work around that opt-in. If the operator asks "
+        "for a goal/mission/task and the tool is absent, explain that the explicit opt-in is required instead of creating a "
+        "task through terminal, a worker, or another tool.\n"
+        "- Only when `mission_goal_create` is actually present AND the operator explicitly asks to start, trigger, kick off, "
+        "or run a goal/mission/task, create a REAL one with it (it returns a tracked task_id and starts the Mission Daemon "
+        "so it self-drives). Do NOT "
         "run the no-model smoke test (or any temp/throwaway graph validation) as a stand-in for a real goal — the smoke "
         "never appears in Mission Control. Only fall back to the smoke if the operator explicitly asks to validate the "
         "graph without creating real work.\n"
@@ -1010,7 +1018,11 @@ def _chat_trace_callback(
 
 
 def _enabled_toolsets_for_chat(
-    persona: AgentPersona, *, session_id: str | None, admission=None
+    persona: AgentPersona,
+    *,
+    session_id: str | None,
+    admission=None,
+    allow_mission_goal: bool = False,
 ) -> list[str]:
     """The single chat-lane toolset chokepoint (both the free-chat and operator/
     mission chat call sites funnel through here).
@@ -1018,9 +1030,9 @@ def _enabled_toolsets_for_chat(
     Resolution order: permission mode → role/persona toolset resolution → chat
     capability augmentation → the chat-lane cost policy
     (``scope_chat_lane_toolsets``) that drops browser / vision / heavy-dev from a
-    conversational lane → the MCP admission scope. ``unbounded`` permission mode
-    bypasses that cost policy, but does not resurrect product-disabled chat
-    capabilities such as unfinished Neko goal creation. A persona that wants a
+    conversational lane → the explicit mission-goal guard → the MCP admission
+    scope. ``unbounded`` permission mode bypasses the cost policy, but never the
+    global chat-only default. A persona that wants a
     specific cost-excluded toolset back on its *bounded* chat lane restores it via
     ``agent_runtime.personas.<id>.chat_lane_restore_toolsets`` (see
     ``config.chat_lane_restore_toolsets``). Worker/dev task lanes never call this
@@ -1043,7 +1055,14 @@ def _enabled_toolsets_for_chat(
         resolved = scope_chat_lane_toolsets(
             resolved, restore=chat_lane_restore_toolsets(persona.id)
         )
-    if persona.id == DEFAULT_SUPERVISOR_PERSONA_ID:
+    # Ordinary persona chat is globally chat-only. The mission/task/graph lane
+    # creates durable work, workers, retries, and proof state, so permission mode
+    # and role capability must never imply admission. Only the dedicated caller
+    # opt-in for this exact Mission Control turn can retain this toolset.
+    mission_goal_role_allowed = "mission_goal" in ALLOWED_TOOLSETS_BY_ROLE.get(
+        role_from_persona(persona), frozenset()
+    )
+    if not allow_mission_goal or not mission_goal_role_allowed:
         resolved = [toolset for toolset in resolved if toolset != "mission_goal"]
     admitted = admission.server_names if admission is not None else ()
     if admission is None and admission_enabled():
@@ -1219,11 +1238,11 @@ def apply_chat_lane_tool_scope(
     return options
 
 
-# Operator-chat-only first-class capabilities that a persona's role is allowed to
-# use but which a persisted/config toolset list (created before the capability
-# existed) may not yet enumerate. Without this, a deployment whose supervisor
-# toolsets were persisted before ``mission_goal`` shipped could never trigger a
-# real Mission Control goal from chat — the very thing the tool exists for.
+# Operator-chat first-class capabilities that a persona's role is allowed to use
+# but which an older persisted/config toolset list may not enumerate. The
+# ``mission_goal`` augmentation is capability discovery only: the global guard in
+# ``_enabled_toolsets_for_chat`` removes it again unless the caller explicitly
+# opts that exact turn into heavy mission routing.
 _CHAT_CAPABILITY_TOOLSETS = ("mission_goal", "agent_chat", "board")
 
 

@@ -850,11 +850,12 @@ def test_mission_chat_reply_runs_for_profile_persona(tmp_path, monkeypatch):
         # profile on disk; the role="profile" sentinel still drives toolset resolution.
         hermes_profile=None,
     )
-    captured = {}
+    captured = {"requests": []}
 
     class CapturingRunner:
         def run(self, request):
             captured["request"] = request
+            captured["requests"].append(request)
             return AgentRunResult(
                 final_response="hi from alice",
                 session_id="session_profile_chat",
@@ -874,9 +875,9 @@ def test_mission_chat_reply_runs_for_profile_persona(tmp_path, monkeypatch):
 
     assert result.final_response == "hi from alice"
     request = captured["request"]
-    # Toolsets resolved through the supervisor ceiling; mission_goal augmentation
-    # (the operator-channel goal capability) is available to the profile chat.
-    assert "mission_goal" in request.enabled_toolsets
+    # Toolsets resolve through the supervisor ceiling, but ordinary profile chat
+    # is globally chat-only and cannot create a durable mission by default.
+    assert "mission_goal" not in request.enabled_toolsets
     # The chat lane keeps the supervision toolsets; the T6a cost policy drops the
     # `file` dev toolkit (patch/read/write/search_files) from the conversational
     # lane, so it is no longer present even though the persona configured it.
@@ -884,6 +885,14 @@ def test_mission_chat_reply_runs_for_profile_persona(tmp_path, monkeypatch):
         set(request.enabled_toolsets)
     )
     assert "file" not in request.enabled_toolsets
+
+    runtime.mission_chat_reply(
+        profile,
+        "start the explicitly requested goal",
+        permission_session_id="session_profile_chat",
+        allow_mission_goal=True,
+    )
+    assert "mission_goal" in captured["requests"][-1].enabled_toolsets
 
 
 def test_mission_chat_reply_has_no_api_call_cap_and_keeps_iteration_failsafe(

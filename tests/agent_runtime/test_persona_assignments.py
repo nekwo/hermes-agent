@@ -2054,12 +2054,53 @@ def _mission_chat_test_args(client_message_id: str, *, stream: bool = False):
         message="please answer",
         surface_prompt="",
         intent_hint="chat",
+        allow_mission_goal=False,
         requested_by="test",
         client_message_id=client_message_id,
         stream=stream,
         max_seconds=5.0,
         json=True,
     )
+
+
+def test_mission_chat_threads_explicit_goal_opt_in_only_when_requested(
+    monkeypatch,
+    capsys,
+    isolate_agent_runtime_root,
+):
+    from hermes_cli import harness
+
+    db = _TranscriptDB()
+    seen = []
+
+    class _ProviderSpy:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def mission_chat_reply(self, persona, message, **kwargs):
+            seen.append(kwargs["allow_mission_goal"])
+            return SimpleNamespace(
+                final_response="provider reply",
+                input_tokens=1,
+                output_tokens=2,
+                total_tokens=3,
+                raw={},
+            )
+
+    monkeypatch.setattr(harness, "load_agent_runtime_config", _assignment_config)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _ProviderSpy)
+
+    normal = _mission_chat_test_args("client_chat_only")
+    assert harness._cmd_mission_chat_message(normal) == 0
+    capsys.readouterr()
+
+    opted_in = _mission_chat_test_args("client_goal_opt_in")
+    opted_in.allow_mission_goal = True
+    assert harness._cmd_mission_chat_message(opted_in) == 0
+    capsys.readouterr()
+
+    assert seen == [False, True]
 
 
 @pytest.mark.parametrize("operation", ["session_create"])
@@ -4720,9 +4761,9 @@ def test_profile_persona_instance_summary_includes_tool_visibility(isolate_agent
     assert "read_file" not in final_tools
     assert "terminal" not in final_tools
     assert "execute_code" not in final_tools
-    # ...while the operator-chat capability augmentation (mission_goal / agent_chat
-    # / clarify) is present, matching what the chat lane actually ships.
-    assert "mission_goal_create" in final_tools
+    # ...while ordinary chat keeps the heavy mission route absent globally and
+    # retains the non-task chat capabilities.
+    assert "mission_goal_create" not in final_tools
     assert "agent_chat_send" in final_tools
     assert "clarify" in final_tools
     assert "send_message" in detail["tool_resolution"]["blocked_tool_names"]

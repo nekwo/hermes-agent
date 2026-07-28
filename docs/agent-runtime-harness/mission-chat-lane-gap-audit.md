@@ -258,13 +258,16 @@ are explicitly retained-but-blocked ("parallel-authority surfaces", L134-137) �
 a documented, owned decision. Worth re-opening only if the ruling implies
 mission-chat agents should spawn subagents. **DELIBERATE, P2.**
 
-### G13 — `mission_goal` stripped specifically from `neko_supervisor`
+### G13 — ordinary persona chat globally strips `mission_goal`
 
-`agent_runtime/persona_runtime.py:903-904`. The supervisor the ruling names as
-the operator's primary counterpart cannot create a goal from chat. Reason is
-recorded at `personas.py:305-310` (goal would route to unseeded dev/qa slots).
-**DELIBERATE product disable, P2** — but it will read as a capability gap the
-moment the pipeline is reseeded.
+Current policy: every ordinary Mission Control persona-chat turn is chat-only.
+`agent_runtime/persona_runtime.py::_enabled_toolsets_for_chat` strips
+`mission_goal` for all roles and permission modes unless the caller explicitly adds
+`mission-chat message --allow-mission-goal` for that exact turn. This replaces the
+older Neko-only strip, which left profile-backed supervisors able to default into a
+real task/graph. `intent_hint=assign_work` remains chat coordination and does not opt
+in. Existing role eligibility and product disables still apply after explicit opt-in.
+**RESOLVED as a global routing guard, 2026-07-28.**
 
 ---
 
