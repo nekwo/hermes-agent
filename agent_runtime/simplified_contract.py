@@ -178,6 +178,17 @@ def legacy_qa_review_decision_from_qa_verdict(decision: AgentDecision) -> AgentD
     if decision.type != DecisionType.QA_VERDICT:
         return decision
     payload = dict(decision.payload or {})
+    qa_coverage = {
+        "backend_contract": "not_required",
+        "launcher_integration": "not_required",
+        "visual_or_mcp": "not_required",
+        "cross_stack_join": "not_required",
+    }
+    simplified_coverage = payload.get("coverage")
+    if isinstance(simplified_coverage, dict):
+        for key in qa_coverage:
+            if key in simplified_coverage:
+                qa_coverage[key] = simplified_coverage[key]
     return AgentDecision(
         type=DecisionType.REPORT_QA_VERDICT,
         summary=decision.summary or "Collapsed qa_verdict signal.",
@@ -188,12 +199,7 @@ def legacy_qa_review_decision_from_qa_verdict(decision: AgentDecision) -> AgentD
             "proof_ids": payload.get("proof_ids", []),
             "findings": payload.get("findings", []),
             "qa_review": {
-                "coverage": payload.get("coverage") if isinstance(payload.get("coverage"), dict) else {
-                    "backend_contract": "not_required",
-                    "launcher_integration": "not_required",
-                    "visual_or_mcp": "not_required",
-                    "cross_stack_join": "not_required",
-                },
+                "coverage": qa_coverage,
                 "decision_basis": "harness_verified_proof",
                 "remaining_gaps": payload.get("findings", []),
                 "next_owner": "harness",
