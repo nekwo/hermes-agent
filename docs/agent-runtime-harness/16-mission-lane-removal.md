@@ -217,12 +217,20 @@ upstream `tools/terminal_tool.py:2101,2139` imports `envelope_decision` and
 python -m pytest tests/agent_runtime -q
 python -m pytest tests/hermes_cli -q
 cd "X:/Unreal Engine/Engine/Launcher/EterniaLauncher" && flutter test test/features/mission_control
-git diff --name-only upstream/main...HEAD \
+git diff --name-only e471c23d2..HEAD \
   | grep -vE '^(agent/|agent_runtime/|hermes_cli/harness)' \
   | grep -vE '^tools/(agent_chat_tool|mission_goal_tool)\.py$'
 ```
 The last command is the **real** upstream check (§0.3). It must return only paths the
 operator has accepted — expect `tests/`, `docs/`, and the deleted `tools/mission_goal_tool.py`.
+
+> **Corrected 2026-07-29 (S1 verification).** This gate originally diffed
+> `upstream/main...HEAD`, which compares the **entire fork divergence** and surfaces
+> **122 pre-existing** out-of-boundary paths from fork history — noise that makes the gate
+> unusable per stage. The baseline must be the last commit before this refactor,
+> `e471c23d2` ("fix mission control snapshot diagnostics"). If you branch or rebase, re-pin
+> the baseline rather than reaching for `upstream/main`. Verifying an S-stage introduced no
+> upstream edit is a question about *this range*, not about the fork's whole life.
 
 ## Hazards — five words with a keep-side and a remove-side meaning
 
