@@ -82,6 +82,9 @@ def test_snapshot_summarizes_without_raw_errors_paths_or_decisions(tmp_path):
         def list_for_task(self, task_id): return [proof]
     class IS:
         def list_all(self): return [inc]
+        # The contract build_snapshot reads since cc9db651f: open rows plus a
+        # count of the closed tail, never the coerced closed history.
+        def list_open_with_closed_count(self): return [inc], 0
 
     snap = build_snapshot(task_store=TS(), run_store=RS(), agent_store=AS(), proof_store=PS(), incident_store=IS())
     encoded = json.dumps(snap, default=str)

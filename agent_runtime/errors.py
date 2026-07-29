@@ -33,6 +33,44 @@ class DefaultScopeReconciliationRequired(AgentRuntimeError):
         self.safe_details = dict(safe_details or {})
 
 
+class LegacyOrchestratorRemoved(AgentRuntimeError):
+    """Raised when mission routing produced no typed action (Stage 15.4).
+
+    There is exactly ONE action source: the blueprint stage graph. Until
+    2026-07-29 a ``None`` from that router fell through to a second, legacy
+    ``if state == TaskState.X`` orchestrator that inferred a slot from the
+    mission's title/description text. That silent fall-through is deleted.
+
+    Reaching this exception means ``ensure_default_mission_plan`` returned a
+    mission the graph router cannot dispatch — a broken invariant, not a routing
+    decision. Refuse rather than guess: the same discipline as
+    ``DefaultScopeReconciliationRequired`` (surface, do not pick) and
+    ``ambiguous_window_match`` (refuse, do not rank). ``safe_details`` carries
+    redaction-safe routing facts only, never mission content.
+    """
+
+    code = "legacy_orchestrator_removed"
+
+    def __init__(self, message: str, *, safe_details: dict | None = None):
+        super().__init__(message)
+        self.safe_details = dict(safe_details or {})
+
+    def read_surface_envelope(self) -> dict:
+        """Redaction-safe projection for READ surfaces (status / snapshot).
+
+        The dispatch path must keep raising — that refusal is what replaced the
+        legacy guess. But a pure read surface (``hermes harness status --json``,
+        the Mission Control snapshot) is exactly what an operator uses to
+        *diagnose* the broken mission, so it must report this condition as typed
+        data rather than die on it: one undispatchable mission must not blank the
+        HUD for the whole runtime. Everything here comes from ``safe_details``,
+        which carries routing facts only (ids, states, counts) and never mission
+        title/description content.
+        """
+
+        return {"code": self.code, "message": str(self), **self.safe_details}
+
+
 class NotFound(AgentRuntimeError):
     """Raised when a persisted runtime entity cannot be found."""
 

@@ -85,15 +85,23 @@ def test_root_authored_single_repo_stage_persists_for_snapshot(monkeypatch, isol
         },
     )
 
-    from agent_runtime.snapshot import build_snapshot
+    from agent_runtime.snapshot import build_snapshot, goal_detail_for_task
 
     stored = TaskStore().get(task.id)
     snapshot = build_snapshot(task_store=TaskStore())
     snap_task = next(item for item in list(snapshot["goals"].values()) if item["task_id"] == task.id)
     assert result.ok is True
     assert [stage.repo for stage in stored.mission_plan.stages] == ["hermes-agent"]
-    assert snap_task["mission_plan"]["stages"][0]["repo"] == "hermes-agent"
-    assert snap_task["mission_plan"]["stages"][0]["test_plan"] == ["python -m pytest tests/agent_runtime/test_root_authoring.py -q"]
+    # S8: ``mission_plan`` is one of GOAL_DETAIL_ONLY_FIELDS — it left the
+    # steady-state frame for the on-demand goal detail, and the head carries a
+    # typed ``detail_ref`` pointer naming it rather than a silent absence. The
+    # claim under test (the authored stage persists all the way to what an
+    # operator surface reads) is unchanged; only the fetch verb moved.
+    assert snap_task["detail_ref"]["evicted"] is True
+    assert "mission_plan" in snap_task["detail_ref"]["fields"]
+    detail = goal_detail_for_task(task.id)
+    assert detail["mission_plan"]["stages"][0]["repo"] == "hermes-agent"
+    assert detail["mission_plan"]["stages"][0]["test_plan"] == ["python -m pytest tests/agent_runtime/test_root_authoring.py -q"]
 
 
 def test_root_system_prompt_loads_root_skill_contract():

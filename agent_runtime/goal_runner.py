@@ -193,6 +193,8 @@ class MissionRuntimeController:
 
     def _create_task(self, options: GoalRunOptions) -> Task:
         ts = now()
+        # Local accumulator only — NOT a shape any created goal can keep. The
+        # `else` branch below closes it (Stage 15.2: no goal is born plan-less).
         mission_plan = None
         blueprint_id = (options.blueprint_id or DEFAULT_GOAL_BLUEPRINT_ID).strip()
         if blueprint_id:
@@ -226,6 +228,15 @@ class MissionRuntimeController:
         if mission_plan is not None:
             specialize_default_plan_for_task(task, mission_plan)
             task.current_stage_id = mission_plan.current_stage_id
+        else:
+            # Stage 15.2: no goal may be born plan-less. ``blueprint_id`` above
+            # only falls through when the caller passed a blank/whitespace id,
+            # which used to hand the engine an un-typed task — the exact shape
+            # that reached the legacy orchestrator. Fall back to the default
+            # graph rather than leaving the window open.
+            from .default_plan import ensure_default_mission_plan
+
+            ensure_default_mission_plan(task)
         return self.task_store.create(task)
 
     def _build_result(

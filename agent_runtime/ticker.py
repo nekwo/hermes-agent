@@ -204,6 +204,22 @@ class TickEngine:
                     if persona_id:
                         if getattr(action, "stage_id", None):
                             active_runs = self.run_store.find_active(task_id=action_task.id, persona_id=persona_id, stage_id=action.stage_id)
+                            if not active_runs:
+                                # An active run for this persona that carries NO
+                                # stage is unattributed, not unrelated — it must
+                                # still block a second dispatch. This only became
+                                # reachable at Stage 15.3: the retired legacy
+                                # orchestrator emitted stage-less actions, so the
+                                # lookup below was the one that ran; every graph
+                                # action carries a stage, which would otherwise
+                                # make a stage-less live run invisible here and
+                                # race a second run onto the same persona.
+                                # Fail safe: unknown lane counts as occupied.
+                                active_runs = [
+                                    run
+                                    for run in self.run_store.find_active(task_id=action_task.id, persona_id=persona_id)
+                                    if not getattr(run, "stage_id", None)
+                                ]
                         else:
                             active_runs = self.run_store.find_active(task_id=action_task.id, persona_id=persona_id)
                         if active_runs:

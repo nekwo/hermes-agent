@@ -35,7 +35,7 @@ def test_append_row_records_custom_blueprint_metadata(tmp_path):
 
     text = doc.read_text(encoding="utf-8")
     assert row["custom"] is True
-    assert row["blueprint"] == "stage46_custom_launcher_proof"
+    assert row["blueprint"] == "custom_launcher_proof"
     assert "custom-launcher-proof" in text
     assert "proof_1" in text
 

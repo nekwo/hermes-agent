@@ -885,8 +885,34 @@ def _routing_scope_from_acceptance(payload: dict[str, Any], *, actor: str | None
 
 
 def _task_has_operator_goal_detail(task: Task) -> bool:
+    """Did the OPERATOR state goal detail that Neko must not overwrite?
+
+    Stage 15.3 note: this used to answer ``True`` for the mere presence of a
+    ``mission_intent``, which was a fair proxy while typing was conditional — an
+    intent existed only if something had deliberately authored one. Routing is
+    now unconditional, so ``ensure_default_mission_plan`` synthesizes an intent
+    for *every* mission from the task's own title/description. Left as-is the
+    clause degenerates to "always true" and Neko's scope route silently stops
+    updating acceptance criteria on every mission in the runtime.
+
+    So an intent counts as operator detail only when it actually CARRIES detail
+    — acceptance criteria or non-goals — rather than mirroring the task.
+    ``MissionIntent.locked`` is deliberately NOT part of the test: it is ``True``
+    on every one of the eight construction paths, either explicitly
+    (`blueprints/instantiate.py`, `default_plan.py`, `mission_plan.py`
+    ``_mission_intent_from_task``) or by the `models.py` field default
+    (`persona_diagnostics.py`, `root_node_engine.py`, `ticker.py`
+    ``legacy_command_proof``). The one path that could set it otherwise
+    (`mission_plan.py` ``_plan_from_payload``) is gated on ``not intent.locked``
+    and is therefore unreachable. ``locked`` says nothing about who authored the
+    intent.
+    """
+
     plan = getattr(task, "mission_plan", None)
-    if getattr(plan, "mission_intent", None) is not None:
+    intent = getattr(plan, "mission_intent", None)
+    if intent is not None and (
+        getattr(intent, "acceptance_criteria", None) or getattr(intent, "non_goals", None)
+    ):
         return True
     return bool(
         getattr(task, "acceptance_criteria", None)

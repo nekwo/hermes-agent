@@ -41,6 +41,7 @@ from agent_runtime.status import build_status
 from agent_runtime.store import AgentStore, ProofStore, RunStore, TaskStore
 from agent_runtime.ticker import TickEngine
 from agent_runtime.worker_sessions import WorkerSessionStore
+from tests.agent_runtime.conftest import release_to_implementation
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -4778,7 +4779,7 @@ def test_tick_observe_only_links_assignment_to_run_and_worker(monkeypatch, isola
     runs = RunStore()
     proofs = ProofStore()
     workers = WorkerSessionStore()
-    task = _task("task_tick_assign")
+    task = release_to_implementation(_task("task_tick_assign"))
     tasks.create(task)
 
     result = TickEngine(
@@ -4853,7 +4854,7 @@ def test_tick_assignment_tracks_command_proof_and_archive_preserves_it(
     tasks = TaskStore()
     proofs = ProofStore()
     workers = WorkerSessionStore()
-    task = _task("task_archive_assignment")
+    task = release_to_implementation(_task("task_archive_assignment"))
     tasks.create(task)
 
     result = TickEngine(

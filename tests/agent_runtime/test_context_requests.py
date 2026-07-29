@@ -9,6 +9,7 @@ from agent_runtime.models import AgentRun, Task
 from agent_runtime.observability import build_observability
 from agent_runtime.state_machine import MissionStateMachine
 from agent_runtime.states import RunState, TaskState
+from tests.agent_runtime.conftest import release_to_implementation
 
 
 def _task():
@@ -38,7 +39,7 @@ def test_context_request_fulfills_safe_file_and_renders_next_dev_context(tmp_pat
 
 
 def test_context_request_rejects_unsafe_or_missing_path_without_freezing_scheduling(tmp_path):
-    task = _task()
+    task = release_to_implementation(_task())
 
     req = add_context_request(task, actor="dev", payload={"paths": ["../secret.txt"], "reason": "need secret"}, root=tmp_path)
     action = MissionStateMachine().next_action(task)

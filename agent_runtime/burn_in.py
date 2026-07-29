@@ -97,31 +97,31 @@ STAGE47_CASES: dict[str, dict[str, Any]] = {
         "expected_persona_sequence": ["neko_supervisor", "dev", "neko_supervisor"],
     },
     "custom-backend-proof": {
-        "title": "Stage 46 custom backend proof burn-in",
+        "title": "Custom backend proof burn-in",
         "description": "Run an authored non-default Neko-to-Backend proof-only blueprint with no product edits.",
         "acceptance_criteria": ["Backend Dev receives the custom backend proof stage.", "The custom blueprint reaches done with backend_contract_smoke proof."],
         "affected_repos": ["EterniaBackend", "hermes-agent"],
         "suggested_roles": ["neko_supervisor", "backend_dev"],
-        "risk_flags": ["stage46_custom_blueprint", "no_product_edits", "backend_contract_first"],
+        "risk_flags": ["custom_blueprint", "no_product_edits", "backend_contract_first"],
         "non_goals": ["No product code edits.", "No Launcher stage.", "No QA stage."],
         "expected_persona_sequence": ["neko_supervisor", "backend_dev"],
         "custom_blueprint": True,
-        "blueprint": "stage46_custom_backend_proof",
+        "blueprint": "custom_backend_proof",
     },
     "custom-launcher-proof": {
-        "title": "Stage 46 custom Launcher proof burn-in",
+        "title": "Custom Launcher proof burn-in",
         "description": "Run an authored non-default Neko-to-Launcher proof-only blueprint with no product edits.",
         "acceptance_criteria": ["Launcher Dev receives the custom Launcher proof stage.", "The custom blueprint reaches done with launcher_contract_smoke proof."],
         "affected_repos": ["EterniaLauncher", "hermes-agent"],
         "suggested_roles": ["neko_supervisor", "dev"],
-        "risk_flags": ["stage46_custom_blueprint", "no_product_edits"],
+        "risk_flags": ["custom_blueprint", "no_product_edits"],
         "non_goals": ["No product code edits.", "No Backend stage.", "No QA stage."],
         "expected_persona_sequence": ["neko_supervisor", "dev"],
         "custom_blueprint": True,
-        "blueprint": "stage46_custom_launcher_proof",
+        "blueprint": "custom_launcher_proof",
     },
     "custom-cross-stack-proof": {
-        "title": "Stage 46 custom cross-stack proof burn-in",
+        "title": "Custom cross-stack proof burn-in",
         "description": "Run an authored non-default backend-first Launcher-second blueprint with no product edits.",
         "acceptance_criteria": [
             "Backend Dev completes backend_contract_smoke before Launcher Dev starts.",
@@ -130,11 +130,11 @@ STAGE47_CASES: dict[str, dict[str, Any]] = {
         ],
         "affected_repos": ["EterniaBackend", "EterniaLauncher", "hermes-agent"],
         "suggested_roles": ["neko_supervisor", "backend_dev", "dev"],
-        "risk_flags": ["stage46_custom_blueprint", "no_product_edits", "backend_contract_first", "cross_stack_sequential_handoff"],
+        "risk_flags": ["custom_blueprint", "no_product_edits", "backend_contract_first", "cross_stack_sequential_handoff"],
         "non_goals": ["No product code edits.", "No QA stage.", "No visual proof."],
         "expected_persona_sequence": ["neko_supervisor", "backend_dev", "dev"],
         "custom_blueprint": True,
-        "blueprint": "stage46_custom_cross_stack_proof",
+        "blueprint": "custom_cross_stack_proof",
     },
 }
 
@@ -550,7 +550,7 @@ def _create_case_task(case_id: str, case: dict[str, Any], *, hygiene: dict[str, 
     )
     blueprint_id = str(case.get("blueprint") or "").strip()
     if blueprint_id:
-        _apply_stage46_custom_blueprint(task, blueprint_id)
+        _apply_custom_blueprint(task, blueprint_id)
     else:
         ensure_default_mission_plan(task)
     # Same baseline capture as `harness task create`: pre-existing operator dirt
@@ -561,11 +561,11 @@ def _create_case_task(case_id: str, case: dict[str, Any], *, hygiene: dict[str, 
     return task
 
 
-def _apply_stage46_custom_blueprint(task: Task, blueprint_id: str) -> None:
+def _apply_custom_blueprint(task: Task, blueprint_id: str) -> None:
     from .blueprints import instantiate_blueprint
     from .blueprints.schema import blueprint_from_dict
 
-    blueprint = blueprint_from_dict(_stage46_custom_blueprint_raw(blueprint_id))
+    blueprint = blueprint_from_dict(_custom_blueprint_raw(blueprint_id))
     bindings = {
         key: value
         for key, value in {
@@ -584,7 +584,24 @@ def _apply_stage46_custom_blueprint(task: Task, blueprint_id: str) -> None:
     task.current_stage_id = plan.current_stage_id
 
 
-def _stage46_custom_blueprint_raw(blueprint_id: str) -> dict[str, Any]:
+# Read-compat only, modelled on `_LEGACY_RUNNING_TASK_STATE_VALUES` in `states.py`.
+# These custom burn-in blueprints used to be named after Stage 46; the stage is
+# retired and the number carries no meaning, so the ids are now intent-named.
+# Audit (2026-07-29) of the runtime root found the old ids in **no** machine-read
+# record — not in `burn_in/*/task_create.json`, `tasks/`, `goals/`, `runs/`,
+# `blueprint_runs/`, `proofs/`, `events.jsonl`, `read_model.db`, nor
+# `burn_in/certification_ledger.json` (which keys on `case_id`, not blueprint id).
+# They survive only in human-readable `cert_streak.md` evidence tables. This map
+# exists so replaying any such legacy id still resolves instead of raising.
+_LEGACY_CUSTOM_BLUEPRINT_IDS = {
+    "stage46_custom_backend_proof": "custom_backend_proof",
+    "stage46_custom_launcher_proof": "custom_launcher_proof",
+    "stage46_custom_cross_stack_proof": "custom_cross_stack_proof",
+}
+
+
+def _custom_blueprint_raw(blueprint_id: str) -> dict[str, Any]:
+    blueprint_id = _LEGACY_CUSTOM_BLUEPRINT_IDS.get(blueprint_id, blueprint_id)
     common_scope = {
         "id": "scope",
         "title": "Scope",
@@ -629,11 +646,11 @@ def _stage46_custom_blueprint_raw(blueprint_id: str) -> dict[str, Any]:
             "proof_recipe_id": "launcher_contract_smoke",
         },
     }
-    if blueprint_id == "stage46_custom_backend_proof":
+    if blueprint_id == "custom_backend_proof":
         return {
             "id": blueprint_id,
             "version": 1,
-            "title": "Stage 46 Custom Backend Proof",
+            "title": "Custom Backend Proof",
             "description": "Neko releases one Backend Dev proof-only stage.",
             "slots": [
                 {"id": "lead", "role": "neko", "required": True},
@@ -650,11 +667,11 @@ def _stage46_custom_blueprint_raw(blueprint_id: str) -> dict[str, Any]:
             "agent_topology": {"root": "lead", "edges": [{"source": "lead", "target": "backend_builder", "kind": "steers"}]},
             "limits": {"max_attempts_per_stage": 3, "max_total_stages": 8},
         }
-    if blueprint_id == "stage46_custom_launcher_proof":
+    if blueprint_id == "custom_launcher_proof":
         return {
             "id": blueprint_id,
             "version": 1,
-            "title": "Stage 46 Custom Launcher Proof",
+            "title": "Custom Launcher Proof",
             "description": "Neko releases one Launcher Dev proof-only stage.",
             "slots": [
                 {"id": "lead", "role": "neko", "required": True},
@@ -671,13 +688,13 @@ def _stage46_custom_blueprint_raw(blueprint_id: str) -> dict[str, Any]:
             "agent_topology": {"root": "lead", "edges": [{"source": "lead", "target": "builder", "kind": "steers"}]},
             "limits": {"max_attempts_per_stage": 3, "max_total_stages": 8},
         }
-    if blueprint_id == "stage46_custom_cross_stack_proof":
+    if blueprint_id == "custom_cross_stack_proof":
         launcher_after_backend = dict(launcher_stage)
         launcher_after_backend["depends_on"] = ["backend_implementation"]
         return {
             "id": blueprint_id,
             "version": 1,
-            "title": "Stage 46 Custom Cross-Stack Proof",
+            "title": "Custom Cross-Stack Proof",
             "description": "Neko releases Backend Dev first, then Launcher Dev after backend proof.",
             "slots": [
                 {"id": "lead", "role": "neko", "required": True},
@@ -704,7 +721,7 @@ def _stage46_custom_blueprint_raw(blueprint_id: str) -> dict[str, Any]:
             },
             "limits": {"max_attempts_per_stage": 3, "max_total_stages": 12},
         }
-    raise ValueError(f"unknown Stage 46 custom blueprint: {blueprint_id}")
+    raise ValueError(f"unknown custom burn-in blueprint: {blueprint_id}")
 
 
 def _new_burn_id(suite: str, case_id: str | None) -> str:

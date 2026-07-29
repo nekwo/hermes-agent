@@ -302,9 +302,9 @@ def test_cross_stack_burn_in_case_has_explicit_repo_role_and_join_scope():
 
 def test_custom_burn_in_case_instantiates_non_default_blueprint():
     expectations = {
-        "custom-backend-proof": ("stage46_custom_backend_proof", ["scope", "backend_implementation"], "backend_contract_smoke"),
-        "custom-launcher-proof": ("stage46_custom_launcher_proof", ["scope", "implement"], "launcher_contract_smoke"),
-        "custom-cross-stack-proof": ("stage46_custom_cross_stack_proof", ["scope", "backend_implementation", "implement"], "launcher_contract_smoke"),
+        "custom-backend-proof": ("custom_backend_proof", ["scope", "backend_implementation"], "backend_contract_smoke"),
+        "custom-launcher-proof": ("custom_launcher_proof", ["scope", "implement"], "launcher_contract_smoke"),
+        "custom-cross-stack-proof": ("custom_cross_stack_proof", ["scope", "backend_implementation", "implement"], "launcher_contract_smoke"),
     }
     for case_id, (blueprint_id, stage_ids, final_recipe) in expectations.items():
         manifest = run_burn_in_case(case_id, engine=PassingBurnInEngine())
@@ -313,11 +313,25 @@ def test_custom_burn_in_case_instantiates_non_default_blueprint():
         created = json.loads((root / "task_create.json").read_text(encoding="utf-8"))["task"]
         plan = created["mission_plan"]
 
-        assert "stage46_custom_blueprint" in created["risk_flags"]
+        assert "custom_blueprint" in created["risk_flags"]
         assert plan["blueprint_id"] == blueprint_id
         assert plan["current_stage_id"] == "scope"
         assert [stage["id"] for stage in plan["stages"]] == stage_ids
         assert plan["stages"][-1]["proof_recipe_id"] == final_recipe
+
+
+def test_legacy_stage46_blueprint_ids_still_resolve():
+    """Old records name these blueprints after the retired Stage 46; keep reading them."""
+    from agent_runtime.burn_in import _custom_blueprint_raw
+
+    legacy_to_current = {
+        "stage46_custom_backend_proof": "custom_backend_proof",
+        "stage46_custom_launcher_proof": "custom_launcher_proof",
+        "stage46_custom_cross_stack_proof": "custom_cross_stack_proof",
+    }
+    for legacy_id, current_id in legacy_to_current.items():
+        assert _custom_blueprint_raw(legacy_id) == _custom_blueprint_raw(current_id)
+        assert _custom_blueprint_raw(legacy_id)["id"] == current_id
 
 
 def test_burn_in_summary_fails_closed_when_evidence_is_missing():

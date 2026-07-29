@@ -22,6 +22,7 @@ from agent_runtime.runtime_config import ContinuousRoleSessionConfig, MissionPla
 from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.store import AgentStore, IncidentStore, ProofStore, RunStore, TaskStore
 from agent_runtime.profile_runner import RunBudgetExceeded
+from tests.agent_runtime.conftest import release_to_implementation
 
 
 def test_handoff_diff_test_tampering_detector_fails_closed():
@@ -912,6 +913,7 @@ def test_tick_persists_active_run_provider_model_metadata_before_runtime_call():
 def test_tick_uses_persona_specific_live_budget_for_dev_runs():
     task = make_task()
     task.state = TaskState.RUNNING
+    task = release_to_implementation(task)
     ts = TaskStore(); ts.create(task)
     runs = RunStore()
     runtime = FakeRuntime()
@@ -1004,7 +1006,14 @@ def test_tick_uses_configured_persona_when_agent_store_empty():
     assert res.actions_taken[0].ok
     assert runtime.personas[0].id == "neko_supervisor"
     assert runtime.personas[0].hermes_profile == "alice"
-    assert runtime.personas[0].skills == ["agent-runtime-harness"]
+    # `skills:` EXTENDS the persona's default assignments since 07e662a9c
+    # ("make skill context backend authoritative") — the defaults are required
+    # or recommended assignments, and subtraction is explicit (`skills_remove`)
+    # so naming one skill can never silently erase them.
+    from agent_runtime.personas import default_personas
+
+    defaults = next(p for p in default_personas() if p.id == "neko_supervisor").skills
+    assert runtime.personas[0].skills == [*defaults, "agent-runtime-harness"]
 
 
 def test_tick_resolves_blueprint_run_slot_through_binding():
@@ -1072,6 +1081,7 @@ def test_live_dev_tick_emits_preflight_started_before_dispatch():
     task = make_task()
     task.id = "task_preflight_event"
     task.state = TaskState.RUNNING
+    task = release_to_implementation(task)
     ts.create(task)
 
     TickEngine(task_store=ts, persona_runtime=GPTPersonaRuntime()).tick_once(task_id=task.id)
@@ -2699,6 +2709,7 @@ def test_backend_affected_repo_routes_run_dev_to_backend_dev():
     task = make_task()
     task.state = TaskState.RUNNING
     task.affected_repos = ["EterniaBackend"]
+    task = release_to_implementation(task)
     ts.create(task)
     runtime = CapturingFailureRuntime()
     engine = TickEngine(task_store=ts, persona_runtime=runtime)
@@ -2743,6 +2754,10 @@ def test_run_until_settled_blocks_orchestration_only_backend_plan_without_repeat
     task.requested_by = "stage47_burn_in"
     task.affected_repos = ["EterniaBackend", "EterniaLauncher", "hermes-agent"]
     task.risk_flags = ["cross_stack_contract_handoff", "backend_contract_first", "bounded_complex_burn_in"]
+    # `backend_contract_first`: this mission's implementation lane IS the backend
+    # one, and the graph carries three in-scope repos, so name the lane instead of
+    # taking the generic dev default.
+    task = release_to_implementation(task, owner_slots=("backend_dev",))
     ts.create(task)
     incidents = IncidentStore()
     runs = RunStore()
@@ -2766,6 +2781,7 @@ def test_latest_launcher_handoff_overrides_mixed_backend_affected_repos():
     task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.affected_repos = ["EterniaLauncher", "EterniaBackend", "hermes-agent"]
+    task = release_to_implementation(task)
     ts.create(task)
     EventLog().append(
         Event(
@@ -2847,6 +2863,7 @@ def test_stale_approved_dev_continuation_does_not_override_backend_routing():
     task = make_task()
     task.state = TaskState.RUNNING
     task.affected_repos = ["EterniaBackend"]
+    task = release_to_implementation(task)
     ts.create(task)
     runs = RunStore()
     old = runs.open_run("dev", "task_1", stage_id=None, session_id="session_old_dev")
@@ -2869,6 +2886,7 @@ def test_matching_approved_backend_continuation_reuses_backend_session():
     task = make_task()
     task.state = TaskState.RUNNING
     task.affected_repos = ["EterniaBackend"]
+    task = release_to_implementation(task)
     ts.create(task)
     runs = RunStore()
     old = runs.open_run(
@@ -2899,6 +2917,7 @@ def test_run_until_settled_stops_on_open_incident_after_failed_action(tmp_path):
     task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.affected_repos = [str(tmp_path / "missing-product-repo")]
+    task = release_to_implementation(task)
     ts.create(task)
     engine = TickEngine(task_store=ts, persona_runtime=RequestTestRunRuntime())
 
@@ -3239,6 +3258,7 @@ def test_tick_passes_proof_intent_and_environment_fingerprint_metadata_to_runner
             }
         }
     }
+    task = release_to_implementation(task)
     ts.create(task)
     runner = MetadataCaptureProofRunner(proofs)
     engine = TickEngine(task_store=ts, proof_store=proofs, persona_runtime=RequestTestRunRuntime(), proof_runner=runner)
@@ -3260,6 +3280,7 @@ def test_tick_collects_command_proof_in_task_affected_repo_when_no_explicit_work
     task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.affected_repos = [str(tmp_path)]
+    task = release_to_implementation(task)
     ts.create(task)
     engine = TickEngine(task_store=ts, persona_runtime=RequestTestRunRuntime())
 
@@ -3795,6 +3816,7 @@ def test_tick_collects_command_proof_in_harness_repo_alias_when_no_explicit_work
     task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.affected_repos = ["agent-runtime-harness"]
+    task = release_to_implementation(task)
     ts.create(task)
     engine = TickEngine(task_store=ts, persona_runtime=RequestTestRunRuntime())
 
@@ -3819,6 +3841,7 @@ def test_tick_collects_command_proof_in_hermes_agent_alias_when_no_explicit_work
     task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.affected_repos = ["hermes-agent"]
+    task = release_to_implementation(task)
     ts.create(task)
     engine = TickEngine(task_store=ts, persona_runtime=RequestTestRunRuntime())
 
@@ -3843,6 +3866,7 @@ def test_tick_opens_incident_when_command_proof_affected_repo_is_missing(tmp_pat
     task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.affected_repos = [str(tmp_path / "missing-product-repo")]
+    task = release_to_implementation(task)
     ts.create(task)
     engine = TickEngine(task_store=ts, persona_runtime=RequestTestRunRuntime())
 
@@ -3864,6 +3888,7 @@ def test_tick_opens_incident_when_command_proof_affected_repo_is_ambiguous_alias
     task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
     task.affected_repos = ["mission-control"]
+    task = release_to_implementation(task)
     ts.create(task)
     engine = TickEngine(task_store=ts, persona_runtime=RequestTestRunRuntime())
 
@@ -3888,6 +3913,7 @@ def test_tick_opens_incident_when_command_proof_affected_repo_is_path_like_alias
         task.state = TaskState.RUNNING
         task.current_stage_id = "stage_1"
         task.affected_repos = [repo_alias]
+        task = release_to_implementation(task)
         ts.create(task)
         engine = TickEngine(task_store=ts, persona_runtime=RequestTestRunRuntime())
 
@@ -4044,6 +4070,7 @@ def test_request_test_run_failed_proof_stays_in_dev_for_fix_pass(tmp_path):
     task = make_task()
     task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
+    task = release_to_implementation(task)
     ts.create(task)
     engine = TickEngine(task_store=ts, persona_runtime=FailingRequestTestRunRuntime())
     engine.command_workdir = tmp_path
@@ -4069,6 +4096,7 @@ def test_failed_command_proof_is_retry_context_and_clears_after_pass(tmp_path):
     task = make_task()
     task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
+    task = release_to_implementation(task)
     ts.create(task)
     runtime = FailingThenPassingRetryRuntime()
     engine = TickEngine(task_store=ts, persona_runtime=runtime)
@@ -4095,6 +4123,7 @@ def test_failed_command_proof_retry_auto_attaches_context_when_model_omits_id(tm
     task = make_task()
     task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
+    task = release_to_implementation(task)
     ts.create(task)
     runtime = FailingThenPassingAutoAttachedRetryRuntime()
     engine = TickEngine(task_store=ts, persona_runtime=runtime)
@@ -4120,6 +4149,7 @@ def test_second_same_stage_failed_command_proof_routes_to_neko(tmp_path):
     task = make_task()
     task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
+    task = release_to_implementation(task)
     ts.create(task)
     engine = TickEngine(task_store=ts, persona_runtime=FailingTwiceRetryRuntime())
     engine.command_workdir = tmp_path
@@ -4142,6 +4172,7 @@ def test_dev_block_after_failed_proof_routes_to_neko_self_heal(tmp_path):
     task = make_task()
     task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
+    task = release_to_implementation(task)
     ts.create(task)
     runtime = FailingThenBlockingRuntime()
     engine = TickEngine(task_store=ts, persona_runtime=runtime)
@@ -4213,6 +4244,7 @@ def test_request_test_run_does_not_handoff_after_run_cancelled_during_proof_coll
     task = make_task()
     task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
+    task = release_to_implementation(task)
     ts.create(task)
     engine = TickEngine(
         task_store=ts,
@@ -4650,6 +4682,7 @@ def test_mission_budget_does_not_starve_neko_budget_adjudication(isolate_agent_r
     incidents = IncidentStore()
     task = make_task()
     task.state = TaskState.RUNNING
+    task = release_to_implementation(task)
     ts.create(task)
     runtime = BudgetThenNekoApprovalRuntime()
     engine = TickEngine(
@@ -4675,6 +4708,72 @@ def test_mission_budget_does_not_starve_neko_budget_adjudication(isolate_agent_r
     assert not [item for item in incidents.list_open() if item.kind == "mission_budget_exceeded"]
     approved = runs.get(waiting.id)
     assert approved.progress.get("approved_for_continuation") is True
+
+
+def test_dispatch_gate_blocks_when_the_live_run_for_the_persona_carries_no_stage(isolate_agent_runtime_root):
+    """Stage 15.3 regression pin for the per-persona dispatch gate.
+
+    The gate is stage-scoped whenever `action.stage_id` is set. The retired legacy
+    orchestrator emitted STAGE-LESS actions, so on that ladder the unscoped lookup
+    was the one that ran and saw every live run for the persona. Every graph action
+    carries a stage, so after the retirement the stage-scoped lookup is the only one
+    a dev/QA dispatch takes — and a live run with `stage_id=None` (still opened by
+    `node_tools.steer_node` when the persona has no stage, and by `smoke.py`'s
+    neko run) became invisible to it. That would race a second concurrent run onto
+    the same persona for the same mission: `RunStore.open_run` de-dupes on
+    `(task, persona, stage)` too, so it would NOT catch it either.
+
+    Fail-safe direction: an active run whose lane cannot be attributed counts as
+    OCCUPIED, never as free."""
+
+    ts = TaskStore()
+    runs = RunStore()
+    task = make_task()
+    task.state = TaskState.RUNNING
+    task = release_to_implementation(task)
+    ts.create(task)
+    stage_less = runs.open_run("dev", task.id, stage_id=None)
+    assert stage_less.stage_id is None
+    assert stage_less.state == RunState.RUNNING
+
+    result = TickEngine(task_store=ts, run_store=runs, persona_runtime=RuntimeMustNotRun()).tick_once(task_id=task.id)
+
+    # The graph action targets the `implement` stage, which has no run of its own,
+    # so only the unattributed-lane fallback can hold this dispatch back.
+    assert result.actions_taken == []
+    assert result.skipped == [task.id]
+    assert [run.id for run in runs.find_active(task_id=task.id, persona_id="dev")] == [stage_less.id]
+
+
+def test_dispatch_gate_clears_once_the_stage_less_run_is_no_longer_active(isolate_agent_runtime_root):
+    """The companion to the pin above: the block must be a lane guard, not a wedge.
+
+    Nothing re-attributes a stage-less run to a stage, so the ONLY thing that can
+    release the persona is the run leaving the active set — which `mark_stale_runs`
+    does at the top of every tick, without any stage filter, once the heartbeat TTL
+    lapses. Pin that the gate reopens rather than parking the persona forever."""
+
+    ts = TaskStore()
+    runs = RunStore()
+    task = make_task()
+    task.state = TaskState.RUNNING
+    task = release_to_implementation(task)
+    ts.create(task)
+    stage_less = runs.open_run("dev", task.id, stage_id=None)
+    runtime = CapturingFailureRuntime()
+    engine = TickEngine(task_store=ts, run_store=runs, persona_runtime=runtime)
+
+    assert engine.tick_once(task_id=task.id).actions_taken == []
+    assert runtime.personas == []
+
+    runs.close_run(stage_less.id, state=RunState.STALE)
+    assert runs.find_active(task_id=task.id, persona_id="dev") == []
+
+    engine.tick_once(task_id=task.id)
+
+    assert runtime.personas == ["dev"]
+    dispatched = [run for run in runs.list_for_task(task.id) if run.id != stage_less.id]
+    assert [run.stage_id for run in dispatched] == ["implement"]
 
 
 def test_swarm_token_hard_limit_blocks_new_run_and_logs_event(isolate_agent_runtime_root):
@@ -4841,6 +4940,7 @@ def test_request_test_run_emits_budget_warning_for_expensive_dev_run(tmp_path):
     task = make_task()
     task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
+    task = release_to_implementation(task)
     ts.create(task)
     engine = TickEngine(task_store=ts, persona_runtime=HighBudgetDevRuntime())
     engine.command_workdir = tmp_path
@@ -5059,6 +5159,7 @@ def test_tick_persists_incremental_command_proof_when_later_command_fails():
     task = make_task()
     task.state = TaskState.RUNNING
     task.current_stage_id = "stage_1"
+    task = release_to_implementation(task)
     ts.create(task)
     proof_store = ProofStore()
     engine = TickEngine(

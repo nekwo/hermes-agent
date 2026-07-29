@@ -1,8 +1,12 @@
+import pytest
+
 from hermes_time import now
 from agent_runtime.config import AgentRuntimeConfig
+from agent_runtime.errors import LegacyOrchestratorRemoved
 from agent_runtime.models import Incident, Proof, Task, TaskStage
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
+from agent_runtime.state_machine import MissionStateMachine
 from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.status import build_status
 from agent_runtime.store import IncidentStore, ProofStore, RunStore, TaskStore
@@ -219,3 +223,94 @@ def test_status_routes_read_search_budget_loop_to_neko_scope_recovery(isolate_ag
     assert s["next_actions"][0]["action"] == "run_slot"
     assert s["next_actions"][0]["reason"] == "Dev exhausted read/search without patch or proof; Neko must split or narrow the stage before retry"
     assert s["next_actions"][0]["stopped_progress"]["owner"] == "neko_supervisor"
+
+
+def _force_undispatchable(monkeypatch) -> None:
+    """Make the ONLY action source return `None`, the broken-invariant shape that
+    Stage 15.4 turned into a typed refusal instead of a legacy-orchestrator guess."""
+
+    monkeypatch.setattr(
+        MissionStateMachine,
+        "_blueprint_next_action",
+        lambda self, mission, *, state: None,
+    )
+
+
+def test_status_reports_undispatchable_mission_instead_of_raising(monkeypatch, isolate_agent_runtime_root):
+    """Stage 15.4 read-surface contract. `status --json` is what an operator runs to
+    diagnose a stuck mission; an undispatchable mission must NOT blank the whole
+    status surface. It is reported as typed, structured data instead."""
+
+    ts = TaskStore()
+    n = now()
+    ts.create(Task(id="t_broken", title="T", description="d", state=TaskState.RUNNING, created_at=n, updated_at=n, requested_by="tony"))
+    _force_undispatchable(monkeypatch)
+
+    s = build_status(task_store=ts)
+
+    entry = s["next_actions"][0]
+    assert entry["task_id"] == "t_broken"
+    # A dedicated action value: no consumer can mistake it for a dispatchable action.
+    assert entry["action"] == "undispatchable"
+    assert entry["stopped_progress"]["reason"] == "routing_undispatchable"
+    assert entry["stopped_progress"]["owner"] == "human"
+    # `tick` would just raise again; the operator must inspect, not retry.
+    assert entry["stopped_progress"]["next_action"] == "inspect_blocker"
+    failure = entry["routing_failure"]
+    assert failure["code"] == "legacy_orchestrator_removed"
+    assert failure["task_id"] == "t_broken"
+    assert failure["state"] == "running"
+    assert failure["mission_plan_absent"] is False
+    assert failure["blueprint_id_absent"] is False
+    assert failure["stage_count"] >= 1
+    assert "current_stage_id" in failure
+    # Routing facts only — never mission content.
+    assert not {"title", "description", "goal"} & set(failure)
+    # And the rest of the status surface still built.
+    assert s["open_tasks"] == 1
+    assert "observability" in s and "parity" in s
+
+
+def test_status_rolls_undispatchable_missions_up_to_top_level(monkeypatch, isolate_agent_runtime_root):
+    """Visible without scanning every `next_actions` entry, and never inferable
+    only from a stack trace."""
+
+    ts = TaskStore()
+    n = now()
+    ts.create(Task(id="t_broken", title="T", description="d", state=TaskState.RUNNING, created_at=n, updated_at=n, requested_by="tony"))
+    _force_undispatchable(monkeypatch)
+
+    s = build_status(task_store=ts)
+
+    assert [item["task_id"] for item in s["undispatchable_missions"]] == ["t_broken"]
+    assert s["undispatchable_missions"][0]["code"] == "legacy_orchestrator_removed"
+
+
+def test_status_reports_no_undispatchable_missions_when_routing_is_healthy():
+    ts = TaskStore()
+    n = now()
+    ts.create(Task(id="t", title="T", description="d", state=TaskState.CREATED, created_at=n, updated_at=n, requested_by="tony"))
+
+    s = build_status(task_store=ts)
+
+    assert s["undispatchable_missions"] == []
+    assert s["next_actions"][0]["action"] == "run_slot"
+    assert "routing_failure" not in s["next_actions"][0]
+
+
+def test_dispatch_path_still_raises_while_read_surface_degrades(monkeypatch, isolate_agent_runtime_root):
+    """The asymmetry is the whole design: READ reports, DISPATCH refuses. Pinning
+    both against the same broken mission stops a future edit from softening the
+    dispatch refusal 'for consistency' with the read surface."""
+
+    ts = TaskStore()
+    n = now()
+    task = Task(id="t_broken", title="T", description="d", state=TaskState.RUNNING, created_at=n, updated_at=n, requested_by="tony")
+    ts.create(task)
+    _force_undispatchable(monkeypatch)
+
+    assert build_status(task_store=ts)["next_actions"][0]["action"] == "undispatchable"
+
+    with pytest.raises(LegacyOrchestratorRemoved) as excinfo:
+        MissionStateMachine().next_action(ts.get("t_broken"))
+    assert excinfo.value.code == "legacy_orchestrator_removed"

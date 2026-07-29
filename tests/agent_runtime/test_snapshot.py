@@ -1686,3 +1686,110 @@ def test_snapshot_masks_secret_assignments_but_keeps_pathful_decision_text(isola
     assert "docs/scratch/goal_turn_probe.md" in run["decision_rationale"]
     assert "[redacted secret]" in run["decision_rationale"]
     assert "sk-live-12345" not in repr(archived)
+
+
+def _break_routing_for(monkeypatch, *task_ids: str) -> None:
+    """Make the ONLY action source return ``None`` for the named missions.
+
+    ``None`` is the broken-invariant shape Stage 15.4 turned into a typed refusal
+    instead of a legacy-orchestrator guess. Scoping it by mission id (rather than
+    disabling the router wholesale, as ``test_status.py`` does with a single-task
+    store) is what lets the frame-wide claim below be tested: a HEALTHY mission
+    must keep routing normally in the same snapshot.
+    """
+
+    from agent_runtime.state_machine import MissionStateMachine
+
+    original = MissionStateMachine._blueprint_next_action
+    broken = set(task_ids)
+
+    def _routed(self, mission, *, state):
+        if str(getattr(mission, "id", "") or "") in broken:
+            return None
+        return original(self, mission, state=state)
+
+    monkeypatch.setattr(MissionStateMachine, "_blueprint_next_action", _routed)
+
+
+def test_snapshot_reports_undispatchable_mission_instead_of_blanking_the_frame(monkeypatch, isolate_agent_runtime_root):
+    """Stage 15.4 read-surface contract, snapshot half.
+
+    ``build_snapshot`` is the frame Mission Control renders. An unguarded
+    ``next_action`` call let ONE undispatchable mission raise out of a pure READ
+    surface and blank the snapshot for EVERY mission — destroying the operator's
+    ability to diagnose the very task that is broken. It is reported as typed,
+    structured data instead, and the healthy mission beside it is unaffected.
+    """
+
+    ts = TaskStore()
+    n = now()
+    ts.create(Task(id="t_broken", title="T", description="d", state=TaskState.RUNNING, created_at=n, updated_at=n, requested_by="tony"))
+    ts.create(Task(id="t_healthy", title="H", description="d", state=TaskState.CREATED, created_at=n, updated_at=n, requested_by="tony"))
+    _break_routing_for(monkeypatch, "t_broken")
+
+    snap = build_snapshot(task_store=ts)
+
+    broken = snap["goals"]["t_broken"]["next_action"]
+    # A dedicated action value: no consumer can mistake it for a dispatchable one.
+    assert broken["action"] == "undispatchable"
+    assert broken["stopped_progress"]["reason"] == "routing_undispatchable"
+    assert broken["stopped_progress"]["owner"] == "human"
+    # `tick` would just raise again; the operator must inspect, not retry.
+    assert broken["stopped_progress"]["next_action"] == "inspect_blocker"
+    failure = broken["routing_failure"]
+    assert failure["code"] == "legacy_orchestrator_removed"
+    assert failure["state"] == "running"
+    assert "current_stage_id" in failure
+    # Routing facts only — never mission content.
+    assert not {"title", "description", "goal"} & set(failure)
+    # Unlike a `status.py` `next_actions` entry, the snapshot entry carries no
+    # `task_id`: the goal row it is nested under already supplies it.
+    assert "task_id" not in broken
+    assert snap["goals"]["t_broken"]["task_id"] == "t_broken"
+
+    # The whole point: one broken mission does not take the frame down with it.
+    assert snap["goals"]["t_healthy"]["next_action"]["action"] == "run_slot"
+    assert "routing_failure" not in snap["goals"]["t_healthy"]["next_action"]
+    assert "observability" in snap and "parity" in snap
+    # `next_action` is NOT a GOAL_DETAIL_ONLY_FIELD, so the refusal survives the
+    # `_goal_head` split and reaches the operator in the steady-state frame.
+    assert "next_action" not in snap["goals"]["t_broken"]["detail_ref"]["fields"]
+
+
+def test_snapshot_dispatch_path_still_raises_while_the_frame_degrades(monkeypatch, isolate_agent_runtime_root):
+    """The asymmetry is the whole design: READ reports, DISPATCH refuses.
+
+    Pinning both against the same broken mission stops a future edit from
+    softening the dispatch refusal "for consistency" with the read surface.
+    """
+
+    import pytest
+
+    from agent_runtime.errors import LegacyOrchestratorRemoved
+    from agent_runtime.state_machine import MissionStateMachine
+
+    ts = TaskStore()
+    n = now()
+    ts.create(Task(id="t_broken", title="T", description="d", state=TaskState.RUNNING, created_at=n, updated_at=n, requested_by="tony"))
+    _break_routing_for(monkeypatch, "t_broken")
+
+    assert build_snapshot(task_store=ts)["goals"]["t_broken"]["next_action"]["action"] == "undispatchable"
+
+    with pytest.raises(LegacyOrchestratorRemoved) as excinfo:
+        MissionStateMachine().next_action(ts.get("t_broken"))
+    assert excinfo.value.code == "legacy_orchestrator_removed"
+
+
+def test_snapshot_carries_no_routing_failure_when_routing_is_healthy(isolate_agent_runtime_root):
+    """The healthy steady state stays byte-identical: the guard adds a key only
+    on the path that used to raise."""
+
+    ts = TaskStore()
+    n = now()
+    ts.create(Task(id="t", title="T", description="d", state=TaskState.CREATED, created_at=n, updated_at=n, requested_by="tony"))
+
+    entry = build_snapshot(task_store=ts)["goals"]["t"]["next_action"]
+
+    assert entry["action"] == "run_slot"
+    assert "routing_failure" not in entry
+    assert entry["stopped_progress"]["next_action"] == "tick"

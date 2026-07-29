@@ -174,6 +174,108 @@ def test_typed_neko_acceptance_creates_plan_without_shrinking_parent_goal():
     assert t.affected_repos == ["EterniaBackend"]
 
 
+# --- `_task_has_operator_goal_detail` behaviour pins -------------------------
+#
+# These two go through `MissionStateMachine.apply_decision`, NOT bare
+# `apply_planning_decision`, on purpose. `apply_decision` calls
+# `ensure_default_mission_plan` FIRST, so by the time `_apply_acceptance` runs the
+# mission already carries a synthesized `mission_intent`. That is the only path on
+# which the predicate's intent clause is live, and since Stage 15.3 made typing
+# unconditional it is the path every real Neko turn takes. Asserting through
+# `apply_planning_decision` alone would pin nothing: the plan is still None there.
+
+
+def _neko_scope_payload():
+    return {
+        "objective": "Run backend contract smoke.",
+        "acceptance_criteria": ["Backend proof passes."],
+        "non_goals": ["No Launcher edits."],
+        "affected_repos": ["EterniaBackend"],
+    }
+
+
+def test_neko_scope_route_still_sets_criteria_when_operator_left_the_goal_bare():
+    """Regression pin. `_task_has_operator_goal_detail` used to answer True for the
+    mere PRESENCE of a `mission_intent`. Once routing became unconditional,
+    `ensure_default_mission_plan` synthesizes an intent for every mission, so that
+    clause degenerated to "always true" and silently swallowed Neko's
+    `PROPOSE_ACCEPTANCE` — acceptance criteria stayed `[]` on every bare mission in
+    the runtime, with no error and no event. The predicate must key on whether the
+    intent CARRIES detail, not on whether it exists."""
+
+    from agent_runtime.state_machine import MissionStateMachine
+
+    t = task()
+    t.title = "Fix Mission Control terminals"
+    t.description = "Operator authored goal text."
+    assert not t.acceptance_criteria
+    assert not t.non_goals
+    assert not t.suggested_roles
+    assert not t.risk_flags
+
+    MissionStateMachine().apply_decision(
+        t,
+        dec(DecisionType.PROPOSE_ACCEPTANCE, _neko_scope_payload()),
+        actor="neko_supervisor",
+    )
+
+    # The mission IS graph-typed by now — that is exactly what made the old
+    # predicate degenerate — and the synthesized intent mirrors the bare task.
+    assert t.mission_plan is not None
+    assert t.acceptance_criteria == ["Backend proof passes."]
+    assert t.non_goals == ["No Launcher edits."]
+    assert t.description == "Run backend contract smoke."
+
+
+def test_neko_scope_route_preserves_operator_criteria_carried_by_the_intent():
+    """The other direction, through the same path: when the operator DID state
+    acceptance detail, `ensure_default_mission_plan` copies it into the synthesized
+    intent, and Neko's narrower scope must land in `routing_scope` only — never
+    overwrite the operator's goal (the contract of 8faff29fe)."""
+
+    from agent_runtime.state_machine import MissionStateMachine
+
+    t = task()
+    t.title = "Fix Mission Control all role terminals"
+    t.description = "Backend stream proof, Launcher UI repair, and QA screenshot must all complete."
+    t.acceptance_criteria = ["All role streams render in Mission Control."]
+
+    MissionStateMachine().apply_decision(
+        t,
+        dec(DecisionType.PROPOSE_ACCEPTANCE, _neko_scope_payload()),
+        actor="neko_supervisor",
+    )
+
+    assert t.mission_plan.mission_intent.acceptance_criteria == ["All role streams render in Mission Control."]
+    assert t.acceptance_criteria == ["All role streams render in Mission Control."]
+    assert t.non_goals == []
+    assert t.description == "Backend stream proof, Launcher UI repair, and QA screenshot must all complete."
+    assert t.routing_scope["objective"] == "Run backend contract smoke."
+    assert t.routing_scope["acceptance_criteria"] == ["Backend proof passes."]
+
+
+def test_operator_goal_detail_ignores_the_always_true_intent_lock():
+    """`MissionIntent.locked` is True on every construction path, so it carries no
+    authorship signal and must not gate preservation. Pin both halves: a locked
+    intent with no detail does NOT preserve, a locked intent with detail does."""
+
+    from agent_runtime.default_plan import ensure_default_mission_plan
+    from agent_runtime.planning import _task_has_operator_goal_detail
+
+    bare = task()
+    ensure_default_mission_plan(bare)
+    assert bare.mission_plan.mission_intent is not None
+    assert bare.mission_plan.mission_intent.locked is True
+    assert _task_has_operator_goal_detail(bare) is False
+
+    detailed = task()
+    detailed.acceptance_criteria = ["Operator said so."]
+    ensure_default_mission_plan(detailed)
+    assert detailed.mission_plan.mission_intent.locked is True
+    assert detailed.mission_plan.mission_intent.acceptance_criteria == ["Operator said so."]
+    assert _task_has_operator_goal_detail(detailed) is True
+
+
 def test_typed_qa_approval_rejects_missing_launcher_stage():
     t = task(TaskState.RUNNING)
     t.mission_plan = MissionPlan(

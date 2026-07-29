@@ -19,10 +19,11 @@ from agent_runtime.role_checklists import (
 )
 from agent_runtime.role_envelopes import RoleEnvelopeStore
 from agent_runtime.runtime_config import RoleEnvelopeConfig
-from agent_runtime.snapshot import build_snapshot
+from agent_runtime.snapshot import build_snapshot, goal_detail_for_task
 from agent_runtime.states import StageStatus, TaskState
 from agent_runtime.store import ProofStore, RunStore, TaskStore
 from agent_runtime.ticker import TickEngine
+from tests.agent_runtime.conftest import release_to_implementation
 
 
 def _task(task_id: str = "task_stage52", state: TaskState = TaskState.RUNNING) -> Task:
@@ -525,7 +526,7 @@ def test_proof_batch_supersedes_previous_recipe_batch():
 def test_tick_records_envelope_checklist_and_proof_batch_when_enabled():
     tasks = TaskStore()
     proofs = ProofStore()
-    task = _task("task_tick")
+    task = release_to_implementation(_task("task_tick"))
     tasks.create(task)
     runtime = ChecklistProofRuntime()
 
@@ -552,7 +553,7 @@ def test_tick_records_envelope_checklist_and_proof_batch_when_enabled():
 def test_tick_does_not_record_stage52_state_when_disabled():
     tasks = TaskStore()
     proofs = ProofStore()
-    task = _task("task_disabled")
+    task = release_to_implementation(_task("task_disabled"))
     tasks.create(task)
 
     result = TickEngine(
@@ -572,7 +573,7 @@ def test_tick_does_not_record_stage52_state_when_disabled():
 def test_snapshot_surfaces_stage52_state_for_mission_control():
     tasks = TaskStore()
     proofs = ProofStore()
-    task = _task("task_snapshot")
+    task = release_to_implementation(_task("task_snapshot"))
     tasks.create(task)
     TickEngine(
         task_store=tasks,
@@ -585,12 +586,26 @@ def test_snapshot_surfaces_stage52_state_for_mission_control():
     snap = build_snapshot(task_store=tasks, proof_store=proofs)
     item = list(snap["goals"].values())[0]
 
+    # The top-level roster sections stay in the steady-state frame — they are what
+    # Mission Control actually renders each tick.
     assert snap["role_envelopes"]
     assert snap["role_checklists"]
     assert snap["proof_batches"]
-    assert item["role_envelopes"][0]["role_id"] == "dev"
-    assert item["role_checklists"][0]["items"][0]["item_id"] == "inspect"
-    assert item["proof_batches"][0]["proof_ids"] == [f"proof_{task.id}_implement"]
+    # S8: the goal ROW ships only the head. ``role_envelopes`` /
+    # ``role_checklists`` / ``proof_batches`` are GOAL_DETAIL_ONLY_FIELDS — they
+    # left the row and are replaced by a typed ``detail_ref`` pointer (never a
+    # silent absence), served on demand by ``goal_detail_for_task``. The claim
+    # under test — the tick's stage-52 state reaches what an operator surface
+    # reads off the goal — is unchanged; only the fetch verb moved.
+    assert item["detail_ref"]["evicted"] is True
+    assert item["detail_ref"]["task_id"] == task.id
+    assert {"role_envelopes", "role_checklists", "proof_batches"} <= set(item["detail_ref"]["fields"])
+    assert "role_envelopes" not in item
+
+    detail = goal_detail_for_task(task.id)
+    assert detail["role_envelopes"][0]["role_id"] == "dev"
+    assert detail["role_checklists"][0]["items"][0]["item_id"] == "inspect"
+    assert detail["proof_batches"][0]["proof_ids"] == [f"proof_{task.id}_implement"]
 
 
 def test_context_hud_injects_task_list_after_checklist_exists():

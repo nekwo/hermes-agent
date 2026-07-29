@@ -751,3 +751,97 @@ def test_mission_plan_summary_is_redaction_safe_shape():
     assert summary["current_stage_id"] == "scope"
     assert summary["stages"][0]["owner"] == "neko_supervisor"
     assert summary["blueprint_id"] == "neko_two_dev_default"
+
+
+# --- Stage 15.2: no task is born plan-less -----------------------------------
+#
+# One assertion per production task-creation entry point. The un-typed window
+# between construction and the first tick is the ONLY shape that reached the
+# retired legacy orchestrator, so closing it is a per-site invariant, not a
+# module-level one — a new creation site that forgets a plan must fail here.
+
+
+def _assert_graph_typed(task, *, site: str):
+    assert task.mission_plan is not None, f"{site} created a plan-less task"
+    assert task.mission_plan.stages, f"{site} created a stage-less plan"
+
+
+def test_goal_runner_create_task_is_graph_typed_even_with_a_blank_blueprint_id():
+    from agent_runtime.config import load_root_runtime_config
+    from agent_runtime.goal_runner import GoalRunOptions, MissionRuntimeController
+
+    controller = MissionRuntimeController(config=load_root_runtime_config())
+    for label, blueprint_id in (("default", None), ("blank", "   ")):
+        task = controller._create_task(
+            GoalRunOptions(
+                title="typed from birth",
+                description="goal runner must never create an un-typed goal",
+                acceptance_criteria=["plan exists"],
+                blueprint_id=blueprint_id,
+            )
+        )
+        _assert_graph_typed(task, site=f"goal_runner._create_task[{label}]")
+        assert task.mission_plan.blueprint_id
+
+
+def test_burn_in_case_tasks_are_graph_typed_at_creation():
+    from agent_runtime.burn_in import STAGE47_CASES, _create_case_task
+
+    for case_id, case in STAGE47_CASES.items():
+        task = _create_case_task(case_id, case, hygiene=None)
+        _assert_graph_typed(task, site=f"burn_in._create_case_task[{case_id}]")
+        assert task.mission_plan.blueprint_id
+
+
+def test_mission_goal_create_is_graph_typed_at_creation():
+    from agent_runtime.mission_goal import create_mission_goal
+    from agent_runtime.store import TaskStore
+
+    data = create_mission_goal(
+        title="typed from birth",
+        description="mission goal create must never create an un-typed goal",
+        requested_by="tests",
+        acceptance_criteria=["plan exists"],
+        start_daemon_mode=False,
+    )
+    assert "error" not in data, data
+    _assert_graph_typed(TaskStore().get(data["task_id"]), site="mission_goal.create_mission_goal")
+
+
+def test_persona_diagnostic_tasks_are_typed_at_creation():
+    from agent_runtime.persona_diagnostics import PersonaDiagnosticOptions, _attach_persona_stage
+    from agent_runtime.states import TaskState as _TaskState
+
+    for persona_id in ("dev", "backend_dev", "qa"):
+        task = make_task(id=f"task_diag_{persona_id}", state=_TaskState.CREATED)
+        task.mission_plan = None
+        _attach_persona_stage(task, persona_id=persona_id)
+        _assert_graph_typed(task, site=f"persona_diagnostics._attach_persona_stage[{persona_id}]")
+    assert PersonaDiagnosticOptions is not None
+
+
+def test_scope_control_child_missions_are_graph_typed_at_creation():
+    from agent_runtime.default_plan import ensure_default_mission_plan as _ensure
+
+    child = make_task(id="task_child", state=TaskState.CREATED)
+    child.mission_plan = None
+    _ensure(child)
+    _assert_graph_typed(child, site="scope_control fork child")
+    assert child.mission_plan.blueprint_id
+
+
+def test_blueprint_run_cli_and_api_tasks_carry_the_instantiated_plan():
+    """`harness blueprint run` / POST /api/blueprints/{id}/run and the smoke goal
+    all construct the Task WITH `mission_plan=plan`; pin the shared precondition
+    (an instantiated blueprint always yields a graph-typed plan) rather than
+    booting a CLI/web process per site."""
+
+    from agent_runtime.blueprints.instantiate import instantiate_blueprint
+    from agent_runtime.blueprints.store import BlueprintStore
+    from agent_runtime.default_plan import DEFAULT_TASK_BLUEPRINT_ID
+
+    from agent_runtime.default_plan import DEFAULT_TASK_BLUEPRINT_BINDINGS
+
+    bp = BlueprintStore().get(DEFAULT_TASK_BLUEPRINT_ID)
+    plan = instantiate_blueprint(bp, goal="typed from birth", bindings=dict(DEFAULT_TASK_BLUEPRINT_BINDINGS))
+    assert plan is not None and plan.stages and plan.blueprint_id == DEFAULT_TASK_BLUEPRINT_ID

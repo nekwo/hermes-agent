@@ -57,6 +57,7 @@ from .parity import PARITY_ENVELOPE_VERSION, ProjectionAccountant, events_waterm
 from .parse_cache import cached_by_mtime
 from .resolution import resolution_payload, resolve_runtime, suspect_default_root
 from .personas import blocked_tool_names, effective_toolsets, seed_personas
+from .errors import LegacyOrchestratorRemoved
 from .prompt_observability import _SkillObservabilityResolver, snapshot_prompt_observability
 from .proof_gates import task_verdict_proof_satisfied
 from .realm_sync import read_realm_sync_sidecar
@@ -4241,7 +4242,28 @@ def _next_action_summary(task, open_incidents, *, run_store=None, event_log=None
     if task.state in {TaskState.DONE, TaskState.CANCELLED}:
         return {**_stopped_progress(task, [], "settled", "harness"), "action": "terminal", "reason": "mission is terminal"}
     cfg = load_root_runtime_config()
-    action = MissionStateMachine(config=cfg, event_log=event_log).next_action(task)
+    try:
+        action = MissionStateMachine(config=cfg, event_log=event_log).next_action(task)
+    except LegacyOrchestratorRemoved as exc:
+        # Stage 15.4 read-surface contract, the same ruling `status.py` carries.
+        # The DISPATCH path (ticker, goal runner, blueprint create) must keep
+        # raising this — the typed refusal is what replaced the retired legacy
+        # orchestrator's silent guess, and softening it there would resurrect the
+        # failure mode the retirement removed. `build_snapshot` is a pure READ
+        # surface and is the frame Mission Control renders: letting the exception
+        # escape here would turn ONE undispatchable mission into a blank snapshot
+        # for EVERY mission, destroying the operator's ability to diagnose the
+        # very task that is broken. So report, do not swallow and do not guess —
+        # the refusal becomes a typed entry with its own `action` value (never
+        # confusable with a dispatchable one) plus the redaction-safe routing
+        # facts. Only the typed error is caught; a bare `except Exception` here
+        # would hide unrelated faults behind a routing verdict.
+        progress = _stopped_progress(task, [], "routing_undispatchable", "human")
+        # `tick` is the wrong advice here — ticking this mission raises again.
+        progress["stopped_progress"]["next_action"] = "inspect_blocker"
+        # No `task_id`: unlike a `status.py` `next_actions` entry, this dict is
+        # nested under the goal row, which already carries the id.
+        return {**progress, "action": "undispatchable", "reason": str(exc), "routing_failure": exc.read_surface_envelope()}
     reason = "settled" if action.type.value == "noop" else "retry_authorized" if "retry" in action.reason else "self_heal_pending" if "Neko" in action.reason else "waiting_for_preflight"
     return {**_stopped_progress(task, [], reason, _owner_for_action(action, task=task, run_store=run_store)), "action": action.type.value, "reason": action.reason}
 

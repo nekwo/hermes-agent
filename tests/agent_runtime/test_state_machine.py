@@ -14,6 +14,7 @@ from agent_runtime.recovery_flags import mark_block_recovery_attempt, mark_incid
 from agent_runtime.state_machine import MissionStateMachine
 from agent_runtime.store import ProofStore
 from agent_runtime.states import StageStatus, TaskState
+from tests.agent_runtime.conftest import release_to_implementation
 
 
 def make_mission(state=TaskState.CREATED):
@@ -1044,7 +1045,12 @@ def test_state_machine_applies_neko_mission_lead_decision_through_transition_aut
     assert result.events[0].payload["actor"] == "neko_supervisor"
 
 
-def test_neko_scoped_launcher_fix_with_harness_support_scope_routes_to_dev():
+def test_unscoped_launcher_fix_enters_at_graph_root_with_launcher_pinned_dev_lane():
+    """Stage 15.3 retarget. An unscoped Launcher+harness mission enters at the
+    graph ROOT (Neko scopes first) instead of being keyword-routed straight to a
+    dev slot, and the instantiated graph carries a dev lane pinned to
+    ``EterniaLauncher`` — which is the slot that actually runs once scope passes."""
+
     mission = make_mission(TaskState.RUNNING)
     mission.title = "Fix Mission Control live terminals for all agents"
     mission.description = (
@@ -1062,5 +1068,145 @@ def test_neko_scoped_launcher_fix_with_harness_support_scope_routes_to_dev():
 
     action = MissionStateMachine().next_action(mission)
 
+    # This test used to pin LADDER behavior: with routing conditional, an
+    # unscoped mission skipped typing and the legacy orchestrator inferred
+    # "route to dev" by keyword-sniffing the title/description. Routing is now
+    # graph-derived, so the FIRST action is the scope stage — the de-hardwiring
+    # 01-architecture.md requires.
     assert action.type == HarnessActionType.RUN_SLOT
-    assert "dev" in action.reason.lower()
+    assert action.slot_id == "neko_supervisor"
+    assert action.stage_id == "scope"
+    dev_stages = [
+        stage
+        for stage in mission.mission_plan.stages
+        if (stage.owner_slot or stage.owner) in {"dev", "backend_dev"}
+    ]
+    assert dev_stages, "graph must carry a dev lane for the Launcher fix"
+    launcher_lanes = [stage for stage in dev_stages if stage.repo == "EterniaLauncher"]
+    assert launcher_lanes
+
+    # Entering at the root only DEFERS the dev dispatch — it must still happen.
+    # Release the scope stage the way the dev-mechanics suites do and assert the
+    # Launcher lane is what the graph dispatches next, so the eventual-dev-run
+    # proof the pre-retarget assertion carried is not lost.
+    release_to_implementation(mission)
+
+    released = MissionStateMachine().next_action(mission)
+
+    assert released.type == HarnessActionType.RUN_SLOT
+    assert released.slot_id == "dev"
+    assert released.stage_id in {stage.id for stage in launcher_lanes}
+
+
+# --- Stage 15.4: exactly one orchestrator ------------------------------------
+#
+# These replace the Stage 15.1 reachability probe (typed `orchestrator.legacy_fallback`
+# event + per-call-site counters). The probe existed to MEASURE whether the legacy
+# ladder was reachable before deleting it — it measured zero across the deterministic
+# smoke mission, all nine burn-in case shapes, and a goal_runner goal — and its subject
+# no longer exists, so its tests are retargeted to the successor behavior rather than
+# carried as dead scaffolding.
+
+
+def test_routing_is_unconditional_even_with_mission_plan_config_disabled():
+    """Stage 15.3. A plan-less mission under the DEFAULT config (`mission_plan.enabled`
+    false) is the exact shape that used to skip typing and fall to the legacy ladder.
+    It must now be graph-typed and dispatched from the graph."""
+
+    mission = make_mission(TaskState.RUNNING)
+    assert mission.mission_plan is None
+    assert not mission.stages
+    config = RuntimeConfig(mission_plan=MissionPlanConfig(enabled=False))
+
+    action = MissionStateMachine(config=config).next_action(mission)
+
+    assert mission.mission_plan is not None
+    assert mission.mission_plan.blueprint_id
+    assert action.type == HarnessActionType.RUN_SLOT
+    assert action.reason.startswith("blueprint stage ")
+
+
+def test_blueprint_router_returning_none_refuses_instead_of_routing():
+    """Stage 15.4. `_blueprint_next_action` is the ONLY action source; its `None`
+    case is a typed refusal, never a silent fall-through to a second orchestrator."""
+
+    import pytest
+
+    from agent_runtime.errors import LegacyOrchestratorRemoved
+
+    machine = MissionStateMachine(config=typed_config())
+    mission = make_mission(TaskState.RUNNING)
+    machine._blueprint_next_action = lambda mission, *, state: None
+
+    with pytest.raises(LegacyOrchestratorRemoved) as excinfo:
+        machine.next_action(mission)
+
+    error = excinfo.value
+    assert error.code == "legacy_orchestrator_removed"
+    assert error.safe_details["task_id"] == mission.id
+    assert error.safe_details["state"] == "running"
+    assert error.safe_details["mission_plan_absent"] is False
+    assert error.safe_details["blueprint_id_absent"] is False
+    assert error.safe_details["stage_count"] >= 1
+
+
+def test_legacy_orchestrator_removed_envelope_is_read_surface_safe():
+    """Stage 15.4 read-surface contract. Read surfaces (status/snapshot) report
+    this refusal as typed data instead of dying on it, so the envelope must carry
+    every routing fact an operator needs to diagnose the mission — and nothing
+    from the mission's own content."""
+
+    import json
+
+    import pytest
+
+    from agent_runtime.errors import LegacyOrchestratorRemoved
+
+    machine = MissionStateMachine(config=typed_config())
+    mission = make_mission(TaskState.RUNNING)
+    mission.title = "SECRET MISSION TITLE"
+    mission.description = "SECRET MISSION DESCRIPTION"
+    machine._blueprint_next_action = lambda mission, *, state: None
+
+    with pytest.raises(LegacyOrchestratorRemoved) as excinfo:
+        machine.next_action(mission)
+
+    envelope = excinfo.value.read_surface_envelope()
+    assert envelope["code"] == "legacy_orchestrator_removed"
+    assert envelope["message"] == str(excinfo.value)
+    assert set(envelope) == {
+        "code",
+        "message",
+        "task_id",
+        "state",
+        "mission_plan_absent",
+        "blueprint_id_absent",
+        "stage_count",
+        "current_stage_id",
+    }
+    assert "SECRET" not in json.dumps(envelope)
+    # Mutating the projection must not mutate the exception's own details.
+    envelope["task_id"] = "tampered"
+    assert excinfo.value.safe_details["task_id"] == mission.id
+
+
+def test_no_second_orchestrator_survives_in_the_state_machine_module():
+    """Regression pin for the condition 03-retirement-ledger.md calls the single
+    largest risk. The ledger marked this retired on 2026-06-25 while
+    `_legacy_next_action` was still live and reached; pin the symbols so the
+    claim cannot silently become false a second time."""
+
+    import inspect
+
+    from agent_runtime import state_machine
+
+    source = inspect.getsource(state_machine)
+    for retired in (
+        "_legacy_next_action",
+        "_legacy_dev_slot_for_task",
+        "_legacy_backend_first_burn_in",
+        "_mission_plan_routing_enabled",
+    ):
+        assert not hasattr(state_machine, retired), f"{retired} is back"
+        assert retired not in source.replace("`" + retired + "`", ""), f"{retired} is back in source"
+    assert "LegacyOrchestratorRemoved" in source

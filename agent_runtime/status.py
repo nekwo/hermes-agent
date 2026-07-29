@@ -6,6 +6,7 @@ from .config import ensure_persisted_personas, load_agent_runtime_config, load_r
 from .budget_approval import budget_incident_can_continue, budget_incident_needs_scope_recovery
 from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash
 from .dirty_state import build_dirty_state
+from .errors import LegacyOrchestratorRemoved
 from .events import CachedEventLog, EventLog
 from .observability import build_observability
 from .operator_channels import operator_channel_summary
@@ -137,6 +138,10 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
         "lanes": runtime_instances_summary(runtime_instances)["lanes"],
         "swarm_budget": _swarm_budget_summary(runs, cfg),
     }
+    # Top-level so an undispatchable mission is visible without reading every
+    # `next_actions` entry. Empty list is the healthy steady state; a non-empty
+    # one is a broken routing invariant that needs an operator, not a retry.
+    data["undispatchable_missions"] = [entry["routing_failure"] for entry in data["next_actions"] if entry.get("action") == "undispatchable"]
     if persona_instance_runtime_enabled(cfg):
         instance_store = PersonaInstanceStore(event_log=event_log)
         instances = instance_store.derive_from_workers(agents, workers)
@@ -265,7 +270,25 @@ def _next_action(task, *, blocked: bool = False, incidents=None, run_store: RunS
         reason = "budget_continuation_blocked" if _has_budget_incident(incidents or []) else "environment_blocked"
         message = "budget continuation cap reached; human review required" if reason == "budget_continuation_blocked" else "open incident requires human review"
         return {**_stopped_progress(task, incidents or [], reason, "human"), "task_id": task.id, "action": "blocked_by_incident", "reason": message}
-    action = MissionStateMachine(proof_store=proof_store, config=config).next_action(task)
+    try:
+        action = MissionStateMachine(proof_store=proof_store, config=config).next_action(task)
+    except LegacyOrchestratorRemoved as exc:
+        # Stage 15.4 read-surface contract. The DISPATCH path (ticker, goal
+        # runner, blueprint create) must keep raising this — the typed refusal
+        # is what replaced the legacy orchestrator's silent guess, and weakening
+        # it there would resurrect the failure mode the retirement removed.
+        # Status is a pure READ surface, and it is the first thing an operator
+        # runs to diagnose a stuck mission: letting the exception escape here
+        # would turn ONE undispatchable mission into a dead `status --json` for
+        # the entire runtime, hiding the very fact it is trying to report.
+        # So report, do not swallow and do not guess: the refusal becomes a
+        # typed entry with its own `action` value (never confusable with a
+        # dispatchable one) plus the redaction-safe routing facts, and
+        # `build_status` rolls it up top-level as `undispatchable_missions`.
+        progress = _stopped_progress(task, [], "routing_undispatchable", "human")
+        # `tick` is the wrong advice here — ticking this mission raises again.
+        progress["stopped_progress"]["next_action"] = "inspect_blocker"
+        return {**progress, "task_id": task.id, "action": "undispatchable", "reason": str(exc), "routing_failure": exc.read_surface_envelope()}
     reason = "settled" if action.type.value == "noop" else "retry_authorized" if "retry" in action.reason else "self_heal_pending" if "Neko" in action.reason else "waiting_for_preflight"
     return {**_stopped_progress(task, [], reason, _owner_for_action(action, task=task, run_store=run_store)), "task_id": task.id, "action": action.type.value, "reason": action.reason}
 
