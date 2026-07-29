@@ -449,8 +449,12 @@ class CachedEventLog(EventLog):
             self._lines = lines
             indexed: dict[str, list[str]] = {}
             for line in lines:
-                for match in _INDEXED_EVENT_ID_TOKEN_RE.finditer(line):
-                    indexed.setdefault(match.group(0), []).append(line)
+                # One line per token bucket regardless of how many times the token
+                # appears in the line — a payload echoing its own id (lane.created
+                # repeats task_id inside payload) must not double the event. Two
+                # DIFFERENT tokens on one line still index it once each.
+                for token in {match.group(0) for match in _INDEXED_EVENT_ID_TOKEN_RE.finditer(line)}:
+                    indexed.setdefault(token, []).append(line)
             self._lines_by_id_token = indexed
         return self._lines
 

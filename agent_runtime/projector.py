@@ -9,17 +9,32 @@ from typing import Any
 
 from hermes_time import now
 
-from .events import EventLog
+from .config import load_agent_runtime_config
+from .events import CachedEventLog, EventLog
 from .parity import events_watermark
+from .persona_assignments import (
+    PersonaAssignmentStore,
+    PersonaInstanceStore,
+    persona_assignment_store_enabled,
+    persona_instance_runtime_enabled,
+)
+from .personas import seed_personas
+from .proof_batches import ProofBatchStore
 from .read_model import ReadModel
+from .repo_bundles import RepoBundleStore
+from .role_checklists import RoleChecklistStore
+from .role_envelopes import RoleEnvelopeStore
+from .runtime_instances import GoalRuntimeInstanceStore
+from .self_test_evidence import SelfTestEvidenceStore
 from .snapshot import (
+    _goal_head,
     _goal_projection_from_task,
     _incident_summary,
     _proof_summary,
     _run_summary,
     build_snapshot,
 )
-from .store import IncidentStore, ProofStore, RunStore, TaskStore, WorkspaceStore
+from .store import AgentStore, IncidentStore, ProofStore, RunStore, TaskStore, WorkspaceStore
 from .worker_sessions import WorkerSessionStore
 
 
@@ -121,33 +136,116 @@ class Projector:
             conn.execute("BEGIN IMMEDIATE")
             try:
                 if task_ids:
+                    # ONE point-in-time event view for the whole rebuild, the
+                    # same reader ``build_snapshot`` projects goals from. Two
+                    # readers over one log are NOT interchangeable — the cached
+                    # one indexes a line once per id token it contains, so an
+                    # event whose payload echoes its own ``task_id`` (``lane.*``,
+                    # for one) comes back twice from ``CachedEventLog.for_task``
+                    # and once from the plain ``EventLog``. Whatever that view
+                    # says, both paths must say the same thing or the rows
+                    # diverge for a reason that has nothing to do with the
+                    # delta. It is also the cheaper reader here: the plain log
+                    # re-reads the whole file per ``for_task`` call, i.e. once
+                    # per changed task.
+                    projection_log = CachedEventLog()
                     all_tasks = task_store.list_all()
                     runs = run_store.list_all()
                     incidents = incident_store.list_all()
-                    workers = WorkerSessionStore(event_log=self.event_log).list_all()
+                    workers = WorkerSessionStore(event_log=projection_log).list_all()
                     workspaces = WorkspaceStore().list_all(include_archived=True)
+                    # Every store ``build_snapshot`` feeds the goal projection
+                    # (snapshot.py, the ``goals`` map) is read HERE too, and
+                    # filtered per task the same way. Passing these empty made an
+                    # incrementally projected row diverge in VALUE from a rebuilt
+                    # one on any mission that owns them: the head keeps
+                    # ``simplified_phase`` / ``repo_bundle_ids`` /
+                    # ``repo_bundle_closeout`` / ``bundle_queue`` /
+                    # ``qa_waiting_on`` (repo bundles), ``active_assignment_id`` /
+                    # ``persona_assignment_ids`` (assignments), ``runtime_lane``
+                    # (runtime instances) and ``mission_level_state``, whose
+                    # ``role_streams`` input is built from the envelopes /
+                    # checklists / proof batches — that nested input is NOT
+                    # stripped by ``_goal_head``, so the role stores must be read
+                    # even though their own goal-row fields are evicted. Same
+                    # inputs in, same row out: that IS replay equivalence, and it
+                    # outranks micro-optimizing a path that already lists four
+                    # stores per delta.
+                    role_envelopes = RoleEnvelopeStore(event_log=projection_log).list_all()
+                    role_checklists = RoleChecklistStore(event_log=projection_log).list_all()
+                    proof_batches = ProofBatchStore(event_log=projection_log).list_all()
+                    repo_bundles = RepoBundleStore(event_log=projection_log).list_all()
+                    runtime_instances = GoalRuntimeInstanceStore(event_log=projection_log).list_all()
+                    self_test_store = SelfTestEvidenceStore(event_log=projection_log)
+                    # The persona lanes are CONFIG-GATED in ``build_snapshot``;
+                    # mirror the gate exactly (and off the same authority —
+                    # ``load_agent_runtime_config()``, NOT the caller-supplied
+                    # ``self.config``, which callers build partially). Reading the
+                    # assignment store unconditionally would swap one divergence
+                    # for its mirror image: rows carrying assignments the full
+                    # rebuild deliberately omits while the flag is off.
+                    cfg = load_agent_runtime_config()
+                    instance_store = PersonaInstanceStore(event_log=projection_log)
+                    persona_instances = instance_store.list_all()
+                    persona_assignments: list = []
+                    if persona_instance_runtime_enabled(cfg):
+                        agents = AgentStore().list_all() or seed_personas()
+                        persona_instances = instance_store.derive_from_workers(agents, workers)
+                        if persona_assignment_store_enabled(cfg):
+                            persona_assignments = PersonaAssignmentStore(event_log=projection_log).list_all()
                     goals = []
                     for task_id in task_ids:
                         try:
                             task = task_store.get(task_id)
                         except Exception:
                             continue
+                        # ``_goal_head`` — the SAME split ``build_snapshot``
+                        # applies (snapshot.py, the ``goals`` map). The frame
+                        # ships only the goal HEAD: the heavy detail-only fields
+                        # leave the row and are replaced by a typed
+                        # ``detail_ref`` pointer. Writing the raw projection here
+                        # made a row's shape depend on which path last touched
+                        # it — an incrementally projected goal carried the full
+                        # detail inline and NO ``detail_ref``, a rebuilt one the
+                        # head + pointer. That broke replay equivalence (the
+                        # read model's whole correctness claim) and silently gave
+                        # back the S8 frame-size win on every task event.
                         goals.append(
-                            _goal_projection_from_task(
+                            _goal_head(_goal_projection_from_task(
                                 task,
                                 proof_store.list_for_task(task.id),
                                 all_tasks,
                                 incidents,
                                 runs,
-                                self.event_log.for_task(task.id, limit=200),
+                                projection_log.for_task(task.id, limit=200),
                                 workers=workers,
                                 run_store=run_store,
-                                persona_assignments=[],
-                                repo_bundles=[],
-                                runtime_instances=[],
-                                persona_instances=[],
+                                self_tests=self_test_store.list_for_task(task.id),
+                                role_envelopes=[item for item in role_envelopes if item.task_id == task.id],
+                                role_checklists=[item for item in role_checklists if item.task_id == task.id],
+                                proof_batches=[item for item in proof_batches if item.task_id == task.id],
+                                persona_assignments=[item for item in persona_assignments if item.task_id == task.id],
+                                repo_bundles=[item for item in repo_bundles if item.task_id == task.id],
+                                runtime_instances=[item for item in runtime_instances if item.task_id == task.id],
+                                # NOT per-task filtered — ``build_snapshot``
+                                # passes the whole topology list here too.
+                                persona_instances=persona_instances,
+                                # Telemetry-only: the accountants record what the
+                                # projection bounded, they never change a field's
+                                # value (verified against ``_stage_verification``
+                                # / ``_mission_flow_timeline``), so the
+                                # incremental path leaves them unwired rather
+                                # than emitting duplicate parity counters for a
+                                # single-task delta.
+                                stage_verification_accountant=None,
+                                flow_timeline_accountant=None,
                                 workspaces=workspaces,
-                            )
+                                # Feeds ``next_action`` (and through it
+                                # ``why_not_done``) via the state machine — head
+                                # fields, so the same log the rest of this row is
+                                # projected from has to reach it.
+                                event_log=projection_log,
+                            ))
                         )
                     self.read_model._write_goals(conn, goals)
                 if run_ids:

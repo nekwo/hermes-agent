@@ -313,6 +313,78 @@ def test_cached_event_log_type_filter_matches_base(isolate_agent_runtime_root):
     assert all(e.type == "run.progress" for e in cached.for_task("task_typed", limit=0, types=trace_types))
 
 
+def test_cached_event_log_does_not_duplicate_events_whose_payload_echoes_their_id(isolate_agent_runtime_root):
+    # A real ``lane.created`` row (runtime_instances.RuntimeInstanceStore.save)
+    # repeats the task id inside its own payload, so the serialized line carries
+    # the ``"task_id":"…"`` token twice. The cached index must still hand that
+    # line to the scan once.
+    from agent_runtime.events import CachedEventLog
+
+    base = EventLog()
+    base.append(
+        Event(
+            ts=now(),
+            type="lane.created",
+            task_id="task_lane",
+            run_id=None,
+            persona_id=None,
+            payload={
+                "runtime_instance_id": "goalrt_abc123",
+                "task_id": "task_lane",
+                "lane": "goalrt_abc123",
+                "state": "queued",
+                "reason": "lane created",
+            },
+        )
+    )
+    base.append(
+        Event(
+            ts=now(),
+            type="run.progress",
+            task_id="task_lane",
+            run_id="run_1",
+            persona_id="dev",
+            payload={"summary": "after the lane"},
+        )
+    )
+
+    cached = CachedEventLog()
+    expected = base.for_task("task_lane", limit=0)
+    actual = cached.for_task("task_lane", limit=0)
+    assert len(actual) == len(expected)
+    assert [e.type for e in actual] == [e.type for e in expected]
+    assert [e.run_id for e in actual] == [e.run_id for e in expected]
+    # Duplicates would also burn the caller's window.
+    assert [e.type for e in cached.for_task("task_lane", limit=1)] == [
+        e.type for e in base.for_task("task_lane", limit=1)
+    ]
+
+
+def test_cached_event_log_indexes_one_line_under_each_distinct_token(isolate_agent_runtime_root):
+    # One line legitimately carrying two DIFFERENT tokens must resolve once from
+    # each index — deduping per line must not collapse task and session lanes.
+    from agent_runtime.events import CachedEventLog
+
+    base = EventLog()
+    base.append(
+        Event(
+            ts=now(),
+            type="run.tool.finished",
+            task_id="task_dual",
+            run_id="run_1",
+            persona_id="dev",
+            payload={"tool_name": "pytest", "status": "passed"},
+            session_id="chat_dual",
+        )
+    )
+
+    cached = CachedEventLog()
+    assert [e.run_id for e in cached.for_task("task_dual")] == [e.run_id for e in base.for_task("task_dual")]
+    assert len(cached.for_task("task_dual")) == 1
+    assert [e.run_id for e in cached.for_session("chat_dual")] == [e.run_id for e in base.for_session("chat_dual")]
+    assert len(cached.for_session("chat_dual")) == 1
+
+
 def test_event_log_rejects_payloads_over_4kb_and_does_not_write(isolate_agent_runtime_root):
     log = EventLog()
     event = Event(
