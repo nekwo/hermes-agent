@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from enum import StrEnum
 from pathlib import Path
 
@@ -348,3 +349,81 @@ def load_bundled_prompt(role: AgentRole | str) -> str:
     resolved_role = role if isinstance(role, AgentRole) else AgentRole(role)
     path = Path(__file__).with_name("prompts") / f"{resolved_role.value}.md"
     return path.read_text(encoding="utf-8")
+
+
+# ── profile → persona promotion ───────────────────────────────────────────────
+# Re-homed here from ``agent_runtime/blueprints/resolve.py`` (mission-lane removal,
+# S1). It only lived under ``blueprints/`` by accident of filing: promoting a raw
+# Hermes profile into a persisted persona is a persona-lifecycle operation, not
+# stage routing, and its live callers are the blueprint slot resolver *and* the
+# upstream ``POST /api/profiles/{name}/promote`` endpoint, which has nothing to do
+# with stage graphs. It has to outlive the blueprint package.
+#
+# Role → the template persona id whose model/provider/toolsets/system prompt the
+# promoted persona is cloned from. Unknown roles fall back to ``dev``.
+_ROLE_TEMPLATE = {
+    "builder": "dev",
+    "dev": "dev",
+    "backend_dev": "backend_dev",
+    "verifier": "qa",
+    "reviewer": "qa",
+    "qa": "qa",
+    "lead": "neko_supervisor",
+    "neko": "neko_supervisor",
+    "pm": "neko_supervisor",
+    "specialist": "dev",
+    "harness": "dev",
+    "human": "dev",
+}
+
+
+def promote_profile_to_persona(
+    profile_name: str,
+    *,
+    slot_role: str,
+    personas: dict[str, AgentPersona] | None = None,
+    agent_store=None,
+) -> AgentPersona:
+    """Mint and persist a persona that wraps the raw Hermes profile ``profile_name``.
+
+    A profile is only a *template* — it carries no orchestration contract — so it
+    cannot act as an agent on its own. Promotion clones the ``slot_role`` template
+    persona (so model / provider / toolsets / system prompt are valid) and points
+    ``hermes_profile`` at the profile.
+
+    Stores are imported lazily: ``agent_runtime.config`` imports this module, so a
+    top-level import would close a cycle.
+    """
+
+    from agent_runtime.store import AgentStore
+
+    store = agent_store if agent_store is not None else AgentStore()
+    known = dict(personas or {})
+    if not known:
+        try:
+            for persona in store.list_all():
+                known[persona.id] = persona
+        except Exception:
+            pass
+        from agent_runtime.config import ensure_persisted_personas
+
+        for persona in ensure_persisted_personas():
+            known.setdefault(persona.id, persona)
+    template_id = _ROLE_TEMPLATE.get(slot_role, "dev")
+    template = known.get(template_id) or known.get("dev") or next(iter(known.values()), None)
+    if template is None:
+        raise ValueError(
+            f"cannot promote profile {profile_name!r}: no template persona for role {slot_role!r}"
+        )
+    new_id = profile_name if profile_name not in known else f"{profile_name}_{slot_role}"
+    persona = replace(
+        template,
+        id=new_id,
+        display_name=f"{profile_name} ({slot_role})",
+        hermes_profile=profile_name,
+        skills=list(template.skills),
+        toolsets=list(template.toolsets),
+        required_mcp_servers=list(template.required_mcp_servers),
+        readiness={},
+    )
+    return store.save(persona)

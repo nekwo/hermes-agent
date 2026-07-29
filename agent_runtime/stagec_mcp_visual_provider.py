@@ -840,11 +840,26 @@ def _flutter_command() -> str | None:
 
 
 def _write_rebuild_artifact(task_id: str, stream_name: str, text: str | bytes | None) -> str:
-    safe_task = _safe_token(task_id)
+    """Persist one marionette-rebuild stream under the Stage C artifact dir.
+
+    This used to write into the proof store — the only such write in this file — and
+    it never produced a ``Proof`` row, just a build log referenced by ``stdout_path``
+    / ``stderr_path`` in the rebuild result dict. That store is removed with the
+    mission lane (S6/S9) and is already quarantined out of the live runtime root, so
+    this now targets ``paths.stagec_artifacts_task_dir``.
+
+    ``task_id`` is a *filename grouping token* here and nothing more — the caller
+    passes ``request.task_id`` straight through, no Task record is read, and
+    ``request.stage_id`` is never consulted on this path.
+    """
+
     safe_stream = _safe_token(stream_name)
     stamp = now().strftime("%Y%m%d%H%M%S%f")
-    rel = Path("proofs") / safe_task / "artifacts" / f"stagec_marionette_rebuild_{stamp}.{safe_stream}.log"
-    path = paths.store_root() / rel
+    path = paths.stagec_artifacts_task_dir(task_id) / f"stagec_marionette_rebuild_{stamp}.{safe_stream}.log"
+    try:
+        rel = path.relative_to(paths.store_root())
+    except ValueError:
+        rel = path
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         if isinstance(text, bytes):

@@ -6,6 +6,15 @@ from pathlib import Path
 
 from .decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
 from .models import Task
+from .stagec_command_policy import (
+    reject_invalid_stagec_screenshot_window_args as _reject_invalid_stagec_screenshot_window_args,
+    reject_unpinned_mission_control_stagec_commands as _reject_unpinned_mission_control_stagec_commands,
+)
+
+# The two Stage C argument checks moved to ``agent_runtime.stagec_command_policy``
+# (S1 of the mission-lane removal). They inspect the MCP command string, not a
+# Task, so they outlive this module — everything else here reads Task fields and
+# dies with the goal/task lane. The aliases keep the call sites below unchanged.
 
 
 def validate_request_test_run_policy(task: Task, decision: AgentDecision) -> None:
@@ -107,41 +116,6 @@ def narrow_launcher_contract_analyze_command(
     return _strip_trailing_launcher_main_analyze(command)
 
 
-def _reject_invalid_stagec_screenshot_window_args(commands: list[str]) -> None:
-    invalid_args = ("screenshot_stabilize_ms", "screenshot_max_retries", "screenshot_retry_delay_ms")
-    for command in commands:
-        for segment in _tool_segments(command, "mcp_launcher_qa_screenshot_window"):
-            if any(arg in segment for arg in invalid_args):
-                raise DecisionPayloadInvalid(
-                    "Stage C screenshot_window proof command policy failed: "
-                    "mcp_launcher_qa_screenshot_window accepts max_retries and retry_delay_ms, "
-                    "not screenshot_stabilize_ms, screenshot_max_retries, or screenshot_retry_delay_ms. "
-                    "Use screenshot_* only on the open_app_tab composed screenshot path, or add a bounded "
-                    "wait before screenshot_window and pass max_retries/retry_delay_ms to screenshot_window."
-                )
-
-
-def _reject_unpinned_mission_control_stagec_commands(commands: list[str]) -> None:
-    for command in commands:
-        lowered = command.lower()
-        if "mcp_launcher_qa_open_app_tab" not in lowered and "mcp_launcher_qa_launch_or_attach" not in lowered:
-            continue
-        if "missioncontrol" not in lowered and "mission control" not in lowered:
-            continue
-        missing = [
-            field
-            for field in ("hermes_profile", "harness_runtime_root", "hermes_home")
-            if field not in lowered
-        ]
-        if missing:
-            raise DecisionPayloadInvalid(
-                "Mission Control Stage C proof command policy failed: open_app_tab/launch_or_attach "
-                "must pin Tony's Harness runtime by passing hermes_profile, harness_runtime_root, "
-                f"and hermes_home; missing {', '.join(missing)}. Unpinned Mission Control pixels do "
-                "not prove the live runtime root/profile."
-            )
-
-
 def task_requires_bounded_smoke_proof(task: Task, *, stage_id: str | None = None, summary: str = "", rationale: str = "") -> bool:
     text = _policy_text(task, stage_id=stage_id, summary=summary, rationale=rationale)
     if not any(marker in text for marker in ("smoke", "observational", "no-edit", "no product edits", "without product edits")):
@@ -177,30 +151,6 @@ def _task_requires_mission_control_stagec_env_pins(
     if "mission control" not in text and "missioncontrol" not in text:
         return False
     return any(marker in text for marker in ("stage c", "stagec", "mcp", "screenshot", "visual", "marionette"))
-
-
-def _tool_segments(command: str, tool_name: str) -> list[str]:
-    lowered = str(command or "").lower()
-    marker = tool_name.lower()
-    segments: list[str] = []
-    search_from = 0
-    while True:
-        start = lowered.find(marker, search_from)
-        if start < 0:
-            return segments
-        end_candidates = [
-            candidate
-            for candidate in (
-                lowered.find("&&", start + len(marker)),
-                lowered.find(";", start + len(marker)),
-                lowered.find("|", start + len(marker)),
-                lowered.find("-tool mcp_launcher_qa_", start + len(marker)),
-            )
-            if candidate >= 0
-        ]
-        end = min(end_candidates) if end_candidates else len(lowered)
-        segments.append(lowered[start:end])
-        search_from = start + len(marker)
 
 
 def _explicit_full_suite_gate_text(text: str) -> bool:

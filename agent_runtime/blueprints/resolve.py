@@ -13,26 +13,21 @@ The persisted runtime binding is therefore always ``slot_id -> persona_id``.
 
 from __future__ import annotations
 
-from dataclasses import replace
-
 from agent_runtime.models import AgentPersona
+from agent_runtime.personas import promote_profile_to_persona
 
-
-# slot role -> the default_personas() template id to clone when promoting
-_ROLE_TEMPLATE = {
-    "builder": "dev",
-    "dev": "dev",
-    "backend_dev": "backend_dev",
-    "verifier": "qa",
-    "reviewer": "qa",
-    "qa": "qa",
-    "lead": "neko_supervisor",
-    "neko": "neko_supervisor",
-    "pm": "neko_supervisor",
-    "specialist": "dev",
-    "harness": "dev",
-    "human": "dev",
-}
+# ``promote_profile_to_persona`` (and its ``_ROLE_TEMPLATE``) now live in
+# ``agent_runtime.personas`` — it is persona lifecycle, not stage routing, and it
+# has a live caller outside this package (mission-lane removal, S1).
+#
+# This re-export is NOT cosmetic. Upstream-owned ``hermes_cli/web_server.py:12671``
+# (``POST /api/profiles/{name}/promote``) does
+# ``from agent_runtime.blueprints.resolve import promote_profile_to_persona``, and
+# the fork may not edit upstream files, so this import path must keep resolving for
+# as long as that endpoint exists. See the S1 report: whoever deletes
+# ``agent_runtime/blueprints/`` in S7 must leave a shim behind or get the operator to
+# accept an upstream edit.
+__all__ = ["BindingResolver", "promote_profile_to_persona"]
 
 
 class BindingResolver:
@@ -103,44 +98,3 @@ class BindingResolver:
         )
         personas[persona.id] = persona
         return persona.id
-
-
-def promote_profile_to_persona(
-    profile_name: str,
-    *,
-    slot_role: str,
-    personas: dict[str, AgentPersona] | None = None,
-    agent_store=None,
-) -> AgentPersona:
-    from agent_runtime.store import AgentStore
-
-    store = agent_store if agent_store is not None else AgentStore()
-    known = dict(personas or {})
-    if not known:
-        try:
-            for persona in store.list_all():
-                known[persona.id] = persona
-        except Exception:
-            pass
-        from agent_runtime.config import ensure_persisted_personas
-
-        for persona in ensure_persisted_personas():
-            known.setdefault(persona.id, persona)
-    template_id = _ROLE_TEMPLATE.get(slot_role, "dev")
-    template = known.get(template_id) or known.get("dev") or next(iter(known.values()), None)
-    if template is None:
-        raise ValueError(
-            f"cannot promote profile {profile_name!r}: no template persona for role {slot_role!r}"
-        )
-    new_id = profile_name if profile_name not in known else f"{profile_name}_{slot_role}"
-    persona = replace(
-        template,
-        id=new_id,
-        display_name=f"{profile_name} ({slot_role})",
-        hermes_profile=profile_name,
-        skills=list(template.skills),
-        toolsets=list(template.toolsets),
-        required_mcp_servers=list(template.required_mcp_servers),
-        readiness={},
-    )
-    return store.save(persona)

@@ -1277,27 +1277,41 @@ def apply_chat_lane_tool_scope(
     return options
 
 
-# Operator-chat first-class capabilities that a persona's role is allowed to use
-# but which an older persisted/config toolset list may not enumerate. The
-# ``mission_goal`` augmentation is capability discovery only: the global guard in
-# ``_enabled_toolsets_for_chat`` removes it again unless the caller explicitly
-# opts that exact turn into heavy mission routing.
-_CHAT_CAPABILITY_TOOLSETS = ("mission_goal", "agent_chat", "board")
+# Operator-chat first-class capabilities that a chat persona gets regardless of
+# what its persisted/config toolset list happens to enumerate. This is capability
+# *discovery* — it does not widen any downstream gate.
+#
+# `agent_chat`, `board` and `clarify` are UNCONDITIONAL on purpose (mission-lane
+# removal, S1). This is the ONLY path that puts `board` and `agent_chat` on a chat lane, and
+# it used to gate them on ``ALLOWED_TOOLSETS_BY_ROLE.get(role, frozenset())``. That
+# dict is deleted in S11 — and it already returns an EMPTY set for any role token
+# it does not know — so a role-keyed gate here silently strips the Mission Board
+# and agent-to-agent chat from every chat persona the moment either happens. Both
+# are explicit KEEP. The gate had no protective value either: all four roles in the
+# dict already allow `board` and `agent_chat`, so removing it changes nothing for a
+# known role and *restores* the intended surface for an unknown one.
+#
+# `clarify` is likewise universal: ask a question, get the answer as the next
+# message in the same session.
+_CHAT_CAPABILITY_TOOLSETS = ("mission_goal", "agent_chat", "board", "clarify")
+
+# `mission_goal` is the one privileged member that is NOT unconditional. It opens
+# the mission/task/graph lane (durable work, workers, retries, proof state), so
+# role capability must not imply admission. It stays role-gated here and is
+# additionally stripped in ``_enabled_toolsets_for_chat`` unless the caller opted
+# that exact turn in. Both it and its gate are removed in S4.
+_ROLE_GATED_CHAT_CAPABILITY_TOOLSETS = frozenset({"mission_goal"})
 
 
 def _augment_chat_capabilities(persona: AgentPersona, toolsets: list[str]) -> list[str]:
-    role = role_from_persona(persona)
-    allowed = ALLOWED_TOOLSETS_BY_ROLE.get(role, frozenset())
+    allowed = ALLOWED_TOOLSETS_BY_ROLE.get(role_from_persona(persona), frozenset())
     augmented = list(toolsets)
     for toolset in _CHAT_CAPABILITY_TOOLSETS:
-        if toolset in allowed and toolset not in augmented:
-            augmented.append(toolset)
-    # clarify is a universal operator/relay conversational primitive — ask a
-    # question, get the answer as the next message in the same session — so it
-    # is available to every chat persona regardless of role, unlike the
-    # privileged mission_goal capability which stays gated on `allowed`.
-    if "clarify" not in augmented:
-        augmented.append("clarify")
+        if toolset in augmented:
+            continue
+        if toolset in _ROLE_GATED_CHAT_CAPABILITY_TOOLSETS and toolset not in allowed:
+            continue
+        augmented.append(toolset)
     return augmented
 
 

@@ -46,6 +46,74 @@ def test_board_toolset_gated_for_all_mission_roles():
     assert "board" in PROFILE_CHAT_FALLBACK_TOOLSETS
 
 
+# ── the chat-lane augmentation must not be role-keyed (mission-lane removal S1) ──
+
+
+def _chat_persona(role: str = "dev"):
+    from agent_runtime.models import AgentPersona
+
+    return AgentPersona(
+        id=f"persona_{role}",
+        display_name=role,
+        role=role,
+        model=None,
+        provider=None,
+        api_mode="chat",
+        toolsets=["search"],
+        system_prompt_path=None,
+    )
+
+
+def test_board_and_agent_chat_survive_an_empty_role_toolset_table(monkeypatch):
+    """``_augment_chat_capabilities`` is the ONLY path that puts ``board`` and
+    ``agent_chat`` on a chat lane, and both are explicit KEEP.
+
+    It used to read ``ALLOWED_TOOLSETS_BY_ROLE.get(role, frozenset())`` and append
+    only what the role allowed. That dict is deleted in S11 of the mission-lane
+    removal, and it already answers with an EMPTY set for any role token it does
+    not know — so a role-keyed gate here strips the Mission Board and
+    agent-to-agent chat from every chat persona the moment either happens, with no
+    error.
+
+    This test simulates the post-S11 world by emptying the table. It fails if the
+    append is ever made conditional on the role again.
+    """
+
+    from agent_runtime import persona_runtime as PR
+
+    monkeypatch.setattr(PR, "ALLOWED_TOOLSETS_BY_ROLE", {})
+    augmented = PR._augment_chat_capabilities(_chat_persona(), ["search"])
+    assert "board" in augmented
+    assert "agent_chat" in augmented
+    assert "clarify" in augmented
+
+
+def test_mission_goal_stays_role_gated_when_the_table_is_empty(monkeypatch):
+    """The de-gating is scoped: the privileged mission/task/graph capability keeps
+    its role gate (removed with the toolset itself in S4), so making board and
+    agent_chat unconditional does not quietly widen goal creation."""
+
+    from agent_runtime import persona_runtime as PR
+
+    monkeypatch.setattr(PR, "ALLOWED_TOOLSETS_BY_ROLE", {})
+    assert "mission_goal" not in PR._augment_chat_capabilities(_chat_persona(), ["search"])
+
+
+def test_supervisor_still_gets_mission_goal_from_the_live_table():
+    from agent_runtime import persona_runtime as PR
+
+    augmented = PR._augment_chat_capabilities(_chat_persona("alice_supervisor"), ["search"])
+    assert augmented == ["search", "mission_goal", "agent_chat", "board", "clarify"]
+
+
+def test_dev_chat_lane_augmentation_is_unchanged_for_a_known_role():
+    from agent_runtime import persona_runtime as PR
+
+    # dev has no mission_goal in ALLOWED_TOOLSETS_BY_ROLE, so it is still withheld.
+    augmented = PR._augment_chat_capabilities(_chat_persona("dev"), ["search"])
+    assert augmented == ["search", "agent_chat", "board", "clarify"]
+
+
 # ── §10 board-resolution rule ─────────────────────────────────────────────
 
 

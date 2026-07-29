@@ -202,6 +202,28 @@ def incidents_dir() -> Path:
     return store_root() / "incidents"
 
 
+def stagec_artifacts_dir() -> Path:
+    """Stage C's own artifact drop — deliberately NOT under ``proofs/``.
+
+    Stage C visual proof is KEEP; the ``proofs/`` store is REMOVE (mission-lane
+    removal, S6/S9) and is already quarantined out of the live runtime root. Stage C
+    side artifacts (marionette rebuild stdout/stderr logs) therefore land here, in a
+    directory whose lifetime matches Stage C's rather than the retired proof store's.
+    """
+
+    return store_root() / "stagec_artifacts"
+
+
+def stagec_artifacts_task_dir(token: str) -> Path:
+    """Per-caller Stage C artifact subdirectory.
+
+    ``token`` is a naming token only — it groups one Stage C session's logs and is
+    never resolved back to a Task record.
+    """
+
+    return stagec_artifacts_dir() / _safe_path_token(token)
+
+
 def events_path() -> Path:
     """The pristine/base live event-log file.
 

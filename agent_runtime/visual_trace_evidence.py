@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import json
 import re
 import shutil
-import struct
 import uuid
 from pathlib import Path
 from typing import Any
@@ -14,7 +12,17 @@ from . import paths
 from .events import EventLog
 from .models import AgentRun, Event, Proof
 from .proof_rules import ProofType
+from .stagec_trace_parsers import (
+    is_launcher_qa_screenshot_tool as _is_launcher_qa_screenshot_tool,
+    png_dimensions as _png_dimensions,
+    terminal_wrapper_screenshot as _terminal_wrapper_screenshot,
+)
 from .store import ProofStore
+
+# The Stage C trace parsers moved to ``agent_runtime.stagec_trace_parsers`` (S1 of
+# the mission-lane removal): Stage C visual proof is KEEP, the ``Proof``-building
+# half of this module is REMOVE. The aliases above keep this file reading exactly as
+# before while the parsers live where they can survive.
 
 
 def record_screenshot_from_progress(
@@ -94,94 +102,6 @@ def record_screenshot_from_progress(
     return stored
 
 
-def _is_launcher_qa_screenshot_tool(tool_name: str) -> bool:
-    lowered = tool_name.lower()
-    return lowered.startswith("mcp_launcher_qa_") and "screenshot" in lowered
-
-
-def _terminal_wrapper_screenshot(payload: dict[str, Any], *, run: AgentRun | None = None) -> tuple[str, str] | None:
-    if str(payload.get("tool_name") or payload.get("tool") or "").strip().lower() != "terminal":
-        return None
-    if str(payload.get("status") or "").strip().lower() not in {"passed", "ok", "success"}:
-        return None
-    command = str(payload.get("command_label") or payload.get("command") or payload.get("summary") or "")
-    if "Invoke-LauncherQaMcpTool.ps1" not in command:
-        return None
-    match = re.search(r"-Tool\s+(mcp_launcher_qa_[A-Za-z0-9_]*screenshot[A-Za-z0-9_]*)", command, re.IGNORECASE)
-    if match is None:
-        return None
-    tool_name = match.group(1)
-    args = _wrapper_args(command)
-    label = str(args.get("label") or _partial_json_string(command, "label") or "").strip()
-    out_dir = str(args.get("out_dir") or _partial_json_string(command, "out_dir") or "").strip()
-    # Bind the artifact to THIS run's time window so a stale/foreign PNG left in the
-    # output directory by an earlier run can't be mtime-globbed in as fake evidence.
-    source = _latest_wrapper_artifact(label=label, out_dir=out_dir, min_mtime=_run_min_mtime(run))
-    if source is None:
-        return None
-    return tool_name, str(source)
-
-
-def _run_min_mtime(run: AgentRun | None) -> float | None:
-    """Earliest artifact mtime accepted for a run: its start minus a skew tolerance."""
-
-    started = getattr(run, "started_at", None) if run is not None else None
-    if started is None:
-        return None
-    try:
-        epoch = started.timestamp() if hasattr(started, "timestamp") else float(started)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return epoch - 120.0
-
-
-def _wrapper_args(command: str) -> dict[str, Any]:
-    match = re.search(r"-ArgsJson\s+'([^']+)'", command)
-    if match is None:
-        match = re.search(r'-ArgsJson\s+"([^"]+)"', command)
-    if match is None:
-        return {}
-    raw = match.group(1)
-    try:
-        parsed = json.loads(raw.replace('\\"', '"'))
-    except json.JSONDecodeError:
-        return {}
-    return parsed if isinstance(parsed, dict) else {}
-
-
-def _partial_json_string(command: str, key: str) -> str:
-    match = re.search(rf'"{re.escape(key)}"\s*:\s*"([^"]+)', command)
-    if match is None:
-        return ""
-    return match.group(1).replace("...", "").strip()
-
-
-def _latest_wrapper_artifact(*, label: str, out_dir: str, min_mtime: float | None = None) -> Path | None:
-    roots: list[Path] = []
-    if out_dir:
-        roots.append(Path(out_dir))
-    roots.append(Path("X:/tmp/stagec/screenshots"))
-    patterns = [f"{_safe_glob_prefix(label)}*.png"] if label else []
-    patterns.append("*.png")
-    candidates: list[Path] = []
-    for root in roots:
-        if not root.exists():
-            continue
-        for pattern in patterns:
-            for path in root.glob(pattern):
-                if not path.is_file():
-                    continue
-                if min_mtime is not None and path.stat().st_mtime < min_mtime:
-                    # Older than this run started — reject as stale/foreign.
-                    continue
-                candidates.append(path)
-        if candidates:
-            break
-    if not candidates:
-        return None
-    return max(candidates, key=lambda path: path.stat().st_mtime)
-
-
 def _screenshot_path(value: Any) -> str:
     if isinstance(value, dict):
         for key in ("path", "screenshot_path", "image_path", "artifact_path"):
@@ -233,16 +153,6 @@ def _nested_value(value: Any, key: str) -> Any:
     return None
 
 
-def _png_dimensions(path: Path) -> tuple[int, int]:
-    try:
-        data = path.read_bytes()[:24]
-    except OSError:
-        return 0, 0
-    if len(data) >= 24 and data[:8] == b"\x89PNG\r\n\x1a\n":
-        return struct.unpack(">II", data[16:24])
-    return 0, 0
-
-
 def _redaction_status(payload: dict[str, Any]) -> str:
     redaction = payload.get("redaction") if isinstance(payload.get("redaction"), dict) else {}
     raw = str(payload.get("redaction_status") or "").strip().lower()
@@ -268,8 +178,3 @@ def _safe_label(value: Any) -> str:
     if not text or ":/" in text or "\\" in text:
         return "screenshot"
     return text[:80]
-
-
-def _safe_glob_prefix(value: str) -> str:
-    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("._-")
-    return text or "*"

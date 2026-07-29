@@ -1,0 +1,257 @@
+# 16 — Mission Lane Removal
+
+> **Status: the executable plan.** Removes the goal/task mission lane and the two old
+> graphs, keeps chat, agents, the runtime agent graph, the board, realms, and Stage C
+> visual proof. Derived from a full dependency map (2026-07-29) that **corrected six
+> premises** the earlier framing assumed — read §0 before acting on prior notes.
+>
+> Baseline at authoring: `tests/agent_runtime` 3743 · `tests/hermes_cli` 8468 ·
+> Launcher `test/features/mission_control` 2750 / 2 skipped. Tree clean, `main` 4 commits
+> ahead of `origin/main`.
+
+---
+
+## 0. Corrections to earlier premises — read first
+
+1. **The kept graph is NOT persisted as a Blueprint.** `EterniaLauncher/.../data/blueprint_models.dart`
+   (122 lines) is a read-only in-memory **view model** — a name collision with Python's
+   `agent_runtime/blueprints/`, not a shared container. Dart `BlueprintEdge.outcome` is a
+   free-form string carrying `'steers'`; Python's is a StrEnum that would reject it. The
+   runtime graph persists via `agent_runtime/flow_graph.py` (`graph_id: runtime:<owner>`)
+   plus `persona_instances[].steered_by`. **Deleting Python's blueprint package does not
+   touch the kept graph.** The real seam is `MissionTypedPlan`.
+2. **`agent_topology` is neither dead nor live.** 6 of 12 persisted goals carry a populated
+   topology, but it is absent from the contract-44 frame (S4 removed it), so the Dart
+   `_agentTopologyRuntimeGraphProjection` branch cannot fire. Dormant, not primary.
+3. **`scripts/upstream_sync_gate.py` does NOT enforce the upstream boundary.** Its
+   `AGENT_TOOL_SEAMS` only decides whether to additionally run the Flutter lane. It is a
+   test runner. The real check is the `git diff --name-only upstream/main...HEAD` filter in
+   the final gate below.
+4. **Personas and profiles are DATA and are not deleted.** Nothing under
+   `.hermes/profiles/` is removed. Only the *hardcoded logic* that declares them goes.
+5. **The kept graph is 100% chat-mode and already goal-free** — 8 runtime-created instances
+   in two workspace-scoped `steered_by` trees, zero task binding. The 6 hardcoded seeds are
+   outside it, and 3 of them are exactly the 3 real task-bound instances.
+6. **No `serde.py` compat shim is needed.** `serde._coerce` iterates `fields(dataclass)`,
+   so persisted `mission_plan` / `agent_topology` / `linked_goal_id` keys with no field are
+   silently dropped. The `_LEGACY_RUNNING_TASK_STATE_VALUES` precedent does not apply — it
+   exists because enum *values* raise, not because fields vanish.
+
+## Operator rulings (2026-07-29)
+
+- **R-1 — Role floor removed.** `R1_ADMISSIBLE_ROLES` goes; MCP admission becomes governed
+  by whether a **profile declares the server**. Effect: `alice`, `aliceimagecron`, `base`,
+  `launcher-dev`, `launcher-qa`, `neko`, `qa`, `unbounded` gain `launcher_qa`;
+  `backend-dev` and `gpt-launcher` do not (no `mcp_servers` block). This deliberately
+  overturns the invariant at `mcp_admission.py:33-38` — **replace that docstring, do not
+  leave it contradicting the code.**
+- **R-2 — Hard floors removed.** `credential_read`, `credential_exfil`, `prod_operation`
+  are removed. Operator will re-add secret blocking after seeing the system work. **Must be
+  its own commit** (S12) so re-adding is a single revert, not an archaeology exercise.
+- **R-3 — `TaskStore` stub is permanent.** Upstream `tools/board_tool.py:85` imports it
+  unguarded. A stub stands indefinitely.
+- **R-4 — The Agent Console `Inspect ▾` menu is KEEP, in full**, except that the
+  *custom harness* permission gating goes while **upstream permission state stays visible**.
+  Menu items: Run detail · Context Inspector · Turn tool context · Permissions
+  (`agent_visibility_dialog.dart:35 showAgentPermissionsDialog`) · Skills Context. Also keep
+  the model selector, Session %, and Filter. The Permissions dialog is **retargeted, not
+  deleted**: it stops reporting role-keyed harness gates (removed in S11/S12) and reports
+  the upstream permission surface instead.
+  **`Run detail` is REMOVED** (operator ruling, same session): it resolves a `run_id`, and
+  runs go in S5/S8, so it could only ever render its empty state. Drop the menu item, its
+  handler, and `open_run_detail` — including the Stage C control
+  `mission_control.agent_chat.open_run_detail`, so `get_buttons` stops advertising it.
+  The other four items stay.
+- **R-5 — `Assign Work` is REMOVED.** Button + semantic control
+  `mission_control.agent_chat.action.assign_work`. Surfaces:
+  `agent_chat/mission_agent_chat_adapter.dart`, `mission_agent_chat_panel.dart`,
+  `mission_agent_chat_panel_parts/controls_and_helpers.dart`, `mission_control_page.dart`.
+  It assigns goal work and has no meaning once goals are gone. Remove in S10 alongside the
+  other Launcher lockstep work, and drop its Stage C control registration so
+  `get_buttons` stops advertising it.
+
+---
+
+## Stages
+
+Each stage leaves the tree importable and green. Gates are `rg`-returns-zero plus a named
+test command. **All gates are path-scoped — never a bare word grep** (see §Hazards).
+
+### S0 — Data migration, no code change
+- Run `harness persona instance sweep-orphans` **while `TaskStore` still exists** to reap
+  the 4 task-bound instances (`_owning_task_release_state` returns `archived` when the task
+  file is gone).
+- Archive `goals/`, `tasks/`, `runs/`, `blueprint_runs/`, `proofs/`, `incidents/`,
+  `burn_in/` out of the live root.
+**Proof:** zero `mode == task_bound` instances remain; the 11 chat-mode instances survive;
+`harness snapshot --json` still builds.
+
+### S1 — Protect the KEEP set first
+- `TaskStore` stub contract for upstream `tools/board_tool.py` (call site is already inside
+  `try/except Exception: pass`, so a stub raising on `.get()` suffices).
+- Re-home `promote_profile_to_persona` (`blueprints/resolve.py:108`) → `personas.py`. Two
+  live callers, one upstream (`web_server.py:12671`, `/api/profiles/{name}/promote`).
+- Extract Stage C arg validation from `proof_command_policy.py:113-197`.
+- Extract Stage C trace parsers from `visual_trace_evidence.py:97-183`.
+- Repoint `stagec_mcp_visual_provider._write_rebuild_artifact` (842-855) off `proofs/`.
+- **Make `_augment_chat_capabilities` (`persona_runtime.py:1293`) append unconditionally** —
+  it is the ONLY path adding `board` and `agent_chat` to a chat lane, and it reads
+  `ALLOWED_TOOLSETS_BY_ROLE`.
+**Gate:** `rg "proofs/" agent_runtime/stagec_mcp_visual_provider.py` → 0 ·
+`pytest tests/agent_runtime/test_board_agent_tools.py tests/agent_runtime/test_chat_lane_toolsets.py -q`
+
+### S2 — Sever the Launcher's cosmetic reads
+Delete `_topologyNodeRepo` (projection:737-750) and the `repo:` write (:581); drop the
+`limits`/`onUnhandled` writes (:624-626). `missionAgentRuntimeGoalText` (:1092) already
+falls back to goal title → `owner.taskTitle` → `'No goal captured yet.'`
+**Gate:** `rg "missionPlan\.(stages|limits|onUnhandled)" <projection file>` → 0 ·
+`flutter test test/features/mission_control`
+
+### S3 — Board → goal bridge
+Delete `BoardStore.escalate` (`board_store.py:467-524`), `_cmd_board_escalate`
+(`board.py:222`), parser `board_escalate` (`harness.py:943`), contract
+`board.card.escalated`, and `BoardCard.linked_goal_id`. All 3 live cards have it `null`;
+it is decorative provenance only. **No shim** (see §0.6).
+**Gate:** `rg "linked_goal_id|escalate" agent_runtime/board_store.py hermes_cli/harness_parts/board.py` → 0 ·
+`pytest tests/agent_runtime/test_board_store.py tests/agent_runtime/test_board_sync.py tests/agent_runtime/test_board_agent_tools.py -q`
+
+### S4 — Goal creation
+Delete `tools/mission_goal_tool.py`, `agent_runtime/mission_goal.py`,
+`--allow-mission-goal`, the `mission_goal` toolset and its role gate
+(`persona_runtime.py:1063-1067`).
+**Gate:** `rg "mission_goal_create|allow_mission_goal" agent_runtime hermes_cli tools --glob '!*.md'` → 0 ·
+`pytest tests/agent_runtime -q`
+
+### S5 — Dispatch loop
+Delete `ticker.py` + `ticker_parts/`, `goal_runner.py`, `planning.py`, `autonomy.py`,
+`liveness.py`, `no_freeze_monitor.py`, `recovery.py`, `reconciler.py`, `supervision.py`,
+`root_node_engine.py` (zero importers — already dead), `node_tools.py`,
+`worker_actions.py`, and `persona_runtime.run_tick` / `_invoke_agent`.
+**Gate:** `rg "from .ticker|TickEngine|run_tick|_invoke_agent|MissionRuntimeController" agent_runtime hermes_cli` → 0 ·
+`pytest tests/agent_runtime -q`
+
+### S6 — Proof machinery and burn-in
+Delete the 9 proof/gate files, `burn_in.py`, `smoke.py`, `replay_scenarios.py`,
+`scripts/cert_streak.py`, and the REMOVE halves of `visual_proof.py` (from line 60) and
+`visual_trace_evidence.py` (from line 44).
+**KEEP — named like the remove set, are not:** `parity.py` (ProjectionAccountant,
+read-model infra), `patch_coverage.py` (stream frames), `proof_capture.py` (Stage C
+dataclasses — **rename it**).
+**Gate:** `rg "proof_gates|proof_runner|proof_batches|promotion_gates|final_gate|ProofStore" agent_runtime hermes_cli` → 0 ·
+**negative gate:** `rg "ProjectionAccountant" agent_runtime/parity.py` → non-zero ·
+`pytest tests/agent_runtime -q`
+
+### S7 — The stage graph itself
+Delete `agent_runtime/blueprints/` (1,318 lines, 6 .py + 9 .yaml), `default_plan.py`,
+`mission_plan.py`, `state_machine.py`, and `MissionPlan` / `MissionPlanStage` / `TaskStage`
+from `models.py`.
+**Gate:** `rg "MissionPlan|mission_plan|BlueprintStore|instantiate_blueprint|owner_slot|agent_topology|ensure_default_mission_plan" agent_runtime hermes_cli/harness.py hermes_cli/harness_parts` → 0 ·
+`pytest tests/agent_runtime -q`
+
+### S8 — `Task` / `TaskStore` and the CLI
+Reduce `TaskStore` to the S1 stub; delete `Task`; delete the 57 REMOVE subcommands
+(of 168). **KEEP:** `persona`, `instance`, `open-chat`, `mission-chat`, `board`, `card`,
+`realm`, `workspace`, `agent`, `skills`, `snapshot`, `status`, `stream`, `serve`.
+**Gate:** `rg "TaskStore\(\)\.(get|list_all|create|update)" agent_runtime hermes_cli tools` → 0 outside the stub ·
+`pytest tests/hermes_cli -q`
+
+### S9 — Snapshot / read model retarget
+Remove goal sections; drop `goals`, `stage_verification`, `runs`, `proofs`, `incidents`
+from `ROW_TABLES` (`read_model.py:28`) and their 3 indexes. **KEEP** `agent_instances`
+(drop its `task_id` column), `operator_channels`, `meta`, `projection_watermarks`,
+`projections_misc`. Bump `READ_MODEL_SCHEMA_VERSION` 1→2 and `contract_version` 44→45.
+**Not stage-sourced — do not delete by name:** `goals[].stage_verification` reads
+`task.harness_self_heal["stage_observations"]`.
+**Gate:** `rg '"mission_plan"|"mission_flow_timeline"|"proof_gate_state"|"agent_topology"' agent_runtime/snapshot.py` → 0 ·
+`harness snapshot --json` builds · `harness rebuild-read-model`
+
+### S10 — Launcher lockstep
+Bump `kSupportedMissionContractVersion` 44→45; delete `MissionTypedStage` / `MissionTypedEdge`
+/ `MissionTypedSlot` / `MissionTypedLimits`, `_qaGraphActorsFromPlan`,
+`_missionActorsFromPlan`; trim `blueprint_models.dart` to the pointer-resolution fields
+(`BlueprintSlot.id`+`.role`, `BlueprintStage.id`/`.title`/`.objective`/`.ownerSlot`,
+`BlueprintEdge.source`/`.target`, `Blueprint.slots`/`.stages`/`.edges`); default
+`BlueprintStage.kind` → `'sub_agent'`; rename `BlueprintEdge.outcome` → `kind`. Regenerate
+`test/fixtures/harness_stream/*.json` + `MANIFEST.sha256`; fix the hardcoded
+`expect(kSupportedMissionContractVersion, 44)` at `read_model_s2_history_test.dart:79`.
+**Gate:** `flutter test test/features/mission_control` · `rg "kSupportedMissionContractVersion, 44" test/` → 0
+
+### S11 — De-hardcode personas and roles
+**Profiles and persona records are untouched — this removes only the code that declares
+them.** Delete from `personas.py`: `default_personas()`, `seed_personas()`,
+`BUNDLED_PERSONA_PROFILES`, `BUNDLED_PERSONA_IDS`, `DEFAULT_PERSONA_IDS`,
+`BASE_PERSONA_ID`, `DEFAULT_SUPERVISOR_PERSONA_ID`, `ALLOWED_TOOLSETS_BY_ROLE`,
+`PER_ROLE_TOOL_DENIES`. Also: `config.py:397` (**drops a persona whose role is unknown —
+must go, or non-hardcoded personas start disappearing**), the `decision_contract_registry`
+role matrix, and residual name references in `context_builder.py` / `snapshot.py`.
+Remove `R1_ADMISSIBLE_ROLES` (ruling R-1) and **replace the `mcp_admission.py:33-38`
+invariant docstring** with the profile-declares-the-server rule.
+Also the now-unreachable `task_bound_chat_root` guard — **surgical, not `git revert`**
+(a revert would restore two deleted deprecated aliases and delete 52 unrelated tests):
+`TASK_BOUND_INSTANCE_MODE` (`persona_commands.py:4957`),
+`_mission_chat_carries_mission_context` (4961), `_chat_mode_redirect_targets` (4993),
+`_task_bound_chat_root_refusal` (5054), the call site (1621-1639), 5 of 57 tests in
+`test_relay_session_lifecycle.py`, and `harness-runtime-model/SKILL.md:91-99`.
+**Gate:** `rg "task_bound_chat_root|R1_ADMISSIBLE_ROLES|ALLOWED_TOOLSETS_BY_ROLE|default_personas" agent_runtime hermes_cli tests docs` → 0 ·
+**negative gate:** `harness persona list --json` still returns 11 chat instances ·
+`pytest tests/agent_runtime/test_mcp_admission.py -q`
+
+### S12 — Hard floors (ruling R-2) — ITS OWN COMMIT
+Remove `credential_read`, `credential_exfil`, `prod_operation` from `terminal_envelope.py`
+and `_lanes_for_role`. **This is a deliberate security-posture change, not a side effect**;
+the operator will re-add secret blocking later, so this must be one revertable commit with
+a commit message stating exactly what protection was removed and why.
+Note the ordering that made this dangerous: the grant check (`:683-686`) runs **before**
+the floor check (`:703`), and the "grants never contain a floor class" invariant lives at
+`:598` inside the role-keyed resolver. `terminal_envelope.py` must remain **importable** —
+upstream `tools/terminal_tool.py:2101,2139` imports `envelope_decision` and
+`record_legacy_block` unguarded.
+**Gate:** `pytest tests/agent_runtime/test_terminal_envelope_grants.py -q` ·
+`python -c "import tools.terminal_tool"` succeeds
+
+---
+
+## Final gate — every stage and once at the end
+
+```bash
+python -m pytest tests/agent_runtime -q
+python -m pytest tests/hermes_cli -q
+cd "X:/Unreal Engine/Engine/Launcher/EterniaLauncher" && flutter test test/features/mission_control
+git diff --name-only upstream/main...HEAD \
+  | grep -vE '^(agent/|agent_runtime/|hermes_cli/harness)' \
+  | grep -vE '^tools/(agent_chat_tool|mission_goal_tool)\.py$'
+```
+The last command is the **real** upstream check (§0.3). It must return only paths the
+operator has accepted — expect `tests/`, `docs/`, and the deleted `tools/mission_goal_tool.py`.
+
+## Hazards — five words with a keep-side and a remove-side meaning
+
+| Word | REMOVE | KEEP |
+|---|---|---|
+| goal | harness mission records | `hermes_cli/goals.py` (upstream session goals / Ralph loop) |
+| kanban / board | — | upstream kanban (~14k lines) **and** the fork board |
+| proof | proof gates, `proofs/` store | Stage C MCP + PS helper, `proof_capture.py` |
+| task | goal/task records | `TaskStore` stub (permanent, ruling R-3) |
+| graph | stage graph, `agent_topology` | the agent runtime graph + `flow_graph.py` |
+
+**Never gate on a bare word.** A name-based pass during planning flagged the kept graph's
+own tests and all 15 Mission Office files as removal candidates purely on filename match.
+
+Additional traps: `agent_runtime/sync_merge.py` looks generic, is a hard board dependency ·
+`hermes_cli/harness_parts/board.py` is `exec`'d into `harness.py` globals, not imported, and
+needs 8 helpers from that scope · `agent_runtime/office_*.py` is a 1:1 clone of the board
+family sharing `sync_merge` — treat Office and Board as one blast radius ·
+`shared_harness_overlay.md:9` has the anti-Kanban rule and the Mission Board carve-out in
+the same sentence.
+
+## Acceptance criteria
+
+1. All three suites green at their baselines or above; nothing skipped, xfailed, or loosened.
+2. The upstream diff filter returns only accepted paths.
+3. `harness persona list --json` returns the 11 chat-mode instances; the two `steered_by`
+   trees render in the Agent Console on an ordinary chat turn.
+4. A board card can be created and listed; realms and workspaces round-trip.
+5. A Stage C screenshot captures and returns a MEDIA path.
+6. Every doc and skill describing the removed lane is updated in the same stage that
+   removes it — a skill describing a retired contract makes agents behave wrong even when
+   the code is right.
