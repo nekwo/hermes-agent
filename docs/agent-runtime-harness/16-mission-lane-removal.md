@@ -77,6 +77,14 @@
 Each stage leaves the tree importable and green. Gates are `rg`-returns-zero plus a named
 test command. **All gates are path-scoped — never a bare word grep** (see §Hazards).
 
+| Stage | Status | Verification note |
+|---|---|---|
+| S0 | complete | Runtime mission data quarantined; 11 chat instances retained. |
+| S1 | complete | Protective keep-set stage committed as `0a7d96cd1`. |
+| S2 | complete | Launcher cosmetic-read removal committed as `429f26a5`. |
+| S3 | complete | Board→goal bridge removed. Operator authorized the required upstream projection edit in `tools/board_tool.py`. |
+| S4–S12 | pending | Must execute in order. |
+
 ### S0 — Data migration, no code change
 - Run `harness persona instance sweep-orphans` **while `TaskStore` still exists** to reap
   the 4 task-bound instances (`_owning_task_release_state` returns `archived` when the task

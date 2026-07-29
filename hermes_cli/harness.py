@@ -940,11 +940,6 @@ def build_parser(parent_subparsers) -> None:
     _add_stage42_global_args(card_restore, mutation=True)
     card_restore.set_defaults(func=_cmd_board_card_restore)
 
-    board_escalate = board_subs.add_parser("escalate", help="Escalate a card to a goal (idempotent orchestration over the standard goal-create envelope)")
-    board_escalate.add_argument("card_id")
-    board_escalate.add_argument("--request-json", dest="request_json", required=True, help="Goal-create envelope (path or inline JSON)")
-    _add_stage42_global_args(board_escalate, mutation=True)
-    board_escalate.set_defaults(func=_cmd_board_escalate)
     board_resolve = board_subs.add_parser("resolve-conflict", help="Resolve a realm-sync conflict on a card")
     board_resolve.add_argument("card_id")
     board_resolve.add_argument("--take", required=True, choices=["local", "remote"])

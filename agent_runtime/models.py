@@ -219,10 +219,8 @@ class BoardColumn:
 class BoardCard:
     """One planning card — one file each under ``boards/<board_id>/cards/``.
 
-    A card is a PLANNING artifact only: its column is planning state and never
-    mutates a goal. ``linked_goal_id`` is a read-only reflection pointer (the
-    card stores the id, never a cached goal state). ``created_by`` attribution
-    is first-class so operator- and agent-authored cards render distinctly.
+    A card is a PLANNING artifact only. ``created_by`` attribution is first-class
+    so operator- and agent-authored cards render distinctly.
     """
 
     card_id: str
@@ -235,7 +233,6 @@ class BoardCard:
     labels: list[str] = field(default_factory=list)
     assignee: str | None = None  # persona_id or "operator"
     checklist: list[dict[str, Any]] = field(default_factory=list)  # [{text, done}]
-    linked_goal_id: str | None = None
     state: str = "active"  # "active" | "archived"
     created_by: str = "operator"  # "operator" | persona_id
     revision: int = 1

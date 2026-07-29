@@ -856,7 +856,7 @@ def _stage42_handlers(*names: str) -> set[_FunctionId]:
 _STAGE42_ENVELOPE_HANDLERS = _stage42_handlers(
     "_cmd_agent_list", "_cmd_agent_set_profile", "_cmd_board_card_add",
     "_cmd_board_card_archive", "_cmd_board_card_edit", "_cmd_board_card_move",
-    "_cmd_board_card_restore", "_cmd_board_create", "_cmd_board_escalate",
+    "_cmd_board_card_restore", "_cmd_board_create",
     "_cmd_board_list", "_cmd_board_resolve_conflict", "_cmd_board_show",
     "_cmd_board_update", "_cmd_goal_archive", "_cmd_goal_cancel",
     "_cmd_goal_create", "_cmd_goal_history", "_cmd_goal_list", "_cmd_goal_run",

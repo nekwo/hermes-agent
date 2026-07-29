@@ -713,8 +713,7 @@ def _build_snapshot_uncoalesced(
         # Mission Board projection: board defs + bounded, redaction-safe card
         # rows, scoped by workspace. Local reads only — NO git/sync calls in the
         # snapshot path (conflict state comes from local sidecar files, never a
-        # git call). Cards never carry goal state; a linked_goal_id is resolved
-        # against the snapshot's goals at render time on the client.
+        # git call). Cards carry planning state only.
         "boards": boards_section,
         # Mission Office projection: surface defs + bounded actor rows, keyed by
         # workspace. Local reads only — conflict state comes from local sidecar
@@ -1069,7 +1068,6 @@ def _board_card_row(card, *, unpublished: bool | None = None) -> dict:
             for item in card.checklist
             if isinstance(item, dict)
         ],
-        "linked_goal_id": card.linked_goal_id,
         "order_key": card.order_key,
         "state": card.state,
         "created_by": card.created_by,

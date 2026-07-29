@@ -166,7 +166,6 @@ def board_cards(args, **kwargs):
                 "column": column_titles.get(card.column_id, card.column_id),
                 "title": card.title,
                 "priority": card.priority,
-                "linked_goal_id": card.linked_goal_id,
                 "created_by": card.created_by,
             }
             for card in store.list_cards(board_id)

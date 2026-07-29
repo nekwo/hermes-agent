@@ -56,7 +56,6 @@ def _card_row(card, *, full: bool = False) -> dict:
         "title": card.title,
         "priority": card.priority,
         "state": card.state,
-        "linked_goal_id": card.linked_goal_id,
         "updated_at": card.updated_at,
     }
     if full:
@@ -151,7 +150,7 @@ def _cmd_board_update(args) -> int:
 def _cmd_board_card_add(args) -> int:
     store = _board_store()
     if getattr(args, "dry_run", False):
-        row = {"id": "card_dry", "column_id": getattr(args, "column", None) or "col_queued", "title": args.title, "priority": getattr(args, "priority", None) or "p2", "state": "active", "linked_goal_id": None, "updated_at": now()}
+        row = {"id": "card_dry", "column_id": getattr(args, "column", None) or "col_queued", "title": args.title, "priority": getattr(args, "priority", None) or "p2", "state": "active", "updated_at": now()}
         _print_stage42(_object_envelope("card", row), args=args, default_output="json")
         return 0
     labels = [part.strip() for part in (getattr(args, "labels", None) or "").split(",") if part.strip()] or None
@@ -216,27 +215,6 @@ def _cmd_board_card_restore(args) -> int:
     store = _board_store()
     card = store.restore_card(args.card_id)
     _print_stage42(_object_envelope("card", _card_row(card, full=True)), args=args, default_output="json")
-    return 0
-
-
-def _cmd_board_escalate(args) -> int:
-    store = _board_store()
-    try:
-        envelope = _load_request_json(args.request_json)
-    except Exception as exc:  # noqa: BLE001
-        return emit_harness_error(exc, args=args, code="invalid_payload")
-    if not isinstance(envelope, dict):
-        return emit_harness_error(ValueError("--request-json must be a goal-create envelope object"), args=args, code="invalid_request")
-    response = store.escalate(
-        args.card_id,
-        request_envelope=envelope,
-        operator_key=getattr(args, "idempotency_key", None),
-        dry_run=bool(getattr(args, "dry_run", False)),
-    )
-    if response.get("error"):
-        err = response["error"]
-        return emit_harness_error(ValueError(err.get("message") or "escalate failed"), args=args, code=err.get("code") or "invalid_request")
-    _print_stage42(_object_envelope("escalation", response), args=args, default_output="json")
     return 0
 
 
