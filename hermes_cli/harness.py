@@ -36,7 +36,6 @@ from agent_runtime.coordinator_permissions import (
 from agent_runtime.decision_contract_examples import verify_harness_skill_examples
 from agent_runtime.decision_contract_registry import canonical_role_value, contract_manifest, hud_shape_index_for_stage, verify_registry
 from agent_runtime.decision_schema import AgentDecision, DecisionType
-from agent_runtime.default_plan import ensure_default_mission_plan
 from agent_runtime.default_scope import (
     ensure_default_scope,
     preview_default_scope_migration,
@@ -162,7 +161,6 @@ from agent_runtime.snapshot import build_snapshot, write_snapshot
 from agent_runtime.scope_control import find_discovery_task
 from agent_runtime.states import TaskState, RunState, WorkerSessionState
 from agent_runtime.status import build_status
-from agent_runtime.steering import execute_steer_action
 from agent_runtime.store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, RunStore, TaskStore
 from agent_runtime.store import RealmStore, WorkspaceStore
 from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
@@ -391,7 +389,7 @@ def build_parser(parent_subparsers) -> None:
     goal_history.set_defaults(func=_cmd_goal_history)
     goal_detail = goal_subs.add_parser(
         "detail",
-        help="S8: the heavy goal DETAIL body (role streams, envelopes, checklists, per-event timelines, mission plan) evicted from the steady-state frame; rebuilt read-only on demand",
+        help="Show the heavy goal DETAIL body evicted from the steady-state frame",
     )
     goal_detail.add_argument("goal_id", help="Goal id or task id (parent/child tasks share a goal_id)")
     goal_detail.add_argument("--json", action="store_true")
@@ -415,37 +413,6 @@ def build_parser(parent_subparsers) -> None:
     goal_archive_ready = goal_subs.add_parser("archive-ready", help="Archive terminal ready/done Harness goals while preserving evidence")
     _add_stage42_global_args(goal_archive_ready, mutation=True)
     goal_archive_ready.set_defaults(func=_cmd_task_archive_ready)
-
-    blueprint = subs.add_parser("blueprint", help="Validate and run Agent Runtime blueprints headlessly")
-    blueprint_subs = blueprint.add_subparsers(dest="blueprint_command", required=True)
-    blueprint_list = blueprint_subs.add_parser("list", help="List bundled Agent Runtime blueprints")
-    blueprint_list.add_argument("--json", action="store_true")
-    blueprint_list.set_defaults(func=_cmd_blueprint_list)
-    blueprint_validate = blueprint_subs.add_parser("validate", help="Validate one Agent Runtime blueprint by id or path")
-    blueprint_validate.add_argument("blueprint")
-    blueprint_validate.add_argument("--json", action="store_true")
-    blueprint_validate.set_defaults(func=_cmd_blueprint_validate)
-    blueprint_run = blueprint_subs.add_parser("run", help="Instantiate a blueprint; --dry-run validates without executing agents")
-    blueprint_run.add_argument("blueprint")
-    blueprint_run.add_argument("--goal", required=True)
-    blueprint_run.add_argument("--bind", action="append", default=[], help="Bind a slot, e.g. builder=persona:dev or builder=profile:gpt-launcher")
-    blueprint_run.add_argument("--dry-run", action="store_true")
-    blueprint_run.add_argument("--requested-by", default="cli")
-    blueprint_run.add_argument("--json", action="store_true")
-    blueprint_run.set_defaults(func=_cmd_blueprint_run)
-    blueprint_save = blueprint_subs.add_parser("save", help="Create or update a blueprint from a JSON/YAML spec file (validated before write)")
-    blueprint_save.add_argument("--spec-file", required=True, help="Path to a JSON or YAML blueprint spec")
-    blueprint_save.add_argument("--json", action="store_true")
-    blueprint_save.set_defaults(func=_cmd_blueprint_save)
-    blueprint_matrix = blueprint_subs.add_parser("matrix-run", help="Instantiate one blueprint across varied slot bindings")
-    blueprint_matrix.add_argument("blueprint")
-    blueprint_matrix.add_argument("--goal", required=True)
-    blueprint_matrix.add_argument("--bind", action="append", default=[], help="Base slot binding, e.g. verifier=persona:qa")
-    blueprint_matrix.add_argument("--vary", action="append", default=[], help="Vary a slot across comma-separated bindings, e.g. builder=persona:dev,profile:gpt-launcher")
-    blueprint_matrix.add_argument("--dry-run", action="store_true")
-    blueprint_matrix.add_argument("--requested-by", default="cli")
-    blueprint_matrix.add_argument("--json", action="store_true")
-    blueprint_matrix.set_defaults(func=_cmd_blueprint_matrix_run)
 
     task = subs.add_parser("task", help="Manage harness tasks")
     task_subs = task.add_subparsers(dest="task_command")
@@ -478,16 +445,6 @@ def build_parser(parent_subparsers) -> None:
     task_unblock.add_argument("--foreground", action="store_true", help="Reactivate this task as the foreground runtime lane")
     task_unblock.add_argument("--json", action="store_true")
     task_unblock.set_defaults(func=_cmd_task_unblock)
-    task_steer = task_subs.add_parser("steer", help="Execute a live topology steer action")
-    task_steer.add_argument("task_id")
-    task_steer.add_argument("--action-id", default=None, help="Snapshot steer action id, e.g. steer:slot_lead:slot_builder:route")
-    task_steer.add_argument("--verb", choices=["route", "spawn", "re-scope", "resolve", "verdict-back"], default=None)
-    task_steer.add_argument("--source-node", dest="source_node_id", default=None)
-    task_steer.add_argument("--target-node", dest="target_node_id", default=None)
-    task_steer.add_argument("--reason", default="operator steer")
-    task_steer.add_argument("--requested-by", default="operator")
-    task_steer.add_argument("--json", action="store_true")
-    task_steer.set_defaults(func=_cmd_task_steer)
     task_archive_ready = task_subs.add_parser("archive-ready", help="Archive terminal ready/done harness tasks while preserving evidence")
     task_archive_ready.add_argument("--json", action="store_true")
     task_archive_ready.set_defaults(func=_cmd_task_archive_ready)
@@ -1932,8 +1889,6 @@ def _require_yes(args, code: str = "confirmation_required") -> bool:
 
 
 def _goal_row(task: Task, *, full: bool = False) -> dict:
-    from agent_runtime.mission_plan import mission_plan_summary
-
     workspace_id = getattr(task, "workspace_id", None)
     realm_id = None
     if workspace_id:
@@ -1941,8 +1896,7 @@ def _goal_row(task: Task, *, full: bool = False) -> dict:
             realm_id = WorkspaceStore().get(workspace_id).realm_id
         except Exception:
             realm_id = None
-    plan = getattr(task, "mission_plan", None)
-    stage_id = getattr(plan, "current_stage_id", None) if plan is not None else getattr(task, "current_stage_id", None)
+    stage_id = getattr(task, "current_stage_id", None)
     row = {
         "id": getattr(task, "goal_id", None) or task.id,
         "task_id": task.id,
@@ -1958,7 +1912,6 @@ def _goal_row(task: Task, *, full: bool = False) -> dict:
         incidents = [item for item in IncidentStore().list_all() if item.task_id == task.id and item.closed_at is None]
         row.update(
             {
-                "graph": mission_plan_summary(task),
                 "run_ids": [run.id for run in runs],
                 "open_incident_ids": [incident.id for incident in incidents],
             }
@@ -1980,7 +1933,7 @@ def _archived_goal_row(task_id: str, result) -> dict | None:
         "state": task_data.get("state") or getattr(result, "final_task_state", ""),
         "workspace_id": task_data.get("workspace_id"),
         "realm_id": None,
-        "stage": (task_data.get("mission_plan") or {}).get("current_stage_id") or task_data.get("current_stage_id"),
+        "stage": task_data.get("current_stage_id"),
         "updated_at": task_data.get("updated_at"),
         "archived": True,
         "archive_batch": archived.get("archive_batch"),
@@ -2467,12 +2420,8 @@ def _cmd_goal_unblock(args) -> int:
     task.open_incident_ids = []
     if args.rescope:
         task.current_stage_id = None
-        if task.mission_plan is not None:
-            task.mission_plan.current_stage_id = None
-        task.stages = []
         task.affected_repos = []
         task.assigned_persona_ids = {}
-        ensure_default_mission_plan(task)
     task.updated_at = now()
     TaskStore().update(task, actor="cli", reason=f"operator unblock: {_safe_operator_text(args.reason)}")
     task = TaskStore().get(task.id)
@@ -2700,19 +2649,6 @@ def _activation_outcome_row(store, row_builder, outcome: dict, key: str) -> dict
     row["superseded"] = outcome.get("reason") == "superseded"
     row[f"requested_{key}"] = outcome.get(f"requested_{key}")
     return row
-
-
-def _append_scope_event(event_type: str, **payload) -> None:
-    """Advance the EventLog watermark after a verb-layer mutation with no
-    evented store chokepoint. Stage 12 moved scope emission into the stores
-    (agent_runtime/store.py); this helper remains for catalog writes like
-    `blueprint save`. Payload values of None are dropped. Best effort: a
-    broken event log must not fail the verb."""
-    try:
-        body = {key: value for key, value in payload.items() if value is not None}
-        EventLog().append(Event(now(), event_type, None, None, None, body))
-    except Exception:
-        pass
 
 
 def _cmd_workspace_actors(args) -> int:
@@ -3517,250 +3453,6 @@ def _pet_sprite_payload_for_launcher(pet) -> dict:
         "scale": constants.DEFAULT_SCALE,
         "stateRows": _pet_state_rows(pet.spritesheet),
     }
-
-
-def _cmd_blueprint_list(args) -> int:
-    from agent_runtime.blueprints.store import BlueprintStore, blueprint_summary
-
-    items = [blueprint_summary(bp) for bp in BlueprintStore().list()]
-    data = {"ok": True, "blueprints": items}
-    if args.json:
-        print(emit_json(data))
-    else:
-        for bp in items:
-            print(f"{bp['id']} v{bp['version']}: {bp['title']}")
-    return 0
-
-
-def _cmd_blueprint_validate(args) -> int:
-    from agent_runtime.blueprints.schema import validate_blueprint
-    from agent_runtime.blueprints.store import BlueprintStore, blueprint_summary
-
-    try:
-        bp = BlueprintStore().get(args.blueprint)
-        errors = validate_blueprint(bp)
-    except Exception as exc:
-        data = {"ok": False, "error": str(exc)}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    data = {"ok": not errors, "errors": errors, "blueprint": blueprint_summary(bp)}
-    if args.json:
-        print(emit_json(data))
-    else:
-        print(f"blueprint {bp.id}: {'valid' if not errors else 'invalid'}")
-        for error in errors:
-            print(f"- {error}")
-    return 0 if not errors else 2
-
-
-def _cmd_blueprint_save(args) -> int:
-    import json as _json
-
-    from agent_runtime.blueprints.schema import blueprint_from_dict
-    from agent_runtime.blueprints.store import blueprint_summary, save_blueprint
-
-    try:
-        spec_path = Path(args.spec_file)
-        text = spec_path.read_text(encoding="utf-8")
-        if spec_path.suffix.lower() in {".yaml", ".yml"}:
-            import yaml
-
-            raw = yaml.safe_load(text) or {}
-        else:
-            raw = _json.loads(text)
-        bp = blueprint_from_dict(raw)  # validates; raises ValueError on an invalid graph
-        path = save_blueprint(bp)
-    except Exception as exc:
-        data = {"ok": False, "error": str(exc)}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    # The blueprint catalog is client-visible snapshot state (snapshot
-    # `blueprints[]`); a save without an event is invisible to the
-    # watermark-gated stream/read-model pipeline (Stage 12).
-    _append_scope_event("blueprint.saved", blueprint_id=bp.id, version=bp.version, title=bp.title)
-    data = {"ok": True, "blueprint_id": bp.id, "version": bp.version, "path": str(path), "blueprint": blueprint_summary(bp)}
-    print(emit_json(data) if args.json else f"saved blueprint {bp.id} -> {path}")
-    return 0
-
-
-def _cmd_blueprint_run(args) -> int:
-    from agent_runtime.blueprints.instantiate import instantiate_blueprint
-    from agent_runtime.blueprints.store import BlueprintStore
-    from agent_runtime.mission_plan import mission_plan_summary
-    from agent_runtime.state_machine import MissionStateMachine
-
-    from agent_runtime.blueprints.resolve import BindingResolver
-
-    try:
-        bp = BlueprintStore().get(args.blueprint)
-        bindings = _parse_blueprint_bindings(args.bind or [])
-        # Dry-run resolves find-only (no persona promotion / no writes); a real run
-        # may promote a bare profile into a persisted persona.
-        resolver = BindingResolver(allow_promote=not args.dry_run)
-        plan = instantiate_blueprint(bp, goal=args.goal, bindings=bindings, resolver=resolver)
-    except Exception as exc:
-        data = {"ok": False, "error": str(exc)}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    task = Task(
-        id=f"task_blueprint_{uuid.uuid4().hex[:12]}",
-        title=bp.title,
-        description=args.goal,
-        state=TaskState.CREATED,
-        created_at=now(),
-        updated_at=now(),
-        requested_by=args.requested_by,
-        mission_plan=plan,
-        current_stage_id=plan.current_stage_id,
-    )
-    action = MissionStateMachine().next_action(task)
-    data = {
-        "ok": True,
-        "dry_run": bool(args.dry_run),
-        "blueprint_id": bp.id,
-        "blueprint_version": bp.version,
-        "task_id": task.id,
-        "mission_plan": mission_plan_summary(task),
-        "next_action": {
-            "type": action.type.value,
-            "task_id": action.task_id,
-            "slot_id": action.slot_id,
-            "reason": action.reason,
-        },
-    }
-    if not args.dry_run:
-        TaskStore().create(task)
-        data["created"] = True
-    if args.json:
-        print(emit_json(data))
-    else:
-        prefix = "dry-run" if args.dry_run else "created"
-        print(f"{prefix} blueprint {bp.id} task={task.id} next={action.type.value} slot={action.slot_id or '-'}")
-    return 0
-
-
-def _cmd_blueprint_matrix_run(args) -> int:
-    from agent_runtime.blueprints.instantiate import instantiate_blueprint
-    from agent_runtime.blueprints.resolve import BindingResolver
-    from agent_runtime.blueprints.store import BlueprintStore
-    from agent_runtime.mission_plan import mission_plan_summary
-    from agent_runtime.state_machine import MissionStateMachine
-
-    try:
-        bp = BlueprintStore().get(args.blueprint)
-        base_bindings = _parse_blueprint_bindings(args.bind or [])
-        variations = _parse_blueprint_variations(args.vary or [])
-        cases = _matrix_binding_cases(base_bindings, variations)
-    except Exception as exc:
-        data = {"ok": False, "error": str(exc)}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    resolver = BindingResolver(allow_promote=not args.dry_run)
-    results = []
-    ok = True
-    for index, bindings in enumerate(cases, start=1):
-        task_id = f"task_blueprint_matrix_{uuid.uuid4().hex[:12]}"
-        try:
-            plan = instantiate_blueprint(bp, goal=args.goal, bindings=bindings, resolver=resolver)
-            task = Task(
-                id=task_id,
-                title=f"{bp.title} Matrix {index}",
-                description=args.goal,
-                state=TaskState.CREATED,
-                created_at=now(),
-                updated_at=now(),
-                requested_by=args.requested_by,
-                mission_plan=plan,
-                current_stage_id=plan.current_stage_id,
-            )
-            action = MissionStateMachine().next_action(task)
-            if not args.dry_run:
-                TaskStore().create(task)
-            results.append(
-                {
-                    "case": index,
-                    "ok": True,
-                    "created": not bool(args.dry_run),
-                    "task_id": task.id,
-                    "bindings": dict(bindings),
-                    "resolved_bindings": dict(plan.bindings),
-                    "metrics": {
-                        "stage_count": len(plan.stages),
-                        "edge_count": len(plan.edges),
-                        "attempts": dict(plan.stage_attempts),
-                    },
-                    "next_action": {
-                        "type": action.type.value,
-                        "task_id": action.task_id,
-                        "slot_id": action.slot_id,
-                        "reason": action.reason,
-                    },
-                    "mission_plan": mission_plan_summary(task),
-                }
-            )
-        except Exception as exc:
-            ok = False
-            results.append({"case": index, "ok": False, "created": False, "task_id": task_id, "bindings": dict(bindings), "error": str(exc)})
-    data = {
-        "ok": ok,
-        "dry_run": bool(args.dry_run),
-        "blueprint_id": bp.id,
-        "blueprint_version": bp.version,
-        "case_count": len(results),
-        "vary": variations,
-        "results": results,
-    }
-    if args.json:
-        print(emit_json(data))
-    else:
-        print(f"{'dry-run ' if args.dry_run else ''}matrix blueprint {bp.id}: {len(results)} case(s)")
-        for item in results:
-            status = "ok" if item.get("ok") else "failed"
-            slot = ((item.get("next_action") or {}).get("slot_id") if item.get("ok") else "-") or "-"
-            print(f"- case {item['case']}: {status} task={item['task_id']} next_slot={slot}")
-    return 0 if ok else 2
-
-
-def _parse_blueprint_bindings(items: list[str]) -> dict[str, str]:
-    bindings: dict[str, str] = {}
-    for item in items:
-        if "=" not in str(item):
-            raise ValueError("--bind must be slot=persona:<id> or slot=profile:<name>")
-        slot, value = str(item).split("=", 1)
-        slot = slot.strip()
-        value = value.strip()
-        if not slot or not value:
-            raise ValueError("--bind must include a non-empty slot and value")
-        bindings[slot] = value
-    return bindings
-
-
-def _parse_blueprint_variations(items: list[str]) -> dict[str, list[str]]:
-    variations: dict[str, list[str]] = {}
-    for item in items:
-        if "=" not in str(item):
-            raise ValueError("--vary must be slot=value1,value2")
-        slot, values = str(item).split("=", 1)
-        slot = slot.strip()
-        choices = [value.strip() for value in values.split(",") if value.strip()]
-        if not slot or not choices:
-            raise ValueError("--vary must include a non-empty slot and at least one binding")
-        variations[slot] = choices
-    if not variations:
-        raise ValueError("matrix-run requires at least one --vary slot=value1,value2")
-    return variations
-
-
-def _matrix_binding_cases(base: dict[str, str], variations: dict[str, list[str]]) -> list[dict[str, str]]:
-    from itertools import product
-
-    slots = list(variations)
-    cases: list[dict[str, str]] = []
-    for choices in product(*(variations[slot] for slot in slots)):
-        bindings = dict(base)
-        bindings.update({slot: value for slot, value in zip(slots, choices)})
-        cases.append(bindings)
-    return cases
 
 
 def _cmd_init(args) -> int:

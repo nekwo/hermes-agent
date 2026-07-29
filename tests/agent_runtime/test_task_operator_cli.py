@@ -3,8 +3,8 @@ import json
 
 from hermes_time import now
 
-from agent_runtime.models import Incident, Task, TaskStage
-from agent_runtime.states import StageStatus, TaskState
+from agent_runtime.models import Incident, Task
+from agent_runtime.states import TaskState
 from agent_runtime.store import IncidentStore, TaskStore
 from hermes_cli import harness as harness_cli
 
@@ -50,15 +50,6 @@ def test_task_unblock_rescope_closes_stale_incidents_and_clears_recovery_markers
     task.open_incident_ids = ["inc_listed"]
     task.risk_flags = ["neko_block_recovery_attempted", "keep_me"]
     task.current_stage_id = "stage_old"
-    task.stages = [
-        TaskStage(
-            id="stage_old",
-            title="Old stage",
-            objective="old objective",
-            status=StageStatus.BLOCKED,
-        )
-    ]
-    task.mission_plan = {"summary": "old plan"}
     task.affected_repos = ["Launcher"]
     task.assigned_persona_ids = {"stage_old": "dev"}
     task.harness_self_heal = {
@@ -123,10 +114,9 @@ def test_task_unblock_rescope_closes_stale_incidents_and_clears_recovery_markers
     assert saved.state == TaskState.CREATED
     assert saved.open_incident_ids == []
     assert saved.risk_flags == ["keep_me"]
-    assert saved.mission_plan is not None
-    assert saved.mission_plan.enabled
-    assert saved.current_stage_id == "scope"
-    assert saved.stages == []
+    assert not hasattr(saved, "mission_plan")
+    assert not hasattr(saved, "stages")
+    assert saved.current_stage_id is None
     assert saved.affected_repos == []
     assert saved.assigned_persona_ids == {}
     assert saved.harness_self_heal["other"] == {"preserve": True}

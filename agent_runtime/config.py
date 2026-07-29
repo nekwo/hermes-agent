@@ -15,7 +15,7 @@ from .dispatch_session_policy import normalize_dispatch_session_policy
 from .personas import BUNDLED_PERSONA_IDS, BUNDLED_PERSONA_PROFILES, DEFAULT_PERSONA_IDS, PROFILE_ROLE_SENTINEL, coerce_agent_role, default_personas, seed_personas, validate_toolsets, AgentRole
 from .profile_context import active_profile_name
 from .redaction_mode import normalize_redaction_mode
-from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, EventLogConfig, McpAdmissionConfig, MissionChatConfig, MissionPlanConfig, NormalWorkerFlowConfig, PersonaChatConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig, TerminalEnvelopeConfig
+from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, EventLogConfig, McpAdmissionConfig, MissionChatConfig, NormalWorkerFlowConfig, PersonaChatConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig, TerminalEnvelopeConfig
 
 logger = logging.getLogger(__name__)
 
@@ -114,7 +114,6 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
     enterprise_worker_sessions = _enterprise_worker_sessions_config(raw.get("enterprise_worker_sessions") or {})
     continuous_role_sessions = _continuous_role_sessions_config(raw.get("continuous_role_sessions") or {})
     normal_worker_flow = _normal_worker_flow_config(raw.get("normal_worker_flow") or {})
-    mission_plan = _mission_plan_config(raw.get("mission_plan") or {})
     role_envelope = _role_envelope_config(raw.get("role_envelope") or {})
     repo_bundle_routing = _repo_bundle_routing_config(raw.get("repo_bundle_routing") or {})
     simplified_agent_contract = _simplified_agent_contract_config(raw.get("simplified_agent_contract") or {})
@@ -174,7 +173,6 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
         continuous_role_sessions=continuous_role_sessions,
         enterprise_worker_sessions=enterprise_worker_sessions,
         normal_worker_flow=normal_worker_flow,
-        mission_plan=mission_plan,
         role_envelope=role_envelope,
         repo_bundle_routing=repo_bundle_routing,
         simplified_agent_contract=simplified_agent_contract,
@@ -697,7 +695,6 @@ def _repo_bundle_routing_config(raw: dict[str, Any]) -> RepoBundleRoutingConfig:
     return RepoBundleRoutingConfig(
         enabled=bool(raw.get("enabled", defaults.enabled)),
         strict_repo_ownership=bool(raw.get("strict_repo_ownership", defaults.strict_repo_ownership)),
-        auto_create_from_mission_plan=bool(raw.get("auto_create_from_mission_plan", defaults.auto_create_from_mission_plan)),
         queue_on_dependency_bundles=bool(raw.get("queue_on_dependency_bundles", defaults.queue_on_dependency_bundles)),
         expose_in_snapshot=bool(raw.get("expose_in_snapshot", defaults.expose_in_snapshot)),
     )
@@ -1044,16 +1041,6 @@ def _terminal_envelope_config(raw: dict[str, Any]) -> TerminalEnvelopeConfig:
             if parsed_lanes:
                 grants[str(role)] = parsed_lanes
     return TerminalEnvelopeConfig(grants=grants)
-
-
-def _mission_plan_config(raw: dict[str, Any]) -> MissionPlanConfig:
-    raw = raw if isinstance(raw, dict) else {}
-    defaults = MissionPlanConfig()
-    return MissionPlanConfig(
-        enabled=bool(raw.get("enabled", defaults.enabled)),
-        enforce_hud=bool(raw.get("enforce_hud", defaults.enforce_hud)),
-        version=_positive_int(raw.get("version"), defaults.version),
-    )
 
 
 def _apply_enterprise_role_session_compat(

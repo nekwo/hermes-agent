@@ -2,10 +2,10 @@ from datetime import timedelta
 
 from hermes_time import now
 
-from agent_runtime.models import AgentPersona, AgentRun, Event, Incident, MissionIntent, MissionPlan, MissionPlanStage, Proof, Task, TaskStage
+from agent_runtime.models import AgentPersona, AgentRun, Event, Incident, Proof, Task
 from agent_runtime.models import ProofType
 from agent_runtime.serde import from_jsonable, to_jsonable
-from agent_runtime.states import RunState, StageStatus, TaskState
+from agent_runtime.states import RunState, TaskState
 
 
 def test_task_model_round_trips_through_strict_jsonable_shape():
@@ -20,22 +20,13 @@ def test_task_model_round_trips_through_strict_jsonable_shape():
         requested_by="tony",
         requires_visual_proof=True,
         acceptance_criteria=["tests pass"],
-        stages=[
-            TaskStage(
-                id="stage_1",
-                title="Audit",
-                objective="Inspect first",
-                status=StageStatus.DRAFT,
-                created_at=ts,
-            )
-        ],
     )
 
     raw = to_jsonable(task)
 
     assert raw["state"] == "created"
     assert raw["created_at"].endswith("Z") or "+" in raw["created_at"]
-    assert raw["stages"][0]["status"] == "draft"
+    assert "stages" not in raw
     assert from_jsonable(Task, raw) == task
 
 
@@ -110,7 +101,7 @@ def test_agent_persona_legacy_json_defaults_new_stage9_fields():
     assert persona.include_core_context_files is False
 
 
-def test_task_legacy_json_defaults_missing_mission_plan():
+def test_task_legacy_json_drops_retired_stage_graph_fields():
     ts = now()
     raw = {
         "id": "task_legacy",
@@ -120,12 +111,15 @@ def test_task_legacy_json_defaults_missing_mission_plan():
         "created_at": ts.isoformat(),
         "updated_at": ts.isoformat(),
         "requested_by": "tony",
+        "mission_plan": {"enabled": True, "stages": [{"id": "old"}]},
+        "stages": [{"id": "old"}],
         "schema_version": 1,
     }
 
     task = from_jsonable(Task, raw)
 
-    assert task.mission_plan is None
+    assert not hasattr(task, "mission_plan")
+    assert not hasattr(task, "stages")
 
 
 def test_task_legacy_prose_risk_flags_migrate_to_operator_notes():
@@ -154,7 +148,7 @@ def test_task_legacy_prose_risk_flags_migrate_to_operator_notes():
     ]
 
 
-def test_task_with_typed_mission_plan_round_trips():
+def test_task_without_stage_graph_round_trips():
     ts = now()
     task = Task(
         id="task_typed",
@@ -164,27 +158,6 @@ def test_task_with_typed_mission_plan_round_trips():
         created_at=ts,
         updated_at=ts,
         requested_by="tony",
-        mission_plan=MissionPlan(
-            mission_intent=MissionIntent(
-                title="Fix Mission Control",
-                objective="Fix all role streams",
-                acceptance_criteria=["Neko, Backend, Launcher, and QA streams are visible."],
-                source_task_id="task_typed",
-            ),
-            current_stage_id="backend_contract_smoke",
-            stages=[
-                MissionPlanStage(
-                    id="backend_contract_smoke",
-                    title="Backend Contract Smoke",
-                    objective="Emit backend stream seed proof.",
-                    owner="backend_dev",
-                    repo="EterniaBackend",
-                    kind="proof_only",
-                    proof_recipe_id="backend_contract_smoke",
-                    requires_product_edit=False,
-                ),
-            ],
-        ),
     )
 
     assert from_jsonable(Task, to_jsonable(task)) == task

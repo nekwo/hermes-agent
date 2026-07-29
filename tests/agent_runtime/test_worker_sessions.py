@@ -12,14 +12,14 @@ from agent_runtime import paths
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.context_builder import build_context
 from agent_runtime.decision_schema import AgentDecision, DecisionType
-from agent_runtime.models import AgentPersona, MissionIntent, MissionPlan, MissionPlanStage, Proof, Task
+from agent_runtime.models import AgentPersona, Proof, Task
 from agent_runtime.observability import build_observability
 from agent_runtime.events import EventLog
 from agent_runtime.operator_control import operator_takeover_worker
 from agent_runtime.runtime_instances import GoalRuntimeInstanceStore
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.snapshot import build_snapshot
-from agent_runtime.states import RunState, StageStatus, TaskState, WorkerSessionState
+from agent_runtime.states import RunState, TaskState, WorkerSessionState
 from agent_runtime.status import build_status
 from agent_runtime.store import RunStore, TaskStore
 from agent_runtime.worker_sessions import WorkerSessionStore, worker_context_manifest
@@ -42,28 +42,6 @@ def _task(task_id: str = "task_worker", state: TaskState = TaskState.RUNNING) ->
         affected_repos=["hermes-agent"],
         current_stage_id="stage_1",
     )
-
-
-def _mark_graph_complete(task: Task) -> Task:
-    task.current_stage_id = None
-    task.mission_plan = MissionPlan(
-        mission_intent=MissionIntent(title=task.title, objective=task.description),
-        current_stage_id=None,
-        blueprint_id="neko_dev_qa_basic",
-        stages=[
-            MissionPlanStage(
-                id="qa_release",
-                title="QA Release",
-                objective="Verify mission.",
-                owner="qa",
-                owner_slot="qa",
-                repo="hermes-agent",
-                kind="qa_verdict",
-                status=StageStatus.PASSED,
-            )
-        ],
-    )
-    return task
 
 
 def _persona(persona_id: str = "dev") -> AgentPersona:

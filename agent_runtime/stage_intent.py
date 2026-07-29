@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .models import Task, TaskStage
+from .models import Task
 
 
 NO_PRODUCT_EDIT_RECIPE_IDS = frozenset(
@@ -64,7 +64,7 @@ def no_product_edit_recipe_id(recipe_id: str | None) -> bool:
     return str(recipe_id or "").strip() in NO_PRODUCT_EDIT_RECIPE_IDS
 
 
-def no_product_edit_recipe_for_stage(stage: TaskStage | None) -> str | None:
+def no_product_edit_recipe_for_stage(stage: object | None) -> str | None:
     if stage is None:
         return None
     identity_sources = [
@@ -91,7 +91,7 @@ def no_product_edit_recipe_for_stage(stage: TaskStage | None) -> str | None:
     return None
 
 
-def stage_requires_product_edit(task: Task, stage: TaskStage | None = None) -> bool:
+def stage_requires_product_edit(task: Task, stage: object | None = None) -> bool:
     """Best-effort contract classifier for proof routing.
 
     The Harness uses this as a safety gate, not as product semantics. It is
@@ -125,11 +125,9 @@ def stage_requires_product_edit(task: Task, stage: TaskStage | None = None) -> b
     return False
 
 
-def first_incomplete_product_edit_stage(task: Task, *, excluding_stage_id: str | None = None) -> TaskStage | None:
-    from .mission_plan import task_stage_records
-
+def first_incomplete_product_edit_stage(task: Task, *, excluding_stage_id: str | None = None) -> object | None:
     excluded = str(excluding_stage_id or "").strip()
-    for stage in list(task_stage_records(task)):
+    for stage in []:
         if excluded and stage.id == excluded:
             continue
         status = getattr(stage, "status", None)
@@ -141,7 +139,7 @@ def first_incomplete_product_edit_stage(task: Task, *, excluding_stage_id: str |
     return None
 
 
-def no_product_edit_recipe_conflicts_with_stage(task: Task, stage: TaskStage | None, recipe_id: str | None) -> bool:
+def no_product_edit_recipe_conflicts_with_stage(task: Task, stage: object | None, recipe_id: str | None) -> bool:
     safe_recipe_id = str(recipe_id or "").strip()
     if not no_product_edit_recipe_id(safe_recipe_id):
         return False
@@ -154,9 +152,7 @@ def no_product_edit_recipe_conflicts_with_stage(task: Task, stage: TaskStage | N
     return stage_requires_product_edit(task, stage)
 
 
-def stage_is_committed_verification_gate(task: Task, stage: TaskStage | None) -> bool:
-    from .mission_plan import task_stage_records
-
+def stage_is_committed_verification_gate(task: Task, stage: object | None) -> bool:
     """Return true when an implementation-shaped stage should go straight to proof.
 
     Live Neko can correctly preserve a Hermes code-change as an implementation
@@ -178,13 +174,11 @@ def stage_is_committed_verification_gate(task: Task, stage: TaskStage | None) ->
 
 
 def extract_single_known_stage_reference(task: Task, *, source_stage_id: str, text: str) -> str | None:
-    from .mission_plan import task_stage_records
-
     haystack = str(text or "")
     if not haystack:
         return None
     matches = []
-    for stage in list(task_stage_records(task)):
+    for stage in []:
         sid = str(stage.id or "").strip()
         if not sid or sid == source_stage_id:
             continue
@@ -209,7 +203,7 @@ def extract_single_known_stage_reference(task: Task, *, source_stage_id: str, te
     return None
 
 
-def _combined_text(task: Task, stage: TaskStage | None) -> str:
+def _combined_text(task: Task, stage: object | None) -> str:
     values: list[str] = [
         str(getattr(task, "title", "") or ""),
         str(getattr(task, "description", "") or ""),
@@ -222,11 +216,11 @@ def _combined_text(task: Task, stage: TaskStage | None) -> str:
     return _normalize_text(" ".join(values))
 
 
-def _stage_text(stage: TaskStage) -> str:
+def _stage_text(stage: object) -> str:
     return _normalize_text(_stage_raw_text(stage))
 
 
-def _typed_stage_declares_no_product_edit(stage: TaskStage) -> bool:
+def _typed_stage_declares_no_product_edit(stage: object) -> bool:
     kind = str(getattr(stage, "kind", "") or "").strip()
     requires_product_edit = getattr(stage, "requires_product_edit", None)
     if kind == "proof_only":
@@ -236,7 +230,7 @@ def _typed_stage_declares_no_product_edit(stage: TaskStage) -> bool:
     return False
 
 
-def _stage_raw_text(stage: TaskStage) -> str:
+def _stage_raw_text(stage: object) -> str:
     return " ".join(
         [
             str(getattr(stage, "id", "") or ""),
@@ -302,7 +296,7 @@ def _has_ui_feature_language(text: str) -> bool:
     )
 
 
-def _has_product_path(task: Task, stage: TaskStage | None) -> bool:
+def _has_product_path(task: Task, stage: object | None) -> bool:
     paths: list[Any] = []
     if stage is not None:
         paths.extend(getattr(stage, "affected_paths", []) or [])
@@ -322,12 +316,12 @@ def _has_product_path(task: Task, stage: TaskStage | None) -> bool:
     )
 
 
-def _looks_like_no_edit_contract_stage(stage: TaskStage) -> bool:
+def _looks_like_no_edit_contract_stage(stage: object) -> bool:
     text = _stage_text(stage)
     return any(marker in text for marker in ("contract smoke", "smoke", "proof only", "verify", "verification"))
 
 
-def _stage_has_command_gate(stage: TaskStage) -> bool:
+def _stage_has_command_gate(stage: object) -> bool:
     return any(_looks_like_command(item) for item in getattr(stage, "test_plan", []) or [])
 
 

@@ -7,7 +7,6 @@ from agent_runtime.context_requests import add_context_request, has_unresolved_c
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.models import AgentRun, Task
 from agent_runtime.observability import build_observability
-from agent_runtime.state_machine import MissionStateMachine
 from agent_runtime.states import RunState, TaskState
 from tests.agent_runtime.conftest import release_to_implementation
 

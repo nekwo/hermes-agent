@@ -7,11 +7,9 @@ from typing import Any, Callable
 
 from hermes_time import now
 
-from .default_plan import ensure_default_mission_plan
 from .errors import LegacyOrchestratorRemoved
 from .goal_hygiene import prepare_new_goal_runtime
-from .mission_plan import _sync_task_stage_compat_from_plan
-from .models import MissionIntent, MissionPlan, MissionPlanStage, Task
+from .models import Task
 from .persona_assignments import (
     PersonaAssignmentSpec,
     PersonaAssignmentStore,
@@ -21,7 +19,7 @@ from .persona_assignments import (
     persona_instance_runtime_enabled,
 )
 from .runtime_config import RuntimeConfig
-from .states import StageStatus, TaskState
+from .states import TaskState
 from .store import IncidentStore, RunStore, TaskStore
 from .worklog import append_persona_worklog
 
@@ -263,10 +261,6 @@ class PersonaDiagnosticController:
                 f"diagnostic_persona:{persona_id}",
             ],
         )
-        if persona_id != "neko_supervisor":
-            _attach_persona_stage(task, persona_id=persona_id)
-        else:
-            ensure_default_mission_plan(task)
         return self.task_store.create(task)
 
     def _build_result(
@@ -302,7 +296,7 @@ class PersonaDiagnosticController:
             next_actions.append(f"Latest {persona_id} run ended in state {latest_state or 'unknown'}; inspect run error before treating the diagnostic as healthy.")
         if latest is not None and latest_completed and not latest_valid:
             next_actions.append(f"Latest {persona_id} run did not record validation_status=valid; inspect decision parsing and validation.")
-        stage = task.mission_plan.stages[0] if task.mission_plan and task.mission_plan.stages else None
+        stage = None
         return PersonaDiagnosticResult(
             ok=exit_code == 0,
             operation_id=operation_id,
@@ -428,38 +422,6 @@ def _affected_repos_for_persona(persona_id: str, requested: list[str]) -> list[s
     if persona_id == "qa":
         return ["EterniaLauncher"]
     return ["hermes-agent"]
-
-
-def _attach_persona_stage(task: Task, *, persona_id: str) -> None:
-    repo = "EterniaBackend" if persona_id == "backend_dev" else "EterniaLauncher"
-    owner = persona_id if persona_id in {"dev", "backend_dev"} else "qa"
-    stage_id = f"diagnostic_{persona_id}"
-    task.mission_plan = MissionPlan(
-        mission_intent=MissionIntent(
-            title=task.title,
-            objective=task.description,
-            acceptance_criteria=list(task.acceptance_criteria),
-            non_goals=list(task.non_goals),
-            source_task_id=task.id,
-            locked=True,
-        ),
-        current_stage_id=stage_id,
-        stages=[
-            MissionPlanStage(
-                id=stage_id,
-                title=f"{persona_id} Diagnostic",
-                objective=task.description,
-                owner=owner,
-                repo=repo,
-                kind="context",
-                status=StageStatus.READY,
-                blocks_qa_until=owner != "qa",
-                created_at=now(),
-                updated_at=now(),
-            )
-        ],
-    )
-    _sync_task_stage_compat_from_plan(task)
 
 
 def _decision_type(final_decision: Any) -> str | None:

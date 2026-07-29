@@ -4,7 +4,6 @@ import re
 from typing import Any
 
 from .decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
-from .mission_plan import task_stage_records
 from .models import AgentPersona, AgentRun, Task
 from .packets import latest_packet
 from .personas import role_from_persona
@@ -64,13 +63,6 @@ def needs_supervisor_slicing(task: Task, *, event_log=None) -> bool:
     specialist work. Small one-repo fixes still go directly to Dev.
     """
 
-    plan = getattr(task, "mission_plan", None)
-    if task_stage_records(task) and not (
-        plan and getattr(plan, "blueprint_id", None) in {"neko_dev_qa_basic", "neko_two_dev_default"}
-    ):
-        return False
-    if _blueprint_current_stage_is_specialist_slice(task):
-        return False
     repos = [str(repo).strip().lower() for repo in (getattr(task, "affected_repos", []) or []) if str(repo).strip()]
     text = " ".join(
         [
@@ -89,24 +81,6 @@ def needs_supervisor_slicing(task: Task, *, event_log=None) -> bool:
     broad_body_hits = sum(1 for marker in _BROAD_DESCRIPTION_MARKERS if marker in text)
     many_acceptance = len(getattr(task, "acceptance_criteria", []) or []) >= 3
     return multi_repo and (broad_title or broad_body_hits >= 2 or many_acceptance)
-
-
-def _blueprint_current_stage_is_specialist_slice(task: Task) -> bool:
-    plan = getattr(task, "mission_plan", None)
-    if not plan or getattr(plan, "blueprint_id", None) not in {"neko_dev_qa_basic", "neko_two_dev_default"}:
-        return False
-    current_id = str(getattr(plan, "current_stage_id", None) or getattr(task, "current_stage_id", None) or "").strip()
-    if not current_id:
-        return False
-    stage = next((item for item in list(getattr(plan, "stages", None) or []) if str(getattr(item, "id", "")) == current_id), None)
-    if stage is None:
-        return False
-    owner = str(getattr(stage, "owner_slot", None) or getattr(stage, "owner", None) or "").strip()
-    if owner not in {"dev", "backend_dev", "builder", "backend_builder"}:
-        return False
-    status = getattr(stage, "status", None)
-    status_value = getattr(status, "value", status)
-    return str(status_value or "").strip().lower() in {"ready", "implementing", "rework", "blocked"}
 
 
 def _repos_that_require_specialist_slicing(repos: list[str]) -> list[str]:

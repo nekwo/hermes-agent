@@ -34,16 +34,9 @@ class DefaultScopeReconciliationRequired(AgentRuntimeError):
 
 
 class LegacyOrchestratorRemoved(AgentRuntimeError):
-    """Raised when mission routing produced no typed action (Stage 15.4).
+    """Typed refusal retained while task-era read surfaces still deserialize it.
 
-    There is exactly ONE action source: the blueprint stage graph. Until
-    2026-07-29 a ``None`` from that router fell through to a second, legacy
-    ``if state == TaskState.X`` orchestrator that inferred a slot from the
-    mission's title/description text. That silent fall-through is deleted.
-
-    Reaching this exception means ``ensure_default_mission_plan`` returned a
-    mission the graph router cannot dispatch — a broken invariant, not a routing
-    decision. Refuse rather than guess: the same discipline as
+    Refuse rather than guess: the same discipline as
     ``DefaultScopeReconciliationRequired`` (surface, do not pick) and
     ``ambiguous_window_match`` (refuse, do not rank). ``safe_details`` carries
     redaction-safe routing facts only, never mission content.

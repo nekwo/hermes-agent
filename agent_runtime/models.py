@@ -64,55 +64,6 @@ class MissionIntent:
 
 
 @dataclass(slots=True)
-class MissionPlanStage:
-    id: str
-    title: str
-    objective: str
-    owner: str
-    repo: str
-    kind: str
-    owner_slot: str | None = None
-    status: StageStatus = StageStatus.READY
-    proof_recipe_id: str | None = None
-    proof_gate: dict[str, Any] = field(default_factory=dict)
-    output_type: str | None = None
-    requires_product_edit: bool = False
-    requires_visual_proof: bool = False
-    depends_on: list[str] = field(default_factory=list)
-    blocks_qa_until: bool = True
-    proof_ids: list[str] = field(default_factory=list)
-    packet_ids: list[str] = field(default_factory=list)
-    blocker_ids: list[str] = field(default_factory=list)
-    affected_paths: list[str] = field(default_factory=list)
-    acceptance_criteria: list[str] = field(default_factory=list)
-    test_plan: list[str] = field(default_factory=list)
-    audit_notes: list[str] = field(default_factory=list)
-    corrections: list[str] = field(default_factory=list)
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
-
-
-@dataclass(slots=True)
-class MissionPlan:
-    version: int = 1
-    enabled: bool = True
-    mission_intent: MissionIntent | None = None
-    stages: list[MissionPlanStage] = field(default_factory=list)
-    current_stage_id: str | None = None
-    revision: int = 0
-    blueprint_id: str | None = None
-    blueprint_version: int | None = None
-    slots: dict[str, dict[str, Any]] = field(default_factory=dict)
-    bindings: dict[str, str] = field(default_factory=dict)
-    binding_sources: dict[str, str] = field(default_factory=dict)
-    edges: list[dict[str, str]] = field(default_factory=list)
-    agent_topology: dict[str, Any] = field(default_factory=dict)
-    limits: dict[str, int] = field(default_factory=dict)
-    stage_attempts: dict[str, int] = field(default_factory=dict)
-    on_unhandled: str = "intervention"
-
-
-@dataclass(slots=True)
 class Task:
     id: str
     title: str
@@ -130,7 +81,6 @@ class Task:
     non_goals: list[str] = field(default_factory=list)
     affected_repos: list[str] = field(default_factory=list)
     suggested_roles: list[str] = field(default_factory=list)
-    stages: list[TaskStage] = field(default_factory=list)
     current_stage_id: str | None = None
     assigned_persona_ids: dict[str, str] = field(default_factory=dict)
     proof_ids: list[str] = field(default_factory=list)
@@ -146,7 +96,6 @@ class Task:
     context_requests: list[dict[str, Any]] = field(default_factory=list)
     issue_discoveries: list[dict[str, Any]] = field(default_factory=list)
     plan_review: PlanReview | None = None
-    mission_plan: MissionPlan | None = None
     planning_locked: bool = False
     goal_id: str | None = None
     workspace_id: str | None = None
@@ -381,22 +330,6 @@ class GoalRuntimeInstance:
     open_incident_ids: list[str] = field(default_factory=list)
     latest_proof_ids: list[str] = field(default_factory=list)
     schema_version: int = 1
-
-
-@dataclass(slots=True)
-class TaskStage:
-    id: str
-    title: str
-    objective: str
-    status: StageStatus
-    affected_paths: list[str] = field(default_factory=list)
-    acceptance_criteria: list[str] = field(default_factory=list)
-    test_plan: list[str] = field(default_factory=list)
-    audit_notes: list[str] = field(default_factory=list)
-    corrections: list[str] = field(default_factory=list)
-    requires_visual_proof: bool | None = None
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
 
 
 @dataclass(slots=True)

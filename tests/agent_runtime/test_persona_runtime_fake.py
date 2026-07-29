@@ -1062,26 +1062,20 @@ def test_llm_timing_records_repeated_profile_attempts_without_losing_totals():
 
 
 
-def test_dev_grounds_in_current_stage_repo_not_lagging_affected_repos(monkeypatch):
-    # Regression: task.affected_repos lags the active stage in a graph blueprint (it
-    # holds the previous stage's repo), so grounding MUST use the current mission-plan
-    # stage's repo. Here affected_repos points at the "wrong" repo; grounding must
-    # ignore it and use the stage repo (hermes-agent always resolves to the harness
-    # root, so this stays platform-independent).
+def test_dev_grounds_in_task_affected_repo_without_stage_graph():
     from agent_runtime import persona_runtime as pr
 
     task, run = make_task_and_run()
-    task.affected_repos = ["EterniaBackend"]  # stale/lagging value from the previous stage
+    task.affected_repos = ["hermes-agent"]
     dev = next(persona for persona in default_personas() if persona.id == "dev")
-    dev.repo_scope = None  # no scope -> stage repo is used directly
+    dev.repo_scope = None
     ctx = build_context(task, run)
-    monkeypatch.setattr(pr, "current_plan_stage", lambda _task: type("S", (), {"repo": "hermes-agent"})())
 
     repo_ctx = pr._repo_context_for_persona(dev, ctx)
 
     harness_root = Path(pr.__file__).resolve().parents[1]
     assert repo_ctx is not None
-    assert repo_ctx.workdir == harness_root  # stage repo won, not affected_repos[0]
+    assert repo_ctx.workdir == harness_root
 
 
 
@@ -1098,46 +1092,29 @@ def test_dev_grounds_in_current_stage_repo_not_lagging_affected_repos(monkeypatc
 
 
 
-def test_dev_grounding_overrides_default_blueprint_placeholder_repo(isolate_agent_runtime_root):
-    """Live regression 2026-07-03 (task_8e1e0832): on the default two-dev
-    blueprint a hermes-agent goal's backend_dev grounded in the
-    backend_implementation placeholder repo (EterniaBackend), so the
-    goal-named gate command ran file-not-found in the wrong tree."""
+def test_dev_grounding_honors_compatible_persona_scope_without_blueprint_placeholder():
+    from agent_runtime.models import AgentPersona
+    from agent_runtime import persona_runtime as pr
 
-    from hermes_time import now as _now
-
-    from agent_runtime.default_plan import ensure_default_mission_plan
-    from agent_runtime.models import AgentPersona, Task
-    from agent_runtime.persona_runtime import _stage_repo_scope_for_persona
-    from agent_runtime.states import TaskState
-
-    ts = _now()
-    task = Task(
-        id="task_ground",
-        title="Audit",
-        description="In the hermes-agent repo, audit and report.",
-        state=TaskState.RUNNING,
-        created_at=ts,
-        updated_at=ts,
-        requested_by="test",
-        affected_repos=["hermes-agent"],
-    )
-    plan = ensure_default_mission_plan(task)
-    plan.current_stage_id = "backend_implementation"
-    task.current_stage_id = "backend_implementation"
+    task, run = make_task_and_run()
+    task.affected_repos = ["hermes-agent"]
+    harness_root = Path(pr.__file__).resolve().parents[1]
     persona = AgentPersona(
-        id="backend_dev",
-        display_name="Backend Dev",
-        role="backend_dev",
+        id="dev_scoped",
+        display_name="Scoped Dev",
+        role="dev",
         model="stub",
         provider="stub",
         api_mode=None,
         toolsets=[],
         system_prompt_path="",
+        repo_scope=str(harness_root),
     )
-    ctx = type("Ctx", (), {"task": task, "current_stage": None})()
+    ctx = build_context(task, run)
 
-    assert _stage_repo_scope_for_persona(persona, ctx) == "hermes-agent"
+    repo_ctx = pr._repo_context_for_persona(persona, ctx)
+    assert repo_ctx is not None
+    assert repo_ctx.workdir == harness_root
 
 
 def test_mission_chat_reply_sets_cache_scope_id_but_keeps_session_none(tmp_path, monkeypatch):

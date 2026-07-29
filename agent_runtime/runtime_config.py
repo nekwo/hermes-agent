@@ -50,13 +50,6 @@ class NormalWorkerFlowConfig:
 
 
 @dataclass(slots=True)
-class MissionPlanConfig:
-    enabled: bool = False
-    enforce_hud: bool = True
-    version: int = 1
-
-
-@dataclass(slots=True)
 class RoleEnvelopeConfig:
     enabled: bool = False
     prefer_same_session: bool = True
@@ -75,7 +68,6 @@ class RoleEnvelopeConfig:
 class RepoBundleRoutingConfig:
     enabled: bool = False
     strict_repo_ownership: bool = True
-    auto_create_from_mission_plan: bool = True
     queue_on_dependency_bundles: bool = True
     expose_in_snapshot: bool = True
 
@@ -345,7 +337,6 @@ class RuntimeConfig:
     continuous_role_sessions: ContinuousRoleSessionConfig = field(default_factory=ContinuousRoleSessionConfig)
     enterprise_worker_sessions: EnterpriseWorkerSessionsConfig = field(default_factory=EnterpriseWorkerSessionsConfig)
     normal_worker_flow: NormalWorkerFlowConfig = field(default_factory=NormalWorkerFlowConfig)
-    mission_plan: MissionPlanConfig = field(default_factory=MissionPlanConfig)
     role_envelope: RoleEnvelopeConfig = field(default_factory=RoleEnvelopeConfig)
     repo_bundle_routing: RepoBundleRoutingConfig = field(default_factory=RepoBundleRoutingConfig)
     simplified_agent_contract: SimplifiedAgentContractConfig = field(default_factory=SimplifiedAgentContractConfig)

@@ -239,10 +239,8 @@ def _cmd_task_unblock(args) -> int:
     cleared_recovery_keys = _clear_task_recovery_markers(task)
     if args.rescope:
         task.current_stage_id = None
-        task.stages = []
         task.affected_repos = []
         task.assigned_persona_ids = {}
-        ensure_default_mission_plan(task)
     task.updated_at = now()
     store.update(task, actor="cli", reason=f"operator unblock: {_safe_operator_text(args.reason)}")
     foreground = activate_foreground_runtime(task.id, started_by="cli") if args.foreground else None
@@ -258,20 +256,6 @@ def _cmd_task_unblock(args) -> int:
     }
     print(emit_json(data) if args.json else f"unblocked {task.id}: {previous_state} -> {task.state.value}")
     return 0
-
-
-def _cmd_task_steer(args) -> int:
-    data = execute_steer_action(
-        args.task_id,
-        action_id=getattr(args, "action_id", None),
-        verb=getattr(args, "verb", None),
-        source_node_id=getattr(args, "source_node_id", None),
-        target_node_id=getattr(args, "target_node_id", None),
-        requested_by=getattr(args, "requested_by", "operator"),
-        reason=getattr(args, "reason", "operator steer"),
-    )
-    print(emit_json(data) if args.json else (f"steered {data.get('task_id')}: {data.get('result')}" if data.get("ok") else data.get("error", "steer failed")))
-    return 0 if data.get("ok") else ERROR_EXIT_CODES.get(str(data.get("error_kind") or "invalid_request"), 2)
 
 
 def _clear_task_recovery_markers(task: Task) -> list[str]:

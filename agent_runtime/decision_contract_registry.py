@@ -753,7 +753,7 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
         DecisionType.PROPOSE_ACCEPTANCE,
         allowed_roles=_PM_NEKO,
         required_payload_keys=("objective", "acceptance_criteria"),
-        optional_payload_keys=("non_goals", "affected_repos", "suggested_roles", "requires_visual_proof", "risk_flags", "handoff_packet", "mission_plan", "mission_plan_patch", "release_stage_id", "scope_override_reason"),
+        optional_payload_keys=("non_goals", "affected_repos", "suggested_roles", "requires_visual_proof", "risk_flags", "handoff_packet", "scope_override_reason"),
         nested_contracts=("handoff_packet", "handoff_packet.proof_gate", "handoff_packet.join_gate", "handoff_packet.self_heal"),
         shape_hint="Neko/PM scope or route one bounded owner; attach handoff_packet for specialist routing.",
     ),
@@ -1155,7 +1155,6 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "task.stage_corrected": EventContract("task.stage_corrected", "Stage corrected", ("stage_id",), ("corrections", "audit_notes")),
     "task.pm_fleshed": EventContract("task.pm_fleshed", "Task scoped", ("objective",), ("acceptance_criteria",)),
     "task.preflight": EventContract("task.preflight", "Task preflight", ("status", "summary"), ("checks",)),
-    "mission_plan.updated": EventContract("mission_plan.updated", "Mission plan updated", ("current_stage_id", "stage_count", "revision"), ("summary",)),
     "foreground_runtime.prepared": EventContract("foreground_runtime.prepared", "Foreground runtime prepared", ("state",), ("foreground_task_id", "parked_task_count", "blocking_active_run_ids")),
     "foreground_runtime.activated": EventContract("foreground_runtime.activated", "Foreground runtime activated", ("runtime_instance_id", "task_id", "lane", "state"), ("reason",)),
     "foreground_runtime.parked_task": EventContract("foreground_runtime.parked_task", "Task parked in background runtime lane", ("runtime_instance_id", "task_id", "lane", "state"), ("reason",)),
@@ -1320,7 +1319,6 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "office.actor.removed": EventContract("office.actor.removed", "Office actor placement archived", ("workspace_id", "actor_key", "reason"), ()),
     "office.actor.restored": EventContract("office.actor.restored", "Office actor placement restored", ("workspace_id", "actor_key"), ()),
     "office.actor.conflict_resolved": EventContract("office.actor.conflict_resolved", "Office actor sync conflict resolved", ("workspace_id", "actor_key", "take"), ("revision",)),
-    "blueprint.saved": EventContract("blueprint.saved", "Blueprint saved", ("blueprint_id",), ("version", "title")),
     "persona.updated": EventContract("persona.updated", "Persona updated", ("persona_id",), ("display_name",)),
     # The persona ⇄ Hermes-profile rebind chokepoint
     # (``persona_profile_binding.rebind_persona_profile``). ONE event per

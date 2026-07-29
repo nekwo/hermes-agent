@@ -8,12 +8,12 @@ from agent_runtime.actions import HarnessAction, HarnessActionType
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.events import EventLog
-from agent_runtime.models import Event, MissionIntent, MissionPlan, MissionPlanStage, Proof, RepoBundle, Task
+from agent_runtime.models import Event, Proof, RepoBundle, Task
 from agent_runtime.persona_assignments import PersonaAssignmentSpec, PersonaAssignmentStore
 from agent_runtime.repo_bundles import RepoBundleStore, acquire_repo_bundle_locks, desired_bundles_for_task, qa_waiting_on, release_repo_bundle_locks, repo_lock_summary
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig, RepoBundleRoutingConfig, SimplifiedAgentContractConfig
 from agent_runtime.snapshot import build_snapshot
-from agent_runtime.states import StageStatus, TaskState
+from agent_runtime.states import TaskState
 from agent_runtime.store import IncidentStore, TaskStore
 
 
@@ -29,33 +29,7 @@ def _task_with_plan(task_id: str = "task_bundle") -> Task:
         requested_by="tony",
         affected_repos=["EterniaBackend", "EterniaLauncher"],
         current_stage_id="launcher_impl",
-        mission_plan=MissionPlan(
-            mission_intent=MissionIntent(title="Cross repo mission", objective="Patch backend and launcher."),
-            current_stage_id="launcher_impl",
-            stages=[
-                MissionPlanStage(
-                    id="backend_contract",
-                    title="Backend contract",
-                    objective="Update backend API contract.",
-                    owner="backend_dev",
-                    repo="EterniaBackend",
-                    kind="implementation",
-                    status=StageStatus.READY,
-                    proof_recipe_id="backend_contract_smoke",
-                ),
-                MissionPlanStage(
-                    id="launcher_impl",
-                    title="Launcher implementation",
-                    objective="Consume the backend contract.",
-                    owner="dev",
-                    repo="EterniaLauncher",
-                    kind="implementation",
-                    status=StageStatus.READY,
-                    depends_on=["backend_contract"],
-                    requires_visual_proof=True,
-                ),
-            ],
-        ),
+        requires_visual_proof=True,
     )
 
 
@@ -135,20 +109,6 @@ def test_no_product_edit_delivery_no_longer_bypasses_patch_guard_with_retired_pr
     task.affected_repos = ["EterniaBackend"]
     task.current_stage_id = "backend_implementation"
     task.risk_flags = ["no_product_edits"]
-    task.mission_plan.current_stage_id = "backend_implementation"
-    task.mission_plan.stages = [
-        MissionPlanStage(
-            id="backend_implementation",
-            title="Backend contract smoke",
-            objective="Attach no-product-edit backend proof.",
-            owner="backend_dev",
-            repo="EterniaBackend",
-            kind="implementation",
-            status=StageStatus.IMPLEMENTING,
-            proof_recipe_id="backend_contract_smoke",
-            requires_product_edit=False,
-        )
-    ]
     TaskStore().create(task)
 
     def _empty_capture(_bundle, *, event_log):
@@ -297,7 +257,7 @@ class ShouldNotRunRuntime:
         raise AssertionError("queued assignment should not launch persona runtime")
 
 
-def test_desired_bundles_group_by_repo_and_queue_dependencies(isolate_agent_runtime_root):
+def test_desired_bundles_project_affected_repos_without_stage_dependencies(isolate_agent_runtime_root):
     task = _task_with_plan()
 
     bundles = desired_bundles_for_task(task)
@@ -306,13 +266,13 @@ def test_desired_bundles_group_by_repo_and_queue_dependencies(isolate_agent_runt
     assert set(by_repo) == {"EterniaBackend", "EterniaLauncher"}
     assert by_repo["EterniaBackend"].owner_persona_id == "backend_dev"
     assert by_repo["EterniaLauncher"].owner_persona_id == "dev"
-    assert by_repo["EterniaLauncher"].state == "queued_waiting_dependency"
-    assert by_repo["EterniaLauncher"].dependency_bundle_ids == [by_repo["EterniaBackend"].id]
+    assert by_repo["EterniaLauncher"].state == "planned"
+    assert by_repo["EterniaLauncher"].dependency_bundle_ids == []
     assert by_repo["EterniaLauncher"].visual_requirements == ["visual_proof"]
     assert all("qa_release" not in bundle.stage_ids for bundle in bundles)
 
 
-def test_repo_bundle_store_is_idempotent_and_wakes_dependencies(isolate_agent_runtime_root):
+def test_repo_bundle_store_is_idempotent_without_stage_dependencies(isolate_agent_runtime_root):
     task = _task_with_plan()
     store = RepoBundleStore()
 
@@ -321,15 +281,13 @@ def test_repo_bundle_store_is_idempotent_and_wakes_dependencies(isolate_agent_ru
     assert [bundle.id for bundle in second] == [bundle.id for bundle in first]
 
     backend = next(bundle for bundle in first if bundle.repo == "EterniaBackend")
-    launcher = next(bundle for bundle in first if bundle.repo == "EterniaLauncher")
     store.mark_delivered(backend, proof_ids=["proof_backend"])
     woke = store.wake_ready_dependencies(task.id)
 
-    assert [bundle.id for bundle in woke] == [launcher.id]
-    assert store.get(task.id, launcher.id).state == "planned"
+    assert woke == []
 
 
-def test_repo_bundle_store_cancels_preplan_placeholder_after_mission_plan(isolate_agent_runtime_root):
+def test_repo_bundle_store_keeps_repo_projection_stable_without_stage_graph(isolate_agent_runtime_root):
     ts = now()
     task = Task(
         id="task_supersede",
@@ -343,34 +301,11 @@ def test_repo_bundle_store_cancels_preplan_placeholder_after_mission_plan(isolat
     )
     store = RepoBundleStore()
     placeholder = store.create_or_update_from_task(task)[0]
-    task.mission_plan = MissionPlan(
-        mission_intent=MissionIntent(title=task.title, objective=task.description),
-        current_stage_id="stage_dev",
-        stages=[
-            MissionPlanStage(
-                id="stage_dev",
-                title="Dev proof",
-                objective="Run focused proof.",
-                owner="dev",
-                repo="hermes-agent",
-                kind="proof_only",
-            ),
-            MissionPlanStage(
-                id="qa_release",
-                title="QA",
-                objective="Review proof.",
-                owner="qa",
-                repo="hermes-agent",
-                kind="qa_verdict",
-                depends_on=["stage_dev"],
-            ),
-        ],
-    )
 
     bundles = store.create_or_update_from_task(task)
 
-    assert len([bundle for bundle in bundles if bundle.state != "cancelled"]) == 1
-    assert store.get(task.id, placeholder.id).state == "cancelled"
+    assert [bundle.id for bundle in bundles] == [placeholder.id]
+    assert store.get(task.id, placeholder.id).state == "planned"
 
 
 def test_assignment_signal_hash_includes_repo_bundle_id(isolate_agent_runtime_root):
@@ -406,7 +341,7 @@ def test_snapshot_projects_repo_bundles_and_qa_waiting_on(isolate_agent_runtime_
     assert task_summary["repo_bundle_closeout"]["delivery_contract"] == "staged_bundle_not_applied"
     assert task_summary["repo_bundle_closeout"]["checkout_applied"] is False
     assert "checkout not modified" in task_summary["repo_bundle_closeout"]["closeout_label"]
-    assert task_summary["bundle_queue"][0]["state"] == "queued_waiting_dependency"
+    assert task_summary["bundle_queue"] == []
     assert task_summary["qa_waiting_on"]
     assert snapshot["repo_bundles"]
     assert snapshot["repo_bundles"][0]["delivery_contract"] == "staged_bundle_not_applied"

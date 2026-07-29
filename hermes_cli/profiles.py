@@ -1359,45 +1359,6 @@ def backfill_profile_envs(quiet: bool = False) -> List[str]:
     return backfilled
 
 
-def _profile_bound_in_live_runtime(profile_name: str) -> list[str]:
-    try:
-        from agent_runtime.config import ensure_persisted_personas
-        from agent_runtime.states import TaskState
-        from agent_runtime.store import AgentStore, TaskStore
-    except Exception:
-        return []
-    persona_ids: set[str] = set()
-    try:
-        personas = list(AgentStore().list_all())
-    except Exception:
-        personas = []
-    try:
-        personas.extend(ensure_persisted_personas())
-    except Exception:
-        pass
-    for persona in personas:
-        if str(getattr(persona, "hermes_profile", "") or "") == profile_name:
-            persona_ids.add(str(persona.id))
-    bound_tasks: list[str] = []
-    try:
-        tasks = TaskStore().list_all()
-    except Exception:
-        return []
-    terminal = {TaskState.DONE, TaskState.CANCELLED}
-    for task in tasks:
-        state = task.state if isinstance(task.state, TaskState) else TaskState(task.state)
-        if state in terminal:
-            continue
-        plan = getattr(task, "mission_plan", None)
-        if not plan or not getattr(plan, "blueprint_id", None):
-            continue
-        bindings = {str(value) for value in (getattr(plan, "bindings", {}) or {}).values()}
-        sources = {str(value) for value in (getattr(plan, "binding_sources", {}) or {}).values()}
-        if bindings.intersection(persona_ids) or f"profile:{profile_name}" in sources:
-            bound_tasks.append(task.id)
-    return sorted(set(bound_tasks))
-
-
 def _mark_profile_personas_orphaned(profile_name: str) -> None:
     try:
         from agent_runtime.store import AgentStore
@@ -1618,10 +1579,6 @@ def delete_profile(name: str, yes: bool = False) -> Path:
     profile_dir = get_profile_dir(canon)
     if not profile_dir.is_dir():
         raise FileNotFoundError(f"Profile '{canon}' does not exist.")
-    bound_tasks = _profile_bound_in_live_runtime(canon)
-    if bound_tasks:
-        raise RuntimeError(f"Profile '{canon}' is bound in live blueprint task(s): {', '.join(bound_tasks)}")
-
     # Show what will be deleted
     model, provider = _read_config_model(profile_dir)
     gw_running = _check_gateway_running(profile_dir)

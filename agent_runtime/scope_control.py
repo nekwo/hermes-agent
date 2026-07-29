@@ -5,7 +5,6 @@ from typing import Any
 
 from hermes_time import now
 
-from .default_plan import ensure_default_mission_plan
 from .decision_schema import AgentDecision, DecisionPayloadInvalid
 from .models import Incident, Task
 from .states import TaskState
@@ -250,7 +249,6 @@ def apply_issue_triage(task: Task, decision: AgentDecision, *, actor: str, task_
             parent_task_id=task.id,
             risk_flags=["forked_from_issue_discovery", "max_child_depth:1", f"priority:{priority}", f"severity:{discovery.get('severity', priority)}"],
         )
-        ensure_default_mission_plan(child)
         task_store.create(child)
         discovery["child_task_id"] = child.id
         discovery["triage_status"] = "forked"

@@ -12,7 +12,7 @@ from utils import atomic_json_write
 from . import paths
 from .delivery_directive import read_bundle_promotion_record
 from .events import EventLog
-from .models import Event, Incident, MissionPlanStage, RepoBundle, Task
+from .models import Event, Incident, RepoBundle, Task
 from .serde import from_jsonable, to_jsonable
 from .states import TaskState
 from .store import IncidentStore, TaskStore
@@ -334,18 +334,7 @@ class RepoBundleStore:
         return woke
 
     def cancel_superseded(self, task: Task, *, desired_ids: set[str]) -> list[RepoBundle]:
-        if getattr(task, "mission_plan", None) is None:
-            return []
-        cancelled: list[RepoBundle] = []
-        for bundle in self.list_for_task(task.id):
-            if bundle.id in desired_ids or bundle.state in TERMINAL_REPO_BUNDLE_STATES:
-                continue
-            bundle.state = "cancelled"
-            bundle.queue_reason = "superseded_by_mission_plan"
-            bundle.wake_condition = None
-            bundle.last_terminal_feedback = {"reason": "Superseded by current mission plan repo bundle projection."}
-            cancelled.append(self.update(bundle, event_type="repo_bundle.updated", payload={"reason": "superseded_by_mission_plan"}))
-        return cancelled
+        return []
 
     def _write(self, bundle: RepoBundle) -> None:
         bundle.state = safe_bundle_state(bundle.state)
@@ -373,9 +362,6 @@ class RepoBundleStore:
 
 
 def desired_bundles_for_task(task: Task) -> list[RepoBundle]:
-    stages = list(getattr(getattr(task, "mission_plan", None), "stages", None) or [])
-    if stages:
-        return _bundles_from_mission_plan(task, stages)
     repos = list(getattr(task, "affected_repos", None) or [])
     if not repos:
         return []
@@ -471,86 +457,6 @@ def _write_repo_locks(locks: list[dict[str, Any]]) -> None:
     atomic_json_write(_repo_locks_path(), to_jsonable({"schema_version": 1, "locks": locks, "updated_at": now()}), indent=2, sort_keys=True)
 
 
-def _bundles_from_mission_plan(task: Task, stages: list[MissionPlanStage]) -> list[RepoBundle]:
-    by_repo: dict[str, list[MissionPlanStage]] = {}
-    for stage in stages:
-        owner = safe_token(getattr(stage, "owner", None))
-        if owner not in REPO_BUNDLE_OWNER_PERSONAS:
-            continue
-        if _stage_is_out_of_scope_noop(stage):
-            continue
-        repo = safe_text(getattr(stage, "repo", None) or _fallback_repo_for_stage(task, stage), limit=160)
-        if not repo:
-            continue
-        by_repo.setdefault(repo, []).append(stage)
-    created_at = now()
-    bundles: list[RepoBundle] = []
-    stage_to_bundle: dict[str, str] = {}
-    for repo, repo_stages in by_repo.items():
-        stage_ids = [stage.id for stage in repo_stages if getattr(stage, "id", None)]
-        bundle_id = bundle_id_for(task.id, repo, stage_ids=stage_ids)
-        stage_to_bundle.update({stage_id: bundle_id for stage_id in stage_ids})
-        requires_visual = any(bool(getattr(stage, "requires_visual_proof", False)) for stage in repo_stages) or bool(getattr(task, "requires_visual_proof", False))
-        proof_targets = list(getattr(task, "proof_expectations", None) or [])
-        for stage in repo_stages:
-            recipe_id = getattr(stage, "proof_recipe_id", None)
-            if recipe_id:
-                proof_targets.append(f"proof_recipe:{recipe_id}")
-        bundles.append(
-            RepoBundle(
-                id=bundle_id,
-                task_id=task.id,
-                repo=repo,
-                owner_persona_id=_bundle_owner_for_stages(repo, repo_stages),
-                state="planned",
-                title=_bundle_title(repo, repo_stages),
-                objective=_bundle_objective(task, repo_stages),
-                stage_ids=stage_ids,
-                acceptance=_dedupe_preserve_order([item for stage in repo_stages for item in getattr(stage, "acceptance_criteria", [])] or list(getattr(task, "acceptance_criteria", None) or [])),
-                non_goals=list(getattr(task, "non_goals", None) or []),
-                proof_targets=_dedupe_preserve_order(proof_targets),
-                proof_requirements=["self_test"],
-                visual_requirements=["visual_proof"] if requires_visual else [],
-                created_at=created_at,
-                updated_at=created_at,
-            )
-        )
-    by_id = {bundle.id: bundle for bundle in bundles}
-    for bundle in bundles:
-        dependencies: list[str] = []
-        for stage in by_repo.get(bundle.repo, []):
-            for dep_stage_id in getattr(stage, "depends_on", []) or []:
-                dep_bundle_id = stage_to_bundle.get(str(dep_stage_id))
-                if dep_bundle_id and dep_bundle_id != bundle.id:
-                    dependencies.append(dep_bundle_id)
-        if dependencies:
-            bundle.dependency_bundle_ids = _dedupe_preserve_order(dependencies)
-            bundle.state = "queued_waiting_dependency"
-            bundle.queue_reason = "waiting_for_dependency_bundle"
-            bundle.wake_condition = WAKE_DEPENDENCY_DELIVERED
-        if bundle.id not in by_id:
-            continue
-    return sorted(bundles, key=lambda item: (item.repo.lower(), item.id))
-
-
-def _stage_is_out_of_scope_noop(stage: MissionPlanStage) -> bool:
-    if getattr(stage, "status", None) != "passed" and getattr(getattr(stage, "status", None), "value", None) != "passed":
-        return False
-    notes = " ".join(str(item) for item in (getattr(stage, "audit_notes", None) or [])).lower()
-    if "out of scope" not in notes:
-        return False
-    gate = getattr(stage, "proof_gate", None) or {}
-    return not (
-        gate.get("required")
-        or gate.get("required_proof_types")
-        or gate.get("proof_recipe_id")
-        or gate.get("commands")
-        or getattr(stage, "proof_recipe_id", None)
-        or getattr(stage, "requires_product_edit", False)
-        or getattr(stage, "requires_visual_proof", False)
-    )
-
-
 def merge_desired_bundle(existing: RepoBundle, desired: RepoBundle) -> RepoBundle:
     mutable_state = existing.state if existing.state in REPO_BUNDLE_STATES else desired.state
     if mutable_state in {"running", "delivered_waiting_for_qa", "delivered", "verified", "blocked", "rejected", "cancelled", "archived"}:
@@ -586,15 +492,6 @@ def owner_for_repo(repo: str | None) -> str | None:
     return None
 
 
-def _bundle_owner_for_stages(repo: str, stages: list[MissionPlanStage]) -> str | None:
-    owners = [safe_token(getattr(stage, "owner", None)) for stage in stages]
-    dev_owners = [owner for owner in owners if owner in REPO_BUNDLE_OWNER_PERSONAS]
-    unique = _dedupe_preserve_order(dev_owners)
-    if len(unique) == 1:
-        return unique[0]
-    return owner_for_repo(repo)
-
-
 def simplified_phase_for_task(task: Task, bundles: list[RepoBundle]) -> str:
     state = getattr(task, "state", None)
     state_value = state.value if hasattr(state, "value") else str(state or "")
@@ -610,8 +507,6 @@ def simplified_phase_for_task(task: Task, bundles: list[RepoBundle]) -> str:
         return "working"
     if bundles:
         return "working"
-    if getattr(task, "mission_plan", None):
-        return "planning"
     return "created"
 
 
@@ -822,14 +717,6 @@ def _empty_delivery_is_proof_only_no_product_edit(bundle: RepoBundle, *, task_st
     return False
 
 
-def _stage_for_bundle(task: Task, stage_id: str) -> MissionPlanStage | None:
-    plan = getattr(task, "mission_plan", None)
-    for stage in list(getattr(plan, "stages", None) or []):
-        if str(getattr(stage, "id", "") or "") == stage_id:
-            return stage
-    return None
-
-
 def _task_declares_no_product_edits(task: Task) -> bool:
     flags = {str(flag or "").strip().lower() for flag in list(getattr(task, "risk_flags", None) or [])}
     if "no_product_edits" in flags:
@@ -905,31 +792,6 @@ def safe_token(value: Any) -> str:
 
 def safe_text(value: Any, *, limit: int) -> str:
     return " ".join(str(value or "").replace("\x00", " ").split())[:limit]
-
-
-def _fallback_repo_for_stage(task: Task, stage: MissionPlanStage) -> str:
-    repos = list(getattr(task, "affected_repos", None) or [])
-    if len(repos) == 1:
-        return str(repos[0])
-    owner = str(getattr(stage, "owner", "") or "")
-    if owner == "dev":
-        return "EterniaLauncher"
-    if owner == "backend_dev":
-        return "EterniaBackend"
-    return str(repos[0]) if repos else ""
-
-
-def _bundle_title(repo: str, stages: list[MissionPlanStage]) -> str:
-    if len(stages) == 1:
-        return safe_text(stages[0].title, limit=200) or f"{repo} bundle"
-    return f"{repo} repo bundle"
-
-
-def _bundle_objective(task: Task, stages: list[MissionPlanStage]) -> str:
-    if len(stages) == 1:
-        return safe_text(stages[0].objective, limit=4000) or task.description
-    objectives = [safe_text(stage.objective, limit=500) for stage in stages if safe_text(stage.objective, limit=500)]
-    return "\n".join(objectives)[:4000] or task.description
 
 
 def _dedupe_preserve_order(items: list[Any]) -> list[Any]:

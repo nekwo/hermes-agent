@@ -5,33 +5,19 @@ import sys
 from hermes_time import now
 
 from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
-from agent_runtime.models import MissionPlan, MissionPlanStage, Task
+from agent_runtime.models import Task
 from agent_runtime.persona_assignments import (
     PersonaAssignmentSpec,
     PersonaAssignmentStore,
     PersonaInstanceStore,
 )
 from agent_runtime.runtime_instances import GoalRuntimeInstanceStore
-from agent_runtime.states import StageStatus, TaskState
+from agent_runtime.states import TaskState
 from agent_runtime.store import TaskStore, WorkspaceStore, RealmStore
 
 
 def _task(task_id: str, *, goal_id: str | None = None, workspace_id: str | None = None, stage_id: str = "scope") -> Task:
     ts = now()
-    plan = MissionPlan(
-        current_stage_id=stage_id,
-        stages=[
-            MissionPlanStage(
-                id="scope",
-                title="Scope",
-                objective="Scope the work",
-                owner="neko_supervisor",
-                repo="hermes-agent",
-                kind="scope",
-                status=StageStatus.READY,
-            )
-        ],
-    )
     return Task(
         id=task_id,
         goal_id=goal_id,
@@ -42,8 +28,7 @@ def _task(task_id: str, *, goal_id: str | None = None, workspace_id: str | None 
         created_at=ts,
         updated_at=ts,
         requested_by="test",
-        mission_plan=plan,
-        current_stage_id="stale_copy",
+        current_stage_id=stage_id,
     )
 
 

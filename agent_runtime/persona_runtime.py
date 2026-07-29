@@ -43,7 +43,6 @@ from .mcp_lane import mission_chat_mcp_lane_line
 from .models import AgentPersona, AgentRun
 from .mission_chat_clarify import MissionChatClarifyCapture
 from .mission_chat_workdir import mission_chat_workdir_for_persona
-from .mission_plan import current_plan_stage
 from .personas import ALLOWED_TOOLSETS_BY_ROLE, all_registered_toolsets, blocked_tool_names, effective_toolsets, load_bundled_prompt, role_from_persona
 from .profile_context import resolve_persona_profile
 from .provider_health import assert_provider_health_for_persona
@@ -714,7 +713,7 @@ def _repo_context_for_persona(persona: AgentPersona, ctx: AgentContext) -> RepoE
     if stage_repo is not None:
         try:
             return repo_execution_context_for_task(
-                type("TaskStageRepoScope", (), {"affected_repos": [stage_repo]})()
+                type("RepoScopeTask", (), {"affected_repos": [stage_repo]})()
             )
         except ValueError:
             pass
@@ -733,58 +732,21 @@ def _repo_context_for_persona(persona: AgentPersona, ctx: AgentContext) -> RepoE
 
 
 def _stage_repo_scope_for_persona(persona: AgentPersona, ctx: AgentContext) -> str | None:
-    """Resolve the grounding repo from the current mission-plan stage.
-
-    Authoritative over ``task.affected_repos`` (which lags the active stage). Only
-    returns a repo when it is a known product/harness repo and — if the persona
-    declares a ``repo_scope`` — that scope agrees with the stage repo. A mismatch is
-    a slot/persona mis-binding we surface via the legacy path rather than silently
-    grounding in the wrong tree.
-    """
-    stage = current_plan_stage(ctx.task) or getattr(ctx, "current_stage", None)
+    """Resolve the grounding repo from the current legacy stage, if any."""
+    stage = getattr(ctx, "current_stage", None)
     stage_repo = str(getattr(stage, "repo", "") or "").strip() if stage is not None else ""
     if stage_repo not in {"EterniaBackend", "EterniaLauncher", "hermes-agent"}:
         return None
-    stage_repo = _default_blueprint_placeholder_repo_override(ctx.task, stage_repo) or stage_repo
     persona_scope = getattr(persona, "repo_scope", None)
     if persona_scope:
         try:
             scoped = repo_execution_context_for_task(type("TaskPersonaScope", (), {"affected_repos": [persona_scope]})())
-            stage_ctx = repo_execution_context_for_task(type("TaskStageRepo", (), {"affected_repos": [stage_repo]})())
+            stage_ctx = repo_execution_context_for_task(type("RepoScopeTask", (), {"affected_repos": [stage_repo]})())
         except ValueError:
             return None
         if scoped is None or stage_ctx is None or scoped.workdir != stage_ctx.workdir:
             return None
     return stage_repo
-
-
-def _default_blueprint_placeholder_repo_override(task: Task, stage_repo: str | None) -> str | None:
-    """Let a single resolved repo override a bundled-plan placeholder repo."""
-
-    stage_repo = str(stage_repo or "").strip()
-    if not stage_repo:
-        return None
-    plan = getattr(task, "mission_plan", None)
-    if str(getattr(plan, "blueprint_id", "") or "") != "neko_two_dev_default":
-        return None
-    task_repos = [str(item).strip() for item in (getattr(task, "affected_repos", []) or []) if str(item).strip()]
-    if len(task_repos) != 1 or task_repos[0] == stage_repo:
-        return None
-    task_repo = task_repos[0]
-    if task_repo == "hermes-agent":
-        return task_repo
-    plan_repos = {
-        str(getattr(stage, "repo", "") or "").strip()
-        for stage in (getattr(plan, "stages", None) or [])
-        if str(getattr(stage, "repo", "") or "").strip()
-    }
-    task_and_stage_are_product_repos = (
-        task_repo in {"EterniaBackend", "EterniaLauncher"}
-        and stage_repo in {"EterniaBackend", "EterniaLauncher"}
-    )
-    if task_and_stage_are_product_repos and {task_repo, stage_repo}.issubset(plan_repos):
-        return None
-    return task_repo
 
 
 def _handoff_repo_scope_for_persona(persona: AgentPersona, ctx: AgentContext) -> str | None:
@@ -1169,7 +1131,7 @@ def _augment_chat_capabilities(persona: AgentPersona, toolsets: list[str]) -> li
 
 
 def _is_no_edit_context_stage(ctx: AgentContext) -> bool:
-    stage = current_plan_stage(ctx.task) or ctx.current_stage
+    stage = ctx.current_stage
     if stage is None:
         return False
     return str(getattr(stage, "kind", "") or "") == "context" and not stage_requires_product_edit(ctx.task, stage)

@@ -72,10 +72,6 @@ def validate_planning_decision(decision: AgentDecision) -> None:
         _list_of_strings(p, "risk_flags")
         if "requires_visual_proof" in p and not isinstance(p["requires_visual_proof"], bool):
             raise DecisionPayloadInvalid("requires_visual_proof must be boolean")
-        if "mission_plan" in p or "mission_plan_patch" in p or "release_stage_id" in p:
-            from .mission_plan import validate_mission_plan_payload
-
-            validate_mission_plan_payload(p)
     elif decision.type == DecisionType.REQUEST_FILE_READS:
         _list_of_strings(p, "paths", required=True)
         if not str(p.get("reason", "")).strip():

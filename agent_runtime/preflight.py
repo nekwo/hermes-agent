@@ -14,7 +14,7 @@ from hermes_time import now
 
 from .events import EventLog
 from .dirty_state import no_product_edit_dirty_check
-from .models import Event, Incident, Task, TaskStage
+from .models import Event, Incident, Task
 from .packets import latest_packet
 from .repo_context import safe_affected_repo_labels
 from .stagec_mcp_visual_provider import (
@@ -46,7 +46,7 @@ class PreflightResult:
     proof_payload: dict[str, Any] | None = None
 
 
-def run_preflight(task: Task, *, stage: TaskStage | None = None, persona_target: str) -> PreflightResult:
+def run_preflight(task: Task, *, stage: object | None = None, persona_target: str) -> PreflightResult:
     checks: list[PreflightCheck] = []
     if _repo_clean_required(task, stage=stage):
         checks.append(_repo_clean_check(task))
@@ -197,7 +197,7 @@ def record_preflight_pass(
     return True
 
 
-def _dependency_sensitive(task: Task, *, stage: TaskStage | None, persona_target: str) -> bool:
+def _dependency_sensitive(task: Task, *, stage: object | None, persona_target: str) -> bool:
     return (
         _backend_required(task, persona_target=persona_target)
         or _launcher_required(task, stage=stage, persona_target=persona_target)
@@ -205,7 +205,7 @@ def _dependency_sensitive(task: Task, *, stage: TaskStage | None, persona_target
     )
 
 
-def _repo_clean_required(task: Task, *, stage: TaskStage | None) -> bool:
+def _repo_clean_required(task: Task, *, stage: object | None) -> bool:
     flags = {str(flag).strip().lower() for flag in (getattr(task, "risk_flags", []) or [])}
     if "no_product_edits" in flags or "routing_burn_in_only" in flags:
         return True
@@ -322,7 +322,7 @@ def _backend_required(task: Task, *, persona_target: str) -> bool:
     return "backend" in labels or "backend" in text or "docker" in text or "compose" in text
 
 
-def _launcher_required(task: Task, *, stage: TaskStage | None, persona_target: str) -> bool:
+def _launcher_required(task: Task, *, stage: object | None, persona_target: str) -> bool:
     if persona_target == "backend_dev":
         return False
     labels = " ".join(safe_affected_repo_labels(list(getattr(task, "affected_repos", []) or []))).lower()
@@ -330,12 +330,12 @@ def _launcher_required(task: Task, *, stage: TaskStage | None, persona_target: s
     return "launcher" in labels or "eternialauncher" in labels or "launcher" in text or "flutter" in text
 
 
-def _docker_required(task: Task, *, stage: TaskStage | None) -> bool:
+def _docker_required(task: Task, *, stage: object | None) -> bool:
     text = _task_text(task, stage=stage)
     return "docker" in text or "compose" in text or "container" in text
 
 
-def _visual_proof_required(task: Task, *, stage: TaskStage | None = None, persona_target: str) -> bool:
+def _visual_proof_required(task: Task, *, stage: object | None = None, persona_target: str) -> bool:
     if persona_target == "backend_dev":
         return False
     if getattr(task, "requires_visual_proof", False) or getattr(stage, "requires_visual_proof", False):
@@ -346,7 +346,7 @@ def _visual_proof_required(task: Task, *, stage: TaskStage | None = None, person
     return any(marker in text for marker in ("mission control", "screenshot", "video", "visual", "stage c", "mcp"))
 
 
-def _latest_handoff_visual_required(task: Task, *, stage: TaskStage | None = None) -> bool | None:
+def _latest_handoff_visual_required(task: Task, *, stage: object | None = None) -> bool | None:
     stage_id = getattr(stage, "id", None) or getattr(task, "current_stage_id", None)
     try:
         packet = latest_packet(task.id, "handoff_packet", stage_id=stage_id)
@@ -584,7 +584,7 @@ def _mcp_exposure_check() -> PreflightCheck:
     )
 
 
-def _task_text(task: Task, *, stage: TaskStage | None = None) -> str:
+def _task_text(task: Task, *, stage: object | None = None) -> str:
     parts = [
         getattr(task, "title", ""),
         getattr(task, "description", ""),

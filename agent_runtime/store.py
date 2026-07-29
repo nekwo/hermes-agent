@@ -313,11 +313,6 @@ class TaskStore:
         return [task for task in self.list_all() if _safe_model_id(getattr(task, "workspace_id", None)) == normalized]
 
     def _canonicalize_current_stage(self, task: Task) -> Task:
-        plan = getattr(task, "mission_plan", None)
-        if plan is not None:
-            current = getattr(plan, "current_stage_id", None)
-            if current != getattr(task, "current_stage_id", None):
-                task.current_stage_id = current
         if not getattr(task, "goal_id", None):
             task.goal_id = task.id
         return task

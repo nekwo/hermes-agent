@@ -515,12 +515,6 @@ def _scope_fingerprint() -> str:
         except OSError:
             parts.append(f"{path.name}:absent")
     directories = [paths.workspaces_dir(), paths.realms_dir(), paths.agents_dir()]
-    try:
-        from .blueprints.store import BlueprintStore
-
-        directories.extend(BlueprintStore().roots)
-    except Exception:  # noqa: BLE001 — catalog fingerprint is best-effort
-        pass
     for directory in directories:
         try:
             entries = [

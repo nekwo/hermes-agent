@@ -27,7 +27,6 @@ from .delivery_directive import task_delivery_directive
 from .dirty_state import build_dirty_state
 from .events import CachedEventLog, EventLog, event_summary_missing, operator_event_summary
 from .migrations import effective_config_summary, migration_status
-from .mission_plan import mission_plan_summary, task_stage_records
 from .models import looks_like_persona_instance_id
 from .observability import build_observability
 from .operator_channels import (
@@ -58,7 +57,6 @@ from .parity import PARITY_ENVELOPE_VERSION, ProjectionAccountant, events_waterm
 from .parse_cache import cached_by_mtime
 from .resolution import resolution_payload, resolve_runtime, suspect_default_root
 from .personas import blocked_tool_names, effective_toolsets, seed_personas
-from .errors import LegacyOrchestratorRemoved
 from .prompt_observability import _SkillObservabilityResolver, snapshot_prompt_observability
 from .realm_sync import read_realm_sync_sidecar
 from .repo_bundles import RepoBundleStore, bundle_queue_summary, qa_waiting_on, repo_bundle_delivery_summary, repo_bundle_summary, simplified_phase_for_task
@@ -68,11 +66,9 @@ from .role_checklists import RoleChecklist, RoleChecklistStore, checklist_summar
 from .role_envelopes import RoleEnvelope, RoleEnvelopeStore, role_envelope_summary
 from .scope_control import issue_discovery_counts, untriaged_issue_discoveries
 from .simplified_contract import public_decision_type_value
-from .state_machine import MissionStateMachine
 from .serde import from_jsonable, to_jsonable
 from .self_test_evidence import SelfTestEvidenceStore, self_test_summary
 from .states import RunState, StageStatus, TaskState
-from .steering import build_steer_actions
 from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, RealmStore, RunStore, TaskStore, WorkspaceStore
 from .tool_visibility import (
     _profile_readiness_for_visibility,
@@ -81,7 +77,6 @@ from .tool_visibility import (
 from .workspace_scope import exact_scoped_instance_ids
 from .worker_sessions import WorkerSessionStore, worker_session_summary
 
-AGENT_TOPOLOGY_NODE_ID_CAP = 20
 STAGE_VERIFICATION_STAGE_CAP = 12
 STAGE_VERIFICATION_PROOF_ID_CAP = 8
 STAGE_VERIFICATION_PATH_CAP = 6
@@ -120,11 +115,11 @@ ARCHIVED_TASKS_REF_RECENT_CAP = 25
 # fusion of a compact HEAD (identity/state/current-stage/counts/delivery
 # pointers + the mission-level fields the ALWAYS-VISIBLE surfaces render) and a
 # heavy DETAIL body (per-role streams, envelopes, checklists, per-event
-# timelines, the mission plan, the per-run persona streams). The detail body has
+# timelines, the per-run persona streams). The detail body has
 # no steady-state launcher reader: it was verified 2026-07-17 that
 # ``MissionGoalSummary`` (the launcher's goal fold) never renders any of these
 # fields off a goal — ``role_streams`` / ``stage_streams`` / ``timeline`` /
-# ``mission_plan`` / ``persona_streams`` are not even parsed, and
+# ``persona_streams`` are not even parsed, and
 # ``role_envelopes`` / ``role_checklists`` parse to unread
 # fields (the top-level ``role_envelopes`` / ``role_checklists`` sections feed
 # the roster; the goal-row copies are dead). They leave the head and are served
@@ -140,7 +135,6 @@ GOAL_DETAIL_ONLY_FIELDS = frozenset(
         "role_checklists",
         "stage_streams",
         "timeline",
-        "mission_plan",
         "persona_streams",
         "proof_summaries",
         "self_test_summaries",
@@ -961,7 +955,6 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         "capabilities": [
             "goal_create",
             "mission_level_state",
-            "agent_topology",
             "mission_flow_timeline",
             "proof_gate_state",
             "stage_verification",
@@ -2514,19 +2507,10 @@ def _archived_role_streams(
     role_envelopes: list[dict] | None = None,
     role_checklists: list[dict] | None = None,
 ) -> list[dict]:
-    mission_plan = raw.get("mission_plan") if isinstance(raw.get("mission_plan"), dict) else {}
     role_ids: list[str] = []
     role_envelopes = role_envelopes or []
     role_checklists = role_checklists or []
-    if not (mission_plan.get("enabled") is True or mission_plan.get("stages") or role_envelopes or role_checklists):
-        return []
     role_ids.extend(["neko_supervisor", "backend_dev", "dev", "qa"])
-    for stage in mission_plan.get("stages") or []:
-        if not isinstance(stage, dict):
-            continue
-        owner = str(stage.get("owner") or "")
-        if owner in {"backend_dev", "dev", "qa", "neko_supervisor"}:
-            role_ids.append(owner)
     for run in runs:
         role_ids.append(str(run.get("persona_id") or ""))
     for event in events:
@@ -2671,23 +2655,14 @@ def _archived_event_display_title(event_type: str, event: dict) -> str:
 
 
 def _archived_role_current_stage(raw: dict, persona_id: str) -> str | None:
-    mission_plan = raw.get("mission_plan") if isinstance(raw.get("mission_plan"), dict) else {}
-    current_stage_id = mission_plan.get("current_stage_id") or raw.get("current_stage_id")
-    for stage in mission_plan.get("stages") or []:
-        if not isinstance(stage, dict):
-            continue
-        owner = stage.get("owner")
-        if owner == persona_id or (owner == "dev" and persona_id == "dev"):
-            status = str(stage.get("status") or "")
-            if stage.get("id") == current_stage_id or status not in {"ready_for_qa", "passed"}:
-                return stage.get("id")
+    current_stage_id = raw.get("current_stage_id")
     return current_stage_id if isinstance(current_stage_id, str) else None
 
 
 def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, events=None, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None, flow_timeline_accountant=None, event_log=None):
     gate = SimpleNamespace(allowed=True, missing=[])
     current_stage_id = _task_current_stage_id(task)
-    current = next((s for s in task_stage_records(task) if s.id == current_stage_id), None)
+    current = None
     untriaged = untriaged_issue_discoveries(task)
     child_count = len([item for item in (all_tasks or []) if getattr(item, "parent_task_id", None) == task.id])
     open_incidents = [item for item in (incidents or []) if item.task_id == task.id and item.closed_at is None]
@@ -2750,7 +2725,6 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
         "next_action": next_action,
         "why_not_done": _why_not_done(task, gate, open_incidents, next_action),
         "updated_at": task.updated_at,
-        "mission_plan": mission_plan_summary(task),
         "role_streams": _role_streams(
             task,
             events or [],
@@ -2931,14 +2905,7 @@ def _stage_verification(task, proofs: list, *, accountant: ProjectionAccountant 
 
 
 def _stage_owner_by_id(task) -> dict[str, str]:
-    plan = getattr(task, "mission_plan", None)
-    owners: dict[str, str] = {}
-    for stage in list(getattr(plan, "stages", []) or []):
-        stage_id = str(getattr(stage, "id", "") or "").strip()
-        owner = str(getattr(stage, "owner", "") or "").strip()
-        if stage_id and owner:
-            owners[stage_id] = owner
-    return owners
+    return {}
 
 
 def _bounded_projection_strings(raw, *, cap: int, accountant: ProjectionAccountant | None, drop_code: str, entity_id: str) -> tuple[list[str], bool]:
@@ -3009,8 +2976,7 @@ def _safe_int(value) -> int:
 
 
 def _task_current_stage_id(task) -> str | None:
-    plan = getattr(task, "mission_plan", None)
-    return getattr(plan, "current_stage_id", None) if plan is not None else getattr(task, "current_stage_id", None)
+    return getattr(task, "current_stage_id", None)
 
 
 def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events, *, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None, flow_timeline_accountant=None, workspaces=None, event_log=None) -> dict:
@@ -3288,668 +3254,31 @@ def _mission_lifecycle_state(task, active_runs, open_incidents, gate) -> str:
 
 
 def _mission_level_state(task, *, active_runs, active_workers, events, runtime_instances, persona_instances, role_streams) -> dict:
-    plan = getattr(task, "mission_plan", None)
-    stages = list(getattr(plan, "stages", []) or [])
-    stage_by_owner: dict[str, list] = {}
-    for stage in stages:
-        owner = str(getattr(stage, "owner", "") or "").strip()
-        if owner:
-            stage_by_owner.setdefault(owner, []).append(stage)
-    actor_ids = list(stage_by_owner)
-    for run in active_runs:
-        if getattr(run, "persona_id", None) and run.persona_id not in actor_ids:
-            actor_ids.append(run.persona_id)
-    active_stage_id = getattr(plan, "current_stage_id", None) or getattr(task, "current_stage_id", None)
-    stream_by_id = {stream.get("persona_id"): stream for stream in role_streams if isinstance(stream, dict)}
-    actors = []
-    for persona_id in actor_ids:
-        owned_stages = stage_by_owner.get(persona_id, [])
-        active_owned = next((stage for stage in owned_stages if stage.id == active_stage_id), None)
-        actor_stage = active_owned if active_owned is not None else (owned_stages[0] if owned_stages else None)
-        latest = _latest_actor_event(persona_id, events)
-        runs = [run for run in active_runs if getattr(run, "persona_id", None) == persona_id]
-        workers = [worker for worker in active_workers if getattr(worker, "persona_id", None) == persona_id]
-        stream = stream_by_id.get(persona_id) or {}
-        status = getattr(getattr(actor_stage, "status", None), "value", getattr(actor_stage, "status", None))
-        actors.append(
-            {
-                "id": f"actor_{persona_id}",
-                "kind": "agent",
-                "actor_id": persona_id,
-                "persona_id": persona_id,
-                "persona_instance_id": next(iter(stream.get("persona_instance_ids") or []), None),
-                "goal_id": getattr(task, "goal_id", None) or task.id,
-                "task_id": task.id,
-                "chat_session_id": next((getattr(worker, "session_id", None) for worker in workers if getattr(worker, "session_id", None)), None),
-                "worker_session_id": next((getattr(worker, "id", None) for worker in workers), None),
-                "display_name": _display_name_for_persona(persona_id),
-                "label": _display_name_for_persona(persona_id),
-                "role": _actor_role_for_persona(persona_id),
-                "presence": _actor_presence(active_owned, owned_stages, runs, workers),
-                "stage_id": getattr(actor_stage, "id", None),
-                "flow": {
-                    "blueprint_id": getattr(plan, "blueprint_id", None),
-                    "stage": getattr(actor_stage, "id", None),
-                    "status": status,
-                },
-                "state_label": _actor_state_label(active_owned, owned_stages, runs, workers),
-                "state": _actor_state_label(active_owned, owned_stages, runs, workers),
-                "active_run_ids": [run.id for run in runs],
-                "active_worker_session_ids": [worker.id for worker in workers],
-                "latest_safe_event": latest,
-                "latest_event": latest,
-                "budget": _actor_budget_summary(runs, stream_by_id.get(persona_id)),
-                "hidden_by_blueprint": False,
-            }
-        )
     return {
         "schema_version": 1,
         "mission_id": task.id,
         "task_id": task.id,
-        "blueprint_id": getattr(plan, "blueprint_id", None),
-        "blueprint_version": getattr(plan, "blueprint_version", None),
-        "active_stage_id": active_stage_id,
-        "actors": actors,
-        # S4 (delete derived copies): ``agent_topology`` was a DERIVED copy of
-        # steering truth (``persona_instances[].steered_by``). It leaves the
-        # frame entirely — the launcher already derives both directions from
-        # ``steered_by`` (missionAgentInstanceParentIds /
-        # missionAgentSteeredInstances) and its runtime-graph projection falls
-        # back to that steered_by path when no topology is present. Zero
-        # ``agent_topology`` bytes ship; the ``_agent_topology`` builder is now
-        # unreferenced (its removal is S7 cleanup, kept out of this shrink stage
-        # to bound the diff).
+        "active_stage_id": getattr(task, "current_stage_id", None),
+        "actors": [],
         "updated_at": getattr(task, "updated_at", None),
     }
-
-
-def agent_topology_for_task(task) -> dict:
-    """Re-derive the steering topology (incl. ``steer_actions``) for one task.
-
-    S4 deleted the derived ``agent_topology`` copy from the snapshot frame. The
-    steering executor (``steering.execute_steer_action``) was the one live
-    reader of its ``steer_actions`` — it validated an operator's requested steer
-    against the frame's copy. Rather than ship that derived copy on EVERY frame
-    for a reader that fires only on an operator action, the executor re-derives
-    it on demand here from the stores, so there is still exactly ONE producer
-    (``_agent_topology``) and no per-frame duplicate. Not a hot path (one steer
-    action), so a per-call store read is acceptable.
-    """
-
-    event_log = CachedEventLog()
-    cfg = load_agent_runtime_config()
-    all_runs = RunStore().list_all()
-    runs = [run for run in all_runs if run.task_id == task.id]
-    active_runs = [run for run in runs if run.state in ACTIVE_RUN_STATES]
-    all_workers = WorkerSessionStore(event_log=event_log).list_all()
-    workers = [w for w in all_workers if getattr(w, "task_id", None) == task.id]
-    active_workers = [
-        w
-        for w in workers
-        if str(getattr(getattr(w, "state", ""), "value", getattr(w, "state", "")))
-        not in {"completed", "blocked", "closed"}
-    ]
-    runtime_instances = [
-        item
-        for item in GoalRuntimeInstanceStore(event_log=event_log).list_all()
-        if item.task_id == task.id
-    ]
-    agents = AgentStore().list_all() or seed_personas()
-    if persona_instance_runtime_enabled(cfg):
-        persona_instances = PersonaInstanceStore(event_log=event_log).derive_from_workers(agents, all_workers)
-    else:
-        persona_instances = PersonaInstanceStore(event_log=event_log).list_all()
-    persona_assignments = (
-        [
-            item
-            for item in PersonaAssignmentStore(event_log=event_log).list_all()
-            if item.task_id == task.id
-        ]
-        if persona_assignment_store_enabled(cfg)
-        else []
-    )
-    role_envelopes = [
-        item for item in RoleEnvelopeStore(event_log=event_log).list_all() if item.task_id == task.id
-    ]
-    role_checklists = [
-        item for item in RoleChecklistStore(event_log=event_log).list_all() if item.task_id == task.id
-    ]
-    role_streams = _role_streams(
-        task,
-        event_log.for_task(task.id, limit=200),
-        runs,
-        workers,
-        persona_assignments=persona_assignments,
-        role_envelopes=role_envelopes,
-        role_checklists=role_checklists,
-    )
-    return _agent_topology(
-        task,
-        active_runs=active_runs,
-        active_workers=active_workers,
-        runtime_instances=runtime_instances,
-        persona_instances=persona_instances,
-        role_streams=role_streams,
-    )
-
-
-def _agent_topology(task, *, active_runs, active_workers, runtime_instances, persona_instances, role_streams) -> dict:
-    plan = getattr(task, "mission_plan", None)
-    stages = list(getattr(plan, "stages", []) or [])
-    topology = getattr(plan, "agent_topology", None) if plan is not None else None
-    topology = topology if isinstance(topology, dict) else {}
-    plan_slots = dict(getattr(plan, "slots", {}) or {}) if plan is not None else {}
-    bindings = dict(getattr(plan, "bindings", {}) or {}) if plan is not None else {}
-    topology_edges = [
-        edge
-        for edge in topology.get("edges", []) or []
-        if isinstance(edge, dict)
-    ]
-    root_slot = str(topology.get("root") or "").strip()
-    if not root_slot and topology_edges:
-        root_slot = str(topology_edges[0].get("source") or "").strip()
-    if not root_slot and len(plan_slots) == 1:
-        root_slot = next(iter(plan_slots))
-
-    task_goal_id = str(getattr(task, "goal_id", None) or task.id)
-    runtime_instances = list(runtime_instances or [])
-    persona_instances = list(persona_instances or [])
-    related_instances = [
-        instance
-        for instance in [*runtime_instances, *persona_instances]
-        if _instance_matches_task(instance, task, task_goal_id)
-    ]
-    # --- Steering closure -------------------------------------------------
-    # The runtime graph the operator edits lives in persona-instance steering
-    # (``steered_by``, keyed by instance id). Seeding topology nodes only from
-    # goal-matched instances + plan slots drops any node the operator steered IN
-    # whose goal does not match the task — e.g. a fan-in convergence agent on a
-    # goal-less default flow. Its node (and every edge into it) is omitted, so
-    # the Launcher reprojects the operator's wiring away ("connected + saved,
-    # gone on refresh"). Pull the steered graph in: anchor on the goal-matched
-    # set plus the lead instance bound to the plan root, then transitively add
-    # any instance steered by a member. This mirrors the Launcher's own
-    # related-instance expansion and stays BOUNDED to the mission — only steered
-    # descendants of the seed, never the global persona pool.
-    _all_instances = [*runtime_instances, *persona_instances]
-    _seed_ids = {
-        sid
-        for sid in (str(getattr(i, "id", "") or "").strip() for i in related_instances)
-        if sid
-    }
-    if root_slot:
-        _root_persona = _topology_slot_persona_id(root_slot, bindings)
-        _by_persona_all: dict[str, list] = {}
-        for _inst in _all_instances:
-            _pid = str(getattr(_inst, "persona_id", "") or "").strip()
-            if _pid:
-                _by_persona_all.setdefault(_pid, []).append(_inst)
-        _root_inst = _instance_for_persona(_root_persona, _by_persona_all)
-        _root_id = str(getattr(_root_inst, "id", "") or "").strip() if _root_inst else ""
-        if _root_id and _root_id not in _seed_ids:
-            related_instances.append(_root_inst)
-            _seed_ids.add(_root_id)
-    _closure_changed = True
-    while _closure_changed:
-        _closure_changed = False
-        for _inst in _all_instances:
-            _iid = str(getattr(_inst, "id", "") or "").strip()
-            if not _iid or _iid in _seed_ids:
-                continue
-            if any(ref in _seed_ids for ref in _instance_parent_refs(_inst)):
-                related_instances.append(_inst)
-                _seed_ids.add(_iid)
-                _closure_changed = True
-    instances_by_id = {str(getattr(instance, "id", "") or ""): instance for instance in related_instances}
-    instances_by_persona: dict[str, list] = {}
-    for instance in related_instances:
-        persona_id = str(getattr(instance, "persona_id", "") or "").strip()
-        if persona_id:
-            instances_by_persona.setdefault(persona_id, []).append(instance)
-
-    stages_by_slot: dict[str, list] = {}
-    stages_by_persona: dict[str, list] = {}
-    for stage in stages:
-        slot = str(getattr(stage, "owner_slot", None) or getattr(stage, "owner", "") or "").strip()
-        owner = str(getattr(stage, "owner", "") or "").strip()
-        if slot:
-            stages_by_slot.setdefault(slot, []).append(stage)
-        if owner:
-            stages_by_persona.setdefault(owner, []).append(stage)
-
-    stream_by_id = {stream.get("persona_id"): stream for stream in role_streams if isinstance(stream, dict)}
-    nodes_by_id: dict[str, dict] = {}
-    slot_node_ids: dict[str, str] = {}
-    # Canonical node per persona. A persona that runs N turns (N re-instantiated
-    # persona_instances) is ONE agent, not N nodes — without this the topology
-    # grows O(runs/spawns) and floods the graph with duplicate "Backend Dev Agent"
-    # / "Launcher Dev Agent" nodes. Multi-turn instances collapse onto the canonical
-    # node; only a genuinely distinct persona (a spawned sub-agent of a new role)
-    # gets its own node.
-    persona_node_id: dict[str, str] = {}
-    collapsed_instances = 0
-
-    def add_node_for_slot(slot: str) -> str | None:
-        slot = str(slot or "").strip()
-        if not slot:
-            return None
-        persona_id = _topology_slot_persona_id(slot, bindings)
-        instance = _instance_for_persona(persona_id, instances_by_persona)
-        owned_stages = stages_by_slot.get(slot) or stages_by_persona.get(persona_id) or []
-        node_id = str(getattr(instance, "id", "") or "").strip() or f"slot_{slot}"
-        slot_node_ids[slot] = node_id
-        nodes_by_id[node_id] = _agent_topology_node(
-            node_id=node_id,
-            persona_id=persona_id or slot,
-            instance=instance,
-            owned_stages=owned_stages,
-            active_runs=active_runs,
-            active_workers=active_workers,
-            stream=stream_by_id.get(persona_id) or {},
-            fallback_display=_display_name_for_persona(persona_id or slot),
-            fallback_role=_actor_role_for_persona(persona_id or slot),
-        )
-        if persona_id:
-            persona_node_id.setdefault(persona_id, node_id)
-        return node_id
-
-    topology_slots: list[str] = []
-    if root_slot:
-        topology_slots.append(root_slot)
-    for edge in topology_edges:
-        for key in ("source", "target"):
-            slot = str(edge.get(key) or "").strip()
-            if slot and slot not in topology_slots:
-                topology_slots.append(slot)
-    if not topology_slots and plan_slots:
-        topology_slots.extend(plan_slots.keys())
-    for slot in topology_slots:
-        add_node_for_slot(slot)
-
-    for instance in related_instances:
-        instance_id = str(getattr(instance, "id", "") or "").strip()
-        if not instance_id or instance_id in nodes_by_id:
-            continue
-        persona_id = str(getattr(instance, "persona_id", "") or "").strip()
-        # Collapse a re-instantiated persona onto its canonical node instead of
-        # minting a duplicate node per turn. Only a persona that has no node yet
-        # (a genuinely distinct spawned sub-agent) earns its own node.
-        if persona_id and persona_id in persona_node_id:
-            collapsed_instances += 1
-            continue
-        owned_stages = stages_by_persona.get(persona_id) or []
-        nodes_by_id[instance_id] = _agent_topology_node(
-            node_id=instance_id,
-            persona_id=persona_id,
-            instance=instance,
-            owned_stages=owned_stages,
-            active_runs=active_runs,
-            active_workers=active_workers,
-            stream=stream_by_id.get(persona_id) or {},
-            fallback_display=_display_name_for_persona(persona_id),
-            fallback_role=_actor_role_for_persona(persona_id),
-        )
-        if persona_id:
-            persona_node_id[persona_id] = instance_id
-
-    def _canonical_node_for(instance) -> str:
-        pid = str(getattr(instance, "persona_id", "") or "").strip()
-        if pid and pid in persona_node_id:
-            return persona_node_id[pid]
-        return str(getattr(instance, "id", "") or "").strip()
-
-    edges: list[dict] = []
-    targets_with_runtime_parent: set[str] = set()
-    fan_in_targets: set[str] = set()
-    seen_spawn_edges: set[tuple[str, str]] = set()
-    for instance in related_instances:
-        # Multi-parent fan-in (Stage 77): a child can be steered by ≥1 parents.
-        # Iterate the authoritative `steered_by` set (falling back to the legacy
-        # scalar `spawned_by` for un-migrated records) and emit one edge per
-        # distinct parent node.
-        for parent_ref in _instance_parent_refs(instance):
-            parent = _topology_parent_instance(parent_ref, related_instances)
-            if parent is None:
-                continue
-            # Map lineage onto canonical persona nodes so collapsed multi-turn
-            # instances don't drop the spawn edge; dedupe and skip self-edges (a
-            # persona spawning another turn of itself is not a distinct steer).
-            target_node = _canonical_node_for(instance)
-            parent_node = _canonical_node_for(parent)
-            if not target_node or not parent_node or parent_node == target_node:
-                continue
-            if target_node not in nodes_by_id or parent_node not in nodes_by_id:
-                continue
-            key = (parent_node, target_node)
-            if key in seen_spawn_edges:
-                continue
-            seen_spawn_edges.add(key)
-            if target_node in targets_with_runtime_parent:
-                # A second (or later) distinct runtime parent for this node =
-                # true fan-in.
-                fan_in_targets.add(target_node)
-            targets_with_runtime_parent.add(target_node)
-            edges.append(
-                {
-                    "source_node_id": parent_node,
-                    "target_node_id": target_node,
-                    "kind": "steers",
-                    "source": "runtime_spawned_by",
-                }
-            )
-
-    if topology_edges:
-        for edge in topology_edges:
-            source_id = slot_node_ids.get(str(edge.get("source") or "").strip())
-            target_id = slot_node_ids.get(str(edge.get("target") or "").strip())
-            if not source_id or not target_id or target_id in targets_with_runtime_parent:
-                continue
-            edges.append(
-                {
-                    "source_node_id": source_id,
-                    "target_node_id": target_id,
-                    "kind": str(edge.get("kind") or "steers"),
-                    "source": "blueprint_agent_topology",
-                }
-            )
-
-    root_node_id = slot_node_ids.get(root_slot) if root_slot else None
-    if root_node_id is None and nodes_by_id:
-        child_ids = {edge["target_node_id"] for edge in edges}
-        root_node_id = next((node_id for node_id in nodes_by_id if node_id not in child_ids), next(iter(nodes_by_id)))
-    control_node_id = _topology_control_node_id(task, stages, slot_node_ids, root_node_id)
-    steer_actions, steer_action_drops = build_steer_actions(nodes_by_id, edges, control_node_id=control_node_id, task=task)
-    drop_samples: list[dict] = []
-    for node in nodes_by_id.values():
-        node_drops = node.pop("_drops", [])
-        if isinstance(node_drops, list):
-            drop_samples.extend(item for item in node_drops if isinstance(item, dict))
-    drop_samples.extend(steer_action_drops)
-    return {
-        "schema_version": 1,
-        "source": "runtime_spawned_by" if targets_with_runtime_parent else ("blueprint_agent_topology" if topology_edges or root_slot else "persona_instances"),
-        "root_node_id": root_node_id,
-        "control_node_id": control_node_id,
-        "nodes": list(nodes_by_id.values()),
-        "edges": edges,
-        "steer_actions": steer_actions,
-        "completeness": {
-            "node_count": len(nodes_by_id),
-            "edge_count": len(edges),
-            "fan_in_targets": len(fan_in_targets),
-            "collapsed_multi_turn_instances": collapsed_instances,
-            "stream_event_cap_per_node": 3,
-            "id_cap_per_node": AGENT_TOPOLOGY_NODE_ID_CAP,
-            "drops": drop_samples[:50],
-        },
-    }
-
-
-def _agent_topology_node(*, node_id: str, persona_id: str, instance, owned_stages, active_runs, active_workers, stream, fallback_display: str, fallback_role: str) -> dict:
-    runs = [run for run in active_runs if getattr(run, "persona_id", None) == persona_id]
-    workers = [worker for worker in active_workers if getattr(worker, "persona_id", None) == persona_id]
-    active_stage = next((stage for stage in owned_stages if getattr(stage, "status", None) in {StageStatus.IMPLEMENTING, StageStatus.READY}), None)
-    stage = active_stage or (owned_stages[0] if owned_stages else None)
-    stage_ids, stage_drops = _bounded_topology_ids(
-        [getattr(stage, "id", None) for stage in owned_stages if getattr(stage, "id", None)],
-        node_id=node_id,
-        field="stage_ids",
-    )
-    run_ids, run_drops = _bounded_topology_ids([run.id for run in runs], node_id=node_id, field="active_run_ids")
-    worker_ids, worker_drops = _bounded_topology_ids([worker.id for worker in workers], node_id=node_id, field="active_worker_session_ids")
-    return {
-        "node_id": node_id,
-        "persona_id": persona_id,
-        "persona_instance_id": str(getattr(instance, "id", "") or "").strip() or None,
-        "display_name": str(getattr(instance, "display_name", "") or "").strip() or fallback_display,
-        "role": str(getattr(instance, "role", "") or "").strip() or fallback_role,
-        "stage_ids": stage_ids,
-        "presence": _actor_presence(active_stage, owned_stages, runs, workers),
-        "state_label": _actor_state_label(active_stage, owned_stages, runs, workers),
-        "active_run_ids": run_ids,
-        "active_worker_session_ids": worker_ids,
-        "budget": _actor_budget_summary(runs, stream),
-        "current_stage_id": getattr(stage, "id", None),
-        "spawned_by": str(getattr(instance, "spawned_by", "") or "").strip() or None,
-        "steered_by": _instance_parent_refs(instance),
-        "returned_to": str(getattr(instance, "returned_to", "") or "").strip() or None,
-        "stream_event_count": len(stream.get("events") or []) if isinstance(stream, dict) else 0,
-        "progress_peek": _progress_peek(stream),
-        "_drops": [*stage_drops, *run_drops, *worker_drops],
-    }
-
-
-def _bounded_topology_ids(values: list, *, node_id: str, field: str) -> tuple[list[str], list[dict]]:
-    clean = [str(value).strip() for value in values if str(value or "").strip()]
-    if len(clean) <= AGENT_TOPOLOGY_NODE_ID_CAP:
-        return clean, []
-    return clean[:AGENT_TOPOLOGY_NODE_ID_CAP], [
-        {
-            "node_id": node_id,
-            "field": field,
-            "kept": AGENT_TOPOLOGY_NODE_ID_CAP,
-            "dropped": len(clean) - AGENT_TOPOLOGY_NODE_ID_CAP,
-            "reason": "topology_node_id_cap",
-        }
-    ]
-
-
-def _progress_peek(stream: dict) -> list[dict]:
-    events = stream.get("events") if isinstance(stream, dict) else None
-    if not isinstance(events, list):
-        return []
-    peek: list[dict] = []
-    for event in events[-3:]:
-        payload = event.get("payload") if isinstance(event, dict) else None
-        payload = payload if isinstance(payload, dict) else {}
-        summary = str(payload.get("display_summary") or payload.get("summary") or "").strip()
-        if not summary:
-            continue
-        peek.append(
-            {
-                "type": str(event.get("type") or "")[:80],
-                "run_id": str(event.get("run_id") or "")[:128] or None,
-                "summary": summary[:300],
-                "status": str(payload.get("status") or "")[:40] or None,
-            }
-        )
-    return peek
-
-
-def _topology_control_node_id(task, stages: list, slot_node_ids: dict[str, str], root_node_id: str | None) -> str | None:
-    current_id = str(getattr(getattr(task, "mission_plan", None), "current_stage_id", None) or getattr(task, "current_stage_id", "") or "").strip()
-    stage = next((item for item in stages if str(getattr(item, "id", "") or "") == current_id), None)
-    if stage is not None:
-        slot = str(getattr(stage, "owner_slot", "") or getattr(stage, "owner", "") or "").strip()
-        if slot and slot_node_ids.get(slot):
-            return slot_node_ids[slot]
-    return root_node_id
-
-
-def _instance_matches_task(instance, task, task_goal_id: str) -> bool:
-    return (
-        str(getattr(instance, "goal_id", "") or "") == task_goal_id
-        or str(getattr(instance, "current_task_id", "") or "") == task.id
-        or str(getattr(instance, "task_id", "") or "") == task.id
-    )
-
-
-def _topology_slot_persona_id(slot: str, bindings: dict) -> str:
-    bound = str(bindings.get(slot) or slot).strip()
-    if bound.startswith("persona:") or bound.startswith("profile:"):
-        return bound.split(":", 1)[1].strip()
-    return bound
-
-
-def _instance_for_persona(persona_id: str, instances_by_persona: dict[str, list]):
-    candidates = instances_by_persona.get(persona_id) or []
-    if not candidates:
-        return None
-    return sorted(candidates, key=lambda item: str(getattr(item, "updated_at", "") or ""), reverse=True)[0]
-
-
-def _instance_parent_refs(instance) -> list[str]:
-    """The child's steering-parent refs, preferring the authoritative
-    ``steered_by`` set and falling back to the legacy scalar ``spawned_by`` for
-    un-migrated records. De-duplicated, order-preserving (first = primary)."""
-    raw = list(getattr(instance, "steered_by", []) or [])
-    if not raw:
-        scalar = getattr(instance, "spawned_by", None)
-        raw = [scalar] if scalar else []
-    refs: list[str] = []
-    seen: set[str] = set()
-    for value in raw:
-        ref = str(value or "").strip()
-        if ref and ref not in seen:
-            seen.add(ref)
-            refs.append(ref)
-    return refs
-
-
-def _topology_parent_instance(parent_ref: str, instances: list):
-    if not parent_ref:
-        return None
-    for instance in instances:
-        if str(getattr(instance, "id", "") or "") == parent_ref:
-            return instance
-    for instance in instances:
-        if str(getattr(instance, "persona_id", "") or "") == parent_ref or str(getattr(instance, "role", "") or "") == parent_ref:
-            return instance
-    return None
-
-
 def _mission_flow_timeline(task, events, *, accountant: ProjectionAccountant | None = None) -> dict:
-    plan = getattr(task, "mission_plan", None)
-    stages = list(getattr(plan, "stages", []) or [])
-    items = []
-    for stage in stages:
-        status = getattr(getattr(stage, "status", None), "value", getattr(stage, "status", None))
-        items.append(
-            {
-                "id": f"stage:{stage.id}",
-                "kind": "stage",
-                "stage_id": stage.id,
-                "title": stage.title,
-                "owner": getattr(stage, "owner", None),
-                "owner_slot": getattr(stage, "owner_slot", None),
-                "status": status,
-                "proof_ids": list(getattr(stage, "proof_ids", []) or []),
-                "depends_on": list(getattr(stage, "depends_on", []) or []),
-            }
-        )
-    for event in [event for event in _coalesced_progress_events(events) if event.task_id == task.id][-20:]:
-        display = _event_display_projection(event)
-        items.append(
-            {
-                "id": f"event:{event.type}:{event.run_id or 'task'}:{event.ts}",
-                "kind": display.get("display_kind") or "event",
-                "ts": event.ts,
-                "type": event.type,
-                "persona_id": event.persona_id,
-                "run_id": event.run_id,
-                "summary": display.get("display_summary"),
-                "redaction_status": display.get("redaction_status") or "safe",
-                "artifact_refs": display.get("artifact_refs") or [],
-            }
-        )
-    total = len(items)
-    if accountant is not None:
-        accountant.consider(total)
-    # Keep the office-rendered FRONT window (office takes ``items.take(5)``; the
-    # cap keeps the front MISSION_FLOW_TIMELINE_ITEM_CAP so that render is
-    # byte-identical) and account the evicted tail with a fetch pointer.
-    selected = items[:MISSION_FLOW_TIMELINE_ITEM_CAP]
-    evicted = total - len(selected)
-    if accountant is not None:
-        accountant.include(len(selected))
-        if evicted:
-            # Deliberate bound: the front window is kept and the evicted tail is
-            # disclosed with a typed fetch pointer below.
-            accountant.drop(
-                "flow_item_cap",
-                count=evicted,
-                entity_id=getattr(task, "id", None),
-                detail=f"kept front {MISSION_FLOW_TIMELINE_ITEM_CAP} flow items",
-                by_design=True,
-            )
-            accountant.mark_truncated()
-    result = {
-        "schema_version": 1,
-        "mission_id": task.id,
-        "active_stage_id": getattr(plan, "current_stage_id", None) if plan else getattr(task, "current_stage_id", None),
-        "items": selected,
-        "items_total": total,
-        "items_evicted": evicted,
-    }
-    if evicted:
-        # Honest accounting: a typed pointer to the full paged history, never a
-        # silent truncation (the full timeline is rebuilt from the EventLog).
-        result["items_ref"] = {
-            "evicted": True,
-            "count": evicted,
-            "fetch": "harness goal history <task_id> --json",
-        }
-    return result
-
-
-def _proof_gate_state(task, proofs) -> dict:
-    proof_by_id = {proof.id: proof for proof in proofs}
-    plan = getattr(task, "mission_plan", None)
-    stages = list(getattr(plan, "stages", []) or [])
-    requirements = []
-    missing = []
-    captured = []
-    required_statuses: list[str] = []
-    for stage in stages:
-        gate = getattr(stage, "proof_gate", {}) if isinstance(getattr(stage, "proof_gate", None), dict) else {}
-        required_types = [str(item) for item in gate.get("required_proof_types") or []]
-        required = bool(gate.get("required") or required_types or gate.get("proof_recipe_id") or gate.get("commands"))
-        stage_proofs = [proof_by_id[item] for item in getattr(stage, "proof_ids", []) or [] if item in proof_by_id]
-        safe_refs = [_proof_evidence_ref(proof) for proof in stage_proofs if _proof_evidence_ref(proof)]
-        captured.extend(safe_refs)
-        status = "not_applicable"
-        if required:
-            status = _proof_requirement_status(stage, stage_proofs)
-            required_statuses.append(status)
-        if status == "missing":
-            missing.append(stage.id)
-        requirements.append(
-            {
-                "stage_id": stage.id,
-                "title": stage.title,
-                "required": required,
-                "required_proof_types": required_types,
-                "minimum_status": gate.get("minimum_status") or "passed",
-                "status": status,
-                "evidence_refs": safe_refs,
-                "redaction_status": "safe",
-            }
-        )
-    gate_state = _roll_up_gate_state(required_statuses, waived=bool(getattr(task, "waiver", None)))
-    why_not_ready = [
-        f"{req['stage_id']} {req['status']}"
-        for req in requirements
-        if req["required"] and req["status"] not in {"passed", "not_applicable"}
-    ]
     return {
         "schema_version": 1,
         "mission_id": task.id,
-        "gate_state": gate_state,
-        "requirements": requirements,
-        "captured_evidence": captured,
-        "missing_stage_ids": missing,
-        "why_not_ready": why_not_ready,
-        "waiver": getattr(task, "waiver", None),
-        "updated_at": getattr(task, "updated_at", None),
+        "active_stage_id": getattr(task, "current_stage_id", None),
+        "items": [],
+        "items_total": 0,
+        "items_evicted": 0,
     }
-
-
-# Roles whose proof verdict can satisfy a required gate. Worker self-reports
-# (dev/backend_dev) are evidence candidates only — never a passing verdict —
-# until a verifier/reviewer/Neko proof review records the result.
-_PROOF_VERIFIER_ROLES = frozenset({"qa", "verifier", "reviewer", "neko_supervisor"})
-
-
+def _proof_gate_state(task, proofs) -> dict:
+    return {
+        "schema_version": 1,
+        "status": "not_applicable",
+        "requirements": [],
+        "missing": [],
+        "captured": [],
+    }
 def _roll_up_gate_state(required_statuses: list[str], *, waived: bool) -> str:
     """Roll per-requirement statuses into a spec gate_state value.
 
@@ -4177,44 +3506,22 @@ def _run_blocked_reason(task, active_runs, open_incidents, *, run_store=None) ->
 
 def _next_action_summary(task, open_incidents, *, run_store=None, event_log=None):
     if open_incidents:
-        runs = run_store or RunStore()
-        cfg = load_root_runtime_config()
-        if any(budget_incident_needs_scope_recovery(incident, runs) for incident in open_incidents):
-            return {**_stopped_progress(task, open_incidents, "self_heal_pending", "neko_supervisor"), "action": "run_slot", "reason": "Dev exhausted read/search without patch or proof; Neko must split or narrow the stage before retry"}
-        if any(budget_incident_can_continue(incident, runs, cap=cfg.neko_extension_cap) for incident in open_incidents):
-            return {**_stopped_progress(task, open_incidents, "self_heal_pending", "neko_supervisor"), "action": "run_slot", "reason": "needs Neko approval to continue budget-limited Dev run"}
-        reason = "budget_continuation_blocked" if _has_budget_incident(open_incidents) else "environment_blocked"
-        message = "budget continuation cap reached; human review required" if reason == "budget_continuation_blocked" else "open incident requires human review"
-        return {**_stopped_progress(task, open_incidents, reason, "human"), "action": "blocked_by_incident", "reason": message}
+        return {
+            **_stopped_progress(task, open_incidents, "environment_blocked", "human"),
+            "action": "blocked_by_incident",
+            "reason": "open incident requires human review",
+        }
     if task.state in {TaskState.DONE, TaskState.CANCELLED}:
-        return {**_stopped_progress(task, [], "settled", "harness"), "action": "terminal", "reason": "mission is terminal"}
-    cfg = load_root_runtime_config()
-    try:
-        action = MissionStateMachine(config=cfg, event_log=event_log).next_action(task)
-    except LegacyOrchestratorRemoved as exc:
-        # Stage 15.4 read-surface contract, the same ruling `status.py` carries.
-        # The DISPATCH path (ticker, goal runner, blueprint create) must keep
-        # raising this — the typed refusal is what replaced the retired legacy
-        # orchestrator's silent guess, and softening it there would resurrect the
-        # failure mode the retirement removed. `build_snapshot` is a pure READ
-        # surface and is the frame Mission Control renders: letting the exception
-        # escape here would turn ONE undispatchable mission into a blank snapshot
-        # for EVERY mission, destroying the operator's ability to diagnose the
-        # very task that is broken. So report, do not swallow and do not guess —
-        # the refusal becomes a typed entry with its own `action` value (never
-        # confusable with a dispatchable one) plus the redaction-safe routing
-        # facts. Only the typed error is caught; a bare `except Exception` here
-        # would hide unrelated faults behind a routing verdict.
-        progress = _stopped_progress(task, [], "routing_undispatchable", "human")
-        # `tick` is the wrong advice here — ticking this mission raises again.
-        progress["stopped_progress"]["next_action"] = "inspect_blocker"
-        # No `task_id`: unlike a `status.py` `next_actions` entry, this dict is
-        # nested under the goal row, which already carries the id.
-        return {**progress, "action": "undispatchable", "reason": str(exc), "routing_failure": exc.read_surface_envelope()}
-    reason = "settled" if action.type.value == "noop" else "retry_authorized" if "retry" in action.reason else "self_heal_pending" if "Neko" in action.reason else "waiting_for_preflight"
-    return {**_stopped_progress(task, [], reason, _owner_for_action(action, task=task, run_store=run_store)), "action": action.type.value, "reason": action.reason}
-
-
+        return {
+            **_stopped_progress(task, [], "settled", "harness"),
+            "action": "terminal",
+            "reason": "mission is terminal",
+        }
+    return {
+        **_stopped_progress(task, [], "routing_removed", "human"),
+        "action": "undispatchable",
+        "reason": "the task dispatch lane has been retired",
+    }
 def _why_not_done(task, gate, open_incidents, next_action):
     if task.state == TaskState.DONE:
         return []
@@ -4311,15 +3618,7 @@ def _coalesced_progress_events(events):
 
 
 def _role_streams(task, events, runs, workers, *, persona_assignments=None, role_envelopes=None, role_checklists=None) -> list[dict]:
-    plan = getattr(task, "mission_plan", None)
     role_ids = ["neko_supervisor", "backend_dev", "dev", "qa"]
-    if plan is not None:
-        for stage in getattr(plan, "stages", []) or []:
-            owner = str(getattr(stage, "owner", "") or "")
-            if owner == "dev":
-                role_ids.append("dev")
-            elif owner in {"backend_dev", "qa", "neko_supervisor"}:
-                role_ids.append(owner)
     for run in runs:
         if getattr(run, "task_id", None) == task.id:
             role_ids.append(str(getattr(run, "persona_id", "") or ""))
@@ -4367,31 +3666,7 @@ def _role_streams(task, events, runs, workers, *, persona_assignments=None, role
 
 
 def _stage_streams(task, events) -> list[dict]:
-    plan = getattr(task, "mission_plan", None)
-    stages = list(getattr(plan, "stages", []) or [])
-    if not stages:
-        stages = list(task_stage_records(task))
-    streams: list[dict] = []
-    for stage in stages:
-        stage_id = getattr(stage, "id", None)
-        if not stage_id:
-            continue
-        stage_events = _coalesced_progress_events([
-            event
-            for event in events
-            if event.task_id == task.id and (event.payload or {}).get("stage_id") == stage_id
-        ])
-        streams.append(
-            {
-                "stage_id": stage_id,
-                "owner": getattr(stage, "owner", None),
-                "repo": getattr(stage, "repo", None),
-                "kind": getattr(stage, "kind", None),
-                "status": getattr(getattr(stage, "status", None), "value", getattr(stage, "status", None)),
-                "events": [_event_stream_item(event) for event in stage_events][-20:],
-            }
-        )
-    return streams
+    return []
 
 
 def _event_stream_item(event) -> dict:
@@ -4435,14 +3710,6 @@ def _display_name_for_persona(persona_id: str) -> str:
 
 
 def _role_current_stage(task, persona_id: str) -> str | None:
-    plan = getattr(task, "mission_plan", None)
-    if plan is not None:
-        current_id = getattr(plan, "current_stage_id", None)
-        for stage in getattr(plan, "stages", []) or []:
-            owner = getattr(stage, "owner", None)
-            if owner == persona_id or (owner == "dev" and persona_id == "dev"):
-                if stage.id == current_id or stage.status not in {StageStatus.READY_FOR_QA, StageStatus.PASSED}:
-                    return stage.id
     return getattr(task, "current_stage_id", None)
 
 

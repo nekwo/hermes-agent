@@ -616,12 +616,12 @@ class TestDeleteProfile:
         assert profile_dir.is_dir()
         assert get_active_profile() == "default"
 
-    def test_rejects_delete_when_profile_bound_in_live_blueprint_task(self, profile_env, tmp_path, monkeypatch):
+    def test_delete_is_not_blocked_by_retired_task_graph_binding(self, profile_env, tmp_path, monkeypatch):
         profile_dir = create_profile("coder", no_alias=True)
         monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
 
         from hermes_time import now
-        from agent_runtime.models import AgentPersona, MissionIntent, MissionPlan, MissionPlanStage, Task
+        from agent_runtime.models import AgentPersona, Task
         from agent_runtime.states import TaskState
         from agent_runtime.store import AgentStore, TaskStore
 
@@ -648,30 +648,12 @@ class TestDeleteProfile:
                 created_at=n,
                 updated_at=n,
                 requested_by="test",
-                mission_plan=MissionPlan(
-                    mission_intent=MissionIntent(title="Bound", objective="Bound"),
-                    blueprint_id="one_agent_smoke",
-                    blueprint_version=1,
-                    bindings={"builder": "coder_persona"},
-                    binding_sources={"builder": "profile:coder"},
-                    stages=[
-                        MissionPlanStage(
-                            id="build",
-                            title="Build",
-                            objective="Build",
-                            owner="builder",
-                            owner_slot="builder",
-                            repo="hermes-agent",
-                            kind="implementation",
-                        )
-                    ],
-                ),
             )
         )
 
-        with pytest.raises(RuntimeError, match="bound in live blueprint"):
+        with patch("hermes_cli.profiles._cleanup_gateway_service"):
             delete_profile("coder", yes=True)
-        assert profile_dir.is_dir()
+        assert not profile_dir.is_dir()
 
     def test_delete_marks_persisted_profile_persona_orphaned(self, profile_env, tmp_path, monkeypatch):
         profile_dir = create_profile("coder", no_alias=True)

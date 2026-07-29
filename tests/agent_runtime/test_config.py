@@ -202,11 +202,10 @@ def test_normal_worker_flow_defaults_off_and_can_be_enabled(tmp_path):
     assert cfg.normal_worker_flow.max_self_test_repeats_without_change == 2
 
 
-def test_mission_plan_config_defaults_off_and_can_be_enabled(tmp_path):
+def test_legacy_mission_plan_config_is_ignored_after_stage_graph_removal(tmp_path):
     default_config = load_agent_runtime_config(tmp_path / "missing.yaml")
 
-    assert default_config.mission_plan.enabled is False
-    assert default_config.mission_plan.enforce_hud is True
+    assert not hasattr(default_config, "mission_plan")
 
     p = tmp_path / "config.yaml"
     p.write_text(
@@ -219,9 +218,8 @@ def test_mission_plan_config_defaults_off_and_can_be_enabled(tmp_path):
 
     cfg = load_agent_runtime_config(p)
 
-    assert cfg.mission_plan.enabled is True
-    assert cfg.mission_plan.enforce_hud is True
-    assert cfg.mission_plan.version == 1
+    assert not hasattr(cfg, "mission_plan")
+    assert cfg.normal_worker_flow.enabled is False
 
 
 def test_role_envelope_config_defaults_off_and_can_be_enabled(tmp_path):

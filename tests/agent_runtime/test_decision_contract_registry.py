@@ -21,10 +21,10 @@ from agent_runtime.decision_contract_examples import verify_harness_skill_exampl
 from agent_runtime.decision_payload_contracts import payload_contract as facade_payload_contract
 from agent_runtime.decision_schema import ALLOWED_DECISIONS_BY_ROLE, DECISION_SCHEMA, DecisionType
 from agent_runtime.events import ALLOWED_EVENT_TYPES
-from agent_runtime.models import AgentRun, Task, TaskStage
+from agent_runtime.models import AgentRun, Task
 from agent_runtime.persona_runtime import build_system_prompt
 from agent_runtime.personas import AgentRole
-from agent_runtime.states import RunState, StageStatus, TaskState
+from agent_runtime.states import RunState, TaskState
 from hermes_time import now
 
 
@@ -43,16 +43,6 @@ def _task() -> Task:
         requested_by="test",
         current_stage_id="stage_1",
         affected_repos=["EterniaLauncher"],
-        stages=[
-            TaskStage(
-                id="stage_1",
-                title="Proof",
-                objective="Run proof",
-                status=StageStatus.READY,
-                acceptance_criteria=["proof passes"],
-                test_plan=["pytest tests/agent_runtime/test_decision_contract_registry.py -q"],
-            )
-        ],
     )
 
 
@@ -105,27 +95,18 @@ def test_role_aliases_support_runtime_persona_ids():
     assert "scope_route" in contract_manifest()["roles"][canonical_role_value("neko_supervisor")]
 
 
-def test_registry_hud_shapes_drive_context_builder_menu():
-    ctx = build_context(_task(), _run())
-    hud = ctx.mission_hud
+def test_registry_shapes_remain_available_without_stage_graph():
     registry_shapes = hud_shape_index_for_stage("dev")
 
-    assert hud["decision_contract_hash"] == contract_hash()
-    assert hud["decision_menu"][0]["shape_id"] == "dev.request_test_run"
-    assert hud["decision_shape_index"]["dev.request_test_run"]["payload_template"]["stage_id"] == "stage_1"
-    assert hud["decision_shape_index"]["dev.request_test_run"]["allowed_payload_keys"] == registry_shapes["dev.request_test_run"]["allowed_payload_keys"]
-    assert hud["decision_menu"][0]["nested_required"] == registry_shapes["dev.request_test_run"].get("nested_required", {})
+    assert contract_hash()
+    assert registry_shapes["dev.request_test_run"]["allowed_payload_keys"]
+    assert registry_shapes["dev.request_test_run"].get("nested_required", {}) == {}
 
 
-def test_qa_menu_exposes_nested_and_enum_choices():
-    task = _task()
-    task.state = TaskState.RUNNING
-    task.requires_visual_proof = True
-    task.stages[0].requires_visual_proof = True
-    ctx = build_context(task, _run("qa"))
-
-    screenshot = next(item for item in ctx.mission_hud["decision_menu"] if item["shape_id"] == "qa.request_screenshot")
-    verdict = next(item for item in ctx.mission_hud["decision_menu"] if item["shape_id"] == "qa.verdict")
+def test_qa_registry_exposes_nested_and_enum_choices():
+    qa_shapes = hud_shape_index_for_stage("qa")
+    screenshot = qa_shapes["qa.request_screenshot"]
+    verdict = qa_shapes["qa.verdict"]
 
     assert screenshot["nested_required"]["required_launch_pins"] == ["hermes_profile", "runtime_root_id"]
     assert screenshot["enum_choices"]["mcp_server"] == ["launcher_qa"]
