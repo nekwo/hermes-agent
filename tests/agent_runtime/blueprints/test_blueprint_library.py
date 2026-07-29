@@ -72,24 +72,6 @@ def test_blueprint_library_contains_expected_ship_set():
     assert set(BLUEPRINT_REPLAYS).issubset(ids)
 
 
-@pytest.mark.parametrize("blueprint_id", sorted(BLUEPRINT_REPLAYS))
-def test_shipped_blueprint_fixture_replay_reaches_done(tmp_path, monkeypatch, blueprint_id):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    bp = BlueprintStore().get(blueprint_id)
-    replay = BLUEPRINT_REPLAYS[blueprint_id]
-
-    assert validate_blueprint(bp) == []
-    task = _task_for(bp.id, replay["bindings"])
-    action = MissionStateMachine().next_action(task)
-    assert action.type == HarnessActionType.RUN_SLOT
-    assert action.slot_id == replay["first_slot"]
-
-    result = None
-    for stage_id, outcome in replay["steps"]:
-        result = apply_stage_outcome(task, stage_id, outcome, reason=f"fixture replay {blueprint_id}")
-
-    assert result == "done"
-    assert task.mission_plan.current_stage_id is None
 
 
 def _task_for(blueprint_id: str, bindings: dict[str, str]) -> Task:

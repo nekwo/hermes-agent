@@ -84,7 +84,8 @@ test command. **All gates are path-scoped — never a bare word grep** (see §Ha
 | S2 | complete | Launcher cosmetic-read removal committed as `429f26a5`. |
 | S3 | complete | Board→goal bridge removed. Operator authorized the required upstream projection edit in `tools/board_tool.py`. |
 | S4 | complete | Goal creation, CLI verbs, toolset, and opt-in gate removed; `3742 passed`. Operator authorized upstream edits in `tools/agent_chat_tool.py`, `tools/board_tool.py`, and `tools/tool_full_descriptions.py`, plus deletion of `tools/mission_goal_tool.py`. Dedicated-worktree verification exposed two stale checkout-name assumptions: runtime repo labels now remain canonical and the resolver test asserts the exact active repo root. |
-| S5–S12 | pending | Must execute in order. |
+| S5 | complete | Dispatch loop and worker execution modules removed; `3222 passed`; affected Harness CLI module `50 passed`. The dependency map omitted two later-stage importers: `burn_in.py` (S6) and `persona_diagnostics.py`/its CLI verbs (S8). They now fail closed with `LegacyOrchestratorRemoved` until their owning stages delete them. Main-loop review also found and retargeted stale `goal_runner`/`run_tick` tests in `tests/hermes_cli/test_harness_cli.py`; no upstream-owned file changed in S5. |
+| S6–S12 | pending | Must execute in order. |
 
 ### S0 — Data migration, no code change
 - Run `harness persona instance sweep-orphans` **while `TaskStore` still exists** to reap

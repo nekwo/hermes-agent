@@ -506,29 +506,6 @@ def _cmd_lane_control(args) -> int:
     return 0
 
 
-def _cmd_tick(args) -> int:
-    cfg = load_agent_runtime_config()
-    result = TickEngine(
-        config=cfg,
-        persona_runtime=GPTPersonaRuntime(default_provider=cfg.default_provider, default_model=cfg.default_model),
-    ).tick_once(task_id=args.task_id)
-    print(emit_json(result) if args.json else f"tick {result.tick_id}: {len(result.actions_taken)} actions")
-    return 0
-
-
-def _cmd_run_until_settled(args) -> int:
-    cfg = load_agent_runtime_config()
-    result = TickEngine(
-        config=cfg,
-        persona_runtime=GPTPersonaRuntime(default_provider=cfg.default_provider, default_model=cfg.default_model),
-    ).run_until_settled(task_id=args.task_id, max_actions=args.max_actions, max_seconds=args.max_seconds)
-    if args.json:
-        print(emit_json(result))
-    else:
-        print(f"settle {result.settle_id}: {len(result.actions_taken)} actions stop={result.stop_reason}")
-    return 0
-
-
 def _cmd_burn_in_create(args) -> int:
     manifest = create_burn_in(suite=args.suite, case_id=getattr(args, "case_id", None), rerun_of=getattr(args, "rerun_of", None))
     if args.json:
@@ -539,15 +516,10 @@ def _cmd_burn_in_create(args) -> int:
 
 
 def _cmd_burn_in_run(args) -> int:
-    cfg = load_agent_runtime_config()
     manifest = run_burn_in_case(
         args.case_id,
         burn_id=getattr(args, "burn_id", None),
         max_actions=getattr(args, "max_actions", 12),
-        engine=TickEngine(
-            config=cfg,
-            persona_runtime=GPTPersonaRuntime(default_provider=cfg.default_provider, default_model=cfg.default_model),
-        ),
     )
     if args.json:
         print(emit_json(manifest))
@@ -1016,6 +988,10 @@ def _cmd_issue_show(args) -> int:
 
 
 def _cmd_issue_triage(args) -> int:
+    raise LegacyOrchestratorRemoved(
+        "mission issue triage is unavailable because the dispatch loop is retired",
+        safe_details={"discovery_id": args.discovery_id},
+    )
     task_store = TaskStore(); incident_store = IncidentStore()
     task, _item = find_discovery_task(task_store, args.discovery_id)
     payload = {

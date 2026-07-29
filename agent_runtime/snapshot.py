@@ -4302,12 +4302,7 @@ def _owner_for_action(action, *, task=None, run_store=None) -> str:
     action_value = action.type.value if hasattr(getattr(action, "type", None), "value") else str(action)
     slot_id = str(getattr(action, "slot_id", "") or "").strip()
     if action_value == "run_slot" and slot_id == "dev" and task is not None:
-        try:
-            from .ticker import _dev_persona_id_for_task
-
-            return _dev_persona_id_for_task(task, run_store=run_store)
-        except Exception:
-            return "dev"
+        return "dev"
     if action_value == "run_slot" and slot_id:
         return slot_id
     return {

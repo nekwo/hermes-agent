@@ -2,19 +2,53 @@ from __future__ import annotations
 
 from datetime import timedelta
 from typing import Any
+import uuid
 
 from hermes_time import now
 
 from .events import EventLog
-from .models import Event
+from .models import Event, Incident
 from .dirty_state import build_dirty_state
 from .launcher_process_hygiene import clean_launcher_visual_processes
 from .persona_assignments import PersonaInstanceStore
-from .recovery import mark_stale_runs
 from .runtime_instances import GoalRuntimeInstanceStore, runtime_instances_summary
-from .states import TaskState
+from .states import RunState, TaskState
 from .store import ACTIVE_RUN_STATES, IncidentStore, RunStore, TaskStore
 from .worker_sessions import WorkerSessionStore
+
+
+def _mark_stale_runs(
+    run_store: RunStore,
+    incident_store: IncidentStore,
+    *,
+    heartbeat_ttl_seconds: int,
+) -> list[str]:
+    """Preserve hygiene while the mission dispatcher itself is retired."""
+
+    opened: list[str] = []
+    for run in run_store.find_stale(heartbeat_ttl_seconds=heartbeat_ttl_seconds):
+        run.state = RunState.STALE
+        run.finished_at = now()
+        run_store.update(run)
+        existing = [
+            incident
+            for incident in incident_store.list_open()
+            if incident.run_id == run.id and incident.kind == "stale_run"
+        ]
+        if existing:
+            continue
+        incident = Incident(
+            id=f"inc_{uuid.uuid4().hex[:8]}",
+            task_id=run.task_id,
+            run_id=run.id,
+            kind="stale_run",
+            summary="Run heartbeat exceeded TTL",
+            detail_path=None,
+            opened_at=now(),
+        )
+        incident_store.open(incident)
+        opened.append(incident.id)
+    return opened
 
 
 def prepare_new_goal_runtime(
@@ -48,7 +82,7 @@ def prepare_new_goal_runtime(
     persona_instance_store = PersonaInstanceStore(event_log=event_log)
     exclude_task_ids = {str(item) for item in (exclude_task_ids or set()) if str(item).strip()}
     launcher_process_cleanup = clean_launcher_visual_processes(enabled=cleanup_launcher_visual_processes)
-    stale_incidents = mark_stale_runs(run_store, incident_store, heartbeat_ttl_seconds=heartbeat_ttl_seconds)
+    stale_incidents = _mark_stale_runs(run_store, incident_store, heartbeat_ttl_seconds=heartbeat_ttl_seconds)
     worker_cleanup = worker_session_store.close_for_new_goal(reason="new goal hygiene")
     persona_instance_cleanup = persona_instance_store.sweep_orphaned_task_bound_instances(
         reason="new goal hygiene",

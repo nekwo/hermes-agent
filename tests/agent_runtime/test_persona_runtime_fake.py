@@ -129,35 +129,6 @@ def test_apply_llm_metadata_tolerates_non_dict_raw_result():
     assert run.llm["total_tokens"] == 15
 
 
-def test_dev_persona_tick_returns_structured_decision_without_network():
-    FakeAIAgent.instances.clear()
-    task, run = make_task_and_run()
-    task.affected_repos = [str(Path.cwd())]
-    dev = next(persona for persona in default_personas() if persona.id == "dev")
-    ctx = build_context(task, run)
-    runtime = GPTPersonaRuntime(default_provider="openai-codex", default_model="gpt-5.5", agent_factory=FakeAIAgent)
-
-    decision = runtime.run_tick(dev, ctx, run=run)
-
-    assert decision.type == DecisionType.PROPOSE_STAGE_PLAN
-    assert decision.payload["stages"][0]["title"] == "Audit"
-    fake = FakeAIAgent.instances[0]
-    assert fake.kwargs["provider"] == "openai-codex"
-    assert fake.kwargs["model"] == "gpt-5.5"
-    assert fake.kwargs["enabled_toolsets"] == effective_toolsets(dev)
-    assert fake.kwargs["skip_context_files"] is True
-    assert fake.kwargs["skip_memory"] is True
-    assert fake.kwargs["platform"] == "agent_runtime"
-    assert fake.kwargs["session_id"] == "session_existing"
-    assert fake.kwargs["max_iterations"] == 12
-    assert fake.calls[0]["task_id"] == "run_abc"
-    assert "AgentDecision" in fake.calls[0]["system_message"]
-    assert "Build harness" in fake.calls[0]["user_message"]
-    assert run.session_id == "session_from_fake"
-    assert run.llm["session_id"] == "session_from_fake"
-    assert run.llm["base_url_host"] == "chatgpt.com"
-    assert run.llm["total_tokens"] == 120
-    assert isinstance(run.llm["latency_ms"], int)
 
 
 def _unbounded_chat_toolsets():
@@ -1085,49 +1056,10 @@ def test_llm_timing_records_repeated_profile_attempts_without_losing_totals():
     assert timing["profile_provider_stream_event_count"] == 11
 
 
-def test_dev_launcher_can_use_profile_memory_when_configured():
-    FakeAIAgent.instances.clear()
-    task, run = make_task_and_run()
-    task.affected_repos = [str(Path.cwd())]
-    dev = next(persona for persona in default_personas() if persona.id == "dev")
-    dev.include_profile_memory = True
-    ctx = build_context(task, run)
-    runtime = GPTPersonaRuntime(default_provider="openai-codex", default_model="gpt-5.5", agent_factory=FakeAIAgent)
-
-    runtime.run_tick(dev, ctx, run=run)
-
-    fake = FakeAIAgent.instances[0]
-    assert fake.kwargs["skip_memory"] is False
 
 
-def test_free_floating_persona_chat_turn_uses_memory():
-    FakeAIAgent.instances.clear()
-    task, run = make_task_and_run()
-    task.affected_repos = [str(Path.cwd())]
-    task.risk_flags = ["persona_operation_kind:free_floating"]
-    dev = next(persona for persona in default_personas() if persona.id == "dev")
-    ctx = build_context(task, run)
-    runtime = GPTPersonaRuntime(default_provider="openai-codex", default_model="gpt-5.5", agent_factory=FakeAIAgent)
-
-    runtime.run_tick(dev, ctx, run=run)
-
-    fake = FakeAIAgent.instances[0]
-    assert fake.kwargs["skip_memory"] is False
 
 
-def test_dev_core_context_files_require_explicit_opt_in():
-    FakeAIAgent.instances.clear()
-    task, run = make_task_and_run()
-    task.affected_repos = [str(Path.cwd())]
-    dev = next(persona for persona in default_personas() if persona.id == "dev")
-    dev.include_core_context_files = True
-    ctx = build_context(task, run)
-    runtime = GPTPersonaRuntime(default_provider="openai-codex", default_model="gpt-5.5", agent_factory=FakeAIAgent)
-
-    runtime.run_tick(dev, ctx, run=run)
-
-    fake = FakeAIAgent.instances[0]
-    assert fake.kwargs["skip_context_files"] is False
 
 
 def test_dev_grounds_in_current_stage_repo_not_lagging_affected_repos(monkeypatch):
@@ -1152,247 +1084,18 @@ def test_dev_grounds_in_current_stage_repo_not_lagging_affected_repos(monkeypatc
     assert repo_ctx.workdir == harness_root  # stage repo won, not affected_repos[0]
 
 
-def test_dev_persona_run_is_grounded_in_resolved_repo_and_loads_project_context(tmp_path, monkeypatch):
-    FakeAIAgent.instances.clear()
-    runtime_root = tmp_path / "runtime"
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(runtime_root))
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / "AGENTS.md").write_text("# Agent instructions\nUse repo-local tests.\n", encoding="utf-8")
-    (repo / "CLAUDE.md").write_text("# Claude instructions\nStay scoped.\n", encoding="utf-8")
-    (repo / ".hermes.md").write_text("# Hermes project rules\nUse all repo guidance.\n", encoding="utf-8")
-    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=repo, check=True)
-    subprocess.run(["git", "add", "."], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    task, run = make_task_and_run()
-    task.affected_repos = [str(repo)]
-    dev = next(persona for persona in default_personas() if persona.id == "dev")
-    ctx = build_context(task, run)
-    seen = {}
-
-    class CwdAwareAgent(FakeAIAgent):
-        def run_conversation(self, *, user_message, system_message, task_id):
-            seen["cwd"] = Path.cwd()
-            seen["TERMINAL_CWD"] = os.environ.get("TERMINAL_CWD")
-            seen["user_message"] = user_message
-            return super().run_conversation(user_message=user_message, system_message=system_message, task_id=task_id)
-
-    runtime = GPTPersonaRuntime(default_provider="openai-codex", default_model="gpt-5.5", agent_factory=CwdAwareAgent)
-
-    runtime.run_tick(dev, ctx, run=run)
-
-    fake = FakeAIAgent.instances[0]
-    assert fake.kwargs["skip_context_files"] is True
-    assert seen["cwd"].parent == runtime_root / "wt" or seen["cwd"].parent.name == "hermes-agent-wt"
-    assert seen["TERMINAL_CWD"] == str(seen["cwd"])
-    assert seen["cwd"] != repo
-    assert subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=seen["cwd"], text=True, stdout=subprocess.PIPE, check=True).stdout.strip() == "HEAD"
-    assert "Repo-Grounded Execution" in seen["user_message"]
-    assert "repo_label: repo_" in seen["user_message"]
-    assert "context_loaded: .hermes.md, AGENTS.md, CLAUDE.md" in seen["user_message"]
-    assert "Repo Context Excerpts (Harness-Controlled)" in seen["user_message"]
-    assert "Use repo-local tests." in seen["user_message"]
-    assert "Stay scoped." in seen["user_message"]
 
 
-def test_backend_dev_persona_run_is_isolated_in_detached_worktree(tmp_path, monkeypatch):
-    FakeAIAgent.instances.clear()
-    runtime_root = tmp_path / "runtime"
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(runtime_root))
-    repo = tmp_path / "backend"
-    repo.mkdir()
-    (repo / "manage.py").write_text("print('ok')\n", encoding="utf-8")
-    subprocess.run(["git", "init"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
-    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=repo, check=True)
-    subprocess.run(["git", "add", "."], cwd=repo, check=True)
-    subprocess.run(["git", "commit", "-m", "initial"], cwd=repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    (repo / "live-only.txt").write_text("pre-existing live dirt\n", encoding="utf-8")
-    task, run = make_task_and_run()
-    task.affected_repos = [str(repo)]
-    backend_dev = next(persona for persona in default_personas() if persona.id == "backend_dev")
-    backend_dev.hermes_profile = None
-    backend_dev.repo_scope = None
-    ctx = build_context(task, run)
-    seen = {}
-
-    class CwdAwareAgent(FakeAIAgent):
-        def run_conversation(self, *, user_message, system_message, task_id):
-            seen["cwd"] = Path.cwd()
-            seen["user_message"] = user_message
-            return super().run_conversation(user_message=user_message, system_message=system_message, task_id=task_id)
-
-    runtime = GPTPersonaRuntime(default_provider="openai-codex", default_model="gpt-5.5", agent_factory=CwdAwareAgent)
-
-    runtime.run_tick(backend_dev, ctx, run=run)
-
-    assert seen["cwd"].parent == runtime_root / "wt" or seen["cwd"].parent.name == "hermes-agent-wt"
-    assert seen["cwd"] != repo
-    assert not (seen["cwd"] / "live-only.txt").exists()
-    assert subprocess.run(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=seen["cwd"], text=True, stdout=subprocess.PIPE, check=True).stdout.strip() == "HEAD"
-    assert run.progress["repo_execution"]["isolated"] is True
-    assert run.progress["repo_execution"]["detached_head"] is True
-    assert str(repo) not in seen["user_message"]
-    assert "Use session_search only when task context is insufficient" in seen["user_message"]
 
 
-def test_backend_dev_uses_persona_repo_scope_instead_of_first_task_repo(tmp_path, monkeypatch):
-    FakeAIAgent.instances.clear()
-    runtime_root = tmp_path / "runtime"
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(runtime_root))
-    harness_repo = tmp_path / "harness"
-    backend_repo = tmp_path / "backend"
-    harness_repo.mkdir()
-    backend_repo.mkdir()
-    subprocess.run(["git", "init"], cwd=harness_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=harness_repo, check=True)
-    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=harness_repo, check=True)
-    (harness_repo / "README.md").write_text("harness\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=harness_repo, check=True)
-    subprocess.run(["git", "commit", "-m", "initial"], cwd=harness_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    subprocess.run(["git", "init"], cwd=backend_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=backend_repo, check=True)
-    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=backend_repo, check=True)
-    (backend_repo / "README.md").write_text("backend\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=backend_repo, check=True)
-    subprocess.run(["git", "commit", "-m", "initial"], cwd=backend_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    task, run = make_task_and_run()
-    task.affected_repos = [str(harness_repo), str(backend_repo)]
-    backend_dev = next(persona for persona in default_personas() if persona.id == "backend_dev")
-    backend_dev.hermes_profile = None
-    backend_dev.repo_scope = str(backend_repo)
-    ctx = build_context(task, run)
-    seen = {}
-
-    class CwdAwareAgent(FakeAIAgent):
-        def run_conversation(self, *, user_message, system_message, task_id):
-            seen["cwd"] = Path.cwd()
-            seen["user_message"] = user_message
-            return super().run_conversation(user_message=user_message, system_message=system_message, task_id=task_id)
-
-    runtime = GPTPersonaRuntime(default_provider="openai-codex", default_model="gpt-5.5", agent_factory=CwdAwareAgent)
-
-    runtime.run_tick(backend_dev, ctx, run=run)
-
-    assert seen["cwd"] != backend_repo
-    assert seen["cwd"].parent == runtime_root / "wt" or seen["cwd"].parent.name == "hermes-agent-wt"
-    assert "repo_label: backend_" in seen["user_message"]
 
 
-def test_dev_persona_repo_scope_does_not_override_mismatched_task_repo(tmp_path, monkeypatch):
-    FakeAIAgent.instances.clear()
-    runtime_root = tmp_path / "runtime"
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(runtime_root))
-    launcher_repo = tmp_path / "launcher"
-    harness_repo = tmp_path / "hermes-agent"
-    launcher_repo.mkdir()
-    harness_repo.mkdir()
-    subprocess.run(["git", "init"], cwd=launcher_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=launcher_repo, check=True)
-    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=launcher_repo, check=True)
-    (launcher_repo / "README.md").write_text("launcher\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=launcher_repo, check=True)
-    subprocess.run(["git", "commit", "-m", "initial"], cwd=launcher_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    subprocess.run(["git", "init"], cwd=harness_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=harness_repo, check=True)
-    subprocess.run(["git", "config", "user.name", "Harness Test"], cwd=harness_repo, check=True)
-    (harness_repo / "README.md").write_text("harness\n", encoding="utf-8")
-    subprocess.run(["git", "add", "."], cwd=harness_repo, check=True)
-    subprocess.run(["git", "commit", "-m", "initial"], cwd=harness_repo, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    task, run = make_task_and_run()
-    task.affected_repos = [str(harness_repo)]
-    dev = next(persona for persona in default_personas() if persona.id == "dev")
-    dev.hermes_profile = None
-    dev.repo_scope = str(launcher_repo)
-    ctx = build_context(task, run)
-    seen = {}
-
-    class CwdAwareAgent(FakeAIAgent):
-        def run_conversation(self, *, user_message, system_message, task_id):
-            seen["cwd"] = Path.cwd()
-            seen["user_message"] = user_message
-            return super().run_conversation(user_message=user_message, system_message=system_message, task_id=task_id)
-
-    runtime = GPTPersonaRuntime(default_provider="openai-codex", default_model="gpt-5.5", agent_factory=CwdAwareAgent)
-
-    runtime.run_tick(dev, ctx, run=run)
-
-    assert seen["cwd"] != harness_repo
-    assert seen["cwd"].parent == runtime_root / "wt" or seen["cwd"].parent.name == "hermes-agent-wt"
-    assert "repo_label: hermes-agent_" in seen["user_message"]
 
 
-def test_dev_persona_can_use_latest_handoff_repo_when_affected_repos_empty(monkeypatch, tmp_path):
-    FakeAIAgent.instances.clear()
-    runtime_root = tmp_path / "runtime"
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(runtime_root))
-    task, run = make_task_and_run()
-    task.affected_repos = []
-    log = EventLog()
-    log.append(
-        Event(
-            ts=now(),
-            type="packet.recorded",
-            task_id=task.id,
-            run_id="run_neko",
-            persona_id="neko_supervisor",
-            payload={
-                "packet_id": "packet_handoff_harness",
-                "packet_type": "handoff_packet",
-                "body": {
-                    "target_owner": "dev",
-                    "target_repo": "hermes-agent",
-                    "proof_gate": {"required": True, "required_proof_types": ["test_run"], "minimum_status": "passed", "visual_required": False},
-                },
-            },
-        )
-    )
-    dev = next(persona for persona in default_personas() if persona.id == "dev")
-    dev.hermes_profile = None
-    ctx = build_context(task, run, event_log=log)
-    seen = {}
-
-    class CwdAwareAgent(FakeAIAgent):
-        def run_conversation(self, *, user_message, system_message, task_id):
-            seen["cwd"] = Path.cwd()
-            seen["user_message"] = user_message
-            return super().run_conversation(user_message=user_message, system_message=system_message, task_id=task_id)
-
-    runtime = GPTPersonaRuntime(default_provider="openai-codex", default_model="gpt-5.5", agent_factory=CwdAwareAgent)
-
-    runtime.run_tick(dev, ctx, run=run)
-
-    assert seen["cwd"] != Path(__file__).resolve().parents[2]
-    assert (seen["cwd"] / ".git").exists()
-    assert "repo_label: hermes-agent" in seen["user_message"]
 
 
-def test_dev_persona_invalid_affected_repo_fails_closed_before_home_cwd_fallback(tmp_path):
-    FakeAIAgent.instances.clear()
-    task, run = make_task_and_run()
-    task.affected_repos = [str(tmp_path / "missing_repo")]
-    dev = next(persona for persona in default_personas() if persona.id == "dev")
-    runtime = GPTPersonaRuntime(default_provider="openai-codex", default_model="gpt-5.5", agent_factory=FakeAIAgent)
-
-    with pytest.raises(DecisionPayloadInvalid, match="affected repo workdir"):
-        runtime.run_tick(dev, build_context(task, run), run=run)
-
-    assert FakeAIAgent.instances == []
 
 
-def test_dev_persona_missing_affected_repo_fails_closed_before_home_cwd_fallback():
-    FakeAIAgent.instances.clear()
-    task, run = make_task_and_run()
-    task.affected_repos = []
-    dev = next(persona for persona in default_personas() if persona.id == "dev")
-    runtime = GPTPersonaRuntime(default_provider="openai-codex", default_model="gpt-5.5", agent_factory=FakeAIAgent)
-
-    with pytest.raises(DecisionPayloadInvalid, match="requires at least one affected_repo"):
-        runtime.run_tick(dev, build_context(task, run), run=run)
-
-    assert FakeAIAgent.instances == []
 
 
 def test_dev_grounding_overrides_default_blueprint_placeholder_repo(isolate_agent_runtime_root):

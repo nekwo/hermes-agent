@@ -16,14 +16,13 @@ from . import paths
 from .goal_hygiene import prepare_new_goal_runtime
 from .models import Task
 from .budget_approval import budget_incident_can_continue
+from .errors import LegacyOrchestratorRemoved
 from .events import EventLog
-from .no_freeze_monitor import classify_freezes, record_freeze_findings
 from .serde import to_jsonable
 from .snapshot import build_snapshot
 from .states import TaskState
 from .status import build_status
 from .store import IncidentStore, ProofStore, RunStore, TaskStore
-from .ticker import TickEngine
 
 
 STAGE47_SUITE = "aaa-stage47"
@@ -158,8 +157,12 @@ def run_burn_in_case(
     burn_id: str | None = None,
     max_actions: int = 12,
     persona_runtime=None,
-    engine: TickEngine | None = None,
+    engine=None,
 ) -> dict[str, Any]:
+    raise LegacyOrchestratorRemoved(
+        "mission burn-in execution is unavailable because the dispatch loop is retired",
+        safe_details={"case_id": case_id, "burn_id": burn_id},
+    )
     if case_id not in STAGE47_CASES:
         raise ValueError(f"unknown burn-in case: {case_id}")
     if burn_id is None:
@@ -178,7 +181,6 @@ def run_burn_in_case(
         manifest["expected_persona_sequence"] = list(case.get("expected_persona_sequence") or [])
         _write_json(root / "task_create.json", {"task": task})
     _write_json(root / "manifest.json", manifest)
-    engine = engine or TickEngine(persona_runtime=persona_runtime)
     task_store = getattr(engine, "task_store", TaskStore())
     run_store = getattr(engine, "run_store", RunStore())
     proof_store = getattr(engine, "proof_store", ProofStore())

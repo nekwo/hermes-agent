@@ -27,7 +27,6 @@ from .role_contracts import contract_for_persona
 from .serde import to_jsonable
 from .simplified_contract import expose_only_simplified_actions
 from .stage_intent import stage_is_committed_verification_gate, stage_requires_product_edit
-from .worker_actions import primary_worker_action, worker_actions_for_role
 
 
 @dataclass(slots=True)
@@ -801,9 +800,9 @@ def _mission_hud(task: Task, run: AgentRun, packets: dict[str, dict[str, Any]], 
     config = config or load_root_runtime_config()
     simplified_contract = getattr(config, "simplified_agent_contract", None)
     simplified_contract_enabled = bool(getattr(simplified_contract, "enabled", False))
-    worker_actions = worker_actions_for_role(role, task, run, config=config, proof_store=proof_store)
-    primary_action = primary_worker_action(worker_actions)
-    next_move = _next_move_from_worker_action(primary_action) if primary_action is not None else _next_required_move(task, run, handoff=handoff, stage_state=stage_state)
+    worker_actions = []
+    primary_action = None
+    next_move = _next_required_move(task, run, handoff=handoff, stage_state=stage_state)
     shape_index = _decision_shape_index(role, task, run, handoff=handoff)
     if worker_actions:
         wanted_shape_ids = [*_worker_action_shape_ids(worker_actions), *registry_context_expansion_shape_ids(role)]

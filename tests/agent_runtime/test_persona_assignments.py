@@ -39,7 +39,6 @@ from agent_runtime.snapshot import build_snapshot
 from agent_runtime.states import RunState, TaskState, WorkerSessionState
 from agent_runtime.status import build_status
 from agent_runtime.store import AgentStore, ProofStore, RunStore, TaskStore
-from agent_runtime.ticker import TickEngine
 from agent_runtime.worker_sessions import WorkerSessionStore
 from tests.agent_runtime.conftest import release_to_implementation
 
@@ -4673,44 +4672,6 @@ def test_persona_message_cli_creates_assignment_without_ticking(monkeypatch, iso
     assert RunStore().list_for_task(task.id) == []
 
 
-def test_run_slot_spawns_attributed_persona_instance(isolate_agent_runtime_root):
-    store = AgentStore()
-    store.save(_persona("neko_supervisor"))
-    store.save(_persona("backend_dev"))
-    bp = BlueprintStore().get("neko_dev_qa_basic")
-    plan = instantiate_blueprint(
-        bp,
-        goal="Build a graph-routed thing.",
-        bindings={"lead": "persona:neko_supervisor", "builder": "persona:backend_dev", "verifier": "persona:qa"},
-    )
-    task = _task("task_run_slot_instance")
-    plan.current_stage_id = "implement"
-    task.mission_plan = plan
-    task.current_stage_id = "implement"
-    TaskStore().create(task)
-
-    result = TickEngine(
-        task_store=TaskStore(),
-        proof_store=ProofStore(),
-        persona_runtime=RequestProofRuntime(),
-        proof_runner=PassingProofRunner(ProofStore()),
-        config=_assignment_config(),
-    )._execute_action(
-        HarnessAction(HarnessActionType.RUN_SLOT, task_id=task.id, reason="run builder", slot_id="builder"),
-        task,
-    )
-
-    assert result.ok is True
-    instance = PersonaInstanceStore().get(persona_instance_id_for_placement(f"{task.id}:backend_dev"))
-    assert instance.goal_id == task.id
-    assert instance.spawned_by == "neko_supervisor"
-    instance.returned_to = "parent_session_r3"
-    summary = persona_instance_summary(instance)
-    assert summary["goal_id"] == task.id
-    assert summary["spawned_by"] == "neko_supervisor"
-    assert summary["returned_to"] == "parent_session_r3"
-
-
 def test_profile_persona_instance_summary_includes_tool_visibility(isolate_agent_runtime_root):
     instance = PersonaInstance(
         id="personainst_profile_alice",
@@ -4765,128 +4726,6 @@ def test_profile_persona_instance_summary_includes_tool_visibility(isolate_agent
     assert detail["permission_state"]["mode"] == "profile_default"
     assert "agent_hud_state" not in detail
     assert summary["tool_count"] == len(detail["tool_resolution"]["final_model_tools"])
-
-
-def test_tick_observe_only_links_assignment_to_run_and_worker(monkeypatch, isolate_agent_runtime_root):
-    cfg = _assignment_config()
-    tasks = TaskStore()
-    runs = RunStore()
-    proofs = ProofStore()
-    workers = WorkerSessionStore()
-    task = release_to_implementation(_task("task_tick_assign"))
-    tasks.create(task)
-
-    result = TickEngine(
-        task_store=tasks,
-        run_store=runs,
-        worker_session_store=workers,
-        proof_store=proofs,
-        persona_runtime=RequestProofRuntime(),
-        proof_runner=PassingProofRunner(proofs),
-        config=cfg,
-    ).tick_once(task_id=task.id)
-
-    assert result.actions_taken[0].ok
-    assignment_id = result.actions_taken[0].payload["assignment_id"]
-    assignment = PersonaAssignmentStore().get(assignment_id)
-    run = runs.get(assignment.run_ids[0])
-    worker = workers.list_for_task(task.id)[0]
-    assert assignment.state == "completed"
-    assert run.progress["assignment_id"] == assignment.id
-    assert run.progress["persona_instance_id"] == persona_instance_id_for_placement(f"{task.id}:dev")
-    assert worker.current_assignment_id == assignment.id
-
-
-def test_tick_reuses_task_flagged_diagnostic_assignment(isolate_agent_runtime_root):
-    cfg = _assignment_config()
-    tasks = TaskStore()
-    runs = RunStore()
-    workers = WorkerSessionStore()
-    agents = AgentStore()
-    agents.save(_persona("neko_supervisor"))
-    task = _task("task_diag_assign", state=TaskState.CREATED)
-    task.current_stage_id = None
-    assignment = PersonaAssignmentStore().create_or_resume(
-        PersonaAssignmentSpec(
-            persona_id="neko_supervisor",
-            kind="diagnostic",
-            title="Neko diagnostic",
-            message="Run one scoped Neko diagnostic.",
-            created_by="test",
-            task_id=task.id,
-        )
-    )
-    task.risk_flags = [f"persona_assignment_id:{assignment.id}"]
-    tasks.create(task)
-
-    result = TickEngine(
-        task_store=tasks,
-        run_store=runs,
-        agent_store=agents,
-        worker_session_store=workers,
-        persona_runtime=NekoAcceptanceRuntime(),
-        config=cfg,
-    ).tick_once(task_id=task.id)
-
-    assert result.actions_taken[0].ok
-    assert result.actions_taken[0].payload["assignment_id"] == assignment.id
-    assignments = PersonaAssignmentStore().list_for_task(task.id)
-    assert [item.id for item in assignments] == [assignment.id]
-    updated = PersonaAssignmentStore().get(assignment.id)
-    run = runs.get(updated.run_ids[0])
-    worker = workers.list_for_task(task.id)[0]
-    assert updated.state == "completed"
-    assert run.progress["assignment_id"] == assignment.id
-    assert run.progress["assignment_kind"] == "diagnostic"
-    assert worker.current_assignment_id == assignment.id
-
-
-def test_tick_assignment_tracks_command_proof_and_archive_preserves_it(
-    isolate_agent_runtime_root,
-):
-    cfg = _assignment_config()
-    tasks = TaskStore()
-    proofs = ProofStore()
-    workers = WorkerSessionStore()
-    task = release_to_implementation(_task("task_archive_assignment"))
-    tasks.create(task)
-
-    result = TickEngine(
-        task_store=tasks,
-        proof_store=proofs,
-        worker_session_store=workers,
-        persona_runtime=RequestProofRuntime(),
-        proof_runner=PassingProofRunner(proofs),
-        config=cfg,
-    ).tick_once(task_id=task.id)
-
-    assert result.actions_taken[0].ok
-    assignment_id = result.actions_taken[0].payload["assignment_id"]
-    assignment = PersonaAssignmentStore().get(assignment_id)
-    assert assignment.proof_ids == ["proof_assignment_ok"]
-
-    workers.close(workers.list_for_task(task.id)[0].id, reason="ready to archive")
-    saved = tasks.get(task.id)
-    saved.state = TaskState.DONE
-    saved.updated_at = now()
-    tasks.update(saved, actor="harness", reason="test terminal")
-    archived = tasks.archive(task.id, actor="cli", reason="test archive")
-
-    batch = Path(archived["archive_dir"])
-    assert archived["archived_tasks"][0]["persona_assignment_ids"] == [assignment_id]
-    assert (batch / "persona_assignments" / f"{assignment_id}.json").exists()
-    # S7-B: the frame carries an archived_tasks POINTER stub, not the rows. The
-    # preserved assignment/command-proof evidence is read from the projection the
-    # pointer references (the same rows `harness task history` serves) + the
-    # on-disk artifact asserted above — not the in-frame projection.
-    from agent_runtime.snapshot import _archived_task_summaries
-
-    assert task.id in build_snapshot()["archived_tasks"]["recent_ids"]
-    archived_task = next(
-        row for row in _archived_task_summaries() if row["task_id"] == task.id
-    )
-    assert archived_task["persona_assignment_ids"] == [assignment_id]
-    assert archived_task["persona_streams"]["dev"]["assignment_ids"] == [assignment_id]
 
 
 def test_close_for_task_releases_active_assignments_and_leaves_other_goals():

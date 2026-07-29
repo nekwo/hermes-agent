@@ -108,27 +108,6 @@ def test_replay_all_summarizes(isolate_agent_runtime_root):
     assert len(summary["passes_current_contract"]) + len(summary["still_failing"]) + len(summary["not_replayable"]) == 1
 
 
-def test_ticker_repair_path_captures_scenario(isolate_agent_runtime_root):
-    from types import SimpleNamespace
-
-    from agent_runtime.decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
-    from agent_runtime.ticker import _capture_replay_scenario
-
-    decision = AgentDecision(
-        type=DecisionType.REPORT_QA_VERDICT,
-        summary="s",
-        rationale="r",
-        payload={"qa_review": {"notes": "extra"}},
-    )
-    task = SimpleNamespace(id="task_cap")
-    run = SimpleNamespace(id="run_cap")
-
-    _capture_replay_scenario(task, run, persona_id="qa", exc=DecisionPayloadInvalid("qa_review has unsupported keys: ['notes']"), decision=decision)
-
-    listed = list_scenarios()
-    assert len(listed) == 1
-    assert listed[0]["task_id"] == "task_cap"
-    assert listed[0]["decision_type"] == "report_qa_verdict"
 
 
 def test_replay_runs_mission_plan_validation(isolate_agent_runtime_root):

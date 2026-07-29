@@ -1287,7 +1287,7 @@ reached:
   routing.
 - `MissionStateMachine.apply_decision` treats blueprint-owned plans as graph-owned
   even when legacy routing gates are absent.
-- `TickEngine` applies proof-derived blueprint outcomes after command proof is
+- The retired mission dispatcher applied proof-derived blueprint outcomes after command proof was
   collected and attached, and skips the legacy deterministic proof handoff for
   blueprint-owned tasks so graph terminal routing is not overwritten.
 - Non-dry-run `harness blueprint run` persists a real `Task` with the instantiated

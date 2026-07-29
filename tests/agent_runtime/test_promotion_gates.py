@@ -6,7 +6,6 @@ import pytest
 
 from agent_runtime.decision_schema import DecisionPayloadInvalid
 from agent_runtime.models import MissionIntent, MissionPlan, MissionPlanStage, Proof, Task, TaskStage
-from agent_runtime.planning import _apply_implementation_review
 from agent_runtime.promotion_gates import product_promotion_required, satisfied_promotion_lanes, validate_product_promotion_gate
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.states import StageStatus, TaskState
@@ -238,18 +237,3 @@ def test_product_promotion_gate_rejects_prod_before_staging(isolate_agent_runtim
 
     with pytest.raises(DecisionPayloadInvalid, match="out of order"):
         validate_product_promotion_gate(task, task.proof_ids, proof_store=ProofStore())
-
-
-def test_qa_approval_is_blocked_until_prod_rollout_proof(isolate_agent_runtime_root):
-    task = make_product_task("task_promo_qa")
-    attach(task, "proof_local", ".EterniaBackendVirtualEnv/Scripts/python.exe manage.py check", intent="auto_final_gate_after_delivery")
-    attach(task, "proof_docker", "python -m pytest tests/docker/ -v --tb=short # local Docker PostgreSQL", intent="local_docker_postgres")
-    attach(task, "proof_staging", "kubectl -n staging rollout status deploy/eternia-backend")
-
-    with pytest.raises(DecisionPayloadInvalid, match="production pod rollout"):
-        _apply_implementation_review(
-            task,
-            {"verdict": "approved", "proof_ids": ["proof_local", "proof_staging"], "findings": []},
-            actor="qa",
-            proof_store=ProofStore(),
-        )

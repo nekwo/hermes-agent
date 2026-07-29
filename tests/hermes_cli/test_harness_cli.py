@@ -11,8 +11,6 @@ import pytest
 from hermes_time import now
 from hermes_cli.harness import build_parser
 from agent_runtime import paths
-from agent_runtime.decision_schema import AgentDecision, DecisionType
-from agent_runtime.goal_runner import GoalRunResult
 from agent_runtime.models import AgentRun, Incident, Proof, Task
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.states import RunState, TaskState
@@ -205,103 +203,20 @@ def test_harness_parser_exposes_task_archive_ready_json():
     assert args.json is True
 
 
-def test_harness_parser_exposes_goal_run():
-    args = parser().parse_args(["harness", "goal", "run", "--title", "T", "--description", "D", "--json"])
-    assert args.command == "harness"
-    assert args.harness_command == "goal"
-    assert args.goal_command == "run"
-    assert args.max_actions == 16
+def test_harness_parser_rejects_goal_run():
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "goal", "run", "--title", "T", "--description", "D", "--json"])
 
 
-def test_harness_goal_run_returns_controller_exit_code(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+def test_harness_no_longer_exports_mission_runtime_controller():
+    from hermes_cli import harness
 
-    class Controller:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-        def run_goal(self, options):
-            assert options.title == "T"
-            assert options.description == "D"
-            assert options.max_actions == 2
-            return GoalRunResult(
-                ok=False,
-                task_id="task_1",
-                title="T",
-                final_task_state="created",
-                stop_reason="max_actions",
-                tick_stop_reason="max_actions",
-                exit_code=3,
-                elapsed_seconds=0.0,
-                actions_taken=0,
-                ticks=1,
-                run_ids=[],
-                proof_ids=[],
-                open_incident_ids=[],
-                all_incident_ids=[],
-                hygiene={},
-            )
-
-    monkeypatch.setattr("hermes_cli.harness.MissionRuntimeController", Controller)
-
-    args = parser().parse_args(["harness", "goal", "run", "--title", "T", "--description", "D", "--max-actions", "2", "--json"])
-
-    assert args.func(args) == 3
-    data = json.loads(capsys.readouterr().out)
-    assert data["stop_reason"] == "max_actions"
+    assert not hasattr(harness, "MissionRuntimeController")
 
 
-def test_harness_goal_run_json_survives_archive_on_done(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-
-    class Controller:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-        def run_goal(self, options):
-            assert options.archive_on_done is True
-            task = Task(
-                id="task_archived_goal",
-                title="T",
-                description="D",
-                state=TaskState.DONE,
-                created_at=now(),
-                updated_at=now(),
-                requested_by="cli",
-                goal_id="goal_archived",
-            )
-            TaskStore().create(task)
-            archive_result = TaskStore().archive(task.id, actor="harness", reason="goal runner archive-on-done")
-            return GoalRunResult(
-                ok=True,
-                task_id=task.id,
-                title=task.title,
-                final_task_state="done",
-                stop_reason="task_done",
-                tick_stop_reason="task_terminal",
-                exit_code=0,
-                elapsed_seconds=0.0,
-                actions_taken=1,
-                ticks=1,
-                run_ids=[],
-                proof_ids=[],
-                open_incident_ids=[],
-                all_incident_ids=[],
-                hygiene={},
-                archive_result=archive_result,
-            )
-
-    monkeypatch.setattr("hermes_cli.harness.MissionRuntimeController", Controller)
-
-    args = parser().parse_args(["harness", "goal", "run", "--title", "T", "--description", "D", "--archive-on-done", "--json"])
-
-    assert args.func(args) == 0
-    data = json.loads(capsys.readouterr().out)
-    assert data["task_id"] == "task_archived_goal"
-    assert data["archived"] is True
-    assert data["archive_result"]["archived_task_ids"] == ["task_archived_goal"]
-    assert data["archive_batch"]
-    assert data["stop_reason"] == "task_done"
+def test_harness_rejects_goal_run_archive_on_done():
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "goal", "run", "--title", "T", "--description", "D", "--archive-on-done", "--json"])
 
 
 def test_harness_task_archive_ready_preserves_evidence_and_removes_open_listing(tmp_path, monkeypatch, capsys):
@@ -634,30 +549,13 @@ def test_harness_parser_has_no_import_kanban():
         raise AssertionError("import-kanban unexpectedly parsed")
 
 
-def test_harness_cli_init_create_tick_status_snapshot_e2e(tmp_path, monkeypatch, capsys):
+def test_harness_cli_init_status_observe_snapshot_e2e(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-
-    class Runtime:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-        def run_tick(self, persona, ctx, *, run):
-            return AgentDecision(
-                type=DecisionType.PROPOSE_ACCEPTANCE,
-                summary="pm fleshed",
-                rationale="r",
-                payload={"objective": "obj", "acceptance_criteria": ["done"]},
-            )
-
-    monkeypatch.setattr("hermes_cli.harness.GPTPersonaRuntime", Runtime)
 
     init_args = parser().parse_args(["harness", "init", "--json"])
     assert init_args.func(init_args) == 0
-    stamp = now()
-    TaskStore().create(Task(id="task_e2e", title="T", description="D", state=TaskState.CREATED, created_at=stamp, updated_at=stamp, requested_by="test"))
 
     for argv in [
-        ["harness", "tick", "--json"],
         ["harness", "status", "--json"],
         ["harness", "observe", "--json"],
         ["harness", "snapshot", "--json"],
@@ -665,8 +563,7 @@ def test_harness_cli_init_create_tick_status_snapshot_e2e(tmp_path, monkeypatch,
         args = parser().parse_args(argv)
         assert args.func(args) == 0
 
-    output = capsys.readouterr().out
-    assert "pm fleshed" in output
+    assert capsys.readouterr().out
     assert (tmp_path / "runtime" / "snapshot.json").exists()
 
 
@@ -854,7 +751,7 @@ _STAGE42_ENVELOPE_HANDLERS = _stage42_handlers(
     "_cmd_board_card_restore", "_cmd_board_create",
     "_cmd_board_list", "_cmd_board_resolve_conflict", "_cmd_board_show",
     "_cmd_board_update", "_cmd_goal_archive", "_cmd_goal_cancel",
-    "_cmd_goal_history", "_cmd_goal_list", "_cmd_goal_run",
+    "_cmd_goal_history", "_cmd_goal_list",
     "_cmd_goal_show", "_cmd_goal_unblock", "_cmd_lane_list", "_cmd_lane_show",
     "_cmd_mission_chat_clarify_tickets", "_cmd_office_actor_remove",
     "_cmd_office_actor_restore", "_cmd_office_actor_upsert",

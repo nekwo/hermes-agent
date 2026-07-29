@@ -20,9 +20,7 @@ from .mission_plan import (
     release_next_stage,
 )
 from .packets import record_decision_packets
-from .planning import apply_planning_decision
 from .proof_gates import stage_proof_satisfied
-from .reconciler import reconcile_task
 from .recovery_flags import block_recovery_attempted_for_current_signal
 from .scope_control import needs_pm_triage_before_dev
 from .states import StageStatus, TaskState
@@ -86,6 +84,10 @@ class MissionStateMachine:
         self.event_log = event_log
 
     def next_action(self, mission: Task) -> HarnessAction:
+        raise LegacyOrchestratorRemoved(
+            "mission dispatch is retired; use persona chat and the runtime agent graph",
+            safe_details={"task_id": getattr(mission, "id", None)},
+        )
         state = mission.state if isinstance(mission.state, TaskState) else TaskState(mission.state)
         # Stage 15.3: unconditional. There is no routing on/off switch — every
         # mission this authority is asked about IS graph-typed before it is
@@ -121,6 +123,10 @@ class MissionStateMachine:
         )
 
     def next_actions(self, mission: Task) -> list[HarnessAction]:
+        raise LegacyOrchestratorRemoved(
+            "mission dispatch is retired; use persona chat and the runtime agent graph",
+            safe_details={"task_id": getattr(mission, "id", None)},
+        )
         state = mission.state if isinstance(mission.state, TaskState) else TaskState(mission.state)
         ensure_default_mission_plan(mission)
         _prune_closed_incident_links(mission)
@@ -203,9 +209,6 @@ class MissionStateMachine:
         current = current_plan_stage(mission)
         if current is None:
             return _blueprint_terminal_action(mission, proof_store=self.proof_store)
-        reconciliation = reconcile_task(mission)
-        if reconciliation.needs_supervisor:
-            return _run_slot(mission, "neko_supervisor", f"blueprint needs Neko transition reconciliation: {reconciliation.findings[0].kind}")
         if needs_pm_triage_before_dev(mission):
             return _run_slot(mission, "neko_supervisor", "blueprint needs Neko Mission Lead issue discovery triage")
         if has_unresolved_context_request(mission):
@@ -246,6 +249,10 @@ class MissionStateMachine:
         return _run_slot(mission, slot_id, f"blueprint stage {current.id} needs slot {slot_id}", stage_id=current.id)
 
     def apply_decision(self, mission: Task, decision: AgentDecision, *, actor: str, task_store=None, incident_store=None, proof_store=None, run_id: str | None = None, stage_id: str | None = None, normal_worker_flow: bool = False, mission_plan_flow: bool | None = None) -> StateMachineResult:
+        raise LegacyOrchestratorRemoved(
+            "mission decision application is retired; use persona chat and the runtime agent graph",
+            safe_details={"task_id": getattr(mission, "id", None), "actor": actor},
+        )
         ensure_default_mission_plan(mission)
         before = mission.state if isinstance(mission.state, TaskState) else TaskState(mission.state)
         blueprint_owned = is_blueprint_plan(getattr(mission, "mission_plan", None))
@@ -495,5 +502,4 @@ def _safe_int(value) -> int:
 
 def _environment_changed(value) -> bool:
     return str(value or "").strip().lower().startswith("changed")
-
 

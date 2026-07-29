@@ -48,6 +48,7 @@ from agent_runtime.errors import (
     DefaultScopeReconciliationRequired,
     EventPayloadTooLarge,
     InvalidTransition,
+    LegacyOrchestratorRemoved,
     NotFound,
     ProofMissing,
     RuntimeRootMismatch,
@@ -68,7 +69,6 @@ from agent_runtime.harness_doctor import (
     DEFAULT_WORKTREE_MIN_AGE_SECONDS,
     run_harness_doctor,
 )
-from agent_runtime.goal_runner import GoalRunOptions, MissionRuntimeController
 from agent_runtime.launcher_process_hygiene import launcher_visual_cleanup_needed
 from agent_runtime.models import AgentPersona, Event, Task, apply_instance_model_overrides
 from agent_runtime import paths
@@ -101,7 +101,6 @@ from agent_runtime.persona_chat_mints import (
     PersonaChatMintError,
     reserve_persona_chat_mint,
 )
-from agent_runtime.persona_diagnostics import PersonaDiagnosticController, PersonaDiagnosticOptions
 from agent_runtime.profile_context import active_profile_name
 from agent_runtime.realm_sync import (
     RealmSyncError,
@@ -163,13 +162,11 @@ from agent_runtime.skill_install import install_harness_skills, install_harness_
 from agent_runtime.snapshot import build_snapshot, write_snapshot
 from agent_runtime.smoke import run_smoke
 from agent_runtime.scope_control import find_discovery_task
-from agent_runtime.planning import apply_planning_decision
 from agent_runtime.states import TaskState, RunState, WorkerSessionState
 from agent_runtime.status import build_status
 from agent_runtime.steering import execute_steer_action
 from agent_runtime.store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, ProofStore, RunStore, TaskStore
 from agent_runtime.store import RealmStore, WorkspaceStore
-from agent_runtime.ticker import TickEngine
 from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
 from agent_runtime.tool_permissions import ChatToolPermissionStore, permission_state_for_chat
 from agent_runtime.tool_turn_history import persist_tool_turn_actual
@@ -401,23 +398,6 @@ def build_parser(parent_subparsers) -> None:
     goal_detail.add_argument("goal_id", help="Goal id or task id (parent/child tasks share a goal_id)")
     goal_detail.add_argument("--json", action="store_true")
     goal_detail.set_defaults(func=_cmd_goal_detail)
-    goal_run = goal_subs.add_parser("run", help="Create a goal and run bounded ticks until a meaningful boundary")
-    goal_run.add_argument("--title", required=True)
-    goal_run.add_argument("--description", required=True)
-    goal_run.add_argument("--requested-by", default="cli")
-    goal_run.add_argument("--max-actions", type=int, default=16)
-    goal_run.add_argument("--max-seconds", type=float, default=None)
-    goal_run.add_argument("--archive-on-done", action="store_true")
-    goal_run.add_argument("--requires-visual-proof", action="store_true")
-    goal_run.add_argument("--affected-repo", action="append", default=[])
-    goal_run.add_argument("--acceptance", action="append", default=[])
-    goal_run.add_argument("--non-goal", action="append", default=[])
-    goal_run.add_argument("--blueprint", default="neko_two_dev_default", help="Blueprint id for graph-routed goal creation")
-    goal_run.add_argument("--bind", action="append", default=[], help="Bind a blueprint slot, e.g. builder=persona:dev")
-    goal_run.add_argument("--workspace", default=None)
-    goal_run.add_argument("--runtime-root", default=None, help="Pin the expected resolved Harness runtime root")
-    _add_stage42_global_args(goal_run, mutation=True)
-    goal_run.set_defaults(func=_cmd_goal_run)
     goal_unblock = goal_subs.add_parser("unblock", help="Operator-unblock a Harness goal")
     goal_unblock.add_argument("goal_id")
     goal_unblock.add_argument("--reason", required=True)
@@ -1006,18 +986,6 @@ def build_parser(parent_subparsers) -> None:
         command.add_argument("--json", action="store_true")
         command.set_defaults(func=_cmd_lane_control)
 
-    tick = subs.add_parser("tick", help="Diagnostic only: run one harness tick")
-    tick.add_argument("--task", dest="task_id", default=None, help="Run one tick for a specific task id")
-    tick.add_argument("--json", action="store_true")
-    tick.set_defaults(func=_cmd_tick)
-
-    settle = subs.add_parser("run-until-settled", help="Diagnostic only: run bounded mission ticks until done, blocked, waiting, or incident")
-    settle.add_argument("--task", dest="task_id", default=None, help="Settle a specific task id")
-    settle.add_argument("--max-actions", type=int, default=10)
-    settle.add_argument("--max-seconds", type=float, default=None)
-    settle.add_argument("--json", action="store_true")
-    settle.set_defaults(func=_cmd_run_until_settled)
-
     burn = subs.add_parser("burn-in", help="Run Stage 47 certification burn-in cases")
     burn_subs = burn.add_subparsers(dest="burn_in_command")
     burn_create = burn_subs.add_parser("create", help="Create a burn-in ledger")
@@ -1166,27 +1134,6 @@ def build_parser(parent_subparsers) -> None:
     persona_message.add_argument("--requested-by", default="cli")
     persona_message.add_argument("--json", action="store_true")
     persona_message.set_defaults(func=_cmd_persona_message)
-    persona_diagnose = persona_subs.add_parser("diagnose", help="Create a diagnostic task and run exactly one bounded persona turn")
-    persona_diagnose.add_argument("persona_id", help="Persona id or alias: neko, dev, launcher-dev, backend-dev, qa")
-    persona_diagnose.add_argument("--title", required=True)
-    persona_diagnose.add_argument("--message", required=True)
-    persona_diagnose.add_argument("--requested-by", default="cli")
-    persona_diagnose.add_argument("--operation-kind", default="diagnostic")
-    persona_diagnose.add_argument("--operation-mode", default="standalone_task")
-    persona_diagnose.add_argument("--max-actions", type=int, default=1)
-    persona_diagnose.add_argument("--max-seconds", type=float, default=240.0)
-    persona_diagnose.add_argument("--affected-repo", action="append", default=[])
-    persona_diagnose.add_argument("--acceptance", action="append", default=[])
-    persona_diagnose.add_argument("--non-goal", action="append", default=[])
-    persona_diagnose.add_argument(
-        "--keep-task",
-        action="store_true",
-        help="Preserve the standalone diagnostic task in the live runtime instead of auto-archiving it. "
-        "By default a diagnostic auto-archives on completion so throwaway probes do not accumulate and gate the scheduler.",
-    )
-    persona_diagnose.add_argument("--json", action="store_true")
-    persona_diagnose.set_defaults(func=_cmd_persona_diagnose)
-
     persona_chat = persona_subs.add_parser("chat", help="Manage durable persona chat sessions")
     persona_chat_subs = persona_chat.add_subparsers(dest="persona_chat_command")
     persona_chat_delete = persona_chat_subs.add_parser("delete", help="Delete a persona chat session and clear active persona bindings")
@@ -1273,15 +1220,6 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_message.add_argument("--max-seconds", type=float, default=240.0)
     persona_instance_message.add_argument("--json", action="store_true")
     persona_instance_message.set_defaults(func=_cmd_persona_instance_message)
-    persona_instance_run_once = persona_instance_subs.add_parser("run-once", help="Run one bounded sandbox turn for a free-floating persona instance")
-    persona_instance_run_once.add_argument("persona_instance_id")
-    persona_instance_run_once.add_argument("--title", default="Free-floating persona run")
-    persona_instance_run_once.add_argument("--message", default=None)
-    persona_instance_run_once.add_argument("--requested-by", default="cli")
-    persona_instance_run_once.add_argument("--max-actions", type=int, default=1)
-    persona_instance_run_once.add_argument("--max-seconds", type=float, default=240.0)
-    persona_instance_run_once.add_argument("--json", action="store_true")
-    persona_instance_run_once.set_defaults(func=_cmd_persona_instance_run_once)
     persona_instance_close = persona_instance_subs.add_parser("close", help="Close active free-floating assignments for one persona instance")
     persona_instance_close.add_argument("persona_instance_id")
     persona_instance_close.add_argument("--reason", required=True)
@@ -4604,68 +4542,6 @@ def _cmd_doctor(args) -> int:
             mode = "dry run" if getattr(args, "dry_run", False) else "applied"
             print(f"repairs: {mode}")
     return 0
-
-
-def _cmd_goal_run(args) -> int:
-    cfg = load_agent_runtime_config()
-    try:
-        bindings = _parse_blueprint_bindings(list(args.bind or []))
-    except Exception as exc:
-        data = {"ok": False, "error": str(exc)}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    result = MissionRuntimeController(
-        config=cfg,
-        engine_factory=lambda **kwargs: TickEngine(
-            **kwargs,
-            persona_runtime=GPTPersonaRuntime(default_provider=cfg.default_provider, default_model=cfg.default_model),
-        ),
-    ).run_goal(
-        GoalRunOptions(
-            title=args.title,
-            description=args.description,
-            requested_by=args.requested_by,
-            max_actions=args.max_actions,
-            max_seconds=args.max_seconds,
-            archive_on_done=args.archive_on_done,
-            requires_visual_proof=args.requires_visual_proof,
-            affected_repos=list(args.affected_repo or []),
-            acceptance_criteria=list(args.acceptance or []),
-            non_goals=list(args.non_goal or []),
-            blueprint_id=args.blueprint,
-            bindings=bindings,
-            workspace_id=getattr(args, "workspace", None),
-            runtime_root=getattr(args, "runtime_root", None),
-        )
-    )
-    if getattr(args, "json", False) or getattr(args, "output", None):
-        task = None
-        try:
-            task = TaskStore().get(result.task_id)
-            row = _goal_row(task)
-            warnings = _goal_contention_warnings(task)
-        except NotFound:
-            row = _archived_goal_row(result.task_id, result)
-            if row is None:
-                row = _result_goal_row(result)
-            warnings = []
-        row.update(
-            {
-                "stop_reason": result.stop_reason,
-                "actions_taken": result.actions_taken,
-                "run_ids": list(result.run_ids),
-                "proof_ids": list(result.proof_ids),
-                "open_incident_ids": list(result.open_incident_ids),
-            }
-        )
-        if result.archive_result is not None:
-            row["archive_result"] = result.archive_result
-            row["archived"] = bool(row.get("archived") or result.archive_result.get("archived_count"))
-        _print_stage42(_object_envelope("goal", row, warnings=warnings), args=args, default_output="json")
-    else:
-        print(f"goal {result.task_id}: stop={result.stop_reason} state={result.final_task_state} actions={result.actions_taken}")
-    return result.exit_code
-
 
 
 def _cmd_serve(args) -> int:

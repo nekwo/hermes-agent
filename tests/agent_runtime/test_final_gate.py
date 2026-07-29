@@ -141,25 +141,6 @@ def test_goal_named_exact_proof_reads_locked_mission_intent():
     assert commands == ["echo e2e-trust-probe-qa"]
 
 
-def test_proof_expectation_command_outranks_broad_stage_plan_for_authoritative_gate():
-    from agent_runtime.final_gate import goal_named_proof_commands
-    from agent_runtime.ticker import _build_authoritative_stage_gate_decision
-
-    task = _goal_task(
-        "Create docs/agent-runtime-harness/mission-control-stream.md.",
-        repos=["hermes-agent"],
-    )
-    task.proof_expectations = [
-        "python -m pytest tests/agent_runtime/test_stream.py -q passes (stream contract unchanged)",
-        "A focused command shows the doc exists and contains the strings: hydrate, delta, heartbeat, schema_version",
-    ]
-    stage = _edit_stage(test_plan=["python -m pytest tests/agent_runtime -q"])
-
-    assert goal_named_proof_commands(task) == ["python -m pytest tests/agent_runtime/test_stream.py -q"]
-    assert final_gate_commands(task, stage) == ["python -m pytest tests/agent_runtime/test_stream.py -q"]
-    decision = _build_authoritative_stage_gate_decision(task, stage)
-    assert decision is not None
-    assert decision.payload["commands"] == ["python -m pytest tests/agent_runtime/test_stream.py -q"]
 
 
 def test_handoff_packet_exact_proof_outranks_stage_test_plan():
@@ -225,84 +206,10 @@ def test_goal_named_command_extraction_rejects_shell_plumbing_and_secrets():
     assert goal_named_proof_commands(task) == []
 
 
-def test_authoritative_gate_decision_uses_goal_named_command_for_no_edit_stage():
-    from agent_runtime.ticker import _build_authoritative_stage_gate_decision
-
-    task = _goal_task(
-        "No-edit investigation: in the hermes-agent repo run `python -m pytest tests/agent_runtime/test_liveness.py -q` and report findings without product edits.",
-        repos=["hermes-agent"],
-    )
-    stage = TaskStage(
-        id="implement",
-        title="No-Edit Investigation",
-        objective="Investigate without product edits and attach focused proof.",
-        status=StageStatus.IMPLEMENTING,
-        test_plan=[],
-    )
-
-    decision = _build_authoritative_stage_gate_decision(task, stage)
-    assert decision is not None
-    assert decision.payload["commands"] == ["python -m pytest tests/agent_runtime/test_liveness.py -q"]
-    assert decision.payload["proof_intent"] == "authoritative_gate_after_hand_off"
 
 
-def test_no_required_gate_stage_advances_on_delivery_when_no_gate_command_derivable(isolate_agent_runtime_root):
-    """Live regression 2026-07-03 (task_49f8ee3b): a no-edit goal's
-    backend_implementation stage (proof_gate.required=false, empty test_plan,
-    no recipe, goal-named command scoped to another repo) produced a None gate
-    decision after hand_off and nothing ever marked the stage passed — the
-    owner was re-dispatched forever."""
-
-    from agent_runtime.blueprints.routing import apply_stage_outcome, stage_declares_required_gate
-    from agent_runtime.blueprints.schema import StageOutcome
-    from agent_runtime.default_plan import ensure_default_mission_plan
-    from agent_runtime.ticker import _build_authoritative_stage_gate_decision
-
-    task = _goal_task(
-        "Bounded no-edit investigation of the hermes-agent watchdog wiring; report findings with no product edits.",
-        repos=["hermes-agent"],
-    )
-    plan = ensure_default_mission_plan(task)
-    stage = next(s for s in plan.stages if s.id == "backend_implementation")
-    next(s for s in plan.stages if s.id == "scope").status = StageStatus.PASSED
-    plan.current_stage_id = "backend_implementation"
-    task.current_stage_id = "backend_implementation"
-
-    # The gate has nothing safe to run for this stage...
-    gate_decision = _build_authoritative_stage_gate_decision(task, stage)
-    assert gate_decision is None
-    # ...and the blueprint declares no required proof gate for it...
-    assert stage_declares_required_gate(stage) is False
-    # ...so the accepted delivery completes the no-gate branch and the graph
-    # reaches the implicit terminal join.
-    target = apply_stage_outcome(task, "backend_implementation", StageOutcome.PASSED, reason="delivery accepted; no required gate")
-    assert target == "done"
-    assert task.current_stage_id is None
 
 
-def test_default_blueprint_placeholder_repo_yields_to_task_scope(isolate_agent_runtime_root):
-    """Live regression 2026-07-03 (task_49f8ee3b): the default graph's implement
-    stage (placeholder repo EterniaLauncher) made a hermes-agent goal's
-    authoritative gate run 'flutter analyze' in the Launcher; the goal-named
-    focused command was filtered out by the wrong repo hint."""
-
-    from agent_runtime.default_plan import ensure_default_mission_plan
-    from agent_runtime.final_gate import stage_repo_for_gate
-    from agent_runtime.ticker import _build_authoritative_stage_gate_decision
-
-    task = _goal_task(
-        "Bounded no-edit investigation. In the hermes-agent repo, run `python -m pytest tests/agent_runtime/test_liveness.py -q` and report, with no product edits.",
-        repos=["hermes-agent"],
-    )
-    plan = ensure_default_mission_plan(task)
-    stage = next(s for s in plan.stages if s.id == "implement")
-    plan.current_stage_id = "implement"
-    task.current_stage_id = "implement"
-
-    assert stage_repo_for_gate(task, stage) == "hermes-agent"
-    decision = _build_authoritative_stage_gate_decision(task, stage)
-    assert decision is not None
-    assert decision.payload["commands"] == ["python -m pytest tests/agent_runtime/test_liveness.py -q"]
 
 
 def test_explicit_graph_blueprint_stage_repo_is_not_overridden(isolate_agent_runtime_root):

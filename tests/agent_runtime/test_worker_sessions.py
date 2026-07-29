@@ -9,7 +9,6 @@ from pathlib import Path
 from hermes_time import now
 
 from agent_runtime import paths
-from agent_runtime.autonomy import record_autonomy_packet
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.context_builder import build_context
 from agent_runtime.decision_schema import AgentDecision, DecisionType
@@ -26,7 +25,6 @@ from agent_runtime.snapshot import build_snapshot
 from agent_runtime.states import RunState, StageStatus, TaskState, WorkerSessionState
 from agent_runtime.status import build_status
 from agent_runtime.store import ProofStore, RunStore, TaskStore
-from agent_runtime.ticker import TickEngine
 from agent_runtime.worker_sessions import WorkerSessionStore, worker_context_manifest
 from tests.agent_runtime.conftest import release_to_implementation
 
@@ -137,92 +135,10 @@ def _enterprise_config() -> AgentRuntimeConfig:
     )
 
 
-def test_enterprise_worker_session_tracks_tick_context_and_proof(isolate_agent_runtime_root):
-    tasks = TaskStore()
-    proofs = ProofStore()
-    workers = WorkerSessionStore()
-    task = release_to_implementation(_task())
-    tasks.create(task)
-    runner = PassingProofRunner(proofs)
-
-    result = TickEngine(
-        task_store=tasks,
-        proof_store=proofs,
-        persona_runtime=RequestTestRunRuntime(),
-        proof_runner=runner,
-        worker_session_store=workers,
-        config=_enterprise_config(),
-    ).tick_once(task_id=task.id)
-
-    assert result.actions_taken[0].ok
-    worker = workers.list_for_task(task.id)[0]
-    assert result.actions_taken[0].payload["worker_session_id"] == worker.id
-    assert worker.context_receipt_id.startswith("ctxr_")
-    assert worker.decision_count == 1
-    assert worker.proof_count == 1
-    assert worker.prompt_contract_hash
-    from agent_runtime.decision_contract_registry import contract_hash
-
-    assert worker.prompt_contract_hash == contract_hash()
-    manifest = worker_context_manifest(task.id, "dev")
-    assert "static_prompt_receipt.json" in manifest["files"]
 
 
-def test_request_test_run_recipe_normalizes_commands_and_metadata():
-    tasks = TaskStore()
-    proofs = ProofStore()
-    task = _task("task_recipe")
-    task.mission_plan = MissionPlan(
-        mission_intent=MissionIntent(title=task.title, objective=task.description),
-        current_stage_id="archive_button_cli_contract",
-        blueprint_id="neko_two_dev_default",
-        stages=[
-            MissionPlanStage(
-                id="archive_button_cli_contract",
-                title="Archive Button CLI Contract",
-                objective="Collect archive button CLI proof.",
-                owner="dev",
-                owner_slot="dev",
-                repo="hermes-agent",
-                kind="proof_only",
-                proof_recipe_id="archive_button_cli_contract",
-                requires_product_edit=False,
-                status=StageStatus.IMPLEMENTING,
-            )
-        ],
-    )
-    task.current_stage_id = "archive_button_cli_contract"
-    tasks.create(task)
-    runner = PassingProofRunner(proofs)
-
-    result = TickEngine(
-        task_store=tasks,
-        proof_store=proofs,
-        persona_runtime=RequestRecipeRuntime(),
-        proof_runner=runner,
-    ).tick_once(task_id=task.id)
-
-    assert result.actions_taken[0].ok
-    assert runner.calls[0]["commands"] == list(RECIPES["archive_button_cli_contract"].commands)
-    assert runner.calls[0]["proof_recipe"]["recipe_id"] == "archive_button_cli_contract"
-    assert "proof_recipe" not in result.actions_taken[0].payload
-    saved = tasks.get(task.id)
-    assert len(saved.proof_ids) == 1
 
 
-def test_autonomy_packet_advertises_relevant_proof_recipes():
-    tasks = TaskStore()
-    runs = RunStore()
-    task = _task("task_recipe_hud")
-    task.title = "Launcher contract smoke"
-    tasks.create(task)
-    run = runs.open_run("dev", task.id, stage_id="launcher_contract_smoke")
-    ctx = build_context(task, run)
-
-    packet = record_autonomy_packet(_persona("dev"), ctx, run_store=runs)
-
-    recipe_ids = {item["recipe_id"] for item in packet["available_proof_recipes"]}
-    assert "launcher_contract_smoke" in recipe_ids
 
 
 def test_no_edit_recipe_fails_when_command_dirties_git_worktree(tmp_path):
@@ -515,18 +431,3 @@ def test_archive_refuses_active_worker_then_preserves_closed_worker_context_and_
     assert (batch / "worker_sessions" / f"{worker.id}.json").exists()
     assert (batch / "context" / task.id / "dev" / "static_prompt_receipt.json").exists()
     assert (batch / "proof_sandbox" / task.id / "recipe" / "manifest.json").exists()
-
-
-def test_complete_task_action_closes_active_workers():
-    tasks = TaskStore()
-    workers = WorkerSessionStore()
-    task = _mark_graph_complete(_task("task_complete_worker", state=TaskState.RUNNING))
-    task.proof_ids = ["proof_ok"]
-    tasks.create(task)
-    worker = workers.open(task_id=task.id, persona=_persona(), stage_id="stage_1", session_id="session_safe")
-
-    result = TickEngine(task_store=tasks, worker_session_store=workers).tick_once(task_id=task.id)
-
-    assert result.actions_taken[0].ok
-    assert result.actions_taken[0].payload["closed_worker_session_ids"] == [worker.id]
-    assert workers.get(worker.id).state.value == "closed"

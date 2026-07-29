@@ -8,6 +8,7 @@ from typing import Any, Callable
 from hermes_time import now
 
 from .default_plan import ensure_default_mission_plan
+from .errors import LegacyOrchestratorRemoved
 from .goal_hygiene import prepare_new_goal_runtime
 from .mission_plan import _sync_task_stage_compat_from_plan
 from .models import MissionIntent, MissionPlan, MissionPlanStage, Task
@@ -22,7 +23,6 @@ from .persona_assignments import (
 from .runtime_config import RuntimeConfig
 from .states import StageStatus, TaskState
 from .store import IncidentStore, ProofStore, RunStore, TaskStore
-from .ticker import RunUntilSettledResult, TickEngine
 from .worklog import append_persona_worklog
 
 
@@ -77,12 +77,7 @@ class PersonaDiagnosticResult:
 
 
 class PersonaDiagnosticController:
-    """Bounded live-token diagnostic runner for one Harness persona.
-
-    This intentionally creates a normal Harness task and uses TickEngine for the
-    agent turn. The diagnostic surface is small, but evidence and events stay in
-    the same stores Mission Control already understands.
-    """
+    """Retained typed boundary for the retired mission diagnostic runner."""
 
     def __init__(
         self,
@@ -94,7 +89,7 @@ class PersonaDiagnosticController:
         incident_store: IncidentStore | None = None,
         assignment_store: PersonaAssignmentStore | None = None,
         instance_store: PersonaInstanceStore | None = None,
-        engine_factory: Callable[..., TickEngine] | None = None,
+        engine_factory: Callable[..., Any] | None = None,
         hygiene_fn: Callable[..., dict[str, Any]] = prepare_new_goal_runtime,
     ) -> None:
         self.config = config
@@ -104,10 +99,14 @@ class PersonaDiagnosticController:
         self.incident_store = incident_store or IncidentStore()
         self.assignment_store = assignment_store or PersonaAssignmentStore()
         self.instance_store = instance_store or PersonaInstanceStore()
-        self.engine_factory = engine_factory or TickEngine
+        self.engine_factory = engine_factory
         self.hygiene_fn = hygiene_fn
 
     def diagnose(self, options: PersonaDiagnosticOptions) -> PersonaDiagnosticResult:
+        raise LegacyOrchestratorRemoved(
+            "persona mission diagnostics are unavailable because the dispatch loop is retired",
+            safe_details={"persona_id": options.persona_id, "operation_kind": options.operation_kind},
+        )
         persona_id = _normalize_persona_id(options.persona_id)
         operation_id = f"personaop_{uuid.uuid4().hex[:12]}"
         started = time.monotonic()

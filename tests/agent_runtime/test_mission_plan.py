@@ -768,24 +768,6 @@ def _assert_graph_typed(task, *, site: str):
     assert task.mission_plan.stages, f"{site} created a stage-less plan"
 
 
-def test_goal_runner_create_task_is_graph_typed_even_with_a_blank_blueprint_id():
-    from agent_runtime.config import load_root_runtime_config
-    from agent_runtime.goal_runner import GoalRunOptions, MissionRuntimeController
-
-    controller = MissionRuntimeController(config=load_root_runtime_config())
-    for label, blueprint_id in (("default", None), ("blank", "   ")):
-        task = controller._create_task(
-            GoalRunOptions(
-                title="typed from birth",
-                description="goal runner must never create an un-typed goal",
-                acceptance_criteria=["plan exists"],
-                blueprint_id=blueprint_id,
-            )
-        )
-        _assert_graph_typed(task, site=f"goal_runner._create_task[{label}]")
-        assert task.mission_plan.blueprint_id
-
-
 def test_burn_in_case_tasks_are_graph_typed_at_creation():
     from agent_runtime.burn_in import STAGE47_CASES, _create_case_task
 

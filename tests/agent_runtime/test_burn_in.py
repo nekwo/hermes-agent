@@ -4,14 +4,16 @@ from datetime import timedelta
 import json
 from pathlib import Path
 
+import pytest
+
 from hermes_time import now
 
 from agent_runtime.burn_in import _product_repos_modified, burn_in_dir, create_burn_in, run_burn_in_case, summarize_burn_in, swarm_certification_allows_production
+from agent_runtime.errors import LegacyOrchestratorRemoved
 from agent_runtime.models import Incident, Proof, Task
 from agent_runtime.proof_rules import ProofType
 from agent_runtime.states import RunState, TaskState
 from agent_runtime.store import IncidentStore, ProofStore, RunStore, TaskStore
-from agent_runtime.ticker import RunUntilSettledResult
 
 
 class PassingBurnInEngine:
@@ -201,39 +203,6 @@ class BudgetCapReachedBurnInEngine:
         )
 
 
-def test_burn_in_run_writes_certification_ledger_and_summary():
-    manifest = run_burn_in_case("noop-orchestration", engine=PassingBurnInEngine())
-    root = burn_in_dir(manifest["burn_id"])
-
-    assert manifest["status"] == "passed"
-    assert manifest["actual_persona_sequence"] == ["qa"]
-    assert manifest["proof_ids"] == ["proof_burn_pass"]
-    assert (root / "manifest.json").exists()
-    assert (root / "new_goal_hygiene.json").exists()
-    assert (root / "task_create.json").exists()
-    created = json.loads((root / "task_create.json").read_text(encoding="utf-8"))["task"]
-    assert created["affected_repos"] == ["EterniaBackend", "EterniaLauncher", "hermes-agent"]
-    assert "backend_contract_first" in created["risk_flags"]
-    assert (root / "tick_log.jsonl").exists()
-    assert (root / "monitor_log.jsonl").exists()
-    assert (root / "archive_result.json").exists()
-    assert (root / "certification_notes.md").exists()
-    assert "dirty_state_after_run" in manifest
-    assert manifest["product_repos_modified"] is False
-
-    summary = summarize_burn_in(manifest["burn_id"])
-    assert summary["ok"] is True
-    assert summary["missing_files"] == []
-    # A passed case now satisfies the full unattended definition: the in-process
-    # driver emits daemon lifecycle events and the terminal case task is
-    # auto-archived, so the green streak advances.
-    assert summary["certification"]["state"] == "red"
-    assert summary["certification"]["consecutive_green"] == 1
-    assert summary["case_unattended"]["green"] is True
-    assert summary["case_unattended"]["failure_class"] is None
-    assert manifest["archive_batch"]
-
-
 def test_swarm_certification_gate_blocks_production_but_exempts_playground(isolate_agent_runtime_root):
     allowed, cert = swarm_certification_allows_production()
     assert allowed is False
@@ -255,69 +224,9 @@ def test_burn_in_product_repo_modified_flag_ignores_harness_only_dirty_state():
     assert _product_repos_modified(None) is False
 
 
-def test_burn_in_continues_through_safe_budget_approval_boundary():
-    engine = BudgetContinuationBurnInEngine()
-
-    manifest = run_burn_in_case("launcher-only-edit", engine=engine, max_actions=4)
-
-    assert manifest["status"] == "passed"
-    assert manifest["failure_class"] is None
-    assert manifest["settle_segments"] == 2
-    assert manifest["incident_ids"] == ["inc_budget"]
-    assert engine.calls == 2
-    # The terminal case task is auto-archived with its evidence; the closed
-    # incident record now lives in the archive batch.
-    archive_dir = Path(manifest["archive_dir"]) if manifest.get("archive_dir") else None
-    if archive_dir is None:
-        assert engine.incident_store.get("inc_budget").closed_at is not None
-    else:
-        archived = json.loads(next(archive_dir.rglob("inc_budget.json")).read_text(encoding="utf-8"))
-        assert archived["closed_at"]
-
-
-def test_burn_in_stops_when_budget_continuation_cap_reached():
-    engine = BudgetCapReachedBurnInEngine()
-
-    manifest = run_burn_in_case("launcher-only-edit", engine=engine, max_actions=6)
-
-    assert manifest["status"] == "blocked"
-    assert manifest["failure_class"]
-    assert manifest["settle_segments"] == 1
-    assert "inc_budget_cap" in manifest["incident_ids"]
-    assert engine.calls == 1
-
-
-def test_cross_stack_burn_in_case_has_explicit_repo_role_and_join_scope():
-    manifest = run_burn_in_case("cross-stack-edit", engine=PassingBurnInEngine())
-    root = burn_in_dir(manifest["burn_id"])
-
-    created = json.loads((root / "task_create.json").read_text(encoding="utf-8"))["task"]
-
-    assert created["affected_repos"] == ["EterniaBackend", "EterniaLauncher", "hermes-agent"]
-    assert created["suggested_roles"] == ["neko_supervisor", "backend_dev", "dev"]
-    assert "backend_contract_first" in created["risk_flags"]
-    assert "launcher_contract_second" in created["risk_flags"]
-    assert any("Do not add QA" in item for item in created["non_goals"])
-
-
-def test_custom_burn_in_case_instantiates_non_default_blueprint():
-    expectations = {
-        "custom-backend-proof": ("custom_backend_proof", ["scope", "backend_implementation"], "backend_contract_smoke"),
-        "custom-launcher-proof": ("custom_launcher_proof", ["scope", "implement"], "launcher_contract_smoke"),
-        "custom-cross-stack-proof": ("custom_cross_stack_proof", ["scope", "backend_implementation", "implement"], "launcher_contract_smoke"),
-    }
-    for case_id, (blueprint_id, stage_ids, final_recipe) in expectations.items():
-        manifest = run_burn_in_case(case_id, engine=PassingBurnInEngine())
-        root = burn_in_dir(manifest["burn_id"])
-
-        created = json.loads((root / "task_create.json").read_text(encoding="utf-8"))["task"]
-        plan = created["mission_plan"]
-
-        assert "custom_blueprint" in created["risk_flags"]
-        assert plan["blueprint_id"] == blueprint_id
-        assert plan["current_stage_id"] == "scope"
-        assert [stage["id"] for stage in plan["stages"]] == stage_ids
-        assert plan["stages"][-1]["proof_recipe_id"] == final_recipe
+def test_burn_in_execution_refuses_after_dispatch_loop_retirement():
+    with pytest.raises(LegacyOrchestratorRemoved, match="dispatch loop is retired"):
+        run_burn_in_case("noop-orchestration")
 
 
 def test_legacy_stage46_blueprint_ids_still_resolve():
@@ -357,18 +266,3 @@ def test_burn_in_create_cleans_previous_stage47_temp_state():
     assert run.id in manifest["new_goal_hygiene"]["cancelled_run_ids"]
     assert ts.get(old.id).state == TaskState.CANCELLED
     assert runs.get(run.id).state == RunState.CANCELLED
-
-
-def test_burn_in_records_freeze_findings_as_proof_and_incident():
-    engine = StalledBurnInEngine()
-
-    manifest = run_burn_in_case("launcher-only-edit", engine=engine)
-
-    assert manifest["status"] == "blocked"
-    assert manifest["failure_class"] == "run_stalled"
-    assert manifest["monitor_proof_ids"]
-    assert manifest["monitor_incident_ids"]
-    assert engine.proof_store.get(manifest["monitor_proof_ids"][0]).redaction_status == "safe"
-    incident = engine.incident_store.get(manifest["monitor_incident_ids"][0])
-    assert incident.kind == "runtime_freeze"
-    assert engine.task_store.get(manifest["task_id"]).state == TaskState.RUNNING

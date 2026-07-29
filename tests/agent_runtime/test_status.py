@@ -25,13 +25,6 @@ def _persona_runtime_config() -> AgentRuntimeConfig:
     )
 
 
-def test_status_counts_open_tasks():
-    ts=TaskStore(); n=now(); ts.create(Task(id="t", title="T", description="d", state=TaskState.CREATED, created_at=n, updated_at=n, requested_by="tony"))
-    s=build_status(task_store=ts)
-    assert s["open_tasks"] == 1 and s["next_actions"][0]["action"] == "run_slot"
-    assert s["dirty"] is True
-    assert s["open_task_ids"] == ["t"]
-    assert s["dirty_state"]["runtime"]["open_task_ids"] == ["t"]
 
 
 def test_status_lane_only_does_not_report_background_task_ids(isolate_agent_runtime_root):
@@ -111,67 +104,10 @@ def test_status_marks_next_action_blocked_by_open_incident():
     assert s["next_actions"][0]["action"] == "blocked_by_incident"
 
 
-def test_status_next_action_uses_mission_state_machine_for_READY_FOR_REVIEW():
-    ts=TaskStore(); n=now(); ts.create(Task(
-        id="t",
-        title="T",
-        description="d",
-        state=TaskState.RUNNING,
-        created_at=n,
-        updated_at=n,
-        requested_by="tony",
-        current_stage_id="stage_1",
-        stages=[TaskStage(id="stage_1", title="S", objective="O", status=StageStatus.READY_FOR_QA)],
-    ))
-
-    s=build_status(task_store=ts)
-
-    assert s["next_actions"][0]["action"] == "run_slot"
-    assert s["next_actions"][0]["reason"] == "blueprint stage verify needs slot qa"
 
 
-def test_status_uses_proof_store_for_resolved_incident_only_qa_blocker():
-    ts=TaskStore(); ps=ProofStore(); n=now()
-    task=Task(id="t", title="T", description="d", state=TaskState.BLOCKED, created_at=n, updated_at=n, requested_by="tony")
-    task.proof_ids=["proof_qa"]
-    ts.create(task)
-    ps.attach(Proof(id="proof_qa", task_id="t", stage_id=None, type=ProofType.QA_VERDICT, title="QA", path_or_value="blocked", created_by="qa", created_at=n, metadata={"verdict":"blocked", "findings":[{"kind":"open_incidents", "severity":"blocking"}]}))
-
-    s=build_status(task_store=ts, proof_store=ps)
-
-    assert s["next_actions"][0]["action"] == "run_slot"
-    assert s["next_actions"][0]["reason"] == "blueprint needs delivery recovery from QA blocked verdict"
 
 
-def test_status_next_action_owner_reports_backend_specialist_for_backend_stage():
-    ts = TaskStore()
-    n = now()
-    task = Task(
-        id="t",
-        title="Stage 47",
-        description="d",
-        state=TaskState.RUNNING,
-        created_at=n,
-        updated_at=n,
-        requested_by="tony",
-        affected_repos=["EterniaBackend", "EterniaLauncher"],
-        current_stage_id="stage_47_backend_contract_proof",
-        stages=[
-            TaskStage(
-                id="stage_47_backend_contract_proof",
-                title="Backend Contract Proof",
-                objective="Attach backend proof before the Launcher release gate.",
-                status=StageStatus.IMPLEMENTING,
-                test_plan=["python manage.py test api.tests.SystemHealthContractTests"],
-            )
-        ],
-    )
-    ts.create(task)
-
-    s = build_status(task_store=ts)
-
-    assert s["next_actions"][0]["action"] == "run_slot"
-    assert s["next_actions"][0]["stopped_progress"]["owner"] == "backend_dev"
 
 
 def test_status_blocks_budget_incident_after_continuation_cap():
@@ -236,39 +172,6 @@ def _force_undispatchable(monkeypatch) -> None:
     )
 
 
-def test_status_reports_undispatchable_mission_instead_of_raising(monkeypatch, isolate_agent_runtime_root):
-    """Stage 15.4 read-surface contract. `status --json` is what an operator runs to
-    diagnose a stuck mission; an undispatchable mission must NOT blank the whole
-    status surface. It is reported as typed, structured data instead."""
-
-    ts = TaskStore()
-    n = now()
-    ts.create(Task(id="t_broken", title="T", description="d", state=TaskState.RUNNING, created_at=n, updated_at=n, requested_by="tony"))
-    _force_undispatchable(monkeypatch)
-
-    s = build_status(task_store=ts)
-
-    entry = s["next_actions"][0]
-    assert entry["task_id"] == "t_broken"
-    # A dedicated action value: no consumer can mistake it for a dispatchable action.
-    assert entry["action"] == "undispatchable"
-    assert entry["stopped_progress"]["reason"] == "routing_undispatchable"
-    assert entry["stopped_progress"]["owner"] == "human"
-    # `tick` would just raise again; the operator must inspect, not retry.
-    assert entry["stopped_progress"]["next_action"] == "inspect_blocker"
-    failure = entry["routing_failure"]
-    assert failure["code"] == "legacy_orchestrator_removed"
-    assert failure["task_id"] == "t_broken"
-    assert failure["state"] == "running"
-    assert failure["mission_plan_absent"] is False
-    assert failure["blueprint_id_absent"] is False
-    assert failure["stage_count"] >= 1
-    assert "current_stage_id" in failure
-    # Routing facts only — never mission content.
-    assert not {"title", "description", "goal"} & set(failure)
-    # And the rest of the status surface still built.
-    assert s["open_tasks"] == 1
-    assert "observability" in s and "parity" in s
 
 
 def test_status_rolls_undispatchable_missions_up_to_top_level(monkeypatch, isolate_agent_runtime_root):
@@ -286,16 +189,6 @@ def test_status_rolls_undispatchable_missions_up_to_top_level(monkeypatch, isola
     assert s["undispatchable_missions"][0]["code"] == "legacy_orchestrator_removed"
 
 
-def test_status_reports_no_undispatchable_missions_when_routing_is_healthy():
-    ts = TaskStore()
-    n = now()
-    ts.create(Task(id="t", title="T", description="d", state=TaskState.CREATED, created_at=n, updated_at=n, requested_by="tony"))
-
-    s = build_status(task_store=ts)
-
-    assert s["undispatchable_missions"] == []
-    assert s["next_actions"][0]["action"] == "run_slot"
-    assert "routing_failure" not in s["next_actions"][0]
 
 
 def test_dispatch_path_still_raises_while_read_surface_degrades(monkeypatch, isolate_agent_runtime_root):
