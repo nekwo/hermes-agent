@@ -6,12 +6,11 @@ from utils import atomic_json_write
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.models import AgentPersona, Event, Incident, MissionIntent, MissionPlan, MissionPlanStage, Proof, Task, TaskStage
 from agent_runtime.persona_assignments import PersonaAssignmentSpec, PersonaAssignmentStore, PersonaInstanceStore
-from agent_runtime.proof_rules import ProofType
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.snapshot import AGENT_TOPOLOGY_NODE_ID_CAP, _agent_topology, _agent_topology_node, _archived_task_summaries, _parity_warnings, _workspace_summary, build_snapshot, goal_detail_for_task, write_snapshot
 from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.steering import execute_steer_action
-from agent_runtime.store import IncidentStore, ProofStore, RunStore, TaskStore, WorkspaceStore
+from agent_runtime.store import IncidentStore, RunStore, TaskStore, WorkspaceStore
 from agent_runtime.events import EventLog
 from agent_runtime.serde import to_jsonable
 
@@ -405,7 +404,7 @@ def test_snapshot_exposes_stage38_goal_flow_read_models(isolate_agent_runtime_ro
     assert row["proof_gate_state"]["gate_state"] == "incomplete"
     assert row["proof_gate_state"]["missing_stage_ids"] == ["implement", "verify"]
     assert row["proof_gate_state"]["why_not_ready"]
-    assert _goal_detail_view(snap, "stage38")["operator_capabilities"]["actions"]["waive_proof"]["enabled"] is True
+    assert _goal_detail_view(snap, "stage38")["operator_capabilities"]["actions"]["waive_proof"]["enabled"] is False
 
 
 def test_mission_level_actors_emit_typed_persona_instance_id(monkeypatch, isolate_agent_runtime_root):
@@ -682,35 +681,6 @@ def test_snapshot_projects_bounded_stage_verification_with_parity(isolate_agent_
         }
     task.harness_self_heal = {"stage_observations": observations}
     TaskStore().create(task)
-    proof_store = ProofStore()
-    for proof_index in range(8):
-        proof_store.attach(
-            Proof(
-                id=f"proof_observed_{proof_index}",
-                task_id=task.id,
-                stage_id="stage_13",
-                type=ProofType.TEST_RUN,
-                title="Observed proof",
-                path_or_value="observed.log",
-                created_by="dev",
-                created_at=n,
-                metadata={"status": "passed"},
-            )
-        )
-    proof_store.attach(
-        Proof(
-            id="proof_auth_passed",
-            task_id=task.id,
-            stage_id="stage_13",
-            type=ProofType.TEST_RUN,
-            title="Authoritative proof",
-            path_or_value="auth.log",
-            created_by="harness",
-            created_at=n,
-            metadata={"status": "passed"},
-        )
-    )
-
     snap = build_snapshot()
     row = next(item for item in list(snap["goals"].values()) if item["task_id"] == task.id)
     verification = row["stage_verification"]
@@ -723,7 +693,7 @@ def test_snapshot_projects_bounded_stage_verification_with_parity(isolate_agent_
     assert latest["repo_diff"]["diff_chars"] == 133
     assert len(latest["repo_diff"]["excluded_baseline_paths"]) == 6
     assert len(latest["observed"]["proof_ids"]) == 8
-    assert latest["observed"]["status"] == "passed"
+    assert latest["observed"]["status"] == "pending"
     assert latest["authoritative"]["status"] == "passed"
     assert latest["authoritative"]["run_id"] == "run_auth_13"
     assert latest["tamper_flag"] is True
@@ -912,45 +882,15 @@ def test_snapshot_exposes_terminal_and_active_run_execution_truth(isolate_agent_
     assert snap["summary"]["running_runs"] == 1
 
 
-def test_snapshot_top_level_proofs_include_status_and_command_metadata(isolate_agent_runtime_root):
+def test_snapshot_top_level_proofs_are_empty_after_proof_store_removal(isolate_agent_runtime_root):
     ts = TaskStore()
-    proofs = ProofStore()
     n = now()
     task = Task(id="proofed", title="Proofed", description="d", state=TaskState.DONE, created_at=n, updated_at=n, requested_by="tony")
     ts.create(task)
-    proofs.attach(
-        Proof(
-            id="proof_test",
-            task_id=task.id,
-            stage_id="stage_1",
-            type=ProofType.TEST_RUN,
-            title="Command proof: pytest tests/example.py",
-            path_or_value="proofs/proofed/artifacts/proof_test.log",
-            created_by="harness",
-            created_at=n,
-            metadata={"status": "passed", "exit_code": 0, "duration_ms": 42},
-            redaction_status="safe",
-        )
-    )
 
-    snap = build_snapshot(task_store=ts, proof_store=proofs)
+    snap = build_snapshot(task_store=ts)
 
-    assert snap["proofs"] == [
-        {
-            "proof_id": "proof_test",
-            "task_id": "proofed",
-            "stage_id": "stage_1",
-            "type": "test_run",
-            "title": "Command proof: pytest tests/example.py",
-            "status": "passed",
-            "exit_code": 0,
-            "duration_ms": 42,
-            "has_artifact": True,
-            "redaction_status": "safe",
-            "created_by": "harness",
-            "created_at": n,
-        }
-    ]
+    assert snap["proofs"] == []
 
 
 def test_snapshot_exposes_typed_mission_role_and_stage_streams(isolate_agent_runtime_root):

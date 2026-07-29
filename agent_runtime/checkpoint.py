@@ -105,7 +105,6 @@ ENTITY_CLASSES: tuple[EntityClass, ...] = (
     EntityClass("repo_bundles", paths.repo_bundles_dir, recursive=True),
     EntityClass("role_envelopes", paths.role_envelopes_dir, recursive=True),
     EntityClass("role_checklists", paths.role_checklists_dir, recursive=True),
-    EntityClass("proof_batches", paths.proof_batches_dir, recursive=True),
     EntityClass("self_tests", paths.self_tests_dir, recursive=True),
     EntityClass("packet_artifacts", paths.packet_artifacts_dir, recursive=True),
 )

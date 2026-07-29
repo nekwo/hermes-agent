@@ -3,7 +3,7 @@
 Extracted from ``agent_runtime/visual_trace_evidence.py`` ahead of the mission-lane
 removal (``docs/agent-runtime-harness/16-mission-lane-removal.md`` S1/S6). That file
 has two halves with opposite fates: the half that builds a ``Proof`` row and writes
-it through ``ProofStore`` dies with the proof machinery; the half below only *reads*
+it through the retired mission evidence store dies with that machinery; the half below only *reads*
 a tool-progress payload and answers "was this a Stage C screenshot, and which PNG is
 it?". Stage C visual proof survives, so these do.
 

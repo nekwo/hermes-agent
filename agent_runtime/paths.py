@@ -374,17 +374,6 @@ def packet_raw_artifact_path(task_id: str, packet_id: str) -> Path:
     return packet_artifacts_task_dir(task_id) / f"{_safe_path_token(packet_id)}.raw.json"
 
 
-def proof_batches_dir() -> Path:
-    return store_root() / "proof_batches"
-
-
-def proof_batches_task_dir(task_id: str) -> Path:
-    return proof_batches_dir() / _safe_path_token(task_id)
-
-
-def proof_batch_path(task_id: str, proof_batch_id: str) -> Path:
-    return proof_batches_task_dir(task_id) / f"{_safe_path_token(proof_batch_id)}.json"
-
 def proof_sandbox_task_dir(task_id: str) -> Path:
     return proof_sandbox_root() / _safe_path_token(task_id)
 

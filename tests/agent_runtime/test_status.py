@@ -4,12 +4,11 @@ from hermes_time import now
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.errors import LegacyOrchestratorRemoved
 from agent_runtime.models import Incident, Proof, Task, TaskStage
-from agent_runtime.proof_rules import ProofType
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.state_machine import MissionStateMachine
 from agent_runtime.states import RunState, StageStatus, TaskState
 from agent_runtime.status import build_status
-from agent_runtime.store import IncidentStore, ProofStore, RunStore, TaskStore
+from agent_runtime.store import IncidentStore, RunStore, TaskStore
 from agent_runtime.runtime_instances import GoalRuntimeInstanceStore
 from agent_runtime.repo_bundles import acquire_repo_bundle_locks
 
@@ -43,13 +42,11 @@ def test_status_lane_only_does_not_report_background_task_ids(isolate_agent_runt
     assert s["background_task_ids"] == []
 
 
-def test_status_surfaces_swarm_certification_state(isolate_agent_runtime_root):
+def test_status_omits_retired_burn_in_certification_state(isolate_agent_runtime_root):
     s = build_status()
 
     assert s["swarm"]["enabled"] is False
-    assert s["swarm"]["certification"]["required"] is True
-    assert s["swarm"]["certification"]["state"] == "red"
-    assert s["swarm"]["certification"]["consecutive_green"] == 0
+    assert "certification" not in s["swarm"]
 
 
 def test_status_projects_operator_channels_for_persona_instances(monkeypatch, isolate_agent_runtime_root):

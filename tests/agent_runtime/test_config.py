@@ -185,7 +185,7 @@ def test_normal_worker_flow_defaults_off_and_can_be_enabled(tmp_path):
     default_config = load_agent_runtime_config(tmp_path / "missing.yaml")
 
     assert default_config.normal_worker_flow.enabled is False
-    assert default_config.normal_worker_flow.auto_final_gate_after_delivery is True
+    assert not hasattr(default_config.normal_worker_flow, "auto_final_gate_after_delivery")
 
     p = tmp_path / "config.yaml"
     p.write_text(

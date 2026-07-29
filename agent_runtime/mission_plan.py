@@ -7,10 +7,8 @@ from typing import Any, Iterable
 from hermes_time import now
 
 from .decision_schema import DecisionPayloadInvalid, DecisionType
-from .final_gate import goal_demands_exact_proof, goal_named_gate_commands
 from .models import MissionIntent, MissionPlan, MissionPlanStage, Proof, Task, TaskStage
-from .proof_recipes import resolve_proof_recipe
-from .proof_rules import ProofType
+from .models import ProofType
 from .stage_intent import no_product_edit_recipe_id
 from .states import StageStatus
 
@@ -271,11 +269,6 @@ def validate_mission_plan(plan: MissionPlan) -> list[str]:
             errors.append(f"stage {stage.id} repo {stage.repo!r} is not allowed")
         if stage.kind not in ALLOWED_KINDS:
             errors.append(f"stage {stage.id} kind {stage.kind!r} is not allowed")
-        if stage.proof_recipe_id:
-            try:
-                resolve_proof_recipe(stage.proof_recipe_id)
-            except Exception as exc:
-                errors.append(f"stage {stage.id} proof_recipe_id {stage.proof_recipe_id!r} is invalid: {exc}")
         for dep in stage.depends_on:
             if dep not in ids and not any(candidate.id == dep for candidate in plan.stages):
                 errors.append(f"stage {stage.id} depends on unknown stage {dep!r}")
@@ -690,8 +683,6 @@ def _stage_from_raw(task: Task, raw: dict[str, Any], *, intent: MissionIntent, e
         and _raw_stage_agent_runtime_test_files(raw, intent=intent, task=task)
     ):
         recipe = None
-    if recipe:
-        resolve_proof_recipe(recipe)
     kind = str(raw.get("kind") or (existing.kind if existing else ("proof_only" if recipe else "implementation"))).strip() or "implementation"
     if kind not in ALLOWED_KINDS:
         kind = "proof_only" if recipe else "implementation"
@@ -804,19 +795,7 @@ def _legacy_stage_defaults(task: Task, typed: MissionPlanStage, plan: MissionPla
 
 
 def _exact_goal_proof_stage_defaults(task: Task, typed: MissionPlanStage) -> dict[str, list[str]] | None:
-    if typed.owner not in {"dev", "backend_dev"} or typed.kind not in {"implementation", "proof_only"}:
-        return None
-    if not goal_demands_exact_proof(task):
-        return None
-    if not _exact_goal_proof_applies_to_repo(task, typed.repo):
-        return None
-    commands = goal_named_gate_commands(task, typed.repo)
-    if not commands:
-        return None
-    return {
-        "affected_paths": _extract_goal_repo_relative_paths(task),
-        "test_plan": commands,
-    }
+    return None
 
 
 def _exact_goal_proof_applies_to_repo(task: Task, repo: str) -> bool:
@@ -1175,10 +1154,6 @@ def _recipe_from_payload(payload: dict[str, Any], handoff: dict[str, Any], *, ta
         if not recipe:
             continue
         if not explicit and target_repo == "EterniaBackend" and recipe == "backend_contract_smoke" and not _is_backend_no_edit_recipe_text(backend_text):
-            continue
-        try:
-            resolve_proof_recipe(recipe)
-        except Exception:
             continue
         return recipe
     return None

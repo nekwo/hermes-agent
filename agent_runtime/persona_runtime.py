@@ -745,14 +745,7 @@ def _stage_repo_scope_for_persona(persona: AgentPersona, ctx: AgentContext) -> s
     stage_repo = str(getattr(stage, "repo", "") or "").strip() if stage is not None else ""
     if stage_repo not in {"EterniaBackend", "EterniaLauncher", "hermes-agent"}:
         return None
-    from .final_gate import default_blueprint_placeholder_repo_override
-
-    # On the bundled default blueprint the stage repo is a placeholder; a goal
-    # resolved to a single different repo grounds there instead (observed live
-    # 2026-07-03, task_8e1e0832: backend_dev grounded in an EterniaBackend
-    # worktree for a hermes-agent goal, so the goal-named gate command failed
-    # with file-not-found in the wrong tree).
-    stage_repo = default_blueprint_placeholder_repo_override(ctx.task, stage_repo) or stage_repo
+    stage_repo = _default_blueprint_placeholder_repo_override(ctx.task, stage_repo) or stage_repo
     persona_scope = getattr(persona, "repo_scope", None)
     if persona_scope:
         try:
@@ -763,6 +756,35 @@ def _stage_repo_scope_for_persona(persona: AgentPersona, ctx: AgentContext) -> s
         if scoped is None or stage_ctx is None or scoped.workdir != stage_ctx.workdir:
             return None
     return stage_repo
+
+
+def _default_blueprint_placeholder_repo_override(task: Task, stage_repo: str | None) -> str | None:
+    """Let a single resolved repo override a bundled-plan placeholder repo."""
+
+    stage_repo = str(stage_repo or "").strip()
+    if not stage_repo:
+        return None
+    plan = getattr(task, "mission_plan", None)
+    if str(getattr(plan, "blueprint_id", "") or "") != "neko_two_dev_default":
+        return None
+    task_repos = [str(item).strip() for item in (getattr(task, "affected_repos", []) or []) if str(item).strip()]
+    if len(task_repos) != 1 or task_repos[0] == stage_repo:
+        return None
+    task_repo = task_repos[0]
+    if task_repo == "hermes-agent":
+        return task_repo
+    plan_repos = {
+        str(getattr(stage, "repo", "") or "").strip()
+        for stage in (getattr(plan, "stages", None) or [])
+        if str(getattr(stage, "repo", "") or "").strip()
+    }
+    task_and_stage_are_product_repos = (
+        task_repo in {"EterniaBackend", "EterniaLauncher"}
+        and stage_repo in {"EterniaBackend", "EterniaLauncher"}
+    )
+    if task_and_stage_are_product_repos and {task_repo, stage_repo}.issubset(plan_repos):
+        return None
+    return task_repo
 
 
 def _handoff_repo_scope_for_persona(persona: AgentPersona, ctx: AgentContext) -> str | None:

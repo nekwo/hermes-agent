@@ -478,7 +478,6 @@ def _template_items(role_id: str, stage_kind: str) -> list[RoleChecklistItem]:
         _item("patch", "Patch product code", role_id, ["Relevant product files changed and unrelated churn avoided."]),
         _item("self_test", "Run focused self-test", role_id, ["Focused command exits 0 or blocker is recorded."]),
         _item("attach_self_test", "Attach self-test evidence", role_id, ["Self-test evidence refs are recorded when available."]),
-        _item("final_gate", "Request or satisfy final gate", role_id, ["Harness final gate proof is requested or passed."]),
         _item("handoff", "Hand off to QA", role_id, ["Delivery summary and proof refs are ready for QA."]),
     ]
 

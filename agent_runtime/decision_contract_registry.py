@@ -1214,8 +1214,6 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "role_envelope.closed": EventContract("role_envelope.closed", "Role envelope closed", ("envelope_id", "close_reason"), ("role_id", "mission_stage_id")),
     "role_checklist.created": EventContract("role_checklist.created", "Role checklist created", ("checklist_id", "role_id"), ("mission_stage_id",)),
     "role_checklist.item_updated": EventContract("role_checklist.item_updated", "Role checklist item updated", ("checklist_id", "revision"), ("item_ids", "role_id")),
-    "proof_batch.recorded": EventContract("proof_batch.recorded", "Proof batch recorded", ("proof_batch_id", "status"), ("mission_stage_id", "recipe_id", "proof_ids")),
-    "proof_batch.superseded": EventContract("proof_batch.superseded", "Proof batch superseded", ("proof_batch_id", "status"), ("mission_stage_id", "recipe_id")),
     "persona_instance.created": EventContract("persona_instance.created", "Persona instance created", ("persona_instance_id",), ("persona_id",)),
     "persona_instance.attributed": EventContract("persona_instance.attributed", "Persona instance attributed to a goal", ("persona_instance_id", "goal_id"), ("persona_id", "spawned_by")),
     "persona_instance.steered": EventContract("persona_instance.steered", "Persona instance steering edge changed", ("persona_instance_id", "goal_id"), ("persona_id", "spawned_by", "steered_by", "added", "removed", "detached")),

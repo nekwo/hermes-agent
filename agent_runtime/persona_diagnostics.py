@@ -22,7 +22,7 @@ from .persona_assignments import (
 )
 from .runtime_config import RuntimeConfig
 from .states import StageStatus, TaskState
-from .store import IncidentStore, ProofStore, RunStore, TaskStore
+from .store import IncidentStore, RunStore, TaskStore
 from .worklog import append_persona_worklog
 
 
@@ -85,7 +85,6 @@ class PersonaDiagnosticController:
         config: RuntimeConfig,
         task_store: TaskStore | None = None,
         run_store: RunStore | None = None,
-        proof_store: ProofStore | None = None,
         incident_store: IncidentStore | None = None,
         assignment_store: PersonaAssignmentStore | None = None,
         instance_store: PersonaInstanceStore | None = None,
@@ -95,7 +94,6 @@ class PersonaDiagnosticController:
         self.config = config
         self.task_store = task_store or TaskStore()
         self.run_store = run_store or RunStore()
-        self.proof_store = proof_store or ProofStore()
         self.incident_store = incident_store or IncidentStore()
         self.assignment_store = assignment_store or PersonaAssignmentStore()
         self.instance_store = instance_store or PersonaInstanceStore()
@@ -167,7 +165,6 @@ class PersonaDiagnosticController:
             task_store=self.task_store,
             run_store=self.run_store,
             incident_store=self.incident_store,
-            proof_store=self.proof_store,
             config=self.config,
         )
         settled = engine.run_until_settled(

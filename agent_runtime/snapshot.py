@@ -5,6 +5,7 @@ import json
 import re
 import threading
 import time
+from types import SimpleNamespace
 import hashlib
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -59,14 +60,12 @@ from .resolution import resolution_payload, resolve_runtime, suspect_default_roo
 from .personas import blocked_tool_names, effective_toolsets, seed_personas
 from .errors import LegacyOrchestratorRemoved
 from .prompt_observability import _SkillObservabilityResolver, snapshot_prompt_observability
-from .proof_gates import task_verdict_proof_satisfied
 from .realm_sync import read_realm_sync_sidecar
 from .repo_bundles import RepoBundleStore, bundle_queue_summary, qa_waiting_on, repo_bundle_delivery_summary, repo_bundle_summary, simplified_phase_for_task
 from .runtime_instances import GoalRuntimeInstanceStore, runtime_instance_summary, runtime_instances_summary
 from .repo_context import resolve_affected_repo_workdir
 from .role_checklists import RoleChecklist, RoleChecklistStore, checklist_summary
 from .role_envelopes import RoleEnvelope, RoleEnvelopeStore, role_envelope_summary
-from .proof_batches import ProofBatch, ProofBatchStore, proof_batch_summary
 from .scope_control import issue_discovery_counts, untriaged_issue_discoveries
 from .simplified_contract import public_decision_type_value
 from .state_machine import MissionStateMachine
@@ -74,7 +73,7 @@ from .serde import from_jsonable, to_jsonable
 from .self_test_evidence import SelfTestEvidenceStore, self_test_summary
 from .states import RunState, StageStatus, TaskState
 from .steering import build_steer_actions
-from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, ProofStore, RealmStore, RunStore, TaskStore, WorkspaceStore
+from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, RealmStore, RunStore, TaskStore, WorkspaceStore
 from .tool_visibility import (
     _profile_readiness_for_visibility,
     resolve_tool_visibility,
@@ -126,7 +125,7 @@ ARCHIVED_TASKS_REF_RECENT_CAP = 25
 # ``MissionGoalSummary`` (the launcher's goal fold) never renders any of these
 # fields off a goal — ``role_streams`` / ``stage_streams`` / ``timeline`` /
 # ``mission_plan`` / ``persona_streams`` are not even parsed, and
-# ``role_envelopes`` / ``role_checklists`` / ``proof_batches`` parse to unread
+# ``role_envelopes`` / ``role_checklists`` parse to unread
 # fields (the top-level ``role_envelopes`` / ``role_checklists`` sections feed
 # the roster; the goal-row copies are dead). They leave the head and are served
 # on demand by ``harness goal detail <task_id> --json``. The KEPT mission-level
@@ -145,7 +144,6 @@ GOAL_DETAIL_ONLY_FIELDS = frozenset(
         "persona_streams",
         "proof_summaries",
         "self_test_summaries",
-        "proof_batches",
         "verification_status",
         "operator_capabilities",
         "repo_bundles",
@@ -464,7 +462,6 @@ def _build_snapshot_uncoalesced(
     task_store = task_store or TaskStore()
     run_store = run_store or RunStore()
     agent_store = agent_store or AgentStore()
-    proof_store = proof_store or ProofStore()
     incident_store = incident_store or IncidentStore()
     # A snapshot calls for_task/for_session/tail dozens of times on the same log;
     # CachedEventLog reads events.jsonl once and serves all of them from memory.
@@ -498,12 +495,10 @@ def _build_snapshot_uncoalesced(
     incidents, incidents_evicted_count = incident_store.list_open_with_closed_count()
     role_envelope_store = RoleEnvelopeStore(event_log=event_log)
     role_checklist_store = RoleChecklistStore(event_log=event_log)
-    proof_batch_store = ProofBatchStore(event_log=event_log)
     repo_bundle_store = RepoBundleStore(event_log=event_log)
     runtime_instance_store = GoalRuntimeInstanceStore(event_log=event_log)
     role_envelopes = role_envelope_store.list_all()
     role_checklists = role_checklist_store.list_all()
-    proof_batches = proof_batch_store.list_all()
     repo_bundles = repo_bundle_store.list_all()
     runtime_instances = runtime_instance_store.list_all()
     archived_tasks = _archived_task_summaries()
@@ -545,7 +540,6 @@ def _build_snapshot_uncoalesced(
     proofs = []
     self_tests = []
     for task in tasks:
-        proofs.extend(proof_store.list_for_task(task.id))
         self_tests.extend(SelfTestEvidenceStore(event_log=event_log).list_for_task(task.id))
     active_runs = [run for run in runs if run.state in ACTIVE_RUN_STATES]
     active_workers = worker_session_store.find_active()
@@ -600,7 +594,7 @@ def _build_snapshot_uncoalesced(
             persona_instances=persona_instances,
             session_db=session_db,
             tasks=tasks,
-            proof_store=proof_store,
+            proof_store=None,
             daemon=None,
             realm=active_realm_name,
             workspace=active_workspace_name,
@@ -658,7 +652,7 @@ def _build_snapshot_uncoalesced(
         # GOAL is the wire name). The old ``tasks`` wire section retires; every
         # field BOTH projections carried lives once here — the merged goal row
         # is the full ``_task_summary`` (self_tests / role_envelopes /
-        # role_checklists / proof_batches / stage_verification all threaded, as
+        # role_checklists / stage_verification all threaded, as
         # the old ``tasks`` section had them) PLUS the goal-only fields (``id``,
         # ``kind``, resolved ``realm_id``). Keyed by ``task_id`` — the unique
         # per-row id, matching the on-disk ``task_*.json`` store keying. NOT
@@ -670,7 +664,7 @@ def _build_snapshot_uncoalesced(
             [
                 _goal_head(_goal_projection_from_task(
                     t,
-                    proof_store.list_for_task(t.id),
+                    [],
                     tasks,
                     incidents,
                     runs,
@@ -680,7 +674,6 @@ def _build_snapshot_uncoalesced(
                     self_tests=SelfTestEvidenceStore(event_log=event_log).list_for_task(t.id),
                     role_envelopes=[item for item in role_envelopes if item.task_id == t.id],
                     role_checklists=[item for item in role_checklists if item.task_id == t.id],
-                    proof_batches=[item for item in proof_batches if item.task_id == t.id],
                     persona_assignments=[item for item in persona_assignments if item.task_id == t.id],
                     repo_bundles=[item for item in repo_bundles if item.task_id == t.id],
                     runtime_instances=[item for item in runtime_instances if item.task_id == t.id],
@@ -730,7 +723,6 @@ def _build_snapshot_uncoalesced(
         "worker_sessions": [worker_session_summary(worker) for worker in workers],
         "role_envelopes": [role_envelope_summary(item, checklist_store=role_checklist_store) for item in role_envelopes],
         "role_checklists": [checklist_summary(item) for item in role_checklists],
-        "proof_batches": [proof_batch_summary(item) for item in proof_batches],
         "repo_bundles": [repo_bundle_summary(item) for item in repo_bundles],
         "bundle_queue": bundle_queue_summary(repo_bundles),
         "runtime_instances": [runtime_instance_summary(item) for item in runtime_instances],
@@ -1775,7 +1767,6 @@ def _archived_task_summary(task_id: str, raw: dict, archive_batch: str, reason: 
     proofs = _archived_proof_summaries(batch_dir, task_id) if batch_dir is not None else []
     role_envelopes = _archived_role_envelope_summaries(batch_dir, task_id) if batch_dir is not None else []
     role_checklists = _archived_role_checklist_summaries(batch_dir, task_id) if batch_dir is not None else []
-    proof_batches = _archived_proof_batch_summaries(batch_dir, task_id) if batch_dir is not None else []
     persona_assignments = _archived_persona_assignment_summaries(batch_dir, task_id) if batch_dir is not None else []
     repo_bundles = _archived_repo_bundle_summaries(batch_dir, task_id) if batch_dir is not None else []
     incident_ids = raw.get("incident_ids") if isinstance(raw.get("incident_ids"), list) else raw.get("open_incident_ids") if isinstance(raw.get("open_incident_ids"), list) else []
@@ -1812,7 +1803,6 @@ def _archived_task_summary(task_id: str, raw: dict, archive_batch: str, reason: 
         "recent_events": recent_events,
         "role_envelopes": role_envelopes,
         "role_checklists": role_checklists,
-        "proof_batches": proof_batches,
         "persona_assignment_ids": [item.get("assignment_id") for item in persona_assignments if item.get("assignment_id")],
         "persona_assignments": persona_assignments,
         "repo_bundle_ids": [item.get("repo_bundle_id") for item in repo_bundles if item.get("repo_bundle_id")],
@@ -1832,7 +1822,6 @@ def _archived_task_summary(task_id: str, raw: dict, archive_batch: str, reason: 
             recent_events,
             role_envelopes=role_envelopes,
             role_checklists=role_checklists,
-            proof_batches=proof_batches,
         ),
     }
 
@@ -2174,22 +2163,6 @@ def _archived_role_checklist_summaries(batch_dir, task_id: str) -> list[dict]:
             continue
         try:
             summaries.append(checklist_summary(from_jsonable(RoleChecklist, raw)))
-        except Exception:
-            continue
-    return summaries
-
-
-def _archived_proof_batch_summaries(batch_dir, task_id: str) -> list[dict]:
-    proof_batch_dir = batch_dir / "proof_batches" / task_id
-    if not proof_batch_dir.exists():
-        return []
-    summaries: list[dict] = []
-    for proof_batch_path in sorted(proof_batch_dir.glob("*.json")):
-        raw = _read_json(proof_batch_path)
-        if str(raw.get("task_id") or "") != task_id:
-            continue
-        try:
-            summaries.append(proof_batch_summary(from_jsonable(ProofBatch, raw)))
         except Exception:
             continue
     return summaries
@@ -2540,14 +2513,12 @@ def _archived_role_streams(
     *,
     role_envelopes: list[dict] | None = None,
     role_checklists: list[dict] | None = None,
-    proof_batches: list[dict] | None = None,
 ) -> list[dict]:
     mission_plan = raw.get("mission_plan") if isinstance(raw.get("mission_plan"), dict) else {}
     role_ids: list[str] = []
     role_envelopes = role_envelopes or []
     role_checklists = role_checklists or []
-    proof_batches = proof_batches or []
-    if not (mission_plan.get("enabled") is True or mission_plan.get("stages") or role_envelopes or role_checklists or proof_batches):
+    if not (mission_plan.get("enabled") is True or mission_plan.get("stages") or role_envelopes or role_checklists):
         return []
     role_ids.extend(["neko_supervisor", "backend_dev", "dev", "qa"])
     for stage in mission_plan.get("stages") or []:
@@ -2564,8 +2535,6 @@ def _archived_role_streams(
         role_ids.append(str(envelope.get("role_id") or ""))
     for checklist in role_checklists:
         role_ids.append(str(checklist.get("role_id") or ""))
-    for batch in proof_batches:
-        role_ids.append(str(batch.get("role_id") or ""))
 
     seen: set[str] = set()
     streams: list[dict] = []
@@ -2577,13 +2546,6 @@ def _archived_role_streams(
         stream_events = [_archived_event_stream_item(event) for event in role_events][-20:]
         stream_envelopes = [item for item in role_envelopes if str(item.get("role_id") or "") == role_id]
         stream_checklists = [item for item in role_checklists if str(item.get("role_id") or "") == role_id]
-        envelope_ids = {str(item.get("envelope_id") or "") for item in stream_envelopes}
-        stream_batches = [
-            item
-            for item in proof_batches
-            if str(item.get("role_id") or "") == role_id
-            or str(item.get("role_envelope_id") or "") in envelope_ids
-        ]
         if not stream_events:
             stream_events = [_empty_archived_role_stream_item(raw, role_id)]
         streams.append(
@@ -2596,7 +2558,6 @@ def _archived_role_streams(
                 "events": stream_events,
                 "role_envelopes": stream_envelopes,
                 "role_checklists": stream_checklists,
-                "proof_batches": stream_batches,
             }
         )
     return streams
@@ -2723,8 +2684,8 @@ def _archived_role_current_stage(raw: dict, persona_id: str) -> str | None:
     return current_stage_id if isinstance(current_stage_id, str) else None
 
 
-def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, events=None, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None, flow_timeline_accountant=None, event_log=None):
-    gate = task_verdict_proof_satisfied(task, proofs)
+def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, events=None, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None, flow_timeline_accountant=None, event_log=None):
+    gate = SimpleNamespace(allowed=True, missing=[])
     current_stage_id = _task_current_stage_id(task)
     current = next((s for s in task_stage_records(task) if s.id == current_stage_id), None)
     untriaged = untriaged_issue_discoveries(task)
@@ -2798,13 +2759,11 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
             persona_assignments=assignments,
             role_envelopes=role_envelopes or [],
             role_checklists=role_checklists or [],
-            proof_batches=proof_batches or [],
         ),
         "persona_assignment_ids": [assignment.id for assignment in assignments],
         "persona_streams": _persona_streams(task, assignments, runs or [], events or []),
         "role_envelopes": [role_envelope_summary(item) for item in (role_envelopes or [])],
         "role_checklists": [checklist_summary(item) for item in (role_checklists or [])],
-        "proof_batches": [proof_batch_summary(item) for item in (proof_batches or [])],
         "stage_streams": _stage_streams(task, events or []),
         "mission_level_state": _mission_level_state(
             task,
@@ -2821,7 +2780,6 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
                 persona_assignments=assignments,
                 role_envelopes=role_envelopes or [],
                 role_checklists=role_checklists or [],
-                proof_batches=proof_batches or [],
             ),
         ),
         "mission_flow_timeline": _mission_flow_timeline(task, events or [], accountant=flow_timeline_accountant),
@@ -3055,10 +3013,10 @@ def _task_current_stage_id(task) -> str | None:
     return getattr(plan, "current_stage_id", None) if plan is not None else getattr(task, "current_stage_id", None)
 
 
-def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events, *, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None, flow_timeline_accountant=None, workspaces=None, event_log=None) -> dict:
+def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events, *, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None, flow_timeline_accountant=None, workspaces=None, event_log=None) -> dict:
     # S4 goals/tasks merge: the goal entity is the FULL task summary (all the
     # rich lanes the old ``tasks`` section carried — self_tests, role_envelopes,
-    # role_checklists, proof_batches, accounted stage_verification) UNIONED with
+    # role_checklists and accounted stage_verification) UNIONED with
     # the goal-only fields below. The old ``goals`` projection omitted these
     # lanes; the merged single owner must carry them so no field the retired
     # ``tasks`` section held is lost.
@@ -3074,7 +3032,6 @@ def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events,
         self_tests=self_tests,
         role_envelopes=role_envelopes,
         role_checklists=role_checklists,
-        proof_batches=proof_batches,
         persona_assignments=persona_assignments,
         repo_bundles=repo_bundles,
         runtime_instances=runtime_instances,
@@ -3128,14 +3085,12 @@ def goal_detail_for_task(task_id: str, *, event_log=None) -> dict | None:
     tasks = task_store.list_all()
     run_store = RunStore()
     runs = run_store.list_all()
-    proof_store = ProofStore()
     incident_store = IncidentStore()
     incidents = incident_store.list_all()
     worker_session_store = WorkerSessionStore(event_log=event_log)
     workers = worker_session_store.list_all()
     role_envelope_store = RoleEnvelopeStore(event_log=event_log)
     role_checklist_store = RoleChecklistStore(event_log=event_log)
-    proof_batch_store = ProofBatchStore(event_log=event_log)
     repo_bundle_store = RepoBundleStore(event_log=event_log)
     runtime_instance_store = GoalRuntimeInstanceStore(event_log=event_log)
     workspace_store = WorkspaceStore()
@@ -3150,7 +3105,7 @@ def goal_detail_for_task(task_id: str, *, event_log=None) -> dict | None:
             persona_assignments = PersonaAssignmentStore(event_log=event_log).list_all()
     return _goal_projection_from_task(
         task,
-        proof_store.list_for_task(task.id),
+        [],
         tasks,
         incidents,
         runs,
@@ -3160,7 +3115,6 @@ def goal_detail_for_task(task_id: str, *, event_log=None) -> dict | None:
         self_tests=SelfTestEvidenceStore(event_log=event_log).list_for_task(task.id),
         role_envelopes=[item for item in role_envelope_store.list_all() if item.task_id == task.id],
         role_checklists=[item for item in role_checklist_store.list_all() if item.task_id == task.id],
-        proof_batches=[item for item in proof_batch_store.list_all() if item.task_id == task.id],
         persona_assignments=[item for item in persona_assignments if item.task_id == task.id],
         repo_bundles=[item for item in repo_bundle_store.list_all() if item.task_id == task.id],
         runtime_instances=[item for item in runtime_instance_store.list_all() if item.task_id == task.id],
@@ -3460,9 +3414,6 @@ def agent_topology_for_task(task) -> dict:
     role_checklists = [
         item for item in RoleChecklistStore(event_log=event_log).list_all() if item.task_id == task.id
     ]
-    proof_batches = [
-        item for item in ProofBatchStore(event_log=event_log).list_all() if item.task_id == task.id
-    ]
     role_streams = _role_streams(
         task,
         event_log.for_task(task.id, limit=200),
@@ -3471,7 +3422,6 @@ def agent_topology_for_task(task) -> dict:
         persona_assignments=persona_assignments,
         role_envelopes=role_envelopes,
         role_checklists=role_checklists,
-        proof_batches=proof_batches,
     )
     return _agent_topology(
         task,
@@ -4098,7 +4048,6 @@ def _actor_budget_summary(runs, role_stream) -> dict:
     return {
         "active_run_count": len(runs),
         "token_budget_used": token_total or None,
-        "proof_batch_count": len((role_stream or {}).get("proof_batches") or []) if isinstance(role_stream, dict) else 0,
     }
 
 
@@ -4361,7 +4310,7 @@ def _coalesced_progress_events(events):
     return items
 
 
-def _role_streams(task, events, runs, workers, *, persona_assignments=None, role_envelopes=None, role_checklists=None, proof_batches=None) -> list[dict]:
+def _role_streams(task, events, runs, workers, *, persona_assignments=None, role_envelopes=None, role_checklists=None) -> list[dict]:
     plan = getattr(task, "mission_plan", None)
     role_ids = ["neko_supervisor", "backend_dev", "dev", "qa"]
     if plan is not None:
@@ -4392,16 +4341,6 @@ def _role_streams(task, events, runs, workers, *, persona_assignments=None, role
         role_assignments = [assignment for assignment in (persona_assignments or []) if assignment.task_id == task.id and assignment.persona_id == role_id]
         role_envelope_items = [item for item in (role_envelopes or []) if item.task_id == task.id and item.role_id == role_id]
         role_checklist_items = [item for item in (role_checklists or []) if item.task_id == task.id and item.role_id == role_id]
-        role_proof_batch_ids = {getattr(item, "proof_batch_id", None) for item in role_envelope_items if getattr(item, "proof_batch_id", None)}
-        role_proof_batches = [
-            item
-            for item in (proof_batches or [])
-            if item.task_id == task.id
-            and (
-                getattr(item, "role_envelope_id", None) in {envelope.envelope_id for envelope in role_envelope_items}
-                or item.proof_batch_id in role_proof_batch_ids
-            )
-        ]
         stream_events = [_event_stream_item(event) for event in role_events][-20:]
         if not stream_events:
             stream_events = [_empty_role_stream_item(task, role_id)]
@@ -4421,7 +4360,6 @@ def _role_streams(task, events, runs, workers, *, persona_assignments=None, role
                 "active_assignment_ids": [assignment.id for assignment in role_assignments if assignment.state in ACTIVE_ASSIGNMENT_STATES],
                 "role_envelopes": [role_envelope_summary(item) for item in role_envelope_items],
                 "role_checklists": [checklist_summary(item) for item in role_checklist_items],
-                "proof_batches": [proof_batch_summary(item) for item in role_proof_batches],
                 "events": stream_events,
             }
         )
@@ -4540,9 +4478,7 @@ def _event_display_kind(event_type: str, payload: dict) -> str:
     if event_type == "self_test.recorded":
         return "self_test"
     if event_type == "proof.attached":
-        return "final_gate" if payload.get("gate_source") == "auto_after_delivery" else "proof"
-    if event_type == "proof.gate_checked":
-        return "final_gate"
+        return "proof"
     if event_type == "packet.recorded":
         packet_type = str(payload.get("packet_type") or "")
         return "delivery" if packet_type == "delivery" else "handoff"
@@ -4560,8 +4496,6 @@ def _event_display_kind(event_type: str, payload: dict) -> str:
 def _event_display_title(event_type: str, payload: dict, kind: str) -> str:
     if kind == "self_test":
         return f"Self-test {payload.get('status') or 'recorded'}"
-    if kind == "final_gate":
-        return f"Final gate {payload.get('status') or 'attached'}"
     if kind == "proof":
         return f"Proof {payload.get('status') or 'attached'}"
     if kind == "delivery":

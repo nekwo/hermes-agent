@@ -11,12 +11,10 @@ import pytest
 from hermes_time import now
 from hermes_cli.harness import build_parser
 from agent_runtime import paths
-from agent_runtime.models import AgentRun, Incident, Proof, Task
-from agent_runtime.proof_rules import ProofType
+from agent_runtime.models import AgentRun, Incident, Task
 from agent_runtime.states import RunState, TaskState
 from agent_runtime.store import (
     IncidentStore,
-    ProofStore,
     RealmStore,
     RunStore,
     TaskStore,
@@ -223,7 +221,6 @@ def test_harness_task_archive_ready_preserves_evidence_and_removes_open_listing(
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     ts = TaskStore()
     rs = RunStore()
-    ps = ProofStore()
     stamp = now()
     done = Task(id="task_done", title="Done mission", description="d", state=TaskState.DONE, created_at=stamp, updated_at=stamp, requested_by="tony")
     active = Task(id="task_active", title="Active mission", description="d", state=TaskState.RUNNING, created_at=stamp, updated_at=stamp, requested_by="tony")
@@ -233,7 +230,6 @@ def test_harness_task_archive_ready_preserves_evidence_and_removes_open_listing(
     from utils import atomic_json_write
     from agent_runtime import paths
     atomic_json_write(paths.run_path(run.id), {"id": run.id, "persona_id": run.persona_id, "task_id": run.task_id, "stage_id": run.stage_id, "state": run.state.value, "started_at": stamp.isoformat(), "last_heartbeat_at": stamp.isoformat(), "finished_at": stamp.isoformat()})
-    ps.attach(Proof(id="proof_done", task_id="task_done", stage_id="stage_impl", type=ProofType.TEST_RUN, title="pytest", path_or_value="pytest.log", created_by="dev", created_at=stamp, metadata={"status": "passed", "exit_code": 0}))
 
     args = parser().parse_args(["harness", "task", "archive-ready", "--json"])
 
@@ -246,7 +242,6 @@ def test_harness_task_archive_ready_preserves_evidence_and_removes_open_listing(
     assert (archive_dir / "manifest.json").exists()
     assert (archive_dir / "tasks" / "task_done.json").exists()
     assert (archive_dir / "runs" / "run_done.json").exists()
-    assert (archive_dir / "proofs" / "task_done" / "proof_proof_done.json").exists()
     assert not paths.existing_task_path("task_done").exists()
     assert paths.existing_task_path("task_active").exists()
     assert [task.id for task in ts.list_open()] == ["task_active"]
@@ -320,32 +315,18 @@ def test_harness_task_history_returns_event_envelope(tmp_path, monkeypatch, caps
     assert data["events"][0]["type"] == "task.created"
 
 
-def test_harness_run_show_returns_run_proofs_and_events(tmp_path, monkeypatch, capsys):
+def test_harness_run_show_returns_run_and_events_without_retired_proofs(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     stamp = now()
     TaskStore().create(Task(id="task_run_show", title="Run show mission", description="d", state=TaskState.RUNNING, created_at=stamp, updated_at=stamp, requested_by="tony"))
     run = RunStore().open_run("dev", "task_run_show", stage_id="stage_impl", session_id="session_run_show")
-    ProofStore().attach(
-        Proof(
-            id="proof_run_show",
-            task_id="task_run_show",
-            stage_id="stage_impl",
-            type=ProofType.TEST_RUN,
-            title="pytest",
-            path_or_value="pytest.log",
-            created_by="dev",
-            created_at=stamp,
-            metadata={"status": "passed", "exit_code": 0, "run_id": run.id},
-        )
-    )
-
     args = parser().parse_args(["harness", "run", "show", run.id, "--events", "20", "--json"])
 
     assert args.func(args) == 0
     data = json.loads(capsys.readouterr().out)
     assert data["ok"] is True
     assert data["run"]["id"] == run.id
-    assert data["proofs"][0]["id"] == "proof_run_show"
+    assert "proofs" not in data
     assert any(item["type"] == "run.opened" for item in data["events"]["items"])
 
 
@@ -385,11 +366,8 @@ def test_harness_parser_exposes_config_migrate_and_verify():
     assert verify.harness_command == "verify"
     assert verify.mode == "temp-root"
     assert verify.skip_tests is True
-    burn = p.parse_args(["harness", "burn-in", "run", "noop-orchestration", "--max-actions", "3", "--json"])
-    assert burn.harness_command == "burn-in"
-    assert burn.burn_in_command == "run"
-    assert burn.case_id == "noop-orchestration"
-    assert burn.max_actions == 3
+    with pytest.raises(SystemExit):
+        p.parse_args(["harness", "burn-in", "run", "noop-orchestration", "--json"])
 
 
 def test_harness_config_show_and_migrate_check_are_redaction_safe(tmp_path, monkeypatch, capsys):
@@ -424,74 +402,9 @@ def test_harness_verify_skip_tests_emits_proof_packet(tmp_path, monkeypatch, cap
     assert packet["runtime_config"]["validation"]["ok"] is True
 
 
-def test_harness_burn_in_run_returns_nonzero_for_blocked_result(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    monkeypatch.setattr(
-        "hermes_cli.harness.run_burn_in_case",
-        lambda *args, **kwargs: {
-            "burn_id": "burn_1",
-            "case_id": args[0],
-            "status": "blocked",
-            "failure_class": "run_stalled",
-        },
-    )
-
-    args = parser().parse_args(["harness", "burn-in", "run", "noop-orchestration", "--json"])
-
-    assert args.func(args) == 2
-    data = json.loads(capsys.readouterr().out)
-    assert data["status"] == "blocked"
-    assert data["failure_class"] == "run_stalled"
-
-
-def test_harness_burn_in_summarize_returns_nonzero_when_evidence_missing(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    monkeypatch.setattr(
-        "hermes_cli.harness.summarize_burn_in",
-        lambda burn_id: {
-            "burn_id": burn_id,
-            "ok": False,
-            "status": "blocked",
-            "failure_class": "incomplete_evidence",
-            "missing_files": ["snapshot_after.json"],
-        },
-    )
-
-    args = parser().parse_args(["harness", "burn-in", "summarize", "burn_1", "--json"])
-
-    assert args.func(args) == 2
-    data = json.loads(capsys.readouterr().out)
-    assert data["ok"] is False
-    assert data["missing_files"] == ["snapshot_after.json"]
-
-
-def test_harness_burn_in_summarize_missing_ledger_returns_clean_json(capsys):
-    args = parser().parse_args(["harness", "burn-in", "summarize", "missing_burn", "--json"])
-
-    assert args.func(args) == 2
-    data = json.loads(capsys.readouterr().out)
-    assert data["ok"] is False
-    assert data["error"] == "FileNotFoundError"
-
-
-def test_harness_process_exit_code_propagates_for_burn_in_failure(tmp_path):
-    env = os.environ.copy()
-    env["HERMES_AGENT_RUNTIME_ROOT"] = str(tmp_path / "runtime")
-    repo = Path(__file__).resolve().parents[2]
-
-    completed = subprocess.run(
-        [sys.executable, "-m", "hermes_cli.main", "harness", "burn-in", "summarize", "missing_burn", "--json"],
-        cwd=repo,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-
-    assert completed.returncode == 2
-    data = json.loads(completed.stdout)
-    assert data["ok"] is False
-    assert "Traceback" not in completed.stderr
+def test_harness_burn_in_commands_are_removed():
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "burn-in", "summarize", "missing_burn", "--json"])
 
 
 def test_harness_parser_exposes_observe():
@@ -499,28 +412,9 @@ def test_harness_parser_exposes_observe():
     assert args.command == "harness" and args.harness_command == "observe"
 
 
-def test_harness_parser_exposes_smoke():
-    args = parser().parse_args(["harness", "smoke", "--json", "--no-model"])
-    assert args.command == "harness" and args.harness_command == "smoke"
-    assert args.no_model is True
-
-
-def test_the_smoke_subparser_no_longer_registers_temp_root():
-    """env-determinism audit §7.3, applied 2026-07-27 (inverted guard).
-
-    A smoke run is synthetic and ALWAYS uses a temp runtime root, so the flag
-    could only ever be ignored — and an ignored flag that still parses is a
-    documented lie an operator has to discover. It is gone from the parser, and
-    the handler no longer reads it. This guard is the §7.1/§7.2 convention: it
-    watches the NEW shape, so a silent revert fails a test instead of quietly
-    rotting the audit doc back into a claim nobody checks.
-    """
-
-    import pytest
-
-    assert not hasattr(parser().parse_args(["harness", "smoke", "--json"]), "temp_root")
+def test_harness_smoke_command_is_removed():
     with pytest.raises(SystemExit):
-        parser().parse_args(["harness", "smoke", "--temp-root"])
+        parser().parse_args(["harness", "smoke", "--json", "--no-model"])
 
 
 def test_harness_incident_close_closes_incident_with_reason(tmp_path, monkeypatch, capsys):

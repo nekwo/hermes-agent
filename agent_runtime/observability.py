@@ -520,10 +520,6 @@ def _event_display_projection(event: Event) -> dict[str, Any]:
 def _event_display_kind(event_type: str, payload: dict[str, Any]) -> str:
     if event_type == "self_test.recorded":
         return "self_test"
-    if event_type == "proof.attached":
-        return "final_gate" if payload.get("gate_source") == "auto_after_delivery" else "proof"
-    if event_type == "proof.gate_checked":
-        return "final_gate"
     if event_type == "packet.recorded":
         return "delivery" if str(payload.get("packet_type") or "") == "delivery" else "handoff"
     if event_type == "qa.verdict_recorded":
@@ -540,8 +536,6 @@ def _event_display_kind(event_type: str, payload: dict[str, Any]) -> str:
 def _event_display_title(event_type: str, payload: dict[str, Any], kind: str) -> str:
     if kind == "self_test":
         return f"Self-test {payload.get('status') or 'recorded'}"
-    if kind == "final_gate":
-        return f"Final gate {payload.get('status') or 'attached'}"
     if kind == "proof":
         return f"Proof {payload.get('status') or 'attached'}"
     if kind == "delivery":

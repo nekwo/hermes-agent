@@ -9,11 +9,10 @@ from hermes_time import now
 from agent_runtime import paths
 from agent_runtime.errors import AlreadyExists, NotFound
 from agent_runtime.events import EventLog, compact_archived_task_events
-from agent_runtime.models import AgentPersona, AgentRun, Event, Incident, Proof, Task
-from agent_runtime.proof_rules import ProofType
+from agent_runtime.models import AgentPersona, AgentRun, Event, Incident, Task
 from agent_runtime.self_test_evidence import record_self_test_from_progress
 from agent_runtime.states import RunState, TaskState
-from agent_runtime.store import AgentStore, IncidentStore, ProofStore, RunStore, TaskStore
+from agent_runtime.store import AgentStore, IncidentStore, RunStore, TaskStore
 from agent_runtime.snapshot import build_snapshot
 from agent_runtime.transitions import apply_transition
 
@@ -79,32 +78,12 @@ def test_task_store_filters_open_and_by_state():
     assert [task.id for task in store.list_by_state(TaskState.DONE)] == ["task_done"]
 
 
-def test_proof_and_incident_events_preserve_lane_attribution(isolate_agent_runtime_root):
+def test_incident_events_preserve_lane_attribution(isolate_agent_runtime_root):
     events = EventLog()
     task_store = TaskStore(event_log=events)
-    proofs = ProofStore(event_log=events)
     incidents = IncidentStore(event_log=events)
     ts = now()
     task_store.create(make_task("task_lane"))
-    proof = Proof(
-        id="proof_lane",
-        task_id="task_lane",
-        stage_id="stage_1",
-        type=ProofType.TEST_RUN,
-        title="lane proof",
-        path_or_value="proof.log",
-        created_by="dev",
-        created_at=ts,
-        metadata={
-            "status": "passed",
-            "lane_id": "lane_1",
-            "persona_instance_id": "personainst_dev_1",
-            "repo_bundle_ids": ["bundle_backend"],
-            "proof_reuse_basis": "same lane final gate",
-        },
-        redaction_status="safe",
-    )
-    proofs.attach(proof)
     incidents.open(
         Incident(
             id="inc_lane",
@@ -119,11 +98,7 @@ def test_proof_and_incident_events_preserve_lane_attribution(isolate_agent_runti
     )
 
     payloads = [event.payload for event in events.tail(10)]
-    assert any(payload.get("proof_id") == "proof_lane" and payload.get("lane_id") == "lane_1" for payload in payloads)
     assert any(payload.get("incident_id") == "inc_lane" and payload.get("lane_id") == "lane_1" for payload in payloads)
-    snap = build_snapshot(task_store=task_store, proof_store=proofs, incident_store=incidents)
-    assert snap["proofs"][0]["lane_id"] == "lane_1"
-    assert snap["proofs"][0]["repo_bundle_ids"] == ["bundle_backend"]
 
 
 def test_task_store_list_all_tolerates_concurrent_archive_move(monkeypatch):
@@ -465,25 +440,8 @@ def test_run_store_rejects_duplicate_active_run_for_same_task_persona_stage():
     assert reopened.id != first.id
 
 
-def test_proof_store_attach_get_and_filter():
-    ts = now()
-    proof = Proof(
-        id="proof_1",
-        task_id="task_abc",
-        stage_id="stage_1",
-        type=ProofType.SCREENSHOT,
-        title="screenshot",
-        path_or_value="proofs/task_abc/screenshots/proof_1.png",
-        created_by="qa",
-        created_at=ts,
-    )
-    store = ProofStore()
-
-    store.attach(proof)
-
-    assert store.get("proof_1") == proof
-    assert store.list_for_task("task_abc") == [proof]
-    assert store.list_for_stage("stage_1") == [proof]
+def test_mission_proof_store_is_removed():
+    assert not hasattr(store_module, "ProofStore")
 
 
 def test_incident_store_open_close_and_list_open():

@@ -12,9 +12,7 @@ from utils import atomic_json_write
 
 from . import paths
 from .events import EventLog
-from .models import AgentRun, Event, Proof
-from .proof_rules import ProofType
-from .store import ProofStore
+from .models import AgentRun, Event
 
 
 @dataclass(slots=True)
@@ -176,7 +174,6 @@ def record_self_test_from_progress(
         satisfies_release_gate=False,
     )
     saved = SelfTestEvidenceStore(event_log=event_log).save(evidence)
-    _record_observed_proof_from_evidence(saved, event_log=event_log)
     return saved
 
 
@@ -214,38 +211,6 @@ def self_test_summary(evidence: SelfTestEvidence) -> dict[str, Any]:
         "redaction_status": evidence.redaction_status,
         "satisfies_release_gate": evidence.satisfies_release_gate,
     }
-
-
-def _record_observed_proof_from_evidence(evidence: SelfTestEvidence, *, event_log: EventLog | None) -> Proof | None:
-    proof_id = f"proof_observed_{evidence.evidence_id.removeprefix('selftest_')}"
-    record_path = paths.self_test_record_path(evidence.task_id, evidence.evidence_id)
-    proof = Proof(
-        id=proof_id,
-        task_id=evidence.task_id,
-        stage_id=evidence.stage_id,
-        type=ProofType.TEST_RUN,
-        title=f"Observed agent proof: {evidence.command_label[:80]}",
-        path_or_value=_relative_runtime_path(record_path),
-        created_by=evidence.persona_id,
-        created_at=now(),
-        metadata={
-            "source": "agent_tool_trace",
-            "authoritative": False,
-            "self_test_evidence_id": evidence.evidence_id,
-            "actor_requested": evidence.persona_id,
-            "run_id": evidence.run_id,
-            "command": evidence.command_label,
-            "command_hash": evidence.command_hash,
-            "exit_code": evidence.exit_code,
-            "status": evidence.status,
-            "duration_ms": evidence.elapsed_ms,
-            "workdir_label": evidence.workdir_label,
-            "repo_label": evidence.repo_label,
-            "redaction_status": evidence.redaction_status,
-        },
-        redaction_status=evidence.redaction_status,
-    )
-    return ProofStore(event_log=event_log).attach(proof)
 
 
 def _relative_runtime_path(path) -> str:

@@ -14,9 +14,6 @@ from agent_runtime.context_builder import build_context
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.models import AgentPersona, MissionIntent, MissionPlan, MissionPlanStage, Proof, Task
 from agent_runtime.observability import build_observability
-from agent_runtime.proof_recipes import RECIPES
-from agent_runtime.proof_rules import ProofType
-from agent_runtime.proof_runner import CommandProofRunner
 from agent_runtime.events import EventLog
 from agent_runtime.operator_control import operator_takeover_worker
 from agent_runtime.runtime_instances import GoalRuntimeInstanceStore
@@ -24,7 +21,7 @@ from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.snapshot import build_snapshot
 from agent_runtime.states import RunState, StageStatus, TaskState, WorkerSessionState
 from agent_runtime.status import build_status
-from agent_runtime.store import ProofStore, RunStore, TaskStore
+from agent_runtime.store import RunStore, TaskStore
 from agent_runtime.worker_sessions import WorkerSessionStore, worker_context_manifest
 from tests.agent_runtime.conftest import release_to_implementation
 
@@ -102,28 +99,6 @@ class RequestRecipeRuntime:
         )
 
 
-class PassingProofRunner:
-    def __init__(self, proof_store: ProofStore):
-        self.proof_store = proof_store
-        self.calls = []
-
-    def run_commands(self, task, *, stage_id, run_id, actor, commands, proof_recipe=None, **_kwargs):
-        self.calls.append({"commands": list(commands), "proof_recipe": proof_recipe})
-        proof = Proof(
-            id=f"proof_{task.id}_{len(self.calls)}",
-            task_id=task.id,
-            stage_id=stage_id,
-            type=ProofType.TEST_RUN,
-            title="passing proof",
-            path_or_value="proof.log",
-            created_by="harness",
-            created_at=now(),
-            metadata={"status": "passed", "run_id": run_id, "actor_requested": actor},
-            redaction_status="safe",
-        )
-        return [self.proof_store.attach(proof)]
-
-
 def _enterprise_config() -> AgentRuntimeConfig:
     return AgentRuntimeConfig(
         enterprise_worker_sessions=EnterpriseWorkerSessionsConfig(
@@ -139,85 +114,6 @@ def _enterprise_config() -> AgentRuntimeConfig:
 
 
 
-
-
-def test_no_edit_recipe_fails_when_command_dirties_git_worktree(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
-    task = _task("task_dirty_recipe")
-    runner = CommandProofRunner(proof_store=ProofStore(), workdir=repo, timeout_seconds=10)
-
-    proof = runner.run_commands(
-        task,
-        stage_id="stage_1",
-        run_id="run_1",
-        actor="dev",
-        commands=["python -c \"open('probe.txt','w',encoding='utf-8').write('dirty')\""],
-        proof_recipe={
-            "recipe_id": "no_edit_dirty_guard",
-            "recipe_hash": "abc123",
-            "mode": "no_product_edit",
-            "writes_product_probe": False,
-            "cleanup": "manifest_verified",
-        },
-    )[0]
-
-    assert proof.metadata["exit_code"] == 0
-    assert proof.metadata["status"] == "failed"
-    assert proof.metadata["dirty_delta_status"] == "dirty_delta_blocked"
-    assert proof.metadata["dirty_delta_count"] == 1
-    assert (repo / "probe.txt").exists()
-    sandbox_manifest = paths.store_root() / proof.metadata["proof_recipe_sandbox_manifest"]
-    assert sandbox_manifest.exists()
-
-
-def test_recipe_expected_markers_are_enforced(tmp_path):
-    task = _task("task_marker_recipe")
-    runner = CommandProofRunner(proof_store=ProofStore(), workdir=tmp_path, timeout_seconds=10)
-
-    proof = runner.run_commands(
-        task,
-        stage_id="stage_1",
-        run_id="run_1",
-        actor="dev",
-        commands=["python -c \"print('wrong-output')\""],
-        proof_recipe={
-            "recipe_id": "marker_guard",
-            "recipe_hash": "def456",
-            "mode": "no_product_edit",
-            "expected_markers": ["required_marker"],
-        },
-    )[0]
-
-    assert proof.metadata["exit_code"] == 0
-    assert proof.metadata["status"] == "failed"
-    assert proof.metadata["missing_expected_markers"] == ["required_marker"]
-
-
-def test_recipe_expected_markers_can_be_command_specific(tmp_path):
-    task = _task("task_marker_by_command_recipe")
-    runner = CommandProofRunner(proof_store=ProofStore(), workdir=tmp_path, timeout_seconds=10)
-
-    proofs = runner.run_commands(
-        task,
-        stage_id="stage_1",
-        run_id="run_1",
-        actor="dev",
-        commands=[
-            "python -c \"print('first_marker')\"",
-            "python -c \"print('second_marker')\"",
-        ],
-        proof_recipe={
-            "recipe_id": "marker_by_command_guard",
-            "recipe_hash": "def789",
-            "mode": "no_product_edit",
-            "expected_markers": ["first_marker", "second_marker"],
-            "expected_markers_by_command": [["first_marker"], ["second_marker"]],
-        },
-    )
-
-    assert [proof.metadata["status"] for proof in proofs] == ["passed", "passed"]
 
 
 def test_snapshot_status_and_observability_surface_worker_sessions():

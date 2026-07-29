@@ -1,11 +1,10 @@
 from hermes_time import now
 
 from agent_runtime.events import EventLog
-from agent_runtime.models import Event, Incident, Proof, Task
-from agent_runtime.proof_rules import ProofType
+from agent_runtime.models import Event, Incident, Task
 from agent_runtime.snapshot import build_snapshot
 from agent_runtime.states import TaskState
-from agent_runtime.store import IncidentStore, ProofStore, TaskStore
+from agent_runtime.store import IncidentStore, TaskStore
 
 
 def make_task(state=TaskState.RUNNING):
@@ -26,25 +25,10 @@ def make_task(state=TaskState.RUNNING):
 def test_snapshot_exposes_goal_timeline_proof_summaries_and_why_not_done():
     events = EventLog()
     tasks = TaskStore(event_log=events)
-    proofs = ProofStore(event_log=events)
     incidents = IncidentStore(event_log=events)
     task = make_task()
     tasks.create(task)
     events.append(Event(now(), "run.opened", task.id, "run_dev", "dev", {"tick_id": "tick_1"}))
-    proofs.attach(
-        Proof(
-            id="proof_cmd",
-            task_id=task.id,
-            stage_id="stage_1",
-            type=ProofType.TEST_RUN,
-            title="Command proof: smoke",
-            path_or_value="proofs/task_visibility/artifacts/proof_cmd.log",
-            created_by="harness",
-            created_at=now(),
-            metadata={"status": "passed", "exit_code": 0, "duration_ms": 15, "command": "printf ok"},
-            redaction_status="safe",
-        )
-    )
     incidents.open(
         Incident(
             id="inc_waiting_qa",
@@ -57,7 +41,7 @@ def test_snapshot_exposes_goal_timeline_proof_summaries_and_why_not_done():
         )
     )
 
-    snap = build_snapshot(task_store=tasks, proof_store=proofs, incident_store=incidents, event_log=events)
+    snap = build_snapshot(task_store=tasks, incident_store=incidents, event_log=events)
     summary = next(item for item in list(snap["goals"].values()) if item["task_id"] == task.id)
 
     assert summary["why_not_done"][0]["kind"] == "open_incident"
@@ -72,17 +56,7 @@ def test_snapshot_exposes_goal_timeline_proof_summaries_and_why_not_done():
 
     detail = goal_detail_for_task(task.id, event_log=events)
     assert detail is not None
-    assert detail["proof_summaries"] == [
-        {
-            "proof_id": "proof_cmd",
-            "type": "test_run",
-            "status": "passed",
-            "exit_code": 0,
-            "duration_ms": 15,
-            "created_by": "harness",
-            "has_artifact": True,
-        }
-    ]
-    assert [item["type"] for item in detail["timeline"]][-3:] == ["run.opened", "proof.attached", "incident.opened"]
+    assert detail["proof_summaries"] == []
+    assert [item["type"] for item in detail["timeline"]][-2:] == ["run.opened", "incident.opened"]
     assert "needs QA verdict" not in str(summary)
     assert "proofs/task_visibility" not in str(summary)

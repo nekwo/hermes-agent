@@ -83,7 +83,7 @@ def test_h5_envelope_advertises_behavioral_migration_and_rollback_controls():
     assert h5["status"] == "implemented"
     assert not h5["blockers"]
     assert any("collapsed hand_off/block/escalate/scope_route/qa_verdict" in control for control in h5["controls"])
-    assert any("proof-from-trace records agent terminal self-tests" in control for control in h5["controls"])
+    assert not any("proof-from-trace" in control for control in h5["controls"])
     assert any("hand_off captures the grounded isolated-worktree diff" in control for control in h5["controls"])
     assert any("legacy decision aliases are pruned" in control for control in h5["controls"])
     assert any("disable simplified_agent_contract.enabled" in control for control in h5["controls"])

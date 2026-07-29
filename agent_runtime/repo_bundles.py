@@ -15,7 +15,7 @@ from .events import EventLog
 from .models import Event, Incident, MissionPlanStage, RepoBundle, Task
 from .serde import from_jsonable, to_jsonable
 from .states import TaskState
-from .store import IncidentStore, ProofStore, TaskStore
+from .store import IncidentStore, TaskStore
 
 REPO_BUNDLE_STATES = frozenset(
     {
@@ -47,7 +47,6 @@ SIMPLIFIED_PHASES = frozenset({"created", "planning", "working", "verifying", "r
 WAKE_DEPENDENCY_DELIVERED = "dependency_bundle_delivered"
 WAKE_CONTRACT_PACKET_AVAILABLE = "contract_packet_available"
 WAKE_ALL_REQUIRED_BUNDLES_DELIVERED = "all_required_bundles_delivered"
-WAKE_FINAL_GATE_PASSED = "final_gate_passed"
 WAKE_VISUAL_PROOF_ATTACHED = "visual_proof_attached"
 WAKE_QA_REJECTED_BUNDLE = "qa_rejected_bundle"
 WAKE_NEKO_SCOPE_REPAIRED = "neko_scope_repaired"
@@ -396,7 +395,7 @@ def desired_bundles_for_task(task: Task) -> list[RepoBundle]:
                 acceptance=list(getattr(task, "acceptance_criteria", None) or []),
                 non_goals=list(getattr(task, "non_goals", None) or []),
                 proof_targets=list(getattr(task, "proof_expectations", None) or []),
-                proof_requirements=["final_gate"],
+                proof_requirements=[],
                 visual_requirements=["visual_proof"] if getattr(task, "requires_visual_proof", False) else [],
                 created_at=created_at,
                 updated_at=created_at,
@@ -510,7 +509,7 @@ def _bundles_from_mission_plan(task: Task, stages: list[MissionPlanStage]) -> li
                 acceptance=_dedupe_preserve_order([item for stage in repo_stages for item in getattr(stage, "acceptance_criteria", [])] or list(getattr(task, "acceptance_criteria", None) or [])),
                 non_goals=list(getattr(task, "non_goals", None) or []),
                 proof_targets=_dedupe_preserve_order(proof_targets),
-                proof_requirements=_dedupe_preserve_order(["self_test", "final_gate"]),
+                proof_requirements=["self_test"],
                 visual_requirements=["visual_proof"] if requires_visual else [],
                 created_at=created_at,
                 updated_at=created_at,
@@ -820,31 +819,6 @@ def _patch_was_proposed_for_delivery(
 
 
 def _empty_delivery_is_proof_only_no_product_edit(bundle: RepoBundle, *, task_store: TaskStore, stage_id: str) -> bool:
-    if not bundle.proof_ids:
-        return False
-    try:
-        task = task_store.get(bundle.task_id)
-    except Exception:
-        return False
-    stage = _stage_for_bundle(task, stage_id)
-    if stage is not None and getattr(stage, "requires_product_edit", False):
-        return False
-    if stage is None and not _task_declares_no_product_edits(task):
-        return False
-    proof_store = ProofStore()
-    for proof_id in bundle.proof_ids:
-        try:
-            proof = proof_store.get(str(proof_id))
-        except Exception:
-            continue
-        metadata = getattr(proof, "metadata", None) or {}
-        if str(metadata.get("status") or "").strip().lower() not in {"passed", "approved", "safe"}:
-            continue
-        if str(metadata.get("proof_recipe_mode") or "").strip() == "no_product_edit":
-            return True
-        recipe = metadata.get("proof_recipe") if isinstance(metadata.get("proof_recipe"), dict) else {}
-        if str(recipe.get("mode") or "").strip() == "no_product_edit":
-            return True
     return False
 
 

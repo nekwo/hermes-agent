@@ -6,11 +6,9 @@ from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.events import EventLog
 from agent_runtime.models import AgentRun, MissionIntent, MissionPlan, MissionPlanStage, Proof, Task, TaskStage
 from agent_runtime.packets import make_packet, record_packet
-from agent_runtime.proof_rules import ProofType
 from agent_runtime.repo_bundles import RepoBundleStore
 from agent_runtime.runtime_config import MissionPlanConfig, NormalWorkerFlowConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig
 from agent_runtime.states import RunState, StageStatus, TaskState
-from agent_runtime.store import ProofStore
 from agent_runtime.role_checklists import RoleChecklistStore
 
 
@@ -927,55 +925,6 @@ def test_qa_mission_hud_exposes_screenshot_and_verdict_choices():
 
 
 
-def test_render_context_includes_all_stages_and_proof_metadata_for_qa_review():
-    task = make_task()
-    task.stages.append(TaskStage(id="stage_2", title="Smoke", objective="Run smoke", status=StageStatus.READY, acceptance_criteria=["smoke-ok"], test_plan=["printf smoke-ok"]))
-    task.proof_ids = ["proof_smoke"]
-    store = ProofStore()
-    store.attach(
-        Proof(
-            id="proof_smoke",
-            task_id=task.id,
-            stage_id="stage_2",
-            type=ProofType.TEST_RUN,
-            title="Smoke command proof",
-            path_or_value="proofs/task_abc/artifacts/proof_smoke.log",
-            created_by="harness",
-            created_at=now(),
-            metadata={
-                "command": "printf 'smoke-ok'",
-                "exit_code": 0,
-                "status": "passed",
-                "shell": "bash",
-                "workdir_label": "EterniaBackend",
-                "artifact_exists": True,
-                "artifact_bytes": 120,
-                "artifact_relative_path": "proofs/task_abc/artifacts/proof_smoke.log",
-                "stdout_excerpt": "smoke-ok",
-                "stderr_excerpt": "",
-                "unsafe_debug_dump": "TOKEN=should-not-render",
-            },
-            redaction_status="safe",
-        )
-    )
-
-    rendered = render_context(build_context(task, make_run(), proof_store=store))
-
-    assert "## All Stages" in rendered
-    assert "stage_1" in rendered and "stage_2" in rendered
-    assert "## Proof Records" in rendered
-    assert "proof_smoke" in rendered
-    assert "exit_code: 0" in rendered
-    assert "shell: bash" in rendered
-    assert "workdir_label: EterniaBackend" in rendered
-    assert "printf 'smoke-ok'" in rendered
-    assert "artifact_exists: True" in rendered
-    assert "artifact_relative_path: proofs/task_abc/artifacts/proof_smoke.log" in rendered
-    assert "stdout_excerpt: smoke-ok" in rendered
-    assert "unsafe_debug_dump" not in rendered
-    assert "should-not-render" not in rendered
-
-
 def test_render_context_compacts_non_current_stages_to_avoid_dev_context_bloat():
     task = make_task()
     for idx in range(2, 8):
@@ -997,43 +946,3 @@ def test_render_context_compacts_non_current_stages_to_avoid_dev_context_bloat()
     assert "very long objective" not in rendered
     assert "acceptance_criteria: 1 item(s)" in rendered
     assert "test_plan: 1 item(s)" in rendered
-
-
-def test_render_context_includes_safe_qa_blocked_findings_for_dev_recovery():
-    task = make_task()
-    task.state = TaskState.BLOCKED
-    task.proof_ids = ["proof_qa_blocked"]
-    store = ProofStore()
-    store.attach(
-        Proof(
-            id="proof_qa_blocked",
-            task_id=task.id,
-            stage_id="stage_1",
-            type=ProofType.QA_VERDICT,
-            title="QA verdict: blocked",
-            path_or_value="blocked",
-            created_by="qa",
-            created_at=now(),
-            metadata={
-                "verdict": "blocked",
-                "findings": [
-                    {
-                        "severity": "blocking",
-                        "issue": "missing proof manifest",
-                        "required_fix": "attach proof mapping",
-                        "secret_debug_dump": "TOKEN=should-not-render",
-                    }
-                ],
-            },
-            redaction_status="safe",
-        )
-    )
-
-    rendered = render_context(build_context(task, make_run(), proof_store=store))
-
-    assert "findings:" in rendered
-    assert "missing proof manifest" in rendered
-    assert "attach proof mapping" in rendered
-    assert "blocking" in rendered
-    assert "secret_debug_dump" not in rendered
-    assert "should-not-render" not in rendered

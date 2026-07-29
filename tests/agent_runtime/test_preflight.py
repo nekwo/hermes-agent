@@ -6,7 +6,7 @@ from agent_runtime.events import EventLog
 from agent_runtime.models import Event, Task
 from agent_runtime.preflight import PreflightCheck, PreflightResult, environment_fingerprint, open_preflight_blocker, record_preflight_pass, run_preflight
 from agent_runtime.states import TaskState
-from agent_runtime.store import IncidentStore, ProofStore, TaskStore
+from agent_runtime.store import IncidentStore, TaskStore
 
 
 def task(**overrides):
@@ -132,14 +132,11 @@ def test_no_product_edit_preflight_blocks_dirty_affected_repo(tmp_path):
     assert result.blocker["metadata"]["repos"][0]["dirty_count"] == 1
 
     ts = TaskStore()
-    ps = ProofStore()
     incidents = IncidentStore()
     stored = ts.create(t)
-    incident = open_preflight_blocker(stored, result, persona_target="dev", proof_store=ps, incident_store=incidents, task_store=ts, stage_id="stage_1")
-    proof = ps.get(ts.get(stored.id).proof_ids[-1])
+    incident = open_preflight_blocker(stored, result, persona_target="dev", incident_store=incidents, task_store=ts, stage_id="stage_1")
     assert incident.metadata["dirty_labels"]
-    assert proof.metadata["dirty_labels"]
-    assert proof.metadata["repos"][0]["status_excerpt"]
+    assert not ts.get(stored.id).proof_ids
 
 
 def test_no_product_edit_preflight_allows_unchanged_dirty_baseline(tmp_path):
@@ -272,10 +269,9 @@ def test_preflight_pass_records_applied_remediation_event():
     assert any(event.type == "task.preflight" and event.payload["remediations"][0]["check_id"] == "docker_engine" for event in events)
 
 
-def test_preflight_blocker_attaches_proof_and_incident(monkeypatch):
+def test_preflight_blocker_records_incident_without_retired_proof_store(monkeypatch):
     monkeypatch.setenv("HERMES_PREFLIGHT_DOCKER_AUTOSTART", "0")
     ts = TaskStore()
-    ps = ProofStore()
     incidents = IncidentStore()
     t = ts.create(task())
     result = run_preflight(t, persona_target="backend_dev")
@@ -288,13 +284,11 @@ def test_preflight_blocker_attaches_proof_and_incident(monkeypatch):
             proof_payload={},
         )
 
-    incident = open_preflight_blocker(t, result, persona_target="backend_dev", proof_store=ps, incident_store=incidents, task_store=ts, stage_id="stage_1")
+    incident = open_preflight_blocker(t, result, persona_target="backend_dev", incident_store=incidents, task_store=ts, stage_id="stage_1")
     saved = ts.get(t.id)
 
     assert incident is not None
     assert saved.state == TaskState.RUNNING
-    assert saved.proof_ids
-    proof = ps.get(saved.proof_ids[-1])
-    assert proof.metadata["kind"] == "preflight"
-    assert incident.metadata["proof_id"] == proof.id
+    assert not saved.proof_ids
+    assert "proof_id" not in incident.metadata
     assert incident.metadata["blocking_event_id"]

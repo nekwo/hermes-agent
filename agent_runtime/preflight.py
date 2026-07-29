@@ -14,9 +14,8 @@ from hermes_time import now
 
 from .events import EventLog
 from .dirty_state import no_product_edit_dirty_check
-from .models import Event, Incident, Proof, Task, TaskStage
+from .models import Event, Incident, Task, TaskStage
 from .packets import latest_packet
-from .proof_rules import ProofType
 from .repo_context import safe_affected_repo_labels
 from .stagec_mcp_visual_provider import (
     load_launcher_qa_mcp_config,
@@ -24,7 +23,7 @@ from .stagec_mcp_visual_provider import (
     smoke_launcher_qa_mcp,
 )
 from .states import TaskState
-from .store import IncidentStore, ProofStore, TaskStore
+from .store import IncidentStore, TaskStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,7 +102,6 @@ def open_preflight_blocker(
     result: PreflightResult,
     *,
     persona_target: str,
-    proof_store: ProofStore,
     incident_store: IncidentStore,
     task_store: TaskStore,
     stage_id: str | None = None,
@@ -116,7 +114,6 @@ def open_preflight_blocker(
     status = environment_fingerprint_status(task, stage_id, result.environment_fingerprint)
     blocker = result.blocker
     remediation = blocker.get("metadata") if isinstance(blocker.get("metadata"), dict) else {}
-    proof_id = f"preflight_{_safe_token(task.id)}_{_safe_token(stage_id or 'mission')}_{uuid.uuid4().hex[:8]}"
     metadata = {
         "kind": "preflight",
         "check_id": str(blocker.get("check_id")),
@@ -137,20 +134,6 @@ def open_preflight_blocker(
         value = remediation.get(key)
         if value is not None:
             metadata[key] = _safe_preflight_metadata(value)
-    proof = proof_store.attach(
-        Proof(
-            id=proof_id,
-            task_id=task.id,
-            stage_id=stage_id,
-            type=ProofType.LOG,
-            title=f"Preflight blocked: {metadata['check_id']}",
-            path_or_value=f"preflight:{metadata['check_id']}",
-            created_by="harness",
-            created_at=now(),
-            metadata=metadata,
-            redaction_status="safe",
-        )
-    )
     blocking_event_id = f"preflight_blocked_{uuid.uuid4().hex[:8]}"
     incident = Incident(
         id=f"inc_{uuid.uuid4().hex[:8]}",
@@ -161,7 +144,6 @@ def open_preflight_blocker(
         detail_path=None,
         opened_at=now(),
         metadata={
-            "proof_id": proof.id,
             "check_id": str(metadata["check_id"]),
             "environment_fingerprint": result.environment_fingerprint,
             "blocking_event_id": blocking_event_id,
@@ -174,8 +156,7 @@ def open_preflight_blocker(
     if task.state not in {TaskState.DONE, TaskState.CANCELLED, TaskState.FAILED}:
         task.state = TaskState.RUNNING
     task.open_incident_ids = _dedupe(list(task.open_incident_ids or []), [incident.id])
-    task.proof_ids = _dedupe(list(task.proof_ids or []), [proof.id])
-    _persist_environment_fingerprint(task, stage_id, result.environment_fingerprint, status, failed_proof_id=proof.id)
+    _persist_environment_fingerprint(task, stage_id, result.environment_fingerprint, status)
     task.updated_at = now()
     task_store.update(task, actor="harness", reason="preflight environment blocker")
     return incident

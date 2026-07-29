@@ -343,49 +343,6 @@ def _cmd_task_archive(args) -> int:
     return 0 if data.get("archived_count") else 1
 
 
-def _cmd_playground_list(args) -> int:
-    from agent_runtime.replay_scenarios import list_scenarios
-
-    records = list_scenarios()
-    if args.json:
-        print(emit_json(records))
-    else:
-        for record in records:
-            print(f"{record.get('scenario_id')} [{record.get('status')}] origin={record.get('failure_origin', 'unknown')} {record.get('decision_type')} task={record.get('task_id')} {record.get('error_message', '')[:80]}")
-        if not records:
-            print("no replay scenarios captured")
-    return 0
-
-
-def _cmd_playground_show(args) -> int:
-    from agent_runtime.replay_scenarios import get_scenario
-
-    record = get_scenario(args.scenario_id)
-    if record is None:
-        data = {"ok": False, "error": "scenario_not_found", "scenario_id": args.scenario_id}
-        print(emit_json(data) if args.json else f"scenario not found: {args.scenario_id}")
-        return 1
-    print(emit_json(record) if args.json else emit_json(record))
-    return 0
-
-
-def _cmd_playground_replay(args) -> int:
-    from agent_runtime.replay_scenarios import replay_all, replay_scenario
-
-    if args.scenario_id:
-        result = replay_scenario(args.scenario_id)
-        print(emit_json(result) if args.json else f"{result.get('scenario_id')}: {result.get('verdict', result.get('error'))}")
-        return 0 if result.get("ok") else 1
-    summary = replay_all()
-    if args.json:
-        print(emit_json(summary))
-    else:
-        print(f"total={summary['total']} passing={len(summary['passes_current_contract'])} still_failing={len(summary['still_failing'])} not_replayable={len(summary['not_replayable'])}")
-        for sid in summary["still_failing"]:
-            print(f"  still failing: {sid}")
-    return 0
-
-
 def _swarm_state_path() -> Path:
     return paths.store_root() / "swarm_state.json"
 
@@ -506,62 +463,6 @@ def _cmd_lane_control(args) -> int:
     return 0
 
 
-def _cmd_burn_in_create(args) -> int:
-    manifest = create_burn_in(suite=args.suite, case_id=getattr(args, "case_id", None), rerun_of=getattr(args, "rerun_of", None))
-    if args.json:
-        print(emit_json(manifest))
-    else:
-        print(f"burn-in {manifest['burn_id']}: created")
-    return 0
-
-
-def _cmd_burn_in_run(args) -> int:
-    manifest = run_burn_in_case(
-        args.case_id,
-        burn_id=getattr(args, "burn_id", None),
-        max_actions=getattr(args, "max_actions", 12),
-    )
-    if args.json:
-        print(emit_json(manifest))
-    else:
-        print(f"burn-in {manifest['burn_id']}: {manifest['status']}")
-    return 0 if manifest.get("status") == "passed" else 2
-
-
-def _cmd_burn_in_status(args) -> int:
-    try:
-        data = burn_in_status(args.burn_id)
-    except (FileNotFoundError, ValueError) as exc:
-        data = {"burn_id": args.burn_id, "ok": False, "error": type(exc).__name__, "message": "burn-in ledger was not found or is invalid"}
-        if args.json:
-            print(emit_json(data))
-        else:
-            print(f"burn-in {args.burn_id}: not found")
-        return 2
-    if args.json:
-        print(emit_json(data))
-    else:
-        print(f"burn-in {args.burn_id}: {data['manifest'].get('status')}")
-    return 0
-
-
-def _cmd_burn_in_summarize(args) -> int:
-    try:
-        data = summarize_burn_in(args.burn_id)
-    except (FileNotFoundError, ValueError) as exc:
-        data = {"burn_id": args.burn_id, "ok": False, "error": type(exc).__name__, "message": "burn-in ledger was not found or is invalid"}
-        if args.json:
-            print(emit_json(data))
-        else:
-            print(f"burn-in {args.burn_id}: not found")
-        return 2
-    if args.json:
-        print(emit_json(data))
-    else:
-        print(f"burn-in {args.burn_id}: ok={data['ok']} status={data['status']}")
-    return 0 if data.get("ok") else 2
-
-
 def _cmd_run_cancel(args) -> int:
     worker_store = WorkerSessionStore()
     run_store = RunStore()
@@ -603,7 +504,6 @@ def _cmd_run_cancel(args) -> int:
 
 def _cmd_run_show(args) -> int:
     run_store = RunStore()
-    proof_store = ProofStore()
     try:
         run = run_store.get(args.run_id)
     except (NotFound, FileNotFoundError):
@@ -612,11 +512,6 @@ def _cmd_run_show(args) -> int:
             args=args,
             code="run_not_found",
         )
-    proof_records = [
-        proof
-        for proof in proof_store.list_for_task(run.task_id)
-        if isinstance(proof.metadata, dict) and proof.metadata.get("run_id") == run.id
-    ]
     events = _task_events(run.task_id, limit=max(1, min(250, int(getattr(args, "events", 25) or 25))), since_text=None)
     scoped_events = [
         item
@@ -626,7 +521,6 @@ def _cmd_run_show(args) -> int:
     data = {
         "ok": True,
         "run": run,
-        "proofs": proof_records,
         "events": {
             "ok": events.get("ok", True),
             "count": len(scoped_events),
@@ -636,7 +530,7 @@ def _cmd_run_show(args) -> int:
     if args.json:
         print(emit_json(data))
     else:
-        print(f"{run.id} {run.persona_id} {run.state.value} task={run.task_id} proofs={len(proof_records)} events={len(scoped_events)}")
+        print(f"{run.id} {run.persona_id} {run.state.value} task={run.task_id} events={len(scoped_events)}")
     return 0
 
 
@@ -797,7 +691,6 @@ def _cmd_verify(args) -> int:
                 "-o",
                 "addopts=",
                 "-q",
-                "tests/agent_runtime/test_proof_runner.py",
                 "tests/agent_runtime/test_store.py",
                 "tests/agent_runtime/test_snapshot.py",
                 "tests/agent_runtime/test_status.py",
@@ -824,17 +717,13 @@ def _cmd_observe(args) -> int:
     incidents = IncidentStore().list_all()
     worker_store = WorkerSessionStore()
     workers = worker_store.list_all()
-    proofs = []
-    proof_store = ProofStore()
-    for task in tasks:
-        proofs.extend(proof_store.list_for_task(task.id))
     cfg = load_agent_runtime_config()
     execution_mode = "manual"
     data = build_observability(
         tasks=tasks,
         runs=runs,
         incidents=incidents,
-        proofs=proofs,
+        proofs=[],
         daemon_status=None,
         events=EventLog().tail(20),
         execution_mode=execution_mode,
@@ -929,23 +818,6 @@ def _git_summary(root: Path) -> dict:
 def _cmd_agents(args) -> int:
     personas = ensure_persisted_personas(load_agent_runtime_config())
     print(emit_json(personas) if args.json else "\n".join(f"{p.id} ({p.role})" for p in personas))
-    return 0
-
-
-def _cmd_smoke(args) -> int:
-    data = run_smoke(no_model=args.no_model)
-    if args.json:
-        print(emit_json(data))
-    else:
-        task = data.get("task_id", "-")
-        state = data.get("final_state", data.get("failure_class", "unknown"))
-        print(f"smoke={data['ok']} task={task} state={state}")
-    return 0
-
-
-def _cmd_proof_list(args) -> int:
-    proofs=ProofStore().list_for_task(args.task_id)
-    print(emit_json(proofs) if args.json else "\n".join(f"{p.id} {p.type} {p.title}" for p in proofs))
     return 0
 
 

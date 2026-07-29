@@ -172,19 +172,11 @@ def test_stagec_command_policy_rejects_unpinned_mission_control_capture():
     )
 
 
-def test_stagec_command_policy_still_reachable_from_proof_command_policy():
-    """The dying module must delegate, not keep a divergent copy."""
+def test_stagec_command_policy_survives_without_the_mission_policy_module():
+    from agent_runtime import stagec_command_policy
 
-    from agent_runtime import proof_command_policy, stagec_command_policy
-
-    assert (
-        proof_command_policy._reject_invalid_stagec_screenshot_window_args
-        is stagec_command_policy.reject_invalid_stagec_screenshot_window_args
-    )
-    assert (
-        proof_command_policy._reject_unpinned_mission_control_stagec_commands
-        is stagec_command_policy.reject_unpinned_mission_control_stagec_commands
-    )
+    assert callable(stagec_command_policy.reject_invalid_stagec_screenshot_window_args)
+    assert callable(stagec_command_policy.reject_unpinned_mission_control_stagec_commands)
 
 
 # ── item 4: extracted Stage C trace parsers ───────────────────────────────
@@ -242,14 +234,43 @@ def test_png_dimensions_sniffs_the_header(tmp_path):
     assert png_dimensions(tmp_path / "missing.png") == (0, 0)
 
 
-def test_visual_trace_evidence_delegates_to_the_surviving_parsers():
-    from agent_runtime import stagec_trace_parsers, visual_trace_evidence
+def test_stagec_trace_parsers_survive_without_the_mission_evidence_module():
+    from agent_runtime import stagec_trace_parsers
 
-    assert (
-        visual_trace_evidence._terminal_wrapper_screenshot
-        is stagec_trace_parsers.terminal_wrapper_screenshot
+    assert callable(stagec_trace_parsers.terminal_wrapper_screenshot)
+    assert callable(stagec_trace_parsers.png_dimensions)
+
+
+def test_s6_removes_mission_proof_modules_but_keeps_stagec_capture_primitives():
+    import importlib.util
+
+    removed = (
+        "agent_runtime.gates",
+        "agent_runtime.final_gate",
+        "agent_runtime.proof_batches",
+        "agent_runtime.proof_command_policy",
+        "agent_runtime.promotion_gates",
+        "agent_runtime.proof_runner",
+        "agent_runtime.proof_rules",
+        "agent_runtime.proof_recipes",
+        "agent_runtime.proof_gates",
+        "agent_runtime.burn_in",
+        "agent_runtime.smoke",
+        "agent_runtime.replay_scenarios",
+        "agent_runtime.visual_proof",
+        "agent_runtime.visual_trace_evidence",
     )
-    assert visual_trace_evidence._png_dimensions is stagec_trace_parsers.png_dimensions
+
+    assert all(importlib.util.find_spec(name) is None for name in removed)
+
+    from agent_runtime.proof_capture import CapturedArtifact, ScreenshotRequest
+    from agent_runtime.stagec_command_policy import reject_invalid_stagec_screenshot_window_args
+    from agent_runtime.stagec_trace_parsers import png_dimensions
+
+    assert CapturedArtifact.__name__ == "CapturedArtifact"
+    assert ScreenshotRequest.__name__ == "ScreenshotRequest"
+    assert callable(reject_invalid_stagec_screenshot_window_args)
+    assert callable(png_dimensions)
 
 
 # ── item 5: Stage C rebuild artifacts leave the proofs/ store ─────────────

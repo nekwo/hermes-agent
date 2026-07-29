@@ -3,7 +3,6 @@ from __future__ import annotations
 import pytest
 
 from agent_runtime.missing_input import create_missing_input_request
-from agent_runtime.proof_recipes import RECIPES
 from agent_runtime.role_contracts import contract_for_persona
 from agent_runtime.worklog import append_persona_worklog, persona_worklog_for_task
 
@@ -48,15 +47,3 @@ def test_persona_worklog_is_task_and_persona_filterable(tmp_path, monkeypatch):
 
     assert [evt.persona_id for evt in persona_worklog_for_task("task_1")] == ["dev", "qa"]
     assert [evt.persona_id for evt in persona_worklog_for_task("task_1", persona_id="dev")] == ["dev"]
-
-
-def test_harness_runtime_status_snapshot_recipe_covers_contract_verification():
-    recipe = RECIPES["harness_runtime_status_snapshot"]
-
-    assert recipe.version >= 2
-    assert list(recipe.commands) == [
-        "python -m hermes_cli.main harness status --json",
-        "python -m hermes_cli.main harness snapshot --json",
-        "python -m hermes_cli.main harness contracts verify-examples --json",
-    ]
-    assert recipe.expected_markers_by_command[-1] == ("contract_hash", "ok")

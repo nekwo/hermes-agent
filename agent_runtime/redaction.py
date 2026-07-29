@@ -20,7 +20,7 @@ class RedactionStatus(StrEnum):
 # -------------------------------------------
 # The runtime carried TWELVE independent spellings of "a secret-ish key,
 # followed by a separator, followed by a value" — in ``realm_sync``,
-# ``repo_context``, ``stream``, ``proof_runner``, ``autonomy``,
+# ``repo_context`` and ``stream``,
 # ``profile_runner``, ``prompt_observability``, ``operator_channels``,
 # ``persona_chat_continuity``, ``persona_chat_history``, ``snapshot``, and this
 # module. Every single one wrote the separator as ``\s*[:=]``.
@@ -92,7 +92,7 @@ SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(" + GATE_SECRET_KEYS + r")\b" + SECRET_KEY_SEPARATOR + r"['\"]?[A-Za-z0-9_./+=:-]{16,}"
 )
 
-#: Env-var-shaped redaction (``stream``, ``proof_runner``, ``autonomy``).
+#: Env-var-shaped redaction used by stream and packet projection.
 #: One group: the full key (``HERMES_API_KEY``, not just ``API_KEY``).
 ENV_SECRET_ASSIGNMENT_RE = re.compile(
     r"(?i)\b(" + ENV_SECRET_KEYS + r")" + SECRET_KEY_SEPARATOR + r"(?:\"[^\"]*\"|'[^']*'|[^\s'\"]+)"

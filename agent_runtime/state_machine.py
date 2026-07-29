@@ -20,7 +20,6 @@ from .mission_plan import (
     release_next_stage,
 )
 from .packets import record_decision_packets
-from .proof_gates import stage_proof_satisfied
 from .recovery_flags import block_recovery_attempted_for_current_signal
 from .scope_control import needs_pm_triage_before_dev
 from .states import StageStatus, TaskState
@@ -374,14 +373,6 @@ def _first_incomplete_or_unproven_blueprint_stage(mission: Task, *, proof_store=
         if stage.status != StageStatus.PASSED:
             status = stage.status.value if hasattr(stage.status, "value") else str(stage.status)
             return stage, f"blueprint terminal close blocked: stage {stage.id} is {status}, not passed", False
-        if proofs is not None:
-            failed = _latest_failed_proof_for_stage(stage, proofs)
-            if failed is not None:
-                return stage, f"blueprint terminal close blocked: latest proof {failed.id} for stage {stage.id} failed", True
-            gate = stage_proof_satisfied(stage, proofs)
-            if not gate.allowed:
-                missing = ", ".join(gate.missing or ["missing required proof"])
-                return stage, f"blueprint terminal close blocked: stage {stage.id} proof gate unsatisfied ({missing})", True
     return None
 
 
@@ -502,4 +493,3 @@ def _safe_int(value) -> int:
 
 def _environment_changed(value) -> bool:
     return str(value or "").strip().lower().startswith("changed")
-

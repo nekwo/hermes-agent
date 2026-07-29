@@ -13,9 +13,8 @@ from agent_runtime.persona_assignments import PersonaAssignmentSpec, PersonaAssi
 from agent_runtime.repo_bundles import RepoBundleStore, acquire_repo_bundle_locks, desired_bundles_for_task, qa_waiting_on, release_repo_bundle_locks, repo_lock_summary
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig, RepoBundleRoutingConfig, SimplifiedAgentContractConfig
 from agent_runtime.snapshot import build_snapshot
-from agent_runtime.proof_rules import ProofType
 from agent_runtime.states import StageStatus, TaskState
-from agent_runtime.store import IncidentStore, ProofStore, TaskStore
+from agent_runtime.store import IncidentStore, TaskStore
 
 
 def _task_with_plan(task_id: str = "task_bundle") -> Task:
@@ -131,7 +130,7 @@ def test_proof_only_delivery_intent_does_not_open_empty_patch_incident(isolate_a
     assert IncidentStore().list_open() == []
 
 
-def test_no_product_edit_proof_delivery_skips_patch_landed_nowhere_incident(isolate_agent_runtime_root, monkeypatch):
+def test_no_product_edit_delivery_no_longer_bypasses_patch_guard_with_retired_proofs(isolate_agent_runtime_root, monkeypatch):
     task = _task_with_plan("task_no_edit_empty_capture")
     task.affected_repos = ["EterniaBackend"]
     task.current_stage_id = "backend_implementation"
@@ -151,24 +150,6 @@ def test_no_product_edit_proof_delivery_skips_patch_landed_nowhere_incident(isol
         )
     ]
     TaskStore().create(task)
-    ProofStore().attach(
-        Proof(
-            id="proof_no_edit_backend",
-            task_id=task.id,
-            stage_id="backend_implementation",
-            type=ProofType.TEST_RUN,
-            title="Backend contract smoke",
-            path_or_value="proof.log",
-            created_by="harness",
-            created_at=now(),
-            metadata={
-                "status": "passed",
-                "proof_recipe_mode": "no_product_edit",
-                "proof_recipe_recipe_id": "backend_contract_smoke",
-            },
-            redaction_status="safe",
-        )
-    )
 
     def _empty_capture(_bundle, *, event_log):
         return {"captured": False, "reason": "worktree_clean"}
@@ -190,9 +171,9 @@ def test_no_product_edit_proof_delivery_skips_patch_landed_nowhere_incident(isol
     )
 
     assert delivered.delivery_capture["captured"] is False
-    assert IncidentStore().list_open() == []
+    assert len(IncidentStore().list_open()) == 1
     saved = TaskStore().get(task.id)
-    assert "delivery_no_progress_guard" not in saved.harness_self_heal
+    assert "delivery_no_progress_guard" in saved.harness_self_heal
 
 
 def test_repeated_empty_delivery_without_new_proof_waits_for_operator(isolate_agent_runtime_root, monkeypatch):
@@ -309,70 +290,6 @@ class ApproveQaRuntime:
                 "findings": [],
             },
         )
-
-
-class PassingProofRunner:
-    def __init__(self, proof_store: ProofStore):
-        self.proof_store = proof_store
-
-    def run_commands(self, task, *, stage_id, run_id, actor, commands, **_kwargs):
-        proof = Proof(
-            id="proof_requested_ok",
-            task_id=task.id,
-            stage_id=stage_id,
-            type=ProofType.TEST_RUN,
-            title="Requested proof",
-            path_or_value="proof.log",
-            created_by="harness",
-            created_at=now(),
-            metadata={"status": "passed", "run_id": run_id, "command": ".EterniaBackendVirtualEnv/Scripts/python.exe manage.py check"},
-            redaction_status="safe",
-        )
-        return [self.proof_store.attach(proof)]
-
-
-def _attach_product_promotion_proofs(task: Task, proof_store: ProofStore, *, after):
-    proofs = [
-        Proof(
-            id="proof_backend_docker_postgres",
-            task_id=task.id,
-            stage_id="qa_release",
-            type=ProofType.TEST_RUN,
-            title="Backend Docker/PostgreSQL validation",
-            path_or_value="docker-postgres.log",
-            created_by="harness",
-            created_at=after + timedelta(seconds=30),
-            metadata={"status": "passed", "command": "scripts/test.sh # local Docker Compose PostgreSQL tier"},
-            redaction_status="safe",
-        ),
-        Proof(
-            id="proof_staging_k8",
-            task_id=task.id,
-            stage_id="qa_release",
-            type=ProofType.TEST_RUN,
-            title="Staging k8 validation",
-            path_or_value="staging.log",
-            created_by="harness",
-            created_at=after + timedelta(minutes=1),
-            metadata={"status": "passed", "command": "kubectl -n staging rollout status deploy/eternia-backend"},
-            redaction_status="safe",
-        ),
-        Proof(
-            id="proof_prod_rollout",
-            task_id=task.id,
-            stage_id="qa_release",
-            type=ProofType.TEST_RUN,
-            title="Production pod rollout",
-            path_or_value="prod.log",
-            created_by="harness",
-            created_at=after + timedelta(minutes=2),
-            metadata={"status": "passed", "command": "kubectl -n prod rollout status deploy/eternia-backend", "proof_intent": "prod_rollout"},
-            redaction_status="safe",
-        ),
-    ]
-    for proof in proofs:
-        proof_store.attach(proof)
-        task.proof_ids.append(proof.id)
 
 
 class ShouldNotRunRuntime:

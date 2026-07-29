@@ -3,7 +3,7 @@ from datetime import timedelta
 from hermes_time import now
 
 from agent_runtime.models import AgentPersona, AgentRun, Event, Incident, MissionIntent, MissionPlan, MissionPlanStage, Proof, Task, TaskStage
-from agent_runtime.proof_rules import ProofType
+from agent_runtime.models import ProofType
 from agent_runtime.serde import from_jsonable, to_jsonable
 from agent_runtime.states import RunState, StageStatus, TaskState
 

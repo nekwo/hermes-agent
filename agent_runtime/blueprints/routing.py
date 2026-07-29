@@ -6,7 +6,6 @@ from hermes_time import now
 
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.models import MissionPlan, MissionPlanStage, Proof, Task
-from agent_runtime.proof_gates import stage_proof_satisfied
 from agent_runtime.states import StageStatus, TaskState
 
 from .schema import StageOutcome
@@ -47,18 +46,6 @@ def derive_stage_outcome(
         if verdict in {"missing_input", "missing-input"}:
             return StageOutcome.MISSING_INPUT
         return StageOutcome.FAILED
-    if _stage_has_required_gate(stage) and decision.type in {
-        DecisionType.REQUEST_TEST_RUN,
-        DecisionType.REQUEST_QA_REVIEW,
-        DecisionType.COMPLETE,
-        DecisionType.APPROVE,
-        DecisionType.HAND_OFF,
-        DecisionType.PROPOSE_PATCH,
-    }:
-        gate = stage_proof_satisfied(stage, list(proofs or []))
-        if gate.allowed:
-            return StageOutcome.PASSED
-        return StageOutcome.MISSING_INPUT
     if decision.type == DecisionType.REQUEST_TEST_RUN:
         return _outcome_from_proofs(proofs or [])
     if decision.type in {DecisionType.SCOPE_ROUTE, DecisionType.PROPOSE_ACCEPTANCE, DecisionType.REQUEST_QA_REVIEW, DecisionType.COMPLETE, DecisionType.APPROVE}:
@@ -222,10 +209,6 @@ def apply_decision_outcome(
     outcome = derive_stage_outcome(decision, stage, proofs=proofs)
     if outcome is None:
         return None
-    if outcome == StageOutcome.MISSING_INPUT and _stage_has_required_gate(stage):
-        gate = stage_proof_satisfied(stage, list(proofs or []))
-        if not gate.allowed:
-            _record_proof_gate_evidence(task, stage, gate, reason=reason or decision.summary or decision.type.value)
     return apply_stage_outcome(task, stage.id, outcome, reason=reason or decision.summary or decision.type.value)
 
 

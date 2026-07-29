@@ -18,10 +18,9 @@ from agent_runtime.blueprints.schema import StageOutcome, blueprint_from_dict, v
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.mission_plan import mission_plan_summary, validate_mission_plan
 from agent_runtime.models import MissionIntent, MissionPlan, MissionPlanStage, Proof, Task
-from agent_runtime.proof_rules import ProofType
+from agent_runtime.models import ProofType
 from agent_runtime.state_machine import MissionStateMachine
 from agent_runtime.states import StageStatus, TaskState
-from agent_runtime.store import ProofStore
 
 
 def test_schema_rejects_undeclared_owner_slot():

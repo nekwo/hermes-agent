@@ -288,18 +288,11 @@ def _validate_proof_gate(stage: BlueprintStage) -> list[str]:
         errors.append(f"stage {stage.id} proof_gate.minimum_status {gate.minimum_status!r} is not allowed")
     for proof_type in gate.required_proof_types:
         try:
-            from agent_runtime.proof_rules import ProofType
+            from agent_runtime.models import ProofType
 
             ProofType(proof_type)
         except ValueError:
             errors.append(f"stage {stage.id} proof_gate.required_proof_types contains unknown type {proof_type!r}")
-    if gate.proof_recipe_id:
-        try:
-            from agent_runtime.proof_recipes import resolve_proof_recipe
-
-            resolve_proof_recipe(gate.proof_recipe_id)
-        except Exception as exc:
-            errors.append(f"stage {stage.id} proof_gate.proof_recipe_id is invalid: {exc}")
     return errors
 
 

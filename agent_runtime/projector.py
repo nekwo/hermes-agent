@@ -19,7 +19,6 @@ from .persona_assignments import (
     persona_instance_runtime_enabled,
 )
 from .personas import seed_personas
-from .proof_batches import ProofBatchStore
 from .read_model import ReadModel
 from .repo_bundles import RepoBundleStore
 from .role_checklists import RoleChecklistStore
@@ -30,11 +29,10 @@ from .snapshot import (
     _goal_head,
     _goal_projection_from_task,
     _incident_summary,
-    _proof_summary,
     _run_summary,
     build_snapshot,
 )
-from .store import AgentStore, IncidentStore, ProofStore, RunStore, TaskStore, WorkspaceStore
+from .store import AgentStore, IncidentStore, RunStore, TaskStore, WorkspaceStore
 from .worker_sessions import WorkerSessionStore
 
 
@@ -126,7 +124,6 @@ class Projector:
     def _apply_changed(self, changed: "_Changed", *, to_offset: int, last_event_ts: Any) -> None:
         task_store = TaskStore(event_log=self.event_log)
         run_store = RunStore(event_log=self.event_log)
-        proof_store = ProofStore(event_log=self.event_log)
         incident_store = IncidentStore(event_log=self.event_log)
         task_ids = sorted(changed.task_ids)
         run_ids = sorted(changed.run_ids)
@@ -173,7 +170,6 @@ class Projector:
                     # stores per delta.
                     role_envelopes = RoleEnvelopeStore(event_log=projection_log).list_all()
                     role_checklists = RoleChecklistStore(event_log=projection_log).list_all()
-                    proof_batches = ProofBatchStore(event_log=projection_log).list_all()
                     repo_bundles = RepoBundleStore(event_log=projection_log).list_all()
                     runtime_instances = GoalRuntimeInstanceStore(event_log=projection_log).list_all()
                     self_test_store = SelfTestEvidenceStore(event_log=projection_log)
@@ -213,7 +209,7 @@ class Projector:
                         goals.append(
                             _goal_head(_goal_projection_from_task(
                                 task,
-                                proof_store.list_for_task(task.id),
+                                [],
                                 all_tasks,
                                 incidents,
                                 runs,
@@ -223,7 +219,6 @@ class Projector:
                                 self_tests=self_test_store.list_for_task(task.id),
                                 role_envelopes=[item for item in role_envelopes if item.task_id == task.id],
                                 role_checklists=[item for item in role_checklists if item.task_id == task.id],
-                                proof_batches=[item for item in proof_batches if item.task_id == task.id],
                                 persona_assignments=[item for item in persona_assignments if item.task_id == task.id],
                                 repo_bundles=[item for item in repo_bundles if item.task_id == task.id],
                                 runtime_instances=[item for item in runtime_instances if item.task_id == task.id],
@@ -250,8 +245,6 @@ class Projector:
                     self.read_model._write_goals(conn, goals)
                 if run_ids:
                     self.read_model._write_runs(conn, [_run_summary(run_store.get(run_id)) for run_id in run_ids])
-                if proof_ids:
-                    self.read_model._write_proofs(conn, [_proof_summary(proof_store.get(proof_id)) for proof_id in proof_ids])
                 if incident_ids:
                     self.read_model._write_incidents(conn, [_incident_summary(incident_store.get(incident_id)) for incident_id in incident_ids])
                 if changed.stale_sections:

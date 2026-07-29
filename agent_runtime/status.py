@@ -30,18 +30,17 @@ from .repo_bundles import RepoBundleStore, bundle_queue_summary, repo_bundle_del
 from .runtime_instances import GoalRuntimeInstanceStore, runtime_instances_summary
 from .state_machine import MissionStateMachine
 from .states import RunState, TaskState
-from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, ProofStore, RunStore, TaskStore
+from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, RunStore, TaskStore
 from .worker_sessions import WorkerSessionStore, worker_session_summary
 from .snapshot import _default_persona_session_db, _parity_envelope
 
 
-def build_status(task_store: TaskStore | None = None, run_store: RunStore | None = None, incident_store: IncidentStore | None = None, agent_store: AgentStore | None = None, proof_store: ProofStore | None = None, event_log: EventLog | None = None, worker_session_store: WorkerSessionStore | None = None) -> dict:
+def build_status(task_store: TaskStore | None = None, run_store: RunStore | None = None, incident_store: IncidentStore | None = None, agent_store: AgentStore | None = None, event_log: EventLog | None = None, worker_session_store: WorkerSessionStore | None = None) -> dict:
     _build_started = time.perf_counter()
     task_store = task_store or TaskStore()
     run_store = run_store or RunStore()
     incident_store = incident_store or IncidentStore()
     agent_store = agent_store or AgentStore()
-    proof_store = proof_store or ProofStore()
     # Status calls persona_chat_trace/for_session dozens of times on the same
     # log; CachedEventLog reads events.jsonl once and serves all of them from
     # memory (same as build_snapshot — this was the 2s hog of a warm status).
@@ -57,11 +56,6 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
     execution_mode = "manual"
     agents = agent_store.list_all() or ensure_persisted_personas(cfg)
     proofs = []
-    for task in tasks:
-        proofs.extend(proof_store.list_for_task(task.id))
-    from .burn_in import certification_summary
-
-    cert = certification_summary()
     repo_bundles = RepoBundleStore(event_log=event_log).list_all()
     runtime_instances = GoalRuntimeInstanceStore(event_log=event_log).list_all()
     open_incident_task_ids = {i.task_id for i in incidents if i.closed_at is None and i.task_id}
@@ -102,17 +96,9 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
         "production_envelope": production_envelope_status(cfg),
         "swarm": {
             "enabled": bool(getattr(getattr(cfg, "swarm", None), "enabled", False)),
-            "certification": {
-                **cert,
-                "required": bool(getattr(getattr(cfg, "swarm", None), "requires_certification", True)),
-            },
         },
         "recursive_supervision": {
             "enabled": _recursive_supervision_enabled(cfg),
-            "certification": {
-                **cert,
-                "required": bool(getattr(getattr(cfg, "swarm", None), "requires_certification", True)),
-            },
         },
         "foreground_runtime": runtime_instances_summary(runtime_instances),
         "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=None, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
@@ -122,7 +108,6 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
                 blocked=t.id in open_incident_task_ids,
                 incidents=open_incidents_by_task.get(t.id, []),
                 run_store=run_store,
-                proof_store=proof_store,
                 config=cfg,
             )
             for t in tasks
@@ -261,7 +246,7 @@ def _recursive_supervision_enabled(cfg) -> bool:
     )
 
 
-def _next_action(task, *, blocked: bool = False, incidents=None, run_store: RunStore | None = None, proof_store: ProofStore | None = None, config=None):
+def _next_action(task, *, blocked: bool = False, incidents=None, run_store: RunStore | None = None, config=None):
     if blocked and _has_budget_scope_recovery_path(incidents or [], run_store or RunStore()):
         return {**_stopped_progress(task, incidents or [], "self_heal_pending", "neko_supervisor"), "task_id": task.id, "action": "run_slot", "reason": "Dev exhausted read/search without patch or proof; Neko must split or narrow the stage before retry"}
     if blocked and _has_budget_approval_path(incidents or [], run_store or RunStore()):
@@ -271,7 +256,7 @@ def _next_action(task, *, blocked: bool = False, incidents=None, run_store: RunS
         message = "budget continuation cap reached; human review required" if reason == "budget_continuation_blocked" else "open incident requires human review"
         return {**_stopped_progress(task, incidents or [], reason, "human"), "task_id": task.id, "action": "blocked_by_incident", "reason": message}
     try:
-        action = MissionStateMachine(proof_store=proof_store, config=config).next_action(task)
+        action = MissionStateMachine(config=config).next_action(task)
     except LegacyOrchestratorRemoved as exc:
         # Stage 15.4 read-surface contract. The DISPATCH path (ticker, goal
         # runner, blueprint create) must keep raising this — the typed refusal

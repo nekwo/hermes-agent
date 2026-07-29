@@ -48,7 +48,7 @@ def _h5_migration_rollback(cfg: Any) -> dict[str, Any]:
         controls=[
             "simplified_agent_contract.enabled activates the collapsed hand_off/block/escalate/scope_route/qa_verdict agent-facing contract",
             "expose_only_simplified_actions removes legacy delivery and proof-request payload fill surfaces from the HUD",
-            "proof-from-trace records agent terminal self-tests as observed ProofStore records; authoritative gates still rerun harness-side",
+            "agent terminal self-tests are retained as observational evidence",
             "hand_off captures the grounded isolated-worktree diff and then runs the stage proof recipe/test plan as the authoritative gate",
             "legacy decision aliases are pruned; simplified contracts accept only collapsed signal decisions",
             "keep_internal_state_machine preserves the old deterministic executor behind the simplified action surface",
@@ -184,15 +184,8 @@ def _recursive_supervision(cfg: Any) -> dict[str, Any]:
             bool(getattr(swarm, "enabled", False)),
         ]
     )
-    try:
-        from .burn_in import recursive_supervision_certification_allows_production
-
-        certified, cert = recursive_supervision_certification_allows_production(
-            requires_certification=bool(getattr(swarm, "requires_certification", True)),
-            allow_uncertified_recursive_supervision=bool(getattr(swarm, "allow_uncertified_dev_swarm", False)),
-        )
-    except Exception:
-        certified, cert = False, {"state": "unknown", "consecutive_green": 0, "required_consecutive_green": 10}
+    certified = False
+    cert = {"state": "retired", "consecutive_green": 0, "required_consecutive_green": 0}
     blockers = []
     status = "implemented"
     if enabled and not certified:

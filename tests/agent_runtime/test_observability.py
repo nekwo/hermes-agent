@@ -217,7 +217,7 @@ def test_recent_events_include_redaction_safe_progress_summary():
     assert "C:/Users" not in encoded
 
 
-def test_recent_events_include_dev_work_log_quality_fields():
+def test_legacy_proof_event_uses_generic_display_but_keeps_safe_quality_fields():
     ts = now()
     event = Event(
         ts=ts,
@@ -256,8 +256,8 @@ def test_recent_events_include_dev_work_log_quality_fields():
             "task_id": "task_log",
             "run_id": "run_log",
             "persona_id": "dev",
-            "display_kind": "proof",
-            "display_title": "Proof passed",
+            "display_kind": "event",
+            "display_title": "proof.attached",
             "display_summary": "Command proof passed: exit 0, 467ms, proof proof_1",
             "artifact_refs": [{"kind": "proof", "id": "proof_1"}],
             "phase": "proof",

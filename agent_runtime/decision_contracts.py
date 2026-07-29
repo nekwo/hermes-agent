@@ -141,15 +141,7 @@ def validate_planning_decision(decision: AgentDecision) -> None:
         _list_of_strings(p, "test_plan")
     elif decision.type == DecisionType.REQUEST_TEST_RUN:
         require_keys(p, "stage_id")
-        recipe_id = str(p.get("recipe_id") or "").strip()
-        if recipe_id:
-            from .proof_recipes import resolve_proof_recipe
-
-            resolve_proof_recipe(recipe_id)
-            if "commands" in p:
-                _list_of_strings(p, "commands")
-        else:
-            _list_of_strings(p, "commands", required=True)
+        _list_of_strings(p, "commands", required=True)
     elif decision.type == DecisionType.REQUEST_SCREENSHOT:
         _validate_visual_proof_request(p, "request_screenshot")
     elif decision.type == DecisionType.REQUEST_VIDEO:

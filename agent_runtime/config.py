@@ -664,11 +664,9 @@ def _normal_worker_flow_config(raw: dict[str, Any]) -> NormalWorkerFlowConfig:
     return NormalWorkerFlowConfig(
         enabled=bool(raw.get("enabled", defaults.enabled)),
         dev_self_tests_in_session=bool(raw.get("dev_self_tests_in_session", defaults.dev_self_tests_in_session)),
-        auto_final_gate_after_delivery=bool(raw.get("auto_final_gate_after_delivery", defaults.auto_final_gate_after_delivery)),
         hide_request_test_run_until_gate=bool(raw.get("hide_request_test_run_until_gate", defaults.hide_request_test_run_until_gate)),
         self_test_evidence_capture=bool(raw.get("self_test_evidence_capture", defaults.self_test_evidence_capture)),
         max_self_test_repeats_without_change=_positive_int(raw.get("max_self_test_repeats_without_change"), defaults.max_self_test_repeats_without_change),
-        max_auto_final_gate_repairs_per_stage=_positive_int(raw.get("max_auto_final_gate_repairs_per_stage"), defaults.max_auto_final_gate_repairs_per_stage),
         expose_worker_actions_in_contract_dump=bool(raw.get("expose_worker_actions_in_contract_dump", defaults.expose_worker_actions_in_contract_dump)),
     )
 

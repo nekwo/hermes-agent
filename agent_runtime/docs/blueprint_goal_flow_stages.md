@@ -328,7 +328,7 @@ as `missing_skills` / `skill_hash_mismatches`.
 `MissionPlanStage.proof_recipe_id` + `blocks_qa_until` already attach proof to stages.
 The gap is the **gate evaluation**, which is role-named:
 `implementation proof satisfied`, `verification proof satisfied`, `integration proof satisfied`
-([`proof_gates.py`](../proof_gates.py)).
+(the retired mission proof-gate evaluator).
 - *Dynamic form:* one generic `stage_proof_satisfied(stage, proofs)` evaluated against
   the stage's declared `proof_gate` (`required`, `minimum_status`,
   `required_proof_types`, `commands` / `proof_recipe_id`). The recipe **registry stays
@@ -1103,7 +1103,7 @@ prerequisite profile slice (create + promote + orphan handling).
 ## Stage 7 — Proof Gates as First-Class Nodes
 
 **Goal:** Make proof requirements explicit and machine-checkable. Build on existing
-`proof_recipe_id` / `proof_rules` / `proof_gates` modules.
+the former mission proof-recipe and gate modules.
 
 ```yaml
 proof_gate:
@@ -1116,7 +1116,7 @@ proof_gate:
 
 ### Files touched
 
-- `agent_runtime/proof_gates.py` — add `stage_proof_satisfied(stage, proofs) -> GateResult`
+- Add a stage-proof evaluator for the legacy mission lane.
   driven by the stage's `ProofGate`; delete `implementation proof satisfied` / `verification proof satisfied`
   / `integration proof satisfied` once `derive_stage_outcome` calls the generic gate.
 - `agent_runtime/proof_recipes.py` — recipe registry stays; allow a stage to reference
@@ -1255,7 +1255,7 @@ regression is explicitly being checked:
 
 ```bash
 python -m pytest tests/agent_runtime/blueprints tests/agent_runtime/test_state_machine.py
-python -m pytest tests/agent_runtime/test_proof_gates.py
+python -m pytest tests/agent_runtime
 rg "retired dev action|retired qa action|retired lead action|retired owner allowlist|implementation proof satisfied|verification proof satisfied|integration proof satisfied" agent_runtime hermes_cli tests
 rg "ready-for-implementation|ready-for-verification|verified|needs-fixes|proof-review|applying" agent_runtime hermes_cli tests
 ```

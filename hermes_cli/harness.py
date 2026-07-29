@@ -111,7 +111,6 @@ from agent_runtime.realm_sync import (
     sync_artifacts_for_workspace_agent,
 )
 from agent_runtime.resolution import resolution_table, resolve_runtime
-from agent_runtime.burn_in import STAGE47_CASES, STAGE47_SUITE, burn_in_status, create_burn_in, run_burn_in_case, summarize_burn_in, swarm_certification_allows_production
 from agent_runtime.migrations import effective_config_summary, migration_status
 from agent_runtime.mission_chat_turns import (
     MissionChatTurnPersistOutcome,
@@ -160,12 +159,11 @@ from agent_runtime.prompt_observability import attach_prompt_observability_turn_
 from agent_runtime.provider_health import provider_health_for_personas
 from agent_runtime.skill_install import install_harness_skills, install_harness_skills_for_personas
 from agent_runtime.snapshot import build_snapshot, write_snapshot
-from agent_runtime.smoke import run_smoke
 from agent_runtime.scope_control import find_discovery_task
 from agent_runtime.states import TaskState, RunState, WorkerSessionState
 from agent_runtime.status import build_status
 from agent_runtime.steering import execute_steer_action
-from agent_runtime.store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, ProofStore, RunStore, TaskStore
+from agent_runtime.store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, RunStore, TaskStore
 from agent_runtime.store import RealmStore, WorkspaceStore
 from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
 from agent_runtime.tool_permissions import ChatToolPermissionStore, permission_state_for_chat
@@ -940,20 +938,6 @@ def build_parser(parent_subparsers) -> None:
     _add_stage42_global_args(office_resolve, mutation=True)
     office_resolve.set_defaults(func=_cmd_office_resolve_conflict)
 
-    playground = subs.add_parser("playground", help="Replay captured contract-failure scenarios against current contracts")
-    playground_subs = playground.add_subparsers(dest="playground_command", required=True)
-    playground_list = playground_subs.add_parser("list", help="List captured replay scenarios")
-    playground_list.add_argument("--json", action="store_true")
-    playground_list.set_defaults(func=_cmd_playground_list)
-    playground_show = playground_subs.add_parser("show", help="Show one replay scenario")
-    playground_show.add_argument("scenario_id")
-    playground_show.add_argument("--json", action="store_true")
-    playground_show.set_defaults(func=_cmd_playground_show)
-    playground_replay = playground_subs.add_parser("replay", help="Replay one scenario (or all) against current contracts; mutates nothing")
-    playground_replay.add_argument("scenario_id", nargs="?", default=None, help="Scenario id; omit to replay all")
-    playground_replay.add_argument("--json", action="store_true")
-    playground_replay.set_defaults(func=_cmd_playground_replay)
-
     swarm = subs.add_parser("swarm", help="Manage production swarm gate and runtime state")
     swarm_subs = swarm.add_subparsers(dest="swarm_command", required=True)
     swarm_status = swarm_subs.add_parser("status", help="Show swarm certification and enablement status")
@@ -985,29 +969,6 @@ def build_parser(parent_subparsers) -> None:
         command.add_argument("--reason", default=f"operator {command_name}")
         command.add_argument("--json", action="store_true")
         command.set_defaults(func=_cmd_lane_control)
-
-    burn = subs.add_parser("burn-in", help="Run Stage 47 certification burn-in cases")
-    burn_subs = burn.add_subparsers(dest="burn_in_command")
-    burn_create = burn_subs.add_parser("create", help="Create a burn-in ledger")
-    burn_create.add_argument("--suite", default=STAGE47_SUITE)
-    burn_create.add_argument("--case-id", choices=sorted(STAGE47_CASES), default=None)
-    burn_create.add_argument("--rerun-of", default=None)
-    burn_create.add_argument("--json", action="store_true")
-    burn_create.set_defaults(func=_cmd_burn_in_create)
-    burn_run = burn_subs.add_parser("run", help="Run a burn-in case")
-    burn_run.add_argument("case_id", choices=sorted(STAGE47_CASES))
-    burn_run.add_argument("--burn-id", default=None)
-    burn_run.add_argument("--max-actions", type=int, default=12)
-    burn_run.add_argument("--json", action="store_true")
-    burn_run.set_defaults(func=_cmd_burn_in_run)
-    burn_status = burn_subs.add_parser("status", help="Show burn-in ledger status")
-    burn_status.add_argument("burn_id")
-    burn_status.add_argument("--json", action="store_true")
-    burn_status.set_defaults(func=_cmd_burn_in_status)
-    burn_summary = burn_subs.add_parser("summarize", help="Summarize burn-in certification evidence")
-    burn_summary.add_argument("burn_id")
-    burn_summary.add_argument("--json", action="store_true")
-    burn_summary.set_defaults(func=_cmd_burn_in_summarize)
 
     run = subs.add_parser("run", help="Manage harness runs")
     run_subs = run.add_subparsers(dest="run_command")
@@ -1546,18 +1507,6 @@ def build_parser(parent_subparsers) -> None:
     skills.add_argument("--json", action="store_true")
     skills.set_defaults(func=_cmd_install_harness_skills)
 
-    smoke = subs.add_parser("smoke", help="Run a safe Mission Control smoke goal")
-    smoke.add_argument("--json", action="store_true")
-    smoke.add_argument("--no-model", action="store_true", default=False)
-    smoke.set_defaults(func=_cmd_smoke)
-
-    proof = subs.add_parser("proof", help="Manage proof records")
-    proof_subs = proof.add_subparsers(dest="proof_command")
-    proof_list = proof_subs.add_parser("list")
-    proof_list.add_argument("task_id")
-    proof_list.add_argument("--json", action="store_true")
-    proof_list.set_defaults(func=_cmd_proof_list)
-
     issue = subs.add_parser("issue", help="Manage issue discoveries")
     issue_subs = issue.add_subparsers(dest="issue_command")
     issue_list = issue_subs.add_parser("list")
@@ -2006,13 +1955,11 @@ def _goal_row(task: Task, *, full: bool = False) -> dict:
     }
     if full:
         runs = RunStore().list_for_task(task.id)
-        proofs = ProofStore().list_for_task(task.id)
         incidents = [item for item in IncidentStore().list_all() if item.task_id == task.id and item.closed_at is None]
         row.update(
             {
                 "graph": mission_plan_summary(task),
                 "run_ids": [run.id for run in runs],
-                "proof_ids": [proof.id for proof in proofs],
                 "open_incident_ids": [incident.id for incident in incidents],
             }
         )

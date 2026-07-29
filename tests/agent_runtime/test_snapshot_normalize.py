@@ -118,12 +118,12 @@ def test_goals_single_owner_carries_union_of_both_projections(isolate_agent_runt
         "role_streams",
         "role_envelopes",
         "role_checklists",
-        "proof_batches",
         "self_test_summaries",
         "operator_capabilities",
         "timeline",
     ):
         assert key in detail, key
+    assert "proof_batches" not in detail
 
 
 def test_parent_child_tasks_are_not_collapsed(isolate_agent_runtime_root):

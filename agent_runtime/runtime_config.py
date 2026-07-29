@@ -43,11 +43,9 @@ class EnterpriseWorkerSessionsConfig:
 class NormalWorkerFlowConfig:
     enabled: bool = False
     dev_self_tests_in_session: bool = True
-    auto_final_gate_after_delivery: bool = True
     hide_request_test_run_until_gate: bool = True
     self_test_evidence_capture: bool = True
     max_self_test_repeats_without_change: int = 1
-    max_auto_final_gate_repairs_per_stage: int = 1
     expose_worker_actions_in_contract_dump: bool = True
 
 

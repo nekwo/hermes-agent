@@ -18,7 +18,6 @@ from .events import EventLog, archive_task_events
 from .locks import archive_lock, task_lock, run_lock
 from .models import AgentPersona, AgentRun, Event, Goal, GoalRuntimeInstance, Incident, Proof, Realm, Task, Workspace
 from .persona_assignments import PersonaAssignmentStore, PersonaInstanceStore
-from .proof_rules import ProofType
 from .recovery_flags import mark_incident_closed_for_recovery
 from .serde import from_jsonable, to_jsonable
 from .state_patches import emit_incident_remove, emit_task_refresh
@@ -550,7 +549,6 @@ class ArchiveStore:
             "self_test_evidence_archived": archived_self_tests.get("self_test_evidence_archived", False),
             "role_envelope_ids": archived_role_state.get("role_envelope_ids", []),
             "role_checklist_ids": archived_role_state.get("role_checklist_ids", []),
-            "proof_batch_ids": archived_role_state.get("proof_batch_ids", []),
             "role_state_archived": archived_role_state.get("role_state_archived", False),
         }
 
@@ -1382,77 +1380,6 @@ def _enrich_proof_lane_attribution(proof: Proof) -> None:
         pass
 
 
-class ProofStore:
-    def __init__(self, event_log: EventLog | None = None):
-        self.event_log = event_log or EventLog()
-
-    def attach(self, proof: Proof) -> Proof:
-        _enrich_proof_lane_attribution(proof)
-        _write_model(paths.proof_record_path(proof.task_id, proof.id), proof)
-        metadata = proof.metadata or {}
-        run_id = _safe_run_id(metadata.get("run_id"))
-        status = _safe_proof_status(metadata.get("status"))
-        exit_code = metadata.get("exit_code")
-        duration_ms = metadata.get("duration_ms")
-        safe_proof_id = _safe_event_token(proof.id, fallback="proof")
-        safe_stage_id = _safe_event_token(proof.stage_id, fallback=None)
-        payload = {
-            "proof_id": safe_proof_id,
-            "type": str(proof.type),
-            "phase": "proof",
-            "severity": "warning" if status in {"failed", "timeout"} else "info",
-            "step": "command_proof" if proof.type == ProofType.TEST_RUN else "proof_attached",
-            "status": status,
-            "summary": _proof_event_summary(safe_proof_id, proof.type, status=status, exit_code=exit_code, duration_ms=duration_ms),
-            "next_expected": "hand_off" if proof.type == ProofType.TEST_RUN and status == "passed" else "inspect_proof",
-        }
-        if safe_stage_id is not None:
-            payload["stage_id"] = safe_stage_id
-        for key in ("lane_id", "persona_instance_id", "repo_bundle_id", "proof_reuse_basis"):
-            value = metadata.get(key)
-            if isinstance(value, str) and _safe_event_token(value, fallback=None):
-                payload[key] = value
-        if isinstance(metadata.get("repo_bundle_ids"), list):
-            payload["repo_bundle_ids"] = [
-                str(item)[:128]
-                for item in metadata["repo_bundle_ids"][:8]
-                if _safe_event_token(str(item), fallback=None)
-            ]
-        if isinstance(exit_code, int):
-            payload["exit_code"] = exit_code
-        if isinstance(duration_ms, int) and duration_ms >= 0:
-            payload["duration_ms"] = duration_ms
-        self.event_log.append(
-            Event(
-                ts=now(),
-                type="proof.attached",
-                task_id=proof.task_id,
-                run_id=run_id,
-                persona_id=_safe_proof_actor(metadata.get("actor_requested"), fallback=proof.created_by),
-                payload=payload,
-            )
-        )
-        return proof
-
-    def get(self, proof_id: str) -> Proof:
-        for path in paths.proofs_dir().glob(f"*/proof_{proof_id}.json"):
-            return _read_model(Proof, path)
-        raise NotFound(proof_id)
-
-    def list_for_task(self, task_id: str) -> list[Proof]:
-        task_dir = paths.proofs_dir() / task_id
-        return _list_models(Proof, task_dir)
-
-    def list_for_stage(self, stage_id: str) -> list[Proof]:
-        proofs: list[Proof] = []
-        if paths.proofs_dir().exists():
-            for path in paths.proofs_dir().glob("*/proof_*.json"):
-                proof = _read_model(Proof, path)
-                if proof.stage_id == stage_id:
-                    proofs.append(proof)
-        return sorted(proofs, key=lambda proof: proof.id)
-
-
 def _safe_proof_actor(value, *, fallback: str) -> str:
     if isinstance(value, str) and value in {"pm", "dev", "qa", "neko_supervisor", "supervisor", "harness"}:
         return value
@@ -1477,14 +1404,6 @@ def _safe_proof_status(value) -> str:
         if normalized in {"passed", "failed", "timeout", "attached"}:
             return normalized
     return "attached"
-
-
-def _proof_event_summary(proof_id: str, proof_type: ProofType, *, status: str, exit_code, duration_ms) -> str:
-    if proof_type == ProofType.TEST_RUN:
-        exit_part = f"exit {exit_code}" if isinstance(exit_code, int) else "exit unknown"
-        duration_part = f", {duration_ms}ms" if isinstance(duration_ms, int) and duration_ms >= 0 else ""
-        return f"Command proof {status}: {exit_part}{duration_part}, proof {proof_id}"
-    return f"Proof attached: {proof_id}"
 
 
 def _safe_archive_actor(value: str) -> str:
@@ -1671,13 +1590,11 @@ def _archive_role_envelope_evidence(task_id: str, archive_dir: Path) -> dict:
     result = {
         "role_envelope_ids": [],
         "role_checklist_ids": [],
-        "proof_batch_ids": [],
         "role_state_archived": False,
     }
     for source, dest_name, pattern, key in (
         (paths.role_envelopes_task_dir(task_id), "role_envelopes", "*.json", "role_envelope_ids"),
         (paths.role_checklists_task_dir(task_id), "role_checklists", "*.json", "role_checklist_ids"),
-        (paths.proof_batches_task_dir(task_id), "proof_batches", "*.json", "proof_batch_ids"),
     ):
         if not source.exists():
             continue

@@ -15,7 +15,7 @@ from agent_runtime.mission_plan import (
     validate_mission_plan,
 )
 from agent_runtime.models import MissionIntent, MissionPlan, MissionPlanStage, Proof, Task
-from agent_runtime.proof_rules import ProofType
+from agent_runtime.models import ProofType
 from agent_runtime.states import StageStatus, TaskState
 
 
@@ -431,7 +431,7 @@ def test_mission_control_launcher_plan_projects_focused_worker_hud_defaults():
     ]
 
 
-def test_exact_proof_goal_projects_exact_stage_defaults_not_mission_control_flutter():
+def test_retired_exact_proof_directive_does_not_override_launcher_stage_defaults():
     task = make_task(
         title="Mission Control Harness exact proof trust probe",
         description=(
@@ -465,11 +465,14 @@ def test_exact_proof_goal_projects_exact_stage_defaults_not_mission_control_flut
     )
 
     stage = task.stages[0]
-    assert stage.affected_paths == ["docs/scratch/e2e_trust_probe.md"]
-    assert stage.test_plan == ["echo e2e-trust-probe"]
+    assert stage.affected_paths == ["lib/features/mission_control/", "test/features/mission_control/"]
+    assert stage.test_plan == [
+        "flutter analyze lib/features/mission_control test/features/mission_control",
+        "flutter test test/features/mission_control",
+    ]
 
 
-def test_exact_proof_projection_reads_locked_mission_intent_after_description_rewrite():
+def test_retired_locked_exact_proof_directive_does_not_override_launcher_defaults():
     task = make_task(
         title="Mission Control Harness exact proof trust probe",
         description="Create the concise Launcher trust-probe artifact.",
@@ -506,8 +509,11 @@ def test_exact_proof_projection_reads_locked_mission_intent_after_description_re
     ensure_mission_plan(task, {}, actor="neko_supervisor")
 
     stage = task.stages[0]
-    assert stage.affected_paths == ["docs/scratch/e2e_trust_probe_qa.md"]
-    assert stage.test_plan == ["echo e2e-trust-probe-qa"]
+    assert stage.affected_paths == ["lib/features/mission_control/", "test/features/mission_control/"]
+    assert stage.test_plan == [
+        "flutter analyze lib/features/mission_control test/features/mission_control",
+        "flutter test test/features/mission_control",
+    ]
 
 
 def test_launcher_post_media_plan_projects_focused_worker_hud_defaults():
@@ -768,13 +774,8 @@ def _assert_graph_typed(task, *, site: str):
     assert task.mission_plan.stages, f"{site} created a stage-less plan"
 
 
-def test_burn_in_case_tasks_are_graph_typed_at_creation():
-    from agent_runtime.burn_in import STAGE47_CASES, _create_case_task
-
-    for case_id, case in STAGE47_CASES.items():
-        task = _create_case_task(case_id, case, hygiene=None)
-        _assert_graph_typed(task, site=f"burn_in._create_case_task[{case_id}]")
-        assert task.mission_plan.blueprint_id
+def test_burn_in_case_task_factory_is_removed():
+    assert importlib.util.find_spec("agent_runtime.burn_in") is None
 
 
 def test_mission_goal_creation_entrypoint_is_removed_from_stage_graph():

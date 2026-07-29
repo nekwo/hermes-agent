@@ -2,11 +2,33 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
 from .plan_review import PlanReview
-from .proof_rules import ProofType
 from .states import PossessionState, RunState, StageStatus, TaskState, WorkerSessionState
+
+
+class ProofType(StrEnum):
+    """Legacy serialized proof kind retained until task records leave in S8.
+
+    Proof evaluation and execution were removed in S6; this enum remains only so
+    the still-readable mission records can be deserialized between stages.
+    """
+
+    DIFF = "diff"
+    DIFF_STAT = "diff_stat"
+    COMMIT = "commit"
+    TEST_RUN = "test_run"
+    SCREENSHOT = "screenshot"
+    VIDEO = "video"
+    LOG = "log"
+    URL = "url"
+    TEXT = "text"
+    ARTIFACT = "artifact"
+    QA_VERDICT = "qa_verdict"
+    PM_APPROVAL = "pm_approval"
+    REDACTION_SCAN = "redaction_scan"
 
 
 # The structural prefix every persona-instance id carries. Defined at this low

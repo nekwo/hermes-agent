@@ -33,12 +33,11 @@ from agent_runtime.persona_assignments import (
     persona_instance_id_for_placement,
 )
 from agent_runtime.persona_chat_history import persona_chat_history_summary
-from agent_runtime.proof_rules import ProofType
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.snapshot import build_snapshot
 from agent_runtime.states import RunState, TaskState, WorkerSessionState
 from agent_runtime.status import build_status
-from agent_runtime.store import AgentStore, ProofStore, RunStore, TaskStore
+from agent_runtime.store import AgentStore, RunStore, TaskStore
 from agent_runtime.worker_sessions import WorkerSessionStore
 from tests.agent_runtime.conftest import release_to_implementation
 
@@ -93,26 +92,6 @@ class RequestProofRuntime:
             rationale="The proof should attach to the active assignment.",
             payload={"stage_id": "implement", "commands": ["python -c \"print('assignment-ok')\""]},
         )
-
-
-class PassingProofRunner:
-    def __init__(self, proof_store: ProofStore):
-        self.proof_store = proof_store
-
-    def run_commands(self, task, *, stage_id, run_id, actor, commands, **_kwargs):
-        proof = Proof(
-            id="proof_assignment_ok",
-            task_id=task.id,
-            stage_id=stage_id,
-            type=ProofType.TEST_RUN,
-            title="assignment proof",
-            path_or_value="assignment.log",
-            created_by="harness",
-            created_at=now(),
-            metadata={"status": "passed", "run_id": run_id, "actor_requested": actor},
-            redaction_status="safe",
-        )
-        return [self.proof_store.attach(proof)]
 
 
 class NekoAcceptanceRuntime:
