@@ -132,6 +132,7 @@ def _resolvers(**overrides) -> MissionChatTurnResolvers:
             "turn_budget": _kw["turn_budget"],
             CAPABILITY_HUD_KEY: _kw["capability"],
         },
+        admitted_operating_skills=lambda _persona, **_kw: [],
         admission_line=lambda _persona, **_kw: "- MCP: launcher_qa (not admitted).",
         tool_contract=lambda _persona, **_kw: {"enabled_toolsets": ["search"]},
         permission_state=lambda _persona, **_kw: {"mode": "profile_default"},
@@ -369,6 +370,65 @@ def test_the_skill_preload_is_consumed_once_and_delivered_inside_its_envelope():
     assert context.skills.revision.startswith("skills_")
 
 
+def test_an_admitted_mcp_surface_brings_its_operating_manual_into_the_preload():
+    """Live failure, 2026-07-29: a QA turn drove the admitted ``launcher_qa``
+    surface, hit ``helper_low_information_capture``, and burned the turn — with
+    the skill documenting that exact remedy granted to the persona and never in
+    context. An admitted surface's manual is required-preload FOR THAT TURN."""
+
+    context = _build(
+        persona=_persona(
+            id="qa", role="qa", skills=("harness-qa-verdict", "launcher-stagec-mcp-screenshot")
+        ),
+        resolvers=_resolvers(
+            required_preload_skills=lambda _skills: ["harness-runtime-model"],
+            admitted_operating_skills=lambda _persona, **_kw: [
+                "launcher-stagec-mcp-screenshot"
+            ],
+        ),
+    )
+
+    # Standing policy first, the turn's admitted manual after it, both marked
+    # required so the loader renders the stronger runtime-policy activation note.
+    assert context.skills.required == (
+        "harness-runtime-model",
+        "launcher-stagec-mcp-screenshot",
+    )
+    assert "launcher-stagec-mcp-screenshot" in context.skills.loaded
+    assert "launcher-stagec-mcp-screenshot" in context.skill_preload_prompt
+
+
+def test_a_turn_with_nothing_admitted_preloads_exactly_what_it_did_before():
+    """The flag-off / not-admitted / not-granted turn — every turn today — must
+    be byte-identical to the pre-change preload."""
+
+    context = _build(resolvers=_resolvers(admitted_operating_skills=lambda _p, **_kw: []))
+
+    assert context.skills.required == ("harness-dev-delivery",)
+    assert context.skills.loaded == ("harness-dev-delivery", "queued-skill")
+
+
+def test_a_manual_that_is_also_standing_policy_is_loaded_once():
+    context = _build(
+        resolvers=_resolvers(
+            required_preload_skills=lambda _skills: ["launcher-stagec-mcp-screenshot"],
+            admitted_operating_skills=lambda _p, **_kw: ["launcher-stagec-mcp-screenshot"],
+        )
+    )
+
+    assert context.skills.required == ("launcher-stagec-mcp-screenshot",)
+    assert context.skills.loaded == ("launcher-stagec-mcp-screenshot", "queued-skill")
+
+
+def test_an_operating_skill_resolution_fault_degrades_the_turn_but_never_fails_it():
+    def _boom(_persona, **_kw):
+        raise RuntimeError("the admission policy is wedged")
+
+    context = _build(resolvers=_resolvers(admitted_operating_skills=_boom))
+
+    assert context.skills.required == ("harness-dev-delivery",)
+
+
 def test_a_skill_preload_fault_degrades_the_turn_but_never_fails_it():
     def _boom(_names, **_kw):
         raise RuntimeError("skill catalog unavailable")
@@ -471,24 +531,62 @@ def test_a_relay_hop_inherits_the_shared_chain_deadline():
     assert context.situational_hud["turn_budget"]["shared"] is True
 
 
+def _resolver_default_source(name: str) -> str:
+    """The default resolver ``name`` as written ON DISK, looked up by NAME.
+
+    Deliberately NOT ``inspect.getsource(DEFAULT_RESOLVERS.<field>)``. That call
+    fuses two readings taken at DIFFERENT times: ``co_firstlineno``, frozen when
+    the module was imported at collection, and the file's text, read from disk at
+    assertion time. Anything that rewrites ``mission_chat_turn_context.py``
+    in between — another agent's edit landing during a ten-minute suite run, an
+    editor save, a checkout — shifts the line numbers, and ``getsource`` then
+    returns a DIFFERENT function's body with no error at all. That is why this
+    assertion could pass in a two-second isolated run and fail in the full suite:
+    the failure tracked the length of the run, not the binding under test.
+
+    Parsing the file once and locating the definition by name reads a single
+    consistent snapshot, so it cannot desynchronize. Same remedy, for the same
+    class of full-suite-only fault, as ``test_runtime_root_request_ordering.py``'s
+    ``_function_def`` and ``test_terminal_envelope_grants.py``'s
+    ``_upstream_receipt_writer_source``.
+    """
+
+    import ast
+    from pathlib import Path
+
+    from agent_runtime import mission_chat_turn_context
+
+    text = Path(mission_chat_turn_context.__file__).read_text(encoding="utf-8")
+    for node in ast.walk(ast.parse(text)):
+        if isinstance(node, ast.FunctionDef) and node.name == name:
+            return ast.get_source_segment(text, node) or ""
+    raise AssertionError(f"{name} not found in {mission_chat_turn_context.__file__}")
+
+
 def test_the_default_resolvers_bind_the_canonical_authorities():
     """No parallel implementations: the defaults are the SAME functions the turn
     itself would have called inline."""
 
-    from agent_runtime import runtime_hud, tool_permissions
+    from agent_runtime import mission_chat_turn_context, runtime_hud, tool_permissions
     from agent_runtime.prompt_observability import load_workspace_agents_context
     from agent_runtime.queued_skills import consume_skills_for_next_turn
 
     # Each default is a thin adapter, so assert the authority it reaches for.
-    import inspect
-
     sources = {
         "consume_queued_skills": consume_skills_for_next_turn.__name__,
+        "admitted_operating_skills": "mission_chat_operating_skills",
         "load_workspace_agents": load_workspace_agents_context.__name__,
         "capability_block": runtime_hud.capability_block_for_persona.__name__,
         "situational_hud": runtime_hud.situational_hud_for_instance.__name__,
         "permission_state": tool_permissions.permission_state_for_chat.__name__,
     }
     for field, authority in sources.items():
-        body = inspect.getsource(getattr(DEFAULT_RESOLVERS, field))
+        bound = getattr(DEFAULT_RESOLVERS, field)
+        # Assert the BINDING first, which the old source-only check never did: a
+        # wrapper or replacement left on the field is caught here, instead of
+        # ``getsource`` quietly following it and reporting on the wrapper's body.
+        assert bound is getattr(mission_chat_turn_context, f"_default_{field}"), (
+            f"{field} is no longer bound to the module's own default"
+        )
+        body = _resolver_default_source(bound.__name__)
         assert authority in body, f"{field} no longer reaches {authority}"

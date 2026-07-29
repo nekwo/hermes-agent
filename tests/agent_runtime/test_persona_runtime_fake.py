@@ -24,6 +24,19 @@ from agent_runtime.tool_permissions import ChatToolPermissionStore
 from agent_runtime.states import RunState, TaskState
 
 
+@pytest.fixture(autouse=True)
+def _bundled_profiles_exist(bundled_persona_profiles):
+    """Every test here drives the REAL run path with a BUNDLED persona.
+
+    ``9ad9c8017`` made a bound Hermes profile a hard precondition of
+    ``_invoke_agent``; without it the runtime refuses before any decision is
+    produced and every assertion below reads
+    ``Hermes profile 'launcher-dev' does not exist`` instead of what it is
+    about."""
+
+    return bundled_persona_profiles
+
+
 class FakeAIAgent:
     instances = []
 
@@ -147,6 +160,17 @@ def test_dev_persona_tick_returns_structured_decision_without_network():
     assert isinstance(run.llm["latency_ms"], int)
 
 
+def _unbounded_chat_toolsets():
+    """What ``unbounded`` actually resolves on the chat lane.
+
+    Everything the registry advertises, less ``mission_goal`` — the one toolset
+    that is never implied by a permission mode or a role (c2320b73e). Derived
+    from the registry rather than hard-coded so a newly registered toolset shows
+    up here the same turn it shows up for the agent."""
+
+    return [name for name in all_registered_toolsets() if name != "mission_goal"]
+
+
 def test_chat_permission_unbounded_reaches_actual_agent_request(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     FakeAIAgent.instances.clear()
@@ -163,7 +187,11 @@ def test_chat_permission_unbounded_reaches_actual_agent_request(tmp_path, monkey
     runtime.chat_reply(qa, "can you write now?", session_id=session_id)
 
     fake = FakeAIAgent.instances[0]
-    assert fake.kwargs["enabled_toolsets"] == all_registered_toolsets()
+    # `unbounded` resolves the whole registry MINUS `mission_goal`: since
+    # c2320b73e ("keep normal persona chat task-free") the mission/task/graph
+    # lane creates durable work, so no permission mode and no role capability
+    # may imply it — only the dedicated per-turn caller opt-in retains it.
+    assert fake.kwargs["enabled_toolsets"] == _unbounded_chat_toolsets()
     # T6c registry hygiene rides every construction, unbounded included:
     # kanban/feishu are registry junk, not a permission tier, so the escape
     # hatch does not resurrect them.
@@ -188,7 +216,7 @@ def test_chat_permission_unbounded_one_turn_expires_after_success(tmp_path, monk
     runtime.chat_reply(neko, "run the command", session_id=session_id)
 
     fake = FakeAIAgent.instances[0]
-    assert fake.kwargs["enabled_toolsets"] == all_registered_toolsets()
+    assert fake.kwargs["enabled_toolsets"] == _unbounded_chat_toolsets()
     # Registry hygiene applies even on the unbounded turn (see the QA test above).
     assert set(fake.kwargs["blocked_tool_names"]) == set(REGISTRY_HYGIENE_BLOCKED_TOOLS)
     record = store.get(persona_id=neko.id, session_id=session_id)
@@ -427,13 +455,26 @@ def test_mission_chat_operative_rules_teach_the_chat_session_verbs():
 def test_mission_chat_operative_rules_route_named_agents_without_creating_goals():
     from agent_runtime.persona_runtime import _mission_chat_operative_rules
 
+    # The RULE, not the paragraph. c2320b73e ("keep normal persona chat
+    # task-free") rewrote this bullet to match the code change that made
+    # `mission_goal` a per-turn caller opt-in rather than a role capability;
+    # pinning the old prose byte-for-byte pinned the wording and said nothing
+    # about the instruction actually surviving. These are the two halves that
+    # must: route named agents with `agent_chat_send`, and never let ordinary
+    # chat work imply goal creation.
     rules = _mission_chat_operative_rules()
-    assert (
-        "When the operator asks you to send, brief, or coordinate named agents, use "
-        "`agent_chat_send` for each agent. Do not create a goal unless the operator "
-        "explicitly asks for a goal, mission, or task. Investigations and multi-agent "
-        "work do not imply goal creation."
-    ) in rules
+    routing = next(
+        (
+            line
+            for line in rules.splitlines()
+            if line.startswith("- ") and "agent_chat_send" in line and "named agents" in line
+        ),
+        None,
+    )
+    assert routing is not None, "operative rules must route named agents to agent_chat_send"
+    assert "send, brief, or coordinate named agents" in routing
+    assert "never imply goal creation" in routing
+    assert "chat-only for every role" in routing
 
 
 def test_mission_chat_operative_rules_preserve_media_lines_verbatim():

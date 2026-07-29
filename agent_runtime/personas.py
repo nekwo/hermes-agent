@@ -257,6 +257,11 @@ def default_personas() -> list[AgentPersona]:
                 "harness-continuity",
                 "harness-dev-delivery",
                 "launcher-analyze-proof",
+                # Same pairing as the seeded `qa` row: `dev` joined the MCP
+                # admission floor on 2026-07-29, so it is admitted `launcher_qa`
+                # and must be granted that surface's operating manual for
+                # `MCP_OPERATING_SKILLS` to preload it.
+                "launcher-stagec-mcp-screenshot",
             ],
             repo_scope_label="EterniaLauncher",
         ),
@@ -289,7 +294,14 @@ def default_personas() -> list[AgentPersona]:
             system_prompt_path="agent_runtime/prompts/qa.md",
             autonomy=AutonomyLevel.AUTONOMOUS.value,
             hermes_profile=BUNDLED_PERSONA_PROFILES["qa"],
-            skills=["harness-qa-verdict"],
+            # `launcher-stagec-mcp-screenshot` is the operating manual for the
+            # `launcher_qa` MCP surface that `mcp_admission.MCP_OPERATING_SKILLS`
+            # auto-preloads for admitted QA turns. That resolver requires the
+            # skill to be GRANTED as well as admitted, so a deployment seeded
+            # without this grant admits the tools and ships no manual — the exact
+            # gap that made a QA turn rediscover the sparse-feed screenshot
+            # refusal from scratch (2026-07-29).
+            skills=["harness-qa-verdict", "launcher-stagec-mcp-screenshot"],
         ),
     ]
 

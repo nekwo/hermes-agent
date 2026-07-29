@@ -140,7 +140,12 @@ def test_decision_type_not_allowed_for_role_raises():
         runtime.run_tick(pm, build_context(task, run), run=run)
 
 
-def test_contract_invalid_payload_gets_one_bounded_repair_attempt_then_succeeds():
+def test_contract_invalid_payload_gets_one_bounded_repair_attempt_then_succeeds(
+    bundled_persona_profiles,
+):
+    # Unlike the two tests above (which build an explicit profile-less PM), this
+    # one drives a BUNDLED persona, and since 9ad9c8017 a bundled persona's
+    # Hermes profile must exist before `_invoke_agent` will run it at all.
     RepairInvalidPayloadAIAgent.instances.clear()
     task, run = make_task_run(persona_id="dev")
     task.affected_repos = [str(Path.cwd())]

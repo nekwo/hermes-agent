@@ -12,6 +12,57 @@ from agent_runtime.personas import default_personas
 from agent_runtime.states import StageStatus, TaskState
 from agent_runtime.store import RunStore
 
+# ``default_personas()`` carries only the Harness-owned baseline since
+# ``9ad9c8017`` ("provision bundled agent personas") — that list is the bundled
+# INSTALL contract, not a deployment's skill roster — and since ``07e662a9c``
+# ("make skill context backend authoritative") a config ``skills:`` block
+# EXTENDS that baseline rather than replacing it, with ``skills_remove:`` as the
+# only subtraction.
+#
+# ``autonomy._skill_selection`` can only ever choose from what a persona GRANTS,
+# so driving the selection policy with the bare baseline tests the baseline
+# rather than the policy: every candidate the priority list names is filtered
+# out before it can be ranked. These are the grants the deployed personas
+# actually carry (`hermes harness skills inventory`), restricted to the ids the
+# priority policy can propose for that role.
+#
+# These are the EXTRA grants only — the additions a deployment's ``skills:``
+# block layers on top of the seeded baseline, restricted to the ids the priority
+# policy can propose for that role. ``configured_persona`` re-derives the full
+# roster as ``baseline + extras`` so this fixture keeps matching the real extend
+# semantics even when a bundled baseline gains or loses a skill, instead of
+# silently replacing it with a frozen list.
+_CONFIGURED_EXTRA_SKILLS = {
+    "dev": [
+        "eternia-launcher-workflow",
+        "frontend-backend-contract-handoff",
+        "flutter-ui-development",
+        "systematic-debugging",
+        "test-driven-development",
+    ],
+    "backend_dev": [
+        "eternia-backend-tests",
+        "frontend-backend-contract-handoff",
+        "systematic-debugging",
+        "test-driven-development",
+    ],
+}
+
+
+def configured_persona(persona_id: str):
+    """A bundled persona as a deployment actually configures it.
+
+    EXTENDS the seeded baseline (``default_personas()`` grants) with the
+    deployment's extra grants — the same ``baseline + skills:`` composition
+    ``07e662a9c`` made authoritative — rather than replacing the roster.
+    """
+
+    import dataclasses
+
+    persona = next(item for item in default_personas() if item.id == persona_id)
+    skills = list(dict.fromkeys([*persona.skills, *_CONFIGURED_EXTRA_SKILLS[persona_id]]))
+    return dataclasses.replace(persona, skills=skills)
+
 
 def make_task() -> Task:
     ts = now()
@@ -34,7 +85,7 @@ def test_record_autonomy_packet_writes_context_receipts_and_prompt_contract():
     task.harness_self_heal = {"stages": {"stage_1": {"last_failed_proof_ids": [failed_proof_id]}}}
     run_store = RunStore()
     run = run_store.open_run("dev", task.id, stage_id="stage_1")
-    persona = next(item for item in default_personas() if item.id == "dev")
+    persona = configured_persona("dev")
     ctx = build_context(
         task,
         run,
@@ -97,7 +148,7 @@ def test_launcher_contract_smoke_selects_launcher_analyze_skill_without_backend_
     )
     run_store = RunStore()
     run = run_store.open_run("dev", task.id, stage_id="launcher_contract_smoke")
-    persona = next(item for item in default_personas() if item.id == "dev")
+    persona = configured_persona("dev")
     ctx = build_context(task, run, recent_events=[], proof_ids=["proof_backend"])
 
     packet = record_autonomy_packet(persona, ctx, event_log=EventLog(), run_store=run_store)
@@ -231,7 +282,7 @@ def test_no_edit_context_stage_uses_single_fast_dev_skill_budget():
     )
     run_store = RunStore()
     run = run_store.open_run("backend_dev", task.id, stage_id="diagnostic_backend_dev")
-    persona = next(item for item in default_personas() if item.id == "backend_dev")
+    persona = configured_persona("backend_dev")
     ctx = build_context(task, run, recent_events=[], proof_ids=[])
 
     packet = record_autonomy_packet(persona, ctx, event_log=EventLog(), run_store=run_store)

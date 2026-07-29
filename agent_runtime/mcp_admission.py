@@ -153,7 +153,15 @@ LANE_MISSION_CHAT = "mission_chat"
 #: config alone), but R1 additionally refuses any role outside this set even
 #: when the config names it — the first autonomous lane that can spawn a local
 #: GUI-driving executable ships to ONE role, deliberately. Retired by R4.
-R1_ADMISSIBLE_ROLES = frozenset({"qa"})
+#:
+#: Operator ruling 2026-07-29 (R4 widening, deliberate product decision — NOT a
+#: config edit alone, which is exactly why it is recorded here): ``dev`` joins
+#: ``qa``. Launcher Dev drives the same Stage C ``launcher_qa`` surface to
+#: verify its own Launcher changes visually instead of routing every check
+#: through QA. The floor is WIDENED, not retired: every other role is still
+#: refused even when the config names it, so this stays a two-key decision
+#: (this set AND ``agent_runtime.mcp_admission.roles`` in the root config).
+R1_ADMISSIBLE_ROLES = frozenset({"qa", "dev"})
 
 #: Toolset-name prefix ``tools/mcp_tool.py`` registers every MCP server under.
 _MCP_TOOLSET_PREFIX = "mcp-"
@@ -235,6 +243,40 @@ READ_ONLY_EXCLUDED_TOOLS: Mapping[str, tuple[str, ...]] = {
         "mcp_launcher_qa_set_tab",
         "mcp_launcher_qa_wait_for_state",
     ),
+}
+
+#: The OPERATING MANUAL for each admissible server: the skill(s) that document
+#: how to drive that server's surface, and — the part that matters — what to do
+#: when it REFUSES. Admitting a tool surface without its manual is what produced
+#: the live 2026-07-29 failure: a QA mission-chat turn drove ``launcher_qa``,
+#: hit ``helper_low_information_capture`` from ``screenshot_window``, and burned
+#: the turn rediscovering nothing — while the remedy (capture a content-bearing
+#: sub-tab, or take the documented sparse-acceptance path) sat in a skill the
+#: persona was ALREADY granted and that was never put in context.
+#:
+#: Why the map lives here rather than in the skill's frontmatter
+#: -------------------------------------------------------------
+#: ``metadata.hermes.load_policy: required_preload`` is the right mechanism for
+#: "this persona always needs this skill" (``harness-runtime-model``), and it is
+#: reused verbatim downstream — the resolved names join the SAME required-preload
+#: set. It is the wrong mechanism for this fact, twice over:
+#:
+#: * The condition is not "the persona is granted it", it is "this RUN was
+#:   admitted the server". A persona that declares ``launcher_qa`` on a lane
+#:   where admission is off, or under a role the config does not name, gets no
+#:   MCP tools — and must not pay a 45KB manual for tools it does not have.
+#: * ``launcher-stagec-mcp-screenshot`` is not a Harness-owned skill: it is not
+#:   under ``docs/agent-runtime-harness/harness-skills`` and ``skill_install``
+#:   never writes it, so its frontmatter is a realm-published runtime artifact
+#:   that the next realm pull would overwrite. A policy Hermes must hold cannot
+#:   live in a file Hermes does not own — the same reasoning that keeps
+#:   :data:`READ_ONLY_INCLUDED_TOOLS` here instead of reading the launcher's YAML.
+#:
+#: Keyed by server, not by role, for the same reason the tool tables are: the
+#: manual belongs to the SURFACE. A second role admitted the same server would
+#: need the same manual, and a role admitted nothing needs none.
+MCP_OPERATING_SKILLS: Mapping[str, tuple[str, ...]] = {
+    "launcher_qa": ("launcher-stagec-mcp-screenshot",),
 }
 
 _DEFAULT_CONNECT_TIMEOUT_SECONDS = 20.0
@@ -989,6 +1031,46 @@ def _is_mcp_toolset(name: Any, aliases: frozenset[str]) -> bool:
     if not text:
         return False
     return text.startswith(_MCP_TOOLSET_PREFIX) or text in aliases
+
+
+# ── operating skills (pure) ─────────────────────────────────────────────────
+
+
+def admitted_operating_skill_ids(
+    admission: McpAdmission | None, *, granted_skills: Iterable[str] | None
+) -> list[str]:
+    """The operating manual(s) THIS run must have in context, in grant order.
+
+    Two gates, both required, and each one narrows:
+
+    1. **Admitted.** ``admission.server_names`` is what actually survived the
+       whole deny-by-default ladder — flag, role/lane allowlist, stage floor,
+       machine resolvability, permission mode. Nothing else is consulted, so a
+       persona that merely DECLARES a server (and will get a typed denial line
+       instead of tools) never pays for its manual.
+    2. **Granted.** The skill must already be on the persona's own skill list.
+       This function turns an existing grant into an active load; it never
+       invents one. An operator who revokes the grant has revoked the preload,
+       with no second place to look.
+
+    Order follows the persona's grant list rather than the server list, so the
+    preload set is stable against a config reordering of ``roles.<role>.<lane>``.
+    Pure: no registry read, no filesystem, no resolve.
+    """
+
+    if admission is None or admission.is_empty:
+        return []
+    wanted: set[str] = set()
+    for server in admission.server_names:
+        wanted.update(MCP_OPERATING_SKILLS.get(str(server), ()))
+    if not wanted:
+        return []
+    resolved: list[str] = []
+    for skill in granted_skills or ():
+        name = str(skill or "").strip()
+        if name in wanted and name not in resolved:
+            resolved.append(name)
+    return resolved
 
 
 # ── requirement-failure composition ─────────────────────────────────────────

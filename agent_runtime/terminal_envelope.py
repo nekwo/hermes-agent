@@ -66,10 +66,14 @@ in every load-bearing respect:
    with no entry admits nothing. There is no ``*`` role, no ``*`` lane, and a
    grant on one lane says nothing about another.
 3. **A stage floor the config cannot cross.** :data:`GRANTABLE_COMMAND_CLASSES`
-   is the R1 floor (mirroring ``mcp_admission.R1_ADMISSIBLE_ROLES``): classes
-   outside it stay hard-blocked no matter what the config says. Credential
-   reads, credential exfiltration and prod mutations are not a config edit
-   away from being allowed.
+   is the floor: classes outside it stay hard-blocked no matter what the config
+   says. Credential reads, credential exfiltration and prod mutations are not a
+   config edit away from being allowed. It is the same DISCIPLINE
+   ``mcp_admission.R1_ADMISSIBLE_ROLES`` applies — deny by default, a code-side
+   floor above the config — but the two floors are INDEPENDENT: no code here
+   reads that set, they are over different things (command classes vs. roles),
+   and they deliberately differ in membership. Widening one is never license to
+   widen the other.
 4. **Every step can only NARROW.** A malformed stanza, an unknown class, a
    non-list value — all collapse to "grants nothing" AND produce a typed
    config issue. A config fault never reads as "allow".
@@ -178,11 +182,17 @@ COMMAND_CLASSES: frozenset[str] = frozenset(
     }
 )
 
-#: R1 stage floor — the classes an operator grant may cover AT ALL.
+#: Stage floor — the classes an operator grant may cover AT ALL.
 #:
-#: Mirrors ``mcp_admission.R1_ADMISSIBLE_ROLES``: admission ships narrow, and
-#: widening it is a deliberate product decision rather than a config edit. The
-#: three excluded classes are excluded on purpose and are NOT an oversight:
+#: Same DISCIPLINE as ``mcp_admission.R1_ADMISSIBLE_ROLES`` — ship narrow, keep a
+#: code-side floor above the config, and treat widening it as a deliberate
+#: product decision rather than a config edit — but an INDEPENDENT floor, not a
+#: mirror of it. Nothing here reads that set, the two are over different things
+#: (command classes here, admissible roles there), and their membership
+#: deliberately differs: ``R1_ADMISSIBLE_ROLES`` gained ``dev`` on 2026-07-29 while
+#: this set is unchanged. Widening one is never license to widen the other.
+#:
+#: The three excluded classes are excluded on purpose and are NOT an oversight:
 #: ``credential_read`` and ``credential_exfil`` are secret-handling floors (an
 #: agent that can read ``.env`` and reach the network has exfiltration, and no
 #: work task needs it), and ``prod_operation`` mutates infrastructure outside

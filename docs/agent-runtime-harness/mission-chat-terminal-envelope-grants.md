@@ -102,10 +102,14 @@ the old table did not distinguish them. They are separate **classes** so a
 grant can name one without granting the other.
 
 The three non-grantable classes are the **stage floor**
-(`GRANTABLE_COMMAND_CLASSES`), mirroring
-`mcp_admission.R1_ADMISSIBLE_ROLES`. Naming one under `grants` is a typed
-config error, not a grant. Widening the floor is a product decision, not a
-config edit.
+(`GRANTABLE_COMMAND_CLASSES`) — the same *discipline* as
+`mcp_admission.R1_ADMISSIBLE_ROLES` (deny-by-default, code-side floor above
+the config), but an **independent** floor over a different thing: command
+classes here, roles there. No code links the two sets, and their membership
+deliberately differs (`R1_ADMISSIBLE_ROLES` gained `dev` on 2026-07-29; this
+floor did not change). Naming a non-grantable class under `grants` is a typed
+config error, not a grant. Widening either floor is its own product decision;
+widening one is never license to widen the other.
 
 ## 3. The config stanza — OPERATOR WRITES THIS
 

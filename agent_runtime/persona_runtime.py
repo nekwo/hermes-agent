@@ -34,6 +34,7 @@ from .decision_contracts import validate_planning_decision
 from .mcp_admission import (
     LANE_MISSION_CHAT,
     admission_enabled,
+    admitted_operating_skill_ids,
     render_mcp_admission_line,
     resolve_mcp_admission,
     scope_toolsets_to_admission,
@@ -1167,6 +1168,44 @@ def mission_chat_admission_line(
     except Exception:  # pragma: no cover - a context line must never fail a turn
         return ""
     return render_mcp_admission_line(admission)
+
+
+def mission_chat_operating_skills(
+    persona: AgentPersona, *, session_id: str | None
+) -> list[str]:
+    """The operating manual(s) this turn's ADMITTED MCP surface comes with.
+
+    The twin of :func:`mission_chat_admission_line`, and deliberately built from
+    the SAME pure policy with the SAME inputs: the line tells the agent which
+    declared servers it did NOT get, and this tells the turn which manuals it
+    must be handed for the ones it DID. Resolved once here rather than inferred
+    from the rendered line, so the two can never describe different admissions.
+
+    Flag-off costs nothing — no root-config load past the kill switch, no
+    persona-profile read, no filesystem — because with admission off nothing is
+    ever admitted and there is no surface to document. A persona whose admitted
+    servers have no registered manual, or who was never granted it, gets ``[]``
+    and the turn's preload is byte-identical to what it was before.
+
+    Never raises: an unavailable policy must degrade the turn's context, never
+    fail the turn.
+    """
+
+    if not admission_enabled():
+        return []
+    try:
+        admission = resolve_mcp_admission(
+            persona,
+            lane=LANE_MISSION_CHAT,
+            permission_mode=permission_options_for_chat(
+                persona, session_id=session_id
+            ).permission_mode,
+        )
+    except Exception:  # pragma: no cover - a context input must never fail a turn
+        return []
+    return admitted_operating_skill_ids(
+        admission, granted_skills=getattr(persona, "skills", None) or ()
+    )
 
 
 def chat_runtime_tool_contract(
