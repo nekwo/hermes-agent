@@ -2476,7 +2476,6 @@ def _cmd_mission_chat_message(args) -> int:
                 # inherit the runtime default). Applied to the model call by the
                 # transport; unsupported/absent values fall back to the default.
                 reasoning_effort=getattr(instance, "reasoning_effort", None),
-                allow_mission_goal=bool(getattr(args, "allow_mission_goal", False)),
                 surface_prompt=getattr(args, "surface_prompt", "") or "",
                 max_wall_seconds=relay_wall_seconds,
                 stream_callback=_stream_delta if getattr(args, "stream", False) else None,

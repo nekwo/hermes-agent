@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from agent_runtime.config import AgentRuntimeConfig, persona_records_from_config
@@ -134,7 +136,7 @@ def test_backend_dev_repo_grounding_uses_backend_alias_without_raw_path_leakage(
     assert frontend is not None
     assert frontend.name == "EterniaLauncher"
     assert harness is not None
-    assert harness.name.startswith("hermes-agent")
+    assert harness == Path(__file__).resolve().parents[2]
 
     labels = safe_affected_repo_labels(["EterniaBackend", "EterniaLauncher", "hermes-agent"])
     assert labels == ["EterniaBackend", "EterniaLauncher", "hermes-agent"]

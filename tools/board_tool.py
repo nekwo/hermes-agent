@@ -3,8 +3,7 @@
 
 The board is ADVISORY (nudged, never forced): nothing in the run loop requires
 these tools; a mission runs identically with zero cards. They join the
-permission-gated mission-chat tool surface (toolset ``board``, role-gated like
-``mission_goal``) so an agent MAY add/list cards when it notices work worth
+mission-chat tool surface (toolset ``board``) so an agent MAY add/list cards when it notices work worth
 tracking — exactly like a human teammate.
 
 Board resolution (§10): explicit ``board_id`` arg > the lane's bound goal's
@@ -13,9 +12,7 @@ board; typed ``invalid_request`` when none resolves — never a silent
 cross-workspace write. Agent writes carry ``created_by=<persona_id>`` resolved
 from the chat session, so operator- and agent-authored cards render distinctly.
 
-Cards never mutate goal state; that is a hard invariant of the board domain and
-these tools cannot break it (they only add/list cards). To START real work, use
-``mission_goal_create`` or escalate a card from Mission Control.
+Cards are planning state only and never start tracked work.
 """
 
 import json
@@ -29,7 +26,7 @@ logger = logging.getLogger(__name__)
 BOARD_CARD_ADD_SCHEMA = {
     "name": "board_card_add",
     "description": (
-        "Add a planning CARD to the workspace Mission Board (Queued column, attributed to you) for follow-up work worth remembering. Advisory. Disambiguator: a card is planning state only -- it never starts or changes a goal; use mission_goal_create to start real work."
+        "Add a planning CARD to the workspace Mission Board (Queued column, attributed to you) for follow-up work worth remembering. Advisory. A card is planning state only and never starts tracked work."
     ),
     "parameters": {
         "type": "object",

@@ -859,7 +859,7 @@ def _apply_acceptance(task: Task, payload: dict[str, Any], *, actor: str | None 
         task.acceptance_criteria = list(payload.get("acceptance_criteria", []))
         task.non_goals = list(payload.get("non_goals", []))
     affected_repos = _canonical_affected_repos(payload.get("affected_repos", []) or [])
-    fallback_repos = _affected_repos_from_handoff(payload) or _canonical_affected_repos(_pinned_repo_scope(task))
+    fallback_repos = _affected_repos_from_handoff(payload) or _canonical_affected_repos(_declared_repo_scope(task))
     if affected_repos or fallback_repos:
         task.affected_repos = affected_repos or fallback_repos
     if not preserve_operator_goal:
@@ -987,7 +987,7 @@ def _release_stage_affected_repos(task: Task, stage_repo: str | None) -> list[st
     cannot forget a sibling Launcher/Backend stage while a fork is live.
     """
 
-    pinned_repos = _canonical_affected_repos(_pinned_repo_scope(task))
+    pinned_repos = _canonical_affected_repos(_declared_repo_scope(task))
     if pinned_repos:
         return pinned_repos
     routing_scope = getattr(task, "routing_scope", None)
@@ -1060,11 +1060,9 @@ def _canonical_affected_repos(repos: Iterable[str]) -> list[str]:
     return result
 
 
-def _pinned_repo_scope(task: Task) -> list[str]:
-    meta = (getattr(task, "harness_self_heal", None) or {}).get("mission_goal_create")
-    if not isinstance(meta, dict):
-        return []
-    return [str(item).strip() for item in (meta.get("repo_scope_pinned") or []) if str(item).strip()]
+def _declared_repo_scope(task: Task) -> list[str]:
+    values = (getattr(task, "harness_self_heal", None) or {}).get("repo_scope_pinned") or []
+    return [str(item).strip() for item in values if str(item).strip()]
 
 
 def _validate_affected_repo_scope(task: Task, decision: AgentDecision, *, actor: str, log: EventLog, run_id: str | None) -> None:
@@ -1093,7 +1091,7 @@ def _validate_affected_repo_scope(task: Task, decision: AgentDecision, *, actor:
         # outside the canonical-alias contract; only canonical scopes are
         # cross-checked against the goal's named repo.
         return
-    pinned = _pinned_repo_scope(task)
+    pinned = _declared_repo_scope(task)
     mentions = list(explicit_repo_mentions(f"{task.title or ''} {task.description or ''}"))
     conflicts: list[str] = []
     if pinned and set(canonical) != set(pinned):

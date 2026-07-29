@@ -823,9 +823,6 @@ def _exact_goal_proof_applies_to_repo(task: Task, repo: str) -> bool:
     stage_repo = _canonical_repo(repo)
     if stage_repo not in {"EterniaLauncher", "EterniaBackend", "hermes-agent"}:
         return False
-    pinned = _canonical_task_pinned_repos(task)
-    if pinned:
-        return len(set(pinned)) == 1 and stage_repo in pinned
     repos = [
         _canonical_repo(str(item))
         for item in (getattr(task, "affected_repos", []) or [])
@@ -866,18 +863,6 @@ def _extract_goal_repo_relative_paths(task: Task) -> list[str]:
         if path and path not in found:
             found.append(path)
     return found[:8]
-
-
-def _canonical_task_pinned_repos(task: Task) -> list[str]:
-    meta = (getattr(task, "harness_self_heal", None) or {}).get("mission_goal_create")
-    if not isinstance(meta, dict):
-        return []
-    result: list[str] = []
-    for item in meta.get("repo_scope_pinned") or []:
-        repo = _canonical_repo(str(item))
-        if repo != "none" and repo not in result:
-            result.append(repo)
-    return result
 
 
 def _is_mission_control_launcher_implementation(task: Task, typed: MissionPlanStage, plan: MissionPlan) -> bool:

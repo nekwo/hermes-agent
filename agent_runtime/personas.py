@@ -45,8 +45,7 @@ MOTHBALLED_PERSONA_IDS: frozenset[str] = frozenset({AgentRole.PM.value})
 # ``AgentRole(...)`` raises ``'profile' is not a valid AgentRole`` and kills the whole
 # operator chat turn. For capability/toolset resolution on that chat path a profile
 # behaves as the supervisor class: the most permissive ceiling, so the profile's own
-# configured toolsets pass the ``validate_toolsets`` intersection unchanged and the
-# ``mission_goal`` operator capability stays available.
+# configured toolsets pass the ``validate_toolsets`` intersection unchanged.
 PROFILE_ROLE_SENTINEL = "profile"
 PROFILE_CHAT_ROLE = AgentRole.ALICE_SUPERVISOR
 
@@ -86,7 +85,6 @@ ALLOWED_TOOLSETS_BY_ROLE: dict[AgentRole, frozenset[str]] = {
             "session_search",
             "todo",
             "skills",
-            "mission_goal",
             "agent_chat",
             "board",
         }
@@ -114,7 +112,6 @@ PROFILE_CHAT_FALLBACK_TOOLSETS = (
     "code_execution",
     "session_search",
     "skills",
-    "mission_goal",
     "agent_chat",
     "board",
 )
@@ -217,7 +214,7 @@ def profile_chat_toolsets(profile_id: str, personas: list[AgentPersona] | tuple[
     )
     toolsets = list(getattr(matching, "toolsets", []) or []) if matching is not None else list(PROFILE_CHAT_FALLBACK_TOOLSETS)
     for toolset in PROFILE_CHAT_FALLBACK_TOOLSETS:
-        if toolset in ("mission_goal", "agent_chat") and toolset not in toolsets:
+        if toolset == "agent_chat" and toolset not in toolsets:
             toolsets.append(toolset)
     return [toolset for toolset in toolsets if toolset]
 
@@ -237,7 +234,7 @@ def default_personas() -> list[AgentPersona]:
             model=None,
             provider=None,
             api_mode="codex_responses",
-            toolsets=["file", "search", "terminal", "session_search", "code_execution", "todo", "skills", "mission_goal"],
+            toolsets=["file", "search", "terminal", "session_search", "code_execution", "todo", "skills"],
             system_prompt_path="agent_runtime/prompts/alice_supervisor.md",
             autonomy=AutonomyLevel.PROPOSE_ONLY.value,
             hermes_profile=None,
@@ -316,13 +313,10 @@ def seed_personas() -> list[AgentPersona]:
     retained as dormant typed-pipeline templates for the eventual pipeline
     rebuild and is intentionally unused by the seed.
 
-    ``mission_goal`` is deliberately excluded from the base toolset: with no
-    pipeline personas seeded, a created goal would route to dev/qa slots that
-    resolve to nothing, so exposing goal-creation would be a broken affordance.
-    Re-add it when the autonomous pipeline is rebuilt on profiles.
+    The base profile receives the chat fallback toolsets directly.
     """
 
-    base_toolsets = [toolset for toolset in PROFILE_CHAT_FALLBACK_TOOLSETS if toolset != "mission_goal"]
+    base_toolsets = list(PROFILE_CHAT_FALLBACK_TOOLSETS)
     return [
         AgentPersona(
             id=BASE_PERSONA_ID,

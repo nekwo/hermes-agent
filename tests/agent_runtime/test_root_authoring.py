@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import importlib.util
 from types import SimpleNamespace
 
 from hermes_time import now
 
 from agent_runtime.config import AgentRuntimeConfig
-from agent_runtime.mission_goal import create_mission_goal
 from agent_runtime.models import MissionPlan, Task
 from agent_runtime.node_tools import NodeToolService
 from agent_runtime.root_node_engine import _root_system_prompt
@@ -36,20 +36,8 @@ def _ready_binding(*_args, **_kwargs):
     return SimpleNamespace(readiness="ready", hermes_profile="base", summary="ready")
 
 
-def test_root_mode_create_goal_uses_script_blueprint_instead_of_default_plan(isolate_agent_runtime_root):
-    data = create_mission_goal(
-        title="Gap one trap",
-        description="Please fix the regression in hermes-agent and run `python -m pytest tests/agent_runtime/test_root_authoring.py -q`.",
-        requested_by="test",
-        start_daemon_mode=False,
-        config=AgentRuntimeConfig(root_node_mode=True),
-    )
-
-    task = TaskStore().get(data["task_id"])
-    assert task.harness_self_heal["root_node_mode"] is True
-    assert task.mission_plan.blueprint_id == "neko_default_script"
-    assert task.mission_plan.stages == []
-    assert task.current_stage_id is None
+def test_root_mode_goal_creation_entrypoint_is_removed():
+    assert importlib.util.find_spec("agent_runtime.mission_goal") is None
 
 
 def test_root_authored_single_repo_stage_persists_for_snapshot(monkeypatch, isolate_agent_runtime_root):

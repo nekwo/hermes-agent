@@ -161,14 +161,9 @@ def test_dev_persona_tick_returns_structured_decision_without_network():
 
 
 def _unbounded_chat_toolsets():
-    """What ``unbounded`` actually resolves on the chat lane.
+    """What ``unbounded`` actually resolves on the chat lane."""
 
-    Everything the registry advertises, less ``mission_goal`` — the one toolset
-    that is never implied by a permission mode or a role (c2320b73e). Derived
-    from the registry rather than hard-coded so a newly registered toolset shows
-    up here the same turn it shows up for the agent."""
-
-    return [name for name in all_registered_toolsets() if name != "mission_goal"]
+    return all_registered_toolsets()
 
 
 def test_chat_permission_unbounded_reaches_actual_agent_request(tmp_path, monkeypatch):
@@ -187,10 +182,8 @@ def test_chat_permission_unbounded_reaches_actual_agent_request(tmp_path, monkey
     runtime.chat_reply(qa, "can you write now?", session_id=session_id)
 
     fake = FakeAIAgent.instances[0]
-    # `unbounded` resolves the whole registry MINUS `mission_goal`: since
-    # c2320b73e ("keep normal persona chat task-free") the mission/task/graph
-    # lane creates durable work, so no permission mode and no role capability
-    # may imply it — only the dedicated per-turn caller opt-in retains it.
+    # `unbounded` resolves the whole live registry. The retired mission creation
+    # toolset is absent from that registry rather than filtered per turn.
     assert fake.kwargs["enabled_toolsets"] == _unbounded_chat_toolsets()
     # T6c registry hygiene rides every construction, unbounded included:
     # kanban/feishu are registry junk, not a permission tier, so the escape
@@ -927,13 +920,7 @@ def test_mission_chat_reply_runs_for_profile_persona(tmp_path, monkeypatch):
     )
     assert "file" not in request.enabled_toolsets
 
-    runtime.mission_chat_reply(
-        profile,
-        "start the explicitly requested goal",
-        permission_session_id="session_profile_chat",
-        allow_mission_goal=True,
-    )
-    assert "mission_goal" in captured["requests"][-1].enabled_toolsets
+    assert len(captured["requests"]) == 1
 
 
 def test_mission_chat_reply_has_no_api_call_cap_and_keeps_iteration_failsafe(

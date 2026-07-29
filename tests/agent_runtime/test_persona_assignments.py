@@ -2055,7 +2055,6 @@ def _mission_chat_test_args(client_message_id: str, *, stream: bool = False):
         message="please answer",
         surface_prompt="",
         intent_hint="chat",
-        allow_mission_goal=False,
         requested_by="test",
         client_message_id=client_message_id,
         stream=stream,
@@ -2064,7 +2063,7 @@ def _mission_chat_test_args(client_message_id: str, *, stream: bool = False):
     )
 
 
-def test_mission_chat_threads_explicit_goal_opt_in_only_when_requested(
+def test_mission_chat_never_forwards_retired_goal_opt_in(
     monkeypatch,
     capsys,
     isolate_agent_runtime_root,
@@ -2079,7 +2078,7 @@ def test_mission_chat_threads_explicit_goal_opt_in_only_when_requested(
             pass
 
         def mission_chat_reply(self, persona, message, **kwargs):
-            seen.append(kwargs["allow_mission_goal"])
+            seen.append("allow_mission_goal" in kwargs)
             return SimpleNamespace(
                 final_response="provider reply",
                 input_tokens=1,
@@ -2096,12 +2095,7 @@ def test_mission_chat_threads_explicit_goal_opt_in_only_when_requested(
     assert harness._cmd_mission_chat_message(normal) == 0
     capsys.readouterr()
 
-    opted_in = _mission_chat_test_args("client_goal_opt_in")
-    opted_in.allow_mission_goal = True
-    assert harness._cmd_mission_chat_message(opted_in) == 0
-    capsys.readouterr()
-
-    assert seen == [False, True]
+    assert seen == [False]
 
 
 @pytest.mark.parametrize("operation", ["session_create"])
@@ -4222,7 +4216,7 @@ def test_profile_persona_resolution_does_not_borrow_role_skills(monkeypatch, iso
     assert persona.provider == "openai-codex"
     assert "terminal" in persona.toolsets
     assert "code_execution" in persona.toolsets
-    assert "mission_goal" in persona.toolsets
+    assert "mission_goal" not in persona.toolsets
 
 
 def test_profile_prompt_observability_uses_profile_skills_and_chat_title(

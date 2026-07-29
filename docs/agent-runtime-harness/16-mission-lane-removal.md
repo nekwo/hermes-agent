@@ -83,7 +83,8 @@ test command. **All gates are path-scoped — never a bare word grep** (see §Ha
 | S1 | complete | Protective keep-set stage committed as `0a7d96cd1`. |
 | S2 | complete | Launcher cosmetic-read removal committed as `429f26a5`. |
 | S3 | complete | Board→goal bridge removed. Operator authorized the required upstream projection edit in `tools/board_tool.py`. |
-| S4–S12 | pending | Must execute in order. |
+| S4 | complete | Goal creation, CLI verbs, toolset, and opt-in gate removed; `3742 passed`. Operator authorized upstream edits in `tools/agent_chat_tool.py`, `tools/board_tool.py`, and `tools/tool_full_descriptions.py`, plus deletion of `tools/mission_goal_tool.py`. Dedicated-worktree verification exposed two stale checkout-name assumptions: runtime repo labels now remain canonical and the resolver test asserts the exact active repo root. |
+| S5–S12 | pending | Must execute in order. |
 
 ### S0 — Data migration, no code change
 - Run `harness persona instance sweep-orphans` **while `TaskStore` still exists** to reap

@@ -1178,9 +1178,11 @@ def _log_worktree_event(event_type: str, payload: dict[str, Any]) -> None:
 def _context_for_workdir(workdir: Path, *, source: str) -> RepoExecutionContext:
     resolved = workdir.resolve()
     context_files = _project_context_files(resolved)
+    source_alias = str(source or "").removesuffix("-worktree")
+    repo_label = _REPO_ALIAS_DISPLAY_LABELS.get(source_alias, _safe_repo_label(resolved.name))
     return RepoExecutionContext(
         workdir=resolved,
-        repo_label=_safe_repo_label(resolved.name),
+        repo_label=repo_label,
         source=_safe_repo_label(source) or "repo",
         context_files=context_files,
         context_excerpts=_project_context_excerpts(resolved),

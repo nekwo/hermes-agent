@@ -104,12 +104,12 @@ def test_harness_personas_expose_mission_dev_and_qa_skills():
     assert "harness-qa-verdict" in personas["qa"].skills
 
 
-def test_root_node_neko_keeps_goal_toolset_and_mission_lead_skill():
+def test_root_node_neko_drops_goal_toolset_and_keeps_mission_lead_skill():
     from agent_runtime.root_node_engine import _root_toolsets
 
     neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
 
-    assert "mission_goal" in _root_toolsets(neko)
+    assert "mission_goal" not in _root_toolsets(neko)
     assert "harness-mission-lead" in neko.skills
 
 

@@ -631,11 +631,6 @@ def test_unbounded_chat_lane_resolution_is_scoped_end_to_end(
     assert "mcp-launcher_qa" not in resolved
     assert "launcher_qa" not in resolved
     assert "mission_goal" not in resolved
-    assert "mission_goal" not in persona_runtime._enabled_toolsets_for_chat(
-        _persona("dev"),
-        session_id="s1",
-        allow_mission_goal=True,
-    )
 
 
 # ── the admitted surface's operating manual ─────────────────────────────────

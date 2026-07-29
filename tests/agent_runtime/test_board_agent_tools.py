@@ -99,11 +99,11 @@ def test_mission_goal_stays_role_gated_when_the_table_is_empty(monkeypatch):
     assert "mission_goal" not in PR._augment_chat_capabilities(_chat_persona(), ["search"])
 
 
-def test_supervisor_still_gets_mission_goal_from_the_live_table():
+def test_supervisor_no_longer_gets_the_retired_mission_goal_toolset():
     from agent_runtime import persona_runtime as PR
 
     augmented = PR._augment_chat_capabilities(_chat_persona("alice_supervisor"), ["search"])
-    assert augmented == ["search", "mission_goal", "agent_chat", "board", "clarify"]
+    assert augmented == ["search", "agent_chat", "board", "clarify"]
 
 
 def test_dev_chat_lane_augmentation_is_unchanged_for_a_known_role():

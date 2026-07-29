@@ -30,9 +30,9 @@ def parser():
     p=argparse.ArgumentParser(); subs=p.add_subparsers(dest="command"); build_parser(subs); return p
 
 
-def test_harness_parser_exposes_task_create():
-    args=parser().parse_args(["harness", "task", "create", "--title", "T", "--description", "D", "--json"])
-    assert args.command == "harness" and args.task_command == "create"
+def test_harness_parser_no_longer_exposes_task_create():
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "task", "create", "--title", "T", "--description", "D", "--json"])
 
 
 def test_harness_init_exposes_atomic_bundled_persona_opt_in():
@@ -190,19 +190,12 @@ def test_harness_mission_chat_steer_no_active_turn_returns_structured_json(tmp_p
     assert data["client_message_id"] == "client_1"
 
 
-def test_harness_task_create_reports_new_goal_hygiene(tmp_path, monkeypatch, capsys):
+def test_harness_task_create_is_removed_without_store_mutation(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
 
-    args = parser().parse_args(["harness", "task", "create", "--title", "T", "--description", "D", "--json"])
-
-    assert args.func(args) == 0
-    data = json.loads(capsys.readouterr().out)
-    assert data["task_id"].startswith("task_")
-    assert data["new_goal_hygiene"]["preserved_evidence"] is True
-    assert data["new_goal_hygiene"]["dirty_state_after_cleanup"]["summary"]
-    assert data["daemon_start"]["attempted"] is False
-    assert data["daemon_start"]["started"] is False
-    assert "harness goal run" in data["daemon_start"]["summary"]
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "task", "create", "--title", "T", "--description", "D", "--json"])
+    assert TaskStore().list_all() == []
 
 
 def test_harness_parser_exposes_task_archive_ready_json():
@@ -658,9 +651,12 @@ def test_harness_cli_init_create_tick_status_snapshot_e2e(tmp_path, monkeypatch,
 
     monkeypatch.setattr("hermes_cli.harness.GPTPersonaRuntime", Runtime)
 
+    init_args = parser().parse_args(["harness", "init", "--json"])
+    assert init_args.func(init_args) == 0
+    stamp = now()
+    TaskStore().create(Task(id="task_e2e", title="T", description="D", state=TaskState.CREATED, created_at=stamp, updated_at=stamp, requested_by="test"))
+
     for argv in [
-        ["harness", "init", "--json"],
-        ["harness", "task", "create", "--title", "T", "--description", "D", "--json"],
         ["harness", "tick", "--json"],
         ["harness", "status", "--json"],
         ["harness", "observe", "--json"],
@@ -839,7 +835,6 @@ _STAGE42_DESTINATION_OWNERS: dict[str, _FunctionId] = {
     "limit": ("hermes_cli.harness", "_cmd_goal_list"),
     "cursor": ("hermes_cli.harness", "_cmd_goal_list"),
     "since": ("hermes_cli.harness", "_cmd_goal_history"),
-    "idempotency_key": ("hermes_cli.harness", "_cmd_goal_create"),
 }
 
 
@@ -859,7 +854,7 @@ _STAGE42_ENVELOPE_HANDLERS = _stage42_handlers(
     "_cmd_board_card_restore", "_cmd_board_create",
     "_cmd_board_list", "_cmd_board_resolve_conflict", "_cmd_board_show",
     "_cmd_board_update", "_cmd_goal_archive", "_cmd_goal_cancel",
-    "_cmd_goal_create", "_cmd_goal_history", "_cmd_goal_list", "_cmd_goal_run",
+    "_cmd_goal_history", "_cmd_goal_list", "_cmd_goal_run",
     "_cmd_goal_show", "_cmd_goal_unblock", "_cmd_lane_list", "_cmd_lane_show",
     "_cmd_mission_chat_clarify_tickets", "_cmd_office_actor_remove",
     "_cmd_office_actor_restore", "_cmd_office_actor_upsert",
@@ -889,7 +884,9 @@ _STAGE42_HANDLER_SCOPES: dict[str, set[_FunctionId]] = {
     "limit": _stage42_handlers("_cmd_goal_list"),
     "cursor": _stage42_handlers("_cmd_goal_list"),
     "since": _stage42_handlers("_cmd_goal_history"),
-    "idempotency_key": _stage42_handlers("_cmd_goal_create"),
+    "idempotency_key": _stage42_handlers(
+        "_cmd_board_card_add", "_cmd_board_card_edit", "_cmd_board_card_move"
+    ),
 }
 
 # Local --json registrations predate Stage 42 and are the identical store_true

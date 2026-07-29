@@ -381,7 +381,6 @@ class GPTPersonaRuntime:
         compression_threshold_tokens_override: int | None = None,
         compression_protect_first_n_override: int | None = None,
         compression_protect_last_n_override: int | None = None,
-        allow_mission_goal: bool = False,
     ) -> AgentRunResult:
         """Run the canonical Mission Control chat path.
 
@@ -474,7 +473,6 @@ class GPTPersonaRuntime:
                     persona,
                     session_id=perm_session_id,
                     admission=admission,
-                    allow_mission_goal=allow_mission_goal,
                 ),
                 blocked_tool_names=_blocked_tool_names_for_chat(persona, session_id=perm_session_id),
                 quiet_mode=True,
@@ -663,16 +661,7 @@ def _mission_chat_operative_rules() -> str:
         "grant blocks it, say so plainly instead of inventing output.\n"
         "- When the operator asks you to send, brief, or coordinate named agents, use `agent_chat_send` for each agent. "
         "Ordinary persona chat is chat-only for every role: investigations, verification, MCP calls, and multi-agent work "
-        "never imply goal creation. The `mission_goal_create` tool is absent unless the CALLER explicitly opted this turn "
-        "into heavy mission routing with `--allow-mission-goal`; never infer or work around that opt-in. If the operator asks "
-        "for a goal/mission/task and the tool is absent, explain that the explicit opt-in is required instead of creating a "
-        "task through terminal, a worker, or another tool.\n"
-        "- Only when `mission_goal_create` is actually present AND the operator explicitly asks to start, trigger, kick off, "
-        "or run a goal/mission/task, create a REAL one with it (it returns a tracked task_id and starts the Mission Daemon "
-        "so it self-drives). Do NOT "
-        "run the no-model smoke test (or any temp/throwaway graph validation) as a stand-in for a real goal — the smoke "
-        "never appears in Mission Control. Only fall back to the smoke if the operator explicitly asks to validate the "
-        "graph without creating real work.\n"
+        "stay in chat and never imply goal creation or create hidden durable work.\n"
         "- If an order is ambiguous or underspecified — an unclear target, a missing detail, or a routing choice with more "
         "than one plausible answer — use the `clarify` tool to ask before acting, rather than guessing. Pass the question, and "
         "when the answer is one of a few known options pass them as `choices` (up to 4) so they render as pickable rows. On "
@@ -1023,7 +1012,6 @@ def _enabled_toolsets_for_chat(
     *,
     session_id: str | None,
     admission=None,
-    allow_mission_goal: bool = False,
 ) -> list[str]:
     """The single chat-lane toolset chokepoint (both the free-chat and operator/
     mission chat call sites funnel through here).
@@ -1031,7 +1019,7 @@ def _enabled_toolsets_for_chat(
     Resolution order: permission mode → role/persona toolset resolution → chat
     capability augmentation → the chat-lane cost policy
     (``scope_chat_lane_toolsets``) that drops browser / vision / heavy-dev from a
-    conversational lane → the explicit mission-goal guard → the MCP admission
+    conversational lane → the MCP admission
     scope. ``unbounded`` permission mode bypasses the cost policy, but never the
     global chat-only default. A persona that wants a
     specific cost-excluded toolset back on its *bounded* chat lane restores it via
@@ -1056,15 +1044,6 @@ def _enabled_toolsets_for_chat(
         resolved = scope_chat_lane_toolsets(
             resolved, restore=chat_lane_restore_toolsets(persona.id)
         )
-    # Ordinary persona chat is globally chat-only. The mission/task/graph lane
-    # creates durable work, workers, retries, and proof state, so permission mode
-    # and role capability must never imply admission. Only the dedicated caller
-    # opt-in for this exact Mission Control turn can retain this toolset.
-    mission_goal_role_allowed = "mission_goal" in ALLOWED_TOOLSETS_BY_ROLE.get(
-        role_from_persona(persona), frozenset()
-    )
-    if not allow_mission_goal or not mission_goal_role_allowed:
-        resolved = [toolset for toolset in resolved if toolset != "mission_goal"]
     admitted = admission.server_names if admission is not None else ()
     if admission is None and admission_enabled():
         # Only pay the policy resolve when the kill switch is on. With it off the
@@ -1234,7 +1213,7 @@ def apply_chat_lane_tool_scope(
     The operator-facing permission preview (``persona_instance_summary`` /
     ``persona_instance_tool_detail``) resolved ``effective_toolsets(persona)`` —
     the persona's raw configured set — so it omitted BOTH the operator-chat
-    capability augmentation (mission_goal / agent_chat / board / clarify) and the
+    capability augmentation (agent_chat / board / clarify) and the
     T3/T6a chat-lane cost scoping (browser / vision / file / terminal /
     skill_manage cut). The preview therefore lied about the actual chat lane.
 
@@ -1293,23 +1272,13 @@ def apply_chat_lane_tool_scope(
 #
 # `clarify` is likewise universal: ask a question, get the answer as the next
 # message in the same session.
-_CHAT_CAPABILITY_TOOLSETS = ("mission_goal", "agent_chat", "board", "clarify")
-
-# `mission_goal` is the one privileged member that is NOT unconditional. It opens
-# the mission/task/graph lane (durable work, workers, retries, proof state), so
-# role capability must not imply admission. It stays role-gated here and is
-# additionally stripped in ``_enabled_toolsets_for_chat`` unless the caller opted
-# that exact turn in. Both it and its gate are removed in S4.
-_ROLE_GATED_CHAT_CAPABILITY_TOOLSETS = frozenset({"mission_goal"})
+_CHAT_CAPABILITY_TOOLSETS = ("agent_chat", "board", "clarify")
 
 
 def _augment_chat_capabilities(persona: AgentPersona, toolsets: list[str]) -> list[str]:
-    allowed = ALLOWED_TOOLSETS_BY_ROLE.get(role_from_persona(persona), frozenset())
     augmented = list(toolsets)
     for toolset in _CHAT_CAPABILITY_TOOLSETS:
         if toolset in augmented:
-            continue
-        if toolset in _ROLE_GATED_CHAT_CAPABILITY_TOOLSETS and toolset not in allowed:
             continue
         augmented.append(toolset)
     return augmented

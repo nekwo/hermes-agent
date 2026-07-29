@@ -1,3 +1,5 @@
+import importlib.util
+
 import pytest
 
 from hermes_time import now
@@ -793,19 +795,8 @@ def test_burn_in_case_tasks_are_graph_typed_at_creation():
         assert task.mission_plan.blueprint_id
 
 
-def test_mission_goal_create_is_graph_typed_at_creation():
-    from agent_runtime.mission_goal import create_mission_goal
-    from agent_runtime.store import TaskStore
-
-    data = create_mission_goal(
-        title="typed from birth",
-        description="mission goal create must never create an un-typed goal",
-        requested_by="tests",
-        acceptance_criteria=["plan exists"],
-        start_daemon_mode=False,
-    )
-    assert "error" not in data, data
-    _assert_graph_typed(TaskStore().get(data["task_id"]), site="mission_goal.create_mission_goal")
+def test_mission_goal_creation_entrypoint_is_removed_from_stage_graph():
+    assert importlib.util.find_spec("agent_runtime.mission_goal") is None
 
 
 def test_persona_diagnostic_tasks_are_typed_at_creation():

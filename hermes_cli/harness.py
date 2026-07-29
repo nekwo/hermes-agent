@@ -401,16 +401,6 @@ def build_parser(parent_subparsers) -> None:
     goal_detail.add_argument("goal_id", help="Goal id or task id (parent/child tasks share a goal_id)")
     goal_detail.add_argument("--json", action="store_true")
     goal_detail.set_defaults(func=_cmd_goal_detail)
-    goal_create = goal_subs.add_parser("create", help="Create a Harness goal")
-    goal_create.add_argument("--title")
-    goal_create.add_argument("--description")
-    goal_create.add_argument("--requested-by", default="cli")
-    goal_create.add_argument("--request-json")
-    goal_create.add_argument("--workspace", default=None)
-    goal_create.add_argument("--start-daemon", dest="start_daemon", action="store_true", default=None)
-    goal_create.add_argument("--no-start-daemon", dest="start_daemon", action="store_false")
-    _add_stage42_global_args(goal_create, mutation=True)
-    goal_create.set_defaults(func=_cmd_goal_create)
     goal_run = goal_subs.add_parser("run", help="Create a goal and run bounded ticks until a meaningful boundary")
     goal_run.add_argument("--title", required=True)
     goal_run.add_argument("--description", required=True)
@@ -481,21 +471,6 @@ def build_parser(parent_subparsers) -> None:
 
     task = subs.add_parser("task", help="Manage harness tasks")
     task_subs = task.add_subparsers(dest="task_command")
-    create = task_subs.add_parser("create", help="Create a harness task")
-    create.add_argument("--title")
-    create.add_argument("--description")
-    create.add_argument("--request-json", help="Path to a Stage 38 canonical goal-create request JSON file")
-    create.add_argument("--requested-by", default="cli")
-    create.add_argument(
-        "--affected-repo",
-        action="append",
-        default=[],
-        help="Pin the goal's repo scope (EterniaLauncher, EterniaBackend, hermes-agent, or an alias like launcher/backend). Repeatable.",
-    )
-    create.add_argument("--start-daemon", dest="start_daemon", action="store_true", default=None, help="Start the Mission Daemon after creating the task")
-    create.add_argument("--no-start-daemon", dest="start_daemon", action="store_false", help="Create the task without starting the Mission Daemon")
-    create.add_argument("--json", action="store_true")
-    create.set_defaults(func=_cmd_task_create)
     listp = task_subs.add_parser("list", help="List harness tasks")
     listp.add_argument("--state", choices=["open", "all", "done", "blocked"], default="open")
     listp.add_argument("--json", action="store_true")
@@ -1419,11 +1394,6 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_message.add_argument("--workspace-id", default=None)
     mission_chat_message.add_argument("--workspace-name", default=None)
     mission_chat_message.add_argument("--intent-hint", default="chat")
-    mission_chat_message.add_argument(
-        "--allow-mission-goal",
-        action="store_true",
-        help="Explicitly admit mission_goal_create for this one turn. Normal persona chat is chat-only and never creates a mission/task/graph by default.",
-    )
     mission_chat_message.add_argument("--requested-by", default="cli")
     mission_chat_message.add_argument("--client-message-id", default=None)
     mission_chat_message.add_argument("--idempotency-key", default=None)
@@ -2580,48 +2550,6 @@ def _cmd_goal_history(args) -> int:
         for index, event in enumerate(events.get("items", []), start=1)
     ]
     _print_stage42(_list_envelope("goal_event", rows), args=args)
-    return 0
-
-
-def _cmd_goal_create(args) -> int:
-    from agent_runtime.mission_goal import create_mission_goal, create_mission_goal_from_request
-
-    if getattr(args, "request_json", None):
-        request = _load_request_json(args.request_json)
-        data = create_mission_goal_from_request(
-            request,
-            start_daemon_mode=getattr(args, "start_daemon", None),
-            dry_run=bool(getattr(args, "dry_run", False)),
-        )
-    else:
-        if not args.title or not args.description:
-            return emit_harness_error(ValueError("--title and --description are required unless --request-json is provided"), args=args, code="invalid_request")
-        if getattr(args, "dry_run", False):
-            _print_stage42(
-                _object_envelope("goal", {"id": f"goal_dry_{uuid.uuid4().hex[:6]}", "title": args.title, "state": "dry_run", "workspace_id": getattr(args, "workspace", None), "updated_at": now()}),
-                args=args,
-                default_output="json",
-            )
-            return 0
-        data = create_mission_goal(
-            title=args.title,
-            description=args.description,
-            requested_by=args.requested_by,
-            start_daemon_mode=getattr(args, "start_daemon", None),
-            idempotency_key=getattr(args, "idempotency_key", None),
-        )
-    if data.get("error"):
-        err = data["error"]
-        _print_stage42(_error_envelope(err.get("code") or "invalid_request", err.get("message") or "goal create failed", retryable=bool(err.get("retryable")), safe_details=err.get("safe_details") or {}), args=args, default_output="json")
-        return ERROR_EXIT_CODES.get(err.get("code"), 1)
-    task = TaskStore().get(data.get("task_id"))
-    if getattr(args, "workspace", None):
-        WorkspaceStore().get(args.workspace)
-        task.workspace_id = args.workspace
-        task.updated_at = now()
-        TaskStore().update(task, actor="cli", reason="assigned workspace")
-        task = TaskStore().get(task.id)
-    _print_stage42(_object_envelope("goal", _goal_row(task), warnings=_goal_contention_warnings(task)), args=args, default_output="json")
     return 0
 
 

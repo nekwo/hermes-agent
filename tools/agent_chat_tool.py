@@ -5,14 +5,14 @@ Lets any chat persona brief, deploy, or steer ANOTHER persona by sending a
 message into that persona's own Mission Control chat session ("Alice, deploy
 Neko on X" -> Alice calls this tool -> the prompt lands in Neko's session,
 Neko replies there, and the whole exchange is visible in Mission Control with
-real provenance). This is the CHAT lane: no task, no daemon, no proof gates —
-``mission_goal_create`` remains the escalation path for tracked goals.
+real provenance). This is the CHAT lane: no task, no daemon, no proof gates,
+and no tracked-work creation.
 
 Runs fully in-process by invoking the same handler behind
 ``hermes harness mission-chat message`` (session dedup, transcript persistence,
 prompt observability, trace — one canonical lane, nothing re-implemented).
 In-process matters: one Hermes process shelling out to another can hit the
-``agent.log`` rotation lock (see mission_goal_tool.py), and the operator lane
+``agent.log`` rotation lock, and the operator lane
 must never fork a second, slightly different chat pipeline.
 
 Thread contract (V3 — task-scoped dispatch, 2026-07-27): a send that names no
@@ -76,7 +76,7 @@ _MESSAGE_LIMIT = 12000
 AGENT_CHAT_SEND_SCHEMA = {
     "name": "agent_chat_send",
     "description": (
-        "Send a conversational message to ANOTHER Harness persona (persona id e.g. neko_supervisor/dev/qa, or a @personainst_* handle for a specific instance; display names refused). Each new task you dispatch starts a FRESH thread by default; to continue an exchange (an in-task follow-up) pass back the session_id their reply returned. Answering their clarifying question: pass back the clarify_token from their clarify_request and your answer lands in that question's thread. new_session=false continues the target's CURRENT default thread (the most recent one) instead. Disambiguator: does NOT start tracked work -- use mission_goal_create for that."
+        "Send a conversational message to ANOTHER Harness persona (persona id e.g. neko_supervisor/dev/qa, or a @personainst_* handle for a specific instance; display names refused). Each new task you dispatch starts a FRESH thread by default; to continue an exchange (an in-task follow-up) pass back the session_id their reply returned. Answering their clarifying question: pass back the clarify_token from their clarify_request and your answer lands in that question's thread. new_session=false continues the target's CURRENT default thread (the most recent one) instead. This is conversational only and does not create tracked work."
     ),
     "parameters": {
         "type": "object",

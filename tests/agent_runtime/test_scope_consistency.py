@@ -108,17 +108,17 @@ def test_free_form_scope_stays_out_of_contract(isolate_agent_runtime_root):
     assert t.affected_repos == ["X:/somewhere/custom-checkout"]
 
 
-def test_operator_pinned_scope_conflict_is_rejected(isolate_agent_runtime_root):
+def test_declared_scope_conflict_is_rejected(isolate_agent_runtime_root):
     t = make_task("generic description without repo names")
-    t.harness_self_heal["mission_goal_create"] = {"repo_scope_pinned": ["hermes-agent"]}
+    t.harness_self_heal["repo_scope_pinned"] = ["hermes-agent"]
     with pytest.raises(DecisionPayloadInvalid) as exc:
         apply_planning_decision(t, acceptance({"affected_repos": ["EterniaLauncher"]}), actor="neko_supervisor")
     assert "pinned" in str(exc.value)
 
 
-def test_operator_pinned_scope_expansion_is_rejected(isolate_agent_runtime_root):
+def test_declared_scope_expansion_is_rejected(isolate_agent_runtime_root):
     t = make_task("generic description without repo names")
-    t.harness_self_heal["mission_goal_create"] = {"repo_scope_pinned": ["EterniaLauncher"]}
+    t.harness_self_heal["repo_scope_pinned"] = ["EterniaLauncher"]
     with pytest.raises(DecisionPayloadInvalid) as exc:
         apply_planning_decision(
             t,
@@ -128,9 +128,9 @@ def test_operator_pinned_scope_expansion_is_rejected(isolate_agent_runtime_root)
     assert "pinned" in str(exc.value)
 
 
-def test_operator_pinned_scope_expansion_with_override_is_rejected(isolate_agent_runtime_root):
+def test_declared_scope_expansion_with_override_is_rejected(isolate_agent_runtime_root):
     t = make_task("generic description without repo names")
-    t.harness_self_heal["mission_goal_create"] = {"repo_scope_pinned": ["EterniaLauncher"]}
+    t.harness_self_heal["repo_scope_pinned"] = ["EterniaLauncher"]
     with pytest.raises(DecisionPayloadInvalid) as exc:
         apply_planning_decision(
             t,
@@ -147,20 +147,20 @@ def test_operator_pinned_scope_expansion_with_override_is_rejected(isolate_agent
     assert "cannot be overridden" in message
 
 
-def test_operator_pinned_scope_match_passes(isolate_agent_runtime_root):
+def test_declared_scope_match_passes(isolate_agent_runtime_root):
     t = make_task("generic description without repo names")
-    t.harness_self_heal["mission_goal_create"] = {"repo_scope_pinned": ["hermes-agent"]}
+    t.harness_self_heal["repo_scope_pinned"] = ["hermes-agent"]
     apply_planning_decision(t, acceptance({"affected_repos": ["hermes-agent"]}), actor="neko_supervisor")
     assert t.affected_repos == ["hermes-agent"]
 
 
-def test_operator_pinned_scope_wins_over_graph_release_union(isolate_agent_runtime_root):
+def test_declared_scope_wins_over_graph_release_union(isolate_agent_runtime_root):
     from agent_runtime.models import MissionPlan, MissionPlanStage
     from agent_runtime.planning import _release_stage_affected_repos
 
     t = make_task("Launcher-only trust probe.")
     t.affected_repos = ["hermes-agent", "EterniaBackend", "EterniaLauncher"]
-    t.harness_self_heal["mission_goal_create"] = {"repo_scope_pinned": ["EterniaLauncher"]}
+    t.harness_self_heal["repo_scope_pinned"] = ["EterniaLauncher"]
     t.mission_plan = MissionPlan(
         enabled=True,
         current_stage_id="implement",
@@ -195,21 +195,10 @@ def test_scope_route_projection_carries_override_reason():
     assert projected.payload["scope_override_reason"] == "goal text is stale"
 
 
-def test_goal_create_records_pinned_repo_scope(isolate_agent_runtime_root):
-    from agent_runtime.mission_goal import create_mission_goal
-    from agent_runtime.store import TaskStore
-
-    data = create_mission_goal(
-        title="Audit liveness",
-        description="Audit the watchdog wiring.",
-        start_daemon_mode=False,
-        repo_scope=["hermes-agent"],
-    )
-    assert not data.get("error")
-    task = TaskStore().get(data["task_id"])
-    assert task.affected_repos == ["hermes-agent"]
-    meta = task.harness_self_heal["mission_goal_create"]
-    assert meta["repo_scope_pinned"] == ["hermes-agent"]
+def test_declared_repo_scope_is_kept_on_task():
+    task = make_task("Audit liveness")
+    task.harness_self_heal["repo_scope_pinned"] = ["hermes-agent"]
+    assert task.harness_self_heal["repo_scope_pinned"] == ["hermes-agent"]
 
 
 def test_default_plan_stage_release_does_not_leak_placeholder_repo(isolate_agent_runtime_root):
