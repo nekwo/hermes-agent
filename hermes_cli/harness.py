@@ -1186,7 +1186,6 @@ def build_parser(parent_subparsers) -> None:
     persona_assignments = persona_subs.add_parser("assignments", help="List persona assignments")
     persona_assignments.add_argument("--persona", dest="persona_id", default=None)
     persona_assignments.add_argument("--goal", dest="goal_id", default=None)
-    persona_assignments.add_argument("--task", dest="task_id", default=None, help="Deprecated alias for --goal")
     persona_assignments.add_argument("--json", action="store_true")
     persona_assignments.set_defaults(func=_cmd_persona_assignments)
     persona_message = persona_subs.add_parser("message", help="Queue a bounded operator message assignment for one persona")
@@ -1637,11 +1636,6 @@ def build_parser(parent_subparsers) -> None:
     agent_set_profile.add_argument("--requested-by", default="operator")
     _add_stage42_global_args(agent_set_profile, mutation=True)
     agent_set_profile.set_defaults(func=_cmd_agent_set_profile)
-
-    agents = subs.add_parser("agents", help="Deprecated alias for `agent list`")
-    agents.add_argument("--all-profiles", action="store_true")
-    agents.add_argument("--json", action="store_true")
-    agents.set_defaults(func=_cmd_agent_list)
 
     skills = subs.add_parser("install-harness-skills", help="Install versioned Harness skills into configured persona profiles")
     skills.add_argument("--active-profile-only", action="store_true", help="Install all Harness skills only into the active Hermes profile")
