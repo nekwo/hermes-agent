@@ -5,29 +5,24 @@ import json
 from typing import Any
 
 from .context_requests import fulfilled_context_bundles
-from .config import load_root_runtime_config
-from .decision_contract_registry import (
-    context_expansion_shape_ids as registry_context_expansion_shape_ids,
-    contract_hash,
-    hud_shape_index_for_stage,
-    role_shape_ids as registry_role_shape_ids,
-)
-from .decision_payload_contracts import payload_contract
 from .events import EventLog
 from .models import AgentRun, Event, Proof
 from .objective_templates import render_objective
 from .packets import HANDOFF_MODES, HANDOFF_OWNERS, HANDOFF_REPOS, QA_NEXT_OWNERS, latest_packet, latest_packets_for_task
 from .profile_context import mcp_owner_profile_name
-from .repo_bundles import RepoBundleStore, bundle_queue_summary, qa_waiting_on, repo_bundle_delivery_summary, repo_bundle_summary, simplified_phase_for_task
 from .repo_context import repo_execution_context_for_task, safe_affected_repo_labels
-from .role_checklists import stage_checklist_hud
-from .role_contracts import contract_for_persona
 from .serde import to_jsonable
-from .simplified_contract import expose_only_simplified_actions
-from .stage_intent import stage_is_committed_verification_gate, stage_requires_product_edit
+
+#: The ``Task`` record was deleted with the mission lane (S8), so there is no
+#: type left to name here. Everything below takes a duck-typed, task-shaped
+#: object and reads it exclusively through ``getattr``/``.id``-style access;
+#: ``TaskLike`` states that honestly instead of annotating a name that resolves
+#: to nothing (``from __future__ import annotations`` hid the NameError, but
+#: ``typing.get_type_hints`` on these signatures would still raise).
+TaskLike = Any
 
 
-def _stage_records(task: Task) -> list:
+def _stage_records(task: TaskLike) -> list:
     """The task stage graph was retired; persisted stage keys are ignored."""
 
     return []
@@ -35,7 +30,7 @@ def _stage_records(task: Task) -> list:
 
 @dataclass(slots=True)
 class AgentContext:
-    task: Task
+    task: TaskLike
     run: AgentRun
     current_stage: object | None = None
     recent_events: list[dict[str, Any]] = field(default_factory=list)
@@ -54,7 +49,7 @@ class AgentContext:
 
 
 def build_context(
-    task: Task,
+    task: TaskLike,
     run: AgentRun,
     *,
     recent_events: list[dict[str, Any]] | None = None,
@@ -119,19 +114,6 @@ def build_context(
     )
 
 
-def _delivery_directive_line(task) -> str:
-    """One HUD line stating what the harness will do with delivered bundles,
-    so personas never have to guess (or decide) promotion/cleanup policy."""
-
-    from .delivery_directive import task_delivery_directive
-
-    directive = task_delivery_directive(task)
-    return (
-        f"promote={directive['promote']} preserve_diff={directive['preserve_diff']} "
-        f"worktree={directive['worktree']} (executed by the harness at terminal settle; not a persona decision)"
-    )
-
-
 def render_context(ctx: AgentContext) -> str:
     objective_stage = _context_objective_stage(ctx.task, ctx.run)
     lines = [
@@ -143,7 +125,6 @@ def render_context(ctx: AgentContext) -> str:
         f"- state: {ctx.task.state}",
         f"- requested_by: {ctx.task.requested_by}",
         f"- requires_visual_proof: {bool(getattr(ctx.task, 'requires_visual_proof', False))}",
-        f"- delivery_directive: {_delivery_directive_line(ctx.task)}",
         "",
         "## Objective",
         render_objective(
@@ -597,7 +578,7 @@ def _format_proof_ids(proof_ids: list[str], *, limit: int = 12) -> str:
     return ", ".join(selected) + suffix
 
 
-def _incident_records(task: Task, *, incident_store=None) -> list[dict[str, Any]]:
+def _incident_records(task: TaskLike, *, incident_store=None) -> list[dict[str, Any]]:
     if incident_store is None:
         return []
     incident_ids = list(getattr(task, "open_incident_ids", []) or [])
@@ -645,7 +626,7 @@ def _incident_run_terminal_state(run_id: str | None) -> str | None:
     return None
 
 
-def _safe_repo_context(task: Task) -> dict[str, Any] | None:
+def _safe_repo_context(task: TaskLike) -> dict[str, Any] | None:
     try:
         ctx = repo_execution_context_for_task(task)
     except ValueError:
@@ -723,7 +704,7 @@ def _safe_proof_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     return safe
 
 
-def _context_objective_stage(task: Task, run: AgentRun):
+def _context_objective_stage(task: TaskLike, run: AgentRun):
     return None
 def _objective_input_artifact(ctx: AgentContext, stage) -> str | None:
     depends_on = list(getattr(stage, "depends_on", []) or []) if stage is not None else []
@@ -737,7 +718,7 @@ def _objective_input_artifact(ctx: AgentContext, stage) -> str | None:
     return None
 
 
-def _stage_role(task: Task, run: AgentRun, stage) -> str:
+def _stage_role(task: TaskLike, run: AgentRun, stage) -> str:
     return str(getattr(stage, "owner", "") or "").strip() or _hud_owner(run)
 def _stage_output_type(stage) -> str:
     explicit = str(getattr(stage, "output_type", "") or "").strip()
@@ -767,9 +748,7 @@ def _stage_proof_gate(stage) -> dict[str, Any]:
     return {"required": False, "required_proof_types": [], "minimum_status": "passed"}
 
 
-def _stage_outgoing_edges(task: Task, stage) -> list[dict[str, str]]:
-    return []
-def _mission_hud(task: Task, run: AgentRun, packets: dict[str, dict[str, Any]], *, config=None, proof_store=None) -> dict[str, Any] | None:
+def _mission_hud(task: TaskLike, run: AgentRun, packets: dict[str, dict[str, Any]], *, config=None, proof_store=None) -> dict[str, Any] | None:
     hud = {
         "task_id": task.id,
         "phase": str(task.state),
@@ -781,11 +760,9 @@ def _mission_hud(task: Task, run: AgentRun, packets: dict[str, dict[str, Any]], 
     if feedback:
         hud["terminal_feedback"] = feedback
     return hud
-def mission_hud_preview(task: Task, *, proof_store=None) -> dict[str, Any]:
-    if task is None:
-        return {}
-    return {"task_id": task.id, "preview": True, "phase": str(task.state)}
-def _terminal_feedback(task: Task, run: AgentRun) -> dict[str, Any] | None:
+
+
+def _terminal_feedback(task: TaskLike, run: AgentRun) -> dict[str, Any] | None:
     context_feedback = _latest_context_request_feedback(task, run)
     if context_feedback:
         return context_feedback
@@ -804,7 +781,7 @@ def _terminal_feedback(task: Task, run: AgentRun) -> dict[str, Any] | None:
     return None
 
 
-def _latest_context_request_feedback(task: Task, run: AgentRun) -> dict[str, Any] | None:
+def _latest_context_request_feedback(task: TaskLike, run: AgentRun) -> dict[str, Any] | None:
     requests = [req for req in (getattr(task, "context_requests", []) or []) if isinstance(req, dict)]
     if not requests:
         return None
@@ -850,170 +827,6 @@ def _latest_context_request_feedback(task: Task, run: AgentRun) -> dict[str, Any
     return {key: value for key, value in feedback.items() if value not in (None, "", [], {})}
 
 
-def _simplified_agent_hud(task: Task, run: AgentRun, *, role: str, simplified_contract: bool = False) -> dict[str, Any]:
-    repo_bundles = RepoBundleStore().list_for_task(task.id)
-    active_bundle_id = str((run.progress or {}).get("repo_bundle_id") or "").strip() if isinstance(run.progress, dict) else ""
-    active_bundle = next((bundle for bundle in repo_bundles if bundle.id == active_bundle_id), None)
-    active_assignment = _active_assignment_for_run(run)
-    stage = _context_objective_stage(task, run)
-    proof_gate = _stage_proof_gate(stage)
-    output_type = _stage_output_type(stage)
-    stage_id = str(getattr(stage, "id", "") or "")
-    hud = {
-        "schema_version": 1,
-        "mode": "stage53_simplified",
-        "stage": "stage57_repo_bundle_simplified",
-        "simplified_phase": simplified_phase_for_task(task, repo_bundles),
-        "current_assignment": {
-            "task_id": task.id,
-            "title": task.title,
-            "stage_id": stage_id or None,
-            "stage_title": str(getattr(stage, "title", "") or "") or None,
-            "owner": str(getattr(stage, "owner", "") or "") or None,
-            "objective": str(getattr(stage, "objective", "") or task.description),
-            "acceptance": list(getattr(stage, "acceptance_criteria", None) or task.acceptance_criteria or []),
-            "output_type": output_type,
-            "proof_gate": proof_gate,
-            "required_proof_types": list(proof_gate.get("required_proof_types", []) or []),
-            "outgoing_edges": _stage_outgoing_edges(task, stage),
-            "affected_repos": safe_affected_repo_labels(getattr(task, "affected_repos", []) or []),
-            "requires_visual_proof": bool(getattr(task, "requires_visual_proof", False)),
-            "active_assignment_id": (run.progress or {}).get("assignment_id") if isinstance(run.progress, dict) else None,
-            "assignment_title": getattr(active_assignment, "title", None) if active_assignment is not None else None,
-            "assignment_message": getattr(active_assignment, "message", None) if active_assignment is not None else None,
-            "repo_bundle_id": active_bundle_id or None,
-            "repo_bundle": repo_bundle_summary(active_bundle) if active_bundle is not None else None,
-        },
-        "repo_bundles": [repo_bundle_summary(bundle) for bundle in repo_bundles],
-        "repo_bundle_closeout": repo_bundle_delivery_summary(repo_bundles) if repo_bundles else None,
-        "bundle_queue": bundle_queue_summary(repo_bundles),
-        "qa_waiting_on": qa_waiting_on(repo_bundles),
-        "contract": contract_for_persona(run.persona_id, role=role, simplified=simplified_contract),
-        "response_rule": "Read STATUS for Harness-verified diff/proof/gate truth, then use the recommended visible ACTION affordance. Unknown fields are invalid; open only the named skill_ref when deeper guidance is needed.",
-    }
-    evidence_stack = _task_evidence_stack(task)
-    if evidence_stack:
-        hud["evidence_stack"] = evidence_stack
-    verification_status = _task_verification_status(task, stage_id=stage_id)
-    if verification_status:
-        hud["verification_status"] = verification_status
-    return hud
-
-
-def _active_assignment_for_run(run: AgentRun):
-    progress = run.progress if isinstance(getattr(run, "progress", None), dict) else {}
-    assignment_id = str(progress.get("assignment_id") or "").strip()
-    if not assignment_id:
-        return None
-    try:
-        from .persona_assignments import PersonaAssignmentStore
-
-        return PersonaAssignmentStore().get(assignment_id)
-    except Exception:
-        return None
-
-
-def _task_evidence_stack(task: Task) -> list[dict[str, Any]]:
-    root = getattr(task, "harness_self_heal", None)
-    raw_stack = root.get("evidence_stack") if isinstance(root, dict) else None
-    if not isinstance(raw_stack, list):
-        return []
-    safe_stack: list[dict[str, Any]] = []
-    for item in raw_stack[-10:]:
-        if not isinstance(item, dict):
-            continue
-        safe = {
-            "kind": str(item.get("kind") or "evidence")[:80],
-            "severity": str(item.get("severity") or "warning")[:40],
-            "stage_id": str(item.get("stage_id") or "")[:120],
-            "summary": str(item.get("summary") or "")[:500],
-            "recommended_owner": str(item.get("recommended_owner") or "")[:120],
-        }
-        missing = [str(value)[:240] for value in (item.get("missing") or []) if str(value)]
-        warnings = [str(value)[:240] for value in (item.get("warnings") or []) if str(value)]
-        if missing:
-            safe["missing"] = missing[:10]
-        if warnings:
-            safe["warnings"] = warnings[:10]
-        if item.get("recorded_at"):
-            safe["recorded_at"] = str(item.get("recorded_at"))[:80]
-        safe_stack.append({key: value for key, value in safe.items() if value not in ("", [], {})})
-    return safe_stack
-
-
-def _task_verification_status(task: Task, *, stage_id: str | None) -> dict[str, Any] | None:
-    root = getattr(task, "harness_self_heal", None)
-    observations = root.get("stage_observations") if isinstance(root, dict) else None
-    if not isinstance(observations, dict):
-        return None
-    item = observations.get(stage_id or "_task")
-    if not isinstance(item, dict):
-        return None
-    diff = item.get("repo_diff") if isinstance(item.get("repo_diff"), dict) else {}
-    return {
-        "status_lane": {
-            "repo_diff_chars": int(diff.get("diff_chars") or 0),
-            "repo_diff_truncated": bool(diff.get("truncated")),
-            "baseline_dirty_count": int(diff.get("baseline_dirty_count") or 0),
-            "observed_proof_ids": [str(value)[:128] for value in (item.get("observed_proof_ids") or []) if str(value)][:20],
-            "authoritative_gate_proof_ids": [str(value)[:128] for value in (item.get("authoritative_gate_proof_ids") or []) if str(value)][:20],
-            "authoritative_gate_status": str(item.get("authoritative_gate_status") or "pending")[:40],
-        }
-    }
-
-
-def _agent_hud_options(menu: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    options: list[dict[str, Any]] = []
-    for item in menu:
-        if not isinstance(item, dict):
-            continue
-        options.append(
-            {
-                key: item.get(key)
-                for key in (
-                    "choice_id",
-                    "primary",
-                    "worker_action_id",
-                    "shape_id",
-                    "label",
-                    "decision_type",
-                    "when",
-                )
-                if item.get(key) not in (None, "", [], {})
-            }
-        )
-    return options
-
-
-def _recommended_action(menu: list[dict[str, Any]], *, next_move: dict[str, Any], role: str) -> dict[str, Any] | None:
-    primary = next((item for item in menu if isinstance(item, dict) and item.get("primary")), None)
-    if primary is None and menu:
-        primary = next((item for item in menu if isinstance(item, dict)), None)
-    if not isinstance(primary, dict):
-        return None
-    shape_id = str(primary.get("shape_id") or next_move.get("shape_id") or "").strip()
-    skill = _skill_reference_for_action(role, shape_id=shape_id, action_id=str(primary.get("worker_action_id") or next_move.get("worker_action_id") or ""))
-    payload_skeleton = primary.get("recommended_payload")
-    if payload_skeleton in (None, "", [], {}):
-        payload_skeleton = primary.get("payload_template") or {}
-    action = {
-        "choice_id": primary.get("choice_id"),
-        "action_id": primary.get("worker_action_id") or next_move.get("worker_action_id"),
-        "decision_type": primary.get("decision_type") or next_move.get("decision_type"),
-        "shape_id": shape_id,
-        "label": primary.get("label"),
-        "reason": next_move.get("reason") or primary.get("when"),
-        "required_payload_keys": primary.get("required_payload_keys", []),
-        "allowed_payload_keys": primary.get("allowed_payload_keys", []),
-        "nested_required": primary.get("nested_required", {}),
-        "enum_choices": primary.get("enum_choices", {}),
-        "payload_skeleton": payload_skeleton or {},
-        "forbid_unknown_payload_keys": True,
-        **skill,
-    }
-    return {key: value for key, value in action.items() if key == "payload_skeleton" or value not in (None, "", [], {})}
-
-
 def _skill_reference_for_action(role: str, *, shape_id: str, action_id: str) -> dict[str, str]:
     del role, action_id
     if shape_id.startswith("neko."):
@@ -1056,452 +869,8 @@ def _skill_reference_for_action(role: str, *, shape_id: str, action_id: str) -> 
     }
 
 
-def _next_move_from_worker_action(action) -> dict[str, Any]:
-    return {
-        "decision_type": action.decision_type.value,
-        "shape_id": action.shape_id,
-        "worker_action_id": action.action_id,
-        "reason": action.reason,
-        "recommended_payload": action.payload_template,
-    }
-
-
-def _worker_action_shape_ids(actions) -> list[str]:
-    seen: set[str] = set()
-    result: list[str] = []
-    for action in actions:
-        if not action.visible or action.shape_id in seen:
-            continue
-        seen.add(action.shape_id)
-        result.append(action.shape_id)
-    return result
-
-
 def _hud_owner(run: AgentRun) -> str:
     return str(getattr(run, "persona_id", "") or "").strip() or "unknown"
-
-
-def _next_required_move(task: Task, run: AgentRun, *, handoff: dict[str, Any], stage_state: dict[str, Any]) -> dict[str, Any]:
-    role = _hud_owner(run)
-    stage_id = str(run.stage_id or getattr(task, "current_stage_id", None) or "").strip()
-    state = str(task.state.value if hasattr(task.state, "value") else task.state)
-    failed_proof_ids = [str(item).strip() for item in (stage_state.get("last_failed_proof_ids") or []) if str(item).strip()] if isinstance(stage_state.get("last_failed_proof_ids"), list) else []
-    if role == "alice_supervisor":
-        diagnostic_persona = _diagnostic_persona(task)
-        if state in {"created", "pm_triage"} and diagnostic_persona == str(run.persona_id or ""):
-            return {
-                "decision_type": "scope_route",
-                "shape_id": "neko.scope_route",
-                "reason": "This is a bounded Neko-only diagnostic; acknowledge with the canonical diagnostic packet and do not route Dev or QA.",
-                "stage_id": stage_id,
-                "recommended_payload": _neko_diagnostic_ack_payload(task),
-            }
-        if getattr(task, "open_incident_ids", None):
-            return {
-                "decision_type": "resolve_incident",
-                "shape_id": "neko.resolve_incident",
-                "reason": (
-                    "Open incidents are yours to adjudicate. When an incident's underlying run is already "
-                    "terminal (cancelled/failed/hung-reaped), close it with resolve_incident and a "
-                    "redaction-safe reason; block only when recovery genuinely needs a human."
-                ),
-                "stage_id": stage_id,
-                "incident_ids": list(getattr(task, "open_incident_ids", []) or [])[:5],
-            }
-        if failed_proof_ids:
-            if _task_or_stage_mentions_visual(task, stage_id):
-                return {
-                    "decision_type": "scope_route",
-                    "shape_id": "neko.scope_route",
-                    "reason": "A current-stage visual proof failed; release one bounded Dev recovery with failed proof IDs and a precise proof gate.",
-                    "must_reference_failed_proof_ids": failed_proof_ids[:5],
-                    "stage_id": stage_id,
-                    "recommended_payload_keys": payload_contract("scope_route")["allowed_payload_keys"],
-                }
-            return {
-                "decision_type": "scope_route",
-                "shape_id": "neko.scope_route",
-                "reason": "A current-stage proof failed; choose bounded retry, route to Dev, or block if the signal is unchanged.",
-                "must_reference_failed_proof_ids": failed_proof_ids[:5],
-                "stage_id": stage_id,
-                "recommended_payload_keys": payload_contract("scope_route")["allowed_payload_keys"],
-            }
-        if state == "dev_ready_for_qa" and _task_has_qa_stage(task):
-            return {
-                "decision_type": "scope_route",
-                "shape_id": "neko.scope_route",
-                "reason": "Dev is ready; join proof IDs and release QA only if required proof is attached.",
-                "stage_id": stage_id,
-            }
-        if state == "dev_ready_for_qa":
-            return {
-                "decision_type": "scope_route",
-                "shape_id": "neko.scope_route",
-                "reason": "Dev is ready, but the active graph has no QA/verifier node; release the next graph stage or let the Harness close.",
-                "stage_id": stage_id,
-            }
-        if state in {"created", "pm_triage", "pm_ready_for_dev", "blocked"}:
-            return {
-                "decision_type": "scope_route",
-                "shape_id": "neko.scope_route",
-                "reason": "Scope or rescope the next bounded owner handoff; do not patch code.",
-                "stage_id": stage_id,
-            }
-        return {
-            "decision_type": "block",
-            "shape_id": "common.block",
-            "reason": "No safe Neko routing move is obvious; block with exact evidence instead of looping.",
-            "stage_id": stage_id,
-        }
-    if role == "dev":
-        if not stage_id or not _stage_records(task):
-            return {
-                "decision_type": "propose_stage_plan",
-                "shape_id": "dev.propose_stage_plan",
-                "reason": "No executable current stage exists; create one bounded stage with proof gates before requesting proof.",
-                "stage_id": stage_id,
-            }
-        if _task_or_stage_requires_visual(task, stage_id) and not _has_visual_proof_id(task):
-            return {
-                "decision_type": "request_screenshot",
-                "shape_id": "dev.request_screenshot",
-                "reason": "Visual proof is explicitly required; request launcher_qa screenshot proof before any command gate.",
-                "stage_id": stage_id,
-                "recommended_payload": {
-                    "stage_id": stage_id,
-                    "target": "mission_control",
-                    "proof_requirement": "fullscreen Mission Control visual proof for the current stage",
-                    "mcp_server": "launcher_qa",
-                    "required_launch_pins": {"hermes_profile": mcp_owner_profile_name("launcher_qa"), "runtime_root_id": "agent-runtime"},
-                },
-            }
-        commands = _current_stage_command_hints(task, run, role=role)
-        if commands:
-            return {
-                "decision_type": "request_test_run",
-                "shape_id": "dev.request_test_run",
-                "reason": "Current stage has executable proof command(s); request Harness-owned proof instead of rediscovering.",
-                "stage_id": stage_id,
-                "command_count": len(commands),
-                "recommended_payload": {"stage_id": stage_id, "commands": commands[:3]},
-            }
-        if state == "dev_implementing":
-            return {
-                "decision_type": "hand_off",
-                "shape_id": "dev.hand_off",
-                "reason": "Patch/test inside the resolved repo, then hand off so Harness captures diff and runs the authoritative gate.",
-                "stage_id": stage_id,
-            }
-        return {
-            "decision_type": "correct_stage",
-            "shape_id": "dev.correct_stage",
-            "reason": "Stage plan is ambiguous or stale; correct it with exact test_plan/proof gates before proof.",
-            "stage_id": stage_id,
-        }
-    if role == "qa":
-        if _task_or_stage_mentions_visual(task, stage_id) and not _has_visual_proof_id(task):
-            return {
-                "decision_type": "request_screenshot",
-                "shape_id": "qa.request_screenshot",
-                "reason": "Visual proof is required but no screenshot/video proof ID is attached.",
-                "stage_id": stage_id,
-                "recommended_payload": {
-                    "stage_id": stage_id,
-                    "target": "mission_control",
-                    "proof_requirement": "fullscreen Mission Control visual proof for the current stage",
-                    "mcp_server": "launcher_qa",
-                    "required_launch_pins": {"hermes_profile": mcp_owner_profile_name("launcher_qa"), "runtime_root_id": "agent-runtime"},
-                },
-            }
-        return {
-            "decision_type": "qa_verdict",
-            "shape_id": "qa.verdict",
-            "reason": "Review attached proof IDs and emit evidence-backed approval or blocker findings.",
-            "stage_id": stage_id,
-        }
-    return {
-        "decision_type": _required_next_decision(task, run),
-        "shape_id": "common.block",
-        "reason": "Unknown role; use a conservative evidence-backed decision.",
-        "stage_id": stage_id,
-    }
-
-
-def _registry_decision_shape_index(role: str, task: Task, run: AgentRun, *, handoff: dict[str, Any]) -> dict[str, Any]:
-    stage_id = run.stage_id or getattr(task, "current_stage_id", None) or "<current stage>"
-    shape_index = hud_shape_index_for_stage(role)
-    target_repo = str(handoff.get("target_repo") or "EterniaLauncher").strip() or "EterniaLauncher"
-    for shape in shape_index.values():
-        template = shape.get("payload_template")
-        if isinstance(template, dict):
-            shape["payload_template"] = _replace_shape_placeholders(
-                template,
-                {
-                    "<current stage>": stage_id,
-                    "<target_repo>": target_repo,
-                    "<head_agent_profile>": mcp_owner_profile_name("launcher_qa"),
-                },
-            )
-    return shape_index
-
-
-def _replace_shape_placeholders(value: Any, replacements: dict[str, str]) -> Any:
-    if isinstance(value, dict):
-        return {key: _replace_shape_placeholders(item, replacements) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_replace_shape_placeholders(item, replacements) for item in value]
-    if isinstance(value, str):
-        result = value
-        for old, new in replacements.items():
-            result = result.replace(old, new)
-        return result
-    return value
-
-
-def _decision_shape_index(role: str, task: Task, run: AgentRun, *, handoff: dict[str, Any]) -> dict[str, Any]:
-    return _registry_decision_shape_index(role, task, run, handoff=handoff)
-
-
-def _decision_menu(role: str, *, next_move: dict[str, Any], shape_index: dict[str, Any]) -> list[dict[str, Any]]:
-    primary_shape = str(next_move.get("shape_id") or "").strip()
-    shape_ids = _role_shape_ids(role)
-    if primary_shape and primary_shape in shape_index:
-        shape_ids = [primary_shape, *[shape_id for shape_id in shape_ids if shape_id != primary_shape]]
-    menu: list[dict[str, Any]] = []
-    labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    for idx, shape_id in enumerate(shape_ids):
-        shape = shape_index.get(shape_id)
-        if not isinstance(shape, dict):
-            continue
-        entry = {
-            "choice_id": labels[idx] if idx < len(labels) else f"choice_{idx + 1}",
-            "primary": shape_id == primary_shape,
-            "shape_id": shape_id,
-            "label": shape.get("label"),
-            "decision_type": shape.get("decision_type"),
-            "when": shape.get("when") or shape.get("shape_hint"),
-            "required_payload_keys": shape.get("required_payload_keys", []),
-            "allowed_payload_keys": shape.get("allowed_payload_keys", []),
-            "nested_required": shape.get("nested_required", {}),
-            "enum_choices": shape.get("enum_choices", {}),
-            "payload_template": shape.get("payload_template", {}),
-            "forbid_unknown_payload_keys": True,
-        }
-        if shape_id == primary_shape and next_move.get("recommended_payload"):
-            entry["recommended_payload"] = next_move["recommended_payload"]
-        menu.append(entry)
-    return menu
-
-
-def _worker_action_decision_menu(actions, *, next_move: dict[str, Any], shape_index: dict[str, Any]) -> list[dict[str, Any]]:
-    menu: list[dict[str, Any]] = []
-    labels = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    visible_actions = [action for action in actions if action.visible and action.shape_id in shape_index]
-    for idx, action in enumerate(visible_actions):
-        shape = shape_index.get(action.shape_id)
-        if not isinstance(shape, dict):
-            continue
-        entry = {
-            "choice_id": labels[idx] if idx < len(labels) else f"choice_{idx + 1}",
-            "primary": bool(action.primary),
-            "worker_action_id": action.action_id,
-            "shape_id": action.shape_id,
-            "label": action.label,
-            "decision_type": shape.get("decision_type"),
-            "when": action.reason or shape.get("when") or shape.get("shape_hint"),
-            "required_payload_keys": shape.get("required_payload_keys", []),
-            "allowed_payload_keys": shape.get("allowed_payload_keys", []),
-            "nested_required": shape.get("nested_required", {}),
-            "enum_choices": shape.get("enum_choices", {}),
-            "payload_template": shape.get("payload_template", {}),
-            "forbid_unknown_payload_keys": True,
-        }
-        if action.primary and next_move.get("recommended_payload"):
-            entry["recommended_payload"] = next_move["recommended_payload"]
-        menu.append(entry)
-    return menu
-
-
-def _strip_payload_fill_surface(menu: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    stripped: list[dict[str, Any]] = []
-    removed = {
-        "required_payload_keys",
-        "allowed_payload_keys",
-        "nested_required",
-        "enum_choices",
-        "payload_template",
-        "recommended_payload",
-        "forbid_unknown_payload_keys",
-    }
-    for item in menu:
-        if not isinstance(item, dict):
-            continue
-        stripped.append({key: value for key, value in item.items() if key not in removed and value not in (None, "", [], {})})
-    return stripped
-
-
-def _strip_shape_fill_surface(shape: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(shape, dict):
-        return {}
-    removed = {
-        "required_payload_keys",
-        "allowed_payload_keys",
-        "nested_required",
-        "enum_choices",
-        "payload_template",
-        "recommended_payload",
-        "object_contracts",
-        "extras",
-    }
-    return {key: value for key, value in shape.items() if key not in removed and value not in (None, "", [], {})}
-
-
-def _context_expansion_menu(role: str, *, shape_index: dict[str, Any]) -> list[dict[str, Any]]:
-    shape_ids = registry_context_expansion_shape_ids(role)
-    menu: list[dict[str, Any]] = []
-    for shape_id in shape_ids:
-        shape = shape_index.get(shape_id)
-        if not isinstance(shape, dict):
-            continue
-        menu.append(
-            {
-                "shape_id": shape_id,
-                "label": shape.get("label"),
-                "decision_type": shape.get("decision_type"),
-                "required_payload_keys": shape.get("required_payload_keys", []),
-                "allowed_payload_keys": shape.get("allowed_payload_keys", []),
-                "nested_required": shape.get("nested_required", {}),
-                "enum_choices": shape.get("enum_choices", {}),
-                "payload_template": shape.get("payload_template", {}),
-                "forbid_unknown_payload_keys": True,
-                "when": shape.get("when"),
-            }
-        )
-    return menu
-
-
-def _role_shape_ids(role: str) -> list[str]:
-    return registry_role_shape_ids(role)
-
-
-def _current_stage_command_hints(task: Task, run: AgentRun, *, role: str) -> list[str]:
-    if role != "dev":
-        return []
-    stage_id = str(run.stage_id or getattr(task, "current_stage_id", None) or "").strip()
-    stage = next((item for item in _stage_records(task) or [] if item.id == stage_id), None)
-    if stage is None:
-        return []
-    if stage_requires_product_edit(task, stage) and not stage_is_committed_verification_gate(task, stage):
-        return []
-    commands: list[str] = []
-    for item in stage.test_plan or []:
-        text = str(item or "").strip()
-        lowered = text.lower()
-        if lowered.startswith(("flutter ", "dart ", "python ", "py ", "pytest", "powershell", "cmd ", "npm ", "pnpm ", "yarn ", "node ", ".\\", "./")):
-            commands.append(_truncate_command_hint(text))
-    return commands[:3]
-
-
-def _truncate_command_hint(command: str) -> str:
-    text = str(command or "").strip()
-    return text[:1600] + "...[truncated]" if len(text) > 1600 else text
-
-
-def _task_or_stage_mentions_visual(task: Task, stage_id: str | None) -> bool:
-    stage = next((item for item in _stage_records(task) or [] if item.id == stage_id), None)
-    if _task_or_stage_requires_visual(task, stage_id):
-        return True
-    values = [
-        str(getattr(task, "title", "") or ""),
-        str(getattr(task, "description", "") or ""),
-        " ".join(str(item) for item in (getattr(task, "acceptance_criteria", []) or [])),
-        " ".join(str(item) for item in (getattr(task, "risk_flags", []) or [])),
-    ]
-    if stage is not None:
-        values.extend(
-            [
-                str(stage.id or ""),
-                str(stage.title or ""),
-                str(stage.objective or ""),
-                " ".join(str(item) for item in (stage.acceptance_criteria or [])),
-                " ".join(str(item) for item in (stage.test_plan or [])),
-                "visual" if getattr(stage, "requires_visual_proof", False) else "",
-            ]
-        )
-    text = " ".join(values).lower()
-    return any(marker in text for marker in ("screenshot", "visual proof", "stage c", "stagec", "mcp", "fullscreen", "marionette"))
-
-
-def _task_or_stage_requires_visual(task: Task, stage_id: str | None) -> bool:
-    stage = next((item for item in _stage_records(task) or [] if item.id == stage_id), None)
-    return bool(getattr(task, "requires_visual_proof", False)) or bool(getattr(stage, "requires_visual_proof", False))
-
-
-def _has_visual_proof_id(task: Task) -> bool:
-    return any(str(item).startswith(("screenshot_", "video_")) for item in (getattr(task, "proof_ids", []) or []))
-
-
-def _stage_self_heal_state(task: Task, stage_id: str | None) -> dict[str, Any]:
-    root = getattr(task, "harness_self_heal", None)
-    if not isinstance(root, dict):
-        return {}
-    stages = root.get("stages") if isinstance(root.get("stages"), dict) else root
-    stage_key = stage_id or "_mission"
-    state = stages.get(stage_key) if isinstance(stages, dict) else {}
-    return state if isinstance(state, dict) else {}
-
-
-def _proof_gate_status(handoff: dict[str, Any]) -> str:
-    proof_gate = handoff.get("proof_gate") if isinstance(handoff, dict) else None
-    if not isinstance(proof_gate, dict):
-        return "unknown"
-    return "required" if proof_gate.get("required") else "not_required"
-
-
-def _required_next_decision(task: Task, run: AgentRun) -> str:
-    state = str(task.state.value if hasattr(task.state, "value") else task.state)
-    if state in {"created", "pm_triage"}:
-        return "scope_route"
-    if state == "blocked":
-        if getattr(task, "open_incident_ids", None):
-            return "resolve_incident_or_block"
-        return "scope_route"
-    return "handoff_or_recovery_packet"
-
-
-def _diagnostic_persona(task: Task) -> str | None:
-    prefix = "diagnostic_persona:"
-    for flag in getattr(task, "risk_flags", []) or []:
-        text = str(flag or "")
-        if text.startswith(prefix):
-            return text[len(prefix) :].strip() or None
-    return None
-
-
-def _task_has_qa_stage(task: Task) -> bool:
-    return False
-def _neko_diagnostic_ack_payload(task: Task) -> dict[str, Any]:
-    objective = str(getattr(task, "description", "") or getattr(task, "title", "") or "Neko-only diagnostic").strip()
-    acceptance = [str(item).strip() for item in (getattr(task, "acceptance_criteria", []) or []) if str(item).strip()]
-    non_goals = [str(item).strip() for item in (getattr(task, "non_goals", []) or []) if str(item).strip()]
-    affected_repos = [str(item).strip() for item in (getattr(task, "affected_repos", []) or []) if str(item).strip()] or ["hermes-agent"]
-    return {
-        "objective": objective,
-        "acceptance_criteria": acceptance or ["The Harness records one valid Neko diagnostic decision and stops without launching Dev or QA."],
-        "non_goals": non_goals,
-        "target_owner": str(getattr(task, "requested_by", "") or "operator"),
-        "target_repo": affected_repos[0] if affected_repos[0] in {"EterniaLauncher", "EterniaBackend", "hermes-agent"} else "hermes-agent",
-        "proof_gate": {
-            "required": False,
-            "required_proof_types": ["harness_observation"],
-            "minimum_status": "passed",
-            "visual_required": False,
-        },
-    }
-
-
-def _forbidden_decisions(run: AgentRun) -> list[str]:
-    return []
 
 
 def _safe_packet_projection(packet: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -1665,18 +1034,16 @@ def _packet_targets_persona(body: dict[str, Any], persona_id: str | None) -> boo
     return bool(persona and target == persona)
 
 
-_RECENT_CONTEXT_EVENT_TYPES = frozenset(
-    {
-        "packet.recorded",
-        "proof.attached",
-        "task.transition",
-        "task.blocked",
-        "task.unblocked",
-        "qa.coordination_released",
-        "cross_stack.backend_contract_packet_missing",
-        "cross_stack.launcher_released",
-    }
-)
+#: Event types this builder will surface in the tick context. S15 de-registered
+#: the other seven rows this set used to carry (``proof.attached``,
+#: ``task.transition`` / ``.blocked`` / ``.unblocked``,
+#: ``qa.coordination_released``, and the two ``cross_stack.*`` rows): their
+#: producers went with the mission lane, so no surviving code can emit them and
+#: ``EventLog.append`` now refuses them. ``tests/agent_runtime/
+#: test_s19_context_builder_cluster_removal.py`` keeps this set a subset of the
+#: registry-derived ``ALLOWED_EVENT_TYPES``, so a row can never again advertise
+#: a shape no reader will see.
+_RECENT_CONTEXT_EVENT_TYPES = frozenset({"packet.recorded"})
 
 
 def _recent_relevant_events(
@@ -1701,28 +1068,21 @@ def _recent_relevant_events(
 def _safe_event_projection(event: Event, *, persona_id: str | None, stage_id: str | None) -> dict[str, Any] | None:
     if event.type not in _RECENT_CONTEXT_EVENT_TYPES:
         return None
+    # ``packet.recorded`` is the only surviving selected type, so this is the
+    # only projection shape: the proof arm and the generic transition arm both
+    # keyed on types S15 de-registered.
     payload = event.payload if isinstance(event.payload, dict) else {}
-    if event.type == "packet.recorded":
-        packet = _safe_packet_projection(payload)
-        if not packet:
-            return None
-        if not _packet_event_relevant(packet, persona_id=persona_id, stage_id=stage_id):
-            return None
-        safe_payload: dict[str, Any] = {"packet": packet}
-    elif event.type == "proof.attached":
-        safe_payload = _safe_proof_event_payload(payload)
-    else:
-        safe_payload = {
-            key: _truncate_packet_values(payload.get(key))
-            for key in ("from", "to", "status", "reason", "summary", "next_expected", "stage_id", "proof_ids")
-            if key in payload
-        }
+    packet = _safe_packet_projection(payload)
+    if not packet:
+        return None
+    if not _packet_event_relevant(packet, persona_id=persona_id, stage_id=stage_id):
+        return None
     return {
         "type": event.type,
         "ts": str(event.ts) if event.ts is not None else None,
         "run_id": str(event.run_id or "")[:120] or None,
         "persona_id": str(event.persona_id or "")[:120] or None,
-        "payload": safe_payload,
+        "payload": {"packet": packet},
     }
 
 
@@ -1736,14 +1096,6 @@ def _packet_event_relevant(packet: dict[str, Any], *, persona_id: str | None, st
     if packet.get("packet_type") == "delivery" and str(body.get("next_owner") or "") == str(persona_id or ""):
         return True
     return False
-
-
-def _safe_proof_event_payload(payload: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: _truncate_packet_values(payload.get(key))
-        for key in ("proof_id", "status", "summary", "stage_id", "exit_code", "duration_ms", "next_expected")
-        if key in payload
-    }
 
 
 def _truncate_packet_values(value: Any) -> Any:

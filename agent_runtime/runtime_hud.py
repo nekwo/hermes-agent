@@ -5,7 +5,7 @@ reason from the identical picture ("parity so the AI and I are on the same page"
 The launcher `MissionRuntimeHudStrip` shows the operator: the daemon pulse
 (state · loop · beat · next-wake), the scope (realm · workspace), the bound
 mission (title · state · threads), the selected lane (identity · liveness ·
-steer handle), the on-level roster, and — via the CONTEXT peek — the Mission HUD.
+steer handle), and the on-level roster.
 Historically none of that reached the model: the mission-chat turn composed only
 identity + rules + optional surface/skill prompts, so the agent was blind to
 everything the operator saw.
@@ -16,9 +16,13 @@ snapshot from already-loaded runtime facts (pure — no I/O, unit-testable);
 prompt block injected into the chat turn. The snapshot exposes the same dict on
 each per-instance prompt context so the launcher renders exactly what is fed.
 
-The Mission HUD slice reuses ``context_builder.mission_hud_preview`` verbatim — no
-parallel HUD math. Empty when the lane has no bound task (honest: a standing-by
-lane still carries runtime/scope/identity/roster, just no mission).
+The stage/QA-gate ``mission_hud`` slice is GONE (S19). It reused
+``context_builder.mission_hud_preview``, whose only inputs here were
+``task``/``goal_task`` — and both entry points can now only resolve ``None``
+(the snapshot builds with ``tasks = []``; the chat wrapper below reads through
+the permanent ``TaskStoreStub``, whose ``.get()`` always raises ``NotFound``).
+Its ``HUD_FIELDS`` row went with the producer, so the roster cannot advertise a
+slice nothing fills.
 
 Two delivery lanes, one authority
 ---------------------------------
@@ -153,7 +157,6 @@ HUD_FIELDS: tuple[HudField, ...] = (
     HudField("roster", volatile=False, summary="addressable on-level agents"),
     HudField("steering", volatile=False, summary="who steers this lane, and whom it steers"),
     HudField("board", volatile=False, summary="advisory Mission Board digest"),
-    HudField("mission_hud", volatile=False, summary="stage / QA-gate preview"),
     HudField("turn_budget", volatile=True, summary="wall-clock window left on THIS turn"),
     HudField(
         CAPABILITY_HUD_KEY,
@@ -668,21 +671,6 @@ def resolve_situational_hud(
     if isinstance(capability, dict) and capability:
         hud[CAPABILITY_HUD_KEY] = capability
 
-    if task is not None:
-        # Deferred import: context_builder pulls a large dependency graph and is
-        # imported late elsewhere for the same reason. Reuse the exact preview
-        # the CONTEXT peek renders — no second HUD authority.
-        try:
-            from .context_builder import mission_hud_preview
-
-            preview = mission_hud_preview(task, proof_store=proof_store)
-            if isinstance(preview, dict) and preview:
-                hud["mission_hud"] = preview
-        except Exception:
-            # The situational block is diagnostic context; a preview failure must
-            # never break the turn it decorates.
-            pass
-
     return hud
 
 
@@ -786,23 +774,6 @@ def render_situational_hud_block(hud: dict[str, Any]) -> str:
     if roster:
         names = ", ".join(_handle(entry) for entry in roster if isinstance(entry, dict))
         lines.append(f"- On level ({len(roster)}): {names}")
-
-    mission_hud = hud.get("mission_hud") if isinstance(hud.get("mission_hud"), dict) else {}
-    if mission_hud:
-        stage = mission_hud.get("typed_current_stage") if isinstance(mission_hud.get("typed_current_stage"), dict) else {}
-        gate = mission_hud.get("typed_qa_gate") if isinstance(mission_hud.get("typed_qa_gate"), dict) else {}
-        hud_bits: list[str] = []
-        if _clean(stage.get("id")):
-            status = stage.get("status")
-            hud_bits.append(f"stage {stage['id']}" + (f" ({status})" if _clean(status) else ""))
-        if gate:
-            if gate.get("ready"):
-                hud_bits.append("QA gate ready")
-            else:
-                blockers = gate.get("blockers") if isinstance(gate.get("blockers"), list) else []
-                hud_bits.append(f"QA gate waiting on {len(blockers)}" if blockers else "QA gate not ready")
-        if hud_bits:
-            lines.append(f"- Mission HUD: {' · '.join(hud_bits)}")
 
     return "\n".join(lines)
 

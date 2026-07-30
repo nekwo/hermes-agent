@@ -70,16 +70,23 @@ def test_resolve_situational_hud_bound_lane_carries_mission_and_thread_count():
     assert hud["mission"]["thread_count"] == 2
 
 
-def test_resolve_situational_hud_reuses_mission_hud_preview(monkeypatch):
-    from agent_runtime import context_builder
+def test_resolve_situational_hud_no_longer_carries_a_stage_qa_gate_slice():
+    """Retargeted in S19 (was ``..._reuses_mission_hud_preview``).
 
-    sentinel = {"preview": True, "typed_current_stage": {"id": "s1", "status": "in_progress"}}
-    monkeypatch.setattr(context_builder, "mission_hud_preview", lambda task, *, proof_store=None: sentinel)
+    The slice reused ``context_builder.mission_hud_preview``, whose only inputs
+    here were ``task``/``goal_task`` — and both entry points can now resolve
+    only ``None`` (the snapshot builds with ``tasks = []``; the chat wrapper
+    reads through the permanent ``TaskStoreStub``). Producer and ``HUD_FIELDS``
+    row went together, so even a hand-fed task yields no ``mission_hud`` key.
+    """
+
     hud = resolve_situational_hud(
         _instance(current_task_id="task_stage"),
         task=SimpleNamespace(id="task_stage", title="t", state="in_progress"),
     )
-    assert hud["mission_hud"] == sentinel
+    assert "mission_hud" not in hud
+    # The mission block itself is untouched: the bound task still names the lane.
+    assert hud["mission"]["title"] == "t"
 
 
 def test_resolve_situational_hud_missing_daemon_and_scope_degrade_cleanly():
