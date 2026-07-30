@@ -80,14 +80,17 @@ def test_suspect_default_root_and_parity_warning(monkeypatch, tmp_path):
     assert snapshot["parity"]["resolution"]["layer"] == "default"
 
 
-def test_resolution_table_marks_winner_and_tasks_dir(tmp_path):
+def test_resolution_table_marks_winner_without_mission_columns(tmp_path):
     root = tmp_path / "runtime"
-    (root / "tasks").mkdir(parents=True)
+    root.mkdir(parents=True)
 
     rows = resolution_table({"HERMES_AGENT_RUNTIME_ROOT": str(root), "HERMES_HOME": str(tmp_path / "home")})
 
     env_row = next(row for row in rows if row["layer"] == "env")
     assert env_row["winner"] is True
     assert env_row["exists"] is True
-    assert env_row["tasks"] is True
+    # The tasks/ directory probe left with the mission lane (doc 16); the row
+    # carries only layer/value/exists/winner now.
+    assert "tasks" not in env_row
+    assert set(env_row) == {"layer", "value", "exists", "winner"}
     assert [row["layer"] for row in rows] == ["env", "config", "default"]
