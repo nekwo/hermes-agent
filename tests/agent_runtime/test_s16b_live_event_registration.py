@@ -29,15 +29,16 @@ summary fields are the keys the emitter passes on EVERY emission (append
 validates ``summary_fields`` presence and raises under
 ``HERMES_EVENT_CONTRACT_STRICT``), everything else is a detail field.
 
-DELIBERATELY STILL UNREGISTERED — ``worktree.task_reaped`` and
-``bundle.worktree_reaped``. Their emitters (``_emit_task_reap_event`` and
-``_reap_bundle_worktrees``) are reached only from the Task-declared directive
-path (``execute_delivery_directive`` / ``execute_task_worktree_delivery_directives``
-/ ``reap_task_run_worktrees``), which the delivery-directive liveness ruling
-classes as unswept residue awaiting retirement. Registering a contract for an
-emitter that is about to be deleted would just re-create the unemittable-contract
-debt S15 spent a stage clearing. Pinned here so the omission is a recorded
-decision, not an oversight.
+STILL UNREGISTERED, NOW PERMANENTLY — ``worktree.task_reaped`` and
+``bundle.worktree_reaped``. They were held back here because their emitters
+(``_emit_task_reap_event`` and ``_reap_bundle_worktrees``) were reachable only
+from the Task-declared directive path, which the delivery-directive liveness
+ruling classed as unswept residue awaiting retirement: registering a contract
+for an emitter about to be deleted would just re-create the unemittable-contract
+debt S15 spent a stage clearing. S24 (354d7555a) deleted exactly those emitters
+in the delivery-residue sweep, so the omission is now permanent rather than
+provisional. The assertions below are unchanged — they were always "these two
+are NOT registered".
 """
 
 from __future__ import annotations

@@ -258,10 +258,10 @@ def test_operator_events_receive_redaction_safe_summaries(isolate_agent_runtime_
     samples = [
         Event(now(), "repo_bundle.assigned", "task_1", "run_1", "dev", {"repo_bundle_id": "bundle_1", "repo": "hermes-agent", "state": "assigned"}),
         Event(now(), "repo_bundle.updated", "task_1", "run_1", "dev", {"repo_bundle_id": "bundle_1", "repo": "hermes-agent", "state": "running"}),
-        Event(now(), "repo_bundle.delivered", "task_1", "run_1", "dev", {"repo_bundle_id": "bundle_1", "repo": "hermes-agent", "state": "delivered_waiting_for_qa", "proof_count": 0, "diff_captured": False}),
-        # S25 retargeted this sample off run.opened (de-registered with its
-        # writer) onto the other live operator-summary arm.
+        # S25 retargeted two samples: off run.opened and off repo_bundle.delivered
+        # (both de-registered with their writers) onto live operator-summary arms.
         Event(now(), "run.tool.started", "task_1", "run_1", "dev", {"tool_name": "terminal"}),
+        Event(now(), "run.tool.finished", "task_1", "run_1", "dev", {"tool_name": "terminal", "status": "passed"}),
         Event(now(), "run.closed", "task_1", "run_1", "dev", {"state": "completed", "decision_type": "deliver"}),
     ]
 
@@ -270,8 +270,8 @@ def test_operator_events_receive_redaction_safe_summaries(isolate_agent_runtime_
 
     events = list(log.iter_all())
     assert all(str(event.payload.get("summary") or "").strip() for event in events)
-    delivered = next(event for event in events if event.type == "repo_bundle.delivered")
-    assert "captured:false" in delivered.payload["summary"]
+    updated = next(event for event in events if event.type == "repo_bundle.updated")
+    assert updated.payload["summary"] == "Updated hermes-agent bundle to running."
 
 
 def test_run_progress_receives_stable_event_id(isolate_agent_runtime_root):

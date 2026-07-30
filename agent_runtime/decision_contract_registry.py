@@ -1046,7 +1046,12 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "repo_bundle.updated": EventContract("repo_bundle.updated", "Repo bundle updated", ("repo_bundle_id", "repo", "state"), ("wake_condition",)),
     "repo_bundle.assigned": EventContract("repo_bundle.assigned", "Repo bundle assigned", ("repo_bundle_id", "repo", "state"), ("assignment_id", "run_id")),
     "repo_bundle.running": EventContract("repo_bundle.running", "Repo bundle running", ("repo_bundle_id", "repo", "state"), ("run_id",)),
-    "repo_bundle.delivered": EventContract("repo_bundle.delivered", "Repo bundle delivered", ("repo_bundle_id", "repo", "state"), ("proof_count",)),
+    # S25 de-registered repo_bundle.delivered one commit behind its emitter: S24
+    # (354d7555a) deleted RepoBundleStore.mark_delivered with the
+    # delivery-capture path, and it was the only writer that ever produced the
+    # type. Every OTHER repo_bundle.* below still rides a live
+    # RepoBundleStore.update call. See
+    # tests/agent_runtime/test_s25_repo_bundle_delivered_retirement.py.
     "repo_bundle.verified": EventContract("repo_bundle.verified", "Repo bundle verified", ("repo_bundle_id", "repo", "state"), ("proof_count",)),
     "repo_bundle.rejected": EventContract("repo_bundle.rejected", "Repo bundle rejected", ("repo_bundle_id", "repo", "state"), ("reason",)),
     "repo_bundle.woke": EventContract("repo_bundle.woke", "Repo bundle woke", ("repo_bundle_id", "repo", "state"), ("wake_condition",)),
@@ -1170,8 +1175,9 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     # the destructive path only (dry_run previews are write-free), so both counts
     # are always present; `captured` lists the reap-captured patch filenames and
     # is bounded to 20 at the emitter. NOT registered alongside it:
-    # worktree.task_reaped and bundle.worktree_reaped, whose emitters sit in the
-    # Task-declared-directive residue half of that module awaiting retirement —
-    # registering them would re-create the unemittable-contract debt S15 cleared.
+    # worktree.task_reaped and bundle.worktree_reaped, whose emitters sat in the
+    # Task-declared-directive residue half of that module — S24 (354d7555a)
+    # deleted them, so those two stay unregistered permanently rather than
+    # provisionally, and no unemittable-contract debt was created.
     "worktree.orphans_reaped": EventContract("worktree.orphans_reaped", "Orphan worktrees reaped", ("reaped_count", "kept_count"), ("captured",)),
 }

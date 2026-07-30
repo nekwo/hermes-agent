@@ -109,14 +109,16 @@ REMOVED_EVENT_TYPES = frozenset(
 # delta), then +3 at S16b (realm.archived, persona_chat.deleted,
 # worktree.orphans_reaped — live emitters whose appends were being refused and
 # swallowed; see tests/agent_runtime/test_s16b_live_event_registration.py), then
-# net 0 at S25: -1 run.opened (S17's third writer-less contract, held back only
-# by two filler test appends until they were retargeted) +1 flow_graph.pruned
-# (the persona-instance reconciler's phase-5 graph reap). Those two deltas are
-# owned by tests/agent_runtime/test_s25_run_opened_retirement.py and
+# net -1 at S25: -1 run.opened (S17's third writer-less contract, held back only
+# by two filler test appends until they were retargeted), -1 repo_bundle.delivered
+# (S24 deleted RepoBundleStore.mark_delivered, its only emitter), +1
+# flow_graph.pruned (the persona-instance reconciler's phase-5 graph reap). Those
+# three deltas are owned by tests/agent_runtime/test_s25_run_opened_retirement.py,
+# tests/agent_runtime/test_s25_repo_bundle_delivered_retirement.py, and
 # tests/agent_runtime/test_s25_graph_prune_on_reap.py.
 # This stays an absolute count on purpose: it is the one assertion that catches
 # a contract silently appearing or disappearing.
-SURVIVING_EVENT_COUNT = 93
+SURVIVING_EVENT_COUNT = 92
 
 
 def test_the_unemittable_event_types_are_no_longer_registered():

@@ -79,10 +79,13 @@ ALLOWED_EVENT_TYPES = allowed_event_types()
 # practice: ``operator_event_summary``'s only read-side consumer is
 # ``snapshot._event_display_projection``, which is reached solely from three
 # task-scoped projections that have had ZERO callers since the ``Task`` record
-# went at S8.
+# went at S8. ``repo_bundle.delivered`` went in the same pass and for the same
+# rule, one commit behind its emitter: S24 deleted
+# ``RepoBundleStore.mark_delivered``, the only writer that ever produced it,
+# while every other ``repo_bundle.*`` type still rides a live
+# ``RepoBundleStore.update``.
 OPERATOR_SUMMARY_EVENT_TYPES = frozenset(
     {
-        "repo_bundle.delivered",
         "repo_bundle.updated",
         "repo_bundle.assigned",
         "run.closed",
@@ -689,21 +692,13 @@ def operator_event_summary(evt: Event) -> str | None:
         state = _safe_text(payload.get("state")) or "closed"
         decision = _safe_text(payload.get("decision_type"))
         return f"Closed {actor} run as {state}" + (f" after {decision}." if decision else ".")
-    if event_type in {"repo_bundle.assigned", "repo_bundle.updated", "repo_bundle.delivered"}:
+    if event_type in {"repo_bundle.assigned", "repo_bundle.updated"}:
         repo = _safe_text(payload.get("repo")) or _safe_text(payload.get("repo_bundle_id")) or "repo bundle"
         state = _safe_text(payload.get("state"))
         if event_type == "repo_bundle.assigned":
             return f"Assigned {repo} bundle" + (f" ({state})." if state else ".")
-        if event_type == "repo_bundle.updated":
-            reason = _safe_text(payload.get("reason"))
-            return f"Updated {repo} bundle" + (f" to {state}" if state else "") + (f": {reason}." if reason else ".")
-        captured = payload.get("captured")
-        if captured is None:
-            captured = payload.get("diff_captured")
-        capture_label = f"captured:{str(bool(captured)).lower()}" if captured is not None else "capture unknown"
-        proof_count = _safe_int(payload.get("proof_count"))
-        suffix = f", {proof_count} proof{'s' if proof_count != 1 else ''}" if proof_count is not None else ""
-        return f"Delivered {repo} bundle ({capture_label}{suffix})."
+        reason = _safe_text(payload.get("reason"))
+        return f"Updated {repo} bundle" + (f" to {state}" if state else "") + (f": {reason}." if reason else ".")
     if event_type == "run.progress":
         parts = [
             _safe_text(payload.get("phase")),
@@ -755,15 +750,6 @@ def _safe_text(value, *, limit: int = 240) -> str | None:
 
 def _label(value, fallback: str) -> str:
     return (_safe_text(value, limit=80) or fallback).replace("_", " ")
-
-
-def _safe_int(value) -> int | None:
-    if isinstance(value, bool):
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def _safe_token(value) -> str | None:
