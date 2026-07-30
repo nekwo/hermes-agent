@@ -55,7 +55,7 @@ from .profile_runner import (
     _blocked_tool_names_with_registry_hygiene,
 )
 from .progress import ChatProgressSink, RunProgressSink
-from .repo_context import RepoExecutionContext, capture_repo_baseline, isolated_repo_context_for_run, repo_execution_context_for_task
+from .repo_context import RepoExecutionContext, capture_repo_baseline, repo_execution_context_for_task
 from .stage_intent import stage_requires_product_edit
 from .store import RunStore, _safe_session_id
 from .tool_permissions import (
