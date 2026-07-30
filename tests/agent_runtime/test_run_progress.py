@@ -6,10 +6,33 @@ from agent_runtime.states import RunState
 from agent_runtime.store import RunStore
 
 
+def _seed_run(store: RunStore, *, run_id: str = "run_progress", task_id: str = "task_1") -> AgentRun:
+    """Persist a run row without ``RunStore.open_run``.
+
+    S17 removed ``open_run`` as write-dead (no production caller survived the
+    mission lane). ``update`` is the surviving write path and tolerates a
+    missing previous row; these tests cover ``RunProgressSink``, not the writer.
+    """
+
+    ts = now()
+    run = AgentRun(
+        id=run_id,
+        persona_id="dev",
+        task_id=task_id,
+        stage_id=None,
+        state=RunState.RUNNING,
+        started_at=ts,
+        last_heartbeat_at=ts,
+    )
+    assert store.update(run) is True
+    return run
+
+
+
 def test_run_progress_sink_updates_run_and_appends_safe_event(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     store = RunStore()
-    run = store.open_run("dev", "task_1", None)
+    run = _seed_run(store)
     sink = RunProgressSink(run_store=store, event_log=EventLog(), run_id=run.id)
 
     sink.emit(
@@ -49,7 +72,7 @@ def test_run_progress_sink_prunes_timing_progress_from_durable_log(tmp_path, mon
     """
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     store = RunStore()
-    run = store.open_run("dev", "task_1", None)
+    run = _seed_run(store)
     baseline = EventLog().tail(50)
     sink = RunProgressSink(run_store=store, event_log=EventLog(), run_id=run.id)
 
@@ -93,7 +116,7 @@ def test_run_progress_sink_prunes_timing_progress_from_durable_log(tmp_path, mon
 def test_run_progress_sink_ignores_late_progress_after_terminal_run(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     store = RunStore()
-    run = store.open_run("dev", "task_1", None)
+    run = _seed_run(store)
     cancelled = store.close_run(run.id, state=RunState.CANCELLED, error={"type": "operator_cancelled"})
     events_before = EventLog().tail(10)
     sink = RunProgressSink(run_store=store, event_log=EventLog(), run_id=run.id)

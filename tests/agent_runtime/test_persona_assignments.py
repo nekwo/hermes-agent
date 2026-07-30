@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,7 +14,7 @@ from hermes_time import now
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.events import EventLog
-from agent_runtime.models import AgentPersona, PersonaInstance, Proof
+from agent_runtime.models import AgentPersona, AgentRun, PersonaInstance, Proof
 from types import SimpleNamespace
 
 Task = SimpleNamespace
@@ -43,6 +44,37 @@ from agent_runtime.status import build_status
 from agent_runtime.store import AgentStore, RunStore, TaskStore
 from agent_runtime.worker_sessions import WorkerSessionStore
 from tests.agent_runtime.conftest import release_to_implementation
+
+
+def _seed_run(
+    persona_id: str,
+    task_id: str,
+    stage_id: str | None = None,
+    *,
+    session_id: str | None = None,
+) -> AgentRun:
+    """Persist a run row without ``RunStore.open_run``.
+
+    S17 removed ``open_run`` as write-dead: no production caller survived the
+    mission lane, so its only users were tests seeding a row. ``update`` is the
+    surviving write path (it tolerates a missing previous row and applies the
+    same ``_safe_session_id`` sanitisation ``open_run`` did).
+    """
+
+    ts = now()
+    run = AgentRun(
+        id=f"run_{uuid.uuid4().hex[:12]}",
+        persona_id=persona_id,
+        task_id=task_id,
+        stage_id=stage_id,
+        state=RunState.RUNNING,
+        started_at=ts,
+        last_heartbeat_at=ts,
+        session_id=session_id,
+    )
+    assert RunStore().update(run) is True
+    return run
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -188,7 +220,7 @@ def test_persona_instance_derivation_clears_stale_worker_projection(isolate_agen
     store = PersonaInstanceStore()
     workers = WorkerSessionStore()
     worker = workers.open(task_id="task_1", persona=_persona("dev"), stage_id="stage_1", assignment_id="assign_1")
-    workers.assign_run(worker.id, RunStore().open_run("dev", "task_1", "stage_1", session_id="session_safe"))
+    workers.assign_run(worker.id, _seed_run("dev", "task_1", "stage_1", session_id="session_safe"))
     store.derive_from_workers([_persona("dev")], workers.list_all())
     workers.close(worker.id, reason="archived")
 
@@ -1372,7 +1404,7 @@ def test_open_chat_updates_only_default_chat_pointer_during_live_run(isolate_age
     workers = WorkerSessionStore()
     runs = RunStore()
     worker = workers.open(task_id="task_live", persona=_persona("dev"), stage_id="stage_1", assignment_id="assign_live")
-    run = runs.open_run("dev", "task_live", "stage_1", session_id="persona_chat_personainst_dev_live")
+    run = _seed_run("dev", "task_live", "stage_1", session_id="persona_chat_personainst_dev_live")
     worker = workers.assign_run(worker.id, run)
     instance_store.update_from_worker(worker)
 
@@ -1393,7 +1425,7 @@ def test_open_chat_kill_active_flag_cannot_cancel_worker_lifecycle(isolate_agent
     workers = WorkerSessionStore()
     runs = RunStore()
     worker = workers.open(task_id="task_live", persona=_persona("dev"), stage_id="stage_1", assignment_id="assign_live")
-    run = runs.open_run("dev", "task_live", "stage_1", session_id="persona_chat_personainst_dev_live")
+    run = _seed_run("dev", "task_live", "stage_1", session_id="persona_chat_personainst_dev_live")
     worker = workers.assign_run(worker.id, run)
     instance_store.update_from_worker(worker)
 
@@ -5011,7 +5043,7 @@ def test_retire_refuses_active_run_binding(isolate_agent_runtime_root):
 
     store = PersonaInstanceStore()
     instance = _placement_instance()
-    run = RunStore().open_run("dev", "task_live", "stage_1", session_id="session_live")
+    run = _seed_run("dev", "task_live", "stage_1", session_id="session_live")
     instance.active_run_id = run.id
     store.update(instance)
 

@@ -49,8 +49,26 @@ def test_run_progress_sink_captures_observed_proof_independent_of_config(monkeyp
     )
     monkeypatch.setattr(_cfg, "load_agent_runtime_config", lambda *a, **k: disabled, raising=False)
 
+    # S17 removed RunStore.open_run as write-dead; ``update`` is the surviving
+    # write path and seeds the row directly. This case covers the self-test
+    # evidence recorder, not the writer.
+    from hermes_time import now as _now
+
+    from agent_runtime.models import AgentRun
+    from agent_runtime.states import RunState
+
     runs = RunStore()
-    run = runs.open_run("dev", "task_obs_gate", stage_id="implement")
+    _ts = _now()
+    run = AgentRun(
+        id="run_obs_gate",
+        persona_id="dev",
+        task_id="task_obs_gate",
+        stage_id="implement",
+        state=RunState.RUNNING,
+        started_at=_ts,
+        last_heartbeat_at=_ts,
+    )
+    assert runs.update(run) is True
     RunProgressSink(run_store=runs, run_id=run.id).emit(
         "run.tool.finished",
         {

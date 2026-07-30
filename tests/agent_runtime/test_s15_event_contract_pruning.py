@@ -103,8 +103,12 @@ REMOVED_EVENT_TYPES = frozenset(
     }
 )
 
-# 159 registered - 67 unemittable.
-SURVIVING_EVENT_COUNT = 92
+# 159 registered - 67 unemittable at S15, then -2 at S17 (run.heartbeat and
+# run.approved went with their RunStore writers; see
+# tests/agent_runtime/test_s17_run_store_residue_removal.py, which owns that
+# delta). This stays an absolute count on purpose: it is the one assertion that
+# catches a contract silently reappearing.
+SURVIVING_EVENT_COUNT = 90
 
 
 def test_the_unemittable_event_types_are_no_longer_registered():
@@ -142,11 +146,13 @@ def test_the_near_miss_survivors_stay_registered():
         "run.tool.started",
         "run.tool.finished",
         "run.progress",
-        # RunStore still owns these writers (store.py is a deferred Tier-2 cluster).
+        # RunStore.cancel -> close_run is LIVE (operator takeover, persona-chat
+        # replacement), so run.closed stays emittable. run.opened outlived its
+        # writer at S17 but is still minted by filler appends in
+        # tests/agent_runtime/test_events.py. run.heartbeat and run.approved
+        # went with their writers at S17 and are pinned as REMOVED there.
         "run.opened",
         "run.closed",
-        "run.heartbeat",
-        "run.approved",
         # self_test_evidence.py appends both directly.
         "self_test.recorded",
         "self_test.loop_detected",

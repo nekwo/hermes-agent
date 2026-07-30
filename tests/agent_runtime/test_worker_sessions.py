@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 import subprocess
 import sys
 from datetime import timedelta
@@ -12,7 +13,7 @@ from agent_runtime import paths
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.context_builder import build_context
 from agent_runtime.decision_schema import AgentDecision, DecisionType
-from agent_runtime.models import AgentPersona, Proof
+from agent_runtime.models import AgentPersona, AgentRun, Proof
 from types import SimpleNamespace
 
 Task = SimpleNamespace
@@ -27,6 +28,37 @@ from agent_runtime.status import build_status
 from agent_runtime.store import RunStore, TaskStore
 from agent_runtime.worker_sessions import WorkerSessionStore, worker_context_manifest
 from tests.agent_runtime.conftest import release_to_implementation
+
+
+def _seed_run(
+    persona_id: str,
+    task_id: str,
+    stage_id: str | None = None,
+    *,
+    session_id: str | None = None,
+) -> AgentRun:
+    """Persist a run row without ``RunStore.open_run``.
+
+    S17 removed ``open_run`` as write-dead: no production caller survived the
+    mission lane, so its only users were tests seeding a row. ``update`` is the
+    surviving write path (it tolerates a missing previous row and applies the
+    same ``_safe_session_id`` sanitisation ``open_run`` did).
+    """
+
+    ts = now()
+    run = AgentRun(
+        id=f"run_{uuid.uuid4().hex[:12]}",
+        persona_id=persona_id,
+        task_id=task_id,
+        stage_id=stage_id,
+        state=RunState.RUNNING,
+        started_at=ts,
+        last_heartbeat_at=ts,
+        session_id=session_id,
+    )
+    assert RunStore().update(run) is True
+    return run
+
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -120,7 +152,7 @@ def test_operator_takeover_freezes_peers_and_requires_destructive_approval(isola
     runtimes = GoalRuntimeInstanceStore()
     target = workers.open(task_id="task_takeover", persona=_persona("dev"), stage_id="stage_1", session_id="session_target")
     peer = workers.open(task_id="task_peer", persona=_persona("qa"), stage_id="stage_1", session_id="session_peer")
-    run = runs.open_run("dev", "task_takeover", stage_id="stage_1", session_id="session_target")
+    run = _seed_run("dev", "task_takeover", stage_id="stage_1", session_id="session_target")
     workers.assign_run(target.id, run)
     lane = runtimes.create_lane(task_id="task_peer", started_by="test", state="running")
 
@@ -154,7 +186,7 @@ def test_operator_takeover_with_approval_cancels_run_then_possesses_worker(isola
     runs = RunStore()
     workers = WorkerSessionStore()
     target = workers.open(task_id="task_takeover_cancel", persona=_persona("dev"), stage_id="stage_1", session_id="session_target")
-    run = runs.open_run("dev", "task_takeover_cancel", stage_id="stage_1", session_id="session_target")
+    run = _seed_run("dev", "task_takeover_cancel", stage_id="stage_1", session_id="session_target")
     workers.assign_run(target.id, run)
 
     result = operator_takeover_worker(
@@ -177,7 +209,7 @@ def test_operator_takeover_with_approval_cancels_run_then_possesses_worker(isola
 def test_terminal_run_update_marks_worker_idle_and_clears_active_run(isolate_agent_runtime_root):
     runs = RunStore()
     workers = WorkerSessionStore()
-    run = runs.open_run("dev", "task_terminal_worker", stage_id="stage_1", session_id="session_safe")
+    run = _seed_run("dev", "task_terminal_worker", stage_id="stage_1", session_id="session_safe")
     worker = workers.open(task_id=run.task_id, persona=_persona(), stage_id=run.stage_id, session_id=run.session_id)
     workers.assign_run(worker.id, run)
 
@@ -192,7 +224,7 @@ def test_terminal_run_update_marks_worker_idle_and_clears_active_run(isolate_age
 def test_worker_run_refresh_does_not_double_count_llm_budget(isolate_agent_runtime_root):
     runs = RunStore()
     workers = WorkerSessionStore()
-    run = runs.open_run("dev", "task_worker_budget", stage_id="stage_1", session_id="session_safe")
+    run = _seed_run("dev", "task_worker_budget", stage_id="stage_1", session_id="session_safe")
     run.llm = {"total_tokens": 120, "tool_turns": 3}
     runs.update(run)
     worker = workers.open(task_id=run.task_id, persona=_persona(), stage_id=run.stage_id, session_id=run.session_id)

@@ -987,11 +987,17 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "lane.created": EventContract("lane.created", "Lane created", ("runtime_instance_id", "task_id", "state"), ("lane_kind", "reason")),
     "lane.transitioned": EventContract("lane.transitioned", "Lane transitioned", ("runtime_instance_id", "task_id", "state"), ("reason",)),
     "lane.transition_rejected": EventContract("lane.transition_rejected", "Lane transition rejected", ("runtime_instance_id", "from", "to"), ("reason",)),
+    # S17 de-registered run.heartbeat (RunStore.heartbeat) and run.approved
+    # (RunStore.approve_continuation) with their writers. run.opened is the
+    # third of that set: its writer (RunStore.open_run) is gone too, but two
+    # filler appends in tests/agent_runtime/test_events.py still mint it, so it
+    # stays registered until those are retargeted — de-registering first would
+    # only convert a stale test into a crash. run.closed is NOT in this set: it
+    # is still LIVE via RunStore.cancel -> close_run (operator takeover and
+    # persona-chat replacement both reach it).
     "run.opened": EventContract("run.opened", "Run opened", ("run_id", "persona_id", "stage_id"), ("model", "provider")),
-    "run.heartbeat": EventContract("run.heartbeat", "Run heartbeat", ("run_id", "state"), ("phase",)),
     "run.progress": EventContract("run.progress", "Run progress", ("phase", "step", "status", "summary"), ("next_expected", "proof_id")),
     "child.returned": EventContract("child.returned", "Child returned", ("parent_node_id", "child_node_id", "summary"), ("proof_ids", "artifact_refs", "stage_id", "persona_instance_id")),
-    "run.approved": EventContract("run.approved", "Run approved", ("run_id",), ("approval_type",)),
     "run.tool.started": EventContract("run.tool.started", "Tool started", ("tool_name",), ("run_id",)),
     "run.tool.finished": EventContract("run.tool.finished", "Tool finished", ("tool_name", "status"), ("duration_ms",)),
     "decision_contract.parity": EventContract("decision_contract.parity", "Decision contract parity", ("mode", "status", "public_decision_type", "execution_decision_type"), ("legacy_decision_type", "shimmed", "blocked_reason")),
