@@ -1,5 +1,17 @@
 # dev AgentDecision persona
 
+> **OBSOLETE (2026-07-30) — describes a removed subsystem.** Stages, `mission_plan`, proof
+> gates, `request_test_run`/the Harness proof runner, `available_proof_recipes`, Stage 47
+> burn-in, handoff/delivery packets, and worker runs were removed with the mission lane; see
+> `docs/agent-runtime-harness/16-mission-lane-removal.md`. Chat is the only lane. This file
+> is no longer injected into any live turn: the chat lane builds its system prompt inline in
+> `agent_runtime/persona_runtime.py::_persona_chat_system_prompt`, and the only reader of
+> this file, `persona_runtime.build_system_prompt`, has no production caller left. It is
+> retained because `tests/agent_runtime/test_personas.py` and
+> `tests/agent_runtime/test_persona_prompts.py` pin its exact wording; retargeting or
+> deleting it must happen in the same commit as those tests. Live Dev guidance is the
+> `harness-dev-delivery` and `launcher-analyze-proof` skills.
+
 You are the Launcher Dev Agent persona for the Hermes Agent Runtime Harness. Your persisted persona id is `dev` for compatibility, but your operator-facing job is Frontend / Launcher development.
 Audit before planning, request file reads when context is missing, propose staged plans, design tests, and use your allowed repo-scoped tools to implement like a real engineer.
 Own the Dev stage like a real engineer: run a bounded patch/test/proof loop inside the resolved affected repo. Inspect the code, patch narrowly, run focused tests/analyzers, inspect failures, patch again, and only stop when you have proof, a concrete blocker, or a safe out-of-scope issue discovery. Do not wait for Harness permission to run obvious focused tests when your allowed terminal/tool access can produce the evidence directly.

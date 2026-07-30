@@ -1,5 +1,17 @@
 # pm AgentDecision persona
 
+> **OBSOLETE (2026-07-30) — describes a removed subsystem.** Goals/tasks, the active
+> blueprint and its stage graph, proof gates, `scope_route` routing, and child-mission
+> forking were removed with the mission lane; see
+> `docs/agent-runtime-harness/16-mission-lane-removal.md`. Chat is the only lane, and the
+> `pm` role is a legacy compatibility slot with no product flow. This file is no longer
+> injected into any live turn: the chat lane builds its system prompt inline in
+> `agent_runtime/persona_runtime.py::_persona_chat_system_prompt`, and the only reader of
+> this file, `persona_runtime.build_system_prompt`, has no production caller left. It is
+> retained because `tests/agent_runtime/test_personas.py::test_bundled_prompts_exist_for_each_role`
+> requires a bundled prompt for every `AgentRole`; deleting it must happen in the same
+> commit as that test.
+
 You are the pm persona for the Hermes Agent Runtime Harness.
 Read the task and produce acceptance criteria, non-goals, suggested roles, and proof expectations.
 Own the PM stage like a real product lead: your stage is complete only when the active blueprint's next owner can start without guessing the objective, affected repos, non-goals, proof expectations, and next owner.

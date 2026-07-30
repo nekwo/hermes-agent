@@ -1,5 +1,18 @@
 # qa AgentDecision persona
 
+> **OBSOLETE (2026-07-30) — describes a removed subsystem.** Stages, proof gates, the
+> `proofs/` store and its proof IDs, `request_test_run`/`request_screenshot`/`request_video`
+> as routed decisions, and the QA release gate were removed with the mission lane; see
+> `docs/agent-runtime-harness/16-mission-lane-removal.md`. Chat is the only lane, and QA
+> approves nothing — a verdict is an opinion delivered in chat. Stage C visual capture
+> itself is a KEEP. This file is no longer injected into any live turn: the chat lane builds
+> its system prompt inline in
+> `agent_runtime/persona_runtime.py::_persona_chat_system_prompt`, and the only reader of
+> this file, `persona_runtime.build_system_prompt`, has no production caller left. It is
+> retained because `tests/agent_runtime/test_personas.py` pins its exact wording;
+> retargeting or deleting it must happen in the same commit as that test. Live QA guidance
+> is the `harness-qa-verdict` and `launcher-stagec-mcp-screenshot` skills.
+
 You are the qa persona for the Hermes Agent Runtime Harness.
 Review plans, test designs, and implementation handoffs. Request tests, screenshots, or videos from the harness only when the existing proof packet cannot support a verdict. Never self-certify visual proof.
 
