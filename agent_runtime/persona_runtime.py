@@ -19,10 +19,8 @@ from .chat_lane_toolsets import (
     scope_chat_lane_toolsets,
 )
 from .config import chat_lane_restore_toolsets
-from .context_builder import AgentContext
 from .decision_schema import (
     AgentDecision,
-    DecisionPayloadInvalid,
     parse_structured_decision,
     validate_decision_for_role,
 )
@@ -55,8 +53,7 @@ from .profile_runner import (
     _blocked_tool_names_with_registry_hygiene,
 )
 from .progress import ChatProgressSink, RunProgressSink
-from .repo_context import RepoExecutionContext, capture_repo_baseline, repo_execution_context_for_task
-from .stage_intent import stage_requires_product_edit
+from .repo_context import RepoExecutionContext, capture_repo_baseline
 from .store import RunStore, _safe_session_id
 from .tool_permissions import (
     ChatToolPermissionStore,
@@ -695,104 +692,6 @@ def _mission_chat_user_message(
     return "\n\n".join(part for part in parts if part)
 
 
-def _repo_context_for_persona(persona: AgentPersona, ctx: AgentContext) -> RepoExecutionContext | None:
-    if role_from_persona(persona) != "dev":
-        return None
-    # Ground in the CURRENT mission-plan stage's repo first. task.affected_repos lags
-    # the active stage in a graph blueprint — it holds the *previous* stage's repo — so
-    # grounding off it mis-routes every cross-stack dev (backend_dev lands in
-    # hermes-agent, launcher dev lands in EterniaBackend, each then fails its proof in
-    # the wrong tree). The stage repo is authoritative for the slice this persona owns.
-    # Falls through to the legacy affected_repos/handoff resolution when there is no plan
-    # stage (e.g. CLI goal_run) or the stage repo is unknown/unresolvable.
-    stage_repo = _stage_repo_scope_for_persona(persona, ctx)
-    if stage_repo is not None:
-        try:
-            return repo_execution_context_for_task(
-                type("RepoScopeTask", (), {"affected_repos": [stage_repo]})()
-            )
-        except ValueError:
-            pass
-    repo_task = ctx.task
-    if not (getattr(repo_task, "affected_repos", []) or []):
-        handoff_repo = _handoff_repo_scope_for_persona(persona, ctx)
-        if handoff_repo:
-            repo_task = type("TaskHandoffRepoScope", (), {"affected_repos": [handoff_repo]})()
-    if not (getattr(repo_task, "affected_repos", []) or []):
-        raise DecisionPayloadInvalid("Dev run requires at least one affected_repo so the session can start in a repo workdir.")
-    try:
-        repo_scope = _compatible_repo_scope(persona, repo_task)
-        return repo_execution_context_for_task(repo_task, explicit_workdir=repo_scope if repo_scope else None)
-    except ValueError as exc:
-        raise DecisionPayloadInvalid("Dev run could not resolve a valid affected repo workdir; fix affected_repos before dispatching Dev.") from exc
-
-
-def _stage_repo_scope_for_persona(persona: AgentPersona, ctx: AgentContext) -> str | None:
-    """Resolve the grounding repo from the current legacy stage, if any."""
-    stage = getattr(ctx, "current_stage", None)
-    stage_repo = str(getattr(stage, "repo", "") or "").strip() if stage is not None else ""
-    if stage_repo not in {"EterniaBackend", "EterniaLauncher", "hermes-agent"}:
-        return None
-    persona_scope = getattr(persona, "repo_scope", None)
-    if persona_scope:
-        try:
-            scoped = repo_execution_context_for_task(type("TaskPersonaScope", (), {"affected_repos": [persona_scope]})())
-            stage_ctx = repo_execution_context_for_task(type("RepoScopeTask", (), {"affected_repos": [stage_repo]})())
-        except ValueError:
-            return None
-        if scoped is None or stage_ctx is None or scoped.workdir != stage_ctx.workdir:
-            return None
-    return stage_repo
-
-
-def _handoff_repo_scope_for_persona(persona: AgentPersona, ctx: AgentContext) -> str | None:
-    packet = ctx.latest_handoff_packet if isinstance(ctx.latest_handoff_packet, dict) else {}
-    body = packet.get("body") if isinstance(packet.get("body"), dict) else {}
-    target_repo = str(body.get("target_repo") or "").strip()
-    if target_repo not in {"EterniaBackend", "EterniaLauncher", "hermes-agent"}:
-        return None
-    persona_id = str(getattr(persona, "id", "") or "").strip()
-    if persona_id == "backend_dev" and target_repo != "EterniaBackend":
-        return None
-    if persona_id == "dev" and target_repo == "EterniaBackend":
-        return None
-    return target_repo
-
-
-def _compatible_repo_scope(persona: AgentPersona, task) -> str | None:
-    repo_scope = getattr(persona, "repo_scope", None)
-    if not repo_scope:
-        return None
-    try:
-        scoped = repo_execution_context_for_task(type("TaskRepoScope", (), {"affected_repos": [repo_scope]})())
-    except ValueError:
-        return None
-    if scoped is None:
-        return None
-    for repo in getattr(task, "affected_repos", []) or []:
-        try:
-            task_ctx = repo_execution_context_for_task(type("TaskRepo", (), {"affected_repos": [repo]})())
-        except ValueError:
-            continue
-        if task_ctx is not None and task_ctx.workdir == scoped.workdir:
-            return repo_scope
-    return None
-
-
-def _persona_run_uses_memory(persona: AgentPersona, ctx: AgentContext) -> bool:
-    if bool(getattr(persona, "include_profile_memory", False)):
-        return True
-    flags = {str(flag or "").strip().lower() for flag in getattr(ctx.task, "risk_flags", []) or []}
-    return "persona_operation_kind:free_floating" in flags
-
-
-def _blocked_tool_names_for_run(persona: AgentPersona, ctx: AgentContext) -> list[str]:
-    names = set(blocked_tool_names(persona))
-    if _is_no_edit_context_stage(ctx) and str(role_from_persona(persona)) == "dev":
-        names.update({"read_file", "search_files", "session_search", "browser_snapshot"})
-    return sorted(names)
-
-
 def _blocked_tool_names_for_chat(persona: AgentPersona, *, session_id: str | None) -> list[str]:
     options = permission_options_for_chat(persona, session_id=session_id)
     if permission_mode_is_unbounded(options.permission_mode):
@@ -1124,13 +1023,6 @@ def _augment_chat_capabilities(persona: AgentPersona, toolsets: list[str]) -> li
     return augmented
 
 
-def _is_no_edit_context_stage(ctx: AgentContext) -> bool:
-    stage = ctx.current_stage
-    if stage is None:
-        return False
-    return str(getattr(stage, "kind", "") or "") == "context" and not stage_requires_product_edit(ctx.task, stage)
-
-
 def _repo_context_for_render(repo_ctx: RepoExecutionContext) -> dict:
     return {
         "repo_label": repo_ctx.repo_label,
@@ -1381,54 +1273,6 @@ def _finish_reason_from_result(result: dict | object) -> str | None:
         if isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("finish_reason"):
             return str(msg.get("finish_reason"))
     return None
-
-
-def _tool_budget_limits(ctx: AgentContext) -> dict[str, object] | None:
-    packet = ctx.autonomy_packet if isinstance(ctx.autonomy_packet, dict) else {}
-    budget = packet.get("inspection_budget") if isinstance(packet.get("inspection_budget"), dict) else None
-    safe: dict[str, object] = {}
-    if budget:
-        for key in ("read_search_limit", "proof_retry_limit", "proof_command_limit", "skill_load_limit"):
-            try:
-                value = int(budget.get(key))
-            except (TypeError, ValueError):
-                continue
-            if value > 0:
-                safe[key] = min(value, 20)
-    safe.update(_prior_stage_progress_flags(ctx))
-    return safe or None
-
-
-def _prior_stage_progress_flags(ctx: AgentContext) -> dict[str, bool]:
-    flags: dict[str, bool] = {}
-    run_progress = ctx.run.progress if isinstance(getattr(ctx.run, "progress", None), dict) else {}
-    if run_progress.get("has_patch_progress") is True or _safe_positive_counter(run_progress.get("patch_count")) > 0:
-        flags["has_patch_progress"] = True
-    if run_progress.get("has_test_progress") is True or _safe_positive_counter(run_progress.get("test_count")) > 0:
-        flags["has_test_progress"] = True
-    if run_progress.get("has_proof_progress") is True or _safe_positive_counter(run_progress.get("proof_count")) > 0:
-        flags["has_proof_progress"] = True
-    for event in ctx.recent_events or []:
-        payload = event.get("payload") if isinstance(event, dict) else None
-        if not isinstance(payload, dict):
-            payload = event if isinstance(event, dict) else {}
-        if payload.get("has_patch_progress") is True or _safe_positive_counter(payload.get("patch_count")) > 0 or str(payload.get("phase") or "") == "dev_work":
-            flags["has_patch_progress"] = True
-        if payload.get("has_test_progress") is True or _safe_positive_counter(payload.get("test_count")) > 0:
-            flags["has_test_progress"] = True
-        if payload.get("has_proof_progress") is True or _safe_positive_counter(payload.get("proof_count")) > 0 or payload.get("proof_id"):
-            flags["has_proof_progress"] = True
-    return flags
-
-
-def _safe_positive_counter(value: object) -> int:
-    if isinstance(value, bool):
-        return 0
-    try:
-        parsed = int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return 0
-    return max(0, parsed)
 
 
 def _safe_read_soul_overlay(

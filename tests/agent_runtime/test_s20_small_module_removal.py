@@ -99,11 +99,23 @@ def test_repo_context_keeps_the_worktree_inventory_half():
 
 
 def test_persona_runtime_imports_and_drops_the_dead_worktree_creator_name():
-    """It kept three live ``repo_context`` names and never called the fourth."""
+    """It kept three live ``repo_context`` names and never called the fourth.
+
+    **Corrected by S29.** Only TWO of the three were live. Every call site of
+    ``repo_execution_context_for_task`` in ``persona_runtime`` sat inside the
+    ``AgentContext``-typed repo-grounding cluster, which lost its producer when
+    S27 removed ``build_context``; S29 removed the cluster, so that name is now
+    an import with no caller here — the very shape this test was written to
+    catch — and it goes with it. ``capture_repo_baseline`` /
+    ``RepoExecutionContext`` still have live callers
+    (``_attach_repo_baseline`` / the render + progress payload helpers).
+    ``repo_context`` itself is untouched. See
+    tests/agent_runtime/test_s29_persona_runtime_context_lane_removal.py."""
 
     from agent_runtime import persona_runtime, repo_context
 
-    assert persona_runtime.repo_execution_context_for_task is repo_context.repo_execution_context_for_task
     assert persona_runtime.capture_repo_baseline is repo_context.capture_repo_baseline
     assert persona_runtime.RepoExecutionContext is repo_context.RepoExecutionContext
     assert not hasattr(persona_runtime, "isolated_repo_context_for_run")
+    assert not hasattr(persona_runtime, "repo_execution_context_for_task")
+    assert callable(repo_context.repo_execution_context_for_task)
