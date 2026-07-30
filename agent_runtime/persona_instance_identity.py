@@ -14,7 +14,10 @@ This module retires the drift at the source:
   structurally derivable aliases for rows still live).
 - :func:`reconcile_persona_instances` — the one-shot store repair: archives
   (never deletes) legacy rows onto their canonical channel, records aliases
-  durably, emits ``persona_instance.reconciled`` events, and is idempotent.
+  durably, emits ``persona_instance.reconciled`` events, and is idempotent. Its
+  last phase reaches one store further: a runtime flow graph is keyed on its
+  owner instance's id, so reaping a row leaves an owner-less canvas behind, and
+  the reconciler archives those too (``flow_graph.pruned``).
 
 Creation-path canonicalization lives in
 :func:`agent_runtime.persona_assignments.canonical_persona_instance_id` —
@@ -34,7 +37,14 @@ from utils import atomic_json_write
 
 from . import paths
 from .events import EventLog
-from .models import PersonaInstance
+from .flow_graph import (
+    GRAPH_HELD_REASON_OWNER_ALIASED,
+    FlowGraphStore,
+    bound_agent_ids_of_stored,
+    classify_graph_owner_liveness,
+    reconcile_departed_agents,
+)
+from .models import Event, PersonaInstance
 from .personas import MOTHBALLED_PERSONA_IDS, MOTHBALLED_ROLE_TOKENS
 from .persona_assignments import (
     PersonaInstanceStore,
@@ -366,10 +376,21 @@ def reconcile_persona_instances(*, apply: bool = True, event_log: EventLog | Non
     durable registry regardless, so the ``identity_map`` keeps resolving old
     ids in archived history. Running twice is a no-op the second time.
 
-    Four phases run in order: (1) legacy-id fold, (2) orphan / legacy-role
+    Five phases run in order: (1) legacy-id fold, (2) orphan / legacy-role
     prune, (3) missing steering-parent repair, (4) missing chat-session-binding
-    repair. ``apply=False`` (the CLI's ``--dry-run``) reports every phase and
-    writes nothing — no store rows, no events.
+    repair, (5) owner-less flow-graph prune. ``apply=False`` (the CLI's
+    ``--dry-run``) reports every phase and writes nothing — no store rows, no
+    graph docs, no events.
+
+    Phase 5 is LAST by referential ordering, not by convenience. Phases 1-2 are
+    the only phases that add or remove rows and phases 3-4 only repair pointers
+    inside surviving rows, so by phase 5 the live-instance set is final and the
+    "does this graph's owner still exist?" question is asked exactly once
+    against it. Running after phase 3 also makes phase 5's departure settlement
+    idempotent instead of competing with it: phase 3's liveness repair has
+    already dropped a departed owner from every child's ``steered_by``, so the
+    graph-scoped pass reports ``changed: False`` rather than racing the same
+    write from a second authority.
     """
     store = PersonaInstanceStore(event_log=event_log)
     instances = store.list_all()
@@ -480,6 +501,28 @@ def reconcile_persona_instances(*, apply: bool = True, event_log: EventLog | Non
     # orphan, forever. This is the write-path repair that retires them.
     session_binding_repairs = store.repair_missing_chat_session_bindings(apply=apply)
 
+    # Phase 5 — flow-graph referential integrity. A runtime flow graph IS one
+    # instance's blueprint (``runtime:<owner>``), so a graph whose owner no
+    # longer resolves is an operator canvas addressed to an agent this
+    # reconciler just archived — the launcher still opens it and every consumer
+    # that reads it re-materializes a departed agent. Same contract as phase 2:
+    # archive (never delete), typed event, held/pruned accounting, dry-run
+    # writes nothing. The live-instance set is derived (not re-read) so the
+    # dry-run preview matches what an applied run would do: rows phase 1 folds
+    # away and rows phase 2 prunes are already discounted, which on ``apply``
+    # they are anyway.
+    live_instance_ids = {instance.id for instance in surviving}
+    for item in actions:
+        if item["action"] in {"merged", "renamed"}:
+            live_instance_ids.discard(item["from_id"])
+            live_instance_ids.add(item["to_id"])
+    live_instance_ids -= {item["persona_instance_id"] for item in pruned_actions}
+    graph_prune = _prune_owner_less_flow_graphs(
+        store=store,
+        live_instance_ids=live_instance_ids,
+        apply=apply,
+    )
+
     return {
         "applied": bool(apply),
         "actions": actions,
@@ -496,10 +539,111 @@ def reconcile_persona_instances(*, apply: bool = True, event_log: EventLog | Non
         "session_binding_repaired_count": session_binding_repairs["repaired_count"],
         "session_binding_held": session_binding_repairs.get("held") or [],
         "session_binding_skipped": session_binding_repairs.get("skipped"),
+        "graphs_pruned": graph_prune["pruned"],
+        "graphs_held": graph_prune["held"],
+        "graphs_pruned_count": len(graph_prune["pruned"]),
+        "graphs_held_count": len(graph_prune["held"]),
+        "graph_departed_steering": graph_prune["departed_steering"],
+        "graph_departed_steering_count": sum(
+            1 for item in graph_prune["departed_steering"] if item.get("changed")
+        ),
         "alias_count": len(aliases),
         "archive_dir": str(archive_dir) if apply and actions else None,
         "prune_archive_dir": str(prune_archive_dir) if apply and pruned_actions else None,
+        "graph_prune_archive_dir": graph_prune["archive_dir"],
         "remaining_instance_ids": sorted(by_id.keys()),
+    }
+
+
+def _instance_resolves(store: PersonaInstanceStore, instance_id: str) -> bool:
+    """Whether the store can still reach a row for [instance_id] — the same
+    try/get idiom the flow-graph ingest uses for an unknown reference. Broader
+    than literal id membership on purpose: ``get`` also resolves the actor-token
+    / legacy-alias drift this module records, and the graph reap's keep side
+    must be the forgiving one."""
+
+    try:
+        store.get(instance_id)
+    except Exception:
+        return False
+    return True
+
+
+def _prune_owner_less_flow_graphs(
+    *,
+    store: PersonaInstanceStore,
+    live_instance_ids: set[str],
+    apply: bool,
+) -> dict[str, Any]:
+    """Phase 5 body: archive every stored flow graph whose OWNER instance no
+    longer resolves, and settle the steering the reaped map asserted.
+
+    Owner liveness is the whole rule — never emptiness. The launcher creates a
+    single self-node, zero-edge canvas on demand (``requested_by: launcher``)
+    the moment an operator opens an agent's graph; that doc is intended, and a
+    "looks empty" heuristic would delete a live agent's canvas between the open
+    and the first drawn edge. So a graph whose owner resolves is held however
+    empty, and a graph whose owner does not is reaped however richly drawn.
+
+    Departure settlement: a reaped map's owner is gone, so the children it drew
+    keep an inbound edge from a departed parent. Those are handed to the
+    owner-scoped [reconcile_departed_agents], which strips ONLY that owner and
+    preserves every other parent. Phase 3's liveness repair normally got there
+    first (a departed owner is not a live parent), so these entries usually
+    report ``changed: False`` — that is the phases agreeing, and the entries are
+    accounted rather than dropped so a disagreement would be visible.
+    """
+
+    graph_store = FlowGraphStore()
+    classified = classify_graph_owner_liveness(
+        graph_store.list_ids(), live_instance_ids=live_instance_ids
+    )
+    held: list[dict[str, Any]] = list(classified["held"])
+    pruned: list[dict[str, Any]] = []
+    departed_steering: list[dict[str, Any]] = []
+    archive_dir = graph_store.stale_dir() / now().strftime("%Y%m%dT%H%M%SZ_graph_prune")
+
+    for candidate in classified["stale"]:
+        owner = candidate["owner_instance_id"]
+        if owner and _instance_resolves(store, owner):
+            held.append({**candidate, "reason": GRAPH_HELD_REASON_OWNER_ALIASED})
+            continue
+        drawn = bound_agent_ids_of_stored(graph_store.get(candidate["graph_id"])) - {owner}
+        entry = {**candidate, "drawn_agent_count": len(drawn)}
+        pruned.append(entry)
+        if not apply:
+            continue
+        if drawn:
+            departed_steering.extend(
+                {**item, "graph_id": candidate["graph_id"]}
+                for item in reconcile_departed_agents(
+                    departed=drawn, owner_id=owner, store=store
+                )
+            )
+        archived = graph_store.archive(candidate["graph_id"], archive_dir)
+        entry["archived_to"] = str(archived) if archived is not None else None
+        store.event_log.append(
+            Event(
+                ts=now(),
+                type="flow_graph.pruned",
+                task_id=None,
+                run_id=None,
+                persona_id=None,
+                payload={
+                    "graph_id": candidate["graph_id"],
+                    "owner_instance_id": owner,
+                    "reason": candidate["reason"],
+                    "drawn_agent_count": len(drawn),
+                    "archived_to": entry["archived_to"],
+                },
+            )
+        )
+
+    return {
+        "pruned": pruned,
+        "held": held,
+        "departed_steering": departed_steering,
+        "archive_dir": str(archive_dir) if apply and pruned else None,
     }
 
 
