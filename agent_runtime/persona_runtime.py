@@ -52,8 +52,7 @@ from .profile_runner import (
     _blocked_tool_names_with_registry_hygiene,
 )
 from .progress import ChatProgressSink
-from .repo_context import RepoExecutionContext, capture_repo_baseline
-from .store import RunStore, _safe_session_id
+from .store import _safe_session_id
 from .tool_permissions import (
     ChatToolPermissionStore,
     extra_blocked_tools_for_permission_mode,
@@ -1020,55 +1019,6 @@ def _augment_chat_capabilities(persona: AgentPersona, toolsets: list[str]) -> li
             continue
         augmented.append(toolset)
     return augmented
-
-
-def _repo_context_for_render(repo_ctx: RepoExecutionContext) -> dict:
-    return {
-        "repo_label": repo_ctx.repo_label,
-        "source": repo_ctx.source,
-        "context_loaded": repo_ctx.context_loaded_label,
-        "context_excerpts": [
-            {"label": item.label, "content": item.content, "truncated": item.truncated}
-            for item in repo_ctx.context_excerpts
-        ],
-    }
-
-
-def _repo_context_progress_payload(repo_ctx: RepoExecutionContext) -> dict:
-    return {
-        "type": "run.progress",
-        "phase": "inspect",
-        "severity": "info",
-        "step": "repo_context_loaded",
-        "status": "ready",
-        "summary": f"Dev session grounded in repo {repo_ctx.repo_label}; context_loaded: {repo_ctx.context_loaded_label}",
-        "repo_label": repo_ctx.repo_label,
-        "context_loaded": repo_ctx.context_loaded_label,
-        "next_expected": "repo_scoped_audit",
-    }
-
-
-def _attach_repo_baseline(run: AgentRun, repo_ctx: RepoExecutionContext) -> None:
-    try:
-        baseline = capture_repo_baseline(repo_ctx.workdir)
-        run.progress = {
-            **(run.progress or {}),
-            "repo_baseline": baseline,
-            "repo_execution": {
-                "schema_version": 1,
-                "workdir": str(repo_ctx.workdir),
-                "workdir_label": repo_ctx.workdir.name,
-                "repo_label": repo_ctx.repo_label,
-                "source": repo_ctx.source,
-                "isolated": repo_ctx.source.endswith("-worktree"),
-                "detached_head": baseline.get("git_branch") == "HEAD",
-                "git_head": baseline.get("git_head"),
-            },
-        }
-        RunStore().update(run)
-    except Exception:
-        return
-
 
 
 def _apply_llm_metadata(run: AgentRun, result: AgentRunResult, *, timing: dict[str, int] | None = None) -> None:

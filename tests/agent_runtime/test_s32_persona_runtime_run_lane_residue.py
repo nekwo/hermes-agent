@@ -41,7 +41,8 @@ Its eight callees are therefore not proven dead either: each is reachable from
 it. They are pinned below by name so the next pass does not re-litigate them
 one at a time.
 
-**Kept, blocked — the three ``RepoExecutionContext``-typed helpers.**
+**Deferred here, retired at S33 — the three ``RepoExecutionContext``-typed
+helpers.**
 
 ``_repo_context_for_render``, ``_repo_context_progress_payload`` and
 ``_attach_repo_baseline`` ARE proven caller-free (zero code-form references
@@ -49,10 +50,9 @@ repo-wide; ``test_s28_status_observe_shrink``'s own docstring already records
 that ``_attach_repo_baseline`` "has had zero callers since S5"). The cut is
 blocked on a CONTESTED file, not on evidence: dropping them makes
 ``capture_repo_baseline`` and ``RepoExecutionContext`` last-use imports, and
-``tests/agent_runtime/test_s20_small_module_removal.py`` asserts both are still
-bound on ``persona_runtime``. That module is held by a concurrent session this
-round, so the trio is reported for the follow-up that can retarget its pin in the
-same commit — never cut here leaving that suite red.
+``tests/agent_runtime/test_s20_small_module_removal.py`` asserted both were still
+bound on ``persona_runtime``. S33 owns the follow-up ruling and retargets that
+pin in the same commit as the cut.
 """
 
 from __future__ import annotations
@@ -82,8 +82,8 @@ KEPT_LLM_METADATA_CLUSTER = (
     "_safe_timing_map",
 )
 
-#: KEPT, blocked on a contested pin rather than on evidence.
-KEPT_REPO_EXECUTION_CLUSTER = (
+#: Deferred at S32 and retired together at S33.
+REMOVED_REPO_EXECUTION_CLUSTER = (
     "_attach_repo_baseline",
     "_repo_context_for_render",
     "_repo_context_progress_payload",
@@ -125,16 +125,14 @@ def test_the_llm_metadata_cluster_is_kept_because_it_writes_a_field_live_code_re
     assert inspect.getsource(persona_runtime).count("run.llm = ") == 1
 
 
-def test_the_repo_execution_cluster_is_kept_pending_its_contested_pin():
-    """Caller-free but not cuttable here: the imports it would take with it are
-    asserted by a test module a concurrent session holds."""
+def test_the_repo_execution_cluster_was_retired_by_its_follow_up():
+    """S33 retargeted the contested pin and retired all three names together."""
 
-    for name in KEPT_REPO_EXECUTION_CLUSTER:
-        assert callable(getattr(persona_runtime, name)), name
+    for name in REMOVED_REPO_EXECUTION_CLUSTER:
+        assert not hasattr(persona_runtime, name), name
 
-    # The exact pin that gates the follow-up.
-    assert persona_runtime.capture_repo_baseline is not None
-    assert persona_runtime.RepoExecutionContext is not None
+    assert not hasattr(persona_runtime, "capture_repo_baseline")
+    assert not hasattr(persona_runtime, "RepoExecutionContext")
 
 
 def test_no_module_level_name_is_unreachable_from_the_external_surface():
@@ -158,7 +156,7 @@ def test_no_module_level_name_is_unreachable_from_the_external_surface():
         "mission_chat_admission_line",
         "mission_chat_operating_skills",
     }
-    kept_with_cause = set(KEPT_LLM_METADATA_CLUSTER) | set(KEPT_REPO_EXECUTION_CLUSTER)
+    kept_with_cause = set(KEPT_LLM_METADATA_CLUSTER)
 
     tree = ast.parse(inspect.getsource(persona_runtime))
     defs: dict[str, ast.AST] = {}

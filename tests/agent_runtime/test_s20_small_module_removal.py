@@ -108,24 +108,25 @@ def test_repo_context_keeps_the_worktree_inventory_half():
     assert callable(delivery_directive.reap_orphan_worktrees)
 
 
-def test_persona_runtime_imports_and_drops_the_dead_worktree_creator_name():
-    """It kept three live ``repo_context`` names and never called the fourth.
+def test_persona_runtime_drops_retired_repo_context_names_without_touching_the_module():
+    """The persona runtime no longer imports the retired repo-baseline lane.
 
     **Corrected by S29.** Only TWO of the three were live. Every call site of
     ``repo_execution_context_for_task`` in ``persona_runtime`` sat inside the
     ``AgentContext``-typed repo-grounding cluster, which lost its producer when
     S27 removed ``build_context``; S29 removed the cluster, so that name is now
     an import with no caller here — the very shape this test was written to
-    catch — and it goes with it. ``capture_repo_baseline`` /
-    ``RepoExecutionContext`` still have live callers
-    (``_attach_repo_baseline`` / the render + progress payload helpers).
-    ``repo_context`` itself is untouched. See
-    tests/agent_runtime/test_s29_persona_runtime_context_lane_removal.py."""
+    catch — and it went with it. S33 then retired the caller-free render,
+    progress-payload, and baseline-attach trio cleared by ``a54e802cd``;
+    ``capture_repo_baseline`` and both last-use imports went with that lane.
+    The live worktree-creator infrastructure in ``repo_context`` is untouched."""
 
     from agent_runtime import persona_runtime, repo_context
 
-    assert persona_runtime.capture_repo_baseline is repo_context.capture_repo_baseline
-    assert persona_runtime.RepoExecutionContext is repo_context.RepoExecutionContext
+    assert not hasattr(persona_runtime, "capture_repo_baseline")
+    assert not hasattr(persona_runtime, "RepoExecutionContext")
+    assert not hasattr(repo_context, "capture_repo_baseline")
     assert not hasattr(persona_runtime, "isolated_repo_context_for_run")
     assert not hasattr(persona_runtime, "repo_execution_context_for_task")
     assert callable(repo_context.repo_execution_context_for_task)
+    assert callable(repo_context.isolated_repo_context_for_run)

@@ -7,71 +7,12 @@ from agent_runtime.repo_context import (
     HARNESS_WORKTREE_BASE_MAX_CHARS,
     HARNESS_WORKTREE_ADD_TIMEOUT_SECONDS,
     RepoExecutionContext,
-    capture_repo_baseline,
     isolated_repo_context_for_run,
 )
 
 
 def _git(repo, *args):
     return subprocess.run(["git", *args], cwd=repo, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
-
-
-# S24 removed ``git_diff_since_baseline`` (zero production callers after the
-# worker lane went). ``capture_repo_baseline`` is still LIVE —
-# ``persona_runtime._attach_repo_baseline`` calls it — so its own behaviour is
-# pinned here instead of only through the deleted diff reader.
-def test_capture_repo_baseline_records_preexisting_dirty_paths(tmp_path, monkeypatch):
-    runtime_root = tmp_path / "runtime"
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(runtime_root))
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(repo, "init")
-    _git(repo, "config", "user.email", "test@example.invalid")
-    _git(repo, "config", "user.name", "Harness Test")
-    (repo / "preexisting.txt").write_text("clean\n", encoding="utf-8")
-    (repo / "agent.txt").write_text("clean\n", encoding="utf-8")
-    _git(repo, "add", ".")
-    _git(repo, "commit", "-m", "initial")
-
-    (repo / "preexisting.txt").write_text("dirty before run\n", encoding="utf-8")
-    baseline = capture_repo_baseline(repo)
-
-    assert baseline["dirty_count"] == 1
-    assert baseline["dirty_paths"] == ["preexisting.txt"]
-    assert baseline["tracked_dirty_paths"] == ["preexisting.txt"]
-    assert baseline["untracked_paths"] == []
-    assert baseline["git_head"] and baseline["git_head_short"]
-    # The pre-run content is snapshotted so a later reader can attribute the
-    # agent's delta instead of claiming the operator's uncommitted work.
-    snapshot = Path(baseline["tracked_dirty_snapshots"]["preexisting.txt"])
-    assert snapshot.is_file()
-    assert snapshot.read_text(encoding="utf-8") == "dirty before run\n"
-
-
-def test_capture_repo_baseline_separates_untracked_and_harness_litter(tmp_path, monkeypatch):
-    runtime_root = tmp_path / "runtime"
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(runtime_root))
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(repo, "init")
-    _git(repo, "config", "user.email", "test@example.invalid")
-    _git(repo, "config", "user.name", "Harness Test")
-    (repo / "tracked.txt").write_text("clean\n", encoding="utf-8")
-    _git(repo, "add", ".")
-    _git(repo, "commit", "-m", "initial")
-
-    (repo / "tracked.txt").write_text("dirty before run\n", encoding="utf-8")
-    (repo / "preexisting-untracked.txt").write_text("old litter\n", encoding="utf-8")
-    (repo / "media").mkdir()
-    (repo / "media" / ".hermes-tmp.old").write_text("harness litter\n", encoding="utf-8")
-
-    baseline = capture_repo_baseline(repo)
-
-    assert baseline["tracked_dirty_paths"] == ["tracked.txt"]
-    assert baseline["untracked_paths"] == ["preexisting-untracked.txt"]
-    assert baseline["harness_litter_paths"] == ["media/.hermes-tmp.old"]
-    # Harness litter is never snapshotted as if it were the operator's work.
-    assert set(baseline["tracked_dirty_snapshots"]) == {"tracked.txt"}
 
 
 def test_isolated_repo_context_uses_distinct_worktrees_for_parallel_runs(tmp_path, monkeypatch):

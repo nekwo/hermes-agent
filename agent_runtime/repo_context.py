@@ -702,32 +702,6 @@ def _append_worktree_excludes(worktree: Path, patterns: list[str]) -> None:
         _log_worktree_event("worktree_support_failed", {"worktree": str(worktree), "support": "git_exclude"})
 
 
-def capture_repo_baseline(workdir: str | Path) -> dict[str, Any]:
-    """Capture pre-run dirty state so handoff diffs do not claim old work."""
-
-    root = _git_root_for(Path(workdir).expanduser()) or Path(workdir).expanduser()
-    status_lines = _git_output(root, ["git", "status", "--short", "--untracked-files=all"])
-    manifest = _status_manifest(status_lines)
-    snapshot_dir, tracked_snapshots = _snapshot_tracked_dirty_files(root, manifest["tracked_dirty_paths"])
-    return {
-        "schema_version": 1,
-        "captured_at": now().isoformat(),
-        "workdir_label": _safe_repo_label(root.name),
-        "workdir": str(root),
-        "git_head": _git_output(root, ["git", "rev-parse", "HEAD"], single=True),
-        "git_head_short": _git_output(root, ["git", "rev-parse", "--short", "HEAD"], single=True),
-        "git_branch": _git_output(root, ["git", "rev-parse", "--abbrev-ref", "HEAD"], single=True),
-        "dirty_count": len(status_lines),
-        "dirty_paths": manifest["dirty_paths"],
-        "tracked_dirty_paths": manifest["tracked_dirty_paths"],
-        "untracked_paths": manifest["untracked_paths"],
-        "harness_litter_paths": manifest["harness_litter_paths"],
-        "tracked_dirty_snapshots": tracked_snapshots,
-        "snapshot_dir": str(snapshot_dir) if snapshot_dir is not None else None,
-        "status_lines": status_lines[:200],
-    }
-
-
 # ``b/<path>``. Reused by both the legacy handoff gate and the root-node evidence
 # stack so the two never drift.
 _DIFF_TEST_FILE_RE = re.compile(
@@ -785,70 +759,6 @@ def _git_output(workdir: Path, command: list[str], *, single: bool = False) -> A
     return [line.rstrip() for line in text.splitlines() if line.strip()]
 
 
-def _status_manifest(status_lines: list[str]) -> dict[str, list[str]]:
-    dirty_paths: list[str] = []
-    tracked_dirty_paths: list[str] = []
-    untracked_paths: list[str] = []
-    harness_litter_paths: list[str] = []
-    for line in status_lines:
-        for path in _paths_from_status_line(line):
-            if path not in dirty_paths:
-                dirty_paths.append(path)
-            if _is_harness_litter_path(path):
-                if path not in harness_litter_paths:
-                    harness_litter_paths.append(path)
-                continue
-            if line.startswith("?? "):
-                if path not in untracked_paths:
-                    untracked_paths.append(path)
-            elif path not in tracked_dirty_paths:
-                tracked_dirty_paths.append(path)
-    return {
-        "dirty_paths": dirty_paths[:200],
-        "tracked_dirty_paths": tracked_dirty_paths[:200],
-        "untracked_paths": untracked_paths[:200],
-        "harness_litter_paths": harness_litter_paths[:200],
-    }
-
-
-def _paths_from_status_line(line: str) -> list[str]:
-    raw = line[3:].strip() if len(line) > 3 else line.strip()
-    parts = [part.strip() for part in raw.split(" -> ") if part.strip()]
-    paths: list[str] = []
-    for part in parts or [raw]:
-        clean = part.strip().strip('"').replace("\\", "/")
-        if clean:
-            paths.append(clean)
-    return paths
-
-
-def _snapshot_tracked_dirty_files(root: Path, dirty_paths: list[str]) -> tuple[Path | None, dict[str, str]]:
-    clean_paths = [path for path in dirty_paths if path and not _is_harness_litter_path(path)]
-    if not clean_paths:
-        return None, {}
-    digest = hashlib.sha1(f"{root.resolve()}|{time.time_ns()}".encode("utf-8", errors="ignore")).hexdigest()[:16]
-    snapshot_dir = _baseline_snapshot_dir() / f"{_safe_path_token(root.name)}_{digest}"
-    snapshots: dict[str, str] = {}
-    for rel in clean_paths[:200]:
-        if rel.startswith(("/", "~")) or ":" in rel:
-            continue
-        source = (root / rel).resolve()
-        if not _is_relative_to(source, root) or not source.is_file():
-            continue
-        target = snapshot_dir / _safe_path_token(rel)
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(source, target)
-            snapshots[rel] = str(target)
-        except OSError:
-            continue
-    return (snapshot_dir if snapshots else None), snapshots
-
-
-def _baseline_snapshot_dir() -> Path:
-    return paths.store_root() / "repo_baselines"
-
-
 def resolve_affected_repo_workdir(repo: str) -> Path | None:
     path = Path(repo).expanduser()
     if path.is_absolute() and path.is_dir():
@@ -877,11 +787,6 @@ def _git_root_for(path: Path) -> Path | None:
 
 def _is_detached_head(workdir: Path) -> bool:
     return _git_output(workdir, ["git", "rev-parse", "--abbrev-ref", "HEAD"], single=True) == "HEAD"
-
-
-def _is_harness_litter_path(path: str) -> bool:
-    parts = [part for part in str(path or "").replace("\\", "/").split("/") if part]
-    return any(part.startswith(".hermes-tmp.") for part in parts)
 
 
 def _is_relative_to(path: Path, root: Path) -> bool:

@@ -27,12 +27,10 @@ inherited from the S27 note):
 * ``_tool_budget_limits`` — read the removed autonomy packet's inspection
   budget. Takes ``_prior_stage_progress_flags`` and ``_safe_positive_counter``.
 
-KEEP, explicitly: ``_blocked_tool_names_for_chat`` (three live call sites in
-this module — it is the chat lane's block list), ``_repo_context_for_render`` /
-``_repo_context_progress_payload`` / ``_attach_repo_baseline`` (``RepoExecution
-Context``-typed, NOT ``AgentContext``-typed — a separate run-lane cluster left
-for its own ruling), and the ``RepoExecutionContext`` / ``capture_repo_baseline``
-imports they need.
+KEEP at S29: ``_blocked_tool_names_for_chat`` (three live call sites in this
+module — it is the chat lane's block list). The separate
+``RepoExecutionContext``-typed trio was left for its own ruling; S33 later
+retired it after ``a54e802cd`` proved all three names caller-free.
 """
 
 from __future__ import annotations
@@ -72,8 +70,6 @@ REMOVED_PERSONA_RUNTIME_IMPORTS = (
 
 #: Imports on the SAME import lines that stay, because live code still uses them.
 KEPT_PERSONA_RUNTIME_IMPORTS = (
-    "RepoExecutionContext",
-    "capture_repo_baseline",
     "AgentDecision",
     "parse_structured_decision",
     "blocked_tool_names",
@@ -125,16 +121,16 @@ def test_the_chat_lane_block_list_survives():
     assert source.count("_blocked_tool_names_for_chat(") >= 4
 
 
-def test_the_repo_execution_context_cluster_survives():
-    """KEEP: ``RepoExecutionContext``-typed helpers are a different cluster from
-    the ``AgentContext``-typed one and are not part of this cut."""
+def test_the_separately_ruled_repo_execution_context_cluster_is_now_gone():
+    """Retargeted by S33: S29 correctly deferred this separate cluster, and
+    ``a54e802cd`` later supplied the caller evidence needed to retire it."""
 
     for name in (
         "_repo_context_for_render",
         "_repo_context_progress_payload",
         "_attach_repo_baseline",
     ):
-        assert callable(getattr(persona_runtime, name)), name
+        assert not hasattr(persona_runtime, name), name
 
 
 def test_the_stage_intent_module_is_not_collateral():
@@ -174,18 +170,15 @@ def test_no_module_level_name_is_unreachable_from_the_external_surface():
     #: NOT part of this cut — reported, not removed. See the docstring above.
     #: RETARGETED at S32, which verified the thirteen individually: ``_emit_timing``
     #: was proven caller-free and removed, so it is no longer listed here. The
-    #: twelve below are KEPT WITH CAUSE, not still-unverified — see
+    #: nine below were KEPT WITH CAUSE, not still-unverified — see
     #: tests/agent_runtime/test_s32_persona_runtime_run_lane_residue.py, which
     #: owns that delta and records why each stayed.
     run_lane_metadata_cluster = {
         "_apply_llm_metadata",
-        "_attach_repo_baseline",
         "_decision_metric_reason",
         "_decision_metrics",
         "_finish_reason_from_result",
         "_record_timing_value",
-        "_repo_context_for_render",
-        "_repo_context_progress_payload",
         "_safe_base_url_host",
         "_safe_nonnegative_int",
         "_safe_run_budget_block",

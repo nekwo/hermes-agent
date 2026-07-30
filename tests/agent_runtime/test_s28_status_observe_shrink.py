@@ -29,9 +29,9 @@ of a measurement:
 
 ``open_tasks`` / ``running_runs`` on the status payload are the same class: the
 task list is a literal, and no production path constructs an ``AgentRun`` or
-opens a run (``_attach_repo_baseline`` -- the last ``RunStore().update`` caller
-in ``persona_runtime`` -- has had zero callers since S5), so the RUNNING count
-can never move.
+opens a run. S33 retired ``_attach_repo_baseline`` after ``a54e802cd`` proved it
+had had zero callers since S5, leaving ``progress.RunProgressSink`` as the sole
+production ``RunStore().update`` caller, so the RUNNING count can never move.
 
 Retargeted here, citing this wave (their subject was the daemon lane, which no
 longer reaches observability at all):
