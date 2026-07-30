@@ -1,5 +1,12 @@
 # Delivery Directive
 
+> **2026-07-30 — partially describes a removed subsystem.** §Declaration was a
+> Stage-38 goal-create field and §Execution stored the directive on `Task` — both
+> removed by [16 — Mission Lane Removal](16-mission-lane-removal.md).
+> `agent_runtime/delivery_directive.py` still exists with live importers
+> (`context_builder.py`, `snapshot.py`, `harness_doctor.py`, `repo_bundles.py`);
+> its declaration path is gone.
+
 One declarative contract for what happens to a delivered repo bundle. The
 directive is DECLARED on the goal, projected to the HUD, and executed by ONE
 executor — the harness makes no ad-hoc promote/cleanup micro-decisions.

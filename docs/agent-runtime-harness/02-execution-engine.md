@@ -1,13 +1,24 @@
 # 02 — Blueprint Goal-Flow Engine
 
+> **2026-07-30 — describes a removed subsystem.** The Blueprint stage-graph engine
+> specified here (blueprints, `MissionPlan`, slots/edges/proof gates, `ticker.py`,
+> `goal_runner.py`) was removed by
+> [16 — Mission Lane Removal](16-mission-lane-removal.md). Retained for
+> archaeology. Still-live content: the §Identity profile→persona substrate —
+> `promote_profile_to_persona` now lives in `agent_runtime/personas.py` behind the
+> permanent `agent_runtime/blueprints/resolve.py` shim — and the AAA
+> non-negotiables in spirit. The implementation reference this doc links
+> (`agent_runtime/docs/blueprint_goal_flow_stages.md`) was deleted with the engine
+> (S7), and companion doc 03 was deleted 2026-07-30.
+
 > **Status: the live engine spec + remaining build.** How a Mission Control goal
 > actually runs: a stable **graph** of swappable **agent bindings**, 1 to N agents, not
 > a forced 3–4. This folds the blueprint goal-flow staged plan and the simplified-state
 > work that preceded it into one source of truth.
 >
 > Companions: [01 — Architecture](01-architecture.md) (the entity model this engine
-> serves) and [03 — Retirement Ledger](03-retirement-ledger.md) (the legacy execution
-> path this engine deletes).
+> served) and `03-retirement-ledger.md` (deleted 2026-07-30; the legacy execution
+> path this engine deleted).
 >
 > The canonical engine spec also lives at
 > `agent_runtime/docs/blueprint_goal_flow_stages.md` (kept beside the code, with full

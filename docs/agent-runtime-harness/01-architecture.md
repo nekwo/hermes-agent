@@ -1,5 +1,15 @@
 # 01 — Mission Control Architecture: Entities + Agent Graph
 
+> **2026-07-30 — partially describes a removed subsystem.** The goal/task mission
+> lane documented here (Part A's `Chat → Goal/Task` chain and `task_bound` mode,
+> Part B's tasks-as-HUD and proof gates, Part C's `mission_plan`/`owner_slot`
+> mapping) was removed by [16 — Mission Lane Removal](16-mission-lane-removal.md);
+> chat is the only lane. Part C's "one node = one agent, output socket = steering
+> edge" graph model remains the design origin of the **kept**
+> `agent_runtime/flow_graph.py` + `steered_by` runtime graph, and the
+> canonical-instance-id and chat-swap-safety invariants still hold. Read with that
+> split in mind.
+
 > **Status: LOCKED.** This is the canonical entity + UI architecture for Mission
 > Control. It folds the two locked stages (the entity model, locked with Tony
 > 2026-06-22, and the consolidated agent-graph node model) into one source of truth
@@ -7,8 +17,8 @@
 > note, the standalone persona pipeline).
 >
 > Companions: [02 — Blueprint Goal-Flow Engine](02-execution-engine.md) (how a goal
-> actually runs) and [03 — Retirement Ledger](03-retirement-ledger.md) (the code the
-> two docs above retire).
+> actually ran) and `03-retirement-ledger.md` (deleted 2026-07-30; the code the
+> two docs above retired).
 >
 > Repos:
 > - Harness: `X:/Eternia/hermes-agent`

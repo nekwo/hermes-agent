@@ -1,124 +1,91 @@
-# Agent Runtime Harness — Staged Implementation Plan
+# Agent Runtime Harness — Index
 
-> Purpose: replace flaky Kanban-as-agent-manager behavior with a lean, reliable,
-> Hermes-native ticking agent harness. GPT personas are first-class Hermes actors
-> invoked through Hermes' model/tool runtime; the harness owns state, proof,
-> transitions, and scheduling. Not a wrapper system.
+> Purpose: Hermes-native persona runtime for Mission Control. **Chat is the only
+> lane** — an operator (or agent) messages an on-level persona instance's chat
+> root; the runtime owns identity, chat continuity, the board, realms/workspaces,
+> and an enforcement-free agent graph. The goal/task mission lane (daemon, stage
+> graph, proof gates, role gating) was removed on 2026-07-30 — see doc 16.
 
-## Canonical docs (read these)
+## Live truth (read these)
 
-The 70+ exploratory stage docs were folded down on 2026-06-25 into three canonical
-documents after the codebase was rewritten several times. The journey is in git history;
-these three are the live truth.
+1. **[16 — Mission Lane Removal](16-mission-lane-removal.md)** — the executed
+   removal plan, S0–S12, with the dependency-map corrections, operator rulings,
+   hazards table, and final acceptance. **What the system is now, defined by what
+   it no longer is.**
 
-1. **[01 — Architecture: Entities + Agent Graph](01-architecture.md)** — *LOCKED.* The
-   entity model (`Template → durable Level Instance → swappable Chat → Goal/Task`),
-   tasks-as-HUD, and the consolidated agent graph (one node = one agent; the persona
-   pipeline is retired). **What the system is.**
+2. **[17 — Upstream Boundary Ledger](17-upstream-boundary-ledger.md)** — which
+   files outside the fork boundary the removal touched, verified fork-vs-upstream
+   ownership, merge guidance, and the verified revert recipe for the S12
+   security-posture commit (`933aa3d97`).
 
-2. **[02 — Blueprint Goal-Flow Engine](02-execution-engine.md)** — the execution engine:
-   a stable graph of swappable agent bindings (slots/bindings/edges/proof gates), 1 to N
-   agents; the slot↔instance/chat/goal binding; dynamic stage-shaped HUD/skills/proof;
-   the coordinator permission scope. **How a goal runs.** Implementation reference lives
-   beside the code at `agent_runtime/docs/blueprint_goal_flow_stages.md`.
+3. **The mission-chat lane docs** — the live operating surface:
+   - [mission-chat-turn-context.md](mission-chat-turn-context.md) — the chat turn
+     contract.
+   - [mission-chat-mcp-admission.md](mission-chat-mcp-admission.md) — MCP
+     admission (profile-declares-the-server rule; records the R-1 role-floor
+     removal).
+   - [mission-chat-terminal-envelope-grants.md](mission-chat-terminal-envelope-grants.md) —
+     terminal envelope grants (records the R-2 floor removal).
+   - [mission-chat-lane-gap-audit.md](mission-chat-lane-gap-audit.md) — the lane
+     gap audit.
+   - [chat-session-presence-authority.md](chat-session-presence-authority.md),
+     [turn-durability-design.md](turn-durability-design.md),
+     [run-budget-accounting.md](run-budget-accounting.md).
 
-3. **[03 — Retirement Ledger](03-retirement-ledger.md)** — the single grep-gated
-   worklist for deleting the legacy execution path (the `TaskState` ladder remnants, the
-   `has_typed_plan` dual-orchestrator fork, role-shaped HUD/skill map, launcher
-   cross-stack special cases). **What gets deleted.**
+4. **Read/write path hardening** — live data-layer docs:
+   [12 — Read-Path Freshness](12-read-path-freshness-hardening.md) ·
+   [13 — Write-Path Intent Integrity](13-write-path-intent-integrity.md) ·
+   [14 — Snapshot Core Build Performance](14-snapshot-core-build-performance.md) ·
+   [mission-control-stream.md](mission-control-stream.md).
 
-4. **[04 — Decision / HUD Simplification: Target Model](04-decision-hud-simplification-map.md)** —
-   agents work **unbounded** (edit + run tests with native tools, no per-op decision); the
-   **harness reads the work** (git diff + tool trace + its own gate re-run) instead of making
-   agents fill a validated form, and surfaces it in an operator **HUD dashboard**. Collapses
-   ~19 decision types + the `delivery`/`work_status` packet to ~5 coordination signals
-   (hand off · block · escalate · neko scope/route · qa verdict). Kills the
-   `model_invalid_output` failure class. **What the decision contract simplifies to.**
+5. **Serve + operations** —
+   [harness-serve-design.md](harness-serve-design.md) ·
+   [serve-runtime-truth.md](serve-runtime-truth.md) ·
+   [env-determinism-audit.md](env-determinism-audit.md).
 
-5. **[05 — Runtime Data: Enterprise-Grade Storage & Access](05-runtime-data-enterprise-storage.md)** —
-   *implementation-ready.* Staged spec (RD0–RD8) with exact modules, SQLite DDL, config
-   keys, test files, proof commands, rollback paths, and per-stage handoff prompts:
-   monolithic `snapshot.json` + poll → transactional `read_model.db` with an incremental
-   lease-holding projector, NDJSON change feed, per-lane consumer degradation,
-   deterministic fail-loud runtime-root resolution, event-log segmentation +
-   backup/restore drills, and hard CI perf/concurrency/crash gates. **How the runtime's
-   data layer becomes production-grade.**
+6. **Skills** — the agent-facing skills live in
+   [harness-skills/](harness-skills/) (repo source; installed to the shared root
+   by `harness install-harness-skills` — never edit the shared copy). Rewritten
+   for the chat-only lane on 2026-07-30.
+   [SKILL_INBOX_PROMOTION_DESIGN_2026-07-24.md](SKILL_INBOX_PROMOTION_DESIGN_2026-07-24.md)
+   covers skill-inbox promotion.
 
-6. **[06 — Recursive Agent-Supervised Execution](06-recursive-agent-supervised-execution.md)** —
-   *implemented + verified (v3.1) on branch `recursive-agent-supervised-execution`;
-   production recursive lanes remain burn-in-ledger-gated (see doc §6).* The target execution model: the harness stops *ticking*
-   worker turns and becomes the incorruptible substrate (gate every handoff, watchdog every
-   level, hierarchical budget, event-source everything); agents become recursive supervisors —
-   each node schedules/watches only its DIRECT children and reports a distilled summary up
-   (builds on doc-04 S2 steering + S3 continuity). Stages AS0–AS7: AS0 active liveness watchdog
-   (kills indefinite hangs, ships first; runs on a daemon thread and extends the burn-in-only
-   `no_freeze_monitor`) → honest child status events → recursive supervision → per-boundary
-   gate → hierarchical budget → real concurrent lanes (store-lock audit + doc-04 H1 worktree
-   isolation; the doc-05 read-model dependency is already shipped) → verified deploy → CI
-   gates. **How the scheduler becomes distributed AI judgment instead of a serial tick loop.**
+7. **Personas** —
+   [neko-persona-identity-deploy.md](neko-persona-identity-deploy.md) ·
+   [neko_SOUL_draft.md](neko_SOUL_draft.md). Personas and profiles are **data**;
+   nothing in code declares them (S11).
 
-7. **[08 — Root Node + Self-Looped Sub-Agents](08-blueprint-as-script-collapse.md)** —
-   *implementation-ready (v4); staged plan, not yet implemented.* The over-engineering
-   correction, final shape: **every node is a standard self-looped Hermes agent
-   (customizable but simple: prompt + HUD + toolset + workdir), and the root node runs the
-   goal by spawning and steering sub-agent nodes** — the same shape as Hermes'
-   `delegate_task`. The harness is substrate only (run loops, resolve workdirs, capture
-   evidence server-side, kill hangs, persist for Mission Control); **no judgment in
-   Python** — the root's model judges children's work from harness-captured evidence and
-   at worst steers them. Two root-only service tools (`run_node`/`steer_node`), stages
-   N0–N3, deletes the ~13.7k-line decision-contract/gate/incident/adjudication tower at
-   N3 after burn-in, and makes the 2026-07-03 self-drive bug class unrepresentable at N1.
+## Historical — describes the removed mission lane
 
-## Operator forensics
+Retained for archaeology with dated headers; do not implement from these.
 
-- **[Serve Runtime Truth — interpreter chain + read-model/snapshot freshness](serve-runtime-truth.md)** —
-  two live-serve facts that keep reading as bugs but are healthy: the Windows
-  venv interpreter trampoline (a base-`Python311` grandchild in the process tree
-  is normal; nothing to pin), and frozen `read_model.db` / `snapshot.json` mtimes
-  during a live serve (Mission Control is fed from RAM + a ≤20s cache, so neither
-  file is touched). Retires the old tell "`read_model.db` mtime < session start =
-  no serve".
+- **[01 — Architecture](01-architecture.md)** — the locked entity model. Part C's
+  node/steering-edge graph is the design origin of the kept
+  `agent_runtime/flow_graph.py` + `steered_by` runtime graph; the Goal/Task chain
+  is gone.
+- **[02 — Blueprint Goal-Flow Engine](02-execution-engine.md)** — the removed
+  stage-graph engine. Its §Identity profile→persona substrate survives via the
+  permanent `blueprints/resolve.py` shim.
+- **[04 — Decision/HUD Simplification](04-decision-hud-simplification-map.md)** —
+  its §Steering sections fathered the kept `steered_by` edges.
+- **[05 — Runtime Data Storage](05-runtime-data-enterprise-storage.md)** — mostly
+  live (projector, feed, resolution, backups); its goal/run/proof/incident DDL is
+  gone.
+- **[06 — Recursive Agent-Supervised Execution](06-recursive-agent-supervised-execution.md)** —
+  design record for the removed supervision machinery.
+- **[08 — Root Node + Self-Looped Sub-Agents](08-blueprint-as-script-collapse.md)** —
+  the "no judgment in Python" principle that shaped the chat-only lane.
+- **[delivery-directive.md](delivery-directive.md)** — declaration path removed;
+  `delivery_directive.py` still has importers.
 
-## Product stance
+Deleted on 2026-07-30 (operator ruling; recoverable from git history):
+`03-retirement-ledger.md`, `06-implementation-prompt.md`,
+`07-selfdrive-gap-audit-prompt.md`, `09-root-node-execution-prompts.md`,
+`10-root-node-n3-burn-in-ledger.md`, `11-neko-fork-join-dehardwire.md`,
+`15-legacy-orchestrator-retirement.md`. The old implementation reference
+`agent_runtime/docs/blueprint_goal_flow_stages.md` went with the engine in S7.
 
-Build the smallest reliable core first:
-
-```text
-Mission state machine + Agent state + Mission Daemon + GPT persona runtime + Proof gates
-```
-
-Do **not** start with Launcher UI, Unreal UI, Postgres, Centrifugo, or Claude/CLI
-wrappers. Those are consumers/adapters.
-
-## MVP success criteria
-
-The first end-to-end vertical slice works locally when:
-
-```text
-hermes harness blueprint run one_agent_smoke --goal "..." --bind builder=profile:gpt-launcher
-  -> agent receives the objective, acts, returns evidence
-  -> result + stage outcome visible in Mission Control snapshot
-hermes harness blueprint run two_agent_build_verify --goal "..." \
-    --bind builder=profile:gpt-launcher --bind verifier=persona:qa
-  -> builder works, verifier checks, failed verify routes back (bounded), passed -> done
-```
-
-## AAA non-negotiables
-
-See [02 — AAA non-negotiables](02-execution-engine.md#aaa-non-negotiables) for the full,
-current statement (proof is harness-owned evidence the goal owner *adjudicates*; an unmet
-check escalates, it does not dead-end). In short:
-
-- State transitions are explicit and tested.
-- The harness, not the model, owns proof validation; the goal owner adjudicates.
-- Dev claims are backed by commits/diff/test output; visual QA needs passed tests + a
-  screenshot or video.
-- Process failures are incidents/retryable run failures, not product task failures.
-- No duplicate recovery spam; no Claude/CLI wrappers in the core design.
-
----
-
-*Historical note:* Stages 01–77 (the exploratory journey, including the rewrites) were
-removed from the working tree on 2026-06-25 and folded into the three docs above. To read
-the original staging, check out a commit before that date, e.g.
+*Historical note:* Stages 01–77 (the exploratory journey) were removed from the
+working tree on 2026-06-25. To read the original staging, check out a commit
+before that date, e.g.
 `git show baf366cb4:docs/agent-runtime-harness/76-unified-template-instance-chat-goal-model.md`.

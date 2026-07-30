@@ -1,5 +1,13 @@
 # 06 — Recursive Agent-Supervised Execution (implementation-ready)
 
+> **2026-07-30 — describes a removed subsystem.** The supervised-execution
+> machinery this doc designed and verified (`liveness.py`, `no_freeze_monitor.py`,
+> `supervision.py`, `recovery.py`, the ticker, hierarchical budgets, steering
+> fanout limits) was removed by
+> [16 — Mission Lane Removal](16-mission-lane-removal.md) S5–S7. Retained as a
+> design record for its audit ledger, resolved design decisions, and independent
+> verification appendix. Do not implement from it.
+
 Status: **implemented + independently verified** (2026-07-03, v3.1 — AS0–AS7 landed on
 branch `recursive-agent-supervised-execution`, commits `60bec0008`…`bbefde6ea` + the v3.1
 verification commit; suite 1290 collected / green; the §6 verification appendix records

@@ -1,5 +1,12 @@
 # Decision / HUD Simplification — Target Model
 
+> **2026-07-30 — partially describes a removed subsystem.** This doc's deletion
+> targets (`request_test_run`, `propose_stage_plan`, the `delivery` packet,
+> proof-from-trace) were all worker-lane machinery, removed wholesale by
+> [16 — Mission Lane Removal](16-mission-lane-removal.md). Its §Steering sections
+> are the design origin of the **kept** `steered_by` edges;
+> `decision_contract_registry.py` still exists (only its role matrix went in S11).
+
 Status: planning (2026-07-01). **Direction: agents work unbounded; the harness reads the
 work instead of making agents fill a form.** This replaces the decision-contract "HUD
 options" surface (root cause of the `model_invalid_output` failure class).
