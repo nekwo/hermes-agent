@@ -1037,8 +1037,14 @@ def build_parser(parent_subparsers) -> None:
     # turn's clarify_binding block). Unknown/pruned tokens degrade to normal
     # precedence rather than refusing.
     mission_chat_message.add_argument("--clarify-token", dest="clarify_token", default=None, help="Answer a clarify question by its token (clarify_request.clarify_token from the asking turn); binds this reply to the thread the question was asked in")
-    mission_chat_message.add_argument("--task", dest="task_id", default=None)
-    mission_chat_message.add_argument("--goal", dest="goal_id", default=None)
+    # No --task/--goal: the goal/task mission lane is retired (contract 45) and
+    # chat is the only lane. They were not inert residue -- the handler consumed
+    # them by writing instance.current_task_id/goal_id and flipping instance.mode
+    # to the RETIRED "task_bound", so an armed row re-armed retired runtime state
+    # on the operator's next ordinary message. The Launcher stopped emitting them
+    # first (launcher 87957547); this is the lockstep half. `persona instance
+    # steer --goal` is untouched -- goal_id rides the contract-45 wire and the
+    # Launcher groups its agent rooms by it.
     # Default None = "no title opinion": consumed as the fresh thread's title
     # when this send mints one, otherwise the durable "<persona> chat" title
     # stands. A literal default would name every freshly minted thread after it.

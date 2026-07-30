@@ -1202,7 +1202,6 @@ def _publish_persona_chat_projection_event(
     turn_id: str,
     persona_id: str,
     persona_instance_id: str,
-    task_id: str | None,
     active_session_id: str | None,
     native_revision: str | None,
 ) -> bool:
@@ -1226,7 +1225,10 @@ def _publish_persona_chat_projection_event(
         EventLog().append(
             Event(
                 type="persona_chat.projected",
-                task_id=task_id or None,
+                # Chat is the only lane (contract 45): a chat turn has no task
+                # binding to report, so this is a constant rather than an
+                # argv-sourced value that could only ever be None.
+                task_id=None,
                 run_id=None,
                 persona_id=persona_id or None,
                 ts=now(),
@@ -1263,7 +1265,6 @@ def _publish_persona_chat_metadata_event(
     session_id: str,
     persona_id: str,
     persona_instance_id: str,
-    task_id: str | None,
 ) -> bool:
     """Notify stream consumers that SessionDB-only chat metadata changed."""
 
@@ -1271,7 +1272,9 @@ def _publish_persona_chat_metadata_event(
         EventLog().append(
             Event(
                 type="persona_chat.metadata_updated",
-                task_id=task_id or None,
+                # See the projection event above: chat turns carry no task
+                # binding under contract 45.
+                task_id=None,
                 run_id=None,
                 persona_id=persona_id or None,
                 ts=now(),
@@ -1799,13 +1802,11 @@ def _cmd_mission_chat_message(args) -> int:
             print(emit_json(data) if args.json else data["error"])
         return 2
 
-    task_id = safe_assignment_token(getattr(args, "task_id", None))
-    goal_id = safe_assignment_token(getattr(args, "goal_id", None))
-    if task_id or goal_id:
-        instance.current_task_id = task_id or instance.current_task_id
-        instance.goal_id = goal_id or task_id or instance.goal_id
-        instance.mode = "task_bound"
-        instance = instance_store.update(instance)
+    # The retired mission lane's re-entry point used to live here: --task/--goal
+    # wrote instance.current_task_id/goal_id and flipped instance.mode to the
+    # RETIRED "task_bound", then persisted the row. A chat send must never arm
+    # retired runtime state. Both flags are gone from the parser (contract 45);
+    # arming a row is `persona instance steer --goal`, which is untouched.
 
     try:
         _ensure_persona_chat_session(
@@ -2039,7 +2040,6 @@ def _cmd_mission_chat_message(args) -> int:
             turn_id=journal.get("turn_id") or client_message_id,
             persona_id=normalized_persona,
             persona_instance_id=instance.id,
-            task_id=task_id,
             active_session_id=journal.get("active_session_id")
             or _persona_chat_native_tip(session_db, session_id),
             native_revision=journal.get("native_revision")
@@ -2114,7 +2114,6 @@ def _cmd_mission_chat_message(args) -> int:
             turn_id=client_message_id,
             persona_id=normalized_persona,
             persona_instance_id=instance.id,
-            task_id=task_id,
             active_session_id=_persona_chat_native_tip(session_db, session_id),
             native_revision=_persona_chat_native_revision(session_db, session_id),
         )
@@ -2129,8 +2128,11 @@ def _cmd_mission_chat_message(args) -> int:
             # See the projected-replay envelope above: a replay reports the same
             # thread lineage the original turn did.
             "session_established": session_established,
-            "task_id": task_id,
-            "goal_id": goal_id,
+            # Kept because the Launcher parses it (mission_control_bridge.dart
+            # `payload['task_id']`), now an honest constant: chat is the only
+            # lane, so a chat reply has no task binding to report. `goal_id`
+            # dropped alongside it -- no Launcher reply parser ever read it.
+            "task_id": None,
             "client_message_id": client_message_id,
             "execution_state": "completed",
             "kind": "mission_chat_message",
@@ -2235,8 +2237,8 @@ def _cmd_mission_chat_message(args) -> int:
         persona=persona,
         persona_instance_id=instance.id,
         session_id=session_id,
-        task_id=task_id,
-        goal_id=goal_id,
+        # task_id/goal_id intentionally not passed: both are defaulted kwargs and
+        # the retired mission lane was their only source on this path.
         turn_id=safe_assignment_token(client_message_id),
         surface_prompt=getattr(args, "surface_prompt", "") or "",
         limiting_wrapper_active=False,
@@ -2464,8 +2466,8 @@ def _cmd_mission_chat_message(args) -> int:
         persist_tool_turn_actual(
             persona_id=normalized_persona,
             session_id=session_id,
-            task_id=task_id,
-            goal_id=goal_id,
+            # task_id/goal_id intentionally not passed: defaulted kwargs whose
+            # only source on this path was the retired mission lane.
             turn_id=safe_assignment_token(client_message_id),
             model_input=prompt_context.get("final_model_input"),
         )
@@ -2729,8 +2731,9 @@ def _cmd_mission_chat_message(args) -> int:
             # `none` = they landed there by inheritance).
             **({"clarify_binding": clarify_binding} if clarify_binding else {}),
             "active_session_id": active_session_id,
-            "task_id": task_id,
-            "goal_id": goal_id,
+            # See the replay envelope above: kept for the Launcher's reply
+            # parser, constant because chat turns carry no task binding.
+            "task_id": None,
             "relay_chain": list(turn_relay_chain),
             "client_message_id": client_message_id,
             # A checkpointed turn is a SUCCESS with a truncated scope, not a
@@ -2829,7 +2832,6 @@ def _cmd_mission_chat_message(args) -> int:
                 turn_id=stream_emitter.turn_id,
                 persona_id=normalized_persona,
                 persona_instance_id=instance.id,
-                task_id=task_id,
                 active_session_id=active_session_id,
                 native_revision=native_revision,
             )
@@ -2866,7 +2868,6 @@ def _cmd_mission_chat_message(args) -> int:
                     session_id=session_id,
                     persona_id=normalized_persona,
                     persona_instance_id=instance.id,
-                    task_id=task_id,
                 )
         except Exception:
             pass
