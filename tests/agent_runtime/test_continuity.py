@@ -27,8 +27,6 @@ def test_return_summary_posts_bounded_parent_message_and_records_lineage(tmp_pat
         summary=summary,
         proof_ids=proof_ids,
         artifact_refs=artifact_refs,
-        task_id="task_r3",
-        stage_id="investigate",
     )
 
     from hermes_state import SessionDB
@@ -52,7 +50,11 @@ def test_return_summary_posts_bounded_parent_message_and_records_lineage(tmp_pat
     assert "Proof refs:" in messages[0]["content"]
     assert "Artifact refs:" in messages[0]["content"]
     assert [event.type for event in events] == ["steer.returned"]
-    assert events[0].task_id == "task_r3"
+    # S27: the ``task_id`` column and the ``stage_id`` payload key were removed
+    # with the CLI-unreachable parameters that were their only source; there is
+    # no ``Task`` record left for either to name.
+    assert events[0].task_id is None
+    assert "stage_id" not in events[0].payload
     assert events[0].persona_id == "dev"
     assert events[0].payload["result"] == "summary_returned"
     assert events[0].payload["source_node_id"] == child.id
