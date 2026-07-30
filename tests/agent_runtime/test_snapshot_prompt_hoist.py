@@ -19,7 +19,7 @@ import copy
 import json
 
 from agent_runtime import prompt_observability as po
-from agent_runtime.snapshot_audit import snapshot_size_budget
+from tests.agent_runtime.snapshot_bytes import snapshot_size_budget
 
 
 def _skill(name: str, source: str = "persona_definition") -> dict:

@@ -17,7 +17,6 @@ from agent_runtime.self_test_evidence import record_self_test_from_progress
 from agent_runtime.states import RunState, TaskState
 from agent_runtime.store import AgentStore, IncidentStore, RunStore, TaskStore
 from agent_runtime.snapshot import build_snapshot
-from agent_runtime.transitions import apply_transition
 
 
 def make_task(task_id="task_abc", state=TaskState.CREATED):

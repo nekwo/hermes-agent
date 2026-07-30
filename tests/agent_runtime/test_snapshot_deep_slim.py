@@ -20,7 +20,7 @@ from agent_runtime.snapshot import (
     build_snapshot,
     goal_detail_for_task,
 )
-from agent_runtime.snapshot_audit import snapshot_size_budget
+from tests.agent_runtime.snapshot_bytes import snapshot_size_budget
 from agent_runtime.states import TaskState
 from agent_runtime.store import TaskStore
 
