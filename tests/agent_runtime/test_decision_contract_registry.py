@@ -8,7 +8,6 @@ from pathlib import Path
 from agent_runtime.context_builder import build_context
 from agent_runtime.decision_contract_registry import (
     agent_decision_json_schema,
-    allowed_decisions_for_role,
     canonical_role_value,
     contract_hash,
     contract_manifest,
@@ -71,10 +70,22 @@ def test_registry_covers_every_decision_type_and_projects_schema():
     assert DECISION_SCHEMA == agent_decision_json_schema()
 
 
-def test_all_persona_role_tokens_share_the_registry_decisions():
-    expected = frozenset(DecisionType)
+def test_no_role_filtered_decision_surface_survives():
+    """S11 removed the role matrix; S15 removed the no-op shell it left behind.
+
+    Every declared role — enum member, hyphenated custom token, or bare profile —
+    reaches the whole registry, and there is no per-role decision accessor left to
+    reintroduce filtering through.
+    """
+
+    from agent_runtime import decision_contract_registry as registry
+
+    assert not hasattr(registry, "allowed_decisions_for_role")
+    published = set(contract_manifest()["decisions"])
+    assert published == {item.value for item in DecisionType}
     for role in [*AgentRole, "custom-reviewer", "profile"]:
-        assert allowed_decisions_for_role(role) == expected
+        assert set(hud_shape_index_for_stage(role)) <= set(contract_manifest()["hud_shapes"])
+        assert canonical_role_value(role)
 
 
 def test_hud_shapes_are_not_filtered_by_role():

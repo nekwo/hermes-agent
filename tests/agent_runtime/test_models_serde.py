@@ -45,7 +45,7 @@ def test_all_stage_one_models_round_trip():
             created_by="harness",
             created_at=ts,
         ),
-        Event(ts=ts, type="task.created", task_id="task_abc", run_id=None, persona_id=None),
+        Event(ts=ts, type="persona_instance.created", task_id="task_abc", run_id=None, persona_id=None),
         Incident(
             id="inc_1",
             task_id="task_abc",

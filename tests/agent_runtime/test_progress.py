@@ -138,7 +138,7 @@ def test_chat_progress_sink_drops_noise_and_secrets(isolate_agent_runtime_root):
     # Generic progress with no tool/command/reasoning signal is dropped.
     sink.emit("run.progress", {"type": "run.progress", "summary": "Run progress update"})
     # A non-trace event type is ignored entirely.
-    sink.emit("task.transition", {"type": "task.transition"})
+    sink.emit("persona_instance.created", {"type": "persona_instance.created"})
     # Signal-bearing progress is kept but raw secrets are redacted out.
     sink.emit(
         "run.progress",

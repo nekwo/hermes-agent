@@ -13,7 +13,7 @@ def test_run_progress_sink_updates_run_and_appends_safe_event(tmp_path, monkeypa
     sink = RunProgressSink(run_store=store, event_log=EventLog(), run_id=run.id)
 
     sink.emit(
-        "run.model_call.started",
+        "run.progress",
         {
             "state": "waiting_model",
             "prompt": "SECRET",
@@ -25,7 +25,7 @@ def test_run_progress_sink_updates_run_and_appends_safe_event(tmp_path, monkeypa
     )
 
     updated = store.get(run.id)
-    assert updated.progress["type"] == "run.model_call.started"
+    assert updated.progress["type"] == "run.progress"
     assert updated.progress["state"] == "waiting_model"
     assert "prompt" not in updated.progress
     assert "path" not in updated.progress
@@ -33,7 +33,7 @@ def test_run_progress_sink_updates_run_and_appends_safe_event(tmp_path, monkeypa
     assert "summary" not in updated.progress
     assert updated.progress["next_expected"] == "request_qa_review"
     events = EventLog().tail(1)
-    assert events[0].type == "run.model_call.started"
+    assert events[0].type == "run.progress"
     assert events[0].run_id == run.id
     assert updated.last_heartbeat_at >= run.last_heartbeat_at
 

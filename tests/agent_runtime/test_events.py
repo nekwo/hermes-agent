@@ -21,10 +21,10 @@ from agent_runtime.store import TaskStore
 
 def test_event_log_appends_jsonl_and_tails_events(isolate_agent_runtime_root):
     log = EventLog()
-    first = Event(ts=now(), type="task.created", task_id="task_1", run_id=None, persona_id=None)
+    first = Event(ts=now(), type="persona_instance.created", task_id="task_1", run_id=None, persona_id=None)
     second = Event(
         ts=now(),
-        type="task.transition",
+        type="persona_instance.steered",
         task_id="task_1",
         run_id=None,
         persona_id="pm",
@@ -44,7 +44,7 @@ def test_event_log_appends_jsonl_and_tails_events(isolate_agent_runtime_root):
 def test_event_log_for_task_filters_before_decoding_and_preserves_order(isolate_agent_runtime_root):
     log = EventLog()
     for index in range(6):
-        log.append(Event(ts=now(), type="task.created", task_id=f"task_noise_{index}", run_id=None, persona_id=None))
+        log.append(Event(ts=now(), type="persona_instance.created", task_id=f"task_noise_{index}", run_id=None, persona_id=None))
         log.append(
             Event(
                 ts=now(),
@@ -253,11 +253,9 @@ def test_event_log_for_session_type_filter_counts_matches_not_raw_rows(isolate_a
 def test_operator_events_receive_redaction_safe_summaries(isolate_agent_runtime_root):
     log = EventLog()
     samples = [
-        Event(now(), "patch.proposed", "task_1", "run_1", "dev", {"changed_files": ["a.py"]}),
         Event(now(), "repo_bundle.assigned", "task_1", "run_1", "dev", {"repo_bundle_id": "bundle_1", "repo": "hermes-agent", "state": "assigned"}),
         Event(now(), "repo_bundle.updated", "task_1", "run_1", "dev", {"repo_bundle_id": "bundle_1", "repo": "hermes-agent", "state": "running"}),
         Event(now(), "repo_bundle.delivered", "task_1", "run_1", "dev", {"repo_bundle_id": "bundle_1", "repo": "hermes-agent", "state": "delivered_waiting_for_qa", "proof_count": 0, "diff_captured": False}),
-        Event(now(), "role_session.closed", "task_1", "run_1", "qa", {"close_reason": "proof_passed"}),
         Event(now(), "run.opened", "task_1", "run_1", "dev", {"stage_id": "impl"}),
         Event(now(), "run.closed", "task_1", "run_1", "dev", {"state": "completed", "decision_type": "deliver"}),
     ]
@@ -392,7 +390,7 @@ def test_event_log_rejects_payloads_over_4kb_and_does_not_write(isolate_agent_ru
     log = EventLog()
     event = Event(
         ts=now(),
-        type="task.created",
+        type="persona_instance.created",
         task_id="task_1",
         run_id=None,
         persona_id=None,

@@ -221,6 +221,10 @@ def test_recent_events_include_redaction_safe_progress_summary():
 
 
 def test_legacy_proof_event_uses_generic_display_but_keeps_safe_quality_fields():
+    # ``proof.attached`` was de-registered in S15 (no producer survives). This
+    # pins the read side: a HISTORICAL log row carrying a de-registered type
+    # still renders safely — the allowlist is checked on append only, never on
+    # read, so old events never become unreadable.
     ts = now()
     event = Event(
         ts=ts,

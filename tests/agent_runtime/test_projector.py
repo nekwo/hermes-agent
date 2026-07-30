@@ -28,9 +28,9 @@ from test_read_model_slo import SLO_INCREMENTAL_APPLY_MS, _seed_synthetic_runtim
 
 def test_event_log_iter_from_offset_resumes_at_byte_boundary(isolate_agent_runtime_root):
     log = EventLog()
-    log.append(Event(ts=now(), type="task.created", task_id="t1", run_id=None, persona_id=None))
+    log.append(Event(ts=now(), type="persona_instance.created", task_id="t1", run_id=None, persona_id=None))
     first_offset = isolate_agent_runtime_root.joinpath("events.jsonl").stat().st_size
-    log.append(Event(ts=now(), type="task.created", task_id="t2", run_id=None, persona_id=None))
+    log.append(Event(ts=now(), type="persona_instance.created", task_id="t2", run_id=None, persona_id=None))
 
     events = list(log.iter_from_offset(first_offset))
 
