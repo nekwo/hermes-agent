@@ -106,9 +106,12 @@ REMOVED_EVENT_TYPES = frozenset(
 # 159 registered - 67 unemittable at S15, then -2 at S17 (run.heartbeat and
 # run.approved went with their RunStore writers; see
 # tests/agent_runtime/test_s17_run_store_residue_removal.py, which owns that
-# delta). This stays an absolute count on purpose: it is the one assertion that
-# catches a contract silently reappearing.
-SURVIVING_EVENT_COUNT = 90
+# delta), then +3 at S16b (realm.archived, persona_chat.deleted,
+# worktree.orphans_reaped — live emitters whose appends were being refused and
+# swallowed; see tests/agent_runtime/test_s16b_live_event_registration.py).
+# This stays an absolute count on purpose: it is the one assertion that catches
+# a contract silently appearing or disappearing.
+SURVIVING_EVENT_COUNT = 93
 
 
 def test_the_unemittable_event_types_are_no_longer_registered():

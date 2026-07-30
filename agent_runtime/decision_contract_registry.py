@@ -1023,6 +1023,14 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "persona_instance.chat_opened": EventContract("persona_instance.chat_opened", "Persona instance chat opened", ("persona_instance_id", "session_id"), ("persona_id",)),
     "persona_chat.projected": EventContract("persona_chat.projected", "Persona chat turn projection committed", ("persona_instance_id", "root_chat_session_id", "client_message_id", "turn_id", "change_kind"), ("active_session_id", "native_revision")),
     "persona_chat.metadata_updated": EventContract("persona_chat.metadata_updated", "Persona chat session metadata updated", ("persona_instance_id", "root_chat_session_id", "change_kind"), ()),
+    # The operator chat-delete CLI verb (_cmd_persona_chat_delete). It was
+    # emitted but never registered, so the append raised inside its own
+    # try/except and the delete left no durable record while the per-instance
+    # unbind (persona_instance.chat_binding_cleared) did land — a split trail.
+    # Summary fields are the two keys the verb always passes; the three list/
+    # actor fields are details. The persona rides the Event envelope's
+    # persona_id column, not the payload.
+    "persona_chat.deleted": EventContract("persona_chat.deleted", "Persona chat session deleted", ("session_id", "deleted_session"), ("cleared_bindings", "closed_assignment_ids", "requested_by")),
     "persona_instance.profile_updated": EventContract("persona_instance.profile_updated", "Persona instance runtime profile updated", ("persona_instance_id",), ("persona_id", "display_name", "current_chat_goal", "goal_id", "skill_overrides", "provider", "model", "api_mode", "requested_by")),
     "persona_assignment.created": EventContract("persona_assignment.created", "Persona assignment created", ("assignment_id", "persona_instance_id", "kind"), ("state",)),
     "persona_assignment.closed": EventContract("persona_assignment.closed", "Persona assignment closed", ("assignment_id", "state"), ("kind",)),
@@ -1059,6 +1067,12 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "realm.adopted": EventContract("realm.adopted", "Realm adopted", ("realm_id", "name"), ("server_id",)),
     "realm.created": EventContract("realm.created", "Realm created", ("realm_id", "name"), ("server_id",)),
     "realm.updated": EventContract("realm.updated", "Realm updated", ("realm_id", "change"), ("server_id",)),
+    # RealmStore.archive — the one realm mutation whose event was emitted but
+    # never registered, so its append raised and was swallowed by
+    # _append_store_event's best-effort wrapper and the archive stayed invisible
+    # to watermark-gated consumers. ``name`` rides in detail_fields because
+    # _append_store_event drops None values. Mirrors workspace.archived.
+    "realm.archived": EventContract("realm.archived", "Realm archived", ("realm_id",), ("name",)),
     # Activation events carry realm_id/workspace_id when a scope is activated
     # and {"cleared": true} when the active pointer is cleared — so the ids
     # live in detail_fields, not summary_fields (Stage 12 slice D validates
@@ -1141,4 +1155,15 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     # envelope, not the payload. Emitted only when ``read_model.delta_patches``
     # is on (default off → this type never appears).
     "state.patched": EventContract("state.patched", "State patched", ("entity", "id", "op"), ("changed",)),
+    # The LIVE orphan-worktree janitor (delivery_directive.reap_orphan_worktrees,
+    # two production callers: harness_doctor and the `worktree reap` CLI verb).
+    # Emitted but never registered, so every destructive reap appended nothing —
+    # the operator lost the only durable record of what was removed. Emitted on
+    # the destructive path only (dry_run previews are write-free), so both counts
+    # are always present; `captured` lists the reap-captured patch filenames and
+    # is bounded to 20 at the emitter. NOT registered alongside it:
+    # worktree.task_reaped and bundle.worktree_reaped, whose emitters sit in the
+    # Task-declared-directive residue half of that module awaiting retirement —
+    # registering them would re-create the unemittable-contract debt S15 cleared.
+    "worktree.orphans_reaped": EventContract("worktree.orphans_reaped", "Orphan worktrees reaped", ("reaped_count", "kept_count"), ("captured",)),
 }

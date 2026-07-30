@@ -108,8 +108,10 @@ LIVE_RUN_STORE_METHODS = ("get", "update", "close_run", "cancel", "list_for_task
 
 DE_REGISTERED_RUN_EVENT_TYPES = frozenset({"run.heartbeat", "run.approved"})
 
-# 92 registered - 2 de-registered.
-SURVIVING_EVENT_COUNT = 90
+# The ABSOLUTE registered-contract count has a single owner:
+# tests/agent_runtime/test_s15_event_contract_pruning.SURVIVING_EVENT_COUNT.
+# This file asserts only its own delta — two duplicated totals would just mean
+# two places to edit on every registry change, and one of them going stale.
 
 
 def _seed_run(*, run_id: str = "run_s17", persona_id: str = "dev", task_id: str = "task_s17") -> AgentRun:
@@ -196,7 +198,6 @@ def test_the_surviving_run_store_surface_is_exactly_the_read_and_close_path():
 def test_the_orphaned_run_event_contracts_are_de_registered():
     assert DE_REGISTERED_RUN_EVENT_TYPES & ALLOWED_EVENT_TYPES == frozenset()
     assert DE_REGISTERED_RUN_EVENT_TYPES & set(event_catalog()) == frozenset()
-    assert len(event_catalog()) == SURVIVING_EVENT_COUNT
     assert set(event_catalog()) == ALLOWED_EVENT_TYPES
 
     with pytest.raises(ValueError):
