@@ -25,13 +25,8 @@ def _rows(value: Any) -> list:
     return []
 
 
-READ_MODEL_SCHEMA_VERSION = 1
+READ_MODEL_SCHEMA_VERSION = 2
 ROW_TABLES = (
-    "goals",
-    "stage_verification",
-    "runs",
-    "proofs",
-    "incidents",
     "agent_instances",
     "operator_channels",
 )
@@ -92,15 +87,8 @@ class ReadModel:
                 )
                 self._write_misc(conn, "snapshot", payload)
                 for key, value in payload.items():
-                    if key not in {"goals", "runs", "proofs", "incidents", "persona_instances", "operator_channels"}:
+                    if key not in {"persona_instances", "operator_channels"}:
                         self._write_misc(conn, str(key), value)
-                # S4: goals / runs / incidents / persona_instances /
-                # operator_channels ship as id-keyed maps; the writers consume
-                # ordered rows, so read the map values.
-                self._write_goals(conn, _rows(payload.get("goals")))
-                self._write_runs(conn, _rows(payload.get("runs")))
-                self._write_proofs(conn, payload.get("proofs") or [])
-                self._write_incidents(conn, _rows(payload.get("incidents")))
                 self._write_agent_instances(conn, _rows(payload.get("persona_instances")) or _rows(payload.get("agent_instances")))
                 self._write_operator_channels(conn, _rows(payload.get("operator_channels")))
             except Exception:
@@ -156,6 +144,18 @@ class ReadModel:
         return str(row[0]) if row is not None else "missing"
 
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(agent_instances)")}
+        if "task_id" in columns:
+            conn.execute("DROP TABLE agent_instances")
+        conn.executescript(
+            """
+            DROP TABLE IF EXISTS goals;
+            DROP TABLE IF EXISTS stage_verification;
+            DROP TABLE IF EXISTS runs;
+            DROP TABLE IF EXISTS proofs;
+            DROP TABLE IF EXISTS incidents;
+            """
+        )
         schema = resources.files("agent_runtime").joinpath("read_model_schema.sql").read_text(encoding="utf-8")
         conn.executescript(schema)
 
@@ -165,131 +165,19 @@ class ReadModel:
             (projection, _json(payload)),
         )
 
-    def _write_goals(self, conn: sqlite3.Connection, goals: list[Any]) -> None:
-        for index, goal in enumerate(item for item in goals if isinstance(item, dict)):
-            goal_id = _first_text(goal, "goal_id", "id", "task_id") or f"goal_{index}"
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO goals(
-                    id, state, title, workspace_id, realm_id, updated_at, payload
-                ) VALUES(?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    goal_id,
-                    _first_text(goal, "state", "status") or "unknown",
-                    _optional_text(goal.get("title")),
-                    _optional_text(goal.get("workspace_id")),
-                    _optional_text(goal.get("realm_id")),
-                    _optional_text(goal.get("updated_at") or goal.get("last_activity_at")),
-                    _json(goal),
-                ),
-            )
-            self._write_stage_verification(conn, goal_id, goal)
-
-    def _write_stage_verification(self, conn: sqlite3.Connection, goal_id: str, goal: dict[str, Any]) -> None:
-        raw = goal.get("stage_verification")
-        stages = (raw or {}).get("stages") if isinstance(raw, dict) else []
-        if not isinstance(stages, list):
-            return
-        for index, stage in enumerate(item for item in stages if isinstance(item, dict)):
-            stage_id = _first_text(stage, "stage_id", "id") or f"stage_{index}"
-            observed = stage.get("observed") if isinstance(stage.get("observed"), dict) else {}
-            authoritative = stage.get("authoritative") if isinstance(stage.get("authoritative"), dict) else {}
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO stage_verification(
-                    goal_id, stage_id, owner, observed_status, observed_proof_count,
-                    authoritative_status, authoritative_proof_count, tamper_flag, payload
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    goal_id,
-                    stage_id,
-                    _optional_text(stage.get("owner")),
-                    _first_text(observed, "status"),
-                    _optional_int(observed.get("proof_count")),
-                    _first_text(authoritative, "status"),
-                    _optional_int(authoritative.get("proof_count")),
-                    1 if bool(stage.get("tamper_flag") or stage.get("tampered")) else 0,
-                    _json(stage),
-                ),
-            )
-
-    def _write_runs(self, conn: sqlite3.Connection, runs: list[Any]) -> None:
-        for index, run in enumerate(item for item in runs if isinstance(item, dict)):
-            run_id = _first_text(run, "run_id", "id") or f"run_{index}"
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO runs(
-                    id, task_id, persona_id, state, stage_id, updated_at, payload
-                ) VALUES(?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    run_id,
-                    _optional_text(run.get("task_id")),
-                    _optional_text(run.get("persona_id")),
-                    _first_text(run, "state", "status") or "unknown",
-                    _optional_text(run.get("stage_id")),
-                    _optional_text(run.get("finished_at") or run.get("last_heartbeat_at") or run.get("started_at")),
-                    _json(run),
-                ),
-            )
-
-    def _write_proofs(self, conn: sqlite3.Connection, proofs: list[Any]) -> None:
-        for index, proof in enumerate(item for item in proofs if isinstance(item, dict)):
-            proof_id = _first_text(proof, "proof_id", "id") or f"proof_{index}"
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO proofs(
-                    id, task_id, stage_id, type, status, created_by, payload
-                ) VALUES(?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    proof_id,
-                    _optional_text(proof.get("task_id")),
-                    _optional_text(proof.get("stage_id")),
-                    _optional_text(proof.get("type")),
-                    _optional_text(proof.get("status")),
-                    _optional_text(proof.get("created_by")),
-                    _json(proof),
-                ),
-            )
-
-    def _write_incidents(self, conn: sqlite3.Connection, incidents: list[Any]) -> None:
-        for index, incident in enumerate(item for item in incidents if isinstance(item, dict)):
-            incident_id = _first_text(incident, "incident_id", "id") or f"incident_{index}"
-            state = _first_text(incident, "state", "status")
-            if state is None and "is_open" in incident:
-                state = "open" if incident.get("is_open") else "closed"
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO incidents(
-                    id, task_id, kind, state, payload
-                ) VALUES(?, ?, ?, ?, ?)
-                """,
-                (
-                    incident_id,
-                    _optional_text(incident.get("task_id")),
-                    _optional_text(incident.get("kind")),
-                    state or "unknown",
-                    _json(incident),
-                ),
-            )
-
     def _write_agent_instances(self, conn: sqlite3.Connection, instances: list[Any]) -> None:
         for index, instance in enumerate(item for item in instances if isinstance(item, dict)):
             instance_id = _first_text(instance, "persona_instance_id", "instance_id", "id") or f"instance_{index}"
             conn.execute(
                 """
                 INSERT OR REPLACE INTO agent_instances(
-                    instance_id, persona_id, status, task_id, payload
-                ) VALUES(?, ?, ?, ?, ?)
+                    instance_id, persona_id, status, payload
+                ) VALUES(?, ?, ?, ?)
                 """,
                 (
                     instance_id,
                     _optional_text(instance.get("persona_id")),
                     _first_text(instance, "status", "state") or "unknown",
-                    _optional_text(instance.get("task_id")),
                     _json(instance),
                 ),
             )

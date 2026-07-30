@@ -80,7 +80,7 @@ from .worker_sessions import WorkerSessionStore, worker_session_summary
 STAGE_VERIFICATION_STAGE_CAP = 12
 STAGE_VERIFICATION_PROOF_ID_CAP = 8
 STAGE_VERIFICATION_PATH_CAP = 6
-# Residue-slim R5(a): cap the in-head ``mission_flow_timeline.items`` at the FRONT
+# Residue-slim R5(a): cap the retired in-head flow timeline at the FRONT
 # window (the office renders ``items.take(5)``; keeping the front 8 preserves that
 # render byte-for-byte with margin). The evicted tail — the newest coalesced
 # progress events, the bulk of this projection's bytes — is accounted (count +
@@ -124,8 +124,7 @@ ARCHIVED_TASKS_REF_RECENT_CAP = 25
 # fields (the top-level ``role_envelopes`` / ``role_checklists`` sections feed
 # the roster; the goal-row copies are dead). They leave the head and are served
 # on demand by ``harness goal detail <task_id> --json``. The KEPT mission-level
-# fields (``mission_level_state`` → office/roster/page; ``mission_flow_timeline``
-# / ``proof_gate_state`` / ``stage_verification`` → office scene) stay in the
+# fields that previously fed the retired mission office stay in the
 # head because they render on every frame. Archive-never-delete: nothing leaves
 # disk — the detail is rebuilt from the same stores + EventLog on demand.
 GOAL_DETAIL_ONLY_FIELDS = frozenset(
@@ -453,9 +452,7 @@ def _build_snapshot_uncoalesced(
 ) -> dict:
     _build_started = time.perf_counter()
     _sections_ms: dict[str, int] = {}
-    run_store = run_store or RunStore()
     agent_store = agent_store or AgentStore()
-    incident_store = incident_store or IncidentStore()
     # A snapshot calls for_task/for_session/tail dozens of times on the same log;
     # CachedEventLog reads events.jsonl once and serves all of them from memory.
     event_log = event_log or CachedEventLog()
@@ -465,10 +462,9 @@ def _build_snapshot_uncoalesced(
     # a pure read reused later (build_observability / parity watermark).
     with _timed_section(_sections_ms, "events"):
         recent_events = event_log.tail(20)
-    worker_session_store = worker_session_store or WorkerSessionStore(event_log=event_log)
     tasks = []
-    runs = run_store.list_all()
-    workers = worker_session_store.list_all()
+    runs = []
+    workers = []
     cfg = load_agent_runtime_config()
     # S2 read-model: history is always evicted from the steady-state frame and
     # served via paged on-demand queries (S7-B RULING-0: no legacy full-in-frame
@@ -485,16 +481,11 @@ def _build_snapshot_uncoalesced(
     # recursively coercing the entire closed tail (thousands of files on a
     # mature runtime) merely to count it; the store still validates each JSON
     # row and materializes every open incident used by routing/observability.
-    incidents, incidents_evicted_count = incident_store.list_open_with_closed_count()
-    role_envelope_store = RoleEnvelopeStore(event_log=event_log)
-    role_checklist_store = RoleChecklistStore(event_log=event_log)
-    repo_bundle_store = RepoBundleStore(event_log=event_log)
-    runtime_instance_store = GoalRuntimeInstanceStore(event_log=event_log)
-    role_envelopes = role_envelope_store.list_all()
-    role_checklists = role_checklist_store.list_all()
-    repo_bundles = repo_bundle_store.list_all()
-    runtime_instances = runtime_instance_store.list_all()
-    archived_tasks = _archived_task_summaries()
+    incidents = []
+    role_envelopes = []
+    role_checklists = []
+    repo_bundles = []
+    runtime_instances = []
     workspace_store = WorkspaceStore()
     realm_store = RealmStore()
     workspaces = workspace_store.list_all(include_archived=True)
@@ -532,20 +523,10 @@ def _build_snapshot_uncoalesced(
     available_personas = _available_persona_summary(agents)
     proofs = []
     self_tests = []
-    for task in tasks:
-        self_tests.extend(SelfTestEvidenceStore(event_log=event_log).list_for_task(task.id))
-    active_runs = [run for run in runs if run.state in ACTIVE_RUN_STATES]
-    active_workers = worker_session_store.find_active()
-    running_runs = [run for run in active_runs if run.state == RunState.RUNNING]
-    queued_runs = [run for run in active_runs if run.state == RunState.QUEUED]
-    waiting_runs = [run for run in active_runs if run.state in {RunState.WAITING_ON_TOOL, RunState.WAITING_ON_APPROVAL}]
-    dirty_state = build_dirty_state(tasks=tasks, runs=runs, incidents=incidents, workers=workers, runtime_instances=runtime_instances)
     persona_assignments = []
     persona_instances = []
     topology_persona_instances = PersonaInstanceStore(event_log=event_log).list_all()
     personas_by_id = {str(getattr(agent, "id", "") or ""): agent for agent in agents}
-    stage_verification_accountant = ProjectionAccountant("stage_verification")
-    flow_timeline_accountant = ProjectionAccountant("mission_flow_timeline")
     if persona_instance_runtime_enabled(cfg):
         instance_store = PersonaInstanceStore(event_log=event_log)
         persona_instances = instance_store.derive_from_workers(agents, workers)
@@ -563,7 +544,6 @@ def _build_snapshot_uncoalesced(
     # closed incident is history, evicted to the paged query. The full
     # ``incidents`` list still feeds summary/observability/dirty/tasks — only the
     # ``incidents`` frame key is filtered to open.
-    incident_frame_rows = incidents
     # S4: the frame carries these as id-keyed maps (``_keyed`` below). The row
     # LISTS are still needed as an ordered input to the operator-channel
     # projection (``run_summaries`` feeds the goal-turn flow), so build them once
@@ -573,10 +553,7 @@ def _build_snapshot_uncoalesced(
     # live lane/goal). Historical/terminal runs are old residue — evicted to a
     # count + pointer, fetched on demand via ``harness run list``. No disk
     # change: the run store keeps every row.
-    run_rows = [_run_summary(r) for r in runs]
-    active_run_id_set = {r.id for r in active_runs}
-    frame_run_rows = [row for row in run_rows if row.get("run_id") in active_run_id_set]
-    incident_rows = [_incident_summary(i) for i in incident_frame_rows]
+    run_rows = []
     migration = migration_status()
     # Hoisted out of the ``data`` literal so their cost is attributable in
     # ``sections_ms`` (both were profiled hot: prompt_observability ~5s, the
@@ -611,20 +588,8 @@ def _build_snapshot_uncoalesced(
         "event_contract_version": CONTRACT_SCHEMA_VERSION,
         "generated_at": now(),
         "summary": {
-            "open_tasks": len([t for t in tasks if t.state not in {TaskState.DONE, TaskState.CANCELLED}]),
-            "active_runs": len(active_runs),
-            "running_runs": len(running_runs),
-            "queued_runs": len(queued_runs),
-            "waiting_runs": len(waiting_runs),
-            "active_worker_sessions": len(active_workers),
-            "blocked_tasks": len([t for t in tasks if t.state == TaskState.BLOCKED]),
-            "open_incidents": len([i for i in incidents if i.closed_at is None]),
-            "dirty": dirty_state["dirty"],
-            "dirty_summary": dirty_state["summary"],
+            "persona_instances": len(topology_persona_instances),
         },
-        "dirty_state": dirty_state,
-        "foreground_runtime": runtime_instances_summary(runtime_instances),
-        "execution_mode": execution_mode,
         # Single runtime-default authority, resolved + provenance-stamped, as a
         # typed top-level block so surfaces (launcher model-switcher caption,
         # `hermes harness config show`) report what agents actually follow
@@ -639,7 +604,6 @@ def _build_snapshot_uncoalesced(
         "runtime_config": effective_config_summary(cfg, migration=migration),
         "migration": migration,
         "prompt_observability": prompt_observability_section,
-        "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=None, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
         "repo_scopes": _repo_scopes_summary(),
         # S4: ONE keyed ``goals`` map is the wire entity (operator decision:
         # GOAL is the wire name). The old ``tasks`` wire section retires; every
@@ -653,33 +617,6 @@ def _build_snapshot_uncoalesced(
         # under one mission), which would collapse rows. Each row still carries
         # ``id`` (goal identity) + ``goal_id`` for goal-addressed consumers; the
         # launcher folds the map's values, so the map key is never a lookup key.
-        "goals": _keyed(
-            [
-                _goal_head(_goal_projection_from_task(
-                    t,
-                    [],
-                    tasks,
-                    incidents,
-                    runs,
-                    event_log.for_task(t.id, limit=200),
-                    workers=workers,
-                    run_store=run_store,
-                    self_tests=SelfTestEvidenceStore(event_log=event_log).list_for_task(t.id),
-                    role_envelopes=[item for item in role_envelopes if item.task_id == t.id],
-                    role_checklists=[item for item in role_checklists if item.task_id == t.id],
-                    persona_assignments=[item for item in persona_assignments if item.task_id == t.id],
-                    repo_bundles=[item for item in repo_bundles if item.task_id == t.id],
-                    runtime_instances=[item for item in runtime_instances if item.task_id == t.id],
-                    persona_instances=topology_persona_instances,
-                    stage_verification_accountant=stage_verification_accountant,
-                    flow_timeline_accountant=flow_timeline_accountant,
-                    workspaces=workspaces,
-                    event_log=event_log,
-                ))
-                for t in tasks
-            ],
-            "task_id",
-        ),
         # Rows carry a resolved ``active`` flag alongside the top-level
         # ``active_*_id`` keys — consumers (launcher scope switcher) key
         # selection off the row flag and must not re-derive it.
@@ -709,40 +646,9 @@ def _build_snapshot_uncoalesced(
         "active_workspace_id": workspace_store.active_id(),
         "active_realm_id": realm_store.active_id(),
         "warnings": _snapshot_warnings(persona_assignments),
-        "archived_tasks": _archived_tasks_frame(archived_tasks),
         "agents": agent_summaries,
         "available_personas": available_personas,
         "runtime_paths_diagnostic": _runtime_paths_diagnostic(available_personas),
-        "worker_sessions": [worker_session_summary(worker) for worker in workers],
-        "role_envelopes": [role_envelope_summary(item, checklist_store=role_checklist_store) for item in role_envelopes],
-        "role_checklists": [checklist_summary(item) for item in role_checklists],
-        "repo_bundles": [repo_bundle_summary(item) for item in repo_bundles],
-        "bundle_queue": bundle_queue_summary(repo_bundles),
-        "runtime_instances": [runtime_instance_summary(item) for item in runtime_instances],
-        "runs": _keyed(frame_run_rows, "run_id"),
-        "incidents": _keyed(incident_rows, "incident_id"),
-        "proofs": [_proof_summary(p) for p in proofs],
-        "self_tests": [self_test_summary(item) for item in self_tests],
-    }
-    # Honest accounting for the closed incidents evicted from the ``incidents``
-    # section — a typed pointer, never a silent absence. Only OPEN incidents
-    # remain in ``incidents`` as live state; every closed one is history-only
-    # (open-only retention, operator decision 2026-07-16).
-    data["incidents_history_ref"] = {
-        "evicted": True,
-        "closed_evicted": True,
-        "count": incidents_evicted_count,
-        "fetch": "harness incident list --state closed --json",
-    }
-    # S8: historical (non-active) runs are evicted from the ``runs`` frame map —
-    # a typed pointer accounts them, never a silent absence. Served on demand by
-    # the paged ``harness run list`` query.
-    data["runs_history_ref"] = {
-        "evicted": True,
-        "count": len(run_rows) - len(frame_run_rows),
-        "active_count": len(frame_run_rows),
-        "total_count": len(run_rows),
-        "fetch": "harness run list --json",
     }
     if persona_instance_runtime_enabled(cfg):
         data["persona_instance_runtime"] = {
@@ -816,10 +722,6 @@ def _build_snapshot_uncoalesced(
         data["operator_channels"] = _keyed(
             [
                 *live_operator_channels,
-                *_archived_operator_channels(
-                    archived_tasks,
-                    live_task_ids=live_channel_task_ids,
-                ),
             ],
             "channel_id",
         )
@@ -859,10 +761,6 @@ def _build_snapshot_uncoalesced(
         data["persona_instance_runtime"] = {"enabled": False}
         completeness = {}
         drop_samples = []
-    completeness["stage_verification"] = stage_verification_accountant.summary()
-    drop_samples.extend(stage_verification_accountant.drop_samples())
-    completeness["mission_flow_timeline"] = flow_timeline_accountant.summary()
-    drop_samples.extend(flow_timeline_accountant.drop_samples())
     # Guarantee the documented section keys exist even when a lane was skipped
     # (e.g. persona_chat when persona-instance runtime is disabled) so consumers
     # can rely on a stable shape.
@@ -932,9 +830,8 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         # DELETED; ``persona_instances`` / ``agents`` rows evict the heavy
         # tool-detail payloads behind a typed ``visibility_ref`` (fetched via
         # ``harness persona-instance detail``) and ``agent_hud_state`` is RETIRED;
-        # ``goals[].mission_flow_timeline.items`` is capped to the front window
-        # (accounted, ``harness goal history`` pointer).
-        "contract_version": 44,
+        # 45 removes mission rows while retaining chat/runtime graph projections.
+        "contract_version": 45,
         "generated_at": data.get("generated_at"),
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
         "redaction_observed": _redaction_observed(data),
@@ -952,11 +849,6 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         "resolution": resolution_payload(resolution),
         "profile": _runtime_profile_identity(),
         "capabilities": [
-            "goal_create",
-            "mission_level_state",
-            "mission_flow_timeline",
-            "proof_gate_state",
-            "stage_verification",
             "operator_capabilities",
             "server_minted_chat_sessions",
         ],
@@ -2755,8 +2647,6 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
                 role_checklists=role_checklists or [],
             ),
         ),
-        "mission_flow_timeline": _mission_flow_timeline(task, events or [], accountant=flow_timeline_accountant),
-        "proof_gate_state": _proof_gate_state(task, proofs),
         "operator_capabilities": _operator_capabilities(task, next_action, gate),
     }
 
@@ -3258,23 +3148,6 @@ def _mission_level_state(task, *, active_runs, active_workers, events, runtime_i
         "active_stage_id": getattr(task, "current_stage_id", None),
         "actors": [],
         "updated_at": getattr(task, "updated_at", None),
-    }
-def _mission_flow_timeline(task, events, *, accountant: ProjectionAccountant | None = None) -> dict:
-    return {
-        "schema_version": 1,
-        "mission_id": task.id,
-        "active_stage_id": getattr(task, "current_stage_id", None),
-        "items": [],
-        "items_total": 0,
-        "items_evicted": 0,
-    }
-def _proof_gate_state(task, proofs) -> dict:
-    return {
-        "schema_version": 1,
-        "status": "not_applicable",
-        "requirements": [],
-        "missing": [],
-        "captured": [],
     }
 def _roll_up_gate_state(required_statuses: list[str], *, waived: bool) -> str:
     """Roll per-requirement statuses into a spec gate_state value.

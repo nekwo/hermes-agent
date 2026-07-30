@@ -25,28 +25,20 @@ def _task() -> Task:
 
 
 def test_snapshot_builds_without_stage_graph(isolate_agent_runtime_root) -> None:
-    TaskStore().create(_task())
-
     snapshot = build_snapshot()
-    row = next(item for item in snapshot["goals"].values() if item["task_id"] == "task_snapshot")
-
-    assert "mission_plan" not in row
-    assert "agent_topology" not in row.get("mission_level_state", {})
-    assert "agent_topology" not in snapshot["parity"]["capabilities"]
+    assert snapshot["parity"]["contract_version"] == 45
+    assert "goals" not in snapshot
+    assert "boards" in snapshot
 
 
 def test_snapshot_stage_projections_are_empty_after_graph_removal(isolate_agent_runtime_root) -> None:
-    TaskStore().create(_task())
-
-    row = next(item for item in build_snapshot()["goals"].values() if item["task_id"] == "task_snapshot")
-
-    assert row["mission_flow_timeline"]["items"] == []
-    assert row["proof_gate_state"]["status"] == "not_applicable"
-    assert "stage_streams" not in row
+    snapshot = build_snapshot()
+    for key in ("goals", "stage_verification", "runs", "proofs", "incidents"):
+        assert key not in snapshot
 
 
 def test_write_snapshot_remains_importable_and_persists(isolate_agent_runtime_root) -> None:
     result = write_snapshot(build_snapshot())
 
-    assert isinstance(result["goals"], dict)
+    assert result["parity"]["contract_version"] == 45
     assert paths.snapshot_path().exists()

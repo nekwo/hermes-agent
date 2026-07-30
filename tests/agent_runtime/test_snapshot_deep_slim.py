@@ -44,36 +44,13 @@ def _seed_goal(store: TaskStore, task_id: str) -> None:
 # Slice 1 — goal head / on-demand detail.
 # --------------------------------------------------------------------------- #
 def test_goal_frame_row_is_head_only(isolate_agent_runtime_root):
-    store = TaskStore()
-    _seed_goal(store, "g_head")
-    snap = build_snapshot(task_store=store)
-    head = snap["goals"]["g_head"]
-
-    # The head carries identity + the mission-level fields the always-visible
-    # surfaces render, plus a typed detail pointer.
-    for kept in ("task_id", "id", "state", "mission_level_state", "mission_flow_timeline", "proof_gate_state", "detail_ref"):
-        assert kept in head, kept
-    # No heavy detail field leaks back into the head.
-    for field in GOAL_DETAIL_ONLY_FIELDS:
-        assert field not in head, field
-    ref = head["detail_ref"]
-    assert ref["evicted"] is True
-    assert ref["task_id"] == "g_head"
-    assert "harness goal detail" in ref["fetch"]
-    assert set(ref["fields"]) == set(GOAL_DETAIL_ONLY_FIELDS)
+    snap = build_snapshot()
+    assert "goals" not in snap
+    assert snap["parity"]["contract_version"] == 45
 
 
 def test_goal_detail_served_on_demand_carries_every_evicted_field(isolate_agent_runtime_root):
-    store = TaskStore()
-    _seed_goal(store, "g_detail")
-    build_snapshot(task_store=store)
-    detail = goal_detail_for_task("g_detail")
-    assert detail is not None
-    for field in GOAL_DETAIL_ONLY_FIELDS:
-        assert field in detail, field
-    # Head fields survive in the detail too (it is the full projection).
-    assert detail["task_id"] == "g_detail"
-    # An unknown id is an honest miss, never a fabricated empty goal.
+    assert "goals" not in build_snapshot()
     assert goal_detail_for_task("g_missing") is None
 
 
@@ -121,15 +98,9 @@ def test_skills_catalog_by_hash_resolves_persisted_list(isolate_agent_runtime_ro
 # Slice 4a — runs frame keeps only active runs.
 # --------------------------------------------------------------------------- #
 def test_runs_frame_is_active_only_with_pointer(isolate_agent_runtime_root):
-    store = TaskStore()
-    _seed_goal(store, "g_runs")
-    snap = build_snapshot(task_store=store)
-    assert isinstance(snap["runs"], dict)
-    ref = snap["runs_history_ref"]
-    assert ref["evicted"] is True
-    assert ref["active_count"] == len(snap["runs"])
-    assert ref["total_count"] == ref["active_count"] + ref["count"]
-    assert "harness run list" in ref["fetch"]
+    snap = build_snapshot()
+    assert "runs" not in snap
+    assert "runs_history_ref" not in snap
 
 
 # --------------------------------------------------------------------------- #
@@ -192,17 +163,12 @@ def test_chat_contexts_keeps_live_roster_row(isolate_agent_runtime_root):
 # snapshot_audit.py). A section re-inflating past these ceilings turns CI red.
 # --------------------------------------------------------------------------- #
 def test_snapshot_size_budget_holds_after_deep_slim(isolate_agent_runtime_root):
-    store = TaskStore()
-    for i in range(3):
-        _seed_goal(store, f"g_budget_{i}")
-    snap = build_snapshot(task_store=store)
+    snap = build_snapshot()
     violations = snapshot_size_budget(
         snap,
         budgets={
-            "goals": 40 * 1024,
             "operator_channels": 60 * 1024,
             "prompt_observability": 80 * 1024,
-            "runs": 40 * 1024,
             "total": 700 * 1024,
         },
     )
