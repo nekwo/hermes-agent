@@ -289,3 +289,25 @@ the same sentence.
 6. Every doc and skill describing the removed lane is updated in the same stage that
    removes it — a skill describing a retired contract makes agents behave wrong even when
    the code is right.
+
+## Post-removal follow-ups (2026-07-30 audit)
+
+- **Persona prompt-builder lane deleted.** `persona_runtime.build_system_prompt` had zero
+  production callers after S5/S8 (the live chat lane builds its prompt inline in
+  `_persona_chat_system_prompt`); it, `_load_persona_system_prompt`,
+  `personas.load_bundled_prompt`, the helpers only it used (`_recommended_skill_guidance`,
+  `_specialist_dev_guidance`, `_normal_worker_flow_guidance`, the `_simplified_contract_*`
+  trio), and all five `agent_runtime/prompts/*.md` files (the four role prompts plus
+  `shared_harness_overlay.md`) are removed. The overlay's board sentence is pinned on the
+  chat prompt path only now (`test_board_agent_tools.py::test_board_sentence_present_in_chat_prompt`);
+  its anti-Kanban rule governed the deleted GOAL PIPELINE and needed no migration. The
+  bundled-prompt pinning tests in `test_personas.py` / `test_persona_prompts.py` /
+  `test_persona_skill_policy.py` / `test_decision_contract_registry.py` /
+  `test_decision_schema.py` were retargeted or removed in the same commit;
+  `test_persona_skill_guidance.py` went with its helper.
+  `_safe_read_soul_overlay` and `prompt_sources.resolve_persona_system_prompt_path` remain —
+  both have live chat-lane / profile-binding callers.
+- **`delivery_directive.py` ruled mixed live/residue** — see the liveness ruling in
+  [delivery-directive.md](delivery-directive.md): the orphan-worktree janitor and
+  promotion-record reads are live; the Task-declared directive path and terminal-settle
+  executors are unswept residue awaiting a future retirement pass.

@@ -24,7 +24,6 @@ from agent_runtime.models import AgentRun
 from types import SimpleNamespace
 
 Task = SimpleNamespace
-from agent_runtime.persona_runtime import build_system_prompt
 from agent_runtime.personas import AgentRole
 from agent_runtime.states import RunState, TaskState
 from hermes_time import now
@@ -124,26 +123,6 @@ def test_qa_registry_exposes_nested_and_enum_choices():
     assert screenshot["enum_choices"]["mcp_server"] == ["launcher_qa"]
     assert verdict["enum_choices"]["verdict"] == ["approved", "needs_fixes", "blocked"]
     assert "coverage" in verdict["allowed_payload_keys"]
-
-
-def test_prompt_contract_includes_registry_hash():
-    from agent_runtime.models import AgentPersona
-
-    persona = AgentPersona(
-        id="dev",
-        display_name="Dev",
-        role="dev",
-        model="test",
-        provider="test",
-        api_mode="codex_responses",
-        toolsets=[],
-        system_prompt_path="agent_runtime/prompts/dev.md",
-    )
-
-    prompt = build_system_prompt(persona)
-
-    assert contract_hash() in prompt
-    assert "request_test_run: required [stage_id]" in prompt
 
 
 def test_event_allowlist_is_catalog_projected():

@@ -8,7 +8,6 @@ import pytest
 pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
 
 from agent_runtime.models import AgentPersona
-from agent_runtime.persona_runtime import build_system_prompt
 from agent_runtime.personas import AgentRole, effective_toolsets, validate_toolsets
 from tests.agent_runtime.persona_samples import sample_personas
 
@@ -32,67 +31,6 @@ def _persona(**overrides) -> AgentPersona:
 def test_dev_role_allows_skills_toolset_for_alice_style_loading():
     assert "skills" in validate_toolsets(AgentRole.DEV, ["file", "skills", "cronjob"])
     assert "skills" in effective_toolsets(_persona())
-
-
-def test_harness_system_prompt_lists_recommended_skills_without_preloading_bodies():
-    prompt = build_system_prompt(_persona(), task_id="task-123")
-
-    assert "# Recommended Harness Persona Skills" in prompt
-    assert "Recommended skills:" in prompt
-    assert "- aaa-feature-delivery" in prompt
-    assert "- test-driven-development" in prompt
-    assert "skill use is the default for non-trivial Harness ticks" in prompt
-    assert "start with skill_search(query=...)" in prompt
-    assert "Two loaded skills is the normal maximum" in prompt
-    assert "Never preload or bulk-load the whole manifest" in prompt
-    assert "skill_search(query=...)" in prompt
-    assert "skills_list/skill_view" in prompt
-    assert "do not shell out to `hermes skills search`" in prompt
-    assert "Loaded Harness persona skill" not in prompt
-    assert "Loaded by Agent Runtime Harness persona skill manifest" not in prompt
-
-
-def test_configured_system_prompt_is_real_and_contract_section_is_generated(tmp_path):
-    configured = tmp_path / "custom-dev.md"
-    configured.write_text("# Custom Dev Identity\nStable invariant.\n", encoding="utf-8")
-
-    prompt = build_system_prompt(
-        _persona(system_prompt_path=str(configured), skills=[]),
-        task_id="run_custom_prompt",
-    )
-
-    assert "# Custom Dev Identity" in prompt
-    assert "# AgentDecision Payload Contracts" in prompt
-    assert "Registry contract_hash:" in prompt
-
-
-def test_root_node_required_policy_loads_mission_lead_body(
-    tmp_path, monkeypatch
-):
-    import agent.skill_utils as skill_utils
-    import tools.skills_tool as skills_tool
-
-    shared = tmp_path / "shared"
-    manifest = shared / "harness-mission-lead" / "SKILL.md"
-    manifest.parent.mkdir(parents=True)
-    manifest.write_text(
-        "---\nname: harness-mission-lead\nmetadata:\n  hermes:\n"
-        "    surfaces: [mission_worker]\n    modes: [root_node]\n"
-        "    load_policy: required_preload\n---\n# Required Lead Body\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(skill_utils, "get_shared_skills_dir", lambda: shared)
-    monkeypatch.setattr(skill_utils, "get_all_skills_dirs", lambda: [shared])
-    monkeypatch.setattr(skills_tool, "SKILLS_DIR", shared)
-
-    prompt = build_system_prompt(
-        _persona(skills=["harness-mission-lead"]),
-        task_id="run_root",
-        root_node_mode=True,
-    )
-
-    assert "Runtime policy requires" in prompt
-    assert "# Required Lead Body" in prompt
 
 
 def test_harness_personas_expose_mission_dev_and_qa_skills():

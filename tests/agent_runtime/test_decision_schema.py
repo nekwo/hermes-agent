@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 
 import pytest
 
@@ -109,13 +108,3 @@ def test_decision_types_are_not_filtered_by_supervisor_role():
     validate_decision_for_role(close, AgentRole.ALICE_SUPERVISOR)
     validate_decision_for_role(hand_off, AgentRole.ALICE_SUPERVISOR)
     validate_decision_for_role(qa_verdict, AgentRole.ALICE_SUPERVISOR)
-
-
-def test_neko_prompt_matches_mission_lead_role_boundary():
-    prompt = (Path(__file__).resolve().parents[2] / "agent_runtime" / "prompts" / "alice_supervisor.md").read_text(encoding="utf-8")
-
-    assert "Neko Mission Lead" in prompt
-    assert "scope_route" in prompt
-    assert "Allowed AgentDecision types" in prompt
-    assert "propose_acceptance" not in prompt
-    assert "report_qa_verdict" not in prompt
