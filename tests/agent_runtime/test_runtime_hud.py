@@ -62,7 +62,6 @@ def test_resolve_situational_hud_bound_lane_carries_mission_and_thread_count():
         roster=[instance, peer, other],
         task=task,
         goal_task=goal_task,
-        proof_store=None,
     )
     assert hud["mission"]["title"] == "Neko default graph live token burn"
     assert hud["mission"]["state"] == "queued"

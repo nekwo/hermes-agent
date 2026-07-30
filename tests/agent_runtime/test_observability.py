@@ -34,11 +34,6 @@ class Store:
         return open_items, len(items) - len(open_items)
 
 
-class EmptyProofStore:
-    def list_for_task(self, task_id):
-        return []
-
-
 class EmptyAgentStore:
     def list_all(self):
         return []
@@ -502,7 +497,6 @@ def test_snapshot_embeds_observability_envelope():
         task_store=Store([task]),
         run_store=Store([]),
         agent_store=EmptyAgentStore(),
-        proof_store=EmptyProofStore(),
         incident_store=Store([]),
     )
 

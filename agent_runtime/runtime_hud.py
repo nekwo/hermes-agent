@@ -592,7 +592,6 @@ def resolve_situational_hud(
     identity_roster: Iterable[Any] | None = None,
     task: Any = None,
     goal_task: Any = None,
-    proof_store: Any = None,
     board: dict[str, Any] | None = None,
     turn_budget: dict[str, Any] | None = None,
     capability: dict[str, Any] | None = None,
@@ -1055,7 +1054,6 @@ def _board_digest_for_workspace(workspace_id: str | None) -> dict[str, Any] | No
 def situational_hud_for_instance(
     instance: Any,
     *,
-    proof_store: Any = None,
     turn_budget: dict[str, Any] | None = None,
     capability: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -1138,7 +1136,6 @@ def situational_hud_for_instance(
             identity_roster=identity_roster,
             task=_safe_get(getattr(instance, "current_task_id", None)),
             goal_task=_safe_get(getattr(instance, "goal_id", None)),
-            proof_store=proof_store,
             board=_board_digest_for_workspace(scope_workspace_id),
             turn_budget=turn_budget,
             capability=capability,
@@ -1147,10 +1144,8 @@ def situational_hud_for_instance(
         return {}
 
 
-def situational_hud_content_for_instance(instance: Any, *, proof_store: Any = None) -> str:
+def situational_hud_content_for_instance(instance: Any) -> str:
     """Rendered-block form of `situational_hud_for_instance` (same authority);
     kept for callers that only need the fed text."""
 
-    return render_situational_hud_block(
-        situational_hud_for_instance(instance, proof_store=proof_store)
-    )
+    return render_situational_hud_block(situational_hud_for_instance(instance))
