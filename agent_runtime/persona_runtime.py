@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import time
 from urllib.parse import urlparse
 from typing import Callable, Protocol, TYPE_CHECKING
 
@@ -52,7 +51,7 @@ from .profile_runner import (
     RunBudgetExceeded,
     _blocked_tool_names_with_registry_hygiene,
 )
-from .progress import ChatProgressSink, RunProgressSink
+from .progress import ChatProgressSink
 from .repo_context import RepoExecutionContext, capture_repo_baseline
 from .store import RunStore, _safe_session_id
 from .tool_permissions import (
@@ -1122,23 +1121,6 @@ def _apply_llm_metadata(run: AgentRun, result: AgentRunResult, *, timing: dict[s
     if timing_map:
         llm["timing"] = timing_map
     run.llm = {key: value for key, value in llm.items() if value is not None}
-
-
-def _emit_timing(progress_sink: RunProgressSink, timing_key: str, started: float, *, status: str) -> int:
-    duration_ms = max(0, int((time.perf_counter() - started) * 1000))
-    progress_sink.emit(
-        "run.progress",
-        {
-            "type": "run.progress",
-            "phase": "timing",
-            "step": timing_key,
-            "status": status,
-            "summary": f"{timing_key.replace('_', ' ').title()} {status} in {duration_ms}ms.",
-            "duration_ms": duration_ms,
-            "timing_key": f"{timing_key}_ms",
-        },
-    )
-    return duration_ms
 
 
 def _record_timing_value(timing_map: dict[str, int], key: object, value: object) -> None:

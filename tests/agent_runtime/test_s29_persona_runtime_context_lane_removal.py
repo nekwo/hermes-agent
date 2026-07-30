@@ -172,12 +172,16 @@ def test_no_module_level_name_is_unreachable_from_the_external_surface():
         "mission_chat_operating_skills",
     }
     #: NOT part of this cut — reported, not removed. See the docstring above.
+    #: RETARGETED at S32, which verified the thirteen individually: ``_emit_timing``
+    #: was proven caller-free and removed, so it is no longer listed here. The
+    #: twelve below are KEPT WITH CAUSE, not still-unverified — see
+    #: tests/agent_runtime/test_s32_persona_runtime_run_lane_residue.py, which
+    #: owns that delta and records why each stayed.
     run_lane_metadata_cluster = {
         "_apply_llm_metadata",
         "_attach_repo_baseline",
         "_decision_metric_reason",
         "_decision_metrics",
-        "_emit_timing",
         "_finish_reason_from_result",
         "_record_timing_value",
         "_repo_context_for_render",
