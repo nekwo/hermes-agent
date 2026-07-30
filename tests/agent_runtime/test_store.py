@@ -239,7 +239,6 @@ def test_run_store_update_sanitizes_session_id_before_persist_and_close_event():
     runs = RunStore()
     run = seed_run()
     run.session_id = "session_secret_token_C:/Users/example/config"
-    run.llm = {"session_id": "session_secret_token_C:/Users/example/config", "total_tokens": 1}
 
     runs.update(run)
     saved = runs.get(run.id)
@@ -247,7 +246,6 @@ def test_run_store_update_sanitizes_session_id_before_persist_and_close_event():
     event = EventLog().tail(1)[0]
 
     assert saved.session_id is None
-    assert "session_id" not in saved.llm
     assert closed.session_id is None
     assert "session_id" not in event.payload
 

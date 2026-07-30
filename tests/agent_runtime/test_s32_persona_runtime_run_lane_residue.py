@@ -19,27 +19,27 @@ per name — and acts only where the evidence is complete.
   off the ``.progress`` line — whose sibling ``ChatProgressSink`` is LIVE on the
   chat lane and must survive the drop.
 
-**Kept, with cause — the nine-name ``_apply_llm_metadata`` sub-cluster.**
+**Kept here, retired at S34 — the nine-name ``_apply_llm_metadata``
+sub-cluster.**
 
-``_apply_llm_metadata`` has no PRODUCTION caller, but it is not residue this
-sweep may cut, for two independent reasons:
+At S32, ``_apply_llm_metadata`` had no PRODUCTION caller but was not residue
+that sweep could cut, for two independent reasons:
 
-1. It is the SOLE WRITER of ``AgentRun.llm`` — a declared model field that four
+1. It was the SOLE WRITER of ``AgentRun.llm`` — a declared model field that four
    live modules read (``observability``, ``status``, ``store``, and
    ``worker_sessions``). ``store`` goes further: a whole decision-recording
    branch is gated on ``run.llm`` already BEING a dict, which only this writer
    can make true. Removing the only writer of a field live readers consume is a
    lane-level ruling about ``AgentRun.llm`` itself, not a helper cut — and two of
    those readers are owned by a concurrent session this round.
-2. It has eight live call sites across two test modules
+2. It had eight call sites across two test modules
    (``test_persona_runtime_fake``, ``test_run_budget``) that are its OWN unit
    tests — they pin the timing count/total/max accumulation and the run-record
    accounting-block lift. They cannot be retargeted onto a surviving seam, only
    deleted, and this wave does not delete coverage to make a removal fit.
 
-Its eight callees are therefore not proven dead either: each is reachable from
-it. They are pinned below by name so the next pass does not re-litigate them
-one at a time.
+Its eight callees were reachable only from that sole writer. S34 owns the
+lockstep field-retirement ruling and removes all nine together.
 
 **Deferred here, retired at S33 — the three ``RepoExecutionContext``-typed
 helpers.**
@@ -69,8 +69,8 @@ REMOVED_RUN_LANE_SYMBOLS = ("_emit_timing",)
 #: keeps a live sibling.
 REMOVED_RUN_LANE_IMPORTS = ("RunProgressSink", "time")
 
-#: KEPT: the sole writer of ``AgentRun.llm`` and the callees exclusive to it.
-KEPT_LLM_METADATA_CLUSTER = (
+#: Deferred at S32 and retired together at S34.
+REMOVED_LLM_METADATA_CLUSTER = (
     "_apply_llm_metadata",
     "_decision_metric_reason",
     "_decision_metrics",
@@ -111,18 +111,17 @@ def test_the_shared_progress_import_line_keeps_its_live_sibling():
     assert "ChatProgressSink(" in inspect.getsource(persona_runtime)
 
 
-def test_the_llm_metadata_cluster_is_kept_because_it_writes_a_field_live_code_reads():
-    """Not a removal this sweep may make: ``_apply_llm_metadata`` is the ONLY
-    writer of ``AgentRun.llm``, a declared field four live modules read."""
+def test_the_llm_metadata_cluster_was_retired_with_its_writerless_field():
+    """S34 removed the sole writer, its exclusive callees, field, and readers
+    as one lockstep contract."""
 
-    for name in KEPT_LLM_METADATA_CLUSTER:
-        assert callable(getattr(persona_runtime, name)), name
+    for name in REMOVED_LLM_METADATA_CLUSTER:
+        assert not hasattr(persona_runtime, name), name
 
     from agent_runtime.models import AgentRun
 
-    assert "llm" in AgentRun.__dataclass_fields__
-    # One writer, and it is this module's.
-    assert inspect.getsource(persona_runtime).count("run.llm = ") == 1
+    assert "llm" not in AgentRun.__dataclass_fields__
+    assert "run.llm" not in inspect.getsource(persona_runtime)
 
 
 def test_the_repo_execution_cluster_was_retired_by_its_follow_up():
@@ -156,7 +155,7 @@ def test_no_module_level_name_is_unreachable_from_the_external_surface():
         "mission_chat_admission_line",
         "mission_chat_operating_skills",
     }
-    kept_with_cause = set(KEPT_LLM_METADATA_CLUSTER)
+    kept_with_cause: set[str] = set()
 
     tree = ast.parse(inspect.getsource(persona_runtime))
     defs: dict[str, ast.AST] = {}

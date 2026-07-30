@@ -394,8 +394,9 @@ _DEFAULT_UNIT: dict[RunBudgetKind, str] = {
 ACCOUNTING_ROW_CAP = 32
 
 #: The key the block is filed under everywhere it is carried: the run's
-#: ``profile_timing``, the run record's ``llm``, the mission-chat turn journal
-#: record, and the chat-history projection rows built from it. One spelling.
+#: ``profile_timing``, the mission-chat turn journal record, and the
+#: chat-history projection rows built from it. One spelling. S34 retired the
+#: writerless ``AgentRun.llm`` carrier.
 ACCOUNTING_KEY = "run_budget"
 
 

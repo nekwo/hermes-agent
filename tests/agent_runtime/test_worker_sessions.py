@@ -220,11 +220,10 @@ def test_terminal_run_update_marks_worker_idle_and_clears_active_run(isolate_age
     assert workers.find_active(task_id=run.task_id) == []
 
 
-def test_worker_run_refresh_does_not_double_count_llm_budget(isolate_agent_runtime_root):
+def test_worker_run_refresh_does_not_invent_retired_llm_budget(isolate_agent_runtime_root):
     runs = RunStore()
     workers = WorkerSessionStore()
     run = _seed_run("dev", "task_worker_budget", stage_id="stage_1", session_id="session_safe")
-    run.llm = {"total_tokens": 120, "tool_turns": 3}
     runs.update(run)
     worker = workers.open(task_id=run.task_id, persona=_persona(), stage_id=run.stage_id, session_id=run.session_id)
     workers.assign_run(worker.id, run)
@@ -233,10 +232,10 @@ def test_worker_run_refresh_does_not_double_count_llm_budget(isolate_agent_runti
     completed = runs.close_run(run.id, state=RunState.COMPLETED, final_decision={"type": "request_test_run"})
     second = workers.update_after_run(worker.id, completed, close_reason="tick_completed", count_decision=False)
 
-    assert first.token_budget_used == 120
-    assert first.tool_budget_used == 3
-    assert second.token_budget_used == 120
-    assert second.tool_budget_used == 3
+    assert first.token_budget_used == 0
+    assert first.tool_budget_used == 0
+    assert second.token_budget_used == 0
+    assert second.tool_budget_used == 0
     assert second.decision_count == 1
 
 

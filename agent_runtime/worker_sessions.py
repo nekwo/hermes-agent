@@ -220,10 +220,6 @@ class WorkerSessionStore:
             if count_decision:
                 worker.decision_count += 1
             worker.proof_count += len(proof_ids_added or [])
-            llm = run.llm if isinstance(run.llm, dict) else {}
-            if count_decision:
-                worker.token_budget_used += _safe_int(llm.get("total_tokens"))
-                worker.tool_budget_used += _safe_int(llm.get("tool_turns"))
             progress = run.progress if isinstance(run.progress, dict) else {}
             if progress.get("loop_warning") or progress.get("severity") == "critical":
                 worker.watchdog_warning_count += 1
@@ -589,13 +585,6 @@ def _safe_token(value: Any) -> str | None:
         return None
     cleaned = "".join(ch if ch.isalnum() or ch in "_.:-" else "_" for ch in text)
     return cleaned[:128] or None
-
-
-def _safe_int(value: Any) -> int:
-    try:
-        return max(0, int(value or 0))
-    except (TypeError, ValueError):
-        return 0
 
 
 def _age_seconds(reference_time, timestamp) -> float | None:

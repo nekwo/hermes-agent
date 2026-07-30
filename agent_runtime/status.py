@@ -104,7 +104,7 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
         "repo_locks": repo_lock_summary(),
         "runtime_instances": runtime_instances_summary(runtime_instances),
         "lanes": runtime_instances_summary(runtime_instances)["lanes"],
-        "swarm_budget": _swarm_budget_summary(runs, cfg),
+        "swarm_budget": _swarm_budget_summary(cfg),
     }
     if persona_instance_runtime_enabled(cfg):
         instance_store = PersonaInstanceStore(event_log=event_log)
@@ -171,34 +171,15 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
     return data
 
 
-def _swarm_budget_summary(runs, cfg) -> dict:
-    total_tokens = 0
-    api_calls = 0
-    by_task: dict[str, dict[str, int]] = {}
-    for run in runs:
-        llm = getattr(run, "llm", None) if isinstance(getattr(run, "llm", None), dict) else {}
-        tokens = int(llm.get("total_tokens") or 0)
-        calls = int(llm.get("api_calls") or 0)
-        total_tokens += tokens
-        api_calls += calls
-        task_id = str(getattr(run, "task_id", "") or "")
-        if task_id:
-            entry = by_task.setdefault(task_id, {"total_tokens": 0, "api_calls": 0})
-            entry["total_tokens"] += tokens
-            entry["api_calls"] += calls
+def _swarm_budget_summary(cfg) -> dict:
     swarm = getattr(cfg, "swarm", None)
     soft_tokens = int(getattr(swarm, "global_token_soft_limit", 0) or 0)
     hard_tokens = int(getattr(swarm, "global_token_hard_limit", 0) or 0)
     soft_calls = int(getattr(swarm, "global_api_call_soft_limit", 0) or 0)
     hard_calls = int(getattr(swarm, "global_api_call_hard_limit", 0) or 0)
-    state = "ok"
-    if (hard_tokens and total_tokens >= hard_tokens) or (hard_calls and api_calls >= hard_calls):
-        state = "hard_limit"
-    elif (soft_tokens and total_tokens >= soft_tokens) or (soft_calls and api_calls >= soft_calls):
-        state = "soft_limit"
     return {
-        "state": state,
-        "global": {"total_tokens": total_tokens, "api_calls": api_calls},
+        "state": "ok",
+        "global": {"total_tokens": 0, "api_calls": 0},
         "limits": {
             "global_token_soft_limit": soft_tokens,
             "global_token_hard_limit": hard_tokens,
@@ -207,7 +188,7 @@ def _swarm_budget_summary(runs, cfg) -> dict:
             "per_lane_token_limit": int(getattr(swarm, "per_lane_token_limit", 0) or 0),
             "per_lane_api_call_limit": int(getattr(swarm, "per_lane_api_call_limit", 0) or 0),
         },
-        "by_task": by_task,
+        "by_task": {},
     }
 
 

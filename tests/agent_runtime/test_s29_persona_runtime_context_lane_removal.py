@@ -170,20 +170,9 @@ def test_no_module_level_name_is_unreachable_from_the_external_surface():
     #: NOT part of this cut — reported, not removed. See the docstring above.
     #: RETARGETED at S32, which verified the thirteen individually: ``_emit_timing``
     #: was proven caller-free and removed, so it is no longer listed here. The
-    #: nine below were KEPT WITH CAUSE, not still-unverified — see
-    #: tests/agent_runtime/test_s32_persona_runtime_run_lane_residue.py, which
-    #: owns that delta and records why each stayed.
-    run_lane_metadata_cluster = {
-        "_apply_llm_metadata",
-        "_decision_metric_reason",
-        "_decision_metrics",
-        "_finish_reason_from_result",
-        "_record_timing_value",
-        "_safe_base_url_host",
-        "_safe_nonnegative_int",
-        "_safe_run_budget_block",
-        "_safe_timing_map",
-    }
+    #: S32 verified the nine-name LLM metadata cluster; S34 later retired it
+    #: with its writerless field, so no reported-not-removed roots remain.
+    run_lane_metadata_cluster: set[str] = set()
 
     tree = ast.parse(inspect.getsource(persona_runtime))
     defs: dict[str, ast.AST] = {}

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from urllib.parse import urlparse
 from typing import Callable, Protocol, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -33,7 +32,7 @@ from .mcp_admission import (
     scope_toolsets_to_admission,
 )
 from .mcp_lane import mission_chat_mcp_lane_line
-from .models import AgentPersona, AgentRun
+from .models import AgentPersona
 from .mission_chat_clarify import MissionChatClarifyCapture
 from .mission_chat_workdir import mission_chat_workdir_for_persona
 from .personas import all_registered_toolsets, blocked_tool_names, effective_toolsets, role_from_persona
@@ -52,7 +51,6 @@ from .profile_runner import (
     _blocked_tool_names_with_registry_hygiene,
 )
 from .progress import ChatProgressSink
-from .store import _safe_session_id
 from .tool_permissions import (
     ChatToolPermissionStore,
     extra_blocked_tools_for_permission_mode,
@@ -1019,192 +1017,6 @@ def _augment_chat_capabilities(persona: AgentPersona, toolsets: list[str]) -> li
             continue
         augmented.append(toolset)
     return augmented
-
-
-def _apply_llm_metadata(run: AgentRun, result: AgentRunResult, *, timing: dict[str, int] | None = None) -> None:
-    run.session_id = _safe_session_id(result.session_id) or _safe_session_id(run.session_id)
-    messages = result.messages
-    tool_turns = sum(1 for msg in messages if isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("tool_calls"))
-    final_response = result.final_response
-    llm = {
-        "provider": result.provider,
-        "model": result.model,
-        "base_url_host": _safe_base_url_host(result.base_url),
-        "session_id": run.session_id,
-        "api_calls": result.api_calls,
-        "tool_turns": tool_turns,
-        "input_tokens": result.input_tokens,
-        "output_tokens": result.output_tokens,
-        "total_tokens": result.total_tokens,
-        "latency_ms": result.latency_ms,
-        "finish_reason": _finish_reason_from_result(result.raw),
-        "response_len": len(final_response) if isinstance(final_response, str) else None,
-        "decision_metrics": _decision_metrics(run, result, tool_turns=tool_turns),
-    }
-    timing_map = _safe_timing_map(getattr(run, "llm", None))
-    for key, value in (timing or {}).items():
-        _record_timing_value(timing_map, key, value)
-    profile_timing = getattr(result, "profile_timing", None)
-    run_budget = None
-    if isinstance(profile_timing, dict):
-        # ``run_budget`` is the ONE structured entry in an otherwise
-        # ``_ms``/``_count`` integer map, so ``_record_timing_value`` filters it
-        # out by design — and the run record therefore lost the only answer to
-        # "what bounded this run?". Lift it onto ``run.llm`` as its own key: the
-        # timing map keeps its integer contract, and nothing has to smuggle a
-        # nested dict through a filter written for scalars.
-        run_budget = _safe_run_budget_block(profile_timing.get("run_budget"))
-        for key, value in profile_timing.items():
-            timing_key = key if str(key).startswith("profile_") else f"profile_{key}"
-            _record_timing_value(timing_map, timing_key, value)
-    if run_budget is None:
-        # A later result without an accounting block must not erase the block an
-        # earlier one recorded — the same carry-forward the timing map gets.
-        previous = getattr(run, "llm", None)
-        if isinstance(previous, dict):
-            run_budget = _safe_run_budget_block(previous.get("run_budget"))
-    llm["run_budget"] = run_budget
-    if result.latency_ms is not None:
-        _record_timing_value(timing_map, "profile_runner_ms", result.latency_ms)
-        if "provider_call_ms" not in timing_map:
-            _record_timing_value(timing_map, "provider_call_ms", result.latency_ms)
-    if timing_map:
-        llm["timing"] = timing_map
-    run.llm = {key: value for key, value in llm.items() if value is not None}
-
-
-def _record_timing_value(timing_map: dict[str, int], key: object, value: object) -> None:
-    if not isinstance(key, str) or not key.endswith(("_ms", "_count")):
-        return
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return
-    if parsed < 0:
-        return
-    safe_key = key[:64]
-    if safe_key.endswith("_count"):
-        previous = timing_map.get(safe_key)
-        timing_map[safe_key] = (previous if isinstance(previous, int) and previous >= 0 else 0) + parsed
-        return
-    previous = timing_map.get(safe_key)
-    if isinstance(previous, int):
-        base = safe_key[:-3]
-        count_key = f"{base}_count"[:64]
-        total_key = f"{base}_total_ms"[:64]
-        max_key = f"{base}_max_ms"[:64]
-        previous_count = timing_map.get(count_key)
-        previous_total = timing_map.get(total_key)
-        previous_max = timing_map.get(max_key)
-        if not isinstance(previous_count, int) or previous_count < 1:
-            previous_count = 1
-        if not isinstance(previous_total, int) or previous_total < previous:
-            previous_total = previous
-        if not isinstance(previous_max, int):
-            previous_max = previous
-        timing_map[count_key] = previous_count + 1
-        timing_map[total_key] = previous_total + parsed
-        timing_map[max_key] = max(previous_max, parsed)
-    timing_map[safe_key] = parsed
-
-
-def _safe_run_budget_block(value: object) -> dict[str, object] | None:
-    """The run's WHOLE budget accounting block, kept structured.
-
-    Delegates to ``run_budget.safe_accounting_block`` — ONE reader for the block
-    at every persistence boundary (run record, mission-chat turn journal,
-    chat-history projection). This used to be a local copy of that bounding
-    logic; a second copy is how the two boundaries start disagreeing about what
-    the block IS, which is the defect ``run_budget`` exists to retire. Kept as a
-    module-local seam because callers/tests patch it here.
-    """
-
-    from .run_budget import safe_accounting_block
-
-    return safe_accounting_block(value)
-
-
-def _safe_timing_map(value: object) -> dict[str, int]:
-    if not isinstance(value, dict):
-        return {}
-    raw = value.get("timing")
-    if not isinstance(raw, dict):
-        return {}
-    result: dict[str, int] = {}
-    for key, item in raw.items():
-        if not isinstance(key, str) or not (key.endswith("_ms") or key.endswith("_count")):
-            continue
-        try:
-            parsed = int(item)
-        except (TypeError, ValueError):
-            continue
-        if parsed >= 0:
-            result[key[:64]] = parsed
-    return result
-
-
-def _decision_metrics(run: AgentRun, result: AgentRunResult, *, tool_turns: int) -> dict[str, object]:
-    progress = run.progress if isinstance(getattr(run, "progress", None), dict) else {}
-    read_search_count = _safe_nonnegative_int(progress.get("read_search_count"))
-    proof_count = _safe_nonnegative_int(progress.get("proof_count"))
-    patch_count = _safe_nonnegative_int(progress.get("patch_count"))
-    test_count = _safe_nonnegative_int(progress.get("test_count"))
-    packet_repair_count = _safe_nonnegative_int(progress.get("packet_repair_count") or progress.get("repair_count"))
-    classification = "necessary_progress"
-    if str(progress.get("loop_warning") or "") == "read_search_without_patch_threshold":
-        classification = "possible_loop"
-    elif str(progress.get("status") or "") in {"blocked", "failed"} or progress.get("blocker_kind"):
-        classification = "blocked_environment"
-    elif packet_repair_count:
-        classification = "contract_repair"
-    return {
-        "classification": classification,
-        "api_calls": _safe_nonnegative_int(result.api_calls),
-        "tool_turns": max(0, int(tool_turns or 0)),
-        "read_search_count": read_search_count,
-        "proof_count": proof_count,
-        "patch_count": patch_count,
-        "test_count": test_count,
-        "packet_repair_count": packet_repair_count,
-        "new_evidence_count": sum(1 for item in (proof_count, patch_count, test_count, packet_repair_count) if item > 0),
-        "reason": _decision_metric_reason(classification),
-    }
-
-
-def _decision_metric_reason(classification: str) -> str:
-    return {
-        "possible_loop": "read/search budget warning without matching patch progress",
-        "blocked_environment": "run progress reported blocked or failed status",
-        "contract_repair": "packet or contract repair progress was recorded",
-        "necessary_progress": "run produced bounded decision metadata without loop/blocker signal",
-    }.get(classification, "run classified from redaction-safe counters")
-
-
-def _safe_nonnegative_int(value) -> int:
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return 0
-    return parsed if parsed >= 0 else 0
-
-def _safe_base_url_host(base_url: str | None) -> str | None:
-    if not base_url:
-        return None
-    parsed = urlparse(str(base_url))
-    return parsed.hostname
-
-
-def _finish_reason_from_result(result: dict | object) -> str | None:
-    if not isinstance(result, dict):
-        return None
-    raw = result.get("turn_exit_reason")
-    if isinstance(raw, str) and "finish_reason=" in raw:
-        return raw.split("finish_reason=", 1)[1].split(")", 1)[0]
-    messages = result.get("messages") if isinstance(result.get("messages"), list) else []
-    for msg in reversed(messages):
-        if isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("finish_reason"):
-            return str(msg.get("finish_reason"))
-    return None
 
 
 def _safe_read_soul_overlay(

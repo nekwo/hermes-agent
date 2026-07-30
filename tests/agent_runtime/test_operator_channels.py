@@ -823,7 +823,6 @@ def _dev_run_summary(run_id: str, *, started: str, finished: str, **overrides):
         "decision_summary": f"Handed off the Petdex menu ({run_id}).",
         "decision_rationale": None,
         "reasoning_summary": f"Reviewed the Petdex widget tree before patching ({run_id}).",
-        "llm": {"model": "gpt-5.5", "input_tokens": 1000, "output_tokens": 200, "latency_ms": 900},
         "has_error": False,
     }
     run.update(overrides)
@@ -891,7 +890,6 @@ def test_goal_conversation_projects_turns_and_tool_calls_as_flow_messages():
     assert "Reviewed the Petdex widget tree" in thinking["display_text"]
     turn = by_kind["turn"]
     assert turn["display_title"] == "Turn"
-    assert turn["llm"]["model"] == "gpt-5.5"
     assert turn["refs"]["decision_type"] == "hand_off"
     assert turn["refs"]["run_id"] == "run_a"
 

@@ -1209,10 +1209,6 @@ def _conversation_turn_messages(
                 "redaction_status": "safe",
                 "refs": {**refs, **({"decision_type": decision_type} if decision_type else {})},
             }
-            llm = run.get("llm")
-            if isinstance(llm, dict) and llm:
-                # Already allowlisted by the snapshot's _safe_llm.
-                turn_message["llm"] = llm
             duration_ms = run.get("duration_ms")
             if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool):
                 turn_message["duration_ms"] = int(duration_ms)

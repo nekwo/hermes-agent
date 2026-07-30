@@ -1,10 +1,11 @@
 """The chat lane's run record: ``run_budget`` on the mission-chat turn journal.
 
-A goal/task run gets an ``AgentRun`` and the accounting block lands on
-``run.llm["run_budget"]`` (wave 4). A pure **chat** turn gets no run record at
-all — ``runs/`` is the goal/task lane — so the block reached the live envelope,
-was read once by whoever was watching, and then evaporated. "Why was that reply
-short?" had no durable answer five seconds after the turn settled.
+The retired goal/task lane once copied this block onto
+``AgentRun.llm["run_budget"]``; S34 removed that writerless field. A pure
+**chat** turn never had an ``AgentRun`` — ``runs/`` belonged to the goal/task
+lane — so the block reached the live envelope, was read once by whoever was
+watching, and then evaporated. "Why was that reply short?" had no durable
+answer five seconds after the turn settled.
 
 The mission-chat turn journal IS the chat lane's run record, so the block lives
 there, under the SAME key and in the SAME verbatim shape every other carrier
