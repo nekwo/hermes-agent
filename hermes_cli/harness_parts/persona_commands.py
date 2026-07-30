@@ -84,8 +84,12 @@ def _cmd_persona_tool_diff(args) -> int:
             repo_scope=args.repo_scope,
             workdir=args.workdir,
             session_id=args.session_id,
-            task_id=args.task_id,
-            goal_id=args.goal_id,
+            # S27: no ``task_id``/``goal_id``. Their ``--task``/``--goal`` flags
+            # were the only writers and nothing emitted them (the Launcher's
+            # permission-preview argv never carried either), so this preview
+            # could only ever correlate against a mission record deleted in S8.
+            # The fields themselves stay on ToolVisibilityOptions -- the CHAT
+            # lane fills them from the live persona-instance row.
             # This command IS the harness lane; say so rather than letting the
             # lane be inferred from argv.
             entry_point_lane=HARNESS_LANE,

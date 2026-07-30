@@ -813,8 +813,6 @@ def build_parser(parent_subparsers) -> None:
     persona_tool_diff = persona_subs.add_parser("tool-diff", help="Show resolved model tools and blocked tools for one persona")
     persona_tool_diff.add_argument("persona_id", help="Persona id or alias: neko, dev, launcher-dev, backend-dev, qa")
     persona_tool_diff.add_argument("--session-id", default=None)
-    persona_tool_diff.add_argument("--task", dest="task_id", default=None)
-    persona_tool_diff.add_argument("--goal", dest="goal_id", default=None)
     persona_tool_diff.add_argument("--permission-mode", default="profile_default")
     persona_tool_diff.add_argument("--repo-scope", default=None)
     persona_tool_diff.add_argument("--workdir", default=None)
