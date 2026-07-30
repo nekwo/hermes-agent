@@ -3986,7 +3986,11 @@ def _queue_free_floating_assignment(
         "assignment_id": assignment.id,
         "persona_instance_id": assignment.persona_instance_id,
         "persona_id": normalized_persona,
-        "task_id": assignment.task_id,
+        # S31: see the runner's frame. This copy read `assignment.task_id`, but
+        # the spec below is built with `task_id=None` -- so it was equally
+        # constant, and on the auto_run path the runner's `data.update` wrote
+        # its own None straight over it. The FIELD stays (create_or_resume and
+        # the free-floating close paths select on it); only the wire key goes.
         "state": assignment.state,
         "kind": assignment.kind,
         "evidence_kind": assignment.evidence_kind,
@@ -5746,7 +5750,10 @@ def _run_free_floating_assignment_once(
             "turn_id": stream_emitter.turn_id,
             "client_message_id": client_message_id,
             "run_ids": [],
-            "task_id": None,
+            # S31: no task binding key -- the free-floating half of S30's reap.
+            # It emitted a constant None into the SAME Launcher terminal parser
+            # the mission-chat lane uses, whose typed field for it was retired
+            # first (launcher 23bd05c6). Audited both repos: no reader remains.
             "input_tokens": getattr(chat_result, "input_tokens", None),
             "output_tokens": getattr(chat_result, "output_tokens", None),
             "total_tokens": getattr(chat_result, "total_tokens", None),

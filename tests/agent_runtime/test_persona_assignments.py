@@ -3124,7 +3124,12 @@ def test_free_floating_auto_run_streams_ndjson_and_final_payload(
     assert lines[-1]["execution_state"] == "completed"
     assert lines[-1]["reply"] == "Hello"
     assert lines[-1]["run_ids"] == []
-    assert lines[-1]["task_id"] is None
+    # S31: `task_id` no longer rides this frame at all. It was a constant None
+    # here (both emitters wrote one), pinned by this line as present-and-None;
+    # with the Launcher's reader retired (23bd05c6) the key itself went. Flipped
+    # to the same absence shape `turn_elements` uses above -- a strictly
+    # stronger assertion than "present and None".
+    assert "task_id" not in lines[-1]
     assert lines[-1]["assignment_id"]
     assert lines[-1]["persona_instance_id"] == "personainst_dev"
     assert lines[-1]["client_message_id"] == "client_1"
