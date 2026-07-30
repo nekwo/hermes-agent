@@ -4,7 +4,6 @@ from hermes_time import now
 
 from agent_runtime.context_requests import (
     add_context_request,
-    fulfilled_context_bundles,
     has_unresolved_context_request,
 )
 from agent_runtime.decision_schema import AgentDecision, DecisionType
@@ -30,8 +29,11 @@ def _run(task):
 def test_context_request_fulfills_safe_file_into_the_task_bundle(tmp_path):
     # S27: the "renders next dev context" half of this test asserted on
     # ``render_context`` output; that renderer is removed with the tick-context
-    # lane. The subject here is ``context_requests``, so the fulfilled bundle is
-    # read from the store-side projection the renderer used to consume.
+    # lane. S29 then removed ``fulfilled_context_bundles``, the store-side
+    # collector S27 pointed this at — it was written for that same renderer and
+    # had no other consumer. The bundle is asserted where ``_fulfill_request``
+    # actually writes it, on the request row, the way the sibling tests below
+    # already do.
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("def main():\n    return 'ok'\n", encoding="utf-8")
     task = _task()
@@ -40,9 +42,9 @@ def test_context_request_fulfills_safe_file_into_the_task_bundle(tmp_path):
 
     assert req["status"] == "fulfilled"
     assert req["bundle_id"]
-    bundles = fulfilled_context_bundles(task)
-    assert [bundle["bundle_id"] for bundle in bundles] == [req["bundle_id"]]
-    assert "def main" in bundles[0]["files"][0]["content"]
+    assert req["bundle"]["bundle_id"] == req["bundle_id"]
+    assert "def main" in req["bundle"]["files"][0]["content"]
+    assert [entry["bundle_id"] for entry in task.context_requests] == [req["bundle_id"]]
     assert has_unresolved_context_request(task) is False
 
 
