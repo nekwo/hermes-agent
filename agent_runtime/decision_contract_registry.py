@@ -102,7 +102,6 @@ class HudShape:
 @dataclass(frozen=True, slots=True)
 class DecisionContract:
     decision_type: DecisionType
-    allowed_roles: tuple[AgentRole, ...]
     required_payload_keys: tuple[str, ...] = ()
     optional_payload_keys: tuple[str, ...] = ()
     shape_hint: str = ""
@@ -143,9 +142,10 @@ class DecisionContract:
         return _drop_empty(result)
 
     def manifest(self) -> dict[str, Any]:
-        payload = self.payload_contract()
-        payload["allowed_roles"] = [role.value for role in self.allowed_roles]
-        return payload
+        # Identical to ``payload_contract`` — kept so every contract dataclass in
+        # this module answers the same ``manifest()`` protocol. S16 removed the
+        # ``allowed_roles`` tail that used to make the two differ.
+        return self.payload_contract()
 
 
 @dataclass(frozen=True, slots=True)
@@ -338,26 +338,6 @@ def contract_hash() -> str:
         "events": {key: value.manifest() for key, value in _EVENT_CONTRACTS.items()},
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-
-
-def prompt_contract_markdown(decision_types: list[DecisionType] | tuple[DecisionType, ...] | None = None) -> str:
-    lines = [
-        f"Registry contract_hash: {contract_hash()}",
-        "These payload contracts are mandatory and are checked after the JSON schema. Include every required key exactly.",
-    ]
-    selected_decision_types = list(decision_types) if decision_types is not None else list(DecisionType)
-    for decision_type in selected_decision_types:
-        contract = decision_contract(decision_type)
-        if not contract.allowed_roles:
-            continue
-        required = ", ".join(contract.required_payload_keys) or "none"
-        allowed = ", ".join(contract.allowed_payload_keys) or "none"
-        lines.append(f"- {decision_type.value}: required [{required}]; allowed [{allowed}]. {contract.shape_hint}")
-    if decision_types is None:
-        lines.append('- request_file_reads: payload must include {"paths": ["path/to/file"], "reason": "why these files are needed"}.')
-        lines.append('- request_test_run: payload must include {"stage_id": "..."} plus either commands or recipe_id for deterministic command/test proof.')
-    lines.append('- block: payload must include {"reason": "...", "log_ref": {"path": "events.jsonl", "line": 123, "summary": "brief evidence summary"}}.')
-    return "\n".join(lines)
 
 
 def verify_registry() -> dict[str, Any]:
@@ -653,13 +633,11 @@ _DEV_ONLY = (AgentRole.DEV,)
 _QA_ONLY = (AgentRole.QA,)
 _NEKO_ONLY = (AgentRole.ALICE_SUPERVISOR,)
 _PM_NEKO = (AgentRole.PM, AgentRole.ALICE_SUPERVISOR)
-_PM_QA = (AgentRole.PM, AgentRole.QA)
 
 
 _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     DecisionType.NEEDS_CONTEXT: DecisionContract(
         DecisionType.NEEDS_CONTEXT,
-        allowed_roles=(AgentRole.PM, AgentRole.DEV, AgentRole.ALICE_SUPERVISOR),
         optional_payload_keys=("reason", "requested_context", "questions", "missing", "handoff_request", "operator_note"),
         nested_contracts=("needs_context.handoff_request",),
         shape_hint="Use only when a safe bounded answer is missing and request_file_reads is not the right tool.",
@@ -667,14 +645,12 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.REQUEST_HUMAN: DecisionContract(
         DecisionType.REQUEST_HUMAN,
-        allowed_roles=_PM_NEKO,
         required_payload_keys=("reason",),
         optional_payload_keys=("requested_action", "log_ref"),
         shape_hint="Escalate only external decisions or credentials/human approvals.",
     ),
     DecisionType.PERSONA_MESSAGE_REPLY: DecisionContract(
         DecisionType.PERSONA_MESSAGE_REPLY,
-        allowed_roles=_ALL_ROLES,
         required_payload_keys=("reply",),
         optional_payload_keys=("persona_instance_id", "session_id", "message_id", "turn_id"),
         shape_hint="Reply conversationally to a Mission Control operator persona-chat message. Keep reply redaction-safe and do not scope a task unless the operator asked for task work.",
@@ -682,7 +658,6 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.PROPOSE_ACCEPTANCE: DecisionContract(
         DecisionType.PROPOSE_ACCEPTANCE,
-        allowed_roles=_PM_NEKO,
         required_payload_keys=("objective", "acceptance_criteria"),
         optional_payload_keys=("non_goals", "affected_repos", "suggested_roles", "requires_visual_proof", "risk_flags", "handoff_packet", "scope_override_reason"),
         nested_contracts=("handoff_packet", "handoff_packet.proof_gate", "handoff_packet.join_gate", "handoff_packet.self_heal"),
@@ -690,7 +665,6 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.PROPOSE_STAGE_PLAN: DecisionContract(
         DecisionType.PROPOSE_STAGE_PLAN,
-        allowed_roles=_DEV_ONLY,
         required_payload_keys=("stages",),
         optional_payload_keys=("delivery",),
         stage_allowed_keys=("id", "title", "objective", "acceptance_criteria", "affected_paths", "test_plan", "requires_visual_proof", "delivery"),
@@ -699,26 +673,22 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.CORRECT_STAGE: DecisionContract(
         DecisionType.CORRECT_STAGE,
-        allowed_roles=(AgentRole.DEV, AgentRole.QA),
         required_payload_keys=("stage_id",),
         optional_payload_keys=("corrections", "audit_notes", "affected_paths", "test_plan", "target_stage_id", "set_current_stage_id"),
         shape_hint="Repair current-stage instructions/proof gates, or reroute to a known target_stage_id. Do not attach delivery here.",
     ),
     DecisionType.REQUEST_FILE_READS: DecisionContract(
         DecisionType.REQUEST_FILE_READS,
-        allowed_roles=_ALL_ROLES,
         required_payload_keys=("paths", "reason"),
         shape_hint="Ask the Harness for a bounded file bundle instead of dumping context.",
     ),
     DecisionType.HAND_OFF: DecisionContract(
         DecisionType.HAND_OFF,
-        allowed_roles=_DEV_ONLY,
         optional_payload_keys=("stage_id", "summary", "known_gaps", "log_ref"),
         shape_hint="Collapsed Dev signal: work is ready for Harness-observed diff capture and authoritative gate rerun. Do not declare changed files, proof IDs, delivery, or work_status.",
     ),
     DecisionType.ESCALATE: DecisionContract(
         DecisionType.ESCALATE,
-        allowed_roles=(AgentRole.DEV, AgentRole.QA),
         required_payload_keys=("title", "summary"),
         optional_payload_keys=("severity", "evidence", "log_ref"),
         enum_choices={"severity": ("low", "medium", "high", "critical")},
@@ -726,7 +696,6 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.SCOPE_ROUTE: DecisionContract(
         DecisionType.SCOPE_ROUTE,
-        allowed_roles=_PM_NEKO,
         required_payload_keys=("objective", "acceptance_criteria", "target_owner", "target_repo", "proof_gate"),
         optional_payload_keys=("non_goals", "suggested_roles", "requires_visual_proof", "risk_flags", "release_stage_id", "scope_override_reason"),
         enum_choices={"target_owner": ("dev", "backend_dev", "qa", "neko_supervisor", "human"), "target_repo": ("EterniaLauncher", "EterniaBackend", "hermes-agent", "none")},
@@ -734,7 +703,6 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.QA_VERDICT: DecisionContract(
         DecisionType.QA_VERDICT,
-        allowed_roles=_QA_ONLY,
         required_payload_keys=("verdict",),
         optional_payload_keys=("coverage", "findings", "proof_ids"),
         enum_choices={"verdict": ("approved", "needs_fixes", "blocked")},
@@ -742,14 +710,12 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.PROPOSE_PATCH: DecisionContract(
         DecisionType.PROPOSE_PATCH,
-        allowed_roles=_DEV_ONLY,
         optional_payload_keys=("stage_id", "patch", "summary", "changed_files", "tests", "delivery", "proof_ids", "known_gaps"),
         nested_contracts=("delivery",),
         shape_hint="Use after actual code edits or a concrete patch plan; Harness derives any compatibility delivery status.",
     ),
     DecisionType.REQUEST_TEST_RUN: DecisionContract(
         DecisionType.REQUEST_TEST_RUN,
-        allowed_roles=(AgentRole.DEV, AgentRole.QA),
         required_payload_keys=("stage_id",),
         optional_payload_keys=("commands", "recipe_id", "proof_intent", "intent", "repo_scope", "delivery", "failed_proof_ids", "failed_proof_auto_attached"),
         nested_contracts=("delivery",),
@@ -757,7 +723,6 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.REQUEST_SCREENSHOT: DecisionContract(
         DecisionType.REQUEST_SCREENSHOT,
-        allowed_roles=_QA_ONLY,
         required_payload_keys=("stage_id", "target", "proof_requirement", "mcp_server", "required_launch_pins"),
         optional_payload_keys=("qa_review",),
         nested_contracts=("visual.required_launch_pins", "qa_review"),
@@ -766,7 +731,6 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.REQUEST_VIDEO: DecisionContract(
         DecisionType.REQUEST_VIDEO,
-        allowed_roles=_QA_ONLY,
         required_payload_keys=("stage_id", "target", "proof_requirement", "mcp_server", "required_launch_pins", "duration_seconds", "interaction_script"),
         optional_payload_keys=("qa_review",),
         nested_contracts=("visual.required_launch_pins", "qa_review"),
@@ -775,7 +739,6 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.REQUEST_QA_REVIEW: DecisionContract(
         DecisionType.REQUEST_QA_REVIEW,
-        allowed_roles=_DEV_ONLY,
         required_payload_keys=("stage_id", "proof_ids", "handoff"),
         optional_payload_keys=("delivery",),
         nested_contracts=("request_qa_review.handoff", "delivery"),
@@ -783,7 +746,6 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.REPORT_QA_VERDICT: DecisionContract(
         DecisionType.REPORT_QA_VERDICT,
-        allowed_roles=_QA_ONLY,
         required_payload_keys=("review_scope",),
         optional_payload_keys=("verdict", "proof_ids", "delivery_packets_reviewed", "findings", "reviewed_stage_ids", "proof_requirements_confirmed", "test_plan_confirmed", "qa_review"),
         nested_contracts=("qa_review", "qa_review.coverage"),
@@ -792,7 +754,6 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.APPROVE: DecisionContract(
         DecisionType.APPROVE,
-        allowed_roles=_PM_QA,
         required_payload_keys=("review_scope",),
         optional_payload_keys=("verdict", "proof_ids", "findings", "reviewed_stage_ids", "proof_requirements_confirmed", "test_plan_confirmed", "qa_review"),
         nested_contracts=("qa_review", "qa_review.coverage"),
@@ -801,7 +762,6 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.BLOCK: DecisionContract(
         DecisionType.BLOCK,
-        allowed_roles=_ALL_ROLES,
         required_payload_keys=("reason", "log_ref"),
         optional_payload_keys=("failed_proof_ids", "delivery"),
         nested_contracts=("block.log_ref", "delivery"),
@@ -809,12 +769,10 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.COMPLETE: DecisionContract(
         DecisionType.COMPLETE,
-        allowed_roles=(),
         shape_hint="Reserved terminal signal; specialist personas should normally not emit this.",
     ),
     DecisionType.REPORT_ISSUE_DISCOVERY: DecisionContract(
         DecisionType.REPORT_ISSUE_DISCOVERY,
-        allowed_roles=(AgentRole.DEV, AgentRole.QA),
         required_payload_keys=("title", "summary"),
         optional_payload_keys=("severity", "relationship_hint", "evidence", "affected_paths", "suggested_child_title", "suggested_child_description", "suggested_acceptance_criteria", "delivery"),
         nested_contracts=("delivery",),
@@ -823,7 +781,6 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.TRIAGE_ISSUE_DISCOVERY: DecisionContract(
         DecisionType.TRIAGE_ISSUE_DISCOVERY,
-        allowed_roles=_PM_NEKO,
         required_payload_keys=("discovery_id", "decision", "rationale"),
         optional_payload_keys=("priority", "child_title", "child_description", "child_acceptance_criteria"),
         enum_choices={"decision": ("same_scope", "fork_child", "defer", "escalate", "blocks_current")},
@@ -831,20 +788,11 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.RESOLVE_INCIDENT: DecisionContract(
         DecisionType.RESOLVE_INCIDENT,
-        allowed_roles=_NEKO_ONLY,
         required_payload_keys=("incident_id", "resolution"),
         optional_payload_keys=("next_state",),
         shape_hint="Close a specific open incident and optionally route to the next task state.",
     ),
 }
-
-
-_COMMON_SHAPE_IDS = (
-    "common.block",
-    "common.request_file_reads",
-    "common.needs_context",
-    "common.request_human",
-)
 
 
 _HUD_SHAPES: dict[str, HudShape] = {
