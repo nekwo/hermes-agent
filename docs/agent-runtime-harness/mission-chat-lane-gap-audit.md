@@ -212,6 +212,11 @@ even the seeded supervisor doesn't list it), `image_gen`, `tts`,
 `computer_use`, `memory`, `context_engine`, `node_control` (root-node only by
 design), `project`, `cronjob`, `delegation`.
 
+**2026-07-30 correction:** `node_control` is no longer merely unreachable or
+root-only. Its broken `run_node` / `steer_node` tool module was deleted by
+`de14b06d2`, and its fork-added toolset registration was removed by
+`e69db6e71`. The list above is the audit's historical state.
+
 By contrast `hermes chat` with no `--toolsets` resolves the `hermes-cli`
 composite (`cli.py:15805-15810` → `hermes_cli/tools_config.py::_get_platform_tools`
 → `toolsets.py:436-440`, whose `tools` is `_HERMES_CORE_TOOLS`, `toolsets.py:31-80`)

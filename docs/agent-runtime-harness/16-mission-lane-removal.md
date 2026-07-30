@@ -307,7 +307,67 @@ the same sentence.
   `test_persona_skill_guidance.py` went with its helper.
   `_safe_read_soul_overlay` and `prompt_sources.resolve_persona_system_prompt_path` remain —
   both have live chat-lane / profile-binding callers.
-- **`delivery_directive.py` ruled mixed live/residue** — see the liveness ruling in
-  [delivery-directive.md](delivery-directive.md): the orphan-worktree janitor and
-  promotion-record reads are live; the Task-declared directive path and terminal-settle
-  executors are unswept residue awaiting a future retirement pass.
+- **`delivery_directive.py` was ruled mixed live/residue** — the initial audit kept the
+  orphan-worktree janitor and promotion-record reads and queued the Task-declared
+  directive / terminal-settle half for follow-up. That residue was swept in Wave 3
+  (`354d7555a`); [delivery-directive.md](delivery-directive.md) records the split.
+
+### Wave 3 outcomes (2026-07-30)
+
+This follow-up wave re-derived every cut from the named symbols' current callers. The
+outcomes below are the commit-recorded decisions, not a filename-based deletion list:
+
+- **Five small-module candidates:** only `agent_runtime/role_sessions.py` was actually
+  dead and was removed. The other four — `dev_discipline`, `simplified_contract`,
+  `scope_control`, and `role_checklists` — have live production callers and were skipped.
+  In other words, four of the original five are live; they were not dead modules merely
+  because the mission lane once used them. The same commit removed only the already-dead
+  `repo_context` worktree-creator import from `persona_runtime.py` (`3a32ec617`).
+- **CLI mission-record flags:** `persona instance return-summary --task/--stage` were
+  removed, while `--proof-id` and `--artifact-ref` remain live output fields
+  (`64d2f9176`); the now-CLI-unreachable `task_id` / `stage_id` continuity parameter
+  chain was then removed while live `proof_ids` stayed (`304eb42c0`).
+  `mission-chat message --task/--goal` and the write that re-armed `task_bound` state
+  were removed (`b9f0043c4`). `persona instance steer --goal` is a separate, live
+  contract-45 wire and stays; `persona instance update-profile --goal` and
+  `persona tool-diff --task/--goal` also remain outside that cut.
+- **Dead read/HUD/status clusters:** the caller-free context-builder HUD cluster was cut
+  (`8fa9ee283`); the unreachable goal/task projection builders were cut from snapshot
+  (`8fe3d6687`), followed by the remaining 78-name unreachable snapshot island
+  (`064d46a27`); the tick-only `build_context` / `render_context` lane and its private
+  helper graph were removed while `AgentContext` stayed as a live annotation
+  (`539bf5813`); and constant-by-construction status, runtime-instance,
+  stream-routing, event-summary, and observability fields/arms were removed
+  (`c12e6850d`). The latter is also why `_delta_op` no longer has `task.*`,
+  `proof.attached`, or `daemon.*` arms.
+- **Store and event catalog:** writer-less proof/archive helpers, dead `RunStore`
+  methods, and `run.heartbeat` / `run.approved` were removed (`8c1c8e6cc`).
+  **`run.closed` is live and stays registered** because live cancel paths reach
+  `close_run`. `realm.archived`, `persona_chat.deleted`, and
+  `worktree.orphans_reaped` were registered from their real emitters
+  (`a7e679972`). `moa.*` were explicitly skipped because they are TUI/display
+  callbacks in `agent/moa_loop.py`, not `EventLog` events. The last writer-less
+  `run.opened` contract was then retired while `flow_graph.pruned` was registered
+  (`06eee42fa`), and reconcile now archives owner-less runtime graphs and emits that
+  event in its final graph-prune phase (`6c5040ed2`). The registered-but-writer-less
+  `repo_bundle.delivered` contract and its operator-summary arm were retired after
+  the S24 emitter deletion (`f9febb32b`).
+- **Narrow residue cuts:** writer-less task/proof/daemon path helpers and only the
+  `proofs` checkpoint class were removed (`633772c34`); the retired stage-graph
+  `StageStatus` enum was removed while the four live sibling enums stayed
+  (`9ca3f8743`); and only the two zero-reference packet symbols were removed while
+  the test-reached packet emission path stayed pending an operator decision
+  (`ac751ea2f`). The six-hop `proof_store` parameter chain was also removed after
+  every hop was confirmed to pass it onward without reading it (`dc926aa6c`).
+- **Node control:** the broken `tools/node_control_tool.py` implementation of
+  `run_node` / `steer_node` was deleted (`de14b06d2`), followed by the fork-added
+  `node_control` block in upstream-owned `toolsets.py` under explicit operator
+  authorization (`e69db6e71`).
+- **Delivery residue:** declaration, terminal-settle, delivery-capture, and caller-free
+  repo-context/repo-bundle helpers — including `git_diff_since_baseline` and
+  `diff_weakens_tests` — were removed, while the orphan-worktree janitor and historical
+  promotion-record reader stayed live (`354d7555a`). The
+  `repo_context.isolated_repo_context_for_run` / `_worktree_token` /
+  `_ensure_isolated_worktree` trio is intentionally kept as regression-test
+  infrastructure: twelve tests exercise its worktree safety behavior, including two
+  live-incident regressions. It has no production creator caller and is labelled as such.

@@ -71,8 +71,6 @@ Retained for archaeology with dated headers; do not implement from these.
 - **[05 — Runtime Data Storage](05-runtime-data-enterprise-storage.md)** — mostly
   live (projector, feed, resolution, backups); its goal/run/proof/incident DDL is
   gone.
-- **[06 — Recursive Agent-Supervised Execution](06-recursive-agent-supervised-execution.md)** —
-  design record for the removed supervision machinery.
 - **[08 — Root Node + Self-Looped Sub-Agents](08-blueprint-as-script-collapse.md)** —
   the "no judgment in Python" principle that shaped the chat-only lane.
 - **[delivery-directive.md](delivery-directive.md)** — declaration path removed;
@@ -80,6 +78,7 @@ Retained for archaeology with dated headers; do not implement from these.
 
 Deleted on 2026-07-30 (operator ruling; recoverable from git history):
 `03-retirement-ledger.md`, `06-implementation-prompt.md`,
+`06-recursive-agent-supervised-execution.md`,
 `07-selfdrive-gap-audit-prompt.md`, `09-root-node-execution-prompts.md`,
 `10-root-node-n3-burn-in-ledger.md`, `11-neko-fork-join-dehardwire.md`,
 `15-legacy-orchestrator-retirement.md`. The old implementation reference

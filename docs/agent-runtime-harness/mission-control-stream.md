@@ -6,22 +6,26 @@ Each output line is one JSON frame. Consumers must parse each line independently
 
 ## Versioning and compatibility
 
-All stream frames currently carry:
+Hydrate, delta, and heartbeat frames currently carry:
 
 - `schema_version`: `1`
 - `generated_at`: the time the frame was emitted
 - `watermark`: ordering metadata for the event stream or snapshot boundary
 
+Patch frames carry `schema_version: 2`; they are the additive, op-based
+delta-patch lane implemented alongside the schema-1 full-core frames.
+
 Forward-compatibility expectations:
 
-- Treat `schema_version: 1` as the current stream schema.
+- Treat `schema_version: 1` as the full-core stream schema and
+  `schema_version: 2` as the patch-frame schema.
 - Ignore unknown top-level fields and unknown nested fields.
 - Do not require frame-specific fields on a different `type`.
 - Continue to support the one-shot `hermes harness snapshot --json` path as the canonical fallback when streaming is unavailable or a consumer needs to rehydrate from a known-good full snapshot.
 
 ## Frame ordering and watermarks
 
-The stream starts with exactly one `hydrate` frame. `stream_frames()` reads the hydrate frame's `watermark.event_offset` and then emits `delta` frames from the event log after that offset.
+The stream starts with exactly one `hydrate` frame. `stream_frames()` reads the hydrate frame's `watermark.event_offset` and then emits full-core `delta` frames or schema-2 `patch` frames from the event log after that offset.
 
 For `delta` frames:
 
@@ -39,7 +43,9 @@ For `heartbeat` frames:
   the heartbeat proves a frame was missed. The consumer must keep its applied
   watermark unchanged and rehydrate; advancing to the heartbeat offset would
   make the missing delta look stale when it later arrives.
-- Heartbeats additionally carry the current `daemon` status block (see the `heartbeat` frame section) so runtime HUDs stay live while an idle daemon emits no deltas. Consumers may merge it into their read model's daemon view; it never changes any other entity.
+- A heartbeat may carry an `activity` block while a snapshot build is in
+  progress. The background Mission Daemon and its heartbeat status block were
+  removed; no daemon state is carried now.
 
 ## `hydrate` frame
 
@@ -75,9 +81,9 @@ Fields:
 
 ### `completeness` row shape
 
-`completeness` is keyed by projection name (`persona_chat_history`,
-`persona_chat_trace`, `operator_conversation`, `stage_verification`,
-`mission_flow_timeline`). Every row is one `ProjectionAccountant.summary()`:
+`completeness` is keyed by the current projection names
+(`persona_chat_history`, `persona_chat_trace`, `operator_conversation`). Every
+row is one `ProjectionAccountant.summary()`:
 
 ```json
 {
@@ -118,6 +124,10 @@ no `by_design` and behaves exactly as before.
 ## `delta` frame
 
 Delta frames carry redaction-safe event payloads from the event log after the hydrate watermark. They are intended to update the already-hydrated read model without forcing a full snapshot fetch.
+
+When the debounce window coalesces a burst, the frame retains `entity` and
+`op` for the last event and adds ordered `events` plus `coalesced_count` for
+batch-aware consumers.
 
 Top-level shape:
 
@@ -175,13 +185,13 @@ Current `op` mappings:
 | --- | --- |
 | Starts with `run.tool.` | `chat.trace.appended` |
 | Equals `run.progress` | `chat.trace.appended` |
-| Equals `task.transition`, `task.blocked`, `task.unblocked`, `task.cancelled`, or `task.archived` | `task.state_changed` |
-| Starts with `task.` but is not one of the state-change events above | `task.upserted` |
-| Equals `proof.attached` | `proof.added` |
 | Starts with `incident.` | the source event type |
-| Starts with `daemon.` | `daemon.status` |
 | Starts with `persona_assignment.` | `instance.upserted` |
 | Any other event type | `event.appended` |
+
+**Corrected 2026-07-30 (`c12e6850d`):** the `task.*`, `proof.attached`, and
+`daemon.*` classifier arms were removed after those event families were
+de-registered. The five rows above are the complete current `_delta_op` table.
 
 ## `heartbeat` frame
 
@@ -198,16 +208,10 @@ Top-level shape:
     "event_offset": 0,
     "captured_at": "..."
   },
-  "daemon": {
-    "schema_version": 1,
-    "state": "idle",
-    "pid": 12345,
-    "heartbeat_at": "...",
-    "target_task_id": null,
-    "settle_stop_reason": "no_eligible_action",
-    "loops": 47,
-    "next_wake_at": "...",
-    "wait_seconds": 30
+  "activity": {
+    "kind": "snapshot_build",
+    "state": "busy",
+    "elapsed_ms": 1250
   }
 }
 ```
@@ -219,14 +223,18 @@ Fields:
 - `generated_at`: the time the heartbeat frame was emitted.
 - `watermark.event_offset`: the latest event-log offset known to the stream.
 - `watermark.captured_at`: the time the heartbeat watermark was captured.
-- `daemon`: the versioned daemon status block (`daemon_status_schema()` — the same shape `harness daemon status --json` returns). The daemon writes its per-loop status to `daemon_status.json`, not the EventLog, so an idle daemon produces no deltas; this block is the only live channel for daemon liveness between deltas. It is read-model telemetry: fire-and-forget, never acknowledged, and a missing/dropped block only means "no update this frame" (the field is omitted if the status file cannot be read). Optional keys beyond the core set (e.g. `next_wake_at`, `wait_seconds`, `last_tick_id`, `liveness`) appear when the daemon has recorded them.
+- `activity`: optional fire-and-forget telemetry emitted while a snapshot build
+  is busy. Its current keys are `kind`, `state`, and `elapsed_ms`; the field is
+  absent on an ordinary idle heartbeat.
 
 CLI timing flags:
 
 - `--poll-interval`: maps to `poll_interval_seconds`; default `0.25`. The stream sleeps for this interval between event-log polls, with a lower bound of `0.01` seconds.
 - `--heartbeat-interval`: maps to `heartbeat_interval_seconds`; default `5.0`. When no delta is emitted for at least this interval, the stream emits a `heartbeat` frame.
-
-`--max-frames` exists as a suppressed CLI/testing control and is not part of the normal consumer contract.
+- `--delta-debounce-ms`: settle window for coalescing an event burst into one
+  delta frame; default `200`, and `0` disables coalescing.
+- `--resync`: forces the first post-hydrate batch to use a full-core delta so a
+  reconnecting patch consumer can re-baseline before folding patches.
 
 ## Consumer guidance
 
