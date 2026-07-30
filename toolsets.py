@@ -224,12 +224,6 @@ TOOLSETS = {
         "includes": []
     },
 
-    "node_control": {
-        "description": "Harness root-node service tools for running and steering child nodes.",
-        "tools": ["run_node", "steer_node"],
-        "includes": []
-    },
-
     "project": {
         "description": "Desktop Projects — create/switch named workspaces (GUI sessions only)",
         "tools": ["project_list", "project_create", "project_switch"],
