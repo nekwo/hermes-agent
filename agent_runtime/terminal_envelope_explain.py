@@ -1,7 +1,7 @@
 """Operator-facing explanation of the terminal safety envelope for one persona.
 
 ``agent_runtime.terminal_envelope`` is the authority: it owns the command-class
-taxonomy, the R1 stage floor, the ROOT-config grant table and the per-command
+taxonomy, the ROOT-config grant table and the per-command
 decision. ``runtime_hud.render_capability_block`` already renders the
 AGENT-facing half of that posture onto the chat turn's volatile tail.
 
@@ -9,8 +9,8 @@ This module is the operator-facing half, and it exists for the same reason the
 agent-facing half does: the facts were computed and typed, and the person who
 has to act on them could not see them. Before ``hermes harness persona tool-diff
 --explain-envelope``, an operator debugging "why did Dev refuse to push?" had to
-read ``terminal_envelope.py`` to learn that ``git_push`` is grantable while
-``credential_read`` is a hard floor, and then guess at the config key.
+read ``terminal_envelope.py`` to learn the command taxonomy and then guess at
+the config key.
 
 Everything here is RENDERING. Every fact comes from the canonical authorities —
 :func:`terminal_envelope.explain_terminal_envelope`,
@@ -69,11 +69,9 @@ def explain_persona_terminal_envelope(
     exactly what this persona WOULD get without running a turn or touching a
     tool.
 
-    The refusal set is split into the operator-grantable classes and the hard
-    floor. That split is the whole point of the verb: pointing an operator at a
-    config key for ``credential_read`` — which no configuration lifts — would be
-    the same lie ``ENVELOPE_COMMAND_NOT_GRANTABLE`` exists to prevent telling an
-    agent.
+    The refusal set retains its grantable/hard-floor split so any future
+    code-owned floor remains representable. Ruling R-2 leaves the hard-floor
+    side empty today.
     """
 
     scope = scope_for_persona(persona, lane=lane)

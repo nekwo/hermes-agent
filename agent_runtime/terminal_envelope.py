@@ -5,7 +5,7 @@ Why this module exists
 The harness terminal safety envelope (``tools/terminal_tool.py`` —
 ``_HARNESS_BLOCK_PATTERNS`` / ``_harness_safety_block``, both fork-added) hard
 blocks ``git push``, destructive git, recursive delete, credential reads,
-prod operations and non-localhost network egress. It activates on the mere
+production operations and non-localhost network egress. It activates on the mere
 PRESENCE of ``HERMES_AGENT_RUNTIME_ROOT`` and reads no permission state at
 all — see ``docs/agent-runtime-harness/mission-chat-lane-gap-audit.md`` G4/G5b.
 
@@ -65,15 +65,9 @@ in every load-bearing respect:
 2. **Deny by default, no wildcard, no inheritance.** ``grants.<role>.<lane>``
    with no entry admits nothing. There is no ``*`` role, no ``*`` lane, and a
    grant on one lane says nothing about another.
-3. **A stage floor the config cannot cross.** :data:`GRANTABLE_COMMAND_CLASSES`
-   is the floor: classes outside it stay hard-blocked no matter what the config
-   says. Credential reads, credential exfiltration and prod mutations are not a
-   config edit away from being allowed. It is the same DISCIPLINE
-   MCP admission applies — profile-declared surfaces are the authority and a
-   floor above the config — but the two floors are INDEPENDENT: no code here
-   reads that set, they are over different things (command classes vs. roles),
-   and they deliberately differ in membership. Widening one is never license to
-   widen the other.
+3. **A code-owned command taxonomy.** :data:`COMMAND_CLASSES` is the complete
+   envelope surface. Every current class is grantable; adding a future class
+   still requires an explicit code review before configuration can name it.
 4. **Every step can only NARROW.** A malformed stanza, an unknown class, a
    non-list value — all collapse to "grants nothing" AND produce a typed
    config issue. A config fault never reads as "allow".
@@ -165,42 +159,21 @@ GOVERNED_LANES = frozenset({LANE_MISSION_CHAT})
 GIT_PUSH = "git_push"
 DESTRUCTIVE_GIT = "destructive_git"
 RECURSIVE_DELETE = "recursive_delete"
-CREDENTIAL_READ = "credential_read"
-PROD_OPERATION = "prod_operation"
 NETWORK_EGRESS = "network_egress"
-CREDENTIAL_EXFIL = "credential_exfil"
 
 COMMAND_CLASSES: frozenset[str] = frozenset(
     {
         GIT_PUSH,
         DESTRUCTIVE_GIT,
         RECURSIVE_DELETE,
-        CREDENTIAL_READ,
-        PROD_OPERATION,
         NETWORK_EGRESS,
-        CREDENTIAL_EXFIL,
     }
 )
 
-#: Stage floor — the classes an operator grant may cover AT ALL.
-#:
-#: Keep terminal policy narrow and explicit; changes remain reviewable here.
-#: code-side floor above the config, and treat widening it as a deliberate
-#: product decision rather than a config edit — but an INDEPENDENT floor, not a
-#: mirror of it. Nothing here reads that set, the two are over different things
-#: (command classes here, admissible roles there), and their membership
-#: Terminal policy and MCP admission are deliberately independent surfaces.
-#: this set is unchanged. Widening one is never license to widen the other.
-#:
-#: The three excluded classes are excluded on purpose and are NOT an oversight:
-#: ``credential_read`` and ``credential_exfil`` are secret-handling floors (an
-#: agent that can read ``.env`` and reach the network has exfiltration, and no
-#: work task needs it), and ``prod_operation`` mutates infrastructure outside
-#: the repo the operator is watching. Those stay hard-blocked; the config
-#: cannot lift them, and naming them under ``grants`` is a typed config error.
-GRANTABLE_COMMAND_CLASSES: frozenset[str] = frozenset(
-    {GIT_PUSH, DESTRUCTIVE_GIT, RECURSIVE_DELETE, NETWORK_EGRESS}
-)
+#: Classes an operator grant may cover. Ruling R-2 removed the former secret
+#: read/exfiltration and production-operation floors from this taxonomy, so all
+#: remaining envelope classes are grantable.
+GRANTABLE_COMMAND_CLASSES: frozenset[str] = COMMAND_CLASSES
 
 #: Class → the legacy ``_HARNESS_BLOCK_PATTERNS`` reason code. Preserved
 #: verbatim so ``blocked_tool_attempts.jsonl`` readers, operator dashboards and
@@ -212,10 +185,7 @@ LEGACY_REASON_BY_CLASS: Mapping[str, str] = {
     GIT_PUSH: "git_push_requires_operator_approval",
     DESTRUCTIVE_GIT: "tree_wipe_blocked",
     RECURSIVE_DELETE: "tree_wipe_blocked",
-    CREDENTIAL_READ: "credential_read_blocked",
-    PROD_OPERATION: "prod_operation_requires_operator_approval",
     NETWORK_EGRESS: "network_command_requires_allowlist",
-    CREDENTIAL_EXFIL: "credential_exfil_blocked",
 }
 
 #: Human-facing one-liners for the refusal an AGENT reads.
@@ -223,10 +193,7 @@ CLASS_SUMMARY: Mapping[str, str] = {
     GIT_PUSH: "publishes commits to a remote",
     DESTRUCTIVE_GIT: "discards uncommitted or committed work in the git tree",
     RECURSIVE_DELETE: "recursively deletes a directory tree",
-    CREDENTIAL_READ: "reads a credential/secret file",
-    PROD_OPERATION: "mutates production infrastructure",
     NETWORK_EGRESS: "reaches a network host outside the loopback allowlist",
-    CREDENTIAL_EXFIL: "sends credential-shaped data to a network host",
 }
 
 _NETWORK_ALLOWLIST = ("localhost", "127.0.0.1", "::1", "host.docker.internal")
@@ -258,20 +225,10 @@ _CLASS_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"\bgit\s+stash\s+(?:drop|clear)\b", re.IGNORECASE), DESTRUCTIVE_GIT),
     (re.compile(r"\brm\s+-[^\n;&|]*r[^\n;&|]*f\b", re.IGNORECASE), RECURSIVE_DELETE),
     (re.compile(r"\bRemove-Item\b[^\n;&|]*(?:-Recurse|-r)\b", re.IGNORECASE), RECURSIVE_DELETE),
-    (
-        re.compile(
-            r"\b(?:cat|type|Get-Content)\b[^\n;&|]*(?:\.env|credentials|\.netrc|\.pgpass|\.npmrc|\.pypirc)",
-            re.IGNORECASE,
-        ),
-        CREDENTIAL_READ,
-    ),
-    (re.compile(r"\b(?:kubectl|helm)\s+(?:apply|delete|rollout|scale|patch)\b", re.IGNORECASE), PROD_OPERATION),
-    (re.compile(r"\bterraform\s+(?:apply|destroy)\b", re.IGNORECASE), PROD_OPERATION),
 )
 
 _NETWORK_TOOL_RE = re.compile(r"\b(curl|wget|iwr|Invoke-WebRequest|Invoke-RestMethod)\b", re.IGNORECASE)
 _NETWORK_URL_RE = re.compile(r"https?://([^/\s'\"`]+)", re.IGNORECASE)
-_SECRET_WORD_RE = re.compile(r"(secret|token|password|credential|api[_-]?key|authorization|bearer)", re.IGNORECASE)
 
 
 def classify_command(command: str) -> str | None:
@@ -301,10 +258,6 @@ def _network_class(command: str) -> str | None:
         clean = host.split(":", 1)[0].strip("[]").lower()
         if clean not in _NETWORK_ALLOWLIST:
             return NETWORK_EGRESS
-    # Loopback-only, but carrying credential-shaped material: the legacy table
-    # calls this ``credential_exfil_blocked`` and it stays a hard floor.
-    if _SECRET_WORD_RE.search(command):
-        return CREDENTIAL_EXFIL
     return None
 
 
@@ -367,9 +320,8 @@ OUTCOME_REFUSE = "refuse"
 
 #: The gated class has no grant for this role+lane. THE headline failure class.
 ENVELOPE_COMMAND_REQUIRES_GRANT = "envelope_command_requires_grant"
-#: The gated class is outside :data:`GRANTABLE_COMMAND_CLASSES` — a hard floor
-#: no config can lift. Distinct from the above on purpose: telling an agent to
-#: "ask the operator for a grant" that cannot exist would be a new lie.
+#: Reserved for any future gated class kept outside
+#: :data:`GRANTABLE_COMMAND_CLASSES`. Ruling R-2 leaves no current hard floors.
 ENVELOPE_COMMAND_NOT_GRANTABLE = "envelope_command_not_grantable"
 #: The run IS a harness run (a scope is bound) but its lane is outside
 #: :data:`GOVERNED_LANES`, so no grant table applies and every gated class is
@@ -1091,7 +1043,7 @@ def explain_terminal_envelope(
 
 
 def hard_floor_command_classes() -> frozenset[str]:
-    """The classes NO configuration can grant — the R1 stage floor's complement.
+    """The classes no configuration can grant (empty after ruling R-2).
 
     Read-only accessor over the two canonical sets above, added so operator
     surfaces (``harness persona tool-diff --explain-envelope``) can name the hard
@@ -1111,8 +1063,6 @@ __all__ = [
     "BLOCKED_ATTEMPT_LOG",
     "CLASS_SUMMARY",
     "COMMAND_CLASSES",
-    "CREDENTIAL_EXFIL",
-    "CREDENTIAL_READ",
     "DESTRUCTIVE_GIT",
     "ENVELOPE_COMMAND_NOT_GRANTABLE",
     "ENVELOPE_COMMAND_REQUIRES_GRANT",
@@ -1135,7 +1085,6 @@ __all__ = [
     "OUTCOME_ALLOW",
     "OUTCOME_GRANTED",
     "OUTCOME_REFUSE",
-    "PROD_OPERATION",
     "RECURSIVE_DELETE",
     "TerminalEnvelopeDecision",
     "TerminalEnvelopeGrantIssue",

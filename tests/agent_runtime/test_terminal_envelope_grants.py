@@ -18,9 +18,9 @@ Which branch a turn got was decided by whether its persona happened to carry a
 produce the identical typed refusal, and the only way a gated class runs is an
 explicit ROOT-config operator grant.
 
-Ordering mirrors ``test_mcp_admission.py``: the security floor first (nothing
-is granted by default, a profile cannot self-grant, the stage floor holds, a
-config fault never reads as allow), the happy path second.
+Ordering mirrors ``test_mcp_admission.py``: deny-by-default first (nothing is
+granted by default, a profile cannot self-grant, a config fault never reads as
+allow), the happy path second.
 
 ``tests/agent_runtime/conftest.py`` sets ``HERMES_AGENT_RUNTIME_ROOT``
 autouse — the fail-open cases delete it deliberately, which is the whole point.
@@ -35,15 +35,11 @@ import types
 import pytest
 
 from agent_runtime.terminal_envelope import (
-    CREDENTIAL_EXFIL,
-    CREDENTIAL_READ,
     DESTRUCTIVE_GIT,
-    ENVELOPE_COMMAND_NOT_GRANTABLE,
     ENVELOPE_COMMAND_REQUIRES_GRANT,
     ENVELOPE_DECISION_LOG,
     ENVELOPE_LANE_NOT_GOVERNED,
     GIT_PUSH,
-    GRANT_CLASS_NOT_GRANTABLE,
     GRANT_MALFORMED,
     GRANT_UNKNOWN_COMMAND_CLASS,
     GRANTABLE_COMMAND_CLASSES,
@@ -60,7 +56,6 @@ from agent_runtime.terminal_envelope import (
     OUTCOME_ALLOW,
     OUTCOME_GRANTED,
     OUTCOME_REFUSE,
-    PROD_OPERATION,
     RECURSIVE_DELETE,
     TerminalEnvelopeScope,
     blocked_result,
@@ -136,15 +131,19 @@ def _write_root_and_profile(tmp_path, monkeypatch, *, root_yaml: str, profile_ya
 # ── classification: the taxonomy mirrors the envelope, and nothing else ─────
 
 
+def test_s12_removes_secret_read_exfil_and_production_operation_protection():
+    retired = {"credential_" + "read", "credential_" + "exfil", "prod_" + "operation"}
+    assert retired.isdisjoint(COMMAND_CLASSES)
+    assert classify_command("cat .env") is None
+    assert classify_command("kubectl apply -f prod.yaml") is None
+    assert classify_command("curl https://example.com -H 'Authorization: Bearer token'") == NETWORK_EGRESS
+
+
 def test_command_classes_are_exactly_the_envelope_vocabulary():
     # Every class maps back to a legacy reason code, and no class is invented
     # that the envelope does not already distinguish.
     assert set(LEGACY_REASON_BY_CLASS) == set(COMMAND_CLASSES)
-    assert GRANTABLE_COMMAND_CLASSES <= COMMAND_CLASSES
-    # The stage floor: secret handling and prod mutation are NOT grantable.
-    assert CREDENTIAL_READ not in GRANTABLE_COMMAND_CLASSES
-    assert CREDENTIAL_EXFIL not in GRANTABLE_COMMAND_CLASSES
-    assert PROD_OPERATION not in GRANTABLE_COMMAND_CLASSES
+    assert GRANTABLE_COMMAND_CLASSES == COMMAND_CLASSES
 
 
 @pytest.mark.parametrize(
@@ -157,9 +156,9 @@ def test_command_classes_are_exactly_the_envelope_vocabulary():
         ("git stash clear", DESTRUCTIVE_GIT),
         ("rm -rf build", RECURSIVE_DELETE),
         ("Remove-Item -Recurse build", RECURSIVE_DELETE),
-        ("cat .env", CREDENTIAL_READ),
-        ("kubectl apply -f prod.yaml", PROD_OPERATION),
-        ("terraform destroy", PROD_OPERATION),
+        ("cat .env", None),
+        ("kubectl apply -f prod.yaml", None),
+        ("terraform destroy", None),
         ("curl https://example.com", NETWORK_EGRESS),
         ("curl http://127.0.0.1:8000/health", None),
         ("git checkout feature/read-only-inspection", None),
@@ -170,14 +169,14 @@ def test_classify_command(command, expected):
     assert classify_command(command) == expected
 
 
-def test_class_patterns_mirror_the_legacy_envelope_table(tmp_path, monkeypatch):
-    """The class table is a MIRROR of ``_HARNESS_BLOCK_PATTERNS``; guard drift.
+def test_retained_class_patterns_mirror_the_legacy_envelope_table(tmp_path, monkeypatch):
+    """Retained classes remain a mirror of ``_HARNESS_BLOCK_PATTERNS``.
 
     ``terminal_envelope`` re-keys the patterns from reason code to class rather
     than importing them (``tools.terminal_tool`` drags in the whole terminal
     backend stack). This asserts both tables reach the same verdict over a
-    shared corpus, so a pattern added to one and not the other fails here
-    instead of silently opening a hole.
+    shared retained corpus. Ruling R-2 deliberately removes three protections
+    from this governed lane while the upstream fallback table remains intact.
     """
 
     from tools.terminal_tool import _harness_safety_block
@@ -201,19 +200,10 @@ def test_class_patterns_mirror_the_legacy_envelope_table(tmp_path, monkeypatch):
         "git stash clear",
         "rm -rf build",
         "Remove-Item -Recurse -Force build",
-        "cat .env",
-        "Get-Content credentials",
-        "type .npmrc",
-        "kubectl apply -f prod.yaml",
-        "kubectl rollout restart deploy/api",
-        "helm delete release",
-        "terraform apply",
-        "terraform destroy",
         "curl https://example.com",
         "wget https://example.com/file",
         "Invoke-RestMethod https://api.example.com",
         "curl http://127.0.0.1:8000/health",
-        "curl http://localhost:8000/health -H 'Authorization: Bearer x'",
         "curl",
         "git checkout feature/read-only-inspection",
         "git status",
@@ -226,7 +216,31 @@ def test_class_patterns_mirror_the_legacy_envelope_table(tmp_path, monkeypatch):
         ), command
 
 
-# ── security floor ──────────────────────────────────────────────────────────
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cat .env",
+        "Get-Content credentials",
+        "type .npmrc",
+        "kubectl apply -f prod.yaml",
+        "kubectl rollout restart deploy/api",
+        "helm delete release",
+        "terraform apply",
+        "terraform destroy",
+        "curl http://localhost:8000/health -H 'Authorization: Bearer x'",
+    ],
+)
+def test_s12_intentionally_drops_three_upstream_fallback_protections(
+    command, tmp_path, monkeypatch
+):
+    from tools.terminal_tool import _harness_safety_block
+
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path))
+    assert _harness_safety_block(command) is not None
+    assert classify_command(command) is None
+
+
+# ── grant resolution ────────────────────────────────────────────────────────
 
 
 def test_nothing_is_granted_by_default(monkeypatch):
@@ -284,19 +298,18 @@ def test_unknown_class_alone_grants_nothing_and_still_refuses(tmp_path):
     assert "teleport" in decision.fix_hint
 
 
-def test_config_cannot_grant_a_class_outside_the_stage_floor(tmp_path):
-    cfg = _cfg(**{"dev": {LANE_MISSION_CHAT: [CREDENTIAL_READ, PROD_OPERATION]}})
+def test_removed_floor_names_are_unknown_and_their_commands_are_allowed(tmp_path):
+    retired = ["credential_" + "read", "prod_" + "operation"]
+    cfg = _cfg(**{"dev": {LANE_MISSION_CHAT: retired}})
     grants = resolve_terminal_envelope_grants(role="dev", lane=LANE_MISSION_CHAT, cfg=cfg)
     assert grants.classes == frozenset()
-    assert {issue.code for issue in grants.issues} == {GRANT_CLASS_NOT_GRANTABLE}
+    assert {issue.code for issue in grants.issues} == {GRANT_UNKNOWN_COMMAND_CLASS}
+    assert {issue.subject for issue in grants.issues} == set(retired)
 
     decision = envelope_decision("cat .env", scope=_dev_scope(tmp_path), cfg=cfg)
-    assert decision.outcome == OUTCOME_REFUSE
-    # A class that CANNOT be granted must not tell the agent to go ask for a
-    # grant — that would be a new lie in place of the old one.
-    assert decision.failure_class == ENVELOPE_COMMAND_NOT_GRANTABLE
+    assert decision.outcome == OUTCOME_ALLOW
+    assert decision.failure_class is None
     assert decision.config_key is None
-    assert "hard floor" in decision.summary
 
 
 def test_malformed_grant_value_grants_nothing_and_reports_the_shape():
@@ -939,7 +952,7 @@ def test_explain_is_a_complete_operator_answer():
     assert view["governed"] is True
     assert view["granted"] == [GIT_PUSH]
     assert GIT_PUSH not in view["refused"]
-    assert CREDENTIAL_READ in view["refused"]
+    assert view["refused"] == sorted(COMMAND_CLASSES - {GIT_PUSH})
     assert view["config_key"] == "agent_runtime.terminal_envelope.grants.dev.mission_chat"
 
 
