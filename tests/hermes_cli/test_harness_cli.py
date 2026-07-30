@@ -1205,3 +1205,25 @@ def test_a_stage42_flag_nothing_implements_is_refused_not_swallowed():
     with pytest.raises(SystemExit) as excinfo:
         parser().parse_args(["harness", "goal", "list", "--state", "done"])
     assert excinfo.value.code == 2
+
+
+def test_run_verify_command_survives_non_cp1252_bytes_in_child_output(tmp_path):
+    """Sub-command output is decoded as UTF-8 with replacement, never the
+    locale codepage: byte 0x90 is undefined in cp1252, and without a pinned
+    encoding it crashed subprocess's reader thread on Windows, silently
+    dropping the captured output from the verification payload."""
+    # runtime_commands.py is exec'd into hermes_cli.harness globals by
+    # _load_command_parts(); it is not importable as a standalone module.
+    from hermes_cli.harness import _run_verify_command
+
+    child = (
+        "import sys;"
+        "sys.stdout.buffer.write('utf8:\\u2713'.encode('utf-8') + b' raw:\\x90');"
+        "sys.stderr.buffer.write(b'err:\\x90')"
+    )
+    result = _run_verify_command("unicode", [sys.executable, "-c", child], cwd=tmp_path)
+
+    assert result["exit_code"] == 0
+    assert "utf8:✓" in result["stdout_summary"]
+    assert "raw:�" in result["stdout_summary"]
+    assert "err:�" in result["stderr_summary"]

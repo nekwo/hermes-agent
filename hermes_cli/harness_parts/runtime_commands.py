@@ -311,7 +311,18 @@ def _cmd_contracts_verify_examples(args) -> int:
 def _run_verify_command(label: str, command: list[str], *, cwd: Path) -> dict:
     started = time.monotonic()
     try:
-        completed = subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=120)
+        # encoding= pinned: text=True alone decodes with the locale codepage
+        # (cp1252 on Windows), and non-cp1252 bytes in a sub-command's output
+        # crash subprocess's reader thread without changing the exit code.
+        completed = subprocess.run(
+            command,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
         stdout = completed.stdout or ""
         stderr = completed.stderr or ""
         exit_code = completed.returncode
@@ -341,7 +352,15 @@ def _safe_output_summary(text: str) -> str:
 def _git_summary(root: Path) -> dict:
     def run(args: list[str]) -> str | None:
         try:
-            completed = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, timeout=10)
+            completed = subprocess.run(
+                ["git", *args],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+            )
         except Exception:
             return None
         return completed.stdout.strip() if completed.returncode == 0 else None
