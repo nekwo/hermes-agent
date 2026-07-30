@@ -356,7 +356,6 @@ class PersonaAssignmentSpec:
     created_by: str = "harness"
     persona_instance_id: str | None = None
     state: str = "queued"
-    task_id: str | None = None
     goal_id: str | None = None
     stage_id: str | None = None
     operation_id: str | None = None
@@ -2064,13 +2063,13 @@ class PersonaAssignmentStore:
 
     def create_or_resume(self, spec: PersonaAssignmentSpec) -> PersonaAssignment:
         persona_id = safe_assignment_token(spec.persona_id)
-        goal_id = safe_optional_token(spec.goal_id or spec.task_id)
+        goal_id = safe_optional_token(spec.goal_id)
         instance_id = canonical_persona_instance_id(spec.persona_instance_id, persona_id=persona_id) or (
             persona_instance_id_for_placement(f"{goal_id}:{persona_id}") if goal_id else persona_instance_id_for(persona_id)
         )
         signal_hash = assignment_signal_hash_from_parts(
             persona_id=persona_id,
-            task_id=spec.task_id,
+            goal_id=goal_id,
             stage_id=spec.stage_id,
             kind=spec.kind,
             repo_bundle_id=spec.repo_bundle_id,
@@ -2088,12 +2087,17 @@ class PersonaAssignmentStore:
                     and getattr(existing, "client_message_id", None) == client_message_id
                 ):
                     return existing
-        for existing in self.find_active(persona_id=persona_id, task_id=spec.task_id, stage_id=spec.stage_id, kind=spec.kind):
+        for existing in self.find_active(
+            persona_id=persona_id,
+            goal_id=goal_id,
+            stage_id=spec.stage_id,
+            kind=spec.kind,
+        ):
             if existing.signal_hash == signal_hash:
                 return existing
         ts = now()
         evidence_kind = assignment_evidence_kind(spec.kind)
-        archive_scope = assignment_archive_scope(spec.kind, task_id=spec.task_id)
+        archive_scope = assignment_archive_scope(spec.kind)
         production_proof_eligible = (
             bool(spec.production_proof_eligible)
             if spec.production_proof_eligible is not None
@@ -2111,7 +2115,6 @@ class PersonaAssignmentStore:
                 created_by=safe_assignment_token(spec.created_by) or "harness",
                 created_at=ts,
                 updated_at=ts,
-                task_id=safe_optional_token(spec.task_id),
                 goal_id=goal_id,
                 stage_id=safe_optional_token(spec.stage_id),
                 operation_id=safe_optional_token(spec.operation_id),
@@ -2131,16 +2134,16 @@ class PersonaAssignmentStore:
             )
         )
 
-    def contention_warnings(self, *, persona_id: str | None = None, goal_id: str | None = None, task_id: str | None = None) -> list[dict[str, Any]]:
+    def contention_warnings(self, *, persona_id: str | None = None, goal_id: str | None = None) -> list[dict[str, Any]]:
         wanted_persona = safe_assignment_token(persona_id) if persona_id else None
-        wanted_goal = safe_optional_token(goal_id or task_id)
+        wanted_goal = safe_optional_token(goal_id)
         warnings: list[dict[str, Any]] = []
         for assignment in self.list_all():
             if assignment.state not in ACTIVE_ASSIGNMENT_STATES:
                 continue
             if wanted_persona and assignment.persona_id != wanted_persona:
                 continue
-            existing_goal = safe_optional_token(assignment.goal_id or assignment.task_id)
+            existing_goal = safe_optional_token(assignment.goal_id)
             if wanted_goal and existing_goal == wanted_goal:
                 continue
             if self._release_if_owning_goal_terminal(assignment):
@@ -2169,7 +2172,7 @@ class PersonaAssignmentStore:
         (no owning task/goal) are never touched — their staleness cannot be
         inferred from task state.
         """
-        owner = safe_optional_token(assignment.task_id or assignment.goal_id)
+        owner = safe_optional_token(assignment.goal_id)
         if not owner:
             return False
         owner_state = _owning_task_release_state(owner)
@@ -2225,9 +2228,9 @@ class PersonaAssignmentStore:
             if (assignment.goal_id or assignment.task_id) == normalized
         ]
 
-    def find_active(self, *, persona_id: str | None = None, task_id: str | None = None, stage_id: str | None = None, kind: str | None = None) -> list[PersonaAssignment]:
+    def find_active(self, *, persona_id: str | None = None, goal_id: str | None = None, stage_id: str | None = None, kind: str | None = None) -> list[PersonaAssignment]:
         wanted_persona = safe_assignment_token(persona_id) if persona_id else None
-        wanted_task = safe_optional_token(task_id) if task_id else None
+        wanted_goal = safe_optional_token(goal_id) if goal_id else None
         wanted_stage = safe_optional_token(stage_id) if stage_id else None
         wanted_kind = safe_assignment_token(kind) if kind else None
         return [
@@ -2235,7 +2238,7 @@ class PersonaAssignmentStore:
             for assignment in self.list_all()
             if assignment.state in ACTIVE_ASSIGNMENT_STATES
             and (wanted_persona is None or assignment.persona_id == wanted_persona)
-            and (wanted_task is None or assignment.task_id == wanted_task)
+            and (wanted_goal is None or assignment.goal_id == wanted_goal)
             and (wanted_stage is None or assignment.stage_id == wanted_stage)
             and (wanted_kind is None or assignment.kind == wanted_kind)
         ]
@@ -2332,6 +2335,55 @@ class PersonaAssignmentStore:
                 },
             )
         )
+
+
+def migrate_retired_persona_assignment_task_ids(*, dry_run: bool) -> dict[str, Any]:
+    """Archive pre-retirement mission-lane assignment rows.
+
+    A non-null raw ``task_id`` is the migration discriminator. Rows move out of
+    the live store intact; no record is rewritten or deleted. Repeating the
+    apply is inert because migrated rows are no longer present in the live
+    directory.
+    """
+
+    live_dir = paths.persona_assignments_dir()
+    archive_dir = paths.persona_assignments_archive_dir() / "retired_task_id"
+    sources = sorted(live_dir.glob("*.json")) if live_dir.exists() else []
+    eligible: list[tuple[Path, str]] = []
+    held: list[dict[str, str]] = []
+    for source in sources:
+        try:
+            raw = json.loads(source.read_text(encoding="utf-8"))
+        except Exception as exc:
+            held.append({"path": source.name, "reason": f"unreadable:{type(exc).__name__}"})
+            continue
+        if not isinstance(raw, dict) or raw.get("task_id") is None:
+            continue
+        assignment_id = safe_assignment_token(raw.get("id")) or source.stem
+        eligible.append((source, assignment_id))
+
+    archived = 0
+    if not dry_run and eligible:
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        for source, assignment_id in eligible:
+            target = archive_dir / source.name
+            if target.exists():
+                held.append({"assignment_id": assignment_id, "reason": "archive_target_exists"})
+                continue
+            shutil.move(str(source), str(target))
+            archived += 1
+
+    return {
+        "ok": not held,
+        "migration": "retired_persona_assignment_task_id",
+        "dry_run": bool(dry_run),
+        "scanned": len(sources),
+        "eligible": len(eligible),
+        "archived": archived,
+        "assignment_ids": [assignment_id for _, assignment_id in eligible],
+        "archive_dir": str(archive_dir),
+        "held": held,
+    }
 
 
 # ``PERSONA_INSTANCE_ID_PREFIX`` / ``looks_like_persona_instance_id`` are the
@@ -3003,19 +3055,17 @@ def assignment_evidence_kind(kind: str | None) -> str:
     return "task_bound"
 
 
-def assignment_archive_scope(kind: str | None, *, task_id: str | None) -> str:
+def assignment_archive_scope(kind: str | None) -> str:
     evidence_kind = assignment_evidence_kind(kind)
-    if evidence_kind == "free_floating" and not safe_optional_token(task_id):
+    if evidence_kind == "free_floating":
         return "assignment"
-    if evidence_kind == "diagnostic":
-        return "task"
-    return "task" if safe_optional_token(task_id) else "assignment"
+    return "task"
 
 
 def assignment_signal_hash(assignment: PersonaAssignment) -> str:
     return assignment_signal_hash_from_parts(
         persona_id=assignment.persona_id,
-        task_id=assignment.task_id,
+        goal_id=assignment.goal_id,
         stage_id=assignment.stage_id,
         kind=assignment.kind,
         repo_bundle_id=assignment.repo_bundle_id,
@@ -3026,10 +3076,10 @@ def assignment_signal_hash(assignment: PersonaAssignment) -> str:
     )
 
 
-def assignment_signal_hash_from_parts(*, persona_id: str | None, task_id: str | None, stage_id: str | None, kind: str | None, repo: str | None, affected_paths: list[str] | None, proof_targets: list[str] | None, message: str | None, repo_bundle_id: str | None = None) -> str:
+def assignment_signal_hash_from_parts(*, persona_id: str | None, goal_id: str | None, stage_id: str | None, kind: str | None, repo: str | None, affected_paths: list[str] | None, proof_targets: list[str] | None, message: str | None, repo_bundle_id: str | None = None) -> str:
     payload = {
         "persona_id": safe_assignment_token(persona_id),
-        "task_id": safe_optional_token(task_id),
+        "goal_id": safe_optional_token(goal_id),
         "stage_id": safe_optional_token(stage_id),
         "kind": safe_assignment_token(kind),
         "repo_bundle_id": safe_optional_token(repo_bundle_id),

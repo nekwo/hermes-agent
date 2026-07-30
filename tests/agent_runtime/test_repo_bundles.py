@@ -231,7 +231,7 @@ def test_assignment_signal_hash_includes_repo_bundle_id(isolate_agent_runtime_ro
         kind="repo_bundle",
         title="Launcher",
         message="Patch launcher.",
-        task_id="task_bundle",
+        goal_id="task_bundle",
         stage_id="launcher_impl",
         repo="EterniaLauncher",
     )
