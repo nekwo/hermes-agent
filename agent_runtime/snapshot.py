@@ -620,7 +620,7 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         warnings.append(
             {
                 "code": "suspect_default_root",
-                "detail": "runtime root resolved through the default layer, but no tasks/ directory exists; check runtime-root pins",
+                "detail": "runtime root resolved through the default layer, but no store marker directories (persona_instances/, sessions/, agents/) exist; check runtime-root pins",
             }
         )
     return {

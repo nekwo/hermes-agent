@@ -80,6 +80,22 @@ def test_suspect_default_root_and_parity_warning(monkeypatch, tmp_path):
     assert snapshot["parity"]["resolution"]["layer"] == "default"
 
 
+def test_default_root_with_store_marker_is_not_suspect(monkeypatch, tmp_path):
+    monkeypatch.delenv("HERMES_AGENT_RUNTIME_ROOT", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+    clear_parse_cache()
+    # A chat-only store has persona/chat state, never tasks/ — any one marker
+    # directory is proof the default-resolved root is the real store.
+    (tmp_path / "home" / "agent-runtime" / "persona_instances").mkdir(parents=True)
+
+    resolution = resolve_runtime()
+
+    assert resolution.layer == "default"
+    assert suspect_default_root(resolution) is False
+    snapshot = build_snapshot()
+    assert "suspect_default_root" not in {warning["code"] for warning in snapshot["parity"]["warnings"]}
+
+
 def test_resolution_table_marks_winner_without_mission_columns(tmp_path):
     root = tmp_path / "runtime"
     root.mkdir(parents=True)
