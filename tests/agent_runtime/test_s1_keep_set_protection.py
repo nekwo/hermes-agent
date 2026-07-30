@@ -6,13 +6,12 @@ contracts those later stages will lean on:
 
 1. the permanent ``TaskStore`` stub for upstream ``tools/board_tool.py`` (ruling R-3),
 2. ``promote_profile_to_persona`` at its new home in ``agent_runtime.personas``,
-   still reachable from the upstream import path,
-3. the extracted Stage C command-argument checks,
-4. the extracted Stage C trace parsers,
-5. the Stage C rebuild artifact no longer landing in the ``proofs/`` store.
+   still reachable from the upstream import path.
 
-Item 6 (``_augment_chat_capabilities`` appending unconditionally) is pinned in
-``test_board_agent_tools.py``, next to the board toolset gating it protects.
+Items 3-5 were the Stage C Python capture extractions, retired in S14 by operator
+ruling — see the note below. Item 6 (``_augment_chat_capabilities`` appending
+unconditionally) is pinned in ``test_board_agent_tools.py``, next to the board
+toolset gating it protects.
 """
 
 from __future__ import annotations
@@ -165,111 +164,19 @@ def test_promotion_unknown_role_does_not_clone_an_unrelated_stored_persona():
     assert persona.toolsets == list(PROFILE_CHAT_FALLBACK_TOOLSETS)
 
 
-# ── item 3: extracted Stage C command-argument checks ─────────────────────
+# ── items 3-5: the Stage C Python capture lane (retired in S14) ───────────
+#
+# S1 extracted the Stage C command-argument checks, the trace parsers, and the
+# rebuild-artifact path so a *Python* capture lane could survive S3-S12. The
+# 2026-07-30 operator ruling retired that lane outright: Stage C visual proof lives
+# only as the ``launcher_qa`` MCP server plus the marionette skill. Those three
+# items therefore have nothing left to protect and their tests went with
+# ``agent_runtime/stagec_command_policy.py``, ``stagec_trace_parsers.py``,
+# ``proof_capture.py``, and ``stagec_mcp_visual_provider.py``.
+# The removal itself is pinned in ``test_s14_stagec_python_capture_removal.py``.
 
 
-def test_stagec_command_policy_rejects_composed_path_screenshot_args():
-    from agent_runtime.decision_schema import DecisionPayloadInvalid
-    from agent_runtime.stagec_command_policy import reject_invalid_stagec_screenshot_window_args
-
-    with pytest.raises(DecisionPayloadInvalid):
-        reject_invalid_stagec_screenshot_window_args(
-            ["mcp_launcher_qa_screenshot_window --screenshot_stabilize_ms 500"]
-        )
-    # the arguments screenshot_window actually accepts pass
-    reject_invalid_stagec_screenshot_window_args(
-        ["mcp_launcher_qa_screenshot_window --max_retries 3 --retry_delay_ms 250"]
-    )
-
-
-def test_stagec_command_policy_rejects_unpinned_mission_control_capture():
-    from agent_runtime.decision_schema import DecisionPayloadInvalid
-    from agent_runtime.stagec_command_policy import reject_unpinned_mission_control_stagec_commands
-
-    with pytest.raises(DecisionPayloadInvalid) as excinfo:
-        reject_unpinned_mission_control_stagec_commands(
-            ["mcp_launcher_qa_open_app_tab --tab MissionControl --hermes_profile alice"]
-        )
-    assert "harness_runtime_root" in str(excinfo.value)
-
-    reject_unpinned_mission_control_stagec_commands(
-        [
-            "mcp_launcher_qa_open_app_tab --tab MissionControl --hermes_profile alice "
-            "--harness_runtime_root X:/root --hermes_home X:/home"
-        ]
-    )
-
-
-def test_stagec_command_policy_survives_without_the_mission_policy_module():
-    from agent_runtime import stagec_command_policy
-
-    assert callable(stagec_command_policy.reject_invalid_stagec_screenshot_window_args)
-    assert callable(stagec_command_policy.reject_unpinned_mission_control_stagec_commands)
-
-
-# ── item 4: extracted Stage C trace parsers ───────────────────────────────
-
-
-def test_trace_parsers_recognise_the_direct_and_wrapper_screenshot_paths(tmp_path):
-    from agent_runtime.stagec_trace_parsers import (
-        is_launcher_qa_screenshot_tool,
-        terminal_wrapper_screenshot,
-    )
-
-    assert is_launcher_qa_screenshot_tool("mcp_launcher_qa_screenshot_window")
-    assert not is_launcher_qa_screenshot_tool("terminal")
-
-    shot = tmp_path / "missioncontrol_001.png"
-    shot.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 200)
-    payload = {
-        "tool_name": "terminal",
-        "status": "passed",
-        "command_label": (
-            "pwsh Invoke-LauncherQaMcpTool.ps1 -Tool mcp_launcher_qa_screenshot_window "
-            f"-ArgsJson '{json.dumps({'label': 'missioncontrol', 'out_dir': str(tmp_path)})}'"
-        ),
-    }
-    resolved = terminal_wrapper_screenshot(payload, run=None)
-    assert resolved is not None
-    tool_name, path = resolved
-    assert tool_name == "mcp_launcher_qa_screenshot_window"
-    assert path == str(shot)
-
-
-def test_trace_parsers_reject_an_artifact_older_than_the_run(tmp_path):
-    import os
-    import time
-
-    from agent_runtime.stagec_trace_parsers import latest_wrapper_artifact
-
-    stale = tmp_path / "stale.png"
-    stale.write_bytes(b"\x89PNG\r\n\x1a\n")
-    old = time.time() - 10_000
-    os.utime(stale, (old, old))
-
-    assert latest_wrapper_artifact(label="", out_dir=str(tmp_path), min_mtime=None) == stale
-    assert latest_wrapper_artifact(label="", out_dir=str(tmp_path), min_mtime=time.time()) is None
-
-
-def test_png_dimensions_sniffs_the_header(tmp_path):
-    import struct
-
-    from agent_runtime.stagec_trace_parsers import png_dimensions
-
-    png = tmp_path / "sized.png"
-    png.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8 + struct.pack(">II", 1920, 1080))
-    assert png_dimensions(png) == (1920, 1080)
-    assert png_dimensions(tmp_path / "missing.png") == (0, 0)
-
-
-def test_stagec_trace_parsers_survive_without_the_mission_evidence_module():
-    from agent_runtime import stagec_trace_parsers
-
-    assert callable(stagec_trace_parsers.terminal_wrapper_screenshot)
-    assert callable(stagec_trace_parsers.png_dimensions)
-
-
-def test_s6_removes_mission_proof_modules_but_keeps_stagec_capture_primitives():
+def test_s6_removed_the_mission_proof_modules():
     import importlib.util
 
     removed = (
@@ -291,26 +198,8 @@ def test_s6_removes_mission_proof_modules_but_keeps_stagec_capture_primitives():
 
     assert all(importlib.util.find_spec(name) is None for name in removed)
 
-    from agent_runtime.proof_capture import CapturedArtifact, ScreenshotRequest
-    from agent_runtime.stagec_command_policy import reject_invalid_stagec_screenshot_window_args
-    from agent_runtime.stagec_trace_parsers import png_dimensions
 
-    assert CapturedArtifact.__name__ == "CapturedArtifact"
-    assert ScreenshotRequest.__name__ == "ScreenshotRequest"
-    assert callable(reject_invalid_stagec_screenshot_window_args)
-    assert callable(png_dimensions)
+def test_no_proofs_store_is_created_by_the_runtime():
+    """The ``proofs/`` store S1 repointed away from must never come back."""
 
-
-# ── item 5: Stage C rebuild artifacts leave the proofs/ store ─────────────
-
-
-def test_rebuild_artifact_is_written_under_stagec_artifacts_not_proofs():
-    from agent_runtime.stagec_mcp_visual_provider import _write_rebuild_artifact
-
-    rel = _write_rebuild_artifact("task_stagec_probe", "stdout", "build log line\n")
-    assert rel.startswith("stagec_artifacts/")
-    assert "proofs/" not in rel
-
-    written = paths.store_root() / rel
-    assert written.read_text(encoding="utf-8") == "build log line\n"
     assert not (paths.store_root() / "proofs").exists()
