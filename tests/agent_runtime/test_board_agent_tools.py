@@ -227,12 +227,13 @@ def test_hud_digest_absent_when_only_done_cards():
     assert _board_digest_for_workspace(ws) is None
 
 
-# ── prompt-path parity ────────────────────────────────────────────────────
+# ── chat prompt board guidance ────────────────────────────────────────────
+# The chat system prompt is the only persona prompt path left (the bundled
+# mission-worker prompt builder and its shared_harness_overlay.md were removed
+# with the mission lane), so the board sentence is pinned here alone.
 
 
-def test_board_sentence_present_in_both_prompt_paths():
-    from pathlib import Path
-
+def test_board_sentence_present_in_chat_prompt():
     from agent_runtime.models import AgentPersona
     from agent_runtime.persona_runtime import _persona_chat_system_prompt
 
@@ -249,12 +250,3 @@ def test_board_sentence_present_in_both_prompt_paths():
     chat_prompt = _persona_chat_system_prompt(persona)
     assert "workspace board" in chat_prompt.lower()
     assert "may add a card" in chat_prompt.lower()
-
-    overlay = (
-        Path(__file__).resolve().parents[2]
-        / "agent_runtime"
-        / "prompts"
-        / "shared_harness_overlay.md"
-    ).read_text(encoding="utf-8")
-    assert "Mission Board" in overlay
-    assert "may add a card" in overlay.lower()

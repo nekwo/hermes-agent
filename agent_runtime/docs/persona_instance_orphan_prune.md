@@ -10,7 +10,7 @@ runtime HUD as phantom "on level" agents. Two classes:
   QA probes `codex_{create,display,no_display}_probe` created against the LIVE
   store instead of an isolated temp home).
 - **`legacy-role`** — an instance under a mothballed role (the retired `pm`
-  slot; see `prompts/shared_harness_overlay.md`).
+  slot; see `MOTHBALLED_ROLES` in `personas.py`).
 
 The snapshot builds the instance list from `PersonaInstanceStore.list_all()`
 (a fresh glob), and the only cleanup lanes were duplicate-id fold
