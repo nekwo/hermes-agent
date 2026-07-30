@@ -5,7 +5,6 @@ import json
 import re
 import threading
 import time
-from types import SimpleNamespace
 import hashlib
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -23,17 +22,12 @@ from .office_store import OfficeStore
 from .budget_approval import budget_incident_can_continue, budget_incident_needs_scope_recovery
 from .config import ensure_persisted_personas, load_agent_runtime_config, load_root_runtime_config
 from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash
-from .delivery_directive import task_delivery_directive
 from .dirty_state import build_dirty_state
 from .events import CachedEventLog, EventLog, event_summary_missing, operator_event_summary
 from .migrations import effective_config_summary, migration_status
 from .models import looks_like_persona_instance_id
 from .observability import build_observability
-from .operator_channels import (
-    OPERATOR_CHANNELS_SCHEMA_VERSION,
-    OPERATOR_CONVERSATION_SCHEMA_VERSION,
-    operator_channel_summary,
-)
+from .operator_channels import operator_channel_summary
 from .persona_assignments import (
     ACTIVE_ASSIGNMENT_STATES,
     PersonaAssignmentStore,
@@ -59,17 +53,15 @@ from .resolution import resolution_payload, resolve_runtime, suspect_default_roo
 from .personas import blocked_tool_names, effective_toolsets
 from .prompt_observability import _SkillObservabilityResolver, snapshot_prompt_observability
 from .realm_sync import read_realm_sync_sidecar
-from .repo_bundles import RepoBundleStore, bundle_queue_summary, qa_waiting_on, repo_bundle_delivery_summary, repo_bundle_summary, simplified_phase_for_task
-from .runtime_instances import GoalRuntimeInstanceStore, runtime_instance_summary, runtime_instances_summary
+from .repo_bundles import qa_waiting_on
+from .runtime_instances import runtime_instance_summary, runtime_instances_summary
 from .repo_context import resolve_affected_repo_workdir
-from .role_checklists import RoleChecklist, RoleChecklistStore, checklist_summary
-from .role_envelopes import RoleEnvelope, RoleEnvelopeStore, role_envelope_summary
-from .scope_control import issue_discovery_counts, untriaged_issue_discoveries
+from .role_checklists import RoleChecklist, checklist_summary
+from .role_envelopes import RoleEnvelope, role_envelope_summary
 from .simplified_contract import public_decision_type_value
 from .serde import from_jsonable, to_jsonable
-from .self_test_evidence import SelfTestEvidenceStore, self_test_summary
-from .states import RunState, StageStatus, TaskState
-from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, RealmStore, RunStore, TaskStore, WorkspaceStore
+from .states import RunState, TaskState
+from .store import ACTIVE_RUN_STATES, AgentStore, RealmStore, RunStore, WorkspaceStore
 from .tool_visibility import (
     _profile_readiness_for_visibility,
     resolve_tool_visibility,
@@ -108,84 +100,6 @@ MISSION_FLOW_TIMELINE_ITEM_CAP = 8
 # evicted (pointer-stub) shape is the ONLY shape. Rollback = ``git revert``, not
 # a flag flip. The helpers below always evict.
 ARCHIVED_TASKS_REF_RECENT_CAP = 25
-
-
-# S8 read-model — DEEP SLIM inside live rows (operator ruling 2026-07-17: "one
-# file per goal + log; the UI parses it when relevant"). The goal row is a
-# fusion of a compact HEAD (identity/state/current-stage/counts/delivery
-# pointers + the mission-level fields the ALWAYS-VISIBLE surfaces render) and a
-# heavy DETAIL body (per-role streams, envelopes, checklists, per-event
-# timelines, the per-run persona streams). The detail body has
-# no steady-state launcher reader: it was verified 2026-07-17 that
-# ``MissionGoalSummary`` (the launcher's goal fold) never renders any of these
-# fields off a goal — ``role_streams`` / ``stage_streams`` / ``timeline`` /
-# ``persona_streams`` are not even parsed, and
-# ``role_envelopes`` / ``role_checklists`` parse to unread
-# fields (the top-level ``role_envelopes`` / ``role_checklists`` sections feed
-# the roster; the goal-row copies are dead). They leave the head and are served
-# on demand by ``harness goal detail <task_id> --json``. The KEPT mission-level
-# fields that previously fed the retired mission office stay in the
-# head because they render on every frame. Archive-never-delete: nothing leaves
-# disk — the detail is rebuilt from the same stores + EventLog on demand.
-GOAL_DETAIL_ONLY_FIELDS = frozenset(
-    {
-        "role_streams",
-        "role_envelopes",
-        "role_checklists",
-        "stage_streams",
-        "timeline",
-        "persona_streams",
-        "proof_summaries",
-        "self_test_summaries",
-        "verification_status",
-        "operator_capabilities",
-        "repo_bundles",
-    }
-)
-
-
-def _goal_head(row: dict) -> dict:
-    """Split a full goal projection into its compact frame HEAD.
-
-    The heavy detail-only fields (``GOAL_DETAIL_ONLY_FIELDS``) leave the row and
-    are replaced by a single typed ``detail_ref`` pointer carrying the fetch verb
-    + which fields were evicted (never a silent absence — a consumer that opens a
-    goal detail drawer/blueprint/replay view fetches them, an unfetched detail
-    renders a loading/fetch affordance). The head still carries every field the
-    always-visible surfaces read, including the mission-level state the office /
-    roster / HUD render each frame."""
-
-    head = {key: value for key, value in row.items() if key not in GOAL_DETAIL_ONLY_FIELDS}
-    evicted = sorted(key for key in GOAL_DETAIL_ONLY_FIELDS if key in row)
-    head["detail_ref"] = {
-        "evicted": True,
-        "task_id": row.get("task_id"),
-        "fields": evicted,
-        "fetch": "harness goal detail <task_id> --json",
-    }
-    return head
-
-
-def _archived_tasks_frame(archived_tasks: list):
-    """The ``archived_tasks`` frame value: a typed pointer stub.
-
-    Replaces the 25-dead-row array (≈1.27 MB live) with a small honest marker
-    carrying the count + newest-N ids + the fetch verb — never a silent absence.
-    Full rows are fetched via ``harness task history <task_id> --json`` (which
-    already reads archived batches).
-    """
-
-    recent_ids = [
-        str(row.get("task_id"))
-        for row in archived_tasks[:ARCHIVED_TASKS_REF_RECENT_CAP]
-        if isinstance(row, dict) and row.get("task_id")
-    ]
-    return {
-        "evicted": True,
-        "count": len(archived_tasks),
-        "recent_ids": recent_ids,
-        "fetch": "harness task history <task_id> --json",
-    }
 
 
 def _open_incidents_frame(incidents: list) -> tuple[list, int]:
@@ -605,21 +519,6 @@ def _build_snapshot_uncoalesced(
         "migration": migration,
         "prompt_observability": prompt_observability_section,
         "repo_scopes": _repo_scopes_summary(),
-        # S4: ONE keyed ``goals`` map is the wire entity (operator decision:
-        # GOAL is the wire name). The old ``tasks`` wire section retires; every
-        # field BOTH projections carried lives once here — the merged goal row
-        # is the full ``_task_summary`` (self_tests / role_envelopes /
-        # role_checklists / stage_verification all threaded, as
-        # the old ``tasks`` section had them) PLUS the goal-only fields (``id``,
-        # ``kind``, resolved ``realm_id``). Keyed by ``task_id`` — the unique
-        # per-row id, matching the on-disk ``task_*.json`` store keying. NOT
-        # ``goal_id``/``id``: several tasks can share one goal_id (parent/child
-        # under one mission), which would collapse rows. Each row still carries
-        # ``id`` (goal identity) + ``goal_id`` for goal-addressed consumers; the
-        # launcher folds the map's values, so the map key is never a lookup key.
-        # Rows carry a resolved ``active`` flag alongside the top-level
-        # ``active_*_id`` keys — consumers (launcher scope switcher) key
-        # selection off the row flag and must not re-derive it.
         "workspaces": [
             _workspace_summary(
                 item,
@@ -1710,225 +1609,6 @@ def _archived_task_summary(task_id: str, raw: dict, archive_batch: str, reason: 
     }
 
 
-def _archived_operator_channels(archived_tasks: list[dict], *, live_task_ids: set[str] | None = None, limit: int = 25) -> list[dict]:
-    live_task_ids = live_task_ids or set()
-    channels: list[dict] = []
-    for archived in archived_tasks[:limit]:
-        task_id = str(archived.get("task_id") or "").strip()
-        if not task_id or task_id in live_task_ids:
-            continue
-        channel = _archived_operator_channel(archived)
-        if channel is not None:
-            channels.append(channel)
-    return channels
-
-
-def _archived_operator_channel(archived: dict) -> dict | None:
-    task_id = str(archived.get("task_id") or "").strip()
-    if not task_id:
-        return None
-    goal_id = str(archived.get("goal_id") or "").strip() or None
-    owner_persona_id = str(archived.get("owner_persona_id") or archived.get("requested_by") or "operator").strip() or "operator"
-    channel_id = f"{owner_persona_id}::archived:{task_id}"
-    messages: list[dict] = []
-    goal_message = _archived_goal_input_message(archived, channel_id=channel_id)
-    if goal_message is not None:
-        messages.append(goal_message)
-    for index, assignment in enumerate(archived.get("persona_assignments") or []):
-        if isinstance(assignment, dict):
-            message = _archived_assignment_message(assignment, channel_id=channel_id, index=index)
-            if message is not None:
-                messages.append(message)
-    for index, event in enumerate(archived.get("recent_events") or []):
-        if isinstance(event, dict):
-            message = _archived_event_message(event, channel_id=channel_id, index=index)
-            if message is not None:
-                messages.append(message)
-    messages.sort(key=_archived_conversation_message_sort_key)
-    messages = _dedupe_archived_conversation_messages(messages)
-    for seq, message in enumerate(messages, start=1):
-        message["seq"] = seq
-    updated_at = _latest_archived_message_timestamp(messages) or archived.get("updated_at") or archived.get("archived_at")
-    # S8: an archived channel is a POINTER STUB — the embedded transcript
-    # (~20-25 KB/row of dead-mission messages) leaves the frame (operator ruling
-    # 2026-07-17: "old residue and runs need to be purged — it should just be
-    # pointers to chat history"). The full transcript stays on disk in the
-    # deleted-archive batch and is fetched on demand via ``harness task history``
-    # (or the persona chat-history query). The stub keeps identity + recency +
-    # message_count so the console renders an honest archived row + a fetch
-    # affordance, never a fake-empty conversation. ``messages`` is an explicit
-    # empty list flagged ``messages_evicted`` so the launcher conversation parser
-    # distinguishes an evicted transcript from a genuinely empty one.
-    message_count = len(messages)
-    fetch = f"harness task history {task_id} --json"
-    conversation = {
-        "schema_version": OPERATOR_CONVERSATION_SCHEMA_VERSION,
-        "thread_id": channel_id,
-        "goal_id": goal_id,
-        "task_id": task_id,
-        "owner_persona_id": owner_persona_id,
-        "persona_instance_id": f"archived:{task_id}:{owner_persona_id}",
-        "session_id": None,
-        "root_thread_id": channel_id,
-        "parent_thread_id": None,
-        "title": _archived_conversation_text(archived.get("title"), limit=240) or "Archived mission",
-        "state": "archived",
-        "updated_at": updated_at,
-        "status": "archived",
-        "incomplete_reason": None,
-        "messages": [],
-        "messages_evicted": True,
-        "message_count": message_count,
-        "fetch": fetch,
-    }
-    return {
-        "schema_version": OPERATOR_CHANNELS_SCHEMA_VERSION,
-        "channel_id": channel_id,
-        "persona_id": owner_persona_id,
-        "persona_instance_id": f"archived:{task_id}:{owner_persona_id}",
-        "session_id": None,
-        "task_id": task_id,
-        "goal_id": goal_id,
-        "display_name": _display_name_for_persona(owner_persona_id),
-        "state": "archived",
-        "mode": "archived_goal",
-        "source_instance_ids": [],
-        "history": None,
-        "trace": None,
-        "conversation": conversation,
-        "conversation_status": "archived",
-        "message_count": message_count,
-        "messages_evicted": True,
-        "fetch": fetch,
-        "trace_count": 0,
-        "tool_trace_count": 0,
-        "warnings": [],
-        "archived": True,
-        "archive_batch": archived.get("archive_batch"),
-        "archive_reason": archived.get("archive_reason"),
-        "archived_at": archived.get("archived_at"),
-        "updated_at": updated_at,
-    }
-
-
-def _archived_goal_input_message(archived: dict, *, channel_id: str) -> dict | None:
-    task_id = str(archived.get("task_id") or "").strip()
-    title = _archived_conversation_text(archived.get("title"), limit=500) or "Archived mission"
-    parts = [f"Goal: {title}"]
-    description = _archived_conversation_text(archived.get("description"), limit=4000)
-    if description:
-        parts.append(f"Objective: {description}")
-    acceptance = [
-        item
-        for item in (
-            _archived_conversation_text(value, limit=500)
-            for value in (archived.get("acceptance_criteria") or [])
-        )
-        if item
-    ]
-    if acceptance:
-        parts.append("Acceptance:\n" + "\n".join(f"- {item}" for item in acceptance))
-    owner_persona_id = str(archived.get("owner_persona_id") or archived.get("requested_by") or "operator").strip() or "operator"
-    return {
-        "id": f"{channel_id}:goal_input:{task_id}",
-        "seq": 0,
-        "timestamp": archived.get("created_at") or archived.get("archived_at"),
-        "actor_persona_id": "operator",
-        "actor_instance_id": None,
-        "target_persona_id": owner_persona_id,
-        "target_persona_instance_id": f"archived:{task_id}:{owner_persona_id}",
-        "role": "operator",
-        "kind": "goal_input",
-        "status": "delivered",
-        "display_title": "",
-        "display_text": "\n\n".join(parts),
-        "redaction_status": "safe",
-        "refs": {"task_id": task_id, "goal_id": archived.get("goal_id"), "source": "deleted_archive"},
-    }
-
-
-def _archived_assignment_message(assignment: dict, *, channel_id: str, index: int) -> dict | None:
-    target_persona_id = str(assignment.get("persona_id") or "agent").strip() or "agent"
-    title = _archived_conversation_text(assignment.get("title"), limit=240)
-    prompt = _archived_conversation_text(assignment.get("message"), limit=1200)
-    if not title and not prompt:
-        return None
-    parts = [f"Prompted {target_persona_id}."]
-    if title:
-        parts.append(f"Stage: {title}")
-    if prompt:
-        parts.append(f"Prompt: {prompt}")
-    proof_targets = _archived_conversation_list(assignment.get("proof_targets"), limit=160)
-    if proof_targets:
-        parts.append("Proof expected: " + "; ".join(proof_targets))
-    allowed_decisions = _archived_conversation_list(assignment.get("allowed_decisions"), limit=80)
-    if allowed_decisions:
-        parts.append("Allowed decisions: " + ", ".join(allowed_decisions))
-    refs = {"source": "persona_assignment"}
-    for key in ("id", "assignment_id", "task_id", "goal_id", "stage_id", "persona_instance_id"):
-        value = str(assignment.get(key) or "").strip()
-        if value:
-            refs["assignment_id" if key == "id" else key] = value
-    owner_persona_id = str(assignment.get("owner_persona_id") or assignment.get("requested_by") or "operator").strip() or "operator"
-    return {
-        "id": f"{channel_id}:assignment:{refs.get('assignment_id', index)}",
-        "seq": 0,
-        "timestamp": assignment.get("created_at") or assignment.get("updated_at"),
-        "actor_persona_id": owner_persona_id,
-        "actor_instance_id": f"archived:{refs.get('task_id', 'task')}:{owner_persona_id}",
-        "target_persona_id": target_persona_id,
-        "target_persona_instance_id": assignment.get("persona_instance_id"),
-        "role": "agent",
-        "kind": "handoff",
-        "status": str(assignment.get("state") or "delivered"),
-        "display_title": "Subagent prompt",
-        "display_text": "\n".join(parts),
-        "redaction_status": "safe",
-        "refs": refs,
-    }
-
-
-def _archived_event_message(event: dict, *, channel_id: str, index: int) -> dict | None:
-    event_type = str(event.get("type") or "").strip()
-    if event_type == "proof.attached":
-        text = _archived_conversation_text(event.get("summary"), limit=1200)
-        kind = "proof"
-        title = "Proof update"
-        role = "proof"
-    elif event_type in {"run.progress", "run.decision"}:
-        text = _archived_conversation_text(
-            event.get("reasoning_summary") or event.get("rationale") or event.get("summary"),
-            limit=1200,
-        )
-        kind = "final" if event_type == "run.decision" or str(event.get("status") or "") in {"completed", "passed", "approved"} else "agent_update"
-        title = "Final update" if kind == "final" else "Neko update"
-        role = "agent"
-    else:
-        return None
-    if not text:
-        return None
-    persona_id = str(event.get("persona_id") or event.get("actor_persona_id") or "operator").strip() or "operator"
-    refs = {"source": "deleted_archive", "event_type": event_type}
-    for key in ("task_id", "run_id", "proof_id", "stage_id"):
-        value = str(event.get(key) or "").strip()
-        if value:
-            refs[key] = value
-    return {
-        "id": f"{channel_id}:event:{event_type}:{refs.get('run_id') or refs.get('proof_id') or index}",
-        "seq": 0,
-        "timestamp": event.get("ts"),
-        "actor_persona_id": persona_id,
-        "actor_instance_id": None,
-        "role": role,
-        "kind": kind,
-        "status": str(event.get("status") or "recorded"),
-        "display_title": title,
-        "display_text": text,
-        "redaction_status": "safe",
-        "refs": refs,
-    }
-
-
 def _archived_conversation_text(value, *, limit: int) -> str | None:
     text = str(value or "").replace("\x00", " ")
     text = text.replace("\r\n", "\n").replace("\r", "\n")
@@ -2552,107 +2232,6 @@ def _archived_role_current_stage(raw: dict, persona_id: str) -> str | None:
     return current_stage_id if isinstance(current_stage_id, str) else None
 
 
-def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, events=None, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None, flow_timeline_accountant=None, event_log=None):
-    gate = SimpleNamespace(allowed=True, missing=[])
-    current_stage_id = _task_current_stage_id(task)
-    current = None
-    untriaged = untriaged_issue_discoveries(task)
-    child_count = len([item for item in (all_tasks or []) if getattr(item, "parent_task_id", None) == task.id])
-    open_incidents = [item for item in (incidents or []) if item.task_id == task.id and item.closed_at is None]
-    active_runs = [item for item in (runs or []) if item.task_id == task.id and item.state in ACTIVE_RUN_STATES]
-    active_workers = [
-        worker
-        for worker in (workers or [])
-        if getattr(worker, "task_id", None) == task.id
-        and str(getattr(getattr(worker, "state", ""), "value", getattr(worker, "state", ""))) not in {"completed", "blocked", "closed"}
-    ]
-    next_action = _next_action_summary(
-        task,
-        open_incidents,
-        run_store=run_store,
-        event_log=event_log,
-    )
-    assignments = list(persona_assignments or [])
-    bundles = list(repo_bundles or [])
-    runtime_lane = _runtime_lane_summary(runtime_instances or [])
-    return {
-        "task_id": task.id,
-        "goal_id": getattr(task, "goal_id", None) or task.id,
-        "title": task.title,
-        "description": getattr(task, "description", None),
-        "acceptance_criteria": list(getattr(task, "acceptance_criteria", []) or []),
-        "routing_scope": getattr(task, "routing_scope", {}) or None,
-        "state": str(task.state),
-        "workspace_id": getattr(task, "workspace_id", None),
-        "realm_id": None,
-        "mission_state": _mission_lifecycle_state(task, active_runs, open_incidents, gate),
-        "parent_task_id": task.parent_task_id,
-        "child_task_count": child_count,
-        "current_stage_id": current_stage_id,
-        "current_stage_title": current.title if current else None,
-        "simplified_phase": simplified_phase_for_task(task, bundles),
-        "active_assignment_id": next((assignment.id for assignment in assignments if assignment.state in ACTIVE_ASSIGNMENT_STATES), None),
-        "repo_bundle_ids": [bundle.id for bundle in bundles],
-        "repo_bundles": [repo_bundle_summary(bundle) for bundle in bundles],
-        "repo_bundle_closeout": repo_bundle_delivery_summary(bundles) if bundles else None,
-        "bundle_queue": bundle_queue_summary(bundles),
-        "runtime_lane": runtime_lane,
-        "qa_waiting_on": qa_waiting_on(bundles),
-        "execution_status": _execution_status(task, active_runs, open_incidents),
-        "active_run_ids": [run.id for run in active_runs],
-        "active_worker_session_ids": [worker.id for worker in active_workers],
-        "active_persona_ids": sorted({run.persona_id for run in active_runs}),
-        "can_start_run": _can_start_run(task, active_runs, open_incidents),
-        "run_blocked_reason": _run_blocked_reason(task, active_runs, open_incidents, run_store=run_store),
-        "requires_visual_proof": task.requires_visual_proof,
-        "delivery_directive": task_delivery_directive(task),
-        "missing_proof": gate.missing,
-        "open_incident_count": len(task.open_incident_ids) or len(open_incidents),
-        "issue_discovery_counts": issue_discovery_counts(task),
-        "untriaged_issue_severities": sorted({str(item.get("severity", "medium")) for item in untriaged}),
-        "proof_summaries": [_proof_visibility_summary(proof) for proof in proofs],
-        "self_test_summaries": [self_test_summary(item) for item in (self_tests or [])],
-        "verification_status": _verification_status(task),
-        "stage_verification": _stage_verification(task, proofs or [], accountant=stage_verification_accountant),
-        "timeline": _task_timeline(task.id, events or []),
-        "next_action": next_action,
-        "why_not_done": _why_not_done(task, gate, open_incidents, next_action),
-        "updated_at": task.updated_at,
-        "role_streams": _role_streams(
-            task,
-            events or [],
-            runs or [],
-            workers or [],
-            persona_assignments=assignments,
-            role_envelopes=role_envelopes or [],
-            role_checklists=role_checklists or [],
-        ),
-        "persona_assignment_ids": [assignment.id for assignment in assignments],
-        "persona_streams": _persona_streams(task, assignments, runs or [], events or []),
-        "role_envelopes": [role_envelope_summary(item) for item in (role_envelopes or [])],
-        "role_checklists": [checklist_summary(item) for item in (role_checklists or [])],
-        "stage_streams": _stage_streams(task, events or []),
-        "mission_level_state": _mission_level_state(
-            task,
-            active_runs=active_runs,
-            active_workers=active_workers,
-            events=events or [],
-            runtime_instances=runtime_instances or [],
-            persona_instances=persona_instances or [],
-            role_streams=_role_streams(
-                task,
-                events or [],
-                runs or [],
-                workers or [],
-                persona_assignments=assignments,
-                role_envelopes=role_envelopes or [],
-                role_checklists=role_checklists or [],
-            ),
-        ),
-        "operator_capabilities": _operator_capabilities(task, next_action, gate),
-    }
-
-
 def _verification_status(task) -> dict:
     root = getattr(task, "harness_self_heal", None)
     observations = root.get("stage_observations") if isinstance(root, dict) else None
@@ -2870,116 +2449,6 @@ def _task_current_stage_id(task) -> str | None:
     return getattr(task, "current_stage_id", None)
 
 
-def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events, *, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None, flow_timeline_accountant=None, workspaces=None, event_log=None) -> dict:
-    # S4 goals/tasks merge: the goal entity is the FULL task summary (all the
-    # rich lanes the old ``tasks`` section carried — self_tests, role_envelopes,
-    # role_checklists and accounted stage_verification) UNIONED with
-    # the goal-only fields below. The old ``goals`` projection omitted these
-    # lanes; the merged single owner must carry them so no field the retired
-    # ``tasks`` section held is lost.
-    row = _task_summary(
-        task,
-        proofs,
-        all_tasks,
-        incidents,
-        runs,
-        events,
-        workers=workers,
-        run_store=run_store,
-        self_tests=self_tests,
-        role_envelopes=role_envelopes,
-        role_checklists=role_checklists,
-        persona_assignments=persona_assignments,
-        repo_bundles=repo_bundles,
-        runtime_instances=runtime_instances,
-        persona_instances=persona_instances,
-        stage_verification_accountant=stage_verification_accountant,
-        flow_timeline_accountant=flow_timeline_accountant,
-        event_log=event_log,
-    )
-    workspace_id = getattr(task, "workspace_id", None)
-    realm_id = None
-    for workspace in workspaces or []:
-        if getattr(workspace, "id", None) == workspace_id:
-            realm_id = getattr(workspace, "realm_id", None)
-            break
-    row.update(
-        {
-            "id": getattr(task, "goal_id", None) or task.id,
-            "kind": "goal",
-            "task_id": task.id,
-            "workspace_id": workspace_id,
-            "realm_id": realm_id,
-        }
-    )
-    return row
-
-
-def goal_detail_for_task(task_id: str, *, event_log=None) -> dict | None:
-    """The FULL goal projection for ONE task, rebuilt read-only from the stores.
-
-    S8: the steady-state frame ships only the goal HEAD (``_goal_head``); the
-    heavy detail (``GOAL_DETAIL_ONLY_FIELDS``) is served on demand here — the
-    exact bytes ``_goal_projection_from_task`` produced before the split, so the
-    launcher's goal-detail drawer / blueprint / replay views fetch identical data
-    to what the pre-S8 in-frame row carried. Read-only: lists stores + the
-    EventLog, mutates nothing. Returns ``None`` when the task id does not resolve
-    (an honest miss, never a fabricated empty goal)."""
-
-    return None
-    event_log = event_log or CachedEventLog()
-    task_store = TaskStore(event_log=event_log)
-    # ``get_goal`` resolves BOTH a task id and a goal id (parent/child tasks can
-    # share one goal_id), raising NotFound on a genuine miss.
-    from .errors import NotFound
-
-    try:
-        task = task_store.get_goal(token)
-    except NotFound:
-        return None
-    tasks = task_store.list_all()
-    run_store = RunStore()
-    runs = run_store.list_all()
-    incident_store = IncidentStore()
-    incidents = incident_store.list_all()
-    worker_session_store = WorkerSessionStore(event_log=event_log)
-    workers = worker_session_store.list_all()
-    role_envelope_store = RoleEnvelopeStore(event_log=event_log)
-    role_checklist_store = RoleChecklistStore(event_log=event_log)
-    repo_bundle_store = RepoBundleStore(event_log=event_log)
-    runtime_instance_store = GoalRuntimeInstanceStore(event_log=event_log)
-    workspace_store = WorkspaceStore()
-    workspaces = workspace_store.list_all(include_archived=True)
-    cfg = load_agent_runtime_config()
-    persona_instances: list = []
-    persona_assignments: list = []
-    if persona_instance_runtime_enabled(cfg):
-        agents = AgentStore().list_all()
-        persona_instances = PersonaInstanceStore(event_log=event_log).derive_from_workers(agents, workers)
-        if persona_assignment_store_enabled(cfg):
-            persona_assignments = PersonaAssignmentStore(event_log=event_log).list_all()
-    return _goal_projection_from_task(
-        task,
-        [],
-        tasks,
-        incidents,
-        runs,
-        event_log.for_task(task.id, limit=200),
-        workers=workers,
-        run_store=run_store,
-        self_tests=SelfTestEvidenceStore(event_log=event_log).list_for_task(task.id),
-        role_envelopes=[item for item in role_envelope_store.list_all() if item.task_id == task.id],
-        role_checklists=[item for item in role_checklist_store.list_all() if item.task_id == task.id],
-        persona_assignments=[item for item in persona_assignments if item.task_id == task.id],
-        repo_bundles=[item for item in repo_bundle_store.list_all() if item.task_id == task.id],
-        runtime_instances=[item for item in runtime_instance_store.list_all() if item.task_id == task.id],
-        persona_instances=persona_instances,
-        stage_verification_accountant=None,
-        workspaces=workspaces,
-        event_log=event_log,
-    )
-
-
 def _agent_tool_detail(agent) -> dict:
     """The evicted tool-detail payloads for one persona (``agents`` section row),
     rebuilt read-only — the same fields ``_agent_summary`` carried before R2 evicted
@@ -3151,27 +2620,6 @@ def _mission_level_state(task, *, active_runs, active_workers, events, runtime_i
         "actors": [],
         "updated_at": getattr(task, "updated_at", None),
     }
-def _roll_up_gate_state(required_statuses: list[str], *, waived: bool) -> str:
-    """Roll per-requirement statuses into a spec gate_state value.
-
-    Allowed: not_required | incomplete | running | blocked | failed | passed | waived.
-    """
-
-    if not required_statuses:
-        return "not_required"
-    if any(status == "failed" for status in required_statuses):
-        return "failed"
-    if any(status == "blocked_external" for status in required_statuses):
-        return "blocked"
-    if waived and all(status in {"passed", "waived_by_operator", "not_applicable"} for status in required_statuses):
-        return "waived"
-    if any(status == "missing" for status in required_statuses):
-        return "incomplete"
-    if any(status == "running" for status in required_statuses):
-        return "running"
-    if all(status in {"passed", "not_applicable"} for status in required_statuses):
-        return "passed"
-    return "incomplete"
 
 
 def _operator_capabilities(task, next_action, gate) -> dict:
@@ -3188,18 +2636,6 @@ def _operator_capabilities(task, next_action, gate) -> dict:
             "raw_log": {"enabled": False, "disabled_reason": "raw logs require explicit redaction-aware debug path"},
         },
     }
-
-
-def _actor_presence(active_stage, owned_stages, runs, workers) -> str:
-    if runs or workers:
-        return "active"
-    if active_stage is not None:
-        return "waiting"
-    if owned_stages and all(getattr(stage, "status", None) == StageStatus.PASSED for stage in owned_stages):
-        return "complete"
-    if owned_stages:
-        return "queued"
-    return "unknown"
 
 
 def _actor_state_label(active_stage, owned_stages, runs, workers) -> str:
@@ -3240,52 +2676,6 @@ def _actor_budget_summary(runs, role_stream) -> dict:
     return {
         "active_run_count": len(runs),
         "token_budget_used": token_total or None,
-    }
-
-
-def _proof_requirement_status(stage, proofs) -> str:
-    """Resolve a required proof requirement to a spec proof status.
-
-    Returns one of: passed | failed | blocked_external | running | missing.
-    A worker self-report is treated as in-progress evidence (``running``),
-    never ``passed`` — only a verifier/reviewer/Neko verdict (or the gate
-    machinery flipping the stage to PASSED) can pass the requirement.
-    """
-
-    if getattr(stage, "status", None) == StageStatus.PASSED:
-        return "passed"
-    if getattr(stage, "status", None) == StageStatus.BLOCKED:
-        return "blocked_external"
-    saw_evidence = False
-    for proof in proofs:
-        if getattr(proof, "redaction_status", None) not in {"safe", "redacted", None}:
-            continue
-        saw_evidence = True
-        metadata = proof.metadata if isinstance(proof.metadata, dict) else {}
-        status = str(metadata.get("status") or metadata.get("verdict") or "").lower()
-        author = str(getattr(proof, "created_by", "") or "").lower()
-        author_role = author.split(":", 1)[0]
-        is_verifier = author_role in _PROOF_VERIFIER_ROLES or author in _PROOF_VERIFIER_ROLES
-        if status in {"failed", "rejected", "needs_fixes"}:
-            return "failed"
-        if status == "blocked_external":
-            return "blocked_external"
-        if status in {"passed", "approved"} and is_verifier:
-            return "passed"
-    return "running" if saw_evidence else "missing"
-
-
-def _proof_evidence_ref(proof) -> dict | None:
-    if not getattr(proof, "id", None):
-        return None
-    redaction_status = getattr(proof, "redaction_status", None) or "unknown"
-    if redaction_status not in {"safe", "redacted", "unknown", "pending"}:
-        return None
-    return {
-        "evidence_id": proof.id,
-        "kind": str(getattr(proof, "type", "proof")),
-        "uri": f"artifact://proof/{proof.task_id}/{proof.id}",
-        "redaction_status": redaction_status,
     }
 
 
@@ -3865,31 +3255,3 @@ def _safe_text(value):
     if len(text) > 500:
         return f"{text[:497]}…"
     return text
-
-
-def _incident_summary(incident):
-    return {"incident_id": incident.id, "task_id": incident.task_id, "run_id": incident.run_id, "kind": incident.kind, "is_open": incident.closed_at is None, "opened_at": incident.opened_at, "closed_at": incident.closed_at}
-
-
-def _proof_summary(proof):
-    metadata = proof.metadata if isinstance(proof.metadata, dict) else {}
-    summary = {
-        "proof_id": proof.id,
-        "task_id": proof.task_id,
-        "stage_id": proof.stage_id,
-        "type": str(proof.type),
-        "title": proof.title,
-        "status": metadata.get("status") or metadata.get("verdict"),
-        "exit_code": metadata.get("exit_code"),
-        "duration_ms": metadata.get("duration_ms"),
-        "has_artifact": bool(proof.path_or_value),
-        "redaction_status": proof.redaction_status,
-        "created_by": proof.created_by,
-        "created_at": proof.created_at,
-    }
-    for key in ("lane_id", "persona_instance_id", "repo_bundle_id", "proof_reuse_basis"):
-        if isinstance(metadata.get(key), str):
-            summary[key] = metadata[key]
-    if isinstance(metadata.get("repo_bundle_ids"), list):
-        summary["repo_bundle_ids"] = list(metadata["repo_bundle_ids"][:8])
-    return summary
