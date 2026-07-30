@@ -72,12 +72,19 @@ ALLOWED_EVENT_TYPES = allowed_event_types()
 # S21 dropped ``delivery.intent``, ``patch.proposed``, ``role_session.closed``,
 # and ``run.approval_required`` for exactly that reason (S15 de-registered all
 # four), together with their branches in ``operator_event_summary``.
+# S25 dropped ``run.opened`` under the same rule once its contract went (its
+# writer ``RunStore.open_run`` went at S17). Historical rows are unaffected —
+# ``append`` type-checks on WRITE only, so the 1,882 ``run.opened`` rows in the
+# live log still read back — and none of them lose a rendered summary in
+# practice: ``operator_event_summary``'s only read-side consumer is
+# ``snapshot._event_display_projection``, which is reached solely from three
+# task-scoped projections that have had ZERO callers since the ``Task`` record
+# went at S8.
 OPERATOR_SUMMARY_EVENT_TYPES = frozenset(
     {
         "repo_bundle.delivered",
         "repo_bundle.updated",
         "repo_bundle.assigned",
-        "run.opened",
         "run.closed",
         "run.progress",
         "run.tool.started",
@@ -677,10 +684,6 @@ def operator_event_summary(evt: Event) -> str | None:
     if existing:
         return existing
     event_type = evt.type
-    if event_type == "run.opened":
-        actor = _label(evt.persona_id, "agent")
-        stage = _safe_text(payload.get("stage_id"))
-        return f"Opened {actor} run" + (f" for {stage}." if stage else ".")
     if event_type == "run.closed":
         actor = _label(evt.persona_id, "agent")
         state = _safe_text(payload.get("state")) or "closed"

@@ -234,14 +234,17 @@ def test_event_log_for_session_type_filter_counts_matches_not_raw_rows(isolate_a
                 session_id="chat_flooded",
             )
         )
-    for _ in range(50):
+    # Filler is any registered type OUTSIDE ``trace_types``; S25 retargeted it
+    # off run.opened (de-registered with its writer) onto a live chat-lane type.
+    for index in range(50):
         log.append(
             Event(
                 ts=now(),
-                type="run.opened",
+                type="persona_instance.created",
                 task_id=None,
                 run_id=None,
                 persona_id="base",
+                payload={"persona_instance_id": f"personainst_flood_{index}"},
                 session_id="chat_flooded",
             )
         )
@@ -256,7 +259,9 @@ def test_operator_events_receive_redaction_safe_summaries(isolate_agent_runtime_
         Event(now(), "repo_bundle.assigned", "task_1", "run_1", "dev", {"repo_bundle_id": "bundle_1", "repo": "hermes-agent", "state": "assigned"}),
         Event(now(), "repo_bundle.updated", "task_1", "run_1", "dev", {"repo_bundle_id": "bundle_1", "repo": "hermes-agent", "state": "running"}),
         Event(now(), "repo_bundle.delivered", "task_1", "run_1", "dev", {"repo_bundle_id": "bundle_1", "repo": "hermes-agent", "state": "delivered_waiting_for_qa", "proof_count": 0, "diff_captured": False}),
-        Event(now(), "run.opened", "task_1", "run_1", "dev", {"stage_id": "impl"}),
+        # S25 retargeted this sample off run.opened (de-registered with its
+        # writer) onto the other live operator-summary arm.
+        Event(now(), "run.tool.started", "task_1", "run_1", "dev", {"tool_name": "terminal"}),
         Event(now(), "run.closed", "task_1", "run_1", "dev", {"state": "completed", "decision_type": "deliver"}),
     ]
 

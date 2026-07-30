@@ -108,7 +108,12 @@ REMOVED_EVENT_TYPES = frozenset(
 # tests/agent_runtime/test_s17_run_store_residue_removal.py, which owns that
 # delta), then +3 at S16b (realm.archived, persona_chat.deleted,
 # worktree.orphans_reaped — live emitters whose appends were being refused and
-# swallowed; see tests/agent_runtime/test_s16b_live_event_registration.py).
+# swallowed; see tests/agent_runtime/test_s16b_live_event_registration.py), then
+# net 0 at S25: -1 run.opened (S17's third writer-less contract, held back only
+# by two filler test appends until they were retargeted) +1 flow_graph.pruned
+# (the persona-instance reconciler's phase-5 graph reap). Those two deltas are
+# owned by tests/agent_runtime/test_s25_run_opened_retirement.py and
+# tests/agent_runtime/test_s25_graph_prune_on_reap.py.
 # This stays an absolute count on purpose: it is the one assertion that catches
 # a contract silently appearing or disappearing.
 SURVIVING_EVENT_COUNT = 93
@@ -150,11 +155,10 @@ def test_the_near_miss_survivors_stay_registered():
         "run.tool.finished",
         "run.progress",
         # RunStore.cancel -> close_run is LIVE (operator takeover, persona-chat
-        # replacement), so run.closed stays emittable. run.opened outlived its
-        # writer at S17 but is still minted by filler appends in
-        # tests/agent_runtime/test_events.py. run.heartbeat and run.approved
-        # went with their writers at S17 and are pinned as REMOVED there.
-        "run.opened",
+        # replacement), so run.closed stays emittable. run.heartbeat and
+        # run.approved went with their writers at S17; run.opened followed at
+        # S25 once its two filler minters were retargeted — all three are pinned
+        # as removed by the tests that own those deltas.
         "run.closed",
         # self_test_evidence.py appends both directly.
         "self_test.recorded",

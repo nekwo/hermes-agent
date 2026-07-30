@@ -988,14 +988,13 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "lane.transitioned": EventContract("lane.transitioned", "Lane transitioned", ("runtime_instance_id", "task_id", "state"), ("reason",)),
     "lane.transition_rejected": EventContract("lane.transition_rejected", "Lane transition rejected", ("runtime_instance_id", "from", "to"), ("reason",)),
     # S17 de-registered run.heartbeat (RunStore.heartbeat) and run.approved
-    # (RunStore.approve_continuation) with their writers. run.opened is the
-    # third of that set: its writer (RunStore.open_run) is gone too, but two
-    # filler appends in tests/agent_runtime/test_events.py still mint it, so it
-    # stays registered until those are retargeted — de-registering first would
-    # only convert a stale test into a crash. run.closed is NOT in this set: it
-    # is still LIVE via RunStore.cancel -> close_run (operator takeover and
-    # persona-chat replacement both reach it).
-    "run.opened": EventContract("run.opened", "Run opened", ("run_id", "persona_id", "stage_id"), ("model", "provider")),
+    # (RunStore.approve_continuation) with their writers; S25 finished the set
+    # with run.opened once the two filler appends that were its last minters
+    # (tests/agent_runtime/test_events.py) were retargeted onto live types — see
+    # tests/agent_runtime/test_s25_run_opened_retirement.py, which owns that
+    # delta. run.closed is NOT in this set: it is still LIVE via
+    # RunStore.cancel -> close_run (operator takeover and persona-chat
+    # replacement both reach it).
     "run.progress": EventContract("run.progress", "Run progress", ("phase", "step", "status", "summary"), ("next_expected", "proof_id")),
     "child.returned": EventContract("child.returned", "Child returned", ("parent_node_id", "child_node_id", "summary"), ("proof_ids", "artifact_refs", "stage_id", "persona_instance_id")),
     "run.tool.started": EventContract("run.tool.started", "Tool started", ("tool_name",), ("run_id",)),
@@ -1016,6 +1015,15 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "persona_instance.pruned": EventContract("persona_instance.pruned", "Orphaned/legacy-role persona instance archived from the live graph", ("persona_instance_id", "reason"), ("persona_id", "role", "profile_id", "updated_at")),
     "persona_instance.chat_binding_cleared": EventContract("persona_instance.chat_binding_cleared", "Persona instance unbound from a chat session (operator delete, or a binding whose session SessionDB no longer has)", ("persona_instance_id", "session_id", "reason"), ("persona_id", "cleared_fields", "mode_before", "mode_after")),
     "persona_instance.retired": EventContract("persona_instance.retired", "Placement-backed persona instance retired (end-of-life) to the archive on placement removal", ("persona_instance_id", "reason"), ("persona_id", "mode", "requested_by", "archive_dir")),
+    # The persona-instance reconciler's phase-5 graph reap
+    # (persona_instance_identity._prune_owner_less_flow_graphs). A runtime flow
+    # graph is keyed on its OWNER instance (``runtime:<owner>``), so reaping a
+    # row strands the canvas it owned; the phase archives the doc into
+    # ``flow_graphs_stale/<ts>_graph_prune/`` and rides this event. The three
+    # summary fields are what every emission carries — ``reason`` is the typed
+    # constant from flow_graph.py, never free text. No persona rides the Event
+    # envelope: by construction the owner no longer resolves to a row.
+    "flow_graph.pruned": EventContract("flow_graph.pruned", "Owner-less runtime flow graph archived", ("graph_id", "owner_instance_id", "reason"), ("drawn_agent_count", "archived_to")),
     "steer.returned": EventContract("steer.returned", "Steer returned", ("action_id", "verb", "source_node_id", "target_node_id"), ("result", "stage_id", "persona_instance_id")),
     "operator.takeover.requested": EventContract("operator.takeover.requested", "Operator takeover requested", ("worker_session_id", "actor"), ("reason", "cancel_active_run")),
     "operator.takeover.approval_required": EventContract("operator.takeover.approval_required", "Operator takeover approval required", ("worker_session_id", "actor", "approval"), ("reason",)),

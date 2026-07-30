@@ -183,7 +183,11 @@ def test_delta_op_has_no_leftover_prefix_literals():
 
 
 DE_REGISTERED_OPERATOR_SUMMARY_TYPES = frozenset(
-    {"delivery.intent", "patch.proposed", "role_session.closed", "run.approval_required"}
+    # S25 added run.opened: its contract went with the last two appends that
+    # minted it, so its summary row and formatter arm went too (the arm is
+    # unreachable once the type leaves OPERATOR_SUMMARY_EVENT_TYPES). See
+    # tests/agent_runtime/test_s25_run_opened_retirement.py.
+    {"delivery.intent", "patch.proposed", "role_session.closed", "run.approval_required", "run.opened"}
 )
 
 
@@ -199,8 +203,15 @@ def test_the_de_registered_types_get_no_operator_summary():
 
 
 def test_the_surviving_operator_summaries_still_render():
-    opened = Event(ts=now(), type="run.opened", task_id=None, run_id="run_1", persona_id="dev", payload={"stage_id": "s1"})
-    assert operator_event_summary(opened) == "Opened dev run for s1."
+    closed = Event(
+        ts=now(),
+        type="run.closed",
+        task_id=None,
+        run_id="run_1",
+        persona_id="dev",
+        payload={"state": "completed", "decision_type": "deliver"},
+    )
+    assert operator_event_summary(closed) == "Closed dev run as completed after deliver."
 
     tool = Event(
         ts=now(),
