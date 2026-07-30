@@ -151,7 +151,6 @@ HANDOFF_MODES = frozenset(
         "split_child_missions",
     }
 )
-UNSUPPORTED_HANDOFF_MODES = frozenset({"parallel_specialists", "split_child_missions"})
 HANDOFF_OWNERS = frozenset({"backend_dev", "launcher_dev", "dev", "qa", "neko_supervisor", "human"})
 HANDOFF_REPOS = frozenset({"EterniaBackend", "EterniaLauncher", "hermes-agent"})
 HANDOFF_REPO_ALIASES = {
@@ -1001,12 +1000,6 @@ def _packet_summary(body: dict[str, Any]) -> str:
         if body.get(key):
             return f"{key}={str(body.get(key))[:220]}"
     return "packet recorded"
-
-
-def _reject_unknown_packet_keys(packet: dict[str, Any], allowed: frozenset[str], label: str) -> None:
-    extra = sorted(set(packet.keys()) - allowed)
-    if extra:
-        raise DecisionPayloadInvalid(f"{label} has unsupported keys: {extra}")
 
 
 def _normalize_unknown_packet_metadata(packet: dict[str, Any], allowed: frozenset[str], label: str) -> None:
