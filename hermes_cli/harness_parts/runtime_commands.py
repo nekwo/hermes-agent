@@ -36,6 +36,9 @@ def _cmd_persona_instance_reconcile(args) -> int:
             f"pruned={data.get('pruned_count', 0)} held={data.get('held_count', 0)} "
             f"steering_repaired={data.get('steering_repaired_count', 0)} "
             f"chat_bindings_cleared={data.get('session_binding_repaired_count', 0)} "
+            f"graphs_pruned={data.get('graphs_pruned_count', 0)} "
+            f"graphs_held={data.get('graphs_held_count', 0)} "
+            f"graph_steering_settled={data.get('graph_departed_steering_count', 0)} "
             f"aliases={data['alias_count']}"
         )
         for item in data["actions"]:
@@ -61,6 +64,24 @@ def _cmd_persona_instance_reconcile(args) -> int:
             )
         if data.get("session_binding_skipped"):
             print(f"  - chat binding repair skipped: {data['session_binding_skipped']}")
+        # The graph-prune phase (6c5040ed2) archives owner-less runtime graphs
+        # and emits `flow_graph.pruned`. It reported only through `--json` until
+        # S28; a phase that moves files and appends events must be legible to the
+        # operator reading the human render too.
+        for item in data.get("graphs_pruned") or []:
+            print(
+                f"  - graph pruned ({item['reason']}): {item['graph_id']} "
+                f"(drew {item.get('drawn_agent_count', 0)} agent(s))"
+            )
+        for item in data.get("graphs_held") or []:
+            print(f"  - graph held ({item['reason']}): {item['graph_id']}")
+        for item in data.get("graph_departed_steering") or []:
+            if not item.get("changed"):
+                continue
+            print(
+                f"  - graph steering settled: {item['persona_instance_id']} "
+                f"-> removed {item['owner']} ({item['graph_id']})"
+            )
     return 0
 
 
