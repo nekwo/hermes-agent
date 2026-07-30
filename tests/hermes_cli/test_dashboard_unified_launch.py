@@ -16,6 +16,44 @@ def main_mod():
     return main_mod
 
 
+def _capture_reexec(main_mod, monkeypatch):
+    """Stub BOTH platform branches of the machine-dashboard re-exec.
+
+    ``cmd_dashboard`` re-execs through ``os.execvpe`` on POSIX but through
+    ``subprocess.Popen`` + ``sys.exit(proc.wait())`` on Windows (``execvpe``
+    does not truly replace the process there and can crash with
+    STATUS_ACCESS_VIOLATION under Python 3.14+ — see the comment at the
+    call site in ``hermes_cli/main.py``).
+
+    A test that stubs only ``os.execvpe`` is therefore vacuous on Windows:
+    the win32 branch spawns a REAL ``python -m hermes_cli.main ... dashboard``
+    child, which runs ``npm install`` + ``vite build`` and then serves
+    forever, while the parent blocks in ``proc.wait()``. That hangs the whole
+    pytest process (pytest-timeout's thread method then kills the run, so a
+    single test takes the entire file's results with it).
+
+    Returning one ``calls`` list for both branches lets the assertions below
+    describe the same re-exec on either platform — the recorded tuple is
+    always ``(executable, argv, env)``.
+    """
+    calls: list[tuple[str, list[str], dict]] = []
+
+    def fake_exec(exe, argv, env):
+        calls.append((exe, list(argv), env))
+        raise SystemExit(0)  # execvpe never returns
+
+    class _FakePopen:
+        def __init__(self, argv, *_a, env=None, **_kw):
+            calls.append((argv[0], list(argv), env if env is not None else {}))
+
+        def wait(self):
+            return 0
+
+    monkeypatch.setattr(main_mod.os, "execvpe", fake_exec)
+    monkeypatch.setattr(main_mod.subprocess, "Popen", _FakePopen)
+    return calls
+
+
 def _args(**kw):
     defaults = dict(
         status=False, stop=False, host="127.0.0.1", port=9119,
@@ -32,13 +70,12 @@ class TestUnifiedDashboardRouting:
             "hermes_cli.profiles.get_active_profile_name", lambda: "worker_x"
         )
         monkeypatch.setattr(main_mod, "_dashboard_listening", lambda host, port: True)
-        execs = []
-        monkeypatch.setattr(main_mod.os, "execvpe", lambda *a, **k: execs.append(a))
+        execs = _capture_reexec(main_mod, monkeypatch)
 
         with pytest.raises(SystemExit) as exc:
             main_mod.cmd_dashboard(_args())
         assert exc.value.code == 0
-        assert execs == []  # attached, never re-exec'd
+        assert execs == []  # attached, never re-exec'd (on either platform)
 
     def test_profile_launch_attach_opens_scoped_url(self, main_mod, monkeypatch):
         """The attach path must open the browser at ?profile=<name> — that
@@ -62,13 +99,7 @@ class TestUnifiedDashboardRouting:
             "hermes_cli.profiles.get_active_profile_name", lambda: "worker_x"
         )
         monkeypatch.setattr(main_mod, "_dashboard_listening", lambda host, port: False)
-        execs = []
-
-        def fake_exec(exe, argv, env):
-            execs.append((exe, argv, env))
-            raise SystemExit(0)  # execvpe never returns
-
-        monkeypatch.setattr(main_mod.os, "execvpe", fake_exec)
+        execs = _capture_reexec(main_mod, monkeypatch)
 
         with pytest.raises(SystemExit):
             main_mod.cmd_dashboard(_args())
@@ -103,13 +134,7 @@ class TestUnifiedDashboardRouting:
             "hermes_cli.profiles.get_active_profile_name", lambda: "oracle"
         )
         monkeypatch.setattr(main_mod, "_dashboard_listening", lambda host, port: False)
-        execs = []
-
-        def fake_exec(exe, argv, env):
-            execs.append((exe, argv, env))
-            raise SystemExit(0)
-
-        monkeypatch.setattr(main_mod.os, "execvpe", fake_exec)
+        execs = _capture_reexec(main_mod, monkeypatch)
 
         with pytest.raises(SystemExit):
             main_mod.cmd_dashboard(_args())
@@ -135,8 +160,7 @@ class TestUnifiedDashboardRouting:
             main_mod, "_dashboard_listening",
             lambda host, port: listening_calls.append(1) or False,
         )
-        execs = []
-        monkeypatch.setattr(main_mod.os, "execvpe", lambda *a, **k: execs.append(a))
+        execs = _capture_reexec(main_mod, monkeypatch)
         monkeypatch.setitem(sys.modules, "fastapi", None)
 
         with pytest.raises((SystemExit, AttributeError, ImportError, TypeError)):
@@ -183,8 +207,7 @@ class TestUnifiedDashboardRouting:
         monkeypatch.setattr(
             "hermes_cli.profiles.get_active_profile_name", lambda: "worker_x"
         )
-        execs = []
-        monkeypatch.setattr(main_mod.os, "execvpe", lambda *a, **k: execs.append(a))
+        execs = _capture_reexec(main_mod, monkeypatch)
         monkeypatch.setitem(sys.modules, "fastapi", None)
 
         with pytest.raises((SystemExit, AttributeError, ImportError, TypeError)):
