@@ -319,10 +319,14 @@ outcomes below are the commit-recorded decisions, not a filename-based deletion 
 
 - **Five small-module candidates:** only `agent_runtime/role_sessions.py` was actually
   dead and was removed. The other four — `dev_discipline`, `simplified_contract`,
-  `scope_control`, and `role_checklists` — have live production callers and were skipped.
-  In other words, four of the original five are live; they were not dead modules merely
-  because the mission lane once used them. The same commit removed only the already-dead
-  `repo_context` worktree-creator import from `persona_runtime.py` (`3a32ec617`).
+  `scope_control`, and `role_checklists` — have live production callers, so whole-module
+  deletion was skipped. The same commit removed only the already-dead `repo_context`
+  worktree-creator import from `persona_runtime.py` (`3a32ec617`). A later
+  reachability pass established the precise correction: **four of the five modules are
+  live modules with dead insides.** It removed 800 lines of unreachable mission-lane
+  internals while retaining each imported surface (`5c16417f6`); notably,
+  `role_checklists.checklist_for_task_stage` was kept as live and the formerly listed
+  keep `stage_checklist_hud` was removed as dead.
 - **CLI mission-record flags:** `persona instance return-summary --task/--stage` were
   removed, while `--proof-id` and `--artifact-ref` remain live output fields
   (`64d2f9176`); the now-CLI-unreachable `task_id` / `stage_id` continuity parameter
