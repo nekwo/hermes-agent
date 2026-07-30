@@ -29,8 +29,11 @@ def _persona_runtime_config() -> AgentRuntimeConfig:
 def _assert_no_mission_status() -> None:
     status = build_status()
     assert status["open_tasks"] == 0
-    assert status["next_actions"] == []
-    assert status["undispatchable_missions"] == []
+    # S21 stopped publishing `next_actions` / `undispatchable_missions`: both were
+    # computed over the `tasks = []` literal, so they could only ever be `[]` —
+    # a constant reported in the shape of a measurement. Absence is now the pin.
+    assert "next_actions" not in status
+    assert "undispatchable_missions" not in status
     assert not hasattr(TaskStore(), "create")
 
 

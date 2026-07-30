@@ -576,17 +576,17 @@ def _append_state_reconciled(log: EventLog, fingerprint: str) -> bool:
 
 
 def _delta_op(event: Event) -> str:
+    # S21 removed three arms whose whole event family is de-registered, so
+    # ``EventLog.append`` refuses them and no frame can ever carry them: the
+    # task pair (task.upserted / task.state_changed), proof.attached, and the
+    # daemon.* prefix. They now fall through to the generic arm like any other
+    # unrouted type. Keep this table in step with the event catalog — an arm for
+    # a type that cannot be appended is a classifier branch that reads as live.
     event_type = str(event.type or "")
     if event_type.startswith("run.tool.") or event_type == "run.progress":
         return "chat.trace.appended"
-    if event_type.startswith("task."):
-        return "task.state_changed" if event_type in {"task.transition", "task.blocked", "task.unblocked", "task.cancelled", "task.archived"} else "task.upserted"
-    if event_type == "proof.attached":
-        return "proof.added"
     if event_type.startswith("incident."):
         return event_type
-    if event_type.startswith("daemon."):
-        return "daemon.status"
     if event_type.startswith("persona_assignment."):
         return "instance.upserted"
     return "event.appended"

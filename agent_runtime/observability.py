@@ -518,13 +518,15 @@ def _event_display_projection(event: Event) -> dict[str, Any]:
 
 
 def _event_display_kind(event_type: str, payload: dict[str, Any]) -> str:
+    # S21: the ``qa.verdict_recorded`` arm and ``task.blocked`` were dropped —
+    # S15 de-registered both, so ``EventLog.append`` refuses them and no event
+    # reaching this classifier can carry either type. ``incident.opened`` is the
+    # surviving producer of the ``blocker`` kind.
     if event_type == "self_test.recorded":
         return "self_test"
     if event_type == "packet.recorded":
         return "delivery" if str(payload.get("packet_type") or "") == "delivery" else "handoff"
-    if event_type == "qa.verdict_recorded":
-        return "qa_verdict"
-    if event_type in {"task.blocked", "incident.opened"}:
+    if event_type == "incident.opened":
         return "blocker"
     if event_type.startswith("run.tool."):
         return "tool_call"
@@ -534,14 +536,14 @@ def _event_display_kind(event_type: str, payload: dict[str, Any]) -> str:
 
 
 def _event_display_title(event_type: str, payload: dict[str, Any], kind: str) -> str:
+    # ``kind`` only ever comes from ``_event_display_kind``. S21 dropped the
+    # ``proof`` arm (that classifier has never returned ``"proof"`` — it was
+    # unreachable before the mission lane was touched) and the ``qa_verdict``
+    # arm (its producer went with ``qa.verdict_recorded``).
     if kind == "self_test":
         return f"Self-test {payload.get('status') or 'recorded'}"
-    if kind == "proof":
-        return f"Proof {payload.get('status') or 'attached'}"
     if kind == "delivery":
         return "Delivery packet"
-    if kind == "qa_verdict":
-        return f"QA verdict {payload.get('verdict') or ''}".strip()
     if kind == "blocker":
         return "Blocker"
     if kind == "tool_call":

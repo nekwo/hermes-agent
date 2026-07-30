@@ -151,9 +151,6 @@ class GoalRuntimeInstanceStore:
             closed.append(updated.id)
         return closed
 
-    def park_foreground_except(self, task_id: str, *, reason: str) -> list[str]:
-        return []
-
     def save(self, instance: GoalRuntimeInstance, *, event_type: str | None = None, reason: str = "") -> GoalRuntimeInstance:
         path = paths.runtime_instance_path(instance.id)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -205,35 +202,13 @@ class GoalRuntimeInstanceStore:
                 return item
         return None
 
-    def active_foreground(self) -> GoalRuntimeInstance | None:
-        """Most recent foreground lane actively driving an OPEN task.
-
-        The lane registered at goal-create is the operator's declared target.
-        An untargeted daemon start adopts it instead of scanning the stale
-        open-task backlog — the lane IS the targeting directive.
-        """
-
-        from .states import TaskState
-        from .store import NotFound, TaskStore
-
-        active_states = {ACTIVE_STATE, WAITING_STATE, "queued", "activating", "running"}
-        task_store = TaskStore(event_log=self.event_log)
-        for item in reversed(self.list_all()):
-            # Post lane-pivot, ``lane`` holds the instance id; production
-            # lane_kind + active state is what marks a live operator-declared lane.
-            if getattr(item, "lane_kind", "production") != "production" or item.state not in active_states:
-                continue
-            if not item.task_id:
-                continue
-            try:
-                task = task_store.get(item.task_id)
-            except NotFound:
-                continue
-            except Exception:
-                continue
-            if task.state in {TaskState.CREATED, TaskState.RUNNING}:
-                return item
-        return None
+    # S21: `active_foreground()` and `park_foreground_except()` were removed here.
+    # `active_foreground` walked lanes into `TaskStore.get`, which the permanent
+    # `TaskStoreStub` (ruling R-3) raises `NotFound` from unconditionally — every
+    # iteration hit `continue`, so it returned `None` by construction rather than
+    # because no lane was live. `park_foreground_except` was `return []`. Neither
+    # had a production caller. The foreground/background split itself belonged to
+    # the retired dispatch lane; lanes are now a flat list.
 
 
 def runtime_instance_summary(instance: GoalRuntimeInstance) -> dict[str, Any]:
@@ -265,11 +240,10 @@ def runtime_instance_summary(instance: GoalRuntimeInstance) -> dict[str, Any]:
 
 def runtime_instances_summary(instances: list[GoalRuntimeInstance]) -> dict[str, Any]:
     lane_rows = [runtime_instance_summary(item) for item in instances]
+    # S21: `foreground` / `foreground_active_count` / `background_parked_count` /
+    # `background_task_ids` were literal `None` / `0` / `[]` here — a foreground
+    # lane that no code could ever elect, reported in the shape of a live reading.
     return {
-        "foreground": None,
-        "foreground_active_count": 0,
-        "background_parked_count": 0,
-        "background_task_ids": [],
         "instances": lane_rows,
         "lanes": lane_rows,
     }

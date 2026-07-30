@@ -153,10 +153,13 @@ def test_read_model_db_filename_reads_root_not_profile(tmp_path, monkeypatch):
 
 def test_neko_extension_cap_resolves_from_root(tmp_path, monkeypatch):
     # neko_extension_cap is consumed inside embedded seams that need live
-    # Incident + RunStore state to reach (status._has_budget_approval_path @315,
-    # snapshot._run_blocked_reason @4041, snapshot._next_action_summary @4057);
-    # those now read `load_root_runtime_config().neko_extension_cap`. Exercise
-    # that pinned resolution directly rather than standing up incidents.
+    # Incident + RunStore state to reach (snapshot._run_blocked_reason,
+    # snapshot._next_action_summary); those read
+    # `load_root_runtime_config().neko_extension_cap`. Exercise that pinned
+    # resolution directly rather than standing up incidents.
+    # (S21 removed `status._has_budget_approval_path`, the third seam this
+    # comment used to name — the `next_actions` chain it belonged to ran over a
+    # `tasks = []` literal and could never fire.)
     from agent_runtime.config import load_root_runtime_config
 
     _write_root_and_profile(
