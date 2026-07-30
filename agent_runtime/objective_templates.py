@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from .models import Task
 
 DELIVERABLES: dict[str, str] = {
     "code feature": "a working code change with focused proof",

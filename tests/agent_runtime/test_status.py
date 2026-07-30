@@ -1,6 +1,9 @@
 from hermes_time import now
 from agent_runtime.config import AgentRuntimeConfig
-from agent_runtime.models import Incident, Task
+from agent_runtime.models import Incident
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.states import RunState, TaskState
 from agent_runtime.status import build_status

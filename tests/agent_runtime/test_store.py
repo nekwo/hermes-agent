@@ -9,7 +9,10 @@ from hermes_time import now
 from agent_runtime import paths
 from agent_runtime.errors import AlreadyExists, NotFound
 from agent_runtime.events import EventLog, compact_archived_task_events
-from agent_runtime.models import AgentPersona, AgentRun, Event, Incident, Task
+from agent_runtime.models import AgentPersona, AgentRun, Event, Incident
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.self_test_evidence import record_self_test_from_progress
 from agent_runtime.states import RunState, TaskState
 from agent_runtime.store import AgentStore, IncidentStore, RunStore, TaskStore

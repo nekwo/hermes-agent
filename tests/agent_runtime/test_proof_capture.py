@@ -1,7 +1,9 @@
 from hermes_time import now
 from pathlib import Path
 
-from agent_runtime.models import Task
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.proof_capture import CapturedArtifact, CapturedTestRun, ScreenshotRequest
 from agent_runtime.states import TaskState
 

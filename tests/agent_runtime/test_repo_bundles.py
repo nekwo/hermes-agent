@@ -8,7 +8,10 @@ from agent_runtime.actions import HarnessAction, HarnessActionType
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.events import EventLog
-from agent_runtime.models import Event, Proof, RepoBundle, Task
+from agent_runtime.models import Event, Proof, RepoBundle
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.persona_assignments import PersonaAssignmentSpec, PersonaAssignmentStore
 from agent_runtime.repo_bundles import RepoBundleStore, acquire_repo_bundle_locks, desired_bundles_for_task, qa_waiting_on, release_repo_bundle_locks, repo_lock_summary
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig, RepoBundleRoutingConfig, SimplifiedAgentContractConfig

@@ -8,7 +8,10 @@ from hermes_time import now
 from agent_runtime import paths
 from agent_runtime.errors import EventPayloadTooLarge
 from agent_runtime.events import EventLog
-from agent_runtime.models import Event, Task
+from agent_runtime.models import Event
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.packets import make_packet, record_decision_packets, record_packet
 from agent_runtime.decision_contracts import validate_planning_decision
 from agent_runtime.decision_schema import AgentDecision, DecisionType

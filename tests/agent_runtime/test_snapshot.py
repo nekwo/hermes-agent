@@ -3,7 +3,9 @@ from __future__ import annotations
 from hermes_time import now
 
 from agent_runtime import paths
-from agent_runtime.models import Task
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.snapshot import build_snapshot, write_snapshot
 from agent_runtime.states import TaskState
 from agent_runtime.store import TaskStore

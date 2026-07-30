@@ -10,7 +10,10 @@ from hermes_time import now
 from agent_runtime.context_builder import build_context
 from agent_runtime.decision_schema import DecisionPayloadInvalid, DecisionType
 from agent_runtime.events import EventLog
-from agent_runtime.models import AgentRun, Event, Task
+from agent_runtime.models import AgentRun, Event
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.persona_runtime import GPTPersonaRuntime
 from agent_runtime.persona_runtime import _apply_llm_metadata
 from agent_runtime.profile_runner import AgentRunResult

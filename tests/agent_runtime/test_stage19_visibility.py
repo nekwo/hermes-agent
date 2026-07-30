@@ -1,7 +1,10 @@
 from hermes_time import now
 
 from agent_runtime.events import EventLog
-from agent_runtime.models import Event, Incident, Task
+from agent_runtime.models import Event, Incident
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.snapshot import build_snapshot
 from agent_runtime.states import TaskState
 from agent_runtime.store import IncidentStore, TaskStore

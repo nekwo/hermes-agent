@@ -4,7 +4,10 @@ import pytest
 
 from agent_runtime.decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
 from agent_runtime.events import EventLog
-from agent_runtime.models import AgentRun, Task
+from agent_runtime.models import AgentRun
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.packets import make_packet
 from agent_runtime.self_test_evidence import SelfTestEvidenceStore, record_self_test_from_progress
 from agent_runtime.states import RunState, TaskState

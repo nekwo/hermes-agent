@@ -3,7 +3,10 @@ import json
 
 from hermes_time import now
 
-from agent_runtime.models import Incident, Task
+from agent_runtime.models import Incident
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.states import TaskState
 from agent_runtime.store import IncidentStore, TaskStore
 from hermes_cli import harness as harness_cli

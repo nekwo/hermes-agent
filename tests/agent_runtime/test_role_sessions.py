@@ -3,7 +3,10 @@ from __future__ import annotations
 from hermes_time import now
 
 from agent_runtime.decision_schema import DecisionType
-from agent_runtime.models import AgentRun, Task
+from agent_runtime.models import AgentRun
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.role_sessions import (
     CLOSE_BLOCKED,
     CLOSE_COMPLETED,

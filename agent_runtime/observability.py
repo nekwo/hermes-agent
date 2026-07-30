@@ -6,7 +6,7 @@ from typing import Any
 from hermes_time import now
 
 from .incidents import CRITICAL_INCIDENT_KINDS
-from .models import Event, Incident, Proof, Task
+from .models import Event, Incident, Proof
 from .scope_control import untriaged_issue_discoveries
 from .states import PossessionState, RunState, TaskState, WorkerSessionState
 from .store import ACTIVE_RUN_STATES
@@ -20,7 +20,7 @@ DELIVERY_EVIDENCE_INCIDENT_KINDS = frozenset({"patch_landed_nowhere", "stage_no_
 
 def build_observability(
     *,
-    tasks: list[Task],
+    tasks: list[Any],
     runs: list[Any],
     incidents: list[Incident],
     proofs: list[Proof],
@@ -421,7 +421,7 @@ def _safe_llm(value: Any) -> dict[str, Any]:
     return safe
 
 
-def _self_heal_signals(tasks: list[Task], runs: list[Any]) -> dict[str, Any]:
+def _self_heal_signals(tasks: list[Any], runs: list[Any]) -> dict[str, Any]:
     totals = {
         "scope_update": 0,
         "same_stage_retry": 0,
@@ -476,7 +476,7 @@ def _safe_counter(value: Any) -> int:
         return 0
 
 
-def _latest_context_request(task: Task) -> dict[str, Any] | None:
+def _latest_context_request(task: Any) -> dict[str, Any] | None:
     reqs = getattr(task, "context_requests", []) or []
     return reqs[-1] if reqs else None
 

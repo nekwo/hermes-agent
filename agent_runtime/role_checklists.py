@@ -11,7 +11,7 @@ from utils import atomic_json_write
 
 from . import paths
 from .decision_schema import DecisionPayloadInvalid
-from .models import AgentRun, Event, Task
+from .models import AgentRun, Event
 from .serde import from_jsonable, to_jsonable
 
 CHECKLIST_ITEM_STATUSES = frozenset(

@@ -8,7 +8,10 @@ from hermes_time import now
 from agent_runtime.dirty_state import build_dirty_state, no_product_edit_dirty_check
 from agent_runtime.goal_hygiene import prepare_new_goal_runtime
 from agent_runtime.launcher_process_hygiene import clean_launcher_visual_processes, launcher_visual_cleanup_needed
-from agent_runtime.models import AgentRun, Task
+from agent_runtime.models import AgentRun
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.states import RunState, TaskState
 from agent_runtime.store import RunStore, TaskStore
 

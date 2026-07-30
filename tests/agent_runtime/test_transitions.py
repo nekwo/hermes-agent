@@ -3,7 +3,9 @@ import pytest
 from hermes_time import now
 
 from agent_runtime.errors import InvalidTransition
-from agent_runtime.models import Task
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.states import TaskState
 from agent_runtime.transitions import apply_transition
 

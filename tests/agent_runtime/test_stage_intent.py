@@ -2,7 +2,9 @@ from dataclasses import dataclass, field
 
 from hermes_time import now
 
-from agent_runtime.models import Task
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.stage_intent import no_product_edit_recipe_conflicts_with_stage, no_product_edit_recipe_for_stage, stage_requires_product_edit
 from agent_runtime.states import StageStatus, TaskState
 

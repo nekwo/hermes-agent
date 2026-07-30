@@ -12,7 +12,7 @@ from utils import atomic_json_write
 from . import paths
 from .decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
 from .events import EventLog
-from .models import Event, Task
+from .models import Event
 from .redaction import ENV_SECRET_ASSIGNMENT_RE
 from .serde import to_jsonable
 
@@ -289,7 +289,7 @@ def iter_packet_payloads(payload: dict[str, Any]) -> list[tuple[str, dict[str, A
 
 
 def _body_with_harness_citations(
-    task: Task,
+    task: Any,
     *,
     packet_type: str,
     body: dict[str, Any],
@@ -307,7 +307,7 @@ def _body_with_harness_citations(
     return enriched
 
 
-def _packet_cited_evidence_ids(task: Task, body: dict[str, Any], *, stage_id: str | None) -> list[str]:
+def _packet_cited_evidence_ids(task: Any, body: dict[str, Any], *, stage_id: str | None) -> list[str]:
     cited: list[str] = []
     for key in ("proof_ids", "self_test_evidence_ids", "consumed_proof_ids", "joined_proof_ids"):
         cited.extend(_string_list(body.get(key)))
@@ -327,7 +327,7 @@ def _packet_cited_evidence_ids(task: Task, body: dict[str, Any], *, stage_id: st
     return _dedupe_strings(cited)
 
 
-def make_packet(*, task: Task, decision: AgentDecision, packet_type: str, body: dict[str, Any], actor: str, run_id: str | None, stage_id: str | None) -> Packet:
+def make_packet(*, task: Any, decision: AgentDecision, packet_type: str, body: dict[str, Any], actor: str, run_id: str | None, stage_id: str | None) -> Packet:
     body = _body_with_harness_citations(task, packet_type=packet_type, body=body, stage_id=stage_id)
     raw_body = _raw_packet_body_with_dropped_values(body)
     core = compact_packet_body(packet_type, body)
@@ -362,7 +362,7 @@ def make_packet(*, task: Task, decision: AgentDecision, packet_type: str, body: 
     )
 
 
-def record_decision_packets(task: Task, decision: AgentDecision, *, actor: str, run_id: str | None, event_log: EventLog | None = None, stage_id: str | None = None) -> list[Packet]:
+def record_decision_packets(task: Any, decision: AgentDecision, *, actor: str, run_id: str | None, event_log: EventLog | None = None, stage_id: str | None = None) -> list[Packet]:
     event_log = event_log or EventLog()
     packets: list[Packet] = []
     for packet_type, body in iter_packet_payloads(decision.payload if isinstance(decision.payload, dict) else {}):
@@ -494,7 +494,7 @@ def _compact_delivery_body(body: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
-def _validate_delivery_self_test_refs(task: Task, body: dict[str, Any], *, stage_id: str | None) -> None:
+def _validate_delivery_self_test_refs(task: Any, body: dict[str, Any], *, stage_id: str | None) -> None:
     evidence_ids = body.get("self_test_evidence_ids")
     if not evidence_ids:
         return

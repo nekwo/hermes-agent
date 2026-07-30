@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from .models import Task
 
 
 NO_PRODUCT_EDIT_RECIPE_IDS = frozenset(

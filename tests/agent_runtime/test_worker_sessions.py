@@ -12,7 +12,10 @@ from agent_runtime import paths
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.context_builder import build_context
 from agent_runtime.decision_schema import AgentDecision, DecisionType
-from agent_runtime.models import AgentPersona, Proof, Task
+from agent_runtime.models import AgentPersona, Proof
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.observability import build_observability
 from agent_runtime.events import EventLog
 from agent_runtime.operator_control import operator_takeover_worker

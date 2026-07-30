@@ -14,7 +14,7 @@ from .decision_contract_registry import (
 )
 from .decision_payload_contracts import payload_contract
 from .events import EventLog
-from .models import AgentRun, Event, Proof, Task
+from .models import AgentRun, Event, Proof
 from .objective_templates import render_objective
 from .packets import HANDOFF_MODES, HANDOFF_OWNERS, HANDOFF_REPOS, QA_NEXT_OWNERS, latest_packet, latest_packets_for_task
 from .profile_context import mcp_owner_profile_name

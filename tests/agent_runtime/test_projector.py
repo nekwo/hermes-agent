@@ -8,7 +8,10 @@ from contextlib import closing
 from hermes_time import now
 
 from agent_runtime.events import EventLog
-from agent_runtime.models import Event, RepoBundle, Task
+from agent_runtime.models import Event, RepoBundle
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.persona_assignments import PersonaAssignmentSpec, PersonaAssignmentStore
 from agent_runtime.projector import Projector
 from agent_runtime.read_model import ReadModel

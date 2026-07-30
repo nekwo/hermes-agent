@@ -35,7 +35,6 @@ from .snapshot import _default_persona_session_db, _parity_envelope
 
 def build_status(task_store: TaskStore | None = None, run_store: RunStore | None = None, incident_store: IncidentStore | None = None, agent_store: AgentStore | None = None, event_log: EventLog | None = None, worker_session_store: WorkerSessionStore | None = None) -> dict:
     _build_started = time.perf_counter()
-    task_store = task_store or TaskStore()
     run_store = run_store or RunStore()
     incident_store = incident_store or IncidentStore()
     agent_store = agent_store or AgentStore()
@@ -44,7 +43,7 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
     # memory (same as build_snapshot — this was the 2s hog of a warm status).
     event_log = event_log or CachedEventLog()
     worker_session_store = worker_session_store or WorkerSessionStore(event_log=event_log)
-    tasks = task_store.list_all()
+    tasks = []
     runs = run_store.list_all()
     workers = worker_session_store.list_all()
     incidents = incident_store.list_all()

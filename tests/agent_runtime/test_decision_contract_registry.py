@@ -21,7 +21,10 @@ from agent_runtime.decision_contract_examples import verify_harness_skill_exampl
 from agent_runtime.decision_payload_contracts import payload_contract as facade_payload_contract
 from agent_runtime.decision_schema import ALLOWED_DECISIONS_BY_ROLE, DECISION_SCHEMA, DecisionType
 from agent_runtime.events import ALLOWED_EVENT_TYPES
-from agent_runtime.models import AgentRun, Task
+from agent_runtime.models import AgentRun
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.persona_runtime import build_system_prompt
 from agent_runtime.personas import AgentRole
 from agent_runtime.states import RunState, TaskState

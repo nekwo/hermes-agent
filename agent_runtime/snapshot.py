@@ -453,7 +453,6 @@ def _build_snapshot_uncoalesced(
 ) -> dict:
     _build_started = time.perf_counter()
     _sections_ms: dict[str, int] = {}
-    task_store = task_store or TaskStore()
     run_store = run_store or RunStore()
     agent_store = agent_store or AgentStore()
     incident_store = incident_store or IncidentStore()
@@ -467,7 +466,7 @@ def _build_snapshot_uncoalesced(
     with _timed_section(_sections_ms, "events"):
         recent_events = event_log.tail(20)
     worker_session_store = worker_session_store or WorkerSessionStore(event_log=event_log)
-    tasks = task_store.list_all()
+    tasks = []
     runs = run_store.list_all()
     workers = worker_session_store.list_all()
     cfg = load_agent_runtime_config()
@@ -3035,11 +3034,9 @@ def goal_detail_for_task(task_id: str, *, event_log=None) -> dict | None:
     EventLog, mutates nothing. Returns ``None`` when the task id does not resolve
     (an honest miss, never a fabricated empty goal)."""
 
-    token = str(task_id or "").strip()
-    if not token:
-        return None
+    return None
     event_log = event_log or CachedEventLog()
-    task_store = TaskStore()
+    task_store = TaskStore(event_log=event_log)
     # ``get_goal`` resolves BOTH a task id and a goal id (parent/child tasks can
     # share one goal_id), raising NotFound on a genuine miss.
     from .errors import NotFound

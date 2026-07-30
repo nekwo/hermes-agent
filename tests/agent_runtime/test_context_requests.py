@@ -5,7 +5,10 @@ from hermes_time import now
 from agent_runtime.context_builder import build_context, render_context
 from agent_runtime.context_requests import add_context_request, has_unresolved_context_request
 from agent_runtime.decision_schema import AgentDecision, DecisionType
-from agent_runtime.models import AgentRun, Task
+from agent_runtime.models import AgentRun
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.observability import build_observability
 from agent_runtime.states import RunState, TaskState
 from tests.agent_runtime.conftest import release_to_implementation

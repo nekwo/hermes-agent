@@ -58,7 +58,6 @@ from agent_runtime.errors import (
     WorkspaceDeleteBlocked,
 )
 from agent_runtime.events import EventLog
-from agent_runtime.goal_hygiene import activate_foreground_runtime, prepare_new_goal_runtime
 from agent_runtime.harness_doctor import (
     DEFAULT_STALE_INCIDENT_DAYS,
     DEFAULT_STALE_INCIDENT_HOURS,
@@ -69,7 +68,7 @@ from agent_runtime.harness_doctor import (
     run_harness_doctor,
 )
 from agent_runtime.launcher_process_hygiene import launcher_visual_cleanup_needed
-from agent_runtime.models import AgentPersona, Event, Task, apply_instance_model_overrides
+from agent_runtime.models import AgentPersona, Event, apply_instance_model_overrides
 from agent_runtime import paths
 from agent_runtime.persona_assignments import (
     CHAT_BINDING_CLEARED_REASON_DELETED,
@@ -161,7 +160,7 @@ from agent_runtime.snapshot import build_snapshot, write_snapshot
 from agent_runtime.scope_control import find_discovery_task
 from agent_runtime.states import TaskState, RunState, WorkerSessionState
 from agent_runtime.status import build_status
-from agent_runtime.store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, RunStore, TaskStore
+from agent_runtime.store import AgentStore
 from agent_runtime.store import RealmStore, WorkspaceStore
 from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
 from agent_runtime.tool_permissions import ChatToolPermissionStore, permission_state_for_chat
@@ -369,89 +368,6 @@ def build_parser(parent_subparsers) -> None:
     roots_migrate.add_argument("--no-platform-gates", action="store_true", help="Do not add platforms:[windows] to PowerShell/.ps1-only MCP entries")
     _add_stage42_global_args(roots_migrate, mutation=True)
     roots_migrate.set_defaults(func=_cmd_roots_migrate)
-
-    goal = subs.add_parser("goal", help="Create and run Harness goals in-process")
-    goal_subs = goal.add_subparsers(dest="goal_command")
-    goal_list = goal_subs.add_parser("list", help="List Harness goals")
-    goal_list.add_argument("--workspace", default=None)
-    goal_list.add_argument("--state", choices=["open", "done", "blocked", "all"], default="open")
-    _add_stage42_global_args(goal_list)
-    goal_list.set_defaults(func=_cmd_goal_list)
-    goal_show = goal_subs.add_parser("show", help="Show one Harness goal")
-    goal_show.add_argument("goal_id")
-    goal_show.add_argument("--full", action="store_true")
-    _add_stage42_global_args(goal_show)
-    goal_show.set_defaults(func=_cmd_goal_show)
-    goal_history = goal_subs.add_parser("history", help="Show redaction-safe goal event history")
-    goal_history.add_argument("goal_id")
-    goal_history.add_argument("--limit", type=int, default=50)
-    _add_stage42_global_args(goal_history)
-    goal_history.set_defaults(func=_cmd_goal_history)
-    goal_detail = goal_subs.add_parser(
-        "detail",
-        help="Show the heavy goal DETAIL body evicted from the steady-state frame",
-    )
-    goal_detail.add_argument("goal_id", help="Goal id or task id (parent/child tasks share a goal_id)")
-    goal_detail.add_argument("--json", action="store_true")
-    goal_detail.set_defaults(func=_cmd_goal_detail)
-    goal_unblock = goal_subs.add_parser("unblock", help="Operator-unblock a Harness goal")
-    goal_unblock.add_argument("goal_id")
-    goal_unblock.add_argument("--reason", required=True)
-    goal_unblock.add_argument("--state", choices=["created", "pm_ready_for_dev", "dev_implementing", "qa_testing"], default="created")
-    goal_unblock.add_argument("--rescope", action="store_true")
-    _add_stage42_global_args(goal_unblock, mutation=True)
-    goal_unblock.set_defaults(func=_cmd_goal_unblock)
-    goal_cancel = goal_subs.add_parser("cancel", help="Cancel a Harness goal")
-    goal_cancel.add_argument("goal_id")
-    goal_cancel.add_argument("--reason", required=True)
-    _add_stage42_global_args(goal_cancel, mutation=True)
-    goal_cancel.set_defaults(func=_cmd_goal_cancel)
-    goal_archive = goal_subs.add_parser("archive", help="Archive a terminal Harness goal")
-    goal_archive.add_argument("goal_id")
-    _add_stage42_global_args(goal_archive, mutation=True)
-    goal_archive.set_defaults(func=_cmd_goal_archive)
-    goal_archive_ready = goal_subs.add_parser("archive-ready", help="Archive terminal ready/done Harness goals while preserving evidence")
-    _add_stage42_global_args(goal_archive_ready, mutation=True)
-    goal_archive_ready.set_defaults(func=_cmd_task_archive_ready)
-
-    task = subs.add_parser("task", help="Manage harness tasks")
-    task_subs = task.add_subparsers(dest="task_command")
-    listp = task_subs.add_parser("list", help="List harness tasks")
-    listp.add_argument("--state", choices=["open", "all", "done", "blocked"], default="open")
-    listp.add_argument("--json", action="store_true")
-    listp.set_defaults(func=_cmd_task_list)
-    show = task_subs.add_parser("show", help="Show harness task")
-    show.add_argument("task_id")
-    show.add_argument("--events", type=int, default=0, help="Include the newest N task events")
-    show.add_argument("--since", default=None, help="Include task events since an ISO-8601 timestamp")
-    show.add_argument("--json", action="store_true")
-    show.set_defaults(func=_cmd_task_show)
-    history = task_subs.add_parser("history", help="Show redaction-safe task event history")
-    history.add_argument("task_id")
-    history.add_argument("--limit", type=int, default=50)
-    history.add_argument("--since", default=None, help="Include task events since an ISO-8601 timestamp")
-    history.add_argument("--json", action="store_true")
-    history.set_defaults(func=_cmd_task_history)
-    task_cancel = task_subs.add_parser("cancel", help="Cancel a harness task")
-    task_cancel.add_argument("task_id")
-    task_cancel.add_argument("--reason", required=True)
-    task_cancel.add_argument("--json", action="store_true")
-    task_cancel.set_defaults(func=_cmd_task_cancel)
-    task_unblock = task_subs.add_parser("unblock", help="Operator-unblock or rescope a non-terminal harness task")
-    task_unblock.add_argument("task_id")
-    task_unblock.add_argument("--reason", required=True)
-    task_unblock.add_argument("--state", choices=["created", "pm_ready_for_dev", "dev_implementing", "qa_testing"], default="created")
-    task_unblock.add_argument("--rescope", action="store_true", help="Clear mission plan/stages so Neko can scope the task again")
-    task_unblock.add_argument("--foreground", action="store_true", help="Reactivate this task as the foreground runtime lane")
-    task_unblock.add_argument("--json", action="store_true")
-    task_unblock.set_defaults(func=_cmd_task_unblock)
-    task_archive_ready = task_subs.add_parser("archive-ready", help="Archive terminal ready/done harness tasks while preserving evidence")
-    task_archive_ready.add_argument("--json", action="store_true")
-    task_archive_ready.set_defaults(func=_cmd_task_archive_ready)
-    task_archive = task_subs.add_parser("archive", help="Archive one terminal harness task while preserving evidence")
-    task_archive.add_argument("task_id")
-    task_archive.add_argument("--json", action="store_true")
-    task_archive.set_defaults(func=_cmd_task_archive)
 
     workspace = subs.add_parser("workspace", help="Manage Harness workspaces")
     workspace_subs = workspace.add_subparsers(dest="workspace_command", required=True)
@@ -895,99 +811,6 @@ def build_parser(parent_subparsers) -> None:
     _add_stage42_global_args(office_resolve, mutation=True)
     office_resolve.set_defaults(func=_cmd_office_resolve_conflict)
 
-    swarm = subs.add_parser("swarm", help="Manage production swarm gate and runtime state")
-    swarm_subs = swarm.add_subparsers(dest="swarm_command", required=True)
-    swarm_status = swarm_subs.add_parser("status", help="Show swarm certification and enablement status")
-    swarm_status.add_argument("--json", action="store_true")
-    swarm_status.set_defaults(func=_cmd_swarm_status)
-    swarm_enable = swarm_subs.add_parser("enable", help="Enable production swarm mode after certification")
-    swarm_enable.add_argument("--lanes", type=int, default=2)
-    swarm_enable.add_argument("--allow-uncertified-dev-swarm", action="store_true")
-    swarm_enable.add_argument("--json", action="store_true")
-    swarm_enable.set_defaults(func=_cmd_swarm_enable)
-    swarm_disable = swarm_subs.add_parser("disable", help="Disable new production swarm activation")
-    swarm_disable.add_argument("--json", action="store_true")
-    swarm_disable.set_defaults(func=_cmd_swarm_disable)
-
-    lane = subs.add_parser("lane", help="Inspect and operate persisted swarm lanes")
-    lane_subs = lane.add_subparsers(dest="lane_command", required=True)
-    lane_list = lane_subs.add_parser("list", help="List lanes")
-    lane_list.add_argument("--json", action="store_true")
-    _add_stage42_global_args(lane_list)
-    lane_list.set_defaults(func=_cmd_lane_list)
-    lane_show = lane_subs.add_parser("show", help="Show one lane")
-    lane_show.add_argument("lane_id")
-    lane_show.add_argument("--json", action="store_true")
-    _add_stage42_global_args(lane_show)
-    lane_show.set_defaults(func=_cmd_lane_show)
-    for command_name in ("pause", "park", "resume", "drain"):
-        command = lane_subs.add_parser(command_name, help=f"{command_name.title()} a lane")
-        command.add_argument("lane_id")
-        command.add_argument("--reason", default=f"operator {command_name}")
-        command.add_argument("--json", action="store_true")
-        command.set_defaults(func=_cmd_lane_control)
-
-    run = subs.add_parser("run", help="Manage harness runs")
-    run_subs = run.add_subparsers(dest="run_command")
-    run_list = run_subs.add_parser(
-        "list",
-        help="S8: paged run history — the frame ships only ACTIVE runs; historical/terminal runs are fetched here",
-    )
-    run_list.add_argument("--task", dest="task_id", default=None, help="Filter to one task id")
-    run_list.add_argument("--state", default=None, help="Filter to one run state (e.g. done, failed, cancelled)")
-    run_list.add_argument("--limit", type=int, default=50, help="Max rows (clamped 1..500), newest-first")
-    run_list.add_argument("--json", action="store_true")
-    run_list.set_defaults(func=_cmd_run_list)
-    run_show = run_subs.add_parser("show", help="Show one harness run with task-scoped proof/event context")
-    run_show.add_argument("run_id")
-    run_show.add_argument("--events", type=int, default=25)
-    run_show.add_argument("--json", action="store_true")
-    run_show.set_defaults(func=_cmd_run_show)
-    run_cancel = run_subs.add_parser("cancel", help="Cancel a harness run")
-    run_cancel.add_argument("run_id")
-    run_cancel.add_argument("--reason", required=True)
-    run_cancel.add_argument("--requested-by", default="cli")
-    _add_coordinator_permission_args(run_cancel)
-    run_cancel.add_argument("--json", action="store_true")
-    run_cancel.set_defaults(func=_cmd_run_cancel)
-    run_approve = run_subs.add_parser("approve", help="Approve a waiting run to continue the same session")
-    run_approve.add_argument("run_id")
-    run_approve.add_argument("--json", action="store_true")
-    run_approve.set_defaults(func=_cmd_run_approve)
-
-    worker = subs.add_parser("worker", help="Inspect and steer durable Harness worker sessions")
-    worker_subs = worker.add_subparsers(dest="worker_command")
-    worker_list = worker_subs.add_parser("list", help="List worker sessions")
-    worker_list.add_argument("--task", dest="task_id", default=None)
-    worker_list.add_argument("--persona", dest="persona_id", default=None)
-    worker_list.add_argument("--active", action="store_true")
-    worker_list.add_argument("--json", action="store_true")
-    _add_stage42_global_args(worker_list)
-    worker_list.set_defaults(func=_cmd_worker_list)
-    worker_show = worker_subs.add_parser("show", help="Show one worker session")
-    worker_show.add_argument("worker_session_id")
-    worker_show.add_argument("--json", action="store_true")
-    _add_stage42_global_args(worker_show)
-    worker_show.set_defaults(func=_cmd_worker_show)
-    for command_name in ("pause", "resume", "interrupt", "nudge", "possess", "release"):
-        command = worker_subs.add_parser(command_name, help=f"{command_name.title()} a worker session")
-        command.add_argument("worker_session_id")
-        command.add_argument("--reason", default="")
-        command.add_argument("--note", default="")
-        command.add_argument("--actor", default="cli")
-        command.add_argument("--lease-seconds", type=int, default=900)
-        command.add_argument("--json", action="store_true")
-        command.set_defaults(func=_cmd_worker_control)
-    worker_takeover = worker_subs.add_parser("takeover", help="Audited human takeover: freeze peers, possess worker, and optionally cancel active run with approval")
-    worker_takeover.add_argument("worker_session_id")
-    worker_takeover.add_argument("--reason", default="operator takeover")
-    worker_takeover.add_argument("--actor", default="operator")
-    worker_takeover.add_argument("--lease-seconds", type=int, default=900)
-    worker_takeover.add_argument("--cancel-active-run", action="store_true")
-    worker_takeover.add_argument("--approve-destructive", action="store_true")
-    worker_takeover.add_argument("--json", action="store_true")
-    worker_takeover.set_defaults(func=_cmd_worker_control)
-
     persona = subs.add_parser("persona", help="Run bounded live-token diagnostics for one persona")
     persona_subs = persona.add_subparsers(dest="persona_command")
     persona_list = persona_subs.add_parser("list", help="List durable persona instances")
@@ -1041,17 +864,8 @@ def build_parser(parent_subparsers) -> None:
     persona_permission_set.set_defaults(func=_cmd_persona_permission_set)
     persona_assignments = persona_subs.add_parser("assignments", help="List persona assignments")
     persona_assignments.add_argument("--persona", dest="persona_id", default=None)
-    persona_assignments.add_argument("--goal", dest="goal_id", default=None)
     persona_assignments.add_argument("--json", action="store_true")
     persona_assignments.set_defaults(func=_cmd_persona_assignments)
-    persona_message = persona_subs.add_parser("message", help="Queue a bounded operator message assignment for one persona")
-    persona_message.add_argument("persona_id", help="Persona id or alias: neko, dev, launcher-dev, backend-dev, qa")
-    persona_message.add_argument("--task", dest="task_id", required=True)
-    persona_message.add_argument("--message", required=True)
-    persona_message.add_argument("--title", default="Operator message")
-    persona_message.add_argument("--requested-by", default="cli")
-    persona_message.add_argument("--json", action="store_true")
-    persona_message.set_defaults(func=_cmd_persona_message)
     persona_chat = persona_subs.add_parser("chat", help="Manage durable persona chat sessions")
     persona_chat_subs = persona_chat.add_subparsers(dest="persona_chat_command")
     persona_chat_delete = persona_chat_subs.add_parser("delete", help="Delete a persona chat session and clear active persona bindings")
@@ -1464,43 +1278,6 @@ def build_parser(parent_subparsers) -> None:
     skills.add_argument("--json", action="store_true")
     skills.set_defaults(func=_cmd_install_harness_skills)
 
-    issue = subs.add_parser("issue", help="Manage issue discoveries")
-    issue_subs = issue.add_subparsers(dest="issue_command")
-    issue_list = issue_subs.add_parser("list")
-    issue_list.add_argument("--task-id", required=True)
-    issue_list.add_argument("--json", action="store_true")
-    issue_list.set_defaults(func=_cmd_issue_list)
-    issue_show = issue_subs.add_parser("show")
-    issue_show.add_argument("discovery_id")
-    issue_show.add_argument("--json", action="store_true")
-    issue_show.set_defaults(func=_cmd_issue_show)
-    issue_triage = issue_subs.add_parser("triage")
-    issue_triage.add_argument("discovery_id")
-    issue_triage.add_argument("--decision", required=True, choices=["blocks_current", "same_scope", "fork_child", "defer", "escalate"])
-    issue_triage.add_argument("--child-title", default="")
-    issue_triage.add_argument("--child-description", default="")
-    issue_triage.add_argument("--acceptance", action="append", default=[])
-    issue_triage.add_argument("--rationale", default="Manual CLI triage")
-    issue_triage.add_argument("--priority", default="medium")
-    issue_triage.add_argument("--json", action="store_true")
-    issue_triage.set_defaults(func=_cmd_issue_triage)
-
-    inc = subs.add_parser("incident", help="Manage incidents")
-    inc_subs = inc.add_subparsers(dest="incident_command")
-    inc_list = inc_subs.add_parser("list", help="List incidents or page the closed/ancient history tail")
-    inc_list.add_argument("--open", action="store_true", help="(default) show only open incidents")
-    inc_list.add_argument("--all", action="store_true", help="include closed incidents")
-    inc_list.add_argument("--state", choices=["open", "closed", "all"], default=None, help="Lane to list: open (default), closed (history), or all")
-    inc_list.add_argument("--before", default=None, help="Page: only incidents whose cursor (closed_at/opened_at) is before this ISO-8601 timestamp")
-    inc_list.add_argument("--limit", type=int, default=None, help="Page size (clamped 1..500); JSON output carries next_before for the following page")
-    inc_list.add_argument("--json", action="store_true")
-    inc_list.set_defaults(func=_cmd_incident_list)
-    inc_close = inc_subs.add_parser("close")
-    inc_close.add_argument("incident_id")
-    inc_close.add_argument("--reason", required=True)
-    inc_close.add_argument("--json", action="store_true")
-    inc_close.set_defaults(func=_cmd_incident_close)
-
     snap = subs.add_parser("snapshot", help="Write redaction-safe snapshot.json")
     snap.add_argument("--json", action="store_true")
     snap.set_defaults(func=_cmd_snapshot)
@@ -1888,85 +1665,6 @@ def _require_yes(args, code: str = "confirmation_required") -> bool:
     return False
 
 
-def _goal_row(task: Task, *, full: bool = False) -> dict:
-    workspace_id = getattr(task, "workspace_id", None)
-    realm_id = None
-    if workspace_id:
-        try:
-            realm_id = WorkspaceStore().get(workspace_id).realm_id
-        except Exception:
-            realm_id = None
-    stage_id = getattr(task, "current_stage_id", None)
-    row = {
-        "id": getattr(task, "goal_id", None) or task.id,
-        "task_id": task.id,
-        "title": task.title,
-        "state": str(task.state),
-        "workspace_id": workspace_id,
-        "realm_id": realm_id,
-        "stage": stage_id,
-        "updated_at": task.updated_at,
-    }
-    if full:
-        runs = RunStore().list_for_task(task.id)
-        incidents = [item for item in IncidentStore().list_all() if item.task_id == task.id and item.closed_at is None]
-        row.update(
-            {
-                "run_ids": [run.id for run in runs],
-                "open_incident_ids": [incident.id for incident in incidents],
-            }
-        )
-    return row
-
-
-def _archived_goal_row(task_id: str, result) -> dict | None:
-    archived = _archived_task_summary(task_id)
-    if not archived:
-        return None
-    task_data = archived.get("task") if isinstance(archived.get("task"), dict) else {}
-    archived_task = archived.get("archived_task") if isinstance(archived.get("archived_task"), dict) else {}
-    goal_id = task_data.get("goal_id") or task_id
-    row = {
-        "id": goal_id,
-        "task_id": task_id,
-        "title": task_data.get("title") or getattr(result, "title", ""),
-        "state": task_data.get("state") or getattr(result, "final_task_state", ""),
-        "workspace_id": task_data.get("workspace_id"),
-        "realm_id": None,
-        "stage": task_data.get("current_stage_id"),
-        "updated_at": task_data.get("updated_at"),
-        "archived": True,
-        "archive_batch": archived.get("archive_batch"),
-        "archive_dir": archived.get("archive_dir"),
-        "manifest_path": archived.get("manifest_path"),
-        "archived_run_ids": list(archived_task.get("run_ids") or []),
-        "archived_proof_ids": list(archived_task.get("proof_ids") or []),
-    }
-    return row
-
-
-def _result_goal_row(result) -> dict:
-    return {
-        "id": getattr(result, "task_id", "") or "",
-        "task_id": getattr(result, "task_id", "") or "",
-        "title": getattr(result, "title", ""),
-        "state": getattr(result, "final_task_state", ""),
-        "workspace_id": None,
-        "realm_id": None,
-        "stage": None,
-        "updated_at": None,
-        "archived": False,
-        "source": "goal_run_result",
-    }
-
-
-def _resolve_goal(value: str) -> Task:
-    try:
-        return TaskStore().get_goal(value)
-    except NotFound as exc:
-        raise NotFound(f"goal not found: {value}") from exc
-
-
 def _sort_rows(rows: list[dict], sort_key: str | None) -> list[dict]:
     key = str(sort_key or "").strip()
     if not key:
@@ -1975,60 +1673,6 @@ def _sort_rows(rows: list[dict], sort_key: str | None) -> list[dict]:
     if reverse:
         key = key[1:]
     return sorted(rows, key=lambda item: str(item.get(key, "")), reverse=reverse)
-
-
-def _goal_contention_warnings(task: Task) -> list[dict]:
-    try:
-        assignment_store = PersonaAssignmentStore()
-        warnings: list[dict] = []
-        for assignment in assignment_store.list_for_task(task.id):
-            warnings.extend(assignment_store.contention_warnings(persona_id=assignment.persona_id, goal_id=getattr(task, "goal_id", None) or task.id))
-        return warnings
-    except Exception:
-        return []
-
-
-def _cmd_goal_list(args) -> int:
-    store = TaskStore()
-    if args.state == "all":
-        tasks = store.list_all()
-    elif args.state == "done":
-        tasks = store.list_by_state(TaskState.DONE)
-    elif args.state == "blocked":
-        tasks = store.list_by_state(TaskState.BLOCKED)
-    else:
-        tasks = store.list_open()
-    if args.workspace:
-        tasks = [task for task in tasks if getattr(task, "workspace_id", None) == args.workspace]
-    rows = _sort_rows([_goal_row(task) for task in tasks], getattr(args, "sort", None))
-    limit = getattr(args, "limit", None)
-    truncated = False
-    if limit is not None and limit >= 0 and len(rows) > limit:
-        rows = rows[:limit]
-        truncated = True
-    _print_stage42(_list_envelope("goal", rows, cursor=getattr(args, "cursor", None), truncated=truncated), args=args)
-    return 0
-
-
-def _cmd_goal_detail(args) -> int:
-    """S8: serve the heavy goal DETAIL body evicted from the steady-state frame.
-
-    Read-only rebuild of the exact bytes the pre-S8 in-frame goal row carried, so
-    a goal detail drawer / blueprint / replay view fetches identical data on
-    open. A miss (unknown goal/task id) is an honest ``not_found`` error, never a
-    fabricated empty goal."""
-
-    from agent_runtime.snapshot import goal_detail_for_task
-
-    detail = goal_detail_for_task(str(getattr(args, "goal_id", "") or ""))
-    if detail is None:
-        return emit_harness_error(
-            ValueError(f"goal/task '{getattr(args, 'goal_id', '')}' did not resolve"),
-            args=args,
-            code="not_found",
-        )
-    print(emit_json(detail))
-    return 0
 
 
 def _cmd_persona_instance_detail(args) -> int:
@@ -2309,36 +1953,6 @@ def _cmd_skills_promote(args) -> int:
     return 2 if result.action == "refused" else 0
 
 
-def _cmd_run_list(args) -> int:
-    """S8: paged run history — the frame ships only ACTIVE runs; historical/
-    terminal runs are fetched here (newest-first, id/state filtered)."""
-
-    from agent_runtime.snapshot import _run_summary
-    from agent_runtime.store import RunStore
-
-    limit = max(1, min(500, int(getattr(args, "limit", 50) or 50)))
-    task_id = str(getattr(args, "task_id", "") or "").strip() or None
-    state_filter = str(getattr(args, "state", "") or "").strip().lower() or None
-    runs = RunStore().list_all()
-
-    def _sort_key(run):
-        return str(getattr(run, "started_at", "") or getattr(run, "created_at", "") or "")
-
-    runs = sorted(runs, key=_sort_key, reverse=True)
-    rows: list[dict] = []
-    for run in runs:
-        if task_id is not None and getattr(run, "task_id", None) != task_id:
-            continue
-        row = _run_summary(run)
-        if state_filter is not None and str(row.get("state", "")).lower() != state_filter:
-            continue
-        rows.append(row)
-    truncated = len(rows) > limit
-    rows = rows[:limit]
-    _print_stage42(_list_envelope("run", rows, truncated=truncated), args=args)
-    return 0
-
-
 def _cmd_prompt_context_show(args) -> int:
     """S8: show one persisted prompt-observability context by id (frame-evicted
     historical rows stay on disk and are fetched here; C2 retention MOVES older
@@ -2364,94 +1978,7 @@ def _cmd_prompt_context_show(args) -> int:
     return 0
 
 
-def _cmd_goal_show(args) -> int:
-    task = _resolve_goal(args.goal_id)
-    _print_stage42(_object_envelope("goal", _goal_row(task, full=True)), args=args)
-    return 0
-
-
-def _cmd_goal_history(args) -> int:
-    task = _resolve_goal(args.goal_id)
-    events = _task_events(task.id, limit=max(1, int(getattr(args, "limit", 50) or 50)), since_text=getattr(args, "since", None))
-    if not events.get("ok"):
-        return emit_harness_error(ValueError(events.get("message") or events.get("error")), args=args, code="invalid_request")
-    rows = [
-        {
-            "id": f"event_{index}",
-            "goal_id": getattr(task, "goal_id", None) or task.id,
-            "task_id": task.id,
-            "type": _event_value(event, "type"),
-            "run_id": _event_value(event, "run_id"),
-            "persona_id": _event_value(event, "persona_id"),
-            "ts": _event_value(event, "ts"),
-        }
-        for index, event in enumerate(events.get("items", []), start=1)
-    ]
-    _print_stage42(_list_envelope("goal_event", rows), args=args)
-    return 0
-
-
-def _cmd_goal_unblock(args) -> int:
-    task = _resolve_goal(args.goal_id)
-    if task.state in {TaskState.DONE, TaskState.CANCELLED}:
-        _print_stage42(
-            _error_envelope("goal_terminal", f"{task.id} is terminal: {task.state.value}", retryable=False, correlation_id=getattr(task, "goal_id", None) or task.id),
-            args=args,
-            default_output="json",
-        )
-        return 6
-    previous_state = task.state.value
-    incident_store = IncidentStore()
-    closed_incident_ids: list[str] = []
-    open_incident_ids = {
-        incident.id
-        for incident in incident_store.list_open()
-        if getattr(incident, "task_id", None) == task.id
-    }
-    open_incident_ids.update(task.open_incident_ids or [])
-    for incident_id in sorted(open_incident_ids):
-        try:
-            incident_store.close(incident_id, reason=f"operator unblock: {_safe_operator_text(args.reason)}")
-            closed_incident_ids.append(incident_id)
-        except Exception:
-            pass
-    task = TaskStore().get(task.id)
-    task.state = TaskState(args.state)
-    task.open_incident_ids = []
-    if args.rescope:
-        task.current_stage_id = None
-        task.affected_repos = []
-        task.assigned_persona_ids = {}
-    task.updated_at = now()
-    TaskStore().update(task, actor="cli", reason=f"operator unblock: {_safe_operator_text(args.reason)}")
-    task = TaskStore().get(task.id)
-    row = _goal_row(task)
-    row.update({"from": previous_state, "to": task.state.value, "closed_incident_ids": closed_incident_ids, "rescope": bool(args.rescope)})
-    _print_stage42(_object_envelope("goal", row), args=args, default_output="json")
-    return 0
-
-
-def _cmd_goal_cancel(args) -> int:
-    if not _require_yes(args):
-        return 8
-    task = _resolve_goal(args.goal_id)
-    task = TaskStore().cancel(task.id, reason=args.reason, actor="cli")
-    _print_stage42(_object_envelope("goal", _goal_row(task)), args=args)
-    return 0
-
-
-def _cmd_goal_archive(args) -> int:
-    if not _require_yes(args):
-        return 8
-    task = _resolve_goal(args.goal_id)
-    data = TaskStore().archive(task.id, actor="cli", reason="operator archive goal command")
-    row = {"id": getattr(task, "goal_id", None) or task.id, "task_id": task.id, "state": "archived" if data.get("archived_count") else "skipped", "updated_at": now()}
-    _print_stage42(_object_envelope("goal", row, warnings=data.get("skipped_tasks") or []), args=args)
-    return 0 if data.get("archived_count") else 6
-
-
 def _workspace_row(workspace, *, full: bool = False) -> dict:
-    tasks = TaskStore().list_for_workspace(workspace.id)
     roster_agent_ids = list(workspace.agent_ids or [])
     live_scoped_agent_ids = exact_scoped_instance_ids(
         PersonaInstanceStore().list_all(),
@@ -2467,7 +1994,6 @@ def _workspace_row(workspace, *, full: bool = False) -> dict:
         "live_scoped_agent_ids": live_scoped_agent_ids,
         "roster_agent_count": len(roster_agent_ids),
         "roster_agent_ids": roster_agent_ids,
-        "goals": len(tasks),
         "isolation": workspace.isolation,
         "updated_at": workspace.updated_at,
     }
@@ -2653,20 +2179,13 @@ def _activation_outcome_row(store, row_builder, outcome: dict, key: str) -> dict
 
 def _cmd_workspace_actors(args) -> int:
     workspace = WorkspaceStore().get(args.workspace_id)
-    snapshot = build_snapshot()
-    wanted_goal_ids = {
-        getattr(task, "goal_id", None) or task.id
-        for task in TaskStore().list_for_workspace(workspace.id)
-    }
-    actors: list[dict] = []
-    for goal in snapshot.get("goals") or []:
-        if goal.get("id") not in wanted_goal_ids:
-            continue
-        mission = goal.get("mission_level_state") if isinstance(goal, dict) else None
-        for actor in (mission or {}).get("actors", []):
-            if getattr(args, "kind", None) and actor.get("kind") != args.kind:
-                continue
-            actors.append(actor)
+    actors = [
+        persona_instance_summary(instance)
+        for instance in PersonaInstanceStore().list_all()
+        if getattr(instance, "workspace_id", None) == workspace.id
+    ]
+    if getattr(args, "kind", None):
+        actors = [actor for actor in actors if actor.get("kind") == args.kind]
     _print_stage42(_list_envelope("actor", actors), args=args)
     return 0
 

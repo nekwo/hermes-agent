@@ -220,13 +220,7 @@ def _cmd_persona_assignments(args) -> int:
         print(emit_json(data) if args.json else data["error"])
         return 2
     store = PersonaAssignmentStore()
-    # `--goal` only: the `--task` alias was removed with its parser argument
-    # (2026-07-29), so reading `task_id` here would keep a removed spelling
-    # alive for any caller building `args` by hand.
-    goal_id = getattr(args, "goal_id", None)
-    if goal_id:
-        assignments = store.list_for_goal(goal_id)
-    elif args.persona_id:
+    if args.persona_id:
         assignments = store.list_for_persona(_normalize_cli_persona_id(args.persona_id))
     else:
         assignments = store.list_all()
@@ -241,44 +235,6 @@ def _cmd_persona_assignments(args) -> int:
     else:
         for item in data["assignments"]:
             print(f"{item['assignment_id']}: {item['persona_id']} {item['kind']} state={item['state']} task={item['task_id'] or '-'}")
-    return 0
-
-
-def _cmd_persona_message(args) -> int:
-    cfg = load_agent_runtime_config()
-    if not persona_assignment_store_enabled(cfg):
-        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    persona_id = _normalize_cli_persona_or_template_id(args.persona_id)
-    try:
-        task = TaskStore().get(args.task_id)
-    except Exception:
-        data = {"ok": False, "error": f"task not found: {args.task_id}"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    PersonaInstanceStore().derive_from_workers(ensure_persisted_personas(cfg), WorkerSessionStore().list_all())
-    assignment = PersonaAssignmentStore().create_or_resume(
-        PersonaAssignmentSpec(
-            persona_id=persona_id,
-            kind="operator_message",
-            title=args.title,
-            message=args.message,
-            created_by=args.requested_by,
-            task_id=task.id,
-            stage_id=task.current_stage_id,
-        )
-    )
-    data = {
-        "ok": True,
-        "assignment_id": assignment.id,
-        "persona_instance_id": assignment.persona_instance_id,
-        "persona_id": assignment.persona_id,
-        "task_id": assignment.task_id,
-        "state": assignment.state,
-        "kind": assignment.kind,
-    }
-    print(emit_json(data) if args.json else f"queued {assignment.id} for {assignment.persona_id}")
     return 0
 
 

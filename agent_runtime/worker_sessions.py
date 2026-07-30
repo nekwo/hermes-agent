@@ -554,14 +554,7 @@ def _skill_manifest(
 
 
 def _task_root_node_mode(task_id: str) -> bool:
-    try:
-        from .store import TaskStore
-
-        task = TaskStore().get(task_id)
-        policy = getattr(task, "harness_self_heal", None)
-        return bool(isinstance(policy, dict) and policy.get("root_node_mode"))
-    except Exception:
-        return False
+    return False
 
 
 def _safe_event_payload(payload: dict[str, Any]) -> dict[str, Any]:

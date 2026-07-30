@@ -11,7 +11,7 @@ from hermes_time import now
 from utils import atomic_json_write
 
 from . import paths
-from .models import Event, Task
+from .models import Event
 from .role_checklists import RoleChecklistStore, checklist_summary, normalize_role_id
 from .serde import from_jsonable, to_jsonable
 

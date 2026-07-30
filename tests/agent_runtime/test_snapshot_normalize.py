@@ -11,7 +11,9 @@ from __future__ import annotations
 from hermes_time import now
 
 from agent_runtime.config import AgentRuntimeConfig
-from agent_runtime.models import Task
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.snapshot import _keyed, _parity_warnings, build_snapshot
 from agent_runtime.snapshot_audit import audit_snapshot, snapshot_size_budget

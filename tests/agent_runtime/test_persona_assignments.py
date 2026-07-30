@@ -12,7 +12,10 @@ from agent_runtime.actions import HarnessAction, HarnessActionType
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.events import EventLog
-from agent_runtime.models import AgentPersona, PersonaInstance, Proof, Task
+from agent_runtime.models import AgentPersona, PersonaInstance, Proof
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.mission_chat_turns import (
     mission_chat_turn_elements,
     mission_chat_turn_record,

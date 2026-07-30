@@ -5,8 +5,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from .plan_review import PlanReview
-from .states import PossessionState, RunState, StageStatus, TaskState, WorkerSessionState
+from .states import PossessionState, RunState, WorkerSessionState
 
 
 class ProofType(StrEnum):
@@ -51,64 +50,6 @@ def looks_like_persona_instance_id(token: object) -> bool:
     phantom "steered by <principal>" edge.
     """
     return isinstance(token, str) and token.strip().startswith(PERSONA_INSTANCE_ID_PREFIX)
-
-
-@dataclass(slots=True)
-class MissionIntent:
-    title: str
-    objective: str
-    acceptance_criteria: list[str] = field(default_factory=list)
-    non_goals: list[str] = field(default_factory=list)
-    source_task_id: str | None = None
-    locked: bool = True
-
-
-@dataclass(slots=True)
-class Task:
-    id: str
-    title: str
-    description: str
-    state: TaskState
-    created_at: datetime
-    updated_at: datetime
-    requested_by: str
-    requires_visual_proof: bool = False
-    # Declared delivery directive (promote / preserve_diff / worktree). None
-    # means the contract default; resolved via delivery_directive.task_delivery_directive.
-    delivery_directive: dict[str, Any] | None = None
-    acceptance_criteria: list[str] = field(default_factory=list)
-    proof_expectations: list[str] = field(default_factory=list)
-    non_goals: list[str] = field(default_factory=list)
-    affected_repos: list[str] = field(default_factory=list)
-    suggested_roles: list[str] = field(default_factory=list)
-    current_stage_id: str | None = None
-    assigned_persona_ids: dict[str, str] = field(default_factory=dict)
-    proof_ids: list[str] = field(default_factory=list)
-    open_incident_ids: list[str] = field(default_factory=list)
-    waiver: dict[str, str] | None = None
-    parent_task_id: str | None = None
-    risk_flags: list[str] = field(default_factory=list)
-    # Neko/supervisor may narrow a goal into the current routing slice. Keep
-    # that scope separate so operator-authored goal fields remain stable.
-    routing_scope: dict[str, Any] = field(default_factory=dict)
-    operator_notes: list[str] = field(default_factory=list)
-    harness_self_heal: dict[str, Any] = field(default_factory=dict)
-    context_requests: list[dict[str, Any]] = field(default_factory=list)
-    issue_discoveries: list[dict[str, Any]] = field(default_factory=list)
-    plan_review: PlanReview | None = None
-    planning_locked: bool = False
-    goal_id: str | None = None
-    workspace_id: str | None = None
-    schema_version: int = 1
-
-    def __post_init__(self) -> None:
-        if not self.goal_id:
-            self.goal_id = self.id
-
-
-# Deprecated compatibility alias for one release while persisted files and
-# legacy imports still use Task as the storage record name.
-Goal = Task
 
 
 @dataclass(slots=True)

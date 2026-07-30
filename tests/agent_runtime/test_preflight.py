@@ -3,7 +3,10 @@ from __future__ import annotations
 from hermes_time import now
 
 from agent_runtime.events import EventLog
-from agent_runtime.models import Event, Task
+from agent_runtime.models import Event
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.preflight import PreflightCheck, PreflightResult, environment_fingerprint, open_preflight_blocker, record_preflight_pass, run_preflight
 from agent_runtime.states import TaskState
 from agent_runtime.store import IncidentStore, TaskStore

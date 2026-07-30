@@ -5,7 +5,10 @@ import time
 
 from hermes_time import now
 
-from agent_runtime.models import Event, Task
+from agent_runtime.models import Event
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.projector import Projector
 from agent_runtime.read_model import ReadModel
 from agent_runtime.runtime_config import ReadModelConfig, RuntimeConfig

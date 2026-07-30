@@ -12,7 +12,9 @@ from agent_runtime import board_models, paths
 from agent_runtime.board_store import BoardStore
 from agent_runtime.errors import WorkspaceDeleteBlocked
 from agent_runtime.events import EventLog
-from agent_runtime.models import Task
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.office_store import OfficeStore
 from agent_runtime.realm_sync import _apply_workspace_tombstones, resolve_realm_sync_artifacts
 from agent_runtime.states import TaskState

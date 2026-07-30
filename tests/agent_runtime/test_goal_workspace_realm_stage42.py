@@ -5,7 +5,9 @@ import sys
 from hermes_time import now
 
 from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
-from agent_runtime.models import Task
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.persona_assignments import (
     PersonaAssignmentSpec,
     PersonaAssignmentStore,

@@ -2,7 +2,10 @@ from datetime import timedelta
 
 from hermes_time import now
 
-from agent_runtime.models import AgentPersona, AgentRun, Event, Incident, Proof, Task
+from agent_runtime.models import AgentPersona, AgentRun, Event, Incident, Proof
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.models import ProofType
 from agent_runtime.serde import from_jsonable, to_jsonable
 from agent_runtime.states import RunState, TaskState

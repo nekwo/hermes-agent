@@ -14,7 +14,7 @@ from hermes_time import now
 
 from .events import EventLog
 from .dirty_state import no_product_edit_dirty_check
-from .models import Event, Incident, Task
+from .models import Event, Incident
 from .packets import latest_packet
 from .repo_context import safe_affected_repo_labels
 from .stagec_mcp_visual_provider import (

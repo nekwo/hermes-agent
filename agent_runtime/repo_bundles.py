@@ -12,7 +12,7 @@ from utils import atomic_json_write
 from . import paths
 from .delivery_directive import read_bundle_promotion_record
 from .events import EventLog
-from .models import Event, Incident, RepoBundle, Task
+from .models import Event, Incident, RepoBundle
 from .serde import from_jsonable, to_jsonable
 from .states import TaskState
 from .store import IncidentStore, TaskStore
@@ -66,7 +66,7 @@ class RepoBundleStore:
     def __init__(self, event_log: EventLog | None = None):
         self.event_log = event_log or EventLog()
 
-    def create_or_update_from_task(self, task: Task) -> list[RepoBundle]:
+    def create_or_update_from_task(self, task: Any) -> list[RepoBundle]:
         desired = desired_bundles_for_task(task)
         result: list[RepoBundle] = []
         for bundle in desired:
@@ -333,7 +333,7 @@ class RepoBundleStore:
                 woke.append(self.update(bundle, event_type="repo_bundle.woke", payload={"wake_condition": WAKE_DEPENDENCY_DELIVERED}))
         return woke
 
-    def cancel_superseded(self, task: Task, *, desired_ids: set[str]) -> list[RepoBundle]:
+    def cancel_superseded(self, task: Any, *, desired_ids: set[str]) -> list[RepoBundle]:
         return []
 
     def _write(self, bundle: RepoBundle) -> None:
@@ -361,7 +361,7 @@ class RepoBundleStore:
         )
 
 
-def desired_bundles_for_task(task: Task) -> list[RepoBundle]:
+def desired_bundles_for_task(task: Any) -> list[RepoBundle]:
     repos = list(getattr(task, "affected_repos", None) or [])
     if not repos:
         return []
@@ -492,7 +492,7 @@ def owner_for_repo(repo: str | None) -> str | None:
     return None
 
 
-def simplified_phase_for_task(task: Task, bundles: list[RepoBundle]) -> str:
+def simplified_phase_for_task(task: Any, bundles: list[RepoBundle]) -> str:
     state = getattr(task, "state", None)
     state_value = state.value if hasattr(state, "value") else str(state or "")
     if state_value in {"done", "cancelled"}:
@@ -672,7 +672,7 @@ def bundle_id_for(task_id: str, repo: str, *, stage_ids: list[str]) -> str:
     return f"bundle_{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:12]}"
 
 
-def find_best_bundle_for_action(task: Task, *, persona_id: str, stage_id: str | None = None, repo: str | None = None, store: RepoBundleStore | None = None) -> RepoBundle | None:
+def find_best_bundle_for_action(task: Any, *, persona_id: str, stage_id: str | None = None, repo: str | None = None, store: RepoBundleStore | None = None) -> RepoBundle | None:
     store = store or RepoBundleStore()
     bundles = store.create_or_update_from_task(task)
     wanted_stage = safe_token(stage_id)
@@ -717,7 +717,7 @@ def _empty_delivery_is_proof_only_no_product_edit(bundle: RepoBundle, *, task_st
     return False
 
 
-def _task_declares_no_product_edits(task: Task) -> bool:
+def _task_declares_no_product_edits(task: Any) -> bool:
     flags = {str(flag or "").strip().lower() for flag in list(getattr(task, "risk_flags", None) or [])}
     if "no_product_edits" in flags:
         return True

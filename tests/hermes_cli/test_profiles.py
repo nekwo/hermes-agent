@@ -620,10 +620,8 @@ class TestDeleteProfile:
         profile_dir = create_profile("coder", no_alias=True)
         monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
 
-        from hermes_time import now
-        from agent_runtime.models import AgentPersona, Task
-        from agent_runtime.states import TaskState
-        from agent_runtime.store import AgentStore, TaskStore
+        from agent_runtime.models import AgentPersona
+        from agent_runtime.store import AgentStore
 
         AgentStore().save(
             AgentPersona(
@@ -638,19 +636,6 @@ class TestDeleteProfile:
                 hermes_profile="coder",
             )
         )
-        n = now()
-        TaskStore().create(
-            Task(
-                id="task_bound_profile",
-                title="Bound",
-                description="Bound",
-                state=TaskState.CREATED,
-                created_at=n,
-                updated_at=n,
-                requested_by="test",
-            )
-        )
-
         with patch("hermes_cli.profiles._cleanup_gateway_service"):
             delete_profile("coder", yes=True)
         assert not profile_dir.is_dir()

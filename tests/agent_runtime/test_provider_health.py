@@ -6,7 +6,10 @@ import pytest
 
 from hermes_cli.runtime_environment import missing_runtime_packages_for, runtime_environment_status
 
-from agent_runtime.models import AgentPersona, AgentRun, Task
+from agent_runtime.models import AgentPersona, AgentRun
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.context_builder import build_context
 from agent_runtime.persona_runtime import GPTPersonaRuntime
 from agent_runtime.provider_health import provider_health_for_personas

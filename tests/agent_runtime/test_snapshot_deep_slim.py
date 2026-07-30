@@ -12,7 +12,9 @@ from __future__ import annotations
 from hermes_time import now
 
 from agent_runtime import prompt_observability as po
-from agent_runtime.models import Task
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.snapshot import (
     GOAL_DETAIL_ONLY_FIELDS,
     build_snapshot,

@@ -2,7 +2,9 @@ import os
 
 from agent_runtime.models import AgentPersona
 from agent_runtime.profile_readiness import profile_readiness_for_persona
-from agent_runtime.models import Task
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.states import TaskState
 from hermes_time import now
 

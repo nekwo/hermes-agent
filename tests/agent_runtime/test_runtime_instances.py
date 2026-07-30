@@ -4,7 +4,9 @@ from hermes_time import now
 
 from agent_runtime import paths
 from agent_runtime.goal_hygiene import activate_foreground_runtime, prepare_new_goal_runtime
-from agent_runtime.models import Task
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.runtime_instances import GoalRuntimeInstanceStore, runtime_instance_summary
 from agent_runtime.states import RunState, TaskState
 from agent_runtime.store import RunStore, TaskStore

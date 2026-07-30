@@ -9,7 +9,6 @@ from hermes_time import now
 
 from .errors import LegacyOrchestratorRemoved
 from .goal_hygiene import prepare_new_goal_runtime
-from .models import Task
 from .persona_assignments import (
     PersonaAssignmentSpec,
     PersonaAssignmentStore,

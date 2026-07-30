@@ -21,7 +21,10 @@ from hermes_time import now
 from utils import atomic_json_write
 
 import hermes_cli.harness as harness
-from agent_runtime.models import Incident, Task
+from agent_runtime.models import Incident
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.snapshot import (
     ARCHIVED_TASKS_REF_RECENT_CAP,
     _archived_task_summaries,

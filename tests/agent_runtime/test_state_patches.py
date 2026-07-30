@@ -33,7 +33,10 @@ from agent_runtime import state_patches as sp
 from agent_runtime.config import load_agent_runtime_config, seed_personas
 from agent_runtime.decision_contract_registry import allowed_event_types, validate_event_payload
 from agent_runtime.events import EVENT_PAYLOAD_LIMIT_BYTES, EventLog
-from agent_runtime.models import AgentPersona, Event, Incident, Task
+from agent_runtime.models import AgentPersona, Event, Incident
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.persona_assignments import PersonaInstanceStore, persona_instance_summary
 from agent_runtime.state_patches import (
     PATCH_OP_REFRESH,

@@ -13,7 +13,10 @@ from agent_runtime.default_scope import (
     reconcile_default_scope_to_legacy,
 )
 from agent_runtime.errors import DefaultScopeReconciliationRequired, StoreCorrupt
-from agent_runtime.models import PersonaInstance, Task
+from agent_runtime.models import PersonaInstance
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.office_store import OfficeStore
 from agent_runtime.persona_assignments import PersonaInstanceStore
 from agent_runtime.states import TaskState, WorkerSessionState

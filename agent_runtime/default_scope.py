@@ -180,7 +180,6 @@ def preview_default_scope_migration() -> dict:
     from .board_store import BoardStore
     from .office_store import OfficeStore
     from .persona_assignments import PersonaInstanceStore
-    from .store import TaskStore
     from .workspace_scope import exact_scoped_instance_ids
 
     realm_store = RealmStore()
@@ -228,7 +227,6 @@ def preview_default_scope_migration() -> dict:
         status = "canonical_creation_ready"
         reason = None
 
-    tasks = TaskStore()
     boards = BoardStore()
     offices = OfficeStore()
     instances = PersonaInstanceStore().list_all()
@@ -262,10 +260,7 @@ def preview_default_scope_migration() -> dict:
                 related_by_id[item.id] = item
         workspace_rows: list[dict] = []
         for workspace in sorted(related_by_id.values(), key=lambda item: item.id):
-            goal_ids = [
-                getattr(task, "goal_id", None) or task.id
-                for task in tasks.list_for_workspace(workspace.id)
-            ]
+            goal_ids = []
             board_ids = [
                 board.board_id
                 for board in boards.list_for_workspace(workspace.id, include_archived=True)
@@ -376,7 +371,6 @@ def reconcile_default_scope_to_legacy(
     from .board_store import BoardStore
     from .office_store import OfficeStore
     from .persona_assignments import PersonaInstanceStore
-    from .store import TaskStore
     from .workspace_scope import exact_scoped_instance_ids
 
     realm_store = RealmStore()
@@ -483,7 +477,6 @@ def reconcile_default_scope_to_legacy(
                 workspace_ids=[winner_workspace.id, loser_workspace.id],
             )
 
-        tasks = TaskStore().list_for_workspace(loser_workspace.id)
         boards = BoardStore().list_for_workspace(
             loser_workspace.id, include_archived=True
         )
@@ -492,7 +485,7 @@ def reconcile_default_scope_to_legacy(
         instances = exact_scoped_instance_ids(
             PersonaInstanceStore().list_all(), workspace_id=loser_workspace.id
         )
-        if tasks or boards or actors or offices.surface_exists(loser_workspace.id) or instances:
+        if boards or actors or offices.surface_exists(loser_workspace.id) or instances:
             _raise_reconciliation_required(
                 "The fixed-id duplicate contains live scoped data; a reviewed merge is required.",
                 realm_ids=[winner_realm.id, loser_realm.id],

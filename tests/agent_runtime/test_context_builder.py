@@ -4,7 +4,10 @@ from hermes_time import now
 
 from agent_runtime.context_builder import build_context, render_context
 from agent_runtime.events import EventLog
-from agent_runtime.models import AgentRun, Task
+from agent_runtime.models import AgentRun
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.states import RunState, TaskState
 
 

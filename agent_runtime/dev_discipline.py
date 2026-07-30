@@ -4,7 +4,7 @@ import re
 from typing import Any
 
 from .decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
-from .models import AgentPersona, AgentRun, Task
+from .models import AgentPersona, AgentRun
 from .packets import latest_packet
 from .personas import role_from_persona
 

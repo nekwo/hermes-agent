@@ -9,7 +9,6 @@ from .dev_discipline import update_progress_telemetry
 from .errors import EventPayloadTooLarge
 from .events import EventLog
 from .models import Event
-from .child_events import emit_child_progress
 from .config import load_root_runtime_config
 from .self_test_evidence import record_self_test_from_progress
 from .states import RunState
@@ -136,8 +135,6 @@ class RunProgressSink:
                         payload=safe_payload,
                     ),
                 )
-                if event_type == "run.progress":
-                    emit_child_progress(run=persisted, payload=safe_payload, config=self.config, event_log=self.event_log)
         except Exception:
             return None
 

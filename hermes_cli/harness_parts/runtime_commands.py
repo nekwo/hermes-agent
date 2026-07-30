@@ -64,79 +64,6 @@ def _cmd_persona_instance_reconcile(args) -> int:
     return 0
 
 
-def _cmd_task_list(args) -> int:
-    store=TaskStore()
-    if args.state == "all": tasks=store.list_all()
-    elif args.state == "done": tasks=store.list_by_state(TaskState.DONE)
-    elif args.state == "blocked": tasks=store.list_by_state(TaskState.BLOCKED)
-    else: tasks=store.list_open()
-    print(emit_json([task_summary(t) for t in tasks]) if args.json else "\n".join(human_task_line(t) for t in tasks))
-    return 0
-
-
-def _cmd_task_show(args) -> int:
-    try:
-        task = TaskStore().get(args.task_id)
-    except NotFound:
-        archived = _archived_task_summary(args.task_id)
-        if archived:
-            event_limit = max(0, int(getattr(args, "events", 0) or 0))
-            since_text = getattr(args, "since", None)
-            data = {"archived": True, **archived}
-            if args.json and (event_limit or since_text):
-                data["events"] = _task_events(args.task_id, limit=event_limit, since_text=since_text)
-            print(emit_json(data) if args.json else f"archived {args.task_id}: {archived['archive_batch']}")
-            return 0
-        data = {"ok": False, "error": "task_not_found", "task_id": args.task_id, "message": f"Task not found: {args.task_id}"}
-        print(emit_json(data) if args.json else data["message"])
-        return 1
-    event_limit = max(0, int(getattr(args, "events", 0) or 0))
-    since_text = getattr(args, "since", None)
-    if args.json and (event_limit or since_text):
-        data = {"task": task, "events": _task_events(task.id, limit=event_limit, since_text=since_text)}
-        print(emit_json(data))
-    else:
-        print(emit_json(task) if args.json else human_task_line(task))
-    return 0
-
-
-def _cmd_task_history(args) -> int:
-    try:
-        task = TaskStore().get(args.task_id)
-        archived = False
-        task_state = task.state.value
-    except NotFound:
-        archive = _archived_task_summary(args.task_id)
-        if not archive:
-            data = {"ok": False, "error": "task_not_found", "task_id": args.task_id, "message": f"Task not found: {args.task_id}"}
-            print(emit_json(data) if args.json else data["message"])
-            return 1
-        archived = True
-        task_data = archive.get("task") if isinstance(archive, dict) else None
-        task_state = task_data.get("state") if isinstance(task_data, dict) else None
-
-    limit = max(1, min(500, int(getattr(args, "limit", 50) or 50)))
-    events = _task_events(args.task_id, limit=limit, since_text=getattr(args, "since", None))
-    data = {
-        "ok": bool(events.get("ok", True)),
-        "task_id": args.task_id,
-        "task_state": task_state,
-        "archived": archived,
-        "event_count": events.get("count", 0),
-        "limit": limit,
-        "events": events.get("items", []),
-    }
-    if not data["ok"]:
-        data["error"] = events.get("error")
-        data["message"] = events.get("message")
-    if args.json:
-        print(emit_json(data))
-    else:
-        lines = [f"{_event_value(item, 'ts')} {_event_value(item, 'type')} run={_event_value(item, 'run_id') or '-'} persona={_event_value(item, 'persona_id') or '-'}" for item in data["events"]]
-        print("\n".join(lines))
-    return 0 if data["ok"] else 1
-
-
 def _event_value(event, key: str):
     if isinstance(event, dict):
         return event.get(key)
@@ -192,72 +119,6 @@ def _task_events(task_id: str, *, limit: int, since_text: str | None) -> dict:
     }
 
 
-def _cmd_task_cancel(args) -> int:
-    task = TaskStore().cancel(args.task_id, reason=args.reason, actor="cli")
-    cancelled_run_ids = _cancel_task_active_runs(task.id, reason=args.reason)
-    closed_worker_ids = _close_task_active_workers(task.id, reason=args.reason)
-    data = {"task_id": task.id, "state": task.state.value, "reason_recorded": True, "cancelled_run_ids": cancelled_run_ids, "closed_worker_session_ids": closed_worker_ids}
-    print(emit_json(data) if args.json else f"cancelled {task.id}")
-    return 0
-
-
-def _cmd_task_unblock(args) -> int:
-    store = TaskStore()
-    incident_store = IncidentStore()
-    try:
-        task = store.get(args.task_id)
-    except NotFound:
-        archived = _archived_task_summary(args.task_id)
-        if archived:
-            data = {"ok": False, "error": "task_archived", "task_id": args.task_id, "archive_batch": archived["archive_batch"], "message": "Archived tasks cannot be unblocked; create a new task or inspect the archive evidence."}
-        else:
-            data = {"ok": False, "error": "task_not_found", "task_id": args.task_id}
-        print(emit_json(data) if args.json else data.get("message", data["error"]))
-        return 1
-    if task.state in {TaskState.DONE, TaskState.CANCELLED}:
-        data = {"ok": False, "error": "task_terminal", "task_id": task.id, "state": task.state.value}
-        print(emit_json(data) if args.json else f"{task.id} is terminal: {task.state.value}")
-        return 1
-    previous_state = task.state.value
-    open_incident_ids = {
-        incident.id
-        for incident in incident_store.list_open()
-        if getattr(incident, "task_id", None) == task.id
-    }
-    open_incident_ids.update(task.open_incident_ids or [])
-    closed_incident_ids: list[str] = []
-    for incident_id in sorted(open_incident_ids):
-        try:
-            incident_store.close(incident_id, reason=f"operator unblock: {_safe_operator_text(args.reason)}")
-            closed_incident_ids.append(incident_id)
-        except Exception:
-            pass
-    task = store.get(task.id)
-    task.state = TaskState(args.state)
-    task.open_incident_ids = []
-    task.risk_flags = [flag for flag in list(task.risk_flags or []) if flag != "neko_block_recovery_attempted"]
-    cleared_recovery_keys = _clear_task_recovery_markers(task)
-    if args.rescope:
-        task.current_stage_id = None
-        task.affected_repos = []
-        task.assigned_persona_ids = {}
-    task.updated_at = now()
-    store.update(task, actor="cli", reason=f"operator unblock: {_safe_operator_text(args.reason)}")
-    foreground = activate_foreground_runtime(task.id, started_by="cli") if args.foreground else None
-    data = {
-        "ok": True,
-        "task_id": task.id,
-        "from": previous_state,
-        "to": task.state.value,
-        "rescope": bool(args.rescope),
-        "foreground_runtime": foreground,
-        "closed_incident_ids": closed_incident_ids,
-        "cleared_recovery_keys": cleared_recovery_keys,
-    }
-    print(emit_json(data) if args.json else f"unblocked {task.id}: {previous_state} -> {task.state.value}")
-    return 0
-
-
 def _clear_task_recovery_markers(task: Task) -> list[str]:
     cleared: list[str] = []
     data = task.harness_self_heal if isinstance(task.harness_self_heal, dict) else {}
@@ -307,26 +168,6 @@ def _close_task_active_workers(task_id: str, *, reason: str) -> list[str]:
     return closed
 
 
-def _cmd_task_archive_ready(args) -> int:
-    data = TaskStore().archive_ready(actor="cli", reason="operator archive-ready command")
-    if args.json:
-        print(emit_json(data))
-    else:
-        batch = data["archive_batch"] or "no archive batch"
-        print(f"archived {data['archived_count']} task(s), skipped {data['skipped_count']} task(s): {batch}")
-    return 0
-
-
-def _cmd_task_archive(args) -> int:
-    data = TaskStore().archive(args.task_id, actor="cli", reason="operator archive task command")
-    if args.json:
-        print(emit_json(data))
-    else:
-        batch = data["archive_batch"] or "no archive batch"
-        print(f"archived {data['archived_count']} task(s), skipped {data['skipped_count']} task(s): {batch}")
-    return 0 if data.get("archived_count") else 1
-
-
 def _swarm_state_path() -> Path:
     return paths.store_root() / "swarm_state.json"
 
@@ -349,258 +190,6 @@ def _write_swarm_state(data: dict) -> None:
     path = _swarm_state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_json_write(path, to_jsonable(data), indent=2, sort_keys=True)
-
-
-def _cmd_swarm_status(args) -> int:
-    from agent_runtime.config import load_root_runtime_config
-
-    cfg = load_root_runtime_config()
-    swarm_cfg = getattr(cfg, "swarm", None)
-    allowed, certification = swarm_certification_allows_production(
-        requires_certification=bool(getattr(swarm_cfg, "requires_certification", True)),
-        allow_uncertified_dev_swarm=bool(getattr(swarm_cfg, "allow_uncertified_dev_swarm", False)),
-    )
-    state = _read_swarm_state()
-    data = {"enabled": bool(state.get("enabled")), "certification_allows_production": allowed, "certification": certification, "state": state}
-    print(emit_json(data) if args.json else f"swarm enabled={data['enabled']} certification={certification.get('state')}")
-    return 0
-
-
-def _cmd_swarm_enable(args) -> int:
-    from agent_runtime.config import load_root_runtime_config
-
-    cfg = load_root_runtime_config()
-    swarm_cfg = getattr(cfg, "swarm", None)
-    allowed, certification = swarm_certification_allows_production(
-        requires_certification=bool(getattr(swarm_cfg, "requires_certification", True)),
-        allow_uncertified_dev_swarm=bool(getattr(args, "allow_uncertified_dev_swarm", False)),
-    )
-    lanes = max(1, int(getattr(args, "lanes", 2) or 2))
-    if not allowed:
-        data = {"ok": False, "enabled": False, "reason": "certification_required", "certification": certification}
-        print(emit_json(data) if args.json else "swarm enable refused: certification_required")
-        return 2
-    data = {
-        "ok": True,
-        "enabled": True,
-        "max_active_lanes": lanes,
-        "updated_at": now(),
-        "unsafe_dev_override": bool(getattr(args, "allow_uncertified_dev_swarm", False)),
-        "certification": certification,
-    }
-    _write_swarm_state(data)
-    print(emit_json(data) if args.json else f"swarm enabled lanes={lanes}")
-    return 0
-
-
-def _cmd_swarm_disable(args) -> int:
-    state = _read_swarm_state()
-    data = {**state, "ok": True, "enabled": False, "updated_at": now()}
-    _write_swarm_state(data)
-    print(emit_json(data) if args.json else "swarm disabled")
-    return 0
-
-
-def _cmd_lane_list(args) -> int:
-    from agent_runtime.runtime_instances import GoalRuntimeInstanceStore, runtime_instance_summary
-
-    lanes = [runtime_instance_summary(item) for item in GoalRuntimeInstanceStore().list_all()]
-    _print_stage42(_list_envelope("lane", _sort_rows(lanes, getattr(args, "sort", None))), args=args, default_output="json")
-    return 0
-
-
-def _cmd_lane_show(args) -> int:
-    from agent_runtime.runtime_instances import GoalRuntimeInstanceStore, runtime_instance_summary
-
-    try:
-        lane = runtime_instance_summary(GoalRuntimeInstanceStore().get(args.lane_id))
-    except (NotFound, FileNotFoundError):
-        return emit_harness_error(
-            NotFound(f"lane not found: {args.lane_id}"),
-            args=args,
-            code="lane_not_found",
-        )
-    _print_stage42(_object_envelope("lane", lane), args=args, default_output="json")
-    return 0
-
-
-def _cmd_lane_control(args) -> int:
-    from agent_runtime.runtime_instances import GoalRuntimeInstanceStore, runtime_instance_summary
-
-    store = GoalRuntimeInstanceStore()
-    command = str(getattr(args, "lane_command", ""))
-    try:
-        if command in {"pause", "park"}:
-            lane = store.park_lane(args.lane_id, reason=args.reason, state="parked_by_operator")
-        elif command == "resume":
-            lane = store.resume_lane(args.lane_id, reason=args.reason)
-        elif command == "drain":
-            lane = store.transition(args.lane_id, "done", reason=args.reason, active_run_ids=[])
-        else:
-            raise ValueError("unknown lane command")
-    except Exception as exc:
-        data = {"ok": False, "error": type(exc).__name__, "message": str(exc), "lane_id": args.lane_id}
-        print(emit_json(data) if args.json else f"lane {command} failed: {data['message']}")
-        return 1
-    data = {"ok": True, "lane": runtime_instance_summary(lane)}
-    print(emit_json(data) if args.json else f"{lane.id} {command} -> {lane.state}")
-    return 0
-
-
-def _cmd_run_cancel(args) -> int:
-    worker_store = WorkerSessionStore()
-    run_store = RunStore()
-    run = run_store.get(args.run_id)
-    coordinator_id = _coordinator_actor_id(args)
-    if coordinator_id:
-        target = None
-        for worker in worker_store.find_active(task_id=run.task_id, persona_id=run.persona_id):
-            if worker.active_run_id == run.id:
-                try:
-                    target = PersonaInstanceStore().get(persona_instance_id_for(worker.persona_id))
-                except Exception:
-                    target = None
-                break
-        cfg = load_agent_runtime_config()
-        persona = _persona_by_id(cfg, run.persona_id)
-        scope = _coordinator_scope_from_args(args, cfg, persona)
-        auth = authorize_coordinator_action(
-            "run.cancel",
-            scope,
-            target,
-            actor=coordinator_id,
-            coordinator_id=coordinator_id,
-        )
-        if not auth.ok:
-            data = _coordinator_confirm_payload("run.cancel", coordinator_id, auth)
-            print(emit_json(data) if args.json else data["status"])
-            return 2
-    run = run_store.cancel(args.run_id, reason=args.reason)
-    updated_workers = []
-    for worker in worker_store.find_active(task_id=run.task_id, persona_id=run.persona_id):
-        if worker.active_run_id == run.id:
-            updated = worker_store.update_after_run(worker.id, run, close_reason="run_cancelled", count_decision=False)
-            updated_workers.append(updated.id)
-    data = {"run_id": run.id, "state": run.state.value, "reason_recorded": True, "updated_worker_session_ids": updated_workers}
-    print(emit_json(data) if args.json else f"cancelled {run.id}")
-    return 0
-
-
-def _cmd_run_show(args) -> int:
-    run_store = RunStore()
-    try:
-        run = run_store.get(args.run_id)
-    except (NotFound, FileNotFoundError):
-        return emit_harness_error(
-            NotFound(f"run not found: {args.run_id}"),
-            args=args,
-            code="run_not_found",
-        )
-    events = _task_events(run.task_id, limit=max(1, min(250, int(getattr(args, "events", 25) or 25))), since_text=None)
-    scoped_events = [
-        item
-        for item in events.get("items", [])
-        if _event_value(item, "run_id") == run.id or _event_value(item, "persona_id") == run.persona_id
-    ]
-    data = {
-        "ok": True,
-        "run": run,
-        "events": {
-            "ok": events.get("ok", True),
-            "count": len(scoped_events),
-            "items": scoped_events,
-        },
-    }
-    if args.json:
-        print(emit_json(data))
-    else:
-        print(f"{run.id} {run.persona_id} {run.state.value} task={run.task_id} events={len(scoped_events)}")
-    return 0
-
-
-def _cmd_run_approve(args) -> int:
-    run_store = RunStore()
-    incident_store = IncidentStore()
-    run = run_store.approve_continuation(args.run_id)
-    closed_incidents = []
-    for incident in incident_store.list_open():
-        if incident.run_id == run.id and incident.kind == "run_budget_exceeded":
-            incident_store.close(incident.id, reason="operator approved same-session continuation")
-            closed_incidents.append(incident.id)
-    data = {
-        "run_id": run.id,
-        "state": run.state.value,
-        "approved_for_continuation": True,
-        "session_id": run.session_id,
-        "closed_incidents": closed_incidents,
-        "next_expected": "run harness tick to continue same session",
-    }
-    print(emit_json(data) if args.json else f"approved {run.id} for same-session continuation")
-    return 0
-
-
-def _cmd_worker_list(args) -> int:
-    store = WorkerSessionStore()
-    if getattr(args, "active", False):
-        workers = store.find_active(task_id=getattr(args, "task_id", None), persona_id=getattr(args, "persona_id", None))
-    else:
-        workers = store.list_all()
-        if getattr(args, "task_id", None):
-            workers = [worker for worker in workers if worker.task_id == args.task_id]
-        if getattr(args, "persona_id", None):
-            workers = [worker for worker in workers if worker.persona_id == args.persona_id]
-    data = [worker_session_summary(worker) for worker in workers]
-    _print_stage42(_list_envelope("worker", _sort_rows(data, getattr(args, "sort", None))), args=args, default_output="json")
-    return 0
-
-
-def _cmd_worker_show(args) -> int:
-    try:
-        worker = WorkerSessionStore().get(args.worker_session_id)
-    except (NotFound, FileNotFoundError):
-        return emit_harness_error(
-            NotFound(f"worker not found: {args.worker_session_id}"),
-            args=args,
-            code="worker_not_found",
-        )
-    data = worker_session_summary(worker)
-    _print_stage42(_object_envelope("worker", data), args=args, default_output="json")
-    return 0
-
-
-def _cmd_worker_control(args) -> int:
-    store = WorkerSessionStore()
-    command = getattr(args, "worker_command", "")
-    reason = getattr(args, "reason", "") or getattr(args, "note", "") or f"operator {command}"
-    if command == "takeover":
-        data = operator_takeover_worker(
-            args.worker_session_id,
-            actor=args.actor,
-            reason=reason,
-            lease_seconds=args.lease_seconds,
-            cancel_active_run=bool(getattr(args, "cancel_active_run", False)),
-            approve_destructive=bool(getattr(args, "approve_destructive", False)),
-        )
-        print(emit_json(data) if args.json else f"{data['worker_session_id']} takeover -> {data['state']}")
-        return 0
-    if command == "pause":
-        worker = store.pause(args.worker_session_id, actor=args.actor, reason=reason)
-    elif command == "resume":
-        worker = store.resume(args.worker_session_id, actor=args.actor, reason=reason)
-    elif command == "interrupt":
-        worker = store.interrupt(args.worker_session_id, actor=args.actor, reason=reason)
-    elif command == "nudge":
-        worker = store.nudge(args.worker_session_id, actor=args.actor, note=reason)
-    elif command == "possess":
-        worker = store.possess(args.worker_session_id, actor=args.actor, lease_seconds=args.lease_seconds)
-    elif command == "release":
-        worker = store.release(args.worker_session_id, actor=args.actor, handback=reason)
-    else:
-        print("Use `hermes harness worker --help`.")
-        return 2
-    data = worker_session_summary(worker)
-    print(emit_json(data) if args.json else f"{data['worker_session_id']} {command} -> {data['state']}")
-    return 0
 
 
 def _cmd_status(args) -> int:
@@ -655,8 +244,6 @@ def _cmd_verify(args) -> int:
     commands = [
         ("harness status", [sys.executable, "-m", "hermes_cli.main", "harness", "status", "--json"]),
         ("harness snapshot", [sys.executable, "-m", "hermes_cli.main", "harness", "snapshot", "--json"]),
-        ("harness task archive help", [sys.executable, "-m", "hermes_cli.main", "harness", "task", "archive", "--help"]),
-        ("harness task archive-ready help", [sys.executable, "-m", "hermes_cli.main", "harness", "task", "archive-ready", "--help"]),
         ("harness config show", [sys.executable, "-m", "hermes_cli.main", "harness", "config", "show", "--json"]),
         ("harness migrate check", [sys.executable, "-m", "hermes_cli.main", "harness", "migrate", "--check", "--json"]),
     ]
@@ -696,11 +283,10 @@ def _cmd_verify(args) -> int:
 
 
 def _cmd_observe(args) -> int:
-    tasks = TaskStore().list_all()
-    runs = RunStore().list_all()
-    incidents = IncidentStore().list_all()
-    worker_store = WorkerSessionStore()
-    workers = worker_store.list_all()
+    tasks = []
+    runs = []
+    incidents = []
+    workers = []
     cfg = load_agent_runtime_config()
     execution_mode = "manual"
     data = build_observability(
@@ -820,57 +406,6 @@ def _safe_issue_summary(item: dict) -> dict:
     }
 
 
-def _cmd_issue_list(args) -> int:
-    task = TaskStore().get(args.task_id)
-    items = [_safe_issue_summary(item) for item in getattr(task, "issue_discoveries", []) or []]
-    if args.json:
-        print(emit_json(items))
-    else:
-        print("\n".join(f"{item['discovery_id']} [{item['triage_status']}] {item['severity']} {item['title']}" for item in items))
-    return 0
-
-
-def _cmd_issue_show(args) -> int:
-    _task, item = find_discovery_task(TaskStore(), args.discovery_id)
-    data = _safe_issue_summary(item)
-    data["summary"] = item.get("summary")
-    data["evidence_count"] = len(item.get("evidence", []) or [])
-    data["affected_path_count"] = len(item.get("affected_paths", []) or [])
-    if args.json:
-        print(emit_json(data))
-    else:
-        print(f"{data['discovery_id']} [{data['triage_status']}] {data['title']}\nsummary: {data['summary']}")
-    return 0
-
-
-def _cmd_issue_triage(args) -> int:
-    raise LegacyOrchestratorRemoved(
-        "mission issue triage is unavailable because the dispatch loop is retired",
-        safe_details={"discovery_id": args.discovery_id},
-    )
-    task_store = TaskStore(); incident_store = IncidentStore()
-    task, _item = find_discovery_task(task_store, args.discovery_id)
-    payload = {
-        "discovery_id": args.discovery_id,
-        "decision": args.decision,
-        "rationale": args.rationale,
-        "priority": args.priority,
-    }
-    if args.decision == "fork_child":
-        payload.update({
-            "child_title": args.child_title,
-            "child_description": args.child_description,
-            "child_acceptance_criteria": list(args.acceptance or []),
-        })
-    decision = AgentDecision(type=DecisionType.TRIAGE_ISSUE_DISCOVERY, summary=f"CLI triage {args.decision}", rationale=args.rationale, payload=payload)
-    apply_planning_decision(task, decision, actor="cli", task_store=task_store, incident_store=incident_store)
-    task_store.update(task, actor="cli", reason=f"issue triaged {args.decision}")
-    item = next(item for item in getattr(task, "issue_discoveries", []) or [] if item.get("id") == args.discovery_id)
-    data = _safe_issue_summary(item)
-    print(emit_json(data) if args.json else f"triaged {data['discovery_id']} as {data['triage_status']} child_task_id={data.get('child_task_id')}")
-    return 0
-
-
 def _incident_cursor_ts(incident):
     """The timestamp an incident is ordered/paged by: when it closed (history)
     or when it opened (still live)."""
@@ -891,62 +426,6 @@ def _incident_history_row(incident) -> dict:
         "closed_at": incident.closed_at,
         "cursor": cursor,
     }
-
-
-def _cmd_incident_list(args) -> int:
-    """List incidents, or page the closed/ancient HISTORY tail S2 evicts from the
-    frame. ``--state {open,closed,all}`` selects the lane; ``--before <iso>`` +
-    ``--limit`` page newest-first over the incident store (the store IS the
-    history — no new storage). Back-compat: ``--all`` == ``--state all``,
-    default == open-only."""
-
-    store = IncidentStore()
-    incidents = store.list_all()
-    state = getattr(args, "state", None)
-    if not state:
-        state = "all" if getattr(args, "all", False) else "open"
-    if state == "open":
-        incidents = [i for i in incidents if i.closed_at is None]
-    elif state == "closed":
-        incidents = [i for i in incidents if i.closed_at is not None]
-    # Newest-first by cursor (closed_at for closed, opened_at for open) so
-    # `--before` walks backwards through history one page at a time.
-    incidents = sorted(
-        incidents,
-        key=lambda i: (_incident_cursor_ts(i) is not None, _incident_cursor_ts(i)),
-        reverse=True,
-    )
-    before_text = getattr(args, "before", None)
-    if before_text:
-        try:
-            before = datetime.fromisoformat(str(before_text).replace("Z", "+00:00"))
-        except ValueError:
-            data = {"ok": False, "error": "invalid_before", "message": "--before must be an ISO-8601 timestamp"}
-            print(emit_json(data) if getattr(args, "json", False) else data["message"])
-            return 1
-        incidents = [i for i in incidents if (_incident_cursor_ts(i) is not None and _incident_cursor_ts(i) < before)]
-    truncated = False
-    limit = getattr(args, "limit", None)
-    if limit is not None:
-        limit = max(1, min(500, int(limit)))
-        if len(incidents) > limit:
-            incidents = incidents[:limit]
-            truncated = True
-    rows = [_incident_history_row(i) for i in incidents]
-    if getattr(args, "json", False):
-        next_before = rows[-1]["cursor"] if (truncated and rows) else None
-        data = {
-            "ok": True,
-            "state": state,
-            "count": len(rows),
-            "truncated": truncated,
-            "next_before": next_before,
-            "incidents": rows,
-        }
-        print(emit_json(data))
-    else:
-        print("\n".join(f"{r['incident_id']} {r['kind']} {'open' if r['is_open'] else 'closed'} {r['summary']}" for r in rows))
-    return 0
 
 
 def _cmd_persona_chat_history(args) -> int:
@@ -972,13 +451,6 @@ def _cmd_persona_chat_history(args) -> int:
             lines.append(f"{message.get('timestamp') or '-'} {message.get('role')}: {head}")
         print("\n".join(lines) if lines else f"no messages for {args.session_id}")
     return 0 if data.get("ok") is not False else 2
-
-
-def _cmd_incident_close(args) -> int:
-    incident = IncidentStore().close(args.incident_id, reason=args.reason)
-    data = {"incident_id": incident.id, "closed": incident.closed_at is not None, "reason": args.reason}
-    print(emit_json(data) if args.json else f"closed {incident.id}: {args.reason}")
-    return 0
 
 
 def _cmd_snapshot(args) -> int:
