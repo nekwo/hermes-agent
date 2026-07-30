@@ -253,17 +253,33 @@ def test_harness_parser_exposes_doctor_fix_flags():
     assert args.harness_command == "doctor"
     assert args.fix is True
     assert args.dry_run is True
-    assert args.stale_incident_days == 7
-    assert args.stale_incident_hours is None
+    assert args.worktree_min_age_seconds == 3600
 
 
-def test_harness_parser_accepts_doctor_stale_incident_overrides():
-    days = parser().parse_args(["harness", "doctor", "--stale-incident-days", "3", "--json"])
-    hours = parser().parse_args(["harness", "doctor", "--stale-incident-hours", "12", "--json"])
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--stale-run-hours",
+        "--stale-worker-hours",
+        "--stale-task-days",
+        "--stale-incident-days",
+        "--stale-incident-hours",
+    ],
+)
+def test_harness_doctor_rejects_the_removed_stale_threshold_flags(flag):
+    """These fed task/run/worker/incident sweeps that died with the mission lane.
 
-    assert days.stale_incident_days == 3
-    assert days.stale_incident_hours is None
-    assert hours.stale_incident_hours == 12
+    They were accepted and silently ignored; the parser must now refuse them
+    rather than let an operator believe a threshold took effect.
+    """
+
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "doctor", flag, "3", "--json"])
+
+
+def test_harness_doctor_rejects_the_removed_compact_events_flag():
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "doctor", "--compact-events", "--json"])
 
 
 def test_harness_doctor_fix_requires_confirmation(capsys):
@@ -273,6 +289,52 @@ def test_harness_doctor_fix_requires_confirmation(capsys):
     data = json.loads(capsys.readouterr().out)
     assert data["ok"] is False
     assert data["error"] == "confirmation_required"
+
+
+def test_harness_init_human_branch_states_when_no_personas_are_provisioned(monkeypatch, capsys):
+    """Personas are data now, so an empty roster is a real state.
+
+    The old branch printed a dangling ``Initialized harness personas: `` with
+    nothing after the colon.
+    """
+
+    import hermes_cli.harness as harness_mod
+
+    monkeypatch.setattr(harness_mod, "ensure_persisted_personas", lambda cfg: [])
+    monkeypatch.setattr(
+        harness_mod,
+        "ensure_default_scope",
+        lambda agent_ids: SimpleNamespace(
+            realm=SimpleNamespace(id="realm_default", name="Default"),
+            workspace=SimpleNamespace(id="ws_default", name="Default"),
+        ),
+    )
+    args = parser().parse_args(["harness", "init"])
+
+    assert args.func(args) == 0
+    out = capsys.readouterr().out
+    assert "Initialized harness personas: \n" not in out
+    assert "no personas provisioned" in out
+    assert "Default scope: Default / Default" in out
+
+
+def test_harness_doctor_human_branch_renders_the_surviving_findings(tmp_path, monkeypatch, capsys):
+    """The default (non-JSON) doctor path must render only keys the report emits.
+
+    Regression: the human branch read seven mission-era finding keys while the
+    report ships two, so every plain ``harness doctor`` died with KeyError.
+    """
+
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "agent-runtime"))
+    args = parser().parse_args(["harness", "doctor"])
+
+    assert args.func(args) == 0
+    out = capsys.readouterr().out
+    findings = next(line for line in out.splitlines() if line.startswith("findings: "))
+    rendered = {pair.split("=", 1)[0] for pair in findings[len("findings: ") :].split()}
+    assert rendered == {"orphan_worktrees", "snapshot_null_id_rows"}
+    for retired in ("stale_runs=", "workers=", "incidents=", "event_compactable_rows=", "tasks="):
+        assert retired not in out
 
 
 def test_harness_parser_exposes_config_migrate_and_verify():

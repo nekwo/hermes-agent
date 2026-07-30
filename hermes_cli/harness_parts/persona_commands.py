@@ -3301,13 +3301,13 @@ def _cmd_persona_instance_sweep_orphans(args) -> int:
     else:
         print(
             "persona instances: "
-            f"task_bound {result['before_task_bound_count']} -> {result['after_task_bound_count']}; "
+            f"reconciled {result['before_task_bound_count']} -> {result['after_task_bound_count']}; "
             f"reaped {result['reaped_count']}; "
             f"active preserved {result['skipped_active_count']}"
         )
         remaining = result.get("remaining_task_bound_persona_instance_ids") or []
         if remaining:
-            print("remaining task-bound instances: " + ", ".join(remaining[:20]))
+            print("remaining orphan-candidate instances: " + ", ".join(remaining[:20]))
     return 0
 
 

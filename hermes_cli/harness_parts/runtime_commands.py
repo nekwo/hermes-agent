@@ -150,46 +150,11 @@ def _safe_operator_text(value: str) -> str:
     return " ".join(str(value or "").split())[:160] or "operator requested"
 
 
-def _cancel_task_active_runs(task_id: str, *, reason: str) -> list[str]:
-    runs = RunStore()
-    cancelled = []
-    for run in runs.list_for_task(task_id):
-        if run.state not in ACTIVE_RUN_STATES:
-            continue
-        cancelled.append(runs.cancel(run.id, reason=reason).id)
-    return cancelled
-
-
-def _close_task_active_workers(task_id: str, *, reason: str) -> list[str]:
-    store = WorkerSessionStore()
-    closed = []
-    for worker in store.find_active(task_id=task_id):
-        closed.append(store.close(worker.id, reason=reason).id)
-    return closed
-
-
-def _swarm_state_path() -> Path:
-    return paths.store_root() / "swarm_state.json"
-
-
-def _read_swarm_state() -> dict:
-    path = _swarm_state_path()
-    if not path.exists():
-        return {"enabled": False, "max_active_lanes": 0}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {"enabled": False, "max_active_lanes": 0, "error": "invalid_swarm_state"}
-    return data if isinstance(data, dict) else {"enabled": False, "max_active_lanes": 0, "error": "invalid_swarm_state"}
-
-
-def _write_swarm_state(data: dict) -> None:
-    from utils import atomic_json_write
-    from agent_runtime.serde import to_jsonable
-
-    path = _swarm_state_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_json_write(path, to_jsonable(data), indent=2, sort_keys=True)
+# S13: ``_cancel_task_active_runs`` / ``_close_task_active_workers`` (mission-lane
+# task teardown) and the ``_swarm_state_path`` / ``_read_swarm_state`` /
+# ``_write_swarm_state`` trio (swarm_state.json, a lane-scheduler artifact) were
+# removed here: after the mission-lane removal no harness verb, part, or test
+# referenced any of them. swarm_state.json now has no reader and no writer.
 
 
 def _cmd_status(args) -> int:
@@ -228,7 +193,7 @@ def _cmd_verify(args) -> int:
     repo_root = Path(__file__).resolve().parents[1]
     packet = {
         "schema_version": 1,
-        "proof_packet_id": f"mission_control_verify_{started.strftime('%Y%m%dT%H%M%SZ')}",
+        "verification_id": f"harness_runtime_verify_{started.strftime('%Y%m%dT%H%M%SZ')}",
         "generated_at_utc": started.isoformat().replace("+00:00", "Z"),
         "mode": args.mode,
         "runtime_root": str(paths.store_root()),
@@ -385,10 +350,8 @@ def _git_summary(root: Path) -> dict:
     return {"path": str(root), "git_head": run(["rev-parse", "HEAD"]), "dirty": bool(status)}
 
 
-def _cmd_agents(args) -> int:
-    personas = ensure_persisted_personas(load_agent_runtime_config())
-    print(emit_json(personas) if args.json else "\n".join(f"{p.id} ({p.role})" for p in personas))
-    return 0
+# S13: ``_cmd_agents`` was defined but wired to no parser; ``harness agent list``
+# (_cmd_agent_list) is the live, richer implementation of the same listing.
 
 
 def _safe_issue_summary(item: dict) -> dict:
