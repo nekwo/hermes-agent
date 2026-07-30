@@ -60,35 +60,22 @@ from .workspace_scope import exact_scoped_instance_ids
 from .worker_sessions import WorkerSessionStore
 
 # S2 read-model — history out of the live frame (operator move 6).
-# ``archived_tasks`` (all dead), the closed/ancient tail of ``incidents``, and
-# the persona-chat message tails are append-only HISTORY: read on demand at
+# The persona-chat message tails are append-only HISTORY: read on demand at
 # most, never advancing. They are evicted from the steady-state frame and served
-# via paged on-demand queries over the EventLog / stores (``harness task
-# history`` / ``goal history`` / ``incident list`` / ``persona chat history``).
-# Archive-never-delete: eviction removes rows from the FRAME, never from disk —
-# archived tasks stay in ``deleted_archive/``, closed incidents stay in
-# ``incidents/``.
-# Incident retention is OPEN-ONLY (operator decision 2026-07-16, supersedes the
-# plan's closed-within-TTL recommendation): a closed incident is history the
-# moment it closes and is served exclusively by the paged history query. Only
-# OPEN incidents (live state) ship in the frame.
+# via a paged on-demand query (``harness persona chat history``).
+# Archive-never-delete: eviction removes rows from the FRAME, never from disk.
 #
 # S7-B RULING-0 COMPAT STRIP (2026-07-16): the ``read_model.history_in_frame``
 # kill-switch and its full-in-frame legacy branches were removed here — the
 # evicted (pointer-stub) shape is the ONLY shape. Rollback = ``git revert``, not
-# a flag flip. The helpers below always evict.
-
-
-def _open_incidents_frame(incidents: list) -> tuple[list, int]:
-    """Split incidents into (in-frame open rows, closed-evicted count).
-
-    Open incidents are live state and always in-frame. Closed incidents are
-    history the moment they close (operator decision 2026-07-16: open-only, no
-    TTL window) — evicted from the frame and served by the paged history query.
-    """
-
-    kept = [incident for incident in incidents if getattr(incident, "closed_at", None) is None]
-    return kept, len(incidents) - len(kept)
+# a flag flip. The helper below always evicts.
+#
+# S29: the sibling ``archived_tasks`` and ``incidents`` eviction helpers are
+# gone. S9 removed both as frame sections and S27 removed the archived-task
+# reader, so ``_open_incidents_frame`` had no list left to split and
+# ``snapshot_section_bytes`` had no section left to weigh; both survived S27
+# only as extra reachability roots seeded from a TEST pin, which is not a
+# caller. See tests/agent_runtime/test_s29_snapshot_dead_local_removal.py.
 
 
 def _persona_chat_history_frame(rows: list) -> list:
@@ -160,23 +147,6 @@ def _rows(value) -> list:
     return []
 
 
-def snapshot_section_bytes(data: dict, key: str) -> int:
-    """Compact-JSON byte size of one top-level snapshot section (S2 byte-budget
-    goldens; deliberately independent of the parallel snapshot-audit module)."""
-
-    if key not in data:
-        return 0
-    try:
-        return len(
-            json.dumps(
-                to_jsonable(data.get(key)),
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        )
-    except Exception:
-        return 0
 # Single-homed in ``agent_runtime.redaction`` — see the header there for the
 # JSON blind spot every local spelling shared. This is the same rule as
 # ``persona_chat_history._SECRET_RE`` (also imported into this module); both now
@@ -346,33 +316,27 @@ def _build_snapshot_uncoalesced(
     # Force + time the one-shot CachedEventLog materialization here (the ~1s
     # event-log read, measured 2026-07-23) before other consumers warm it, so
     # ``sections_ms.events`` honestly attributes that cost. ``recent_events`` is
-    # a pure read reused later (build_observability / parity watermark).
+    # a pure read reused later by the parity envelope (watermark + event-summary
+    # warnings); the observability consumer it also named went with S9.
     with _timed_section(_sections_ms, "events"):
         recent_events = event_log.tail(20)
+    # S29: ``tasks`` / ``workers`` are the two surviving seeds — both are still
+    # passed into live projections below (``_workspace_summary`` /
+    # ``snapshot_prompt_observability`` / ``operator_channel_summary`` and
+    # ``derive_from_workers``). Their eight look-alike siblings (``runs``,
+    # ``incidents``, ``proofs``, ``self_tests``, ``role_envelopes``,
+    # ``role_checklists``, ``repo_bundles``, ``runtime_instances``) fed the
+    # mission projections S9/S18/S27 removed and were assigned-never-read; so
+    # were ``execution_mode`` (the retired Mission Daemon's mode string) and
+    # ``live_channel_task_ids``.
     tasks = []
-    runs = []
     workers = []
     cfg = load_agent_runtime_config()
-    # S2 read-model: history is always evicted from the steady-state frame and
-    # served via paged on-demand queries (S7-B RULING-0: no legacy full-in-frame
-    # shape; the pointer-stub shape is the only shape).
-    # The background Mission Daemon was retired; execution is always operator/
-    # goal-runner driven ("manual").
-    execution_mode = "manual"
     # Base-profile foundation: Mission Control shows the seeded store (base only). On a
     # cold store, fall back to the base seed itself — NOT ensure_persisted_personas, which
     # also returns the dormant typed catalog for resolution and would surface mothballed
     # pipeline personas that are not meant to be shown.
     agents = agent_store.list_all()
-    # Closed incidents are history-only in the steady-state frame. Avoid
-    # recursively coercing the entire closed tail (thousands of files on a
-    # mature runtime) merely to count it; the store still validates each JSON
-    # row and materializes every open incident used by routing/observability.
-    incidents = []
-    role_envelopes = []
-    role_checklists = []
-    repo_bundles = []
-    runtime_instances = []
     workspace_store = WorkspaceStore()
     realm_store = RealmStore()
     workspaces = workspace_store.list_all(include_archived=True)
@@ -408,8 +372,6 @@ def _build_snapshot_uncoalesced(
             for agent in agents
         ]
     available_personas = _available_persona_summary(agents)
-    proofs = []
-    self_tests = []
     persona_assignments = []
     persona_instances = []
     topology_persona_instances = PersonaInstanceStore(event_log=event_log).list_all()
@@ -427,19 +389,10 @@ def _build_snapshot_uncoalesced(
         if persona_assignment_store_enabled(cfg):
             persona_assignments = PersonaAssignmentStore(event_log=event_log).list_all()
     session_db = _default_persona_session_db()
-    # S2 read-model: keep only OPEN incidents (live state) in-frame; every
-    # closed incident is history, evicted to the paged query. The full
-    # ``incidents`` list still feeds summary/observability/dirty/tasks — only the
-    # ``incidents`` frame key is filtered to open.
-    # S4: the frame carries these as id-keyed maps (``_keyed`` below). The row
-    # LISTS are still needed as an ordered input to the operator-channel
-    # projection (``run_summaries`` feeds the goal-turn flow), so build them once
-    # here and key them into the frame.
-    # ``run_rows`` (ALL runs) still feeds the operator-channel goal-turn flow
-    # below; the FRAME ``runs`` map (S8) keeps only ACTIVE runs (attached to a
-    # live lane/goal). Historical/terminal runs are old residue — evicted to a
-    # count + pointer, fetched on demand via ``harness run list``. No disk
-    # change: the run store keeps every row.
+    # ``run_rows`` is the ordered run list ``operator_channel_summary`` takes as
+    # ``run_summaries``. S9 removed ``runs`` as a frame section, so nothing
+    # populates it any more — but the parameter is still read by the live
+    # operator-channel projection and must be passed.
     run_rows = []
     migration = migration_status()
     # Hoisted out of the ``data`` literal so their cost is attributable in
@@ -581,21 +534,11 @@ def _build_snapshot_uncoalesced(
         _sections_ms["persona_chat"] = int(
             max(0.0, (time.perf_counter() - _persona_chat_started)) * 1000
         )
-        live_channel_task_ids = {
-            str(channel.get("task_id") or "")
-            for channel in live_operator_channels
-            if channel.get("task_id")
-        }
-        # S4: operator_channels ships as an id-keyed map (channel_id). Live
-        # channels first, then the archived-task channels that don't collide —
-        # ``_keyed`` keeps the first occurrence, so a live channel is never
-        # shadowed by an archived one sharing an id.
-        data["operator_channels"] = _keyed(
-            [
-                *live_operator_channels,
-            ],
-            "channel_id",
-        )
+        # S4: operator_channels ships as an id-keyed map (channel_id). S18
+        # removed the archived-task channels this used to be merged with, so the
+        # live channels are the whole input; ``_keyed`` still keeps the first
+        # occurrence on a duplicate id rather than silently overwriting.
+        data["operator_channels"] = _keyed(live_operator_channels, "channel_id")
         # S8: the ``recent`` lane (last 50 assignments, ~86 KB of old residue)
         # leaves the frame — the launcher roster only needs the ACTIVE
         # assignments (a live instance's current assignment is always active).

@@ -97,8 +97,13 @@ def test_the_lookalike_keep_set_survives():
     # lane; S27 removed both. See test_s27_snapshot_orphan_tree_removal.
     assert not hasattr(snapshot, "_archived_task_summaries")
     assert not hasattr(snapshot, "ARCHIVED_TASKS_REF_RECENT_CAP")
-    # ``proof``/``incident``: the live incident frame split stays.
-    assert callable(snapshot._open_incidents_frame)
+    # ``proof``/``incident``: S18 kept ``_open_incidents_frame`` here as "the
+    # live incident frame split". S9 had already removed ``incidents`` as a frame
+    # section, so the splitter had no list to split; S29 removed it. See
+    # test_s29_snapshot_dead_local_removal. The persona-chat tail eviction is the
+    # one surviving history helper.
+    assert not hasattr(snapshot, "_open_incidents_frame")
+    assert callable(snapshot._persona_chat_history_frame)
     # ``board``/``realm``/``workspace``: the live frames the launcher renders.
     assert callable(snapshot._realm_summary)
     assert callable(snapshot._boards_summary)

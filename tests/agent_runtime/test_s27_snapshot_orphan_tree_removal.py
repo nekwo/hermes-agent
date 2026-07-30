@@ -160,9 +160,12 @@ def test_no_module_level_name_is_unreachable_from_the_external_surface():
         "_parity_envelope",
         "_default_persona_session_db",
         "persona_instance_detail_for_id",
-        # Read-model history helpers pinned by S18 / test_snapshot_history_eviction.
-        "_open_incidents_frame",
-        "snapshot_section_bytes",
+        # S27 seeded two more roots here — ``_open_incidents_frame`` and
+        # ``snapshot_section_bytes`` — on the grounds that S18 and
+        # test_snapshot_history_eviction pinned them. A test pin is not a caller:
+        # S29 established both were production-caller-free and removed them, so
+        # the roots are back to the module's five real external names. See
+        # tests/agent_runtime/test_s29_snapshot_dead_local_removal.py.
     }
     tree = ast.parse(inspect.getsource(snapshot))
     defs: dict[str, ast.AST] = {}
