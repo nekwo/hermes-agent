@@ -16,7 +16,6 @@ from .errors import AlreadyExists, NotFound, WorkspaceDeleteBlocked
 from .events import EventLog
 from .locks import run_lock
 from .models import AgentPersona, AgentRun, Event, Incident, Realm, Workspace
-from .recovery_flags import mark_incident_closed_for_recovery
 from .serde import from_jsonable, to_jsonable
 from .state_patches import emit_incident_remove
 from .simplified_contract import public_decision_type_value
