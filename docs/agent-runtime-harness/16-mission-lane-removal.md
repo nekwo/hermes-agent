@@ -376,6 +376,57 @@ outcomes below are the commit-recorded decisions, not a filename-based deletion 
   infrastructure: twelve tests exercise its worktree safety behavior, including two
   live-incident regressions. It has no production creator caller and is labelled as such.
 
+### S28 — the two cuts S21 could not reach (2026-07-30)
+
+S21 (`c12e6850d`) removed the constant-by-construction status/observe fields but
+**deferred two**, saying so in its commit body and pinning the reasoning in-code:
+`build_status` kept `open_tasks` / `running_runs`, and `build_observability` kept
+its `tasks` / `proofs` / `daemon_status` parameters, because the only reader left
+was `hermes_cli/harness_parts/runtime_commands.py` — a module another lane owned.
+S28 landed both halves once that module was free.
+
+- **Status shrink** (`026bc7b30`): `open_tasks` / `running_runs` and the
+  `_cmd_status` print that was their sole reader. All three removed observability
+  parameters were `[]` / `None` literals in **both** callers, so everything they
+  alone fed went too: `signals.open_tasks` / `proofs_total` / `stale_daemon` /
+  `repeated_context_request_tasks` / `untriaged_issue_discoveries`, the whole
+  `freshness.daemon_*` block, the daemon / context-request / issue-discovery
+  intervention families with their `_risk_if_ignored` + `_allowed_actions` arms,
+  and seven of ten `_self_heal_signals` counters (the task half). **Keep side:**
+  `active_runs` / `queued_runs` / `waiting_runs` / `stale_runs` and every
+  incident/run/worker signal — those read live parameters. Live JSON key-shape
+  diff on alice: 17 removals on `harness status`, 15 on `harness observe`, zero
+  additions, no surviving field changed.
+- **Consequence, recorded rather than hidden:** the removed
+  `scope_control.untriaged_issue_discoveries` import was that function's ONLY
+  production caller, so it is now caller-free while `scope_control` itself stays
+  live. It was NOT deleted (different module, live siblings); the S27 reachability
+  roots now say so explicitly. Re-checked in the same pass:
+  `scope_control.find_discovery_task` is imported at `hermes_cli/harness.py:155`
+  with **no call site anywhere in `hermes_cli/`** — a bound name, not a use. Both
+  belong to a future reachability pass.
+- **Reconcile graph render** (`75ffaac02`): the graph-prune phase (`6c5040ed2`)
+  archives owner-less runtime graphs and appends `flow_graph.pruned`, but reported
+  only through `--json`. The human render now carries `graphs_pruned` /
+  `graphs_held` / `graph_steering_settled` plus matching detail rows.
+  `graph_steering_settled` counts only `changed: True` entries — phase 3 usually
+  strips a departed owner's edge first, and reporting that agreement as a repair
+  would be the same class of untruth. The JSON wire is byte-identical.
+
+**Doctor speed is NOT fixed and is not this wave's to fix.**
+`tests/hermes_cli/test_harness_cli.py -k doctor` is 8 fast tests plus
+`test_harness_doctor_human_branch_renders_the_surviving_findings`, the only one
+that invokes `_cmd_doctor`. It **exceeds the repo's 30 s per-test cap**
+(`pyproject.toml:371`). Cause: `C:\Users\beast\AppData\Local\Temp\hermes-agent-wt`
+holds **4,245** leftover worktree directories. Under pytest the runtime root is a
+long tmp path, so `_worktree_base_dir()` (`repo_context.py:130-134`) falls back to
+that `%TEMP%` base, and `reap_orphan_worktrees` spawns one
+`git rev-parse --git-common-dir` per entry (`repo_context.py:570`) — **15.3 ms
+measured × 4,245 ≈ 65 s**. Every probe returns `None` and every husk holds real
+files (`.git` + `README.md`), so `_is_empty_husk` is false and the janitor
+classifies them `not_a_git_worktree_with_files` and **keeps them**. This never
+self-heals: see the operator-owned leftovers item below.
+
 ### Operator-owned leftovers — nothing in this repo will clean these up
 
 Deliberate holds, not oversights. Each is outside git and safe to leave indefinitely;
@@ -396,7 +447,17 @@ listed so a future session does not re-derive them or assume they were missed.
    and the `gpt-launcher` / `backend-dev` copies inside the archive root above, from the
    2026-07-30 `launcher_qa` grants (both profiles verified field-identical to
    `launcher-dev`'s block afterwards). Disposable once the grants are trusted.
-3. **Shared-skill backups** — `mission-control-harness.bak-20260730` and
+3. **`C:\Users\beast\AppData\Local\Temp\hermes-agent-wt\` — 4,245 broken worktree
+   directories** (found 2026-07-30 by S28's doctor-speed check, above). These are
+   NOT the thirteen registered `%TEMP%` worktrees already reclaimed via
+   `git worktree remove`; these are the unregistered husks left behind. Each holds
+   a `.git` pointer file and a `README.md`, so `harness worktree reap` classifies
+   every one `not_a_git_worktree_with_files` and keeps it — **the janitor will
+   never clear this**, and every `harness doctor` pays ~65 s of `git rev-parse`
+   probes for it. Deleting the directory is the operator's call and is the whole
+   fix; the alternative (making `reap_orphan_worktrees` bound or batch its probe)
+   is a real code change and was not taken on this wave's authority.
+4. **Shared-skill backups** — `mission-control-harness.bak-20260730` and
    `launcher-stagec-mcp-screenshot.bak-20260730` under `X:\Eternia\.hermes\shared\skills\`,
    from the same-day rewrites. Note these sit **inside the shared skills root**: they are
    not installed from this repo, so `harness install-harness-skills` will neither refresh
