@@ -56,11 +56,11 @@
 > `bundle.diff_captured`, `bundle.diff_capture_failed` were never registered
 > either; their appends were being swallowed by `_emit`'s `except`.)
 >
-> **Owed, not done here** (other files, other owners):
-> `repo_bundle.delivered` is still a *registered* contract
-> (`decision_contract_registry.py`, `events.py`) whose only emitter was
-> `mark_delivered` — it is now a registered-but-unemittable contract, the exact
-> debt S15 spent a stage clearing, and belongs to the events/registry owner.
+> **Discharged same-day (2026-07-30):** `repo_bundle.delivered` briefly became a
+> registered-but-unemittable contract when this sweep deleted `mark_delivered`
+> (its only emitter); the registry owner de-registered it in `f9febb32b`
+> together with its `OPERATOR_SUMMARY_EVENT_TYPES` row and formatter arm. The
+> seven sibling `repo_bundle.*` types remain live via `RepoBundleStore.update`.
 >
 > **Fixture ruling (4a): the worktree creator is KEPT and labelled.**
 > `repo_context.isolated_repo_context_for_run` + `_worktree_token` +
