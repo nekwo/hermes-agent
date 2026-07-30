@@ -502,7 +502,5 @@ def test_snapshot_embeds_observability_envelope():
         incident_store=Store([]),
     )
 
-    assert snapshot["observability"]["schema_version"] == 1
-    assert snapshot["observability"]["health"]["status"] in {"healthy", "degraded", "critical"}
-    assert "signals" in snapshot["observability"]
-    assert "interventions" in snapshot["observability"]
+    # S9 removed mission/run/incident observability from the snapshot wire.
+    assert "observability" not in snapshot

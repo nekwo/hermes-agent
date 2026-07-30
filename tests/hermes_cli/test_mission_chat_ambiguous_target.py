@@ -44,9 +44,12 @@ def _seed_two_instances(monkeypatch, tmp_path, persona="dev"):
 
     from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
     from agent_runtime.persona_assignments import PersonaInstanceStore
+    from agent_runtime.store import AgentStore
     from agent_runtime.worker_sessions import WorkerSessionStore
+    from tests.agent_runtime.persona_samples import sample_persona
 
     cfg = load_agent_runtime_config()
+    AgentStore().save(sample_persona(persona))
     store = PersonaInstanceStore()
     store.derive_from_workers(list(ensure_persisted_personas(cfg)), WorkerSessionStore().list_all())
     store.add_instance(persona_id=persona, placement_id="dev_agent_2", display_name=f"{persona} (2)")
@@ -242,10 +245,12 @@ def _seed_dev_scoped(monkeypatch, tmp_path, placements, *, active="ws_home"):
 
     from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
     from agent_runtime.persona_assignments import PersonaInstanceStore
-    from agent_runtime.store import WorkspaceStore
+    from agent_runtime.store import AgentStore, WorkspaceStore
     from agent_runtime.worker_sessions import WorkerSessionStore
+    from tests.agent_runtime.persona_samples import sample_persona
 
     cfg = load_agent_runtime_config()
+    AgentStore().save(sample_persona("dev"))
     ws_store = WorkspaceStore()
     for workspace_id in {active, *(wid for _, wid in placements)}:
         ws_store.create(name=workspace_id, workspace_id=workspace_id)

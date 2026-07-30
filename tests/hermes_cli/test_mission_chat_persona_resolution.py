@@ -46,18 +46,20 @@ def test_instance_shaped_profile_id_resolves_to_profile(tmp_path, monkeypatch):
     )
 
 
-def test_unresolvable_id_still_raises(tmp_path, monkeypatch):
+def test_unknown_data_declared_id_survives_normalization(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    with pytest.raises(ValueError):
+    assert (
         harness._normalize_cli_persona_or_template_id("definitely_not_a_persona_xyz")
+        == "definitely_not_a_persona_xyz"
+    )
 
 
-def test_mangled_persona_falls_back_to_instance_id(tmp_path, monkeypatch):
+def test_safe_data_declared_persona_precedes_instance_fallback(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     resolved = harness._resolve_mission_chat_persona_id(
         "Some Display Name", "personainst_dev"
     )
-    assert resolved == "dev"
+    assert resolved == "Some_Display_Name"
 
 
 def test_mission_chat_message_rejects_unknown_persona_with_typed_payload(
@@ -119,9 +121,12 @@ def _seed_qa_placement(monkeypatch, tmp_path, placement_id="qa_agent_f24601ba"):
 
     from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
     from agent_runtime.persona_assignments import PersonaInstanceStore
+    from agent_runtime.store import AgentStore
     from agent_runtime.worker_sessions import WorkerSessionStore
+    from tests.agent_runtime.persona_samples import sample_persona
 
     cfg = load_agent_runtime_config()
+    AgentStore().save(sample_persona("qa"))
     store = PersonaInstanceStore()
     store.derive_from_workers(list(ensure_persisted_personas(cfg)), WorkerSessionStore().list_all())
     placement = store.add_instance(

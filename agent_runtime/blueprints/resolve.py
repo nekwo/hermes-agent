@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from agent_runtime.personas import promote_profile_to_persona
 
-# ``promote_profile_to_persona`` (and its ``_ROLE_TEMPLATE``) now live in
-# ``agent_runtime.personas`` — it is persona lifecycle, not stage routing, and it
+# ``promote_profile_to_persona`` now lives in ``agent_runtime.personas`` — it is
+# persona lifecycle, not stage routing, and it
 # has a live caller outside this package (mission-lane removal, S1).
 #
 # This re-export is NOT cosmetic. Upstream-owned ``hermes_cli/web_server.py:12671``

@@ -137,6 +137,34 @@ def test_promotion_clones_the_role_template_and_binds_the_profile():
     assert store.get("launcher-qa").hermes_profile == "launcher-qa"
 
 
+def test_promotion_unknown_role_does_not_clone_an_unrelated_stored_persona():
+    from agent_runtime.models import AgentPersona
+    from agent_runtime.personas import PROFILE_CHAT_FALLBACK_TOOLSETS, promote_profile_to_persona
+    from agent_runtime.store import AgentStore
+
+    store = AgentStore()
+    store.save(
+        AgentPersona(
+            id="qa",
+            display_name="QA Agent",
+            role="qa",
+            model="qa-model",
+            provider="qa-provider",
+            api_mode="chat",
+            toolsets=["vision"],
+            system_prompt_path="agent_runtime/prompts/qa.md",
+        )
+    )
+
+    persona = promote_profile_to_persona(
+        "fresh-builder", slot_role="builder", agent_store=store
+    )
+
+    assert persona.role == "builder"
+    assert persona.hermes_profile == "fresh-builder"
+    assert persona.toolsets == list(PROFILE_CHAT_FALLBACK_TOOLSETS)
+
+
 # ── item 3: extracted Stage C command-argument checks ─────────────────────
 
 

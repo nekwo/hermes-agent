@@ -26,22 +26,18 @@ def _persona_runtime_config() -> AgentRuntimeConfig:
     )
 
 
+def _assert_no_mission_status() -> None:
+    status = build_status()
+    assert status["open_tasks"] == 0
+    assert status["next_actions"] == []
+    assert status["undispatchable_missions"] == []
+    assert not hasattr(TaskStore(), "create")
+
+
 
 
 def test_status_lane_only_does_not_report_background_task_ids(isolate_agent_runtime_root):
-    ts = TaskStore()
-    n = now()
-    ts.create(Task(id="task_foreground", title="F", description="d", state=TaskState.CREATED, created_at=n, updated_at=n, requested_by="tony"))
-    ts.create(Task(id="task_background", title="B", description="d", state=TaskState.BLOCKED, created_at=n, updated_at=n, requested_by="tony"))
-    runtimes = GoalRuntimeInstanceStore()
-    runtimes.create_lane(task_id="task_foreground", started_by="test", state="running")
-    runtimes.park_open_task("task_background", reason="test parked")
-
-    s = build_status(task_store=ts)
-
-    assert s["open_tasks"] == 2
-    assert s["background_open_tasks"] == 0
-    assert s["background_task_ids"] == []
+    _assert_no_mission_status()
 
 
 def test_status_omits_retired_burn_in_certification_state(isolate_agent_runtime_root):
@@ -97,10 +93,7 @@ def test_status_surfaces_lanes_repo_locks_and_swarm_budget(isolate_agent_runtime
 
 
 def test_status_marks_next_action_blocked_by_open_incident():
-    ts=TaskStore(); n=now(); ts.create(Task(id="t", title="T", description="d", state=TaskState.CREATED, created_at=n, updated_at=n, requested_by="tony"))
-    incidents=IncidentStore(); incidents.open(Incident(id="i", task_id="t", run_id=None, kind="provider_failure", summary="auth", detail_path=None, opened_at=n))
-    s=build_status(task_store=ts, incident_store=incidents)
-    assert s["next_actions"][0]["action"] == "blocked_by_incident"
+    _assert_no_mission_status()
 
 
 
@@ -110,74 +103,12 @@ def test_status_marks_next_action_blocked_by_open_incident():
 
 
 def test_status_blocks_budget_incident_after_continuation_cap():
-    ts = TaskStore()
-    runs = RunStore()
-    incidents = IncidentStore()
-    n = now()
-    ts.create(Task(id="t", title="T", description="d", state=TaskState.RUNNING, created_at=n, updated_at=n, requested_by="tony"))
-    for idx in range(2):
-        approved = runs.open_run("dev", "t", stage_id="stage_1", session_id="session_budget")
-        approved.state = RunState.WAITING_ON_APPROVAL
-        approved.error = {"type": "run_budget_exceeded"}
-        runs.update(approved)
-        runs.approve_continuation(approved.id)
-    waiting = runs.open_run("dev", "t", stage_id="stage_1", session_id="session_budget")
-    waiting.state = RunState.WAITING_ON_APPROVAL
-    waiting.error = {"type": "run_budget_exceeded"}
-    runs.update(waiting)
-    incidents.open(Incident(id="inc_budget", task_id="t", run_id=waiting.id, kind="run_budget_exceeded", summary="budget", detail_path=None, opened_at=n))
-
-    s = build_status(task_store=ts, run_store=runs, incident_store=incidents)
-
-    assert s["next_actions"][0]["action"] == "blocked_by_incident"
-    assert s["next_actions"][0]["reason"] == "budget continuation cap reached; human review required"
-    assert s["next_actions"][0]["stopped_progress"]["reason"] == "budget_continuation_blocked"
+    _assert_no_mission_status()
 
 
 def test_status_routes_read_search_budget_loop_to_neko_scope_recovery(isolate_agent_runtime_root):
-    ts = TaskStore()
-    runs = RunStore()
-    incidents = IncidentStore()
-    n = now()
-    ts.create(Task(id="t", title="T", description="d", state=TaskState.RUNNING, created_at=n, updated_at=n, requested_by="tony", open_incident_ids=["inc_loop"]))
-    waiting = runs.open_run("backend_dev", "t", stage_id="backend_implementation", session_id="session_budget")
-    waiting.progress = {
-        "loop_warning": "read_search_without_patch_threshold",
-        "read_search_count": 6,
-        "read_search_limit": 6,
-        "patch_count": 0,
-        "proof_count": 0,
-    }
-    waiting.state = RunState.WAITING_ON_APPROVAL
-    waiting.error = {"type": "run_budget_exceeded"}
-    runs.update(waiting)
-    incidents.open(Incident(id="inc_loop", task_id="t", run_id=waiting.id, kind="run_budget_exceeded", summary="budget", detail_path=None, opened_at=n))
-
-    s = build_status(task_store=ts, run_store=runs, incident_store=incidents)
-
-    assert s["next_actions"][0]["action"] == "run_slot"
-    assert s["next_actions"][0]["reason"] == "Dev exhausted read/search without patch or proof; Neko must split or narrow the stage before retry"
-    assert s["next_actions"][0]["stopped_progress"]["owner"] == "neko_supervisor"
+    _assert_no_mission_status()
 
 
 def test_status_reports_retired_dispatch_lane(isolate_agent_runtime_root):
-    ts = TaskStore()
-    n = now()
-    ts.create(
-        Task(
-            id="t_broken",
-            title="T",
-            description="d",
-            state=TaskState.RUNNING,
-            created_at=n,
-            updated_at=n,
-            requested_by="tony",
-        )
-    )
-
-    status = build_status(task_store=ts)
-
-    assert status["next_actions"][0]["action"] == "undispatchable"
-    assert status["undispatchable_missions"] == [
-        {"task_id": "t_broken", "reason": "the task dispatch lane has been retired"}
-    ]
+    _assert_no_mission_status()

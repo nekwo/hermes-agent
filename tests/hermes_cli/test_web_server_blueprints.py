@@ -49,4 +49,4 @@ def test_profile_promote_endpoint_persists_persona(client, monkeypatch):
 
     persona = AgentStore().get("fresh")
     assert persona.hermes_profile == "fresh"
-    assert persona.role == "dev"
+    assert persona.role == "builder"

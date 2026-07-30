@@ -10,6 +10,10 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
+
 from hermes_time import now
 
 from agent_runtime import paths

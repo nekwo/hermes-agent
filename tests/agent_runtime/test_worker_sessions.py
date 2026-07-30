@@ -98,70 +98,20 @@ def _enterprise_config() -> AgentRuntimeConfig:
 
 
 def test_snapshot_status_and_observability_surface_worker_sessions():
-    tasks = TaskStore()
-    workers = WorkerSessionStore()
-    task = _task("task_observe")
-    tasks.create(task)
-    worker = workers.open(task_id=task.id, persona=_persona(), stage_id="stage_1", session_id="session_safe")
-    worker.last_heartbeat_at = now() - timedelta(seconds=1000)
-    workers.update(worker)
-
-    status = build_status(task_store=tasks, worker_session_store=workers)
-    snapshot = build_snapshot(task_store=tasks, worker_session_store=workers)
-    obs = build_observability(
-        tasks=[task],
-        runs=[],
-        incidents=[],
-        proofs=[],
-        daemon_status={"state": "offline"},
-        worker_sessions=workers.list_all(),
-        reference_time=now(),
-        run_stalled_after_seconds=10,
-    )
-
-    assert status["active_worker_sessions"] == 1
-    assert snapshot["summary"]["active_worker_sessions"] == 1
-    assert list(snapshot["goals"].values())[0]["active_worker_session_ids"] == [worker.id]
-    assert obs["signals"]["stale_worker_sessions"] == 1
-    assert obs["interventions"][0]["kind"] == "worker_stale_heartbeat"
+    snapshot = build_snapshot()
+    assert "worker_sessions" not in snapshot
+    assert not hasattr(TaskStore(), "create")
 
 
 def test_worker_cli_lists_and_controls_sessions(isolate_agent_runtime_root):
-    worker = WorkerSessionStore().open(task_id="task_cli", persona=_persona(), stage_id="stage_1", session_id="session_safe")
-
-    listed = subprocess.run(
+    result = subprocess.run(
         [sys.executable, "-m", "hermes_cli.main", "harness", "worker", "list", "--json"],
-        cwd=REPO_ROOT,
-        check=True,
         capture_output=True,
         text=True,
-        timeout=30,
+        check=False,
     )
-    listed_envelope = json.loads(listed.stdout)
-    assert listed_envelope["kind"] == "list"
-    assert listed_envelope["item_kind"] == "worker"
-    rows = listed_envelope["items"]
-    assert rows[0]["worker_session_id"] == worker.id
-
-    possessed = subprocess.run(
-        [sys.executable, "-m", "hermes_cli.main", "harness", "worker", "possess", worker.id, "--actor", "qa", "--json"],
-        cwd=REPO_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert json.loads(possessed.stdout)["possession_state"] == "possessed"
-
-    released = subprocess.run(
-        [sys.executable, "-m", "hermes_cli.main", "harness", "worker", "release", worker.id, "--actor", "qa", "--json"],
-        cwd=REPO_ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-        timeout=30,
-    )
-    assert json.loads(released.stdout)["possession_state"] == "available"
+    assert result.returncode != 0
+    assert "invalid choice" in result.stderr
 
 
 def test_operator_takeover_freezes_peers_and_requires_destructive_approval(isolate_agent_runtime_root):
@@ -260,51 +210,15 @@ def test_worker_run_refresh_does_not_double_count_llm_budget(isolate_agent_runti
 
 
 def test_run_cancel_cli_marks_owning_worker_idle(isolate_agent_runtime_root):
-    runs = RunStore()
-    workers = WorkerSessionStore()
-    run = runs.open_run("dev", "task_cancel_worker", stage_id="stage_1", session_id="session_safe")
-    worker = workers.open(task_id=run.task_id, persona=_persona(), stage_id=run.stage_id, session_id=run.session_id)
-    workers.assign_run(worker.id, run)
-
-    cancelled = subprocess.run(
-        [sys.executable, "-m", "hermes_cli.main", "harness", "run", "cancel", run.id, "--reason", "test cancel", "--json"],
-        cwd=REPO_ROOT,
-        check=True,
+    result = subprocess.run(
+        [sys.executable, "-m", "hermes_cli.main", "harness", "run", "cancel", "retired", "--json"],
         capture_output=True,
         text=True,
-        timeout=30,
+        check=False,
     )
-
-    payload = json.loads(cancelled.stdout)
-    assert payload["updated_worker_session_ids"] == [worker.id]
-    updated = workers.get(worker.id)
-    assert updated.state == WorkerSessionState.IDLE
-    assert updated.active_run_id is None
-    assert workers.find_active(task_id=run.task_id) == []
+    assert result.returncode != 0
+    assert "invalid choice" in result.stderr
 
 
 def test_archive_refuses_active_worker_then_preserves_closed_worker_context_and_sandbox(isolate_agent_runtime_root):
-    tasks = TaskStore()
-    task = _task("task_archive_worker", state=TaskState.DONE)
-    tasks.create(task)
-    workers = WorkerSessionStore()
-    worker = workers.open(task_id=task.id, persona=_persona(), stage_id="stage_1", session_id="session_safe")
-    sandbox = paths.proof_sandbox_dir(task.id, "recipe")
-    sandbox.mkdir(parents=True)
-    (sandbox / "manifest.json").write_text("{}", encoding="utf-8")
-
-    refused = tasks.archive(task.id, actor="cli", reason="operator archive")
-    assert refused["archived_count"] == 0
-    assert refused["skipped_tasks"][0]["reason"] == "active_worker_sessions"
-
-    workers.close(worker.id, reason="test complete")
-    archived = tasks.archive(task.id, actor="cli", reason="operator archive")
-
-    batch = paths.deleted_archive_dir() / archived["archive_batch"]
-    assert archived["archived_count"] == 1
-    assert archived["archived_tasks"][0]["worker_session_ids"] == [worker.id]
-    assert archived["archived_tasks"][0]["worker_context_archived"] is True
-    assert archived["archived_tasks"][0]["proof_sandbox_archived"] is True
-    assert (batch / "worker_sessions" / f"{worker.id}.json").exists()
-    assert (batch / "context" / task.id / "dev" / "static_prompt_receipt.json").exists()
-    assert (batch / "proof_sandbox" / task.id / "recipe" / "manifest.json").exists()
+    assert not hasattr(TaskStore(), "archive")

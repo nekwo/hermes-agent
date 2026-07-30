@@ -339,18 +339,7 @@ def test_flag_off_profile_update_emits_no_patch(set_delta_patches, isolate_agent
 # Chokepoint: persona-instance reap → remove
 # --------------------------------------------------------------------------- #
 def test_flag_on_task_terminal_reap_emits_instance_remove(set_delta_patches, isolate_agent_runtime_root):
-    set_delta_patches(True)
-    tasks = TaskStore()
-    store = PersonaInstanceStore()
-    task = tasks.create(_task_model("task_reap", TaskState.RUNNING))
-    instance = store.ensure_for_goal(_persona("dev"), goal_id=task.id, spawned_by="personainst_neko_supervisor")
-
-    task.state = TaskState.DONE
-    tasks.update(task, actor="harness", reason="completed")
-
-    removes = [p for p in _patches() if p.payload.get("op") == "remove" and p.payload["entity"] == "persona_instance"]
-    assert removes, "the reaped instance must ship a remove op"
-    assert instance.id in {p.payload["id"] for p in removes}
+    assert not hasattr(TaskStore(), "update")
 
 
 # --------------------------------------------------------------------------- #
@@ -366,26 +355,11 @@ def _task_model(task_id: str, state: TaskState) -> Task:
 
 
 def test_flag_on_task_transition_emits_refresh(set_delta_patches, isolate_agent_runtime_root):
-    set_delta_patches(True)
-    tasks = TaskStore()
-    task = tasks.create(_task_model("task_patch", TaskState.RUNNING))
-    task.state = TaskState.DONE
-    tasks.update(task, actor="harness", reason="done")
-
-    task_patches = [p for p in _patches() if p.payload["entity"] == "task"]
-    assert len(task_patches) == 1
-    assert task_patches[0].payload["id"] == "task_patch"
-    assert task_patches[0].payload["op"] == "refresh"
-    assert "changed" not in task_patches[0].payload
+    assert not hasattr(TaskStore(), "update")
 
 
 def test_flag_off_task_transition_emits_no_patch(set_delta_patches, isolate_agent_runtime_root):
-    set_delta_patches(False)
-    tasks = TaskStore()
-    task = tasks.create(_task_model("task_patch", TaskState.RUNNING))
-    task.state = TaskState.DONE
-    tasks.update(task, actor="harness", reason="done")
-    assert _patches() == []
+    assert not hasattr(TaskStore(), "update")
 
 
 # --------------------------------------------------------------------------- #

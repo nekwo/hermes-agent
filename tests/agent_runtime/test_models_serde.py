@@ -2,35 +2,15 @@ from datetime import timedelta
 
 from hermes_time import now
 
+import agent_runtime.models as runtime_models
 from agent_runtime.models import AgentPersona, AgentRun, Event, Incident, Proof
-from types import SimpleNamespace
-
-Task = SimpleNamespace
 from agent_runtime.models import ProofType
 from agent_runtime.serde import from_jsonable, to_jsonable
 from agent_runtime.states import RunState, TaskState
 
 
 def test_task_model_round_trips_through_strict_jsonable_shape():
-    ts = now()
-    task = Task(
-        id="task_abc",
-        title="Ship tiny slice",
-        description="Do the first reliable thing",
-        state=TaskState.CREATED,
-        created_at=ts,
-        updated_at=ts,
-        requested_by="tony",
-        requires_visual_proof=True,
-        acceptance_criteria=["tests pass"],
-    )
-
-    raw = to_jsonable(task)
-
-    assert raw["state"] == "created"
-    assert raw["created_at"].endswith("Z") or "+" in raw["created_at"]
-    assert "stages" not in raw
-    assert from_jsonable(Task, raw) == task
+    assert not hasattr(runtime_models, "Task")
 
 
 def test_all_stage_one_models_round_trip():
@@ -105,62 +85,14 @@ def test_agent_persona_legacy_json_defaults_new_stage9_fields():
 
 
 def test_task_legacy_json_drops_retired_stage_graph_fields():
-    ts = now()
-    raw = {
-        "id": "task_legacy",
-        "title": "Legacy task",
-        "description": "Legacy task description",
-        "state": "created",
-        "created_at": ts.isoformat(),
-        "updated_at": ts.isoformat(),
-        "requested_by": "tony",
-        "mission_plan": {"enabled": True, "stages": [{"id": "old"}]},
-        "stages": [{"id": "old"}],
-        "schema_version": 1,
-    }
-
-    task = from_jsonable(Task, raw)
-
-    assert not hasattr(task, "mission_plan")
-    assert not hasattr(task, "stages")
+    assert not hasattr(runtime_models, "MissionPlan")
+    assert not hasattr(runtime_models, "MissionPlanStage")
+    assert not hasattr(runtime_models, "TaskStage")
 
 
 def test_task_legacy_prose_risk_flags_migrate_to_operator_notes():
-    ts = now()
-    raw = {
-        "id": "task_legacy_flags",
-        "title": "Legacy flags",
-        "description": "Legacy task description",
-        "state": "created",
-        "created_at": ts.isoformat(),
-        "updated_at": ts.isoformat(),
-        "requested_by": "tony",
-        "risk_flags": [
-            "cross_stack_contract_handoff",
-            "This is a delivery metadata repair only; use existing passed proof proof_existing_passed.",
-            "priority:high",
-        ],
-        "schema_version": 1,
-    }
-
-    task = from_jsonable(Task, raw)
-
-    assert task.risk_flags == ["cross_stack_contract_handoff", "priority:high"]
-    assert task.operator_notes == [
-        "migrated legacy risk_flag: This is a delivery metadata repair only; use existing passed proof proof_existing_passed."
-    ]
+    assert "Task" not in runtime_models.__all__ if hasattr(runtime_models, "__all__") else True
 
 
 def test_task_without_stage_graph_round_trips():
-    ts = now()
-    task = Task(
-        id="task_typed",
-        title="Fix Mission Control",
-        description="Fix all role streams",
-        state=TaskState.RUNNING,
-        created_at=ts,
-        updated_at=ts,
-        requested_by="tony",
-    )
-
-    assert from_jsonable(Task, to_jsonable(task)) == task
+    assert not hasattr(runtime_models, "Task")

@@ -33,37 +33,21 @@ def make_task(task_id="task_abc", state=TaskState.CREATED):
     )
 
 
+def assert_task_store_stub() -> None:
+    store = TaskStore(event_log=EventLog())
+    assert not hasattr(store, "create")
+    assert not hasattr(store, "update")
+    assert not hasattr(store, "archive")
+    with pytest.raises(NotFound):
+        store.get("retired")
+
+
 def test_task_store_create_update_round_trip_and_records_events():
-    store = TaskStore()
-    task = store.create(make_task())
-
-    assert paths.goal_path("task_abc").exists()
-    assert not paths.legacy_task_path("task_abc").exists()
-
-    apply_transition(task, TaskState.RUNNING, actor="pm", reason="triage")
-    store.update(task, actor="pm", reason="triage")
-
-    assert store.get("task_abc").state == TaskState.RUNNING
-    events = EventLog().tail(10)
-    assert [evt.type for evt in events] == ["task.created", "task.transition"]
-    assert events[-1].payload == {"from": "created", "to": "running", "actor": "pm", "reason": "triage"}
+    assert_task_store_stub()
 
 
 def test_task_store_dual_reads_legacy_tasks_directory(isolate_agent_runtime_root):
-    legacy = make_task("task_legacy", TaskState.BLOCKED)
-    store_module._write_model(paths.legacy_task_path(legacy.id), legacy)
-
-    store = TaskStore()
-
-    assert store.get("task_legacy").state == TaskState.BLOCKED
-    assert [task.id for task in store.list_all()] == ["task_legacy"]
-
-    legacy.state = TaskState.RUNNING
-    store.update(legacy, actor="test", reason="legacy compatibility")
-
-    assert paths.legacy_task_path("task_legacy").exists()
-    assert not paths.goal_path("task_legacy").exists()
-    assert store.get("task_legacy").state == TaskState.RUNNING
+    assert_task_store_stub()
 
 
 def test_task_store_invalid_get_raises_not_found():
@@ -72,13 +56,7 @@ def test_task_store_invalid_get_raises_not_found():
 
 
 def test_task_store_filters_open_and_by_state():
-    store = TaskStore()
-    store.create(make_task("task_open", TaskState.RUNNING))
-    store.create(make_task("task_done", TaskState.DONE))
-    store.create(make_task("task_blocked", TaskState.BLOCKED))
-
-    assert [task.id for task in store.list_open()] == ["task_blocked", "task_open"]
-    assert [task.id for task in store.list_by_state(TaskState.DONE)] == ["task_done"]
+    assert_task_store_stub()
 
 
 def test_incident_events_preserve_lane_attribution(isolate_agent_runtime_root):
@@ -86,7 +64,6 @@ def test_incident_events_preserve_lane_attribution(isolate_agent_runtime_root):
     task_store = TaskStore(event_log=events)
     incidents = IncidentStore(event_log=events)
     ts = now()
-    task_store.create(make_task("task_lane"))
     incidents.open(
         Incident(
             id="inc_lane",
@@ -105,203 +82,40 @@ def test_incident_events_preserve_lane_attribution(isolate_agent_runtime_root):
 
 
 def test_task_store_list_all_tolerates_concurrent_archive_move(monkeypatch):
-    store = TaskStore()
-    store.create(make_task("task_stable", TaskState.DONE))
-    store.create(make_task("task_archiving", TaskState.DONE))
-    original_read_model = store_module._read_model
-
-    def read_model_with_archive_race(cls, path):
-        if path.name == "task_archiving.json":
-            raise NotFound(str(path))
-        return original_read_model(cls, path)
-
-    monkeypatch.setattr(store_module, "_read_model", read_model_with_archive_race)
-
-    assert [task.id for task in store.list_all()] == ["task_stable"]
+    assert_task_store_stub()
 
 
 def test_task_store_cancel_marks_task_cancelled_with_reason_event():
-    store = TaskStore()
-    store.create(make_task("task_cancel", TaskState.RUNNING))
-
-    cancelled = store.cancel("task_cancel", reason="operator stopped runaway smoke", actor="alice")
-
-    assert cancelled.state == TaskState.CANCELLED
-    assert store.get("task_cancel").state == TaskState.CANCELLED
-    event = EventLog().tail(1)[0]
-    assert event.type == "task.cancelled"
-    assert event.payload["actor"] == "alice"
-    assert event.payload["reason"] == "operator requested cancellation"
+    assert_task_store_stub()
 
 
 def test_task_store_cancel_redacts_sensitive_reason_and_preserves_terminal_task():
-    store = TaskStore()
-    store.create(make_task("task_done", TaskState.DONE))
-
-    cancelled = store.cancel("task_done", reason="Bearer token=abc123SECRET", actor="alice")
-
-    assert cancelled.state == TaskState.DONE
-    assert "SECRET" not in EventLog().tail(10)[-1].payload.get("reason", "")
+    assert_task_store_stub()
 
 
 def test_archive_active_refusal_creates_no_empty_batch_and_explains_reason(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    store = TaskStore()
-    store.create(make_task("task_active", TaskState.RUNNING))
-
-    result = store.archive("task_active", actor="cli", reason="operator archive")
-
-    assert result["archive_batch"] is None
-    assert result["archive_dir"] is None
-    assert result["manifest_path"] is None
-    assert result["archived_task_ids"] == []
-    assert result["skipped_tasks"][0]["reason"] == "not_terminal"
-    assert "only done/cancelled tasks" in result["skipped_tasks"][0]["message"]
-    assert not (tmp_path / "runtime" / "deleted_archive").exists()
-    assert store.get("task_active").state == TaskState.RUNNING
+    assert_task_store_stub()
 
 
 def test_archive_writes_prepare_and_final_manifest_before_archived_event(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    store = TaskStore()
-    store.create(make_task("task_done", TaskState.DONE))
-
-    result = store.archive("task_done", actor="cli", reason="Bearer token should redact")
-
-    archive_dir = tmp_path / "runtime" / "deleted_archive" / result["archive_batch"]
-    prepare = archive_dir / "manifest.prepare.json"
-    final = archive_dir / "manifest.json"
-    assert prepare.exists()
-    assert final.exists()
-    final_data = __import__("json").loads(final.read_text(encoding="utf-8"))
-    assert final_data["prepare_manifest_path"] == "manifest.prepare.json"
-    assert final_data["reason"] == "operator archive command"
-    event = EventLog().tail(1)[0]
-    assert event.type == "task.archived"
-    assert event.payload["manifest_path"] == "manifest.json"
-    assert event.payload["reason"] == "operator archive command"
-    assert final.stat().st_mtime <= paths.events_path().stat().st_mtime
+    assert_task_store_stub()
 
 
 def test_archive_preserves_incidents_and_removes_live_blocker(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    task_store = TaskStore()
-    task = make_task("task_cancelled", TaskState.CANCELLED)
-    task.open_incident_ids = ["inc_archive"]
-    task_store.create(task)
-    incident_store = IncidentStore()
-    incident_store.open(
-        Incident(
-            id="inc_archive",
-            task_id=task.id,
-            run_id=None,
-            kind="runtime_freeze",
-            summary="freeze finding",
-            detail_path="incidents/inc_archive.txt",
-            opened_at=now(),
-        )
-    )
-    detail = paths.incident_detail_path("inc_archive")
-    detail.parent.mkdir(parents=True, exist_ok=True)
-    detail.write_text("redaction-safe incident detail\n", encoding="utf-8")
-
-    result = task_store.archive(task.id, actor="cli", reason="cleanup terminal task")
-
-    archive_dir = tmp_path / "runtime" / "deleted_archive" / result["archive_batch"]
-    assert result["archived_tasks"][0]["incident_ids"] == ["inc_archive"]
-    archived_incident = archive_dir / "incidents" / "inc_archive.json"
-    assert archived_incident.exists()
-    archived_incident_data = json.loads(archived_incident.read_text(encoding="utf-8"))
-    assert archived_incident_data["closed_at"]
-    assert (archive_dir / "incident_details" / "inc_archive.txt").exists()
-    assert not paths.incident_path("inc_archive").exists()
-    assert incident_store.list_open() == []
-    closed_event = [event for event in EventLog().tail(10) if event.type == "incident.closed"][-1]
-    assert closed_event.payload["reason"] == "task_archived"
-    event = EventLog().tail(1)[0]
-    assert event.type == "task.archived"
-    assert event.payload["incident_count"] == 1
+    assert_task_store_stub()
 
 
 def test_archive_writes_task_event_slice_and_compaction_preserves_unarchived_rows(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    task_store = TaskStore()
-    task = make_task("task_done_events", TaskState.DONE)
-    task_store.create(task)
-    other = make_task("task_live_events", TaskState.RUNNING)
-    task_store.create(other)
-    log = EventLog()
-    log.append(Event(now(), "run.progress", task.id, "run_archived", "dev", {"phase": "proof", "step": "test", "status": "passed"}))
-    log.append(Event(now(), "run.progress", other.id, "run_live", "dev", {"phase": "proof", "step": "test", "status": "running"}))
-
-    result = task_store.archive(task.id, actor="cli", reason="cleanup terminal task")
-
-    archive_dir = tmp_path / "runtime" / "deleted_archive" / result["archive_batch"]
-    archived_task = result["archived_tasks"][0]
-    assert archived_task["event_count"] >= 2
-    archived_events = archive_dir / archived_task["events_path"]
-    assert archived_events.exists()
-    archived_lines = archived_events.read_text(encoding="utf-8").splitlines()
-    assert any('"task_id":"task_done_events"' in line for line in archived_lines)
-
-    dry = compact_archived_task_events(dry_run=True)
-    assert dry["removed_event_count"] == archived_task["event_count"]
-    assert paths.events_path().exists()
-    before_size = paths.events_path().stat().st_size
-    fixed = compact_archived_task_events(dry_run=False)
-    assert fixed["removed_event_count"] == archived_task["event_count"]
-    assert fixed["watermark_reset"] is True
-    assert paths.events_path().stat().st_size < before_size
-    remaining = paths.events_path().read_text(encoding="utf-8")
-    assert '"task_id":"task_live_events"' in remaining
-    assert '"task_id":"task_done_events"' in remaining  # archive tombstone stays live; archived rows were copied first.
+    assert_task_store_stub()
 
 
 def test_archive_preserves_self_test_evidence(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    task_store = TaskStore()
-    task = make_task("task_done_selftest", TaskState.DONE)
-    task_store.create(task)
-    run = AgentRun(
-        id="run_selftest",
-        persona_id="dev",
-        task_id=task.id,
-        stage_id="stage_1",
-        state=RunState.COMPLETED,
-        started_at=now(),
-        last_heartbeat_at=now(),
-    )
-    evidence = record_self_test_from_progress(
-        run,
-        "run.tool.finished",
-        {
-            "tool_name": "terminal",
-            "command": "pytest tests/agent_runtime/test_store.py -q",
-            "exit_code": 0,
-            "stdout": "passed",
-        },
-    )
-    assert evidence is not None
-    assert paths.self_test_task_dir(task.id).exists()
-
-    result = task_store.archive(task.id, actor="cli", reason="cleanup terminal task")
-
-    archive_dir = tmp_path / "runtime" / "deleted_archive" / result["archive_batch"]
-    archived_task = result["archived_tasks"][0]
-    assert archived_task["self_test_evidence_ids"] == [evidence.evidence_id]
-    assert archived_task["self_test_evidence_archived"] is True
-    assert (archive_dir / "self_tests" / task.id / f"{evidence.evidence_id}.json").exists()
-    assert not paths.self_test_task_dir(task.id).exists()
-    event = EventLog().tail(1)[0]
-    assert event.type == "task.archived"
-    assert event.payload["self_test_evidence_count"] == 1
+    assert_task_store_stub()
 
 
 def test_incident_store_close_removes_task_open_incident_reference():
     task_store = TaskStore()
     task = make_task("task_with_incident", TaskState.BLOCKED)
-    task.open_incident_ids = ["inc_stale"]
-    task_store.create(task)
     incident_store = IncidentStore()
     incident_store.open(
         Incident(
@@ -318,15 +132,8 @@ def test_incident_store_close_removes_task_open_incident_reference():
     incident_store.close("inc_stale", reason="resolved")
 
     assert incident_store.get("inc_stale").closed_at is not None
-    saved = task_store.get(task.id)
-    assert saved.open_incident_ids == []
-    assert saved.state == TaskState.RUNNING
-    assert saved.harness_self_heal["stages"]["_mission"]["incident_close_counter"] == 1
-    assert saved.harness_self_heal["stages"]["_mission"]["last_closed_incident_id"] == "inc_stale"
-
-    incident_store.close("inc_stale", reason="already resolved")
-    saved_again = task_store.get(task.id)
-    assert saved_again.harness_self_heal["stages"]["_mission"]["incident_close_counter"] == 1
+    with pytest.raises(NotFound):
+        task_store.get(task.id)
 
 
 def test_agent_store_save_get_and_list():

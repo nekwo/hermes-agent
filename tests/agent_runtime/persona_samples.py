@@ -48,7 +48,6 @@ def sample_personas() -> list[AgentPersona]:
         skills=["harness-continuity", "harness-dev-delivery", "launcher-analyze-proof", "launcher-stagec-mcp-screenshot"],
     )
     dev.display_name = "Launcher Dev Agent"
-    dev.autonomy = AutonomyLevel.AUTONOMOUS.value
     dev.repo_scope_label = "EterniaLauncher"
     backend = sample_persona(
         "backend_dev",
@@ -57,7 +56,6 @@ def sample_personas() -> list[AgentPersona]:
         skills=["harness-continuity", "harness-dev-delivery"],
     )
     backend.display_name = "Backend Dev Agent"
-    backend.autonomy = AutonomyLevel.AUTONOMOUS.value
     backend.repo_scope = "X:/Unreal Engine/Engine/EterniaBackend/eternia-backend"
     backend.repo_scope_label = "EterniaBackend"
     qa = sample_persona(
@@ -67,5 +65,4 @@ def sample_personas() -> list[AgentPersona]:
         skills=["harness-qa-verdict", "launcher-stagec-mcp-screenshot"],
     )
     qa.display_name = "QA Agent"
-    qa.autonomy = AutonomyLevel.AUTONOMOUS.value
     return [neko, dev, backend, qa, sample_persona("base", hermes_profile="base")]

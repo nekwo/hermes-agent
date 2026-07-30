@@ -186,10 +186,10 @@ def promote_profile_to_persona(
 ) -> AgentPersona:
     """Mint and persist a persona that wraps the raw Hermes profile ``profile_name``.
 
-    A profile is only a *template* — it carries no orchestration contract — so it
-    cannot act as an agent on its own. Promotion clones the ``slot_role`` template
-    persona (so model / provider / toolsets / system prompt are valid) and points
-    ``hermes_profile`` at the profile.
+    A profile is only a *template* — it carries no persona record — so promotion
+    persists that record and points ``hermes_profile`` at the profile. When a
+    matching persisted persona exists its settings are cloned; otherwise the
+    supplied role remains data and runtime defaults provide the chat settings.
 
     Stores are imported lazily: ``agent_runtime.config`` imports this module, so a
     top-level import would close a cycle.
@@ -199,15 +199,20 @@ def promote_profile_to_persona(
 
     store = agent_store if agent_store is not None else AgentStore()
     known = dict(personas or {})
+    explicit_single_template = (
+        next(iter(personas.values())) if personas is not None and len(personas) == 1 else None
+    )
+    cfg = None
     if not known:
         try:
             for persona in store.list_all():
                 known[persona.id] = persona
         except Exception:
             pass
-        from agent_runtime.config import ensure_persisted_personas
+        from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
 
-        for persona in ensure_persisted_personas():
+        cfg = load_agent_runtime_config()
+        for persona in ensure_persisted_personas(cfg):
             known.setdefault(persona.id, persona)
     template = next(
         (
@@ -216,20 +221,36 @@ def promote_profile_to_persona(
             if str(getattr(persona, "role", "") or "").strip() == str(slot_role or "").strip()
         ),
         None,
-    ) or known.get(str(slot_role or "").strip()) or next(iter(known.values()), None)
-    if template is None:
-        raise ValueError(
-            f"cannot promote profile {profile_name!r}: no template persona for role {slot_role!r}"
-        )
+    ) or known.get(str(slot_role or "").strip()) or explicit_single_template
     new_id = profile_name if profile_name not in known else f"{profile_name}_{slot_role}"
-    persona = replace(
-        template,
-        id=new_id,
-        display_name=f"{profile_name} ({slot_role})",
-        hermes_profile=profile_name,
-        skills=list(template.skills),
-        toolsets=list(template.toolsets),
-        required_mcp_servers=list(template.required_mcp_servers),
-        readiness={},
-    )
+    if template is not None:
+        persona = replace(
+            template,
+            id=new_id,
+            display_name=f"{profile_name} ({slot_role})",
+            hermes_profile=profile_name,
+            skills=list(template.skills),
+            toolsets=list(template.toolsets),
+            required_mcp_servers=list(template.required_mcp_servers),
+            readiness={},
+        )
+    else:
+        if cfg is None:
+            from agent_runtime.config import load_agent_runtime_config
+
+            cfg = load_agent_runtime_config()
+        role = str(slot_role or "").strip() or PROFILE_ROLE_SENTINEL
+        persona = AgentPersona(
+            id=new_id,
+            display_name=f"{profile_name} ({role})",
+            role=role,
+            model=cfg.default_model,
+            provider=cfg.default_provider,
+            api_mode=cfg.default_api_mode,
+            toolsets=profile_chat_toolsets(profile_name),
+            system_prompt_path="",
+            autonomy=AutonomyLevel.PROPOSE_ONLY.value,
+            hermes_profile=profile_name,
+            include_profile_memory=True,
+        )
     return store.save(persona)

@@ -139,30 +139,17 @@ def test_workspace_create_in_active_realm_auto_activates(isolate_agent_runtime_r
     assert WorkspaceStore().active_id() == second["id"]
 
 
-def test_goal_id_current_stage_and_assignment_grouping(isolate_agent_runtime_root):
-    task = TaskStore().create(_task("task_1", goal_id="goal_1"))
-    loaded = TaskStore().get_goal("goal_1")
-    assert loaded.id == task.id
-    assert loaded.current_stage_id == "scope"
-
+def test_goal_id_current_stage_and_assignment_grouping(
+    isolate_agent_runtime_root, persisted_persona_samples
+):
+    store = TaskStore()
+    assert not hasattr(store, "create")
+    assert not hasattr(store, "get_goal")
     persona = next(item for item in ensure_persisted_personas(load_agent_runtime_config()) if item.id == "neko_supervisor")
-    first = PersonaInstanceStore().ensure_for_goal(persona, goal_id="goal_1", spawned_by=None)
-    second = PersonaInstanceStore().ensure_for_goal(persona, goal_id="goal_2", spawned_by=None)
-    assert first.id != second.id
-
-    assignment = PersonaAssignmentStore().create_or_resume(
-        PersonaAssignmentSpec(
-            persona_id="neko_supervisor",
-            kind="task_stage",
-            title="Scope",
-            message="Scope",
-            task_id=task.id,
-            goal_id="goal_1",
-            stage_id="scope",
-        )
-    )
-    assert assignment.goal_id == "goal_1"
-    assert assignment.persona_instance_id.startswith("personainst_goal_1_neko_supervisor")
+    first = PersonaInstanceStore().ensure_for_persona(persona)
+    second = PersonaInstanceStore().ensure_for_persona(persona)
+    assert first.id == second.id
+    assert first.mode in {"chat", "configured"}
 
 
 def test_lane_only_create_lane_does_not_park(isolate_agent_runtime_root):
@@ -178,20 +165,10 @@ def test_lane_only_create_lane_does_not_park(isolate_agent_runtime_root):
 
 
 def test_stage42_goal_list_and_error_envelopes(isolate_agent_runtime_root):
-    TaskStore().create(_task("task_cli", goal_id="goal_cli"))
-
     ok = _run_harness("goal", "list", "--json")
-    assert ok.returncode == 0
-    payload = json.loads(ok.stdout)
-    assert payload["schema_version"] == 1
-    assert payload["kind"] == "list"
-    assert payload["item_kind"] == "goal"
-    assert payload["items"][0]["id"] == "goal_cli"
+    assert ok.returncode != 0
+    assert "invalid choice" in ok.stderr
 
     missing = _run_harness("goal", "show", "missing_goal", "--json")
-    assert missing.returncode == 3
-    error = json.loads(missing.stdout)
-    assert error["schema_version"] == 1
-    assert error["kind"] == "error"
-    assert error["error"]["code"] == "not_found"
-    assert error["error"]["error_id"].startswith("err_")
+    assert missing.returncode != 0
+    assert "invalid choice" in missing.stderr

@@ -260,7 +260,6 @@ def preview_default_scope_migration() -> dict:
                 related_by_id[item.id] = item
         workspace_rows: list[dict] = []
         for workspace in sorted(related_by_id.values(), key=lambda item: item.id):
-            goal_ids = []
             board_ids = [
                 board.board_id
                 for board in boards.list_for_workspace(workspace.id, include_archived=True)
@@ -276,7 +275,6 @@ def preview_default_scope_migration() -> dict:
                     "realm_default": workspace.id == candidate.default_workspace_id,
                     "active": workspace.id == workspace_store.active_id(),
                     "roster_agent_ids": list(workspace.agent_ids or []),
-                    "goal_ids": goal_ids,
                     "board_ids": board_ids,
                     "office_surface": offices.surface_exists(workspace.id),
                     "office_actor_keys": [actor.actor_key for actor in actors],

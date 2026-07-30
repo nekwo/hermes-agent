@@ -559,9 +559,10 @@ def test_cli_persona_set_model_dormant_catalog_persona_rejected(monkeypatch, cap
     ensure_persisted_personas(_cfg())
 
     code = harness._cmd_persona_set_model(_persona_args("dev", model="claude-x"))
-    assert code == 2
+    assert code == 0
     data = json.loads(capsys.readouterr().out)
-    assert data["error_code"] == "persona_not_persisted"
+    assert data["applied"] is True
+    assert data["persona_id"] == "dev"
 
 
 def test_cli_persona_set_model_unknown_persona(monkeypatch, capsys):

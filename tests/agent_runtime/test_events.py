@@ -497,7 +497,7 @@ def test_packet_recording_preserves_raw_artifact_for_normalized_packet(isolate_a
 
 def test_archive_preserves_packet_raw_artifacts(isolate_agent_runtime_root):
     store = TaskStore()
-    task = store.create(Task(id="task_packet_archive", title="Packet", description="Packet", state=TaskState.DONE, created_at=now(), updated_at=now(), requested_by="test"))
+    task = Task(id="task_packet_archive", title="Packet", description="Packet", state=TaskState.DONE, created_at=now(), updated_at=now(), requested_by="test")
     decision = AgentDecision(
         type=DecisionType.REQUEST_TEST_RUN,
         summary="proof",
@@ -505,15 +505,12 @@ def test_archive_preserves_packet_raw_artifacts(isolate_agent_runtime_root):
         payload={"stage_id": "stage_1", "commands": ["pytest"], "delivery": {"work_status": "proof_requested", "summary": "proof", "extra_detail": "raw only"}},
     )
     validate_planning_decision(decision)
-    record_decision_packets(task, decision, actor="dev", run_id="run_1", event_log=EventLog(), stage_id="stage_1")
+    log = EventLog()
+    record_decision_packets(task, decision, actor="dev", run_id="run_1", event_log=log, stage_id="stage_1")
 
-    result = store.archive(task.id, actor="test", reason="archive packet artifacts")
-    archived = result["archived_tasks"][0]
-    archive_dir = Path(result["archive_dir"])
-
-    assert archived["packet_artifacts_archived"] is True
-    assert archived["packet_artifact_ids"]
-    assert list((archive_dir / "packet_artifacts" / task.id).glob("*.raw.json"))
+    recorded = log.for_task(task.id, limit=0)[0].payload
+    assert Path(isolate_agent_runtime_root / recorded["raw_artifact_path"]).exists()
+    assert not hasattr(store, "archive")
 
 
 def test_record_decision_packets_preserves_backend_contract_packet():

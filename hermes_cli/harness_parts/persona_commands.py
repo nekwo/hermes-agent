@@ -1347,7 +1347,15 @@ def _cmd_mission_chat_message(args) -> int:
     turn_relay_chain = relay_decision.chain
     persona = _persona_by_id(cfg, normalized_persona)
     if persona is None:
-        data = {"ok": False, "error": f"unknown persona {safe_assignment_token(args.persona_id)}"}
+        data = {
+            "ok": False,
+            "capability_id": "mission.chat.message",
+            "execution_state": "rejected",
+            "error_kind": "unsupported_persona",
+            "error": f"unknown persona {safe_assignment_token(args.persona_id)}",
+            "persona_id": safe_assignment_token(args.persona_id),
+            "next_expected": "persist the persona, use profile:<name>, or address a known personainst_* instance",
+        }
         if getattr(args, "stream", False):
             _emit_chat_final(data)
         else:

@@ -23,6 +23,7 @@ def _task() -> Task:
         requested_by="test",
         acceptance_criteria=["QA can review handoff repair metadata"],
         current_stage_id="stage_1",
+        harness_self_heal={},
     )
 
 
