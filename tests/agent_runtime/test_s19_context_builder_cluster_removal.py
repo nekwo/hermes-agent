@@ -21,24 +21,26 @@ Three hollow rings go with them:
 * ``_RECENT_CONTEXT_EVENT_TYPES`` — seven of its eight rows name event types
   S15 de-registered, so no surviving code can emit them.
 
-The keep-side names are pinned below: the live chat-lane HUD must keep
-rendering steering edges, and the tick-context builder must keep projecting the
-packet lane.
+The keep-side name that survives is the live chat-lane HUD: it must keep
+rendering steering edges.
+
+**Corrected by S27.** This stage also kept a "tick-context builder keep set"
+(``_mission_hud`` / ``_stage_records`` / ``_safe_packet_projection`` /
+``_recent_relevant_events`` / ``_skill_reference_for_action``) on the premise
+that they sat on a live render path. They did not: ``build_context`` /
+``render_context`` lost their only caller in S5, so the whole path was
+test-reachable only. S27 removed the lane; the affected pins below now assert
+the correction instead of the superseded premise.
 """
 
 from __future__ import annotations
 
+import dataclasses
 from pathlib import Path
 from types import SimpleNamespace
 
-from hermes_time import now
-
 from agent_runtime import context_builder, prompt_observability, runtime_hud
-from agent_runtime.context_builder import build_context, render_context
-from agent_runtime.events import ALLOWED_EVENT_TYPES, EventLog
-from agent_runtime.models import AgentRun
 from agent_runtime.runtime_hud import render_situational_hud_block, resolve_situational_hud
-from agent_runtime.states import RunState, TaskState
 
 
 #: The removed cluster. Public name first, then the private helpers that only it
@@ -93,31 +95,6 @@ REMOVED_CONTEXT_BUILDER_IMPORTS = (
 )
 
 
-def _task_and_run() -> tuple[SimpleNamespace, AgentRun]:
-    ts = now()
-    task = SimpleNamespace(
-        id="task_s19",
-        title="Chat-first runtime",
-        description="Keep the operator context bounded.",
-        state=TaskState.RUNNING,
-        created_at=ts,
-        updated_at=ts,
-        requested_by="test",
-        affected_repos=["hermes-agent"],
-        current_stage_id="retired-stage",
-    )
-    run = AgentRun(
-        id="run_s19",
-        task_id=task.id,
-        persona_id="dev",
-        state=RunState.RUNNING,
-        started_at=ts,
-        last_heartbeat_at=ts,
-        stage_id="retired-stage",
-    )
-    return task, run
-
-
 def _instance(**overrides) -> SimpleNamespace:
     base = dict(
         id="personainst_neko",
@@ -166,23 +143,25 @@ def test_the_mission_hud_preview_entry_points_are_gone():
     assert "mission_hud" not in {field.key for field in runtime_hud.HUD_FIELDS}
 
 
-def test_the_delivery_directive_line_leaves_the_tick_context(isolate_agent_runtime_root):
+def test_the_delivery_directive_line_leaves_the_tick_context():
     """Residue per the delivery-directive liveness ruling: with no ``Task`` to
-    declare one, the line could only ever restate the contract default."""
+    declare one, the line could only ever restate the contract default.
 
-    task, run = _task_and_run()
-    rendered = render_context(build_context(task, run, event_log=EventLog()))
-    assert "delivery_directive" not in rendered
+    S27 finished the job — the renderer this used to inspect (``render_context``)
+    went with the whole tick-context lane — so the gate is now that no producer
+    of the line survives anywhere in the module."""
+
+    assert not hasattr(context_builder, "_delivery_directive_line")
+    assert "delivery_directive" not in Path(context_builder.__file__).read_text(encoding="utf-8")
 
 
-def test_recent_context_event_types_are_all_still_emittable():
-    """A context event type no producer can emit is a shape the prompt
-    advertises and no reader will ever see. ``ALLOWED_EVENT_TYPES`` is the
-    registry-derived authority (S15), so the set must be a subset of it."""
+def test_recent_context_event_types_went_with_the_selector():
+    """S19 bounded this set to event types a producer can still emit. S27
+    removed ``_recent_relevant_events``, its only consumer, so the set itself is
+    gone rather than left advertising a shape nothing selects."""
 
-    selected = frozenset(context_builder._RECENT_CONTEXT_EVENT_TYPES)
-    assert selected <= ALLOWED_EVENT_TYPES
-    assert selected == frozenset({"packet.recorded"})
+    assert not hasattr(context_builder, "_RECENT_CONTEXT_EVENT_TYPES")
+    assert not hasattr(context_builder, "_recent_relevant_events")
 
 
 # ── the keep set ────────────────────────────────────────────────────────────
@@ -202,24 +181,23 @@ def test_the_live_chat_lane_hud_still_renders_steering_edges():
     assert "- Steers: Dev (@personainst_dev)" in lead_block
 
 
-def test_the_tick_context_builder_keep_set_survives(isolate_agent_runtime_root):
-    """Names one bare-word grep away from the removal set — all still live."""
+def test_the_s19_tick_context_keep_set_was_superseded_by_s27():
+    """S19 kept ``_mission_hud`` / ``_stage_records`` / ``_safe_packet_projection``
+    / ``_recent_relevant_events`` / ``_skill_reference_for_action`` because they
+    were on the "live render path". They were not: the renderer's own entry
+    points (``build_context`` / ``render_context``) had lost their only caller in
+    S5, so the whole path was reachable from tests alone. S27 removed the lane;
+    this pin records the correction rather than silently dropping it.
 
-    task, run = _task_and_run()
-    ctx = build_context(task, run, event_log=EventLog())
+    See ``test_s27_context_builder_lane_removal.py`` for the full removal
+    contract; ``AgentContext`` is the one surviving export."""
 
-    # ``_mission_hud`` (kept) is not ``mission_hud_preview`` (removed).
-    assert ctx.mission_hud["task_id"] == task.id
-    # ``_stage_records``/``_context_objective_stage`` are neutered keep-side
-    # stubs on the live render path, not orphans.
-    assert ctx.current_stage is None
-    assert "Chat-first runtime" in render_context(ctx)
     for name in (
         "_mission_hud",
         "_stage_records",
         "_safe_packet_projection",
         "_recent_relevant_events",
-        # Reached from the live validation-repair path, not from the dead menus.
         "_skill_reference_for_action",
     ):
-        assert hasattr(context_builder, name), name
+        assert not hasattr(context_builder, name), name
+    assert dataclasses.is_dataclass(context_builder.AgentContext)

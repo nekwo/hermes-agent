@@ -19,7 +19,7 @@ from .chat_lane_toolsets import (
     scope_chat_lane_toolsets,
 )
 from .config import chat_lane_restore_toolsets
-from .context_builder import AgentContext, build_context, render_context
+from .context_builder import AgentContext
 from .decision_schema import (
     AgentDecision,
     DecisionPayloadInvalid,

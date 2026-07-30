@@ -9,7 +9,7 @@ pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
 
 from hermes_time import now
 
-from agent_runtime.context_builder import build_context
+from agent_runtime.context_builder import AgentContext
 from agent_runtime.decision_schema import DecisionPayloadInvalid, DecisionType
 from agent_runtime.events import EventLog
 from agent_runtime.models import AgentRun, Event
@@ -1074,7 +1074,10 @@ def test_dev_grounds_in_task_affected_repo_without_stage_graph():
     task.affected_repos = ["hermes-agent"]
     dev = next(persona for persona in sample_personas() if persona.id == "dev")
     dev.repo_scope = None
-    ctx = build_context(task, run)
+    # S27: ``build_context`` is removed (S5 deleted its only caller). The subject
+    # here is ``_repo_context_for_persona``, which reads ``ctx.task``/``ctx.run``
+    # only, so the surviving shape is constructed directly.
+    ctx = AgentContext(task=task, run=run)
 
     repo_ctx = pr._repo_context_for_persona(dev, ctx)
 
@@ -1115,7 +1118,7 @@ def test_dev_grounding_honors_compatible_persona_scope_without_blueprint_placeho
         system_prompt_path="",
         repo_scope=str(harness_root),
     )
-    ctx = build_context(task, run)
+    ctx = AgentContext(task=task, run=run)
 
     repo_ctx = pr._repo_context_for_persona(persona, ctx)
     assert repo_ctx is not None

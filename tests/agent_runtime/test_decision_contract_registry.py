@@ -5,7 +5,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-from agent_runtime.context_builder import build_context
 from agent_runtime.decision_contract_registry import (
     agent_decision_json_schema,
     canonical_role_value,

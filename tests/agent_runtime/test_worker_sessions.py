@@ -11,7 +11,6 @@ from hermes_time import now
 
 from agent_runtime import paths
 from agent_runtime.config import AgentRuntimeConfig
-from agent_runtime.context_builder import build_context
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.models import AgentPersona, AgentRun, Proof
 from types import SimpleNamespace

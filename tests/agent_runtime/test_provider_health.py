@@ -10,7 +10,6 @@ from agent_runtime.models import AgentPersona, AgentRun
 from types import SimpleNamespace
 
 Task = SimpleNamespace
-from agent_runtime.context_builder import build_context
 from agent_runtime.persona_runtime import GPTPersonaRuntime
 from agent_runtime.provider_health import provider_health_for_personas
 from agent_runtime.status import build_status
