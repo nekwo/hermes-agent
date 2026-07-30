@@ -158,8 +158,12 @@ def _safe_operator_text(value: str) -> str:
 
 
 def _cmd_status(args) -> int:
+    # S28: the line used to open with `open_tasks=` / `running_runs=`. Both were
+    # constants by construction on the producer side (see agent_runtime/status.py),
+    # so the human render stopped reporting them rather than keep printing a
+    # literal an operator would read as a measurement. The verb is unchanged.
     data=build_status()
-    print(emit_json(data) if args.json else f"open_tasks={data['open_tasks']} running_runs={data['running_runs']} open_incidents={data['open_incidents']} dirty={data['dirty_summary']} runtime_health={data['runtime_health']['ok']}")
+    print(emit_json(data) if args.json else f"open_incidents={data['open_incidents']} dirty={data['dirty_summary']} runtime_health={data['runtime_health']['ok']}")
     return 0
 
 
@@ -248,18 +252,17 @@ def _cmd_verify(args) -> int:
 
 
 def _cmd_observe(args) -> int:
-    tasks = []
+    # S28: the `tasks=[]` / `proofs=[]` / `daemon_status=None` keywords were the
+    # literals holding three dead parameters open on `build_observability`; they
+    # and everything they alone fed are gone. The unread `load_agent_runtime_config`
+    # call went with them — it was assigned and never used.
     runs = []
     incidents = []
     workers = []
-    cfg = load_agent_runtime_config()
     execution_mode = "manual"
     data = build_observability(
-        tasks=tasks,
         runs=runs,
         incidents=incidents,
-        proofs=[],
-        daemon_status=None,
         events=EventLog().tail(20),
         execution_mode=execution_mode,
         worker_sessions=workers,

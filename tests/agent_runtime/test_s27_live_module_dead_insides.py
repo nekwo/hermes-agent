@@ -116,6 +116,16 @@ EXTERNAL_SURFACE = {
     "scope_control": {
         "validate_discovery_payload",
         "validate_triage_payload",
+        # S28 CORRECTION: `untriaged_issue_discoveries` was verified-live here
+        # on ONE production caller — `observability.build_observability`, which
+        # walked it over the `tasks` parameter both callers passed as `[]`. S28
+        # removed that parameter, so this name now has no production caller and
+        # is reachability-root-only: it is kept as a root to keep this module's
+        # unreachable-set honest, NOT because an external caller was re-verified.
+        # A future pass should cut it or find it a real caller. (Re-checked in
+        # the same pass: `find_discovery_task` is imported by `hermes_cli/harness.py:155`
+        # but has no call site anywhere in `hermes_cli/` — a bound name, not a
+        # use. Same question, different module; left for that pass.)
         "untriaged_issue_discoveries",
         "find_discovery_task",
     },

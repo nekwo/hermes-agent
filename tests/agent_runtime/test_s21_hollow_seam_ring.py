@@ -14,12 +14,15 @@ now" — when it is a literal. That is the same class of lie as a fake button:
 the verb answers, but the answer carries no information. This stage keeps every
 verb and every field a reader can still learn something from, and drops the rest.
 
-Scope note (S21): ``open_tasks`` and ``running_runs`` are the same class of
-constant, but ``hermes_cli/harness_parts/runtime_commands.py::_cmd_status``
-indexes both for its human-readable line. That module is upstream-adjacent and
-owned by another lane, so the two fields are deliberately RETAINED here and
-pinned below — removing them without that one-line edit would break the
-``harness status`` verb, which is the opposite of the goal.
+Scope note (S21, CLOSED by S28): ``open_tasks`` and ``running_runs`` are the
+same class of constant, but ``hermes_cli/harness_parts/runtime_commands.py::_cmd_status``
+indexed both for its human-readable line, and that module was owned by another
+lane — removing them without that one-line edit would have broken the
+``harness status`` verb, which is the opposite of the goal. S28 landed both
+halves together once the module was free; the two fields are gone, and the pin
+below moved to
+``tests/agent_runtime/test_s28_status_observe_shrink.py::test_status_drops_the_two_fields_s21_could_not_reach``.
+The keep-side list here now covers only fields S21 itself never questioned.
 """
 
 from __future__ import annotations
@@ -72,10 +75,9 @@ def test_status_keeps_every_field_an_operator_can_still_learn_from(isolate_agent
     data = build_status()
 
     for key in (
-        # Retained on purpose — see the module docstring's scope note.
-        "open_tasks",
-        "running_runs",
         # Live, data-driven, and the reason `harness status` exists.
+        # (`open_tasks` / `running_runs` were pinned here as deliberate S21
+        # residue; S28 removed them — see the module docstring's scope note.)
         "open_incidents",
         "dirty",
         "dirty_summary",

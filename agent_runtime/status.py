@@ -25,7 +25,7 @@ from .migrations import effective_config_summary
 from .production_envelope import production_envelope_status
 from .repo_bundles import RepoBundleStore, bundle_queue_summary, repo_bundle_delivery_summary, repo_bundle_summary, repo_lock_summary
 from .runtime_instances import GoalRuntimeInstanceStore, runtime_instances_summary
-from .states import RunState, TaskState
+from .states import RunState
 from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, RunStore, TaskStore
 from .worker_sessions import WorkerSessionStore, worker_session_summary
 from .snapshot import _default_persona_session_db, _parity_envelope
@@ -50,11 +50,9 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
     # goal-runner driven ("manual").
     execution_mode = "manual"
     agents = agent_store.list_all() or ensure_persisted_personas(cfg)
-    proofs = []
     repo_bundles = RepoBundleStore(event_log=event_log).list_all()
     runtime_instances = GoalRuntimeInstanceStore(event_log=event_log).list_all()
     active_runs = [r for r in runs if r.state in ACTIVE_RUN_STATES]
-    running_runs = [r for r in active_runs if r.state == RunState.RUNNING]
     queued_runs = [r for r in active_runs if r.state == RunState.QUEUED]
     waiting_runs = [r for r in active_runs if r.state in {RunState.WAITING_ON_TOOL, RunState.WAITING_ON_APPROVAL}]
     active_workers = worker_session_store.find_active()
@@ -62,14 +60,15 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
     foreground_dirty_state = dirty_state.get("runtime", {}).get("foreground", {})
     recent_events = event_log.tail(20)
     data = {
-        # S21 RESIDUE, retained deliberately: `tasks` is a `[]` literal and no
-        # production caller can open a run, so `open_tasks` / `running_runs` are
-        # constants wearing the shape of a measurement — exactly what S21 removed
-        # elsewhere. They stay only because `_cmd_status` indexes both for its
-        # human-readable line (hermes_cli/harness_parts/runtime_commands.py), and
-        # that module is owned by another lane. Drop them together with that
-        # print, never before it.
-        "open_tasks": len([t for t in tasks if t.state not in {TaskState.DONE, TaskState.CANCELLED}]),
+        # S28 completed the S21 cut this comment used to defer: `open_tasks` and
+        # `running_runs` are gone, together with the `_cmd_status` print that was
+        # their only reader (hermes_cli/harness_parts/runtime_commands.py). Both
+        # were constants wearing the shape of a measurement — `tasks` is a `[]`
+        # literal, and no production caller constructs an `AgentRun` or opens a
+        # run, so the RUNNING count could never move. The `active_runs` /
+        # `queued_runs` / `waiting_runs` / `stale_runs` counters below stay:
+        # they read the same persisted rows, and a historical row in any of
+        # those states is still information about the store.
         "open_task_ids": dirty_state.get("runtime", {}).get("open_task_ids", []),
         "background_open_tasks": foreground_dirty_state.get("background_open_tasks", 0),
         "background_task_ids": foreground_dirty_state.get("background_task_ids", []),
@@ -78,7 +77,6 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
         "decision_contract_version": CONTRACT_SCHEMA_VERSION,
         "decision_contract_hash": contract_hash(),
         "active_runs": len(active_runs),
-        "running_runs": len(running_runs),
         "queued_runs": len(queued_runs),
         "waiting_runs": len(waiting_runs),
         "stale_runs": len([r for r in runs if r.state == RunState.STALE]),
@@ -97,7 +95,7 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
             "enabled": _recursive_supervision_enabled(cfg),
         },
         "foreground_runtime": runtime_instances_summary(runtime_instances),
-        "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=None, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
+        "observability": build_observability(runs=runs, incidents=incidents, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
         "agents": [_agent_status(a) for a in agents],
         "worker_sessions": [worker_session_summary(worker) for worker in workers],
         "repo_bundles": [repo_bundle_summary(bundle) for bundle in repo_bundles],

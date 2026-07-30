@@ -28,10 +28,15 @@ def _persona_runtime_config() -> AgentRuntimeConfig:
 
 def _assert_no_mission_status() -> None:
     status = build_status()
-    assert status["open_tasks"] == 0
     # S21 stopped publishing `next_actions` / `undispatchable_missions`: both were
     # computed over the `tasks = []` literal, so they could only ever be `[]` —
     # a constant reported in the shape of a measurement. Absence is now the pin.
+    # S28 finished that cut with `open_tasks` (and `running_runs`), which S21 had
+    # to retain while `_cmd_status` still printed them; this assertion used to
+    # read `status["open_tasks"] == 0` — a literal, not a measurement. See
+    # tests/agent_runtime/test_s28_status_observe_shrink.py.
+    assert "open_tasks" not in status
+    assert "running_runs" not in status
     assert "next_actions" not in status
     assert "undispatchable_missions" not in status
     assert not hasattr(TaskStore(), "create")

@@ -64,13 +64,23 @@ def test_simplified_contract_survives_on_its_public_decision_type_callers():
 
 
 def test_scope_control_survives_on_its_payload_validation_callers():
-    """Decision contracts validate discovery/triage payloads through it."""
+    """Decision contracts validate discovery/triage payloads through it.
+
+    S28 retarget: this also pinned ``observability.untriaged_issue_discoveries``.
+    That import fed the ``issue_discovery_triage_needed`` interventions, which
+    were computed over ``build_observability``'s ``tasks`` parameter — a ``[]``
+    literal in both callers since S8 — so the import went with the parameter.
+    ``scope_control`` still survives on the two decision-contract callers below,
+    but ``untriaged_issue_discoveries`` itself now has NO production caller and
+    is a candidate for the next reachability pass (see the final report for
+    2026-07-30 S28).
+    """
 
     from agent_runtime import decision_contracts, observability, scope_control
 
     assert decision_contracts.validate_discovery_payload is scope_control.validate_discovery_payload
     assert decision_contracts.validate_triage_payload is scope_control.validate_triage_payload
-    assert observability.untriaged_issue_discoveries is scope_control.untriaged_issue_discoveries
+    assert not hasattr(observability, "untriaged_issue_discoveries")
 
 
 def test_role_checklists_survives_on_its_role_envelope_callers():
