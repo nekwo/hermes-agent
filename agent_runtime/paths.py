@@ -13,10 +13,6 @@ def store_root() -> Path:
     return resolution.store_root
 
 
-def tasks_dir() -> Path:
-    return store_root() / "tasks"
-
-
 def goals_dir() -> Path:
     return store_root() / "goals"
 
@@ -194,10 +190,6 @@ def agents_dir() -> Path:
     return store_root() / "agents"
 
 
-def proofs_dir() -> Path:
-    return store_root() / "proofs"
-
-
 def incidents_dir() -> Path:
     return store_root() / "incidents"
 
@@ -263,14 +255,6 @@ def snapshot_path() -> Path:
     return store_root() / "snapshot.json"
 
 
-def daemon_status_path() -> Path:
-    return store_root() / "daemon_status.json"
-
-
-def daemon_lease_path() -> Path:
-    return store_root() / "daemon.lease"
-
-
 def deleted_archive_dir() -> Path:
     return store_root() / "deleted_archive"
 
@@ -302,10 +286,6 @@ def prompt_observability_index_path() -> Path:
     A CACHE, never authority — the persist chokepoint is its only writer; a
     missing/corrupt index falls back to the directory scan."""
     return store_root() / "prompt_observability_index.json"
-
-
-def queued_skills_dir() -> Path:
-    return store_root() / "queued_skills"
 
 
 def proof_sandbox_root() -> Path:
@@ -374,14 +354,6 @@ def packet_raw_artifact_path(task_id: str, packet_id: str) -> Path:
     return packet_artifacts_task_dir(task_id) / f"{_safe_path_token(packet_id)}.raw.json"
 
 
-def proof_sandbox_task_dir(task_id: str) -> Path:
-    return proof_sandbox_root() / _safe_path_token(task_id)
-
-
-def proof_sandbox_dir(task_id: str, recipe_id: str) -> Path:
-    return proof_sandbox_task_dir(task_id) / _safe_path_token(recipe_id)
-
-
 def worker_context_dir(task_id: str, persona_id: str) -> Path:
     return context_dir() / _safe_path_token(task_id) / _safe_path_token(persona_id)
 
@@ -390,24 +362,8 @@ def task_path(task_id: str) -> Path:
     return goal_path(task_id)
 
 
-def legacy_task_path(task_id: str) -> Path:
-    return tasks_dir() / f"{task_id}.json"
-
-
 def goal_path(goal_id: str) -> Path:
     return goals_dir() / f"{_safe_path_token(goal_id)}.json"
-
-
-def task_storage_candidates(task_id: str) -> list[Path]:
-    return [goal_path(task_id), legacy_task_path(task_id)]
-
-
-def existing_task_path(task_id: str) -> Path:
-    for path in task_storage_candidates(task_id):
-        if path.exists():
-            return path
-    return goal_path(task_id)
-
 
 
 def worker_session_path(worker_session_id: str) -> Path:
@@ -454,16 +410,8 @@ def agent_path(persona_id: str) -> Path:
     return agents_dir() / f"{persona_id}.json"
 
 
-def proof_record_path(task_id: str, proof_id: str) -> Path:
-    return proofs_dir() / task_id / f"proof_{proof_id}.json"
-
-
 def incident_path(incident_id: str) -> Path:
     return incidents_dir() / f"{incident_id}.json"
-
-
-def incident_detail_path(incident_id: str) -> Path:
-    return incidents_dir() / f"{incident_id}.txt"
 
 
 def _safe_path_token(value: str) -> str:

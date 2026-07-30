@@ -72,7 +72,7 @@ class EntityClass:
     * flat (``recursive=False``): ``<dir>/<actor_id>.json`` — the actor id is
       the filename stem (``persona_instances``, ``flow_graphs`` …).
     * nested (``recursive=True``): owner sub-directories hold the per-actor
-      files (``boards/<board_id>/…``, ``proofs/<task_id>/…``). The actor key is
+      files (``boards/<board_id>/…``, ``repo_bundles/<task_id>/…``). The actor key is
       the POSIX relative path minus ``.json`` so every file is captured
       verbatim and uniquely — the truest "the store IS the checkpoint" form for
       a nested store.
@@ -99,7 +99,6 @@ ENTITY_CLASSES: tuple[EntityClass, ...] = (
     EntityClass("agents", paths.agents_dir),
     EntityClass("flow_graphs", _flow_graphs_dir),
     EntityClass("boards", paths.boards_root, recursive=True),
-    EntityClass("proofs", paths.proofs_dir, recursive=True),
     EntityClass("repo_bundles", paths.repo_bundles_dir, recursive=True),
     EntityClass("role_envelopes", paths.role_envelopes_dir, recursive=True),
     EntityClass("role_checklists", paths.role_checklists_dir, recursive=True),
