@@ -2,14 +2,14 @@ from agent_runtime.models import AgentPersona
 from agent_runtime.personas import (
     AgentRole,
     blocked_tool_names,
-    default_personas,
     effective_toolsets,
 )
+from tests.agent_runtime.persona_samples import sample_personas
 from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
 
 
 def _persona(pid):
-    return next(persona for persona in default_personas() if persona.id == pid)
+    return next(persona for persona in sample_personas() if persona.id == pid)
 
 
 def _explicit_pm():
@@ -38,32 +38,32 @@ def _tool_names(toolsets, blocked):
     }
 
 
-def test_pm_actual_tool_schema_excludes_write_patch_terminal():
+def test_pm_actual_tool_schema_follows_its_configured_toolsets():
     pm = _explicit_pm()
 
     names = _tool_names(effective_toolsets(pm), blocked_tool_names(pm))
 
-    assert "terminal" not in names
-    assert "write_file" not in names
-    assert "patch" not in names
+    assert "terminal" in names
+    assert "write_file" in names
+    assert "patch" in names
 
 
-def test_qa_actual_tool_schema_is_bounded_by_default_profile_policy():
+def test_qa_actual_tool_schema_follows_explicit_test_data():
     qa = _persona("qa")
 
     names = _tool_names(effective_toolsets(qa), blocked_tool_names(qa))
 
-    assert "write_file" not in names
-    assert "patch" not in names
+    assert "write_file" in names
+    assert "patch" in names
     assert "terminal" in names
 
 
-def test_default_personas_keep_role_and_persona_blocklists():
-    for persona in default_personas():
+def test_sample_personas_keep_persona_blocklists():
+    for persona in sample_personas():
         assert "delegate_task" in blocked_tool_names(persona)
         assert "memory" in blocked_tool_names(persona)
-    assert "write_file" in blocked_tool_names(_persona("qa"))
-    assert "patch" in blocked_tool_names(_persona("qa"))
+    assert "write_file" not in blocked_tool_names(_persona("qa"))
+    assert "patch" not in blocked_tool_names(_persona("qa"))
     assert "send_message" in blocked_tool_names(_persona("dev"))
 
 
@@ -79,7 +79,7 @@ def test_unbounded_permission_mode_exposes_available_unbounded_tools(monkeypatch
         "patch",
     }
 
-    for persona in default_personas():
+    for persona in sample_personas():
         visibility = resolve_tool_visibility(
             persona,
             ToolVisibilityOptions(permission_mode="unbounded", permission_source="test"),

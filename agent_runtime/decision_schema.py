@@ -49,13 +49,10 @@ class AgentDecision:
     schema_version: int = 1
 
 
-from .decision_contract_registry import agent_decision_json_schema, allowed_decisions_by_role
+from .decision_contract_registry import agent_decision_json_schema
 
 
 DECISION_SCHEMA: dict[str, Any] = agent_decision_json_schema()
-
-ALLOWED_DECISIONS_BY_ROLE: dict[AgentRole, frozenset[DecisionType]] = allowed_decisions_by_role()
-
 
 def parse_structured_decision(text: str) -> AgentDecision:
     errors: list[str] = []
@@ -90,9 +87,7 @@ def to_decision_jsonable(decision: AgentDecision) -> dict[str, Any]:
 
 
 def validate_decision_for_role(decision: AgentDecision, role: AgentRole | str) -> None:
-    resolved = role if isinstance(role, AgentRole) else AgentRole(role)
-    if decision.type not in ALLOWED_DECISIONS_BY_ROLE[resolved]:
-        raise DecisionPayloadInvalid(f"{resolved.value} may not emit decision type {decision.type.value}")
+    del decision, role
 
 
 def _extract_first_json_blob(text: str) -> str:

@@ -69,7 +69,7 @@ in every load-bearing respect:
    is the floor: classes outside it stay hard-blocked no matter what the config
    says. Credential reads, credential exfiltration and prod mutations are not a
    config edit away from being allowed. It is the same DISCIPLINE
-   ``mcp_admission.R1_ADMISSIBLE_ROLES`` applies — deny by default, a code-side
+   MCP admission applies — profile-declared surfaces are the authority and a
    floor above the config — but the two floors are INDEPENDENT: no code here
    reads that set, they are over different things (command classes vs. roles),
    and they deliberately differ in membership. Widening one is never license to
@@ -184,12 +184,12 @@ COMMAND_CLASSES: frozenset[str] = frozenset(
 
 #: Stage floor — the classes an operator grant may cover AT ALL.
 #:
-#: Same DISCIPLINE as ``mcp_admission.R1_ADMISSIBLE_ROLES`` — ship narrow, keep a
+#: Keep terminal policy narrow and explicit; changes remain reviewable here.
 #: code-side floor above the config, and treat widening it as a deliberate
 #: product decision rather than a config edit — but an INDEPENDENT floor, not a
 #: mirror of it. Nothing here reads that set, the two are over different things
 #: (command classes here, admissible roles there), and their membership
-#: deliberately differs: ``R1_ADMISSIBLE_ROLES`` gained ``dev`` on 2026-07-29 while
+#: Terminal policy and MCP admission are deliberately independent surfaces.
 #: this set is unchanged. Widening one is never license to widen the other.
 #:
 #: The three excluded classes are excluded on purpose and are NOT an oversight:
@@ -1059,7 +1059,7 @@ def scope_for_persona(
     from .personas import role_from_persona
 
     try:
-        role = str(role_from_persona(persona).value)
+        role = str(role_from_persona(persona))
     except Exception:  # pragma: no cover - defensive
         role = str(getattr(persona, "role", "") or "")
     return TerminalEnvelopeScope(

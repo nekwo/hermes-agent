@@ -67,13 +67,14 @@ def build_context(
     config=None,
 ) -> AgentContext:
     current_stage = None
-    if task.current_stage_id:
-        current_stage = next((stage for stage in _stage_records(task) if stage.id == task.current_stage_id), None)
+    current_stage_id = getattr(task, "current_stage_id", None)
+    if current_stage_id:
+        current_stage = next((stage for stage in _stage_records(task) if stage.id == current_stage_id), None)
     if current_stage is None and run.stage_id:
         current_stage = next((stage for stage in _stage_records(task) if stage.id == run.stage_id), None)
-    selected_proof_ids = proof_ids if proof_ids is not None else list(task.proof_ids)
+    selected_proof_ids = proof_ids if proof_ids is not None else list(getattr(task, "proof_ids", []) or [])
     event_log = event_log or EventLog()
-    stage_id = run.stage_id or task.current_stage_id
+    stage_id = run.stage_id or current_stage_id
     packets = latest_packets_for_task(task.id, event_log=event_log, stage_id=stage_id)
     packets = _add_cross_stage_source_delivery(
         task.id,
@@ -141,7 +142,7 @@ def render_context(ctx: AgentContext) -> str:
         f"- title: {ctx.task.title}",
         f"- state: {ctx.task.state}",
         f"- requested_by: {ctx.task.requested_by}",
-        f"- requires_visual_proof: {ctx.task.requires_visual_proof}",
+        f"- requires_visual_proof: {bool(getattr(ctx.task, 'requires_visual_proof', False))}",
         f"- delivery_directive: {_delivery_directive_line(ctx.task)}",
         "",
         "## Objective",
@@ -155,8 +156,8 @@ def render_context(ctx: AgentContext) -> str:
         "",
         "## Acceptance Criteria",
     ]
-    lines.extend(f"- {item}" for item in (ctx.task.acceptance_criteria or ["(none yet)"]))
-    if ctx.task.affected_repos:
+    lines.extend(f"- {item}" for item in (getattr(ctx.task, "acceptance_criteria", []) or ["(none yet)"]))
+    if getattr(ctx.task, "affected_repos", None):
         lines.extend(["", "## Affected Repositories"])
         safe_repos = safe_affected_repo_labels(ctx.task.affected_repos)
         lines.extend(f"- {item}" for item in (safe_repos or ["(unresolved; absolute path withheld)"]))
@@ -193,7 +194,7 @@ def render_context(ctx: AgentContext) -> str:
                 )
                 if truncated:
                     lines.append("- excerpt_truncated: true")
-    if ctx.task.non_goals:
+    if getattr(ctx.task, "non_goals", None):
         lines.extend(["", "## Non-goals / Scope Boundaries"])
         lines.extend(f"- {item}" for item in ctx.task.non_goals)
     lines.extend(["", "## Task Snapshot", "```json", _context_json(_safe_task_snapshot(ctx)), "```"])
@@ -476,8 +477,8 @@ def _repair_hint_for_message(message: str) -> dict[str, Any]:
         return {
             "invalid_field": "delivery.next_owner",
             "allowed_values": sorted(HANDOFF_OWNERS),
-            "recommended_value": "neko_supervisor",
-            "shape_hint": "For Dev delivery packets, use next_owner=neko_supervisor when Neko must join/release proof, next_owner=qa only after all required proof is passed and attached, or omit next_owner if no handoff is needed.",
+            "recommended_value": "<next owner persona id>",
+            "shape_hint": "Name the next owner from the active persona data, or omit next_owner if no handoff is needed.",
         }
     if "handoff_packet" in text and ("target_owner" in text or "next_owner" in text or "final_owner" in text):
         return {
@@ -496,7 +497,7 @@ def _repair_hint_for_message(message: str) -> dict[str, Any]:
         return {
             "invalid_field": "qa_review.next_owner",
             "allowed_values": sorted(QA_NEXT_OWNERS),
-            "shape_hint": "QA routes approved work to harness, proof/contract gaps to neko_supervisor, fixes to dev, and true external blockers to human.",
+            "shape_hint": "Route work to a persona id present in the active runtime data, or to human for a true external blocker.",
         }
     if "qa_review.coverage" in text:
         return {
@@ -660,6 +661,8 @@ def _safe_repo_context(task: Task) -> dict[str, Any] | None:
 
 def _safe_task_snapshot(ctx: AgentContext) -> dict[str, Any]:
     snapshot = to_jsonable(ctx.task)
+    if not isinstance(snapshot, dict) and hasattr(ctx.task, "__dict__"):
+        snapshot = to_jsonable(vars(ctx.task))
     if isinstance(snapshot, dict):
         snapshot["affected_repos"] = safe_affected_repo_labels(getattr(ctx.task, "affected_repos", []) or [])
         if isinstance(snapshot.get("stages"), list):
@@ -772,7 +775,7 @@ def _mission_hud(task: Task, run: AgentRun, packets: dict[str, dict[str, Any]], 
         "phase": str(task.state),
         "current_owner": run.persona_id,
         "role": _hud_owner(run),
-        "current_stage_id": run.stage_id or task.current_stage_id,
+        "current_stage_id": run.stage_id or getattr(task, "current_stage_id", None),
     }
     feedback = _terminal_feedback(task, run)
     if feedback:
@@ -924,7 +927,7 @@ def _task_evidence_stack(task: Task) -> list[dict[str, Any]]:
             "severity": str(item.get("severity") or "warning")[:40],
             "stage_id": str(item.get("stage_id") or "")[:120],
             "summary": str(item.get("summary") or "")[:500],
-            "recommended_owner": str(item.get("recommended_owner") or "neko_supervisor")[:120],
+            "recommended_owner": str(item.get("recommended_owner") or "")[:120],
         }
         missing = [str(value)[:240] for value in (item.get("missing") or []) if str(value)]
         warnings = [str(value)[:240] for value in (item.get("warnings") or []) if str(value)]
@@ -1012,7 +1015,8 @@ def _recommended_action(menu: list[dict[str, Any]], *, next_move: dict[str, Any]
 
 
 def _skill_reference_for_action(role: str, *, shape_id: str, action_id: str) -> dict[str, str]:
-    if role == "alice_supervisor":
+    del role, action_id
+    if shape_id.startswith("neko."):
         section = "Scope Route"
         if "recovery" in shape_id:
             section = "Bounded Recovery"
@@ -1025,7 +1029,7 @@ def _skill_reference_for_action(role: str, *, shape_id: str, action_id: str) -> 
             "skill_section": section,
             "skill_reason": "Open only when owner/repo/proof-gate routing is not obvious from the HUD.",
         }
-    if role == "qa":
+    if shape_id.startswith("qa."):
         section = "QA Verdict"
         if "screenshot" in shape_id or "video" in shape_id:
             section = "Request Missing Proof"
@@ -1074,24 +1078,17 @@ def _worker_action_shape_ids(actions) -> list[str]:
 
 
 def _hud_owner(run: AgentRun) -> str:
-    persona_id = str(getattr(run, "persona_id", "") or "")
-    if persona_id == "neko_supervisor":
-        return "alice_supervisor"
-    if persona_id == "qa":
-        return "qa"
-    if persona_id == "backend_dev" or persona_id.endswith("_dev") or persona_id == "dev":
-        return "dev"
-    return persona_id or "unknown"
+    return str(getattr(run, "persona_id", "") or "").strip() or "unknown"
 
 
 def _next_required_move(task: Task, run: AgentRun, *, handoff: dict[str, Any], stage_state: dict[str, Any]) -> dict[str, Any]:
     role = _hud_owner(run)
-    stage_id = str(run.stage_id or task.current_stage_id or "").strip()
+    stage_id = str(run.stage_id or getattr(task, "current_stage_id", None) or "").strip()
     state = str(task.state.value if hasattr(task.state, "value") else task.state)
     failed_proof_ids = [str(item).strip() for item in (stage_state.get("last_failed_proof_ids") or []) if str(item).strip()] if isinstance(stage_state.get("last_failed_proof_ids"), list) else []
     if role == "alice_supervisor":
         diagnostic_persona = _diagnostic_persona(task)
-        if state in {"created", "pm_triage"} and diagnostic_persona == "neko_supervisor":
+        if state in {"created", "pm_triage"} and diagnostic_persona == str(run.persona_id or ""):
             return {
                 "decision_type": "scope_route",
                 "shape_id": "neko.scope_route",
@@ -1231,7 +1228,7 @@ def _next_required_move(task: Task, run: AgentRun, *, handoff: dict[str, Any], s
 
 
 def _registry_decision_shape_index(role: str, task: Task, run: AgentRun, *, handoff: dict[str, Any]) -> dict[str, Any]:
-    stage_id = run.stage_id or task.current_stage_id or "<current stage>"
+    stage_id = run.stage_id or getattr(task, "current_stage_id", None) or "<current stage>"
     shape_index = hud_shape_index_for_stage(role)
     target_repo = str(handoff.get("target_repo") or "EterniaLauncher").strip() or "EterniaLauncher"
     for shape in shape_index.values():
@@ -1390,7 +1387,7 @@ def _role_shape_ids(role: str) -> list[str]:
 def _current_stage_command_hints(task: Task, run: AgentRun, *, role: str) -> list[str]:
     if role != "dev":
         return []
-    stage_id = str(run.stage_id or task.current_stage_id or "").strip()
+    stage_id = str(run.stage_id or getattr(task, "current_stage_id", None) or "").strip()
     stage = next((item for item in _stage_records(task) or [] if item.id == stage_id), None)
     if stage is None:
         return []
@@ -1492,7 +1489,7 @@ def _neko_diagnostic_ack_payload(task: Task) -> dict[str, Any]:
         "objective": objective,
         "acceptance_criteria": acceptance or ["The Harness records one valid Neko diagnostic decision and stops without launching Dev or QA."],
         "non_goals": non_goals,
-        "target_owner": "neko_supervisor",
+        "target_owner": str(getattr(task, "requested_by", "") or "operator"),
         "target_repo": affected_repos[0] if affected_repos[0] in {"EterniaLauncher", "EterniaBackend", "hermes-agent"} else "hermes-agent",
         "proof_gate": {
             "required": False,
@@ -1652,7 +1649,7 @@ def _add_cross_stage_qa_review(
 
     if packets.get("qa_review"):
         return packets
-    if str(persona_id or "").strip() not in {"dev", "backend_dev", "launcher_dev"}:
+    if not str(persona_id or "").strip():
         return packets
     source_review = latest_packet(task_id, "qa_review", event_log=event_log, stage_id=None)
     if not source_review:
@@ -1665,15 +1662,7 @@ def _add_cross_stage_qa_review(
 def _packet_targets_persona(body: dict[str, Any], persona_id: str | None) -> bool:
     target = str(body.get("target_owner") or body.get("next_owner") or "").strip()
     persona = str(persona_id or "").strip()
-    if persona == "dev":
-        return target in {"dev", "launcher_dev"}
-    if persona == "backend_dev":
-        return target == "backend_dev"
-    if persona == "qa":
-        return target == "qa"
-    if persona == "neko_supervisor":
-        return target == "neko_supervisor"
-    return False
+    return bool(persona and target == persona)
 
 
 _RECENT_CONTEXT_EVENT_TYPES = frozenset(
@@ -1744,7 +1733,7 @@ def _packet_event_relevant(packet: dict[str, Any], *, persona_id: str | None, st
         return True
     if str(body.get("packet_kind") or "") == "contract_join" and _packet_targets_persona(body, persona_id):
         return True
-    if packet.get("packet_type") == "delivery" and str(body.get("next_owner") or "") in {str(persona_id or ""), "neko_supervisor"}:
+    if packet.get("packet_type") == "delivery" and str(body.get("next_owner") or "") == str(persona_id or ""):
         return True
     return False
 

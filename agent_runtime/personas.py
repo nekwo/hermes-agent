@@ -20,14 +20,6 @@ class AutonomyLevel(StrEnum):
     AUTONOMOUS = "autonomous"
 
 
-# Base-profile foundation (2026-07): every agent is a free Hermes profile. The typed
-# pipeline personas (neko/dev/backend_dev/qa) are mothballed as dormant templates in
-# ``default_personas()`` and are no longer seeded. The running store seeds ONE base
-# profile; other on-disk profiles surface as available personas and are chattable on demand.
-BASE_PERSONA_ID = "base"
-DEFAULT_PERSONA_IDS = frozenset({BASE_PERSONA_ID})
-
-
 # Roles/personas retired from the product flow. A persona instance persisted under one
 # of these — historically the legacy ``pm`` slot (``shared_harness_overlay.md``: "Treat
 # PM names ... as legacy compatibility only; do not present PM as the product flow") —
@@ -47,63 +39,20 @@ MOTHBALLED_PERSONA_IDS: frozenset[str] = frozenset({AgentRole.PM.value})
 # behaves as the supervisor class: the most permissive ceiling, so the profile's own
 # configured toolsets pass the ``validate_toolsets`` intersection unchanged.
 PROFILE_ROLE_SENTINEL = "profile"
-PROFILE_CHAT_ROLE = AgentRole.ALICE_SUPERVISOR
-
-
-def coerce_agent_role(role: AgentRole | str | None) -> AgentRole:
+def coerce_agent_role(role: AgentRole | str | None) -> AgentRole | str:
     """Resolve a persona role token to an ``AgentRole``.
 
-    Tolerates the synthetic ``"profile"`` sentinel (mapping it to the supervisor
-    class); every other value still resolves strictly so a genuinely-misconfigured
-    typed persona surfaces instead of being silently coerced.
+    Known legacy values retain their enum spelling for compatibility. Unknown
+    values remain data: they are never dropped or coerced into a hardcoded role.
     """
 
     if isinstance(role, AgentRole):
         return role
     text = str(role or "").strip()
-    if text.lower() == PROFILE_ROLE_SENTINEL:
-        return PROFILE_CHAT_ROLE
-    return AgentRole(text)
-
-
-# NOTE: the ``board`` toolset (advisory Mission Board card tools) is allowed for
-# every mission role — the board is nudged-never-forced, so any agent may track
-# follow-up work as a card. It never mutates goal state.
-ALLOWED_TOOLSETS_BY_ROLE: dict[AgentRole, frozenset[str]] = {
-    AgentRole.PM: frozenset({"file", "session_search", "todo", "skills", "agent_chat", "board"}),
-    AgentRole.DEV: frozenset({"file", "search", "terminal", "session_search", "todo", "code_execution", "skills", "agent_chat", "board"}),
-    AgentRole.QA: frozenset({"file", "search", "terminal", "browser", "vision", "session_search", "skills", "agent_chat", "board"}),
-    AgentRole.ALICE_SUPERVISOR: frozenset(
-        {
-            "file",
-            "search",
-            "terminal",
-            "code_execution",
-            "browser",
-            "vision",
-            "web",
-            "session_search",
-            "todo",
-            "skills",
-            "agent_chat",
-            "board",
-        }
-    ),
-}
-
-DEFAULT_SUPERVISOR_PERSONA_ID = "neko_supervisor"
-
-# The Launcher-owned install path deliberately opts back into the typed Mission
-# Control team. Every advertised agent must have a real Hermes profile behind
-# it; these bindings are the cross-stack install contract consumed by
-# ``harness init --with-bundled-personas`` and the Launcher's verifier.
-BUNDLED_PERSONA_PROFILES: dict[str, str] = {
-    DEFAULT_SUPERVISOR_PERSONA_ID: BASE_PERSONA_ID,
-    "dev": "launcher-dev",
-    "backend_dev": "backend-dev",
-    "qa": "qa",
-}
-BUNDLED_PERSONA_IDS = frozenset(BUNDLED_PERSONA_PROFILES)
+    try:
+        return AgentRole(text)
+    except ValueError:
+        return text
 
 PROFILE_CHAT_FALLBACK_TOOLSETS = (
     "file",
@@ -166,27 +115,16 @@ PERSONA_BLOCKED_TOOLS = frozenset(
     }
 ) | REGISTRY_HYGIENE_BLOCKED_TOOLS
 
-PER_ROLE_TOOL_DENIES: dict[AgentRole, frozenset[str]] = {
-    AgentRole.PM: frozenset({"write_file", "patch", "terminal"}),
-    AgentRole.DEV: frozenset({"send_message"}),
-    AgentRole.QA: frozenset({"write_file", "patch"}),
-    AgentRole.ALICE_SUPERVISOR: frozenset({"send_message"}),
-}
-
-
-def role_from_persona(persona: AgentPersona) -> AgentRole:
+def role_from_persona(persona: AgentPersona) -> AgentRole | str:
     return coerce_agent_role(persona.role)
 
 
 def validate_toolsets(role: AgentRole | str, configured: list[str]) -> list[str]:
-    resolved_role = role if isinstance(role, AgentRole) else AgentRole(role)
-    allowed = ALLOWED_TOOLSETS_BY_ROLE[resolved_role]
-    return [toolset for toolset in configured if toolset in allowed]
+    return list(dict.fromkeys(str(toolset).strip() for toolset in configured if str(toolset).strip()))
 
 
 def blocked_tool_names(persona: AgentPersona) -> frozenset[str]:
-    role = role_from_persona(persona)
-    return PERSONA_BLOCKED_TOOLS | PER_ROLE_TOOL_DENIES[role]
+    return PERSONA_BLOCKED_TOOLS
 
 
 def effective_toolsets(persona: AgentPersona) -> list[str]:
@@ -225,123 +163,9 @@ def all_registered_toolsets() -> list[str]:
     return sorted(str(name) for name in get_available_toolsets().keys())
 
 
-def default_personas() -> list[AgentPersona]:
-    return [
-        AgentPersona(
-            id=DEFAULT_SUPERVISOR_PERSONA_ID,
-            display_name="Neko Mission Lead",
-            role=AgentRole.ALICE_SUPERVISOR.value,
-            model=None,
-            provider=None,
-            api_mode="codex_responses",
-            toolsets=["file", "search", "terminal", "session_search", "code_execution", "todo", "skills"],
-            system_prompt_path="agent_runtime/prompts/alice_supervisor.md",
-            autonomy=AutonomyLevel.PROPOSE_ONLY.value,
-            hermes_profile=None,
-            skills=["harness-mission-lead", "harness-continuity", "harness-runtime-model"],
-        ),
-        AgentPersona(
-            id="dev",
-            display_name="Launcher Dev Agent",
-            role=AgentRole.DEV.value,
-            model=None,
-            provider=None,
-            api_mode="codex_responses",
-            toolsets=["file", "search", "terminal", "session_search", "code_execution", "skills"],
-            system_prompt_path="agent_runtime/prompts/dev.md",
-            autonomy=AutonomyLevel.AUTONOMOUS.value,
-            hermes_profile=BUNDLED_PERSONA_PROFILES["dev"],
-            skills=[
-                "harness-continuity",
-                "harness-dev-delivery",
-                "launcher-analyze-proof",
-                # Same pairing as the seeded `qa` row: `dev` joined the MCP
-                # admission floor on 2026-07-29, so it is admitted `launcher_qa`
-                # and must be granted that surface's operating manual for
-                # `MCP_OPERATING_SKILLS` to preload it.
-                "launcher-stagec-mcp-screenshot",
-            ],
-            repo_scope_label="EterniaLauncher",
-        ),
-        AgentPersona(
-            id="backend_dev",
-            display_name="Backend Dev Agent",
-            role=AgentRole.DEV.value,
-            model=None,
-            provider=None,
-            api_mode="codex_responses",
-            toolsets=["file", "search", "terminal", "session_search", "code_execution", "skills"],
-            system_prompt_path="agent_runtime/prompts/dev.md",
-            autonomy=AutonomyLevel.AUTONOMOUS.value,
-            hermes_profile=BUNDLED_PERSONA_PROFILES["backend_dev"],
-            skills=[
-                "harness-continuity",
-                "harness-dev-delivery",
-            ],
-            repo_scope="X:/Unreal Engine/Engine/EterniaBackend/eternia-backend",
-            repo_scope_label="EterniaBackend",
-        ),
-        AgentPersona(
-            id="qa",
-            display_name="QA Agent",
-            role=AgentRole.QA.value,
-            model=None,
-            provider=None,
-            api_mode="codex_responses",
-            toolsets=["file", "search", "terminal", "browser", "vision", "session_search", "skills"],
-            system_prompt_path="agent_runtime/prompts/qa.md",
-            autonomy=AutonomyLevel.AUTONOMOUS.value,
-            hermes_profile=BUNDLED_PERSONA_PROFILES["qa"],
-            # `launcher-stagec-mcp-screenshot` is the operating manual for the
-            # `launcher_qa` MCP surface that `mcp_admission.MCP_OPERATING_SKILLS`
-            # auto-preloads for admitted QA turns. That resolver requires the
-            # skill to be GRANTED as well as admitted, so a deployment seeded
-            # without this grant admits the tools and ships no manual — the exact
-            # gap that made a QA turn rediscover the sparse-feed screenshot
-            # refusal from scratch (2026-07-29).
-            skills=["harness-qa-verdict", "launcher-stagec-mcp-screenshot"],
-        ),
-    ]
-
-
-def seed_personas() -> list[AgentPersona]:
-    """The personas actually materialized into the running store.
-
-    Base-profile foundation: seed exactly ONE free base profile as the default
-    agent. Other on-disk Hermes profiles surface as available personas and are
-    chattable on demand; they are not seeded here. ``default_personas()`` is
-    retained as dormant typed-pipeline templates for the eventual pipeline
-    rebuild and is intentionally unused by the seed.
-
-    The base profile receives the chat fallback toolsets directly.
-    """
-
-    base_toolsets = list(PROFILE_CHAT_FALLBACK_TOOLSETS)
-    return [
-        AgentPersona(
-            id=BASE_PERSONA_ID,
-            display_name="Base Agent",
-            role=PROFILE_ROLE_SENTINEL,
-            model=None,
-            provider=None,
-            api_mode="codex_responses",
-            toolsets=base_toolsets,
-            system_prompt_path="",
-            autonomy=AutonomyLevel.PROPOSE_ONLY.value,
-            hermes_profile=BASE_PERSONA_ID,
-            # Base is the operator's default agent, so it carries the Mission Control
-            # runtime-model skill (view/operate goals and agent relationships),
-            # installed into the base profile so its chat can load it on demand. It is NOT
-            # a typed pipeline worker, so it does not carry harness-dev/qa delivery skills.
-            skills=["harness-runtime-model"],
-            include_profile_memory=True,
-        )
-    ]
-
-
 def load_bundled_prompt(role: AgentRole | str) -> str:
-    resolved_role = role if isinstance(role, AgentRole) else AgentRole(role)
-    path = Path(__file__).with_name("prompts") / f"{resolved_role.value}.md"
+    token = role.value if isinstance(role, AgentRole) else str(role or "").strip()
+    path = Path(__file__).with_name("prompts") / f"{token}.md"
     return path.read_text(encoding="utf-8")
 
 
@@ -353,24 +177,6 @@ def load_bundled_prompt(role: AgentRole | str) -> str:
 # upstream ``POST /api/profiles/{name}/promote`` endpoint, which has nothing to do
 # with stage graphs. It has to outlive the blueprint package.
 #
-# Role → the template persona id whose model/provider/toolsets/system prompt the
-# promoted persona is cloned from. Unknown roles fall back to ``dev``.
-_ROLE_TEMPLATE = {
-    "builder": "dev",
-    "dev": "dev",
-    "backend_dev": "backend_dev",
-    "verifier": "qa",
-    "reviewer": "qa",
-    "qa": "qa",
-    "lead": "neko_supervisor",
-    "neko": "neko_supervisor",
-    "pm": "neko_supervisor",
-    "specialist": "dev",
-    "harness": "dev",
-    "human": "dev",
-}
-
-
 def promote_profile_to_persona(
     profile_name: str,
     *,
@@ -403,8 +209,14 @@ def promote_profile_to_persona(
 
         for persona in ensure_persisted_personas():
             known.setdefault(persona.id, persona)
-    template_id = _ROLE_TEMPLATE.get(slot_role, "dev")
-    template = known.get(template_id) or known.get("dev") or next(iter(known.values()), None)
+    template = next(
+        (
+            persona
+            for persona in known.values()
+            if str(getattr(persona, "role", "") or "").strip() == str(slot_role or "").strip()
+        ),
+        None,
+    ) or known.get(str(slot_role or "").strip()) or next(iter(known.values()), None)
     if template is None:
         raise ValueError(
             f"cannot promote profile {profile_name!r}: no template persona for role {slot_role!r}"

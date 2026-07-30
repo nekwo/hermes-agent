@@ -43,7 +43,7 @@ from .mcp_lane import mission_chat_mcp_lane_line
 from .models import AgentPersona, AgentRun
 from .mission_chat_clarify import MissionChatClarifyCapture
 from .mission_chat_workdir import mission_chat_workdir_for_persona
-from .personas import ALLOWED_TOOLSETS_BY_ROLE, all_registered_toolsets, blocked_tool_names, effective_toolsets, load_bundled_prompt, role_from_persona
+from .personas import all_registered_toolsets, blocked_tool_names, effective_toolsets, load_bundled_prompt, role_from_persona
 from .profile_context import resolve_persona_profile
 from .provider_health import assert_provider_health_for_persona
 from .terminal_envelope import (
@@ -439,7 +439,7 @@ PERSONA_CHAT_SCRATCH_SOURCE = "agent_runtime_persona_chat_scratch"
 
 def _persona_chat_system_prompt(persona: AgentPersona) -> str:
     display = getattr(persona, "display_name", None) or getattr(persona, "id", "the agent")
-    role = role_from_persona(persona).value
+    role = str(role_from_persona(persona))
     base = (
         f"You are {display}, a Mission Control operator-channel agent (role: {role}). "
         "You are in a direct, real-time chat with a single human operator — your teammate, not an end user. "
@@ -570,7 +570,7 @@ def _mission_chat_identity_prompt(persona: AgentPersona) -> str:
 
     display = str(getattr(persona, "display_name", None) or getattr(persona, "id", "the agent")).strip()
     persona_id = str(getattr(persona, "id", "") or "").strip()
-    role = role_from_persona(persona).value
+    role = str(role_from_persona(persona))
     voice = _persona_chat_voice(role, display)
     id_clause = f" (Mission Control persona id: `{persona_id}`)" if persona_id else ""
     never_self = (
@@ -792,7 +792,7 @@ def _persona_run_uses_memory(persona: AgentPersona, ctx: AgentContext) -> bool:
 
 def _blocked_tool_names_for_run(persona: AgentPersona, ctx: AgentContext) -> list[str]:
     names = set(blocked_tool_names(persona))
-    if _is_no_edit_context_stage(ctx) and role_from_persona(persona).value == "dev":
+    if _is_no_edit_context_stage(ctx) and str(role_from_persona(persona)) == "dev":
         names.update({"read_file", "search_files", "session_search", "browser_snapshot"})
     return sorted(names)
 
@@ -1108,9 +1108,7 @@ def apply_chat_lane_tool_scope(
 #
 # `agent_chat`, `board` and `clarify` are UNCONDITIONAL on purpose (mission-lane
 # removal, S1). This is the ONLY path that puts `board` and `agent_chat` on a chat lane, and
-# it used to gate them on ``ALLOWED_TOOLSETS_BY_ROLE.get(role, frozenset())``. That
-# dict is deleted in S11 — and it already returns an EMPTY set for any role token
-# it does not know — so a role-keyed gate here silently strips the Mission Board
+# it used to gate them on a hardcoded role map. Such a gate silently strips the Mission Board
 # and agent-to-agent chat from every chat persona the moment either happens. Both
 # are explicit KEEP. The gate had no protective value either: all four roles in the
 # dict already allow `board` and `agent_chat`, so removing it changes nothing for a
@@ -1509,7 +1507,7 @@ def _simplified_contract_decisions_for_role(role) -> list[DecisionType]:
 def _simplified_contract_guidance(persona: AgentPersona, *, cfg) -> str:
     if not _simplified_contract_prompt_enabled(cfg):
         return ""
-    role = role_from_persona(persona).value
+    role = str(role_from_persona(persona))
     common = (
         "# Simplified Agent Contract Active\n"
         "Mission HUD mode is `simplified_agent_contract`. The visible ACTION menu is authoritative. "
@@ -1581,7 +1579,7 @@ def _normal_worker_flow_guidance(persona: AgentPersona) -> str:
     flow = getattr(cfg, "normal_worker_flow", None)
     if not bool(getattr(flow, "enabled", False)):
         return ""
-    role = role_from_persona(persona).value
+    role = str(role_from_persona(persona))
     if role == "dev":
         return (
             "# Normal Worker Flow\n"

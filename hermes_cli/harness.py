@@ -20,7 +20,7 @@ from hermes_constants import get_hermes_home
 from hermes_cli.profiles import list_profiles
 
 from agent_runtime.cli_format import emit_json, human_task_line, task_summary
-from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config, mission_chat_clarify_token_binding, provision_bundled_personas, resolve_mission_chat_max_seconds
+from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config, mission_chat_clarify_token_binding, resolve_mission_chat_max_seconds
 from agent_runtime.continuity import return_summary_to_parent_session
 from agent_runtime.dispatch_session_policy import (
     derive_dispatch_title,
@@ -152,7 +152,7 @@ from agent_runtime.mission_chat_steer import start_active_mission_chat_turn, sub
 from agent_runtime.mission_chat_workdir import mission_chat_workdir_for_persona
 from agent_runtime.observability import build_observability
 from agent_runtime.persona_runtime import GPTPersonaRuntime, chat_lane_capability_drops
-from agent_runtime.personas import profile_chat_toolsets, seed_personas
+from agent_runtime.personas import profile_chat_toolsets
 from agent_runtime.prompt_observability import attach_prompt_observability_turn_results, mission_chat_prompt_observability, persist_prompt_observability_context, slim_chat_final_observability, turn_usage_from_result
 from agent_runtime.provider_health import provider_health_for_personas
 from agent_runtime.skill_install import install_harness_skills, install_harness_skills_for_personas
@@ -332,12 +332,7 @@ def build_parser(parent_subparsers) -> None:
     subs = parser.add_subparsers(dest="harness_command")
     parser.set_defaults(func=harness_command)
 
-    init = subs.add_parser("init", help="Initialize harness store and default personas")
-    init.add_argument(
-        "--with-bundled-personas",
-        action="store_true",
-        help="Persist the profile-backed Neko, Launcher Dev, Backend Dev, and QA team",
-    )
+    init = subs.add_parser("init", help="Initialize the harness store")
     init.add_argument("--json", action="store_true")
     init.set_defaults(func=_cmd_init)
 
@@ -2976,17 +2971,7 @@ def _pet_sprite_payload_for_launcher(pet) -> dict:
 
 def _cmd_init(args) -> int:
     cfg = load_agent_runtime_config()
-    if getattr(args, "with_bundled_personas", False):
-        try:
-            personas = provision_bundled_personas(cfg)
-        except ValueError as exc:
-            return emit_harness_error(
-                exc,
-                args=args,
-                code="bundled_persona_profiles_missing",
-            )
-    else:
-        personas = ensure_persisted_personas(cfg)
+    personas = ensure_persisted_personas(cfg)
     persona_ids = [p.id for p in personas]
     try:
         scope = ensure_default_scope(agent_ids=persona_ids)

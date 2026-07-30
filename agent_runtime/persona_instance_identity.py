@@ -169,23 +169,20 @@ def backed_persona_identity(
     profile_names: Any = None,
 ) -> tuple[set[str], set[str]]:
     """The persona-id / profile-name universe that a persona instance can legitimately
-    back onto: the seeded agent store, the dormant typed catalog (``default_personas``:
-    neko_supervisor / dev / backend_dev / qa are resolvable even though only ``base`` is
-    seeded), and the live profile templates. Single-sourced so the reconcile and snapshot
+    back onto: the persisted agent store and live profile templates. Single-sourced
+    so the reconcile and snapshot
     lanes classify orphans identically. ``agents`` accepts ``AgentPersona`` objects or
     snapshot agent-summary dicts; ``profile_names`` is the profile-template name list."""
-    from .personas import BASE_PERSONA_ID, default_personas, seed_personas
-
-    persona_ids: set[str] = {BASE_PERSONA_ID}
+    persona_ids: set[str] = set()
     profile_set: set[str] = set()
-    for persona in default_personas():
-        pid = _extract_field(persona, "id")
-        if pid:
-            persona_ids.add(pid)
-        hp = _extract_field(persona, "hermes_profile")
-        if hp:
-            profile_set.add(hp)
-    for agent in (agents if agents is not None else seed_personas()) or []:
+    if agents is None:
+        try:
+            from .store import AgentStore
+
+            agents = AgentStore().list_all()
+        except Exception:
+            agents = []
+    for agent in agents or []:
         pid = _extract_field(agent, "id", "persona_id")
         if pid:
             persona_ids.add(pid)

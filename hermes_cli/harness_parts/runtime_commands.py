@@ -315,9 +315,9 @@ def _cmd_contracts_dump(args) -> int:
             "contract_hash": manifest["contract_hash"],
             "role": canonical_role,
             "requested_role": role,
-            "allowed_decisions": manifest["roles"].get(canonical_role, []),
-            "decision_menu_shape_ids": manifest["role_shape_ids"].get(canonical_role, []),
-            "context_expansion_shape_ids": manifest["context_expansion_shape_ids"].get(canonical_role, []),
+            "allowed_decisions": manifest["decisions_available"],
+            "decision_menu_shape_ids": manifest["shape_ids"],
+            "context_expansion_shape_ids": manifest["context_expansion_shape_ids"],
             "hud_shapes": hud_shape_index_for_stage(canonical_role),
         }
     if decision:

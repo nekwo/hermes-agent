@@ -49,7 +49,7 @@ capability is live today.
 | G4 | **Harness terminal safety envelope hard-blocks `git push`, `git restore`, `git checkout -- .`, `rm -rf`, and all non-localhost `curl`/`wget`** — with **no permission-mode escape hatch**. Even `unbounded` cannot lift it. An agent literally cannot land its own work. | `chat`, `acp`, `gateway`, `cron` (envelope inactive) | ✗ blocked | DELIBERATE, but pre-dates the ruling | **P0** — **RESOLVED 2026-07-26 together with G5b**, see [`mission-chat-terminal-envelope-grants.md`](mission-chat-terminal-envelope-grants.md) |
 | G5 | **The tool drops are invisible.** `requirement_failures` carries the new MCP row and *nothing else*: G1/G2/G11 emit no typed row, so "I have no terminal" reads to the agent and the operator as an unexplained absence — the exact defect class the MCP row was created to retire. | n/a | ✗ silent | ACCIDENTAL (same class as the MCP invisibility bug) | **P0** |
 | G6 | **No workdir / repo grounding.** `mission_chat_reply` passes no `workdir`; `TERMINAL_CWD` is never set. The turn runs in whatever cwd the serve process happens to hold. The worker lane resolves a real repo context; `hermes chat` runs in the operator's cwd. | harness **worker** lane (repo ctx), `chat` (operator cwd) | ✗ none | ACCIDENTAL | **P0** |
-| G7 | **Role ceiling caps the lane at ≤13 toolsets.** `ALLOWED_TOOLSETS_BY_ROLE` is an intersection filter, so whole capability classes (`web_extract`, `image_gen`, `tts`, `computer_use`, `memory`, `context_engine`, `project`, `cronjob`, `delegation`) are unreachable on **any** harness lane regardless of config. `hermes chat` defaults to the full `hermes-cli` core set. | `chat` (~40 tools), `gateway`, `acp` | ✗ capped | DELIBERATE, unreviewed since the ruling | P1 |
+| G7 | **Historical role ceiling capped the lane at ≤13 toolsets.** S11 removed the intersection filter; configured persona data now owns the list. | `chat` (~40 tools), `gateway`, `acp` | resolved | REMOVED | P1 |
 | G8 | **Core context files skipped by default** (`AGENTS.md` / `CLAUDE.md` / `.hermes.md` / `.cursorrules`). Opt-in exists (`include_core_context_files`) but is root-`config.yaml`-only — no CLI and no Mission Control surface. | `chat`, `acp`, `gateway`, `oneshot` (all load them); `cron` loads SOUL always, project docs only with a job workdir | ✗ skipped | DELIBERATE (T-series cost work) + invisible knob | P1 |
 | G9 | **No durable memory, read or write.** `skip_memory` defaults on (MEMORY.md / USER.md not injected) *and* the `memory` tool is globally blocked by `PERSONA_BLOCKED_TOOLS`, so the agent can neither read nor write its own memory. | `chat`, `acp`, `gateway`, `oneshot` (`cron` also skips, deliberately) | ✗ both halves | DELIBERATE (two independent decisions, compounding) | P1 |
 | G10 | **Default wall budget is 240 s** → ~180 s of working window after the checkpoint reserve. `hermes chat` is unbounded; the worker lane defaults to 300 s and is config-tunable per persona. A 30-minute task cannot run on mission-chat without the caller overriding `--max-seconds`. | `chat` (unbounded), worker (300 s, tunable) | 240 s CLI default | DELIBERATE | P1 |
@@ -118,10 +118,10 @@ worker lane never passes through it — `run_tick` calls
 (`agent_runtime/personas.py:239`, toolsets
 `file, search, terminal, session_search, code_execution, todo, skills, mission_goal`):
 
-1. `effective_toolsets` ∩ `ALLOWED_TOOLSETS_BY_ROLE[ALICE_SUPERVISOR]` → unchanged.
+1. `effective_toolsets` preserves the persona's configured toolsets.
 2. `_augment_chat_capabilities` (`persona_runtime.py:972`) adds `agent_chat`, `board`, `clarify`.
 3. `scope_chat_lane_toolsets` drops `file`, `terminal`, `code_execution`.
-4. `persona.id == DEFAULT_SUPERVISOR_PERSONA_ID` drops `mission_goal` (`persona_runtime.py:903-904`).
+4. The retired mission-goal capability is absent for every persona.
 
 **Final mission-chat surface:** `search` (= `web_search` only —
 `toolsets.py:103-107`), `session_search`, `todo`, `skills` (minus
@@ -202,15 +202,7 @@ typed member.
 
 `agent_runtime/personas.py:72-93`:
 
-```python
-ALLOWED_TOOLSETS_BY_ROLE = {
-    PM:               {file, session_search, todo, skills, agent_chat, board},
-    DEV:              {file, search, terminal, session_search, todo, code_execution, skills, agent_chat, board},
-    QA:               {file, search, terminal, browser, vision, session_search, skills, agent_chat, board},
-    ALICE_SUPERVISOR: {file, search, terminal, code_execution, browser, vision, web,
-                       session_search, todo, skills, mission_goal, agent_chat, board},
-}
-```
+The former per-role mapping was deleted in S11.
 
 `validate_toolsets` (L183-186) **intersects** the persona's configured list with
 this set, so a toolset absent from the ceiling can never be enabled on any
@@ -231,15 +223,10 @@ delegate_task, memory, cronjob, computer_use. `acp`, `cron`, `gateway`, and
 
 **Classification:** DELIBERATE (role hygiene for the typed pipeline), but
 written for the worker pipeline and never revisited for a lane that is meant to
-host *all* work. Note the seeded reality: `seed_personas()`
-(`personas.py:296-332`) materializes exactly one persona (`base`) with the
-`profile` role sentinel, which coerces to `ALICE_SUPERVISOR` (`personas.py:49-66`).
-So in practice the live ceiling is the supervisor row.
+host *all* work. S11 removed both seed synthesis and the ceiling.
 
-**Seam:** `agent_runtime/personas.py::ALLOWED_TOOLSETS_BY_ROLE` +
-`validate_toolsets`. Decide whether the ceiling remains a *deny* list (current
-behavior: unlisted ⇒ forbidden) or becomes a *default* (unlisted ⇒ allowed if
-explicitly configured).
+**Resolved seam:** `validate_toolsets` now preserves explicitly configured
+toolsets and deduplicates them.
 
 ### G11 — `skill_manage` blocked on chat lanes
 

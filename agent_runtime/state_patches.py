@@ -241,7 +241,7 @@ def project_persona_instance_wire_fields(instance: Any, changed_store_fields: It
     ``_profile_visibility_persona`` → ``ensure_persisted_personas``, which SEEDS
     the agent store and emits a stray ``persona.updated`` into the mutation's own
     event batch (demoting a coverable batch to a full core). The persona is
-    resolved read-only (``AgentStore().list_all()`` / in-memory ``seed_personas``,
+    resolved read-only from ``AgentStore().list_all()``,
     neither of which writes); a profile instance whose persona is absent yields
     the same ``model=None / provider=None / skills=overrides`` fallback the
     visibility-persona standin does.
@@ -303,11 +303,10 @@ def _resolve_persona_for(instance: Any) -> Any:
     values). Best-effort: any resolution failure falls back to None."""
 
     try:
-        from .config import seed_personas
         from .store import AgentStore
 
         persona_id = str(getattr(instance, "persona_id", "") or "")
-        personas = AgentStore().list_all() or seed_personas()
+        personas = AgentStore().list_all()
         return {p.id: p for p in personas}.get(persona_id)
     except Exception:
         return None

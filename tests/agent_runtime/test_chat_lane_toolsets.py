@@ -26,7 +26,8 @@ from agent_runtime.chat_lane_toolsets import (
 )
 from agent_runtime.config import chat_lane_restore_toolsets, load_agent_runtime_config
 from agent_runtime.models import AgentPersona
-from agent_runtime.personas import AgentRole, default_personas
+from agent_runtime.personas import AgentRole
+from tests.agent_runtime.persona_samples import sample_personas
 from agent_runtime.tool_permissions import PERMISSION_MODE_UNBOUNDED
 from agent_runtime.tool_visibility import ToolVisibilityOptions
 
@@ -197,7 +198,7 @@ def _persona_with_dev_toolkit():
 
 
 def test_default_neko_chat_lane_excludes_dev_toolkit():
-    neko = next(p for p in default_personas() if p.id == "neko_supervisor")
+    neko = next(p for p in sample_personas() if p.id == "neko_supervisor")
     enabled = PR._enabled_toolsets_for_chat(neko, session_id=None)
     # browser/vision/code_execution (T3) + file/terminal (T6a) all drop.
     assert not {"browser", "vision", "code_execution", "file", "terminal"} & set(enabled)
@@ -241,7 +242,7 @@ def test_unbounded_permission_mode_is_not_scoped(monkeypatch):
 # Single-tool (skill_manage) cut at the blocked-tool-names chokepoint.
 # --------------------------------------------------------------------------- #
 def test_default_neko_chat_lane_blocks_skill_manage_but_keeps_read_only_skill_tools():
-    neko = next(p for p in default_personas() if p.id == "neko_supervisor")
+    neko = next(p for p in sample_personas() if p.id == "neko_supervisor")
     blocked = PR._blocked_tool_names_for_chat(neko, session_id=None)
     assert "skill_manage" in blocked
     # Read-only skill recall stays available (never in the block list).
@@ -251,14 +252,14 @@ def test_default_neko_chat_lane_blocks_skill_manage_but_keeps_read_only_skill_to
 
 
 def test_chat_lane_restore_unblocks_skill_manage(monkeypatch):
-    neko = next(p for p in default_personas() if p.id == "neko_supervisor")
+    neko = next(p for p in sample_personas() if p.id == "neko_supervisor")
     monkeypatch.setattr(PR, "chat_lane_restore_toolsets", lambda persona_id: ["skill_manage"])
     blocked = PR._blocked_tool_names_for_chat(neko, session_id=None)
     assert "skill_manage" not in blocked
 
 
 def test_unbounded_permission_mode_does_not_block_skill_manage(monkeypatch):
-    neko = next(p for p in default_personas() if p.id == "neko_supervisor")
+    neko = next(p for p in sample_personas() if p.id == "neko_supervisor")
     monkeypatch.setattr(
         PR,
         "permission_options_for_chat",

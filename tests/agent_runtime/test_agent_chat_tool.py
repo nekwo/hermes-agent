@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
+
 from agent_runtime.relay_policy import RELAY_CHAIN, RELAY_DEADLINE
 from tools.agent_chat_tool import (
     AGENT_CHAT_OPEN_SCHEMA,
@@ -243,11 +245,12 @@ def test_tool_does_not_mutate_ambient_relay_state(monkeypatch):
     assert RELAY_DEADLINE.get() is None
 
 
-@pytest.mark.parametrize("role_key", ["PM", "DEV", "QA", "ALICE_SUPERVISOR"])
-def test_every_role_is_allowed_the_agent_chat_toolset(role_key):
-    from agent_runtime.personas import ALLOWED_TOOLSETS_BY_ROLE, AgentRole
+@pytest.mark.parametrize("role", ["custom-reviewer", "dev", "qa", "profile"])
+def test_every_configured_role_gets_chat_capabilities(role):
+    from agent_runtime.persona_runtime import _augment_chat_capabilities
+    from tests.agent_runtime.persona_samples import sample_persona
 
-    assert "agent_chat" in ALLOWED_TOOLSETS_BY_ROLE[AgentRole[role_key]]
+    assert "agent_chat" in _augment_chat_capabilities(sample_persona(role=role), ["search"])
 
 
 def test_profile_chat_fallback_includes_agent_chat():

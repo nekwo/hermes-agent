@@ -32,14 +32,14 @@ from agent_runtime.mcp_lane import (
     mcp_lane_requirement_failures,
     set_entry_point_lane,
 )
-from agent_runtime.personas import default_personas
+from tests.agent_runtime.persona_samples import sample_personas
 from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _persona(persona_id: str):
-    return {persona.id: persona for persona in default_personas()}[persona_id]
+    return {persona.id: persona for persona in sample_personas()}[persona_id]
 
 
 def _mcp_declaring_persona(*servers: str):

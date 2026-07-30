@@ -19,7 +19,7 @@ What this is (and is NOT)
 This module is a **pure filter** over an *already-resolved* toolset list. It
 never GRANTS a toolset that a role / permission layer withheld — it only DROPS
 the browser / vision / heavy-dev toolsets from a chat lane's enabled set. Role
-gating (``ALLOWED_TOOLSETS_BY_ROLE``), persona blocklists, and permission mode
+gating, persona blocklists, and permission mode
 all run first and upstream; this is the last, cost-motivated narrowing applied
 only at the chat-lane chokepoint (``persona_runtime._enabled_toolsets_for_chat``).
 

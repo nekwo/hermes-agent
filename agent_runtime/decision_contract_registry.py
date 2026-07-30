@@ -200,21 +200,12 @@ def payload_contract(decision_type: DecisionType | str) -> dict[str, Any]:
 
 
 def allowed_decisions_for_role(role: AgentRole | str) -> frozenset[DecisionType]:
-    resolved = role if isinstance(role, AgentRole) else AgentRole(str(role))
-    decisions: set[DecisionType] = set()
-    for shape_id in (*_ROLE_SHAPE_IDS.get(resolved, _ROLE_SHAPE_IDS[AgentRole.DEV]), *_COMMON_SHAPE_IDS, *tuple(context_expansion_shape_ids(resolved))):
-        shape = _HUD_SHAPES.get(shape_id)
-        if shape is not None and resolved in shape.roles:
-            decisions.add(shape.decision_type)
-    return frozenset(decisions)
-
-
-def allowed_decisions_by_role() -> dict[AgentRole, frozenset[DecisionType]]:
-    return {role: allowed_decisions_for_role(role) for role in AgentRole}
+    del role
+    return frozenset(_DECISION_CONTRACTS)
 
 
 def canonical_role_value(role: AgentRole | str) -> str:
-    return _resolve_hud_owner(role).value
+    return role.value if isinstance(role, AgentRole) else str(role)
 
 
 def validate_payload_keys(decision) -> None:
@@ -255,34 +246,18 @@ def hud_shape(shape_id: str) -> dict[str, Any]:
 
 
 def hud_shape_index_for_stage(owner: str | AgentRole) -> dict[str, dict[str, Any]]:
-    resolved = _resolve_hud_owner(owner)
-    result: dict[str, dict[str, Any]] = {}
-    for shape_id in role_shape_ids(resolved):
-        shape = _HUD_SHAPES.get(shape_id)
-        if shape is not None and _shape_visible_to_role(shape, resolved):
-            result[shape_id] = hud_shape(shape_id)
-    for shape_id in _COMMON_SHAPE_IDS:
-        shape = _HUD_SHAPES.get(shape_id)
-        if shape is not None and _shape_visible_to_role(shape, resolved):
-            result.setdefault(shape_id, hud_shape(shape_id))
-    return result
+    del owner
+    return {shape_id: hud_shape(shape_id) for shape_id in _HUD_SHAPES}
 
 
 def role_shape_ids(role: str | AgentRole) -> list[str]:
-    resolved = _resolve_hud_owner(role)
-    return [
-        shape_id
-        for shape_id in _ROLE_SHAPE_IDS.get(resolved, _ROLE_SHAPE_IDS[AgentRole.DEV])
-        if (shape := _HUD_SHAPES.get(shape_id)) is not None and _shape_visible_to_role(shape, resolved)
-    ]
+    del role
+    return list(_HUD_SHAPES)
 
 
 def context_expansion_shape_ids(role: str | AgentRole) -> list[str]:
-    resolved = _resolve_hud_owner(role)
-    shape_ids = ["common.request_file_reads"]
-    if resolved in {AgentRole.ALICE_SUPERVISOR, AgentRole.DEV}:
-        shape_ids.append("common.needs_context")
-    return shape_ids
+    del role
+    return ["common.request_file_reads", "common.needs_context"]
 
 
 def object_contract(contract_id: str) -> dict[str, Any]:
@@ -349,19 +324,11 @@ def contract_manifest() -> dict[str, Any]:
         "schema_version": CONTRACT_SCHEMA_VERSION,
         "agent_decision_schema": agent_decision_json_schema(),
         "decisions": {key.value: value.manifest() for key, value in _DECISION_CONTRACTS.items()},
-        "roles": {role.value: [item.value for item in allowed_decisions_for_role(role)] for role in AgentRole},
-        "role_aliases": {
-            "neko_supervisor": AgentRole.ALICE_SUPERVISOR.value,
-            "backend_dev": AgentRole.DEV.value,
-            "launcher_dev": AgentRole.DEV.value,
-        },
+        "decisions_available": [item.value for item in DecisionType],
         "objects": {key: value.manifest() for key, value in _OBJECT_CONTRACTS.items()},
         "hud_shapes": {key: value.manifest() for key, value in _HUD_SHAPES.items()},
-        "role_shape_ids": {role.value: list(shape_ids) for role, shape_ids in _ROLE_SHAPE_IDS.items()},
-        "context_expansion_shape_ids": {
-            role.value: context_expansion_shape_ids(role)
-            for role in AgentRole
-        },
+        "shape_ids": list(_HUD_SHAPES),
+        "context_expansion_shape_ids": context_expansion_shape_ids("*"),
         "events": event_catalog(),
         "contract_hash": contract_hash(),
     }
@@ -408,16 +375,6 @@ def verify_registry() -> dict[str, Any]:
     )
     hud_template_errors = _validate_hud_templates()
     role_shape_errors: list[dict[str, str]] = []
-    for role, shape_ids in _ROLE_SHAPE_IDS.items():
-        allowed = allowed_decisions_for_role(role)
-        for shape_id in (*shape_ids, *_COMMON_SHAPE_IDS, *tuple(context_expansion_shape_ids(role))):
-            shape = _HUD_SHAPES.get(shape_id)
-            if shape is None:
-                role_shape_errors.append({"role": role.value, "shape_id": shape_id, "error": "missing_shape"})
-            elif role not in shape.roles:
-                continue
-            elif shape.decision_type not in allowed:
-                role_shape_errors.append({"role": role.value, "shape_id": shape_id, "error": f"decision_not_allowed:{shape.decision_type.value}"})
     return {
         "ok": not missing and not missing_object_contracts and not hud_template_errors and not role_shape_errors,
         "schema_version": CONTRACT_SCHEMA_VERSION,
@@ -447,10 +404,6 @@ def _shape_from_contract(shape: HudShape) -> dict[str, Any]:
         }
     )
     return _drop_empty(result)
-
-
-def _shape_visible_to_role(shape: HudShape, role: AgentRole) -> bool:
-    return role in shape.roles and shape.decision_type in allowed_decisions_for_role(role)
 
 
 def _validate_hud_templates() -> list[dict[str, str]]:
@@ -519,21 +472,6 @@ def _validate_stage_payload_keys(payload: dict[str, Any], *, contract: DecisionC
                 f"propose_stage_plan stages[{idx}] has unsupported keys: {extra}; "
                 f"allowed keys are {list(contract.stage_allowed_keys)}"
             )
-
-
-def _resolve_hud_owner(role: str | AgentRole) -> AgentRole:
-    if isinstance(role, AgentRole):
-        return role
-    value = str(role or "").strip()
-    if value == "neko_supervisor":
-        return AgentRole.ALICE_SUPERVISOR
-    if value in {"backend_dev", "dev"} or value.endswith("_dev"):
-        return AgentRole.DEV
-    if value == "qa":
-        return AgentRole.QA
-    if value == "alice_supervisor":
-        return AgentRole.ALICE_SUPERVISOR
-    return AgentRole.DEV
 
 
 def _drop_empty(payload: dict[str, Any]) -> dict[str, Any]:
@@ -1099,46 +1037,6 @@ _HUD_SHAPES: dict[str, HudShape] = {
         _QA_ONLY,
         "Use only if the stage/proof gate is wrong; do not patch code.",
         payload_template={"stage_id": "<current stage>", "target_stage_id": "<known stage id when rerouting>", "corrections": ["<stage/proof gate correction>"], "audit_notes": ["<why QA corrected the stage>"], "test_plan": ["<optional proof command>"]},
-    ),
-}
-
-
-_ROLE_SHAPE_IDS: dict[AgentRole, tuple[str, ...]] = {
-    AgentRole.ALICE_SUPERVISOR: (
-        "neko.scope_route",
-        "neko.resolve_incident",
-        "neko.triage_issue_discovery",
-        "common.needs_context",
-        "common.block",
-        "common.request_human",
-    ),
-    AgentRole.DEV: (
-        "dev.hand_off",
-        "common.escalate",
-        "dev.request_test_run",
-        "dev.request_screenshot",
-        "dev.correct_stage",
-        "dev.propose_stage_plan",
-        "common.request_file_reads",
-        "common.needs_context",
-        "common.block",
-    ),
-    AgentRole.QA: (
-        "qa.verdict",
-        "common.escalate",
-        "qa.request_screenshot",
-        "qa.request_video",
-        "qa.request_test_run",
-        "qa.correct_stage",
-        "common.request_file_reads",
-        "common.block",
-    ),
-    AgentRole.PM: (
-        "neko.scope_route",
-        "common.needs_context",
-        "common.block",
-        "common.request_human",
-        "neko.triage_issue_discovery",
     ),
 }
 

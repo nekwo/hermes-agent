@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
+
 from hermes_constants import get_hermes_home, get_shared_skills_dir
 
 from agent_runtime import paths as runtime_paths

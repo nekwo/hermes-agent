@@ -27,11 +27,8 @@ these rows lingered forever with no prune and no accounting.
   persona/profile is absent from the **backed universe** OR its role/persona is
   mothballed; a real product agent (backed and not mothballed) is skipped
   entirely.
-- **Backed universe** = `backed_persona_identity()`: the seeded agent store, the
-  dormant typed catalog `default_personas()` (neko_supervisor / dev / backend_dev
-  / qa are resolvable even though only `base` is seeded), and the live profile
-  templates. This is why dev/qa/neko/backend_dev — not in the single-`base`
-  agent store — are never flagged.
+- **Backed universe** = `backed_persona_identity()`: persisted persona records
+  plus live profile templates. No persona ids are synthesized by code.
 - **Blind-catalog guard**: when the profile template catalog can't be positively
   enumerated (empty/failed read), `profile:*` rows are NEVER classified
   `orphan-no-profile` (a missing template is indistinguishable from an

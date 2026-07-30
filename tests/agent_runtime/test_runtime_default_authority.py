@@ -5,6 +5,10 @@ is present. Guards against the "dropdown says luna, agents run gpt-5.5" split.
 
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
+
 from agent_runtime.config import load_agent_runtime_config, persona_records_from_config
 from agent_runtime.snapshot import build_snapshot
 
@@ -21,7 +25,11 @@ def test_snapshot_runtime_default_follows_top_level_model(tmp_path, monkeypatch)
     p.write_text(
         "model:\n"
         "  default: gpt-5.6-luna\n"
-        "  provider: openai-codex\n",
+        "  provider: openai-codex\n"
+        "agent_runtime:\n"
+        "  personas:\n"
+        "    neko_supervisor:\n"
+        "      role: custom-lead\n",
         encoding="utf-8",
     )
     _point_config_at(monkeypatch, p)
@@ -65,7 +73,11 @@ def test_unpinned_catalog_persona_resolves_to_top_level_default(tmp_path, monkey
     p.write_text(
         "model:\n"
         "  default: gpt-5.6-luna\n"
-        "  provider: openai-codex\n",
+        "  provider: openai-codex\n"
+        "agent_runtime:\n"
+        "  personas:\n"
+        "    neko_supervisor:\n"
+        "      role: custom-lead\n",
         encoding="utf-8",
     )
     _point_config_at(monkeypatch, p)

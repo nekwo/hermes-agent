@@ -23,12 +23,11 @@ The invariants this module exists to hold
    is per-RUN and per-PERSONA, driven by ``register_mcp_servers({name: cfg})``
    for an explicitly resolved subset — the same per-session mechanism
    ``acp_adapter/server.py::_register_session_mcp_servers`` already uses.
-2. **Deny by default, and every step can only NARROW.** requested (what the
-   persona declares) → role/lane allowlist (root config, no wildcard) → R1 stage
-   floor → resolvable on this machine (``machine_roots``) → permission-mode tool
-   filter. A persona that declares nothing admits nothing; a role the config
-   does not name admits nothing; an unknown lane admits nothing.
-3. **``unbounded`` must never widen the admitted set.** The chat lane's
+2. **The profile declaration is the admission authority.** A persona can admit
+   only servers declared by its backing profile. A profile that declares none
+   admits none; role names do not narrow or widen that data-owned set. Machine
+   resolution and permission-mode filtering may still narrow it.
+3. **``unbounded`` must never cross the declared set.** The chat lane's
    ``unbounded`` mode resolves ``all_registered_toolsets()`` — which, in a
    long-lived multi-persona harness process, would include another persona's
    admitted MCP toolsets. ``scope_toolsets_to_admission`` is applied AFTER
@@ -148,20 +147,6 @@ MCP_ADMISSION_BUDGET_EXHAUSTED = "mcp_admission_budget_exhausted"
 #: answers "did this process run MCP discovery". Both are needed: admission is
 #: what puts tools on the harness entry point in the first place.
 LANE_MISSION_CHAT = "mission_chat"
-
-#: R1 stage floor. Admission is config-driven (design §A step 2, R4 widens by
-#: config alone), but R1 additionally refuses any role outside this set even
-#: when the config names it — the first autonomous lane that can spawn a local
-#: GUI-driving executable ships to ONE role, deliberately. Retired by R4.
-#:
-#: Operator ruling 2026-07-29 (R4 widening, deliberate product decision — NOT a
-#: config edit alone, which is exactly why it is recorded here): ``dev`` joins
-#: ``qa``. Launcher Dev drives the same Stage C ``launcher_qa`` surface to
-#: verify its own Launcher changes visually instead of routing every check
-#: through QA. The floor is WIDENED, not retired: every other role is still
-#: refused even when the config names it, so this stays a two-key decision
-#: (this set AND ``agent_runtime.mcp_admission.roles`` in the root config).
-R1_ADMISSIBLE_ROLES = frozenset({"qa", "dev"})
 
 #: Toolset-name prefix ``tools/mcp_tool.py`` registers every MCP server under.
 _MCP_TOOLSET_PREFIX = "mcp-"
@@ -667,49 +652,8 @@ def resolve_mcp_admission(
     if not requested:
         return _empty([])
 
-    allowed = _allowed_servers(config, role=role, lane=lane)
-    if role not in R1_ADMISSIBLE_ROLES:
-        return _empty(
-            [
-                McpAdmissionDenial(
-                    server=name,
-                    code=MCP_NOT_ADMITTED_FOR_ROLE,
-                    summary=(
-                        f"Role '{role}' is outside the MCP admission stage floor "
-                        f"({', '.join(sorted(R1_ADMISSIBLE_ROLES))}), so '{name}' is not registered."
-                    ),
-                    fix_hint=(
-                        "Admission ships one role at a time. Widening it is a deliberate "
-                        "product decision (design R4), not a config edit alone."
-                    ),
-                )
-                for name in requested
-            ]
-        )
-
     denials: list[McpAdmissionDenial] = []
-    candidates: list[str] = []
-    for name in requested:
-        if name in allowed:
-            candidates.append(name)
-            continue
-        denials.append(
-            McpAdmissionDenial(
-                server=name,
-                code=MCP_NOT_ADMITTED_FOR_ROLE,
-                summary=(
-                    f"'{name}' is declared for this persona, but role '{role}' is not "
-                    f"allowed to admit it on the '{lane}' lane."
-                ),
-                fix_hint=(
-                    "Add it under agent_runtime.mcp_admission.roles."
-                    f"{role}.{lane} in the ROOT config.yaml, with a written security note."
-                ),
-            )
-        )
-
-    if not candidates:
-        return _empty(denials)
+    candidates = list(requested)
 
     configured = _configured_servers_for(persona)
     resolvable: dict[str, Any] = {}
@@ -828,19 +772,6 @@ def _configured_servers_for(persona) -> dict[str, Any]:
     except Exception:  # pragma: no cover - defensive; a config fault must not open the gate
         logger.debug("MCP admission could not read the persona profile config", exc_info=True)
         return {}
-
-
-def _allowed_servers(config: Any, *, role: str, lane: str) -> frozenset[str]:
-    """``roles.<role>.<lane>`` — deny-by-default, no wildcard, no inheritance."""
-
-    roles = getattr(config, "roles", None) or {}
-    lanes = roles.get(role) if isinstance(roles, Mapping) else None
-    if not isinstance(lanes, Mapping):
-        return frozenset()
-    servers = lanes.get(lane)
-    if not isinstance(servers, (list, tuple, set, frozenset)):
-        return frozenset()
-    return frozenset(str(name).strip() for name in servers if str(name or "").strip())
 
 
 def _apply_permission_mode(

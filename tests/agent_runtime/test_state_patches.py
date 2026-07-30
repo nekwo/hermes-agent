@@ -30,7 +30,7 @@ import pytest
 from hermes_time import now
 
 from agent_runtime import state_patches as sp
-from agent_runtime.config import load_agent_runtime_config, seed_personas
+from agent_runtime.config import load_agent_runtime_config
 from agent_runtime.decision_contract_registry import allowed_event_types, validate_event_payload
 from agent_runtime.events import EVENT_PAYLOAD_LIMIT_BYTES, EventLog
 from agent_runtime.models import AgentPersona, Event, Incident
@@ -231,7 +231,7 @@ def test_persona_instance_projection_parity_with_summary(isolate_agent_runtime_r
     store = PersonaInstanceStore()
     instance = store.create_free_floating("profile:reviewer")
     instance = store.update_profile(instance.id, model="claude-opus-4-8", provider="anthropic")
-    agents = AgentStore().list_all() or seed_personas()
+    agents = AgentStore().list_all()
     persona = {p.id: p for p in agents}.get(str(instance.persona_id or ""))
     summary = persona_instance_summary(instance, persona)
     row = sp._persona_instance_wire_row(instance, sp._resolve_persona_for(instance))

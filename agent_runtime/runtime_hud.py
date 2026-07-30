@@ -1041,7 +1041,7 @@ def capability_block_for_persona(
         from .terminal_envelope import LANE_MISSION_CHAT, explain_terminal_envelope
 
         try:
-            role = str(role_from_persona(persona).value)
+            role = str(role_from_persona(persona))
         except Exception:
             role = str(getattr(persona, "role", "") or "")
         envelope = explain_terminal_envelope(

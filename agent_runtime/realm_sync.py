@@ -52,7 +52,7 @@ SECRET_PATH_MARKERS = {
 # The machine seed every free Hermes profile forks from. Its RAW settings never
 # travel through realm sync (Office layout realm-sync plan §5.1) — only the
 # allowlisted persona definitions bound to it do. Same spelling as
-# ``personas.BASE_PERSONA_ID``; kept as its own constant here because the guard
+# the historical base persona id; kept as its own constant here because the guard
 # is about the profile HOME, which is what the original persona-id guard missed.
 BASE_PROFILE_NAME = "base"
 HARD_EXCLUDED_PATH_PARTS = {
@@ -1308,7 +1308,7 @@ def _assert_no_raw_profile_config(artifacts: list[RealmSyncArtifact]) -> None:
     §5.1 ruled the base profile — the machine seed every free profile forks from
     — must never travel: overwriting a member's fork seed changes every agent
     they create afterwards, including outside this realm. The original guard was
-    written against the base PERSONA id (``personas.BASE_PERSONA_ID``), so a
+    written against the base PERSONA id, so a
     persona merely *bound to* ``hermes_profile: base`` walked past it and
     published ``profiles/base/config.yaml`` anyway.
 

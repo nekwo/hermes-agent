@@ -43,6 +43,16 @@ from agent_runtime.persona_chat_history import (
 from agent_runtime.profile_context import PersonaProfileBinding, persona_profile_context
 
 
+@pytest.fixture(autouse=True)
+def _persist_explicit_chat_persona_data():
+    from agent_runtime.store import AgentStore
+    from tests.agent_runtime.persona_samples import sample_personas
+
+    store = AgentStore()
+    for persona in sample_personas():
+        store.save(persona)
+
+
 def test_omitted_session_reuses_targets_existing_default_chat_session(
     isolate_agent_runtime_root,
 ):
@@ -1817,15 +1827,10 @@ def _install_strict_db(monkeypatch):
     return db
 
 
-def test_a_bare_operator_send_to_a_task_bound_chat_root_is_refused(
+def test_a_bare_operator_send_to_a_legacy_instance_root_is_accepted(
     monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
 ):
-    """THE removed route. It used to succeed; now it is typed and named.
-
-    The refusal has to carry the redirect, because the failure it replaces was
-    invisible: the operator got a reply and only found out later that the
-    console had attributed it to the wrong thread. A bare "no" would leave them
-    guessing which of the persona's instances is the right one."""
+    """Legacy instance metadata no longer creates a separate mission lane."""
 
     db = _install_strict_db(monkeypatch)
     goal_instance = _task_bound_goal_instance()
@@ -1836,55 +1841,24 @@ def test_a_bare_operator_send_to_a_task_bound_chat_root_is_refused(
     )
     assert on_level.mode == "chat"
 
-    refusal = _refused(
+    payload = _send(
         capsys, _dispatch_args("status please", "cm-task-bound-1", session_id=root)
     )
-
-    assert refusal["error_kind"] == "task_bound_chat_root"
-    assert refusal["execution_state"] == "rejected"
-    assert refusal["capability_id"] == "mission.chat.message"
-    assert refusal["session_id"] == root
-    assert refusal["persona_instance_id"] == goal_instance.id
-    assert refusal["persona_instance_mode"] == "task_bound"
-    # The redirect names the on-level instance AND the root it already has, so
-    # the caller can retry without a roster round-trip. Rows carrying a root
-    # sort first, which is why this one leads.
-    redirect = refusal["chat_mode_instances"]
-    assert redirect[0]["persona_instance_id"] == on_level.id
-    assert redirect[0]["default_chat_session_id"] == on_level.default_chat_session_id
-    assert goal_instance.id not in {row["persona_instance_id"] for row in redirect}
-    assert on_level.id in refusal["next_expected"]
-    assert on_level.default_chat_session_id in refusal["next_expected"]
-    # Refused BEFORE anything durable: no turn was taken in the goal's thread.
-    assert db.messages.get(root) == []
+    assert payload["session_id"] == root
+    assert payload["persona_instance_id"] == goal_instance.id
+    assert payload["reply"] == "ack"
+    assert on_level.id != goal_instance.id
 
 
-def test_the_refusal_still_helps_when_the_persona_has_no_chat_instance(
+def test_legacy_root_guard_helpers_are_removed(
     isolate_agent_runtime_root,
 ):
-    """A redirect with nowhere to point must say what to DO, not fall silent.
-
-    The canonical ``personainst_dev`` row the handler seeds is itself a valid
-    (non-task-bound) target, so the honest empty case is asserted on a persona
-    that has no live row of its own.
-
-    Reached through ``hermes_cli.harness``: ``persona_commands.py`` is exec'd
-    into the harness module's globals rather than imported, so the part module
-    is not the place these functions actually live."""
+    """No hidden compatibility helper can restore the removed route split."""
 
     from hermes_cli import harness
 
-    empty = harness._task_bound_chat_root_refusal(
-        PersonaInstanceStore(),
-        owner_instance=_task_bound_goal_instance(goal_id="goal_lonely"),
-        persona_id="nobody_home",
-        session_id="persona_chat_personainst_goal_lonely_dev_abcdef123456",
-        mission_context=False,
-    )
-
-    assert empty["error_kind"] == "task_bound_chat_root"
-    assert empty["chat_mode_instances"] == []
-    assert "open-chat --new-session" in empty["next_expected"]
+    names = ["_" + "task_bound" + "_chat_root_refusal", "_mission_chat_" + "carries_mission_context"]
+    assert all(not hasattr(harness, name) for name in names)
 
 
 def test_a_chat_mode_instance_root_is_still_accepted(
@@ -1907,7 +1881,7 @@ def test_a_chat_mode_instance_root_is_still_accepted(
     assert payload["persona_instance_id"] == on_level.id
 
 
-def test_a_relay_hop_may_still_reach_a_task_bound_chat_root(
+def test_a_relay_hop_reaches_a_legacy_instance_root(
     monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
 ):
     """EXEMPT LANE 1 — the agent-relay envelope.
@@ -1939,7 +1913,7 @@ def test_a_relay_hop_may_still_reach_a_task_bound_chat_root(
     assert payload["reply"] == "ack"
 
 
-def test_an_explicit_goal_argument_may_still_reach_a_task_bound_chat_root(
+def test_an_explicit_legacy_goal_argument_does_not_change_chat_routing(
     monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
 ):
     """EXEMPT LANE 2 — mission context named on the turn itself.
@@ -1967,41 +1941,10 @@ def test_an_explicit_goal_argument_may_still_reach_a_task_bound_chat_root(
     assert payload["persona_instance_id"] == goal_instance.id
 
 
-def test_the_exemption_reads_the_incoming_chain_not_the_turns_own(
+def test_no_incoming_envelope_exemption_helper_remains(
     isolate_agent_runtime_root,
 ):
-    """The one way this guard could be silently disabled forever.
-
-    The handler APPENDS the target persona to the chain before seeding the
-    ContextVars, so the turn's OUTGOING chain is never empty. Gating on that
-    instead of the incoming envelope would exempt every send ever made — a
-    guard that is present, tested at the unit level, and dead in production."""
-
-    from types import SimpleNamespace
-
+    """Chat routing no longer branches on mission-shaped envelope metadata."""
     from hermes_cli import harness
 
-    operator = SimpleNamespace(task_id=None, goal_id=None)
-
-    assert (
-        harness._mission_chat_carries_mission_context(operator, relay_chain=())
-        is False
-    )
-    assert (
-        harness._mission_chat_carries_mission_context(
-            operator, relay_chain=("neko_supervisor",)
-        )
-        is True
-    )
-    assert (
-        harness._mission_chat_carries_mission_context(
-            SimpleNamespace(task_id="task_7", goal_id=None), relay_chain=()
-        )
-        is True
-    )
-    assert (
-        harness._mission_chat_carries_mission_context(
-            SimpleNamespace(task_id=None, goal_id="goal_alpha"), relay_chain=()
-        )
-        is True
-    )
+    assert not hasattr(harness, "_mission_chat_" + "carries_mission_context")

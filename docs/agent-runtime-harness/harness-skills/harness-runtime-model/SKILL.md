@@ -88,17 +88,9 @@ investigation language, MCP verification, and multi-agent coordination never imp
 
 ## Persona chat continuity
 
-**Message the on-level instance.** Operator chat targets the chat-mode level
-instances (`personainst_<role>_agent_<hash>` — the agents standing on the
-Mission Control level, the same identities the agent-chat relay uses). The bare
-task-bound instances (`personainst_qa`, `personainst_dev`,
-`personainst_goal_*`, …) belong to the goal graph/daemon, and that operator
-route is **removed**: `mission-chat message` rejects a bare operator send to
-their chat roots with `task_bound_chat_root` and names the persona's chat-mode
-on-level instances (with their default roots) in `next_expected` /
-`chat_mode_instances`. Redirect there — do not retry. Mission lanes are
-unaffected: a relay hop (non-empty `relay_chain`) or a send carrying
-`--task`/`--goal` still reaches these instances normally.
+**Message the on-level instance.** Persona instances and their chat roots use
+one chat lane. Legacy lifecycle metadata does not create a separate routing
+class and does not change whether an exact, owned chat root can receive a turn.
 
 `PersonaInstance.default_chat_session_id` is the operator-chat pointer. Worker
 and run session IDs are separate and must never be used as chat roots. Hermes

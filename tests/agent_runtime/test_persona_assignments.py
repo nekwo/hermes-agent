@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
+
 from hermes_time import now
 
 from agent_runtime.actions import HarnessAction, HarnessActionType

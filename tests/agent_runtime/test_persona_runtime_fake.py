@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
+
 from hermes_time import now
 
 from agent_runtime.context_builder import build_context
@@ -20,9 +22,9 @@ from agent_runtime.profile_runner import AgentRunResult
 from agent_runtime.personas import (
     REGISTRY_HYGIENE_BLOCKED_TOOLS,
     all_registered_toolsets,
-    default_personas,
     effective_toolsets,
 )
+from tests.agent_runtime.persona_samples import sample_personas
 from agent_runtime.tool_permissions import ChatToolPermissionStore
 from agent_runtime.states import RunState, TaskState
 
@@ -144,7 +146,7 @@ def test_chat_permission_unbounded_reaches_actual_agent_request(tmp_path, monkey
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     FakeAIAgent.instances.clear()
     session_id = "session_unbounded_actual"
-    qa = next(persona for persona in default_personas() if persona.id == "qa")
+    qa = next(persona for persona in sample_personas() if persona.id == "qa")
     ChatToolPermissionStore().set(
         persona_id=qa.id,
         session_id=session_id,
@@ -169,7 +171,7 @@ def test_chat_permission_unbounded_one_turn_expires_after_success(tmp_path, monk
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     FakeAIAgent.instances.clear()
     session_id = "session_unbounded_once"
-    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    neko = next(persona for persona in sample_personas() if persona.id == "neko_supervisor")
     store = ChatToolPermissionStore()
     store.set(
         persona_id=neko.id,
@@ -196,7 +198,7 @@ def test_chat_reply_can_disable_internal_session_persistence(tmp_path, monkeypat
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     FakeAIAgent.instances.clear()
     session_db = object()
-    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    neko = next(persona for persona in sample_personas() if persona.id == "neko_supervisor")
     runtime = GPTPersonaRuntime(
         default_provider="openai-codex",
         default_model="gpt-5.5",
@@ -218,7 +220,7 @@ def test_chat_reply_routes_tool_calls_into_session_keyed_trace(tmp_path, monkeyp
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     FakeAIAgent.instances.clear()
     session_id = "session_chat_tool_trace"
-    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    neko = next(persona for persona in sample_personas() if persona.id == "neko_supervisor")
 
     class ToolCallingAgent(FakeAIAgent):
         def run_conversation(self, *, user_message, system_message, task_id):
@@ -303,7 +305,7 @@ def test_reasoning_summary_does_not_fire_pre_trace_ack(tmp_path, monkeypatch):
 def test_persona_chat_prompt_allows_real_tools_and_forbids_fabrication():
     from agent_runtime.persona_runtime import _persona_chat_system_prompt
 
-    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    neko = next(persona for persona in sample_personas() if persona.id == "neko_supervisor")
     prompt = _persona_chat_system_prompt(neko)
 
     # Full tool access: actually use tools, permission-gated, no escalation nudge.
@@ -330,7 +332,7 @@ def test_clarify_enabled_and_unblocked_on_chat_lane_but_blocked_on_runs():
     )
     from agent_runtime.personas import blocked_tool_names
 
-    personas = {p.id: p for p in default_personas()}
+    personas = {p.id: p for p in sample_personas()}
     for pid in ("neko_supervisor", "dev", "qa"):
         persona = personas[pid]
         # Chat lane: clarify toolset is offered and the tool is not blocked, so
@@ -348,7 +350,7 @@ def test_mission_chat_surface_message_always_carries_operative_rules():
         _mission_chat_surface_message,
     )
 
-    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    neko = next(persona for persona in sample_personas() if persona.id == "neko_supervisor")
 
     # Blank operator surface still injects the identity block THEN the operative
     # rules (so the "you are <persona>" hat and the anti-fabrication invariant
@@ -508,7 +510,7 @@ def test_persona_soul_overlay_layers_between_identity_and_rules(tmp_path, monkey
         pr, "_persona_profile_home", lambda name: profile_home if name == "neko" else None
     )
 
-    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    neko = next(persona for persona in sample_personas() if persona.id == "neko_supervisor")
     souled = replace(neko, soul_overlay_path=None, hermes_profile="neko")
 
     composed = pr._mission_chat_surface_message(souled, "")
@@ -553,7 +555,7 @@ def test_profile_backed_soul_never_falls_through_to_operator_home(tmp_path, monk
     monkeypatch.setattr(pr, "get_hermes_home", lambda: operator_home)
     monkeypatch.setattr(pr, "_persona_profile_home", lambda name: None)
 
-    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    neko = next(persona for persona in sample_personas() if persona.id == "neko_supervisor")
     souled = replace(neko, soul_overlay_path="SOUL.md", hermes_profile="neko")
     composed = pr._mission_chat_surface_message(souled, "")
     assert "OPERATOR SOUL" not in composed
@@ -571,7 +573,7 @@ def test_mission_chat_identity_prompt_names_persona_and_forbids_self_relay():
     # forbid relaying to itself.
     from agent_runtime.persona_runtime import _mission_chat_identity_prompt
 
-    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    neko = next(persona for persona in sample_personas() if persona.id == "neko_supervisor")
     identity = _mission_chat_identity_prompt(neko)
 
     assert "You are Neko Mission Lead" in identity
@@ -586,7 +588,7 @@ def test_mission_chat_identity_prompt_names_persona_and_forbids_self_relay():
 
 def test_mission_chat_reply_injects_operative_rules_into_system_message(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    neko = next(persona for persona in sample_personas() if persona.id == "neko_supervisor")
     captured = {}
 
     class CapturingRunner:
@@ -636,7 +638,7 @@ def test_mission_chat_reply_rides_hud_on_user_turn_not_system_prompt(tmp_path, m
     # cache prefix survives. Pins the mission_chat_reply -> _mission_chat_user_message
     # / _mission_chat_surface_message wiring against a silent regression.
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    neko = next(persona for persona in sample_personas() if persona.id == "neko_supervisor")
     captured = {}
 
     class CapturingRunner:
@@ -707,7 +709,7 @@ def test_mission_chat_reply_skill_preload_rides_user_turn_byte_stable(tmp_path, 
     # the cross-turn prompt cache prefix survives a mid-conversation skill load;
     # the skill content lands on the user turn instead.
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    neko = next(persona for persona in sample_personas() if persona.id == "neko_supervisor")
 
     captured: list = []
 
@@ -819,7 +821,7 @@ def test_profile_role_sentinel_resolves_to_supervisor_capabilities():
     )
     from agent_runtime.models import AgentPersona
 
-    assert coerce_agent_role("profile") == AgentRole.ALICE_SUPERVISOR
+    assert coerce_agent_role("profile") == "profile"
 
     profile = AgentPersona(
         id="profile:alice",
@@ -833,7 +835,7 @@ def test_profile_role_sentinel_resolves_to_supervisor_capabilities():
         hermes_profile="alice",
     )
 
-    assert role_from_persona(profile) == AgentRole.ALICE_SUPERVISOR
+    assert role_from_persona(profile) == "profile"
     # The profile's own toolsets survive the supervisor-ceiling intersection.
     assert effective_toolsets(profile) == ["file", "search", "session_search", "todo", "skills"]
 
@@ -1001,7 +1003,7 @@ def test_chat_reply_without_session_records_no_trace(tmp_path, monkeypatch):
     # A sandbox chat turn with no durable session must not synthesize trace.
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     FakeAIAgent.instances.clear()
-    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    neko = next(persona for persona in sample_personas() if persona.id == "neko_supervisor")
 
     class ToolCallingAgent(FakeAIAgent):
         def run_conversation(self, *, user_message, system_message, task_id):
@@ -1070,7 +1072,7 @@ def test_dev_grounds_in_task_affected_repo_without_stage_graph():
 
     task, run = make_task_and_run()
     task.affected_repos = ["hermes-agent"]
-    dev = next(persona for persona in default_personas() if persona.id == "dev")
+    dev = next(persona for persona in sample_personas() if persona.id == "dev")
     dev.repo_scope = None
     ctx = build_context(task, run)
 
@@ -1128,7 +1130,7 @@ def test_mission_chat_reply_sets_cache_scope_id_but_keeps_session_none(tmp_path,
     # conflated — cache_scope_id is a routing value, session_id is the
     # transcript/session-load key.
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    neko = next(persona for persona in sample_personas() if persona.id == "neko_supervisor")
     captured = {}
 
     class CapturingRunner:
@@ -1168,7 +1170,7 @@ def test_chat_reply_threads_cache_scope_id_to_run_request(tmp_path, monkeypatch)
     # the header-only cache_scope_id — this lane was cache-cold on every turn
     # without it (live-observed: fmi.session_id='' and cache_read=0 post-T10c).
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    neko = next(persona for persona in sample_personas() if persona.id == "neko_supervisor")
     captured = {}
 
     class CapturingRunner:
@@ -1204,7 +1206,7 @@ def test_chat_reply_cache_scope_defaults_to_none(tmp_path, monkeypatch):
     # header routing via session_id at the transport seam; chat_reply must not
     # invent a scope for them — absent stays absent.
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    neko = next(persona for persona in sample_personas() if persona.id == "neko_supervisor")
     captured = {}
 
     class CapturingRunner:
@@ -1235,7 +1237,7 @@ def test_mission_chat_reply_cache_scope_falls_back_to_session_when_no_perm(tmp_p
     # is supplied (no separate permission id), the cache scope still resolves to
     # that same stable chat id — never left empty on the chat lane.
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    neko = next(persona for persona in default_personas() if persona.id == "neko_supervisor")
+    neko = next(persona for persona in sample_personas() if persona.id == "neko_supervisor")
     captured = {}
 
     class CapturingRunner:

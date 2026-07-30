@@ -9,11 +9,8 @@ from typing import Any
 import yaml
 
 from hermes_constants import get_config_path
-from hermes_cli.profiles import profile_exists
-
 from .dispatch_session_policy import normalize_dispatch_session_policy
-from .personas import BUNDLED_PERSONA_IDS, BUNDLED_PERSONA_PROFILES, DEFAULT_PERSONA_IDS, PROFILE_ROLE_SENTINEL, coerce_agent_role, default_personas, seed_personas, validate_toolsets, AgentRole
-from .profile_context import active_profile_name
+from .personas import PROFILE_ROLE_SENTINEL, validate_toolsets
 from .redaction_mode import normalize_redaction_mode
 from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, EventLogConfig, McpAdmissionConfig, MissionChatConfig, NormalWorkerFlowConfig, PersonaChatConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig, TerminalEnvelopeConfig
 
@@ -376,24 +373,13 @@ def _expand_machine_root_tokens(value, *, field: str):
 
 def persona_records_from_config(cfg: AgentRuntimeConfig | None = None):
     cfg = cfg or load_agent_runtime_config()
-    # Full resolvable catalog: the typed pipeline personas remain here (dormant, so the
-    # mothballed pipeline can still resolve dev/qa), plus any profile-backed agents declared
-    # in config. Only ``seed_personas()`` (base) is actually seeded into the running store.
-    personas = {p.id: p for p in default_personas()}
-    head_profile = _head_agent_profile(cfg)
-    for p in personas.values():
-        p.provider = p.provider or cfg.default_provider
-        p.model = p.model or cfg.default_model
-        p.api_mode = p.api_mode or cfg.default_api_mode
+    personas = {}
     for pid, overrides in cfg.personas.items():
-        persona_id = "neko_supervisor" if pid == "alice_supervisor" else pid
+        persona_id = str(pid or "").strip()
+        if not persona_id or not isinstance(overrides, dict):
+            continue
         if persona_id not in personas:
-            default_role = AgentRole.PM.value if persona_id == AgentRole.PM.value else AgentRole.DEV.value
-            role = str(overrides.get("role", default_role))
-            # Typed roles resolve as before (dormant catalog); profile-backed agents
-            # (role: profile) may also be declared for the base-profile world.
-            if role not in {item.value for item in AgentRole} and role != PROFILE_ROLE_SENTINEL:
-                continue
+            role = str(overrides.get("role") or PROFILE_ROLE_SENTINEL)
             personas[persona_id] = _persona_from_overrides(persona_id, role, overrides, cfg)
         p = personas[persona_id]
         if "role" in overrides:
@@ -427,116 +413,20 @@ def persona_records_from_config(cfg: AgentRuntimeConfig | None = None):
         if "required_mcp_servers" in overrides:
             p.required_mcp_servers = _string_list(overrides["required_mcp_servers"])
         if "toolsets" in overrides:
-            p.toolsets = validate_toolsets(coerce_agent_role(p.role), list(overrides["toolsets"]))
-    supervisor = personas.get("neko_supervisor")
-    if supervisor is not None:
-        explicit_supervisor = _explicit_supervisor_profile_override(cfg)
-        supervisor.hermes_profile = _effective_supervisor_profile(
-            supervisor.hermes_profile,
-            head_profile,
-            fallback_legacy_alice=not explicit_supervisor or bool(str(getattr(cfg, "head_agent_profile", "") or "").strip()),
-        )
+            p.toolsets = validate_toolsets(p.role, list(overrides["toolsets"]))
     return list(personas.values())
 
 
 def ensure_persisted_personas(cfg: AgentRuntimeConfig | None = None):
-    """Materialize configured/default personas, then return persisted personas.
-
-    Stage 10 retires runtime fallback paths that silently use config defaults when
-    the store is empty. This helper is the bootstrap boundary: callers that need
-    runnable personas persist the resolved persona records first, then operate on
-    the store as the source of truth.
-    """
+    """Return the persisted persona store plus data-declared config records."""
     from .store import AgentStore
 
     cfg = cfg or load_agent_runtime_config()
     store = AgentStore()
     stored = {persona.id: persona for persona in store.list_all()}
-    # Base-profile foundation: seed ONLY the base profile for a generic Hermes
-    # installation. Launcher installations explicitly provision the bundled typed
-    # team; once that team exists, later bootstrap calls must not add a fifth `base`
-    # persona on top of it.
-    has_bundled_team = bool(BUNDLED_PERSONA_IDS.intersection(stored))
-    seed = {} if has_bundled_team else {persona.id: persona for persona in seed_personas()}
-    changed = False
-    for persona_id, persona in seed.items():
-        if persona_id not in stored:
-            stored[persona_id] = store.save(persona)
-            changed = True
-        elif persona_id in DEFAULT_PERSONA_IDS:
-            current = stored[persona_id]
-            if (
-                getattr(current, "hermes_profile", None) != persona.hermes_profile
-                or list(getattr(current, "toolsets", []) or []) != list(getattr(persona, "toolsets", []) or [])
-            ):
-                current.hermes_profile = persona.hermes_profile
-                current.toolsets = list(getattr(persona, "toolsets", []) or [])
-                stored[persona_id] = store.save(current)
-                changed = True
-    if changed:
-        stored = {persona.id: persona for persona in store.list_all()}
-    # Return the seeded store PLUS the dormant resolvable catalog: only base is
-    # seeded/shown, but every persona resolver (get_persisted_persona, blueprint slot
-    # binding, CLI persona lookup) must still find the typed pipeline personas so the
-    # mothballed pipeline keeps functioning. Seeded (base) wins on id collision.
     catalog = {persona.id: persona for persona in persona_records_from_config(cfg)}
     merged = {**catalog, **stored}
     return list(merged.values())
-
-
-def provision_bundled_personas(cfg: AgentRuntimeConfig | None = None):
-    """Persist the Launcher's typed default team after a profile preflight.
-
-    The generic Hermes bootstrap remains base-only. The Launcher explicitly
-    opts into this team during installation, after creating every required
-    profile. Preflighting all bindings before the first store write prevents
-    Mission Control from advertising a half-runnable backend/frontend team.
-    Existing custom bindings are preserved when they still point at a real
-    profile; missing/unbacked legacy rows are repaired to the bundled binding.
-    """
-    from .store import AgentStore
-
-    cfg = cfg or load_agent_runtime_config()
-    resolved = {persona.id: persona for persona in persona_records_from_config(cfg)}
-    missing_definitions = sorted(BUNDLED_PERSONA_IDS.difference(resolved))
-    if missing_definitions:
-        raise ValueError(
-            "bundled persona definitions are missing: "
-            + ", ".join(missing_definitions)
-        )
-
-    # This is the Launcher's explicit bundled-team contract. In particular,
-    # generic Hermes may resolve Neko to a configured head profile, while the
-    # Launcher installer always creates and binds the bundled Neko to `base`.
-    for persona_id, profile in BUNDLED_PERSONA_PROFILES.items():
-        resolved[persona_id].hermes_profile = profile
-
-    missing_profiles = sorted(
-        persona_id
-        for persona_id in BUNDLED_PERSONA_IDS
-        if not str(resolved[persona_id].hermes_profile or "").strip()
-        or not profile_exists(str(resolved[persona_id].hermes_profile))
-    )
-    if missing_profiles:
-        raise ValueError(
-            "bundled persona profiles are missing: " + ", ".join(missing_profiles)
-        )
-
-    store = AgentStore()
-    stored = {persona.id: persona for persona in store.list_all()}
-    provisioned = []
-    for persona_id in sorted(BUNDLED_PERSONA_IDS):
-        desired = resolved[persona_id]
-        current = stored.get(persona_id)
-        if current is None:
-            current = store.save(desired)
-        else:
-            current_profile = str(current.hermes_profile or "").strip()
-            if not current_profile or not profile_exists(current_profile):
-                current.hermes_profile = desired.hermes_profile
-                current = store.save(current)
-        provisioned.append(current)
-    return provisioned
 
 
 def get_persisted_persona(persona_id: str, cfg: AgentRuntimeConfig | None = None):
@@ -545,35 +435,6 @@ def get_persisted_persona(persona_id: str, cfg: AgentRuntimeConfig | None = None
         if persona.id == persona_id:
             return persona
     raise StopIteration(persona_id)
-
-
-def _head_agent_profile(cfg: AgentRuntimeConfig) -> str:
-    configured = str(getattr(cfg, "head_agent_profile", None) or "").strip()
-    return configured or active_profile_name()
-
-
-def _explicit_supervisor_profile_override(cfg: AgentRuntimeConfig) -> bool:
-    for key in ("neko_supervisor", "alice_supervisor"):
-        raw = cfg.personas.get(key) if isinstance(getattr(cfg, "personas", None), dict) else None
-        if isinstance(raw, dict) and "hermes_profile" in raw:
-            return True
-    return False
-
-
-def _effective_supervisor_profile(configured_profile: str | None, head_profile: str, *, fallback_legacy_alice: bool = True) -> str:
-    """Resolve Neko/head supervisor profile without hard-coding Alice.
-
-    Existing Tony configs may still say ``alice`` from the Windows runtime.  If
-    that profile exists, preserve it.  If it is absent on the current host, use
-    the active/configured head-agent profile instead so Mission Control can be
-    driven by alice-mac, pm, a future Neko profile, or any other head agent.
-    """
-    value = str(configured_profile or "").strip()
-    if not value:
-        return head_profile
-    if fallback_legacy_alice and value == "alice" and not profile_exists("alice"):
-        return head_profile
-    return value
 
 
 def _persona_from_overrides(persona_id: str, role: str, overrides: dict[str, Any], cfg: AgentRuntimeConfig):
@@ -586,7 +447,7 @@ def _persona_from_overrides(persona_id: str, role: str, overrides: dict[str, Any
         model=overrides.get("model") or cfg.default_model,
         provider=overrides.get("provider") or cfg.default_provider,
         api_mode=overrides.get("api_mode") or cfg.default_api_mode,
-        toolsets=validate_toolsets(coerce_agent_role(role), list(overrides.get("toolsets") or [])),
+        toolsets=validate_toolsets(role, list(overrides.get("toolsets") or [])),
         system_prompt_path=str(overrides.get("system_prompt_path") or f"agent_runtime/prompts/{role}.md"),
         include_core_context_files=bool(overrides.get("include_core_context_files", False)),
     )

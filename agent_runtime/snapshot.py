@@ -56,7 +56,7 @@ from .persona_instance_identity import (
 from .parity import PARITY_ENVELOPE_VERSION, ProjectionAccountant, events_watermark
 from .parse_cache import cached_by_mtime
 from .resolution import resolution_payload, resolve_runtime, suspect_default_root
-from .personas import blocked_tool_names, effective_toolsets, seed_personas
+from .personas import blocked_tool_names, effective_toolsets
 from .prompt_observability import _SkillObservabilityResolver, snapshot_prompt_observability
 from .realm_sync import read_realm_sync_sidecar
 from .repo_bundles import RepoBundleStore, bundle_queue_summary, qa_waiting_on, repo_bundle_delivery_summary, repo_bundle_summary, simplified_phase_for_task
@@ -476,7 +476,7 @@ def _build_snapshot_uncoalesced(
     # cold store, fall back to the base seed itself — NOT ensure_persisted_personas, which
     # also returns the dormant typed catalog for resolution and would surface mothballed
     # pipeline personas that are not meant to be shown.
-    agents = agent_store.list_all() or seed_personas()
+    agents = agent_store.list_all()
     # Closed incidents are history-only in the steady-state frame. Avoid
     # recursively coercing the entire closed tail (thousands of files on a
     # mature runtime) merely to count it; the store still validates each JSON
@@ -1728,7 +1728,8 @@ def _archived_operator_channel(archived: dict) -> dict | None:
     if not task_id:
         return None
     goal_id = str(archived.get("goal_id") or "").strip() or None
-    channel_id = f"neko_supervisor::archived:{task_id}"
+    owner_persona_id = str(archived.get("owner_persona_id") or archived.get("requested_by") or "operator").strip() or "operator"
+    channel_id = f"{owner_persona_id}::archived:{task_id}"
     messages: list[dict] = []
     goal_message = _archived_goal_input_message(archived, channel_id=channel_id)
     if goal_message is not None:
@@ -1765,8 +1766,8 @@ def _archived_operator_channel(archived: dict) -> dict | None:
         "thread_id": channel_id,
         "goal_id": goal_id,
         "task_id": task_id,
-        "owner_persona_id": "neko_supervisor",
-        "persona_instance_id": f"archived:{task_id}:neko_supervisor",
+        "owner_persona_id": owner_persona_id,
+        "persona_instance_id": f"archived:{task_id}:{owner_persona_id}",
         "session_id": None,
         "root_thread_id": channel_id,
         "parent_thread_id": None,
@@ -1783,12 +1784,12 @@ def _archived_operator_channel(archived: dict) -> dict | None:
     return {
         "schema_version": OPERATOR_CHANNELS_SCHEMA_VERSION,
         "channel_id": channel_id,
-        "persona_id": "neko_supervisor",
-        "persona_instance_id": f"archived:{task_id}:neko_supervisor",
+        "persona_id": owner_persona_id,
+        "persona_instance_id": f"archived:{task_id}:{owner_persona_id}",
         "session_id": None,
         "task_id": task_id,
         "goal_id": goal_id,
-        "display_name": _display_name_for_persona("neko_supervisor"),
+        "display_name": _display_name_for_persona(owner_persona_id),
         "state": "archived",
         "mode": "archived_goal",
         "source_instance_ids": [],
@@ -1827,14 +1828,15 @@ def _archived_goal_input_message(archived: dict, *, channel_id: str) -> dict | N
     ]
     if acceptance:
         parts.append("Acceptance:\n" + "\n".join(f"- {item}" for item in acceptance))
+    owner_persona_id = str(archived.get("owner_persona_id") or archived.get("requested_by") or "operator").strip() or "operator"
     return {
         "id": f"{channel_id}:goal_input:{task_id}",
         "seq": 0,
         "timestamp": archived.get("created_at") or archived.get("archived_at"),
         "actor_persona_id": "operator",
         "actor_instance_id": None,
-        "target_persona_id": "neko_supervisor",
-        "target_persona_instance_id": f"archived:{task_id}:neko_supervisor",
+        "target_persona_id": owner_persona_id,
+        "target_persona_instance_id": f"archived:{task_id}:{owner_persona_id}",
         "role": "operator",
         "kind": "goal_input",
         "status": "delivered",
@@ -1867,12 +1869,13 @@ def _archived_assignment_message(assignment: dict, *, channel_id: str, index: in
         value = str(assignment.get(key) or "").strip()
         if value:
             refs["assignment_id" if key == "id" else key] = value
+    owner_persona_id = str(assignment.get("owner_persona_id") or assignment.get("requested_by") or "operator").strip() or "operator"
     return {
         "id": f"{channel_id}:assignment:{refs.get('assignment_id', index)}",
         "seq": 0,
         "timestamp": assignment.get("created_at") or assignment.get("updated_at"),
-        "actor_persona_id": "neko_supervisor",
-        "actor_instance_id": f"archived:{refs.get('task_id', 'task')}:neko_supervisor",
+        "actor_persona_id": owner_persona_id,
+        "actor_instance_id": f"archived:{refs.get('task_id', 'task')}:{owner_persona_id}",
         "target_persona_id": target_persona_id,
         "target_persona_instance_id": assignment.get("persona_instance_id"),
         "role": "agent",
@@ -1904,7 +1907,7 @@ def _archived_event_message(event: dict, *, channel_id: str, index: int) -> dict
         return None
     if not text:
         return None
-    persona_id = str(event.get("persona_id") or "neko_supervisor").strip() or "neko_supervisor"
+    persona_id = str(event.get("persona_id") or event.get("actor_persona_id") or "operator").strip() or "operator"
     refs = {"source": "deleted_archive", "event_type": event_type}
     for key in ("task_id", "run_id", "proof_id", "stage_id"):
         value = str(event.get(key) or "").strip()
@@ -2114,7 +2117,7 @@ def _archived_repo_bundle_summaries(batch_dir, task_id: str) -> list[dict]:
 
 
 def _archived_persona_streams(task_id: str, assignments: list[dict], runs: list[dict], events: list[dict]) -> dict:
-    role_ids = {"neko_supervisor", "backend_dev", "dev", "qa"}
+    role_ids: set[str] = set()
     role_ids.update(str(item.get("persona_id") or "") for item in assignments)
     role_ids.update(str(item.get("persona_id") or "") for item in runs)
     role_ids.update(str(item.get("persona_id") or "") for item in events)
@@ -2401,7 +2404,6 @@ def _archived_role_streams(
     role_ids: list[str] = []
     role_envelopes = role_envelopes or []
     role_checklists = role_checklists or []
-    role_ids.extend(["neko_supervisor", "backend_dev", "dev", "qa"])
     for run in runs:
         role_ids.append(str(run.get("persona_id") or ""))
     for event in events:
@@ -2952,7 +2954,7 @@ def goal_detail_for_task(task_id: str, *, event_log=None) -> dict | None:
     persona_instances: list = []
     persona_assignments: list = []
     if persona_instance_runtime_enabled(cfg):
-        agents = AgentStore().list_all() or seed_personas()
+        agents = AgentStore().list_all()
         persona_instances = PersonaInstanceStore(event_log=event_log).derive_from_workers(agents, workers)
         if persona_assignment_store_enabled(cfg):
             persona_assignments = PersonaAssignmentStore(event_log=event_log).list_all()
@@ -3018,7 +3020,7 @@ def persona_instance_detail_for_id(entity_id: str, *, event_log=None) -> dict | 
 
     event_log = event_log or CachedEventLog()
     cfg = load_agent_runtime_config()
-    agents = AgentStore().list_all() or seed_personas()
+    agents = AgentStore().list_all()
     personas_by_id = {str(getattr(a, "id", "") or ""): a for a in agents}
     if persona_instance_runtime_enabled(cfg):
         worker_session_store = WorkerSessionStore(event_log=event_log)
@@ -3212,15 +3214,6 @@ def _actor_state_label(active_stage, owned_stages, runs, workers) -> str:
     return str(status or "waiting").replace("_", " ").title()
 
 
-def _actor_role_for_persona(persona_id: str) -> str:
-    return {
-        "neko_supervisor": "neko_supervisor",
-        "backend_dev": "backend_dev",
-        "dev": "dev",
-        "qa": "qa",
-    }.get(persona_id, "specialist")
-
-
 def _latest_actor_event(persona_id: str, events) -> dict | None:
     for event in reversed(events):
         if event.persona_id != persona_id:
@@ -3310,7 +3303,7 @@ def _runtime_lane_summary(runtime_instances) -> dict:
 
 def _persona_streams(task, assignments, runs, events) -> dict:
     streams: dict[str, dict] = {}
-    role_ids = ["neko_supervisor", "backend_dev", "dev", "qa"]
+    role_ids: list[str] = []
     for assignment in assignments or []:
         role_ids.append(str(getattr(assignment, "persona_id", "") or ""))
     for run in runs or []:
@@ -3424,22 +3417,6 @@ def _stopped_progress(task, incidents, reason: str, owner: str) -> dict:
     }
 
 
-def _owner_for_action(action, *, task=None, run_store=None) -> str:
-    action_value = action.type.value if hasattr(getattr(action, "type", None), "value") else str(action)
-    slot_id = str(getattr(action, "slot_id", "") or "").strip()
-    if action_value == "run_slot" and slot_id == "dev" and task is not None:
-        return "dev"
-    if action_value == "run_slot" and slot_id:
-        return slot_id
-    return {
-        "run_dev": "dev",
-        "run_qa": "qa",
-        "run_neko_supervisor": "neko_supervisor",
-        "complete_task": "harness",
-        "noop": "harness",
-    }.get(action_value, "harness")
-
-
 def _has_budget_incident(incidents) -> bool:
     return any(getattr(incident, "kind", None) == "run_budget_exceeded" for incident in incidents)
 
@@ -3488,7 +3465,7 @@ def _coalesced_progress_events(events):
 
 
 def _role_streams(task, events, runs, workers, *, persona_assignments=None, role_envelopes=None, role_checklists=None) -> list[dict]:
-    role_ids = ["neko_supervisor", "backend_dev", "dev", "qa"]
+    role_ids: list[str] = []
     for run in runs:
         if getattr(run, "task_id", None) == task.id:
             role_ids.append(str(getattr(run, "persona_id", "") or ""))
@@ -3571,12 +3548,7 @@ def _empty_role_stream_item(task, persona_id: str) -> dict:
 
 
 def _display_name_for_persona(persona_id: str) -> str:
-    return {
-        "neko_supervisor": "Neko Mission Lead",
-        "backend_dev": "Backend Dev Agent",
-        "dev": "Launcher Dev Agent",
-        "qa": "QA Agent",
-    }.get(persona_id, persona_id.replace("_", " ").title())
+    return persona_id.replace("_", " ").title()
 
 
 def _role_current_stage(task, persona_id: str) -> str | None:

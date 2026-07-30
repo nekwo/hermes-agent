@@ -36,14 +36,14 @@ from agent_runtime.mission_chat_workdir import (
     persona_workdir_config_key,
     resolve_mission_chat_workdir,
 )
-from agent_runtime.personas import default_personas
+from tests.agent_runtime.persona_samples import sample_personas
 from agent_runtime.profile_runner import AgentRunResult
 from agent_runtime.mcp_lane import HARNESS_LANE
 from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
 
 
 def _persona(persona_id: str):
-    return {persona.id: persona for persona in default_personas()}[persona_id]
+    return {persona.id: persona for persona in sample_personas()}[persona_id]
 
 
 def _same(path: str | None, expected: Path) -> bool:

@@ -1,4 +1,7 @@
 from hermes_time import now
+import pytest
+
+pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.models import Incident
 from types import SimpleNamespace

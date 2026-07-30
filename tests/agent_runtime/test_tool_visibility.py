@@ -1,5 +1,5 @@
 from agent_runtime.models import AgentPersona
-from agent_runtime.personas import default_personas
+from tests.agent_runtime.persona_samples import sample_personas
 from agent_runtime.tool_visibility import (
     ToolVisibilityOptions,
     permission_state_for_persona,
@@ -11,7 +11,7 @@ from agent_runtime.tool_turn_history import persist_tool_turn_actual
 
 
 def _persona(persona_id: str):
-    return {persona.id: persona for persona in default_personas()}[persona_id]
+    return {persona.id: persona for persona in sample_personas()}[persona_id]
 
 
 def test_neko_supervisor_visibility_has_dev_parity_by_default():

@@ -687,10 +687,8 @@ What R1 contains:
   permission-mode resolution.
 - `agent_runtime/config.py` + `runtime_config.py` — the
   `agent_runtime.mcp_admission` root block, deny-by-default at every parse step.
-- An **R1 stage floor** (`R1_ADMISSIBLE_ROLES`) that refuses any role outside it
-  even when the config names one. Shipped as `{"qa"}`; **`{"qa", "dev"}` since the
-  2026-07-29 R4 widening** (log entry below). R4 WIDENED the floor rather than
-  retiring it, so a config edit alone still cannot add a role.
+- The historical R1 code-side role floor was removed by mission-lane removal
+  S11. Profile declarations are now the admission authority.
 
 **Not in R1:** teardown (see open question 2, now answered — R2 owns it), and
 the compiled positive `tools.include` with launcher-YAML parity (R3). R1's
@@ -1011,10 +1009,9 @@ of R2 rather than a nice-to-have.
 
   **The seed grants it (same day).** The map's gate is the persona's grant, so a
   seed that admits the surface without granting its manual would ship the gap
-  back on every fresh deployment. `personas.default_personas` therefore grants
-  `launcher-stagec-mcp-screenshot` on the seeded `qa` row — and, since the R4
-  widening below put `dev` on the same floor, on the seeded `dev` row too. A
-  fresh deployment with admission on now ships the manual with the tools.
+  back on every fresh deployment. Persona data must therefore grant
+  `launcher-stagec-mcp-screenshot` whenever it declares the corresponding
+  server and needs the operating manual.
 
   **The residual, which is narrower and real:** the skill is not Harness-owned,
   so Hermes grants the manual but cannot install its CONTENT. A realm pull that
@@ -1027,8 +1024,8 @@ of R2 rather than a nice-to-have.
   over a preload. Pinned by
   `test_an_admitted_manual_that_is_not_installed_degrades_the_preload_quietly`.
 
-- **2026-07-29 (R4 — `dev` joins the admission floor)** — the first widening of
-  `R1_ADMISSIBLE_ROLES` since R1, by explicit operator ruling and as a product
+- **2026-07-29 (R4 — `dev` joined the former admission floor)** — the first widening of
+  the former code-side set, by explicit operator ruling and as a product
   decision rather than a config edit. `{"qa"}` → `{"qa", "dev"}`. Launcher Dev
   drives the same Stage C `launcher_qa` surface to verify its own Launcher
   changes visually, instead of routing every visual check through QA and waiting
@@ -1040,7 +1037,7 @@ of R2 rather than a nice-to-have.
 
   | key | where | says |
   | --- | --- | --- |
-  | the floor | `mcp_admission.R1_ADMISSIBLE_ROLES` (code) | which roles MAY ever be named |
+  | the former floor | removed in S11 | no longer narrows profile data |
   | the allowlist | `agent_runtime.mcp_admission.roles.<role>.<lane>` (ROOT config) | which servers this role gets on this lane |
 
   Neither key alone admits anything: a role inside the floor that the config
@@ -1049,9 +1046,8 @@ of R2 rather than a nice-to-have.
   (`test_dev_is_admitted_once_both_keys_name_it`,
   `test_dev_admitted_under_a_qa_only_config_is_still_denied`,
   `test_the_admission_floor_membership_is_pinned`). The live ruling is recorded
-  in three places that must agree: the code comment at `mcp_admission.py`
-  (`R1_ADMISSIBLE_ROLES`), the `roles.dev.mission_chat` comment in the runtime
-  host's root `config.yaml` (`X:\Eternia\.hermes\config.yaml`), and here.
+  in the historical runtime config and this audit. S11 supersedes it with the
+  profile-declaration rule.
 
   **The seeded `dev` persona gains the manual** for the same reason the seeded
   `qa` row carries it (entry above): `MCP_OPERATING_SKILLS` requires the skill to

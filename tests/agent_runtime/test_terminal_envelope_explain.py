@@ -20,6 +20,8 @@ import types
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
+
 from agent_runtime.runtime_config import TerminalEnvelopeConfig
 from agent_runtime.terminal_envelope import (
     COMMAND_CLASSES,

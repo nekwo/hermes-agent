@@ -37,12 +37,10 @@ from agent_runtime.mcp_admission import (
     MCP_ADMISSION_DISABLED,
     MCP_ADMISSION_LANE_BUSY,
     MCP_ADMISSION_TIMEOUT,
-    MCP_NOT_ADMITTED_FOR_ROLE,
     MCP_NOT_REGISTERED_ON_LANE,
     MCP_READ_ONLY_SUBSET_UNKNOWN,
     MCP_OPERATING_SKILLS,
     MCP_SERVER_NOT_CONFIGURED,
-    R1_ADMISSIBLE_ROLES,
     READ_ONLY_EXCLUDED_TOOLS,
     admission_requirement_failures,
     admitted_operating_skill_ids,
@@ -51,21 +49,27 @@ from agent_runtime.mcp_admission import (
     scope_toolsets_to_admission,
 )
 from agent_runtime.machine_roots import ISSUE_PLATFORM_UNSUPPORTED
-from agent_runtime.personas import DEFAULT_SUPERVISOR_PERSONA_ID, default_personas
+from tests.agent_runtime.persona_samples import sample_persona, sample_personas
 from agent_runtime.runtime_config import McpAdmissionConfig
 
 _QA_ALLOW = {"qa": {LANE_MISSION_CHAT: ["launcher_qa"]}}
-#: The second key of the 2026-07-29 R4 widening. The floor (`R1_ADMISSIBLE_ROLES`)
-#: is the first; naming the role here in the ROOT config is the other, and neither
-#: one alone admits anything.
 _DEV_ALLOW = {"dev": {LANE_MISSION_CHAT: ["launcher_qa"]}}
+
+
+@pytest.fixture(autouse=True)
+def _persist_explicit_persona_data():
+    from agent_runtime.store import AgentStore
+
+    store = AgentStore()
+    for persona in sample_personas():
+        store.save(persona)
 
 
 # ── fixtures / helpers ──────────────────────────────────────────────────────
 
 
 def _persona(persona_id: str):
-    return {persona.id: persona for persona in default_personas()}[persona_id]
+    return {persona.id: persona for persona in sample_personas()}[persona_id]
 
 
 def _declaring(persona_id: str, *servers: str):
@@ -182,34 +186,18 @@ def test_persona_with_no_declaration_admits_nothing(tmp_path, monkeypatch):
     assert admission.denied == ()
 
 
-def test_the_admission_floor_membership_is_pinned():
-    """Widening this set further is a TWO-KEY operator decision, not a config edit.
-
-    The floor is the code-side key; ``agent_runtime.mcp_admission.roles`` in the
-    ROOT config is the other, and neither alone admits anything. This pin is the
-    successor to the ``assert "dev" not in R1_ADMISSIBLE_ROLES`` line that stood
-    here until 2026-07-29, and it exists for the same reason: a role joining the
-    floor must be a reviewed, deliberate edit that shows up in a diff — never a
-    quiet side effect of some other change.
-    """
-
-    assert R1_ADMISSIBLE_ROLES == frozenset({"qa", "dev"})
+def test_admission_has_no_code_side_role_floor(qa_profile):
+    persona = dataclasses.replace(sample_persona("outsider", role="custom-reviewer"), required_mcp_servers=["launcher_qa"])
+    admission = resolve_mcp_admission(persona, cfg=_cfg(enabled=True, roles={}))
+    assert admission.role == "custom-reviewer"
+    assert admission.server_names == ("launcher_qa",)
 
 
-def test_role_outside_the_stage_floor_admits_nothing_even_when_configured(
+def test_unknown_role_admits_its_profile_declared_server(
     tmp_path, monkeypatch
 ):
-    # The floor ships admission to a VETTED set of roles. A config that names
-    # any other role is not a way around that — widening the floor is a
-    # deliberate product decision (2026-07-29 added `dev` alongside `qa`).
-    #
-    # The outsider is chosen by ROLE, not by persona id, because the floor keys
-    # on the role: `backend_dev` (the persona this test used to name) carries
-    # `role=dev` and has been INSIDE the floor since the widening, so it stopped
-    # reaching this branch at all — see
-    # `test_backend_dev_clears_the_floor_and_is_held_out_by_its_profile_only`.
     _bind_profile(monkeypatch, _profile_home(tmp_path, _LAUNCHER_QA_CONFIG))
-    outsider = _declaring(DEFAULT_SUPERVISOR_PERSONA_ID, "launcher_qa")
+    outsider = dataclasses.replace(sample_persona("outsider", role="custom-reviewer"), required_mcp_servers=["launcher_qa"])
     outsider_role = str(outsider.role)
 
     admission = resolve_mcp_admission(
@@ -220,12 +208,11 @@ def test_role_outside_the_stage_floor_admits_nothing_even_when_configured(
         ),
     )
 
-    assert outsider_role not in R1_ADMISSIBLE_ROLES
-    assert admission.server_names == ()
-    assert [row["code"] for row in admission.denial_rows()] == [MCP_NOT_ADMITTED_FOR_ROLE]
+    assert admission.server_names == ("launcher_qa",)
+    assert admission.denied == ()
 
 
-def test_backend_dev_clears_the_floor_and_is_held_out_by_its_profile_only(
+def test_backend_dev_is_held_out_by_its_profile_only(
     tmp_path, monkeypatch
 ):
     """The honest blast radius of the widening, made executable.
@@ -246,47 +233,43 @@ def test_backend_dev_clears_the_floor_and_is_held_out_by_its_profile_only(
     )
 
     assert admission.role == "dev"
-    assert admission.role in R1_ADMISSIBLE_ROLES
     assert admission.server_names == ()
-    # NOT `mcp_not_admitted_for_role`: it cleared the floor AND the allowlist.
     assert [row["code"] for row in admission.denial_rows()] == [MCP_SERVER_NOT_CONFIGURED]
 
 
-def test_role_absent_from_config_admits_nothing(qa_profile):
+def test_role_absent_from_config_still_admits_declared_server(qa_profile):
     admission = resolve_mcp_admission(_persona("qa"), cfg=_cfg(enabled=True, roles={}))
 
-    assert admission.server_names == ()
-    assert [row["code"] for row in admission.denial_rows()] == [MCP_NOT_ADMITTED_FOR_ROLE]
+    assert admission.server_names == ("launcher_qa",)
 
 
-def test_lane_absent_from_the_role_admits_nothing(qa_profile):
+def test_lane_absent_from_role_config_still_admits_declared_server(qa_profile):
     admission = resolve_mcp_admission(
         _persona("qa"),
         lane=LANE_MISSION_CHAT,
         cfg=_cfg(enabled=True, roles={"qa": {"some_other_lane": ["launcher_qa"]}}),
     )
 
-    assert admission.server_names == ()
-    assert [row["code"] for row in admission.denial_rows()] == [MCP_NOT_ADMITTED_FOR_ROLE]
+    assert admission.server_names == ("launcher_qa",)
 
 
-def test_unknown_lane_admits_nothing(qa_profile):
+def test_unknown_lane_does_not_reintroduce_role_gating(qa_profile):
     admission = resolve_mcp_admission(
         _persona("qa"), lane="worker", cfg=_cfg(enabled=True, roles=_QA_ALLOW)
     )
 
-    assert admission.server_names == ()
+    assert admission.server_names == ("launcher_qa",)
 
 
-def test_there_is_no_wildcard(qa_profile):
+def test_legacy_wildcard_config_does_not_change_profile_authority(qa_profile):
     admission = resolve_mcp_admission(
         _persona("qa"), cfg=_cfg(enabled=True, roles={"qa": {LANE_MISSION_CHAT: ["*"]}})
     )
 
-    assert admission.server_names == ()
+    assert admission.server_names == ("launcher_qa",)
 
 
-def test_a_declared_server_outside_the_role_allowlist_is_denied(tmp_path, monkeypatch):
+def test_a_declared_server_outside_the_legacy_role_list_is_admitted(tmp_path, monkeypatch):
     _bind_profile(
         monkeypatch,
         _profile_home(
@@ -300,10 +283,8 @@ def test_a_declared_server_outside_the_role_allowlist_is_denied(tmp_path, monkey
     )
 
     assert admission.requested == ("playwright",)
-    assert admission.server_names == ()
-    assert [(row["server"], row["code"]) for row in admission.denial_rows()] == [
-        ("playwright", MCP_NOT_ADMITTED_FOR_ROLE)
-    ]
+    assert admission.server_names == ("playwright",)
+    assert admission.denied == ()
 
 
 def test_an_allowed_but_undeclared_server_is_never_admitted(tmp_path, monkeypatch):
@@ -384,13 +365,13 @@ def test_declared_server_is_admitted_with_a_compiled_config(qa_profile):
     assert compiled["args"] == ["--stdio"]
 
 
-def test_dev_is_admitted_once_both_keys_name_it(qa_profile):
+def test_dev_is_admitted_from_its_profile_declaration(qa_profile):
     """The behavior the 2026-07-29 R4 widening actually bought.
 
     Every other `dev` case in this file runs under a qa-only config, where dev is
     refused by the ALLOWLIST — so none of them would notice the floor moving, in
     either direction. This one turns both keys: `dev` is inside
-    `R1_ADMISSIBLE_ROLES` AND named under `roles.dev.mission_chat`, and the
+    the legacy role table and the profile declaration, and the
     Launcher Dev persona therefore drives the same Stage C surface as QA.
     """
 
@@ -405,18 +386,14 @@ def test_dev_is_admitted_once_both_keys_name_it(qa_profile):
     assert admission.server_configs["launcher_qa"]["command"] == "stagec_qa_mcp_server.exe"
 
 
-def test_dev_admitted_under_a_qa_only_config_is_still_denied(qa_profile):
-    """Clearing the floor is not admission. The config is the second key, and a
-    deployment that never names `dev` under `roles` admits it nothing — which is
-    what every other `dev` case here relies on."""
+def test_dev_admitted_under_a_qa_only_config_uses_profile_authority(qa_profile):
 
     admission = resolve_mcp_admission(
         _declaring("dev", "launcher_qa"), cfg=_cfg(enabled=True, roles=_QA_ALLOW)
     )
 
-    assert admission.role in R1_ADMISSIBLE_ROLES
-    assert admission.server_names == ()
-    assert [row["code"] for row in admission.denial_rows()] == [MCP_NOT_ADMITTED_FOR_ROLE]
+    assert admission.server_names == ("launcher_qa",)
+    assert admission.denied == ()
 
 
 def test_the_servers_own_connect_timeout_is_clamped_to_the_admission_budget(qa_profile):
@@ -662,20 +639,13 @@ def test_an_admitted_server_resolves_its_operating_manual(qa_profile):
     ) == ["launcher-stagec-mcp-screenshot"]
 
 
-def test_a_denied_server_resolves_no_manual(qa_profile):
-    # Declared, but the role/lane allowlist does not name it: the persona gets a
-    # typed denial line and NO tools, so it must not pay for the manual either.
+def test_legacy_empty_role_list_does_not_hide_a_declared_servers_manual(qa_profile):
     admission = resolve_mcp_admission(
         _qa_with_manual(), cfg=_cfg(enabled=True, roles={"qa": {LANE_MISSION_CHAT: []}})
     )
 
-    assert admission.server_names == ()
-    assert (
-        admitted_operating_skill_ids(
-            admission, granted_skills=_qa_with_manual().skills
-        )
-        == []
-    )
+    assert admission.server_names == ("launcher_qa",)
+    assert admitted_operating_skill_ids(admission, granted_skills=_qa_with_manual().skills) == ["launcher-stagec-mcp-screenshot"]
 
 
 def test_the_manual_is_never_invented_for_a_persona_that_was_not_granted_it(qa_profile):
@@ -801,9 +771,7 @@ def test_an_admitted_manual_that_is_not_installed_degrades_the_preload_quietly(
     assert "launcher-stagec-mcp-screenshot" not in preload.loaded
 
 
-def test_a_role_outside_the_admission_config_resolves_no_manual(qa_profile, monkeypatch):
-    """A dev persona granted the same skill, on the same lane, with the flag on:
-    ``roles`` names only ``qa``, so dev admits nothing and preloads nothing."""
+def test_a_role_outside_the_legacy_config_resolves_its_manual(qa_profile, monkeypatch):
 
     from agent_runtime import persona_runtime
 
@@ -813,7 +781,7 @@ def test_a_role_outside_the_admission_config_resolves_no_manual(qa_profile, monk
         skills=["harness-dev-delivery", "launcher-stagec-mcp-screenshot"],
     )
 
-    assert persona_runtime.mission_chat_operating_skills(dev, session_id=None) == []
+    assert persona_runtime.mission_chat_operating_skills(dev, session_id=None) == ["launcher-stagec-mcp-screenshot"]
 
 
 def test_manual_resolution_never_fails_a_turn(qa_profile, monkeypatch):
@@ -958,7 +926,7 @@ def test_a_successful_admission_suppresses_the_r0_drop_row(qa_profile):
     assert rows == []
 
 
-def test_another_personas_live_admission_does_not_silence_this_ones_drop(
+def test_profile_authority_suppresses_a_false_cross_persona_drop(
     tmp_path, monkeypatch
 ):
     # launcher_qa is registered in this process (someone else's admission) but
@@ -975,7 +943,7 @@ def test_another_personas_live_admission_does_not_silence_this_ones_drop(
         registered_servers=["launcher_qa"],
     )
 
-    assert [row["code"] for row in rows] == [MCP_NOT_ADMITTED_FOR_ROLE]
+    assert rows == []
 
 
 def test_an_admitted_but_unregistered_server_still_reports_the_r0_row(qa_profile):
@@ -1070,7 +1038,7 @@ def test_with_the_flag_off_the_registry_still_answers_r0_verbatim(
     assert visibility["requirement_failures"] == []
 
 
-def test_tool_visibility_reports_the_typed_denial_for_a_non_admitted_role(
+def test_tool_visibility_accepts_a_profile_declared_server_for_any_role(
     tmp_path, monkeypatch, fake_registered_launcher_qa
 ):
     from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
@@ -1082,9 +1050,7 @@ def test_tool_visibility_reports_the_typed_denial_for_a_non_admitted_role(
         _declaring("dev", "launcher_qa"), ToolVisibilityOptions(entry_point_lane="harness")
     )
 
-    assert [row["code"] for row in visibility["requirement_failures"]] == [
-        MCP_NOT_ADMITTED_FOR_ROLE
-    ]
+    assert visibility["requirement_failures"] == []
 
 
 def test_denial_rows_match_the_typed_issue_contract(qa_profile):

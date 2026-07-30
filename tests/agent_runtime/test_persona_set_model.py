@@ -18,6 +18,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
+
 from agent_runtime import paths
 from agent_runtime.config import AgentRuntimeConfig, ensure_persisted_personas
 from agent_runtime.models import AgentPersona, apply_instance_model_overrides

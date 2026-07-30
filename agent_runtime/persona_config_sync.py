@@ -14,7 +14,7 @@ leave a machine:
    realm-sync plan §5.1
    (``docs/mission_control/OFFICE_LAYOUT_REALM_SYNC_PLAN_2026-07-17.md``,
    launcher repo) explicitly ruled the base seed must never sync, but the guard
-   was written against the base *persona id* (``personas.BASE_PERSONA_ID``), so
+   was written against the base *persona id*, so
    a persona merely *bound to* the base profile home walked straight past it.
 2. **Machine/installation-shaped content.** ``mcp_servers`` commands/args/env,
    absolute Windows paths, venv/install pointers, auth-shaped values. On another

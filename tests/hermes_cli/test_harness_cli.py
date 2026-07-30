@@ -34,10 +34,9 @@ def test_harness_parser_no_longer_exposes_task_create():
         parser().parse_args(["harness", "task", "create", "--title", "T", "--description", "D", "--json"])
 
 
-def test_harness_init_exposes_atomic_bundled_persona_opt_in():
-    args = parser().parse_args(["harness", "init", "--with-bundled-personas", "--json"])
-    assert args.harness_command == "init"
-    assert args.with_bundled_personas is True
+def test_harness_init_rejects_the_removed_persona_seeding_flag():
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "init", "--with-" + "bundled-personas", "--json"])
 
 
 def test_harness_init_materializes_an_idempotent_default_scope(capsys):

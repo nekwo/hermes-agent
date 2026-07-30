@@ -2,28 +2,25 @@ import pytest
 
 
 @pytest.fixture
+def persisted_persona_samples():
+    """Install explicit persona DATA for tests that exercise deployed chat surfaces."""
+    from agent_runtime.store import AgentStore
+    from tests.agent_runtime.persona_samples import sample_personas
+
+    store = AgentStore()
+    for persona in sample_personas():
+        store.save(persona)
+    return store.list_all()
+
+
+@pytest.fixture
 def bundled_persona_profiles():
-    """Provision the Hermes profile homes the bundled personas BIND.
+    """Provision the explicit profile homes used by legacy runtime test data."""
 
-    Since ``9ad9c8017`` (*fix(harness): provision bundled agent personas*,
-    2026-07-19) ``default_personas()`` binds a real profile to every advertised
-    agent — ``dev`` → ``launcher-dev``, ``backend_dev`` → ``backend-dev``,
-    ``qa`` → ``qa`` — and ``GPTPersonaRuntime._invoke_agent`` refuses to run a
-    persona whose bound profile does not exist ("every advertised agent must
-    have a real Hermes profile behind it"). The autouse hermetic fixture points
-    ``HERMES_HOME`` at a per-test tempdir, where none of them do.
-
-    Production provisions them with ``harness init --with-bundled-personas``;
-    a test that drives the REAL run path is asking for the same precondition.
-    Opt in explicitly — tests that assert the *missing*-profile refusal must not
-    have it provisioned underneath them.
-    """
-
-    from agent_runtime.personas import BUNDLED_PERSONA_PROFILES
     from hermes_cli.profiles import get_profile_dir
 
     homes = []
-    for profile in dict.fromkeys(BUNDLED_PERSONA_PROFILES.values()):
+    for profile in ("gpt-launcher", "backend-dev", "qa"):
         home = get_profile_dir(profile)
         home.mkdir(parents=True, exist_ok=True)
         homes.append(home)

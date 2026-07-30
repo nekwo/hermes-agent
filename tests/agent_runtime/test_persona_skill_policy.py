@@ -3,9 +3,14 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
+
 from agent_runtime.models import AgentPersona
 from agent_runtime.persona_runtime import build_system_prompt
-from agent_runtime.personas import AgentRole, default_personas, effective_toolsets, validate_toolsets
+from agent_runtime.personas import AgentRole, effective_toolsets, validate_toolsets
+from tests.agent_runtime.persona_samples import sample_personas
 
 
 def _persona(**overrides) -> AgentPersona:
@@ -91,7 +96,7 @@ def test_root_node_required_policy_loads_mission_lead_body(
 
 
 def test_harness_personas_expose_mission_dev_and_qa_skills():
-    personas = {persona.id: persona for persona in default_personas()}
+    personas = {persona.id: persona for persona in sample_personas()}
 
     assert "harness-mission-lead" in personas["neko_supervisor"].skills
     assert "harness-continuity" in personas["neko_supervisor"].skills

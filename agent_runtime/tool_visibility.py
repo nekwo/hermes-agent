@@ -22,8 +22,6 @@ from .mcp_lane import current_entry_point_lane, mcp_lane_requirement_failures
 from .mission_chat_workdir import MissionChatWorkdir
 from .models import AgentPersona
 from .personas import (
-    ALLOWED_TOOLSETS_BY_ROLE,
-    PER_ROLE_TOOL_DENIES,
     PERSONA_BLOCKED_TOOLS,
     REGISTRY_HYGIENE_BLOCKED_TOOLS,
     all_registered_toolsets,
@@ -111,7 +109,7 @@ def resolve_tool_visibility(
     unbounded = _is_unbounded(opts)
     resolved_toolsets = _resolved_toolsets(persona, opts, unbounded=unbounded)
     configured_toolsets = list(opts.configured_toolsets or resolved_toolsets)
-    role_allowed_toolsets = list(resolved_toolsets) if unbounded else sorted(ALLOWED_TOOLSETS_BY_ROLE[role])
+    role_allowed_toolsets = list(resolved_toolsets)
     persona_toolsets = list(getattr(persona, "toolsets", []) or [])
     persona_blocked = frozenset() if unbounded else blocked_tool_names(persona)
     requested_blocked = frozenset(_clean_names(opts.blocked_tool_names or []))
@@ -128,7 +126,7 @@ def resolve_tool_visibility(
     final_tools = _tool_names_for_toolsets(resolved_toolsets, blocked_tool_names=sorted(final_blocked))
     blocked_entries = _blocked_tool_entries(
         sorted((set(candidate_tools) | set(_clean_names(final_blocked))) - set(final_tools)),
-        role_denies=PER_ROLE_TOOL_DENIES[role],
+        role_denies=frozenset(),
         persona_denies=PERSONA_BLOCKED_TOOLS,
         requested_denies=requested_blocked,
         registry_hygiene_denies=REGISTRY_HYGIENE_BLOCKED_TOOLS,
