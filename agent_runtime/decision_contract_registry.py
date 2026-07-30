@@ -999,7 +999,16 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "child.returned": EventContract("child.returned", "Child returned", ("parent_node_id", "child_node_id", "summary"), ("proof_ids", "artifact_refs", "stage_id", "persona_instance_id")),
     "run.tool.started": EventContract("run.tool.started", "Tool started", ("tool_name",), ("run_id",)),
     "run.tool.finished": EventContract("run.tool.finished", "Tool finished", ("tool_name", "status"), ("duration_ms",)),
-    "decision_contract.parity": EventContract("decision_contract.parity", "Decision contract parity", ("mode", "status", "public_decision_type", "execution_decision_type"), ("legacy_decision_type", "shimmed", "blocked_reason")),
+    # S32 de-registered decision_contract.parity behind its emitter: S27
+    # (5c16417f6) cut the simplified-contract projection half out of
+    # simplified_contract.py, and _record_parity — which only that half called —
+    # was the only writer that ever produced the type. It compared the public
+    # and execution decision types for the deterministic executor deleted in S5.
+    # Unlike run.opened / repo_bundle.delivered there is no operator-summary row
+    # or formatter arm to retire with it. See
+    # tests/agent_runtime/test_s32_decision_contract_parity_retirement.py.
+    # NOT the same thing: agent_runtime/parity.py is the read-model
+    # ProjectionAccountant and never emitted this (or any) event type.
     "run.closed": EventContract("run.closed", "Run closed", ("state", "decision_type"), ("total_tokens",)),
     "role_envelope.opened": EventContract("role_envelope.opened", "Role envelope opened", ("envelope_id", "role_id"), ("mission_stage_id", "checklist_id")),
     "role_envelope.continued": EventContract("role_envelope.continued", "Role envelope continued", ("envelope_id", "status"), ("decision_type", "proof_count", "no_progress_count")),

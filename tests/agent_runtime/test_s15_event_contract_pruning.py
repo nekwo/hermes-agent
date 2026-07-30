@@ -115,10 +115,13 @@ REMOVED_EVENT_TYPES = frozenset(
 # flow_graph.pruned (the persona-instance reconciler's phase-5 graph reap). Those
 # three deltas are owned by tests/agent_runtime/test_s25_run_opened_retirement.py,
 # tests/agent_runtime/test_s25_repo_bundle_delivered_retirement.py, and
-# tests/agent_runtime/test_s25_graph_prune_on_reap.py.
+# tests/agent_runtime/test_s25_graph_prune_on_reap.py. Then -1 at S32:
+# decision_contract.parity, whose sole emitter simplified_contract._record_parity
+# was deleted at S27 (5c16417f6) — owned by
+# tests/agent_runtime/test_s32_decision_contract_parity_retirement.py.
 # This stays an absolute count on purpose: it is the one assertion that catches
 # a contract silently appearing or disappearing.
-SURVIVING_EVENT_COUNT = 92
+SURVIVING_EVENT_COUNT = 91
 
 
 def test_the_unemittable_event_types_are_no_longer_registered():
