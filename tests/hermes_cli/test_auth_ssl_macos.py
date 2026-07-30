@@ -19,7 +19,13 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+# Repo root is TWO levels up (tests/hermes_cli/ -> tests/ -> repo root).
+# Inserting ``tests/`` here instead put a directory literally named
+# ``hermes_cli`` (this test package) at the FRONT of sys.path, so the import
+# below resolved to ``tests/hermes_cli`` and raised
+# ``ModuleNotFoundError: No module named 'hermes_cli.auth'`` whenever this
+# module was imported before anything had already imported the real package.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 from hermes_cli.auth import _default_verify, _resolve_verify
 
