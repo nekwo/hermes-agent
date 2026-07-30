@@ -91,10 +91,12 @@ def test_the_lookalike_keep_set_survives():
 
     assert callable(parity.ProjectionAccountant)
     assert callable(snapshot.build_snapshot)
-    # ``goal``/``task``: the archived-summary reader and its cap are the fetch
-    # lane behind ``harness task history``, not the evicted frame builder.
-    assert callable(snapshot._archived_task_summaries)
-    assert snapshot.ARCHIVED_TASKS_REF_RECENT_CAP > 0
+    # ``goal``/``task``: S18 kept ``_archived_task_summaries`` + its cap here on
+    # the premise that they were "the fetch lane behind ``harness task
+    # history``". S8 had already deleted that CLI verb, so the reader served no
+    # lane; S27 removed both. See test_s27_snapshot_orphan_tree_removal.
+    assert not hasattr(snapshot, "_archived_task_summaries")
+    assert not hasattr(snapshot, "ARCHIVED_TASKS_REF_RECENT_CAP")
     # ``proof``/``incident``: the live incident frame split stays.
     assert callable(snapshot._open_incidents_frame)
     # ``board``/``realm``/``workspace``: the live frames the launcher renders.

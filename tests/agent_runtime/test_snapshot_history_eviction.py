@@ -12,7 +12,6 @@ from __future__ import annotations
 import argparse
 import contextlib
 import io
-import json
 from datetime import timedelta
 
 import pytest
@@ -26,17 +25,21 @@ from types import SimpleNamespace
 
 Task = SimpleNamespace
 from agent_runtime.snapshot import (
-    ARCHIVED_TASKS_REF_RECENT_CAP,
-    _archived_task_summaries,
     _open_incidents_frame,
     _persona_chat_history_frame,
     build_snapshot,
     snapshot_section_bytes,
 )
+
+# S27: ``ARCHIVED_TASKS_REF_RECENT_CAP`` and ``_archived_task_summaries`` are
+# gone. S18 kept them as "the fetch lane behind ``harness task history``", but S8
+# had already removed that CLI verb family — the asserts at the bottom of this
+# module prove the parser now rejects it — so the reader served no lane and the
+# cap capped nothing. The eviction contract itself (rows leave the FRAME, never
+# the disk) is unchanged and is pinned below without the dead reader.
+ARCHIVED_TASK_SEED_COUNT = 30
 from agent_runtime.states import TaskState
 from agent_runtime.store import IncidentStore, TaskStore, _write_model
-from agent_runtime.events import EventLog
-from agent_runtime.models import Event
 from agent_runtime import paths
 
 
@@ -112,7 +115,7 @@ def test_archived_tasks_evicted_to_pointer_stub_by_default(isolate_agent_runtime
 
 
 def test_archived_tasks_recent_ids_capped(isolate_agent_runtime_root):
-    _seed_archive_batch(isolate_agent_runtime_root, count=ARCHIVED_TASKS_REF_RECENT_CAP + 5)
+    _seed_archive_batch(isolate_agent_runtime_root, count=ARCHIVED_TASK_SEED_COUNT)
     snap = build_snapshot()
     assert "archived_tasks" not in snap
 
@@ -205,8 +208,6 @@ def test_persona_chat_history_frame_strips_tail_keeps_anchors():
 
 def test_history_eviction_drops_bytes(isolate_agent_runtime_root):
     # Seed a heavy archive (big descriptions) + many closed/ancient incidents.
-    from agent_runtime.serde import to_jsonable as _jsonable
-
     big = "D" * 30_000
     _seed_archive_batch(isolate_agent_runtime_root, count=10, description=big)
     store = IncidentStore()
@@ -214,20 +215,20 @@ def test_history_eviction_drops_bytes(isolate_agent_runtime_root):
         _seed_incident(store, f"inc_old_{index}", closed_delta_hours=100)
 
     # The only shape: history evicted (S7-B RULING-0 — no in-frame legacy build to
-    # A/B against). The eviction win is measured against the WEIGHT of the rows
-    # the pointer replaced, read straight from the projection the pointer
-    # references (the same rows `harness task history` serves).
-    snap = build_snapshot()
-
-    assert "archived_tasks" not in snap
-
-    full_rows = _archived_task_summaries()
-    archived_full = len(
-        json.dumps(_jsonable(full_rows), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    # A/B against). S27 removed the in-process reader this used to weigh, so the
+    # win is measured against the rows ON DISK — the authoritative weight the
+    # frame refuses to carry, and the same bytes an on-demand fetch would page.
+    archived_full = sum(
+        path.stat().st_size
+        for path in (isolate_agent_runtime_root / "deleted_archive").rglob("*.json")
     )
     assert archived_full > 250_000  # 10 * 30KB descriptions
-    # The bytes the stub keeps out of every steady-state frame.
-    assert archived_full >= 250_000
+
+    snap = build_snapshot()
+
+    # None of that weight reaches the frame, and the section itself is absent.
+    assert "archived_tasks" not in snap
+    assert snapshot_section_bytes(snap, "archived_tasks") == 0
 
     # Every closed incident left the frame; only the typed history ref accounts
     # for them (open-only retention). The in-frame incidents map is empty here.
