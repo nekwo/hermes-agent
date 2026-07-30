@@ -80,41 +80,35 @@ def test_schema_has_all_decision_type_enum_values():
     assert set(DECISION_SCHEMA["properties"]["type"]["enum"]) == {item.value for item in DecisionType}
 
 
-def test_role_validation_rejects_pm_patch_decision():
+def test_role_validation_accepts_configured_role_tokens():
     decision = parse_structured_decision(decision_blob("propose_patch", {"patch": "..."}))
 
-    with pytest.raises(DecisionPayloadInvalid):
-        validate_decision_for_role(decision, AgentRole.PM)
+    validate_decision_for_role(decision, AgentRole.PM)
+    validate_decision_for_role(decision, "custom-reviewer")
 
 
-def test_dev_like_specialists_can_implement_but_not_self_verify():
+def test_decision_types_are_not_filtered_by_dev_role():
     hand_off = parse_structured_decision(decision_blob("hand_off", {"stage_id": "stage_1", "summary": "done"}))
     qa_review = parse_structured_decision(decision_blob("request_qa_review", {"proof_ids": ["proof_1"]}))
     approve = parse_structured_decision(decision_blob("approve", {"review_scope": "implementation", "proof_ids": ["proof_1"]}))
     qa_verdict = parse_structured_decision(decision_blob("qa_verdict", {"verdict": "approved", "proof_ids": ["proof_1"]}))
 
     validate_decision_for_role(hand_off, AgentRole.DEV)
-    with pytest.raises(DecisionPayloadInvalid):
-        validate_decision_for_role(qa_review, AgentRole.DEV)
-    with pytest.raises(DecisionPayloadInvalid):
-        validate_decision_for_role(approve, AgentRole.DEV)
-    with pytest.raises(DecisionPayloadInvalid):
-        validate_decision_for_role(qa_verdict, AgentRole.DEV)
+    validate_decision_for_role(qa_review, AgentRole.DEV)
+    validate_decision_for_role(approve, AgentRole.DEV)
+    validate_decision_for_role(qa_verdict, AgentRole.DEV)
 
 
-def test_neko_mission_lead_can_scope_but_not_implement_or_self_verify():
+def test_decision_types_are_not_filtered_by_supervisor_role():
     scope = parse_structured_decision(decision_blob("scope_route", {"objective": "ship", "acceptance_criteria": ["proved"], "target_owner": "dev", "target_repo": "hermes-agent"}))
     close = parse_structured_decision(decision_blob("approve", {"review_scope": "implementation", "verdict": "approved", "proof_ids": ["proof_1"]}))
     hand_off = parse_structured_decision(decision_blob("hand_off", {"stage_id": "stage_1"}))
     qa_verdict = parse_structured_decision(decision_blob("qa_verdict", {"verdict": "approved"}))
 
     validate_decision_for_role(scope, AgentRole.ALICE_SUPERVISOR)
-    with pytest.raises(DecisionPayloadInvalid):
-        validate_decision_for_role(close, AgentRole.ALICE_SUPERVISOR)
-    with pytest.raises(DecisionPayloadInvalid):
-        validate_decision_for_role(hand_off, AgentRole.ALICE_SUPERVISOR)
-    with pytest.raises(DecisionPayloadInvalid):
-        validate_decision_for_role(qa_verdict, AgentRole.ALICE_SUPERVISOR)
+    validate_decision_for_role(close, AgentRole.ALICE_SUPERVISOR)
+    validate_decision_for_role(hand_off, AgentRole.ALICE_SUPERVISOR)
+    validate_decision_for_role(qa_verdict, AgentRole.ALICE_SUPERVISOR)
 
 
 def test_neko_prompt_matches_mission_lead_role_boundary():

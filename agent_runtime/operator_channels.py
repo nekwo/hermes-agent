@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from typing import Any, Iterable
 
-from .models import PersonaInstance, Task
+from .models import PersonaInstance
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
 from .redaction import TEXT_SECRET_ASSIGNMENT_RE
 from .run_budget import ACCOUNTING_KEY as RUN_BUDGET_ACCOUNTING_KEY
@@ -85,7 +85,7 @@ def operator_channel_summary(
     persona_instances: Iterable[PersonaInstance],
     persona_chat_history: list[dict[str, Any]],
     persona_chat_trace: list[dict[str, Any]],
-    tasks: Iterable[Task] | None = None,
+    tasks: Iterable[Any] | None = None,
     run_summaries: list[dict[str, Any]] | None = None,
     accountant: Any = None,
     intentionally_omitted_history_session_ids: Iterable[str] | None = None,
@@ -579,9 +579,9 @@ def _entry_runtime_ids(entry: dict[str, Any]) -> set[str]:
 
 
 class _TaskLookup:
-    def __init__(self, tasks: Iterable[Task]):
-        self.by_task_id: dict[str, Task] = {}
-        self.by_goal_id: dict[str, Task] = {}
+    def __init__(self, tasks: Iterable[Any]):
+        self.by_task_id: dict[str, Any] = {}
+        self.by_goal_id: dict[str, Any] = {}
         for task in tasks:
             task_id = safe_assignment_text(getattr(task, "id", None), limit=160)
             goal_id = safe_assignment_text(getattr(task, "goal_id", None), limit=160)
@@ -590,7 +590,7 @@ class _TaskLookup:
             if goal_id:
                 self.by_goal_id[goal_id] = task
 
-    def get(self, *, task_id: str | None, goal_id: str | None) -> Task | None:
+    def get(self, *, task_id: str | None, goal_id: str | None) -> Any | None:
         if task_id and task_id in self.by_task_id:
             return self.by_task_id[task_id]
         if goal_id and goal_id in self.by_goal_id:
@@ -645,7 +645,7 @@ def _conversation_contract(
     goal_id: str | None,
     title: str,
     state: str | None,
-    task: Task | None,
+    task: Any | None,
     history: dict[str, Any] | None,
     trace: dict[str, Any] | None,
     runs: list[dict[str, Any]] | None = None,
@@ -812,7 +812,7 @@ def _settle_terminal_tool_calls(
 
 
 def _conversation_goal_input(
-    task: Task,
+    task: Any,
     *,
     channel_id: str,
     persona_id: str,
@@ -1648,7 +1648,7 @@ def _latest_message_timestamp(messages: list[dict[str, Any]]) -> Any:
     return dated[-1] if dated else None
 
 
-def _task_time(task: Task | None) -> Any:
+def _task_time(task: Any | None) -> Any:
     if task is None:
         return None
     return getattr(task, "created_at", None) or getattr(task, "updated_at", None)

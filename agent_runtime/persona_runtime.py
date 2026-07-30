@@ -34,6 +34,7 @@ from .decision_contracts import validate_planning_decision
 from .mcp_admission import (
     LANE_MISSION_CHAT,
     admission_enabled,
+    admitted_operating_skill_ids,
     render_mcp_admission_line,
     resolve_mcp_admission,
     scope_toolsets_to_admission,
@@ -42,8 +43,7 @@ from .mcp_lane import mission_chat_mcp_lane_line
 from .models import AgentPersona, AgentRun
 from .mission_chat_clarify import MissionChatClarifyCapture
 from .mission_chat_workdir import mission_chat_workdir_for_persona
-from .mission_plan import current_plan_stage
-from .personas import ALLOWED_TOOLSETS_BY_ROLE, all_registered_toolsets, blocked_tool_names, effective_toolsets, load_bundled_prompt, role_from_persona
+from .personas import all_registered_toolsets, blocked_tool_names, effective_toolsets, load_bundled_prompt, role_from_persona
 from .profile_context import resolve_persona_profile
 from .provider_health import assert_provider_health_for_persona
 from .terminal_envelope import (
@@ -69,11 +69,6 @@ from .tool_permissions import (
     permission_options_for_chat,
 )
 
-
-class PersonaRuntime(Protocol):
-    def run_tick(self, persona: AgentPersona, ctx: AgentContext, *, run: AgentRun) -> AgentDecision: ...
-
-
 class GPTPersonaRuntime:
     def __init__(
         self,
@@ -94,139 +89,6 @@ class GPTPersonaRuntime:
             credential_pool=credential_pool,
             session_db=runner_session_db,
         )
-
-    def run_tick(self, persona: AgentPersona, ctx: AgentContext, *, run: AgentRun) -> AgentDecision:
-        first_error: DecisionPayloadInvalid | None = None
-        for attempt in range(2):
-            active_ctx = ctx
-            if attempt == 1:
-                active_ctx = build_context(
-                    ctx.task,
-                    ctx.run,
-                    recent_events=ctx.recent_events,
-                    proof_ids=ctx.proof_ids,
-                    requires_repair=True,
-                    repair_error=str(first_error),
-                )
-                active_ctx.context_bundles = list(ctx.context_bundles)
-                active_ctx.proof_records = list(ctx.proof_records)
-                active_ctx.incident_records = list(ctx.incident_records)
-                active_ctx.repo_context = dict(ctx.repo_context) if isinstance(ctx.repo_context, dict) else ctx.repo_context
-                if isinstance(ctx.mission_hud, dict) and isinstance(active_ctx.mission_hud, dict):
-                    active_ctx.mission_hud = {**ctx.mission_hud, "validation_repair": active_ctx.mission_hud.get("validation_repair")}
-                else:
-                    active_ctx.mission_hud = active_ctx.mission_hud or ctx.mission_hud
-                active_ctx.latest_handoff_packet = dict(ctx.latest_handoff_packet) if isinstance(ctx.latest_handoff_packet, dict) else ctx.latest_handoff_packet
-                active_ctx.latest_delivery = dict(ctx.latest_delivery) if isinstance(ctx.latest_delivery, dict) else ctx.latest_delivery
-                active_ctx.latest_qa_review = dict(ctx.latest_qa_review) if isinstance(ctx.latest_qa_review, dict) else ctx.latest_qa_review
-                active_ctx.autonomy_packet = dict(ctx.autonomy_packet) if isinstance(ctx.autonomy_packet, dict) else ctx.autonomy_packet
-            raw = self._invoke_agent(persona, active_ctx, run=run)
-            try:
-                decision = parse_structured_decision(raw)
-                validate_decision_for_role(decision, role_from_persona(persona))
-                validate_planning_decision(decision)
-                return decision
-            except DecisionPayloadInvalid as exc:
-                first_error = exc
-        raise first_error or DecisionPayloadInvalid("invalid AgentDecision")
-
-    def _invoke_agent(self, persona: AgentPersona, ctx: AgentContext, *, run: AgentRun) -> str:
-        binding = resolve_persona_profile(persona)
-        if binding.readiness == "missing_profile":
-            raise DecisionPayloadInvalid(binding.summary)
-        assert_provider_health_for_persona(persona)
-        progress_sink = RunProgressSink(run_store=RunStore(), run_id=run.id)
-        repo_ctx = _repo_context_for_persona(persona, ctx)
-        if repo_ctx is not None:
-            try:
-                repo_ctx = isolated_repo_context_for_run(repo_ctx, task_id=ctx.task.id, run_id=run.id)
-            except ValueError as exc:
-                raise DecisionPayloadInvalid(f"Dev run repo isolation failed closed: {exc}") from exc
-            ctx.repo_context = _repo_context_for_render(repo_ctx)
-            _attach_repo_baseline(run, repo_ctx)
-            progress_sink.emit("run.progress", _repo_context_progress_payload(repo_ctx))
-        render_started = time.perf_counter()
-        user_message = render_context(ctx)
-        system_message = build_system_prompt(
-            persona,
-            task_id=run.id,
-            root_node_mode=bool(
-                isinstance(getattr(ctx.task, "harness_self_heal", None), dict)
-                and ctx.task.harness_self_heal.get("root_node_mode")
-            ),
-        )
-        timing: dict[str, int] = {}
-        timing["prompt_render_ms"] = _emit_timing(progress_sink, "prompt_render", render_started, status="completed")
-        provider_started = time.perf_counter()
-        progress_sink.emit(
-            "run.progress",
-            {
-                "type": "run.progress",
-                "phase": "timing",
-                "step": "provider_call",
-                "status": "started",
-                "summary": "Provider call started.",
-                "timing_key": "provider_call_ms",
-            },
-        )
-        # Audit Q2: a worker tick is a HARNESS-CONSTRUCTED run, so it binds a
-        # scope. Before this, the worker lane fell through to the legacy
-        # pattern table in ``tools/terminal_tool.py``, whose gate is the mere
-        # presence of ``HERMES_AGENT_RUNTIME_ROOT`` — so whether ``rm -rf`` was
-        # blocked on a tick depended on process ancestry. The lane is not in
-        # GOVERNED_LANES (no grant table applies), so every gated class here is
-        # the legacy HARD BLOCK — the same answer, now reached deterministically.
-        envelope_scope = terminal_envelope_scope_for_persona(
-            persona,
-            lane=TERMINAL_ENVELOPE_LANE_MISSION_WORKER,
-            session_id=run.session_id,
-            runtime_root=paths.store_root(),
-        )
-        try:
-            result = self._runner.run(
-                AgentRunRequest(
-                    profile=binding.hermes_profile,
-                    provider=persona.provider or self._default_provider,
-                    model=persona.model or self._default_model or "",
-                    api_mode=persona.api_mode,
-                    terminal_envelope_scope=envelope_scope,
-                    enabled_toolsets=effective_toolsets(persona),
-                    blocked_tool_names=_blocked_tool_names_for_run(persona, ctx),
-                    quiet_mode=True,
-                    # Harness owns persona identity and repo-context injection
-                    # unless the persona explicitly opts into normal Hermes
-                    # core context-file loading. This keeps standard Hermes
-                    # behavior unchanged while preventing profile SOUL/manual
-                    # session doctrine from outranking AgentDecision rules.
-                    skip_context_files=not bool(getattr(persona, "include_core_context_files", False)),
-                    skip_memory=not _persona_run_uses_memory(persona, ctx),
-                    platform="agent_runtime",
-                    skill_surface="mission_worker",
-                    skill_root_node_mode=bool(
-                        isinstance(getattr(ctx.task, "harness_self_heal", None), dict)
-                        and ctx.task.harness_self_heal.get("root_node_mode")
-                    ),
-                    session_id=run.session_id,
-                    max_iterations=run.iteration_budget,
-                    max_wall_seconds=run.max_wall_seconds,
-                    max_api_calls=run.max_api_calls,
-                    max_total_tokens=run.max_total_tokens,
-                    user_message=user_message,
-                    system_message=system_message,
-                    task_id=run.id,
-                    progress_callback=lambda payload: progress_sink.emit(str(payload.get("type", "run.progress")), payload),
-                    runtime_root=paths.store_root(),
-                    workdir=repo_ctx.workdir if repo_ctx is not None else None,
-                    stop_on_repeated_read_search=role_from_persona(persona).value in {"dev", "qa"},
-                    tool_budget_limits=_tool_budget_limits(ctx),
-                )
-            )
-        except RunBudgetExceeded as exc:
-            run.session_id = exc.session_id or run.session_id
-            raise
-        timing["provider_call_ms"] = _emit_timing(progress_sink, "provider_call", provider_started, status="completed")
-        _apply_llm_metadata(run, result, timing=timing)
-        return result.final_response
 
     def chat_reply(
         self,
@@ -380,7 +242,6 @@ class GPTPersonaRuntime:
         compression_threshold_tokens_override: int | None = None,
         compression_protect_first_n_override: int | None = None,
         compression_protect_last_n_override: int | None = None,
-        allow_mission_goal: bool = False,
     ) -> AgentRunResult:
         """Run the canonical Mission Control chat path.
 
@@ -473,7 +334,6 @@ class GPTPersonaRuntime:
                     persona,
                     session_id=perm_session_id,
                     admission=admission,
-                    allow_mission_goal=allow_mission_goal,
                 ),
                 blocked_tool_names=_blocked_tool_names_for_chat(persona, session_id=perm_session_id),
                 quiet_mode=True,
@@ -579,7 +439,7 @@ PERSONA_CHAT_SCRATCH_SOURCE = "agent_runtime_persona_chat_scratch"
 
 def _persona_chat_system_prompt(persona: AgentPersona) -> str:
     display = getattr(persona, "display_name", None) or getattr(persona, "id", "the agent")
-    role = role_from_persona(persona).value
+    role = str(role_from_persona(persona))
     base = (
         f"You are {display}, a Mission Control operator-channel agent (role: {role}). "
         "You are in a direct, real-time chat with a single human operator — your teammate, not an end user. "
@@ -662,16 +522,7 @@ def _mission_chat_operative_rules() -> str:
         "grant blocks it, say so plainly instead of inventing output.\n"
         "- When the operator asks you to send, brief, or coordinate named agents, use `agent_chat_send` for each agent. "
         "Ordinary persona chat is chat-only for every role: investigations, verification, MCP calls, and multi-agent work "
-        "never imply goal creation. The `mission_goal_create` tool is absent unless the CALLER explicitly opted this turn "
-        "into heavy mission routing with `--allow-mission-goal`; never infer or work around that opt-in. If the operator asks "
-        "for a goal/mission/task and the tool is absent, explain that the explicit opt-in is required instead of creating a "
-        "task through terminal, a worker, or another tool.\n"
-        "- Only when `mission_goal_create` is actually present AND the operator explicitly asks to start, trigger, kick off, "
-        "or run a goal/mission/task, create a REAL one with it (it returns a tracked task_id and starts the Mission Daemon "
-        "so it self-drives). Do NOT "
-        "run the no-model smoke test (or any temp/throwaway graph validation) as a stand-in for a real goal — the smoke "
-        "never appears in Mission Control. Only fall back to the smoke if the operator explicitly asks to validate the "
-        "graph without creating real work.\n"
+        "stay in chat and never imply goal creation or create hidden durable work.\n"
         "- If an order is ambiguous or underspecified — an unclear target, a missing detail, or a routing choice with more "
         "than one plausible answer — use the `clarify` tool to ask before acting, rather than guessing. Pass the question, and "
         "when the answer is one of a few known options pass them as `choices` (up to 4) so they render as pickable rows. On "
@@ -719,7 +570,7 @@ def _mission_chat_identity_prompt(persona: AgentPersona) -> str:
 
     display = str(getattr(persona, "display_name", None) or getattr(persona, "id", "the agent")).strip()
     persona_id = str(getattr(persona, "id", "") or "").strip()
-    role = role_from_persona(persona).value
+    role = str(role_from_persona(persona))
     voice = _persona_chat_voice(role, display)
     id_clause = f" (Mission Control persona id: `{persona_id}`)" if persona_id else ""
     never_self = (
@@ -862,7 +713,7 @@ def _repo_context_for_persona(persona: AgentPersona, ctx: AgentContext) -> RepoE
     if stage_repo is not None:
         try:
             return repo_execution_context_for_task(
-                type("TaskStageRepoScope", (), {"affected_repos": [stage_repo]})()
+                type("RepoScopeTask", (), {"affected_repos": [stage_repo]})()
             )
         except ValueError:
             pass
@@ -881,31 +732,16 @@ def _repo_context_for_persona(persona: AgentPersona, ctx: AgentContext) -> RepoE
 
 
 def _stage_repo_scope_for_persona(persona: AgentPersona, ctx: AgentContext) -> str | None:
-    """Resolve the grounding repo from the current mission-plan stage.
-
-    Authoritative over ``task.affected_repos`` (which lags the active stage). Only
-    returns a repo when it is a known product/harness repo and — if the persona
-    declares a ``repo_scope`` — that scope agrees with the stage repo. A mismatch is
-    a slot/persona mis-binding we surface via the legacy path rather than silently
-    grounding in the wrong tree.
-    """
-    stage = current_plan_stage(ctx.task) or getattr(ctx, "current_stage", None)
+    """Resolve the grounding repo from the current legacy stage, if any."""
+    stage = getattr(ctx, "current_stage", None)
     stage_repo = str(getattr(stage, "repo", "") or "").strip() if stage is not None else ""
     if stage_repo not in {"EterniaBackend", "EterniaLauncher", "hermes-agent"}:
         return None
-    from .final_gate import default_blueprint_placeholder_repo_override
-
-    # On the bundled default blueprint the stage repo is a placeholder; a goal
-    # resolved to a single different repo grounds there instead (observed live
-    # 2026-07-03, task_8e1e0832: backend_dev grounded in an EterniaBackend
-    # worktree for a hermes-agent goal, so the goal-named gate command failed
-    # with file-not-found in the wrong tree).
-    stage_repo = default_blueprint_placeholder_repo_override(ctx.task, stage_repo) or stage_repo
     persona_scope = getattr(persona, "repo_scope", None)
     if persona_scope:
         try:
             scoped = repo_execution_context_for_task(type("TaskPersonaScope", (), {"affected_repos": [persona_scope]})())
-            stage_ctx = repo_execution_context_for_task(type("TaskStageRepo", (), {"affected_repos": [stage_repo]})())
+            stage_ctx = repo_execution_context_for_task(type("RepoScopeTask", (), {"affected_repos": [stage_repo]})())
         except ValueError:
             return None
         if scoped is None or stage_ctx is None or scoped.workdir != stage_ctx.workdir:
@@ -956,7 +792,7 @@ def _persona_run_uses_memory(persona: AgentPersona, ctx: AgentContext) -> bool:
 
 def _blocked_tool_names_for_run(persona: AgentPersona, ctx: AgentContext) -> list[str]:
     names = set(blocked_tool_names(persona))
-    if _is_no_edit_context_stage(ctx) and role_from_persona(persona).value == "dev":
+    if _is_no_edit_context_stage(ctx) and str(role_from_persona(persona)) == "dev":
         names.update({"read_file", "search_files", "session_search", "browser_snapshot"})
     return sorted(names)
 
@@ -1022,7 +858,6 @@ def _enabled_toolsets_for_chat(
     *,
     session_id: str | None,
     admission=None,
-    allow_mission_goal: bool = False,
 ) -> list[str]:
     """The single chat-lane toolset chokepoint (both the free-chat and operator/
     mission chat call sites funnel through here).
@@ -1030,7 +865,7 @@ def _enabled_toolsets_for_chat(
     Resolution order: permission mode → role/persona toolset resolution → chat
     capability augmentation → the chat-lane cost policy
     (``scope_chat_lane_toolsets``) that drops browser / vision / heavy-dev from a
-    conversational lane → the explicit mission-goal guard → the MCP admission
+    conversational lane → the MCP admission
     scope. ``unbounded`` permission mode bypasses the cost policy, but never the
     global chat-only default. A persona that wants a
     specific cost-excluded toolset back on its *bounded* chat lane restores it via
@@ -1055,15 +890,6 @@ def _enabled_toolsets_for_chat(
         resolved = scope_chat_lane_toolsets(
             resolved, restore=chat_lane_restore_toolsets(persona.id)
         )
-    # Ordinary persona chat is globally chat-only. The mission/task/graph lane
-    # creates durable work, workers, retries, and proof state, so permission mode
-    # and role capability must never imply admission. Only the dedicated caller
-    # opt-in for this exact Mission Control turn can retain this toolset.
-    mission_goal_role_allowed = "mission_goal" in ALLOWED_TOOLSETS_BY_ROLE.get(
-        role_from_persona(persona), frozenset()
-    )
-    if not allow_mission_goal or not mission_goal_role_allowed:
-        resolved = [toolset for toolset in resolved if toolset != "mission_goal"]
     admitted = admission.server_names if admission is not None else ()
     if admission is None and admission_enabled():
         # Only pay the policy resolve when the kill switch is on. With it off the
@@ -1169,6 +995,44 @@ def mission_chat_admission_line(
     return render_mcp_admission_line(admission)
 
 
+def mission_chat_operating_skills(
+    persona: AgentPersona, *, session_id: str | None
+) -> list[str]:
+    """The operating manual(s) this turn's ADMITTED MCP surface comes with.
+
+    The twin of :func:`mission_chat_admission_line`, and deliberately built from
+    the SAME pure policy with the SAME inputs: the line tells the agent which
+    declared servers it did NOT get, and this tells the turn which manuals it
+    must be handed for the ones it DID. Resolved once here rather than inferred
+    from the rendered line, so the two can never describe different admissions.
+
+    Flag-off costs nothing — no root-config load past the kill switch, no
+    persona-profile read, no filesystem — because with admission off nothing is
+    ever admitted and there is no surface to document. A persona whose admitted
+    servers have no registered manual, or who was never granted it, gets ``[]``
+    and the turn's preload is byte-identical to what it was before.
+
+    Never raises: an unavailable policy must degrade the turn's context, never
+    fail the turn.
+    """
+
+    if not admission_enabled():
+        return []
+    try:
+        admission = resolve_mcp_admission(
+            persona,
+            lane=LANE_MISSION_CHAT,
+            permission_mode=permission_options_for_chat(
+                persona, session_id=session_id
+            ).permission_mode,
+        )
+    except Exception:  # pragma: no cover - a context input must never fail a turn
+        return []
+    return admitted_operating_skill_ids(
+        admission, granted_skills=getattr(persona, "skills", None) or ()
+    )
+
+
 def chat_runtime_tool_contract(
     persona: AgentPersona, *, session_id: str | None
 ) -> dict[str, list[str]]:
@@ -1195,7 +1059,7 @@ def apply_chat_lane_tool_scope(
     The operator-facing permission preview (``persona_instance_summary`` /
     ``persona_instance_tool_detail``) resolved ``effective_toolsets(persona)`` —
     the persona's raw configured set — so it omitted BOTH the operator-chat
-    capability augmentation (mission_goal / agent_chat / board / clarify) and the
+    capability augmentation (agent_chat / board / clarify) and the
     T3/T6a chat-lane cost scoping (browser / vision / file / terminal /
     skill_manage cut). The preview therefore lied about the actual chat lane.
 
@@ -1238,32 +1102,34 @@ def apply_chat_lane_tool_scope(
     return options
 
 
-# Operator-chat first-class capabilities that a persona's role is allowed to use
-# but which an older persisted/config toolset list may not enumerate. The
-# ``mission_goal`` augmentation is capability discovery only: the global guard in
-# ``_enabled_toolsets_for_chat`` removes it again unless the caller explicitly
-# opts that exact turn into heavy mission routing.
-_CHAT_CAPABILITY_TOOLSETS = ("mission_goal", "agent_chat", "board")
+# Operator-chat first-class capabilities that a chat persona gets regardless of
+# what its persisted/config toolset list happens to enumerate. This is capability
+# *discovery* — it does not widen any downstream gate.
+#
+# `agent_chat`, `board` and `clarify` are UNCONDITIONAL on purpose (mission-lane
+# removal, S1). This is the ONLY path that puts `board` and `agent_chat` on a chat lane, and
+# it used to gate them on a hardcoded role map. Such a gate silently strips the Mission Board
+# and agent-to-agent chat from every chat persona the moment either happens. Both
+# are explicit KEEP. The gate had no protective value either: all four roles in the
+# dict already allow `board` and `agent_chat`, so removing it changes nothing for a
+# known role and *restores* the intended surface for an unknown one.
+#
+# `clarify` is likewise universal: ask a question, get the answer as the next
+# message in the same session.
+_CHAT_CAPABILITY_TOOLSETS = ("agent_chat", "board", "clarify")
 
 
 def _augment_chat_capabilities(persona: AgentPersona, toolsets: list[str]) -> list[str]:
-    role = role_from_persona(persona)
-    allowed = ALLOWED_TOOLSETS_BY_ROLE.get(role, frozenset())
     augmented = list(toolsets)
     for toolset in _CHAT_CAPABILITY_TOOLSETS:
-        if toolset in allowed and toolset not in augmented:
-            augmented.append(toolset)
-    # clarify is a universal operator/relay conversational primitive — ask a
-    # question, get the answer as the next message in the same session — so it
-    # is available to every chat persona regardless of role, unlike the
-    # privileged mission_goal capability which stays gated on `allowed`.
-    if "clarify" not in augmented:
-        augmented.append("clarify")
+        if toolset in augmented:
+            continue
+        augmented.append(toolset)
     return augmented
 
 
 def _is_no_edit_context_stage(ctx: AgentContext) -> bool:
-    stage = current_plan_stage(ctx.task) or ctx.current_stage
+    stage = ctx.current_stage
     if stage is None:
         return False
     return str(getattr(stage, "kind", "") or "") == "context" and not stage_requires_product_edit(ctx.task, stage)
@@ -1641,7 +1507,7 @@ def _simplified_contract_decisions_for_role(role) -> list[DecisionType]:
 def _simplified_contract_guidance(persona: AgentPersona, *, cfg) -> str:
     if not _simplified_contract_prompt_enabled(cfg):
         return ""
-    role = role_from_persona(persona).value
+    role = str(role_from_persona(persona))
     common = (
         "# Simplified Agent Contract Active\n"
         "Mission HUD mode is `simplified_agent_contract`. The visible ACTION menu is authoritative. "
@@ -1713,7 +1579,7 @@ def _normal_worker_flow_guidance(persona: AgentPersona) -> str:
     flow = getattr(cfg, "normal_worker_flow", None)
     if not bool(getattr(flow, "enabled", False)):
         return ""
-    role = role_from_persona(persona).value
+    role = str(role_from_persona(persona))
     if role == "dev":
         return (
             "# Normal Worker Flow\n"

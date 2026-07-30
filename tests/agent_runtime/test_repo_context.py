@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from agent_runtime.repo_context import repo_execution_context_for_task, safe_affected_repo_labels
-from agent_runtime.models import Task
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.states import TaskState
 from hermes_time import now
 

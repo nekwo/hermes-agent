@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .decision_schema import DecisionType
-from .models import AgentRun, Task
+from .models import AgentRun
 from .runtime_config import ContinuousRoleSessionConfig
 from .states import RunState, TaskState
 from .store import _safe_session_id

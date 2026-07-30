@@ -27,26 +27,23 @@ from .migrations import effective_config_summary
 from .production_envelope import production_envelope_status
 from .repo_bundles import RepoBundleStore, bundle_queue_summary, repo_bundle_delivery_summary, repo_bundle_summary, repo_lock_summary
 from .runtime_instances import GoalRuntimeInstanceStore, runtime_instances_summary
-from .state_machine import MissionStateMachine
 from .states import RunState, TaskState
-from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, ProofStore, RunStore, TaskStore
+from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, RunStore, TaskStore
 from .worker_sessions import WorkerSessionStore, worker_session_summary
 from .snapshot import _default_persona_session_db, _parity_envelope
 
 
-def build_status(task_store: TaskStore | None = None, run_store: RunStore | None = None, incident_store: IncidentStore | None = None, agent_store: AgentStore | None = None, proof_store: ProofStore | None = None, event_log: EventLog | None = None, worker_session_store: WorkerSessionStore | None = None) -> dict:
+def build_status(task_store: TaskStore | None = None, run_store: RunStore | None = None, incident_store: IncidentStore | None = None, agent_store: AgentStore | None = None, event_log: EventLog | None = None, worker_session_store: WorkerSessionStore | None = None) -> dict:
     _build_started = time.perf_counter()
-    task_store = task_store or TaskStore()
     run_store = run_store or RunStore()
     incident_store = incident_store or IncidentStore()
     agent_store = agent_store or AgentStore()
-    proof_store = proof_store or ProofStore()
     # Status calls persona_chat_trace/for_session dozens of times on the same
     # log; CachedEventLog reads events.jsonl once and serves all of them from
     # memory (same as build_snapshot — this was the 2s hog of a warm status).
     event_log = event_log or CachedEventLog()
     worker_session_store = worker_session_store or WorkerSessionStore(event_log=event_log)
-    tasks = task_store.list_all()
+    tasks = []
     runs = run_store.list_all()
     workers = worker_session_store.list_all()
     incidents = incident_store.list_all()
@@ -56,11 +53,6 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
     execution_mode = "manual"
     agents = agent_store.list_all() or ensure_persisted_personas(cfg)
     proofs = []
-    for task in tasks:
-        proofs.extend(proof_store.list_for_task(task.id))
-    from .burn_in import certification_summary
-
-    cert = certification_summary()
     repo_bundles = RepoBundleStore(event_log=event_log).list_all()
     runtime_instances = GoalRuntimeInstanceStore(event_log=event_log).list_all()
     open_incident_task_ids = {i.task_id for i in incidents if i.closed_at is None and i.task_id}
@@ -101,17 +93,9 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
         "production_envelope": production_envelope_status(cfg),
         "swarm": {
             "enabled": bool(getattr(getattr(cfg, "swarm", None), "enabled", False)),
-            "certification": {
-                **cert,
-                "required": bool(getattr(getattr(cfg, "swarm", None), "requires_certification", True)),
-            },
         },
         "recursive_supervision": {
             "enabled": _recursive_supervision_enabled(cfg),
-            "certification": {
-                **cert,
-                "required": bool(getattr(getattr(cfg, "swarm", None), "requires_certification", True)),
-            },
         },
         "foreground_runtime": runtime_instances_summary(runtime_instances),
         "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=None, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
@@ -121,7 +105,6 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
                 blocked=t.id in open_incident_task_ids,
                 incidents=open_incidents_by_task.get(t.id, []),
                 run_store=run_store,
-                proof_store=proof_store,
                 config=cfg,
             )
             for t in tasks
@@ -137,6 +120,14 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
         "lanes": runtime_instances_summary(runtime_instances)["lanes"],
         "swarm_budget": _swarm_budget_summary(runs, cfg),
     }
+    # Top-level so an undispatchable mission is visible without reading every
+    # `next_actions` entry. Empty list is the healthy steady state; a non-empty
+    # one is a broken routing invariant that needs an operator, not a retry.
+    data["undispatchable_missions"] = [
+        {"task_id": entry.get("task_id"), "reason": entry.get("reason")}
+        for entry in data["next_actions"]
+        if entry.get("action") == "undispatchable"
+    ]
     if persona_instance_runtime_enabled(cfg):
         instance_store = PersonaInstanceStore(event_log=event_log)
         instances = instance_store.derive_from_workers(agents, workers)
@@ -256,7 +247,7 @@ def _recursive_supervision_enabled(cfg) -> bool:
     )
 
 
-def _next_action(task, *, blocked: bool = False, incidents=None, run_store: RunStore | None = None, proof_store: ProofStore | None = None, config=None):
+def _next_action(task, *, blocked: bool = False, incidents=None, run_store: RunStore | None = None, config=None):
     if blocked and _has_budget_scope_recovery_path(incidents or [], run_store or RunStore()):
         return {**_stopped_progress(task, incidents or [], "self_heal_pending", "neko_supervisor"), "task_id": task.id, "action": "run_slot", "reason": "Dev exhausted read/search without patch or proof; Neko must split or narrow the stage before retry"}
     if blocked and _has_budget_approval_path(incidents or [], run_store or RunStore()):
@@ -265,9 +256,14 @@ def _next_action(task, *, blocked: bool = False, incidents=None, run_store: RunS
         reason = "budget_continuation_blocked" if _has_budget_incident(incidents or []) else "environment_blocked"
         message = "budget continuation cap reached; human review required" if reason == "budget_continuation_blocked" else "open incident requires human review"
         return {**_stopped_progress(task, incidents or [], reason, "human"), "task_id": task.id, "action": "blocked_by_incident", "reason": message}
-    action = MissionStateMachine(proof_store=proof_store, config=config).next_action(task)
-    reason = "settled" if action.type.value == "noop" else "retry_authorized" if "retry" in action.reason else "self_heal_pending" if "Neko" in action.reason else "waiting_for_preflight"
-    return {**_stopped_progress(task, [], reason, _owner_for_action(action, task=task, run_store=run_store)), "task_id": task.id, "action": action.type.value, "reason": action.reason}
+    progress = _stopped_progress(task, [], "routing_removed", "human")
+    progress["stopped_progress"]["next_action"] = "inspect_blocker"
+    return {
+        **progress,
+        "task_id": task.id,
+        "action": "undispatchable",
+        "reason": "the task dispatch lane has been retired",
+    }
 
 
 def _stopped_progress(task, incidents, reason: str, owner: str) -> dict:
@@ -293,12 +289,7 @@ def _owner_for_action(action, *, task=None, run_store: RunStore | None = None) -
     action_value = action.type.value if hasattr(getattr(action, "type", None), "value") else str(action)
     slot_id = str(getattr(action, "slot_id", "") or "").strip()
     if action_value == "run_slot" and slot_id == "dev" and task is not None:
-        try:
-            from .ticker import _dev_persona_id_for_task
-
-            return _dev_persona_id_for_task(task, run_store=run_store)
-        except Exception:
-            return "dev"
+        return "dev"
     if action_value == "run_slot" and slot_id:
         return slot_id
     return {

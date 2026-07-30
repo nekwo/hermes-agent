@@ -200,21 +200,12 @@ def payload_contract(decision_type: DecisionType | str) -> dict[str, Any]:
 
 
 def allowed_decisions_for_role(role: AgentRole | str) -> frozenset[DecisionType]:
-    resolved = role if isinstance(role, AgentRole) else AgentRole(str(role))
-    decisions: set[DecisionType] = set()
-    for shape_id in (*_ROLE_SHAPE_IDS.get(resolved, _ROLE_SHAPE_IDS[AgentRole.DEV]), *_COMMON_SHAPE_IDS, *tuple(context_expansion_shape_ids(resolved))):
-        shape = _HUD_SHAPES.get(shape_id)
-        if shape is not None and resolved in shape.roles:
-            decisions.add(shape.decision_type)
-    return frozenset(decisions)
-
-
-def allowed_decisions_by_role() -> dict[AgentRole, frozenset[DecisionType]]:
-    return {role: allowed_decisions_for_role(role) for role in AgentRole}
+    del role
+    return frozenset(_DECISION_CONTRACTS)
 
 
 def canonical_role_value(role: AgentRole | str) -> str:
-    return _resolve_hud_owner(role).value
+    return role.value if isinstance(role, AgentRole) else str(role)
 
 
 def validate_payload_keys(decision) -> None:
@@ -255,34 +246,18 @@ def hud_shape(shape_id: str) -> dict[str, Any]:
 
 
 def hud_shape_index_for_stage(owner: str | AgentRole) -> dict[str, dict[str, Any]]:
-    resolved = _resolve_hud_owner(owner)
-    result: dict[str, dict[str, Any]] = {}
-    for shape_id in role_shape_ids(resolved):
-        shape = _HUD_SHAPES.get(shape_id)
-        if shape is not None and _shape_visible_to_role(shape, resolved):
-            result[shape_id] = hud_shape(shape_id)
-    for shape_id in _COMMON_SHAPE_IDS:
-        shape = _HUD_SHAPES.get(shape_id)
-        if shape is not None and _shape_visible_to_role(shape, resolved):
-            result.setdefault(shape_id, hud_shape(shape_id))
-    return result
+    del owner
+    return {shape_id: hud_shape(shape_id) for shape_id in _HUD_SHAPES}
 
 
 def role_shape_ids(role: str | AgentRole) -> list[str]:
-    resolved = _resolve_hud_owner(role)
-    return [
-        shape_id
-        for shape_id in _ROLE_SHAPE_IDS.get(resolved, _ROLE_SHAPE_IDS[AgentRole.DEV])
-        if (shape := _HUD_SHAPES.get(shape_id)) is not None and _shape_visible_to_role(shape, resolved)
-    ]
+    del role
+    return list(_HUD_SHAPES)
 
 
 def context_expansion_shape_ids(role: str | AgentRole) -> list[str]:
-    resolved = _resolve_hud_owner(role)
-    shape_ids = ["common.request_file_reads"]
-    if resolved in {AgentRole.ALICE_SUPERVISOR, AgentRole.DEV}:
-        shape_ids.append("common.needs_context")
-    return shape_ids
+    del role
+    return ["common.request_file_reads", "common.needs_context"]
 
 
 def object_contract(contract_id: str) -> dict[str, Any]:
@@ -349,19 +324,11 @@ def contract_manifest() -> dict[str, Any]:
         "schema_version": CONTRACT_SCHEMA_VERSION,
         "agent_decision_schema": agent_decision_json_schema(),
         "decisions": {key.value: value.manifest() for key, value in _DECISION_CONTRACTS.items()},
-        "roles": {role.value: [item.value for item in allowed_decisions_for_role(role)] for role in AgentRole},
-        "role_aliases": {
-            "neko_supervisor": AgentRole.ALICE_SUPERVISOR.value,
-            "backend_dev": AgentRole.DEV.value,
-            "launcher_dev": AgentRole.DEV.value,
-        },
+        "decisions_available": [item.value for item in DecisionType],
         "objects": {key: value.manifest() for key, value in _OBJECT_CONTRACTS.items()},
         "hud_shapes": {key: value.manifest() for key, value in _HUD_SHAPES.items()},
-        "role_shape_ids": {role.value: list(shape_ids) for role, shape_ids in _ROLE_SHAPE_IDS.items()},
-        "context_expansion_shape_ids": {
-            role.value: context_expansion_shape_ids(role)
-            for role in AgentRole
-        },
+        "shape_ids": list(_HUD_SHAPES),
+        "context_expansion_shape_ids": context_expansion_shape_ids("*"),
         "events": event_catalog(),
         "contract_hash": contract_hash(),
     }
@@ -408,16 +375,6 @@ def verify_registry() -> dict[str, Any]:
     )
     hud_template_errors = _validate_hud_templates()
     role_shape_errors: list[dict[str, str]] = []
-    for role, shape_ids in _ROLE_SHAPE_IDS.items():
-        allowed = allowed_decisions_for_role(role)
-        for shape_id in (*shape_ids, *_COMMON_SHAPE_IDS, *tuple(context_expansion_shape_ids(role))):
-            shape = _HUD_SHAPES.get(shape_id)
-            if shape is None:
-                role_shape_errors.append({"role": role.value, "shape_id": shape_id, "error": "missing_shape"})
-            elif role not in shape.roles:
-                continue
-            elif shape.decision_type not in allowed:
-                role_shape_errors.append({"role": role.value, "shape_id": shape_id, "error": f"decision_not_allowed:{shape.decision_type.value}"})
     return {
         "ok": not missing and not missing_object_contracts and not hud_template_errors and not role_shape_errors,
         "schema_version": CONTRACT_SCHEMA_VERSION,
@@ -447,10 +404,6 @@ def _shape_from_contract(shape: HudShape) -> dict[str, Any]:
         }
     )
     return _drop_empty(result)
-
-
-def _shape_visible_to_role(shape: HudShape, role: AgentRole) -> bool:
-    return role in shape.roles and shape.decision_type in allowed_decisions_for_role(role)
 
 
 def _validate_hud_templates() -> list[dict[str, str]]:
@@ -519,21 +472,6 @@ def _validate_stage_payload_keys(payload: dict[str, Any], *, contract: DecisionC
                 f"propose_stage_plan stages[{idx}] has unsupported keys: {extra}; "
                 f"allowed keys are {list(contract.stage_allowed_keys)}"
             )
-
-
-def _resolve_hud_owner(role: str | AgentRole) -> AgentRole:
-    if isinstance(role, AgentRole):
-        return role
-    value = str(role or "").strip()
-    if value == "neko_supervisor":
-        return AgentRole.ALICE_SUPERVISOR
-    if value in {"backend_dev", "dev"} or value.endswith("_dev"):
-        return AgentRole.DEV
-    if value == "qa":
-        return AgentRole.QA
-    if value == "alice_supervisor":
-        return AgentRole.ALICE_SUPERVISOR
-    return AgentRole.DEV
 
 
 def _drop_empty(payload: dict[str, Any]) -> dict[str, Any]:
@@ -753,7 +691,7 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
         DecisionType.PROPOSE_ACCEPTANCE,
         allowed_roles=_PM_NEKO,
         required_payload_keys=("objective", "acceptance_criteria"),
-        optional_payload_keys=("non_goals", "affected_repos", "suggested_roles", "requires_visual_proof", "risk_flags", "handoff_packet", "mission_plan", "mission_plan_patch", "release_stage_id", "scope_override_reason"),
+        optional_payload_keys=("non_goals", "affected_repos", "suggested_roles", "requires_visual_proof", "risk_flags", "handoff_packet", "scope_override_reason"),
         nested_contracts=("handoff_packet", "handoff_packet.proof_gate", "handoff_packet.join_gate", "handoff_packet.self_heal"),
         shape_hint="Neko/PM scope or route one bounded owner; attach handoff_packet for specialist routing.",
     ),
@@ -1103,46 +1041,6 @@ _HUD_SHAPES: dict[str, HudShape] = {
 }
 
 
-_ROLE_SHAPE_IDS: dict[AgentRole, tuple[str, ...]] = {
-    AgentRole.ALICE_SUPERVISOR: (
-        "neko.scope_route",
-        "neko.resolve_incident",
-        "neko.triage_issue_discovery",
-        "common.needs_context",
-        "common.block",
-        "common.request_human",
-    ),
-    AgentRole.DEV: (
-        "dev.hand_off",
-        "common.escalate",
-        "dev.request_test_run",
-        "dev.request_screenshot",
-        "dev.correct_stage",
-        "dev.propose_stage_plan",
-        "common.request_file_reads",
-        "common.needs_context",
-        "common.block",
-    ),
-    AgentRole.QA: (
-        "qa.verdict",
-        "common.escalate",
-        "qa.request_screenshot",
-        "qa.request_video",
-        "qa.request_test_run",
-        "qa.correct_stage",
-        "common.request_file_reads",
-        "common.block",
-    ),
-    AgentRole.PM: (
-        "neko.scope_route",
-        "common.needs_context",
-        "common.block",
-        "common.request_human",
-        "neko.triage_issue_discovery",
-    ),
-}
-
-
 _EVENT_CONTRACTS: dict[str, EventContract] = {
     "task.created": EventContract("task.created", "Task created", ("title", "state"), ("description",)),
     "task.transition": EventContract("task.transition", "Task transition", ("from", "to", "reason"), ("actor",)),
@@ -1155,7 +1053,6 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "task.stage_corrected": EventContract("task.stage_corrected", "Stage corrected", ("stage_id",), ("corrections", "audit_notes")),
     "task.pm_fleshed": EventContract("task.pm_fleshed", "Task scoped", ("objective",), ("acceptance_criteria",)),
     "task.preflight": EventContract("task.preflight", "Task preflight", ("status", "summary"), ("checks",)),
-    "mission_plan.updated": EventContract("mission_plan.updated", "Mission plan updated", ("current_stage_id", "stage_count", "revision"), ("summary",)),
     "foreground_runtime.prepared": EventContract("foreground_runtime.prepared", "Foreground runtime prepared", ("state",), ("foreground_task_id", "parked_task_count", "blocking_active_run_ids")),
     "foreground_runtime.activated": EventContract("foreground_runtime.activated", "Foreground runtime activated", ("runtime_instance_id", "task_id", "lane", "state"), ("reason",)),
     "foreground_runtime.parked_task": EventContract("foreground_runtime.parked_task", "Task parked in background runtime lane", ("runtime_instance_id", "task_id", "lane", "state"), ("reason",)),
@@ -1214,8 +1111,6 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "role_envelope.closed": EventContract("role_envelope.closed", "Role envelope closed", ("envelope_id", "close_reason"), ("role_id", "mission_stage_id")),
     "role_checklist.created": EventContract("role_checklist.created", "Role checklist created", ("checklist_id", "role_id"), ("mission_stage_id",)),
     "role_checklist.item_updated": EventContract("role_checklist.item_updated", "Role checklist item updated", ("checklist_id", "revision"), ("item_ids", "role_id")),
-    "proof_batch.recorded": EventContract("proof_batch.recorded", "Proof batch recorded", ("proof_batch_id", "status"), ("mission_stage_id", "recipe_id", "proof_ids")),
-    "proof_batch.superseded": EventContract("proof_batch.superseded", "Proof batch superseded", ("proof_batch_id", "status"), ("mission_stage_id", "recipe_id")),
     "persona_instance.created": EventContract("persona_instance.created", "Persona instance created", ("persona_instance_id",), ("persona_id",)),
     "persona_instance.attributed": EventContract("persona_instance.attributed", "Persona instance attributed to a goal", ("persona_instance_id", "goal_id"), ("persona_id", "spawned_by")),
     "persona_instance.steered": EventContract("persona_instance.steered", "Persona instance steering edge changed", ("persona_instance_id", "goal_id"), ("persona_id", "spawned_by", "steered_by", "added", "removed", "detached")),
@@ -1309,7 +1204,6 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "board.card.created": EventContract("board.card.created", "Board card created", ("board_id", "card_id"), ("title", "column_id", "created_by")),
     "board.card.moved": EventContract("board.card.moved", "Board card moved", ("board_id", "card_id", "column_id"), ("from_column_id", "order_key")),
     "board.card.edited": EventContract("board.card.edited", "Board card edited", ("board_id", "card_id"), ("fields", "revision")),
-    "board.card.escalated": EventContract("board.card.escalated", "Board card escalated to a goal", ("board_id", "card_id", "goal_id"), ("idempotency_key",)),
     "board.card.archived": EventContract("board.card.archived", "Board card archived", ("board_id", "card_id", "reason"), ("column_id",)),
     "board.card.restored": EventContract("board.card.restored", "Board card restored", ("board_id", "card_id"), ("column_id",)),
     "board.card.conflict_resolved": EventContract("board.card.conflict_resolved", "Board card sync conflict resolved", ("board_id", "card_id", "take"), ("revision",)),
@@ -1323,7 +1217,6 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "office.actor.removed": EventContract("office.actor.removed", "Office actor placement archived", ("workspace_id", "actor_key", "reason"), ()),
     "office.actor.restored": EventContract("office.actor.restored", "Office actor placement restored", ("workspace_id", "actor_key"), ()),
     "office.actor.conflict_resolved": EventContract("office.actor.conflict_resolved", "Office actor sync conflict resolved", ("workspace_id", "actor_key", "take"), ("revision",)),
-    "blueprint.saved": EventContract("blueprint.saved", "Blueprint saved", ("blueprint_id",), ("version", "title")),
     "persona.updated": EventContract("persona.updated", "Persona updated", ("persona_id",), ("display_name",)),
     # The persona ⇄ Hermes-profile rebind chokepoint
     # (``persona_profile_binding.rebind_persona_profile``). ONE event per

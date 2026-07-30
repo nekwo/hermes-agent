@@ -5,11 +5,11 @@ from types import SimpleNamespace
 from agent_runtime.continuity import REF_LIMIT, REF_TEXT_LIMIT, SUMMARY_LIMIT, return_summary_to_parent_session
 from agent_runtime.events import EventLog
 from agent_runtime.persona_assignments import PersonaInstanceStore
-from agent_runtime.personas import default_personas
+from tests.agent_runtime.persona_samples import sample_personas
 
 
 def _persona(persona_id: str):
-    return next(persona for persona in default_personas() if persona.id == persona_id)
+    return next(persona for persona in sample_personas() if persona.id == persona_id)
 
 
 def test_return_summary_posts_bounded_parent_message_and_records_lineage(tmp_path, monkeypatch):

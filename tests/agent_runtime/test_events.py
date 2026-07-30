@@ -8,7 +8,10 @@ from hermes_time import now
 from agent_runtime import paths
 from agent_runtime.errors import EventPayloadTooLarge
 from agent_runtime.events import EventLog
-from agent_runtime.models import Event, Task
+from agent_runtime.models import Event
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.packets import make_packet, record_decision_packets, record_packet
 from agent_runtime.decision_contracts import validate_planning_decision
 from agent_runtime.decision_schema import AgentDecision, DecisionType
@@ -313,6 +316,78 @@ def test_cached_event_log_type_filter_matches_base(isolate_agent_runtime_root):
     assert all(e.type == "run.progress" for e in cached.for_task("task_typed", limit=0, types=trace_types))
 
 
+def test_cached_event_log_does_not_duplicate_events_whose_payload_echoes_their_id(isolate_agent_runtime_root):
+    # A real ``lane.created`` row (runtime_instances.RuntimeInstanceStore.save)
+    # repeats the task id inside its own payload, so the serialized line carries
+    # the ``"task_id":"…"`` token twice. The cached index must still hand that
+    # line to the scan once.
+    from agent_runtime.events import CachedEventLog
+
+    base = EventLog()
+    base.append(
+        Event(
+            ts=now(),
+            type="lane.created",
+            task_id="task_lane",
+            run_id=None,
+            persona_id=None,
+            payload={
+                "runtime_instance_id": "goalrt_abc123",
+                "task_id": "task_lane",
+                "lane": "goalrt_abc123",
+                "state": "queued",
+                "reason": "lane created",
+            },
+        )
+    )
+    base.append(
+        Event(
+            ts=now(),
+            type="run.progress",
+            task_id="task_lane",
+            run_id="run_1",
+            persona_id="dev",
+            payload={"summary": "after the lane"},
+        )
+    )
+
+    cached = CachedEventLog()
+    expected = base.for_task("task_lane", limit=0)
+    actual = cached.for_task("task_lane", limit=0)
+    assert len(actual) == len(expected)
+    assert [e.type for e in actual] == [e.type for e in expected]
+    assert [e.run_id for e in actual] == [e.run_id for e in expected]
+    # Duplicates would also burn the caller's window.
+    assert [e.type for e in cached.for_task("task_lane", limit=1)] == [
+        e.type for e in base.for_task("task_lane", limit=1)
+    ]
+
+
+def test_cached_event_log_indexes_one_line_under_each_distinct_token(isolate_agent_runtime_root):
+    # One line legitimately carrying two DIFFERENT tokens must resolve once from
+    # each index — deduping per line must not collapse task and session lanes.
+    from agent_runtime.events import CachedEventLog
+
+    base = EventLog()
+    base.append(
+        Event(
+            ts=now(),
+            type="run.tool.finished",
+            task_id="task_dual",
+            run_id="run_1",
+            persona_id="dev",
+            payload={"tool_name": "pytest", "status": "passed"},
+            session_id="chat_dual",
+        )
+    )
+
+    cached = CachedEventLog()
+    assert [e.run_id for e in cached.for_task("task_dual")] == [e.run_id for e in base.for_task("task_dual")]
+    assert len(cached.for_task("task_dual")) == 1
+    assert [e.run_id for e in cached.for_session("chat_dual")] == [e.run_id for e in base.for_session("chat_dual")]
+    assert len(cached.for_session("chat_dual")) == 1
+
+
 def test_event_log_rejects_payloads_over_4kb_and_does_not_write(isolate_agent_runtime_root):
     log = EventLog()
     event = Event(
@@ -422,7 +497,7 @@ def test_packet_recording_preserves_raw_artifact_for_normalized_packet(isolate_a
 
 def test_archive_preserves_packet_raw_artifacts(isolate_agent_runtime_root):
     store = TaskStore()
-    task = store.create(Task(id="task_packet_archive", title="Packet", description="Packet", state=TaskState.DONE, created_at=now(), updated_at=now(), requested_by="test"))
+    task = Task(id="task_packet_archive", title="Packet", description="Packet", state=TaskState.DONE, created_at=now(), updated_at=now(), requested_by="test")
     decision = AgentDecision(
         type=DecisionType.REQUEST_TEST_RUN,
         summary="proof",
@@ -430,15 +505,12 @@ def test_archive_preserves_packet_raw_artifacts(isolate_agent_runtime_root):
         payload={"stage_id": "stage_1", "commands": ["pytest"], "delivery": {"work_status": "proof_requested", "summary": "proof", "extra_detail": "raw only"}},
     )
     validate_planning_decision(decision)
-    record_decision_packets(task, decision, actor="dev", run_id="run_1", event_log=EventLog(), stage_id="stage_1")
+    log = EventLog()
+    record_decision_packets(task, decision, actor="dev", run_id="run_1", event_log=log, stage_id="stage_1")
 
-    result = store.archive(task.id, actor="test", reason="archive packet artifacts")
-    archived = result["archived_tasks"][0]
-    archive_dir = Path(result["archive_dir"])
-
-    assert archived["packet_artifacts_archived"] is True
-    assert archived["packet_artifact_ids"]
-    assert list((archive_dir / "packet_artifacts" / task.id).glob("*.raw.json"))
+    recorded = log.for_task(task.id, limit=0)[0].payload
+    assert Path(isolate_agent_runtime_root / recorded["raw_artifact_path"]).exists()
+    assert not hasattr(store, "archive")
 
 
 def test_record_decision_packets_preserves_backend_contract_packet():

@@ -1,5 +1,7 @@
 from agent_runtime.models import PersonaInstance
-from agent_runtime.models import Task
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.operator_channels import (
     _conversation_history_message,
     operator_channel_summary,

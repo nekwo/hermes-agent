@@ -1,8 +1,30 @@
+from dataclasses import dataclass, field
+
 from hermes_time import now
 
-from agent_runtime.models import MissionPlanStage, Task, TaskStage
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.stage_intent import no_product_edit_recipe_conflicts_with_stage, no_product_edit_recipe_for_stage, stage_requires_product_edit
 from agent_runtime.states import StageStatus, TaskState
+
+
+@dataclass
+class StageFixture:
+    id: str
+    title: str
+    objective: str
+    status: StageStatus
+    owner: str = ""
+    repo: str = ""
+    kind: str = ""
+    proof_recipe_id: str | None = None
+    requires_product_edit: bool | None = None
+    affected_paths: list[str] = field(default_factory=list)
+    acceptance_criteria: list[str] = field(default_factory=list)
+    test_plan: list[str] = field(default_factory=list)
+    audit_notes: list[str] = field(default_factory=list)
+    corrections: list[str] = field(default_factory=list)
 
 
 def _task() -> Task:
@@ -22,7 +44,7 @@ def _task() -> Task:
 
 def test_no_edit_recipe_stage_is_not_classified_as_product_edit():
     task = _task()
-    stage = TaskStage(
+    stage = StageFixture(
         id="backend_contract_smoke",
         title="Backend Contract Smoke",
         objective="Request the existing backend_contract_smoke no_product_edit proof recipe without modifying product repositories.",
@@ -40,7 +62,7 @@ def test_no_edit_recipe_stage_is_not_classified_as_product_edit():
 def test_without_editing_product_code_is_not_classified_as_product_edit():
     task = _task()
     task.description = "Produce a staged hardening plan. Do not edit product code."
-    stage = TaskStage(
+    stage = StageFixture(
         id="backend_investigation",
         title="Backend Investigation",
         objective="Inspect backend moderation paths and produce a staged AAA hardening plan without editing product code.",
@@ -52,7 +74,7 @@ def test_without_editing_product_code_is_not_classified_as_product_edit():
 
 def test_no_edit_recipe_still_conflicts_with_real_product_edit_stage():
     task = _task()
-    stage = TaskStage(
+    stage = StageFixture(
         id="backend_api_change",
         title="Backend API Change",
         objective="Modify src/api.py to add a new backend endpoint.",
@@ -70,7 +92,7 @@ def test_generic_no_edit_recipe_stage_ignores_global_ui_fix_language():
     task = _task()
     task.title = "Fix Mission Control role terminal UI after backend stream smoke"
     task.description = "Make the Launcher UI show Neko, Backend Dev, Launcher Dev, and QA live terminal events."
-    stage = TaskStage(
+    stage = StageFixture(
         id="eterniabackend_fresh_scope",
         title="Backend stream seed proof",
         objective="Seed the live mission with Backend Dev redaction-safe events/proof by requesting only the existing no-product-edit backend_contract_smoke proof path.",
@@ -87,7 +109,7 @@ def test_generic_no_edit_recipe_stage_ignores_global_ui_fix_language():
 
 
 def test_recipe_inference_refuses_ambiguous_evidence_fields_without_identity_match():
-    stage = TaskStage(
+    stage = StageFixture(
         id="contract_join_stage",
         title="Contract join stage",
         objective="Consume backend_contract_smoke and certify launcher_contract_smoke.",
@@ -102,7 +124,7 @@ def test_generic_recipe_stage_stays_no_edit_after_backend_correction_notes():
     task = _task()
     task.title = "Fix Mission Control all-role live terminals"
     task.description = "Seed and prove Backend Dev live terminal/event rows only by running the existing no-product-edit backend_contract_smoke proof recipe, without inspecting, editing, or patching backend product files."
-    stage = TaskStage(
+    stage = StageFixture(
         id="eterniabackend_fresh_scope",
         title="Backend Dev Fresh Scope",
         objective="Seed and prove Backend Dev live terminal/event rows only by running the existing no-product-edit backend_contract_smoke proof recipe, without inspecting, editing, or patching backend product files.",
@@ -134,7 +156,7 @@ def test_generic_recipe_stage_stays_no_edit_after_backend_correction_notes():
 def test_typed_proof_only_stage_overrides_legacy_implementation_id_marker():
     task = _task()
     task.affected_repos = ["EterniaBackend", "EterniaLauncher"]
-    stage = MissionPlanStage(
+    stage = StageFixture(
         id="implement",
         title="Launcher No-Edit Contract Smoke",
         objective="Collect the Harness-owned launcher_contract_smoke proof without editing Launcher product files.",

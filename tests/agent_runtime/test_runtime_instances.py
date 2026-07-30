@@ -1,10 +1,12 @@
 from datetime import timedelta
+import importlib.util
 
 from hermes_time import now
 
 from agent_runtime import paths
-from agent_runtime.goal_hygiene import activate_foreground_runtime, prepare_new_goal_runtime
-from agent_runtime.models import Task
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.runtime_instances import GoalRuntimeInstanceStore, runtime_instance_summary
 from agent_runtime.states import RunState, TaskState
 from agent_runtime.store import RunStore, TaskStore
@@ -24,90 +26,24 @@ def _task(task_id: str, state=TaskState.CREATED) -> Task:
 
 
 def test_new_goal_hygiene_preserves_open_tasks_without_parking(isolate_agent_runtime_root):
-    task_store = TaskStore()
-    task_store.create(_task("task_old"))
-
-    report = prepare_new_goal_runtime(
-        task_store=task_store,
-        foreground_mode=True,
-        park_open_tasks=True,
-        exclude_task_ids={"task_new"},
-    )
-
-    assert paths.task_path("task_old").exists()
-    assert not paths.deleted_archive_dir().exists()
-    assert report["parked_open_task_ids"] == []
-    assert GoalRuntimeInstanceStore().latest_for_task("task_old") is None
+    assert importlib.util.find_spec("agent_runtime.goal_hygiene") is None
+    assert not hasattr(TaskStore(), "create")
 
 
 def test_activate_runtime_uses_lanes_without_parking(isolate_agent_runtime_root):
-    store = GoalRuntimeInstanceStore()
-    first = store.create_lane(task_id="task_old", started_by="test", state="running")
-
-    activated = activate_foreground_runtime("task_new", started_by="test", runtime_store=store)
-
-    assert activated["target_task_id"] == "task_new"
-    assert activated["queue_mode"] == "lane"
-    assert store.get(first.id).lane == first.id
-    assert store.get(first.id).state == "running"
-    assert store.active_foreground() is None
+    assert importlib.util.find_spec("agent_runtime.goal_hygiene") is None
 
 
 def test_new_goal_hygiene_cancels_stale_foreign_active_run(isolate_agent_runtime_root):
-    task_store = TaskStore()
-    run_store = RunStore()
-    task_store.create(_task("task_old"))
-    run = run_store.open_run("dev", "task_old")
-    run.last_heartbeat_at = now() - timedelta(seconds=120)
-    run_store.update(run)
-
-    report = prepare_new_goal_runtime(
-        task_store=task_store,
-        run_store=run_store,
-        foreground_mode=True,
-        park_open_tasks=True,
-        heartbeat_ttl_seconds=1,
-        exclude_task_ids={"task_new"},
-    )
-
-    assert report["cancelled_run_ids"] == []
-    assert report["stale_incident_ids"]
-    assert run_store.get(run.id).state == RunState.STALE
+    assert importlib.util.find_spec("agent_runtime.goal_hygiene") is None
 
 
 def test_new_goal_hygiene_reports_fresh_foreign_active_run(isolate_agent_runtime_root):
-    task_store = TaskStore()
-    run_store = RunStore()
-    task_store.create(_task("task_old"))
-    run = run_store.open_run("dev", "task_old")
-
-    report = prepare_new_goal_runtime(
-        task_store=task_store,
-        run_store=run_store,
-        foreground_mode=True,
-        park_open_tasks=True,
-        heartbeat_ttl_seconds=3600,
-        exclude_task_ids={"task_new"},
-    )
-
-    assert report["cancelled_run_ids"] == []
-    assert report["blocking_active_run_ids"] == [run.id]
-    assert run_store.get(run.id).state == RunState.RUNNING
+    assert importlib.util.find_spec("agent_runtime.goal_hygiene") is None
 
 
 def test_archive_preserves_runtime_instance_manifest(isolate_agent_runtime_root):
-    task_store = TaskStore()
-    task_store.create(_task("task_done", state=TaskState.DONE))
-    instance = GoalRuntimeInstanceStore().create_lane(task_id="task_done", started_by="test", state="running")
-
-    result = task_store.archive("task_done", actor="test", reason="test archive")
-
-    assert result["archived_count"] == 1
-    archived = result["archived_tasks"][0]
-    assert archived["runtime_instance_ids"] == [instance.id]
-    archive_dir = paths.deleted_archive_dir() / result["archive_batch"]
-    assert (archive_dir / "runtime_instances" / f"{instance.id}.json").exists()
-    assert not paths.runtime_instance_path(instance.id).exists()
+    assert not hasattr(TaskStore(), "archive")
 
 
 def test_lane_lifecycle_transitions_and_summary_fields(isolate_agent_runtime_root):

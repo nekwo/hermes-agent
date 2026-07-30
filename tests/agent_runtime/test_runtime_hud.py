@@ -1,5 +1,9 @@
 from types import SimpleNamespace
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
+
 from agent_runtime.runtime_hud import (
     SITUATIONAL_HUD_ROSTER_CAP,
     render_situational_hud_block,

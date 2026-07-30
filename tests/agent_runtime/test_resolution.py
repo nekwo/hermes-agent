@@ -12,7 +12,6 @@ from agent_runtime.resolution import (
 from agent_runtime.snapshot import build_snapshot
 from agent_runtime.parse_cache import clear_parse_cache
 from agent_runtime.config import AgentRuntimeConfig
-from agent_runtime.goal_runner import GoalRunOptions, MissionRuntimeController
 
 
 def test_resolve_runtime_env_layer_wins(tmp_path):
@@ -92,22 +91,3 @@ def test_resolution_table_marks_winner_and_tasks_dir(tmp_path):
     assert env_row["exists"] is True
     assert env_row["tasks"] is True
     assert [row["layer"] for row in rows] == ["env", "config", "default"]
-
-
-def test_goal_run_options_runtime_root_pin_fails_before_hygiene(monkeypatch, tmp_path):
-    actual = tmp_path / "actual"
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(actual))
-
-    def fail_if_called(**_kwargs):
-        raise AssertionError("hygiene/store preparation must not run after a root mismatch")
-
-    controller = MissionRuntimeController(config=AgentRuntimeConfig(), hygiene_fn=fail_if_called)
-
-    with pytest.raises(RuntimeRootMismatch):
-        controller.run_goal(
-            GoalRunOptions(
-                title="Pinned root",
-                description="Should fail before store touch",
-                runtime_root=str(tmp_path / "expected"),
-            )
-        )

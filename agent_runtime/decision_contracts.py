@@ -72,10 +72,6 @@ def validate_planning_decision(decision: AgentDecision) -> None:
         _list_of_strings(p, "risk_flags")
         if "requires_visual_proof" in p and not isinstance(p["requires_visual_proof"], bool):
             raise DecisionPayloadInvalid("requires_visual_proof must be boolean")
-        if "mission_plan" in p or "mission_plan_patch" in p or "release_stage_id" in p:
-            from .mission_plan import validate_mission_plan_payload
-
-            validate_mission_plan_payload(p)
     elif decision.type == DecisionType.REQUEST_FILE_READS:
         _list_of_strings(p, "paths", required=True)
         if not str(p.get("reason", "")).strip():
@@ -141,15 +137,7 @@ def validate_planning_decision(decision: AgentDecision) -> None:
         _list_of_strings(p, "test_plan")
     elif decision.type == DecisionType.REQUEST_TEST_RUN:
         require_keys(p, "stage_id")
-        recipe_id = str(p.get("recipe_id") or "").strip()
-        if recipe_id:
-            from .proof_recipes import resolve_proof_recipe
-
-            resolve_proof_recipe(recipe_id)
-            if "commands" in p:
-                _list_of_strings(p, "commands")
-        else:
-            _list_of_strings(p, "commands", required=True)
+        _list_of_strings(p, "commands", required=True)
     elif decision.type == DecisionType.REQUEST_SCREENSHOT:
         _validate_visual_proof_request(p, "request_screenshot")
     elif decision.type == DecisionType.REQUEST_VIDEO:

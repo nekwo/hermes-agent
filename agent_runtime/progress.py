@@ -9,13 +9,11 @@ from .dev_discipline import update_progress_telemetry
 from .errors import EventPayloadTooLarge
 from .events import EventLog
 from .models import Event
-from .child_events import emit_child_progress
 from .config import load_root_runtime_config
 from .self_test_evidence import record_self_test_from_progress
 from .states import RunState
 from .store import RunStore
 from .redaction_mode import redaction_observe_enabled
-from .visual_trace_evidence import record_screenshot_from_progress
 
 _SAFE_PROGRESS_KEYS = {
     "type", "event_id", "phase", "severity", "step", "state", "tool", "tool_name", "status",
@@ -137,8 +135,6 @@ class RunProgressSink:
                         payload=safe_payload,
                     ),
                 )
-                if event_type == "run.progress":
-                    emit_child_progress(run=persisted, payload=safe_payload, config=self.config, event_log=self.event_log)
         except Exception:
             return None
 
@@ -315,12 +311,7 @@ def _maybe_record_visual_screenshot(run, event_type: str, payload: dict[str, Any
     # Root-node substrate only: this recorder writes Proof rows as a side effect of
     # the tool stream. Gated on root_node_mode so the flag-off legacy path is
     # byte-for-byte unchanged (no new proofs from a shared progress sink).
-    try:
-        if not bool(getattr(load_root_runtime_config(), "root_node_mode", False)):
-            return
-        record_screenshot_from_progress(run, event_type, payload, event_log=event_log)
-    except Exception:
-        return
+    return
 
 
 def _safe_progress_payload(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:

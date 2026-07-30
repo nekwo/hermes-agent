@@ -77,7 +77,6 @@ def validate_runtime_config(cfg: AgentRuntimeConfig | None = None) -> dict[str, 
     nwf = getattr(cfg, "normal_worker_flow", None)
     if nwf is not None:
         _positive(errors, "normal_worker_flow.max_self_test_repeats_without_change", nwf.max_self_test_repeats_without_change)
-        _positive(errors, "normal_worker_flow.max_auto_final_gate_repairs_per_stage", nwf.max_auto_final_gate_repairs_per_stage)
     role_env = getattr(cfg, "role_envelope", None)
     if role_env is not None:
         _positive(errors, "role_envelope.max_same_session_continuations", role_env.max_same_session_continuations)
@@ -85,11 +84,6 @@ def validate_runtime_config(cfg: AgentRuntimeConfig | None = None) -> dict[str, 
         _positive(errors, "role_envelope.max_fix_envelopes_per_stage", role_env.max_fix_envelopes_per_stage)
         _positive(errors, "role_envelope.max_checklist_items_rendered", role_env.max_checklist_items_rendered)
         _positive(errors, "role_envelope.max_foreign_checklist_summaries", role_env.max_foreign_checklist_summaries)
-    mp = getattr(cfg, "mission_plan", None)
-    if mp is not None:
-        _positive(errors, "mission_plan.version", mp.version)
-        if int(getattr(mp, "version", 1) or 1) != 1:
-            errors.append({"field": "mission_plan.version", "reason": "unsupported mission plan version"})
     swarm = getattr(cfg, "swarm", None)
     if swarm is not None:
         for field in (

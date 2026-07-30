@@ -68,7 +68,8 @@ def test_effective_config_summary_is_redaction_safe(isolate_agent_runtime_root):
     assert summary["validation"]["ok"] is True
     assert "super-secret-value" not in str(summary)
     assert summary["personas"]["dev"]["api_token"] == "<redacted>"
-    assert "harness-dev-delivery" in summary["effective_personas"]["dev"]["skills"]
+    # S11 removed bundled role/persona defaults: configured data is authoritative.
+    assert summary["effective_personas"]["dev"]["skills"] == []
     assert summary["production_envelope"]["production_ready"] is True
     assert {item["id"] for item in summary["production_envelope"]["items"]} >= {"H5", "H6", "H7", "H8", "H9", "H10", "recursive_supervision"}
     assert summary["production_envelope"]["blockers"] == []
@@ -83,7 +84,7 @@ def test_h5_envelope_advertises_behavioral_migration_and_rollback_controls():
     assert h5["status"] == "implemented"
     assert not h5["blockers"]
     assert any("collapsed hand_off/block/escalate/scope_route/qa_verdict" in control for control in h5["controls"])
-    assert any("proof-from-trace records agent terminal self-tests" in control for control in h5["controls"])
+    assert not any("proof-from-trace" in control for control in h5["controls"])
     assert any("hand_off captures the grounded isolated-worktree diff" in control for control in h5["controls"])
     assert any("legacy decision aliases are pruned" in control for control in h5["controls"])
     assert any("disable simplified_agent_contract.enabled" in control for control in h5["controls"])

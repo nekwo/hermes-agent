@@ -114,13 +114,12 @@ sibling of `--explain-mcp`. Renders, from
 `agent_runtime/terminal_envelope_explain.py`: whether the lane binds an envelope
 scope, the disposition (`deterministic` vs `legacy_ambient` — the fail-open /
 fail-closed coin flip the governed lane retired), the exact ROOT-config grant
-key, the live grants, and the refusal set **split into operator-grantable and
-hard floor**. Pointing an operator at a config key for `credential_read`, which
-no configuration lifts, would be the same lie `ENVELOPE_COMMAND_NOT_GRANTABLE`
-exists to stop us telling an agent.
+key, the live grants, and the refusal set split into operator-grantable and
+hard-floor categories. Ruling R-2 leaves the hard-floor category empty while
+retaining the wire shape for future code-owned floors.
 
 Everything is read from the canonical authorities (`explain_terminal_envelope`,
-`hard_floor_command_classes`, `scope_for_persona`) — no taxonomy, stage floor or
+`hard_floor_command_classes`, `scope_for_persona`) — no taxonomy, floor or
 grant rule is re-derived. `hard_floor_command_classes()` was added to
 `terminal_envelope.py` as a pure read accessor over the two existing sets.
 

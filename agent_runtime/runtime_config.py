@@ -43,19 +43,10 @@ class EnterpriseWorkerSessionsConfig:
 class NormalWorkerFlowConfig:
     enabled: bool = False
     dev_self_tests_in_session: bool = True
-    auto_final_gate_after_delivery: bool = True
     hide_request_test_run_until_gate: bool = True
     self_test_evidence_capture: bool = True
     max_self_test_repeats_without_change: int = 1
-    max_auto_final_gate_repairs_per_stage: int = 1
     expose_worker_actions_in_contract_dump: bool = True
-
-
-@dataclass(slots=True)
-class MissionPlanConfig:
-    enabled: bool = False
-    enforce_hud: bool = True
-    version: int = 1
 
 
 @dataclass(slots=True)
@@ -77,7 +68,6 @@ class RoleEnvelopeConfig:
 class RepoBundleRoutingConfig:
     enabled: bool = False
     strict_repo_ownership: bool = True
-    auto_create_from_mission_plan: bool = True
     queue_on_dependency_bundles: bool = True
     expose_in_snapshot: bool = True
 
@@ -347,7 +337,6 @@ class RuntimeConfig:
     continuous_role_sessions: ContinuousRoleSessionConfig = field(default_factory=ContinuousRoleSessionConfig)
     enterprise_worker_sessions: EnterpriseWorkerSessionsConfig = field(default_factory=EnterpriseWorkerSessionsConfig)
     normal_worker_flow: NormalWorkerFlowConfig = field(default_factory=NormalWorkerFlowConfig)
-    mission_plan: MissionPlanConfig = field(default_factory=MissionPlanConfig)
     role_envelope: RoleEnvelopeConfig = field(default_factory=RoleEnvelopeConfig)
     repo_bundle_routing: RepoBundleRoutingConfig = field(default_factory=RepoBundleRoutingConfig)
     simplified_agent_contract: SimplifiedAgentContractConfig = field(default_factory=SimplifiedAgentContractConfig)

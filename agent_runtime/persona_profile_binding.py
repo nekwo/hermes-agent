@@ -9,9 +9,8 @@ servers the agent actually runs with. Until this module existed the binding had
 * ``harness persona instance update-profile`` — despite the name — writes
   ``display_name`` / ``current_chat_goal`` / ``goal_id`` / ``skills`` and never
   touches ``profile_id``.
-* ``harness init --with-bundled-personas`` FORCES the bundled binding
-  (``BUNDLED_PERSONA_PROFILES``), i.e. the opposite of a rebind.
-* ``blueprints.resolve.promote_profile_to_persona`` mints a NEW persona.
+* Persona/profile bindings come only from persisted or configured persona data.
+* ``personas.promote_profile_to_persona`` mints a NEW persona.
 
 So the only way to rebind was to drive :meth:`AgentStore.save` from a Python
 one-liner, which left three defects behind every time (live incident,

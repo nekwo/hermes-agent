@@ -14,9 +14,8 @@ from hermes_time import now
 
 from .events import EventLog
 from .dirty_state import no_product_edit_dirty_check
-from .models import Event, Incident, Proof, Task, TaskStage
+from .models import Event, Incident
 from .packets import latest_packet
-from .proof_rules import ProofType
 from .repo_context import safe_affected_repo_labels
 from .stagec_mcp_visual_provider import (
     load_launcher_qa_mcp_config,
@@ -24,7 +23,7 @@ from .stagec_mcp_visual_provider import (
     smoke_launcher_qa_mcp,
 )
 from .states import TaskState
-from .store import IncidentStore, ProofStore, TaskStore
+from .store import IncidentStore, TaskStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +46,7 @@ class PreflightResult:
     proof_payload: dict[str, Any] | None = None
 
 
-def run_preflight(task: Task, *, stage: TaskStage | None = None, persona_target: str) -> PreflightResult:
+def run_preflight(task: Task, *, stage: object | None = None, persona_target: str) -> PreflightResult:
     checks: list[PreflightCheck] = []
     if _repo_clean_required(task, stage=stage):
         checks.append(_repo_clean_check(task))
@@ -103,7 +102,6 @@ def open_preflight_blocker(
     result: PreflightResult,
     *,
     persona_target: str,
-    proof_store: ProofStore,
     incident_store: IncidentStore,
     task_store: TaskStore,
     stage_id: str | None = None,
@@ -116,7 +114,6 @@ def open_preflight_blocker(
     status = environment_fingerprint_status(task, stage_id, result.environment_fingerprint)
     blocker = result.blocker
     remediation = blocker.get("metadata") if isinstance(blocker.get("metadata"), dict) else {}
-    proof_id = f"preflight_{_safe_token(task.id)}_{_safe_token(stage_id or 'mission')}_{uuid.uuid4().hex[:8]}"
     metadata = {
         "kind": "preflight",
         "check_id": str(blocker.get("check_id")),
@@ -137,20 +134,6 @@ def open_preflight_blocker(
         value = remediation.get(key)
         if value is not None:
             metadata[key] = _safe_preflight_metadata(value)
-    proof = proof_store.attach(
-        Proof(
-            id=proof_id,
-            task_id=task.id,
-            stage_id=stage_id,
-            type=ProofType.LOG,
-            title=f"Preflight blocked: {metadata['check_id']}",
-            path_or_value=f"preflight:{metadata['check_id']}",
-            created_by="harness",
-            created_at=now(),
-            metadata=metadata,
-            redaction_status="safe",
-        )
-    )
     blocking_event_id = f"preflight_blocked_{uuid.uuid4().hex[:8]}"
     incident = Incident(
         id=f"inc_{uuid.uuid4().hex[:8]}",
@@ -161,7 +144,6 @@ def open_preflight_blocker(
         detail_path=None,
         opened_at=now(),
         metadata={
-            "proof_id": proof.id,
             "check_id": str(metadata["check_id"]),
             "environment_fingerprint": result.environment_fingerprint,
             "blocking_event_id": blocking_event_id,
@@ -174,8 +156,7 @@ def open_preflight_blocker(
     if task.state not in {TaskState.DONE, TaskState.CANCELLED, TaskState.FAILED}:
         task.state = TaskState.RUNNING
     task.open_incident_ids = _dedupe(list(task.open_incident_ids or []), [incident.id])
-    task.proof_ids = _dedupe(list(task.proof_ids or []), [proof.id])
-    _persist_environment_fingerprint(task, stage_id, result.environment_fingerprint, status, failed_proof_id=proof.id)
+    _persist_environment_fingerprint(task, stage_id, result.environment_fingerprint, status)
     task.updated_at = now()
     task_store.update(task, actor="harness", reason="preflight environment blocker")
     return incident
@@ -216,7 +197,7 @@ def record_preflight_pass(
     return True
 
 
-def _dependency_sensitive(task: Task, *, stage: TaskStage | None, persona_target: str) -> bool:
+def _dependency_sensitive(task: Task, *, stage: object | None, persona_target: str) -> bool:
     return (
         _backend_required(task, persona_target=persona_target)
         or _launcher_required(task, stage=stage, persona_target=persona_target)
@@ -224,7 +205,7 @@ def _dependency_sensitive(task: Task, *, stage: TaskStage | None, persona_target
     )
 
 
-def _repo_clean_required(task: Task, *, stage: TaskStage | None) -> bool:
+def _repo_clean_required(task: Task, *, stage: object | None) -> bool:
     flags = {str(flag).strip().lower() for flag in (getattr(task, "risk_flags", []) or [])}
     if "no_product_edits" in flags or "routing_burn_in_only" in flags:
         return True
@@ -341,7 +322,7 @@ def _backend_required(task: Task, *, persona_target: str) -> bool:
     return "backend" in labels or "backend" in text or "docker" in text or "compose" in text
 
 
-def _launcher_required(task: Task, *, stage: TaskStage | None, persona_target: str) -> bool:
+def _launcher_required(task: Task, *, stage: object | None, persona_target: str) -> bool:
     if persona_target == "backend_dev":
         return False
     labels = " ".join(safe_affected_repo_labels(list(getattr(task, "affected_repos", []) or []))).lower()
@@ -349,12 +330,12 @@ def _launcher_required(task: Task, *, stage: TaskStage | None, persona_target: s
     return "launcher" in labels or "eternialauncher" in labels or "launcher" in text or "flutter" in text
 
 
-def _docker_required(task: Task, *, stage: TaskStage | None) -> bool:
+def _docker_required(task: Task, *, stage: object | None) -> bool:
     text = _task_text(task, stage=stage)
     return "docker" in text or "compose" in text or "container" in text
 
 
-def _visual_proof_required(task: Task, *, stage: TaskStage | None = None, persona_target: str) -> bool:
+def _visual_proof_required(task: Task, *, stage: object | None = None, persona_target: str) -> bool:
     if persona_target == "backend_dev":
         return False
     if getattr(task, "requires_visual_proof", False) or getattr(stage, "requires_visual_proof", False):
@@ -365,7 +346,7 @@ def _visual_proof_required(task: Task, *, stage: TaskStage | None = None, person
     return any(marker in text for marker in ("mission control", "screenshot", "video", "visual", "stage c", "mcp"))
 
 
-def _latest_handoff_visual_required(task: Task, *, stage: TaskStage | None = None) -> bool | None:
+def _latest_handoff_visual_required(task: Task, *, stage: object | None = None) -> bool | None:
     stage_id = getattr(stage, "id", None) or getattr(task, "current_stage_id", None)
     try:
         packet = latest_packet(task.id, "handoff_packet", stage_id=stage_id)
@@ -603,7 +584,7 @@ def _mcp_exposure_check() -> PreflightCheck:
     )
 
 
-def _task_text(task: Task, *, stage: TaskStage | None = None) -> str:
+def _task_text(task: Task, *, stage: object | None = None) -> str:
     parts = [
         getattr(task, "title", ""),
         getattr(task, "description", ""),

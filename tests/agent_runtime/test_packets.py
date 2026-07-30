@@ -3,9 +3,12 @@ from hermes_time import now
 from agent_runtime.context_builder import build_context, render_context
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.events import EventLog
-from agent_runtime.models import AgentRun, Task, TaskStage
+from agent_runtime.models import AgentRun
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.packets import make_packet, record_packet, validate_decision_packets
-from agent_runtime.states import RunState, StageStatus, TaskState
+from agent_runtime.states import RunState, TaskState
 
 
 def _task() -> Task:
@@ -19,8 +22,8 @@ def _task() -> Task:
         updated_at=ts,
         requested_by="test",
         acceptance_criteria=["QA can review handoff repair metadata"],
-        stages=[TaskStage(id="stage_1", title="Stage", objective="Patch", status=StageStatus.IMPLEMENTING)],
         current_stage_id="stage_1",
+        harness_self_heal={},
     )
 
 

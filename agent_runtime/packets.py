@@ -12,9 +12,39 @@ from utils import atomic_json_write
 from . import paths
 from .decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
 from .events import EventLog
-from .models import Event, Task
-from .proof_runner import _ABSOLUTE_PATH_PATTERNS, _SECRET_PATTERNS, adapt_eternia_backend_manage_py_command
+from .models import Event
+from .redaction import ENV_SECRET_ASSIGNMENT_RE
 from .serde import to_jsonable
+
+_SECRET_PATTERNS = (
+    ENV_SECRET_ASSIGNMENT_RE,
+    re.compile(r"(?i)\b(bearer)\s+([A-Za-z0-9._\-+/=]{12,})"),
+)
+_ABSOLUTE_PATH_PATTERNS = (
+    re.compile(r"(?i)\b[A-Z]:(?:[\\/]+[^\"'<>|\r\n]+)+"),
+    re.compile(r"(?i)\b[A-Z]:(?:[\\/]+[^\\/\s\"'<>|:]+)+"),
+    re.compile(r"(?<![\w.-])/(?:Users|home|mnt|opt|var|tmp|Volumes)/(?:[^\s\"'<>|:]+/?)+"),
+)
+
+
+def adapt_eternia_backend_manage_py_command(command: str) -> str:
+    if ".EterniaBackendVirtualEnv/Scripts/python.exe" in command:
+        return command
+    stripped = re.sub(
+        r"^\s*(?:source|\.)\s+(?:\.?/)?venv/Scripts/activate\s*(?:&&|;)\s*",
+        "",
+        command,
+        count=1,
+        flags=re.IGNORECASE,
+    ).strip()
+    match = re.match(
+        r"^(?:python|python\.exe|python3|python3\.exe)\s+manage\.py\b(?P<rest>.*)$",
+        stripped,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if match:
+        return f".EterniaBackendVirtualEnv/Scripts/python.exe manage.py{match.group('rest')}"
+    return command
 
 PACKET_SCHEMA_VERSION = 1
 PACKET_REDACTION_STATUS = "passed"
@@ -259,7 +289,7 @@ def iter_packet_payloads(payload: dict[str, Any]) -> list[tuple[str, dict[str, A
 
 
 def _body_with_harness_citations(
-    task: Task,
+    task: Any,
     *,
     packet_type: str,
     body: dict[str, Any],
@@ -277,7 +307,7 @@ def _body_with_harness_citations(
     return enriched
 
 
-def _packet_cited_evidence_ids(task: Task, body: dict[str, Any], *, stage_id: str | None) -> list[str]:
+def _packet_cited_evidence_ids(task: Any, body: dict[str, Any], *, stage_id: str | None) -> list[str]:
     cited: list[str] = []
     for key in ("proof_ids", "self_test_evidence_ids", "consumed_proof_ids", "joined_proof_ids"):
         cited.extend(_string_list(body.get(key)))
@@ -297,7 +327,7 @@ def _packet_cited_evidence_ids(task: Task, body: dict[str, Any], *, stage_id: st
     return _dedupe_strings(cited)
 
 
-def make_packet(*, task: Task, decision: AgentDecision, packet_type: str, body: dict[str, Any], actor: str, run_id: str | None, stage_id: str | None) -> Packet:
+def make_packet(*, task: Any, decision: AgentDecision, packet_type: str, body: dict[str, Any], actor: str, run_id: str | None, stage_id: str | None) -> Packet:
     body = _body_with_harness_citations(task, packet_type=packet_type, body=body, stage_id=stage_id)
     raw_body = _raw_packet_body_with_dropped_values(body)
     core = compact_packet_body(packet_type, body)
@@ -332,7 +362,7 @@ def make_packet(*, task: Task, decision: AgentDecision, packet_type: str, body: 
     )
 
 
-def record_decision_packets(task: Task, decision: AgentDecision, *, actor: str, run_id: str | None, event_log: EventLog | None = None, stage_id: str | None = None) -> list[Packet]:
+def record_decision_packets(task: Any, decision: AgentDecision, *, actor: str, run_id: str | None, event_log: EventLog | None = None, stage_id: str | None = None) -> list[Packet]:
     event_log = event_log or EventLog()
     packets: list[Packet] = []
     for packet_type, body in iter_packet_payloads(decision.payload if isinstance(decision.payload, dict) else {}):
@@ -464,7 +494,7 @@ def _compact_delivery_body(body: dict[str, Any]) -> dict[str, Any]:
     return compact
 
 
-def _validate_delivery_self_test_refs(task: Task, body: dict[str, Any], *, stage_id: str | None) -> None:
+def _validate_delivery_self_test_refs(task: Any, body: dict[str, Any], *, stage_id: str | None) -> None:
     evidence_ids = body.get("self_test_evidence_ids")
     if not evidence_ids:
         return
@@ -479,35 +509,14 @@ def _validate_delivery_self_test_refs(task: Task, body: dict[str, Any], *, stage
             raise DecisionPayloadInvalid("delivery.self_test_evidence_ids contains an empty evidence id")
         try:
             evidence = store.get(evidence_id)
-        except FileNotFoundError:
-            # The field was authored for SelfTestEvidence ids, but a dev routinely
-            # cites the authoritative command-proof id for the same stage instead
-            # (that proof genuinely exists in the ProofStore). A real proof for
-            # this task/stage is valid self-test evidence — accept it rather than
-            # hard-rejecting a truthful hand-off on a store mismatch. Without this
-            # fallback a re-run of a stage that already produced a passing proof
-            # loops on `unknown evidence id`.
-            _validate_delivery_self_test_proof_ref(task, evidence_id, stage_id=stage_id)
-            continue
+        except FileNotFoundError as exc:
+            raise DecisionPayloadInvalid(
+                f"delivery.self_test_evidence_ids unknown evidence id: {evidence_id}"
+            ) from exc
         if evidence.task_id != task.id:
             raise DecisionPayloadInvalid(f"delivery.self_test_evidence_ids evidence {evidence_id} belongs to a different task")
         if stage_id and evidence.stage_id and evidence.stage_id != stage_id:
             raise DecisionPayloadInvalid(f"delivery.self_test_evidence_ids evidence {evidence_id} belongs to a different stage")
-
-
-def _validate_delivery_self_test_proof_ref(task: Task, evidence_id: str, *, stage_id: str | None) -> None:
-    from .errors import NotFound
-    from .store import ProofStore
-
-    try:
-        proof = ProofStore().get(evidence_id)
-    except (NotFound, FileNotFoundError) as exc:
-        raise DecisionPayloadInvalid(f"delivery.self_test_evidence_ids unknown evidence id: {evidence_id}") from exc
-    if proof.task_id != task.id:
-        raise DecisionPayloadInvalid(f"delivery.self_test_evidence_ids evidence {evidence_id} belongs to a different task")
-    if stage_id and proof.stage_id and proof.stage_id != stage_id:
-        raise DecisionPayloadInvalid(f"delivery.self_test_evidence_ids evidence {evidence_id} belongs to a different stage")
-
 
 def content_hash(body: dict[str, Any]) -> str:
     text = json.dumps(to_jsonable(body), sort_keys=True, separators=(",", ":"))

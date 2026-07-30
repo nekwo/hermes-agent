@@ -5,7 +5,10 @@ from datetime import timedelta
 
 from hermes_time import now
 
-from agent_runtime.models import AgentRun, Event, Incident, Task
+from agent_runtime.models import AgentRun, Event, Incident
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.observability import build_observability
 from agent_runtime.snapshot import build_snapshot
 from agent_runtime.states import RunState, TaskState
@@ -17,6 +20,18 @@ class Store:
 
     def list_all(self):
         return list(self.items)
+
+    def list_open_with_closed_count(self):
+        """The incident-store contract ``build_snapshot`` reads since cc9db651f.
+
+        Closed incidents are history-only in the steady-state frame, so the real
+        store returns the open rows plus a COUNT of the closed tail rather than
+        coercing thousands of closed files per snapshot. This double answers the
+        same shape off whatever it was handed."""
+
+        items = list(self.items)
+        open_items = [item for item in items if getattr(item, "closed_at", None) is None]
+        return open_items, len(items) - len(open_items)
 
 
 class EmptyProofStore:
@@ -205,7 +220,7 @@ def test_recent_events_include_redaction_safe_progress_summary():
     assert "C:/Users" not in encoded
 
 
-def test_recent_events_include_dev_work_log_quality_fields():
+def test_legacy_proof_event_uses_generic_display_but_keeps_safe_quality_fields():
     ts = now()
     event = Event(
         ts=ts,
@@ -244,8 +259,8 @@ def test_recent_events_include_dev_work_log_quality_fields():
             "task_id": "task_log",
             "run_id": "run_log",
             "persona_id": "dev",
-            "display_kind": "proof",
-            "display_title": "Proof passed",
+            "display_kind": "event",
+            "display_title": "proof.attached",
             "display_summary": "Command proof passed: exit 0, 467ms, proof proof_1",
             "artifact_refs": [{"kind": "proof", "id": "proof_1"}],
             "phase": "proof",
@@ -487,7 +502,5 @@ def test_snapshot_embeds_observability_envelope():
         incident_store=Store([]),
     )
 
-    assert snapshot["observability"]["schema_version"] == 1
-    assert snapshot["observability"]["health"]["status"] in {"healthy", "degraded", "critical"}
-    assert "signals" in snapshot["observability"]
-    assert "interventions" in snapshot["observability"]
+    # S9 removed mission/run/incident observability from the snapshot wire.
+    assert "observability" not in snapshot

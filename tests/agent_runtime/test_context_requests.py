@@ -5,10 +5,13 @@ from hermes_time import now
 from agent_runtime.context_builder import build_context, render_context
 from agent_runtime.context_requests import add_context_request, has_unresolved_context_request
 from agent_runtime.decision_schema import AgentDecision, DecisionType
-from agent_runtime.models import AgentRun, Task
+from agent_runtime.models import AgentRun
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.observability import build_observability
-from agent_runtime.state_machine import MissionStateMachine
 from agent_runtime.states import RunState, TaskState
+from tests.agent_runtime.conftest import release_to_implementation
 
 
 def _task():
@@ -35,24 +38,6 @@ def test_context_request_fulfills_safe_file_and_renders_next_dev_context(tmp_pat
     assert "## Fulfilled File Context" in rendered
     assert "def main" in rendered
     assert has_unresolved_context_request(task) is False
-
-
-def test_context_request_rejects_unsafe_or_missing_path_without_freezing_scheduling(tmp_path):
-    task = _task()
-
-    req = add_context_request(task, actor="dev", payload={"paths": ["../secret.txt"], "reason": "need secret"}, root=tmp_path)
-    action = MissionStateMachine().next_action(task)
-    ctx = build_context(task, _run(task))
-    obs = build_observability(tasks=[task], runs=[], incidents=[], proofs=[], daemon_status={"state": "running"}, reference_time=now())
-
-    assert req["status"] == "unsupported"
-    assert has_unresolved_context_request(task) is False
-    assert action.type.value == "run_slot"
-    assert action.reason == "blueprint stage implement needs slot dev"
-    assert ctx.mission_hud["terminal_feedback"]["action_result"] == "context_unavailable"
-    assert ctx.mission_hud["terminal_feedback"]["failure_reason"] == "path_outside_runtime_root_or_absolute_disallowed"
-    assert ctx.mission_hud["terminal_feedback"]["next_expected"] == "request_one_narrower_repo_relative_path_or_block_with_exact_feedback"
-    assert any(item["kind"] == "context_request_unfulfilled" and item["context_request_id"] == req["id"] for item in obs["interventions"])
 
 
 def test_context_request_uses_later_affected_repo_when_cwd_lacks_file(tmp_path):
@@ -186,22 +171,6 @@ def test_context_request_can_read_safe_proof_artifact_from_runtime_root(tmp_path
     assert "exit_code: 0" in req["bundle"]["files"][0]["content"]
 
 
-def test_duplicate_context_request_is_superseded_and_not_rescheduled(tmp_path):
-    (tmp_path / "src.py").write_text("print('ok')\n", encoding="utf-8")
-    task = _task()
-    payload = {"paths": ["src.py"], "reason": "need code"}
-
-    first = add_context_request(task, actor="dev", payload=payload, root=tmp_path)
-    duplicate = add_context_request(task, actor="dev", payload=payload, root=tmp_path)
-    action = MissionStateMachine().next_action(task)
-
-    assert first["status"] == "fulfilled"
-    assert duplicate["status"] == "superseded"
-    assert duplicate["failure_reason"] == "duplicate_context_request"
-    assert has_unresolved_context_request(task) is False
-    assert action.type.value == "run_slot"
-
-
 def test_context_request_duplicate_fingerprint_includes_repo_scope(tmp_path):
     repo_a = tmp_path / "repo_a"
     repo_b = tmp_path / "repo_b"
@@ -258,14 +227,3 @@ def test_context_request_oversize_file_returns_skeleton_with_window_hint(tmp_pat
     assert file["kind"] == "file_skeleton"
     assert "Use path#Lstart-Lend" in file["content"]
     assert any(item["failure_reason"] == "file_too_large_use_windows" for item in req["path_results"])
-
-
-def test_initial_scope_context_requests_still_route_to_neko(tmp_path):
-    task = _task()
-    task.state = TaskState.CREATED
-    add_context_request(task, actor="neko_supervisor", payload={"paths": ["missing.md"], "reason": "need scope"}, root=tmp_path)
-
-    action = MissionStateMachine().next_action(task)
-
-    assert action.type.value == "run_slot"
-    assert action.reason == "blueprint stage scope needs slot neko_supervisor"

@@ -440,7 +440,8 @@ ticks the daemon, and executes N persona turns under N different
 That work should **land first and independently**. It converts today's
 silent drop into an honest refusal, needs none of this design, and is a
 strict improvement over `[]` on its own. This design then converts the honest
-refusal into an honest *admission* for exactly one role. **If admission is
+refusal into an honest *admission* for a narrow, code-floored set of roles —
+`qa` at R1, `qa` + `dev` since the 2026-07-29 R4 widening. **If admission is
 never scheduled, the typed failure still stands** — that ordering is
 deliberate.
 
@@ -686,9 +687,8 @@ What R1 contains:
   permission-mode resolution.
 - `agent_runtime/config.py` + `runtime_config.py` — the
   `agent_runtime.mcp_admission` root block, deny-by-default at every parse step.
-- An **R1 stage floor** (`R1_ADMISSIBLE_ROLES = {"qa"}`) that refuses any role
-  outside it even when the config names one. R4 retires the floor; until then a
-  config edit alone cannot widen the role set.
+- The historical R1 code-side role floor was removed by mission-lane removal
+  S11. Profile declarations are now the admission authority.
 
 **Not in R1:** teardown (see open question 2, now answered — R2 owns it), and
 the compiled positive `tools.include` with launcher-YAML parity (R3). R1's
@@ -953,6 +953,122 @@ of R2 rather than a nice-to-have.
 ---
 
 ## Log
+
+- **2026-07-29 (the admitted surface's operating manual)** — the first defect
+  found with the flag actually ON, live. QA mission-chat turns driving the
+  admitted `launcher_qa` surface reported `used_skills: []` /
+  `queued_skills_loaded: []`. One such turn hit
+  `helper_low_information_capture` from `screenshot_window` (a legitimately
+  near-empty Posts feed) and burned itself rediscovering nothing — while
+  `launcher-stagec-mcp-screenshot`, which documents that exact refusal's two
+  remedies (capture a content-bearing sub-tab, or take the sparse-acceptance
+  path), was **granted to the persona** and never in context.
+
+  **The gap was a missing rung, not a broken mechanism.** The required-preload
+  path works and is unchanged: `agent.skill_utils.required_preload_skill_ids`
+  reads `metadata.hermes.load_policy: required_preload` off a granted skill's
+  frontmatter and `mission_chat_turn_context._resolve_skill_preload` loads it
+  every turn — that is how `harness-runtime-model` reaches Neko. It never fired
+  here because admission grants a **tool surface**, and nothing connected a
+  surface to its manual.
+
+  **Fix: `mcp_admission.MCP_OPERATING_SKILLS`,** a server → skill map resolved by
+  `admitted_operating_skill_ids` (pure) and `persona_runtime.
+  mission_chat_operating_skills` (the turn's entry point — the twin of
+  `mission_chat_admission_line`, built from the SAME pure policy with the SAME
+  inputs, so the line's denials and the manual's grants can never describe
+  different admissions). The resolved names join the **existing**
+  required-preload set in `_resolve_skill_preload`; there is no second list, no
+  new load path, and no new activation note.
+
+  **Why not the skill's frontmatter,** which would have been a one-line
+  declarative fix:
+  - The condition is not "the persona is granted it", it is "this RUN was
+    admitted the server". `launcher-stagec-mcp-screenshot` is ~53KB delivered;
+    a persona on a lane where admission is off must not pay for tools it does
+    not have. `load_policy` cannot express a per-run condition.
+  - `launcher-stagec-mcp-screenshot` is **not Harness-owned** — it is absent
+    from `docs/agent-runtime-harness/harness-skills` and from
+    `CANONICAL_SHARED_SKILL_IDS`, so `skill_install` never writes it and its
+    frontmatter is a realm-published runtime artifact the next pull overwrites.
+    Same reasoning that keeps `READ_ONLY_INCLUDED_TOOLS` here rather than
+    reading the launcher's YAML: a policy Hermes must hold cannot live in a
+    file Hermes does not own.
+
+  **Two gates, both required, each narrowing.** *Admitted* — read off
+  `admission.server_names`, i.e. after the whole deny-by-default ladder, so a
+  declared-but-denied server (which gets a denial line and no tools) resolves no
+  manual. *Granted* — the skill must already be on the persona's own list; this
+  turns an existing grant into an active load and never invents one, so revoking
+  the grant revokes the preload with no second place to look. Cost is bounded by
+  the mechanism already there: `skill_preload_delivery` snapshots once per native
+  lineage and serves a compact `unchanged` stub afterwards.
+
+  **Flag-off, not-admitted, and not-granted turns are byte-identical** to before
+  — pinned by `test_a_turn_with_nothing_admitted_preloads_exactly_what_it_did_before`.
+
+  **The seed grants it (same day).** The map's gate is the persona's grant, so a
+  seed that admits the surface without granting its manual would ship the gap
+  back on every fresh deployment. Persona data must therefore grant
+  `launcher-stagec-mcp-screenshot` whenever it declares the corresponding
+  server and needs the operating manual.
+
+  **The residual, which is narrower and real:** the skill is not Harness-owned,
+  so Hermes grants the manual but cannot install its CONTENT. A realm pull that
+  renames or removes `launcher-stagec-mcp-screenshot` leaves both gates intact
+  while the file is gone, and the preload degrades QUIETLY: the id lands in
+  `_resolve_skill_preload`'s `missing` accounting (from
+  `build_preloaded_skills_prompt`) and is reported on the prompt-observability
+  row, but the turn is never failed. That asymmetry is deliberate — the worker
+  lane raises on an unloadable required skill; the chat lane never fails a turn
+  over a preload. Pinned by
+  `test_an_admitted_manual_that_is_not_installed_degrades_the_preload_quietly`.
+
+- **2026-07-29 (R4 — `dev` joined the former admission floor)** — the first widening of
+  the former code-side set, by explicit operator ruling and as a product
+  decision rather than a config edit. `{"qa"}` → `{"qa", "dev"}`. Launcher Dev
+  drives the same Stage C `launcher_qa` surface to verify its own Launcher
+  changes visually, instead of routing every visual check through QA and waiting
+  a round trip for it.
+
+  **Widened, not retired.** R4 was drafted as "retire the floor and let config
+  decide"; what shipped keeps the floor and adds one role to it, so the design's
+  two-key property survives intact:
+
+  | key | where | says |
+  | --- | --- | --- |
+  | the former floor | removed in S11 | no longer narrows profile data |
+  | the allowlist | `agent_runtime.mcp_admission.roles.<role>.<lane>` (ROOT config) | which servers this role gets on this lane |
+
+  Neither key alone admits anything: a role inside the floor that the config
+  never names admits nothing, and a config that names a role outside the floor is
+  refused with `mcp_not_admitted_for_role`. Both directions are pinned
+  (`test_dev_is_admitted_once_both_keys_name_it`,
+  `test_dev_admitted_under_a_qa_only_config_is_still_denied`,
+  `test_the_admission_floor_membership_is_pinned`). The live ruling is recorded
+  in the historical runtime config and this audit. S11 supersedes it with the
+  profile-declaration rule.
+
+  **The seeded `dev` persona gains the manual** for the same reason the seeded
+  `qa` row carries it (entry above): `MCP_OPERATING_SKILLS` requires the skill to
+  be granted as well as admitted, so a role joining the floor without the grant
+  admits the surface and ships no operating manual.
+
+  **Known residual, honest blast radius (2026-07-29 review pass).** The floor
+  keys on the **role**, not the persona. `backend_dev` also carries
+  `role=AgentRole.DEV.value` (`personas.py`), so it clears BOTH keys the moment
+  an operator names `dev` under `roles.<role>.<lane>` — the ruling was about
+  Launcher Dev, but the mechanism cannot tell the two dev personas apart. What
+  holds `backend_dev` out today is neither the floor nor the root config: its
+  own profile declares no `mcp_servers.launcher_qa` to spawn, so it stops at
+  `mcp_server_not_configured`. That is a **profile-owned file**, i.e. a weaker
+  gate than the two this design reasons about — adding that block to the
+  backend-dev profile would admit it with no floor edit and no root-config edit.
+  Stated here rather than rediscovered later; pinned by
+  `test_backend_dev_clears_the_floor_and_is_held_out_by_its_profile_only`, so the
+  day someone adds the block that test changes and the decision is re-made rather
+  than inherited. A per-persona floor (or a role split) is the fix if that stops
+  being acceptable; it was not needed for this ruling.
 
 - **2026-07-26 (R2b — the per-run call budget)** — the one §7 row R2 shipped
   without. Flag still OFF; this changes nothing until admission is enabled.

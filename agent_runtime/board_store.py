@@ -7,9 +7,7 @@ an event-less write is invisible to the watermark-gated snapshot/serve pipeline)
 
 Hard invariants this store upholds (see ``docs/mission_control/BOARD_DESIGN``):
 
-- **Cards never mutate goal state.** A card's column is planning state only.
-  ``escalate`` is the only bridge to a goal and it is an idempotent orchestration
-  over the standard goal-create envelope — never a goal transition.
+- **Cards are planning state.** They do not carry or mutate mission records.
 - **Archive-never-delete.** Archived cards move to ``archive/`` and their ids are
   recorded in the board's ``archived_card_ids`` resurrection-guard ledger.
 - **Merge-friendly ordering.** Card position is a fractional ``order_key``; a move
@@ -301,7 +299,6 @@ class BoardStore:
                 labels=_safe_labels(labels),
                 assignee=_safe_id(assignee),
                 checklist=_safe_checklist(checklist),
-                linked_goal_id=None,
                 state="active",
                 created_by=actor,
                 revision=1,
@@ -463,65 +460,6 @@ class BoardStore:
                 _write_board(board)
             self._emit("board.card.restored", board_id=board_id, card_id=card.card_id, column_id=card.column_id)
         return self.get_card(card_id, board_id=board_id)
-
-    def escalate(
-        self,
-        card_id: str,
-        *,
-        request_envelope: dict[str, Any],
-        operator_key: str | None = None,
-        board_id: str | None = None,
-        updated_by: str = "operator",
-        dry_run: bool = False,
-    ) -> dict[str, Any]:
-        """Idempotent orchestration: create a goal from the standard envelope,
-        then link it to the card. NOT a transaction (goal + board are separate
-        file domains) — a crash between steps converges on retry because the
-        goal idempotency key is derived and the link is an idempotent set.
-
-        Cards never mutate goal state; this is the ONLY bridge to a goal.
-        """
-
-        from .mission_goal import create_mission_goal_from_request  # lazy: avoid import cycle
-
-        board_id, _ = self._locate_card(card_id, board_id=board_id)
-        card = self.get_card(card_id, board_id=board_id)
-        derived_key = f"board-escalate-{card_id}-{_safe_id(operator_key) or 'default'}"[:160]
-        envelope = dict(request_envelope or {})
-        envelope["idempotency_key"] = derived_key
-        # The board is a Mission Control sub-surface; escalate flows through the
-        # EXISTING goal-create envelope (no new goal-creation lane). Default to
-        # the operator surface + attribution rather than inventing a board lane.
-        envelope.setdefault("source_surface", "mission_control")
-        if not isinstance(envelope.get("operator"), dict) or not str((envelope.get("operator") or {}).get("operator_id") or "").strip():
-            envelope["operator"] = {"operator_id": _safe_actor(updated_by)}
-        response = create_mission_goal_from_request(envelope, dry_run=dry_run)
-        if response.get("error"):
-            return response
-        goal_id = response.get("goal_id") or response.get("task_id")
-        if dry_run:
-            return {**response, "card_id": card_id, "linked": False, "dry_run": True}
-        with board_lock(board_id):
-            card = self.get_card(card_id, board_id=board_id)
-            if card.linked_goal_id != goal_id:  # idempotent set
-                card.linked_goal_id = goal_id
-                card.revision += 1
-                card.updated_at = now()
-                card.updated_by = _safe_actor(updated_by)
-                _write_card(card)
-            self._emit(
-                "board.card.escalated",
-                board_id=board_id,
-                card_id=card_id,
-                goal_id=goal_id,
-                idempotency_key=derived_key,
-            )
-        return {
-            **response,
-            "card_id": card_id,
-            "linked_goal_id": goal_id,
-            "linked": True,
-        }
 
     def resolve_conflict(self, card_id: str, *, take: str, board_id: str | None = None, updated_by: str = "operator") -> BoardCard | None:
         """Resolve a realm-sync conflict sidecar for a card. ``take=local`` keeps

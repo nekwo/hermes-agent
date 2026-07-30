@@ -2,8 +2,6 @@ from pathlib import Path
 
 import pytest
 
-from hermes_time import now
-
 from agent_runtime.board_store import BoardStore
 from agent_runtime.default_scope import (
     DEFAULT_REALM_ID,
@@ -13,11 +11,11 @@ from agent_runtime.default_scope import (
     reconcile_default_scope_to_legacy,
 )
 from agent_runtime.errors import DefaultScopeReconciliationRequired, StoreCorrupt
-from agent_runtime.models import PersonaInstance, Task
+from agent_runtime.models import PersonaInstance
 from agent_runtime.office_store import OfficeStore
 from agent_runtime.persona_assignments import PersonaInstanceStore
-from agent_runtime.states import TaskState, WorkerSessionState
-from agent_runtime.store import RealmStore, TaskStore, WorkspaceStore
+from agent_runtime.states import WorkerSessionState
+from agent_runtime.store import RealmStore, WorkspaceStore
 
 
 def test_default_scope_is_durable_and_relationship_complete():
@@ -187,18 +185,6 @@ def test_default_scope_preview_inventories_candidates_without_mutation():
     legacy_realm.default_workspace_id = workspace.id
     legacy_realm.workspace_ids = [workspace.id]
     RealmStore().save(legacy_realm)
-    TaskStore().create(
-        Task(
-            id="goal_preview",
-            title="Preview",
-            description="Inventory me",
-            state=TaskState.CREATED,
-            created_at=now(),
-            updated_at=now(),
-            requested_by="test",
-            workspace_id=workspace.id,
-        )
-    )
     board = BoardStore().ensure_default_board(workspace.id)
     instance = PersonaInstanceStore().update(
         PersonaInstance(
@@ -248,7 +234,7 @@ def test_default_scope_preview_inventories_candidates_without_mutation():
     scope = preview["candidate_scopes"][0]
     row = scope["workspaces"][0]
     assert row["roster_agent_ids"] == ["dev", "qa"]
-    assert row["goal_ids"] == ["goal_preview"]
+    assert "goal_ids" not in row
     assert row["board_ids"] == [board.board_id]
     assert row["office_surface"] is True
     assert row["office_actor_keys"] == [actor.actor_key]
@@ -344,18 +330,7 @@ def test_default_scope_reconciliation_refuses_fixed_duplicate_with_scoped_data()
     )
     canonical.workspace_ids = [canonical_workspace.id]
     RealmStore().save(canonical)
-    TaskStore().create(
-        Task(
-            id="goal_fixed_data",
-            title="Keep me",
-            description="Must block archive",
-            state=TaskState.CREATED,
-            created_at=now(),
-            updated_at=now(),
-            requested_by="test",
-            workspace_id=canonical_workspace.id,
-        )
-    )
+    BoardStore().ensure_default_board(canonical_workspace.id)
 
     with pytest.raises(DefaultScopeReconciliationRequired):
         reconcile_default_scope_to_legacy(

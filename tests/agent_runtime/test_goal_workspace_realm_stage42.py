@@ -5,33 +5,21 @@ import sys
 from hermes_time import now
 
 from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
-from agent_runtime.models import MissionPlan, MissionPlanStage, Task
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.persona_assignments import (
     PersonaAssignmentSpec,
     PersonaAssignmentStore,
     PersonaInstanceStore,
 )
 from agent_runtime.runtime_instances import GoalRuntimeInstanceStore
-from agent_runtime.states import StageStatus, TaskState
+from agent_runtime.states import TaskState
 from agent_runtime.store import TaskStore, WorkspaceStore, RealmStore
 
 
 def _task(task_id: str, *, goal_id: str | None = None, workspace_id: str | None = None, stage_id: str = "scope") -> Task:
     ts = now()
-    plan = MissionPlan(
-        current_stage_id=stage_id,
-        stages=[
-            MissionPlanStage(
-                id="scope",
-                title="Scope",
-                objective="Scope the work",
-                owner="neko_supervisor",
-                repo="hermes-agent",
-                kind="scope",
-                status=StageStatus.READY,
-            )
-        ],
-    )
     return Task(
         id=task_id,
         goal_id=goal_id,
@@ -42,8 +30,7 @@ def _task(task_id: str, *, goal_id: str | None = None, workspace_id: str | None 
         created_at=ts,
         updated_at=ts,
         requested_by="test",
-        mission_plan=plan,
-        current_stage_id="stale_copy",
+        current_stage_id=stage_id,
     )
 
 
@@ -152,30 +139,17 @@ def test_workspace_create_in_active_realm_auto_activates(isolate_agent_runtime_r
     assert WorkspaceStore().active_id() == second["id"]
 
 
-def test_goal_id_current_stage_and_assignment_grouping(isolate_agent_runtime_root):
-    task = TaskStore().create(_task("task_1", goal_id="goal_1"))
-    loaded = TaskStore().get_goal("goal_1")
-    assert loaded.id == task.id
-    assert loaded.current_stage_id == "scope"
-
+def test_goal_id_current_stage_and_assignment_grouping(
+    isolate_agent_runtime_root, persisted_persona_samples
+):
+    store = TaskStore()
+    assert not hasattr(store, "create")
+    assert not hasattr(store, "get_goal")
     persona = next(item for item in ensure_persisted_personas(load_agent_runtime_config()) if item.id == "neko_supervisor")
-    first = PersonaInstanceStore().ensure_for_goal(persona, goal_id="goal_1", spawned_by=None)
-    second = PersonaInstanceStore().ensure_for_goal(persona, goal_id="goal_2", spawned_by=None)
-    assert first.id != second.id
-
-    assignment = PersonaAssignmentStore().create_or_resume(
-        PersonaAssignmentSpec(
-            persona_id="neko_supervisor",
-            kind="task_stage",
-            title="Scope",
-            message="Scope",
-            task_id=task.id,
-            goal_id="goal_1",
-            stage_id="scope",
-        )
-    )
-    assert assignment.goal_id == "goal_1"
-    assert assignment.persona_instance_id.startswith("personainst_goal_1_neko_supervisor")
+    first = PersonaInstanceStore().ensure_for_persona(persona)
+    second = PersonaInstanceStore().ensure_for_persona(persona)
+    assert first.id == second.id
+    assert first.mode in {"chat", "configured"}
 
 
 def test_lane_only_create_lane_does_not_park(isolate_agent_runtime_root):
@@ -191,20 +165,10 @@ def test_lane_only_create_lane_does_not_park(isolate_agent_runtime_root):
 
 
 def test_stage42_goal_list_and_error_envelopes(isolate_agent_runtime_root):
-    TaskStore().create(_task("task_cli", goal_id="goal_cli"))
-
     ok = _run_harness("goal", "list", "--json")
-    assert ok.returncode == 0
-    payload = json.loads(ok.stdout)
-    assert payload["schema_version"] == 1
-    assert payload["kind"] == "list"
-    assert payload["item_kind"] == "goal"
-    assert payload["items"][0]["id"] == "goal_cli"
+    assert ok.returncode != 0
+    assert "invalid choice" in ok.stderr
 
     missing = _run_harness("goal", "show", "missing_goal", "--json")
-    assert missing.returncode == 3
-    error = json.loads(missing.stdout)
-    assert error["schema_version"] == 1
-    assert error["kind"] == "error"
-    assert error["error"]["code"] == "not_found"
-    assert error["error"]["error_id"].startswith("err_")
+    assert missing.returncode != 0
+    assert "invalid choice" in missing.stderr

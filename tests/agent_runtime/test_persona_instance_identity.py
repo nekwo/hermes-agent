@@ -10,6 +10,10 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
+
 from hermes_time import now
 
 from agent_runtime import paths
@@ -397,9 +401,11 @@ _FRESH = datetime(2026, 7, 12, 19, 30, 0, tzinfo=timezone.utc)  # 30 min old
 
 
 def _backed_universe():
-    # dev/qa/neko_supervisor/backend_dev resolve via default_personas() even though only
-    # ``base`` is seeded; ``alice`` is a live profile template.
-    return backed_persona_identity(profile_names=["alice", "base", "backend-dev"])
+    from tests.agent_runtime.persona_samples import sample_personas
+
+    return backed_persona_identity(
+        agents=sample_personas(), profile_names=["alice", "base", "backend-dev"]
+    )
 
 
 def _orphan_row(instance_id, **over):

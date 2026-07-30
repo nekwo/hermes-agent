@@ -20,7 +20,7 @@ from hermes_constants import get_hermes_home
 from hermes_cli.profiles import list_profiles
 
 from agent_runtime.cli_format import emit_json, human_task_line, task_summary
-from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config, mission_chat_clarify_token_binding, provision_bundled_personas, resolve_mission_chat_max_seconds
+from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config, mission_chat_clarify_token_binding, resolve_mission_chat_max_seconds
 from agent_runtime.continuity import return_summary_to_parent_session
 from agent_runtime.dispatch_session_policy import (
     derive_dispatch_title,
@@ -36,7 +36,6 @@ from agent_runtime.coordinator_permissions import (
 from agent_runtime.decision_contract_examples import verify_harness_skill_examples
 from agent_runtime.decision_contract_registry import canonical_role_value, contract_manifest, hud_shape_index_for_stage, verify_registry
 from agent_runtime.decision_schema import AgentDecision, DecisionType
-from agent_runtime.default_plan import ensure_default_mission_plan
 from agent_runtime.default_scope import (
     ensure_default_scope,
     preview_default_scope_migration,
@@ -48,6 +47,7 @@ from agent_runtime.errors import (
     DefaultScopeReconciliationRequired,
     EventPayloadTooLarge,
     InvalidTransition,
+    LegacyOrchestratorRemoved,
     NotFound,
     ProofMissing,
     RuntimeRootMismatch,
@@ -58,7 +58,6 @@ from agent_runtime.errors import (
     WorkspaceDeleteBlocked,
 )
 from agent_runtime.events import EventLog
-from agent_runtime.goal_hygiene import activate_foreground_runtime, prepare_new_goal_runtime
 from agent_runtime.harness_doctor import (
     DEFAULT_STALE_INCIDENT_DAYS,
     DEFAULT_STALE_INCIDENT_HOURS,
@@ -68,9 +67,8 @@ from agent_runtime.harness_doctor import (
     DEFAULT_WORKTREE_MIN_AGE_SECONDS,
     run_harness_doctor,
 )
-from agent_runtime.goal_runner import GoalRunOptions, MissionRuntimeController
 from agent_runtime.launcher_process_hygiene import launcher_visual_cleanup_needed
-from agent_runtime.models import AgentPersona, Event, Task, apply_instance_model_overrides
+from agent_runtime.models import AgentPersona, Event, apply_instance_model_overrides
 from agent_runtime import paths
 from agent_runtime.persona_assignments import (
     CHAT_BINDING_CLEARED_REASON_DELETED,
@@ -101,7 +99,6 @@ from agent_runtime.persona_chat_mints import (
     PersonaChatMintError,
     reserve_persona_chat_mint,
 )
-from agent_runtime.persona_diagnostics import PersonaDiagnosticController, PersonaDiagnosticOptions
 from agent_runtime.profile_context import active_profile_name
 from agent_runtime.realm_sync import (
     RealmSyncError,
@@ -112,7 +109,6 @@ from agent_runtime.realm_sync import (
     sync_artifacts_for_workspace_agent,
 )
 from agent_runtime.resolution import resolution_table, resolve_runtime
-from agent_runtime.burn_in import STAGE47_CASES, STAGE47_SUITE, burn_in_status, create_burn_in, run_burn_in_case, summarize_burn_in, swarm_certification_allows_production
 from agent_runtime.migrations import effective_config_summary, migration_status
 from agent_runtime.mission_chat_turns import (
     MissionChatTurnPersistOutcome,
@@ -156,20 +152,16 @@ from agent_runtime.mission_chat_steer import start_active_mission_chat_turn, sub
 from agent_runtime.mission_chat_workdir import mission_chat_workdir_for_persona
 from agent_runtime.observability import build_observability
 from agent_runtime.persona_runtime import GPTPersonaRuntime, chat_lane_capability_drops
-from agent_runtime.personas import profile_chat_toolsets, seed_personas
+from agent_runtime.personas import profile_chat_toolsets
 from agent_runtime.prompt_observability import attach_prompt_observability_turn_results, mission_chat_prompt_observability, persist_prompt_observability_context, slim_chat_final_observability, turn_usage_from_result
 from agent_runtime.provider_health import provider_health_for_personas
 from agent_runtime.skill_install import install_harness_skills, install_harness_skills_for_personas
 from agent_runtime.snapshot import build_snapshot, write_snapshot
-from agent_runtime.smoke import run_smoke
 from agent_runtime.scope_control import find_discovery_task
-from agent_runtime.planning import apply_planning_decision
 from agent_runtime.states import TaskState, RunState, WorkerSessionState
 from agent_runtime.status import build_status
-from agent_runtime.steering import execute_steer_action
-from agent_runtime.store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, ProofStore, RunStore, TaskStore
+from agent_runtime.store import AgentStore
 from agent_runtime.store import RealmStore, WorkspaceStore
-from agent_runtime.ticker import TickEngine
 from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
 from agent_runtime.tool_permissions import ChatToolPermissionStore, permission_state_for_chat
 from agent_runtime.tool_turn_history import persist_tool_turn_actual
@@ -340,12 +332,7 @@ def build_parser(parent_subparsers) -> None:
     subs = parser.add_subparsers(dest="harness_command")
     parser.set_defaults(func=harness_command)
 
-    init = subs.add_parser("init", help="Initialize harness store and default personas")
-    init.add_argument(
-        "--with-bundled-personas",
-        action="store_true",
-        help="Persist the profile-backed Neko, Launcher Dev, Backend Dev, and QA team",
-    )
+    init = subs.add_parser("init", help="Initialize the harness store")
     init.add_argument("--json", action="store_true")
     init.set_defaults(func=_cmd_init)
 
@@ -376,172 +363,6 @@ def build_parser(parent_subparsers) -> None:
     roots_migrate.add_argument("--no-platform-gates", action="store_true", help="Do not add platforms:[windows] to PowerShell/.ps1-only MCP entries")
     _add_stage42_global_args(roots_migrate, mutation=True)
     roots_migrate.set_defaults(func=_cmd_roots_migrate)
-
-    goal = subs.add_parser("goal", help="Create and run Harness goals in-process")
-    goal_subs = goal.add_subparsers(dest="goal_command")
-    goal_list = goal_subs.add_parser("list", help="List Harness goals")
-    goal_list.add_argument("--workspace", default=None)
-    goal_list.add_argument("--state", choices=["open", "done", "blocked", "all"], default="open")
-    _add_stage42_global_args(goal_list)
-    goal_list.set_defaults(func=_cmd_goal_list)
-    goal_show = goal_subs.add_parser("show", help="Show one Harness goal")
-    goal_show.add_argument("goal_id")
-    goal_show.add_argument("--full", action="store_true")
-    _add_stage42_global_args(goal_show)
-    goal_show.set_defaults(func=_cmd_goal_show)
-    goal_history = goal_subs.add_parser("history", help="Show redaction-safe goal event history")
-    goal_history.add_argument("goal_id")
-    goal_history.add_argument("--limit", type=int, default=50)
-    _add_stage42_global_args(goal_history)
-    goal_history.set_defaults(func=_cmd_goal_history)
-    goal_detail = goal_subs.add_parser(
-        "detail",
-        help="S8: the heavy goal DETAIL body (role streams, envelopes, checklists, per-event timelines, mission plan) evicted from the steady-state frame; rebuilt read-only on demand",
-    )
-    goal_detail.add_argument("goal_id", help="Goal id or task id (parent/child tasks share a goal_id)")
-    goal_detail.add_argument("--json", action="store_true")
-    goal_detail.set_defaults(func=_cmd_goal_detail)
-    goal_create = goal_subs.add_parser("create", help="Create a Harness goal")
-    goal_create.add_argument("--title")
-    goal_create.add_argument("--description")
-    goal_create.add_argument("--requested-by", default="cli")
-    goal_create.add_argument("--request-json")
-    goal_create.add_argument("--workspace", default=None)
-    goal_create.add_argument("--start-daemon", dest="start_daemon", action="store_true", default=None)
-    goal_create.add_argument("--no-start-daemon", dest="start_daemon", action="store_false")
-    _add_stage42_global_args(goal_create, mutation=True)
-    goal_create.set_defaults(func=_cmd_goal_create)
-    goal_run = goal_subs.add_parser("run", help="Create a goal and run bounded ticks until a meaningful boundary")
-    goal_run.add_argument("--title", required=True)
-    goal_run.add_argument("--description", required=True)
-    goal_run.add_argument("--requested-by", default="cli")
-    goal_run.add_argument("--max-actions", type=int, default=16)
-    goal_run.add_argument("--max-seconds", type=float, default=None)
-    goal_run.add_argument("--archive-on-done", action="store_true")
-    goal_run.add_argument("--requires-visual-proof", action="store_true")
-    goal_run.add_argument("--affected-repo", action="append", default=[])
-    goal_run.add_argument("--acceptance", action="append", default=[])
-    goal_run.add_argument("--non-goal", action="append", default=[])
-    goal_run.add_argument("--blueprint", default="neko_two_dev_default", help="Blueprint id for graph-routed goal creation")
-    goal_run.add_argument("--bind", action="append", default=[], help="Bind a blueprint slot, e.g. builder=persona:dev")
-    goal_run.add_argument("--workspace", default=None)
-    goal_run.add_argument("--runtime-root", default=None, help="Pin the expected resolved Harness runtime root")
-    _add_stage42_global_args(goal_run, mutation=True)
-    goal_run.set_defaults(func=_cmd_goal_run)
-    goal_unblock = goal_subs.add_parser("unblock", help="Operator-unblock a Harness goal")
-    goal_unblock.add_argument("goal_id")
-    goal_unblock.add_argument("--reason", required=True)
-    goal_unblock.add_argument("--state", choices=["created", "pm_ready_for_dev", "dev_implementing", "qa_testing"], default="created")
-    goal_unblock.add_argument("--rescope", action="store_true")
-    _add_stage42_global_args(goal_unblock, mutation=True)
-    goal_unblock.set_defaults(func=_cmd_goal_unblock)
-    goal_cancel = goal_subs.add_parser("cancel", help="Cancel a Harness goal")
-    goal_cancel.add_argument("goal_id")
-    goal_cancel.add_argument("--reason", required=True)
-    _add_stage42_global_args(goal_cancel, mutation=True)
-    goal_cancel.set_defaults(func=_cmd_goal_cancel)
-    goal_archive = goal_subs.add_parser("archive", help="Archive a terminal Harness goal")
-    goal_archive.add_argument("goal_id")
-    _add_stage42_global_args(goal_archive, mutation=True)
-    goal_archive.set_defaults(func=_cmd_goal_archive)
-    goal_archive_ready = goal_subs.add_parser("archive-ready", help="Archive terminal ready/done Harness goals while preserving evidence")
-    _add_stage42_global_args(goal_archive_ready, mutation=True)
-    goal_archive_ready.set_defaults(func=_cmd_task_archive_ready)
-
-    blueprint = subs.add_parser("blueprint", help="Validate and run Agent Runtime blueprints headlessly")
-    blueprint_subs = blueprint.add_subparsers(dest="blueprint_command", required=True)
-    blueprint_list = blueprint_subs.add_parser("list", help="List bundled Agent Runtime blueprints")
-    blueprint_list.add_argument("--json", action="store_true")
-    blueprint_list.set_defaults(func=_cmd_blueprint_list)
-    blueprint_validate = blueprint_subs.add_parser("validate", help="Validate one Agent Runtime blueprint by id or path")
-    blueprint_validate.add_argument("blueprint")
-    blueprint_validate.add_argument("--json", action="store_true")
-    blueprint_validate.set_defaults(func=_cmd_blueprint_validate)
-    blueprint_run = blueprint_subs.add_parser("run", help="Instantiate a blueprint; --dry-run validates without executing agents")
-    blueprint_run.add_argument("blueprint")
-    blueprint_run.add_argument("--goal", required=True)
-    blueprint_run.add_argument("--bind", action="append", default=[], help="Bind a slot, e.g. builder=persona:dev or builder=profile:gpt-launcher")
-    blueprint_run.add_argument("--dry-run", action="store_true")
-    blueprint_run.add_argument("--requested-by", default="cli")
-    blueprint_run.add_argument("--json", action="store_true")
-    blueprint_run.set_defaults(func=_cmd_blueprint_run)
-    blueprint_save = blueprint_subs.add_parser("save", help="Create or update a blueprint from a JSON/YAML spec file (validated before write)")
-    blueprint_save.add_argument("--spec-file", required=True, help="Path to a JSON or YAML blueprint spec")
-    blueprint_save.add_argument("--json", action="store_true")
-    blueprint_save.set_defaults(func=_cmd_blueprint_save)
-    blueprint_matrix = blueprint_subs.add_parser("matrix-run", help="Instantiate one blueprint across varied slot bindings")
-    blueprint_matrix.add_argument("blueprint")
-    blueprint_matrix.add_argument("--goal", required=True)
-    blueprint_matrix.add_argument("--bind", action="append", default=[], help="Base slot binding, e.g. verifier=persona:qa")
-    blueprint_matrix.add_argument("--vary", action="append", default=[], help="Vary a slot across comma-separated bindings, e.g. builder=persona:dev,profile:gpt-launcher")
-    blueprint_matrix.add_argument("--dry-run", action="store_true")
-    blueprint_matrix.add_argument("--requested-by", default="cli")
-    blueprint_matrix.add_argument("--json", action="store_true")
-    blueprint_matrix.set_defaults(func=_cmd_blueprint_matrix_run)
-
-    task = subs.add_parser("task", help="Manage harness tasks")
-    task_subs = task.add_subparsers(dest="task_command")
-    create = task_subs.add_parser("create", help="Create a harness task")
-    create.add_argument("--title")
-    create.add_argument("--description")
-    create.add_argument("--request-json", help="Path to a Stage 38 canonical goal-create request JSON file")
-    create.add_argument("--requested-by", default="cli")
-    create.add_argument(
-        "--affected-repo",
-        action="append",
-        default=[],
-        help="Pin the goal's repo scope (EterniaLauncher, EterniaBackend, hermes-agent, or an alias like launcher/backend). Repeatable.",
-    )
-    create.add_argument("--start-daemon", dest="start_daemon", action="store_true", default=None, help="Start the Mission Daemon after creating the task")
-    create.add_argument("--no-start-daemon", dest="start_daemon", action="store_false", help="Create the task without starting the Mission Daemon")
-    create.add_argument("--json", action="store_true")
-    create.set_defaults(func=_cmd_task_create)
-    listp = task_subs.add_parser("list", help="List harness tasks")
-    listp.add_argument("--state", choices=["open", "all", "done", "blocked"], default="open")
-    listp.add_argument("--json", action="store_true")
-    listp.set_defaults(func=_cmd_task_list)
-    show = task_subs.add_parser("show", help="Show harness task")
-    show.add_argument("task_id")
-    show.add_argument("--events", type=int, default=0, help="Include the newest N task events")
-    show.add_argument("--since", default=None, help="Include task events since an ISO-8601 timestamp")
-    show.add_argument("--json", action="store_true")
-    show.set_defaults(func=_cmd_task_show)
-    history = task_subs.add_parser("history", help="Show redaction-safe task event history")
-    history.add_argument("task_id")
-    history.add_argument("--limit", type=int, default=50)
-    history.add_argument("--since", default=None, help="Include task events since an ISO-8601 timestamp")
-    history.add_argument("--json", action="store_true")
-    history.set_defaults(func=_cmd_task_history)
-    task_cancel = task_subs.add_parser("cancel", help="Cancel a harness task")
-    task_cancel.add_argument("task_id")
-    task_cancel.add_argument("--reason", required=True)
-    task_cancel.add_argument("--json", action="store_true")
-    task_cancel.set_defaults(func=_cmd_task_cancel)
-    task_unblock = task_subs.add_parser("unblock", help="Operator-unblock or rescope a non-terminal harness task")
-    task_unblock.add_argument("task_id")
-    task_unblock.add_argument("--reason", required=True)
-    task_unblock.add_argument("--state", choices=["created", "pm_ready_for_dev", "dev_implementing", "qa_testing"], default="created")
-    task_unblock.add_argument("--rescope", action="store_true", help="Clear mission plan/stages so Neko can scope the task again")
-    task_unblock.add_argument("--foreground", action="store_true", help="Reactivate this task as the foreground runtime lane")
-    task_unblock.add_argument("--json", action="store_true")
-    task_unblock.set_defaults(func=_cmd_task_unblock)
-    task_steer = task_subs.add_parser("steer", help="Execute a live topology steer action")
-    task_steer.add_argument("task_id")
-    task_steer.add_argument("--action-id", default=None, help="Snapshot steer action id, e.g. steer:slot_lead:slot_builder:route")
-    task_steer.add_argument("--verb", choices=["route", "spawn", "re-scope", "resolve", "verdict-back"], default=None)
-    task_steer.add_argument("--source-node", dest="source_node_id", default=None)
-    task_steer.add_argument("--target-node", dest="target_node_id", default=None)
-    task_steer.add_argument("--reason", default="operator steer")
-    task_steer.add_argument("--requested-by", default="operator")
-    task_steer.add_argument("--json", action="store_true")
-    task_steer.set_defaults(func=_cmd_task_steer)
-    task_archive_ready = task_subs.add_parser("archive-ready", help="Archive terminal ready/done harness tasks while preserving evidence")
-    task_archive_ready.add_argument("--json", action="store_true")
-    task_archive_ready.set_defaults(func=_cmd_task_archive_ready)
-    task_archive = task_subs.add_parser("archive", help="Archive one terminal harness task while preserving evidence")
-    task_archive.add_argument("task_id")
-    task_archive.add_argument("--json", action="store_true")
-    task_archive.set_defaults(func=_cmd_task_archive)
 
     workspace = subs.add_parser("workspace", help="Manage Harness workspaces")
     workspace_subs = workspace.add_subparsers(dest="workspace_command", required=True)
@@ -940,11 +761,6 @@ def build_parser(parent_subparsers) -> None:
     _add_stage42_global_args(card_restore, mutation=True)
     card_restore.set_defaults(func=_cmd_board_card_restore)
 
-    board_escalate = board_subs.add_parser("escalate", help="Escalate a card to a goal (idempotent orchestration over the standard goal-create envelope)")
-    board_escalate.add_argument("card_id")
-    board_escalate.add_argument("--request-json", dest="request_json", required=True, help="Goal-create envelope (path or inline JSON)")
-    _add_stage42_global_args(board_escalate, mutation=True)
-    board_escalate.set_defaults(func=_cmd_board_escalate)
     board_resolve = board_subs.add_parser("resolve-conflict", help="Resolve a realm-sync conflict on a card")
     board_resolve.add_argument("card_id")
     board_resolve.add_argument("--take", required=True, choices=["local", "remote"])
@@ -989,148 +805,6 @@ def build_parser(parent_subparsers) -> None:
     office_resolve.add_argument("--take", required=True, choices=["local", "remote"])
     _add_stage42_global_args(office_resolve, mutation=True)
     office_resolve.set_defaults(func=_cmd_office_resolve_conflict)
-
-    playground = subs.add_parser("playground", help="Replay captured contract-failure scenarios against current contracts")
-    playground_subs = playground.add_subparsers(dest="playground_command", required=True)
-    playground_list = playground_subs.add_parser("list", help="List captured replay scenarios")
-    playground_list.add_argument("--json", action="store_true")
-    playground_list.set_defaults(func=_cmd_playground_list)
-    playground_show = playground_subs.add_parser("show", help="Show one replay scenario")
-    playground_show.add_argument("scenario_id")
-    playground_show.add_argument("--json", action="store_true")
-    playground_show.set_defaults(func=_cmd_playground_show)
-    playground_replay = playground_subs.add_parser("replay", help="Replay one scenario (or all) against current contracts; mutates nothing")
-    playground_replay.add_argument("scenario_id", nargs="?", default=None, help="Scenario id; omit to replay all")
-    playground_replay.add_argument("--json", action="store_true")
-    playground_replay.set_defaults(func=_cmd_playground_replay)
-
-    swarm = subs.add_parser("swarm", help="Manage production swarm gate and runtime state")
-    swarm_subs = swarm.add_subparsers(dest="swarm_command", required=True)
-    swarm_status = swarm_subs.add_parser("status", help="Show swarm certification and enablement status")
-    swarm_status.add_argument("--json", action="store_true")
-    swarm_status.set_defaults(func=_cmd_swarm_status)
-    swarm_enable = swarm_subs.add_parser("enable", help="Enable production swarm mode after certification")
-    swarm_enable.add_argument("--lanes", type=int, default=2)
-    swarm_enable.add_argument("--allow-uncertified-dev-swarm", action="store_true")
-    swarm_enable.add_argument("--json", action="store_true")
-    swarm_enable.set_defaults(func=_cmd_swarm_enable)
-    swarm_disable = swarm_subs.add_parser("disable", help="Disable new production swarm activation")
-    swarm_disable.add_argument("--json", action="store_true")
-    swarm_disable.set_defaults(func=_cmd_swarm_disable)
-
-    lane = subs.add_parser("lane", help="Inspect and operate persisted swarm lanes")
-    lane_subs = lane.add_subparsers(dest="lane_command", required=True)
-    lane_list = lane_subs.add_parser("list", help="List lanes")
-    lane_list.add_argument("--json", action="store_true")
-    _add_stage42_global_args(lane_list)
-    lane_list.set_defaults(func=_cmd_lane_list)
-    lane_show = lane_subs.add_parser("show", help="Show one lane")
-    lane_show.add_argument("lane_id")
-    lane_show.add_argument("--json", action="store_true")
-    _add_stage42_global_args(lane_show)
-    lane_show.set_defaults(func=_cmd_lane_show)
-    for command_name in ("pause", "park", "resume", "drain"):
-        command = lane_subs.add_parser(command_name, help=f"{command_name.title()} a lane")
-        command.add_argument("lane_id")
-        command.add_argument("--reason", default=f"operator {command_name}")
-        command.add_argument("--json", action="store_true")
-        command.set_defaults(func=_cmd_lane_control)
-
-    tick = subs.add_parser("tick", help="Diagnostic only: run one harness tick")
-    tick.add_argument("--task", dest="task_id", default=None, help="Run one tick for a specific task id")
-    tick.add_argument("--json", action="store_true")
-    tick.set_defaults(func=_cmd_tick)
-
-    settle = subs.add_parser("run-until-settled", help="Diagnostic only: run bounded mission ticks until done, blocked, waiting, or incident")
-    settle.add_argument("--task", dest="task_id", default=None, help="Settle a specific task id")
-    settle.add_argument("--max-actions", type=int, default=10)
-    settle.add_argument("--max-seconds", type=float, default=None)
-    settle.add_argument("--json", action="store_true")
-    settle.set_defaults(func=_cmd_run_until_settled)
-
-    burn = subs.add_parser("burn-in", help="Run Stage 47 certification burn-in cases")
-    burn_subs = burn.add_subparsers(dest="burn_in_command")
-    burn_create = burn_subs.add_parser("create", help="Create a burn-in ledger")
-    burn_create.add_argument("--suite", default=STAGE47_SUITE)
-    burn_create.add_argument("--case-id", choices=sorted(STAGE47_CASES), default=None)
-    burn_create.add_argument("--rerun-of", default=None)
-    burn_create.add_argument("--json", action="store_true")
-    burn_create.set_defaults(func=_cmd_burn_in_create)
-    burn_run = burn_subs.add_parser("run", help="Run a burn-in case")
-    burn_run.add_argument("case_id", choices=sorted(STAGE47_CASES))
-    burn_run.add_argument("--burn-id", default=None)
-    burn_run.add_argument("--max-actions", type=int, default=12)
-    burn_run.add_argument("--json", action="store_true")
-    burn_run.set_defaults(func=_cmd_burn_in_run)
-    burn_status = burn_subs.add_parser("status", help="Show burn-in ledger status")
-    burn_status.add_argument("burn_id")
-    burn_status.add_argument("--json", action="store_true")
-    burn_status.set_defaults(func=_cmd_burn_in_status)
-    burn_summary = burn_subs.add_parser("summarize", help="Summarize burn-in certification evidence")
-    burn_summary.add_argument("burn_id")
-    burn_summary.add_argument("--json", action="store_true")
-    burn_summary.set_defaults(func=_cmd_burn_in_summarize)
-
-    run = subs.add_parser("run", help="Manage harness runs")
-    run_subs = run.add_subparsers(dest="run_command")
-    run_list = run_subs.add_parser(
-        "list",
-        help="S8: paged run history — the frame ships only ACTIVE runs; historical/terminal runs are fetched here",
-    )
-    run_list.add_argument("--task", dest="task_id", default=None, help="Filter to one task id")
-    run_list.add_argument("--state", default=None, help="Filter to one run state (e.g. done, failed, cancelled)")
-    run_list.add_argument("--limit", type=int, default=50, help="Max rows (clamped 1..500), newest-first")
-    run_list.add_argument("--json", action="store_true")
-    run_list.set_defaults(func=_cmd_run_list)
-    run_show = run_subs.add_parser("show", help="Show one harness run with task-scoped proof/event context")
-    run_show.add_argument("run_id")
-    run_show.add_argument("--events", type=int, default=25)
-    run_show.add_argument("--json", action="store_true")
-    run_show.set_defaults(func=_cmd_run_show)
-    run_cancel = run_subs.add_parser("cancel", help="Cancel a harness run")
-    run_cancel.add_argument("run_id")
-    run_cancel.add_argument("--reason", required=True)
-    run_cancel.add_argument("--requested-by", default="cli")
-    _add_coordinator_permission_args(run_cancel)
-    run_cancel.add_argument("--json", action="store_true")
-    run_cancel.set_defaults(func=_cmd_run_cancel)
-    run_approve = run_subs.add_parser("approve", help="Approve a waiting run to continue the same session")
-    run_approve.add_argument("run_id")
-    run_approve.add_argument("--json", action="store_true")
-    run_approve.set_defaults(func=_cmd_run_approve)
-
-    worker = subs.add_parser("worker", help="Inspect and steer durable Harness worker sessions")
-    worker_subs = worker.add_subparsers(dest="worker_command")
-    worker_list = worker_subs.add_parser("list", help="List worker sessions")
-    worker_list.add_argument("--task", dest="task_id", default=None)
-    worker_list.add_argument("--persona", dest="persona_id", default=None)
-    worker_list.add_argument("--active", action="store_true")
-    worker_list.add_argument("--json", action="store_true")
-    _add_stage42_global_args(worker_list)
-    worker_list.set_defaults(func=_cmd_worker_list)
-    worker_show = worker_subs.add_parser("show", help="Show one worker session")
-    worker_show.add_argument("worker_session_id")
-    worker_show.add_argument("--json", action="store_true")
-    _add_stage42_global_args(worker_show)
-    worker_show.set_defaults(func=_cmd_worker_show)
-    for command_name in ("pause", "resume", "interrupt", "nudge", "possess", "release"):
-        command = worker_subs.add_parser(command_name, help=f"{command_name.title()} a worker session")
-        command.add_argument("worker_session_id")
-        command.add_argument("--reason", default="")
-        command.add_argument("--note", default="")
-        command.add_argument("--actor", default="cli")
-        command.add_argument("--lease-seconds", type=int, default=900)
-        command.add_argument("--json", action="store_true")
-        command.set_defaults(func=_cmd_worker_control)
-    worker_takeover = worker_subs.add_parser("takeover", help="Audited human takeover: freeze peers, possess worker, and optionally cancel active run with approval")
-    worker_takeover.add_argument("worker_session_id")
-    worker_takeover.add_argument("--reason", default="operator takeover")
-    worker_takeover.add_argument("--actor", default="operator")
-    worker_takeover.add_argument("--lease-seconds", type=int, default=900)
-    worker_takeover.add_argument("--cancel-active-run", action="store_true")
-    worker_takeover.add_argument("--approve-destructive", action="store_true")
-    worker_takeover.add_argument("--json", action="store_true")
-    worker_takeover.set_defaults(func=_cmd_worker_control)
 
     persona = subs.add_parser("persona", help="Run bounded live-token diagnostics for one persona")
     persona_subs = persona.add_subparsers(dest="persona_command")
@@ -1185,39 +859,8 @@ def build_parser(parent_subparsers) -> None:
     persona_permission_set.set_defaults(func=_cmd_persona_permission_set)
     persona_assignments = persona_subs.add_parser("assignments", help="List persona assignments")
     persona_assignments.add_argument("--persona", dest="persona_id", default=None)
-    persona_assignments.add_argument("--goal", dest="goal_id", default=None)
-    persona_assignments.add_argument("--task", dest="task_id", default=None, help="Deprecated alias for --goal")
     persona_assignments.add_argument("--json", action="store_true")
     persona_assignments.set_defaults(func=_cmd_persona_assignments)
-    persona_message = persona_subs.add_parser("message", help="Queue a bounded operator message assignment for one persona")
-    persona_message.add_argument("persona_id", help="Persona id or alias: neko, dev, launcher-dev, backend-dev, qa")
-    persona_message.add_argument("--task", dest="task_id", required=True)
-    persona_message.add_argument("--message", required=True)
-    persona_message.add_argument("--title", default="Operator message")
-    persona_message.add_argument("--requested-by", default="cli")
-    persona_message.add_argument("--json", action="store_true")
-    persona_message.set_defaults(func=_cmd_persona_message)
-    persona_diagnose = persona_subs.add_parser("diagnose", help="Create a diagnostic task and run exactly one bounded persona turn")
-    persona_diagnose.add_argument("persona_id", help="Persona id or alias: neko, dev, launcher-dev, backend-dev, qa")
-    persona_diagnose.add_argument("--title", required=True)
-    persona_diagnose.add_argument("--message", required=True)
-    persona_diagnose.add_argument("--requested-by", default="cli")
-    persona_diagnose.add_argument("--operation-kind", default="diagnostic")
-    persona_diagnose.add_argument("--operation-mode", default="standalone_task")
-    persona_diagnose.add_argument("--max-actions", type=int, default=1)
-    persona_diagnose.add_argument("--max-seconds", type=float, default=240.0)
-    persona_diagnose.add_argument("--affected-repo", action="append", default=[])
-    persona_diagnose.add_argument("--acceptance", action="append", default=[])
-    persona_diagnose.add_argument("--non-goal", action="append", default=[])
-    persona_diagnose.add_argument(
-        "--keep-task",
-        action="store_true",
-        help="Preserve the standalone diagnostic task in the live runtime instead of auto-archiving it. "
-        "By default a diagnostic auto-archives on completion so throwaway probes do not accumulate and gate the scheduler.",
-    )
-    persona_diagnose.add_argument("--json", action="store_true")
-    persona_diagnose.set_defaults(func=_cmd_persona_diagnose)
-
     persona_chat = persona_subs.add_parser("chat", help="Manage durable persona chat sessions")
     persona_chat_subs = persona_chat.add_subparsers(dest="persona_chat_command")
     persona_chat_delete = persona_chat_subs.add_parser("delete", help="Delete a persona chat session and clear active persona bindings")
@@ -1304,15 +947,6 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_message.add_argument("--max-seconds", type=float, default=240.0)
     persona_instance_message.add_argument("--json", action="store_true")
     persona_instance_message.set_defaults(func=_cmd_persona_instance_message)
-    persona_instance_run_once = persona_instance_subs.add_parser("run-once", help="Run one bounded sandbox turn for a free-floating persona instance")
-    persona_instance_run_once.add_argument("persona_instance_id")
-    persona_instance_run_once.add_argument("--title", default="Free-floating persona run")
-    persona_instance_run_once.add_argument("--message", default=None)
-    persona_instance_run_once.add_argument("--requested-by", default="cli")
-    persona_instance_run_once.add_argument("--max-actions", type=int, default=1)
-    persona_instance_run_once.add_argument("--max-seconds", type=float, default=240.0)
-    persona_instance_run_once.add_argument("--json", action="store_true")
-    persona_instance_run_once.set_defaults(func=_cmd_persona_instance_run_once)
     persona_instance_close = persona_instance_subs.add_parser("close", help="Close active free-floating assignments for one persona instance")
     persona_instance_close.add_argument("persona_instance_id")
     persona_instance_close.add_argument("--reason", required=True)
@@ -1425,11 +1059,6 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_message.add_argument("--workspace-id", default=None)
     mission_chat_message.add_argument("--workspace-name", default=None)
     mission_chat_message.add_argument("--intent-hint", default="chat")
-    mission_chat_message.add_argument(
-        "--allow-mission-goal",
-        action="store_true",
-        help="Explicitly admit mission_goal_create for this one turn. Normal persona chat is chat-only and never creates a mission/task/graph by default.",
-    )
     mission_chat_message.add_argument("--requested-by", default="cli")
     mission_chat_message.add_argument("--client-message-id", default=None)
     mission_chat_message.add_argument("--idempotency-key", default=None)
@@ -1638,65 +1267,11 @@ def build_parser(parent_subparsers) -> None:
     _add_stage42_global_args(agent_set_profile, mutation=True)
     agent_set_profile.set_defaults(func=_cmd_agent_set_profile)
 
-    agents = subs.add_parser("agents", help="Deprecated alias for `agent list`")
-    agents.add_argument("--all-profiles", action="store_true")
-    agents.add_argument("--json", action="store_true")
-    agents.set_defaults(func=_cmd_agent_list)
-
     skills = subs.add_parser("install-harness-skills", help="Install versioned Harness skills into configured persona profiles")
     skills.add_argument("--active-profile-only", action="store_true", help="Install all Harness skills only into the active Hermes profile")
     skills.add_argument("--all-persona-profiles", action="store_true", help="Compatibility flag; persona profiles are now the default")
     skills.add_argument("--json", action="store_true")
     skills.set_defaults(func=_cmd_install_harness_skills)
-
-    smoke = subs.add_parser("smoke", help="Run a safe Mission Control smoke goal")
-    smoke.add_argument("--json", action="store_true")
-    smoke.add_argument("--no-model", action="store_true", default=False)
-    smoke.set_defaults(func=_cmd_smoke)
-
-    proof = subs.add_parser("proof", help="Manage proof records")
-    proof_subs = proof.add_subparsers(dest="proof_command")
-    proof_list = proof_subs.add_parser("list")
-    proof_list.add_argument("task_id")
-    proof_list.add_argument("--json", action="store_true")
-    proof_list.set_defaults(func=_cmd_proof_list)
-
-    issue = subs.add_parser("issue", help="Manage issue discoveries")
-    issue_subs = issue.add_subparsers(dest="issue_command")
-    issue_list = issue_subs.add_parser("list")
-    issue_list.add_argument("--task-id", required=True)
-    issue_list.add_argument("--json", action="store_true")
-    issue_list.set_defaults(func=_cmd_issue_list)
-    issue_show = issue_subs.add_parser("show")
-    issue_show.add_argument("discovery_id")
-    issue_show.add_argument("--json", action="store_true")
-    issue_show.set_defaults(func=_cmd_issue_show)
-    issue_triage = issue_subs.add_parser("triage")
-    issue_triage.add_argument("discovery_id")
-    issue_triage.add_argument("--decision", required=True, choices=["blocks_current", "same_scope", "fork_child", "defer", "escalate"])
-    issue_triage.add_argument("--child-title", default="")
-    issue_triage.add_argument("--child-description", default="")
-    issue_triage.add_argument("--acceptance", action="append", default=[])
-    issue_triage.add_argument("--rationale", default="Manual CLI triage")
-    issue_triage.add_argument("--priority", default="medium")
-    issue_triage.add_argument("--json", action="store_true")
-    issue_triage.set_defaults(func=_cmd_issue_triage)
-
-    inc = subs.add_parser("incident", help="Manage incidents")
-    inc_subs = inc.add_subparsers(dest="incident_command")
-    inc_list = inc_subs.add_parser("list", help="List incidents or page the closed/ancient history tail")
-    inc_list.add_argument("--open", action="store_true", help="(default) show only open incidents")
-    inc_list.add_argument("--all", action="store_true", help="include closed incidents")
-    inc_list.add_argument("--state", choices=["open", "closed", "all"], default=None, help="Lane to list: open (default), closed (history), or all")
-    inc_list.add_argument("--before", default=None, help="Page: only incidents whose cursor (closed_at/opened_at) is before this ISO-8601 timestamp")
-    inc_list.add_argument("--limit", type=int, default=None, help="Page size (clamped 1..500); JSON output carries next_before for the following page")
-    inc_list.add_argument("--json", action="store_true")
-    inc_list.set_defaults(func=_cmd_incident_list)
-    inc_close = inc_subs.add_parser("close")
-    inc_close.add_argument("incident_id")
-    inc_close.add_argument("--reason", required=True)
-    inc_close.add_argument("--json", action="store_true")
-    inc_close.set_defaults(func=_cmd_incident_close)
 
     snap = subs.add_parser("snapshot", help="Write redaction-safe snapshot.json")
     snap.add_argument("--json", action="store_true")
@@ -2085,91 +1660,6 @@ def _require_yes(args, code: str = "confirmation_required") -> bool:
     return False
 
 
-def _goal_row(task: Task, *, full: bool = False) -> dict:
-    from agent_runtime.mission_plan import mission_plan_summary
-
-    workspace_id = getattr(task, "workspace_id", None)
-    realm_id = None
-    if workspace_id:
-        try:
-            realm_id = WorkspaceStore().get(workspace_id).realm_id
-        except Exception:
-            realm_id = None
-    plan = getattr(task, "mission_plan", None)
-    stage_id = getattr(plan, "current_stage_id", None) if plan is not None else getattr(task, "current_stage_id", None)
-    row = {
-        "id": getattr(task, "goal_id", None) or task.id,
-        "task_id": task.id,
-        "title": task.title,
-        "state": str(task.state),
-        "workspace_id": workspace_id,
-        "realm_id": realm_id,
-        "stage": stage_id,
-        "updated_at": task.updated_at,
-    }
-    if full:
-        runs = RunStore().list_for_task(task.id)
-        proofs = ProofStore().list_for_task(task.id)
-        incidents = [item for item in IncidentStore().list_all() if item.task_id == task.id and item.closed_at is None]
-        row.update(
-            {
-                "graph": mission_plan_summary(task),
-                "run_ids": [run.id for run in runs],
-                "proof_ids": [proof.id for proof in proofs],
-                "open_incident_ids": [incident.id for incident in incidents],
-            }
-        )
-    return row
-
-
-def _archived_goal_row(task_id: str, result) -> dict | None:
-    archived = _archived_task_summary(task_id)
-    if not archived:
-        return None
-    task_data = archived.get("task") if isinstance(archived.get("task"), dict) else {}
-    archived_task = archived.get("archived_task") if isinstance(archived.get("archived_task"), dict) else {}
-    goal_id = task_data.get("goal_id") or task_id
-    row = {
-        "id": goal_id,
-        "task_id": task_id,
-        "title": task_data.get("title") or getattr(result, "title", ""),
-        "state": task_data.get("state") or getattr(result, "final_task_state", ""),
-        "workspace_id": task_data.get("workspace_id"),
-        "realm_id": None,
-        "stage": (task_data.get("mission_plan") or {}).get("current_stage_id") or task_data.get("current_stage_id"),
-        "updated_at": task_data.get("updated_at"),
-        "archived": True,
-        "archive_batch": archived.get("archive_batch"),
-        "archive_dir": archived.get("archive_dir"),
-        "manifest_path": archived.get("manifest_path"),
-        "archived_run_ids": list(archived_task.get("run_ids") or []),
-        "archived_proof_ids": list(archived_task.get("proof_ids") or []),
-    }
-    return row
-
-
-def _result_goal_row(result) -> dict:
-    return {
-        "id": getattr(result, "task_id", "") or "",
-        "task_id": getattr(result, "task_id", "") or "",
-        "title": getattr(result, "title", ""),
-        "state": getattr(result, "final_task_state", ""),
-        "workspace_id": None,
-        "realm_id": None,
-        "stage": None,
-        "updated_at": None,
-        "archived": False,
-        "source": "goal_run_result",
-    }
-
-
-def _resolve_goal(value: str) -> Task:
-    try:
-        return TaskStore().get_goal(value)
-    except NotFound as exc:
-        raise NotFound(f"goal not found: {value}") from exc
-
-
 def _sort_rows(rows: list[dict], sort_key: str | None) -> list[dict]:
     key = str(sort_key or "").strip()
     if not key:
@@ -2178,60 +1668,6 @@ def _sort_rows(rows: list[dict], sort_key: str | None) -> list[dict]:
     if reverse:
         key = key[1:]
     return sorted(rows, key=lambda item: str(item.get(key, "")), reverse=reverse)
-
-
-def _goal_contention_warnings(task: Task) -> list[dict]:
-    try:
-        assignment_store = PersonaAssignmentStore()
-        warnings: list[dict] = []
-        for assignment in assignment_store.list_for_task(task.id):
-            warnings.extend(assignment_store.contention_warnings(persona_id=assignment.persona_id, goal_id=getattr(task, "goal_id", None) or task.id))
-        return warnings
-    except Exception:
-        return []
-
-
-def _cmd_goal_list(args) -> int:
-    store = TaskStore()
-    if args.state == "all":
-        tasks = store.list_all()
-    elif args.state == "done":
-        tasks = store.list_by_state(TaskState.DONE)
-    elif args.state == "blocked":
-        tasks = store.list_by_state(TaskState.BLOCKED)
-    else:
-        tasks = store.list_open()
-    if args.workspace:
-        tasks = [task for task in tasks if getattr(task, "workspace_id", None) == args.workspace]
-    rows = _sort_rows([_goal_row(task) for task in tasks], getattr(args, "sort", None))
-    limit = getattr(args, "limit", None)
-    truncated = False
-    if limit is not None and limit >= 0 and len(rows) > limit:
-        rows = rows[:limit]
-        truncated = True
-    _print_stage42(_list_envelope("goal", rows, cursor=getattr(args, "cursor", None), truncated=truncated), args=args)
-    return 0
-
-
-def _cmd_goal_detail(args) -> int:
-    """S8: serve the heavy goal DETAIL body evicted from the steady-state frame.
-
-    Read-only rebuild of the exact bytes the pre-S8 in-frame goal row carried, so
-    a goal detail drawer / blueprint / replay view fetches identical data on
-    open. A miss (unknown goal/task id) is an honest ``not_found`` error, never a
-    fabricated empty goal."""
-
-    from agent_runtime.snapshot import goal_detail_for_task
-
-    detail = goal_detail_for_task(str(getattr(args, "goal_id", "") or ""))
-    if detail is None:
-        return emit_harness_error(
-            ValueError(f"goal/task '{getattr(args, 'goal_id', '')}' did not resolve"),
-            args=args,
-            code="not_found",
-        )
-    print(emit_json(detail))
-    return 0
 
 
 def _cmd_persona_instance_detail(args) -> int:
@@ -2512,36 +1948,6 @@ def _cmd_skills_promote(args) -> int:
     return 2 if result.action == "refused" else 0
 
 
-def _cmd_run_list(args) -> int:
-    """S8: paged run history — the frame ships only ACTIVE runs; historical/
-    terminal runs are fetched here (newest-first, id/state filtered)."""
-
-    from agent_runtime.snapshot import _run_summary
-    from agent_runtime.store import RunStore
-
-    limit = max(1, min(500, int(getattr(args, "limit", 50) or 50)))
-    task_id = str(getattr(args, "task_id", "") or "").strip() or None
-    state_filter = str(getattr(args, "state", "") or "").strip().lower() or None
-    runs = RunStore().list_all()
-
-    def _sort_key(run):
-        return str(getattr(run, "started_at", "") or getattr(run, "created_at", "") or "")
-
-    runs = sorted(runs, key=_sort_key, reverse=True)
-    rows: list[dict] = []
-    for run in runs:
-        if task_id is not None and getattr(run, "task_id", None) != task_id:
-            continue
-        row = _run_summary(run)
-        if state_filter is not None and str(row.get("state", "")).lower() != state_filter:
-            continue
-        rows.append(row)
-    truncated = len(rows) > limit
-    rows = rows[:limit]
-    _print_stage42(_list_envelope("run", rows, truncated=truncated), args=args)
-    return 0
-
-
 def _cmd_prompt_context_show(args) -> int:
     """S8: show one persisted prompt-observability context by id (frame-evicted
     historical rows stay on disk and are fetched here; C2 retention MOVES older
@@ -2567,140 +1973,7 @@ def _cmd_prompt_context_show(args) -> int:
     return 0
 
 
-def _cmd_goal_show(args) -> int:
-    task = _resolve_goal(args.goal_id)
-    _print_stage42(_object_envelope("goal", _goal_row(task, full=True)), args=args)
-    return 0
-
-
-def _cmd_goal_history(args) -> int:
-    task = _resolve_goal(args.goal_id)
-    events = _task_events(task.id, limit=max(1, int(getattr(args, "limit", 50) or 50)), since_text=getattr(args, "since", None))
-    if not events.get("ok"):
-        return emit_harness_error(ValueError(events.get("message") or events.get("error")), args=args, code="invalid_request")
-    rows = [
-        {
-            "id": f"event_{index}",
-            "goal_id": getattr(task, "goal_id", None) or task.id,
-            "task_id": task.id,
-            "type": _event_value(event, "type"),
-            "run_id": _event_value(event, "run_id"),
-            "persona_id": _event_value(event, "persona_id"),
-            "ts": _event_value(event, "ts"),
-        }
-        for index, event in enumerate(events.get("items", []), start=1)
-    ]
-    _print_stage42(_list_envelope("goal_event", rows), args=args)
-    return 0
-
-
-def _cmd_goal_create(args) -> int:
-    from agent_runtime.mission_goal import create_mission_goal, create_mission_goal_from_request
-
-    if getattr(args, "request_json", None):
-        request = _load_request_json(args.request_json)
-        data = create_mission_goal_from_request(
-            request,
-            start_daemon_mode=getattr(args, "start_daemon", None),
-            dry_run=bool(getattr(args, "dry_run", False)),
-        )
-    else:
-        if not args.title or not args.description:
-            return emit_harness_error(ValueError("--title and --description are required unless --request-json is provided"), args=args, code="invalid_request")
-        if getattr(args, "dry_run", False):
-            _print_stage42(
-                _object_envelope("goal", {"id": f"goal_dry_{uuid.uuid4().hex[:6]}", "title": args.title, "state": "dry_run", "workspace_id": getattr(args, "workspace", None), "updated_at": now()}),
-                args=args,
-                default_output="json",
-            )
-            return 0
-        data = create_mission_goal(
-            title=args.title,
-            description=args.description,
-            requested_by=args.requested_by,
-            start_daemon_mode=getattr(args, "start_daemon", None),
-            idempotency_key=getattr(args, "idempotency_key", None),
-        )
-    if data.get("error"):
-        err = data["error"]
-        _print_stage42(_error_envelope(err.get("code") or "invalid_request", err.get("message") or "goal create failed", retryable=bool(err.get("retryable")), safe_details=err.get("safe_details") or {}), args=args, default_output="json")
-        return ERROR_EXIT_CODES.get(err.get("code"), 1)
-    task = TaskStore().get(data.get("task_id"))
-    if getattr(args, "workspace", None):
-        WorkspaceStore().get(args.workspace)
-        task.workspace_id = args.workspace
-        task.updated_at = now()
-        TaskStore().update(task, actor="cli", reason="assigned workspace")
-        task = TaskStore().get(task.id)
-    _print_stage42(_object_envelope("goal", _goal_row(task), warnings=_goal_contention_warnings(task)), args=args, default_output="json")
-    return 0
-
-
-def _cmd_goal_unblock(args) -> int:
-    task = _resolve_goal(args.goal_id)
-    if task.state in {TaskState.DONE, TaskState.CANCELLED}:
-        _print_stage42(
-            _error_envelope("goal_terminal", f"{task.id} is terminal: {task.state.value}", retryable=False, correlation_id=getattr(task, "goal_id", None) or task.id),
-            args=args,
-            default_output="json",
-        )
-        return 6
-    previous_state = task.state.value
-    incident_store = IncidentStore()
-    closed_incident_ids: list[str] = []
-    open_incident_ids = {
-        incident.id
-        for incident in incident_store.list_open()
-        if getattr(incident, "task_id", None) == task.id
-    }
-    open_incident_ids.update(task.open_incident_ids or [])
-    for incident_id in sorted(open_incident_ids):
-        try:
-            incident_store.close(incident_id, reason=f"operator unblock: {_safe_operator_text(args.reason)}")
-            closed_incident_ids.append(incident_id)
-        except Exception:
-            pass
-    task = TaskStore().get(task.id)
-    task.state = TaskState(args.state)
-    task.open_incident_ids = []
-    if args.rescope:
-        task.current_stage_id = None
-        if task.mission_plan is not None:
-            task.mission_plan.current_stage_id = None
-        task.stages = []
-        task.affected_repos = []
-        task.assigned_persona_ids = {}
-        ensure_default_mission_plan(task)
-    task.updated_at = now()
-    TaskStore().update(task, actor="cli", reason=f"operator unblock: {_safe_operator_text(args.reason)}")
-    task = TaskStore().get(task.id)
-    row = _goal_row(task)
-    row.update({"from": previous_state, "to": task.state.value, "closed_incident_ids": closed_incident_ids, "rescope": bool(args.rescope)})
-    _print_stage42(_object_envelope("goal", row), args=args, default_output="json")
-    return 0
-
-
-def _cmd_goal_cancel(args) -> int:
-    if not _require_yes(args):
-        return 8
-    task = _resolve_goal(args.goal_id)
-    task = TaskStore().cancel(task.id, reason=args.reason, actor="cli")
-    _print_stage42(_object_envelope("goal", _goal_row(task)), args=args)
-    return 0
-
-
-def _cmd_goal_archive(args) -> int:
-    if not _require_yes(args):
-        return 8
-    task = _resolve_goal(args.goal_id)
-    data = TaskStore().archive(task.id, actor="cli", reason="operator archive goal command")
-    row = {"id": getattr(task, "goal_id", None) or task.id, "task_id": task.id, "state": "archived" if data.get("archived_count") else "skipped", "updated_at": now()}
-    _print_stage42(_object_envelope("goal", row, warnings=data.get("skipped_tasks") or []), args=args)
-    return 0 if data.get("archived_count") else 6
-
-
 def _workspace_row(workspace, *, full: bool = False) -> dict:
-    tasks = TaskStore().list_for_workspace(workspace.id)
     roster_agent_ids = list(workspace.agent_ids or [])
     live_scoped_agent_ids = exact_scoped_instance_ids(
         PersonaInstanceStore().list_all(),
@@ -2716,7 +1989,6 @@ def _workspace_row(workspace, *, full: bool = False) -> dict:
         "live_scoped_agent_ids": live_scoped_agent_ids,
         "roster_agent_count": len(roster_agent_ids),
         "roster_agent_ids": roster_agent_ids,
-        "goals": len(tasks),
         "isolation": workspace.isolation,
         "updated_at": workspace.updated_at,
     }
@@ -2900,35 +2172,15 @@ def _activation_outcome_row(store, row_builder, outcome: dict, key: str) -> dict
     return row
 
 
-def _append_scope_event(event_type: str, **payload) -> None:
-    """Advance the EventLog watermark after a verb-layer mutation with no
-    evented store chokepoint. Stage 12 moved scope emission into the stores
-    (agent_runtime/store.py); this helper remains for catalog writes like
-    `blueprint save`. Payload values of None are dropped. Best effort: a
-    broken event log must not fail the verb."""
-    try:
-        body = {key: value for key, value in payload.items() if value is not None}
-        EventLog().append(Event(now(), event_type, None, None, None, body))
-    except Exception:
-        pass
-
-
 def _cmd_workspace_actors(args) -> int:
     workspace = WorkspaceStore().get(args.workspace_id)
-    snapshot = build_snapshot()
-    wanted_goal_ids = {
-        getattr(task, "goal_id", None) or task.id
-        for task in TaskStore().list_for_workspace(workspace.id)
-    }
-    actors: list[dict] = []
-    for goal in snapshot.get("goals") or []:
-        if goal.get("id") not in wanted_goal_ids:
-            continue
-        mission = goal.get("mission_level_state") if isinstance(goal, dict) else None
-        for actor in (mission or {}).get("actors", []):
-            if getattr(args, "kind", None) and actor.get("kind") != args.kind:
-                continue
-            actors.append(actor)
+    actors = [
+        persona_instance_summary(instance)
+        for instance in PersonaInstanceStore().list_all()
+        if getattr(instance, "workspace_id", None) == workspace.id
+    ]
+    if getattr(args, "kind", None):
+        actors = [actor for actor in actors if actor.get("kind") == args.kind]
     _print_stage42(_list_envelope("actor", actors), args=args)
     return 0
 
@@ -3717,263 +2969,9 @@ def _pet_sprite_payload_for_launcher(pet) -> dict:
     }
 
 
-def _cmd_blueprint_list(args) -> int:
-    from agent_runtime.blueprints.store import BlueprintStore, blueprint_summary
-
-    items = [blueprint_summary(bp) for bp in BlueprintStore().list()]
-    data = {"ok": True, "blueprints": items}
-    if args.json:
-        print(emit_json(data))
-    else:
-        for bp in items:
-            print(f"{bp['id']} v{bp['version']}: {bp['title']}")
-    return 0
-
-
-def _cmd_blueprint_validate(args) -> int:
-    from agent_runtime.blueprints.schema import validate_blueprint
-    from agent_runtime.blueprints.store import BlueprintStore, blueprint_summary
-
-    try:
-        bp = BlueprintStore().get(args.blueprint)
-        errors = validate_blueprint(bp)
-    except Exception as exc:
-        data = {"ok": False, "error": str(exc)}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    data = {"ok": not errors, "errors": errors, "blueprint": blueprint_summary(bp)}
-    if args.json:
-        print(emit_json(data))
-    else:
-        print(f"blueprint {bp.id}: {'valid' if not errors else 'invalid'}")
-        for error in errors:
-            print(f"- {error}")
-    return 0 if not errors else 2
-
-
-def _cmd_blueprint_save(args) -> int:
-    import json as _json
-
-    from agent_runtime.blueprints.schema import blueprint_from_dict
-    from agent_runtime.blueprints.store import blueprint_summary, save_blueprint
-
-    try:
-        spec_path = Path(args.spec_file)
-        text = spec_path.read_text(encoding="utf-8")
-        if spec_path.suffix.lower() in {".yaml", ".yml"}:
-            import yaml
-
-            raw = yaml.safe_load(text) or {}
-        else:
-            raw = _json.loads(text)
-        bp = blueprint_from_dict(raw)  # validates; raises ValueError on an invalid graph
-        path = save_blueprint(bp)
-    except Exception as exc:
-        data = {"ok": False, "error": str(exc)}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    # The blueprint catalog is client-visible snapshot state (snapshot
-    # `blueprints[]`); a save without an event is invisible to the
-    # watermark-gated stream/read-model pipeline (Stage 12).
-    _append_scope_event("blueprint.saved", blueprint_id=bp.id, version=bp.version, title=bp.title)
-    data = {"ok": True, "blueprint_id": bp.id, "version": bp.version, "path": str(path), "blueprint": blueprint_summary(bp)}
-    print(emit_json(data) if args.json else f"saved blueprint {bp.id} -> {path}")
-    return 0
-
-
-def _cmd_blueprint_run(args) -> int:
-    from agent_runtime.blueprints.instantiate import instantiate_blueprint
-    from agent_runtime.blueprints.store import BlueprintStore
-    from agent_runtime.mission_plan import mission_plan_summary
-    from agent_runtime.state_machine import MissionStateMachine
-
-    from agent_runtime.blueprints.resolve import BindingResolver
-
-    try:
-        bp = BlueprintStore().get(args.blueprint)
-        bindings = _parse_blueprint_bindings(args.bind or [])
-        # Dry-run resolves find-only (no persona promotion / no writes); a real run
-        # may promote a bare profile into a persisted persona.
-        resolver = BindingResolver(allow_promote=not args.dry_run)
-        plan = instantiate_blueprint(bp, goal=args.goal, bindings=bindings, resolver=resolver)
-    except Exception as exc:
-        data = {"ok": False, "error": str(exc)}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    task = Task(
-        id=f"task_blueprint_{uuid.uuid4().hex[:12]}",
-        title=bp.title,
-        description=args.goal,
-        state=TaskState.CREATED,
-        created_at=now(),
-        updated_at=now(),
-        requested_by=args.requested_by,
-        mission_plan=plan,
-        current_stage_id=plan.current_stage_id,
-    )
-    action = MissionStateMachine().next_action(task)
-    data = {
-        "ok": True,
-        "dry_run": bool(args.dry_run),
-        "blueprint_id": bp.id,
-        "blueprint_version": bp.version,
-        "task_id": task.id,
-        "mission_plan": mission_plan_summary(task),
-        "next_action": {
-            "type": action.type.value,
-            "task_id": action.task_id,
-            "slot_id": action.slot_id,
-            "reason": action.reason,
-        },
-    }
-    if not args.dry_run:
-        TaskStore().create(task)
-        data["created"] = True
-    if args.json:
-        print(emit_json(data))
-    else:
-        prefix = "dry-run" if args.dry_run else "created"
-        print(f"{prefix} blueprint {bp.id} task={task.id} next={action.type.value} slot={action.slot_id or '-'}")
-    return 0
-
-
-def _cmd_blueprint_matrix_run(args) -> int:
-    from agent_runtime.blueprints.instantiate import instantiate_blueprint
-    from agent_runtime.blueprints.resolve import BindingResolver
-    from agent_runtime.blueprints.store import BlueprintStore
-    from agent_runtime.mission_plan import mission_plan_summary
-    from agent_runtime.state_machine import MissionStateMachine
-
-    try:
-        bp = BlueprintStore().get(args.blueprint)
-        base_bindings = _parse_blueprint_bindings(args.bind or [])
-        variations = _parse_blueprint_variations(args.vary or [])
-        cases = _matrix_binding_cases(base_bindings, variations)
-    except Exception as exc:
-        data = {"ok": False, "error": str(exc)}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    resolver = BindingResolver(allow_promote=not args.dry_run)
-    results = []
-    ok = True
-    for index, bindings in enumerate(cases, start=1):
-        task_id = f"task_blueprint_matrix_{uuid.uuid4().hex[:12]}"
-        try:
-            plan = instantiate_blueprint(bp, goal=args.goal, bindings=bindings, resolver=resolver)
-            task = Task(
-                id=task_id,
-                title=f"{bp.title} Matrix {index}",
-                description=args.goal,
-                state=TaskState.CREATED,
-                created_at=now(),
-                updated_at=now(),
-                requested_by=args.requested_by,
-                mission_plan=plan,
-                current_stage_id=plan.current_stage_id,
-            )
-            action = MissionStateMachine().next_action(task)
-            if not args.dry_run:
-                TaskStore().create(task)
-            results.append(
-                {
-                    "case": index,
-                    "ok": True,
-                    "created": not bool(args.dry_run),
-                    "task_id": task.id,
-                    "bindings": dict(bindings),
-                    "resolved_bindings": dict(plan.bindings),
-                    "metrics": {
-                        "stage_count": len(plan.stages),
-                        "edge_count": len(plan.edges),
-                        "attempts": dict(plan.stage_attempts),
-                    },
-                    "next_action": {
-                        "type": action.type.value,
-                        "task_id": action.task_id,
-                        "slot_id": action.slot_id,
-                        "reason": action.reason,
-                    },
-                    "mission_plan": mission_plan_summary(task),
-                }
-            )
-        except Exception as exc:
-            ok = False
-            results.append({"case": index, "ok": False, "created": False, "task_id": task_id, "bindings": dict(bindings), "error": str(exc)})
-    data = {
-        "ok": ok,
-        "dry_run": bool(args.dry_run),
-        "blueprint_id": bp.id,
-        "blueprint_version": bp.version,
-        "case_count": len(results),
-        "vary": variations,
-        "results": results,
-    }
-    if args.json:
-        print(emit_json(data))
-    else:
-        print(f"{'dry-run ' if args.dry_run else ''}matrix blueprint {bp.id}: {len(results)} case(s)")
-        for item in results:
-            status = "ok" if item.get("ok") else "failed"
-            slot = ((item.get("next_action") or {}).get("slot_id") if item.get("ok") else "-") or "-"
-            print(f"- case {item['case']}: {status} task={item['task_id']} next_slot={slot}")
-    return 0 if ok else 2
-
-
-def _parse_blueprint_bindings(items: list[str]) -> dict[str, str]:
-    bindings: dict[str, str] = {}
-    for item in items:
-        if "=" not in str(item):
-            raise ValueError("--bind must be slot=persona:<id> or slot=profile:<name>")
-        slot, value = str(item).split("=", 1)
-        slot = slot.strip()
-        value = value.strip()
-        if not slot or not value:
-            raise ValueError("--bind must include a non-empty slot and value")
-        bindings[slot] = value
-    return bindings
-
-
-def _parse_blueprint_variations(items: list[str]) -> dict[str, list[str]]:
-    variations: dict[str, list[str]] = {}
-    for item in items:
-        if "=" not in str(item):
-            raise ValueError("--vary must be slot=value1,value2")
-        slot, values = str(item).split("=", 1)
-        slot = slot.strip()
-        choices = [value.strip() for value in values.split(",") if value.strip()]
-        if not slot or not choices:
-            raise ValueError("--vary must include a non-empty slot and at least one binding")
-        variations[slot] = choices
-    if not variations:
-        raise ValueError("matrix-run requires at least one --vary slot=value1,value2")
-    return variations
-
-
-def _matrix_binding_cases(base: dict[str, str], variations: dict[str, list[str]]) -> list[dict[str, str]]:
-    from itertools import product
-
-    slots = list(variations)
-    cases: list[dict[str, str]] = []
-    for choices in product(*(variations[slot] for slot in slots)):
-        bindings = dict(base)
-        bindings.update({slot: value for slot, value in zip(slots, choices)})
-        cases.append(bindings)
-    return cases
-
-
 def _cmd_init(args) -> int:
     cfg = load_agent_runtime_config()
-    if getattr(args, "with_bundled_personas", False):
-        try:
-            personas = provision_bundled_personas(cfg)
-        except ValueError as exc:
-            return emit_harness_error(
-                exc,
-                args=args,
-                code="bundled_persona_profiles_missing",
-            )
-    else:
-        personas = ensure_persisted_personas(cfg)
+    personas = ensure_persisted_personas(cfg)
     persona_ids = [p.id for p in personas]
     try:
         scope = ensure_default_scope(agent_ids=persona_ids)
@@ -4687,68 +3685,6 @@ def _cmd_doctor(args) -> int:
             mode = "dry run" if getattr(args, "dry_run", False) else "applied"
             print(f"repairs: {mode}")
     return 0
-
-
-def _cmd_goal_run(args) -> int:
-    cfg = load_agent_runtime_config()
-    try:
-        bindings = _parse_blueprint_bindings(list(args.bind or []))
-    except Exception as exc:
-        data = {"ok": False, "error": str(exc)}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    result = MissionRuntimeController(
-        config=cfg,
-        engine_factory=lambda **kwargs: TickEngine(
-            **kwargs,
-            persona_runtime=GPTPersonaRuntime(default_provider=cfg.default_provider, default_model=cfg.default_model),
-        ),
-    ).run_goal(
-        GoalRunOptions(
-            title=args.title,
-            description=args.description,
-            requested_by=args.requested_by,
-            max_actions=args.max_actions,
-            max_seconds=args.max_seconds,
-            archive_on_done=args.archive_on_done,
-            requires_visual_proof=args.requires_visual_proof,
-            affected_repos=list(args.affected_repo or []),
-            acceptance_criteria=list(args.acceptance or []),
-            non_goals=list(args.non_goal or []),
-            blueprint_id=args.blueprint,
-            bindings=bindings,
-            workspace_id=getattr(args, "workspace", None),
-            runtime_root=getattr(args, "runtime_root", None),
-        )
-    )
-    if getattr(args, "json", False) or getattr(args, "output", None):
-        task = None
-        try:
-            task = TaskStore().get(result.task_id)
-            row = _goal_row(task)
-            warnings = _goal_contention_warnings(task)
-        except NotFound:
-            row = _archived_goal_row(result.task_id, result)
-            if row is None:
-                row = _result_goal_row(result)
-            warnings = []
-        row.update(
-            {
-                "stop_reason": result.stop_reason,
-                "actions_taken": result.actions_taken,
-                "run_ids": list(result.run_ids),
-                "proof_ids": list(result.proof_ids),
-                "open_incident_ids": list(result.open_incident_ids),
-            }
-        )
-        if result.archive_result is not None:
-            row["archive_result"] = result.archive_result
-            row["archived"] = bool(row.get("archived") or result.archive_result.get("archived_count"))
-        _print_stage42(_object_envelope("goal", row, warnings=warnings), args=args, default_output="json")
-    else:
-        print(f"goal {result.task_id}: stop={result.stop_reason} state={result.final_task_state} actions={result.actions_taken}")
-    return result.exit_code
-
 
 
 def _cmd_serve(args) -> int:

@@ -2,13 +2,12 @@ from agent_runtime.models import AgentPersona
 from agent_runtime.personas import (
     AgentRole,
     AutonomyLevel,
-    DEFAULT_SUPERVISOR_PERSONA_ID,
     PERSONA_BLOCKED_TOOLS,
-    default_personas,
     effective_toolsets,
     load_bundled_prompt,
     validate_toolsets,
 )
+from tests.agent_runtime.persona_samples import sample_personas
 
 
 def persona(role, toolsets):
@@ -24,10 +23,10 @@ def persona(role, toolsets):
     )
 
 
-def test_pm_cannot_enable_dev_or_write_toolsets():
+def test_role_tokens_do_not_filter_configured_toolsets():
     pm = persona(AgentRole.PM, ["file", "terminal", "code_execution", "todo"])
 
-    assert effective_toolsets(pm) == ["file", "todo"]
+    assert effective_toolsets(pm) == ["file", "terminal", "code_execution", "todo"]
 
 
 def test_blocked_tools_are_exposed_for_runtime_filtering():
@@ -36,33 +35,27 @@ def test_blocked_tools_are_exposed_for_runtime_filtering():
     assert "send_message" in PERSONA_BLOCKED_TOOLS
 
 
-def test_validate_toolsets_drops_unknown_and_out_of_role_values():
+def test_validate_toolsets_preserves_unknown_and_deduplicates_values():
     assert validate_toolsets(AgentRole.QA, ["browser", "terminal", "code_execution", "made_up"]) == [
-        "browser",
-        "terminal",
+        "browser", "terminal", "code_execution", "made_up",
     ]
 
 
-def test_default_personas_are_valid_and_pin_autonomy():
-    personas = default_personas()
+def test_explicit_persona_samples_are_valid():
+    personas = sample_personas()
 
-    assert {p.id for p in personas} == {"dev", "backend_dev", "qa", "neko_supervisor"}
-    assert personas[0].id == DEFAULT_SUPERVISOR_PERSONA_ID
-    assert personas[0].display_name == "Neko Mission Lead"
+    assert {p.id for p in personas} == {"dev", "backend_dev", "qa", "neko_supervisor", "base"}
+    assert personas[0].id == "neko_supervisor"
     dev = next(p for p in personas if p.id == "dev")
-    assert dev.display_name == "Launcher Dev Agent"
-    assert dev.autonomy == AutonomyLevel.AUTONOMOUS.value
+    assert dev.autonomy == AutonomyLevel.PROPOSE_ONLY.value
     assert dev.include_profile_memory is False
     assert all(p.api_mode is not None for p in personas)
     assert {p.autonomy for p in personas} <= {level.value for level in AutonomyLevel}
     assert effective_toolsets(dev)
     backend_dev = next(p for p in personas if p.id == "backend_dev")
-    assert backend_dev.display_name == "Backend Dev Agent"
     assert backend_dev.role == AgentRole.DEV.value
     assert backend_dev.hermes_profile == "backend-dev"
-    assert backend_dev.autonomy == AutonomyLevel.AUTONOMOUS.value
-    assert backend_dev.repo_scope == "X:/Unreal Engine/Engine/EterniaBackend/eternia-backend"
-    assert backend_dev.repo_scope_label == "EterniaBackend"
+    assert backend_dev.autonomy == AutonomyLevel.PROPOSE_ONLY.value
     assert effective_toolsets(backend_dev) == effective_toolsets(dev)
 
 
@@ -86,7 +79,7 @@ def test_qa_prompt_documents_visual_proof_packet_contract():
 def test_pm_role_remains_available_for_explicit_legacy_configuration():
     pm = persona(AgentRole.PM, ["file", "terminal", "todo"])
 
-    assert effective_toolsets(pm) == ["file", "todo"]
+    assert effective_toolsets(pm) == ["file", "terminal", "todo"]
 
 
 def test_dev_prompt_requires_no_guesswork_implementation_handoffs():

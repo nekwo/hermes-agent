@@ -7,7 +7,7 @@ from hermes_time import now
 
 from .decision_schema import AgentDecision, DecisionType
 from .events import EventLog
-from .models import Event, Task
+from .models import Event
 from .runtime_config import RuntimeConfig
 
 
@@ -72,7 +72,7 @@ def collapsed_signal_for(decision_type: DecisionType) -> DecisionType:
     return decision_type
 
 
-def project_decision_for_execution(task: Task, decision: AgentDecision, *, config: RuntimeConfig | None, actor: str, run_id: str | None, event_log: EventLog | None = None) -> DecisionProjection:
+def project_decision_for_execution(task: Any, decision: AgentDecision, *, config: RuntimeConfig | None, actor: str, run_id: str | None, event_log: EventLog | None = None) -> DecisionProjection:
     if not simplified_contract_enabled(config):
         projection = DecisionProjection(
             public_decision=decision,
@@ -122,7 +122,7 @@ def project_decision_for_execution(task: Task, decision: AgentDecision, *, confi
     return projection
 
 
-def _internal_execution_decision(task: Task, decision: AgentDecision) -> AgentDecision:
+def _internal_execution_decision(task: Any, decision: AgentDecision) -> AgentDecision:
     if decision.type == DecisionType.HAND_OFF:
         return decision
     if decision.type == DecisionType.SCOPE_ROUTE:
@@ -134,7 +134,7 @@ def _internal_execution_decision(task: Task, decision: AgentDecision) -> AgentDe
     return decision
 
 
-def legacy_acceptance_decision_from_scope_route(task: Task, decision: AgentDecision) -> AgentDecision:
+def legacy_acceptance_decision_from_scope_route(task: Any, decision: AgentDecision) -> AgentDecision:
     if decision.type != DecisionType.SCOPE_ROUTE:
         return decision
     payload = dict(decision.payload or {})
@@ -230,7 +230,7 @@ def legacy_issue_decision_from_escalate(decision: AgentDecision) -> AgentDecisio
     )
 
 
-def _record_parity(task: Task, projection: DecisionProjection, *, actor: str, run_id: str | None, event_log: EventLog | None) -> None:
+def _record_parity(task: Any, projection: DecisionProjection, *, actor: str, run_id: str | None, event_log: EventLog | None) -> None:
     log = event_log or EventLog()
     status = "rejected" if projection.blocked_reason else "mapped" if projection.shimmed else "native"
     log.append(

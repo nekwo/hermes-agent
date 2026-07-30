@@ -19,6 +19,8 @@ import dataclasses
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
+
 from agent_runtime import persona_runtime as PR
 from agent_runtime.chat_lane_toolsets import (
     DROP_KIND_TOOL,
@@ -33,13 +35,13 @@ from agent_runtime.chat_lane_toolsets import (
     scope_chat_lane_toolsets,
 )
 from agent_runtime.mcp_lane import HARNESS_LANE, mcp_lane_requirement_failures
-from agent_runtime.personas import default_personas
+from tests.agent_runtime.persona_samples import sample_personas
 from agent_runtime.tool_permissions import PERMISSION_MODE_UNBOUNDED
 from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
 
 
 def _persona(persona_id: str):
-    return {persona.id: persona for persona in default_personas()}[persona_id]
+    return {persona.id: persona for persona in sample_personas()}[persona_id]
 
 
 def _rows(visibility: dict, code: str) -> list[dict]:

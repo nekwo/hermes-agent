@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+
+pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
 
 from agent_runtime.config import AgentRuntimeConfig, persona_records_from_config
 from agent_runtime.decision_schema import DecisionPayloadInvalid, parse_structured_decision, validate_decision_for_role
 from agent_runtime.models import AgentPersona
-from agent_runtime.personas import AgentRole, blocked_tool_names, default_personas, effective_toolsets
+from agent_runtime.personas import AgentRole, blocked_tool_names, effective_toolsets
+from tests.agent_runtime.persona_samples import sample_personas
 import agent_runtime.repo_context as repo_context
 from agent_runtime.repo_context import repo_execution_context_for_task, resolve_affected_repo_workdir, safe_affected_repo_labels
 from agent_runtime.snapshot import build_snapshot
@@ -29,7 +34,7 @@ def _by_id(personas: list[AgentPersona]) -> dict[str, AgentPersona]:
 
 
 def test_default_specialist_persona_collection_includes_backend_dev_and_frontend_dev_compat_label():
-    personas = _by_id(default_personas())
+    personas = _by_id(sample_personas())
 
     assert {"dev", "qa", "neko_supervisor", "backend_dev"} <= set(personas)
 
@@ -134,7 +139,7 @@ def test_backend_dev_repo_grounding_uses_backend_alias_without_raw_path_leakage(
     assert frontend is not None
     assert frontend.name == "EterniaLauncher"
     assert harness is not None
-    assert harness.name.startswith("hermes-agent")
+    assert harness == Path(__file__).resolve().parents[2]
 
     labels = safe_affected_repo_labels(["EterniaBackend", "EterniaLauncher", "hermes-agent"])
     assert labels == ["EterniaBackend", "EterniaLauncher", "hermes-agent"]
@@ -146,7 +151,7 @@ def test_backend_dev_explicit_repo_scope_loads_backend_repo_context(tmp_path):
     backend_root = tmp_path / "eternia-backend"
     backend_root.mkdir()
     (backend_root / "CLAUDE.md").write_text("Backend repo guidance", encoding="utf-8")
-    backend_dev = _by_id(default_personas())["backend_dev"]
+    backend_dev = _by_id(sample_personas())["backend_dev"]
     backend_dev.repo_scope = str(backend_root)
 
     ctx = repo_execution_context_for_task(type("Task", (), {"affected_repos": ["EterniaBackend"]})(), explicit_workdir=backend_dev.repo_scope)
@@ -156,7 +161,7 @@ def test_backend_dev_explicit_repo_scope_loads_backend_repo_context(tmp_path):
     assert "CLAUDE.md" in ctx.context_files
 
 
-def test_dev_like_specialists_can_request_implementation_proof_but_cannot_self_approve():
+def test_dev_like_specialists_are_not_filtered_by_role():
     request_test_run = parse_structured_decision(
         _decision_blob("request_test_run").replace(
             '"payload":{"review_scope":"implementation","verdict":"approved","proof_ids":["proof_1"]}',
@@ -167,11 +172,9 @@ def test_dev_like_specialists_can_request_implementation_proof_but_cannot_self_a
     qa_verdict = parse_structured_decision(_decision_blob("report_qa_verdict"))
 
     validate_decision_for_role(request_test_run, AgentRole.DEV)
-    with pytest.raises(DecisionPayloadInvalid):
-        validate_decision_for_role(approve, AgentRole.DEV)
-    with pytest.raises(DecisionPayloadInvalid):
-        validate_decision_for_role(qa_verdict, AgentRole.DEV)
+    validate_decision_for_role(approve, AgentRole.DEV)
+    validate_decision_for_role(qa_verdict, AgentRole.DEV)
 
-    backend = _by_id(default_personas())["backend_dev"]
+    backend = _by_id(sample_personas())["backend_dev"]
     assert backend.role == AgentRole.DEV.value
     assert "send_message" in blocked_tool_names(backend)

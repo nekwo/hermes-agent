@@ -11,7 +11,7 @@ import pytest
 
 from agent_runtime import board_models
 from agent_runtime.board_store import BoardStore
-from agent_runtime.personas import ALLOWED_TOOLSETS_BY_ROLE, PROFILE_CHAT_FALLBACK_TOOLSETS
+from agent_runtime.personas import PROFILE_CHAT_FALLBACK_TOOLSETS
 from agent_runtime.persona_runtime import _CHAT_CAPABILITY_TOOLSETS
 from agent_runtime.runtime_hud import _board_digest_for_workspace, render_situational_hud_block
 from agent_runtime.store import TaskStore, WorkspaceStore
@@ -39,11 +39,64 @@ def test_board_tools_registered_in_board_toolset():
     assert lst is not None and lst.toolset == "board"
 
 
-def test_board_toolset_gated_for_all_mission_roles():
-    for role, toolsets in ALLOWED_TOOLSETS_BY_ROLE.items():
-        assert "board" in toolsets, role
+def test_board_toolset_is_a_chat_capability():
     assert "board" in _CHAT_CAPABILITY_TOOLSETS
     assert "board" in PROFILE_CHAT_FALLBACK_TOOLSETS
+
+
+# ── the chat-lane augmentation must not be role-keyed (mission-lane removal S1) ──
+
+
+def _chat_persona(role: str = "dev"):
+    from agent_runtime.models import AgentPersona
+
+    return AgentPersona(
+        id=f"persona_{role}",
+        display_name=role,
+        role=role,
+        model=None,
+        provider=None,
+        api_mode="chat",
+        toolsets=["search"],
+        system_prompt_path=None,
+    )
+
+
+def test_board_and_agent_chat_are_unconditional_for_unknown_roles():
+    """``_augment_chat_capabilities`` is the ONLY path that puts ``board`` and
+    ``agent_chat`` on a chat lane, and both are explicit KEEP.
+
+    Unknown role values are persona data and must not strip board or agent chat.
+    """
+
+    from agent_runtime import persona_runtime as PR
+
+    augmented = PR._augment_chat_capabilities(_chat_persona("custom-reviewer"), ["search"])
+    assert "board" in augmented
+    assert "agent_chat" in augmented
+    assert "clarify" in augmented
+
+
+def test_retired_mission_goal_is_not_restored_for_unknown_roles():
+
+    from agent_runtime import persona_runtime as PR
+
+    assert "mission_goal" not in PR._augment_chat_capabilities(_chat_persona("custom-reviewer"), ["search"])
+
+
+def test_supervisor_no_longer_gets_the_retired_mission_goal_toolset():
+    from agent_runtime import persona_runtime as PR
+
+    augmented = PR._augment_chat_capabilities(_chat_persona("alice_supervisor"), ["search"])
+    assert augmented == ["search", "agent_chat", "board", "clarify"]
+
+
+def test_dev_chat_lane_augmentation_is_unchanged_for_a_known_role():
+    from agent_runtime import persona_runtime as PR
+
+    # The removed mission capability stays absent without a role table.
+    augmented = PR._augment_chat_capabilities(_chat_persona("dev"), ["search"])
+    assert augmented == ["search", "agent_chat", "board", "clarify"]
 
 
 # ── §10 board-resolution rule ─────────────────────────────────────────────
@@ -76,32 +129,14 @@ def test_explicit_board_id_wins():
     assert result["board_id"] == other.board_id
 
 
-def test_bound_goal_workspace_resolves_over_active():
+def test_legacy_task_id_does_not_override_the_active_workspace():
     active = _make_workspace("Active")
     other = WorkspaceStore().create(name="Goal WS")
-    # a task bound to the OTHER workspace
-    from hermes_time import now
-    from agent_runtime.models import Task
-    from agent_runtime.states import TaskState
-
-    task = TaskStore().create(
-        Task(
-            id="task_board_res",
-            title="t",
-            description="d",
-            state=TaskState.CREATED,
-            created_at=now(),
-            updated_at=now(),
-            requested_by="op",
-            workspace_id=other.id,
-        )
-    )
     result = json.loads(
-        registry.dispatch("board_card_add", {"title": "From goal lane"}, task_id=task.id, session_id=None)
+        registry.dispatch("board_card_add", {"title": "From chat lane"}, task_id="legacy_task", session_id=None)
     )
-    # the bound goal's workspace wins over the active workspace
-    assert result["board_id"] == board_models.default_board_id(other.id)
-    assert result["board_id"] != board_models.default_board_id(active)
+    assert result["board_id"] == board_models.default_board_id(active)
+    assert result["board_id"] != board_models.default_board_id(other.id)
 
 
 def test_no_workspace_no_board_returns_invalid_request():

@@ -5,6 +5,7 @@ import json
 import re
 import threading
 import time
+from types import SimpleNamespace
 import hashlib
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -26,7 +27,6 @@ from .delivery_directive import task_delivery_directive
 from .dirty_state import build_dirty_state
 from .events import CachedEventLog, EventLog, event_summary_missing, operator_event_summary
 from .migrations import effective_config_summary, migration_status
-from .mission_plan import mission_plan_summary, task_stage_records
 from .models import looks_like_persona_instance_id
 from .observability import build_observability
 from .operator_channels import (
@@ -56,24 +56,20 @@ from .persona_instance_identity import (
 from .parity import PARITY_ENVELOPE_VERSION, ProjectionAccountant, events_watermark
 from .parse_cache import cached_by_mtime
 from .resolution import resolution_payload, resolve_runtime, suspect_default_root
-from .personas import blocked_tool_names, effective_toolsets, seed_personas
+from .personas import blocked_tool_names, effective_toolsets
 from .prompt_observability import _SkillObservabilityResolver, snapshot_prompt_observability
-from .proof_gates import task_verdict_proof_satisfied
 from .realm_sync import read_realm_sync_sidecar
 from .repo_bundles import RepoBundleStore, bundle_queue_summary, qa_waiting_on, repo_bundle_delivery_summary, repo_bundle_summary, simplified_phase_for_task
 from .runtime_instances import GoalRuntimeInstanceStore, runtime_instance_summary, runtime_instances_summary
 from .repo_context import resolve_affected_repo_workdir
 from .role_checklists import RoleChecklist, RoleChecklistStore, checklist_summary
 from .role_envelopes import RoleEnvelope, RoleEnvelopeStore, role_envelope_summary
-from .proof_batches import ProofBatch, ProofBatchStore, proof_batch_summary
 from .scope_control import issue_discovery_counts, untriaged_issue_discoveries
 from .simplified_contract import public_decision_type_value
-from .state_machine import MissionStateMachine
 from .serde import from_jsonable, to_jsonable
 from .self_test_evidence import SelfTestEvidenceStore, self_test_summary
 from .states import RunState, StageStatus, TaskState
-from .steering import build_steer_actions
-from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, ProofStore, RealmStore, RunStore, TaskStore, WorkspaceStore
+from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, RealmStore, RunStore, TaskStore, WorkspaceStore
 from .tool_visibility import (
     _profile_readiness_for_visibility,
     resolve_tool_visibility,
@@ -81,11 +77,10 @@ from .tool_visibility import (
 from .workspace_scope import exact_scoped_instance_ids
 from .worker_sessions import WorkerSessionStore, worker_session_summary
 
-AGENT_TOPOLOGY_NODE_ID_CAP = 20
 STAGE_VERIFICATION_STAGE_CAP = 12
 STAGE_VERIFICATION_PROOF_ID_CAP = 8
 STAGE_VERIFICATION_PATH_CAP = 6
-# Residue-slim R5(a): cap the in-head ``mission_flow_timeline.items`` at the FRONT
+# Residue-slim R5(a): cap the retired in-head flow timeline at the FRONT
 # window (the office renders ``items.take(5)``; keeping the front 8 preserves that
 # render byte-for-byte with margin). The evicted tail — the newest coalesced
 # progress events, the bulk of this projection's bytes — is accounted (count +
@@ -120,17 +115,16 @@ ARCHIVED_TASKS_REF_RECENT_CAP = 25
 # fusion of a compact HEAD (identity/state/current-stage/counts/delivery
 # pointers + the mission-level fields the ALWAYS-VISIBLE surfaces render) and a
 # heavy DETAIL body (per-role streams, envelopes, checklists, per-event
-# timelines, the mission plan, the per-run persona streams). The detail body has
+# timelines, the per-run persona streams). The detail body has
 # no steady-state launcher reader: it was verified 2026-07-17 that
 # ``MissionGoalSummary`` (the launcher's goal fold) never renders any of these
 # fields off a goal — ``role_streams`` / ``stage_streams`` / ``timeline`` /
-# ``mission_plan`` / ``persona_streams`` are not even parsed, and
-# ``role_envelopes`` / ``role_checklists`` / ``proof_batches`` parse to unread
+# ``persona_streams`` are not even parsed, and
+# ``role_envelopes`` / ``role_checklists`` parse to unread
 # fields (the top-level ``role_envelopes`` / ``role_checklists`` sections feed
 # the roster; the goal-row copies are dead). They leave the head and are served
 # on demand by ``harness goal detail <task_id> --json``. The KEPT mission-level
-# fields (``mission_level_state`` → office/roster/page; ``mission_flow_timeline``
-# / ``proof_gate_state`` / ``stage_verification`` → office scene) stay in the
+# fields that previously fed the retired mission office stay in the
 # head because they render on every frame. Archive-never-delete: nothing leaves
 # disk — the detail is rebuilt from the same stores + EventLog on demand.
 GOAL_DETAIL_ONLY_FIELDS = frozenset(
@@ -140,11 +134,9 @@ GOAL_DETAIL_ONLY_FIELDS = frozenset(
         "role_checklists",
         "stage_streams",
         "timeline",
-        "mission_plan",
         "persona_streams",
         "proof_summaries",
         "self_test_summaries",
-        "proof_batches",
         "verification_status",
         "operator_capabilities",
         "repo_bundles",
@@ -460,11 +452,7 @@ def _build_snapshot_uncoalesced(
 ) -> dict:
     _build_started = time.perf_counter()
     _sections_ms: dict[str, int] = {}
-    task_store = task_store or TaskStore()
-    run_store = run_store or RunStore()
     agent_store = agent_store or AgentStore()
-    proof_store = proof_store or ProofStore()
-    incident_store = incident_store or IncidentStore()
     # A snapshot calls for_task/for_session/tail dozens of times on the same log;
     # CachedEventLog reads events.jsonl once and serves all of them from memory.
     event_log = event_log or CachedEventLog()
@@ -474,10 +462,9 @@ def _build_snapshot_uncoalesced(
     # a pure read reused later (build_observability / parity watermark).
     with _timed_section(_sections_ms, "events"):
         recent_events = event_log.tail(20)
-    worker_session_store = worker_session_store or WorkerSessionStore(event_log=event_log)
-    tasks = task_store.list_all()
-    runs = run_store.list_all()
-    workers = worker_session_store.list_all()
+    tasks = []
+    runs = []
+    workers = []
     cfg = load_agent_runtime_config()
     # S2 read-model: history is always evicted from the steady-state frame and
     # served via paged on-demand queries (S7-B RULING-0: no legacy full-in-frame
@@ -489,23 +476,16 @@ def _build_snapshot_uncoalesced(
     # cold store, fall back to the base seed itself — NOT ensure_persisted_personas, which
     # also returns the dormant typed catalog for resolution and would surface mothballed
     # pipeline personas that are not meant to be shown.
-    agents = agent_store.list_all() or seed_personas()
+    agents = agent_store.list_all()
     # Closed incidents are history-only in the steady-state frame. Avoid
     # recursively coercing the entire closed tail (thousands of files on a
     # mature runtime) merely to count it; the store still validates each JSON
     # row and materializes every open incident used by routing/observability.
-    incidents, incidents_evicted_count = incident_store.list_open_with_closed_count()
-    role_envelope_store = RoleEnvelopeStore(event_log=event_log)
-    role_checklist_store = RoleChecklistStore(event_log=event_log)
-    proof_batch_store = ProofBatchStore(event_log=event_log)
-    repo_bundle_store = RepoBundleStore(event_log=event_log)
-    runtime_instance_store = GoalRuntimeInstanceStore(event_log=event_log)
-    role_envelopes = role_envelope_store.list_all()
-    role_checklists = role_checklist_store.list_all()
-    proof_batches = proof_batch_store.list_all()
-    repo_bundles = repo_bundle_store.list_all()
-    runtime_instances = runtime_instance_store.list_all()
-    archived_tasks = _archived_task_summaries()
+    incidents = []
+    role_envelopes = []
+    role_checklists = []
+    repo_bundles = []
+    runtime_instances = []
     workspace_store = WorkspaceStore()
     realm_store = RealmStore()
     workspaces = workspace_store.list_all(include_archived=True)
@@ -543,21 +523,10 @@ def _build_snapshot_uncoalesced(
     available_personas = _available_persona_summary(agents)
     proofs = []
     self_tests = []
-    for task in tasks:
-        proofs.extend(proof_store.list_for_task(task.id))
-        self_tests.extend(SelfTestEvidenceStore(event_log=event_log).list_for_task(task.id))
-    active_runs = [run for run in runs if run.state in ACTIVE_RUN_STATES]
-    active_workers = worker_session_store.find_active()
-    running_runs = [run for run in active_runs if run.state == RunState.RUNNING]
-    queued_runs = [run for run in active_runs if run.state == RunState.QUEUED]
-    waiting_runs = [run for run in active_runs if run.state in {RunState.WAITING_ON_TOOL, RunState.WAITING_ON_APPROVAL}]
-    dirty_state = build_dirty_state(tasks=tasks, runs=runs, incidents=incidents, workers=workers, runtime_instances=runtime_instances)
     persona_assignments = []
     persona_instances = []
     topology_persona_instances = PersonaInstanceStore(event_log=event_log).list_all()
     personas_by_id = {str(getattr(agent, "id", "") or ""): agent for agent in agents}
-    stage_verification_accountant = ProjectionAccountant("stage_verification")
-    flow_timeline_accountant = ProjectionAccountant("mission_flow_timeline")
     if persona_instance_runtime_enabled(cfg):
         instance_store = PersonaInstanceStore(event_log=event_log)
         persona_instances = instance_store.derive_from_workers(agents, workers)
@@ -575,7 +544,6 @@ def _build_snapshot_uncoalesced(
     # closed incident is history, evicted to the paged query. The full
     # ``incidents`` list still feeds summary/observability/dirty/tasks — only the
     # ``incidents`` frame key is filtered to open.
-    incident_frame_rows = incidents
     # S4: the frame carries these as id-keyed maps (``_keyed`` below). The row
     # LISTS are still needed as an ordered input to the operator-channel
     # projection (``run_summaries`` feeds the goal-turn flow), so build them once
@@ -585,10 +553,7 @@ def _build_snapshot_uncoalesced(
     # live lane/goal). Historical/terminal runs are old residue — evicted to a
     # count + pointer, fetched on demand via ``harness run list``. No disk
     # change: the run store keeps every row.
-    run_rows = [_run_summary(r) for r in runs]
-    active_run_id_set = {r.id for r in active_runs}
-    frame_run_rows = [row for row in run_rows if row.get("run_id") in active_run_id_set]
-    incident_rows = [_incident_summary(i) for i in incident_frame_rows]
+    run_rows = []
     migration = migration_status()
     # Hoisted out of the ``data`` literal so their cost is attributable in
     # ``sections_ms`` (both were profiled hot: prompt_observability ~5s, the
@@ -599,7 +564,7 @@ def _build_snapshot_uncoalesced(
             persona_instances=persona_instances,
             session_db=session_db,
             tasks=tasks,
-            proof_store=proof_store,
+            proof_store=None,
             daemon=None,
             realm=active_realm_name,
             workspace=active_workspace_name,
@@ -623,20 +588,8 @@ def _build_snapshot_uncoalesced(
         "event_contract_version": CONTRACT_SCHEMA_VERSION,
         "generated_at": now(),
         "summary": {
-            "open_tasks": len([t for t in tasks if t.state not in {TaskState.DONE, TaskState.CANCELLED}]),
-            "active_runs": len(active_runs),
-            "running_runs": len(running_runs),
-            "queued_runs": len(queued_runs),
-            "waiting_runs": len(waiting_runs),
-            "active_worker_sessions": len(active_workers),
-            "blocked_tasks": len([t for t in tasks if t.state == TaskState.BLOCKED]),
-            "open_incidents": len([i for i in incidents if i.closed_at is None]),
-            "dirty": dirty_state["dirty"],
-            "dirty_summary": dirty_state["summary"],
+            "persona_instances": len(topology_persona_instances),
         },
-        "dirty_state": dirty_state,
-        "foreground_runtime": runtime_instances_summary(runtime_instances),
-        "execution_mode": execution_mode,
         # Single runtime-default authority, resolved + provenance-stamped, as a
         # typed top-level block so surfaces (launcher model-switcher caption,
         # `hermes harness config show`) report what agents actually follow
@@ -651,13 +604,12 @@ def _build_snapshot_uncoalesced(
         "runtime_config": effective_config_summary(cfg, migration=migration),
         "migration": migration,
         "prompt_observability": prompt_observability_section,
-        "observability": build_observability(tasks=tasks, runs=runs, incidents=incidents, proofs=proofs, daemon_status=None, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
         "repo_scopes": _repo_scopes_summary(),
         # S4: ONE keyed ``goals`` map is the wire entity (operator decision:
         # GOAL is the wire name). The old ``tasks`` wire section retires; every
         # field BOTH projections carried lives once here — the merged goal row
         # is the full ``_task_summary`` (self_tests / role_envelopes /
-        # role_checklists / proof_batches / stage_verification all threaded, as
+        # role_checklists / stage_verification all threaded, as
         # the old ``tasks`` section had them) PLUS the goal-only fields (``id``,
         # ``kind``, resolved ``realm_id``). Keyed by ``task_id`` — the unique
         # per-row id, matching the on-disk ``task_*.json`` store keying. NOT
@@ -665,34 +617,6 @@ def _build_snapshot_uncoalesced(
         # under one mission), which would collapse rows. Each row still carries
         # ``id`` (goal identity) + ``goal_id`` for goal-addressed consumers; the
         # launcher folds the map's values, so the map key is never a lookup key.
-        "goals": _keyed(
-            [
-                _goal_head(_goal_projection_from_task(
-                    t,
-                    proof_store.list_for_task(t.id),
-                    tasks,
-                    incidents,
-                    runs,
-                    event_log.for_task(t.id, limit=200),
-                    workers=workers,
-                    run_store=run_store,
-                    self_tests=SelfTestEvidenceStore(event_log=event_log).list_for_task(t.id),
-                    role_envelopes=[item for item in role_envelopes if item.task_id == t.id],
-                    role_checklists=[item for item in role_checklists if item.task_id == t.id],
-                    proof_batches=[item for item in proof_batches if item.task_id == t.id],
-                    persona_assignments=[item for item in persona_assignments if item.task_id == t.id],
-                    repo_bundles=[item for item in repo_bundles if item.task_id == t.id],
-                    runtime_instances=[item for item in runtime_instances if item.task_id == t.id],
-                    persona_instances=topology_persona_instances,
-                    stage_verification_accountant=stage_verification_accountant,
-                    flow_timeline_accountant=flow_timeline_accountant,
-                    workspaces=workspaces,
-                    event_log=event_log,
-                ))
-                for t in tasks
-            ],
-            "task_id",
-        ),
         # Rows carry a resolved ``active`` flag alongside the top-level
         # ``active_*_id`` keys — consumers (launcher scope switcher) key
         # selection off the row flag and must not re-derive it.
@@ -712,8 +636,7 @@ def _build_snapshot_uncoalesced(
         # Mission Board projection: board defs + bounded, redaction-safe card
         # rows, scoped by workspace. Local reads only — NO git/sync calls in the
         # snapshot path (conflict state comes from local sidecar files, never a
-        # git call). Cards never carry goal state; a linked_goal_id is resolved
-        # against the snapshot's goals at render time on the client.
+        # git call). Cards carry planning state only.
         "boards": boards_section,
         # Mission Office projection: surface defs + bounded actor rows, keyed by
         # workspace. Local reads only — conflict state comes from local sidecar
@@ -723,41 +646,9 @@ def _build_snapshot_uncoalesced(
         "active_workspace_id": workspace_store.active_id(),
         "active_realm_id": realm_store.active_id(),
         "warnings": _snapshot_warnings(persona_assignments),
-        "archived_tasks": _archived_tasks_frame(archived_tasks),
         "agents": agent_summaries,
         "available_personas": available_personas,
         "runtime_paths_diagnostic": _runtime_paths_diagnostic(available_personas),
-        "worker_sessions": [worker_session_summary(worker) for worker in workers],
-        "role_envelopes": [role_envelope_summary(item, checklist_store=role_checklist_store) for item in role_envelopes],
-        "role_checklists": [checklist_summary(item) for item in role_checklists],
-        "proof_batches": [proof_batch_summary(item) for item in proof_batches],
-        "repo_bundles": [repo_bundle_summary(item) for item in repo_bundles],
-        "bundle_queue": bundle_queue_summary(repo_bundles),
-        "runtime_instances": [runtime_instance_summary(item) for item in runtime_instances],
-        "runs": _keyed(frame_run_rows, "run_id"),
-        "incidents": _keyed(incident_rows, "incident_id"),
-        "proofs": [_proof_summary(p) for p in proofs],
-        "self_tests": [self_test_summary(item) for item in self_tests],
-    }
-    # Honest accounting for the closed incidents evicted from the ``incidents``
-    # section — a typed pointer, never a silent absence. Only OPEN incidents
-    # remain in ``incidents`` as live state; every closed one is history-only
-    # (open-only retention, operator decision 2026-07-16).
-    data["incidents_history_ref"] = {
-        "evicted": True,
-        "closed_evicted": True,
-        "count": incidents_evicted_count,
-        "fetch": "harness incident list --state closed --json",
-    }
-    # S8: historical (non-active) runs are evicted from the ``runs`` frame map —
-    # a typed pointer accounts them, never a silent absence. Served on demand by
-    # the paged ``harness run list`` query.
-    data["runs_history_ref"] = {
-        "evicted": True,
-        "count": len(run_rows) - len(frame_run_rows),
-        "active_count": len(frame_run_rows),
-        "total_count": len(run_rows),
-        "fetch": "harness run list --json",
     }
     if persona_instance_runtime_enabled(cfg):
         data["persona_instance_runtime"] = {
@@ -831,10 +722,6 @@ def _build_snapshot_uncoalesced(
         data["operator_channels"] = _keyed(
             [
                 *live_operator_channels,
-                *_archived_operator_channels(
-                    archived_tasks,
-                    live_task_ids=live_channel_task_ids,
-                ),
             ],
             "channel_id",
         )
@@ -874,10 +761,6 @@ def _build_snapshot_uncoalesced(
         data["persona_instance_runtime"] = {"enabled": False}
         completeness = {}
         drop_samples = []
-    completeness["stage_verification"] = stage_verification_accountant.summary()
-    drop_samples.extend(stage_verification_accountant.drop_samples())
-    completeness["mission_flow_timeline"] = flow_timeline_accountant.summary()
-    drop_samples.extend(flow_timeline_accountant.drop_samples())
     # Guarantee the documented section keys exist even when a lane was skipped
     # (e.g. persona_chat when persona-instance runtime is disabled) so consumers
     # can rely on a stable shape.
@@ -947,9 +830,8 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         # DELETED; ``persona_instances`` / ``agents`` rows evict the heavy
         # tool-detail payloads behind a typed ``visibility_ref`` (fetched via
         # ``harness persona-instance detail``) and ``agent_hud_state`` is RETIRED;
-        # ``goals[].mission_flow_timeline.items`` is capped to the front window
-        # (accounted, ``harness goal history`` pointer).
-        "contract_version": 44,
+        # 45 removes mission rows while retaining chat/runtime graph projections.
+        "contract_version": 45,
         "generated_at": data.get("generated_at"),
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
         "redaction_observed": _redaction_observed(data),
@@ -967,12 +849,6 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         "resolution": resolution_payload(resolution),
         "profile": _runtime_profile_identity(),
         "capabilities": [
-            "goal_create",
-            "mission_level_state",
-            "agent_topology",
-            "mission_flow_timeline",
-            "proof_gate_state",
-            "stage_verification",
             "operator_capabilities",
             "server_minted_chat_sessions",
         ],
@@ -1068,7 +944,6 @@ def _board_card_row(card, *, unpublished: bool | None = None) -> dict:
             for item in card.checklist
             if isinstance(item, dict)
         ],
-        "linked_goal_id": card.linked_goal_id,
         "order_key": card.order_key,
         "state": card.state,
         "created_by": card.created_by,
@@ -1776,7 +1651,6 @@ def _archived_task_summary(task_id: str, raw: dict, archive_batch: str, reason: 
     proofs = _archived_proof_summaries(batch_dir, task_id) if batch_dir is not None else []
     role_envelopes = _archived_role_envelope_summaries(batch_dir, task_id) if batch_dir is not None else []
     role_checklists = _archived_role_checklist_summaries(batch_dir, task_id) if batch_dir is not None else []
-    proof_batches = _archived_proof_batch_summaries(batch_dir, task_id) if batch_dir is not None else []
     persona_assignments = _archived_persona_assignment_summaries(batch_dir, task_id) if batch_dir is not None else []
     repo_bundles = _archived_repo_bundle_summaries(batch_dir, task_id) if batch_dir is not None else []
     incident_ids = raw.get("incident_ids") if isinstance(raw.get("incident_ids"), list) else raw.get("open_incident_ids") if isinstance(raw.get("open_incident_ids"), list) else []
@@ -1813,7 +1687,6 @@ def _archived_task_summary(task_id: str, raw: dict, archive_batch: str, reason: 
         "recent_events": recent_events,
         "role_envelopes": role_envelopes,
         "role_checklists": role_checklists,
-        "proof_batches": proof_batches,
         "persona_assignment_ids": [item.get("assignment_id") for item in persona_assignments if item.get("assignment_id")],
         "persona_assignments": persona_assignments,
         "repo_bundle_ids": [item.get("repo_bundle_id") for item in repo_bundles if item.get("repo_bundle_id")],
@@ -1833,7 +1706,6 @@ def _archived_task_summary(task_id: str, raw: dict, archive_batch: str, reason: 
             recent_events,
             role_envelopes=role_envelopes,
             role_checklists=role_checklists,
-            proof_batches=proof_batches,
         ),
     }
 
@@ -1856,7 +1728,8 @@ def _archived_operator_channel(archived: dict) -> dict | None:
     if not task_id:
         return None
     goal_id = str(archived.get("goal_id") or "").strip() or None
-    channel_id = f"neko_supervisor::archived:{task_id}"
+    owner_persona_id = str(archived.get("owner_persona_id") or archived.get("requested_by") or "operator").strip() or "operator"
+    channel_id = f"{owner_persona_id}::archived:{task_id}"
     messages: list[dict] = []
     goal_message = _archived_goal_input_message(archived, channel_id=channel_id)
     if goal_message is not None:
@@ -1893,8 +1766,8 @@ def _archived_operator_channel(archived: dict) -> dict | None:
         "thread_id": channel_id,
         "goal_id": goal_id,
         "task_id": task_id,
-        "owner_persona_id": "neko_supervisor",
-        "persona_instance_id": f"archived:{task_id}:neko_supervisor",
+        "owner_persona_id": owner_persona_id,
+        "persona_instance_id": f"archived:{task_id}:{owner_persona_id}",
         "session_id": None,
         "root_thread_id": channel_id,
         "parent_thread_id": None,
@@ -1911,12 +1784,12 @@ def _archived_operator_channel(archived: dict) -> dict | None:
     return {
         "schema_version": OPERATOR_CHANNELS_SCHEMA_VERSION,
         "channel_id": channel_id,
-        "persona_id": "neko_supervisor",
-        "persona_instance_id": f"archived:{task_id}:neko_supervisor",
+        "persona_id": owner_persona_id,
+        "persona_instance_id": f"archived:{task_id}:{owner_persona_id}",
         "session_id": None,
         "task_id": task_id,
         "goal_id": goal_id,
-        "display_name": _display_name_for_persona("neko_supervisor"),
+        "display_name": _display_name_for_persona(owner_persona_id),
         "state": "archived",
         "mode": "archived_goal",
         "source_instance_ids": [],
@@ -1955,14 +1828,15 @@ def _archived_goal_input_message(archived: dict, *, channel_id: str) -> dict | N
     ]
     if acceptance:
         parts.append("Acceptance:\n" + "\n".join(f"- {item}" for item in acceptance))
+    owner_persona_id = str(archived.get("owner_persona_id") or archived.get("requested_by") or "operator").strip() or "operator"
     return {
         "id": f"{channel_id}:goal_input:{task_id}",
         "seq": 0,
         "timestamp": archived.get("created_at") or archived.get("archived_at"),
         "actor_persona_id": "operator",
         "actor_instance_id": None,
-        "target_persona_id": "neko_supervisor",
-        "target_persona_instance_id": f"archived:{task_id}:neko_supervisor",
+        "target_persona_id": owner_persona_id,
+        "target_persona_instance_id": f"archived:{task_id}:{owner_persona_id}",
         "role": "operator",
         "kind": "goal_input",
         "status": "delivered",
@@ -1995,12 +1869,13 @@ def _archived_assignment_message(assignment: dict, *, channel_id: str, index: in
         value = str(assignment.get(key) or "").strip()
         if value:
             refs["assignment_id" if key == "id" else key] = value
+    owner_persona_id = str(assignment.get("owner_persona_id") or assignment.get("requested_by") or "operator").strip() or "operator"
     return {
         "id": f"{channel_id}:assignment:{refs.get('assignment_id', index)}",
         "seq": 0,
         "timestamp": assignment.get("created_at") or assignment.get("updated_at"),
-        "actor_persona_id": "neko_supervisor",
-        "actor_instance_id": f"archived:{refs.get('task_id', 'task')}:neko_supervisor",
+        "actor_persona_id": owner_persona_id,
+        "actor_instance_id": f"archived:{refs.get('task_id', 'task')}:{owner_persona_id}",
         "target_persona_id": target_persona_id,
         "target_persona_instance_id": assignment.get("persona_instance_id"),
         "role": "agent",
@@ -2032,7 +1907,7 @@ def _archived_event_message(event: dict, *, channel_id: str, index: int) -> dict
         return None
     if not text:
         return None
-    persona_id = str(event.get("persona_id") or "neko_supervisor").strip() or "neko_supervisor"
+    persona_id = str(event.get("persona_id") or event.get("actor_persona_id") or "operator").strip() or "operator"
     refs = {"source": "deleted_archive", "event_type": event_type}
     for key in ("task_id", "run_id", "proof_id", "stage_id"):
         value = str(event.get(key) or "").strip()
@@ -2180,22 +2055,6 @@ def _archived_role_checklist_summaries(batch_dir, task_id: str) -> list[dict]:
     return summaries
 
 
-def _archived_proof_batch_summaries(batch_dir, task_id: str) -> list[dict]:
-    proof_batch_dir = batch_dir / "proof_batches" / task_id
-    if not proof_batch_dir.exists():
-        return []
-    summaries: list[dict] = []
-    for proof_batch_path in sorted(proof_batch_dir.glob("*.json")):
-        raw = _read_json(proof_batch_path)
-        if str(raw.get("task_id") or "") != task_id:
-            continue
-        try:
-            summaries.append(proof_batch_summary(from_jsonable(ProofBatch, raw)))
-        except Exception:
-            continue
-    return summaries
-
-
 def _archived_persona_assignment_summaries(batch_dir, task_id: str) -> list[dict]:
     assignment_dir = batch_dir / "persona_assignments"
     if not assignment_dir.exists():
@@ -2258,7 +2117,7 @@ def _archived_repo_bundle_summaries(batch_dir, task_id: str) -> list[dict]:
 
 
 def _archived_persona_streams(task_id: str, assignments: list[dict], runs: list[dict], events: list[dict]) -> dict:
-    role_ids = {"neko_supervisor", "backend_dev", "dev", "qa"}
+    role_ids: set[str] = set()
     role_ids.update(str(item.get("persona_id") or "") for item in assignments)
     role_ids.update(str(item.get("persona_id") or "") for item in runs)
     role_ids.update(str(item.get("persona_id") or "") for item in events)
@@ -2541,22 +2400,10 @@ def _archived_role_streams(
     *,
     role_envelopes: list[dict] | None = None,
     role_checklists: list[dict] | None = None,
-    proof_batches: list[dict] | None = None,
 ) -> list[dict]:
-    mission_plan = raw.get("mission_plan") if isinstance(raw.get("mission_plan"), dict) else {}
     role_ids: list[str] = []
     role_envelopes = role_envelopes or []
     role_checklists = role_checklists or []
-    proof_batches = proof_batches or []
-    if not (mission_plan.get("enabled") is True or mission_plan.get("stages") or role_envelopes or role_checklists or proof_batches):
-        return []
-    role_ids.extend(["neko_supervisor", "backend_dev", "dev", "qa"])
-    for stage in mission_plan.get("stages") or []:
-        if not isinstance(stage, dict):
-            continue
-        owner = str(stage.get("owner") or "")
-        if owner in {"backend_dev", "dev", "qa", "neko_supervisor"}:
-            role_ids.append(owner)
     for run in runs:
         role_ids.append(str(run.get("persona_id") or ""))
     for event in events:
@@ -2565,8 +2412,6 @@ def _archived_role_streams(
         role_ids.append(str(envelope.get("role_id") or ""))
     for checklist in role_checklists:
         role_ids.append(str(checklist.get("role_id") or ""))
-    for batch in proof_batches:
-        role_ids.append(str(batch.get("role_id") or ""))
 
     seen: set[str] = set()
     streams: list[dict] = []
@@ -2578,13 +2423,6 @@ def _archived_role_streams(
         stream_events = [_archived_event_stream_item(event) for event in role_events][-20:]
         stream_envelopes = [item for item in role_envelopes if str(item.get("role_id") or "") == role_id]
         stream_checklists = [item for item in role_checklists if str(item.get("role_id") or "") == role_id]
-        envelope_ids = {str(item.get("envelope_id") or "") for item in stream_envelopes}
-        stream_batches = [
-            item
-            for item in proof_batches
-            if str(item.get("role_id") or "") == role_id
-            or str(item.get("role_envelope_id") or "") in envelope_ids
-        ]
         if not stream_events:
             stream_events = [_empty_archived_role_stream_item(raw, role_id)]
         streams.append(
@@ -2597,7 +2435,6 @@ def _archived_role_streams(
                 "events": stream_events,
                 "role_envelopes": stream_envelopes,
                 "role_checklists": stream_checklists,
-                "proof_batches": stream_batches,
             }
         )
     return streams
@@ -2711,23 +2548,14 @@ def _archived_event_display_title(event_type: str, event: dict) -> str:
 
 
 def _archived_role_current_stage(raw: dict, persona_id: str) -> str | None:
-    mission_plan = raw.get("mission_plan") if isinstance(raw.get("mission_plan"), dict) else {}
-    current_stage_id = mission_plan.get("current_stage_id") or raw.get("current_stage_id")
-    for stage in mission_plan.get("stages") or []:
-        if not isinstance(stage, dict):
-            continue
-        owner = stage.get("owner")
-        if owner == persona_id or (owner == "dev" and persona_id == "dev"):
-            status = str(stage.get("status") or "")
-            if stage.get("id") == current_stage_id or status not in {"ready_for_qa", "passed"}:
-                return stage.get("id")
+    current_stage_id = raw.get("current_stage_id")
     return current_stage_id if isinstance(current_stage_id, str) else None
 
 
-def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, events=None, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None, flow_timeline_accountant=None, event_log=None):
-    gate = task_verdict_proof_satisfied(task, proofs)
+def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, events=None, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None, flow_timeline_accountant=None, event_log=None):
+    gate = SimpleNamespace(allowed=True, missing=[])
     current_stage_id = _task_current_stage_id(task)
-    current = next((s for s in task_stage_records(task) if s.id == current_stage_id), None)
+    current = None
     untriaged = untriaged_issue_discoveries(task)
     child_count = len([item for item in (all_tasks or []) if getattr(item, "parent_task_id", None) == task.id])
     open_incidents = [item for item in (incidents or []) if item.task_id == task.id and item.closed_at is None]
@@ -2790,7 +2618,6 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
         "next_action": next_action,
         "why_not_done": _why_not_done(task, gate, open_incidents, next_action),
         "updated_at": task.updated_at,
-        "mission_plan": mission_plan_summary(task),
         "role_streams": _role_streams(
             task,
             events or [],
@@ -2799,13 +2626,11 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
             persona_assignments=assignments,
             role_envelopes=role_envelopes or [],
             role_checklists=role_checklists or [],
-            proof_batches=proof_batches or [],
         ),
         "persona_assignment_ids": [assignment.id for assignment in assignments],
         "persona_streams": _persona_streams(task, assignments, runs or [], events or []),
         "role_envelopes": [role_envelope_summary(item) for item in (role_envelopes or [])],
         "role_checklists": [checklist_summary(item) for item in (role_checklists or [])],
-        "proof_batches": [proof_batch_summary(item) for item in (proof_batches or [])],
         "stage_streams": _stage_streams(task, events or []),
         "mission_level_state": _mission_level_state(
             task,
@@ -2822,11 +2647,8 @@ def _task_summary(task, proofs, all_tasks=None, incidents=None, runs=None, event
                 persona_assignments=assignments,
                 role_envelopes=role_envelopes or [],
                 role_checklists=role_checklists or [],
-                proof_batches=proof_batches or [],
             ),
         ),
-        "mission_flow_timeline": _mission_flow_timeline(task, events or [], accountant=flow_timeline_accountant),
-        "proof_gate_state": _proof_gate_state(task, proofs),
         "operator_capabilities": _operator_capabilities(task, next_action, gate),
     }
 
@@ -2974,14 +2796,7 @@ def _stage_verification(task, proofs: list, *, accountant: ProjectionAccountant 
 
 
 def _stage_owner_by_id(task) -> dict[str, str]:
-    plan = getattr(task, "mission_plan", None)
-    owners: dict[str, str] = {}
-    for stage in list(getattr(plan, "stages", []) or []):
-        stage_id = str(getattr(stage, "id", "") or "").strip()
-        owner = str(getattr(stage, "owner", "") or "").strip()
-        if stage_id and owner:
-            owners[stage_id] = owner
-    return owners
+    return {}
 
 
 def _bounded_projection_strings(raw, *, cap: int, accountant: ProjectionAccountant | None, drop_code: str, entity_id: str) -> tuple[list[str], bool]:
@@ -3052,14 +2867,13 @@ def _safe_int(value) -> int:
 
 
 def _task_current_stage_id(task) -> str | None:
-    plan = getattr(task, "mission_plan", None)
-    return getattr(plan, "current_stage_id", None) if plan is not None else getattr(task, "current_stage_id", None)
+    return getattr(task, "current_stage_id", None)
 
 
-def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events, *, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, proof_batches=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None, flow_timeline_accountant=None, workspaces=None, event_log=None) -> dict:
+def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events, *, workers=None, run_store=None, self_tests=None, role_envelopes=None, role_checklists=None, persona_assignments=None, repo_bundles=None, runtime_instances=None, persona_instances=None, stage_verification_accountant=None, flow_timeline_accountant=None, workspaces=None, event_log=None) -> dict:
     # S4 goals/tasks merge: the goal entity is the FULL task summary (all the
     # rich lanes the old ``tasks`` section carried — self_tests, role_envelopes,
-    # role_checklists, proof_batches, accounted stage_verification) UNIONED with
+    # role_checklists and accounted stage_verification) UNIONED with
     # the goal-only fields below. The old ``goals`` projection omitted these
     # lanes; the merged single owner must carry them so no field the retired
     # ``tasks`` section held is lost.
@@ -3075,7 +2889,6 @@ def _goal_projection_from_task(task, proofs, all_tasks, incidents, runs, events,
         self_tests=self_tests,
         role_envelopes=role_envelopes,
         role_checklists=role_checklists,
-        proof_batches=proof_batches,
         persona_assignments=persona_assignments,
         repo_bundles=repo_bundles,
         runtime_instances=runtime_instances,
@@ -3113,11 +2926,9 @@ def goal_detail_for_task(task_id: str, *, event_log=None) -> dict | None:
     EventLog, mutates nothing. Returns ``None`` when the task id does not resolve
     (an honest miss, never a fabricated empty goal)."""
 
-    token = str(task_id or "").strip()
-    if not token:
-        return None
+    return None
     event_log = event_log or CachedEventLog()
-    task_store = TaskStore()
+    task_store = TaskStore(event_log=event_log)
     # ``get_goal`` resolves BOTH a task id and a goal id (parent/child tasks can
     # share one goal_id), raising NotFound on a genuine miss.
     from .errors import NotFound
@@ -3129,14 +2940,12 @@ def goal_detail_for_task(task_id: str, *, event_log=None) -> dict | None:
     tasks = task_store.list_all()
     run_store = RunStore()
     runs = run_store.list_all()
-    proof_store = ProofStore()
     incident_store = IncidentStore()
     incidents = incident_store.list_all()
     worker_session_store = WorkerSessionStore(event_log=event_log)
     workers = worker_session_store.list_all()
     role_envelope_store = RoleEnvelopeStore(event_log=event_log)
     role_checklist_store = RoleChecklistStore(event_log=event_log)
-    proof_batch_store = ProofBatchStore(event_log=event_log)
     repo_bundle_store = RepoBundleStore(event_log=event_log)
     runtime_instance_store = GoalRuntimeInstanceStore(event_log=event_log)
     workspace_store = WorkspaceStore()
@@ -3145,13 +2954,13 @@ def goal_detail_for_task(task_id: str, *, event_log=None) -> dict | None:
     persona_instances: list = []
     persona_assignments: list = []
     if persona_instance_runtime_enabled(cfg):
-        agents = AgentStore().list_all() or seed_personas()
+        agents = AgentStore().list_all()
         persona_instances = PersonaInstanceStore(event_log=event_log).derive_from_workers(agents, workers)
         if persona_assignment_store_enabled(cfg):
             persona_assignments = PersonaAssignmentStore(event_log=event_log).list_all()
     return _goal_projection_from_task(
         task,
-        proof_store.list_for_task(task.id),
+        [],
         tasks,
         incidents,
         runs,
@@ -3161,7 +2970,6 @@ def goal_detail_for_task(task_id: str, *, event_log=None) -> dict | None:
         self_tests=SelfTestEvidenceStore(event_log=event_log).list_for_task(task.id),
         role_envelopes=[item for item in role_envelope_store.list_all() if item.task_id == task.id],
         role_checklists=[item for item in role_checklist_store.list_all() if item.task_id == task.id],
-        proof_batches=[item for item in proof_batch_store.list_all() if item.task_id == task.id],
         persona_assignments=[item for item in persona_assignments if item.task_id == task.id],
         repo_bundles=[item for item in repo_bundle_store.list_all() if item.task_id == task.id],
         runtime_instances=[item for item in runtime_instance_store.list_all() if item.task_id == task.id],
@@ -3212,7 +3020,7 @@ def persona_instance_detail_for_id(entity_id: str, *, event_log=None) -> dict | 
 
     event_log = event_log or CachedEventLog()
     cfg = load_agent_runtime_config()
-    agents = AgentStore().list_all() or seed_personas()
+    agents = AgentStore().list_all()
     personas_by_id = {str(getattr(a, "id", "") or ""): a for a in agents}
     if persona_instance_runtime_enabled(cfg):
         worker_session_store = WorkerSessionStore(event_log=event_log)
@@ -3335,672 +3143,14 @@ def _mission_lifecycle_state(task, active_runs, open_incidents, gate) -> str:
 
 
 def _mission_level_state(task, *, active_runs, active_workers, events, runtime_instances, persona_instances, role_streams) -> dict:
-    plan = getattr(task, "mission_plan", None)
-    stages = list(getattr(plan, "stages", []) or [])
-    stage_by_owner: dict[str, list] = {}
-    for stage in stages:
-        owner = str(getattr(stage, "owner", "") or "").strip()
-        if owner:
-            stage_by_owner.setdefault(owner, []).append(stage)
-    actor_ids = list(stage_by_owner)
-    for run in active_runs:
-        if getattr(run, "persona_id", None) and run.persona_id not in actor_ids:
-            actor_ids.append(run.persona_id)
-    active_stage_id = getattr(plan, "current_stage_id", None) or getattr(task, "current_stage_id", None)
-    stream_by_id = {stream.get("persona_id"): stream for stream in role_streams if isinstance(stream, dict)}
-    actors = []
-    for persona_id in actor_ids:
-        owned_stages = stage_by_owner.get(persona_id, [])
-        active_owned = next((stage for stage in owned_stages if stage.id == active_stage_id), None)
-        actor_stage = active_owned if active_owned is not None else (owned_stages[0] if owned_stages else None)
-        latest = _latest_actor_event(persona_id, events)
-        runs = [run for run in active_runs if getattr(run, "persona_id", None) == persona_id]
-        workers = [worker for worker in active_workers if getattr(worker, "persona_id", None) == persona_id]
-        stream = stream_by_id.get(persona_id) or {}
-        status = getattr(getattr(actor_stage, "status", None), "value", getattr(actor_stage, "status", None))
-        actors.append(
-            {
-                "id": f"actor_{persona_id}",
-                "kind": "agent",
-                "actor_id": persona_id,
-                "persona_id": persona_id,
-                "persona_instance_id": next(iter(stream.get("persona_instance_ids") or []), None),
-                "goal_id": getattr(task, "goal_id", None) or task.id,
-                "task_id": task.id,
-                "chat_session_id": next((getattr(worker, "session_id", None) for worker in workers if getattr(worker, "session_id", None)), None),
-                "worker_session_id": next((getattr(worker, "id", None) for worker in workers), None),
-                "display_name": _display_name_for_persona(persona_id),
-                "label": _display_name_for_persona(persona_id),
-                "role": _actor_role_for_persona(persona_id),
-                "presence": _actor_presence(active_owned, owned_stages, runs, workers),
-                "stage_id": getattr(actor_stage, "id", None),
-                "flow": {
-                    "blueprint_id": getattr(plan, "blueprint_id", None),
-                    "stage": getattr(actor_stage, "id", None),
-                    "status": status,
-                },
-                "state_label": _actor_state_label(active_owned, owned_stages, runs, workers),
-                "state": _actor_state_label(active_owned, owned_stages, runs, workers),
-                "active_run_ids": [run.id for run in runs],
-                "active_worker_session_ids": [worker.id for worker in workers],
-                "latest_safe_event": latest,
-                "latest_event": latest,
-                "budget": _actor_budget_summary(runs, stream_by_id.get(persona_id)),
-                "hidden_by_blueprint": False,
-            }
-        )
     return {
         "schema_version": 1,
         "mission_id": task.id,
         "task_id": task.id,
-        "blueprint_id": getattr(plan, "blueprint_id", None),
-        "blueprint_version": getattr(plan, "blueprint_version", None),
-        "active_stage_id": active_stage_id,
-        "actors": actors,
-        # S4 (delete derived copies): ``agent_topology`` was a DERIVED copy of
-        # steering truth (``persona_instances[].steered_by``). It leaves the
-        # frame entirely — the launcher already derives both directions from
-        # ``steered_by`` (missionAgentInstanceParentIds /
-        # missionAgentSteeredInstances) and its runtime-graph projection falls
-        # back to that steered_by path when no topology is present. Zero
-        # ``agent_topology`` bytes ship; the ``_agent_topology`` builder is now
-        # unreferenced (its removal is S7 cleanup, kept out of this shrink stage
-        # to bound the diff).
+        "active_stage_id": getattr(task, "current_stage_id", None),
+        "actors": [],
         "updated_at": getattr(task, "updated_at", None),
     }
-
-
-def agent_topology_for_task(task) -> dict:
-    """Re-derive the steering topology (incl. ``steer_actions``) for one task.
-
-    S4 deleted the derived ``agent_topology`` copy from the snapshot frame. The
-    steering executor (``steering.execute_steer_action``) was the one live
-    reader of its ``steer_actions`` — it validated an operator's requested steer
-    against the frame's copy. Rather than ship that derived copy on EVERY frame
-    for a reader that fires only on an operator action, the executor re-derives
-    it on demand here from the stores, so there is still exactly ONE producer
-    (``_agent_topology``) and no per-frame duplicate. Not a hot path (one steer
-    action), so a per-call store read is acceptable.
-    """
-
-    event_log = CachedEventLog()
-    cfg = load_agent_runtime_config()
-    all_runs = RunStore().list_all()
-    runs = [run for run in all_runs if run.task_id == task.id]
-    active_runs = [run for run in runs if run.state in ACTIVE_RUN_STATES]
-    all_workers = WorkerSessionStore(event_log=event_log).list_all()
-    workers = [w for w in all_workers if getattr(w, "task_id", None) == task.id]
-    active_workers = [
-        w
-        for w in workers
-        if str(getattr(getattr(w, "state", ""), "value", getattr(w, "state", "")))
-        not in {"completed", "blocked", "closed"}
-    ]
-    runtime_instances = [
-        item
-        for item in GoalRuntimeInstanceStore(event_log=event_log).list_all()
-        if item.task_id == task.id
-    ]
-    agents = AgentStore().list_all() or seed_personas()
-    if persona_instance_runtime_enabled(cfg):
-        persona_instances = PersonaInstanceStore(event_log=event_log).derive_from_workers(agents, all_workers)
-    else:
-        persona_instances = PersonaInstanceStore(event_log=event_log).list_all()
-    persona_assignments = (
-        [
-            item
-            for item in PersonaAssignmentStore(event_log=event_log).list_all()
-            if item.task_id == task.id
-        ]
-        if persona_assignment_store_enabled(cfg)
-        else []
-    )
-    role_envelopes = [
-        item for item in RoleEnvelopeStore(event_log=event_log).list_all() if item.task_id == task.id
-    ]
-    role_checklists = [
-        item for item in RoleChecklistStore(event_log=event_log).list_all() if item.task_id == task.id
-    ]
-    proof_batches = [
-        item for item in ProofBatchStore(event_log=event_log).list_all() if item.task_id == task.id
-    ]
-    role_streams = _role_streams(
-        task,
-        event_log.for_task(task.id, limit=200),
-        runs,
-        workers,
-        persona_assignments=persona_assignments,
-        role_envelopes=role_envelopes,
-        role_checklists=role_checklists,
-        proof_batches=proof_batches,
-    )
-    return _agent_topology(
-        task,
-        active_runs=active_runs,
-        active_workers=active_workers,
-        runtime_instances=runtime_instances,
-        persona_instances=persona_instances,
-        role_streams=role_streams,
-    )
-
-
-def _agent_topology(task, *, active_runs, active_workers, runtime_instances, persona_instances, role_streams) -> dict:
-    plan = getattr(task, "mission_plan", None)
-    stages = list(getattr(plan, "stages", []) or [])
-    topology = getattr(plan, "agent_topology", None) if plan is not None else None
-    topology = topology if isinstance(topology, dict) else {}
-    plan_slots = dict(getattr(plan, "slots", {}) or {}) if plan is not None else {}
-    bindings = dict(getattr(plan, "bindings", {}) or {}) if plan is not None else {}
-    topology_edges = [
-        edge
-        for edge in topology.get("edges", []) or []
-        if isinstance(edge, dict)
-    ]
-    root_slot = str(topology.get("root") or "").strip()
-    if not root_slot and topology_edges:
-        root_slot = str(topology_edges[0].get("source") or "").strip()
-    if not root_slot and len(plan_slots) == 1:
-        root_slot = next(iter(plan_slots))
-
-    task_goal_id = str(getattr(task, "goal_id", None) or task.id)
-    runtime_instances = list(runtime_instances or [])
-    persona_instances = list(persona_instances or [])
-    related_instances = [
-        instance
-        for instance in [*runtime_instances, *persona_instances]
-        if _instance_matches_task(instance, task, task_goal_id)
-    ]
-    # --- Steering closure -------------------------------------------------
-    # The runtime graph the operator edits lives in persona-instance steering
-    # (``steered_by``, keyed by instance id). Seeding topology nodes only from
-    # goal-matched instances + plan slots drops any node the operator steered IN
-    # whose goal does not match the task — e.g. a fan-in convergence agent on a
-    # goal-less default flow. Its node (and every edge into it) is omitted, so
-    # the Launcher reprojects the operator's wiring away ("connected + saved,
-    # gone on refresh"). Pull the steered graph in: anchor on the goal-matched
-    # set plus the lead instance bound to the plan root, then transitively add
-    # any instance steered by a member. This mirrors the Launcher's own
-    # related-instance expansion and stays BOUNDED to the mission — only steered
-    # descendants of the seed, never the global persona pool.
-    _all_instances = [*runtime_instances, *persona_instances]
-    _seed_ids = {
-        sid
-        for sid in (str(getattr(i, "id", "") or "").strip() for i in related_instances)
-        if sid
-    }
-    if root_slot:
-        _root_persona = _topology_slot_persona_id(root_slot, bindings)
-        _by_persona_all: dict[str, list] = {}
-        for _inst in _all_instances:
-            _pid = str(getattr(_inst, "persona_id", "") or "").strip()
-            if _pid:
-                _by_persona_all.setdefault(_pid, []).append(_inst)
-        _root_inst = _instance_for_persona(_root_persona, _by_persona_all)
-        _root_id = str(getattr(_root_inst, "id", "") or "").strip() if _root_inst else ""
-        if _root_id and _root_id not in _seed_ids:
-            related_instances.append(_root_inst)
-            _seed_ids.add(_root_id)
-    _closure_changed = True
-    while _closure_changed:
-        _closure_changed = False
-        for _inst in _all_instances:
-            _iid = str(getattr(_inst, "id", "") or "").strip()
-            if not _iid or _iid in _seed_ids:
-                continue
-            if any(ref in _seed_ids for ref in _instance_parent_refs(_inst)):
-                related_instances.append(_inst)
-                _seed_ids.add(_iid)
-                _closure_changed = True
-    instances_by_id = {str(getattr(instance, "id", "") or ""): instance for instance in related_instances}
-    instances_by_persona: dict[str, list] = {}
-    for instance in related_instances:
-        persona_id = str(getattr(instance, "persona_id", "") or "").strip()
-        if persona_id:
-            instances_by_persona.setdefault(persona_id, []).append(instance)
-
-    stages_by_slot: dict[str, list] = {}
-    stages_by_persona: dict[str, list] = {}
-    for stage in stages:
-        slot = str(getattr(stage, "owner_slot", None) or getattr(stage, "owner", "") or "").strip()
-        owner = str(getattr(stage, "owner", "") or "").strip()
-        if slot:
-            stages_by_slot.setdefault(slot, []).append(stage)
-        if owner:
-            stages_by_persona.setdefault(owner, []).append(stage)
-
-    stream_by_id = {stream.get("persona_id"): stream for stream in role_streams if isinstance(stream, dict)}
-    nodes_by_id: dict[str, dict] = {}
-    slot_node_ids: dict[str, str] = {}
-    # Canonical node per persona. A persona that runs N turns (N re-instantiated
-    # persona_instances) is ONE agent, not N nodes — without this the topology
-    # grows O(runs/spawns) and floods the graph with duplicate "Backend Dev Agent"
-    # / "Launcher Dev Agent" nodes. Multi-turn instances collapse onto the canonical
-    # node; only a genuinely distinct persona (a spawned sub-agent of a new role)
-    # gets its own node.
-    persona_node_id: dict[str, str] = {}
-    collapsed_instances = 0
-
-    def add_node_for_slot(slot: str) -> str | None:
-        slot = str(slot or "").strip()
-        if not slot:
-            return None
-        persona_id = _topology_slot_persona_id(slot, bindings)
-        instance = _instance_for_persona(persona_id, instances_by_persona)
-        owned_stages = stages_by_slot.get(slot) or stages_by_persona.get(persona_id) or []
-        node_id = str(getattr(instance, "id", "") or "").strip() or f"slot_{slot}"
-        slot_node_ids[slot] = node_id
-        nodes_by_id[node_id] = _agent_topology_node(
-            node_id=node_id,
-            persona_id=persona_id or slot,
-            instance=instance,
-            owned_stages=owned_stages,
-            active_runs=active_runs,
-            active_workers=active_workers,
-            stream=stream_by_id.get(persona_id) or {},
-            fallback_display=_display_name_for_persona(persona_id or slot),
-            fallback_role=_actor_role_for_persona(persona_id or slot),
-        )
-        if persona_id:
-            persona_node_id.setdefault(persona_id, node_id)
-        return node_id
-
-    topology_slots: list[str] = []
-    if root_slot:
-        topology_slots.append(root_slot)
-    for edge in topology_edges:
-        for key in ("source", "target"):
-            slot = str(edge.get(key) or "").strip()
-            if slot and slot not in topology_slots:
-                topology_slots.append(slot)
-    if not topology_slots and plan_slots:
-        topology_slots.extend(plan_slots.keys())
-    for slot in topology_slots:
-        add_node_for_slot(slot)
-
-    for instance in related_instances:
-        instance_id = str(getattr(instance, "id", "") or "").strip()
-        if not instance_id or instance_id in nodes_by_id:
-            continue
-        persona_id = str(getattr(instance, "persona_id", "") or "").strip()
-        # Collapse a re-instantiated persona onto its canonical node instead of
-        # minting a duplicate node per turn. Only a persona that has no node yet
-        # (a genuinely distinct spawned sub-agent) earns its own node.
-        if persona_id and persona_id in persona_node_id:
-            collapsed_instances += 1
-            continue
-        owned_stages = stages_by_persona.get(persona_id) or []
-        nodes_by_id[instance_id] = _agent_topology_node(
-            node_id=instance_id,
-            persona_id=persona_id,
-            instance=instance,
-            owned_stages=owned_stages,
-            active_runs=active_runs,
-            active_workers=active_workers,
-            stream=stream_by_id.get(persona_id) or {},
-            fallback_display=_display_name_for_persona(persona_id),
-            fallback_role=_actor_role_for_persona(persona_id),
-        )
-        if persona_id:
-            persona_node_id[persona_id] = instance_id
-
-    def _canonical_node_for(instance) -> str:
-        pid = str(getattr(instance, "persona_id", "") or "").strip()
-        if pid and pid in persona_node_id:
-            return persona_node_id[pid]
-        return str(getattr(instance, "id", "") or "").strip()
-
-    edges: list[dict] = []
-    targets_with_runtime_parent: set[str] = set()
-    fan_in_targets: set[str] = set()
-    seen_spawn_edges: set[tuple[str, str]] = set()
-    for instance in related_instances:
-        # Multi-parent fan-in (Stage 77): a child can be steered by ≥1 parents.
-        # Iterate the authoritative `steered_by` set (falling back to the legacy
-        # scalar `spawned_by` for un-migrated records) and emit one edge per
-        # distinct parent node.
-        for parent_ref in _instance_parent_refs(instance):
-            parent = _topology_parent_instance(parent_ref, related_instances)
-            if parent is None:
-                continue
-            # Map lineage onto canonical persona nodes so collapsed multi-turn
-            # instances don't drop the spawn edge; dedupe and skip self-edges (a
-            # persona spawning another turn of itself is not a distinct steer).
-            target_node = _canonical_node_for(instance)
-            parent_node = _canonical_node_for(parent)
-            if not target_node or not parent_node or parent_node == target_node:
-                continue
-            if target_node not in nodes_by_id or parent_node not in nodes_by_id:
-                continue
-            key = (parent_node, target_node)
-            if key in seen_spawn_edges:
-                continue
-            seen_spawn_edges.add(key)
-            if target_node in targets_with_runtime_parent:
-                # A second (or later) distinct runtime parent for this node =
-                # true fan-in.
-                fan_in_targets.add(target_node)
-            targets_with_runtime_parent.add(target_node)
-            edges.append(
-                {
-                    "source_node_id": parent_node,
-                    "target_node_id": target_node,
-                    "kind": "steers",
-                    "source": "runtime_spawned_by",
-                }
-            )
-
-    if topology_edges:
-        for edge in topology_edges:
-            source_id = slot_node_ids.get(str(edge.get("source") or "").strip())
-            target_id = slot_node_ids.get(str(edge.get("target") or "").strip())
-            if not source_id or not target_id or target_id in targets_with_runtime_parent:
-                continue
-            edges.append(
-                {
-                    "source_node_id": source_id,
-                    "target_node_id": target_id,
-                    "kind": str(edge.get("kind") or "steers"),
-                    "source": "blueprint_agent_topology",
-                }
-            )
-
-    root_node_id = slot_node_ids.get(root_slot) if root_slot else None
-    if root_node_id is None and nodes_by_id:
-        child_ids = {edge["target_node_id"] for edge in edges}
-        root_node_id = next((node_id for node_id in nodes_by_id if node_id not in child_ids), next(iter(nodes_by_id)))
-    control_node_id = _topology_control_node_id(task, stages, slot_node_ids, root_node_id)
-    steer_actions, steer_action_drops = build_steer_actions(nodes_by_id, edges, control_node_id=control_node_id, task=task)
-    drop_samples: list[dict] = []
-    for node in nodes_by_id.values():
-        node_drops = node.pop("_drops", [])
-        if isinstance(node_drops, list):
-            drop_samples.extend(item for item in node_drops if isinstance(item, dict))
-    drop_samples.extend(steer_action_drops)
-    return {
-        "schema_version": 1,
-        "source": "runtime_spawned_by" if targets_with_runtime_parent else ("blueprint_agent_topology" if topology_edges or root_slot else "persona_instances"),
-        "root_node_id": root_node_id,
-        "control_node_id": control_node_id,
-        "nodes": list(nodes_by_id.values()),
-        "edges": edges,
-        "steer_actions": steer_actions,
-        "completeness": {
-            "node_count": len(nodes_by_id),
-            "edge_count": len(edges),
-            "fan_in_targets": len(fan_in_targets),
-            "collapsed_multi_turn_instances": collapsed_instances,
-            "stream_event_cap_per_node": 3,
-            "id_cap_per_node": AGENT_TOPOLOGY_NODE_ID_CAP,
-            "drops": drop_samples[:50],
-        },
-    }
-
-
-def _agent_topology_node(*, node_id: str, persona_id: str, instance, owned_stages, active_runs, active_workers, stream, fallback_display: str, fallback_role: str) -> dict:
-    runs = [run for run in active_runs if getattr(run, "persona_id", None) == persona_id]
-    workers = [worker for worker in active_workers if getattr(worker, "persona_id", None) == persona_id]
-    active_stage = next((stage for stage in owned_stages if getattr(stage, "status", None) in {StageStatus.IMPLEMENTING, StageStatus.READY}), None)
-    stage = active_stage or (owned_stages[0] if owned_stages else None)
-    stage_ids, stage_drops = _bounded_topology_ids(
-        [getattr(stage, "id", None) for stage in owned_stages if getattr(stage, "id", None)],
-        node_id=node_id,
-        field="stage_ids",
-    )
-    run_ids, run_drops = _bounded_topology_ids([run.id for run in runs], node_id=node_id, field="active_run_ids")
-    worker_ids, worker_drops = _bounded_topology_ids([worker.id for worker in workers], node_id=node_id, field="active_worker_session_ids")
-    return {
-        "node_id": node_id,
-        "persona_id": persona_id,
-        "persona_instance_id": str(getattr(instance, "id", "") or "").strip() or None,
-        "display_name": str(getattr(instance, "display_name", "") or "").strip() or fallback_display,
-        "role": str(getattr(instance, "role", "") or "").strip() or fallback_role,
-        "stage_ids": stage_ids,
-        "presence": _actor_presence(active_stage, owned_stages, runs, workers),
-        "state_label": _actor_state_label(active_stage, owned_stages, runs, workers),
-        "active_run_ids": run_ids,
-        "active_worker_session_ids": worker_ids,
-        "budget": _actor_budget_summary(runs, stream),
-        "current_stage_id": getattr(stage, "id", None),
-        "spawned_by": str(getattr(instance, "spawned_by", "") or "").strip() or None,
-        "steered_by": _instance_parent_refs(instance),
-        "returned_to": str(getattr(instance, "returned_to", "") or "").strip() or None,
-        "stream_event_count": len(stream.get("events") or []) if isinstance(stream, dict) else 0,
-        "progress_peek": _progress_peek(stream),
-        "_drops": [*stage_drops, *run_drops, *worker_drops],
-    }
-
-
-def _bounded_topology_ids(values: list, *, node_id: str, field: str) -> tuple[list[str], list[dict]]:
-    clean = [str(value).strip() for value in values if str(value or "").strip()]
-    if len(clean) <= AGENT_TOPOLOGY_NODE_ID_CAP:
-        return clean, []
-    return clean[:AGENT_TOPOLOGY_NODE_ID_CAP], [
-        {
-            "node_id": node_id,
-            "field": field,
-            "kept": AGENT_TOPOLOGY_NODE_ID_CAP,
-            "dropped": len(clean) - AGENT_TOPOLOGY_NODE_ID_CAP,
-            "reason": "topology_node_id_cap",
-        }
-    ]
-
-
-def _progress_peek(stream: dict) -> list[dict]:
-    events = stream.get("events") if isinstance(stream, dict) else None
-    if not isinstance(events, list):
-        return []
-    peek: list[dict] = []
-    for event in events[-3:]:
-        payload = event.get("payload") if isinstance(event, dict) else None
-        payload = payload if isinstance(payload, dict) else {}
-        summary = str(payload.get("display_summary") or payload.get("summary") or "").strip()
-        if not summary:
-            continue
-        peek.append(
-            {
-                "type": str(event.get("type") or "")[:80],
-                "run_id": str(event.get("run_id") or "")[:128] or None,
-                "summary": summary[:300],
-                "status": str(payload.get("status") or "")[:40] or None,
-            }
-        )
-    return peek
-
-
-def _topology_control_node_id(task, stages: list, slot_node_ids: dict[str, str], root_node_id: str | None) -> str | None:
-    current_id = str(getattr(getattr(task, "mission_plan", None), "current_stage_id", None) or getattr(task, "current_stage_id", "") or "").strip()
-    stage = next((item for item in stages if str(getattr(item, "id", "") or "") == current_id), None)
-    if stage is not None:
-        slot = str(getattr(stage, "owner_slot", "") or getattr(stage, "owner", "") or "").strip()
-        if slot and slot_node_ids.get(slot):
-            return slot_node_ids[slot]
-    return root_node_id
-
-
-def _instance_matches_task(instance, task, task_goal_id: str) -> bool:
-    return (
-        str(getattr(instance, "goal_id", "") or "") == task_goal_id
-        or str(getattr(instance, "current_task_id", "") or "") == task.id
-        or str(getattr(instance, "task_id", "") or "") == task.id
-    )
-
-
-def _topology_slot_persona_id(slot: str, bindings: dict) -> str:
-    bound = str(bindings.get(slot) or slot).strip()
-    if bound.startswith("persona:") or bound.startswith("profile:"):
-        return bound.split(":", 1)[1].strip()
-    return bound
-
-
-def _instance_for_persona(persona_id: str, instances_by_persona: dict[str, list]):
-    candidates = instances_by_persona.get(persona_id) or []
-    if not candidates:
-        return None
-    return sorted(candidates, key=lambda item: str(getattr(item, "updated_at", "") or ""), reverse=True)[0]
-
-
-def _instance_parent_refs(instance) -> list[str]:
-    """The child's steering-parent refs, preferring the authoritative
-    ``steered_by`` set and falling back to the legacy scalar ``spawned_by`` for
-    un-migrated records. De-duplicated, order-preserving (first = primary)."""
-    raw = list(getattr(instance, "steered_by", []) or [])
-    if not raw:
-        scalar = getattr(instance, "spawned_by", None)
-        raw = [scalar] if scalar else []
-    refs: list[str] = []
-    seen: set[str] = set()
-    for value in raw:
-        ref = str(value or "").strip()
-        if ref and ref not in seen:
-            seen.add(ref)
-            refs.append(ref)
-    return refs
-
-
-def _topology_parent_instance(parent_ref: str, instances: list):
-    if not parent_ref:
-        return None
-    for instance in instances:
-        if str(getattr(instance, "id", "") or "") == parent_ref:
-            return instance
-    for instance in instances:
-        if str(getattr(instance, "persona_id", "") or "") == parent_ref or str(getattr(instance, "role", "") or "") == parent_ref:
-            return instance
-    return None
-
-
-def _mission_flow_timeline(task, events, *, accountant: ProjectionAccountant | None = None) -> dict:
-    plan = getattr(task, "mission_plan", None)
-    stages = list(getattr(plan, "stages", []) or [])
-    items = []
-    for stage in stages:
-        status = getattr(getattr(stage, "status", None), "value", getattr(stage, "status", None))
-        items.append(
-            {
-                "id": f"stage:{stage.id}",
-                "kind": "stage",
-                "stage_id": stage.id,
-                "title": stage.title,
-                "owner": getattr(stage, "owner", None),
-                "owner_slot": getattr(stage, "owner_slot", None),
-                "status": status,
-                "proof_ids": list(getattr(stage, "proof_ids", []) or []),
-                "depends_on": list(getattr(stage, "depends_on", []) or []),
-            }
-        )
-    for event in [event for event in _coalesced_progress_events(events) if event.task_id == task.id][-20:]:
-        display = _event_display_projection(event)
-        items.append(
-            {
-                "id": f"event:{event.type}:{event.run_id or 'task'}:{event.ts}",
-                "kind": display.get("display_kind") or "event",
-                "ts": event.ts,
-                "type": event.type,
-                "persona_id": event.persona_id,
-                "run_id": event.run_id,
-                "summary": display.get("display_summary"),
-                "redaction_status": display.get("redaction_status") or "safe",
-                "artifact_refs": display.get("artifact_refs") or [],
-            }
-        )
-    total = len(items)
-    if accountant is not None:
-        accountant.consider(total)
-    # Keep the office-rendered FRONT window (office takes ``items.take(5)``; the
-    # cap keeps the front MISSION_FLOW_TIMELINE_ITEM_CAP so that render is
-    # byte-identical) and account the evicted tail with a fetch pointer.
-    selected = items[:MISSION_FLOW_TIMELINE_ITEM_CAP]
-    evicted = total - len(selected)
-    if accountant is not None:
-        accountant.include(len(selected))
-        if evicted:
-            # Deliberate bound: the front window is kept and the evicted tail is
-            # disclosed with a typed fetch pointer below.
-            accountant.drop(
-                "flow_item_cap",
-                count=evicted,
-                entity_id=getattr(task, "id", None),
-                detail=f"kept front {MISSION_FLOW_TIMELINE_ITEM_CAP} flow items",
-                by_design=True,
-            )
-            accountant.mark_truncated()
-    result = {
-        "schema_version": 1,
-        "mission_id": task.id,
-        "active_stage_id": getattr(plan, "current_stage_id", None) if plan else getattr(task, "current_stage_id", None),
-        "items": selected,
-        "items_total": total,
-        "items_evicted": evicted,
-    }
-    if evicted:
-        # Honest accounting: a typed pointer to the full paged history, never a
-        # silent truncation (the full timeline is rebuilt from the EventLog).
-        result["items_ref"] = {
-            "evicted": True,
-            "count": evicted,
-            "fetch": "harness goal history <task_id> --json",
-        }
-    return result
-
-
-def _proof_gate_state(task, proofs) -> dict:
-    proof_by_id = {proof.id: proof for proof in proofs}
-    plan = getattr(task, "mission_plan", None)
-    stages = list(getattr(plan, "stages", []) or [])
-    requirements = []
-    missing = []
-    captured = []
-    required_statuses: list[str] = []
-    for stage in stages:
-        gate = getattr(stage, "proof_gate", {}) if isinstance(getattr(stage, "proof_gate", None), dict) else {}
-        required_types = [str(item) for item in gate.get("required_proof_types") or []]
-        required = bool(gate.get("required") or required_types or gate.get("proof_recipe_id") or gate.get("commands"))
-        stage_proofs = [proof_by_id[item] for item in getattr(stage, "proof_ids", []) or [] if item in proof_by_id]
-        safe_refs = [_proof_evidence_ref(proof) for proof in stage_proofs if _proof_evidence_ref(proof)]
-        captured.extend(safe_refs)
-        status = "not_applicable"
-        if required:
-            status = _proof_requirement_status(stage, stage_proofs)
-            required_statuses.append(status)
-        if status == "missing":
-            missing.append(stage.id)
-        requirements.append(
-            {
-                "stage_id": stage.id,
-                "title": stage.title,
-                "required": required,
-                "required_proof_types": required_types,
-                "minimum_status": gate.get("minimum_status") or "passed",
-                "status": status,
-                "evidence_refs": safe_refs,
-                "redaction_status": "safe",
-            }
-        )
-    gate_state = _roll_up_gate_state(required_statuses, waived=bool(getattr(task, "waiver", None)))
-    why_not_ready = [
-        f"{req['stage_id']} {req['status']}"
-        for req in requirements
-        if req["required"] and req["status"] not in {"passed", "not_applicable"}
-    ]
-    return {
-        "schema_version": 1,
-        "mission_id": task.id,
-        "gate_state": gate_state,
-        "requirements": requirements,
-        "captured_evidence": captured,
-        "missing_stage_ids": missing,
-        "why_not_ready": why_not_ready,
-        "waiver": getattr(task, "waiver", None),
-        "updated_at": getattr(task, "updated_at", None),
-    }
-
-
-# Roles whose proof verdict can satisfy a required gate. Worker self-reports
-# (dev/backend_dev) are evidence candidates only — never a passing verdict —
-# until a verifier/reviewer/Neko proof review records the result.
-_PROOF_VERIFIER_ROLES = frozenset({"qa", "verifier", "reviewer", "neko_supervisor"})
-
-
 def _roll_up_gate_state(required_statuses: list[str], *, waived: bool) -> str:
     """Roll per-requirement statuses into a spec gate_state value.
 
@@ -4064,15 +3214,6 @@ def _actor_state_label(active_stage, owned_stages, runs, workers) -> str:
     return str(status or "waiting").replace("_", " ").title()
 
 
-def _actor_role_for_persona(persona_id: str) -> str:
-    return {
-        "neko_supervisor": "neko_supervisor",
-        "backend_dev": "backend_dev",
-        "dev": "dev",
-        "qa": "qa",
-    }.get(persona_id, "specialist")
-
-
 def _latest_actor_event(persona_id: str, events) -> dict | None:
     for event in reversed(events):
         if event.persona_id != persona_id:
@@ -4099,7 +3240,6 @@ def _actor_budget_summary(runs, role_stream) -> dict:
     return {
         "active_run_count": len(runs),
         "token_budget_used": token_total or None,
-        "proof_batch_count": len((role_stream or {}).get("proof_batches") or []) if isinstance(role_stream, dict) else 0,
     }
 
 
@@ -4163,7 +3303,7 @@ def _runtime_lane_summary(runtime_instances) -> dict:
 
 def _persona_streams(task, assignments, runs, events) -> dict:
     streams: dict[str, dict] = {}
-    role_ids = ["neko_supervisor", "backend_dev", "dev", "qa"]
+    role_ids: list[str] = []
     for assignment in assignments or []:
         role_ids.append(str(getattr(assignment, "persona_id", "") or ""))
     for run in runs or []:
@@ -4229,23 +3369,22 @@ def _run_blocked_reason(task, active_runs, open_incidents, *, run_store=None) ->
 
 def _next_action_summary(task, open_incidents, *, run_store=None, event_log=None):
     if open_incidents:
-        runs = run_store or RunStore()
-        cfg = load_root_runtime_config()
-        if any(budget_incident_needs_scope_recovery(incident, runs) for incident in open_incidents):
-            return {**_stopped_progress(task, open_incidents, "self_heal_pending", "neko_supervisor"), "action": "run_slot", "reason": "Dev exhausted read/search without patch or proof; Neko must split or narrow the stage before retry"}
-        if any(budget_incident_can_continue(incident, runs, cap=cfg.neko_extension_cap) for incident in open_incidents):
-            return {**_stopped_progress(task, open_incidents, "self_heal_pending", "neko_supervisor"), "action": "run_slot", "reason": "needs Neko approval to continue budget-limited Dev run"}
-        reason = "budget_continuation_blocked" if _has_budget_incident(open_incidents) else "environment_blocked"
-        message = "budget continuation cap reached; human review required" if reason == "budget_continuation_blocked" else "open incident requires human review"
-        return {**_stopped_progress(task, open_incidents, reason, "human"), "action": "blocked_by_incident", "reason": message}
+        return {
+            **_stopped_progress(task, open_incidents, "environment_blocked", "human"),
+            "action": "blocked_by_incident",
+            "reason": "open incident requires human review",
+        }
     if task.state in {TaskState.DONE, TaskState.CANCELLED}:
-        return {**_stopped_progress(task, [], "settled", "harness"), "action": "terminal", "reason": "mission is terminal"}
-    cfg = load_root_runtime_config()
-    action = MissionStateMachine(config=cfg, event_log=event_log).next_action(task)
-    reason = "settled" if action.type.value == "noop" else "retry_authorized" if "retry" in action.reason else "self_heal_pending" if "Neko" in action.reason else "waiting_for_preflight"
-    return {**_stopped_progress(task, [], reason, _owner_for_action(action, task=task, run_store=run_store)), "action": action.type.value, "reason": action.reason}
-
-
+        return {
+            **_stopped_progress(task, [], "settled", "harness"),
+            "action": "terminal",
+            "reason": "mission is terminal",
+        }
+    return {
+        **_stopped_progress(task, [], "routing_removed", "human"),
+        "action": "undispatchable",
+        "reason": "the task dispatch lane has been retired",
+    }
 def _why_not_done(task, gate, open_incidents, next_action):
     if task.state == TaskState.DONE:
         return []
@@ -4276,27 +3415,6 @@ def _stopped_progress(task, incidents, reason: str, owner: str) -> dict:
             "next_action": "inspect_blocker" if incident else "tick",
         }
     }
-
-
-def _owner_for_action(action, *, task=None, run_store=None) -> str:
-    action_value = action.type.value if hasattr(getattr(action, "type", None), "value") else str(action)
-    slot_id = str(getattr(action, "slot_id", "") or "").strip()
-    if action_value == "run_slot" and slot_id == "dev" and task is not None:
-        try:
-            from .ticker import _dev_persona_id_for_task
-
-            return _dev_persona_id_for_task(task, run_store=run_store)
-        except Exception:
-            return "dev"
-    if action_value == "run_slot" and slot_id:
-        return slot_id
-    return {
-        "run_dev": "dev",
-        "run_qa": "qa",
-        "run_neko_supervisor": "neko_supervisor",
-        "complete_task": "harness",
-        "noop": "harness",
-    }.get(action_value, "harness")
 
 
 def _has_budget_incident(incidents) -> bool:
@@ -4346,16 +3464,8 @@ def _coalesced_progress_events(events):
     return items
 
 
-def _role_streams(task, events, runs, workers, *, persona_assignments=None, role_envelopes=None, role_checklists=None, proof_batches=None) -> list[dict]:
-    plan = getattr(task, "mission_plan", None)
-    role_ids = ["neko_supervisor", "backend_dev", "dev", "qa"]
-    if plan is not None:
-        for stage in getattr(plan, "stages", []) or []:
-            owner = str(getattr(stage, "owner", "") or "")
-            if owner == "dev":
-                role_ids.append("dev")
-            elif owner in {"backend_dev", "qa", "neko_supervisor"}:
-                role_ids.append(owner)
+def _role_streams(task, events, runs, workers, *, persona_assignments=None, role_envelopes=None, role_checklists=None) -> list[dict]:
+    role_ids: list[str] = []
     for run in runs:
         if getattr(run, "task_id", None) == task.id:
             role_ids.append(str(getattr(run, "persona_id", "") or ""))
@@ -4377,16 +3487,6 @@ def _role_streams(task, events, runs, workers, *, persona_assignments=None, role
         role_assignments = [assignment for assignment in (persona_assignments or []) if assignment.task_id == task.id and assignment.persona_id == role_id]
         role_envelope_items = [item for item in (role_envelopes or []) if item.task_id == task.id and item.role_id == role_id]
         role_checklist_items = [item for item in (role_checklists or []) if item.task_id == task.id and item.role_id == role_id]
-        role_proof_batch_ids = {getattr(item, "proof_batch_id", None) for item in role_envelope_items if getattr(item, "proof_batch_id", None)}
-        role_proof_batches = [
-            item
-            for item in (proof_batches or [])
-            if item.task_id == task.id
-            and (
-                getattr(item, "role_envelope_id", None) in {envelope.envelope_id for envelope in role_envelope_items}
-                or item.proof_batch_id in role_proof_batch_ids
-            )
-        ]
         stream_events = [_event_stream_item(event) for event in role_events][-20:]
         if not stream_events:
             stream_events = [_empty_role_stream_item(task, role_id)]
@@ -4406,7 +3506,6 @@ def _role_streams(task, events, runs, workers, *, persona_assignments=None, role
                 "active_assignment_ids": [assignment.id for assignment in role_assignments if assignment.state in ACTIVE_ASSIGNMENT_STATES],
                 "role_envelopes": [role_envelope_summary(item) for item in role_envelope_items],
                 "role_checklists": [checklist_summary(item) for item in role_checklist_items],
-                "proof_batches": [proof_batch_summary(item) for item in role_proof_batches],
                 "events": stream_events,
             }
         )
@@ -4414,31 +3513,7 @@ def _role_streams(task, events, runs, workers, *, persona_assignments=None, role
 
 
 def _stage_streams(task, events) -> list[dict]:
-    plan = getattr(task, "mission_plan", None)
-    stages = list(getattr(plan, "stages", []) or [])
-    if not stages:
-        stages = list(task_stage_records(task))
-    streams: list[dict] = []
-    for stage in stages:
-        stage_id = getattr(stage, "id", None)
-        if not stage_id:
-            continue
-        stage_events = _coalesced_progress_events([
-            event
-            for event in events
-            if event.task_id == task.id and (event.payload or {}).get("stage_id") == stage_id
-        ])
-        streams.append(
-            {
-                "stage_id": stage_id,
-                "owner": getattr(stage, "owner", None),
-                "repo": getattr(stage, "repo", None),
-                "kind": getattr(stage, "kind", None),
-                "status": getattr(getattr(stage, "status", None), "value", getattr(stage, "status", None)),
-                "events": [_event_stream_item(event) for event in stage_events][-20:],
-            }
-        )
-    return streams
+    return []
 
 
 def _event_stream_item(event) -> dict:
@@ -4473,23 +3548,10 @@ def _empty_role_stream_item(task, persona_id: str) -> dict:
 
 
 def _display_name_for_persona(persona_id: str) -> str:
-    return {
-        "neko_supervisor": "Neko Mission Lead",
-        "backend_dev": "Backend Dev Agent",
-        "dev": "Launcher Dev Agent",
-        "qa": "QA Agent",
-    }.get(persona_id, persona_id.replace("_", " ").title())
+    return persona_id.replace("_", " ").title()
 
 
 def _role_current_stage(task, persona_id: str) -> str | None:
-    plan = getattr(task, "mission_plan", None)
-    if plan is not None:
-        current_id = getattr(plan, "current_stage_id", None)
-        for stage in getattr(plan, "stages", []) or []:
-            owner = getattr(stage, "owner", None)
-            if owner == persona_id or (owner == "dev" and persona_id == "dev"):
-                if stage.id == current_id or stage.status not in {StageStatus.READY_FOR_QA, StageStatus.PASSED}:
-                    return stage.id
     return getattr(task, "current_stage_id", None)
 
 
@@ -4525,9 +3587,7 @@ def _event_display_kind(event_type: str, payload: dict) -> str:
     if event_type == "self_test.recorded":
         return "self_test"
     if event_type == "proof.attached":
-        return "final_gate" if payload.get("gate_source") == "auto_after_delivery" else "proof"
-    if event_type == "proof.gate_checked":
-        return "final_gate"
+        return "proof"
     if event_type == "packet.recorded":
         packet_type = str(payload.get("packet_type") or "")
         return "delivery" if packet_type == "delivery" else "handoff"
@@ -4545,8 +3605,6 @@ def _event_display_kind(event_type: str, payload: dict) -> str:
 def _event_display_title(event_type: str, payload: dict, kind: str) -> str:
     if kind == "self_test":
         return f"Self-test {payload.get('status') or 'recorded'}"
-    if kind == "final_gate":
-        return f"Final gate {payload.get('status') or 'attached'}"
     if kind == "proof":
         return f"Proof {payload.get('status') or 'attached'}"
     if kind == "delivery":

@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
+
 from hermes_constants import get_hermes_home, get_shared_skills_dir
 
 from agent_runtime import paths as runtime_paths
@@ -116,7 +118,9 @@ def test_publish_dry_run_is_allowlisted_and_excludes_state(isolate_agent_runtime
         (row["persona_id"], row["kind"], row["reason"])
         for row in result["profile_files"]["withheld"]
     }
-    assert ("dev", "system_prompt", "not_profile_owned") in withheld
+    # S11 removed the hardcoded dev persona declaration, so the sync layer has
+    # no undeclared profile file to account for.
+    assert withheld == set()
     assert all("blueprint" not in path.lower() for path in paths)
     assert all("state.db" not in path.lower() for path in paths)
     assert all("\\" not in path for path in paths)

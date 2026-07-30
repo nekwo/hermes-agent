@@ -5,9 +5,8 @@ from typing import Any
 
 from hermes_time import now
 
-from .default_plan import ensure_default_mission_plan
 from .decision_schema import AgentDecision, DecisionPayloadInvalid
-from .models import Incident, Task
+from .models import Incident
 from .states import TaskState
 
 CLASSIFICATIONS = frozenset({"blocks_current", "same_scope", "fork_child", "defer", "escalate"})
@@ -76,7 +75,7 @@ def validate_triage_payload(payload: dict[str, Any]) -> None:
             raise DecisionPayloadInvalid("child_acceptance_criteria must be non-empty for fork_child")
 
 
-def record_issue_discovery(task: Task, decision: AgentDecision, *, actor: str, run_id: str | None = None) -> dict[str, Any]:
+def record_issue_discovery(task: Any, decision: AgentDecision, *, actor: str, run_id: str | None = None) -> dict[str, Any]:
     validate_discovery_payload(decision.payload)
     if getattr(task, "issue_discoveries", None) is None:
         task.issue_discoveries = []
@@ -109,15 +108,15 @@ def record_issue_discovery(task: Task, decision: AgentDecision, *, actor: str, r
     return discovery
 
 
-def untriaged_issue_discoveries(task: Task) -> list[dict[str, Any]]:
+def untriaged_issue_discoveries(task: Any) -> list[dict[str, Any]]:
     return [item for item in getattr(task, "issue_discoveries", []) or [] if item.get("triage_status") == "untriaged"]
 
 
-def has_untriaged_issue_discovery(task: Task) -> bool:
+def has_untriaged_issue_discovery(task: Any) -> bool:
     return bool(untriaged_issue_discoveries(task))
 
 
-def needs_pm_triage_before_dev(task: Task) -> bool:
+def needs_pm_triage_before_dev(task: Any) -> bool:
     for item in untriaged_issue_discoveries(task):
         if item.get("severity") in {"high", "critical"}:
             return True
@@ -126,7 +125,7 @@ def needs_pm_triage_before_dev(task: Task) -> bool:
     return False
 
 
-def issue_discovery_counts(task: Task) -> dict[str, int]:
+def issue_discovery_counts(task: Any) -> dict[str, int]:
     counts = {"untriaged": 0, "forked": 0, "deferred": 0, "escalated": 0, "blocked": 0, "same_scope": 0, "rejected": 0, "reported": 0, "triaged": 0}
     for item in getattr(task, "issue_discoveries", []) or []:
         status = str(item.get("triage_status") or "untriaged")
@@ -134,14 +133,14 @@ def issue_discovery_counts(task: Task) -> dict[str, int]:
     return counts
 
 
-def find_discovery(task: Task, discovery_id: str) -> dict[str, Any]:
+def find_discovery(task: Any, discovery_id: str) -> dict[str, Any]:
     for item in getattr(task, "issue_discoveries", []) or []:
         if item.get("id") == discovery_id:
             return item
     raise DecisionPayloadInvalid(f"unknown discovery_id: {discovery_id}")
 
 
-def find_discovery_task(task_store, discovery_id: str) -> tuple[Task, dict[str, Any]]:
+def find_discovery_task(task_store, discovery_id: str) -> tuple[Any, dict[str, Any]]:
     for task in task_store.list_all():
         for item in getattr(task, "issue_discoveries", []) or []:
             if item.get("id") == discovery_id:
@@ -151,7 +150,7 @@ def find_discovery_task(task_store, discovery_id: str) -> tuple[Task, dict[str, 
 
 
 
-def child_mission_depth(task: Task, task_store=None) -> int:
+def child_mission_depth(task: Any, task_store=None) -> int:
     """Return the task's parent-chain depth, bounded to safe local store traversal.
 
     Depth 0 means a top-level Tony mission. Depth 1 means a direct child mission.
@@ -173,7 +172,7 @@ def child_mission_depth(task: Task, task_store=None) -> int:
     return depth
 
 
-def direct_child_count(task: Task, task_store=None) -> int:
+def direct_child_count(task: Any, task_store=None) -> int:
     if task_store is None:
         return 0
     try:
@@ -182,7 +181,7 @@ def direct_child_count(task: Task, task_store=None) -> int:
         return 0
 
 
-def should_report_gap_instead_of_forking(task: Task, *, task_store=None) -> bool:
+def should_report_gap_instead_of_forking(task: Any, *, task_store=None) -> bool:
     """Tony guardrail: no recursive/deep issue trees and no many-sibling forests."""
     return child_mission_depth(task, task_store) >= 1 or direct_child_count(task, task_store) >= 1
 
@@ -196,7 +195,7 @@ def mark_discovery_for_final_report(discovery: dict[str, Any], *, reason: str, t
     return discovery
 
 
-def mark_bounded_test_fix_pass(task: Task, discovery: dict[str, Any], *, ts=None) -> bool:
+def mark_bounded_test_fix_pass(task: Any, discovery: dict[str, Any], *, ts=None) -> bool:
     """Allow exactly one same-scope test/analyzer fixing pass per mission."""
     ts = ts or now()
     if BOUNDED_TEST_FIX_FLAG in task.risk_flags:
@@ -206,7 +205,7 @@ def mark_bounded_test_fix_pass(task: Task, discovery: dict[str, Any], *, ts=None
     discovery["bounded_test_fix_pass"] = "allowed_once"
     return True
 
-def apply_issue_triage(task: Task, decision: AgentDecision, *, actor: str, task_store=None, incident_store=None) -> dict[str, Any]:
+def apply_issue_triage(task: Any, decision: AgentDecision, *, actor: str, task_store=None, incident_store=None) -> dict[str, Any]:
     validate_triage_payload(decision.payload)
     payload = decision.payload
     discovery = find_discovery(task, str(payload["discovery_id"]).strip())
@@ -250,7 +249,6 @@ def apply_issue_triage(task: Task, decision: AgentDecision, *, actor: str, task_
             parent_task_id=task.id,
             risk_flags=["forked_from_issue_discovery", "max_child_depth:1", f"priority:{priority}", f"severity:{discovery.get('severity', priority)}"],
         )
-        ensure_default_mission_plan(child)
         task_store.create(child)
         discovery["child_task_id"] = child.id
         discovery["triage_status"] = "forked"

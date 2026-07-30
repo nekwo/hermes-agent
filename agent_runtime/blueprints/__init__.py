@@ -1,20 +1,5 @@
-"""Agent Runtime blueprint graph support."""
+"""Permanent compatibility package for profile promotion."""
 
-from .schema import Blueprint, BlueprintStage, BlueprintSlot, BlueprintEdge, BlueprintLimits, StageOutcome, load_blueprint, validate_blueprint
-from .instantiate import instantiate_blueprint
-from .resolve import BindingResolver
-from .store import BlueprintStore
+from .resolve import promote_profile_to_persona
 
-__all__ = [
-    "Blueprint",
-    "BlueprintStage",
-    "BlueprintSlot",
-    "BlueprintEdge",
-    "BlueprintLimits",
-    "StageOutcome",
-    "load_blueprint",
-    "validate_blueprint",
-    "instantiate_blueprint",
-    "BindingResolver",
-    "BlueprintStore",
-]
+__all__ = ["promote_profile_to_persona"]

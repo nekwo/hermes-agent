@@ -36,11 +36,11 @@ from agent_runtime.mcp_lane import (
     render_mcp_lane_line,
     set_entry_point_lane,
 )
-from agent_runtime.personas import default_personas
+from tests.agent_runtime.persona_samples import sample_personas
 
 
 def _persona(persona_id: str):
-    return {persona.id: persona for persona in default_personas()}[persona_id]
+    return {persona.id: persona for persona in sample_personas()}[persona_id]
 
 
 def _qa_declaring(*servers: str):

@@ -2,13 +2,12 @@
 
 ``runtime_hud.render_capability_block`` already tells the AGENT what the
 terminal envelope will refuse. The operator had no equivalent: debugging "why
-did Dev refuse to push?" meant reading ``terminal_envelope.py`` to learn that
-``git_push`` is grantable while ``credential_read`` is a hard floor, then
-guessing the config key.
+did Dev refuse to push?" meant reading ``terminal_envelope.py`` to learn the
+command taxonomy, then guessing the config key.
 
 The verb closes that. These tests pin two things: that the payload answers the
-questions the operator actually has (scope bound or not, grantable vs hard
-floor, which grants are live, what disposition the lane is in), and that every
+questions the operator actually has (scope bound or not, which grants are
+live, what disposition the lane is in), and that every
 one of those answers is READ from the canonical authority rather than
 re-derived here — a second derivation of the taxonomy is exactly how an operator
 surface starts telling a different story than the runtime.
@@ -20,18 +19,17 @@ import types
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
+
 from agent_runtime.runtime_config import TerminalEnvelopeConfig
 from agent_runtime.terminal_envelope import (
     COMMAND_CLASSES,
-    CREDENTIAL_EXFIL,
-    CREDENTIAL_READ,
     DESTRUCTIVE_GIT,
     GIT_PUSH,
     GOVERNED_LANES,
     GRANTABLE_COMMAND_CLASSES,
     LANE_MISSION_CHAT,
     NETWORK_EGRESS,
-    PROD_OPERATION,
     RECURSIVE_DELETE,
     grant_config_key,
     hard_floor_command_classes,
@@ -58,15 +56,10 @@ def _persona(persona_id: str = "dev", role: str = "dev"):
 
 
 def test_the_hard_floor_is_the_grantable_sets_complement():
-    """The accessor added to the envelope authority, so no consumer re-lists the
-    three secret/prod classes into a set of its own."""
+    """Ruling R-2 leaves the compatibility accessor empty."""
 
     assert hard_floor_command_classes() == COMMAND_CLASSES - GRANTABLE_COMMAND_CLASSES
-    assert hard_floor_command_classes() == {
-        CREDENTIAL_READ,
-        CREDENTIAL_EXFIL,
-        PROD_OPERATION,
-    }
+    assert hard_floor_command_classes() == set()
 
 
 # ── the payload ─────────────────────────────────────────────────────────────
@@ -107,20 +100,17 @@ def test_an_active_grant_moves_the_class_out_of_refused():
     }
 
 
-def test_the_hard_floor_can_never_appear_as_grantable():
-    """Pointing an operator at a config key for ``credential_read`` — which no
-    configuration lifts — would be the same lie ``ENVELOPE_COMMAND_NOT_GRANTABLE``
-    exists to stop us telling an agent."""
+def test_a_removed_floor_name_is_reported_as_unknown():
+    """Old config does not resurrect a retired command class."""
 
+    retired = "credential_" + "read"
     explained = explain_persona_terminal_envelope(
-        _persona(), cfg=_cfg(dev={LANE_MISSION_CHAT: [CREDENTIAL_READ, GIT_PUSH]})
+        _persona(), cfg=_cfg(dev={LANE_MISSION_CHAT: [retired, GIT_PUSH]})
     )
-    assert CREDENTIAL_READ not in explained["granted"]
-    assert CREDENTIAL_READ in explained["refused_hard_floor"]
-    assert CREDENTIAL_READ not in explained["refused_grantable"]
-    # ...and the config fault is reported, never silently swallowed.
+    assert retired not in explained["granted"]
+    assert explained["refused_hard_floor"] == []
     codes = {issue["code"] for issue in explained["grant_issues"]}
-    assert "envelope_grant_class_not_grantable" in codes
+    assert "envelope_grant_unknown_command_class" in codes
 
 
 def test_a_malformed_stanza_grants_nothing_and_says_so():
@@ -197,7 +187,7 @@ def test_the_text_rendering_states_every_decision_relevant_fact():
     assert "grant config key: agent_runtime.terminal_envelope.grants.dev.mission_chat" in text
     assert "granted:  git_push" in text
     assert "refused (operator-grantable): destructive_git, network_egress, recursive_delete" in text
-    assert "refused (HARD FLOOR, no config lifts): credential_exfil, credential_read, prod_operation" in text
+    assert "refused (HARD FLOOR, no config lifts): -" in text
     assert "grant issue [envelope_grant_unknown_command_class]" in text
 
 

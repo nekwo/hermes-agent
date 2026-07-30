@@ -12,7 +12,9 @@ from agent_runtime import board_models, paths
 from agent_runtime.board_store import BoardStore
 from agent_runtime.errors import WorkspaceDeleteBlocked
 from agent_runtime.events import EventLog
-from agent_runtime.models import Task
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.office_store import OfficeStore
 from agent_runtime.realm_sync import _apply_workspace_tombstones, resolve_realm_sync_artifacts
 from agent_runtime.states import TaskState
@@ -96,13 +98,12 @@ def test_delete_clears_active_pointer():
     assert WorkspaceStore().active_id() is None
 
 
-def test_delete_refuses_workspace_with_goals():
+def test_delete_no_longer_checks_retired_goals():
     workspace = WorkspaceStore().create(name="Busy")
-    TaskStore().create(_task_for(workspace.id, "task_guard_1"))
-    with pytest.raises(WorkspaceDeleteBlocked) as excinfo:
-        WorkspaceStore().delete(workspace.id)
-    assert excinfo.value.code == "workspace_has_goals"
-    assert paths.workspace_path(workspace.id).exists()
+    assert not hasattr(TaskStore(), "create")
+    deleted = WorkspaceStore().delete(workspace.id)
+    assert deleted["deleted"] is True
+    assert not paths.workspace_path(workspace.id).exists()
 
 
 def test_delete_refuses_server_realm_default_workspace():
@@ -246,18 +247,17 @@ def test_apply_workspace_tombstones_deletes_local_copy():
     assert not paths.office_dir(dead.id).exists()
 
 
-def test_apply_workspace_tombstones_archives_when_goals_survive_locally():
+def test_apply_workspace_tombstones_deletes_without_retired_goal_records():
     realm = RealmStore().create(name="Tombstone Realm 2")
     dead = WorkspaceStore().create(name="Has Local Goals", realm_id=realm.id)
-    TaskStore().create(_task_for(dead.id, "task_local_evidence"))
+    _seed_board_card(dead.id, title="Board data follows workspace lifecycle")
     realm.workspace_ids.append(dead.id)
     realm.deleted_workspace_ids = [dead.id]
     RealmStore().save(realm)
 
     summary = _apply_workspace_tombstones(realm.id)
 
-    assert summary["deleted"] == []
-    assert summary["archived"] == [dead.id]
-    assert paths.workspace_path(dead.id).exists()
-    assert WorkspaceStore().get(dead.id).archived is True
-    assert summary["warnings"] and summary["warnings"][0]["code"] == "workspace_tombstone_archived"
+    assert summary["deleted"] == [dead.id]
+    assert summary["archived"] == []
+    assert not paths.workspace_path(dead.id).exists()
+    assert summary["warnings"] == []

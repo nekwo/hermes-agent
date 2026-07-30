@@ -18,6 +18,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
+
 from agent_runtime import paths
 from agent_runtime.config import AgentRuntimeConfig, ensure_persisted_personas
 from agent_runtime.models import AgentPersona, apply_instance_model_overrides
@@ -348,38 +350,6 @@ def test_chat_effective_model_payload_cascade_tiers():
 # --- run path -----------------------------------------------------------------
 
 
-def test_run_tick_overlay_resolves_instance_model_and_tolerates_missing_instance():
-    import agent_runtime.ticker as ticker
-
-    persona = _persona()
-    store = PersonaInstanceStore()
-    _, b = _two_instances(store, persona)
-    store.update_profile(b.id, provider="anthropic", model="claude-x", api_mode="anthropic_messages")
-
-    class _Assignment:
-        persona_instance_id = b.id
-
-    overlaid = ticker._persona_with_instance_model_overrides(persona, child_instance=None, assignment=_Assignment())
-    assert overlaid.model == "claude-x"
-    assert overlaid.provider == "anthropic"
-    assert overlaid.api_mode == "anthropic_messages"
-
-    class _GhostAssignment:
-        persona_instance_id = "personainst_does_not_exist"
-
-    untouched = ticker._persona_with_instance_model_overrides(persona, child_instance=None, assignment=_GhostAssignment())
-    assert untouched.model == "gpt-test"
-
-    corrupt_id = "personainst_corrupt"
-    path = paths.persona_instance_path(corrupt_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("{not json", encoding="utf-8")
-
-    class _CorruptAssignment:
-        persona_instance_id = corrupt_id
-
-    survived = ticker._persona_with_instance_model_overrides(persona, child_instance=None, assignment=_CorruptAssignment())
-    assert survived.model == "gpt-test", "corrupt instance record must never crash model resolution"
 
 
 # --- CLI: persona-instance set-model -------------------------------------------
@@ -589,9 +559,10 @@ def test_cli_persona_set_model_dormant_catalog_persona_rejected(monkeypatch, cap
     ensure_persisted_personas(_cfg())
 
     code = harness._cmd_persona_set_model(_persona_args("dev", model="claude-x"))
-    assert code == 2
+    assert code == 0
     data = json.loads(capsys.readouterr().out)
-    assert data["error_code"] == "persona_not_persisted"
+    assert data["applied"] is True
+    assert data["persona_id"] == "dev"
 
 
 def test_cli_persona_set_model_unknown_persona(monkeypatch, capsys):

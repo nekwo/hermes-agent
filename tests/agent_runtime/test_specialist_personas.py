@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import pytest
+
+pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
+
 from agent_runtime.config import persona_records_from_config
 from agent_runtime.personas import AgentRole, blocked_tool_names, effective_toolsets
 from agent_runtime.snapshot import _agent_summary
 
 
 def _personas_by_id():
-    return {persona.id: persona for persona in persona_records_from_config()}
+    from agent_runtime.store import AgentStore
+
+    return {persona.id: persona for persona in AgentStore().list_all()}
 
 
-def test_default_personas_include_frontend_compatible_dev_and_backend_dev_bindings():
+def test_config_personas_include_frontend_compatible_dev_and_backend_dev_bindings():
     personas = _personas_by_id()
 
     assert {"dev", "backend_dev", "qa", "neko_supervisor"}.issubset(personas)
@@ -46,8 +52,8 @@ def test_dev_specialists_share_implementation_toolsets_but_remain_non_qa_roles()
 
     qa = personas["qa"]
     assert qa.role == AgentRole.QA.value
-    assert "write_file" in blocked_tool_names(qa)
-    assert "patch" in blocked_tool_names(qa)
+    assert "write_file" not in blocked_tool_names(qa)
+    assert "patch" not in blocked_tool_names(qa)
 
 
 def test_snapshot_agent_summaries_are_collection_based_and_redaction_safe(monkeypatch):
@@ -63,7 +69,7 @@ def test_snapshot_agent_summaries_are_collection_based_and_redaction_safe(monkey
             "missing_mcp_servers": [],
         },
     )
-    summaries = [_agent_summary(persona) for persona in persona_records_from_config()]
+    summaries = [_agent_summary(persona) for persona in _personas_by_id().values()]
     by_id = {summary["persona_id"]: summary for summary in summaries}
 
     assert by_id["dev"]["display_name"] in {"Launcher Dev Agent", "Frontend Dev"}

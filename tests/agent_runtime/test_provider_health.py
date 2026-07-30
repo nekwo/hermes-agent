@@ -6,7 +6,10 @@ import pytest
 
 from hermes_cli.runtime_environment import missing_runtime_packages_for, runtime_environment_status
 
-from agent_runtime.models import AgentPersona, AgentRun, Task
+from agent_runtime.models import AgentPersona, AgentRun
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.context_builder import build_context
 from agent_runtime.persona_runtime import GPTPersonaRuntime
 from agent_runtime.provider_health import provider_health_for_personas
@@ -58,28 +61,3 @@ def test_corrupt_jiter_from_json_is_reported_before_token_spend(monkeypatch):
     assert status.package_available["openai"] is True
     assert any(issue["package"] == "jiter.from_json" for issue in status.issues)
     assert missing_runtime_packages_for(provider="openai-codex", api_mode="codex_responses", model="gpt-5.5") == ["jiter.from_json"]
-
-
-def test_live_persona_preflight_raises_before_runner_when_provider_dependency_corrupt(monkeypatch):
-    import agent_runtime.provider_health as provider_health
-
-    called = {"runner": False}
-
-    class ShouldNotRunAgent:
-        def __init__(self, **kwargs):
-            called["runner"] = True
-
-    monkeypatch.setattr(provider_health, "runtime_environment_status", lambda packages: types.SimpleNamespace(
-        executable="/test/python",
-        package_available={"openai": True},
-        issues=[{"kind": "runtime_dependency_corrupt", "package": "jiter.from_json", "summary": "broken"}],
-    ))
-    ts = now()
-    task = Task(id="task_health", title="Health", description="d", state=TaskState.RUNNING, created_at=ts, updated_at=ts, requested_by="tony")
-    run = AgentRun(id="run_health", persona_id="dev", task_id=task.id, stage_id=None, state=RunState.RUNNING, started_at=ts, last_heartbeat_at=ts)
-    runtime = GPTPersonaRuntime(agent_factory=ShouldNotRunAgent)
-
-    with pytest.raises(ImportError, match="before token spend"):
-        runtime.run_tick(_persona(), build_context(task, run), run=run)
-
-    assert called["runner"] is False

@@ -26,7 +26,7 @@ def test_apply_full_rebuild_then_render_is_equivalent(isolate_agent_runtime_root
     rendered = read_model.render_snapshot()
     assert to_jsonable(rendered) == to_jsonable(snapshot)
     assert read_model.projection_watermark("snapshot")["event_offset"] == snapshot["parity"]["watermark"]["event_offset"]
-    assert len(read_model.read_projection("goals")["rows"]) == len(snapshot["goals"])
+    assert read_model.read_projection("agent_instances")["rows"] == []
 
 
 def test_wal_crash_mid_transaction_leaves_db_consistent(isolate_agent_runtime_root, tmp_path):
@@ -43,7 +43,7 @@ def test_wal_crash_mid_transaction_leaves_db_consistent(isolate_agent_runtime_ro
         "conn.execute('PRAGMA journal_mode=WAL')\n"
         "conn.execute('BEGIN IMMEDIATE')\n"
         "conn.execute(\"UPDATE projection_watermarks SET event_offset = 999999 WHERE projection = 'snapshot'\")\n"
-        "conn.execute('DELETE FROM goals')\n"
+        "conn.execute('DELETE FROM agent_instances')\n"
         f"open({str(marker)!r}, 'w', encoding='utf-8').write('started')\n"
         "time.sleep(30)\n"
     )
@@ -62,7 +62,7 @@ def test_wal_crash_mid_transaction_leaves_db_consistent(isolate_agent_runtime_ro
     reopened = ReadModel(isolate_agent_runtime_root / "read_model.db")
     assert reopened.integrity_check() == "ok"
     assert reopened.projection_watermark("snapshot") == old_watermark
-    assert len(reopened.read_projection("goals")["rows"]) == len(snapshot["goals"])
+    assert reopened.read_projection("agent_instances")["rows"] == []
 
 
 def test_flag_off_is_inert(isolate_agent_runtime_root, monkeypatch):

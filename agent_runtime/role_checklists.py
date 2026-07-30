@@ -11,8 +11,7 @@ from utils import atomic_json_write
 
 from . import paths
 from .decision_schema import DecisionPayloadInvalid
-from .mission_plan import current_plan_stage
-from .models import AgentRun, Event, Task
+from .models import AgentRun, Event
 from .serde import from_jsonable, to_jsonable
 
 CHECKLIST_ITEM_STATUSES = frozenset(
@@ -434,15 +433,7 @@ def normalize_role_id(role_id: str) -> str:
 
 
 def _typed_stage_for_checklist(task: Task, mission_stage_id: str | None):
-    plan = getattr(task, "mission_plan", None)
-    if plan is None:
-        return None
-    requested = str(mission_stage_id or "").strip()
-    if requested:
-        for stage in getattr(plan, "stages", []) or []:
-            if stage.id == requested:
-                return stage
-    return current_plan_stage(task)
+    return None
 
 
 def _promotion_rule(role_id: str) -> str:
@@ -478,7 +469,6 @@ def _template_items(role_id: str, stage_kind: str) -> list[RoleChecklistItem]:
         _item("patch", "Patch product code", role_id, ["Relevant product files changed and unrelated churn avoided."]),
         _item("self_test", "Run focused self-test", role_id, ["Focused command exits 0 or blocker is recorded."]),
         _item("attach_self_test", "Attach self-test evidence", role_id, ["Self-test evidence refs are recorded when available."]),
-        _item("final_gate", "Request or satisfy final gate", role_id, ["Harness final gate proof is requested or passed."]),
         _item("handoff", "Hand off to QA", role_id, ["Delivery summary and proof refs are ready for QA."]),
     ]
 

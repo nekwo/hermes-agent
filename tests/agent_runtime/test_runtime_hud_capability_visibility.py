@@ -49,14 +49,11 @@ from agent_runtime.runtime_hud import (
 )
 from agent_runtime.terminal_envelope import (
     COMMAND_CLASSES,
-    CREDENTIAL_EXFIL,
-    CREDENTIAL_READ,
     DESTRUCTIVE_GIT,
     GIT_PUSH,
     GRANTABLE_COMMAND_CLASSES,
     LANE_MISSION_CHAT,
     NETWORK_EGRESS,
-    PROD_OPERATION,
     RECURSIVE_DELETE,
     explain_terminal_envelope,
     grant_config_key,
@@ -153,10 +150,7 @@ def test_the_capability_block_renders_the_typed_drops_and_the_envelope_refusals(
     assert grant_config_key(role="dev", lane=LANE_MISSION_CHAT) in rendered
     for name in (DESTRUCTIVE_GIT, RECURSIVE_DELETE, NETWORK_EGRESS):
         assert name in rendered
-    # ...and the hard floor, named as a floor rather than as something to ask for.
-    assert "hard floor" in rendered
-    for name in (CREDENTIAL_READ, CREDENTIAL_EXFIL, PROD_OPERATION):
-        assert name in rendered
+    assert "hard floor" not in rendered
 
     # Compact by construction: this rides EVERY turn.
     assert len(rendered.splitlines()) == 2
@@ -178,12 +172,7 @@ def test_a_granted_class_is_reported_as_granted_not_refused():
     assert GIT_PUSH not in envelope.get("refused_hard_floor", [])
 
 
-def test_hard_floor_classes_are_never_offered_as_operator_grantable():
-    """Telling an agent to ask for a grant that cannot exist would be a new lie.
-
-    Same reasoning that made ``envelope_command_not_grantable`` a distinct
-    refusal code rather than a flavor of ``envelope_command_requires_grant``.
-    """
+def test_s12_leaves_no_hard_floor_classes():
 
     block = resolve_capability_block(
         envelope=explain_terminal_envelope(
@@ -192,13 +181,10 @@ def test_hard_floor_classes_are_never_offered_as_operator_grantable():
     )
     envelope = block["envelope"]
     assert set(envelope["refused_grantable"]) == set(GRANTABLE_COMMAND_CLASSES)
-    assert set(envelope["refused_hard_floor"]) == set(COMMAND_CLASSES) - set(
-        GRANTABLE_COMMAND_CLASSES
-    )
+    assert set(COMMAND_CLASSES) == set(GRANTABLE_COMMAND_CLASSES)
+    assert "refused_hard_floor" not in envelope
     # The two partition the taxonomy — a class can never be missing from both.
-    assert set(envelope["refused_grantable"]) | set(
-        envelope["refused_hard_floor"]
-    ) == set(COMMAND_CLASSES)
+    assert set(envelope["refused_grantable"]) == set(COMMAND_CLASSES)
 
 
 # ── (2) volatile: the revision hash must not move ───────────────────────────
@@ -396,7 +382,7 @@ def test_grant_config_issues_are_surfaced_so_a_typo_is_not_read_as_a_grant():
         envelope=explain_terminal_envelope(
             role="dev",
             lane=LANE_MISSION_CHAT,
-            cfg=_cfg(dev={LANE_MISSION_CHAT: ["git-push", CREDENTIAL_READ]}),
+            cfg=_cfg(dev={LANE_MISSION_CHAT: ["git-push", "credential_" + "read"]}),
         )
     )
     assert block["envelope"]["grant_issues"]

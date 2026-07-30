@@ -32,7 +32,7 @@ from hermes_time import now
 
 from . import paths
 from .events import EventLog
-from .models import Event, Incident, RepoBundle, Task
+from .models import Event, Incident, RepoBundle
 from .repo_context import (
     changed_files_from_diff,
     existing_run_worktrees,
@@ -88,7 +88,7 @@ def normalize_delivery_directive(value: Any) -> dict[str, str]:
     return directive
 
 
-def task_delivery_directive(task: Task) -> dict[str, str]:
+def task_delivery_directive(task: Any) -> dict[str, str]:
     declared = getattr(task, "delivery_directive", None)
     try:
         return normalize_delivery_directive(declared)
@@ -184,7 +184,7 @@ def capture_bundle_patch(bundle: RepoBundle, *, event_log: EventLog | None = Non
 
 
 def execute_delivery_directive(
-    task: Task,
+    task: Any,
     bundle: RepoBundle,
     *,
     event_log: EventLog | None = None,
@@ -240,7 +240,7 @@ def execute_delivery_directive(
 
 
 def execute_task_delivery_directives(
-    task: Task,
+    task: Any,
     bundles: list[RepoBundle],
     *,
     event_log: EventLog | None = None,
@@ -269,7 +269,7 @@ def execute_task_delivery_directives(
 
 
 def execute_task_worktree_delivery_directives(
-    task: Task,
+    task: Any,
     *,
     run_ids: list[str],
     repos: list[str],
@@ -394,9 +394,8 @@ def reap_orphan_worktrees(
 ) -> dict[str, Any]:
     """Capture-then-reap harness worktrees no open task run owns.
 
-    Protection, in order: worktrees deterministically owned by any open task's
-    runs are untouchable; worktrees younger than ``min_age_seconds`` are left
-    alone; every other worktree has its diff captured into
+    Protection, in order: worktrees younger than ``min_age_seconds`` are left
+    alone; every older worktree has its diff captured into
     ``wt_reaped_patches/`` (when dirty) before removal. Nothing is ever deleted
     with an uncaptured diff.
     """
@@ -409,32 +408,10 @@ def reap_orphan_worktrees(
         legacy_harness_worktree_base_dir,
         remove_orphan_worktree,
         worktree_source_root,
-        existing_run_worktrees_in_bases,
     )
-    from .store import RunStore, TaskStore
-
-    protected: set[Path] = set()
     candidate_bases = [current_harness_worktree_base_dir()]
     if include_legacy_temp:
         candidate_bases.append(legacy_harness_worktree_base_dir())
-    try:
-        task_store = TaskStore()
-        run_store = RunStore()
-        for task in task_store.list_open():
-            repos = list(getattr(task, "affected_repos", None) or [])
-            for run in run_store.list_for_task(task.id):
-                for repo in repos:
-                    for worktree in existing_run_worktrees_in_bases(
-                        repo,
-                        task_id=task.id,
-                        run_id=run.id,
-                        base_dirs=candidate_bases,
-                    ):
-                        protected.add(worktree.resolve())
-    except Exception:
-        # If ownership cannot be established, protect everything: reap nothing.
-        return {"reaped": [], "kept": [], "error": "open_task_scan_failed"}
-
     capture_dir = paths.store_root() / "wt_reaped_patches"
     now_ts = _time.time()
     reaped: list[dict[str, Any]] = []
@@ -454,9 +431,6 @@ def reap_orphan_worktrees(
             resolved = worktree.resolve()
         except OSError:
             kept.append({**entry, "reason": "unresolvable"})
-            continue
-        if resolved in protected:
-            kept.append({**entry, "reason": "owned_by_open_task_run"})
             continue
         try:
             age = now_ts - worktree.stat().st_mtime
@@ -587,7 +561,7 @@ def _write_reap_patch_exclusive(
 
 
 def _promote_patch_to_repo(
-    task: Task,
+    task: Any,
     bundle: RepoBundle,
     patch_path: Path,
     *,
@@ -691,7 +665,7 @@ def _bundle_run_id(bundle: RepoBundle) -> str:
     return str(capture.get("run_id") or "").strip()
 
 
-def _synthetic_worktree_bundle(task: Task, *, repo: str, run_id: str, worktree: Path) -> RepoBundle:
+def _synthetic_worktree_bundle(task: Any, *, repo: str, run_id: str, worktree: Path) -> RepoBundle:
     digest = hashlib.sha256(
         f"{task.id}|{repo}|{run_id}|{worktree.name}".encode("utf-8", errors="ignore")
     ).hexdigest()[:12]
@@ -727,7 +701,7 @@ def _reap_bundle_worktrees(bundle: RepoBundle, *, event_log: EventLog | None) ->
 
 
 def _open_promotion_incident(
-    task: Task,
+    task: Any,
     bundle: RepoBundle,
     promote_outcome: dict[str, Any],
     *,
@@ -755,7 +729,7 @@ def _open_promotion_incident(
     )
 
 
-def _write_promotion_record(task: Task, bundle: RepoBundle, outcome: dict[str, Any]) -> None:
+def _write_promotion_record(task: Any, bundle: RepoBundle, outcome: dict[str, Any]) -> None:
     from utils import atomic_json_write
 
     record_path = bundle_promotion_record_path(bundle.task_id, bundle.id)

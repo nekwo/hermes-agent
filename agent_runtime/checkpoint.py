@@ -6,7 +6,7 @@
 
 Typed entity CLASSES define the schema; the CANONICAL persisted form is one
 file per actor — which is exactly the fork's existing on-disk store layout
-(``agent_runtime/paths.py``: ``persona_instances/``, ``goals/``, ``incidents/``,
+(``agent_runtime/paths.py``: ``persona_instances/``, ``flow_graphs/``,
 ``flow_graphs/``, ``boards/`` …). So no second checkpoint format is invented:
 this module is a READ-ONLY bundler that reads those per-actor files verbatim
 into one keyed transport envelope. It never re-projects a row and it writes
@@ -70,7 +70,7 @@ class EntityClass:
     ``recursive`` distinguishes the two store layouts the fork uses:
 
     * flat (``recursive=False``): ``<dir>/<actor_id>.json`` — the actor id is
-      the filename stem (``persona_instances``, ``goals``, ``runs`` …).
+      the filename stem (``persona_instances``, ``flow_graphs`` …).
     * nested (``recursive=True``): owner sub-directories hold the per-actor
       files (``boards/<board_id>/…``, ``proofs/<task_id>/…``). The actor key is
       the POSIX relative path minus ``.json`` so every file is captured
@@ -90,8 +90,6 @@ class EntityClass:
 ENTITY_CLASSES: tuple[EntityClass, ...] = (
     EntityClass("persona_instances", paths.persona_instances_dir),
     EntityClass("persona_assignments", paths.persona_assignments_dir),
-    EntityClass("goals", paths.goals_dir),
-    EntityClass("tasks", paths.tasks_dir),  # legacy flat task store, if present
     EntityClass("runs", paths.runs_dir),
     EntityClass("incidents", paths.incidents_dir),
     EntityClass("runtime_instances", paths.runtime_instances_dir),
@@ -105,7 +103,6 @@ ENTITY_CLASSES: tuple[EntityClass, ...] = (
     EntityClass("repo_bundles", paths.repo_bundles_dir, recursive=True),
     EntityClass("role_envelopes", paths.role_envelopes_dir, recursive=True),
     EntityClass("role_checklists", paths.role_checklists_dir, recursive=True),
-    EntityClass("proof_batches", paths.proof_batches_dir, recursive=True),
     EntityClass("self_tests", paths.self_tests_dir, recursive=True),
     EntityClass("packet_artifacts", paths.packet_artifacts_dir, recursive=True),
 )

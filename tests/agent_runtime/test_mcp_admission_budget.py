@@ -44,7 +44,7 @@ from agent_runtime.mcp_admission import (
     resolve_mcp_admission,
     teardown_mcp_admission,
 )
-from agent_runtime.personas import default_personas
+from tests.agent_runtime.persona_samples import sample_personas
 from agent_runtime.runtime_config import McpAdmissionConfig
 
 _QA_ALLOW = {"qa": {LANE_MISSION_CHAT: ["launcher_qa"]}}
@@ -59,7 +59,7 @@ _DRILL_CALLS = 10
 
 
 def _persona(persona_id: str):
-    return {persona.id: persona for persona in default_personas()}[persona_id]
+    return {persona.id: persona for persona in sample_personas()}[persona_id]
 
 
 def _cfg(**kwargs) -> types.SimpleNamespace:

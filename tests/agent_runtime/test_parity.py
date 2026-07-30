@@ -94,7 +94,8 @@ def test_drop_samples_carry_the_by_design_flag():
 
 def test_build_snapshot_completeness_rows_all_carry_by_design(isolate_agent_runtime_root):
     completeness = build_snapshot()["parity"]["completeness"]
-    assert completeness  # the envelope always carries projection rows
+    # S9's compact snapshot has no mission-row projections in an empty runtime.
+    assert completeness == {}
     for projection, row in completeness.items():
         assert isinstance(row.get("by_design"), list), projection
 

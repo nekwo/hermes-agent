@@ -83,45 +83,8 @@ def test_redaction_mode_reads_root_not_profile(tmp_path, monkeypatch):
     assert redaction_mode() == "observe"
 
 
-def test_root_node_mode_reads_root_not_profile(tmp_path, monkeypatch):
-    from agent_runtime.node_tools import node_tools_available
-
-    _write_root_and_profile(
-        tmp_path,
-        monkeypatch,
-        root_yaml="""
-        agent_runtime:
-          root_node_mode: true
-        """,
-        profile_yaml="""
-        agent_runtime:
-          root_node_mode: false
-        """,
-    )
-    # root_node_mode gates the whole node-execution substrate; it is a property
-    # of the harness, not of a profile.
-    assert node_tools_available() is True
 
 
-def test_simplified_agent_contract_reads_root_not_profile(tmp_path, monkeypatch):
-    from agent_runtime.autonomy import _simplified_contract_active
-
-    _write_root_and_profile(
-        tmp_path,
-        monkeypatch,
-        root_yaml="""
-        agent_runtime:
-          simplified_agent_contract:
-            enabled: true
-            expose_only_simplified_actions: true
-        """,
-        profile_yaml="""
-        agent_runtime:
-          simplified_agent_contract:
-            enabled: false
-        """,
-    )
-    assert _simplified_contract_active() is True
 
 
 def test_event_log_rotation_cap_reads_root_not_profile(tmp_path, monkeypatch):

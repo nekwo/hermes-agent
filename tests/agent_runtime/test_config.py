@@ -10,7 +10,7 @@ def test_config_merges_persona_overrides(tmp_path):
     cfg=load_agent_runtime_config(p)
     pm=next(p for p in persona_records_from_config(cfg) if p.id=="pm")
     assert pm.model == "gpt-x"
-    assert pm.toolsets == ["file", "todo"]
+    assert pm.toolsets == ["file", "terminal", "todo"]
 
 
 def test_config_merges_profile_skills_and_readiness_fields(tmp_path):
@@ -185,7 +185,7 @@ def test_normal_worker_flow_defaults_off_and_can_be_enabled(tmp_path):
     default_config = load_agent_runtime_config(tmp_path / "missing.yaml")
 
     assert default_config.normal_worker_flow.enabled is False
-    assert default_config.normal_worker_flow.auto_final_gate_after_delivery is True
+    assert not hasattr(default_config.normal_worker_flow, "auto_final_gate_after_delivery")
 
     p = tmp_path / "config.yaml"
     p.write_text(
@@ -202,11 +202,10 @@ def test_normal_worker_flow_defaults_off_and_can_be_enabled(tmp_path):
     assert cfg.normal_worker_flow.max_self_test_repeats_without_change == 2
 
 
-def test_mission_plan_config_defaults_off_and_can_be_enabled(tmp_path):
+def test_legacy_mission_plan_config_is_ignored_after_stage_graph_removal(tmp_path):
     default_config = load_agent_runtime_config(tmp_path / "missing.yaml")
 
-    assert default_config.mission_plan.enabled is False
-    assert default_config.mission_plan.enforce_hud is True
+    assert not hasattr(default_config, "mission_plan")
 
     p = tmp_path / "config.yaml"
     p.write_text(
@@ -219,9 +218,8 @@ def test_mission_plan_config_defaults_off_and_can_be_enabled(tmp_path):
 
     cfg = load_agent_runtime_config(p)
 
-    assert cfg.mission_plan.enabled is True
-    assert cfg.mission_plan.enforce_hud is True
-    assert cfg.mission_plan.version == 1
+    assert not hasattr(cfg, "mission_plan")
+    assert cfg.normal_worker_flow.enabled is False
 
 
 def test_role_envelope_config_defaults_off_and_can_be_enabled(tmp_path):
@@ -271,25 +269,24 @@ def test_config_persona_skills_merge_defaults_with_explicit_removals(tmp_path):
     assert "backend-docker" in personas["backend_dev"].skills
     assert "visual-qa" in personas["qa"].skills
 
-    defaults = {persona.id: persona for persona in persona_records_from_config(load_agent_runtime_config())}
-    assert set(defaults["neko_supervisor"].skills).issubset(personas["neko_supervisor"].skills)
-    assert set(defaults["dev"].skills).issubset(personas["dev"].skills)
+    assert personas["neko_supervisor"].skills == ["agent-runtime-harness"]
+    assert personas["dev"].skills == ["launcher-stagec-mcp-screenshot"]
 
 
 def test_config_persona_skills_remove_is_explicit(tmp_path):
-    defaults = {persona.id: persona for persona in persona_records_from_config(load_agent_runtime_config())}
-    removed = defaults["qa"].skills[0]
+    removed = "visual-qa"
     p = tmp_path / "config.yaml"
     p.write_text(
         "agent_runtime:\n"
         "  personas:\n"
         "    qa:\n"
+        "      skills: [visual-qa, retained-skill]\n"
         f"      skills_remove: [{removed}]\n",
         encoding="utf-8",
     )
 
     personas = {persona.id: persona for persona in persona_records_from_config(load_agent_runtime_config(p))}
-    assert removed not in personas["qa"].skills
+    assert personas["qa"].skills == ["retained-skill"]
 
 
 def test_neko_supervisor_uses_configured_head_agent_profile_when_not_explicit(tmp_path):
@@ -305,12 +302,11 @@ def test_neko_supervisor_uses_configured_head_agent_profile_when_not_explicit(tm
 
     personas = {persona.id: persona for persona in persona_records_from_config(load_agent_runtime_config(p))}
 
-    assert personas["neko_supervisor"].hermes_profile == "captain"
+    assert personas["neko_supervisor"].hermes_profile is None
     assert "agent-runtime-harness" in personas["neko_supervisor"].skills
 
 
-def test_neko_supervisor_legacy_alice_profile_falls_back_to_head_agent_when_missing(tmp_path, monkeypatch):
-    monkeypatch.setattr("agent_runtime.config.profile_exists", lambda name: False)
+def test_neko_supervisor_profile_data_does_not_fall_back_to_head_agent(tmp_path):
     p = tmp_path / "config.yaml"
     p.write_text(
         "agent_runtime:\n"
@@ -324,11 +320,10 @@ def test_neko_supervisor_legacy_alice_profile_falls_back_to_head_agent_when_miss
 
     personas = {persona.id: persona for persona in persona_records_from_config(load_agent_runtime_config(p))}
 
-    assert personas["neko_supervisor"].hermes_profile == "alice-mac"
+    assert personas["neko_supervisor"].hermes_profile == "alice"
 
 
-def test_neko_supervisor_preserves_existing_explicit_alice_profile(tmp_path, monkeypatch):
-    monkeypatch.setattr("agent_runtime.config.profile_exists", lambda name: name == "alice")
+def test_neko_supervisor_preserves_explicit_profile_data(tmp_path):
     p = tmp_path / "config.yaml"
     p.write_text(
         "agent_runtime:\n"

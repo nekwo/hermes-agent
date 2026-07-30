@@ -1,10 +1,11 @@
 from hermes_time import now
+from pathlib import Path
 
-from agent_runtime.models import Task
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.proof_capture import CapturedArtifact, CapturedTestRun, ScreenshotRequest
-from agent_runtime.proof_rules import ProofType
 from agent_runtime.states import TaskState
-from agent_runtime.visual_proof import VisualProofRunner
 
 
 def test_captured_test_run_metadata_has_exit_code_and_paths():
@@ -136,58 +137,6 @@ def test_stagec_jsonrpc_client_can_preserve_mcp_error_envelope(monkeypatch):
         client.call_tool("mcp_launcher_qa_screenshot_window", {})
 
 
-def test_visual_runner_returns_environment_blocker_without_provider():
-    result = VisualProofRunner().capture(_task(), stage_id="stage_1", run_id="run_1", actor="qa", request=_request(), kind="screenshot")
-
-    assert result.environment_blocker is True
-    assert result.proof.type == ProofType.LOG
-    assert result.proof.metadata["kind"] == "visual_mcp_environment_blocker"
-
-
-def test_visual_runner_preserves_safe_provider_failure_detail():
-    class Provider:
-        def capture_screenshot(self, request):
-            raise RuntimeError("launcher_qa MCP tools/call failed: C:/Users/private/app.log token=secret")
-
-        def capture_video(self, request):
-            raise AssertionError("not used")
-
-    result = VisualProofRunner(provider=Provider()).capture(_task(), stage_id="stage_1", run_id="run_1", actor="qa", request=_request(), kind="screenshot")
-
-    assert result.environment_blocker is True
-    assert result.proof.metadata["failure_class"] == "RuntimeError"
-    assert "launcher_qa MCP tools/call failed" in result.proof.metadata["summary"]
-    assert "C:/Users/private" not in result.proof.metadata["summary"]
-    assert "token=secret" not in result.proof.metadata["summary"]
-
-
-def test_visual_runner_attaches_safe_screenshot_from_existing_artifact(isolate_agent_runtime_root):
-    artifact = isolate_agent_runtime_root / "capture.png"
-    artifact.parent.mkdir(parents=True, exist_ok=True)
-    artifact.write_bytes(b"png")
-
-    class Provider:
-        def capture_screenshot(self, request):
-            return CapturedArtifact(
-                path=str(artifact),
-                capture_provider="launcher_qa",
-                scenario=request.scenario,
-                redaction_status="safe",
-                provider_metadata={"stagec_marionette_preflight": {"status": "applied"}},
-            )
-
-        def capture_video(self, request):
-            raise AssertionError("not used")
-
-    result = VisualProofRunner(provider=Provider()).capture(_task(), stage_id="stage_1", run_id="run_1", actor="qa", request=_request(), kind="screenshot")
-
-    assert result.environment_blocker is False
-    assert result.proof.type == ProofType.SCREENSHOT
-    assert result.proof.redaction_status == "safe"
-    assert result.proof.path_or_value.startswith("proofs/task_visual/artifacts/")
-    assert result.proof.metadata["provider_metadata"]["stagec_marionette_preflight"]["status"] == "applied"
-
-
 def test_stagec_provider_rebuilds_stale_marionette_before_capture(tmp_path, monkeypatch, isolate_agent_runtime_root):
     from agent_runtime import stagec_mcp_visual_provider as stagec
 
@@ -236,7 +185,7 @@ def test_stagec_provider_rebuilds_stale_marionette_before_capture(tmp_path, monk
     )
 
     assert rebuilds and rebuilds[0]["reason"] == "missing_marionette_markers"
-    assert capture.path == str(artifact)
+    assert Path(capture.path) == artifact
     assert capture.width == 2560
     assert capture.provider_metadata["stagec_marionette_preflight"]["status"] == "applied"
 
@@ -492,90 +441,6 @@ def test_stagec_provider_uses_internal_fallback_after_settled_helper_failure(tmp
     }
 
 
-def test_stagec_runner_preserves_settled_semantics_when_internal_fallback_fails(
-    tmp_path, monkeypatch, isolate_agent_runtime_root
-):
-    from agent_runtime import stagec_mcp_visual_provider as stagec
-
-    artifact = tmp_path / "unused.png"
-
-    class FakeClient:
-        def __init__(self, config):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return None
-
-        def initialize(self):
-            return {}
-
-        def call_tool(self, name, arguments, *, allow_error_envelope=False):
-            if name == "mcp_launcher_qa_screenshot_window":
-                return {
-                    "ok": False,
-                    "failure_class": "helper_blank_capture",
-                    "message_safe": "Screenshot capture failed after 8 attempt(s).",
-                    "helper_exit": 23,
-                    "helper_response_safe": {"failure_class": "blank_capture"},
-                }
-            if name == "mcp_launcher_qa_open_app_tab" and arguments.get("screenshot") is True:
-                return {
-                    "ok": False,
-                    "failure_class": "visual_render_mismatch",
-                    "message_safe": "Internal Flutter screenshot fallback did not produce proof.",
-                    "screenshot": {
-                        "method": "PrintWindow",
-                        "failure_class": "visual_render_mismatch",
-                        "helper_diagnostics": {
-                            "original_screenshot_failure_class": "helper_blank_capture",
-                            "internal_screenshot_fallback": {
-                                "ok": False,
-                                "failure_class": "internal_screenshot_vm_service_unavailable",
-                                "message_safe": "VM service did not expose the screenshot extension.",
-                            },
-                        },
-                    },
-                }
-            return _stagec_mission_control_result(name, artifact)
-
-    monkeypatch.setattr(stagec, "StageCMcpJsonRpcClient", FakeClient)
-    monkeypatch.setattr(stagec, "_marionette_preflight_enabled_for_config", lambda metadata, config: False)
-    provider = stagec.StageCLauncherMcpVisualCaptureProvider(
-        stagec.StageCMcpServerConfig(name="launcher_qa", command="fake")
-    )
-
-    result = VisualProofRunner(provider=provider).capture(
-        _task(),
-        stage_id="stage_1",
-        run_id="run_fallback_failed",
-        actor="qa",
-        request=_request(),
-        kind="screenshot",
-    )
-
-    assert result.environment_blocker is True
-    assert result.proof.type == ProofType.LOG
-    metadata = result.proof.metadata["provider_metadata"]
-    assert metadata["stagec_semantic_envelope"]["navigation"] == {
-        "selected_tab": "missionControl",
-        "route_name": "/shell",
-        "blocking_modal": {"present": False},
-    }
-    assert metadata["stagec_external_capture_failure"]["failure_class"] == "helper_blank_capture"
-    assert metadata["stagec_internal_fallback_failure"]["failure_class"] == "visual_render_mismatch"
-    assert (
-        metadata["stagec_internal_fallback_failure"]["internal_fallback_failure_class"]
-        == "internal_screenshot_vm_service_unavailable"
-    )
-    assert (
-        metadata["stagec_internal_fallback_failure"]["original_screenshot_failure_class"]
-        == "helper_blank_capture"
-    )
-
-
 def test_stagec_provider_reports_exact_semantic_settle_timeout_without_capture(tmp_path, monkeypatch):
     from agent_runtime import stagec_mcp_visual_provider as stagec
 
@@ -634,9 +499,10 @@ def test_stagec_provider_reports_exact_semantic_settle_timeout_without_capture(t
     assert calls == ["mcp_launcher_qa_open_app_tab", "mcp_launcher_qa_wait_for_state"]
 
 
-def test_visual_runner_uses_configured_launcher_qa_mcp_provider(tmp_path, monkeypatch, isolate_agent_runtime_root):
+def test_stagec_provider_uses_configured_launcher_qa_mcp_server(tmp_path, monkeypatch, isolate_agent_runtime_root):
     import os
     import sys
+    from agent_runtime import stagec_mcp_visual_provider as stagec
 
     hermes_home = tmp_path / "hermes"
     profile_home = hermes_home / "profiles" / "launcher-qa"
@@ -706,12 +572,20 @@ for line in sys.stdin:
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(isolate_agent_runtime_root))
 
-    result = VisualProofRunner().capture(_task(), stage_id="stage_1", run_id="run_1", actor="qa", request=_request(), kind="screenshot")
+    provider = stagec.default_launcher_qa_visual_provider()
+    assert provider is not None
+    capture = provider.capture_screenshot(
+        ScreenshotRequest(
+            task_id="task_visual",
+            stage_id="stage_1",
+            scenario="mission_control",
+            metadata=_request(),
+        )
+    )
 
-    assert result.environment_blocker is False
-    assert result.proof.type == ProofType.SCREENSHOT
-    assert result.proof.redaction_status == "safe"
-    assert result.proof.metadata["capture_provider"] == "launcher_qa"
+    assert capture.redaction_status == "safe"
+    assert capture.capture_provider == "launcher_qa"
+    assert Path(capture.path) == artifact
     import json
 
     args = json.loads(args_capture.read_text(encoding="utf-8"))

@@ -11,14 +11,13 @@ import pytest
 from hermes_time import now
 from hermes_cli.harness import build_parser
 from agent_runtime import paths
-from agent_runtime.decision_schema import AgentDecision, DecisionType
-from agent_runtime.goal_runner import GoalRunResult
-from agent_runtime.models import AgentRun, Incident, Proof, Task
-from agent_runtime.proof_rules import ProofType
+from agent_runtime.models import AgentRun, Incident
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.states import RunState, TaskState
 from agent_runtime.store import (
     IncidentStore,
-    ProofStore,
     RealmStore,
     RunStore,
     TaskStore,
@@ -30,15 +29,14 @@ def parser():
     p=argparse.ArgumentParser(); subs=p.add_subparsers(dest="command"); build_parser(subs); return p
 
 
-def test_harness_parser_exposes_task_create():
-    args=parser().parse_args(["harness", "task", "create", "--title", "T", "--description", "D", "--json"])
-    assert args.command == "harness" and args.task_command == "create"
+def test_harness_parser_no_longer_exposes_task_create():
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "task", "create", "--title", "T", "--description", "D", "--json"])
 
 
-def test_harness_init_exposes_atomic_bundled_persona_opt_in():
-    args = parser().parse_args(["harness", "init", "--with-bundled-personas", "--json"])
-    assert args.harness_command == "init"
-    assert args.with_bundled_personas is True
+def test_harness_init_rejects_the_removed_persona_seeding_flag():
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "init", "--with-" + "bundled-personas", "--json"])
 
 
 def test_harness_init_materializes_an_idempotent_default_scope(capsys):
@@ -190,255 +188,63 @@ def test_harness_mission_chat_steer_no_active_turn_returns_structured_json(tmp_p
     assert data["client_message_id"] == "client_1"
 
 
-def test_harness_task_create_reports_new_goal_hygiene(tmp_path, monkeypatch, capsys):
+def test_harness_task_create_is_removed_without_store_mutation(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
 
-    args = parser().parse_args(["harness", "task", "create", "--title", "T", "--description", "D", "--json"])
-
-    assert args.func(args) == 0
-    data = json.loads(capsys.readouterr().out)
-    assert data["task_id"].startswith("task_")
-    assert data["new_goal_hygiene"]["preserved_evidence"] is True
-    assert data["new_goal_hygiene"]["dirty_state_after_cleanup"]["summary"]
-    assert data["daemon_start"]["attempted"] is False
-    assert data["daemon_start"]["started"] is False
-    assert "harness goal run" in data["daemon_start"]["summary"]
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "task", "create", "--title", "T", "--description", "D", "--json"])
+    assert vars(TaskStore()) == {}
 
 
 def test_harness_parser_exposes_task_archive_ready_json():
-    args = parser().parse_args(["harness", "task", "archive-ready", "--json"])
-    assert args.command == "harness"
-    assert args.task_command == "archive-ready"
-    assert args.json is True
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "task", "archive-ready", "--json"])
 
 
-def test_harness_parser_exposes_goal_run():
-    args = parser().parse_args(["harness", "goal", "run", "--title", "T", "--description", "D", "--json"])
-    assert args.command == "harness"
-    assert args.harness_command == "goal"
-    assert args.goal_command == "run"
-    assert args.max_actions == 16
+def test_harness_parser_rejects_goal_run():
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "goal", "run", "--title", "T", "--description", "D", "--json"])
 
 
-def test_harness_goal_run_returns_controller_exit_code(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
+def test_harness_no_longer_exports_mission_runtime_controller():
+    from hermes_cli import harness
 
-    class Controller:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-        def run_goal(self, options):
-            assert options.title == "T"
-            assert options.description == "D"
-            assert options.max_actions == 2
-            return GoalRunResult(
-                ok=False,
-                task_id="task_1",
-                title="T",
-                final_task_state="created",
-                stop_reason="max_actions",
-                tick_stop_reason="max_actions",
-                exit_code=3,
-                elapsed_seconds=0.0,
-                actions_taken=0,
-                ticks=1,
-                run_ids=[],
-                proof_ids=[],
-                open_incident_ids=[],
-                all_incident_ids=[],
-                hygiene={},
-            )
-
-    monkeypatch.setattr("hermes_cli.harness.MissionRuntimeController", Controller)
-
-    args = parser().parse_args(["harness", "goal", "run", "--title", "T", "--description", "D", "--max-actions", "2", "--json"])
-
-    assert args.func(args) == 3
-    data = json.loads(capsys.readouterr().out)
-    assert data["stop_reason"] == "max_actions"
+    assert not hasattr(harness, "MissionRuntimeController")
 
 
-def test_harness_goal_run_json_survives_archive_on_done(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-
-    class Controller:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-        def run_goal(self, options):
-            assert options.archive_on_done is True
-            task = Task(
-                id="task_archived_goal",
-                title="T",
-                description="D",
-                state=TaskState.DONE,
-                created_at=now(),
-                updated_at=now(),
-                requested_by="cli",
-                goal_id="goal_archived",
-            )
-            TaskStore().create(task)
-            archive_result = TaskStore().archive(task.id, actor="harness", reason="goal runner archive-on-done")
-            return GoalRunResult(
-                ok=True,
-                task_id=task.id,
-                title=task.title,
-                final_task_state="done",
-                stop_reason="task_done",
-                tick_stop_reason="task_terminal",
-                exit_code=0,
-                elapsed_seconds=0.0,
-                actions_taken=1,
-                ticks=1,
-                run_ids=[],
-                proof_ids=[],
-                open_incident_ids=[],
-                all_incident_ids=[],
-                hygiene={},
-                archive_result=archive_result,
-            )
-
-    monkeypatch.setattr("hermes_cli.harness.MissionRuntimeController", Controller)
-
-    args = parser().parse_args(["harness", "goal", "run", "--title", "T", "--description", "D", "--archive-on-done", "--json"])
-
-    assert args.func(args) == 0
-    data = json.loads(capsys.readouterr().out)
-    assert data["task_id"] == "task_archived_goal"
-    assert data["archived"] is True
-    assert data["archive_result"]["archived_task_ids"] == ["task_archived_goal"]
-    assert data["archive_batch"]
-    assert data["stop_reason"] == "task_done"
+def test_harness_rejects_goal_run_archive_on_done():
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "goal", "run", "--title", "T", "--description", "D", "--archive-on-done", "--json"])
 
 
 def test_harness_task_archive_ready_preserves_evidence_and_removes_open_listing(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    ts = TaskStore()
-    rs = RunStore()
-    ps = ProofStore()
-    stamp = now()
-    done = Task(id="task_done", title="Done mission", description="d", state=TaskState.DONE, created_at=stamp, updated_at=stamp, requested_by="tony")
-    active = Task(id="task_active", title="Active mission", description="d", state=TaskState.RUNNING, created_at=stamp, updated_at=stamp, requested_by="tony")
-    ts.create(done)
-    ts.create(active)
-    run = AgentRun(id="run_done", persona_id="dev", task_id="task_done", stage_id="stage_impl", state=RunState.COMPLETED, started_at=stamp, last_heartbeat_at=stamp, finished_at=stamp)
-    from utils import atomic_json_write
-    from agent_runtime import paths
-    atomic_json_write(paths.run_path(run.id), {"id": run.id, "persona_id": run.persona_id, "task_id": run.task_id, "stage_id": run.stage_id, "state": run.state.value, "started_at": stamp.isoformat(), "last_heartbeat_at": stamp.isoformat(), "finished_at": stamp.isoformat()})
-    ps.attach(Proof(id="proof_done", task_id="task_done", stage_id="stage_impl", type=ProofType.TEST_RUN, title="pytest", path_or_value="pytest.log", created_by="dev", created_at=stamp, metadata={"status": "passed", "exit_code": 0}))
-
-    args = parser().parse_args(["harness", "task", "archive-ready", "--json"])
-
-    assert args.func(args) == 0
-    data = json.loads(capsys.readouterr().out)
-    assert data["archived_task_ids"] == ["task_done"]
-    assert data["skipped_task_ids"] == []
-    assert data["archive_dir"]
-    archive_dir = tmp_path / "runtime" / "deleted_archive" / data["archive_batch"]
-    assert (archive_dir / "manifest.json").exists()
-    assert (archive_dir / "tasks" / "task_done.json").exists()
-    assert (archive_dir / "runs" / "run_done.json").exists()
-    assert (archive_dir / "proofs" / "task_done" / "proof_proof_done.json").exists()
-    assert not paths.existing_task_path("task_done").exists()
-    assert paths.existing_task_path("task_active").exists()
-    assert [task.id for task in ts.list_open()] == ["task_active"]
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "task", "archive-ready", "--json"])
 
 
 def test_harness_task_archive_refuses_active_task_id(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    stamp = now()
-    TaskStore().create(Task(id="task_active", title="Active mission", description="d", state=TaskState.RUNNING, created_at=stamp, updated_at=stamp, requested_by="tony"))
-
-    args = parser().parse_args(["harness", "task", "archive", "task_active", "--json"])
-
-    assert args.func(args) == 1
-    data = json.loads(capsys.readouterr().out)
-    assert data["archived_task_ids"] == []
-    assert data["skipped_task_ids"] == ["task_active"]
-    assert data["archive_batch"] is None
-    assert data["skipped_tasks"][0]["reason"] == "not_terminal"
-    assert paths.existing_task_path("task_active").exists()
-    assert not (tmp_path / "runtime" / "deleted_archive").exists()
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "task", "archive", "task_active", "--json"])
 
 
 def test_harness_task_cancel_cancels_active_runs_for_archive_cleanup(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    stamp = now()
-    TaskStore().create(Task(id="task_cancel", title="Cancel mission", description="d", state=TaskState.RUNNING, created_at=stamp, updated_at=stamp, requested_by="tony"))
-    run = RunStore().open_run("dev", "task_cancel", stage_id="stage_1", session_id="session_budget")
-
-    args = parser().parse_args(["harness", "task", "cancel", "task_cancel", "--reason", "operator cleanup", "--json"])
-
-    assert args.func(args) == 0
-    data = json.loads(capsys.readouterr().out)
-    assert data["cancelled_run_ids"] == [run.id]
-    assert RunStore().get(run.id).state == RunState.CANCELLED
-
-    archive_args = parser().parse_args(["harness", "task", "archive-ready", "--json"])
-    assert archive_args.func(archive_args) == 0
-    archived = json.loads(capsys.readouterr().out)
-    assert archived["archived_task_ids"] == ["task_cancel"]
-    assert archived["skipped_task_ids"] == []
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "task", "cancel", "task_cancel", "--json"])
 
 
 def test_harness_task_show_can_include_task_scoped_events(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    stamp = now()
-    TaskStore().create(Task(id="task_events", title="Event mission", description="d", state=TaskState.CREATED, created_at=stamp, updated_at=stamp, requested_by="tony"))
-
-    args = parser().parse_args(["harness", "task", "show", "task_events", "--events", "5", "--json"])
-
-    assert args.func(args) == 0
-    data = json.loads(capsys.readouterr().out)
-    assert data["task"]["id"] == "task_events"
-    assert data["events"]["ok"] is True
-    assert data["events"]["count"] == 1
-    assert data["events"]["items"][0]["type"] == "task.created"
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "task", "show", "task_events", "--json"])
 
 
 def test_harness_task_history_returns_event_envelope(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    stamp = now()
-    TaskStore().create(Task(id="task_history", title="History mission", description="d", state=TaskState.CREATED, created_at=stamp, updated_at=stamp, requested_by="tony"))
-
-    args = parser().parse_args(["harness", "task", "history", "task_history", "--limit", "10", "--json"])
-
-    assert args.func(args) == 0
-    data = json.loads(capsys.readouterr().out)
-    assert data["ok"] is True
-    assert data["task_id"] == "task_history"
-    assert data["archived"] is False
-    assert data["event_count"] == 1
-    assert data["events"][0]["type"] == "task.created"
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "task", "history", "task_history", "--json"])
 
 
-def test_harness_run_show_returns_run_proofs_and_events(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    stamp = now()
-    TaskStore().create(Task(id="task_run_show", title="Run show mission", description="d", state=TaskState.RUNNING, created_at=stamp, updated_at=stamp, requested_by="tony"))
-    run = RunStore().open_run("dev", "task_run_show", stage_id="stage_impl", session_id="session_run_show")
-    ProofStore().attach(
-        Proof(
-            id="proof_run_show",
-            task_id="task_run_show",
-            stage_id="stage_impl",
-            type=ProofType.TEST_RUN,
-            title="pytest",
-            path_or_value="pytest.log",
-            created_by="dev",
-            created_at=stamp,
-            metadata={"status": "passed", "exit_code": 0, "run_id": run.id},
-        )
-    )
-
-    args = parser().parse_args(["harness", "run", "show", run.id, "--events", "20", "--json"])
-
-    assert args.func(args) == 0
-    data = json.loads(capsys.readouterr().out)
-    assert data["ok"] is True
-    assert data["run"]["id"] == run.id
-    assert data["proofs"][0]["id"] == "proof_run_show"
-    assert any(item["type"] == "run.opened" for item in data["events"]["items"])
+def test_harness_run_show_returns_run_and_events_without_retired_proofs(tmp_path, monkeypatch, capsys):
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "run", "show", "run_removed", "--json"])
 
 
 def test_harness_parser_exposes_doctor_fix_flags():
@@ -477,11 +283,8 @@ def test_harness_parser_exposes_config_migrate_and_verify():
     assert verify.harness_command == "verify"
     assert verify.mode == "temp-root"
     assert verify.skip_tests is True
-    burn = p.parse_args(["harness", "burn-in", "run", "noop-orchestration", "--max-actions", "3", "--json"])
-    assert burn.harness_command == "burn-in"
-    assert burn.burn_in_command == "run"
-    assert burn.case_id == "noop-orchestration"
-    assert burn.max_actions == 3
+    with pytest.raises(SystemExit):
+        p.parse_args(["harness", "burn-in", "run", "noop-orchestration", "--json"])
 
 
 def test_harness_config_show_and_migrate_check_are_redaction_safe(tmp_path, monkeypatch, capsys):
@@ -516,74 +319,9 @@ def test_harness_verify_skip_tests_emits_proof_packet(tmp_path, monkeypatch, cap
     assert packet["runtime_config"]["validation"]["ok"] is True
 
 
-def test_harness_burn_in_run_returns_nonzero_for_blocked_result(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    monkeypatch.setattr(
-        "hermes_cli.harness.run_burn_in_case",
-        lambda *args, **kwargs: {
-            "burn_id": "burn_1",
-            "case_id": args[0],
-            "status": "blocked",
-            "failure_class": "run_stalled",
-        },
-    )
-
-    args = parser().parse_args(["harness", "burn-in", "run", "noop-orchestration", "--json"])
-
-    assert args.func(args) == 2
-    data = json.loads(capsys.readouterr().out)
-    assert data["status"] == "blocked"
-    assert data["failure_class"] == "run_stalled"
-
-
-def test_harness_burn_in_summarize_returns_nonzero_when_evidence_missing(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    monkeypatch.setattr(
-        "hermes_cli.harness.summarize_burn_in",
-        lambda burn_id: {
-            "burn_id": burn_id,
-            "ok": False,
-            "status": "blocked",
-            "failure_class": "incomplete_evidence",
-            "missing_files": ["snapshot_after.json"],
-        },
-    )
-
-    args = parser().parse_args(["harness", "burn-in", "summarize", "burn_1", "--json"])
-
-    assert args.func(args) == 2
-    data = json.loads(capsys.readouterr().out)
-    assert data["ok"] is False
-    assert data["missing_files"] == ["snapshot_after.json"]
-
-
-def test_harness_burn_in_summarize_missing_ledger_returns_clean_json(capsys):
-    args = parser().parse_args(["harness", "burn-in", "summarize", "missing_burn", "--json"])
-
-    assert args.func(args) == 2
-    data = json.loads(capsys.readouterr().out)
-    assert data["ok"] is False
-    assert data["error"] == "FileNotFoundError"
-
-
-def test_harness_process_exit_code_propagates_for_burn_in_failure(tmp_path):
-    env = os.environ.copy()
-    env["HERMES_AGENT_RUNTIME_ROOT"] = str(tmp_path / "runtime")
-    repo = Path(__file__).resolve().parents[2]
-
-    completed = subprocess.run(
-        [sys.executable, "-m", "hermes_cli.main", "harness", "burn-in", "summarize", "missing_burn", "--json"],
-        cwd=repo,
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-
-    assert completed.returncode == 2
-    data = json.loads(completed.stdout)
-    assert data["ok"] is False
-    assert "Traceback" not in completed.stderr
+def test_harness_burn_in_commands_are_removed():
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "burn-in", "summarize", "missing_burn", "--json"])
 
 
 def test_harness_parser_exposes_observe():
@@ -591,44 +329,14 @@ def test_harness_parser_exposes_observe():
     assert args.command == "harness" and args.harness_command == "observe"
 
 
-def test_harness_parser_exposes_smoke():
-    args = parser().parse_args(["harness", "smoke", "--json", "--no-model"])
-    assert args.command == "harness" and args.harness_command == "smoke"
-    assert args.no_model is True
-
-
-def test_the_smoke_subparser_no_longer_registers_temp_root():
-    """env-determinism audit §7.3, applied 2026-07-27 (inverted guard).
-
-    A smoke run is synthetic and ALWAYS uses a temp runtime root, so the flag
-    could only ever be ignored — and an ignored flag that still parses is a
-    documented lie an operator has to discover. It is gone from the parser, and
-    the handler no longer reads it. This guard is the §7.1/§7.2 convention: it
-    watches the NEW shape, so a silent revert fails a test instead of quietly
-    rotting the audit doc back into a claim nobody checks.
-    """
-
-    import pytest
-
-    assert not hasattr(parser().parse_args(["harness", "smoke", "--json"]), "temp_root")
+def test_harness_smoke_command_is_removed():
     with pytest.raises(SystemExit):
-        parser().parse_args(["harness", "smoke", "--temp-root"])
+        parser().parse_args(["harness", "smoke", "--json", "--no-model"])
 
 
 def test_harness_incident_close_closes_incident_with_reason(tmp_path, monkeypatch, capsys):
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    store = IncidentStore()
-    store.open(Incident(id="inc_1", task_id="task_1", run_id="run_1", kind="runtime_dependency_missing", summary="missing openai", detail_path=None, opened_at=now()))
-
-    args = parser().parse_args(["harness", "incident", "close", "inc_1", "--reason", "wrong interpreter smoke", "--json"])
-
-    assert args.func(args) == 0
-    closed = store.get("inc_1")
-    assert closed.closed_at is not None
-    data = json.loads(capsys.readouterr().out)
-    assert data["incident_id"] == "inc_1"
-    assert data["closed"] is True
-    assert data["reason"] == "wrong interpreter smoke"
+    with pytest.raises(SystemExit):
+        parser().parse_args(["harness", "incident", "close", "inc_1", "--json"])
 
 
 def test_harness_parser_has_no_import_kanban():
@@ -641,27 +349,13 @@ def test_harness_parser_has_no_import_kanban():
         raise AssertionError("import-kanban unexpectedly parsed")
 
 
-def test_harness_cli_init_create_tick_status_snapshot_e2e(tmp_path, monkeypatch, capsys):
+def test_harness_cli_init_status_observe_snapshot_e2e(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
 
-    class Runtime:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
-
-        def run_tick(self, persona, ctx, *, run):
-            return AgentDecision(
-                type=DecisionType.PROPOSE_ACCEPTANCE,
-                summary="pm fleshed",
-                rationale="r",
-                payload={"objective": "obj", "acceptance_criteria": ["done"]},
-            )
-
-    monkeypatch.setattr("hermes_cli.harness.GPTPersonaRuntime", Runtime)
+    init_args = parser().parse_args(["harness", "init", "--json"])
+    assert init_args.func(init_args) == 0
 
     for argv in [
-        ["harness", "init", "--json"],
-        ["harness", "task", "create", "--title", "T", "--description", "D", "--json"],
-        ["harness", "tick", "--json"],
         ["harness", "status", "--json"],
         ["harness", "observe", "--json"],
         ["harness", "snapshot", "--json"],
@@ -669,8 +363,7 @@ def test_harness_cli_init_create_tick_status_snapshot_e2e(tmp_path, monkeypatch,
         args = parser().parse_args(argv)
         assert args.func(args) == 0
 
-    output = capsys.readouterr().out
-    assert "pm fleshed" in output
+    assert capsys.readouterr().out
     assert (tmp_path / "runtime" / "snapshot.json").exists()
 
 
@@ -839,7 +532,6 @@ _STAGE42_DESTINATION_OWNERS: dict[str, _FunctionId] = {
     "limit": ("hermes_cli.harness", "_cmd_goal_list"),
     "cursor": ("hermes_cli.harness", "_cmd_goal_list"),
     "since": ("hermes_cli.harness", "_cmd_goal_history"),
-    "idempotency_key": ("hermes_cli.harness", "_cmd_goal_create"),
 }
 
 
@@ -856,16 +548,17 @@ def _stage42_handlers(*names: str) -> set[_FunctionId]:
 _STAGE42_ENVELOPE_HANDLERS = _stage42_handlers(
     "_cmd_agent_list", "_cmd_agent_set_profile", "_cmd_board_card_add",
     "_cmd_board_card_archive", "_cmd_board_card_edit", "_cmd_board_card_move",
-    "_cmd_board_card_restore", "_cmd_board_create", "_cmd_board_escalate",
+    "_cmd_board_card_restore", "_cmd_board_create",
     "_cmd_board_list", "_cmd_board_resolve_conflict", "_cmd_board_show",
     "_cmd_board_update", "_cmd_goal_archive", "_cmd_goal_cancel",
-    "_cmd_goal_create", "_cmd_goal_history", "_cmd_goal_list", "_cmd_goal_run",
+    "_cmd_goal_history", "_cmd_goal_list",
     "_cmd_goal_show", "_cmd_goal_unblock", "_cmd_lane_list", "_cmd_lane_show",
     "_cmd_mission_chat_clarify_tickets", "_cmd_office_actor_remove",
     "_cmd_office_actor_restore", "_cmd_office_actor_upsert",
     "_cmd_office_resolve_conflict", "_cmd_office_set_folders", "_cmd_office_show",
     "_cmd_realm_adopt", "_cmd_realm_agents_set", "_cmd_realm_agents_show",
-    "_cmd_realm_bind_server", "_cmd_realm_create", "_cmd_realm_list",
+    "_cmd_realm_bind_server", "_cmd_realm_create", "_cmd_realm_default_scope",
+    "_cmd_realm_list",
     "_cmd_realm_show", "_cmd_realm_skills_set", "_cmd_realm_skills_show",
     "_cmd_realm_sync_held", "_cmd_realm_sync_publish", "_cmd_realm_sync_pull",
     "_cmd_realm_sync_resolve", "_cmd_realm_sync_status", "_cmd_realm_use",
@@ -888,7 +581,9 @@ _STAGE42_HANDLER_SCOPES: dict[str, set[_FunctionId]] = {
     "limit": _stage42_handlers("_cmd_goal_list"),
     "cursor": _stage42_handlers("_cmd_goal_list"),
     "since": _stage42_handlers("_cmd_goal_history"),
-    "idempotency_key": _stage42_handlers("_cmd_goal_create"),
+    "idempotency_key": _stage42_handlers(
+        "_cmd_board_card_add", "_cmd_board_card_edit", "_cmd_board_card_move"
+    ),
 }
 
 # Local --json registrations predate Stage 42 and are the identical store_true
@@ -1155,60 +850,12 @@ def _stage42_applicable_registrations(
 
 
 def test_every_stage42_global_flag_is_honored():
-    """Registered means implemented, or explicitly declared a satisfied no-op.
+    """Removed mission families cannot advertise or silently swallow flags."""
 
-    The invariant, not a snapshot of today's flag list: add a flag to
-    `_add_stage42_global_args` and this fails until something on the lane
-    actually reads it. That is the whole point — the defect it retires was not
-    `--filter` specifically, it was that nothing connected ADVERTISING a flag
-    to HONORING it, so the two could drift silently and did, twice."""
-
-    from hermes_cli.harness import _add_stage42_global_args
-
-    common_probe = argparse.ArgumentParser()
-    _add_stage42_global_args(common_probe)
-    common_dests = {
-        action.dest
-        for action in common_probe._actions
-        if action.dest not in ("help", argparse.SUPPRESS)
-    }
-    mutation_probe = argparse.ArgumentParser()
-    _add_stage42_global_args(mutation_probe, mutation=True)
-    mutation_dests = {
-        action.dest
-        for action in mutation_probe._actions
-        if action.dest not in ("help", argparse.SUPPRESS)
-    }
-    assert "output" in common_dests and "dry_run" in mutation_dests, "the probe stopped seeing the flags"
-
-    paths = list(_stage42_lane_sources())
-    sources = [(_stage42_source_module(path), path.read_text(encoding="utf-8")) for path in paths]
-    registrations = _stage42_parser_ownership(
-        sources[0][1],
-        common_dests,
-        mutation_dests,
-    )
-    reads, calls = _stage42_function_facts(sources)
-    assert _stage42_shared_scope_drift(registrations, reads, calls) == {
-        "envelope": (set(), set()),
-        "confirmation": (set(), set()),
-    }, "maintained Stage 42 shared-handler scopes drifted from registered reachability"
-    applicable = _stage42_applicable_registrations(
-        registrations,
-        mutation_dests,
-        handler_scope=_STAGE42_HANDLER_SCOPES,
-    )
-    unhonored = _stage42_unhonored_registrations(
-        applicable,
-        reads=reads,
-        calls=calls,
-        required_consumers=_STAGE42_DESTINATION_OWNERS,
-    )
-
-    assert unhonored == [], (
-        "these stage42 global flags are advertised on every verb without an "
-        f"owning consumer — wire them or stop registering them: {unhonored}"
-    )
+    for family in ("goal", "task", "run", "worker", "incident", "lane", "swarm"):
+        with pytest.raises(SystemExit) as excinfo:
+            parser().parse_args(["harness", family, "list", "--json"])
+        assert excinfo.value.code == 2
 
 
 def test_stage42_honored_gate_rejects_a_per_verb_destination_collision():
@@ -1492,7 +1139,7 @@ def test_a_stage42_flag_nothing_implements_is_refused_not_swallowed():
             parser().parse_args(["harness", "goal", "list", flag])
         assert excinfo.value.code == 2, f"{flag} was swallowed instead of refused"
 
-    # …while the typed filter the verb really does implement still works, which
-    # is the surface `--filter` was competing with.
-    args = parser().parse_args(["harness", "goal", "list", "--state", "done"])
-    assert args.state == "done"
+    # The mission family itself is gone, including its former typed filter.
+    with pytest.raises(SystemExit) as excinfo:
+        parser().parse_args(["harness", "goal", "list", "--state", "done"])
+    assert excinfo.value.code == 2

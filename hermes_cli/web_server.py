@@ -12244,13 +12244,6 @@ class ProfilePromoteRequest(BaseModel):
     slot_role: str = "builder"
 
 
-class BlueprintRunRequest(BaseModel):
-    goal: str
-    bindings: Dict[str, str] = {}
-    dry_run: bool = False
-    requested_by: str = "mission_control"
-
-
 def _profile_attr(info, name: str, default: Any = None) -> Any:
     try:
         return getattr(info, name)
@@ -12461,78 +12454,6 @@ def _disable_unselected_skills(profile_dir: Path, keep: List[str]) -> int:
     finally:
         reset_hermes_home_override(token)
     return disabled_count
-
-
-@app.get("/api/blueprints")
-async def list_agent_runtime_blueprints():
-    try:
-        from agent_runtime.blueprints.runs import BlueprintRunStore, blueprint_run_summary
-        from agent_runtime.blueprints.store import BlueprintStore, blueprint_summary
-
-        return {
-            "blueprints": [blueprint_summary(bp) for bp in BlueprintStore().list()],
-            "runs": [blueprint_run_summary(record) for record in BlueprintRunStore().list_all()[-50:]],
-        }
-    except Exception as exc:
-        _log.exception("GET /api/blueprints failed")
-        raise HTTPException(status_code=500, detail=str(exc))
-
-
-@app.post("/api/blueprints/{blueprint_id}/run")
-async def run_agent_runtime_blueprint(blueprint_id: str, body: BlueprintRunRequest):
-    try:
-        import uuid as _uuid
-
-        from agent_runtime.blueprints.instantiate import instantiate_blueprint
-        from agent_runtime.blueprints.resolve import BindingResolver
-        from agent_runtime.blueprints.store import BlueprintStore
-        from agent_runtime.mission_plan import mission_plan_summary
-        from agent_runtime.models import Task
-        from agent_runtime.state_machine import MissionStateMachine
-        from agent_runtime.states import TaskState
-        from agent_runtime.store import TaskStore
-        from hermes_time import now as runtime_now
-
-        bp = BlueprintStore().get(blueprint_id)
-        resolver = BindingResolver(allow_promote=not body.dry_run)
-        plan = instantiate_blueprint(bp, goal=body.goal, bindings=dict(body.bindings), resolver=resolver)
-        created_at = runtime_now()
-        task = Task(
-            id=f"task_blueprint_{_uuid.uuid4().hex[:12]}",
-            title=bp.title,
-            description=body.goal,
-            state=TaskState.CREATED,
-            created_at=created_at,
-            updated_at=created_at,
-            requested_by=body.requested_by or "mission_control",
-            mission_plan=plan,
-            current_stage_id=plan.current_stage_id,
-        )
-        action = MissionStateMachine().next_action(task)
-        if not body.dry_run:
-            TaskStore().create(task)
-        return {
-            "ok": True,
-            "dry_run": bool(body.dry_run),
-            "created": not bool(body.dry_run),
-            "blueprint_id": bp.id,
-            "blueprint_version": bp.version,
-            "task_id": task.id,
-            "mission_plan": mission_plan_summary(task),
-            "next_action": {
-                "type": action.type.value,
-                "task_id": action.task_id,
-                "slot_id": action.slot_id,
-                "reason": action.reason,
-            },
-        }
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-    except Exception as exc:
-        _log.exception("POST /api/blueprints/%s/run failed", blueprint_id)
-        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @app.get("/api/profiles")

@@ -123,6 +123,4 @@ def pre_trace_ack_text(trace_payload: dict[str, Any]) -> str:
         return "I'll run the check now, then report back with the result."
     if tool_name in {"read_file", "search_files", "find_files", "session_search"}:
         return "I'll inspect the relevant context now, then report back with what I find."
-    if tool_name in {"mission_goal_create", "mission_goal"}:
-        return "I'll create the real Mission Control goal now, then report back with the task details."
     return "I'll check that now and report back with what I find."

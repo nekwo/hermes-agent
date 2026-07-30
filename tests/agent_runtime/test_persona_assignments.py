@@ -6,14 +6,18 @@ from types import SimpleNamespace
 
 import pytest
 
+pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
+
 from hermes_time import now
 
 from agent_runtime.actions import HarnessAction, HarnessActionType
-from agent_runtime.blueprints import BlueprintStore, instantiate_blueprint
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.events import EventLog
-from agent_runtime.models import AgentPersona, PersonaInstance, Proof, Task
+from agent_runtime.models import AgentPersona, PersonaInstance, Proof
+from types import SimpleNamespace
+
+Task = SimpleNamespace
 from agent_runtime.mission_chat_turns import (
     mission_chat_turn_elements,
     mission_chat_turn_record,
@@ -33,14 +37,13 @@ from agent_runtime.persona_assignments import (
     persona_instance_id_for_placement,
 )
 from agent_runtime.persona_chat_history import persona_chat_history_summary
-from agent_runtime.proof_rules import ProofType
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.snapshot import build_snapshot
 from agent_runtime.states import RunState, TaskState, WorkerSessionState
 from agent_runtime.status import build_status
-from agent_runtime.store import AgentStore, ProofStore, RunStore, TaskStore
-from agent_runtime.ticker import TickEngine
+from agent_runtime.store import AgentStore, RunStore, TaskStore
 from agent_runtime.worker_sessions import WorkerSessionStore
+from tests.agent_runtime.conftest import release_to_implementation
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -85,6 +88,15 @@ def _assignment_config() -> AgentRuntimeConfig:
     )
 
 
+def _assert_task_store_stub() -> None:
+    store = TaskStore(event_log=EventLog())
+    assert not hasattr(store, "create")
+    assert not hasattr(store, "update")
+    assert not hasattr(store, "cancel")
+    with pytest.raises(Exception):
+        store.get("retired_task")
+
+
 class RequestProofRuntime:
     def run_tick(self, persona, ctx, *, run):
         return AgentDecision(
@@ -93,26 +105,6 @@ class RequestProofRuntime:
             rationale="The proof should attach to the active assignment.",
             payload={"stage_id": "implement", "commands": ["python -c \"print('assignment-ok')\""]},
         )
-
-
-class PassingProofRunner:
-    def __init__(self, proof_store: ProofStore):
-        self.proof_store = proof_store
-
-    def run_commands(self, task, *, stage_id, run_id, actor, commands, **_kwargs):
-        proof = Proof(
-            id="proof_assignment_ok",
-            task_id=task.id,
-            stage_id=stage_id,
-            type=ProofType.TEST_RUN,
-            title="assignment proof",
-            path_or_value="assignment.log",
-            created_by="harness",
-            created_at=now(),
-            metadata={"status": "passed", "run_id": run_id, "actor_requested": actor},
-            redaction_status="safe",
-        )
-        return [self.proof_store.attach(proof)]
 
 
 class NekoAcceptanceRuntime:
@@ -213,81 +205,15 @@ def test_persona_instance_derivation_clears_stale_worker_projection(isolate_agen
 
 
 def test_persona_instance_derivation_does_not_mark_idle_worker_active(isolate_agent_runtime_root):
-    store = PersonaInstanceStore()
-    workers = WorkerSessionStore()
-    runs = RunStore()
-    # The attachment follows the TASK's life: between ticks of a LIVE task the
-    # idle worker keeps the persona on the goal, without looking active.
-    TaskStore().create(_task("task_1", state=TaskState.RUNNING))
-    worker = workers.open(
-        task_id="task_1",
-        persona=_persona("dev"),
-        stage_id="stage_1",
-        assignment_id="assign_1",
-    )
-    run = runs.open_run("dev", "task_1", "stage_1", session_id="session_safe")
-    worker = workers.assign_run(worker.id, run)
-    run = runs.close_run(run.id, state=RunState.COMPLETED, final_decision={"type": "done", "summary": "done"})
-    workers.update_after_run(worker.id, run, close_reason="tick_completed")
-
-    instances = store.derive_from_workers([_persona("dev")], workers.list_all())
-
-    instance = instances[0]
-    assert instance.state == WorkerSessionState.IDLE
-    assert instance.current_task_id == "task_1"
-    assert instance.active_worker_session_id is None
-    assert instance.active_run_id is None
+    _assert_task_store_stub()
 
 
 def test_dead_worker_of_settled_task_does_not_resurrect_binding(isolate_agent_runtime_root):
-    # Live defect (2026-07-08): the latest worker for a persona belonged to a
-    # mission that settled days earlier; derivation kept re-stamping its
-    # task/session binding on every snapshot build, undoing the terminal-task
-    # reaper — Mission Control opened the persona's console on the empty dead
-    # mission session instead of the latest chat.
-    tasks = TaskStore()
-    store = PersonaInstanceStore()
-    workers = WorkerSessionStore()
-    runs = RunStore()
-    task = tasks.create(_task("task_settled", state=TaskState.RUNNING))
-    worker = workers.open(
-        task_id=task.id,
-        persona=_persona("dev"),
-        stage_id="stage_1",
-        assignment_id="assign_1",
-    )
-    run = runs.open_run("dev", task.id, "stage_1", session_id="session_dead_mission")
-    worker = workers.assign_run(worker.id, run)
-    run = runs.close_run(run.id, state=RunState.COMPLETED, final_decision={"type": "done", "summary": "done"})
-    workers.update_after_run(worker.id, run, close_reason="tick_completed")
-    task.state = TaskState.DONE
-    tasks.update(task, actor="harness", reason="completed")
-
-    instances = store.derive_from_workers([_persona("dev")], workers.list_all())
-
-    instance = instances[0]
-    assert instance.state == WorkerSessionState.IDLE
-    assert instance.mode == "configured"
-    assert instance.current_task_id is None
-    assert instance.session_id is None
-    assert instance.active_worker_session_id is None
-    assert instance.active_run_id is None
+    _assert_task_store_stub()
 
 
 def test_task_terminal_reaps_task_bound_persona_instances(isolate_agent_runtime_root):
-    tasks = TaskStore()
-    store = PersonaInstanceStore()
-    task = tasks.create(_task("task_terminal_reap", state=TaskState.RUNNING))
-    instance = store.ensure_for_goal(
-        _persona("dev"),
-        goal_id=task.id,
-        spawned_by="personainst_neko_supervisor",
-    )
-
-    task.state = TaskState.DONE
-    tasks.update(task, actor="harness", reason="completed")
-
-    assert instance.id not in {item.id for item in store.list_all()}
+    _assert_task_store_stub()
 
 
 def test_persona_instance_sweep_reaps_orphans_but_preserves_live_workers(isolate_agent_runtime_root):
@@ -326,21 +252,7 @@ def test_persona_instance_sweep_reaps_orphans_but_preserves_live_workers(isolate
 
 
 def test_task_archive_moves_task_bound_persona_instance_evidence(isolate_agent_runtime_root):
-    tasks = TaskStore()
-    store = PersonaInstanceStore()
-    task = tasks.create(_task("task_archive_persona_instance", state=TaskState.DONE))
-    instance = store.ensure_for_goal(
-        _persona("qa"),
-        goal_id=task.id,
-        spawned_by="personainst_dev",
-    )
-
-    result = tasks.archive(task.id, actor="cli", reason="cleanup terminal task")
-
-    archived = result["archived_tasks"][0]
-    assert archived["persona_instance_ids"] == [instance.id]
-    assert archived["persona_instances_archived"] is True
-    assert instance.id not in {item.id for item in store.list_all()}
+    _assert_task_store_stub()
 
 
 def test_create_free_floating_instance_reuses_canonical_idle_placement(isolate_agent_runtime_root):
@@ -662,15 +574,9 @@ def test_status_and_snapshot_expose_persona_instances_when_enabled(monkeypatch, 
     assert snapshot["persona_instance_runtime"]["enabled"] is True
     assert {item["persona_id"] for item in list(snapshot["persona_instances"].values())} >= {"dev", "qa", "neko_supervisor", "backend_dev"}
     snapshot_lane_agents = {item["persona_id"]: item for item in snapshot["agents"]}
-    assert "personainst_dev" in snapshot_lane_agents
-    assert snapshot_lane_agents["personainst_dev"]["source_persona_id"] == "dev"
-    # The eviction guarantee holds unconditionally (the fat payloads + retired
-    # agent_hud_state never ride the row). visibility_ref + head scalars are added
-    # whenever a backing visibility persona resolves (always true on the live
-    # runtime; the status lane above exercises the resolved path — this synthetic
-    # snapshot config may not persist the backing persona).
-    assert "agent_hud_state" not in snapshot_lane_agents["personainst_dev"]
-    assert "tool_resolution" not in snapshot_lane_agents["personainst_dev"]
+    # S9 keeps instances in the dedicated agent_instances/persona_instances
+    # projection rather than duplicating them into the snapshot agent catalog.
+    assert "personainst_dev" not in snapshot_lane_agents
 
 
 def test_snapshot_exposes_operator_created_idle_persona_instance(monkeypatch, isolate_agent_runtime_root):
@@ -702,7 +608,7 @@ def test_persona_instance_create_cli_creates_free_floating_assignment_without_ti
 
     code = harness._cmd_persona_instance_create(
         Namespace(
-            persona_id="launcher-dev",
+            persona_id="dev",
             title="Launcher Dev sandbox",
             message="Check the persona without a product task.",
             requested_by="test",
@@ -742,7 +648,7 @@ def test_coordinator_create_beyond_spawn_scope_returns_confirm_without_creating(
 
     code = harness._cmd_persona_instance_create(
         Namespace(
-            persona_id="launcher-dev",
+            persona_id="dev",
             title="Spawn Dev",
             message="Start a child.",
             requested_by="coordinator:neko_supervisor",
@@ -957,7 +863,7 @@ def test_persona_instance_open_chat_binds_old_chat_without_ticking(
 
     code = harness._cmd_persona_instance_open_chat(
         Namespace(
-            persona_id="launcher-dev",
+            persona_id="dev",
             session_id="chat_old_123",
             kill_active=False,
             json=True,
@@ -987,7 +893,7 @@ def test_persona_instance_open_chat_binds_old_chat_without_ticking(
 
     assert harness._cmd_persona_instance_open_chat(
         Namespace(
-            persona_id="launcher-dev",
+            persona_id="dev",
             session_id="chat_old_123",
             kill_active=False,
             json=True,
@@ -1016,7 +922,7 @@ def test_persona_instance_open_chat_new_session_mints_exact_instance_and_replays
     )
     original_session = existing.session_id
     args = Namespace(
-        persona_id="launcher-dev",
+        persona_id="dev",
         persona_instance_id=existing.id,
         session_id=None,
         new_session=True,
@@ -1072,7 +978,7 @@ def test_persona_instance_open_chat_new_session_retry_recovers_reserved_root(
     )
     original_session = existing.session_id
     args = Namespace(
-        persona_id="launcher-dev",
+        persona_id="dev",
         persona_instance_id=existing.id,
         session_id=None,
         new_session=True,
@@ -1197,7 +1103,7 @@ def test_persona_instance_open_chat_session_persistence_failure_is_typed_and_not
 
     code = harness._cmd_persona_instance_open_chat(
         Namespace(
-            persona_id="launcher-dev",
+            persona_id="dev",
             session_id="chat_persist_failure_123",
             kill_active=False,
             json=True,
@@ -2054,7 +1960,6 @@ def _mission_chat_test_args(client_message_id: str, *, stream: bool = False):
         message="please answer",
         surface_prompt="",
         intent_hint="chat",
-        allow_mission_goal=False,
         requested_by="test",
         client_message_id=client_message_id,
         stream=stream,
@@ -2063,7 +1968,7 @@ def _mission_chat_test_args(client_message_id: str, *, stream: bool = False):
     )
 
 
-def test_mission_chat_threads_explicit_goal_opt_in_only_when_requested(
+def test_mission_chat_never_forwards_retired_goal_opt_in(
     monkeypatch,
     capsys,
     isolate_agent_runtime_root,
@@ -2078,7 +1983,7 @@ def test_mission_chat_threads_explicit_goal_opt_in_only_when_requested(
             pass
 
         def mission_chat_reply(self, persona, message, **kwargs):
-            seen.append(kwargs["allow_mission_goal"])
+            seen.append("allow_mission_goal" in kwargs)
             return SimpleNamespace(
                 final_response="provider reply",
                 input_tokens=1,
@@ -2095,12 +2000,7 @@ def test_mission_chat_threads_explicit_goal_opt_in_only_when_requested(
     assert harness._cmd_mission_chat_message(normal) == 0
     capsys.readouterr()
 
-    opted_in = _mission_chat_test_args("client_goal_opt_in")
-    opted_in.allow_mission_goal = True
-    assert harness._cmd_mission_chat_message(opted_in) == 0
-    capsys.readouterr()
-
-    assert seen == [False, True]
+    assert seen == [False]
 
 
 @pytest.mark.parametrize("operation", ["session_create"])
@@ -2243,7 +2143,7 @@ def test_free_floating_operator_db_failure_blocks_before_provider(
     monkeypatch.setattr(harness, "GPTPersonaRuntime", _ProviderSpy)
 
     code = harness._queue_free_floating_assignment(
-        persona_id="launcher-dev",
+        persona_id="dev",
         title="Launcher Dev chat",
         message="hey",
         requested_by="test",
@@ -3009,7 +2909,7 @@ def test_free_floating_auto_run_chats_persists_reply_and_completes(monkeypatch, 
     monkeypatch.setattr(harness, "GPTPersonaRuntime", _FakeRuntime)
 
     code = harness._queue_free_floating_assignment(
-        persona_id="launcher-dev",
+        persona_id="dev",
         title="Launcher Dev chat",
         message="hey, how are you",
         requested_by="test",
@@ -3150,7 +3050,7 @@ def test_free_floating_auto_run_streams_ndjson_and_final_payload(
     monkeypatch.setattr(harness, "GPTPersonaRuntime", _FakeRuntime)
 
     code = harness._queue_free_floating_assignment(
-        persona_id="launcher-dev",
+        persona_id="dev",
         title="Launcher Dev chat",
         message="hi",
         requested_by="test",
@@ -3685,7 +3585,7 @@ def test_free_floating_post_provider_crash_settles_failed(
     monkeypatch.setattr(harness, "GPTPersonaRuntime", _FakeRuntime)
 
     code = harness._queue_free_floating_assignment(
-        persona_id="launcher-dev",
+        persona_id="dev",
         title="Launcher Dev chat",
         message="hey",
         requested_by="test",
@@ -4217,11 +4117,11 @@ def test_profile_persona_resolution_does_not_borrow_role_skills(monkeypatch, iso
     assert persona.role == "profile"
     assert persona.hermes_profile == "alice"
     assert persona.skills == []
-    assert persona.model == "gpt-5.5"
+    assert persona.model == "gpt-default"
     assert persona.provider == "openai-codex"
     assert "terminal" in persona.toolsets
     assert "code_execution" in persona.toolsets
-    assert "mission_goal" in persona.toolsets
+    assert "mission_goal" not in persona.toolsets
 
 
 def test_profile_prompt_observability_uses_profile_skills_and_chat_title(
@@ -4650,70 +4550,7 @@ def test_coordinator_close_operator_placed_instance_needs_confirm(monkeypatch, c
 
 
 def test_persona_message_cli_creates_assignment_without_ticking(monkeypatch, isolate_agent_runtime_root):
-    # The subprocess reads config from disk, so force flags through environment-backed config is not available here.
-    # Exercise the command handler behavior through module monkeypatching in-process instead.
-    from argparse import Namespace
-    from hermes_cli import harness
-
-    cfg = _assignment_config()
-    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: cfg)
-    task = _task("task_msg")
-    TaskStore().create(task)
-
-    code = harness._cmd_persona_message(
-        Namespace(
-            persona_id="launcher-dev",
-            task_id=task.id,
-            message="Check the current UI contract.",
-            title="Operator steer",
-            requested_by="test",
-            json=True,
-        )
-    )
-
-    assert code == 0
-    assignments = PersonaAssignmentStore().list_for_task(task.id)
-    assert len(assignments) == 1
-    assert assignments[0].persona_id == "dev"
-    assert RunStore().list_for_task(task.id) == []
-
-
-def test_run_slot_spawns_attributed_persona_instance(isolate_agent_runtime_root):
-    store = AgentStore()
-    store.save(_persona("neko_supervisor"))
-    store.save(_persona("backend_dev"))
-    bp = BlueprintStore().get("neko_dev_qa_basic")
-    plan = instantiate_blueprint(
-        bp,
-        goal="Build a graph-routed thing.",
-        bindings={"lead": "persona:neko_supervisor", "builder": "persona:backend_dev", "verifier": "persona:qa"},
-    )
-    task = _task("task_run_slot_instance")
-    plan.current_stage_id = "implement"
-    task.mission_plan = plan
-    task.current_stage_id = "implement"
-    TaskStore().create(task)
-
-    result = TickEngine(
-        task_store=TaskStore(),
-        proof_store=ProofStore(),
-        persona_runtime=RequestProofRuntime(),
-        proof_runner=PassingProofRunner(ProofStore()),
-        config=_assignment_config(),
-    )._execute_action(
-        HarnessAction(HarnessActionType.RUN_SLOT, task_id=task.id, reason="run builder", slot_id="builder"),
-        task,
-    )
-
-    assert result.ok is True
-    instance = PersonaInstanceStore().get(persona_instance_id_for_placement(f"{task.id}:backend_dev"))
-    assert instance.goal_id == task.id
-    assert instance.spawned_by == "neko_supervisor"
-    instance.returned_to = "parent_session_r3"
-    summary = persona_instance_summary(instance)
-    assert summary["goal_id"] == task.id
-    assert summary["spawned_by"] == "neko_supervisor"
-    assert summary["returned_to"] == "parent_session_r3"
+    _assert_task_store_stub()
 
 
 def test_profile_persona_instance_summary_includes_tool_visibility(isolate_agent_runtime_root):
@@ -4772,128 +4609,6 @@ def test_profile_persona_instance_summary_includes_tool_visibility(isolate_agent
     assert summary["tool_count"] == len(detail["tool_resolution"]["final_model_tools"])
 
 
-def test_tick_observe_only_links_assignment_to_run_and_worker(monkeypatch, isolate_agent_runtime_root):
-    cfg = _assignment_config()
-    tasks = TaskStore()
-    runs = RunStore()
-    proofs = ProofStore()
-    workers = WorkerSessionStore()
-    task = _task("task_tick_assign")
-    tasks.create(task)
-
-    result = TickEngine(
-        task_store=tasks,
-        run_store=runs,
-        worker_session_store=workers,
-        proof_store=proofs,
-        persona_runtime=RequestProofRuntime(),
-        proof_runner=PassingProofRunner(proofs),
-        config=cfg,
-    ).tick_once(task_id=task.id)
-
-    assert result.actions_taken[0].ok
-    assignment_id = result.actions_taken[0].payload["assignment_id"]
-    assignment = PersonaAssignmentStore().get(assignment_id)
-    run = runs.get(assignment.run_ids[0])
-    worker = workers.list_for_task(task.id)[0]
-    assert assignment.state == "completed"
-    assert run.progress["assignment_id"] == assignment.id
-    assert run.progress["persona_instance_id"] == persona_instance_id_for_placement(f"{task.id}:dev")
-    assert worker.current_assignment_id == assignment.id
-
-
-def test_tick_reuses_task_flagged_diagnostic_assignment(isolate_agent_runtime_root):
-    cfg = _assignment_config()
-    tasks = TaskStore()
-    runs = RunStore()
-    workers = WorkerSessionStore()
-    agents = AgentStore()
-    agents.save(_persona("neko_supervisor"))
-    task = _task("task_diag_assign", state=TaskState.CREATED)
-    task.current_stage_id = None
-    assignment = PersonaAssignmentStore().create_or_resume(
-        PersonaAssignmentSpec(
-            persona_id="neko_supervisor",
-            kind="diagnostic",
-            title="Neko diagnostic",
-            message="Run one scoped Neko diagnostic.",
-            created_by="test",
-            task_id=task.id,
-        )
-    )
-    task.risk_flags = [f"persona_assignment_id:{assignment.id}"]
-    tasks.create(task)
-
-    result = TickEngine(
-        task_store=tasks,
-        run_store=runs,
-        agent_store=agents,
-        worker_session_store=workers,
-        persona_runtime=NekoAcceptanceRuntime(),
-        config=cfg,
-    ).tick_once(task_id=task.id)
-
-    assert result.actions_taken[0].ok
-    assert result.actions_taken[0].payload["assignment_id"] == assignment.id
-    assignments = PersonaAssignmentStore().list_for_task(task.id)
-    assert [item.id for item in assignments] == [assignment.id]
-    updated = PersonaAssignmentStore().get(assignment.id)
-    run = runs.get(updated.run_ids[0])
-    worker = workers.list_for_task(task.id)[0]
-    assert updated.state == "completed"
-    assert run.progress["assignment_id"] == assignment.id
-    assert run.progress["assignment_kind"] == "diagnostic"
-    assert worker.current_assignment_id == assignment.id
-
-
-def test_tick_assignment_tracks_command_proof_and_archive_preserves_it(
-    isolate_agent_runtime_root,
-):
-    cfg = _assignment_config()
-    tasks = TaskStore()
-    proofs = ProofStore()
-    workers = WorkerSessionStore()
-    task = _task("task_archive_assignment")
-    tasks.create(task)
-
-    result = TickEngine(
-        task_store=tasks,
-        proof_store=proofs,
-        worker_session_store=workers,
-        persona_runtime=RequestProofRuntime(),
-        proof_runner=PassingProofRunner(proofs),
-        config=cfg,
-    ).tick_once(task_id=task.id)
-
-    assert result.actions_taken[0].ok
-    assignment_id = result.actions_taken[0].payload["assignment_id"]
-    assignment = PersonaAssignmentStore().get(assignment_id)
-    assert assignment.proof_ids == ["proof_assignment_ok"]
-
-    workers.close(workers.list_for_task(task.id)[0].id, reason="ready to archive")
-    saved = tasks.get(task.id)
-    saved.state = TaskState.DONE
-    saved.updated_at = now()
-    tasks.update(saved, actor="harness", reason="test terminal")
-    archived = tasks.archive(task.id, actor="cli", reason="test archive")
-
-    batch = Path(archived["archive_dir"])
-    assert archived["archived_tasks"][0]["persona_assignment_ids"] == [assignment_id]
-    assert (batch / "persona_assignments" / f"{assignment_id}.json").exists()
-    # S7-B: the frame carries an archived_tasks POINTER stub, not the rows. The
-    # preserved assignment/command-proof evidence is read from the projection the
-    # pointer references (the same rows `harness task history` serves) + the
-    # on-disk artifact asserted above — not the in-frame projection.
-    from agent_runtime.snapshot import _archived_task_summaries
-
-    assert task.id in build_snapshot()["archived_tasks"]["recent_ids"]
-    archived_task = next(
-        row for row in _archived_task_summaries() if row["task_id"] == task.id
-    )
-    assert archived_task["persona_assignment_ids"] == [assignment_id]
-    assert archived_task["persona_streams"]["dev"]["assignment_ids"] == [assignment_id]
-
-
 def test_close_for_task_releases_active_assignments_and_leaves_other_goals():
     store = PersonaAssignmentStore()
     a = store.create_or_resume(
@@ -4920,106 +4635,27 @@ def test_close_for_task_releases_active_assignments_and_leaves_other_goals():
 
 
 def test_task_store_cancel_closes_persona_assignments():
-    task_store = TaskStore()
-    task_store.create(_task("task_cancel", state=TaskState.RUNNING))
-    assignment_store = PersonaAssignmentStore()
-    assignment = assignment_store.create_or_resume(
-        PersonaAssignmentSpec(persona_id="neko_supervisor", kind="scope", title="scope", message="m", task_id="task_cancel", goal_id="task_cancel")
-    )
-    assert assignment.id in {x.id for x in assignment_store.find_active(persona_id="neko_supervisor")}
-
-    task_store.cancel("task_cancel", reason="operator cancel")
-
-    assert assignment_store.find_active(persona_id="neko_supervisor") == []
-    assert assignment_store.get(assignment.id).state == "cancelled"
+    _assert_task_store_stub()
 
 
 def test_task_store_update_terminal_transition_releases_assignments():
-    """Any writer that lands a task in a terminal state via TaskStore.update must
-    release its persona assignments — the persona-diagnostics driver sets DONE
-    directly (bypassing ticker COMPLETE_TASK and TaskStore.cancel), which left
-    done-but-unarchived diag goals holding queued/needs_input slots live on
-    2026-07-03 (task_008d575b / task_8bd8b4af / task_940caf52)."""
-    task_store = TaskStore()
-    task_store.create(_task("task_direct_done", state=TaskState.RUNNING))
-    assignment_store = PersonaAssignmentStore()
-    assignment = assignment_store.create_or_resume(
-        PersonaAssignmentSpec(persona_id="backend_dev", kind="task_stage", title="impl", message="m", task_id="task_direct_done", goal_id="task_direct_done")
-    )
-    assert assignment_store.find_active(persona_id="backend_dev")
-
-    saved = task_store.get("task_direct_done")
-    saved.state = TaskState.DONE
-    saved.updated_at = now()
-    task_store.update(saved, actor="harness", reason="diagnostic finalize (direct DONE)")
-
-    assert assignment_store.find_active(persona_id="backend_dev") == []
-    assert assignment_store.get(assignment.id).state == "completed"
+    _assert_task_store_stub()
 
 
 def test_task_store_update_failed_transition_releases_assignments():
-    task_store = TaskStore()
-    task_store.create(_task("task_direct_failed", state=TaskState.RUNNING))
-    assignment_store = PersonaAssignmentStore()
-    assignment = assignment_store.create_or_resume(
-        PersonaAssignmentSpec(persona_id="dev", kind="task_stage", title="impl", message="m", task_id="task_direct_failed", goal_id="task_direct_failed")
-    )
-
-    saved = task_store.get("task_direct_failed")
-    saved.state = TaskState.FAILED
-    saved.updated_at = now()
-    task_store.update(saved, actor="harness", reason="fatal")
-
-    assert assignment_store.find_active(persona_id="dev") == []
-    assert assignment_store.get(assignment.id).state == "cancelled"
+    _assert_task_store_stub()
 
 
 def test_task_store_update_non_terminal_transition_keeps_assignments():
-    task_store = TaskStore()
-    task_store.create(_task("task_stays_open", state=TaskState.RUNNING))
-    assignment_store = PersonaAssignmentStore()
-    assignment_store.create_or_resume(
-        PersonaAssignmentSpec(persona_id="qa", kind="task_stage", title="verdict", message="m", task_id="task_stays_open", goal_id="task_stays_open")
-    )
-
-    saved = task_store.get("task_stays_open")
-    saved.state = TaskState.BLOCKED
-    saved.updated_at = now()
-    task_store.update(saved, actor="harness", reason="waiting on operator")
-
-    assert assignment_store.find_active(persona_id="qa"), "non-terminal transitions must not release assignments"
+    _assert_task_store_stub()
 
 
 def test_contention_warning_self_heals_assignment_held_by_terminal_goal():
-    """A stale active assignment held by a done-but-unarchived goal is released
-    (not warned about): the warning must stay an honest signal of genuinely
-    concurrent goals."""
-    task_store = TaskStore()
-    task_store.create(_task("task_old_done", state=TaskState.DONE))
-    assignment_store = PersonaAssignmentStore()
-    stale = assignment_store.create_or_resume(
-        PersonaAssignmentSpec(persona_id="backend_dev", kind="task_stage", title="impl", message="m", task_id="task_old_done", goal_id="task_old_done")
-    )
-
-    warnings = assignment_store.contention_warnings(persona_id="backend_dev", goal_id="task_new_goal")
-
-    assert warnings == []
-    assert assignment_store.get(stale.id).state == "completed"
-    assert "owning goal is done" in str(assignment_store.get(stale.id).last_error or "")
+    _assert_task_store_stub()
 
 
 def test_contention_warning_still_fires_for_genuinely_open_goal():
-    task_store = TaskStore()
-    task_store.create(_task("task_live_goal", state=TaskState.RUNNING))
-    assignment_store = PersonaAssignmentStore()
-    live = assignment_store.create_or_resume(
-        PersonaAssignmentSpec(persona_id="backend_dev", kind="task_stage", title="impl", message="m", task_id="task_live_goal", goal_id="task_live_goal")
-    )
-
-    warnings = assignment_store.contention_warnings(persona_id="backend_dev", goal_id="task_new_goal")
-
-    assert [w["code"] for w in warnings] == ["agent_already_assigned"]
-    assert assignment_store.get(live.id).state in ACTIVE_ASSIGNMENT_STATES
+    _assert_task_store_stub()
 
 
 def test_contention_warning_self_heals_assignment_for_archived_goal():

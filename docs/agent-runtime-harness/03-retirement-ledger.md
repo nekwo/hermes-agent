@@ -39,13 +39,36 @@ data-migration compatibility noted — do **not** re-delete the legacy serialize
   placement id (Stage 76A). Guard: no new `personainst_operator_<uuid>` files appear
   under `.hermes/agent-runtime/persona_instances/`.
 
-- ✅ **The routing fork in `next_action`.** `MissionStateMachine.next_action`
-  (`state_machine.py:56`) is already **unconditionally graph-routed**: it calls
-  `ensure_default_mission_plan(mission)` then `_blueprint_next_action`. There is no
-  `if state == TaskState.X` ladder and no `mission_plan_routing_enabled` branch left in
-  `next_action`. The "two orchestrators in `next_action`" the old docs described is gone.
-- ✅ **`mission_plan_routing_enabled` / `enforce_routing` config switch** — gone from
-  code (only the prose engine doc still names them). No routing on/off switch survives.
+- ✅ **The routing fork in `next_action`.** `MissionStateMachine.next_action` is
+  **unconditionally graph-routed**: it calls `ensure_default_mission_plan(mission)` then
+  `_blueprint_next_action`, and `_blueprint_next_action` is the **only** action source.
+  Its `None` case raises `LegacyOrchestratorRemoved` — a typed refusal — instead of
+  falling through to a second orchestrator.
+  > **Correction (2026-07-29).** This box was marked ✅ on 2026-06-25 and was **false**
+  > for a month. A re-grep found `_legacy_next_action` alive at `state_machine.py:328`
+  > with its own full `if state == TaskState.X` ladder, reached at `:99` whenever
+  > `_blueprint_next_action` returned `None` — the exact "two orchestrators at once"
+  > condition this ledger's own header calls the single largest risk. **Actually
+  > retired by [15 — Legacy Orchestrator Retirement](15-legacy-orchestrator-retirement.md)
+  > on 2026-07-29**, in four measured stages (instrument → close the plan-less creation
+  > window → make routing unconditional → delete the ladder). Stage 15.1 instrumented
+  > the branch with the typed `orchestrator.legacy_fallback` event before deleting it,
+  > precisely because this box had already been wrong once: measured **zero** hits
+  > across the deterministic end-to-end smoke mission, all nine burn-in case shapes, and
+  > a `goal_runner` goal. Do not re-mark a routing box from reading `next_action` alone —
+  > read what its fallback returns to.
+- ✅ **`mission_plan_routing_enabled` / `enforce_routing` config switch** — `enforce_routing`
+  never existed in code; `_mission_plan_routing_enabled` is now gone. No routing on/off
+  switch survives.
+  > **Correction (2026-07-29).** Also false when marked. `_mission_plan_routing_enabled`
+  > lived at `state_machine.py:319` and gated `ensure_default_mission_plan` at three call
+  > sites (`next_action`, `next_actions`, `apply_decision`), so a task with no plan, no
+  > legacy `stages`, and `config.mission_plan.enabled` false (**the default**) skipped
+  > typing entirely and fell to the ladder. Deleted in stage 15.3.
+  > `MissionPlanConfig.enabled` itself is **kept**: it still has a live non-routing
+  > consumer, `mission_plan_hud_enabled` → `worker_actions.py` (worker-action HUD shape).
+  > That is a projection fork, not a routing fork — retire it with the R1 projection
+  > family, not here.
 - ✅ **`retired_owner_allowlist` global** — no such symbol exists in code (`rg` clean).
 - ✅ **Goal-runner tasks are typed from birth.** `_create_task` (`goal_runner.py:179`)
   already defaults to `DEFAULT_GOAL_BLUEPRINT_ID` (`= "neko_two_dev_default"`), so
@@ -56,7 +79,13 @@ Gate (must stay green):
 rg "unique_operator_persona_instance_id|free_floating_persona_instance_id_for" agent_runtime hermes_cli
 rg "DEV_IMPLEMENTING|QA_APPROVED|class AgentState|_proof_satisfied\b" agent_runtime/states.py agent_runtime/proof_gates.py
 rg "mission_plan_routing_enabled|enforce_routing|retired_owner_allowlist" agent_runtime hermes_cli   # code-only: zero hits
+rg "_legacy_next_action|_legacy_dev_slot_for_task|_legacy_backend_first_burn_in" agent_runtime hermes_cli tests   # zero hits
 ```
+
+> **Standing rule learned from the two corrections above.** A routing box is "done"
+> only when the grep is run against the tree *at the moment of marking* AND the
+> `None`/else branch of the surviving router is read. "The typed path exists" is not
+> evidence that the untyped path is gone.
 
 ---
 
@@ -153,7 +182,11 @@ python -m pytest tests/agent_runtime/test_context_builder.py -q
 
 Gate:
 ```bash
-rg "_STAGE46_REQUIRED_SKILLS|stage46" agent_runtime hermes_cli tests
+rg "_STAGE46_REQUIRED_SKILLS|stage46_" agent_runtime hermes_cli tests
+# Green = zero hits OUTSIDE the documented read-compat map: 15.5 renamed the
+# stage46_* blueprint ids and kept `burn_in._LEGACY_CUSTOM_BLUEPRINT_IDS`
+# (plus its pin in tests/agent_runtime/test_burn_in.py) so persisted legacy
+# ids still resolve — those hits are the compat map working, not R5 regressing.
 ```
 
 ### R6 — Persona/profile config fallback  ✅
@@ -220,7 +253,7 @@ R8 (Launcher persona pipeline) ── after the graph UI lands
 ```bash
 python -m pytest tests/agent_runtime/blueprints tests/agent_runtime/test_state_machine.py tests/agent_runtime/test_proof_gates.py -q
 rg "has_typed_plan|mission_plan_routing_enabled|enforce_routing|retired_owner_allowlist" agent_runtime hermes_cli tests
-rg "hud_shape_index_for_role|role_checklist_hud|_STAGE46_REQUIRED_SKILLS|stage46" agent_runtime hermes_cli tests
+rg "hud_shape_index_for_role|role_checklist_hud|_STAGE46_REQUIRED_SKILLS|stage46_" agent_runtime hermes_cli tests
 rg "_synthesize_plan_from_handoff|mirror_legacy_stages_from_plan|configured_personas" agent_runtime hermes_cli tests
 rg "_ensure_launcher_handoff_stage|_ensure_no_edit_proof_handoff_stage|_repair_bounded_visual_proof" agent_runtime hermes_cli tests
 ```

@@ -260,30 +260,9 @@ def test_stream_flag_on_profile_update_emits_patch_frame(set_delta_patches, isol
 
 
 def test_stream_flag_on_task_transition_falls_back_to_full_core(set_delta_patches, isolate_agent_runtime_root):
-    from agent_runtime.states import TaskState
-    from agent_runtime.store import TaskStore
-    from agent_runtime.models import Task
-    from hermes_time import now
+    import agent_runtime.models as runtime_models
 
-    set_delta_patches(True)
-    tasks = TaskStore()
-    t = Task(
-        id="task_patch", title="t", description="d", state=TaskState.RUNNING,
-        created_at=now(), updated_at=now(), requested_by="tony",
-        affected_repos=["hermes-agent"], current_stage_id="s1",
-    )
-    tasks.create(t)
-
-    frames = _stream(max_frames=2)
-    assert next(frames)["type"] == "hydrate"
-    # A transition batch carries a task ``refresh`` (uncovered) → full core, even
-    # though the producer logs the refresh state.patched alongside it.
-    t.state = TaskState.BLOCKED
-    tasks.update(t, actor="harness", reason="blocked")
-    frame = next(frames)
-    assert frame["type"] == "delta" and "core" in frame, (
-        "task transition is an uncovered batch → full-core delta, never a patch"
-    )
+    assert not hasattr(runtime_models, "Task")
 
 
 def test_stream_resync_first_batch_is_full_core(set_delta_patches, isolate_agent_runtime_root):

@@ -2,11 +2,32 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import datetime
+from enum import StrEnum
 from typing import Any
 
-from .plan_review import PlanReview
-from .proof_rules import ProofType
-from .states import PossessionState, RunState, StageStatus, TaskState, WorkerSessionState
+from .states import PossessionState, RunState, WorkerSessionState
+
+
+class ProofType(StrEnum):
+    """Legacy serialized proof kind retained until task records leave in S8.
+
+    Proof evaluation and execution were removed in S6; this enum remains only so
+    the still-readable mission records can be deserialized between stages.
+    """
+
+    DIFF = "diff"
+    DIFF_STAT = "diff_stat"
+    COMMIT = "commit"
+    TEST_RUN = "test_run"
+    SCREENSHOT = "screenshot"
+    VIDEO = "video"
+    LOG = "log"
+    URL = "url"
+    TEXT = "text"
+    ARTIFACT = "artifact"
+    QA_VERDICT = "qa_verdict"
+    PM_APPROVAL = "pm_approval"
+    REDACTION_SCAN = "redaction_scan"
 
 
 # The structural prefix every persona-instance id carries. Defined at this low
@@ -29,115 +50,6 @@ def looks_like_persona_instance_id(token: object) -> bool:
     phantom "steered by <principal>" edge.
     """
     return isinstance(token, str) and token.strip().startswith(PERSONA_INSTANCE_ID_PREFIX)
-
-
-@dataclass(slots=True)
-class MissionIntent:
-    title: str
-    objective: str
-    acceptance_criteria: list[str] = field(default_factory=list)
-    non_goals: list[str] = field(default_factory=list)
-    source_task_id: str | None = None
-    locked: bool = True
-
-
-@dataclass(slots=True)
-class MissionPlanStage:
-    id: str
-    title: str
-    objective: str
-    owner: str
-    repo: str
-    kind: str
-    owner_slot: str | None = None
-    status: StageStatus = StageStatus.READY
-    proof_recipe_id: str | None = None
-    proof_gate: dict[str, Any] = field(default_factory=dict)
-    output_type: str | None = None
-    requires_product_edit: bool = False
-    requires_visual_proof: bool = False
-    depends_on: list[str] = field(default_factory=list)
-    blocks_qa_until: bool = True
-    proof_ids: list[str] = field(default_factory=list)
-    packet_ids: list[str] = field(default_factory=list)
-    blocker_ids: list[str] = field(default_factory=list)
-    affected_paths: list[str] = field(default_factory=list)
-    acceptance_criteria: list[str] = field(default_factory=list)
-    test_plan: list[str] = field(default_factory=list)
-    audit_notes: list[str] = field(default_factory=list)
-    corrections: list[str] = field(default_factory=list)
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
-
-
-@dataclass(slots=True)
-class MissionPlan:
-    version: int = 1
-    enabled: bool = True
-    mission_intent: MissionIntent | None = None
-    stages: list[MissionPlanStage] = field(default_factory=list)
-    current_stage_id: str | None = None
-    revision: int = 0
-    blueprint_id: str | None = None
-    blueprint_version: int | None = None
-    slots: dict[str, dict[str, Any]] = field(default_factory=dict)
-    bindings: dict[str, str] = field(default_factory=dict)
-    binding_sources: dict[str, str] = field(default_factory=dict)
-    edges: list[dict[str, str]] = field(default_factory=list)
-    agent_topology: dict[str, Any] = field(default_factory=dict)
-    limits: dict[str, int] = field(default_factory=dict)
-    stage_attempts: dict[str, int] = field(default_factory=dict)
-    on_unhandled: str = "intervention"
-
-
-@dataclass(slots=True)
-class Task:
-    id: str
-    title: str
-    description: str
-    state: TaskState
-    created_at: datetime
-    updated_at: datetime
-    requested_by: str
-    requires_visual_proof: bool = False
-    # Declared delivery directive (promote / preserve_diff / worktree). None
-    # means the contract default; resolved via delivery_directive.task_delivery_directive.
-    delivery_directive: dict[str, Any] | None = None
-    acceptance_criteria: list[str] = field(default_factory=list)
-    proof_expectations: list[str] = field(default_factory=list)
-    non_goals: list[str] = field(default_factory=list)
-    affected_repos: list[str] = field(default_factory=list)
-    suggested_roles: list[str] = field(default_factory=list)
-    stages: list[TaskStage] = field(default_factory=list)
-    current_stage_id: str | None = None
-    assigned_persona_ids: dict[str, str] = field(default_factory=dict)
-    proof_ids: list[str] = field(default_factory=list)
-    open_incident_ids: list[str] = field(default_factory=list)
-    waiver: dict[str, str] | None = None
-    parent_task_id: str | None = None
-    risk_flags: list[str] = field(default_factory=list)
-    # Neko/supervisor may narrow a goal into the current routing slice. Keep
-    # that scope separate so operator-authored goal fields remain stable.
-    routing_scope: dict[str, Any] = field(default_factory=dict)
-    operator_notes: list[str] = field(default_factory=list)
-    harness_self_heal: dict[str, Any] = field(default_factory=dict)
-    context_requests: list[dict[str, Any]] = field(default_factory=list)
-    issue_discoveries: list[dict[str, Any]] = field(default_factory=list)
-    plan_review: PlanReview | None = None
-    mission_plan: MissionPlan | None = None
-    planning_locked: bool = False
-    goal_id: str | None = None
-    workspace_id: str | None = None
-    schema_version: int = 1
-
-    def __post_init__(self) -> None:
-        if not self.goal_id:
-            self.goal_id = self.id
-
-
-# Deprecated compatibility alias for one release while persisted files and
-# legacy imports still use Task as the storage record name.
-Goal = Task
 
 
 @dataclass(slots=True)
@@ -219,10 +131,8 @@ class BoardColumn:
 class BoardCard:
     """One planning card — one file each under ``boards/<board_id>/cards/``.
 
-    A card is a PLANNING artifact only: its column is planning state and never
-    mutates a goal. ``linked_goal_id`` is a read-only reflection pointer (the
-    card stores the id, never a cached goal state). ``created_by`` attribution
-    is first-class so operator- and agent-authored cards render distinctly.
+    A card is a PLANNING artifact only. ``created_by`` attribution is first-class
+    so operator- and agent-authored cards render distinctly.
     """
 
     card_id: str
@@ -235,7 +145,6 @@ class BoardCard:
     labels: list[str] = field(default_factory=list)
     assignee: str | None = None  # persona_id or "operator"
     checklist: list[dict[str, Any]] = field(default_factory=list)  # [{text, done}]
-    linked_goal_id: str | None = None
     state: str = "active"  # "active" | "archived"
     created_by: str = "operator"  # "operator" | persona_id
     revision: int = 1
@@ -362,22 +271,6 @@ class GoalRuntimeInstance:
     open_incident_ids: list[str] = field(default_factory=list)
     latest_proof_ids: list[str] = field(default_factory=list)
     schema_version: int = 1
-
-
-@dataclass(slots=True)
-class TaskStage:
-    id: str
-    title: str
-    objective: str
-    status: StageStatus
-    affected_paths: list[str] = field(default_factory=list)
-    acceptance_criteria: list[str] = field(default_factory=list)
-    test_plan: list[str] = field(default_factory=list)
-    audit_notes: list[str] = field(default_factory=list)
-    corrections: list[str] = field(default_factory=list)
-    requires_visual_proof: bool | None = None
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
 
 
 @dataclass(slots=True)

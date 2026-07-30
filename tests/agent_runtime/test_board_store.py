@@ -1,13 +1,13 @@
 """S1 Mission Board store/order/projection tests.
 
 Store round-trip + event-per-mutation + revision guard; order-key properties;
-default-board determinism; escalate idempotent replay + crash-between-steps
-convergence; bounded/redacted projection; parity warnings; serve fingerprint
+default-board determinism; legacy goal-link field tolerance; bounded/redacted projection; parity warnings; serve fingerprint
 invalidation. The autouse conftest fixtures isolate the runtime root per test.
 """
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -174,63 +174,22 @@ def test_archive_records_ledger_and_restore_clears_it():
     assert "board.card.archived" in types and "board.card.restored" in types
 
 
-# ── escalate: idempotent orchestration ────────────────────────────────────
+# ── retired board → goal bridge compatibility ─────────────────────────────
 
 
-def _goal_envelope() -> dict:
-    return {
-        "goal": {"title": "Refactor X", "description": "from board", "acceptance_criteria": ["it works"]},
-        "source_surface": "mission_control",
-    }
-
-
-def test_escalate_links_goal_and_is_idempotent():
-    ws = _make_workspace()
-    store = BoardStore()
-    card = store.add_card(workspace_id=ws, title="Refactor X")
-    r1 = store.escalate(card.card_id, request_envelope=_goal_envelope(), operator_key="op")
-    assert r1["linked"] is True
-    goal_id = r1["goal_id"]
-    assert goal_id
-    # card carries the link
-    assert store.get_card(card.card_id).linked_goal_id == goal_id
-    # replay converges on the SAME goal (idempotency key derived from card)
-    r2 = store.escalate(card.card_id, request_envelope=_goal_envelope(), operator_key="op")
-    assert r2["goal_id"] == goal_id
-    assert "board.card.escalated" in _event_types()
-
-
-def test_escalate_crash_between_steps_converges_on_retry():
-    """Simulate a crash after goal-create but before the link write: the goal
-    exists, the card is unlinked. A retry with the same operator key must adopt
-    the same goal (derived idempotency key) and set the link."""
+def test_legacy_linked_goal_id_is_ignored_when_loading_a_card():
+    """S3 removes the decorative goal link without breaking persisted cards."""
 
     ws = _make_workspace()
     store = BoardStore()
-    card = store.add_card(workspace_id=ws, title="Refactor Y")
+    card = store.add_card(workspace_id=ws, title="Legacy")
+    path = paths.board_card_path(card.board_id, card.card_id)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["linked_goal_id"] = "goal_retired"
+    path.write_text(json.dumps(raw), encoding="utf-8")
 
-    # Step 1 only: create the goal directly with the SAME derived key escalate uses.
-    from agent_runtime.mission_goal import create_mission_goal_from_request
-
-    derived = f"board-escalate-{card.card_id}-op"
-    env = {**_goal_envelope(), "idempotency_key": derived, "operator": {"operator_id": "operator"}}
-    first = create_mission_goal_from_request(env)
-    goal_id = first["goal_id"]
-    assert store.get_card(card.card_id).linked_goal_id is None  # link not written yet
-
-    # Retry the full escalate → same goal adopted, link now set.
-    retried = store.escalate(card.card_id, request_envelope=_goal_envelope(), operator_key="op")
-    assert retried["goal_id"] == goal_id
-    assert store.get_card(card.card_id).linked_goal_id == goal_id
-
-
-def test_escalate_dry_run_does_not_link():
-    ws = _make_workspace()
-    store = BoardStore()
-    card = store.add_card(workspace_id=ws, title="Dry")
-    r = store.escalate(card.card_id, request_envelope=_goal_envelope(), operator_key="op", dry_run=True)
-    assert r.get("dry_run") is True
-    assert store.get_card(card.card_id).linked_goal_id is None
+    loaded = store.get_card(card.card_id)
+    assert not hasattr(loaded, "linked_goal_id")
 
 
 # ── bounded / redacted projection ─────────────────────────────────────────

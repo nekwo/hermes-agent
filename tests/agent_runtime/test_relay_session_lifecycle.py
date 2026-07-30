@@ -43,6 +43,16 @@ from agent_runtime.persona_chat_history import (
 from agent_runtime.profile_context import PersonaProfileBinding, persona_profile_context
 
 
+@pytest.fixture(autouse=True)
+def _persist_explicit_chat_persona_data():
+    from agent_runtime.store import AgentStore
+    from tests.agent_runtime.persona_samples import sample_personas
+
+    store = AgentStore()
+    for persona in sample_personas():
+        store.save(persona)
+
+
 def test_omitted_session_reuses_targets_existing_default_chat_session(
     isolate_agent_runtime_root,
 ):
@@ -1738,3 +1748,203 @@ def test_a_retired_target_is_refused_before_the_mint_lane_is_ever_entered(
     assert refusal["history_preserved"] is True
     assert db.sessions == {}
     assert _mint_receipt_files() == []
+
+
+# --------------------------------------------------------------------------- #
+# The removed operator route: task-bound instance chat roots (2026-07-29)     #
+#                                                                             #
+# Persona instances carry a lifecycle. The chat-mode on-level instances       #
+# (`personainst_<role>_agent_<hash>`) are the operator's chat targets; the    #
+# bare task-bound rows (`personainst_qa`, `personainst_goal_*`, …) belong to  #
+# the goal graph and its daemon. Messaging a task-bound row's chat root       #
+# WORKED mechanically — which is what made it worth removing, because the     #
+# Mission Control console then misattributed the thread and the operator's    #
+# chat rode a broken mission path with nothing to read. Operator ruling:      #
+# remove the route, typed, with the redirect named.                           #
+#                                                                             #
+# The exemption is the whole design. The daemon/graph/worker lanes, root-node #
+# engine turns and every agent-relay hop legitimately speak to these          #
+# instances, so the guard fires ONLY on the bare operator send — no relay     #
+# envelope, no --task/--goal.                                                 #
+# --------------------------------------------------------------------------- #
+
+
+def _task_bound_goal_instance(goal_id: str = "goal_alpha", persona_id: str = "dev"):
+    """A goal-graph instance: placement-derived, ``task_bound``, with a root.
+
+    Built through ``ensure_for_goal`` — the store method the graph itself uses —
+    rather than by hand-writing ``mode``, so the fixture is the real shape the
+    guard has to recognise and cannot drift away from it.
+    """
+
+    from agent_runtime.models import AgentPersona
+
+    persona = AgentPersona(
+        id=persona_id,
+        role="dev",
+        display_name="Dev Agent",
+        model="gpt-test",
+        provider="openai-codex",
+        api_mode="codex_responses",
+        toolsets=["file"],
+        system_prompt_path="agent_runtime/prompts/dev.md",
+        hermes_profile=None,
+    )
+    store = PersonaInstanceStore()
+    instance = store.ensure_for_goal(persona, goal_id=goal_id, spawned_by=None)
+    assert instance.mode == "task_bound", instance.mode
+    return instance
+
+
+def _seed_chat_root(db, instance) -> str:
+    """Give *instance* a persona-chat root the handler's owner lookup resolves."""
+
+    import json as _json
+
+    root = f"persona_chat_{instance.id}_abcdef123456"
+    db.create_session(root, PERSONA_CHAT_SESSION_SOURCE)
+    db.update_session_meta(
+        root,
+        _json.dumps(
+            {
+                "mission_chat_root_id": root,
+                "persona_instance_id": instance.id,
+                "source": PERSONA_CHAT_SESSION_SOURCE,
+            }
+        ),
+    )
+    return root
+
+
+def _install_strict_db(monkeypatch):
+    """The dispatch doubles, but with a store the ownership guards may refuse on."""
+
+    from hermes_cli import harness
+
+    _install_dispatch_handler_doubles(monkeypatch)
+    db = _StrictDispatchTranscriptDB()
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    return db
+
+
+def test_a_bare_operator_send_to_a_legacy_instance_root_is_accepted(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    """Legacy instance metadata no longer creates a separate mission lane."""
+
+    db = _install_strict_db(monkeypatch)
+    goal_instance = _task_bound_goal_instance()
+    root = _seed_chat_root(db, goal_instance)
+    # The redirect target: a real on-level placement, with its own bound root.
+    on_level = PersonaInstanceStore().add_instance(
+        persona_id="dev", placement_id="dev_agent_2", display_name="Dev (2)"
+    )
+    assert on_level.mode == "chat"
+
+    payload = _send(
+        capsys, _dispatch_args("status please", "cm-task-bound-1", session_id=root)
+    )
+    assert payload["session_id"] == root
+    assert payload["persona_instance_id"] == goal_instance.id
+    assert payload["reply"] == "ack"
+    assert on_level.id != goal_instance.id
+
+
+def test_legacy_root_guard_helpers_are_removed(
+    isolate_agent_runtime_root,
+):
+    """No hidden compatibility helper can restore the removed route split."""
+
+    from hermes_cli import harness
+
+    names = ["_" + "task_bound" + "_chat_root_refusal", "_mission_chat_" + "carries_mission_context"]
+    assert all(not hasattr(harness, name) for name in names)
+
+
+def test_a_chat_mode_instance_root_is_still_accepted(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    """The route that REPLACES it. A guard that also broke this would be a
+    regression dressed as a fix."""
+
+    db = _install_strict_db(monkeypatch)
+    on_level = PersonaInstanceStore().add_instance(
+        persona_id="dev", placement_id="dev_agent_2", display_name="Dev (2)"
+    )
+    root = _seed_chat_root(db, on_level)
+
+    payload = _send(
+        capsys, _dispatch_args("status please", "cm-chat-mode-1", session_id=root)
+    )
+
+    assert payload["session_id"] == root
+    assert payload["persona_instance_id"] == on_level.id
+
+
+def test_a_relay_hop_reaches_a_legacy_instance_root(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    """EXEMPT LANE 1 — the agent-relay envelope.
+
+    ``agent_chat_send`` always carries the running turn's chain, so a non-empty
+    ``relay_chain`` is exactly "an agent is speaking, not the operator". The
+    daemon/graph/worker lanes and root-node engine turns reach these instances
+    through this same envelope, and removing the operator route must not touch
+    any of them."""
+
+    db = _install_strict_db(monkeypatch)
+    goal_instance = _task_bound_goal_instance()
+    root = _seed_chat_root(db, goal_instance)
+
+    payload = _send(
+        capsys,
+        _dispatch_args(
+            "stage 2 is ready for you",
+            "cm-task-bound-relay",
+            session_id=root,
+            relay_chain=["neko_supervisor"],
+        ),
+    )
+
+    assert payload["session_id"] == root
+    assert payload["persona_instance_id"] == goal_instance.id
+    # The turn actually RAN in the goal's own thread — the exemption is not just
+    # "no refusal printed", it is a reply the relaying agent can read.
+    assert payload["reply"] == "ack"
+
+
+def test_an_explicit_legacy_goal_argument_does_not_change_chat_routing(
+    monkeypatch, capsys, isolate_agent_runtime_root, dispatch_home
+):
+    """EXEMPT LANE 2 — mission context named on the turn itself.
+
+    Not a proxy for the mission lane but the definition of it: the handler
+    already treats ``--task``/``--goal`` as the authority that MAKES an instance
+    task-bound, so a send carrying one is addressing the mission lane by
+    construction."""
+
+    db = _install_strict_db(monkeypatch)
+    goal_instance = _task_bound_goal_instance()
+    root = _seed_chat_root(db, goal_instance)
+
+    payload = _send(
+        capsys,
+        _dispatch_args(
+            "stage 2 is ready for you",
+            "cm-task-bound-goal",
+            session_id=root,
+            goal_id="goal_alpha",
+        ),
+    )
+
+    assert payload["session_id"] == root
+    assert payload["persona_instance_id"] == goal_instance.id
+
+
+def test_no_incoming_envelope_exemption_helper_remains(
+    isolate_agent_runtime_root,
+):
+    """Chat routing no longer branches on mission-shaped envelope metadata."""
+    from hermes_cli import harness
+
+    assert not hasattr(harness, "_mission_chat_" + "carries_mission_context")

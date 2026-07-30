@@ -220,10 +220,7 @@ def _cmd_persona_assignments(args) -> int:
         print(emit_json(data) if args.json else data["error"])
         return 2
     store = PersonaAssignmentStore()
-    goal_id = getattr(args, "goal_id", None) or getattr(args, "task_id", None)
-    if goal_id:
-        assignments = store.list_for_goal(goal_id)
-    elif args.persona_id:
+    if args.persona_id:
         assignments = store.list_for_persona(_normalize_cli_persona_id(args.persona_id))
     else:
         assignments = store.list_all()
@@ -238,44 +235,6 @@ def _cmd_persona_assignments(args) -> int:
     else:
         for item in data["assignments"]:
             print(f"{item['assignment_id']}: {item['persona_id']} {item['kind']} state={item['state']} task={item['task_id'] or '-'}")
-    return 0
-
-
-def _cmd_persona_message(args) -> int:
-    cfg = load_agent_runtime_config()
-    if not persona_assignment_store_enabled(cfg):
-        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    persona_id = _normalize_cli_persona_or_template_id(args.persona_id)
-    try:
-        task = TaskStore().get(args.task_id)
-    except Exception:
-        data = {"ok": False, "error": f"task not found: {args.task_id}"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    PersonaInstanceStore().derive_from_workers(ensure_persisted_personas(cfg), WorkerSessionStore().list_all())
-    assignment = PersonaAssignmentStore().create_or_resume(
-        PersonaAssignmentSpec(
-            persona_id=persona_id,
-            kind="operator_message",
-            title=args.title,
-            message=args.message,
-            created_by=args.requested_by,
-            task_id=task.id,
-            stage_id=task.current_stage_id,
-        )
-    )
-    data = {
-        "ok": True,
-        "assignment_id": assignment.id,
-        "persona_instance_id": assignment.persona_instance_id,
-        "persona_id": assignment.persona_id,
-        "task_id": assignment.task_id,
-        "state": assignment.state,
-        "kind": assignment.kind,
-    }
-    print(emit_json(data) if args.json else f"queued {assignment.id} for {assignment.persona_id}")
     return 0
 
 
@@ -1388,7 +1347,15 @@ def _cmd_mission_chat_message(args) -> int:
     turn_relay_chain = relay_decision.chain
     persona = _persona_by_id(cfg, normalized_persona)
     if persona is None:
-        data = {"ok": False, "error": f"unknown persona {safe_assignment_token(args.persona_id)}"}
+        data = {
+            "ok": False,
+            "capability_id": "mission.chat.message",
+            "execution_state": "rejected",
+            "error_kind": "unsupported_persona",
+            "error": f"unknown persona {safe_assignment_token(args.persona_id)}",
+            "persona_id": safe_assignment_token(args.persona_id),
+            "next_expected": "persist the persona, use profile:<name>, or address a known personainst_* instance",
+        }
         if getattr(args, "stream", False):
             _emit_chat_final(data)
         else:
@@ -2448,7 +2415,6 @@ def _cmd_mission_chat_message(args) -> int:
                 # inherit the runtime default). Applied to the model call by the
                 # transport; unsupported/absent values fall back to the default.
                 reasoning_effort=getattr(instance, "reasoning_effort", None),
-                allow_mission_goal=bool(getattr(args, "allow_mission_goal", False)),
                 surface_prompt=getattr(args, "surface_prompt", "") or "",
                 max_wall_seconds=relay_wall_seconds,
                 stream_callback=_stream_delta if getattr(args, "stream", False) else None,
@@ -3877,63 +3843,6 @@ def _cmd_persona_set_model(args) -> int:
     }
     print(emit_json(data) if args.json else f"{status}: {target.id} model={data['effective_model']} provider={data['effective_provider']}")
     return 0
-
-
-def _cmd_persona_instance_run_once(args) -> int:
-    cfg = load_agent_runtime_config()
-    if not persona_assignment_store_enabled(cfg):
-        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-    persona_instance_id = safe_assignment_token(args.persona_instance_id)
-    persona_id = _persona_id_from_instance_id(persona_instance_id)
-    active = [
-        item
-        for item in PersonaAssignmentStore().find_active(persona_id=persona_id, kind="free_floating_message")
-        if item.persona_instance_id == persona_instance_id and item.task_id is None
-    ]
-    seed = active[-1] if active else None
-    message = args.message or (seed.message if seed else "Run one bounded free-floating persona sandbox turn.")
-    title = args.title or (seed.title if seed else "Free-floating persona run")
-    try:
-        result = PersonaDiagnosticController(
-            config=cfg,
-            engine_factory=lambda **kwargs: TickEngine(
-                **kwargs,
-                persona_runtime=GPTPersonaRuntime(default_provider=cfg.default_provider, default_model=cfg.default_model),
-            ),
-        ).diagnose(
-            PersonaDiagnosticOptions(
-                persona_id=persona_id,
-                title=title,
-                message=message,
-                requested_by=args.requested_by,
-                operation_kind="free_floating",
-                operation_mode="sandbox_task",
-                max_actions=args.max_actions,
-                max_seconds=args.max_seconds,
-                non_goals=["Not production proof"],
-            )
-        )
-    except ValueError as exc:
-        data = {"ok": False, "error": str(exc)}
-        print(emit_json(data) if args.json else str(exc))
-        return 2
-    if seed is not None:
-        store = PersonaAssignmentStore()
-        for run_id in result.run_ids:
-            store.attach_run(seed.id, run_id)
-        store.complete(seed.id, state="completed")
-    data = {
-        **asdict(result),
-        "ok": result.ok,
-        "persona_instance_id": persona_instance_id,
-        "production_proof_eligible": False,
-        "evidence_kind": "free_floating",
-        "archive_scope": "assignment",
-    }
-    print(emit_json(data) if args.json else f"free-floating persona run {result.task_id}: stop={result.stop_reason}")
-    return result.exit_code
 
 
 def _queue_free_floating_assignment(
@@ -6117,61 +6026,9 @@ def _resolve_mission_chat_persona_id(persona_id, persona_instance_id) -> str:
         raise
 
 
-def _cmd_persona_diagnose(args) -> int:
-    cfg = load_agent_runtime_config()
-    try:
-        result = PersonaDiagnosticController(
-            config=cfg,
-            engine_factory=lambda **kwargs: TickEngine(
-                **kwargs,
-                persona_runtime=GPTPersonaRuntime(default_provider=cfg.default_provider, default_model=cfg.default_model),
-            ),
-        ).diagnose(
-            PersonaDiagnosticOptions(
-                persona_id=args.persona_id,
-                title=args.title,
-                message=args.message,
-                requested_by=args.requested_by,
-                operation_kind=args.operation_kind,
-                operation_mode=args.operation_mode,
-                max_actions=args.max_actions,
-                max_seconds=args.max_seconds,
-                affected_repos=list(args.affected_repo or []),
-                acceptance_criteria=list(args.acceptance or []),
-                non_goals=list(args.non_goal or []),
-                preserve_open_task=bool(getattr(args, "keep_task", False)),
-            )
-        )
-    except ValueError as exc:
-        data = {"ok": False, "error": str(exc)}
-        print(emit_json(data) if args.json else str(exc))
-        return 2
-    if args.json:
-        print(emit_json(result))
-    else:
-        print(
-            f"persona diagnostic {result.task_id}: persona={result.persona_id} "
-            f"stop={result.stop_reason} decision={result.latest_decision_type or 'none'} "
-            f"tokens={result.latest_total_tokens if result.latest_total_tokens is not None else 'unknown'}"
-        )
-    return result.exit_code
-
-
 def _normalize_cli_persona_id(persona_id: str) -> str:
     value = safe_assignment_token(persona_id)
-    aliases = {
-        "neko": "neko_supervisor",
-        "launcher_dev": "dev",
-        "launcher-dev": "dev",
-        "backend-dev": "backend_dev",
-        "backend": "backend_dev",
-    }
-    value = aliases.get(value, value)
-    # Accept any seeded persona id (base-profile foundation seeds ``base``) plus the
-    # legacy typed-pipeline ids (dormant, kept for back-compat). Other on-disk profiles
-    # are reached through the ``profile:<name>`` branch, not this normalizer.
-    allowed = {"neko_supervisor", "dev", "backend_dev", "qa", "pm"} | {p.id for p in seed_personas()}
-    if value not in allowed:
+    if not value:
         raise ValueError(f"unsupported persona {persona_id!r}")
     return value
 
