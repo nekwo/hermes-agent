@@ -194,7 +194,10 @@ def test_repo_bundle_store_is_idempotent_without_stage_dependencies(isolate_agen
     assert [bundle.id for bundle in second] == [bundle.id for bundle in first]
 
     backend = next(bundle for bundle in first if bundle.repo == "EterniaBackend")
-    store.mark_delivered(backend, proof_ids=["proof_backend"])
+    # S24 removed ``mark_delivered`` with the delivery-capture path; the wake
+    # rule under test is about dependency state, not about how it got there.
+    backend.state = "delivered_waiting_for_qa"
+    store.update(backend)
     woke = store.wake_ready_dependencies(task.id)
 
     assert woke == []

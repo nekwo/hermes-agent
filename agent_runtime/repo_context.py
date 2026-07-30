@@ -84,15 +84,24 @@ def repo_execution_context_for_task(task, explicit_workdir=None) -> RepoExecutio
     return None
 
 
-def command_workdir_for_task(task, explicit_workdir=None) -> Path:
-    ctx = repo_execution_context_for_task(task, explicit_workdir=explicit_workdir)
-    if ctx is not None:
-        return ctx.workdir
-    return Path.cwd()
-
-
 def isolated_repo_context_for_run(repo_ctx: RepoExecutionContext, *, task_id: str, run_id: str) -> RepoExecutionContext:
-    """Create a per-run git worktree for grounded agent execution."""
+    """Create a per-run git worktree for grounded agent execution.
+
+    KEPT DELIBERATELY (S24, 2026-07-30): this has **no production caller** since
+    the worker/dispatch lane went in S5/S8 — it survives as the constructor the
+    worktree suites build real worktrees with. Twelve tests in
+    ``tests/agent_runtime/test_repo_context_observation.py`` pin protections
+    reachable only through here (GC count cap, dirty/fresh sparing, fail-closed
+    ``worktree add``, checkout timeout) including two live-incident regressions:
+    junction severing that once emptied the backend venv (2026-07-01) and the
+    backend ``.env`` copy whose absence broke every read-only proof (2026-07-03).
+    Rebuilding the fixtures on raw ``git worktree add`` would delete those
+    regressions, so this is labelled rather than left looking live. It,
+    :func:`_worktree_token`, :func:`_ensure_isolated_worktree`,
+    :func:`existing_run_worktrees` and :func:`remove_harness_worktree_for_repo`
+    are ONE lane — retire them together or not at all. The live consumer of what
+    this lane leaves on disk is ``delivery_directive.reap_orphan_worktrees``.
+    """
 
     source_root = _git_root_for(repo_ctx.workdir)
     if source_root is None:
@@ -388,45 +397,6 @@ def existing_run_worktrees(repo_label: str, *, task_id: str, run_id: str) -> lis
     return [candidate for candidate in candidates if candidate.is_dir() and _git_root_for(candidate) is not None]
 
 
-def existing_run_worktrees_in_bases(
-    repo_label: str, *, task_id: str, run_id: str, base_dirs: list[Path]
-) -> list[Path]:
-    """Deterministic run worktrees across explicitly selected managed bases."""
-
-    source_root = resolve_affected_repo_workdir(repo_label)
-    git_root = _git_root_for(source_root) if source_root is not None else None
-    if git_root is None:
-        return []
-    token_label = _safe_repo_label(source_root.resolve().name)
-    found: list[Path] = []
-    seen: set[Path] = set()
-    for base_dir in base_dirs:
-        if _path_is_reparse_point(base_dir):
-            continue
-        try:
-            resolved_base = Path(base_dir).resolve()
-        except OSError:
-            continue
-        base = Path(base_dir) / _worktree_token(
-            git_root, task_id=task_id, run_id=run_id, repo_label=token_label
-        )
-        for candidate in [base, *[base.with_name(f"{base.name}_{idx}") for idx in range(1, 4)]]:
-            if _path_is_reparse_point(candidate):
-                continue
-            try:
-                resolved = candidate.resolve()
-            except OSError:
-                continue
-            if resolved.parent != resolved_base:
-                continue
-            if resolved in seen:
-                continue
-            seen.add(resolved)
-            if candidate.is_dir() and _git_root_for(candidate) is not None:
-                found.append(candidate)
-    return found
-
-
 def worktree_patch_text(worktree: Path, *, include_untracked: bool = True, timeout_seconds: int = 60) -> str:
     """Binary-safe unified patch of a worktree's changes vs HEAD.
 
@@ -521,23 +491,6 @@ def remove_harness_worktree_for_repo(repo_label: str, worktree: Path, *, reason:
     if removed:
         _run_git_quiet(git_root, ["git", "worktree", "prune"])
     return removed
-
-
-def harness_worktree_dirs() -> list[Path]:
-    """Every directory in the harness worktree base, oldest mtime first."""
-
-    base = _worktree_base_dir()
-    if not base.is_dir():
-        return []
-    entries = [entry for entry in base.iterdir() if entry.is_dir()]
-
-    def _mtime(path: Path) -> float:
-        try:
-            return path.stat().st_mtime
-        except OSError:
-            return 0.0
-
-    return sorted(entries, key=_mtime)
 
 
 def legacy_harness_worktree_base_dir() -> Path:
@@ -775,36 +728,6 @@ def capture_repo_baseline(workdir: str | Path) -> dict[str, Any]:
     }
 
 
-def git_diff_since_baseline(workdir: str | Path, baseline: dict[str, Any] | None, *, max_chars: int = 50000) -> dict[str, Any]:
-    """Return the current git diff, excluding paths dirty before the run."""
-
-    root = _git_root_for(Path(workdir).expanduser()) or Path(workdir).expanduser()
-    baseline_paths = [str(path) for path in ((baseline or {}).get("dirty_paths") or []) if str(path).strip()]
-    lines = _filter_diff_lines(
-        _git_output(root, ["git", "diff", "--no-ext-diff", "--", "."]),
-        baseline_paths=baseline_paths,
-    )
-    if baseline:
-        lines.extend(_tracked_dirty_delta_lines(root, baseline))
-    lines.extend(_untracked_delta_lines(root, baseline))
-    diff_text = "\n".join(lines)
-    truncated = len(diff_text) > max_chars
-    if truncated:
-        diff_text = diff_text[:max_chars].rstrip()
-    return {
-        "schema_version": 1,
-        "captured_at": now().isoformat(),
-        "workdir_label": _safe_repo_label(root.name),
-        "baseline_dirty_count": len(baseline_paths),
-        "excluded_baseline_paths": baseline_paths[:50],
-        "new_untracked_paths": _new_untracked_paths(root, baseline)[:50],
-        "diff": diff_text,
-        "diff_chars": len(diff_text),
-        "truncated": truncated,
-    }
-
-
-# A unified-diff line that starts a new file section names the post-image path as
 # ``b/<path>``. Reused by both the legacy handoff gate and the root-node evidence
 # stack so the two never drift.
 _DIFF_TEST_FILE_RE = re.compile(
@@ -813,48 +736,6 @@ _DIFF_TEST_FILE_RE = re.compile(
 )
 _DIFF_REMOVED_ASSERT_RE = re.compile(r"\b(assert|expect|self\.assert|pytest\.raises)\b")
 _DIFF_ADDED_SKIP_RE = re.compile(r"\b(skip|skipif|xfail|@pytest\.mark\.skip|Skip\()\b")
-
-
-def changed_files_from_diff(diff_text: str) -> list[str]:
-    """Post-image file paths named by a unified diff's ``diff --git`` headers."""
-
-    files: list[str] = []
-    for line in (diff_text or "").splitlines():
-        if not line.startswith("diff --git "):
-            continue
-        marker = line.find(" b/")
-        if marker == -1:
-            continue
-        path = line[marker + 3 :].strip()
-        if path and path not in files:
-            files.append(path)
-    return files
-
-
-def diff_weakens_tests(diff_text: str) -> bool:
-    """True if a unified diff removes test assertions or adds skips in test files.
-
-    Pure over the diff string so both ``ticker._handoff_diff_weakens_tests`` (legacy
-    gate) and ``node_tools`` (root-node evidence handle) share one definition. This
-    is NOT a gate on the root-node path — it is a warning flag the root's model reads
-    and judges; only the legacy ticker path uses it to fail closed.
-    """
-
-    if not isinstance(diff_text, str) or not diff_text.strip():
-        return False
-    in_test_file = False
-    for line in diff_text.splitlines():
-        if line.startswith("diff --git "):
-            in_test_file = bool(_DIFF_TEST_FILE_RE.search(line.lower()))
-            continue
-        if not in_test_file:
-            continue
-        stripped = line.strip()
-        if stripped.startswith("-") and _DIFF_REMOVED_ASSERT_RE.search(stripped):
-            return True
-        if stripped.startswith("+") and _DIFF_ADDED_SKIP_RE.search(stripped):
-            return True
-    return False
 
 
 def safe_affected_repo_labels(repos: list[str] | tuple[str, ...] | None) -> list[str]:
@@ -902,18 +783,6 @@ def _git_output(workdir: Path, command: list[str], *, single: bool = False) -> A
     if single:
         return text.strip().splitlines()[0].strip() if text.strip() else ""
     return [line.rstrip() for line in text.splitlines() if line.strip()]
-
-
-def _dirty_paths_from_status(status_lines: list[str]) -> list[str]:
-    paths: list[str] = []
-    for line in status_lines:
-        raw = line[3:].strip() if len(line) > 3 else line.strip()
-        parts = [part.strip() for part in raw.split(" -> ") if part.strip()]
-        for part in parts or [raw]:
-            clean = part.strip().strip('"').replace("\\", "/")
-            if clean and clean not in paths:
-                paths.append(clean)
-    return paths[:200]
 
 
 def _status_manifest(status_lines: list[str]) -> dict[str, list[str]]:
@@ -978,142 +847,6 @@ def _snapshot_tracked_dirty_files(root: Path, dirty_paths: list[str]) -> tuple[P
 
 def _baseline_snapshot_dir() -> Path:
     return paths.store_root() / "repo_baselines"
-
-
-def _filter_diff_lines(lines: list[str], *, baseline_paths: list[str]) -> list[str]:
-    if not baseline_paths:
-        return lines
-    excluded = {path.replace("\\", "/").strip("/") for path in baseline_paths if path}
-    filtered: list[str] = []
-    current: list[str] = []
-    drop_current = False
-    for line in lines:
-        if line.startswith("diff --git "):
-            if current and not drop_current:
-                filtered.extend(current)
-            current = [line]
-            drop_current = _diff_header_touches_excluded_path(line, excluded)
-            continue
-        current.append(line)
-    if current and not drop_current:
-        filtered.extend(current)
-    return filtered
-
-
-def _diff_header_touches_excluded_path(line: str, excluded: set[str]) -> bool:
-    parts = line.split()
-    candidates = []
-    for part in parts[2:4]:
-        if part.startswith(("a/", "b/")):
-            candidates.append(part[2:].replace("\\", "/").strip("/"))
-    return any(candidate in excluded or _is_harness_litter_path(candidate) for candidate in candidates)
-
-
-def _tracked_dirty_delta_lines(root: Path, baseline: dict[str, Any]) -> list[str]:
-    snapshots = baseline.get("tracked_dirty_snapshots") if isinstance(baseline, dict) else None
-    if not isinstance(snapshots, dict):
-        return []
-    lines: list[str] = []
-    for rel, snapshot in snapshots.items():
-        rel_path = str(rel).replace("\\", "/").strip("/")
-        if not rel_path or _is_harness_litter_path(rel_path):
-            continue
-        current = (root / rel_path).resolve()
-        baseline_file = Path(str(snapshot))
-        if not baseline_file.is_file() or not current.is_file() or not _is_relative_to(current, root):
-            continue
-        diff_lines = _git_output(
-            root,
-            [
-                "git",
-                "diff",
-                "--no-index",
-                "--no-ext-diff",
-                "--",
-                str(baseline_file),
-                str(current),
-            ],
-        )
-        if not diff_lines:
-            continue
-        lines.extend(_rewrite_no_index_diff_headers(diff_lines, rel_path))
-    return lines
-
-
-def _rewrite_no_index_diff_headers(lines: list[str], rel_path: str) -> list[str]:
-    rewritten: list[str] = []
-    for line in lines:
-        if line.startswith("diff --git "):
-            rewritten.append(f"diff --git a/{rel_path} b/{rel_path}")
-        elif line.startswith("--- "):
-            rewritten.append(f"--- a/{rel_path}")
-        elif line.startswith("+++ "):
-            rewritten.append(f"+++ b/{rel_path}")
-        elif line.startswith("index "):
-            continue
-        else:
-            rewritten.append(line)
-    return rewritten
-
-
-def _untracked_delta_lines(root: Path, baseline: dict[str, Any] | None) -> list[str]:
-    lines: list[str] = []
-    for rel_path in _new_untracked_paths(root, baseline)[:50]:
-        target = (root / rel_path).resolve()
-        if not _is_relative_to(target, root) or not target.is_file():
-            continue
-        lines.extend(_pseudo_untracked_file_diff(target, rel_path))
-    return lines
-
-
-def _new_untracked_paths(root: Path, baseline: dict[str, Any] | None) -> list[str]:
-    status_lines = _git_output(root, ["git", "status", "--short", "--untracked-files=all"])
-    manifest = _status_manifest(status_lines)
-    baseline_untracked = {
-        str(path).replace("\\", "/").strip("/")
-        for path in ((baseline or {}).get("untracked_paths") or [])
-        if str(path).strip()
-    }
-    baseline_dirty = {
-        str(path).replace("\\", "/").strip("/")
-        for path in ((baseline or {}).get("dirty_paths") or [])
-        if str(path).strip()
-    }
-    result: list[str] = []
-    for path in manifest["untracked_paths"]:
-        clean = path.replace("\\", "/").strip("/")
-        if not clean or clean in baseline_untracked or clean in baseline_dirty or _is_harness_litter_path(clean):
-            continue
-        result.append(clean)
-    return result
-
-
-def _pseudo_untracked_file_diff(path: Path, rel_path: str) -> list[str]:
-    try:
-        data = path.read_bytes()
-    except OSError:
-        return []
-    if b"\x00" in data[:8192]:
-        return [
-            f"diff --git a/{rel_path} b/{rel_path}",
-            "new file mode 100644",
-            f"Binary files /dev/null and b/{rel_path} differ",
-        ]
-    text = data.decode("utf-8", errors="replace")
-    content_lines = text.splitlines()
-    truncated = len(content_lines) > 200
-    content_lines = content_lines[:200]
-    diff = [
-        f"diff --git a/{rel_path} b/{rel_path}",
-        "new file mode 100644",
-        "--- /dev/null",
-        f"+++ b/{rel_path}",
-        f"@@ -0,0 +1,{len(content_lines)} @@",
-    ]
-    diff.extend(f"+{line}" for line in content_lines)
-    if truncated:
-        diff.append("+[truncated]")
-    return diff
 
 
 def resolve_affected_repo_workdir(repo: str) -> Path | None:
@@ -1275,49 +1008,7 @@ def _normalize_repo_alias(value: str) -> str:
     return re.sub(r"[ _-]+", "-", stripped).strip("-")
 
 
-def known_repo_scope_labels() -> tuple[str, ...]:
-    """Canonical affected_repos labels the harness can actually resolve."""
-
-    return ("EterniaLauncher", "EterniaBackend", "hermes-agent")
-
-
-def canonical_repo_scope_label(value: str) -> str | None:
-    """Map any known repo alias to its canonical affected_repos label."""
-
-    alias = _normalize_repo_alias(str(value or ""))
-    if not alias:
-        return None
-    return _REPO_ALIAS_DISPLAY_LABELS.get(alias)
-
-
-def explicit_repo_mentions(text: str) -> tuple[str, ...]:
-    """Canonical labels for repos literally named in goal title/description.
-
-    Only explicit repo names count (``hermes-agent``, ``EterniaLauncher``,
-    ``eternia-backend``, ...). Generic words like "launcher" or "backend" are
-    deliberately excluded so ordinary prose does not pin scope.
-    """
-
-    lowered = str(text or "").lower()
-    found: list[str] = []
-    for alias in _EXPLICIT_REPO_MENTION_ALIASES:
-        pattern = alias.replace("-", "[-_ ]")
-        if re.search(rf"(?<![a-z0-9]){pattern}(?![a-z0-9])", lowered):
-            label = _REPO_ALIAS_DISPLAY_LABELS.get(alias)
-            if label and label not in found:
-                found.append(label)
-    return tuple(found)
-
-
 _HARNESS_REPO_ALIASES = frozenset({"agent-runtime-harness", "hermes-agent"})
-_EXPLICIT_REPO_MENTION_ALIASES = (
-    "hermes-agent",
-    "agent-runtime-harness",
-    "eternia-launcher",
-    "eternialauncher",
-    "eternia-backend",
-    "eterniabackend",
-)
 _REPO_ALIAS_PATHS = {
     "eterniabackend": (
         "X:/Unreal Engine/Engine/EterniaBackend/eternia-backend",

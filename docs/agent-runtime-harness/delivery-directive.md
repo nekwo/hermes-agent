@@ -1,54 +1,101 @@
 # Delivery Directive
 
-> **Liveness ruling (2026-07-30 follow-up audit to
-> [16 — Mission Lane Removal](16-mission-lane-removal.md)).**
-> `agent_runtime/delivery_directive.py` is neither wholly live nor wholly
-> residue — it is **one live half carrying one unswept residual half**, and it
-> must stay importable for the live half. Per function:
+> **Liveness ruling — SWEPT 2026-07-30 (S24), follow-up to
+> [16 — Mission Lane Removal](16-mission-lane-removal.md).**
+> `agent_runtime/delivery_directive.py` was ruled **one live half carrying one
+> unswept residual half**. The residue half is now gone; the module stays for
+> the live half, and this is the record of where the line was drawn.
 >
-> **LIVE — the orphan-worktree janitor.**
+> **LIVE — kept, unchanged signatures.**
 > - `reap_orphan_worktrees` has two production callers:
 >   `hermes harness worktree reap` (`hermes_cli/harness_parts/runtime_commands.py::_cmd_worktree_reap`)
 >   and `harness doctor --fix` (`agent_runtime/harness_doctor.py`). Its helpers
->   (`_write_reap_patch_exclusive`, `_is_empty_husk`) live with it. This is the
->   reason the module survives, and it is worktree-inventory-driven — it never
->   touches `Task`.
-> - `read_bundle_promotion_record` is a live read surface:
->   `repo_bundles.py` uses it to label bundle summaries
->   (`delivery_contract: delivery_directive`) that `status.py` and the snapshot
->   render. Post-removal it can only ever describe *historical* promotion
->   records; nothing writes new ones.
+>   (`_write_reap_patch_exclusive`, `_is_empty_husk`) and the
+>   `wt_reaped_patches/` capture-before-delete contract live with it. It is
+>   worktree-inventory-driven — it never touched `Task`, which is why it
+>   survived the lane it shipped in.
+> - `read_bundle_promotion_record` (+ `bundle_promotion_record_path`) is a live
+>   read surface: `repo_bundles.repo_bundle_summary` uses it to label bundle
+>   summaries (`delivery_contract: delivery_directive`) that `status.py`
+>   renders. It can only ever describe *historical* promotion records — the
+>   writer went with the executor — so its job now is to stop already-written
+>   records from being relabelled as never-promoted.
 >
-> **DORMANT — importable, but no producer.**
-> - `capture_bundle_patch` is still called by
->   `RepoBundleStore.mark_delivered` (`repo_bundles.py:166`), but the worker /
->   dispatch lane that delivered bundles was removed in S5/S8, so nothing marks
->   a bundle delivered anymore.
->
-> **UNSWEPT RESIDUE — callers removed with the mission lane, kept green only by
-> `tests/agent_runtime/test_delivery_directive.py`.**
-> - The **declaration path**: the directive was a Stage-38 goal-create field
->   stored on `Task` — both removed. `task_delivery_directive` now has two
->   vestigial callers: `context_builder.py::_delivery_directive_line` (its HUD
->   entry points `prompt_observability.py` / `runtime_hud.py` can only pass
->   `task=None`, so it always renders the contract default) and
->   `snapshot.py:2608` inside `_task_summary`, which is reachable only from
->   `goal_detail_for_task` — a function neutered to `return None` at its first
->   line in S8/S9. The declared value can never differ from
->   `DEFAULT_DELIVERY_DIRECTIVE` again.
+> **REMOVED in S24 — every one re-verified caller-free by text grep first.**
+> - The **declaration path**: `task_delivery_directive`,
+>   `normalize_delivery_directive`, `DeliveryDirectiveInvalid`,
+>   `DEFAULT_DELIVERY_DIRECTIVE`, `DIRECTIVE_KEY`, and the three mode
+>   frozensets. The directive was a Stage-38 goal-create field stored on `Task`
+>   — request lane and `Task` both gone. Its last two callers went in wave 1
+>   (`context_builder::_delivery_directive_line`; `snapshot::_task_summary`,
+>   which was reachable only from the neutered `goal_detail_for_task`), leaving
+>   a validator for a field no request can carry and a default nothing reads.
 > - The **terminal-settle executors**: `execute_delivery_directive`,
 >   `execute_task_delivery_directives`,
->   `execute_task_worktree_delivery_directives`, and `reap_task_run_worktrees`
->   have zero production callers — their choke point
->   (`ArchiveStore.archive_tasks` at task settle) went with the mission lane.
->   This is also the only reason the module still imports `TaskState`.
+>   `execute_task_worktree_delivery_directives`, `reap_task_run_worktrees`, and
+>   their private helpers (`_reap_bundle_worktrees`, `_emit_task_reap_event`,
+>   `_promote_patch_to_repo`, `_open_promotion_incident`,
+>   `_write_promotion_record`, `_synthetic_worktree_bundle`, `_bundle_run_id`,
+>   `_dirty_paths`, `_run_git`, `_emit`). Their choke point
+>   (`ArchiveStore.archive_tasks`) went with the mission lane; they were
+>   reachable only from each other. The `TaskState` import left with them.
+> - The **delivery-time capture**: `capture_bundle_patch`, `bundle_patch_path`,
+>   and their only caller `RepoBundleStore.mark_delivered` — plus that method's
+>   exclusive helper cluster (`_record_empty_delivery_guard`,
+>   `_patch_was_proposed_for_delivery`,
+>   `_empty_delivery_is_proof_only_no_product_edit`,
+>   `_task_declares_no_product_edits`, `_open_delivery_incident_once`,
+>   `_bundle_stage_key`, `_safe_string_set`, `PATCH_LANDED_NOWHERE`,
+>   `STAGE_NO_PROGRESS`, `EMPTY_DELIVERY_THRESHOLD`). Nothing had marked a
+>   bundle delivered since S5/S8, so the capture never ran.
 >
-> So: **not a deliberate seam** in the R-3 sense (no upstream file imports it
-> unguarded); the residue half simply has not been swept yet. A future
-> retirement pass may delete the executor half and the declaration path
-> (retargeting `test_delivery_directive.py` in the same commit), but must keep —
-> or re-home — `reap_orphan_worktrees` + `read_bundle_promotion_record` and the
-> `wt_reaped_patches/` capture contract.
+> **Two event types are now emitter-free.** S16b deliberately left
+> `worktree.task_reaped` and `bundle.worktree_reaped` unregistered because their
+> emitters were residue. Those emitters are deleted — the types are now
+> emitter-free AND contract-free, and must stay that way. (`bundle.promoted`,
+> `bundle.diff_captured`, `bundle.diff_capture_failed` were never registered
+> either; their appends were being swallowed by `_emit`'s `except`.)
+>
+> **Owed, not done here** (other files, other owners):
+> `repo_bundle.delivered` is still a *registered* contract
+> (`decision_contract_registry.py`, `events.py`) whose only emitter was
+> `mark_delivered` — it is now a registered-but-unemittable contract, the exact
+> debt S15 spent a stage clearing, and belongs to the events/registry owner.
+>
+> **Fixture ruling (4a): the worktree creator is KEPT and labelled.**
+> `repo_context.isolated_repo_context_for_run` + `_worktree_token` +
+> `_ensure_isolated_worktree` have **no production caller**, but deletion was
+> rejected: the earlier audit assumed `test_delivery_directive.py` was the only
+> consumer, and it is not. Twelve tests in `test_repo_context_observation.py`
+> drive the creator to pin protections reachable only through it (GC count cap,
+> dirty/fresh sparing, fail-closed `worktree add`, checkout timeout) — two of
+> them are live-incident regressions: junction severing that once emptied the
+> backend venv (2026-07-01) and the backend `.env` copy whose absence broke every
+> read-only proof (2026-07-03). Rebuilding the fixtures on raw
+> `git worktree add` would delete those regressions to save a function, so the
+> trio is kept with a docstring that says it is not live. `existing_run_worktrees`
+> and `remove_harness_worktree_for_repo` (caller-free after this sweep) stay with
+> it: **that lane retires whole or not at all.** The consequence to state plainly
+> — nothing in production creates harness worktrees any more, so the live janitor
+> now only ever cleans *historical* litter.
+>
+> **Also swept in the same commit** (caller-free, re-verified):
+> `repo_context.command_workdir_for_task`, `existing_run_worktrees_in_bases`,
+> `harness_worktree_dirs`, `git_diff_since_baseline` (+ its private diff
+> cascade), `diff_weakens_tests` (+ the `_DIFF_*` regexes),
+> `changed_files_from_diff`, `known_repo_scope_labels`,
+> `canonical_repo_scope_label`, `explicit_repo_mentions`,
+> `_dirty_paths_from_status`; and `repo_bundles.simplified_phase_for_task`,
+> `SIMPLIFIED_PHASES`, `REPO_BUNDLE_OWNER_PERSONAS`, and six unused `WAKE_*`
+> constants. `capture_repo_baseline` is NOT swept — `persona_runtime` calls it —
+> so its own behaviour is now pinned directly in
+> `test_repo_context_observation.py` instead of only through the deleted diff
+> reader. **Contradiction found and skipped:** `RepoContextExcerpt` was listed as
+> caller-free by an earlier audit and is not — it types
+> `RepoExecutionContext.context_excerpts`, which `persona_runtime` and
+> `context_builder` both render. `docs/agent-runtime-harness/08-blueprint-as-script-collapse.md`
+> still cites `git_diff_since_baseline` / `diff_weakens_tests` as live helpers;
+> that doc is owed a correction.
 
 Everything below describes the contract as designed, most of which executed on
 the removed goal/task lane and is retained as historical reference.
@@ -87,8 +134,8 @@ snapshot task summary — operator, Dev, and QA read the same declared truth.
 
 ## Execution (removed lane)
 
-1. **Capture at delivery** — `RepoBundleStore.mark_delivered` captures the
-   run worktree's binary-safe patch to
+1. **Capture at delivery** (removed S24) — `RepoBundleStore.mark_delivered`
+   captured the run worktree's binary-safe patch to
    `repo_bundles/<task_id>/<bundle_id>.patch` BEFORE `active_run_id` is
    cleared, and records `bundle.delivery_capture` (run id, patch name, changed
    files). The archive moves that directory wholesale, so the diff is
@@ -119,6 +166,9 @@ snapshot task summary — operator, Dev, and QA read the same declared truth.
 before removal; git-unrecognized directories are removed only when they contain
 no files at all.
 
-Tests: `tests/agent_runtime/test_delivery_directive.py` (covers both the live
-janitor and the residual executor half), plus
+Tests: `tests/agent_runtime/test_delivery_directive.py` (live half only since
+S24 — janitor protections, the capture contract, the registered
+`worktree.orphans_reaped` emission, and the promotion-record read/labelling),
+`tests/agent_runtime/test_s24_delivery_directive_residue_removal.py` (pins the
+removal and the keep-set, including the 4a fixture ruling), plus
 `tests/hermes_cli/test_worktree_reap_cli.py` for the CLI verb.

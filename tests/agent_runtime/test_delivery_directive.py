@@ -1,28 +1,34 @@
+"""Live half of ``delivery_directive``: the orphan janitor + the promotion read.
+
+S24 removed the Task-declared directive path and the terminal-settle executors
+(see ``docs/agent-runtime-harness/delivery-directive.md``). What this file covers
+is what still has production callers:
+
+* ``reap_orphan_worktrees`` — ``hermes harness worktree reap`` and
+  ``harness doctor --fix``. Every protection is pinned here: the age guard, the
+  ``wt_reaped_patches/`` capture-before-delete contract, dry-run write-freedom,
+  opt-in legacy-temp handling, reparse-alias safety, and the registered
+  ``worktree.orphans_reaped`` emission.
+* ``read_bundle_promotion_record`` — the read that lets
+  ``repo_bundles.repo_bundle_summary`` keep labelling historical promotions for
+  ``status.py`` now that nothing writes new ones.
+"""
+
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 
 from hermes_time import now
 
 from agent_runtime.delivery_directive import (
-    DEFAULT_DELIVERY_DIRECTIVE,
-    DeliveryDirectiveInvalid,
-    bundle_patch_path,
-    capture_bundle_patch,
-    execute_delivery_directive,
-    normalize_delivery_directive,
+    bundle_promotion_record_path,
     read_bundle_promotion_record,
-    task_delivery_directive,
 )
 from agent_runtime.models import RepoBundle
-from types import SimpleNamespace
-
-Task = SimpleNamespace
 from agent_runtime.repo_context import RepoExecutionContext, isolated_repo_context_for_run
-from agent_runtime.repo_bundles import RepoBundleStore, repo_bundle_summary
-from agent_runtime.states import RunState, TaskState
-from agent_runtime.store import IncidentStore, RunStore, TaskStore
+from agent_runtime.repo_bundles import repo_bundle_summary
 
 import pytest
 
@@ -58,7 +64,7 @@ def _bundle(source_repo: Path, *, task_id: str = "task_dd01", run_id: str | None
         task_id=task_id,
         repo=str(source_repo),
         owner_persona_id="dev",
-        state="running",
+        state="delivered_waiting_for_qa",
         title="Delivery directive slice",
         objective="Change app.py and add a module.",
         active_run_id=run_id,
@@ -68,21 +74,14 @@ def _bundle(source_repo: Path, *, task_id: str = "task_dd01", run_id: str | None
     )
 
 
-def _task(*, task_id: str = "task_dd01", state: TaskState = TaskState.DONE, directive: dict | None = None) -> Task:
-    ts = now()
-    return Task(
-        id=task_id,
-        title="Delivery directive goal",
-        description="Prove promote/preserve/reap.",
-        state=state,
-        created_at=ts,
-        updated_at=ts,
-        requested_by="tony",
-        delivery_directive=directive,
-    )
-
-
 def _worktree_with_changes(source_repo: Path, *, task_id: str = "task_dd01", run_id: str = "run_dd01") -> Path:
+    """Build a real dirty worktree for the janitor to find.
+
+    Uses the kept worktree creator (see its docstring): the janitor must be
+    tested against worktrees shaped exactly like the ones that lane leaves on
+    disk, not against hand-rolled directories.
+    """
+
     ctx = RepoExecutionContext(workdir=source_repo, repo_label=source_repo.name, source="explicit")
     wt_ctx = isolated_repo_context_for_run(ctx, task_id=task_id, run_id=run_id)
     worktree = wt_ctx.workdir
@@ -91,155 +90,75 @@ def _worktree_with_changes(source_repo: Path, *, task_id: str = "task_dd01", run
     return worktree
 
 
-def test_normalize_defaults_and_rejections():
-    assert normalize_delivery_directive(None) == DEFAULT_DELIVERY_DIRECTIVE
-    assert normalize_delivery_directive({"promote": "hold"})["promote"] == "hold"
-    with pytest.raises(DeliveryDirectiveInvalid):
-        normalize_delivery_directive({"promote": "yolo"})
-    with pytest.raises(DeliveryDirectiveInvalid):
-        normalize_delivery_directive({"unknown_key": True})
-    with pytest.raises(DeliveryDirectiveInvalid):
-        normalize_delivery_directive("promote")
+def _write_promotion_record(bundle: RepoBundle, outcome: dict) -> Path:
+    record_path = bundle_promotion_record_path(bundle.task_id, bundle.id)
+    record_path.parent.mkdir(parents=True, exist_ok=True)
+    record_path.write_text(json.dumps(outcome, sort_keys=True), encoding="utf-8")
+    return record_path
 
 
-def test_task_delivery_directive_survives_bad_declared_value():
-    task = _task(directive={"promote": "not-a-mode"})
-    assert task_delivery_directive(task) == DEFAULT_DELIVERY_DIRECTIVE
-
-
-def test_mark_delivered_captures_patch_before_clearing_run(source_repo):
-    worktree = _worktree_with_changes(source_repo)
-    assert worktree.is_dir()
+def test_promotion_record_read_is_absent_malformed_and_valid_safe(
+    source_repo, isolate_agent_runtime_root
+):
     bundle = _bundle(source_repo)
-    delivered = RepoBundleStore().mark_delivered(bundle, proof_ids=["proof_b"])
-    assert delivered.active_run_id is None
-    assert delivered.delivery_capture["captured"] is True
-    assert delivered.delivery_capture["run_id"] == "run_dd01"
-    assert "app.py" in delivered.delivery_capture["changed_files"]
-    assert "feature.py" in delivered.delivery_capture["changed_files"]
-    patch = bundle_patch_path(delivered.task_id, delivered.id)
-    assert patch.is_file() and patch.stat().st_size > 0
+
+    assert read_bundle_promotion_record(bundle.task_id, bundle.id) is None
+
+    record_path = _write_promotion_record(bundle, {"promote": {"status": "promoted", "commit": "abc1234"}})
+    record = read_bundle_promotion_record(bundle.task_id, bundle.id)
+    assert record is not None and record["promote"]["commit"] == "abc1234"
+
+    record_path.write_text("{not json", encoding="utf-8")
+    assert read_bundle_promotion_record(bundle.task_id, bundle.id) is None
+
+    record_path.write_text('["a list, not a record"]', encoding="utf-8")
+    assert read_bundle_promotion_record(bundle.task_id, bundle.id) is None
 
 
-def test_capture_reports_clean_worktree(source_repo):
-    ctx = RepoExecutionContext(workdir=source_repo, repo_label=source_repo.name, source="explicit")
-    isolated_repo_context_for_run(ctx, task_id="task_dd01", run_id="run_dd01")
-    result = capture_bundle_patch(_bundle(source_repo))
-    assert result["captured"] is False
-    assert result["reason"] == "worktree_clean"
+def test_bundle_summary_still_labels_a_historical_promotion(source_repo, isolate_agent_runtime_root):
+    """Nothing writes promotion records anymore; already-written ones must not
+    be relabelled as never-promoted."""
 
-
-def test_execute_directive_promotes_commits_and_reaps(source_repo):
-    worktree = _worktree_with_changes(source_repo)
-    store = RepoBundleStore()
-    bundle = store.mark_delivered(_bundle(source_repo))
-    task = _task()
-    outcome = execute_delivery_directive(task, bundle)
-
-    assert outcome["promote"]["status"] == "promoted"
-    assert outcome["promote"]["commit"]
-    assert outcome["worktree"]["status"] == "reaped"
-    assert not worktree.exists()
-    assert (source_repo / "feature.py").read_text(encoding="utf-8") == "FEATURE = True\n"
-    assert (source_repo / "app.py").read_text(encoding="utf-8") == "print('v2')\n"
-    log = _git(source_repo, "log", "-1", "--pretty=%s").stdout.strip()
-    assert log == "Delivery directive goal"
-    status = _git(source_repo, "status", "--porcelain").stdout.strip()
-    assert status == ""
-    record = read_bundle_promotion_record(task.id, bundle.id)
-    assert record is not None and record["promote"]["status"] == "promoted"
-
-
-def test_execute_directive_hold_keeps_repo_untouched_and_reaps(source_repo):
-    worktree = _worktree_with_changes(source_repo)
-    bundle = RepoBundleStore().mark_delivered(_bundle(source_repo))
-    task = _task(directive={"promote": "hold"})
-
-    outcome = execute_delivery_directive(task, bundle)
-
-    assert outcome["promote"]["status"] == "held"
-    assert outcome["worktree"]["status"] == "reaped"
-    assert not worktree.exists()
-    assert (source_repo / "app.py").read_text(encoding="utf-8") == "print('v1')\n"
-    # The captured patch still exists — nothing is lost by holding.
-    assert bundle_patch_path(task.id, bundle.id).is_file()
-
-
-def test_execute_directive_dirty_target_fails_keeps_worktree_opens_incident(source_repo):
-    worktree = _worktree_with_changes(source_repo)
-    bundle = RepoBundleStore().mark_delivered(_bundle(source_repo))
-    task = _task()
-    # Overlapping dirt in the target repo must block promotion.
-    (source_repo / "app.py").write_text("print('local edit')\n", encoding="utf-8")
-
-    opened: list = []
-
-    class _RecordingIncidents(IncidentStore):
-        def open(self, incident):
-            opened.append(incident)
-            return super().open(incident)
-
-    outcome = execute_delivery_directive(task, bundle, incident_store=_RecordingIncidents())
-
-    assert outcome["promote"]["status"] == "failed"
-    assert outcome["promote"]["reason"] == "target_paths_dirty"
-    assert outcome["worktree"]["status"] == "kept"
-    assert worktree.exists()
-    assert len(opened) == 1
-    assert opened[0].kind == "bundle_promotion_failed"
-
-
-def test_execute_directive_skips_promote_for_cancelled_task(source_repo):
-    worktree = _worktree_with_changes(source_repo)
-    bundle = RepoBundleStore().mark_delivered(_bundle(source_repo))
-    task = _task(state=TaskState.CANCELLED)
-
-    outcome = execute_delivery_directive(task, bundle)
-
-    assert outcome["promote"]["status"] == "skipped"
-    assert outcome["promote"]["reason"].startswith("task_state_")
-    # Evidence preserved, litter reaped.
-    assert bundle_patch_path(task.id, bundle.id).is_file()
-    assert outcome["worktree"]["status"] == "reaped"
-    assert not worktree.exists()
-    assert (source_repo / "app.py").read_text(encoding="utf-8") == "print('v1')\n"
-
-
-def test_bundle_summary_reports_promotion(source_repo):
-    _worktree_with_changes(source_repo)
-    bundle = RepoBundleStore().mark_delivered(_bundle(source_repo))
-    task = _task()
-    execute_delivery_directive(task, bundle)
+    bundle = _bundle(source_repo)
+    _write_promotion_record(
+        bundle,
+        {
+            "promote": {"status": "promoted", "reason": None, "commit": "deadbee"},
+            "worktree": {"status": "reaped"},
+            "recorded_at": now().isoformat(),
+        },
+    )
 
     summary = repo_bundle_summary(bundle)
+
     assert summary["checkout_applied"] is True
     assert summary["checkout_status"] == "promoted"
     assert summary["delivery_contract"] == "delivery_directive"
     assert summary["promotion"]["status"] == "promoted"
-    assert summary["delivery_capture"]["captured"] is True
+    assert summary["promotion"]["commit"] == "deadbee"
+    assert "commit deadbee" in summary["closeout_label"]
 
 
-def test_bundle_summary_without_promotion_keeps_staged_contract(source_repo):
+def test_bundle_summary_without_promotion_keeps_staged_contract(source_repo, isolate_agent_runtime_root):
     bundle = _bundle(source_repo)
     summary = repo_bundle_summary(bundle)
     assert summary["checkout_applied"] is False
     assert summary["checkout_status"] == "not_applied"
     assert summary["promotion"] is None
+    assert summary["delivery_contract"] == "staged_bundle_not_applied"
 
 
-def test_archive_runs_directive_and_preserves_patch(source_repo, isolate_agent_runtime_root):
+def test_no_archive_choke_point_survives_to_run_a_directive(isolate_agent_runtime_root):
+    """The executors' only caller was ``ArchiveStore.archive_tasks`` on the
+    ``TaskStore``. Ruling R-3 keeps the store as a permanent stub — pinned here
+    so nobody re-grows an archive hook and wires a settle-time promote to it."""
+
+    from agent_runtime.store import TaskStore
     from agent_runtime.task_store_stub import TaskStoreStub
 
     assert TaskStore is TaskStoreStub
     assert not hasattr(TaskStore(), "archive")
-
-
-def test_archive_promotes_dirty_bundleless_run_worktree(source_repo, isolate_agent_runtime_root):
-    from agent_runtime.task_store_stub import TaskStoreStub
-
-    store = TaskStore(event_log=object())
-    assert isinstance(store, TaskStoreStub)
-    assert vars(store) == {}
+    assert vars(TaskStore(event_log=object())) == {}
 
 
 def test_reap_orphan_worktrees_capture_age_and_task_free_cleanup(source_repo, tmp_path, monkeypatch):
@@ -258,9 +177,8 @@ def test_reap_orphan_worktrees_capture_age_and_task_free_cleanup(source_repo, tm
     # Orphan dirty worktree from a long-gone task.
     orphan = _worktree_with_changes(source_repo, task_id="task_gone", run_id="run_gone")
 
-    # A second old worktree is no longer protected by deleted task/run records.
-    owned_task = _task(task_id="task_open", state=TaskState.CREATED)
-    owned_task.affected_repos = [str(source_repo)]
+    # A second old worktree: no task/run record protects anything anymore, so
+    # the age guard and the capture contract are the only protection left.
     owned = _worktree_with_changes(source_repo, task_id="task_open", run_id="run_open")
 
     # Fresh worktrees are kept by the age guard.
@@ -283,6 +201,41 @@ def test_reap_orphan_worktrees_capture_age_and_task_free_cleanup(source_repo, tm
     assert reaped_entry.get("captured_patch")
     captured = Path(result["capture_dir"]) / reaped_entry["captured_patch"]
     assert captured.is_file() and captured.stat().st_size > 0
+
+
+def test_reap_orphan_worktrees_appends_its_registered_event(
+    source_repo, isolate_agent_runtime_root, tmp_path, monkeypatch
+):
+    """``worktree.orphans_reaped`` was emitted-but-unregistered until wave 1;
+    the append used to raise inside the emitter's ``except`` and drop the row.
+    A reap that lands nothing observable is a reap nobody can audit."""
+
+    import os
+    import time
+
+    from agent_runtime import repo_context as repo_context_mod
+    from agent_runtime.delivery_directive import reap_orphan_worktrees
+    from agent_runtime.events import ALLOWED_EVENT_TYPES, EventLog
+
+    assert "worktree.orphans_reaped" in ALLOWED_EVENT_TYPES
+
+    wt_base = tmp_path / "wtbase"
+    monkeypatch.setattr(repo_context_mod, "_worktree_base_dir", lambda: wt_base)
+    orphan = _worktree_with_changes(source_repo, task_id="task_evt", run_id="run_evt")
+    old = time.time() - 7200
+    os.utime(orphan, (old, old))
+    event_log = EventLog()
+
+    result = reap_orphan_worktrees(min_age_seconds=3600, event_log=event_log)
+
+    event = event_log.tail(1)[0]
+    assert event.type == "worktree.orphans_reaped"
+    assert event.payload["reaped_count"] == len(result["reaped"])
+    assert event.payload["kept_count"] == len(result["kept"])
+    assert event.payload["captured"] == [
+        item["captured_patch"] for item in result["reaped"] if item.get("captured_patch")
+    ]
+    assert event.payload["captured"], "a dirty candidate must report its capture"
 
 
 def test_reap_orphan_worktrees_dry_run_is_a_write_free_typed_preview(
@@ -369,10 +322,8 @@ def test_reap_orphan_worktrees_legacy_temp_is_opt_in_protected_and_write_free(
     orphan = _worktree_with_changes(
         source_repo, task_id="task_legacy_gone", run_id="run_legacy_gone"
     )
-    owned_task = _task(task_id="task_legacy_open", state=TaskState.CREATED)
-    owned_task.affected_repos = [str(source_repo)]
     owned = _worktree_with_changes(
-        source_repo, task_id=owned_task.id, run_id="run_legacy_open"
+        source_repo, task_id="task_legacy_open", run_id="run_legacy_open"
     )
     old = time.time() - 7200
     os.utime(orphan, (old, old))
