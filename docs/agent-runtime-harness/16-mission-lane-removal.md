@@ -375,3 +375,35 @@ outcomes below are the commit-recorded decisions, not a filename-based deletion 
   `_ensure_isolated_worktree` trio is intentionally kept as regression-test
   infrastructure: twelve tests exercise its worktree safety behavior, including two
   live-incident regressions. It has no production creator caller and is labelled as such.
+
+### Operator-owned leftovers — nothing in this repo will clean these up
+
+Deliberate holds, not oversights. Each is outside git and safe to leave indefinitely;
+listed so a future session does not re-derive them or assume they were missed.
+
+1. **`X:\Eternia\.hermes\agent-runtime-archive-20260730-writerless\`** (~88 MB) — every
+   writer-less runtime directory archived aside on 2026-07-30 rather than deleted:
+   `role_checklists`, `role_envelopes`, `proof_batches`, `proof_sandbox`,
+   `replay_scenarios`, `stage47_live_runs`, `worker_sessions`, `packet_artifacts`,
+   `repo_bundles`, `operator-runs`, `self_tests`, `context`, plus the S0 residue
+   (`incidents` 1,925 files, `burn_in` 78 MB — both byte-identical to the existing
+   `agent-runtime-archive-20260729-mission-lane` copies), stale daemon/probe/PID files,
+   ~62 root run-logs, `operator_backups/`, and the pre-edit profile config backups.
+   Every archive move was gated on a live read afterwards (`harness status`,
+   `checkpoint classes`, and `persona list` returning 15 rows / 11 chat). **Deleting this
+   directory is the operator's call and finishes the reclaim.**
+2. **Profile config backups** — `X:\Eternia\.hermes\profiles\backend-dev\config.yaml.bak-20260730`
+   and the `gpt-launcher` / `backend-dev` copies inside the archive root above, from the
+   2026-07-30 `launcher_qa` grants (both profiles verified field-identical to
+   `launcher-dev`'s block afterwards). Disposable once the grants are trusted.
+3. **Shared-skill backups** — `mission-control-harness.bak-20260730` and
+   `launcher-stagec-mcp-screenshot.bak-20260730` under `X:\Eternia\.hermes\shared\skills\`,
+   from the same-day rewrites. Note these sit **inside the shared skills root**: they are
+   not installed from this repo, so `harness install-harness-skills` will neither refresh
+   nor remove them.
+
+Already done and needing no action: the `wt-hml-s3-s12` worktree directory, the four
+runtime Launcher worktrees under `.hermes/agent-runtime/wt/` (382 MiB), and the thirteen
+registered `%TEMP%\hermes-agent-wt` worktrees (1.78 GiB) were all removed through
+`git worktree remove` after their contents were proven recoverable from git objects —
+that ~2.2 GiB is already reclaimed and is **not** what the archive directory above holds.
