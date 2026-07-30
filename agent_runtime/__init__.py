@@ -5,7 +5,7 @@ __version__ = "0.1.0"
 from .decision_schema import AgentDecision, DecisionType
 from .models import AgentPersona, AgentRun, Event, Incident, Proof
 from .personas import AgentRole, AutonomyLevel
-from .states import RunState, StageStatus, TaskState
+from .states import RunState, TaskState
 
 __all__ = [
     "AgentPersona",
@@ -18,6 +18,5 @@ __all__ = [
     "Incident",
     "Proof",
     "RunState",
-    "StageStatus",
     "TaskState",
 ]
