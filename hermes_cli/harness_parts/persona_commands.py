@@ -2132,11 +2132,10 @@ def _cmd_mission_chat_message(args) -> int:
             # See the projected-replay envelope above: a replay reports the same
             # thread lineage the original turn did.
             "session_established": session_established,
-            # Kept because the Launcher parses it (mission_control_bridge.dart
-            # `payload['task_id']`), now an honest constant: chat is the only
-            # lane, so a chat reply has no task binding to report. `goal_id`
-            # dropped alongside it -- no Launcher reply parser ever read it.
-            "task_id": None,
+            # S30: no task binding key. It was kept only because the Launcher
+            # parsed it, and that parse fed a field which was never read -- a
+            # dead key held alive by a dead reader. The Launcher dropped the
+            # reader first (23bd05c6); the goal key went the same way in S26.
             "client_message_id": client_message_id,
             "execution_state": "completed",
             "kind": "mission_chat_message",
@@ -2735,9 +2734,8 @@ def _cmd_mission_chat_message(args) -> int:
             # `none` = they landed there by inheritance).
             **({"clarify_binding": clarify_binding} if clarify_binding else {}),
             "active_session_id": active_session_id,
-            # See the replay envelope above: kept for the Launcher's reply
-            # parser, constant because chat turns carry no task binding.
-            "task_id": None,
+            # S30: no task binding key, retired with the replay envelope's
+            # copy above.
             "relay_chain": list(turn_relay_chain),
             "client_message_id": client_message_id,
             # A checkpointed turn is a SUCCESS with a truncated scope, not a
