@@ -992,8 +992,6 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_return.add_argument("--summary", required=True)
     persona_instance_return.add_argument("--proof-id", dest="proof_ids", action="append", default=[])
     persona_instance_return.add_argument("--artifact-ref", dest="artifact_refs", action="append", default=[])
-    persona_instance_return.add_argument("--task", dest="task_id", default=None)
-    persona_instance_return.add_argument("--stage", dest="stage_id", default=None)
     persona_instance_return.add_argument("--json", action="store_true")
     persona_instance_return.set_defaults(func=_cmd_persona_instance_return_summary)
     persona_instance_update = persona_instance_subs.add_parser("update-profile", help="Update runtime persona-instance profile overrides without editing the backing Hermes profile")

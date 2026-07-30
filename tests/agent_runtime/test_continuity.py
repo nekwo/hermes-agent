@@ -60,6 +60,14 @@ def test_return_summary_posts_bounded_parent_message_and_records_lineage(tmp_pat
 
 
 def test_return_summary_cli_uses_first_class_primitive(tmp_path, monkeypatch, capsys):
+    """The namespace is exactly what the parser now produces.
+
+    S22 removed the verb's ``--task``/``--stage`` flags (they wrote the deleted
+    mission-record key and stage-graph payload), so a namespace carrying
+    ``task_id``/``stage_id`` would no longer be reachable from the CLI. The ref
+    flags stay: they render into the parent chat message.
+    """
+
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
     child = PersonaInstanceStore().ensure_for_goal(
         _persona("dev"),
@@ -76,8 +84,6 @@ def test_return_summary_cli_uses_first_class_primitive(tmp_path, monkeypatch, ca
             summary="CLI return summary",
             proof_ids=["proof_cli"],
             artifact_refs=["artifact://cli"],
-            task_id="task_r3_cli",
-            stage_id="return",
             json=True,
         )
     )

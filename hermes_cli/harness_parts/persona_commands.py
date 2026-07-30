@@ -3464,8 +3464,6 @@ def _cmd_persona_instance_return_summary(args) -> int:
             summary=args.summary,
             proof_ids=list(getattr(args, "proof_ids", []) or []),
             artifact_refs=list(getattr(args, "artifact_refs", []) or []),
-            task_id=getattr(args, "task_id", None),
-            stage_id=getattr(args, "stage_id", None),
         )
     except Exception as exc:
         data = {"ok": False, "capability_id": "persona.instance.return_summary", "error": safe_assignment_text(str(exc), limit=240)}
