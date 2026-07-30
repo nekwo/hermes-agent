@@ -117,3 +117,12 @@ accepting the deletion, or retain the command.
    work is the 36 pre-existing composition conflicts.
 4. Port the promotion route into `web_routers/profiles.py` and prove
    `/api/profiles/{name}/promote` green before landing.
+5. **Post-sync (operator decision 2026-07-30): consolidate the per-profile
+   `mcp_servers` blocks.** After R-1 ("profile declares the server" is the whole
+   admission rule) the same `launcher_qa` block is copy-pasted across ~9 profile
+   configs — drift between copies is silent. Consolidating requires touching
+   upstream-owned config loading (`hermes_cli/config.py` / `mcp_config.py`, both
+   already in the conflict table), so it deliberately waits until after this
+   sync lands — upstream's `config_defaults.py` extraction may already provide
+   the layering. Interim guard candidate: a data-only test asserting every
+   profile's `launcher_qa` block is field-identical to `launcher-dev`'s.
