@@ -384,6 +384,15 @@ without exporting `TERMINAL_CWD` (`profile_runner.py:798-802`). Compare:
   run, and passes `workdir=repo_ctx.workdir` (`persona_runtime.py:122-131, 195`).
 * `hermes chat`: runs in the operator's actual cwd.
 
+**2026-07-30 correction:** the first bullet no longer names live code. S5 removed
+the worker lane, and S29 (`4a56bb546`) removed `_repo_context_for_persona` itself
+once its `AgentContext` producer was gone — so that bullet and its line numbers
+are the audit's historical state. G6 has since been resolved from the other
+direction: `agent_runtime/mission_chat_workdir.py` resolves the mission-chat
+workdir through its own ladder and hands it to the same `AgentRunRequest.workdir`
+seam, which makes this lane the only one in the runtime that still has repo
+grounding.
+
 A mission-chat agent therefore has no notion of "which repo am I in", and any
 relative path it uses resolves against the serve process's cwd. Compounded by
 G8 (no `AGENTS.md`), a mission-chat Dev has neither repo grounding nor repo
