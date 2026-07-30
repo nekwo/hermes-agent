@@ -41,13 +41,26 @@ def test_dev_discipline_survives_on_its_progress_telemetry_caller():
 
 
 def test_simplified_contract_survives_on_its_public_decision_type_callers():
-    """Operator channels, the snapshot, and the store all project decision types."""
+    """Operator channels and the store project decision types through it.
+
+    Retargeted in S27. This pin originally named ``snapshot`` as a third caller,
+    but that was an IMPORT with no surviving call: ``8fe3d6687`` cut the goal/task
+    projection cluster, leaving ``snapshot._public_decision_value`` reachable only
+    from the run-projection island, and S27 removed that island and the import
+    with it. The pin now gates on the two modules that actually CALL the
+    normalizer, so it cannot pass on a dangling import again.
+    """
+
+    import inspect
 
     from agent_runtime import operator_channels, simplified_contract, snapshot, store
 
     assert operator_channels.public_decision_type_value is simplified_contract.public_decision_type_value
-    assert snapshot.public_decision_type_value is simplified_contract.public_decision_type_value
     assert store.public_decision_type_value is simplified_contract.public_decision_type_value
+    # A live call site, not just a bound name.
+    for module in (operator_channels, store):
+        assert "public_decision_type_value(" in inspect.getsource(module), module.__name__
+    assert not hasattr(snapshot, "public_decision_type_value")
 
 
 def test_scope_control_survives_on_its_payload_validation_callers():
@@ -61,7 +74,12 @@ def test_scope_control_survives_on_its_payload_validation_callers():
 
 
 def test_role_checklists_survives_on_its_role_envelope_callers():
-    """Role envelopes own a checklist store; the snapshot summarizes it."""
+    """Role envelopes own a checklist store.
+
+    S27 note: the snapshot no longer summarizes checklists -- that reader was in
+    the ``_role_streams`` island -- so ``role_envelopes`` is the whole live
+    surface, alongside ``decision_contract_registry``'s payload-structure check.
+    """
 
     from agent_runtime import role_checklists, role_envelopes
 
