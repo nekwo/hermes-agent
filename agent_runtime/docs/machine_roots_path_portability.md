@@ -98,8 +98,6 @@ Consumers:
 | --- | --- | --- |
 | Runtime MCP client | `tools/mcp_tool.py::_load_mcp_config` | drop the server + `logger.error` with the typed code |
 | `hermes mcp test/add` probe | `hermes_cli/mcp_config.py::_resolve_mcp_server_config` | raise; the CLI prints the typed reason |
-| Stage C visual proof | `agent_runtime/stagec_mcp_visual_provider.py::resolve_launcher_qa_mcp_config` | typed `StageCMcpConfigResolution.code` |
-| Preflight | `agent_runtime/preflight.py::_mcp_exposure_check` | `launcher_qa_mcp=<typed code>` + the exact fix command |
 | Readiness | `agent_runtime/profile_readiness.py` | `mcp_attention` + `machine_root_issues[]` |
 | Persona `repo_scope` | `agent_runtime/config.py::_expand_machine_root_tokens` | keeps the literal token (never blanked, never guessed) so readiness can name the fix |
 

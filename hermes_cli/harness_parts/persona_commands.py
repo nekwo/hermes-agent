@@ -84,8 +84,12 @@ def _cmd_persona_tool_diff(args) -> int:
             repo_scope=args.repo_scope,
             workdir=args.workdir,
             session_id=args.session_id,
-            task_id=args.task_id,
-            goal_id=args.goal_id,
+            # S27: no ``task_id``/``goal_id``. Their ``--task``/``--goal`` flags
+            # were the only writers and nothing emitted them (the Launcher's
+            # permission-preview argv never carried either), so this preview
+            # could only ever correlate against a mission record deleted in S8.
+            # The fields themselves stay on ToolVisibilityOptions -- the CHAT
+            # lane fills them from the live persona-instance row.
             # This command IS the harness lane; say so rather than letting the
             # lane be inferred from argv.
             entry_point_lane=HARNESS_LANE,
@@ -1202,7 +1206,6 @@ def _publish_persona_chat_projection_event(
     turn_id: str,
     persona_id: str,
     persona_instance_id: str,
-    task_id: str | None,
     active_session_id: str | None,
     native_revision: str | None,
 ) -> bool:
@@ -1226,7 +1229,10 @@ def _publish_persona_chat_projection_event(
         EventLog().append(
             Event(
                 type="persona_chat.projected",
-                task_id=task_id or None,
+                # Chat is the only lane (contract 45): a chat turn has no task
+                # binding to report, so this is a constant rather than an
+                # argv-sourced value that could only ever be None.
+                task_id=None,
                 run_id=None,
                 persona_id=persona_id or None,
                 ts=now(),
@@ -1263,7 +1269,6 @@ def _publish_persona_chat_metadata_event(
     session_id: str,
     persona_id: str,
     persona_instance_id: str,
-    task_id: str | None,
 ) -> bool:
     """Notify stream consumers that SessionDB-only chat metadata changed."""
 
@@ -1271,7 +1276,9 @@ def _publish_persona_chat_metadata_event(
         EventLog().append(
             Event(
                 type="persona_chat.metadata_updated",
-                task_id=task_id or None,
+                # See the projection event above: chat turns carry no task
+                # binding under contract 45.
+                task_id=None,
                 run_id=None,
                 persona_id=persona_id or None,
                 ts=now(),
@@ -1799,13 +1806,11 @@ def _cmd_mission_chat_message(args) -> int:
             print(emit_json(data) if args.json else data["error"])
         return 2
 
-    task_id = safe_assignment_token(getattr(args, "task_id", None))
-    goal_id = safe_assignment_token(getattr(args, "goal_id", None))
-    if task_id or goal_id:
-        instance.current_task_id = task_id or instance.current_task_id
-        instance.goal_id = goal_id or task_id or instance.goal_id
-        instance.mode = "task_bound"
-        instance = instance_store.update(instance)
+    # The retired mission lane's re-entry point used to live here: --task/--goal
+    # wrote instance.current_task_id/goal_id and flipped instance.mode to the
+    # RETIRED "task_bound", then persisted the row. A chat send must never arm
+    # retired runtime state. Both flags are gone from the parser (contract 45);
+    # arming a row is `persona instance steer --goal`, which is untouched.
 
     try:
         _ensure_persona_chat_session(
@@ -2039,7 +2044,6 @@ def _cmd_mission_chat_message(args) -> int:
             turn_id=journal.get("turn_id") or client_message_id,
             persona_id=normalized_persona,
             persona_instance_id=instance.id,
-            task_id=task_id,
             active_session_id=journal.get("active_session_id")
             or _persona_chat_native_tip(session_db, session_id),
             native_revision=journal.get("native_revision")
@@ -2114,7 +2118,6 @@ def _cmd_mission_chat_message(args) -> int:
             turn_id=client_message_id,
             persona_id=normalized_persona,
             persona_instance_id=instance.id,
-            task_id=task_id,
             active_session_id=_persona_chat_native_tip(session_db, session_id),
             native_revision=_persona_chat_native_revision(session_db, session_id),
         )
@@ -2129,8 +2132,10 @@ def _cmd_mission_chat_message(args) -> int:
             # See the projected-replay envelope above: a replay reports the same
             # thread lineage the original turn did.
             "session_established": session_established,
-            "task_id": task_id,
-            "goal_id": goal_id,
+            # S30: no task binding key. It was kept only because the Launcher
+            # parsed it, and that parse fed a field which was never read -- a
+            # dead key held alive by a dead reader. The Launcher dropped the
+            # reader first (23bd05c6); the goal key went the same way in S26.
             "client_message_id": client_message_id,
             "execution_state": "completed",
             "kind": "mission_chat_message",
@@ -2235,8 +2240,8 @@ def _cmd_mission_chat_message(args) -> int:
         persona=persona,
         persona_instance_id=instance.id,
         session_id=session_id,
-        task_id=task_id,
-        goal_id=goal_id,
+        # task_id/goal_id intentionally not passed: both are defaulted kwargs and
+        # the retired mission lane was their only source on this path.
         turn_id=safe_assignment_token(client_message_id),
         surface_prompt=getattr(args, "surface_prompt", "") or "",
         limiting_wrapper_active=False,
@@ -2464,8 +2469,8 @@ def _cmd_mission_chat_message(args) -> int:
         persist_tool_turn_actual(
             persona_id=normalized_persona,
             session_id=session_id,
-            task_id=task_id,
-            goal_id=goal_id,
+            # task_id/goal_id intentionally not passed: defaulted kwargs whose
+            # only source on this path was the retired mission lane.
             turn_id=safe_assignment_token(client_message_id),
             model_input=prompt_context.get("final_model_input"),
         )
@@ -2729,8 +2734,8 @@ def _cmd_mission_chat_message(args) -> int:
             # `none` = they landed there by inheritance).
             **({"clarify_binding": clarify_binding} if clarify_binding else {}),
             "active_session_id": active_session_id,
-            "task_id": task_id,
-            "goal_id": goal_id,
+            # S30: no task binding key, retired with the replay envelope's
+            # copy above.
             "relay_chain": list(turn_relay_chain),
             "client_message_id": client_message_id,
             # A checkpointed turn is a SUCCESS with a truncated scope, not a
@@ -2829,7 +2834,6 @@ def _cmd_mission_chat_message(args) -> int:
                 turn_id=stream_emitter.turn_id,
                 persona_id=normalized_persona,
                 persona_instance_id=instance.id,
-                task_id=task_id,
                 active_session_id=active_session_id,
                 native_revision=native_revision,
             )
@@ -2866,7 +2870,6 @@ def _cmd_mission_chat_message(args) -> int:
                     session_id=session_id,
                     persona_id=normalized_persona,
                     persona_instance_id=instance.id,
-                    task_id=task_id,
                 )
         except Exception:
             pass
@@ -3301,13 +3304,13 @@ def _cmd_persona_instance_sweep_orphans(args) -> int:
     else:
         print(
             "persona instances: "
-            f"task_bound {result['before_task_bound_count']} -> {result['after_task_bound_count']}; "
+            f"reconciled {result['before_task_bound_count']} -> {result['after_task_bound_count']}; "
             f"reaped {result['reaped_count']}; "
             f"active preserved {result['skipped_active_count']}"
         )
         remaining = result.get("remaining_task_bound_persona_instance_ids") or []
         if remaining:
-            print("remaining task-bound instances: " + ", ".join(remaining[:20]))
+            print("remaining orphan-candidate instances: " + ", ".join(remaining[:20]))
     return 0
 
 
@@ -3464,8 +3467,6 @@ def _cmd_persona_instance_return_summary(args) -> int:
             summary=args.summary,
             proof_ids=list(getattr(args, "proof_ids", []) or []),
             artifact_refs=list(getattr(args, "artifact_refs", []) or []),
-            task_id=getattr(args, "task_id", None),
-            stage_id=getattr(args, "stage_id", None),
         )
     except Exception as exc:
         data = {"ok": False, "capability_id": "persona.instance.return_summary", "error": safe_assignment_text(str(exc), limit=240)}
@@ -3985,7 +3986,11 @@ def _queue_free_floating_assignment(
         "assignment_id": assignment.id,
         "persona_instance_id": assignment.persona_instance_id,
         "persona_id": normalized_persona,
-        "task_id": assignment.task_id,
+        # S31: see the runner's frame. This copy read `assignment.task_id`, but
+        # the spec below is built with `task_id=None` -- so it was equally
+        # constant, and on the auto_run path the runner's `data.update` wrote
+        # its own None straight over it. The FIELD stays (create_or_resume and
+        # the free-floating close paths select on it); only the wire key goes.
         "state": assignment.state,
         "kind": assignment.kind,
         "evidence_kind": assignment.evidence_kind,
@@ -5745,7 +5750,10 @@ def _run_free_floating_assignment_once(
             "turn_id": stream_emitter.turn_id,
             "client_message_id": client_message_id,
             "run_ids": [],
-            "task_id": None,
+            # S31: no task binding key -- the free-floating half of S30's reap.
+            # It emitted a constant None into the SAME Launcher terminal parser
+            # the mission-chat lane uses, whose typed field for it was retired
+            # first (launcher 23bd05c6). Audited both repos: no reader remains.
             "input_tokens": getattr(chat_result, "input_tokens", None),
             "output_tokens": getattr(chat_result, "output_tokens", None),
             "total_tokens": getattr(chat_result, "total_tokens", None),

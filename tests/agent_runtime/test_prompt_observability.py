@@ -433,20 +433,18 @@ def test_unresolved_used_skill_never_claims_hash_tracking():
     assert receipt["content_hash"] is None
 
 
-def test_snapshot_previews_the_mission_hud_for_a_bound_task(monkeypatch):
-    from agent_runtime import context_builder
+def test_snapshot_leaves_mission_hud_empty_even_for_a_bound_task(monkeypatch):
+    """Retargeted in S19 (was ``..._previews_the_mission_hud_for_a_bound_task``).
+
+    The preview producer (``context_builder.mission_hud_preview``) is removed:
+    ``snapshot.py`` builds this section with ``tasks = []``, so the lookup this
+    test used to exercise could never resolve a task in production. The row
+    field survives as the honest empty dict rather than a fabricated preview.
+    """
+
     from agent_runtime import prompt_observability as po
 
-    # Isolate from the real on-disk store and stub the single-authority builder;
-    # this test covers the wiring (task lookup + pass-through), not HUD shape.
     monkeypatch.setattr(po, "load_latest_prompt_observability_contexts", lambda: [])
-    sentinel = {"preview": True, "phase": "in_progress", "task_id": "task_live"}
-    monkeypatch.setattr(
-        context_builder,
-        "mission_hud_preview",
-        lambda task, *, proof_store=None: sentinel,
-    )
-
     persona = SimpleNamespace(id="dev", hermes_profile="dev", display_name="Dev", role="dev")
     instance = SimpleNamespace(
         id="personainst_dev",
@@ -463,7 +461,7 @@ def test_snapshot_previews_the_mission_hud_for_a_bound_task(monkeypatch):
 
     contexts = snapshot["chat_contexts"]
     assert len(contexts) == 1
-    assert contexts[0]["mission_hud"] == sentinel
+    assert contexts[0]["mission_hud"] == {}
 
 
 def test_snapshot_leaves_mission_hud_empty_for_unbound_instance(monkeypatch):

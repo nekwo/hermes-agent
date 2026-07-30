@@ -50,17 +50,6 @@ class PossessionState(StrEnum):
     DISABLED = "disabled"
 
 
-class StageStatus(StrEnum):
-    DRAFT = "draft"
-    AUDITED = "audited"
-    READY = "ready"
-    IMPLEMENTING = "implementing"
-    READY_FOR_QA = "ready_for_qa"
-    PASSED = "passed"
-    REWORK = "needs_fixes"
-    BLOCKED = "blocked"
-
-
 _LEGACY_RUNNING_TASK_STATE_VALUES = frozenset(
     {
         "pm_triage",

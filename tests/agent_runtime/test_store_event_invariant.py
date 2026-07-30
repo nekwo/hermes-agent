@@ -31,11 +31,16 @@ _EVENT_CALLS = {"append", "_append_store_event"}
 EXEMPT: dict[str, str] = {
     # The JSON-write primitive itself; every store writer funnels through it.
     "<module>._write_model": "write primitive — coupling is enforced on its callers",
-    # Bare field refresh used by evented flows: every public caller
-    # (open_run/heartbeat/close_run/cancel/approve_continuation) appends its
-    # own run.* event for the same mutation; a second append here would
-    # double-bump the watermark per heartbeat.
-    "RunStore.update": "all callers emit run.* events for the same mutation",
+    # Bare field refresh on a run row. S17 removed the evented RunStore writers
+    # that had no production callers left (open_run/heartbeat/
+    # approve_continuation), so the two surviving production callers are
+    # progress.RunProgressSink (which appends its own run.progress /
+    # run.tool.* for the same mutation) and
+    # persona_runtime._attach_repo_baseline (a derived-field refresh). No
+    # consumer is watermark-gated on run rows — S9 dropped `runs` from the
+    # read model's ROW_TABLES — so the refresh converges without an event, and
+    # appending here would double-bump the watermark on every progress tick.
+    "RunStore.update": "sink callers emit their own run.* event; run rows are not watermark-gated",
 }
 
 

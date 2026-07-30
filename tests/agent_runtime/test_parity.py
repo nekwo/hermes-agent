@@ -115,7 +115,7 @@ def test_events_watermark_reports_offset(isolate_agent_runtime_root):
     from agent_runtime.models import Event
 
     log = EventLog()
-    log.append(Event(ts=now(), type="task.created", task_id="t1", run_id=None, persona_id=None))
+    log.append(Event(ts=now(), type="persona_instance.created", task_id="t1", run_id=None, persona_id=None))
 
     wm = events_watermark(last_event_ts="2026-06-25T00:00:00Z")
     assert wm["event_offset"] > 0  # file has bytes

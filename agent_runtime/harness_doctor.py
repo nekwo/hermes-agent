@@ -9,11 +9,6 @@ from .events import EventLog, event_log_health
 from .snapshot import build_snapshot
 
 
-DEFAULT_STALE_RUN_HOURS = 6
-DEFAULT_STALE_WORKER_HOURS = 6
-DEFAULT_STALE_TASK_DAYS = 2
-DEFAULT_STALE_INCIDENT_DAYS = 7
-DEFAULT_STALE_INCIDENT_HOURS = DEFAULT_STALE_INCIDENT_DAYS * 24
 DEFAULT_WORKTREE_MIN_AGE_SECONDS = 3600
 
 
@@ -21,38 +16,22 @@ def run_harness_doctor(
     *,
     fix: bool = False,
     dry_run: bool = False,
-    stale_run_hours: int = 6,
-    stale_worker_hours: int = 6,
-    stale_task_days: int = 2,
-    stale_incident_hours: int = 168,
-    stale_incident_days: int | None = None,
     worktree_min_age_seconds: int = DEFAULT_WORKTREE_MIN_AGE_SECONDS,
     include_worktrees: bool = True,
-    compact_events: bool = False,
-    task_store: Any = None,
-    run_store: Any = None,
-    worker_store: Any = None,
-    incident_store: Any = None,
     event_log: EventLog | None = None,
     snapshot_builder: Callable[[], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Report surviving chat-runtime health without reviving mission records.
 
-    Legacy threshold and store parameters remain accepted so older operators
-    receive a typed, harmless report. They are deliberately ignored: task,
-    run, worker-dispatch, and incident repair belonged to the removed mission
-    lane. Worktree capture/reaping and read-only authority diagnostics remain.
+    Checks: orphan worktrees, snapshot null-id rows, event-log health, model
+    authority, and persona/profile binding. The mission-era threshold/store
+    parameters and the event-compaction switch were removed with the mission
+    lane (doc 16); the CLI stopped passing them in 126976088.
     """
 
-    del task_store, run_store, worker_store, incident_store
     ref = now()
     event_log = event_log or EventLog()
     snapshot_builder = snapshot_builder or build_snapshot
-    incident_hours = (
-        max(1, int(stale_incident_days or 1) * 24)
-        if stale_incident_days is not None
-        else max(1, int(stale_incident_hours or 168))
-    )
     if include_worktrees:
         worktrees = reap_orphan_worktrees(
             min_age_seconds=max(0, int(worktree_min_age_seconds or 0)),
@@ -87,14 +66,8 @@ def run_harness_doctor(
         "ok": True,
         "mode": {"fix": bool(fix), "dry_run": bool(dry_run)},
         "thresholds": {
-            "stale_run_hours": int(stale_run_hours),
-            "stale_worker_hours": int(stale_worker_hours),
-            "stale_task_days": int(stale_task_days),
-            "stale_incident_hours": incident_hours,
-            "stale_incident_days": round(float(incident_hours) / 24, 3),
             "worktree_min_age_seconds": int(worktree_min_age_seconds),
             "include_worktrees": bool(include_worktrees),
-            "compact_events": bool(compact_events),
         },
         "summary": {
             "finding_counts": finding_counts,
@@ -107,11 +80,6 @@ def run_harness_doctor(
             "orphan_worktrees": worktrees,
             "snapshot_null_id_rows": snapshot_defects,
             "event_log": event_health,
-            "event_log_compaction": {
-                "dry_run": True,
-                "skipped": "mission_event_compaction_removed",
-                "removed_event_count": 0,
-            },
         },
         "model_authority": _model_authority_report(),
         "persona_binding": _persona_binding_report(),

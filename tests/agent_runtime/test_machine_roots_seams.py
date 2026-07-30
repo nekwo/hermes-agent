@@ -1,9 +1,9 @@
 """The machine-root chokepoint must be LOUD at every seam that consumes it.
 
-These are the anti-silent-failure contracts: readiness, Stage C config
-resolution, preflight, persona repo scope, and the runtime MCP loader each have
-to report the typed reason rather than degrade into "not configured" or hand a
-literal ``${roots.…}`` token to something that will spawn it.
+These are the anti-silent-failure contracts: readiness, persona repo scope, the
+runtime MCP loader, and the CLI probe each have to report the typed reason rather
+than degrade into "not configured" or hand a literal ``${roots.…}`` token to
+something that will spawn it.
 """
 
 from __future__ import annotations
@@ -207,107 +207,17 @@ def test_persona_repo_scope_without_tokens_is_untouched(tmp_path, monkeypatch):
 
 
 # ── Stage C launcher_qa resolution ──────────────────────────────────────────
-
-
-def test_stagec_resolution_distinguishes_unbound_root_from_not_configured(tmp_path, monkeypatch):
-    from agent_runtime import stagec_mcp_visual_provider as provider
-
-    home = tmp_path / "home"
-    (home / "profiles" / "qa").mkdir(parents=True)
-    (home / "profiles" / "qa" / "config.yaml").write_text(
-        "mcp_servers:\n  launcher_qa:\n    command: ${roots.eternia_launcher}/tool/server\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("HERMES_HOME", str(home / "profiles" / "qa"))
-    machine_roots_cache_clear()
-
-    resolution = provider.resolve_launcher_qa_mcp_config(profile_name="qa")
-
-    assert resolution.config is None
-    assert resolution.code == "unbound_root"
-    assert "hermes harness roots set eternia_launcher" in resolution.fix_hint
-    assert provider.load_launcher_qa_mcp_config(profile_name="qa") is None
-
-
-def test_stagec_resolution_reports_platform_gate(tmp_path, monkeypatch):
-    from agent_runtime import stagec_mcp_visual_provider as provider
-
-    monkeypatch.setattr(machine_roots, "current_platform_key", lambda: "linux")
-    home = tmp_path / "home"
-    (home / "profiles" / "qa").mkdir(parents=True)
-    (home / "profiles" / "qa" / "config.yaml").write_text(
-        "mcp_servers:\n"
-        "  launcher_qa:\n"
-        "    command: powershell.exe\n"
-        "    platforms:\n"
-        "      - windows\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("HERMES_HOME", str(home / "profiles" / "qa"))
-    machine_roots_cache_clear()
-
-    resolution = provider.resolve_launcher_qa_mcp_config(profile_name="qa")
-
-    assert resolution.config is None
-    assert resolution.code == "platform_unsupported"
-    assert "linux" in resolution.summary
-
-
-def test_stagec_resolution_expands_a_bound_root(tmp_path, monkeypatch):
-    from agent_runtime import stagec_mcp_visual_provider as provider
-
-    repo = tmp_path / "EterniaLauncher"
-    (repo / "tool").mkdir(parents=True)
-    home = tmp_path / "home"
-    profile = home / "profiles" / "qa"
-    profile.mkdir(parents=True)
-    profile.joinpath("config.yaml").write_text(
-        "mcp_servers:\n"
-        "  launcher_qa:\n"
-        "    command: ${roots.eternia_launcher}/tool/server${exe_suffix}\n"
-        "    env:\n"
-        "      STAGEC_QA_REPO_ROOT: ${roots.eternia_launcher}\n",
-        encoding="utf-8",
-    )
-    profile.joinpath(MACHINE_ROOTS_FILENAME).write_text(
-        json.dumps({"roots": {"eternia_launcher": str(repo)}}), encoding="utf-8"
-    )
-    monkeypatch.setenv("HERMES_HOME", str(profile))
-    machine_roots_cache_clear()
-
-    resolution = provider.resolve_launcher_qa_mcp_config(profile_name="qa")
-
-    assert resolution.code == "ready"
-    assert resolution.config is not None
-    assert resolution.config.command == str(repo / "tool" / f"server{machine_roots.exe_suffix()}")
-    assert resolution.config.env["STAGEC_QA_REPO_ROOT"] == str(repo)
-
-
-# ── Preflight ───────────────────────────────────────────────────────────────
-
-
-def test_preflight_surfaces_the_typed_root_code_not_a_flat_missing(monkeypatch):
-    from agent_runtime import preflight
-    from agent_runtime.stagec_mcp_visual_provider import StageCMcpConfigResolution
-
-    monkeypatch.setattr(preflight, "load_launcher_qa_mcp_config", lambda persona_target: None)
-    monkeypatch.setattr(
-        preflight,
-        "resolve_launcher_qa_mcp_config",
-        lambda persona_target: StageCMcpConfigResolution(
-            None,
-            "unbound_root",
-            "Machine root 'eternia_launcher' is not bound on this machine",
-            "hermes harness roots set eternia_launcher <absolute-local-path> --yes",
-        ),
-    )
-
-    check = preflight._mcp_exposure_check()
-
-    assert check.ok is False
-    assert check.token == "launcher_qa_mcp=unbound_root"
-    assert "eternia_launcher" in check.detail
-    assert "hermes harness roots set" in check.actionable_fix
+#
+# The three ``resolve_launcher_qa_mcp_config`` seam tests were retired with
+# ``agent_runtime/stagec_mcp_visual_provider.py`` in S14 (operator ruling: Stage C
+# lives only as the MCP server plus the marionette skill). The machine-root token
+# expansion those tests exercised through the provider is still covered on the path
+# Stage C actually uses — see the runtime MCP loader and CLI probe sections below.
+#
+# The preflight seam test that lived here went with ``agent_runtime/preflight.py``
+# in S13: preflight had zero production importers once the task lane was removed,
+# and it was the only caller that turned a typed root-resolution code into a
+# readiness token.
 
 
 # ── Runtime MCP loader ──────────────────────────────────────────────────────

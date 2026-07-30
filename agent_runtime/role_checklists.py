@@ -1,3 +1,16 @@
+"""Role-local checklists: the store, its template, and payload validation.
+
+S27 removed the DECISION-side half — ``validate_decision_checklist_payload``,
+``sanitize_decision_checklist_payload`` and ``apply_decision_checklist_updates``
+— which applied a role's checklist updates while executing a typed decision, a
+lane that went with the dispatch loop in S5. ``stage_checklist_hud`` went with
+them: its last caller left in ``8fa9ee283`` (the S19 ``context_builder`` HUD
+cluster cut), which the plan for this wave had not accounted for.
+
+``checklist_for_task_stage`` is deliberately KEPT — it is reached through
+``RoleChecklistStore.open_or_create`` from ``role_envelopes``.
+"""
+
 from __future__ import annotations
 
 import json
@@ -11,8 +24,15 @@ from utils import atomic_json_write
 
 from . import paths
 from .decision_schema import DecisionPayloadInvalid
-from .models import AgentRun, Event
+from .models import Event
 from .serde import from_jsonable, to_jsonable
+
+#: The ``Task`` record was deleted with the mission lane (S8). The three
+#: surviving signatures below take a duck-typed, task-shaped object and read it
+#: only through ``.id``, so ``TaskLike`` names that honestly instead of an
+#: annotation that resolves to nothing (``from __future__ import annotations``
+#: hid the NameError; ``typing.get_type_hints`` would still raise).
+TaskLike = Any
 
 CHECKLIST_ITEM_STATUSES = frozenset(
     {
@@ -99,7 +119,7 @@ class RoleChecklistStore:
     def open_or_create(
         self,
         *,
-        task: Task,
+        task: TaskLike,
         role_id: str,
         mission_stage_id: str | None,
         run_id: str | None = None,
@@ -191,7 +211,7 @@ class RoleChecklistStore:
         atomic_json_write(path, {"event_id": event_id, "type": event_type, "created_at": to_jsonable(now()), "payload": _safe_payload(payload)}, indent=2, sort_keys=True)
 
 
-def checklist_for_task_stage(task: Task, *, role_id: str, mission_stage_id: str | None, legacy_projection: bool = False) -> RoleChecklist:
+def checklist_for_task_stage(task: TaskLike, *, role_id: str, mission_stage_id: str | None, legacy_projection: bool = False) -> RoleChecklist:
     normalized_role = normalize_role_id(role_id)
     stage_kind = "implementation"
     stage_owner = normalized_role
@@ -216,19 +236,6 @@ def checklist_for_task_stage(task: Task, *, role_id: str, mission_stage_id: str 
         created_at=now(),
         updated_at=now(),
     )
-
-
-def stage_checklist_hud(task: Task, owner: str, run: AgentRun, *, config=None) -> dict[str, Any] | None:
-    cfg = getattr(config, "role_envelope", None)
-    if not bool(getattr(cfg, "enabled", False) and getattr(cfg, "checklist_hud_enabled", True)):
-        return None
-    role_id = normalize_role_id(run.persona_id if run.persona_id else owner)
-    stage_id = run.stage_id or task.current_stage_id
-    store = RoleChecklistStore()
-    checklist = store.latest_for_role_stage(task.id, role_id=role_id, mission_stage_id=stage_id, active_only=True)
-    if checklist is None:
-        checklist = checklist_for_task_stage(task, role_id=role_id, mission_stage_id=stage_id)
-    return checklist_summary(checklist, max_items=int(getattr(cfg, "max_checklist_items_rendered", 8) or 8))
 
 
 def checklist_summary(checklist: RoleChecklist, *, max_items: int = 8) -> dict[str, Any]:
@@ -308,121 +315,6 @@ def validate_checklist_payload_structure(payload: dict[str, Any]) -> None:
             raise DecisionPayloadInvalid(_repair_message("evidence_refs", message="evidence_refs must be a list"))
 
 
-def validate_decision_checklist_payload(task: Task, *, role_id: str, mission_stage_id: str | None, payload: dict[str, Any], config=None) -> None:
-    validate_checklist_payload_structure(payload)
-    cfg = getattr(config, "role_envelope", None)
-    if not bool(getattr(cfg, "enabled", False)):
-        return
-    updates = payload.get("checklist_updates") if isinstance(payload, dict) else None
-    active_item = str(payload.get("active_checklist_item_id") or "").strip() if isinstance(payload, dict) else ""
-    if not updates and not active_item:
-        return
-    checklist = RoleChecklistStore().latest_for_role_stage(task.id, role_id=normalize_role_id(role_id), mission_stage_id=mission_stage_id, active_only=True)
-    if checklist is None:
-        checklist = checklist_for_task_stage(task, role_id=role_id, mission_stage_id=mission_stage_id)
-    valid_ids = {item.item_id for item in checklist.items}
-    if active_item and active_item not in valid_ids:
-        raise DecisionPayloadInvalid(_repair_message("active_checklist_item_id", valid_item_ids=sorted(valid_ids)))
-    if isinstance(updates, list):
-        for update in updates:
-            if not isinstance(update, dict):
-                raise DecisionPayloadInvalid(_repair_message("checklist_updates[]", message="each checklist update must be an object"))
-            item_id = str(update.get("item_id") or "").strip()
-            if item_id not in valid_ids:
-                raise DecisionPayloadInvalid(_repair_message("item_id", valid_item_ids=sorted(valid_ids)))
-            status = str(update.get("status") or "").strip()
-            item = next((candidate for candidate in checklist.items if candidate.item_id == item_id), None)
-            if status == "verified" and normalize_role_id(role_id) not in {"qa", normalize_role_id(getattr(item, "owner_role", ""))}:
-                raise DecisionPayloadInvalid(_repair_message("status", message="only QA or the owning role can mark an item verified", valid_statuses=sorted(CHECKLIST_ITEM_STATUSES)))
-            if status == "self_approved" and item is not None and normalize_role_id(item.owner_role) != normalize_role_id(role_id):
-                raise DecisionPayloadInvalid(_repair_message("status", message="roles can only self_approve their own checklist items", valid_statuses=sorted(CHECKLIST_ITEM_STATUSES)))
-
-
-def sanitize_decision_checklist_payload(
-    task: Task,
-    *,
-    role_id: str,
-    mission_stage_id: str | None,
-    payload: dict[str, Any],
-    config=None,
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Drop non-authoritative checklist status updates while preserving the decision.
-
-    The checklist HUD is guidance, not the source of truth for state transitions. A
-    role attempting to verify or self-approve another role's local checklist item
-    should not invalidate an otherwise valid handoff or proof request.
-    """
-
-    if not isinstance(payload, dict):
-        return payload, []
-    cfg = getattr(config, "role_envelope", None)
-    if not bool(getattr(cfg, "enabled", False)):
-        return payload, []
-    updates = payload.get("checklist_updates")
-    active_item_id = str(payload.get("active_checklist_item_id") or "").strip()
-    if (not isinstance(updates, list) or not updates) and not active_item_id:
-        return payload, []
-    checklist = RoleChecklistStore().latest_for_role_stage(task.id, role_id=normalize_role_id(role_id), mission_stage_id=mission_stage_id, active_only=True)
-    if checklist is None:
-        checklist = checklist_for_task_stage(task, role_id=role_id, mission_stage_id=mission_stage_id)
-    by_id = {item.item_id: item for item in checklist.items}
-    role = normalize_role_id(role_id)
-    kept: list[dict[str, Any]] = []
-    ignored: list[dict[str, Any]] = []
-    if active_item_id and active_item_id not in by_id:
-        ignored.append(
-            {
-                "item_id": active_item_id,
-                "status": "active",
-                "owner_role": "",
-                "reason": "active_checklist_item_id is not visible for this role/stage",
-            }
-        )
-    for update in updates if isinstance(updates, list) else []:
-        if not isinstance(update, dict):
-            kept.append(update)
-            continue
-        item_id = str(update.get("item_id") or "").strip()
-        status = str(update.get("status") or "").strip()
-        item = by_id.get(item_id)
-        owner = normalize_role_id(getattr(item, "owner_role", "")) if item is not None else ""
-        reason = ""
-        if item_id and item is None:
-            reason = "item_id is not visible for this role/stage"
-        elif status and status not in CHECKLIST_ITEM_STATUSES:
-            reason = "checklist status is not one of the HUD valid_statuses"
-        elif status == "verified" and role not in {"qa", owner}:
-            reason = "only QA or the owning role can mark an item verified"
-        elif status == "self_approved" and item is not None and owner != role:
-            reason = "roles can only self_approve their own checklist items"
-        if reason:
-            ignored.append({"item_id": item_id, "status": status, "owner_role": owner, "reason": reason})
-            continue
-        kept.append(update)
-    if not ignored:
-        return payload, []
-    sanitized = dict(payload)
-    if active_item_id and active_item_id not in by_id:
-        sanitized.pop("active_checklist_item_id", None)
-    if kept:
-        sanitized["checklist_updates"] = kept
-    else:
-        sanitized.pop("checklist_updates", None)
-    return sanitized, ignored
-
-
-def apply_decision_checklist_updates(task: Task, *, role_id: str, mission_stage_id: str | None, payload: dict[str, Any], run_id: str | None, config=None) -> RoleChecklist | None:
-    cfg = getattr(config, "role_envelope", None)
-    if not bool(getattr(cfg, "enabled", False) and getattr(cfg, "self_approval_enabled", True)):
-        return None
-    updates = payload.get("checklist_updates") if isinstance(payload, dict) else None
-    store = RoleChecklistStore()
-    checklist = store.open_or_create(task=task, role_id=role_id, mission_stage_id=mission_stage_id, run_id=run_id)
-    if isinstance(updates, list) and updates:
-        checklist = store.apply_updates(checklist, updates=updates, run_id=run_id, persona_id=role_id)
-    return checklist
-
-
 def normalize_role_id(role_id: str) -> str:
     value = str(role_id or "").strip()
     if value in {"alice_supervisor", "pm", "neko"}:
@@ -432,7 +324,7 @@ def normalize_role_id(role_id: str) -> str:
     return value or "dev"
 
 
-def _typed_stage_for_checklist(task: Task, mission_stage_id: str | None):
+def _typed_stage_for_checklist(task: TaskLike, mission_stage_id: str | None):
     return None
 
 

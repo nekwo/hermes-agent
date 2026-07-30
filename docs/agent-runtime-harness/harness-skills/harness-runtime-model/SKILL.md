@@ -1,90 +1,106 @@
 ---
 name: harness-runtime-model
-description: Hermes Agent Runtime mental model + first-class commands to view and operate Mission Control (goals / graphs / agents / lanes). Use instead of low-level DB/Python/scripts.
+description: Hermes Agent Runtime mental model + first-class commands to view and operate Mission Control (personas / instances / chats / graph / board). Use instead of low-level DB/Python/scripts.
 metadata:
   hermes:
-    surfaces: [mission_chat, mission_worker]
-    modes: [standard, root_node]
+    surfaces: [mission_chat]
+    modes: [standard]
     load_policy: required_preload
 ---
 
 # Harness Runtime Model
 
-**Model:** **goal** = a running daemon instance (the mission Tony sets/lists). **graph** = the goal's program (`mission_plan`, instantiated from a blueprint). **nodes** = stages, each owned by one agent. Neko owns the goal + a chat that scopes/steers it; the daemon ticks the graph; each node's bound agent does the work.
+**Chat is the only lane.** There is no goal, task, mission plan, stage graph, daemon,
+worker, run, proof gate, lane, or swarm certification. Those were removed on
+2026-07-30; if you remember them, that memory is stale. A request arrives as a chat
+turn on an existing persona instance, you do the work with your own tools in that
+turn, and you answer in that same chat. Nothing dispatches you, and nothing gates
+your reply.
 
-Default graph `neko_two_dev_default` = **Neko scope → Backend Dev → Launcher Dev** (no QA). **QA is a node only if the selected blueprint binds it.**
+**Model:** **persona** = a profile-backed agent definition (data, in the Hermes
+profile — not hardcoded). **persona instance** = a durable placement of that persona
+(`personainst_<role>_agent_<hash>`). **chat session** = the durable root a turn runs
+on; an instance points at one operator-chat root and can hold several. Roles are
+data too: an unknown role is carried, not rejected, and never filters your tools.
 
-**Two graphs live in `mission_plan`** (both from the blueprint): the **stage graph**
-(`.stages` + `.edges` — *execution*: stage owners, `depends_on`, and `outcome → target`
-routing) and the **agent topology** (`.agent_topology` — *supervision*: a `root` plus
-`source → target` `steers` edges, e.g. `lead → builder → verifier`). Default when asked
-"what's the flow" is the stage graph (blueprint id, stages in order, owners, edges); add the
-`agent_topology` steering graph when the operator asks who steers/coordinates whom. The two
-can differ in ordering — topology is a supervision graph, not the execution order.
+**The runtime agent graph is a picture, not a program.** `flow_graph.py` stores one
+operator-authored document per owner (`graph_id: runtime:<owner>`) and reconciles
+`persona_instances[].steered_by` from it. The Agent Console renders that as the
+steering tree. It records *who steers whom*; **it enforces nothing, routes nothing,
+and picks no next agent.** Never answer "what runs next?" from it — nothing runs
+next. It only ever references instances that already exist; it never creates them
+and never binds work.
 
-**One orchestrator.** The stage graph is the ONLY thing that picks the next agent.
-There is no legacy/text-inference fallback and no routing on/off switch: every goal is
-graph-typed at creation, and a goal the graph cannot dispatch **refuses loudly**
-(`legacy_orchestrator_removed`) rather than guessing an owner from the goal's wording.
-So an unscoped goal starts at its graph root (Neko scopes first) — it does not jump
-straight to a Dev because the title mentions Launcher or backend. If routing looks
-wrong, read `.mission_plan.stages`/`.edges`; the answer is always in the graph.
+**Two messaging paths, and only two:** `mission-chat message` (the canonical
+operator/CLI path) and the in-model `agent_chat_send` tool (agent → agent). If you
+want another agent to do something, message it; there is no assignment surface.
 
-**Concurrency:** goals run as **lanes**; every agent — Neko included — is **instanced per lane**, so concurrent goals with disjoint agents don't fight; binding a busy agent **warns**; true parallel is gated by `swarm enable` (a live toggle) plus the burn-in **certification gate** (`swarm status --json` → `certification_allows_production`; 10 consecutive green unattended cases required). `goal_id == task.id`.
+**The Mission Board is planning state only.** Cards record follow-up work for humans
+to read. A card never starts, routes, or changes anything.
 
-`hermes` == `python -m hermes_cli.main`. No `hermes harness runtime` command. Always `--json`. Never use raw DB / Python / ad-hoc scripts to inspect.
+`hermes` == `python -m hermes_cli.main`. There is no `hermes harness runtime`
+command. Always `--json`. Never use raw DB / Python / ad-hoc scripts to inspect.
 
 ## View
 
 | See | Command |
 |---|---|
-| runtime health / open+blocked | `hermes harness status --json` |
-| installed agents | `hermes harness agent list --json` |
-| graph templates | `hermes harness blueprint list --json` |
-| all goals | `hermes harness task list --json` |
-| full graph for one goal (stage nodes/edges/bindings) | `hermes harness task show <id> --json` → `.mission_plan` |
-| supervision/steering graph for one goal | `hermes harness task show <id> --json` → `.mission_plan.agent_topology` (`root` + `steers` edges) |
-| goal event timeline | `hermes harness task history <id> --json` |
-| agent instances (goal_id/spawned_by) | `hermes harness persona list --json` |
-| agent ↔ goal assignments | `hermes harness persona assignments [--persona <id>|--goal <id>] --json` |
-| worker sessions | `hermes harness worker list --json` |
-| one run + proof | `hermes harness run show <run_id> --json` · `proof list <id> --json` |
-| lanes | `hermes harness lane list --json` |
-| concurrency gate + certification | `hermes harness swarm status --json` |
-| aggregate read-model (UI) | `hermes harness snapshot --json` |
+| runtime health / diagnostics | `hermes harness status --json` · `hermes harness doctor --json` |
+| configured agent definitions | `hermes harness agent list --json` |
+| durable persona instances (the roster) | `hermes harness persona list --json` |
+| one instance in detail | `hermes harness persona show <persona_instance_id> --json` |
+| an instance's resolved tools and blocks | `hermes harness persona tool-diff --json` |
+| a chat session's transcript | `hermes harness persona chat history --session-id <root> --json` |
+| stored agent-graph documents | `hermes harness flow list --json` · `hermes harness flow show <graph_id> --json` |
+| planning boards and cards | `hermes harness board list --json` · `hermes harness board show <board_id> --json` |
+| realms / workspaces | `hermes harness realm list --json` · `hermes harness workspace list --json` |
+| aggregate read-model (what the Launcher renders) | `hermes harness snapshot --json` |
+| shared skills substrate | `hermes harness skills inventory --json` · `skills catalog --json` |
 | level agents shown in Mission Control | Stage C MCP `mcp_launcher_qa_get_buttons` with `scope=mission_control.agent` |
 | compact Mission Control graph probe | Stage C MCP `mcp_launcher_qa_get_widget_state` with `widget=mission_control.graph` |
 
-**Is QA in a goal?** `task show <id> --json` → look for a `verify`/`qa` node in `.mission_plan.stages`. Don't infer QA from `agents` (lists installed, not bound).
+**Do not use for level agents:** `status.agents` and `hermes harness agent list --json`
+rosters show configured/installed Harness agents. They do not show which instances are
+placed on a Mission Control level. Use `persona list --json` for the live roster and
+Stage C MCP `mission_control.agent` for the visible level-agent selection surface.
 
-**Do not use for level agents:** `status.agents` and `hermes harness agent list --json` rosters show configured/installed Harness agents. They do **not** show the graph-bound agents currently on a Mission Control level. Use `.mission_plan` for the full graph and Stage C MCP `mission_control.agent` for the visible level-agent selection surface.
+## Removed — unlearn these
 
-**Normal persona chat is globally chat-only.** For every role, a one-off request stays
-on the existing Mission Control persona/session and must not create or enter a
-goal/task/graph/worker lane. The runtime strips `mission_goal_create` from ordinary
-chat, including unbounded permission mode. Heavy mission creation is a separate
-operator workflow and requires the dedicated `mission-chat message
---allow-mission-goal` opt-in on that exact turn; `intent_hint`, `assign_work`, broad
-investigation language, MCP verification, and multi-agent coordination never imply it.
+These verbs, fields, and rules were removed on 2026-07-30. Do not reach for them, do not
+expect their output shapes, and do not repeat them to an operator as if they were live:
+
+- `hermes harness task show <id> --json`, `task list`, `task create --start-daemon`,
+  `task history`, `task unblock/cancel/archive` — there are no goals or tasks.
+- `hermes harness blueprint list/run --bind`, and the `.mission_plan` field on anything
+  (with its `.stages`, `.edges`, `.agent_topology`) — there is no stage graph. The old
+  default graph `neko_two_dev_default` = **Neko scope → Backend Dev → Launcher Dev**, and
+  the rule that **QA is a node only if the selected blueprint binds it**, are both gone:
+  no blueprint binds anyone, and QA is just another agent you can message.
+- `run show` / `proof list` / `worker list` / `lane list` / `swarm status|enable`, `tick`,
+  and `run-until-settled` — no runs, no proof gates, no worker sessions, no lanes, and no
+  burn-in certification gate.
+- The `mission_goal_create` tool and the `--allow-mission-goal` opt-in on `mission-chat
+  message` — no chat turn can create a goal, because there are no goals.
+
+`harness snapshot --json` is contract 45 and carries no goal, stage, run, proof, or
+incident sections. If you are looking for one, it is gone, not missing.
 
 ## Operate
 
 | Do | Command |
 |---|---|
-| start a graph-routed goal | `hermes harness goal run --blueprint <id> --bind <slot>=persona:<id> …` |
-| create a goal + self-drive | `hermes harness task create --start-daemon …` (there is NO standalone `daemon` command — the Mission Daemon starts only via `--start-daemon` at create) |
-| steer a goal | `hermes harness task unblock <id> --reason …` / `task cancel <id>` / `task archive <id>` |
-| steer a run | `hermes harness run approve\|cancel <run_id>` |
-| steer an agent | `hermes harness worker pause\|resume\|interrupt\|nudge\|possess\|release\|takeover <session>` |
-| steer a lane | `hermes harness lane pause\|park\|resume\|drain <lane>` |
 | find the on-level chat instances to message | `hermes harness persona list --json` → chat-mode `personainst_<role>_agent_<hash>` rows (cross-check Stage C `mission_control.agent` buttons) |
 | continue an existing chat root | `hermes harness persona instance open-chat --persona-instance-id <instance> --persona <id> --session-id <root> --json` (`--session-id` is required unless `--new-session` or `--add-instance`) |
 | create a new server-minted chat on an existing instance | `hermes harness persona instance open-chat --persona-instance-id <instance> --persona <id> --new-session --idempotency-key <key> --json` |
-| message an exact chat root (default; chat-only) | `hermes harness mission-chat message --persona <id> --persona-instance-id <instance> --session-id <root> --client-message-id <id> --message … --json` |
-| explicitly opt one turn into heavy goal creation | `hermes harness mission-chat message --persona <eligible-id> --session-id <root> --allow-mission-goal --client-message-id <id> --message … --json` |
+| message an exact chat root (canonical path) | `hermes harness mission-chat message --persona <id> --persona-instance-id <instance> --session-id <root> --client-message-id <id> --message … --json` |
+| message another agent from inside a turn | the `agent_chat_send` tool |
+| steer an in-flight streamed turn | `hermes harness mission-chat steer --session-id <root> --client-message-id <id> --message … --json` |
 | abandon an outcome-unknown turn | `hermes harness mission-chat turn-resolve --session-id <root> --client-message-id <id> --turn-id <turn> --action abandon --json` |
-| concurrency gate | `hermes harness swarm enable` / `disable` |
-| manual advance (debug) | `hermes harness tick` / `run-until-settled` |
+| load a skill on the next turn | `hermes harness mission-chat queue-skill --persona <id> --session-id <root> --skill <name> --json` |
+| re-route a steering edge in the agent graph | `hermes harness persona instance steer …` (supports multi-parent fan-in) |
+| replace a whole agent-graph document | `hermes harness flow set …` (reconciles `steered_by` for the instances it references; never creates instances) |
+| track follow-up work | `hermes harness board card add …` — planning state only |
+| return a child's bounded summary to a parent chat | `hermes harness persona instance return-summary …` |
 
 ## Persona chat continuity
 
@@ -92,8 +108,7 @@ investigation language, MCP verification, and multi-agent coordination never imp
 one chat lane. Legacy lifecycle metadata does not create a separate routing
 class and does not change whether an exact, owned chat root can receive a turn.
 
-`PersonaInstance.default_chat_session_id` is the operator-chat pointer. Worker
-and run session IDs are separate and must never be used as chat roots. Hermes
+`PersonaInstance.default_chat_session_id` is the operator-chat pointer. Hermes
 mints every new root; callers may use a local draft identity only while waiting
 for the `open-chat --new-session` result.
 

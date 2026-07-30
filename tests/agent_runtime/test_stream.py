@@ -30,17 +30,20 @@ def test_stream_emits_delta_after_hydrate_offset(isolate_agent_runtime_root):
     EventLog().append(
         Event(
             ts=now(),
-            type="task.created",
+            type="persona_assignment.created",
             task_id="task_streamed",
             run_id=None,
             persona_id="neko_supervisor",
-            payload={"summary": "created by stream test"},
+            payload={"summary": "created by stream test", "assignment_id": "pa_streamed"},
         )
     )
 
     second = next(frames)
     assert second["type"] == "delta"
-    assert second["op"] == "task.upserted"
+    # The op still comes from ``_delta_op``'s prefix routing — S15 de-registered
+    # the ``task.*`` family, so the routed prefix under test is the surviving
+    # ``persona_assignment.*`` one.
+    assert second["op"] == "instance.upserted"
     assert second["seq"] == second["watermark"]["event_offset"]
     assert second["entity"]["event"]["task_id"] == "task_streamed"
 

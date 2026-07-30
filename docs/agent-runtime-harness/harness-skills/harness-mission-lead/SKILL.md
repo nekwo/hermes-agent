@@ -10,6 +10,17 @@ metadata:
 
 # Harness Mission Lead
 
+> **OBSOLETE (2026-07-30) — describes a removed subsystem.** Root-node mode, the
+> `run_node` / `steer_node` service tools, goals, stages, `mission_plan`, `blueprint_id`,
+> `agent_topology`, AgentRun rows, and the `proofs/` store were all removed with the
+> mission lane; see `docs/agent-runtime-harness/16-mission-lane-removal.md`. Nothing below
+> can be executed: there is no root node, no child node to run or steer, and no goal to
+> declare complete. Chat is the only lane — message another agent with `agent_chat_send`
+> or `mission-chat message` and do the work in the turn. This file is retained pending an
+> operator ruling on deletion (it is in `CANONICAL_SHARED_SKILL_IDS`, so removing it also
+> touches `hermes_constants.py`, `tests/agent_runtime/persona_samples.py`, and
+> `tests/agent_runtime/test_persona_skill_policy.py`). Do not follow it.
+
 Use this skill when you are the root node for an Agent Runtime Harness goal.
 
 ## Root Node Contract

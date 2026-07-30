@@ -1,7 +1,14 @@
 # Stage 12 — Read-Path Freshness Hardening (event-less mutation chokepoint)
 
-Status: IN PROGRESS (2026-07-09). Branch: `fix/eventless-mutation-chokepoint`.
-Owner: harness (fork-owned surfaces only: `agent_runtime/`, `hermes_cli/harness.py`).
+Status: HISTORICAL IMPLEMENTATION RECORD. The surviving freshness controls are
+on `main`; post-mission-removal inventory corrected 2026-07-30.
+
+> **Post-removal correction (2026-07-30).** The implementation log below is
+> retained, but its event inventory is no longer the live catalog. The table and
+> dated notes now distinguish surviving events from types removed with the
+> mission lane and its cleanup waves. The authority is the current
+> `agent_runtime/decision_contract_registry.py`; stream routing is the current
+> `agent_runtime/stream.py`.
 
 ## Problem
 
@@ -24,33 +31,34 @@ the same-offset snapshot is rejected; any backstop must ADVANCE the offset.
 
 | Mutation | Snapshot state | Event? | Where |
 | --- | --- | --- | --- |
-| `WorkspaceStore.set_active` (use / create-in-active-realm / realm-use reconcile) | `active_workspace_id` | yes — `workspace.activated` | CLI verbs (`_append_scope_event`) |
-| `RealmStore.set_active` (use) | `active_realm_id` | yes — `realm.activated` | CLI verb |
-| `WorkspaceStore.create/add_agent/remove_agent/rename/archive` | `workspaces[]` | yes — `workspace.created/.updated/.archived` | CLI verbs |
-| `RealmStore.create/bind_server` | `realms[]` | yes — `realm.created/.updated` | CLI verbs |
-| `RealmStore.save` via realm adopt / sync | `realms[]` | yes — `realm.adopted`, `realm.sync.*` | `realm_membership.py` / realm_sync |
-| `save_blueprint` via `blueprint save` | `blueprints[]` | **NO — open gap (slice A)** | — |
-| `AgentStore.save` (persona seed) | `agents[]` | **NO — no event seam at all (slice B)** | — |
-| `RunStore.update` (bare) | run rows | not itself; every caller (open/heartbeat/close/cancel/approve) emits `run.*` | allowlisted |
-| daemon `daemon_status.json` | daemon HUD | deliberately event-less; heartbeat frames carry the block | grandfathered (slice F pins its schema) |
-| Task/Run/Proof/Incident/WorkerSession/RepoBundle/RuntimeInstance/RoleState stores | projections | yes (evented stores) | store layer |
+| `WorkspaceStore.set_active` | `active_workspace_id` | yes — `workspace.activated` | store layer |
+| `RealmStore.set_active` | `active_realm_id` | yes — `realm.activated` | store layer |
+| `WorkspaceStore.create/add_agent/remove_agent/rename/archive` | `workspaces[]` | yes — `workspace.created`, `workspace.updated`, `workspace.archived` | store layer |
+| `RealmStore.create/bind_server/archive` | `realms[]` | yes — `realm.created`, `realm.updated`, `realm.archived` | store layer; `realm.archived` was correctly registered by `a7e679972` |
+| Realm adopt / sync | `realms[]` | yes — `realm.adopted`, `realm.sync.pulled`, `realm.sync.published` | `realm_membership.py` / `realm_sync.py` |
+| Blueprint catalog mutation | removed | `blueprint.saved` was removed with the stage-graph/blueprint lane (`d3a414cac`) | no live `blueprint save` surface |
+| `AgentStore.save` | `agents[]` | yes — `persona.updated` | store layer |
+| `RunStore.cancel/close_run` | persisted historical run rows | yes — `run.closed`; it is live and remains registered | store layer; `run.heartbeat` and `run.approved` were removed by `8c1c8e6cc`, then `run.opened` by `06eee42fa` |
+| stream watchdog | scope/catalog freshness | yes — `state.reconciled` | `agent_runtime/stream.py` |
+| background Mission Daemon | removed | its event family and heartbeat side channel are gone | heartbeat frames now carry only optional stream activity |
 
-Structural gaps: (1) scope emission lives in `hermes_cli/harness.py` verbs, not
-in the stores — any programmatic caller of `set_active`/`save` silently
-regresses; (2) nothing bounds staleness when the rule is violated anyway;
-(3) event payload contracts are decorative (no validation on append — the
-reconcile-clear already emits `workspace.activated` with an empty payload
-against a contract that names `workspace_id`).
+Historical gaps at the 2026-07-09 audit boundary: (1) scope emission lived in
+`hermes_cli/harness.py` verbs rather than the stores, so programmatic
+`set_active`/`save` callers could regress; (2) nothing bounded staleness when
+the rule was violated; (3) event payload contracts were decorative. Slices
+B–D below closed those gaps. The current table above reflects their surviving
+post-removal state.
 
 ## Design
 
 Every fix follows one principle: **make the violation impossible (CI) or
 self-announcing (runtime), never "be more careful".**
 
-### Slice A — `blueprint.saved` event (close the live gap)
-`_cmd_blueprint_save` appends `blueprint.saved` after a successful
-`save_blueprint`. Contract:
-`EventContract("blueprint.saved", "Blueprint saved", ("blueprint_id",), ("version", "title"))`.
+### Slice A — historical `blueprint.saved` event
+
+This slice closed the live blueprint-catalog gap in 2026-07-09. The entire
+blueprint save surface and its event contract were later removed with the
+stage graph (`d3a414cac`). `blueprint.saved` is not a current event type.
 
 ### Slice B — store-level emission + CI guard (the chokepoint)
 - B1: `WorkspaceStore` / `RealmStore` / `AgentStore` gain
@@ -112,12 +120,18 @@ recorded follow-up debt: burn the remaining drift down type-by-type (fix the
 emitter or right-size the contract), then enable the flag in conftest. Until
 then observe-mode warnings name each drifted shape once per process.
 
+**2026-07-30 correction:** those two names describe the 2026-07-09 strict-run
+measurement, not current contracts. `task.created` was de-registered with the
+mission event catalog in `afd6c0a83`; `run.heartbeat` left with its writer in
+`8c1c8e6cc`.
+
 ### Slice F — pin the heartbeat side channel
-The daemon block on heartbeat frames is the one sanctioned out-of-band
-channel (eventing per-loop status writes would flood the log). Pin it:
-a stream test freezes `daemon_status_schema()` required keys +
-`schema_version`, and the module docs state the rule — new event-less state
-gets EVENTS, not a second heartbeat rider.
+
+Historical outcome: this slice pinned the then-live daemon block. The
+background Mission Daemon was later retired (`6b558417f`), and current
+heartbeat frames no longer carry daemon status. Their only optional side block
+is transient stream activity such as an in-progress snapshot build; durable
+read-model changes still require events.
 
 ### Slice E — launcher: forceFresh demoted from correctness to tripwire
 (EterniaLauncher repo.) Instrument the forced-apply path: when a forced full
@@ -146,19 +160,21 @@ that names any future regression.
   `core["active_realm_id"]` is the new realm; raw pointer-file write
   (rule violation simulated) yields a `state.reconciled` delta with the fresh
   pointer within the SLO.
-- `blueprint save` appends `blueprint.saved`.
+- Historical only: `blueprint save` appended `blueprint.saved`; both are now
+  removed (`d3a414cac`).
 - D: strict mode rejects a missing-summary-field payload; observe mode warns
   and still appends.
-- F: daemon block schema pin.
+- F: historical daemon block schema pin; the daemon and block are now removed.
 - Suites: `tests/agent_runtime/test_stream.py`,
   `test_goal_workspace_realm_stage42.py`, `blueprints/`,
   `test_realm_membership.py`, new `test_store_event_invariant.py`.
 
-## Live proof
+## 2026-07-09 live proof (historical)
 
-1. `hermes harness stream --ndjson` + `hermes harness realm use <other>` →
+1. `hermes harness stream` + `hermes harness realm use <other>` →
    delta with new `active_realm_id` within one poll cycle, no forced poll.
-2. `blueprint save` while MC open → blueprint list refreshes.
+2. Historical proof only: `blueprint save` refreshed the blueprint list before
+   the stage-graph lane was removed.
 3. Raw write to `active_realm.json` (bypassing the store) → visible
    `state.reconciled` delta within ~10s.
 4. Launcher: scope switch from CLI while MC is open on stream — switcher
@@ -188,6 +204,8 @@ that names any future regression.
   4/4 + bridge suite 74/74, `flutter analyze` clean; launcher edits left
   uncommitted (entangled with pre-existing uncommitted MC work in the same
   files — commit together with that set).
-- REMAINING TO SHIP: merge this branch to hermes `main` (+ push per deploy
-  policy); commit the launcher MC working set; live-soak
-  `producerViolationCount` at zero, then remove the forceFresh gate bypass.
+- 2026-07-09 recorded next steps (historical): merge the Hermes branch; commit
+  the Launcher working set; live-soak `producerViolationCount` at zero, then
+  remove the forceFresh gate bypass.
+- 2026-07-30 correction: the Hermes changes are present on `main`. This
+  docs-only cleanup did not reassess the off-repo Launcher follow-ups.

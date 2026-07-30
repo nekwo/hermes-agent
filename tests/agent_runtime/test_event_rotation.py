@@ -30,11 +30,11 @@ _CAP_ENV = "HERMES_EVENT_LOG_ROTATION_CAP_BYTES"
 def _evt(i: int, *, task_id: str = "t", session_id: str | None = None) -> Event:
     return Event(
         ts=now(),
-        type="task.created",
+        type="persona_instance.created",
         task_id=task_id,
         run_id=f"r{i}",
         persona_id="dev",
-        payload={"n": i, "title": f"evt {i}", "state": "created"},
+        payload={"n": i, "persona_instance_id": f"pi_{i}", "persona_id": "dev"},
         session_id=session_id,
     )
 

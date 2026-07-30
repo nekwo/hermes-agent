@@ -36,6 +36,9 @@ def _cmd_persona_instance_reconcile(args) -> int:
             f"pruned={data.get('pruned_count', 0)} held={data.get('held_count', 0)} "
             f"steering_repaired={data.get('steering_repaired_count', 0)} "
             f"chat_bindings_cleared={data.get('session_binding_repaired_count', 0)} "
+            f"graphs_pruned={data.get('graphs_pruned_count', 0)} "
+            f"graphs_held={data.get('graphs_held_count', 0)} "
+            f"graph_steering_settled={data.get('graph_departed_steering_count', 0)} "
             f"aliases={data['alias_count']}"
         )
         for item in data["actions"]:
@@ -61,6 +64,24 @@ def _cmd_persona_instance_reconcile(args) -> int:
             )
         if data.get("session_binding_skipped"):
             print(f"  - chat binding repair skipped: {data['session_binding_skipped']}")
+        # The graph-prune phase (6c5040ed2) archives owner-less runtime graphs
+        # and emits `flow_graph.pruned`. It reported only through `--json` until
+        # S28; a phase that moves files and appends events must be legible to the
+        # operator reading the human render too.
+        for item in data.get("graphs_pruned") or []:
+            print(
+                f"  - graph pruned ({item['reason']}): {item['graph_id']} "
+                f"(drew {item.get('drawn_agent_count', 0)} agent(s))"
+            )
+        for item in data.get("graphs_held") or []:
+            print(f"  - graph held ({item['reason']}): {item['graph_id']}")
+        for item in data.get("graph_departed_steering") or []:
+            if not item.get("changed"):
+                continue
+            print(
+                f"  - graph steering settled: {item['persona_instance_id']} "
+                f"-> removed {item['owner']} ({item['graph_id']})"
+            )
     return 0
 
 
@@ -150,51 +171,20 @@ def _safe_operator_text(value: str) -> str:
     return " ".join(str(value or "").split())[:160] or "operator requested"
 
 
-def _cancel_task_active_runs(task_id: str, *, reason: str) -> list[str]:
-    runs = RunStore()
-    cancelled = []
-    for run in runs.list_for_task(task_id):
-        if run.state not in ACTIVE_RUN_STATES:
-            continue
-        cancelled.append(runs.cancel(run.id, reason=reason).id)
-    return cancelled
-
-
-def _close_task_active_workers(task_id: str, *, reason: str) -> list[str]:
-    store = WorkerSessionStore()
-    closed = []
-    for worker in store.find_active(task_id=task_id):
-        closed.append(store.close(worker.id, reason=reason).id)
-    return closed
-
-
-def _swarm_state_path() -> Path:
-    return paths.store_root() / "swarm_state.json"
-
-
-def _read_swarm_state() -> dict:
-    path = _swarm_state_path()
-    if not path.exists():
-        return {"enabled": False, "max_active_lanes": 0}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {"enabled": False, "max_active_lanes": 0, "error": "invalid_swarm_state"}
-    return data if isinstance(data, dict) else {"enabled": False, "max_active_lanes": 0, "error": "invalid_swarm_state"}
-
-
-def _write_swarm_state(data: dict) -> None:
-    from utils import atomic_json_write
-    from agent_runtime.serde import to_jsonable
-
-    path = _swarm_state_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_json_write(path, to_jsonable(data), indent=2, sort_keys=True)
+# S13: ``_cancel_task_active_runs`` / ``_close_task_active_workers`` (mission-lane
+# task teardown) and the ``_swarm_state_path`` / ``_read_swarm_state`` /
+# ``_write_swarm_state`` trio (swarm_state.json, a lane-scheduler artifact) were
+# removed here: after the mission-lane removal no harness verb, part, or test
+# referenced any of them. swarm_state.json now has no reader and no writer.
 
 
 def _cmd_status(args) -> int:
+    # S28: the line used to open with `open_tasks=` / `running_runs=`. Both were
+    # constants by construction on the producer side (see agent_runtime/status.py),
+    # so the human render stopped reporting them rather than keep printing a
+    # literal an operator would read as a measurement. The verb is unchanged.
     data=build_status()
-    print(emit_json(data) if args.json else f"open_tasks={data['open_tasks']} running_runs={data['running_runs']} open_incidents={data['open_incidents']} dirty={data['dirty_summary']} runtime_health={data['runtime_health']['ok']}")
+    print(emit_json(data) if args.json else f"open_incidents={data['open_incidents']} dirty={data['dirty_summary']} runtime_health={data['runtime_health']['ok']}")
     return 0
 
 
@@ -228,7 +218,7 @@ def _cmd_verify(args) -> int:
     repo_root = Path(__file__).resolve().parents[1]
     packet = {
         "schema_version": 1,
-        "proof_packet_id": f"mission_control_verify_{started.strftime('%Y%m%dT%H%M%SZ')}",
+        "verification_id": f"harness_runtime_verify_{started.strftime('%Y%m%dT%H%M%SZ')}",
         "generated_at_utc": started.isoformat().replace("+00:00", "Z"),
         "mode": args.mode,
         "runtime_root": str(paths.store_root()),
@@ -283,18 +273,17 @@ def _cmd_verify(args) -> int:
 
 
 def _cmd_observe(args) -> int:
-    tasks = []
+    # S28: the `tasks=[]` / `proofs=[]` / `daemon_status=None` keywords were the
+    # literals holding three dead parameters open on `build_observability`; they
+    # and everything they alone fed are gone. The unread `load_agent_runtime_config`
+    # call went with them — it was assigned and never used.
     runs = []
     incidents = []
     workers = []
-    cfg = load_agent_runtime_config()
     execution_mode = "manual"
     data = build_observability(
-        tasks=tasks,
         runs=runs,
         incidents=incidents,
-        proofs=[],
-        daemon_status=None,
         events=EventLog().tail(20),
         execution_mode=execution_mode,
         worker_sessions=workers,
@@ -346,7 +335,18 @@ def _cmd_contracts_verify_examples(args) -> int:
 def _run_verify_command(label: str, command: list[str], *, cwd: Path) -> dict:
     started = time.monotonic()
     try:
-        completed = subprocess.run(command, cwd=cwd, capture_output=True, text=True, timeout=120)
+        # encoding= pinned: text=True alone decodes with the locale codepage
+        # (cp1252 on Windows), and non-cp1252 bytes in a sub-command's output
+        # crash subprocess's reader thread without changing the exit code.
+        completed = subprocess.run(
+            command,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
         stdout = completed.stdout or ""
         stderr = completed.stderr or ""
         exit_code = completed.returncode
@@ -376,7 +376,15 @@ def _safe_output_summary(text: str) -> str:
 def _git_summary(root: Path) -> dict:
     def run(args: list[str]) -> str | None:
         try:
-            completed = subprocess.run(["git", *args], cwd=root, capture_output=True, text=True, timeout=10)
+            completed = subprocess.run(
+                ["git", *args],
+                cwd=root,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=10,
+            )
         except Exception:
             return None
         return completed.stdout.strip() if completed.returncode == 0 else None
@@ -385,10 +393,8 @@ def _git_summary(root: Path) -> dict:
     return {"path": str(root), "git_head": run(["rev-parse", "HEAD"]), "dirty": bool(status)}
 
 
-def _cmd_agents(args) -> int:
-    personas = ensure_persisted_personas(load_agent_runtime_config())
-    print(emit_json(personas) if args.json else "\n".join(f"{p.id} ({p.role})" for p in personas))
-    return 0
+# S13: ``_cmd_agents`` was defined but wired to no parser; ``harness agent list``
+# (_cmd_agent_list) is the live, richer implementation of the same listing.
 
 
 def _safe_issue_summary(item: dict) -> dict:

@@ -30,6 +30,14 @@ lead's canvas) are the operator's local layout on that map; they are reported
 (never silently dropped) and never applied — the referenced parent's OWN
 blueprint is where such an edge becomes steering.
 
+**Owner-liveness reaping (2026-07-30).** Because graph identity IS the owner
+instance's id, a stored doc outlives its owner: reaping the instance leaves the
+map behind, addressed to an agent that no longer exists. The persona-instance
+reconciler's last phase settles that (see [classify_graph_owner_liveness] and
+[FlowGraphStore.archive]) — archive into ``flow_graphs_stale/``, never delete,
+and strictly on OWNER liveness: an empty launcher-created canvas whose owner is
+live is intended, not garbage.
+
 Wire format (exactly the launcher flow store's persisted shape, plus the store
 key): ``{"graph_id": str, "nodes": [{"id": str, "agent": str|null, ...}],
 "edges": [{"from": str, "to": str}]}``. Unknown node keys (x/y layout, future
@@ -40,6 +48,8 @@ not the runtime's.
 from __future__ import annotations
 
 import json
+import shutil
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -52,6 +62,16 @@ from .persona_assignments import PersonaInstanceStore, safe_assignment_token
 
 # A flow doc is a small authored drawing; anything near this size is not one.
 MAX_FLOW_DOC_BYTES = 256 * 1024
+
+# Owner-liveness reap reasons (typed, single-sourced — the reconciler reports
+# them verbatim, no boolean soup). A graph is one instance's blueprint, so the
+# only question asked of a stored doc is whether its owner still resolves.
+GRAPH_PRUNE_REASON_OWNER_NOT_LIVE = "graph-owner-not-live"
+GRAPH_HELD_REASON_OWNER_LIVE = "graph-owner-live"
+# Held by the reconciler's belt: the owner is absent from the literal live-id
+# set but the store still RESOLVES it through the identity aliases (a canvas
+# saved under an actor-token / legacy spelling of a live instance).
+GRAPH_HELD_REASON_OWNER_ALIASED = "graph-owner-resolves-through-alias"
 
 
 class FlowGraphDocError(ValueError):
@@ -195,6 +215,48 @@ def owner_instance_id_of(graph_id: str) -> str:
         if token.startswith(prefix):
             return token[len(prefix):].strip()
     return token
+
+
+def classify_graph_owner_liveness(
+    graph_ids: Iterable[str],
+    *,
+    live_instance_ids: Collection[str],
+) -> dict[str, list[dict[str, Any]]]:
+    """Pure: split stored graph ids into ``stale`` and ``held`` on OWNER LIVENESS
+    ALONE, each entry carrying a typed reason.
+
+    Graph identity IS the owner instance's id ([owner_instance_id_of]), so a
+    stored doc whose owner no longer resolves is an operator canvas addressed to
+    an agent the runtime already archived: the launcher can still open it, and
+    every consumer that reads it re-materializes a departed agent. That is the
+    whole rule.
+
+    **Emptiness is never a signal.** The launcher auto-creates a single
+    self-node, zero-edge graph (``requested_by: launcher``) the moment an
+    operator opens an agent's canvas — that doc is intended, and reaping
+    "empty-looking" graphs would delete a live agent's canvas in the window
+    between opening it and drawing the first edge. A graph whose owner resolves
+    is ALWAYS held however empty; a graph whose owner does not is stale however
+    richly drawn.
+
+    ``live_instance_ids`` is the caller's settled live-row set. This function
+    does no id resolution of its own: a caller holding a store can hold back a
+    candidate whose owner resolves only through the identity aliases (see
+    [GRAPH_HELD_REASON_OWNER_ALIASED]) — the keep side is deliberately the
+    forgiving one.
+    """
+
+    live = set(live_instance_ids or ())
+    stale: list[dict[str, Any]] = []
+    held: list[dict[str, Any]] = []
+    for graph_id in sorted(graph_ids or []):
+        owner = owner_instance_id_of(graph_id)
+        entry = {"graph_id": graph_id, "owner_instance_id": owner}
+        if owner and owner in live:
+            held.append({**entry, "reason": GRAPH_HELD_REASON_OWNER_LIVE})
+        else:
+            stale.append({**entry, "reason": GRAPH_PRUNE_REASON_OWNER_NOT_LIVE})
+    return {"stale": stale, "held": held}
 
 
 def bound_agent_ids(doc: FlowGraphDoc) -> set[str]:
@@ -404,11 +466,35 @@ class FlowGraphStore:
             return []
         return sorted(path.stem for path in directory.glob("*.json"))
 
+    def stale_dir(self) -> Path:
+        """Sibling of the live graph dir where reaped docs land. The runtime
+        archives an operator's drawing; it never deletes one — a graph is the
+        only record of a map somebody authored by hand."""
 
-def _bound_agents_of_stored(stored: dict[str, Any] | None) -> set[str]:
+        return paths.store_root() / "flow_graphs_stale"
+
+    def archive(self, graph_id: str, archive_dir: Path) -> Path | None:
+        """Move one stored doc out of the live dir into [archive_dir] (created on
+        demand). Returns the doc's new path, or ``None`` when it is already gone
+        — a concurrent reap is a no-op here, never an error."""
+
+        source = self._path(graph_id)
+        if not source.exists():
+            return None
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        target = archive_dir / source.name
+        shutil.move(str(source), str(target))
+        return target
+
+
+def bound_agent_ids_of_stored(stored: dict[str, Any] | None) -> set[str]:
     """The bound-agent id set of a previously stored doc — best-effort: a
     missing/corrupt prior doc contributes no departures rather than failing
-    this ingest."""
+    the read.
+
+    Two callers, one meaning ("who did this doc name?"): the ingest's departure
+    set (the doc a new one REPLACES) and the reconciler's graph reap (the doc it
+    is about to archive)."""
 
     if not isinstance(stored, dict):
         return set()
@@ -504,7 +590,7 @@ def ingest_flow_graph(
     owner = owner_instance_id_of(doc.graph_id)
     graph_store = FlowGraphStore()
     # Departure set comes from the doc this one REPLACES — read before storing.
-    previous_bound = _bound_agents_of_stored(graph_store.get(doc.graph_id))
+    previous_bound = bound_agent_ids_of_stored(graph_store.get(doc.graph_id))
     graph_store.set_doc(doc, requested_by=requested_by)
 
     store = store or PersonaInstanceStore()

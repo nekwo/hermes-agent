@@ -66,20 +66,32 @@ def _rotation_cap_bytes() -> int:
 
 ALLOWED_EVENT_TYPES = allowed_event_types()
 
+# Every row here must also be in ``ALLOWED_EVENT_TYPES`` — a summary rule for a
+# de-registered type describes a shape ``EventLog.append`` refuses, so it can
+# only ever be exercised by a test minting an event no reader will ever see.
+# S21 dropped ``delivery.intent``, ``patch.proposed``, ``role_session.closed``,
+# and ``run.approval_required`` for exactly that reason (S15 de-registered all
+# four), together with their branches in ``operator_event_summary``.
+# S25 dropped ``run.opened`` under the same rule once its contract went (its
+# writer ``RunStore.open_run`` went at S17). Historical rows are unaffected —
+# ``append`` type-checks on WRITE only, so the 1,882 ``run.opened`` rows in the
+# live log still read back — and none of them lose a rendered summary in
+# practice: ``operator_event_summary``'s only read-side consumer is
+# ``snapshot._event_display_projection``, which is reached solely from three
+# task-scoped projections that have had ZERO callers since the ``Task`` record
+# went at S8. ``repo_bundle.delivered`` went in the same pass and for the same
+# rule, one commit behind its emitter: S24 deleted
+# ``RepoBundleStore.mark_delivered``, the only writer that ever produced it,
+# while every other ``repo_bundle.*`` type still rides a live
+# ``RepoBundleStore.update``.
 OPERATOR_SUMMARY_EVENT_TYPES = frozenset(
     {
-        "delivery.intent",
-        "patch.proposed",
-        "repo_bundle.delivered",
         "repo_bundle.updated",
         "repo_bundle.assigned",
-        "role_session.closed",
-        "run.opened",
         "run.closed",
         "run.progress",
         "run.tool.started",
         "run.tool.finished",
-        "run.approval_required",
     }
 )
 
@@ -675,61 +687,18 @@ def operator_event_summary(evt: Event) -> str | None:
     if existing:
         return existing
     event_type = evt.type
-    if event_type == "run.opened":
-        actor = _label(evt.persona_id, "agent")
-        stage = _safe_text(payload.get("stage_id"))
-        return f"Opened {actor} run" + (f" for {stage}." if stage else ".")
     if event_type == "run.closed":
         actor = _label(evt.persona_id, "agent")
         state = _safe_text(payload.get("state")) or "closed"
         decision = _safe_text(payload.get("decision_type"))
         return f"Closed {actor} run as {state}" + (f" after {decision}." if decision else ".")
-    if event_type == "role_session.closed":
-        role = _label(evt.persona_id or payload.get("role_id"), "role")
-        reason = _safe_text(payload.get("close_reason")) or "closed"
-        return f"Closed {role} role session: {reason}."
-    if event_type == "patch.proposed":
-        changed = (
-            _safe_int(payload.get("changed_file_count"))
-            or _safe_count(payload.get("changed_files"))
-            or _safe_count(payload.get("files_touched"))
-        )
-        prefix = "Proposed patch"
-        if payload.get("no_edit_findings_delivery"):
-            prefix = "Proposed no-edit findings delivery"
-        if changed:
-            return f"{prefix}: {changed} file{'s' if changed != 1 else ''} touched."
-        return f"{prefix}."
-    if event_type == "delivery.intent":
-        mode = _safe_text(payload.get("mode")) or "handoff"
-        changed = (
-            _safe_int(payload.get("changed_file_count"))
-            or _safe_count(payload.get("changed_files"))
-            or _safe_count(payload.get("files_touched"))
-        )
-        diff_chars = _safe_int(payload.get("diff_chars"))
-        if payload.get("no_edit") or mode in {"no_edit", "proof_only"}:
-            return "Recorded no-edit delivery intent."
-        if diff_chars is not None and diff_chars <= 0 and not changed:
-            return "Recorded proof-only delivery intent."
-        if changed:
-            return f"Recorded delivery intent: {changed} file{'s' if changed != 1 else ''} touched."
-        return "Recorded delivery intent."
-    if event_type in {"repo_bundle.assigned", "repo_bundle.updated", "repo_bundle.delivered"}:
+    if event_type in {"repo_bundle.assigned", "repo_bundle.updated"}:
         repo = _safe_text(payload.get("repo")) or _safe_text(payload.get("repo_bundle_id")) or "repo bundle"
         state = _safe_text(payload.get("state"))
         if event_type == "repo_bundle.assigned":
             return f"Assigned {repo} bundle" + (f" ({state})." if state else ".")
-        if event_type == "repo_bundle.updated":
-            reason = _safe_text(payload.get("reason"))
-            return f"Updated {repo} bundle" + (f" to {state}" if state else "") + (f": {reason}." if reason else ".")
-        captured = payload.get("captured")
-        if captured is None:
-            captured = payload.get("diff_captured")
-        capture_label = f"captured:{str(bool(captured)).lower()}" if captured is not None else "capture unknown"
-        proof_count = _safe_int(payload.get("proof_count"))
-        suffix = f", {proof_count} proof{'s' if proof_count != 1 else ''}" if proof_count is not None else ""
-        return f"Delivered {repo} bundle ({capture_label}{suffix})."
+        reason = _safe_text(payload.get("reason"))
+        return f"Updated {repo} bundle" + (f" to {state}" if state else "") + (f": {reason}." if reason else ".")
     if event_type == "run.progress":
         parts = [
             _safe_text(payload.get("phase")),
@@ -742,8 +711,6 @@ def operator_event_summary(evt: Event) -> str | None:
         tool = _safe_text(payload.get("tool_name")) or _safe_text(payload.get("tool")) or "tool"
         status = _safe_text(payload.get("status")) or ("started" if event_type.endswith(".started") else "finished")
         return f"{tool} {status}."
-    if event_type == "run.approval_required":
-        return "Run is waiting on approval."
     return event_type.replace(".", " ").title() + "."
 
 
@@ -783,21 +750,6 @@ def _safe_text(value, *, limit: int = 240) -> str | None:
 
 def _label(value, fallback: str) -> str:
     return (_safe_text(value, limit=80) or fallback).replace("_", " ")
-
-
-def _safe_int(value) -> int | None:
-    if isinstance(value, bool):
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _safe_count(value) -> int | None:
-    if isinstance(value, list):
-        return len(value)
-    return _safe_int(value)
 
 
 def _safe_token(value) -> str | None:

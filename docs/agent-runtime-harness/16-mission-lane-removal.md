@@ -289,3 +289,182 @@ the same sentence.
 6. Every doc and skill describing the removed lane is updated in the same stage that
    removes it — a skill describing a retired contract makes agents behave wrong even when
    the code is right.
+
+## Post-removal follow-ups (2026-07-30 audit)
+
+- **Persona prompt-builder lane deleted.** `persona_runtime.build_system_prompt` had zero
+  production callers after S5/S8 (the live chat lane builds its prompt inline in
+  `_persona_chat_system_prompt`); it, `_load_persona_system_prompt`,
+  `personas.load_bundled_prompt`, the helpers only it used (`_recommended_skill_guidance`,
+  `_specialist_dev_guidance`, `_normal_worker_flow_guidance`, the `_simplified_contract_*`
+  trio), and all five `agent_runtime/prompts/*.md` files (the four role prompts plus
+  `shared_harness_overlay.md`) are removed. The overlay's board sentence is pinned on the
+  chat prompt path only now (`test_board_agent_tools.py::test_board_sentence_present_in_chat_prompt`);
+  its anti-Kanban rule governed the deleted GOAL PIPELINE and needed no migration. The
+  bundled-prompt pinning tests in `test_personas.py` / `test_persona_prompts.py` /
+  `test_persona_skill_policy.py` / `test_decision_contract_registry.py` /
+  `test_decision_schema.py` were retargeted or removed in the same commit;
+  `test_persona_skill_guidance.py` went with its helper.
+  `_safe_read_soul_overlay` and `prompt_sources.resolve_persona_system_prompt_path` remain —
+  both have live chat-lane / profile-binding callers.
+- **`delivery_directive.py` was ruled mixed live/residue** — the initial audit kept the
+  orphan-worktree janitor and promotion-record reads and queued the Task-declared
+  directive / terminal-settle half for follow-up. That residue was swept in Wave 3
+  (`354d7555a`); [delivery-directive.md](delivery-directive.md) records the split.
+
+### Wave 3 outcomes (2026-07-30)
+
+This follow-up wave re-derived every cut from the named symbols' current callers. The
+outcomes below are the commit-recorded decisions, not a filename-based deletion list:
+
+- **Five small-module candidates:** only `agent_runtime/role_sessions.py` was actually
+  dead and was removed. The other four — `dev_discipline`, `simplified_contract`,
+  `scope_control`, and `role_checklists` — have live production callers, so whole-module
+  deletion was skipped. The same commit removed only the already-dead `repo_context`
+  worktree-creator import from `persona_runtime.py` (`3a32ec617`). A later
+  reachability pass established the precise correction: **four of the five modules are
+  live modules with dead insides.** It removed 800 lines of unreachable mission-lane
+  internals while retaining each imported surface (`5c16417f6`); notably,
+  `role_checklists.checklist_for_task_stage` was kept as live and the formerly listed
+  keep `stage_checklist_hud` was removed as dead.
+- **CLI mission-record flags:** `persona instance return-summary --task/--stage` were
+  removed, while `--proof-id` and `--artifact-ref` remain live output fields
+  (`64d2f9176`); the now-CLI-unreachable `task_id` / `stage_id` continuity parameter
+  chain was then removed while live `proof_ids` stayed (`304eb42c0`).
+  `mission-chat message --task/--goal` and the write that re-armed `task_bound` state
+  were removed (`b9f0043c4`). `persona instance steer --goal` is a separate, live
+  contract-45 wire and stays; `persona instance update-profile --goal` and
+  `persona tool-diff --task/--goal` also remain outside that cut.
+- **Dead read/HUD/status clusters:** the caller-free context-builder HUD cluster was cut
+  (`8fa9ee283`); the unreachable goal/task projection builders were cut from snapshot
+  (`8fe3d6687`), followed by the remaining 78-name unreachable snapshot island
+  (`064d46a27`); the tick-only `build_context` / `render_context` lane and its private
+  helper graph were removed while `AgentContext` stayed as a live annotation
+  (`539bf5813`); and constant-by-construction status, runtime-instance,
+  stream-routing, event-summary, and observability fields/arms were removed
+  (`c12e6850d`). The latter is also why `_delta_op` no longer has `task.*`,
+  `proof.attached`, or `daemon.*` arms.
+- **Store and event catalog:** writer-less proof/archive helpers, dead `RunStore`
+  methods, and `run.heartbeat` / `run.approved` were removed (`8c1c8e6cc`).
+  **`run.closed` is live and stays registered** because live cancel paths reach
+  `close_run`. `realm.archived`, `persona_chat.deleted`, and
+  `worktree.orphans_reaped` were registered from their real emitters
+  (`a7e679972`). `moa.*` were explicitly skipped because they are TUI/display
+  callbacks in `agent/moa_loop.py`, not `EventLog` events. The last writer-less
+  `run.opened` contract was then retired while `flow_graph.pruned` was registered
+  (`06eee42fa`), and reconcile now archives owner-less runtime graphs and emits that
+  event in its final graph-prune phase (`6c5040ed2`). The registered-but-writer-less
+  `repo_bundle.delivered` contract and its operator-summary arm were retired after
+  the S24 emitter deletion (`f9febb32b`).
+- **Narrow residue cuts:** writer-less task/proof/daemon path helpers and only the
+  `proofs` checkpoint class were removed (`633772c34`); the retired stage-graph
+  `StageStatus` enum was removed while the four live sibling enums stayed
+  (`9ca3f8743`); and only the two zero-reference packet symbols were removed while
+  the test-reached packet emission path stayed pending an operator decision
+  (`ac751ea2f`). The six-hop `proof_store` parameter chain was also removed after
+  every hop was confirmed to pass it onward without reading it (`dc926aa6c`).
+- **Node control:** the broken `tools/node_control_tool.py` implementation of
+  `run_node` / `steer_node` was deleted (`de14b06d2`), followed by the fork-added
+  `node_control` block in upstream-owned `toolsets.py` under explicit operator
+  authorization (`e69db6e71`).
+- **Delivery residue:** declaration, terminal-settle, delivery-capture, and caller-free
+  repo-context/repo-bundle helpers — including `git_diff_since_baseline` and
+  `diff_weakens_tests` — were removed, while the orphan-worktree janitor and historical
+  promotion-record reader stayed live (`354d7555a`). The
+  `repo_context.isolated_repo_context_for_run` / `_worktree_token` /
+  `_ensure_isolated_worktree` trio is intentionally kept as regression-test
+  infrastructure: twelve tests exercise its worktree safety behavior, including two
+  live-incident regressions. It has no production creator caller and is labelled as such.
+
+### S28 — the two cuts S21 could not reach (2026-07-30)
+
+S21 (`c12e6850d`) removed the constant-by-construction status/observe fields but
+**deferred two**, saying so in its commit body and pinning the reasoning in-code:
+`build_status` kept `open_tasks` / `running_runs`, and `build_observability` kept
+its `tasks` / `proofs` / `daemon_status` parameters, because the only reader left
+was `hermes_cli/harness_parts/runtime_commands.py` — a module another lane owned.
+S28 landed both halves once that module was free.
+
+- **Status shrink** (`026bc7b30`): `open_tasks` / `running_runs` and the
+  `_cmd_status` print that was their sole reader. All three removed observability
+  parameters were `[]` / `None` literals in **both** callers, so everything they
+  alone fed went too: `signals.open_tasks` / `proofs_total` / `stale_daemon` /
+  `repeated_context_request_tasks` / `untriaged_issue_discoveries`, the whole
+  `freshness.daemon_*` block, the daemon / context-request / issue-discovery
+  intervention families with their `_risk_if_ignored` + `_allowed_actions` arms,
+  and seven of ten `_self_heal_signals` counters (the task half). **Keep side:**
+  `active_runs` / `queued_runs` / `waiting_runs` / `stale_runs` and every
+  incident/run/worker signal — those read live parameters. Live JSON key-shape
+  diff on alice: 17 removals on `harness status`, 15 on `harness observe`, zero
+  additions, no surviving field changed.
+- **Consequence, recorded rather than hidden:** the removed
+  `scope_control.untriaged_issue_discoveries` import was that function's ONLY
+  production caller, so it is now caller-free while `scope_control` itself stays
+  live. It was NOT deleted (different module, live siblings); the S27 reachability
+  roots now say so explicitly. Re-checked in the same pass:
+  `scope_control.find_discovery_task` is imported at `hermes_cli/harness.py:155`
+  with **no call site anywhere in `hermes_cli/`** — a bound name, not a use. Both
+  belong to a future reachability pass.
+- **Reconcile graph render** (`75ffaac02`): the graph-prune phase (`6c5040ed2`)
+  archives owner-less runtime graphs and appends `flow_graph.pruned`, but reported
+  only through `--json`. The human render now carries `graphs_pruned` /
+  `graphs_held` / `graph_steering_settled` plus matching detail rows.
+  `graph_steering_settled` counts only `changed: True` entries — phase 3 usually
+  strips a departed owner's edge first, and reporting that agreement as a repair
+  would be the same class of untruth. The JSON wire is byte-identical.
+
+**Doctor speed is NOT fixed and is not this wave's to fix.**
+`tests/hermes_cli/test_harness_cli.py -k doctor` is 8 fast tests plus
+`test_harness_doctor_human_branch_renders_the_surviving_findings`, the only one
+that invokes `_cmd_doctor`. It **exceeds the repo's 30 s per-test cap**
+(`pyproject.toml:371`). Cause: `C:\Users\beast\AppData\Local\Temp\hermes-agent-wt`
+holds **4,245** leftover worktree directories. Under pytest the runtime root is a
+long tmp path, so `_worktree_base_dir()` (`repo_context.py:130-134`) falls back to
+that `%TEMP%` base, and `reap_orphan_worktrees` spawns one
+`git rev-parse --git-common-dir` per entry (`repo_context.py:570`) — **15.3 ms
+measured × 4,245 ≈ 65 s**. Every probe returns `None` and every husk holds real
+files (`.git` + `README.md`), so `_is_empty_husk` is false and the janitor
+classifies them `not_a_git_worktree_with_files` and **keeps them**. This never
+self-heals: see the operator-owned leftovers item below.
+
+### Operator-owned leftovers — nothing in this repo will clean these up
+
+Deliberate holds, not oversights. Each is outside git and safe to leave indefinitely;
+listed so a future session does not re-derive them or assume they were missed.
+
+1. **`X:\Eternia\.hermes\agent-runtime-archive-20260730-writerless\`** (~88 MB) — every
+   writer-less runtime directory archived aside on 2026-07-30 rather than deleted:
+   `role_checklists`, `role_envelopes`, `proof_batches`, `proof_sandbox`,
+   `replay_scenarios`, `stage47_live_runs`, `worker_sessions`, `packet_artifacts`,
+   `repo_bundles`, `operator-runs`, `self_tests`, `context`, plus the S0 residue
+   (`incidents` 1,925 files, `burn_in` 78 MB — both byte-identical to the existing
+   `agent-runtime-archive-20260729-mission-lane` copies), stale daemon/probe/PID files,
+   ~62 root run-logs, `operator_backups/`, and the pre-edit profile config backups.
+   Every archive move was gated on a live read afterwards (`harness status`,
+   `checkpoint classes`, and `persona list` returning 15 rows / 11 chat). **Deleting this
+   directory is the operator's call and finishes the reclaim.**
+2. **Profile config backups** — `X:\Eternia\.hermes\profiles\backend-dev\config.yaml.bak-20260730`
+   and the `gpt-launcher` / `backend-dev` copies inside the archive root above, from the
+   2026-07-30 `launcher_qa` grants (both profiles verified field-identical to
+   `launcher-dev`'s block afterwards). Disposable once the grants are trusted.
+3. **`C:\Users\beast\AppData\Local\Temp\hermes-agent-wt\` — 4,245 broken worktree
+   directories** (found 2026-07-30 by S28's doctor-speed check, above). These are
+   NOT the thirteen registered `%TEMP%` worktrees already reclaimed via
+   `git worktree remove`; these are the unregistered husks left behind. Each holds
+   a `.git` pointer file and a `README.md`, so `harness worktree reap` classifies
+   every one `not_a_git_worktree_with_files` and keeps it — **the janitor will
+   never clear this**, and every `harness doctor` pays ~65 s of `git rev-parse`
+   probes for it. Deleting the directory is the operator's call and is the whole
+   fix; the alternative (making `reap_orphan_worktrees` bound or batch its probe)
+   is a real code change and was not taken on this wave's authority.
+4. **Shared-skill backups** — `mission-control-harness.bak-20260730` and
+   `launcher-stagec-mcp-screenshot.bak-20260730` under `X:\Eternia\.hermes\shared\skills\`,
+   from the same-day rewrites. Note these sit **inside the shared skills root**: they are
+   not installed from this repo, so `harness install-harness-skills` will neither refresh
+   nor remove them.
+
+Already done and needing no action: the `wt-hml-s3-s12` worktree directory, the four
+runtime Launcher worktrees under `.hermes/agent-runtime/wt/` (382 MiB), and the thirteen
+registered `%TEMP%\hermes-agent-wt` worktrees (1.78 GiB) were all removed through
+`git worktree remove` after their contents were proven recoverable from git objects —
+that ~2.2 GiB is already reclaimed and is **not** what the archive directory above holds.

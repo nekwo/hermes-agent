@@ -1,5 +1,4 @@
 import json
-from datetime import timedelta
 
 import pytest
 
@@ -7,7 +6,7 @@ import agent_runtime.store as store_module
 from hermes_time import now
 
 from agent_runtime import paths
-from agent_runtime.errors import AlreadyExists, NotFound
+from agent_runtime.errors import NotFound
 from agent_runtime.events import EventLog, compact_archived_task_events
 from agent_runtime.models import AgentPersona, AgentRun, Event, Incident
 from types import SimpleNamespace
@@ -17,7 +16,6 @@ from agent_runtime.self_test_evidence import record_self_test_from_progress
 from agent_runtime.states import RunState, TaskState
 from agent_runtime.store import AgentStore, IncidentStore, RunStore, TaskStore
 from agent_runtime.snapshot import build_snapshot
-from agent_runtime.transitions import apply_transition
 
 
 def make_task(task_id="task_abc", state=TaskState.CREATED):
@@ -155,20 +153,39 @@ def test_agent_store_save_get_and_list():
     assert store.list_all() == [persona]
 
 
-def test_run_store_open_heartbeat_close_and_stale_detection():
+def seed_run(
+    *,
+    run_id: str = "run_store_case",
+    persona_id: str = "dev",
+    task_id: str = "task_abc",
+    state: RunState = RunState.RUNNING,
+) -> AgentRun:
+    """Persist a run row without ``RunStore.open_run``.
+
+    S17 removed the RunStore write surface that had no production callers left
+    after the mission lane went (``open_run``/``heartbeat``/``find_stale``/
+    ``approve_continuation``/``latest_session_id``/``find_active``). ``update``
+    is the surviving write path and tolerates a missing previous row, so the
+    tests below that cover the LIVE close/cancel/read surface seed through it.
+    """
+
+    ts = now()
+    run = AgentRun(
+        id=run_id,
+        persona_id=persona_id,
+        task_id=task_id,
+        stage_id=None,
+        state=state,
+        started_at=ts,
+        last_heartbeat_at=ts,
+    )
+    assert RunStore().update(run) is True
+    return run
+
+
+def test_run_store_close_run_records_final_decision_and_lists_for_task():
     runs = RunStore()
-    run = runs.open_run("pm", "task_abc", iteration_budget=7)
-
-    assert run.state == RunState.RUNNING
-    assert run.iteration_budget == 7
-
-    updated = runs.heartbeat(run.id)
-    assert updated.last_heartbeat_at >= run.last_heartbeat_at
-
-    stale_before = updated.last_heartbeat_at - timedelta(seconds=100)
-    updated.last_heartbeat_at = stale_before
-    runs.update(updated)
-    assert [run.id for run in runs.find_stale(heartbeat_ttl_seconds=1)] == [run.id]
+    run = seed_run(persona_id="pm")
 
     closed = runs.close_run(run.id, state=RunState.COMPLETED, final_decision={"type": "complete"})
     assert closed.finished_at is not None
@@ -178,7 +195,7 @@ def test_run_store_open_heartbeat_close_and_stale_detection():
 
 def test_run_store_cancel_marks_run_cancelled_with_operator_error():
     runs = RunStore()
-    run = runs.open_run("dev", "task_abc")
+    run = seed_run()
 
     cancelled = runs.cancel(run.id, reason="operator stopped runaway smoke")
 
@@ -192,7 +209,7 @@ def test_run_store_cancel_marks_run_cancelled_with_operator_error():
 
 def test_run_store_cancel_redacts_reason_and_does_not_overwrite_terminal_run():
     runs = RunStore()
-    run = runs.open_run("dev", "task_abc")
+    run = seed_run()
     completed = runs.close_run(run.id, state=RunState.COMPLETED, final_decision={"type": "approve"})
 
     cancelled = runs.cancel(run.id, reason="sk-live-secret-without-keyword")
@@ -205,7 +222,7 @@ def test_run_store_cancel_redacts_reason_and_does_not_overwrite_terminal_run():
 
 def test_run_store_update_does_not_overwrite_terminal_run_with_stale_object():
     runs = RunStore()
-    run = runs.open_run("dev", "task_abc")
+    run = seed_run()
     cancelled = runs.cancel(run.id, reason="operator stopped runaway smoke")
     stale = run
     stale.state = RunState.RUNNING
@@ -220,7 +237,7 @@ def test_run_store_update_does_not_overwrite_terminal_run_with_stale_object():
 
 def test_run_store_update_sanitizes_session_id_before_persist_and_close_event():
     runs = RunStore()
-    run = runs.open_run("dev", "task_abc")
+    run = seed_run()
     run.session_id = "session_secret_token_C:/Users/example/config"
     run.llm = {"session_id": "session_secret_token_C:/Users/example/config", "total_tokens": 1}
 
@@ -235,19 +252,10 @@ def test_run_store_update_sanitizes_session_id_before_persist_and_close_event():
     assert "session_id" not in event.payload
 
 
-def test_run_store_rejects_duplicate_active_run_for_same_task_persona_stage():
-    runs = RunStore()
-    first = runs.open_run("dev", "task_abc", stage_id="stage_1")
-
-    with pytest.raises(AlreadyExists):
-        runs.open_run("dev", "task_abc", stage_id="stage_1")
-
-    allowed_for_other_stage = runs.open_run("dev", "task_abc", stage_id="stage_2")
-    assert allowed_for_other_stage.id != first.id
-
-    runs.close_run(first.id, state=RunState.COMPLETED)
-    reopened = runs.open_run("dev", "task_abc", stage_id="stage_1")
-    assert reopened.id != first.id
+# The duplicate-active-run guard went with its writer: it lived inside
+# RunStore.open_run, which S17 removed as write-dead (zero production callers
+# after the mission lane). The removal itself is pinned in
+# tests/agent_runtime/test_s17_run_store_residue_removal.py, not weakened here.
 
 
 def test_mission_proof_store_is_removed():

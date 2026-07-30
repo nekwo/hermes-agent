@@ -875,7 +875,6 @@ def snapshot_prompt_observability(
     persona_instances: Iterable[Any],
     session_db: Any | None = None,
     tasks: Iterable[Any] | None = None,
-    proof_store: Any | None = None,
     daemon: dict[str, Any] | None = None,
     realm: str | None = None,
     workspace: str | None = None,
@@ -883,11 +882,10 @@ def snapshot_prompt_observability(
     catalog_sink: dict[str, list[dict[str, Any]]] | None = None,
     skill_resolver: "_SkillObservabilityResolver | None" = None,
 ) -> dict[str, Any]:
-    # Deferred import: context_builder pulls a large dependency graph, and this
+    # Deferred import: runtime_hud pulls a sizeable dependency graph, and this
     # module is imported very early. A function-local import keeps module load
-    # order robust while still giving the preview a single-authority HUD builder.
+    # order robust while still resolving through the single HUD authority.
     from . import workspace_scope
-    from .context_builder import mission_hud_preview
     from .runtime_hud import resolve_situational_hud
 
     tasks_by_id = {
@@ -898,17 +896,6 @@ def snapshot_prompt_observability(
     # Materialize once: the roster is reused for every lane's situational HUD
     # (thread count + on-level list) and the input may be a one-shot iterable.
     roster = list(persona_instances)
-
-    def _preview_for(task_id: str | None) -> dict[str, Any]:
-        task = tasks_by_id.get(safe_assignment_token(task_id) or "")
-        if task is None:
-            return {}
-        try:
-            return mission_hud_preview(task, proof_store=proof_store)
-        except Exception:
-            # The peek is diagnostic; never let a HUD preview failure break the
-            # snapshot that carries everything else Mission Control renders.
-            return {}
 
     def _situational_for(instance: Any, task_id: str | None) -> dict[str, Any]:
         try:
@@ -938,7 +925,6 @@ def snapshot_prompt_observability(
                 identity_roster=roster,
                 task=tasks_by_id.get(safe_assignment_token(task_id) or ""),
                 goal_task=tasks_by_id.get(safe_assignment_token(goal_id) or ""),
-                proof_store=proof_store,
             )
         except Exception:
             # Same guarantee as the preview: a situational-HUD failure degrades
@@ -976,7 +962,6 @@ def snapshot_prompt_observability(
                 surface_prompt="",
                 limiting_wrapper_active=False,
                 session_db=session_db,
-                mission_hud=_preview_for(task_id),
                 situational_hud=_situational_for(instance, task_id),
                 instance_skill_overrides=(
                     list(getattr(instance, "skill_overrides", None) or [])

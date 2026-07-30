@@ -1,30 +1,41 @@
 ---
 name: launcher-analyze-proof
-description: Choose fast, correct Flutter analyze and Launcher proof commands for Harness tasks. Use when Launcher Dev sees flutter analyze, launcher_contract_smoke, Mission Control bridge proof, Stage 47 burn-in, no-edit Launcher smoke, Stage C/Marionette QA, or contract-consumption proof.
+description: Choose fast, correct Flutter analyze, focused test, and Stage C screenshot commands for Eternia Launcher work. Use when Launcher work needs static analysis, a focused widget/bridge test, or Mission Control visual proof.
 metadata:
   hermes:
-    surfaces: [mission_chat, mission_worker]
+    surfaces: [mission_chat]
     modes: [standard]
     load_policy: recommended
 ---
 
 # Launcher Analyze Proof
 
-Use this skill after `harness-dev-delivery` when the current Launcher stage needs static analysis, no-edit smoke, contract-consumption proof, or a focused proof command.
+> **Scope note (2026-07-30).** The worker/stage lane this skill was written for — Mission
+> HUD, `agent_hud.current_assignment`, `proof_gate.required_proof_types`, Harness-managed
+> `request_test_run`, Stage 47 burn-in, `launcher_contract_smoke` — was removed with the
+> mission lane. See `docs/agent-runtime-harness/16-mission-lane-removal.md`. What survives,
+> and what this skill is now for, is choosing the *right command* for Launcher work you run
+> yourself inside a chat turn, and capturing Stage C visual proof. Stage C is a KEEP: the
+> MCP server, the PowerShell helpers, and the screenshot artifacts are all live.
 
-## Stage 76C Proof Posture
-
-- Read `mission_hud.agent_hud.evidence_stack` before choosing a proof command. Missing proof, stale proof, or a blocked-stage entry is advisory evidence for Neko/the goal owner to adjudicate, not a terminal release gate in this skill.
-- If proof is missing, choose the narrowest command that can create the missing evidence, or return a bounded blocker through the visible HUD action. Do not claim completion from prose, and do not treat missing proof as a dead-end.
-- If the HUD already records a blocked escalation, answer with the smallest recovery proof/input step or exact environment blocker; the Harness keeps the task recoverable.
-- Treat `mission_hud.agent_hud.current_assignment` as stage-shaped. Prefer its `proof_gate.required_proof_types`, `proof_gate.commands`, and `output_type` over role defaults when choosing whether Launcher needs analyze, widget proof, visual proof, or a document/artifact proof.
+Use this skill when Launcher work needs static analysis, a focused test, or a Mission
+Control screenshot. Run the command yourself and report the real result; there is no
+proof runner to ask and no gate to satisfy.
 
 ## First Preflight For Launcher Windows / Stage C Proof
 
-- Before any Windows debug rebuild, Marionette freshness check, Stage C MCP launch/attach, screenshot, or video proof, check for already-running `eternia_launcher.exe` and stale `stagec_qa_mcp_server.exe` processes first.
-- If either is running and the next proof needs a fresh debug binary or fresh Stage C window, close/kill those processes before rebuilding or capturing proof. Stale Launcher windows can lock `build/windows/.../Debug` files, keep an old `lib/main.dart` binary alive, or make MCP attach to the wrong window.
-- Do not blame ordinary `flutter test` widget failures on a running Launcher by default; inspect the proof output. A running Launcher mostly affects Windows build/Marionette/Stage C visual proof, not headless widget tests.
-- After cleanup, rerun the narrowest valid proof once. If cleanup is impossible, block with a redaction-safe environment blocker that names the process owner/IDs and the proof lane that is blocked.
+- Before any Windows debug rebuild, Marionette freshness check, Stage C MCP launch/attach,
+  screenshot, or video capture, check for already-running `eternia_launcher.exe` and stale
+  `stagec_qa_mcp_server.exe` processes first.
+- If either is running and the next capture needs a fresh debug binary or a fresh Stage C
+  window, close/kill those processes before rebuilding or capturing. Stale Launcher windows
+  can lock `build/windows/.../Debug` files, keep an old `lib/main.dart` binary alive, or make
+  MCP attach to the wrong window.
+- Do not blame ordinary `flutter test` widget failures on a running Launcher by default;
+  inspect the output. A running Launcher mostly affects Windows build/Marionette/Stage C
+  visual capture, not headless widget tests.
+- After cleanup, rerun the narrowest valid command once. If cleanup is impossible, report a
+  redaction-safe environment blocker that names the process owner/IDs and what it blocks.
 
 ## Choose The Narrowest Analyze
 
@@ -34,26 +45,45 @@ Use this skill after `harness-dev-delivery` when the current Launcher stage need
 - Stage C/Marionette wiring gate: `flutter analyze lib/main_marionette.dart lib/core/qa test/core/qa`.
 - Do not use `flutter analyze lib/main.dart` unless `lib/main.dart`, bootstrap routing, or app startup wiring changed.
 
-## Contract And Burn-In Proof
+## Choose The Narrowest Test
 
-- First prove joined packet/proof IDs with a deterministic repo-local command, such as a small `python -c` assertion that names the consumed `packet_id` and `proof_id`.
-- Add Flutter analyze only when Launcher Dart changed, Neko explicitly made static analysis the proof gate, or QA needs a real Launcher code gate.
-- For `launcher_contract_smoke`, Stage 47 burn-in, no-product-edit, or contract-join stages, the proof must validate the consumed backend packet/proof ID. Tool availability checks are not contract proof.
-- For Mission Control page/event-view rendering changes, use the focused page/widget proof: `flutter test test/features/mission_control/mission_control_page_test.dart`.
-- For Mission Control bridge/archive/snapshot stages, do not recycle the page/widget proof. Use the bridge regression proof: `flutter test test/features/mission_control/mission_control_snapshot_test.dart test/features/mission_control/mission_control_bridge_test.dart`.
-- Never use `flutter --version`, `flutter doctor`, `where flutter`, or `which flutter` as Launcher contract proof. Those are preflight signals only.
-- In normal worker flow for product-edit stages, run the narrow analyze/widget command in-session first, then emit `hand_off`; Harness runs the final gate after handoff. Use Harness `request_test_run` only when the HUD exposes `request_gate`, for no-edit/certification proof, QA missing proof, or failed final-gate recovery. Missing proof should become explicit HUD evidence or a focused proof request, not a terminal block.
+- For Mission Control page/event-view rendering changes, use the focused page/widget test:
+  `flutter test test/features/mission_control/mission_control_page_test.dart`.
+- For Mission Control bridge/archive/snapshot changes, do not recycle the page/widget test.
+  Use the bridge regression pair:
+  `flutter test test/features/mission_control/mission_control_snapshot_test.dart test/features/mission_control/mission_control_bridge_test.dart`.
+- Use repo-wide `flutter test` only when the operator asks for the full suite.
+- Never use `flutter --version`, `flutter doctor`, `where flutter`, or `which flutter` as
+  evidence that Launcher code works. Those are readiness signals only.
+- Report the command, its exit status, and the failure excerpt. Do not paste whole logs into
+  the chat; keep the artifact and carry a pointer.
 
 ## Stage C Mission Control Screenshot Command Shape
 
-- Mission Control visual proof must be pinned to Tony's live Harness runtime. In every `mcp_launcher_qa_open_app_tab` or `mcp_launcher_qa_launch_or_attach` call for Mission Control, pass `hermes_profile`, `harness_runtime_root`, and `hermes_home`, then verify the envelope shows `hermes_profile` non-null, `harness_runtime_root_configured:true`, and `hermes_home_configured:true`. Unpinned pixels do not prove the correct runtime root/profile.
-- `mcp_launcher_qa_open_app_tab` owns composed screenshot knobs: `screenshot_stabilize_ms`, `screenshot_max_retries`, and `screenshot_retry_delay_ms`.
-- `mcp_launcher_qa_screenshot_window` is a primitive and accepts only `window_title_prefix`/`window_title`/`window`, `label`, `out_dir`, `foreground`, `max_retries`, and `retry_delay_ms`. Do not pass `screenshot_stabilize_ms`, `screenshot_max_retries`, or `screenshot_retry_delay_ms` to `screenshot_window`; use `max_retries` and `retry_delay_ms` there, or add a bounded `Start-Sleep` between navigation and capture.
-- For Tony-facing Mission Control screenshots, capture a fullscreen or maximized Launcher window. If the artifact is visibly compressed, too small, blank/white, or low-information, do not call visual proof complete; return the exact blocker and reuse the failed proof ID in the next bounded retry.
+- Mission Control visual proof must be pinned to Tony's live Harness runtime. In every
+  `mcp_launcher_qa_open_app_tab` or `mcp_launcher_qa_launch_or_attach` call for Mission
+  Control, pass `hermes_profile`, `harness_runtime_root`, and `hermes_home`, then verify the
+  envelope shows `hermes_profile` non-null, `harness_runtime_root_configured:true`, and
+  `hermes_home_configured:true`. Unpinned pixels do not prove the correct runtime root/profile.
+- `mcp_launcher_qa_open_app_tab` owns composed screenshot knobs: `screenshot_stabilize_ms`,
+  `screenshot_max_retries`, and `screenshot_retry_delay_ms`.
+- `mcp_launcher_qa_screenshot_window` is a primitive and accepts only
+  `window_title_prefix`/`window_title`/`window`, `label`, `out_dir`, `foreground`,
+  `max_retries`, and `retry_delay_ms`. Do not pass `screenshot_stabilize_ms`,
+  `screenshot_max_retries`, or `screenshot_retry_delay_ms` to `screenshot_window`; use
+  `max_retries` and `retry_delay_ms` there, or add a bounded `Start-Sleep` between navigation
+  and capture.
+- For Tony-facing Mission Control screenshots, capture a fullscreen or maximized Launcher
+  window. If the artifact is visibly compressed, too small, blank/white, or low-information,
+  do not call it done; report the exact blocker and retry once.
 
-## Delivery Shape
+## Retired AgentDecision Templates
 
-When delivering a product edit in normal worker flow, keep the handoff compact:
+**Do not emit these.** No live lane consumes an `AgentDecision`; a chat turn answers in
+prose and uses its own tools. The two blocks below are retained only as fixtures for
+`hermes harness contracts verify-examples`, which still validates the decision registry
+that outlived the lane, and are pinned by
+`tests/agent_runtime/test_decision_contract_registry.py`.
 
 ```json
 {
@@ -67,8 +97,6 @@ When delivering a product edit in normal worker flow, keep the handoff compact:
   }
 }
 ```
-
-When requesting an explicit proof gate, keep the delivery packet concise:
 
 ```json
 {

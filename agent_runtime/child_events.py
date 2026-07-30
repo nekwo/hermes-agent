@@ -17,8 +17,6 @@ def emit_child_returned(
     summary: str,
     proof_ids: list[str],
     artifact_refs: list[str],
-    task_id: str | None,
-    stage_id: str | None,
     event_log: EventLog | None = None,
 ) -> bool:
     """Append a bounded return event to a child instance's steering parent."""

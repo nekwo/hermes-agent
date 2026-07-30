@@ -1,5 +1,13 @@
 # Mission Control Goal-Room & Chat-Parity Stages
 
+> **2026-07-30 — partially describes a removed subsystem.** The goal-room framing
+> ("a running goal staffs each blueprint slot with a task-bound persona instance";
+> the room as instances sharing a `task_id`) was removed by
+> `docs/agent-runtime-harness/16-mission-lane-removal.md`. The chat-parity /
+> trace-projection design (tool name + summary + changed-file labels, the
+> redaction-safe trace) **is still the live mission-chat display model** — that
+> half remains current.
+
 **Goal:** When a goal runs, make its agent chats feel like talking to a real Hermes
 agent — accessible as one **goal room**, messageable like a normal chat, and
 **showing the work** (tool name + summary + changed-file labels — the redaction-safe trace,

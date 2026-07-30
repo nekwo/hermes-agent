@@ -59,11 +59,6 @@ from agent_runtime.errors import (
 )
 from agent_runtime.events import EventLog
 from agent_runtime.harness_doctor import (
-    DEFAULT_STALE_INCIDENT_DAYS,
-    DEFAULT_STALE_INCIDENT_HOURS,
-    DEFAULT_STALE_RUN_HOURS,
-    DEFAULT_STALE_TASK_DAYS,
-    DEFAULT_STALE_WORKER_HOURS,
     DEFAULT_WORKTREE_MIN_AGE_SECONDS,
     run_harness_doctor,
 )
@@ -582,7 +577,7 @@ def build_parser(parent_subparsers) -> None:
 
     flow = subs.add_parser("flow", help="Operator flow-graph documents: ingest the Launcher's authored agent map whole and set the referenced instances' steering relations")
     flow_subs = flow.add_subparsers(dest="flow_command", required=True)
-    flow_set = flow_subs.add_parser("set", help="Store one flow-graph JSON doc and reconcile steering for the EXISTING instances it references (never creates instances; never touches goal membership)")
+    flow_set = flow_subs.add_parser("set", help="Store one flow-graph JSON doc and reconcile steering for the EXISTING instances it references (never creates instances)")
     flow_set.add_argument("--graph", default=None, help="The flow-graph JSON document, inline")
     flow_set.add_argument("--graph-file", default=None, help="Path to a file holding the flow-graph JSON document")
     flow_set.add_argument("--requested-by", default="operator")
@@ -695,7 +690,7 @@ def build_parser(parent_subparsers) -> None:
     prompt_context_show.add_argument("--json", action="store_true")
     prompt_context_show.set_defaults(func=_cmd_prompt_context_show)
 
-    board = subs.add_parser("board", help="Manage Mission Board planning boards + cards (planning only — cards never mutate goals)")
+    board = subs.add_parser("board", help="Manage Mission Board planning boards + cards (planning only — cards never drive runtime execution)")
     board_subs = board.add_subparsers(dest="board_command", required=True)
     board_list = board_subs.add_parser("list", help="List boards")
     board_list.add_argument("--workspace", default=None)
@@ -818,8 +813,6 @@ def build_parser(parent_subparsers) -> None:
     persona_tool_diff = persona_subs.add_parser("tool-diff", help="Show resolved model tools and blocked tools for one persona")
     persona_tool_diff.add_argument("persona_id", help="Persona id or alias: neko, dev, launcher-dev, backend-dev, qa")
     persona_tool_diff.add_argument("--session-id", default=None)
-    persona_tool_diff.add_argument("--task", dest="task_id", default=None)
-    persona_tool_diff.add_argument("--goal", dest="goal_id", default=None)
     persona_tool_diff.add_argument("--permission-mode", default="profile_default")
     persona_tool_diff.add_argument("--repo-scope", default=None)
     persona_tool_diff.add_argument("--workdir", default=None)
@@ -967,7 +960,7 @@ def build_parser(parent_subparsers) -> None:
     _add_coordinator_permission_args(persona_instance_retire)
     persona_instance_retire.add_argument("--json", action="store_true")
     persona_instance_retire.set_defaults(func=_cmd_persona_instance_retire)
-    persona_instance_sweep = persona_instance_subs.add_parser("sweep-orphans", help="Reap stale task-bound persona instances with no live worker/run")
+    persona_instance_sweep = persona_instance_subs.add_parser("sweep-orphans", help="Reconcile orphaned persona instances: reap rows with no live owner, preserve active ones")
     persona_instance_sweep.add_argument("--reason", default="operator persona instance janitor")
     persona_instance_sweep.add_argument("--json", action="store_true")
     persona_instance_sweep.set_defaults(func=_cmd_persona_instance_sweep_orphans)
@@ -977,8 +970,8 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_steer.add_argument("--add-parent", dest="add_parent", default=None, help="Additively ADD one parent to the steering set (fan-in; idempotent)")
     persona_instance_steer.add_argument("--remove-parent", dest="remove_parent", default=None, help="Remove ONE parent from the steering set (detach-one; last one detaches)")
     persona_instance_steer.add_argument("--set-parents", dest="set_parents", nargs="+", default=None, metavar="PARENT", help="Declaratively REPLACE the whole steering set with these parents (fan-in)")
-    persona_instance_steer.add_argument("--goal", dest="goal_id", default=None, help="Goal/task id this sub-agent inherits from its parent container")
-    persona_instance_steer.add_argument("--detach", action="store_true", help="Detach from ALL parents and goal (becomes a standalone owner)")
+    persona_instance_steer.add_argument("--goal", dest="goal_id", default=None, help="Correlation id this sub-agent inherits from its parent; rides the snapshot as persona_instance.goal_id, which the Launcher groups its agent rooms by")
+    persona_instance_steer.add_argument("--detach", action="store_true", help="Detach from ALL parents and clear the inherited correlation id (becomes a standalone owner)")
     persona_instance_steer.add_argument("--requested-by", default="operator")
     _add_coordinator_permission_args(persona_instance_steer)
     persona_instance_steer.add_argument("--json", action="store_true")
@@ -997,8 +990,6 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_return.add_argument("--summary", required=True)
     persona_instance_return.add_argument("--proof-id", dest="proof_ids", action="append", default=[])
     persona_instance_return.add_argument("--artifact-ref", dest="artifact_refs", action="append", default=[])
-    persona_instance_return.add_argument("--task", dest="task_id", default=None)
-    persona_instance_return.add_argument("--stage", dest="stage_id", default=None)
     persona_instance_return.add_argument("--json", action="store_true")
     persona_instance_return.set_defaults(func=_cmd_persona_instance_return_summary)
     persona_instance_update = persona_instance_subs.add_parser("update-profile", help="Update runtime persona-instance profile overrides without editing the backing Hermes profile")
@@ -1044,8 +1035,14 @@ def build_parser(parent_subparsers) -> None:
     # turn's clarify_binding block). Unknown/pruned tokens degrade to normal
     # precedence rather than refusing.
     mission_chat_message.add_argument("--clarify-token", dest="clarify_token", default=None, help="Answer a clarify question by its token (clarify_request.clarify_token from the asking turn); binds this reply to the thread the question was asked in")
-    mission_chat_message.add_argument("--task", dest="task_id", default=None)
-    mission_chat_message.add_argument("--goal", dest="goal_id", default=None)
+    # No --task/--goal: the goal/task mission lane is retired (contract 45) and
+    # chat is the only lane. They were not inert residue -- the handler consumed
+    # them by writing instance.current_task_id/goal_id and flipping instance.mode
+    # to the RETIRED "task_bound", so an armed row re-armed retired runtime state
+    # on the operator's next ordinary message. The Launcher stopped emitting them
+    # first (launcher 87957547); this is the lockstep half. `persona instance
+    # steer --goal` is untouched -- goal_id rides the contract-45 wire and the
+    # Launcher groups its agent rooms by it.
     # Default None = "no title opinion": consumed as the fresh thread's title
     # when this send mints one, otherwise the durable "<persona> chat" title
     # stands. A literal default would name every freshly minted thread after it.
@@ -1145,25 +1142,22 @@ def build_parser(parent_subparsers) -> None:
     )
     usage.set_defaults(func=_cmd_usage)
 
-    doctor = subs.add_parser("doctor", help="Show Harness runtime diagnostics and stale-state report")
+    doctor = subs.add_parser("doctor", help="Show Harness runtime diagnostics: orphan worktrees, snapshot ids, event-log health, model authority, persona/profile binding")
     doctor.add_argument("--json", action="store_true")
-    doctor.add_argument("--fix", action="store_true", help="Repair stale Harness runtime rows and reap orphan worktrees")
+    doctor.add_argument("--fix", action="store_true", help="Capture-then-reap the orphan worktrees the scan reports")
     doctor.add_argument("--dry-run", action="store_true", help="Preview --fix repairs without mutating runtime state")
     doctor.add_argument("--yes", "-y", action="store_true", help="Confirm --fix repairs")
-    doctor.add_argument("--stale-run-hours", type=int, default=DEFAULT_STALE_RUN_HOURS)
-    doctor.add_argument("--stale-worker-hours", type=int, default=DEFAULT_STALE_WORKER_HOURS)
-    doctor.add_argument("--stale-task-days", type=int, default=DEFAULT_STALE_TASK_DAYS)
-    doctor.add_argument("--stale-incident-days", type=int, default=DEFAULT_STALE_INCIDENT_DAYS)
-    doctor.add_argument("--stale-incident-hours", type=int, default=None, help="Compatibility override for sub-day incident sweeps")
     doctor.add_argument("--worktree-min-age-seconds", type=int, default=DEFAULT_WORKTREE_MIN_AGE_SECONDS)
-    doctor.add_argument("--compact-events", action="store_true", help="Compact archived task rows out of events.jsonl; use with --fix --dry-run to preview")
+    # The six stale-threshold / --compact-events knobs were removed: they fed
+    # task, run, worker and incident sweeps that died with the mission lane, so
+    # the CLI accepted them and silently ignored them.
     doctor.set_defaults(func=_cmd_doctor)
 
-    health = subs.add_parser("health", help="Check Harness runtime/provider dependencies before live ticks")
+    health = subs.add_parser("health", help="Check Harness runtime/provider dependencies are reachable and configured")
     health.add_argument("--json", action="store_true")
     health.set_defaults(func=_cmd_health)
 
-    verify = subs.add_parser("verify", help="Run Mission Control proof-packet verification")
+    verify = subs.add_parser("verify", help="Run runtime smoke verification: read-only harness CLI commands plus the focused store/snapshot/status test modules")
     verify.add_argument("--json", action="store_true")
     verify.add_argument("--mode", choices=["live-tony", "ci", "temp-root"], default="ci")
     verify.add_argument("--skip-tests", action="store_true")
@@ -1199,7 +1193,7 @@ def build_parser(parent_subparsers) -> None:
     worktree_subs = worktree.add_subparsers(dest="worktree_command", required=True)
     worktree_reap = worktree_subs.add_parser(
         "reap",
-        help="Capture-then-reap orphan worktrees not owned by any open task run",
+        help="Capture-then-reap orphan harness worktrees with no live owner",
     )
     worktree_reap.add_argument("--min-age-seconds", type=int, default=3600)
     worktree_reap.add_argument(
@@ -2982,14 +2976,17 @@ def _cmd_init(args) -> int:
         "default_realm_id": scope.realm.id,
         "default_workspace_id": scope.workspace.id,
     }
-    print(
-        emit_json(data)
-        if args.json
-        else (
-            f"Initialized harness personas: {', '.join(data['personas'])}\n"
-            f"Default scope: {scope.realm.name} / {scope.workspace.name}"
+    if args.json:
+        print(emit_json(data))
+    else:
+        # Personas are data now: a fresh root provisions none, so the old
+        # unconditional line rendered a dangling "personas: " with nothing after it.
+        print(
+            f"Initialized harness personas: {', '.join(data['personas'])}"
+            if data["personas"]
+            else "Initialized harness: no personas provisioned (personas are data — add them with `harness persona`)"
         )
-    )
+        print(f"Default scope: {scope.realm.name} / {scope.workspace.name}")
     return 0
 
 
@@ -3626,20 +3623,10 @@ def _cmd_doctor(args) -> int:
     hygiene = run_harness_doctor(
         fix=bool(getattr(args, "fix", False)),
         dry_run=bool(getattr(args, "dry_run", False)),
-        stale_run_hours=int(getattr(args, "stale_run_hours", DEFAULT_STALE_RUN_HOURS) or DEFAULT_STALE_RUN_HOURS),
-        stale_worker_hours=int(getattr(args, "stale_worker_hours", DEFAULT_STALE_WORKER_HOURS) or DEFAULT_STALE_WORKER_HOURS),
-        stale_task_days=int(getattr(args, "stale_task_days", DEFAULT_STALE_TASK_DAYS) or DEFAULT_STALE_TASK_DAYS),
-        stale_incident_hours=int(getattr(args, "stale_incident_hours", None) or DEFAULT_STALE_INCIDENT_HOURS),
-        stale_incident_days=(
-            None
-            if getattr(args, "stale_incident_hours", None) is not None
-            else int(getattr(args, "stale_incident_days", DEFAULT_STALE_INCIDENT_DAYS) or DEFAULT_STALE_INCIDENT_DAYS)
-        ),
         worktree_min_age_seconds=int(
             getattr(args, "worktree_min_age_seconds", DEFAULT_WORKTREE_MIN_AGE_SECONDS)
             or DEFAULT_WORKTREE_MIN_AGE_SECONDS
         ),
-        compact_events=bool(getattr(args, "compact_events", False)),
     )
     data = {
         "ok": True,
@@ -3662,19 +3649,15 @@ def _cmd_doctor(args) -> int:
             marker = "*" if row["winner"] else " "
             print(
                 f"{marker} {row['layer']:<7} value={row['value'] or '<unset>'} "
-                f"exists={row['exists']} tasks={row['tasks']}"
+                f"exists={row['exists']}"
             )
         counts = hygiene["summary"]["finding_counts"]
         event_log = hygiene["findings"]["event_log"]
         print("Harness doctor")
-        print(
-            "findings: "
-            f"runs={counts['stale_runs']} workers={counts['stale_workers']} "
-            f"tasks={counts['stale_open_tasks']} incidents={counts['stale_incidents']} "
-            f"worktrees={counts['orphan_worktrees']} "
-            f"snapshot_null_ids={counts['snapshot_null_id_rows']} "
-            f"event_compactable_rows={counts['event_log_compactable_rows']}"
-        )
+        # Render exactly the findings the report emits. The mission-era counts
+        # (runs/workers/open tasks/incidents/compactable rows) went away with
+        # the lane; reading them here is what made the default path crash.
+        print("findings: " + " ".join(f"{name}={count}" for name, count in counts.items()))
         print(
             "event log: "
             f"size={event_log['size_bytes']} bytes lines={event_log['line_count']} "

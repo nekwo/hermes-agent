@@ -136,7 +136,6 @@ def _table_row(layer: str, value: object, *, winner: bool) -> dict[str, object]:
         "layer": layer,
         "value": str(path) if path is not None else None,
         "exists": path.exists() if path is not None else False,
-        "tasks": (path / "tasks").is_dir() if path is not None else False,
         "winner": winner,
     }
 

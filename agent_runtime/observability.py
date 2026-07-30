@@ -6,30 +6,34 @@ from typing import Any
 from hermes_time import now
 
 from .incidents import CRITICAL_INCIDENT_KINDS
-from .models import Event, Incident, Proof
-from .scope_control import untriaged_issue_discoveries
-from .states import PossessionState, RunState, TaskState, WorkerSessionState
+from .models import Event, Incident
+from .states import PossessionState, RunState, WorkerSessionState
 from .store import ACTIVE_RUN_STATES
 from .worker_sessions import ACTIVE_WORKER_STATES, worker_session_summary
 
-DEFAULT_DAEMON_STALE_AFTER_SECONDS = 120
 DEFAULT_RUN_STALLED_AFTER_SECONDS = 900
-DEFAULT_REPEATED_CONTEXT_REQUESTS_THRESHOLD = 2
 DELIVERY_EVIDENCE_INCIDENT_KINDS = frozenset({"patch_landed_nowhere", "stage_no_progress"})
+
+# S28 removed the three parameters both callers passed as literals -- ``tasks``
+# (a ``[]`` since S8), ``proofs`` (a ``[]`` since the S6 store removal), and
+# ``daemon_status`` (``None``; the Mission Daemon was retired before this wave).
+# With them went every row they alone fed: ``signals.open_tasks`` /
+# ``proofs_total`` / ``stale_daemon`` / ``repeated_context_request_tasks`` /
+# ``untriaged_issue_discoveries``, the whole ``freshness.daemon_*`` block, the
+# daemon / context-request / issue-discovery intervention families and their
+# ``_risk_if_ignored`` / ``_allowed_actions`` arms, ``_latest_context_request``,
+# the ``scope_control.untriaged_issue_discoveries`` import, and the task half of
+# ``_self_heal_signals``. S21 (``c12e6850d``) identified this cut and deferred
+# it only because ``_cmd_observe`` owned the keywords from another lane.
 
 
 def build_observability(
     *,
-    tasks: list[Any],
     runs: list[Any],
     incidents: list[Incident],
-    proofs: list[Proof],
-    daemon_status: dict[str, Any] | None,
     events: list[Event] | None = None,
     reference_time: datetime | None = None,
-    daemon_stale_after_seconds: int = DEFAULT_DAEMON_STALE_AFTER_SECONDS,
     run_stalled_after_seconds: int = DEFAULT_RUN_STALLED_AFTER_SECONDS,
-    repeated_context_requests_threshold: int = DEFAULT_REPEATED_CONTEXT_REQUESTS_THRESHOLD,
     execution_mode: str = "manual",
     worker_sessions: list[Any] | None = None,
 ) -> dict[str, Any]:
@@ -41,26 +45,13 @@ def build_observability(
     """
 
     ref = reference_time or now()
-    daemon = daemon_status or {"state": "offline"}
     open_incidents = [incident for incident in incidents if incident.closed_at is None]
-    open_tasks = [task for task in tasks if task.state not in {TaskState.DONE, TaskState.CANCELLED}]
     active_runs = [run for run in runs if run.state in ACTIVE_RUN_STATES]
     workers = list(worker_sessions or [])
     active_workers = [worker for worker in workers if _worker_is_active(worker)]
     running_runs = [run for run in active_runs if run.state == RunState.RUNNING]
     queued_runs = [run for run in active_runs if run.state == RunState.QUEUED]
     waiting_runs = [run for run in active_runs if run.state in {RunState.WAITING_ON_TOOL, RunState.WAITING_ON_APPROVAL}]
-
-    daemon_heartbeat_at = _coerce_datetime(daemon.get("heartbeat_at"))
-    daemon_heartbeat_age = _age_seconds(ref, daemon_heartbeat_at)
-    daemon_state = str(daemon.get("state", "offline"))
-    daemon_expected = execution_mode == "daemon"
-    daemon_stale_relevant = daemon_expected or daemon_state == "running"
-    stale_daemon = bool(
-        daemon_stale_relevant
-        and daemon_state not in {"offline", "error"}
-        and (daemon_heartbeat_at is None or (daemon_heartbeat_age is not None and daemon_heartbeat_age > daemon_stale_after_seconds))
-    )
 
     stalled_runs = [
         run
@@ -72,21 +63,8 @@ def build_observability(
         for worker in active_workers
         if _worker_age_seconds(ref, worker) is not None and _worker_age_seconds(ref, worker) > run_stalled_after_seconds
     ]
-    repeated_context_tasks = [
-        task
-        for task in open_tasks
-        if len(getattr(task, "context_requests", []) or []) >= repeated_context_requests_threshold
-    ]
-    untriaged_discoveries = [(task, item) for task in open_tasks for item in untriaged_issue_discoveries(task)]
 
     interventions: list[dict[str, Any]] = []
-    if daemon_state == "offline" and daemon_expected:
-        interventions.append(_intervention("daemon_offline", "critical", "mission_daemon", None, None, "Mission Daemon is offline"))
-    elif daemon_state == "error":
-        interventions.append(_intervention("daemon_error", "critical", "mission_daemon", None, None, "Mission Daemon status cannot be read"))
-    elif stale_daemon:
-        interventions.append(_intervention("daemon_stale", "critical", "mission_daemon", None, None, "Mission Daemon heartbeat is stale"))
-
     for incident in open_incidents:
         intervention_kind = incident.kind if incident.kind in DELIVERY_EVIDENCE_INCIDENT_KINDS else "open_incident"
         interventions.append(
@@ -130,54 +108,6 @@ def build_observability(
             )
         )
 
-    for task in repeated_context_tasks:
-        latest = _latest_context_request(task)
-        interventions.append(
-            _intervention(
-                "context_request_loop",
-                "medium",
-                "mission",
-                task.id,
-                None,
-                "Mission has repeated context requests without state advancement",
-                context_request_count=len(getattr(task, "context_requests", []) or []),
-                context_request_id=latest.get("id") if latest else None,
-                context_request_status=latest.get("status") if latest else None,
-            )
-        )
-    for task in open_tasks:
-        latest = _latest_context_request(task)
-        if latest and latest.get("status") in {"open", "unsupported", "superseded"}:
-            interventions.append(
-                _intervention(
-                    "context_request_unfulfilled",
-                    "high" if latest.get("status") == "unsupported" else "medium",
-                    "mission",
-                    task.id,
-                    None,
-                    "Mission is waiting on a context request before another persona run",
-                    context_request_id=latest.get("id"),
-                    context_request_status=latest.get("status"),
-                    failure_reason=latest.get("failure_reason"),
-                )
-            )
-
-    for task, discovery in untriaged_discoveries:
-        severity = str(discovery.get("severity", "medium"))
-        interventions.append(
-            _intervention(
-                "issue_discovery_triage_needed",
-                "high" if severity in {"high", "critical"} else "medium",
-                "mission",
-                task.id,
-                None,
-                "Mission has an untriaged issue discovery",
-                discovery_id=discovery.get("id"),
-                issue_severity=severity,
-                relationship_hint=discovery.get("relationship_hint"),
-            )
-        )
-
     health_status = _health_status(interventions)
     return {
         "schema_version": 1,
@@ -188,13 +118,9 @@ def build_observability(
             "summary": _health_summary(health_status, interventions),
         },
         "freshness": {
-            "daemon_heartbeat_at": daemon_heartbeat_at,
-            "daemon_heartbeat_age_seconds": daemon_heartbeat_age,
             "stalled_run_threshold_seconds": run_stalled_after_seconds,
-            "daemon_stale_threshold_seconds": daemon_stale_after_seconds,
         },
         "signals": {
-            "open_tasks": len(open_tasks),
             "running_runs": len(running_runs),
             "active_runs": len(active_runs),
             "queued_runs": len(queued_runs),
@@ -202,12 +128,8 @@ def build_observability(
             "active_worker_sessions": len(active_workers),
             "stale_worker_sessions": len(stale_workers),
             "open_incidents": len(open_incidents),
-            "stale_daemon": stale_daemon,
             "stalled_running_runs": len(stalled_runs),
-            "repeated_context_request_tasks": len(repeated_context_tasks),
-            "untriaged_issue_discoveries": len(untriaged_discoveries),
-            "proofs_total": len(proofs),
-            "self_heal": _self_heal_signals(open_tasks, runs),
+            "self_heal": _self_heal_signals(runs),
         },
         "interventions": interventions,
         "active_runs": [_run_summary(run) for run in active_runs],
@@ -253,6 +175,9 @@ def _intervention(
         "risk_if_ignored": _risk_if_ignored(kind, severity),
         "allowed_actions": _allowed_actions(kind, subject),
         "expires_at": expires_at,
+        # S28: ``context_request_id`` / ``discovery_id`` were only ever supplied
+        # by the two task-sourced intervention families, so they could no longer
+        # be non-``None`` for any surviving caller.
         "safe_refs": {
             key: value
             for key, value in {
@@ -260,8 +185,6 @@ def _intervention(
                 "run_id": run_id,
                 "incident_id": extra.get("incident_id"),
                 "worker_session_id": extra.get("worker_session_id"),
-                "context_request_id": extra.get("context_request_id"),
-                "discovery_id": extra.get("discovery_id"),
             }.items()
             if value
         },
@@ -271,28 +194,26 @@ def _intervention(
 
 
 def _risk_if_ignored(kind: str, severity: str) -> str:
+    # S28: the context-request arm went with the task-sourced interventions that
+    # were its only producers.
     if severity in {"critical", "high"}:
         return "Mission progress can remain blocked or drift from Harness truth."
-    if kind in {"context_request_loop", "context_request_unfulfilled"}:
-        return "Agents may keep requesting context instead of advancing the mission."
     return "Mission Control may remain degraded until this is resolved."
 
 
 def _allowed_actions(kind: str, subject: str) -> list[str]:
+    # S28: the daemon, context-request, and issue-discovery arms went with the
+    # intervention families that produced those kinds. Every arm below is
+    # reachable from a live parameter (``incidents``, ``runs``,
+    # ``worker_sessions``).
     if kind in DELIVERY_EVIDENCE_INCIDENT_KINDS:
         return ["answer_intervention", "cancel_run", "rescope"]
     if kind == "open_incident":
         return ["answer_intervention", "retry_stage"]
-    if kind in {"daemon_offline", "daemon_error", "daemon_stale"}:
-        return ["start_daemon"]
     if subject == "run":
         return ["cancel_run", "retry_stage"]
     if subject == "worker_session":
         return ["nudge_worker", "cancel_run"]
-    if kind.startswith("context_request"):
-        return ["answer_intervention"]
-    if kind == "issue_discovery_triage_needed":
-        return ["answer_intervention", "create_goal"]
     return ["answer_intervention"]
 
 
@@ -421,40 +342,18 @@ def _safe_llm(value: Any) -> dict[str, Any]:
     return safe
 
 
-def _self_heal_signals(tasks: list[Any], runs: list[Any]) -> dict[str, Any]:
+def _self_heal_signals(runs: list[Any]) -> dict[str, Any]:
+    # S28: seven counters (``scope_update``, ``same_stage_retry``,
+    # ``read_search_after_failed_proof``, ``env_fingerprint_changed``, and the
+    # three ``self_heal_*`` rows) were summed over ``task.harness_self_heal``
+    # stage state. The task list has been a ``[]`` literal in both callers since
+    # S8, so those seven could only ever report 0. The three below read
+    # ``run.progress`` and still move.
     totals = {
-        "scope_update": 0,
-        "same_stage_retry": 0,
-        "read_search_after_failed_proof": 0,
         "skill_fanout": 0,
         "failed_proof_reused": 0,
         "failed_proof_ignored": 0,
-        "env_fingerprint_changed": 0,
-        "self_heal_proposed": 0,
-        "self_heal_applied": 0,
-        "self_heal_cannot": 0,
     }
-    for task in tasks:
-        root = getattr(task, "harness_self_heal", {}) or {}
-        stages = root.get("stages") if isinstance(root, dict) else {}
-        if not isinstance(stages, dict):
-            continue
-        for stage_state in stages.values():
-            if not isinstance(stage_state, dict):
-                continue
-            counters = stage_state.get("counters") if isinstance(stage_state.get("counters"), dict) else {}
-            totals["scope_update"] += _safe_counter(counters.get("scope_update_count"))
-            totals["same_stage_retry"] += _safe_counter(counters.get("same_stage_retry_count"))
-            totals["read_search_after_failed_proof"] += _safe_counter(counters.get("dev_read_search_after_failed_proof"))
-            if stage_state.get("environment_fingerprint_status") == "changed":
-                totals["env_fingerprint_changed"] += 1
-            self_heal = stage_state.get("self_heal") if isinstance(stage_state.get("self_heal"), dict) else {}
-            if self_heal.get("classification"):
-                totals["self_heal_proposed"] += 1
-            if _safe_counter(self_heal.get("attempt_number")):
-                totals["self_heal_applied"] += 1
-            if _safe_counter(self_heal.get("attempts_remaining")) == 0 and self_heal:
-                totals["self_heal_cannot"] += 1
     for run in runs:
         progress = getattr(run, "progress", None)
         if not isinstance(progress, dict):
@@ -474,11 +373,6 @@ def _safe_counter(value: Any) -> int:
         return max(0, int(value or 0))
     except (TypeError, ValueError):
         return 0
-
-
-def _latest_context_request(task: Any) -> dict[str, Any] | None:
-    reqs = getattr(task, "context_requests", []) or []
-    return reqs[-1] if reqs else None
 
 
 def _event_summary(event: Event) -> dict[str, Any]:
@@ -518,13 +412,15 @@ def _event_display_projection(event: Event) -> dict[str, Any]:
 
 
 def _event_display_kind(event_type: str, payload: dict[str, Any]) -> str:
+    # S21: the ``qa.verdict_recorded`` arm and ``task.blocked`` were dropped —
+    # S15 de-registered both, so ``EventLog.append`` refuses them and no event
+    # reaching this classifier can carry either type. ``incident.opened`` is the
+    # surviving producer of the ``blocker`` kind.
     if event_type == "self_test.recorded":
         return "self_test"
     if event_type == "packet.recorded":
         return "delivery" if str(payload.get("packet_type") or "") == "delivery" else "handoff"
-    if event_type == "qa.verdict_recorded":
-        return "qa_verdict"
-    if event_type in {"task.blocked", "incident.opened"}:
+    if event_type == "incident.opened":
         return "blocker"
     if event_type.startswith("run.tool."):
         return "tool_call"
@@ -534,14 +430,14 @@ def _event_display_kind(event_type: str, payload: dict[str, Any]) -> str:
 
 
 def _event_display_title(event_type: str, payload: dict[str, Any], kind: str) -> str:
+    # ``kind`` only ever comes from ``_event_display_kind``. S21 dropped the
+    # ``proof`` arm (that classifier has never returned ``"proof"`` — it was
+    # unreachable before the mission lane was touched) and the ``qa_verdict``
+    # arm (its producer went with ``qa.verdict_recorded``).
     if kind == "self_test":
         return f"Self-test {payload.get('status') or 'recorded'}"
-    if kind == "proof":
-        return f"Proof {payload.get('status') or 'attached'}"
     if kind == "delivery":
         return "Delivery packet"
-    if kind == "qa_verdict":
-        return f"QA verdict {payload.get('verdict') or ''}".strip()
     if kind == "blocker":
         return "Blocker"
     if kind == "tool_call":

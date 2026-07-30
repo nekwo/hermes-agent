@@ -102,7 +102,6 @@ class HudShape:
 @dataclass(frozen=True, slots=True)
 class DecisionContract:
     decision_type: DecisionType
-    allowed_roles: tuple[AgentRole, ...]
     required_payload_keys: tuple[str, ...] = ()
     optional_payload_keys: tuple[str, ...] = ()
     shape_hint: str = ""
@@ -143,9 +142,10 @@ class DecisionContract:
         return _drop_empty(result)
 
     def manifest(self) -> dict[str, Any]:
-        payload = self.payload_contract()
-        payload["allowed_roles"] = [role.value for role in self.allowed_roles]
-        return payload
+        # Identical to ``payload_contract`` — kept so every contract dataclass in
+        # this module answers the same ``manifest()`` protocol. S16 removed the
+        # ``allowed_roles`` tail that used to make the two differ.
+        return self.payload_contract()
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,11 +197,6 @@ def decision_contract(decision_type: DecisionType | str) -> DecisionContract:
 
 def payload_contract(decision_type: DecisionType | str) -> dict[str, Any]:
     return decision_contract(decision_type).payload_contract()
-
-
-def allowed_decisions_for_role(role: AgentRole | str) -> frozenset[DecisionType]:
-    del role
-    return frozenset(_DECISION_CONTRACTS)
 
 
 def canonical_role_value(role: AgentRole | str) -> str:
@@ -345,26 +340,6 @@ def contract_hash() -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
-def prompt_contract_markdown(decision_types: list[DecisionType] | tuple[DecisionType, ...] | None = None) -> str:
-    lines = [
-        f"Registry contract_hash: {contract_hash()}",
-        "These payload contracts are mandatory and are checked after the JSON schema. Include every required key exactly.",
-    ]
-    selected_decision_types = list(decision_types) if decision_types is not None else list(DecisionType)
-    for decision_type in selected_decision_types:
-        contract = decision_contract(decision_type)
-        if not contract.allowed_roles:
-            continue
-        required = ", ".join(contract.required_payload_keys) or "none"
-        allowed = ", ".join(contract.allowed_payload_keys) or "none"
-        lines.append(f"- {decision_type.value}: required [{required}]; allowed [{allowed}]. {contract.shape_hint}")
-    if decision_types is None:
-        lines.append('- request_file_reads: payload must include {"paths": ["path/to/file"], "reason": "why these files are needed"}.')
-        lines.append('- request_test_run: payload must include {"stage_id": "..."} plus either commands or recipe_id for deterministic command/test proof.')
-    lines.append('- block: payload must include {"reason": "...", "log_ref": {"path": "events.jsonl", "line": 123, "summary": "brief evidence summary"}}.')
-    return "\n".join(lines)
-
-
 def verify_registry() -> dict[str, Any]:
     missing = [item.value for item in DecisionType if item not in _DECISION_CONTRACTS]
     missing_object_contracts = sorted(
@@ -374,15 +349,13 @@ def verify_registry() -> dict[str, Any]:
         if contract_id not in _OBJECT_CONTRACTS
     )
     hud_template_errors = _validate_hud_templates()
-    role_shape_errors: list[dict[str, str]] = []
     return {
-        "ok": not missing and not missing_object_contracts and not hud_template_errors and not role_shape_errors,
+        "ok": not missing and not missing_object_contracts and not hud_template_errors,
         "schema_version": CONTRACT_SCHEMA_VERSION,
         "contract_hash": contract_hash(),
         "missing_decision_types": missing,
         "missing_object_contracts": missing_object_contracts,
         "hud_template_errors": hud_template_errors,
-        "role_shape_errors": role_shape_errors,
         "decision_count": len(_DECISION_CONTRACTS),
         "hud_shape_count": len(_HUD_SHAPES),
         "event_count": len(_EVENT_CONTRACTS),
@@ -660,13 +633,11 @@ _DEV_ONLY = (AgentRole.DEV,)
 _QA_ONLY = (AgentRole.QA,)
 _NEKO_ONLY = (AgentRole.ALICE_SUPERVISOR,)
 _PM_NEKO = (AgentRole.PM, AgentRole.ALICE_SUPERVISOR)
-_PM_QA = (AgentRole.PM, AgentRole.QA)
 
 
 _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     DecisionType.NEEDS_CONTEXT: DecisionContract(
         DecisionType.NEEDS_CONTEXT,
-        allowed_roles=(AgentRole.PM, AgentRole.DEV, AgentRole.ALICE_SUPERVISOR),
         optional_payload_keys=("reason", "requested_context", "questions", "missing", "handoff_request", "operator_note"),
         nested_contracts=("needs_context.handoff_request",),
         shape_hint="Use only when a safe bounded answer is missing and request_file_reads is not the right tool.",
@@ -674,14 +645,12 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.REQUEST_HUMAN: DecisionContract(
         DecisionType.REQUEST_HUMAN,
-        allowed_roles=_PM_NEKO,
         required_payload_keys=("reason",),
         optional_payload_keys=("requested_action", "log_ref"),
         shape_hint="Escalate only external decisions or credentials/human approvals.",
     ),
     DecisionType.PERSONA_MESSAGE_REPLY: DecisionContract(
         DecisionType.PERSONA_MESSAGE_REPLY,
-        allowed_roles=_ALL_ROLES,
         required_payload_keys=("reply",),
         optional_payload_keys=("persona_instance_id", "session_id", "message_id", "turn_id"),
         shape_hint="Reply conversationally to a Mission Control operator persona-chat message. Keep reply redaction-safe and do not scope a task unless the operator asked for task work.",
@@ -689,7 +658,6 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.PROPOSE_ACCEPTANCE: DecisionContract(
         DecisionType.PROPOSE_ACCEPTANCE,
-        allowed_roles=_PM_NEKO,
         required_payload_keys=("objective", "acceptance_criteria"),
         optional_payload_keys=("non_goals", "affected_repos", "suggested_roles", "requires_visual_proof", "risk_flags", "handoff_packet", "scope_override_reason"),
         nested_contracts=("handoff_packet", "handoff_packet.proof_gate", "handoff_packet.join_gate", "handoff_packet.self_heal"),
@@ -697,7 +665,6 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.PROPOSE_STAGE_PLAN: DecisionContract(
         DecisionType.PROPOSE_STAGE_PLAN,
-        allowed_roles=_DEV_ONLY,
         required_payload_keys=("stages",),
         optional_payload_keys=("delivery",),
         stage_allowed_keys=("id", "title", "objective", "acceptance_criteria", "affected_paths", "test_plan", "requires_visual_proof", "delivery"),
@@ -706,26 +673,22 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.CORRECT_STAGE: DecisionContract(
         DecisionType.CORRECT_STAGE,
-        allowed_roles=(AgentRole.DEV, AgentRole.QA),
         required_payload_keys=("stage_id",),
         optional_payload_keys=("corrections", "audit_notes", "affected_paths", "test_plan", "target_stage_id", "set_current_stage_id"),
         shape_hint="Repair current-stage instructions/proof gates, or reroute to a known target_stage_id. Do not attach delivery here.",
     ),
     DecisionType.REQUEST_FILE_READS: DecisionContract(
         DecisionType.REQUEST_FILE_READS,
-        allowed_roles=_ALL_ROLES,
         required_payload_keys=("paths", "reason"),
         shape_hint="Ask the Harness for a bounded file bundle instead of dumping context.",
     ),
     DecisionType.HAND_OFF: DecisionContract(
         DecisionType.HAND_OFF,
-        allowed_roles=_DEV_ONLY,
         optional_payload_keys=("stage_id", "summary", "known_gaps", "log_ref"),
         shape_hint="Collapsed Dev signal: work is ready for Harness-observed diff capture and authoritative gate rerun. Do not declare changed files, proof IDs, delivery, or work_status.",
     ),
     DecisionType.ESCALATE: DecisionContract(
         DecisionType.ESCALATE,
-        allowed_roles=(AgentRole.DEV, AgentRole.QA),
         required_payload_keys=("title", "summary"),
         optional_payload_keys=("severity", "evidence", "log_ref"),
         enum_choices={"severity": ("low", "medium", "high", "critical")},
@@ -733,7 +696,6 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.SCOPE_ROUTE: DecisionContract(
         DecisionType.SCOPE_ROUTE,
-        allowed_roles=_PM_NEKO,
         required_payload_keys=("objective", "acceptance_criteria", "target_owner", "target_repo", "proof_gate"),
         optional_payload_keys=("non_goals", "suggested_roles", "requires_visual_proof", "risk_flags", "release_stage_id", "scope_override_reason"),
         enum_choices={"target_owner": ("dev", "backend_dev", "qa", "neko_supervisor", "human"), "target_repo": ("EterniaLauncher", "EterniaBackend", "hermes-agent", "none")},
@@ -741,7 +703,6 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.QA_VERDICT: DecisionContract(
         DecisionType.QA_VERDICT,
-        allowed_roles=_QA_ONLY,
         required_payload_keys=("verdict",),
         optional_payload_keys=("coverage", "findings", "proof_ids"),
         enum_choices={"verdict": ("approved", "needs_fixes", "blocked")},
@@ -749,14 +710,12 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.PROPOSE_PATCH: DecisionContract(
         DecisionType.PROPOSE_PATCH,
-        allowed_roles=_DEV_ONLY,
         optional_payload_keys=("stage_id", "patch", "summary", "changed_files", "tests", "delivery", "proof_ids", "known_gaps"),
         nested_contracts=("delivery",),
         shape_hint="Use after actual code edits or a concrete patch plan; Harness derives any compatibility delivery status.",
     ),
     DecisionType.REQUEST_TEST_RUN: DecisionContract(
         DecisionType.REQUEST_TEST_RUN,
-        allowed_roles=(AgentRole.DEV, AgentRole.QA),
         required_payload_keys=("stage_id",),
         optional_payload_keys=("commands", "recipe_id", "proof_intent", "intent", "repo_scope", "delivery", "failed_proof_ids", "failed_proof_auto_attached"),
         nested_contracts=("delivery",),
@@ -764,7 +723,6 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.REQUEST_SCREENSHOT: DecisionContract(
         DecisionType.REQUEST_SCREENSHOT,
-        allowed_roles=_QA_ONLY,
         required_payload_keys=("stage_id", "target", "proof_requirement", "mcp_server", "required_launch_pins"),
         optional_payload_keys=("qa_review",),
         nested_contracts=("visual.required_launch_pins", "qa_review"),
@@ -773,7 +731,6 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.REQUEST_VIDEO: DecisionContract(
         DecisionType.REQUEST_VIDEO,
-        allowed_roles=_QA_ONLY,
         required_payload_keys=("stage_id", "target", "proof_requirement", "mcp_server", "required_launch_pins", "duration_seconds", "interaction_script"),
         optional_payload_keys=("qa_review",),
         nested_contracts=("visual.required_launch_pins", "qa_review"),
@@ -782,7 +739,6 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.REQUEST_QA_REVIEW: DecisionContract(
         DecisionType.REQUEST_QA_REVIEW,
-        allowed_roles=_DEV_ONLY,
         required_payload_keys=("stage_id", "proof_ids", "handoff"),
         optional_payload_keys=("delivery",),
         nested_contracts=("request_qa_review.handoff", "delivery"),
@@ -790,7 +746,6 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.REPORT_QA_VERDICT: DecisionContract(
         DecisionType.REPORT_QA_VERDICT,
-        allowed_roles=_QA_ONLY,
         required_payload_keys=("review_scope",),
         optional_payload_keys=("verdict", "proof_ids", "delivery_packets_reviewed", "findings", "reviewed_stage_ids", "proof_requirements_confirmed", "test_plan_confirmed", "qa_review"),
         nested_contracts=("qa_review", "qa_review.coverage"),
@@ -799,7 +754,6 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.APPROVE: DecisionContract(
         DecisionType.APPROVE,
-        allowed_roles=_PM_QA,
         required_payload_keys=("review_scope",),
         optional_payload_keys=("verdict", "proof_ids", "findings", "reviewed_stage_ids", "proof_requirements_confirmed", "test_plan_confirmed", "qa_review"),
         nested_contracts=("qa_review", "qa_review.coverage"),
@@ -808,7 +762,6 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.BLOCK: DecisionContract(
         DecisionType.BLOCK,
-        allowed_roles=_ALL_ROLES,
         required_payload_keys=("reason", "log_ref"),
         optional_payload_keys=("failed_proof_ids", "delivery"),
         nested_contracts=("block.log_ref", "delivery"),
@@ -816,12 +769,10 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.COMPLETE: DecisionContract(
         DecisionType.COMPLETE,
-        allowed_roles=(),
         shape_hint="Reserved terminal signal; specialist personas should normally not emit this.",
     ),
     DecisionType.REPORT_ISSUE_DISCOVERY: DecisionContract(
         DecisionType.REPORT_ISSUE_DISCOVERY,
-        allowed_roles=(AgentRole.DEV, AgentRole.QA),
         required_payload_keys=("title", "summary"),
         optional_payload_keys=("severity", "relationship_hint", "evidence", "affected_paths", "suggested_child_title", "suggested_child_description", "suggested_acceptance_criteria", "delivery"),
         nested_contracts=("delivery",),
@@ -830,7 +781,6 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.TRIAGE_ISSUE_DISCOVERY: DecisionContract(
         DecisionType.TRIAGE_ISSUE_DISCOVERY,
-        allowed_roles=_PM_NEKO,
         required_payload_keys=("discovery_id", "decision", "rationale"),
         optional_payload_keys=("priority", "child_title", "child_description", "child_acceptance_criteria"),
         enum_choices={"decision": ("same_scope", "fork_child", "defer", "escalate", "blocks_current")},
@@ -838,20 +788,11 @@ _DECISION_CONTRACTS: dict[DecisionType, DecisionContract] = {
     ),
     DecisionType.RESOLVE_INCIDENT: DecisionContract(
         DecisionType.RESOLVE_INCIDENT,
-        allowed_roles=_NEKO_ONLY,
         required_payload_keys=("incident_id", "resolution"),
         optional_payload_keys=("next_state",),
         shape_hint="Close a specific open incident and optionally route to the next task state.",
     ),
 }
-
-
-_COMMON_SHAPE_IDS = (
-    "common.block",
-    "common.request_file_reads",
-    "common.needs_context",
-    "common.request_human",
-)
 
 
 _HUD_SHAPES: dict[str, HudShape] = {
@@ -1042,69 +983,33 @@ _HUD_SHAPES: dict[str, HudShape] = {
 
 
 _EVENT_CONTRACTS: dict[str, EventContract] = {
-    "task.created": EventContract("task.created", "Task created", ("title", "state"), ("description",)),
-    "task.transition": EventContract("task.transition", "Task transition", ("from", "to", "reason"), ("actor",)),
-    "task.cancelled": EventContract("task.cancelled", "Task cancelled", ("reason",), ("actor",)),
-    "task.blocked": EventContract("task.blocked", "Task blocked", ("reason",), ("log_ref",)),
-    "task.unblocked": EventContract("task.unblocked", "Task unblocked", ("reason",), ("actor",)),
-    "task.archived": EventContract("task.archived", "Task archived", ("task_id", "archive_batch"), ("manifest_path",)),
-    "task.stage_added": EventContract("task.stage_added", "Stage added", ("stage_id", "title"), ("objective",)),
-    "task.stage_updated": EventContract("task.stage_updated", "Stage updated", ("stage_id", "status"), ("reason",)),
-    "task.stage_corrected": EventContract("task.stage_corrected", "Stage corrected", ("stage_id",), ("corrections", "audit_notes")),
-    "task.pm_fleshed": EventContract("task.pm_fleshed", "Task scoped", ("objective",), ("acceptance_criteria",)),
-    "task.preflight": EventContract("task.preflight", "Task preflight", ("status", "summary"), ("checks",)),
-    "foreground_runtime.prepared": EventContract("foreground_runtime.prepared", "Foreground runtime prepared", ("state",), ("foreground_task_id", "parked_task_count", "blocking_active_run_ids")),
-    "foreground_runtime.activated": EventContract("foreground_runtime.activated", "Foreground runtime activated", ("runtime_instance_id", "task_id", "lane", "state"), ("reason",)),
-    "foreground_runtime.parked_task": EventContract("foreground_runtime.parked_task", "Task parked in background runtime lane", ("runtime_instance_id", "task_id", "lane", "state"), ("reason",)),
-    "foreground_runtime.cancelled_stale_run": EventContract("foreground_runtime.cancelled_stale_run", "Foreground runtime cancelled stale run", ("run_id", "task_id"), ("reason",)),
-    "foreground_runtime.waiting_on_fresh_run": EventContract("foreground_runtime.waiting_on_fresh_run", "Foreground runtime waiting on active run", ("run_id", "task_id"), ("reason",)),
-    "foreground_runtime.preempted_background_run": EventContract("foreground_runtime.preempted_background_run", "Foreground runtime preempted background run", ("run_id", "task_id"), ("reason",)),
     "foreground_runtime.closed": EventContract("foreground_runtime.closed", "Foreground runtime closed", ("runtime_instance_id", "task_id", "lane", "state"), ("reason",)),
     "lane.created": EventContract("lane.created", "Lane created", ("runtime_instance_id", "task_id", "state"), ("lane_kind", "reason")),
     "lane.transitioned": EventContract("lane.transitioned", "Lane transitioned", ("runtime_instance_id", "task_id", "state"), ("reason",)),
     "lane.transition_rejected": EventContract("lane.transition_rejected", "Lane transition rejected", ("runtime_instance_id", "from", "to"), ("reason",)),
-    "plan.reviewed": EventContract("plan.reviewed", "Plan reviewed", ("verdict",), ("findings",)),
-    "goal_create.field_dropped": EventContract("goal_create.field_dropped", "Goal-create field dropped", ("field", "reason", "summary"), ()),
-    "delivery.intent": EventContract("delivery.intent", "Delivery intent recorded", ("mode", "summary"), ("diff_chars", "no_edit", "changed_files")),
-    "patch.proposed": EventContract("patch.proposed", "Patch proposed", ("summary",), ("changed_files",)),
-    "context.requested": EventContract("context.requested", "Context requested", ("reason",), ("paths", "requested_context", "request_id", "status", "failure_reason", "bundle_id", "summary", "next_expected", "path_results")),
-    "missing_input.requested": EventContract("missing_input.requested", "Missing input requested", ("input_type", "route_to"), ("question", "context_ref")),
-    "cross_stack.backend_first_released": EventContract("cross_stack.backend_first_released", "Backend released", ("next_expected",), ("proof_ids",)),
-    "cross_stack.backend_contract_packet_missing": EventContract("cross_stack.backend_contract_packet_missing", "Backend packet missing", ("next_expected",), ("stage_id",)),
-    "cross_stack.backend_proof_missing": EventContract("cross_stack.backend_proof_missing", "Backend proof missing", ("next_expected",), ("stage_id",)),
-    "cross_stack.launcher_released": EventContract("cross_stack.launcher_released", "Launcher released", ("next_state",), ("proof_ids",)),
-    "cross_stack.launcher_release_missing": EventContract("cross_stack.launcher_release_missing", "Launcher release missing", ("next_expected",), ("stage_id",)),
-    "cross_stack.qa_coordination_release_missing": EventContract("cross_stack.qa_coordination_release_missing", "QA release missing", ("next_expected",), ("stage_id",)),
-    "backend_release_gate_environment_failed": EventContract("backend_release_gate_environment_failed", "Backend release gate environment failed", ("check_id", "reason"), ("stage_id", "command_index")),
-    "issue.discovery_reported": EventContract("issue.discovery_reported", "Issue discovered", ("title", "severity"), ("evidence",)),
-    "issue.discovery_triaged": EventContract("issue.discovery_triaged", "Issue triaged", ("decision",), ("rationale",)),
-    "issue.child_mission_created": EventContract("issue.child_mission_created", "Child mission created", ("task_id",), ("title",)),
-    "run.opened": EventContract("run.opened", "Run opened", ("run_id", "persona_id", "stage_id"), ("model", "provider")),
-    "run.heartbeat": EventContract("run.heartbeat", "Run heartbeat", ("run_id", "state"), ("phase",)),
+    # S17 de-registered run.heartbeat (RunStore.heartbeat) and run.approved
+    # (RunStore.approve_continuation) with their writers; S25 finished the set
+    # with run.opened once the two filler appends that were its last minters
+    # (tests/agent_runtime/test_events.py) were retargeted onto live types — see
+    # tests/agent_runtime/test_s25_run_opened_retirement.py, which owns that
+    # delta. run.closed is NOT in this set: it is still LIVE via
+    # RunStore.cancel -> close_run (operator takeover and persona-chat
+    # replacement both reach it).
     "run.progress": EventContract("run.progress", "Run progress", ("phase", "step", "status", "summary"), ("next_expected", "proof_id")),
-    "run.liveness.warning": EventContract("run.liveness.warning", "Run liveness warning", ("run_id", "kind", "summary"), ("age_seconds", "quiet_strikes", "worker_session_id")),
-    "liveness.poll": EventContract("liveness.poll", "Liveness poll", ("run_id", "classification", "status", "summary"), ("age_seconds", "poll_count")),
-    "child.progress": EventContract("child.progress", "Child progress", ("parent_node_id", "child_node_id", "phase", "step", "status", "summary"), ("run_id", "stage_id")),
-    "child.blocked": EventContract("child.blocked", "Child blocked", ("parent_node_id", "child_node_id", "reason"), ("run_id", "stage_id", "summary")),
     "child.returned": EventContract("child.returned", "Child returned", ("parent_node_id", "child_node_id", "summary"), ("proof_ids", "artifact_refs", "stage_id", "persona_instance_id")),
-    "child.deploy_failed": EventContract("child.deploy_failed", "Child deploy failed", ("parent_node_id", "child_node_id", "reason"), ("assignment_id", "stage_id", "persona_id", "retryable", "summary")),
-    "persona.worklog": EventContract("persona.worklog", "Persona worklog", ("kind", "source", "message"), ("stage_id", "related_proof_ids")),
-    "run.approval_required": EventContract("run.approval_required", "Approval required", ("reason",), ("run_id",)),
-    "run.approved": EventContract("run.approved", "Run approved", ("run_id",), ("approval_type",)),
-    "mission_budget_exceeded": EventContract("mission_budget_exceeded", "Mission token budget exceeded", ("task_id", "total_tokens", "limit"), ("persona_id", "stage_id")),
-    "swarm_budget_exceeded": EventContract("swarm_budget_exceeded", "Swarm token budget exceeded", ("total_tokens", "limit"), ("task_id", "persona_id", "stage_id")),
-    "run.model_call.started": EventContract("run.model_call.started", "Model call started", ("model",), ("run_id",)),
-    "run.model_call.finished": EventContract("run.model_call.finished", "Model call finished", ("model", "total_tokens"), ("run_id",)),
     "run.tool.started": EventContract("run.tool.started", "Tool started", ("tool_name",), ("run_id",)),
     "run.tool.finished": EventContract("run.tool.finished", "Tool finished", ("tool_name", "status"), ("duration_ms",)),
-    "run.validation.started": EventContract("run.validation.started", "Validation started", ("run_id",), ("decision_type",)),
-    "run.validation.failed": EventContract("run.validation.failed", "Validation failed", ("invalid_field", "summary"), ("repair_hint",)),
-    "decision_contract.parity": EventContract("decision_contract.parity", "Decision contract parity", ("mode", "status", "public_decision_type", "execution_decision_type"), ("legacy_decision_type", "shimmed", "blocked_reason")),
+    # S32 de-registered decision_contract.parity behind its emitter: S27
+    # (5c16417f6) cut the simplified-contract projection half out of
+    # simplified_contract.py, and _record_parity — which only that half called —
+    # was the only writer that ever produced the type. It compared the public
+    # and execution decision types for the deterministic executor deleted in S5.
+    # Unlike run.opened / repo_bundle.delivered there is no operator-summary row
+    # or formatter arm to retire with it. See
+    # tests/agent_runtime/test_s32_decision_contract_parity_retirement.py.
+    # NOT the same thing: agent_runtime/parity.py is the read-model
+    # ProjectionAccountant and never emitted this (or any) event type.
     "run.closed": EventContract("run.closed", "Run closed", ("state", "decision_type"), ("total_tokens",)),
-    "role_session.opened": EventContract("role_session.opened", "Role session opened", ("envelope_id", "persona_id"), ("stage_id",)),
-    "role_session.continued": EventContract("role_session.continued", "Role session continued", ("envelope_id", "would_continue"), ("decision_count",)),
-    "role_session.watchdog_warning": EventContract("role_session.watchdog_warning", "Role session warning", ("summary",), ("kind",)),
-    "role_session.closed": EventContract("role_session.closed", "Role session closed", ("close_reason",), ("decision_count", "total_tokens_total")),
     "role_envelope.opened": EventContract("role_envelope.opened", "Role envelope opened", ("envelope_id", "role_id"), ("mission_stage_id", "checklist_id")),
     "role_envelope.continued": EventContract("role_envelope.continued", "Role envelope continued", ("envelope_id", "status"), ("decision_type", "proof_count", "no_progress_count")),
     "role_envelope.paused": EventContract("role_envelope.paused", "Role envelope paused", ("envelope_id", "status"), ("decision_type", "proof_count", "no_progress_count")),
@@ -1119,17 +1024,30 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "persona_instance.pruned": EventContract("persona_instance.pruned", "Orphaned/legacy-role persona instance archived from the live graph", ("persona_instance_id", "reason"), ("persona_id", "role", "profile_id", "updated_at")),
     "persona_instance.chat_binding_cleared": EventContract("persona_instance.chat_binding_cleared", "Persona instance unbound from a chat session (operator delete, or a binding whose session SessionDB no longer has)", ("persona_instance_id", "session_id", "reason"), ("persona_id", "cleared_fields", "mode_before", "mode_after")),
     "persona_instance.retired": EventContract("persona_instance.retired", "Placement-backed persona instance retired (end-of-life) to the archive on placement removal", ("persona_instance_id", "reason"), ("persona_id", "mode", "requested_by", "archive_dir")),
-    "steer.requested": EventContract("steer.requested", "Steer requested", ("action_id", "verb", "source_node_id", "target_node_id"), ("requested_by", "reason")),
-    "steer.started": EventContract("steer.started", "Steer started", ("action_id", "verb", "source_node_id", "target_node_id"), ("requested_by", "reason")),
+    # The persona-instance reconciler's phase-5 graph reap
+    # (persona_instance_identity._prune_owner_less_flow_graphs). A runtime flow
+    # graph is keyed on its OWNER instance (``runtime:<owner>``), so reaping a
+    # row strands the canvas it owned; the phase archives the doc into
+    # ``flow_graphs_stale/<ts>_graph_prune/`` and rides this event. The three
+    # summary fields are what every emission carries — ``reason`` is the typed
+    # constant from flow_graph.py, never free text. No persona rides the Event
+    # envelope: by construction the owner no longer resolves to a row.
+    "flow_graph.pruned": EventContract("flow_graph.pruned", "Owner-less runtime flow graph archived", ("graph_id", "owner_instance_id", "reason"), ("drawn_agent_count", "archived_to")),
     "steer.returned": EventContract("steer.returned", "Steer returned", ("action_id", "verb", "source_node_id", "target_node_id"), ("result", "stage_id", "persona_instance_id")),
-    "steer.failed": EventContract("steer.failed", "Steer failed", ("error_kind",), ("action_id", "verb", "source_node_id", "target_node_id")),
-    "steer.cap_hit": EventContract("steer.cap_hit", "Steer fan-out cap hit", ("cap", "source_instance_id"), ()),
     "operator.takeover.requested": EventContract("operator.takeover.requested", "Operator takeover requested", ("worker_session_id", "actor"), ("reason", "cancel_active_run")),
     "operator.takeover.approval_required": EventContract("operator.takeover.approval_required", "Operator takeover approval required", ("worker_session_id", "actor", "approval"), ("reason",)),
     "operator.takeover.applied": EventContract("operator.takeover.applied", "Operator takeover applied", ("worker_session_id", "actor"), ("parked_lane_ids", "paused_worker_ids", "cancelled_run_id", "approval_required")),
     "persona_instance.chat_opened": EventContract("persona_instance.chat_opened", "Persona instance chat opened", ("persona_instance_id", "session_id"), ("persona_id",)),
     "persona_chat.projected": EventContract("persona_chat.projected", "Persona chat turn projection committed", ("persona_instance_id", "root_chat_session_id", "client_message_id", "turn_id", "change_kind"), ("active_session_id", "native_revision")),
     "persona_chat.metadata_updated": EventContract("persona_chat.metadata_updated", "Persona chat session metadata updated", ("persona_instance_id", "root_chat_session_id", "change_kind"), ()),
+    # The operator chat-delete CLI verb (_cmd_persona_chat_delete). It was
+    # emitted but never registered, so the append raised inside its own
+    # try/except and the delete left no durable record while the per-instance
+    # unbind (persona_instance.chat_binding_cleared) did land — a split trail.
+    # Summary fields are the two keys the verb always passes; the three list/
+    # actor fields are details. The persona rides the Event envelope's
+    # persona_id column, not the payload.
+    "persona_chat.deleted": EventContract("persona_chat.deleted", "Persona chat session deleted", ("session_id", "deleted_session"), ("cleared_bindings", "closed_assignment_ids", "requested_by")),
     "persona_instance.profile_updated": EventContract("persona_instance.profile_updated", "Persona instance runtime profile updated", ("persona_instance_id",), ("persona_id", "display_name", "current_chat_goal", "goal_id", "skill_overrides", "provider", "model", "api_mode", "requested_by")),
     "persona_assignment.created": EventContract("persona_assignment.created", "Persona assignment created", ("assignment_id", "persona_instance_id", "kind"), ("state",)),
     "persona_assignment.closed": EventContract("persona_assignment.closed", "Persona assignment closed", ("assignment_id", "state"), ("kind",)),
@@ -1137,7 +1055,12 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "repo_bundle.updated": EventContract("repo_bundle.updated", "Repo bundle updated", ("repo_bundle_id", "repo", "state"), ("wake_condition",)),
     "repo_bundle.assigned": EventContract("repo_bundle.assigned", "Repo bundle assigned", ("repo_bundle_id", "repo", "state"), ("assignment_id", "run_id")),
     "repo_bundle.running": EventContract("repo_bundle.running", "Repo bundle running", ("repo_bundle_id", "repo", "state"), ("run_id",)),
-    "repo_bundle.delivered": EventContract("repo_bundle.delivered", "Repo bundle delivered", ("repo_bundle_id", "repo", "state"), ("proof_count",)),
+    # S25 de-registered repo_bundle.delivered one commit behind its emitter: S24
+    # (354d7555a) deleted RepoBundleStore.mark_delivered with the
+    # delivery-capture path, and it was the only writer that ever produced the
+    # type. Every OTHER repo_bundle.* below still rides a live
+    # RepoBundleStore.update call. See
+    # tests/agent_runtime/test_s25_repo_bundle_delivered_retirement.py.
     "repo_bundle.verified": EventContract("repo_bundle.verified", "Repo bundle verified", ("repo_bundle_id", "repo", "state"), ("proof_count",)),
     "repo_bundle.rejected": EventContract("repo_bundle.rejected", "Repo bundle rejected", ("repo_bundle_id", "repo", "state"), ("reason",)),
     "repo_bundle.woke": EventContract("repo_bundle.woke", "Repo bundle woke", ("repo_bundle_id", "repo", "state"), ("wake_condition",)),
@@ -1146,31 +1069,18 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "worker_session.resumed": EventContract("worker_session.resumed", "Worker resumed", ("worker_session_id",), ("session_id_present",)),
     "worker_session.heartbeat": EventContract("worker_session.heartbeat", "Worker heartbeat", ("worker_session_id", "state"), ("heartbeat_age_seconds",)),
     "worker_session.context_absorbed": EventContract("worker_session.context_absorbed", "Context absorbed", ("worker_session_id", "context_receipt_id"), ("watchdog_warnings",)),
-    "worker_session.compressed": EventContract("worker_session.compressed", "Context compressed", ("worker_session_id", "compression_receipt_id"), ("reason",)),
     "worker_session.steered": EventContract("worker_session.steered", "Worker steered", ("worker_session_id", "actor"), ("note",)),
-    "worker_session.possession_requested": EventContract("worker_session.possession_requested", "Possession requested", ("worker_session_id", "actor"), ("lease_owner",)),
     "worker_session.possessed": EventContract("worker_session.possessed", "Worker possessed", ("worker_session_id", "lease_owner"), ("lease_expires_at",)),
     "worker_session.released": EventContract("worker_session.released", "Worker released", ("worker_session_id", "actor"), ("handback",)),
     "worker_session.watchdog_warning": EventContract("worker_session.watchdog_warning", "Worker warning", ("worker_session_id", "kind"), ("summary",)),
     "worker_session.closed": EventContract("worker_session.closed", "Worker closed", ("worker_session_id", "close_reason"), ("state",)),
     "self_test.recorded": EventContract("self_test.recorded", "Self-test recorded", ("evidence_id", "status"), ("stage_id", "command_label")),
-    "self_test.reused": EventContract("self_test.reused", "Self-test reused", ("evidence_id", "status"), ("stage_id", "command_label")),
     "self_test.loop_detected": EventContract("self_test.loop_detected", "Self-test loop detected", ("command_hash", "repeat_count"), ("stage_id",)),
-    "proof.attached": EventContract("proof.attached", "Proof attached", ("proof_id", "status"), ("stage_id", "next_expected")),
-    "proof.scanned": EventContract("proof.scanned", "Proof scanned", ("proof_id", "verdict"), ("findings",)),
-    "proof.gate_checked": EventContract("proof.gate_checked", "Proof gate checked", ("status",), ("proof_ids",)),
     "packet.recorded": EventContract("packet.recorded", "Packet recorded", ("packet_id", "packet_type"), ("content_hash",)),
     "packet.duplicate": EventContract("packet.duplicate", "Packet duplicate", ("packet_id", "duplicate_of"), ("content_hash",)),
     "packet.normalized": EventContract("packet.normalized", "Packet normalized", ("packet_id", "packet_type", "normalization_status"), ("dropped_fields", "renamed_fields", "truncated_fields", "raw_artifact_id")),
-    "handoff_request.deprecated_heuristic_agreement": EventContract("handoff_request.deprecated_heuristic_agreement", "Handoff request heuristic agreement", ("target_repo", "source"), ("legacy_heuristic",)),
-    "qa.verdict_recorded": EventContract("qa.verdict_recorded", "QA verdict", ("verdict",), ("proof_ids", "findings")),
-    "qa.coordination_released": EventContract("qa.coordination_released", "QA released", ("next_owner",), ("proof_ids",)),
     "incident.opened": EventContract("incident.opened", "Incident opened", ("incident_id", "kind"), ("summary",)),
     "incident.closed": EventContract("incident.closed", "Incident closed", ("incident_id",), ("reason",)),
-    "incident.resolved": EventContract("incident.resolved", "Incident resolved", ("incident_id", "next_state"), ("resolution",)),
-    "scope.override_recorded": EventContract("scope.override_recorded", "Scope override recorded", ("affected_repos",), ("named_repo_scope", "scope_override_reason", "summary")),
-    "daemon.started": EventContract("daemon.started", "Mission driver started", ("mode",), ("pid", "queue_mode", "self_driven")),
-    "daemon.stopped": EventContract("daemon.stopped", "Mission driver stopped", ("mode",), ("pid", "reason", "self_driven")),
     # Realm store mutations. Every RealmStore write MUST ride one of
     # these: the stream/read-model pipeline is watermark-gated on the
     # EventLog, so an event-less mutation is invisible to every consumer
@@ -1179,6 +1089,12 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "realm.adopted": EventContract("realm.adopted", "Realm adopted", ("realm_id", "name"), ("server_id",)),
     "realm.created": EventContract("realm.created", "Realm created", ("realm_id", "name"), ("server_id",)),
     "realm.updated": EventContract("realm.updated", "Realm updated", ("realm_id", "change"), ("server_id",)),
+    # RealmStore.archive — the one realm mutation whose event was emitted but
+    # never registered, so its append raised and was swallowed by
+    # _append_store_event's best-effort wrapper and the archive stayed invisible
+    # to watermark-gated consumers. ``name`` rides in detail_fields because
+    # _append_store_event drops None values. Mirrors workspace.archived.
+    "realm.archived": EventContract("realm.archived", "Realm archived", ("realm_id",), ("name",)),
     # Activation events carry realm_id/workspace_id when a scope is activated
     # and {"cleared": true} when the active pointer is cleared — so the ids
     # live in detail_fields, not summary_fields (Stage 12 slice D validates
@@ -1261,4 +1177,16 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     # envelope, not the payload. Emitted only when ``read_model.delta_patches``
     # is on (default off → this type never appears).
     "state.patched": EventContract("state.patched", "State patched", ("entity", "id", "op"), ("changed",)),
+    # The LIVE orphan-worktree janitor (delivery_directive.reap_orphan_worktrees,
+    # two production callers: harness_doctor and the `worktree reap` CLI verb).
+    # Emitted but never registered, so every destructive reap appended nothing —
+    # the operator lost the only durable record of what was removed. Emitted on
+    # the destructive path only (dry_run previews are write-free), so both counts
+    # are always present; `captured` lists the reap-captured patch filenames and
+    # is bounded to 20 at the emitter. NOT registered alongside it:
+    # worktree.task_reaped and bundle.worktree_reaped, whose emitters sat in the
+    # Task-declared-directive residue half of that module — S24 (354d7555a)
+    # deleted them, so those two stay unregistered permanently rather than
+    # provisionally, and no unemittable-contract debt was created.
+    "worktree.orphans_reaped": EventContract("worktree.orphans_reaped", "Orphan worktrees reaped", ("reaped_count", "kept_count"), ("captured",)),
 }

@@ -212,6 +212,11 @@ even the seeded supervisor doesn't list it), `image_gen`, `tts`,
 `computer_use`, `memory`, `context_engine`, `node_control` (root-node only by
 design), `project`, `cronjob`, `delegation`.
 
+**2026-07-30 correction:** `node_control` is no longer merely unreachable or
+root-only. Its broken `run_node` / `steer_node` tool module was deleted by
+`de14b06d2`, and its fork-added toolset registration was removed by
+`e69db6e71`. The list above is the audit's historical state.
+
 By contrast `hermes chat` with no `--toolsets` resolves the `hermes-cli`
 composite (`cli.py:15805-15810` → `hermes_cli/tools_config.py::_get_platform_tools`
 → `toolsets.py:436-440`, whose `tools` is `_HERMES_CORE_TOOLS`, `toolsets.py:31-80`)
@@ -378,6 +383,15 @@ without exporting `TERMINAL_CWD` (`profile_runner.py:798-802`). Compare:
 * worker lane: `_repo_context_for_persona` resolves a real repo, isolates it per
   run, and passes `workdir=repo_ctx.workdir` (`persona_runtime.py:122-131, 195`).
 * `hermes chat`: runs in the operator's actual cwd.
+
+**2026-07-30 correction:** the first bullet no longer names live code. S5 removed
+the worker lane, and S29 (`4a56bb546`) removed `_repo_context_for_persona` itself
+once its `AgentContext` producer was gone — so that bullet and its line numbers
+are the audit's historical state. G6 has since been resolved from the other
+direction: `agent_runtime/mission_chat_workdir.py` resolves the mission-chat
+workdir through its own ladder and hands it to the same `AgentRunRequest.workdir`
+seam, which makes this lane the only one in the runtime that still has repo
+grounding.
 
 A mission-chat agent therefore has no notion of "which repo am I in", and any
 relative path it uses resolves against the serve process's cwd. Compounded by

@@ -1,13 +1,12 @@
 from hermes_time import now
 
-from agent_runtime.context_builder import build_context, render_context
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.events import EventLog
 from agent_runtime.models import AgentRun
 from types import SimpleNamespace
 
 Task = SimpleNamespace
-from agent_runtime.packets import make_packet, record_packet, validate_decision_packets
+from agent_runtime.packets import latest_packet, make_packet, record_packet, validate_decision_packets
 from agent_runtime.states import RunState, TaskState
 
 
@@ -67,10 +66,12 @@ def test_delivery_handoff_repair_fields_survive_packet_projection(isolate_agent_
     packet = make_packet(task=task, decision=decision, packet_type="delivery", body=decision.payload["delivery"], actor="dev", run_id=run.id, stage_id=run.stage_id)
     log = EventLog()
     record_packet(packet, event_log=log)
-    ctx = build_context(task, run, event_log=log)
-    rendered = render_context(ctx)
 
-    body = ctx.latest_delivery["body"]
+    # S27: this used to read the packet back through ``build_context``'s
+    # ``_safe_packet_projection``. That lane is removed; the normalization under
+    # test is ``packets``' own, so the recorded packet is read at its source.
+    recorded = latest_packet(task.id, "delivery", event_log=log)
+    body = recorded["body"]
     assert body["changed_paths"] == ["agent_runtime/packets.py"]
     assert body["inspected_paths"] == ["agent_runtime/packets.py", "agent_runtime/context_builder.py"]
     assert body["dirty_baseline"]["present"] is True
@@ -80,9 +81,7 @@ def test_delivery_handoff_repair_fields_survive_packet_projection(isolate_agent_
     assert body["failed_proof_classification"] == ["shell_wrapper_error:proof_failed"]
     assert body["handoff_repair"]["metadata_only"] is True
     assert "unknown_sidecar" not in body
-    assert "unknown_sidecar" in ctx.latest_delivery["dropped_fields"]
-    assert "proof_reuse_basis" in rendered
-    assert "known_non_coverage" in rendered
+    assert "unknown_sidecar" in recorded["dropped_fields"]
 
 
 def test_delivery_packet_carries_harness_cited_evidence_ids(isolate_agent_runtime_root):

@@ -6,10 +6,16 @@ Why this module exists
 ``workdir`` at all, so ``profile_runner._agent_workdir(None)`` yielded without
 ``os.chdir`` and without exporting ``TERMINAL_CWD``: a mission-chat turn ran in
 whatever cwd the serve (or CLI) process happened to hold, and every relative
-path the agent used resolved against *that*. The worker lane has repo grounding
-(``persona_runtime._repo_context_for_persona`` → ``workdir=repo_ctx.workdir``)
-and ``hermes chat`` runs in the operator's own cwd; only this lane had none —
-see ``docs/agent-runtime-harness/mission-chat-lane-gap-audit.md`` G6.
+path the agent used resolved against *that*. The worker lane had its own repo
+grounding and ``hermes chat`` runs in the operator's own cwd; only this lane had
+none — see ``docs/agent-runtime-harness/mission-chat-lane-gap-audit.md`` G6.
+
+That comparison has since gone one-sided, so read it as history: S5 removed the
+worker lane and S29 removed the helper it grounded through
+(``persona_runtime._repo_context_for_persona``, which this docstring used to
+name as if it were live). THIS module is now the only repo grounding the runtime
+has — ``mission_chat_reply`` resolves a workdir through the ladder below and
+hands it to ``AgentRunRequest.workdir`` on every mission-chat turn.
 
 This module is the resolution POLICY only. It reuses the existing seam rather
 than inventing a parallel one: the answer is handed to

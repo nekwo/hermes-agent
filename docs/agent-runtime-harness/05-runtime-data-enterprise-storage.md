@@ -1,5 +1,12 @@
 # 05 — Runtime Data: Enterprise-Grade Storage & Access (implementation-ready)
 
+> **2026-07-30 — scoped correction.** The SQLite DDL in this doc creates `goals`,
+> `runs`, `proofs`, `incidents` row tables and three indexes that were removed by
+> [16 — Mission Lane Removal](16-mission-lane-removal.md) S9 (read-model schema is
+> now 2, contract 45). Everything else — the read-model projector, watermarks,
+> NDJSON change feed, fail-loud root resolution, backup drills — is live and
+> current.
+
 Status: **in-progress: RD0-RD3 shipped, RD4 next** (2026-07-03, v2 — upgraded from the v1
 proposal with exact modules, schemas, config keys, test files, proof commands,
 rollback paths, and per-stage handoff prompts). Written after the Stage C

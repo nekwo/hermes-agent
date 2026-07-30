@@ -27,8 +27,6 @@ def test_return_summary_posts_bounded_parent_message_and_records_lineage(tmp_pat
         summary=summary,
         proof_ids=proof_ids,
         artifact_refs=artifact_refs,
-        task_id="task_r3",
-        stage_id="investigate",
     )
 
     from hermes_state import SessionDB
@@ -52,7 +50,11 @@ def test_return_summary_posts_bounded_parent_message_and_records_lineage(tmp_pat
     assert "Proof refs:" in messages[0]["content"]
     assert "Artifact refs:" in messages[0]["content"]
     assert [event.type for event in events] == ["steer.returned"]
-    assert events[0].task_id == "task_r3"
+    # S27: the ``task_id`` column and the ``stage_id`` payload key were removed
+    # with the CLI-unreachable parameters that were their only source; there is
+    # no ``Task`` record left for either to name.
+    assert events[0].task_id is None
+    assert "stage_id" not in events[0].payload
     assert events[0].persona_id == "dev"
     assert events[0].payload["result"] == "summary_returned"
     assert events[0].payload["source_node_id"] == child.id
@@ -60,6 +62,14 @@ def test_return_summary_posts_bounded_parent_message_and_records_lineage(tmp_pat
 
 
 def test_return_summary_cli_uses_first_class_primitive(tmp_path, monkeypatch, capsys):
+    """The namespace is exactly what the parser now produces.
+
+    S22 removed the verb's ``--task``/``--stage`` flags (they wrote the deleted
+    mission-record key and stage-graph payload), so a namespace carrying
+    ``task_id``/``stage_id`` would no longer be reachable from the CLI. The ref
+    flags stay: they render into the parent chat message.
+    """
+
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
     child = PersonaInstanceStore().ensure_for_goal(
         _persona("dev"),
@@ -76,8 +86,6 @@ def test_return_summary_cli_uses_first_class_primitive(tmp_path, monkeypatch, ca
             summary="CLI return summary",
             proof_ids=["proof_cli"],
             artifact_refs=["artifact://cli"],
-            task_id="task_r3_cli",
-            stage_id="return",
             json=True,
         )
     )

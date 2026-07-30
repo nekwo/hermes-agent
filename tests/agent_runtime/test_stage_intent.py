@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 Task = SimpleNamespace
 from agent_runtime.stage_intent import no_product_edit_recipe_conflicts_with_stage, no_product_edit_recipe_for_stage, stage_requires_product_edit
-from agent_runtime.states import StageStatus, TaskState
+from agent_runtime.states import TaskState
 
 
 @dataclass
@@ -14,7 +14,9 @@ class StageFixture:
     id: str
     title: str
     objective: str
-    status: StageStatus
+    # Persisted stage rows carry the status as a plain string; the enum that
+    # used to type this field was the removed stage graph's (S23).
+    status: str
     owner: str = ""
     repo: str = ""
     kind: str = ""
@@ -48,7 +50,7 @@ def test_no_edit_recipe_stage_is_not_classified_as_product_edit():
         id="backend_contract_smoke",
         title="Backend Contract Smoke",
         objective="Request the existing backend_contract_smoke no_product_edit proof recipe without modifying product repositories.",
-        status=StageStatus.IMPLEMENTING,
+        status="implementing",
         acceptance_criteria=["No product repository edits are made."],
         test_plan=[
             "request_test_run with stage_id=backend_contract_smoke and recipe_id=backend_contract_smoke",
@@ -66,7 +68,7 @@ def test_without_editing_product_code_is_not_classified_as_product_edit():
         id="backend_investigation",
         title="Backend Investigation",
         objective="Inspect backend moderation paths and produce a staged AAA hardening plan without editing product code.",
-        status=StageStatus.IMPLEMENTING,
+        status="implementing",
     )
 
     assert stage_requires_product_edit(task, stage) is False
@@ -78,7 +80,7 @@ def test_no_edit_recipe_still_conflicts_with_real_product_edit_stage():
         id="backend_api_change",
         title="Backend API Change",
         objective="Modify src/api.py to add a new backend endpoint.",
-        status=StageStatus.IMPLEMENTING,
+        status="implementing",
         affected_paths=["src/api.py"],
         acceptance_criteria=["New endpoint is implemented."],
         test_plan=["pytest tests/test_api.py"],
@@ -96,7 +98,7 @@ def test_generic_no_edit_recipe_stage_ignores_global_ui_fix_language():
         id="eterniabackend_fresh_scope",
         title="Backend stream seed proof",
         objective="Seed the live mission with Backend Dev redaction-safe events/proof by requesting only the existing no-product-edit backend_contract_smoke proof path.",
-        status=StageStatus.IMPLEMENTING,
+        status="implementing",
         acceptance_criteria=["No backend product files are inspected or changed."],
         test_plan=[
             "Run/request the existing backend_contract_smoke no-product-edit proof recipe.",
@@ -113,7 +115,7 @@ def test_recipe_inference_refuses_ambiguous_evidence_fields_without_identity_mat
         id="contract_join_stage",
         title="Contract join stage",
         objective="Consume backend_contract_smoke and certify launcher_contract_smoke.",
-        status=StageStatus.IMPLEMENTING,
+        status="implementing",
         acceptance_criteria=["Both proof recipes are referenced for the join."],
     )
 
@@ -128,7 +130,7 @@ def test_generic_recipe_stage_stays_no_edit_after_backend_correction_notes():
         id="eterniabackend_fresh_scope",
         title="Backend Dev Fresh Scope",
         objective="Seed and prove Backend Dev live terminal/event rows only by running the existing no-product-edit backend_contract_smoke proof recipe, without inspecting, editing, or patching backend product files.",
-        status=StageStatus.IMPLEMENTING,
+        status="implementing",
         affected_paths=["EterniaBackend"],
         acceptance_criteria=[
             "Backend Dev requests/runs only the existing backend_contract_smoke proof recipe.",
@@ -163,7 +165,7 @@ def test_typed_proof_only_stage_overrides_legacy_implementation_id_marker():
         owner="dev",
         repo="EterniaLauncher",
         kind="proof_only",
-        status=StageStatus.IMPLEMENTING,
+        status="implementing",
         proof_recipe_id="launcher_contract_smoke",
         requires_product_edit=False,
         test_plan=["proof_recipe:launcher_contract_smoke"],

@@ -14,7 +14,11 @@ import sys
 
 import pytest
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+# Repo root is TWO levels up (tests/hermes_cli/ -> tests/ -> repo root).
+# Inserting ``tests/`` puts a directory literally named ``hermes_cli`` (this
+# test package) at the front of sys.path and shadows the real package for the
+# whole process — see the same correction in test_auth_ssl_macos.py.
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
 class TestPublicAPI:

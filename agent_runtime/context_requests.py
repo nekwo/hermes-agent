@@ -48,19 +48,12 @@ def add_context_request(task, *, actor: str, payload: dict[str, Any], root: Path
     return req
 
 
-def fulfilled_context_bundles(task) -> list[dict[str, Any]]:
-    bundles: list[dict[str, Any]] = []
-    seen: set[str] = set()
-    for req in getattr(task, "context_requests", []) or []:
-        if req.get("status") not in {"fulfilled", "fulfilled_partial"} or not isinstance(req.get("bundle"), dict):
-            continue
-        bundle = dict(req["bundle"])
-        bundle_id = str(bundle.get("bundle_id") or req.get("bundle_id") or "")
-        if bundle_id in seen:
-            continue
-        seen.add(bundle_id)
-        bundles.append(bundle)
-    return bundles[-3:]
+# S29: ``fulfilled_context_bundles`` lived here — it collected the last three
+# fulfilled bundles off a task for ``context_builder.build_context`` to pack into
+# ``AgentContext.context_bundles``. S27 removed that builder, its only consumer,
+# and no other appeared. The bundle it read is still written onto each request by
+# ``_fulfill_request`` below; only the collector is gone. See
+# tests/agent_runtime/test_s29_context_request_bundle_removal.py.
 
 
 def has_unresolved_context_request(task) -> bool:

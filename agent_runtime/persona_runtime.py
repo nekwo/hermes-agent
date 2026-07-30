@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
-import time
 from urllib.parse import urlparse
 from typing import Callable, Protocol, TYPE_CHECKING
 
@@ -19,14 +17,9 @@ from .chat_lane_toolsets import (
     chat_lane_toolset_drops,
     scope_chat_lane_toolsets,
 )
-from .config import chat_lane_restore_toolsets, load_root_runtime_config
-from .context_builder import AgentContext, build_context, render_context
-from .decision_contract_registry import prompt_contract_markdown
+from .config import chat_lane_restore_toolsets
 from .decision_schema import (
-    DECISION_SCHEMA,
     AgentDecision,
-    DecisionPayloadInvalid,
-    DecisionType,
     parse_structured_decision,
     validate_decision_for_role,
 )
@@ -43,7 +36,7 @@ from .mcp_lane import mission_chat_mcp_lane_line
 from .models import AgentPersona, AgentRun
 from .mission_chat_clarify import MissionChatClarifyCapture
 from .mission_chat_workdir import mission_chat_workdir_for_persona
-from .personas import all_registered_toolsets, blocked_tool_names, effective_toolsets, load_bundled_prompt, role_from_persona
+from .personas import all_registered_toolsets, blocked_tool_names, effective_toolsets, role_from_persona
 from .profile_context import resolve_persona_profile
 from .provider_health import assert_provider_health_for_persona
 from .terminal_envelope import (
@@ -58,9 +51,8 @@ from .profile_runner import (
     RunBudgetExceeded,
     _blocked_tool_names_with_registry_hygiene,
 )
-from .progress import ChatProgressSink, RunProgressSink
-from .repo_context import RepoExecutionContext, capture_repo_baseline, isolated_repo_context_for_run, repo_execution_context_for_task
-from .stage_intent import stage_requires_product_edit
+from .progress import ChatProgressSink
+from .repo_context import RepoExecutionContext, capture_repo_baseline
 from .store import RunStore, _safe_session_id
 from .tool_permissions import (
     ChatToolPermissionStore,
@@ -699,104 +691,6 @@ def _mission_chat_user_message(
     return "\n\n".join(part for part in parts if part)
 
 
-def _repo_context_for_persona(persona: AgentPersona, ctx: AgentContext) -> RepoExecutionContext | None:
-    if role_from_persona(persona) != "dev":
-        return None
-    # Ground in the CURRENT mission-plan stage's repo first. task.affected_repos lags
-    # the active stage in a graph blueprint — it holds the *previous* stage's repo — so
-    # grounding off it mis-routes every cross-stack dev (backend_dev lands in
-    # hermes-agent, launcher dev lands in EterniaBackend, each then fails its proof in
-    # the wrong tree). The stage repo is authoritative for the slice this persona owns.
-    # Falls through to the legacy affected_repos/handoff resolution when there is no plan
-    # stage (e.g. CLI goal_run) or the stage repo is unknown/unresolvable.
-    stage_repo = _stage_repo_scope_for_persona(persona, ctx)
-    if stage_repo is not None:
-        try:
-            return repo_execution_context_for_task(
-                type("RepoScopeTask", (), {"affected_repos": [stage_repo]})()
-            )
-        except ValueError:
-            pass
-    repo_task = ctx.task
-    if not (getattr(repo_task, "affected_repos", []) or []):
-        handoff_repo = _handoff_repo_scope_for_persona(persona, ctx)
-        if handoff_repo:
-            repo_task = type("TaskHandoffRepoScope", (), {"affected_repos": [handoff_repo]})()
-    if not (getattr(repo_task, "affected_repos", []) or []):
-        raise DecisionPayloadInvalid("Dev run requires at least one affected_repo so the session can start in a repo workdir.")
-    try:
-        repo_scope = _compatible_repo_scope(persona, repo_task)
-        return repo_execution_context_for_task(repo_task, explicit_workdir=repo_scope if repo_scope else None)
-    except ValueError as exc:
-        raise DecisionPayloadInvalid("Dev run could not resolve a valid affected repo workdir; fix affected_repos before dispatching Dev.") from exc
-
-
-def _stage_repo_scope_for_persona(persona: AgentPersona, ctx: AgentContext) -> str | None:
-    """Resolve the grounding repo from the current legacy stage, if any."""
-    stage = getattr(ctx, "current_stage", None)
-    stage_repo = str(getattr(stage, "repo", "") or "").strip() if stage is not None else ""
-    if stage_repo not in {"EterniaBackend", "EterniaLauncher", "hermes-agent"}:
-        return None
-    persona_scope = getattr(persona, "repo_scope", None)
-    if persona_scope:
-        try:
-            scoped = repo_execution_context_for_task(type("TaskPersonaScope", (), {"affected_repos": [persona_scope]})())
-            stage_ctx = repo_execution_context_for_task(type("RepoScopeTask", (), {"affected_repos": [stage_repo]})())
-        except ValueError:
-            return None
-        if scoped is None or stage_ctx is None or scoped.workdir != stage_ctx.workdir:
-            return None
-    return stage_repo
-
-
-def _handoff_repo_scope_for_persona(persona: AgentPersona, ctx: AgentContext) -> str | None:
-    packet = ctx.latest_handoff_packet if isinstance(ctx.latest_handoff_packet, dict) else {}
-    body = packet.get("body") if isinstance(packet.get("body"), dict) else {}
-    target_repo = str(body.get("target_repo") or "").strip()
-    if target_repo not in {"EterniaBackend", "EterniaLauncher", "hermes-agent"}:
-        return None
-    persona_id = str(getattr(persona, "id", "") or "").strip()
-    if persona_id == "backend_dev" and target_repo != "EterniaBackend":
-        return None
-    if persona_id == "dev" and target_repo == "EterniaBackend":
-        return None
-    return target_repo
-
-
-def _compatible_repo_scope(persona: AgentPersona, task) -> str | None:
-    repo_scope = getattr(persona, "repo_scope", None)
-    if not repo_scope:
-        return None
-    try:
-        scoped = repo_execution_context_for_task(type("TaskRepoScope", (), {"affected_repos": [repo_scope]})())
-    except ValueError:
-        return None
-    if scoped is None:
-        return None
-    for repo in getattr(task, "affected_repos", []) or []:
-        try:
-            task_ctx = repo_execution_context_for_task(type("TaskRepo", (), {"affected_repos": [repo]})())
-        except ValueError:
-            continue
-        if task_ctx is not None and task_ctx.workdir == scoped.workdir:
-            return repo_scope
-    return None
-
-
-def _persona_run_uses_memory(persona: AgentPersona, ctx: AgentContext) -> bool:
-    if bool(getattr(persona, "include_profile_memory", False)):
-        return True
-    flags = {str(flag or "").strip().lower() for flag in getattr(ctx.task, "risk_flags", []) or []}
-    return "persona_operation_kind:free_floating" in flags
-
-
-def _blocked_tool_names_for_run(persona: AgentPersona, ctx: AgentContext) -> list[str]:
-    names = set(blocked_tool_names(persona))
-    if _is_no_edit_context_stage(ctx) and str(role_from_persona(persona)) == "dev":
-        names.update({"read_file", "search_files", "session_search", "browser_snapshot"})
-    return sorted(names)
-
-
 def _blocked_tool_names_for_chat(persona: AgentPersona, *, session_id: str | None) -> list[str]:
     options = permission_options_for_chat(persona, session_id=session_id)
     if permission_mode_is_unbounded(options.permission_mode):
@@ -1128,13 +1022,6 @@ def _augment_chat_capabilities(persona: AgentPersona, toolsets: list[str]) -> li
     return augmented
 
 
-def _is_no_edit_context_stage(ctx: AgentContext) -> bool:
-    stage = ctx.current_stage
-    if stage is None:
-        return False
-    return str(getattr(stage, "kind", "") or "") == "context" and not stage_requires_product_edit(ctx.task, stage)
-
-
 def _repo_context_for_render(repo_ctx: RepoExecutionContext) -> dict:
     return {
         "repo_label": repo_ctx.repo_label,
@@ -1234,23 +1121,6 @@ def _apply_llm_metadata(run: AgentRun, result: AgentRunResult, *, timing: dict[s
     if timing_map:
         llm["timing"] = timing_map
     run.llm = {key: value for key, value in llm.items() if value is not None}
-
-
-def _emit_timing(progress_sink: RunProgressSink, timing_key: str, started: float, *, status: str) -> int:
-    duration_ms = max(0, int((time.perf_counter() - started) * 1000))
-    progress_sink.emit(
-        "run.progress",
-        {
-            "type": "run.progress",
-            "phase": "timing",
-            "step": timing_key,
-            "status": status,
-            "summary": f"{timing_key.replace('_', ' ').title()} {status} in {duration_ms}ms.",
-            "duration_ms": duration_ms,
-            "timing_key": f"{timing_key}_ms",
-        },
-    )
-    return duration_ms
 
 
 def _record_timing_value(timing_map: dict[str, int], key: object, value: object) -> None:
@@ -1385,316 +1255,6 @@ def _finish_reason_from_result(result: dict | object) -> str | None:
         if isinstance(msg, dict) and msg.get("role") == "assistant" and msg.get("finish_reason"):
             return str(msg.get("finish_reason"))
     return None
-
-
-def build_system_prompt(
-    persona: AgentPersona,
-    *,
-    task_id: str | None = None,
-    root_node_mode: bool = False,
-) -> str:
-    role = role_from_persona(persona)
-    compact_schema = json.dumps(DECISION_SCHEMA, separators=(",", ":"))
-    try:
-        cfg = load_root_runtime_config()
-    except Exception:
-        cfg = None
-    simplified_prompt = _simplified_contract_prompt_enabled(cfg)
-    payload_contracts = prompt_contract_markdown(_simplified_contract_decisions_for_role(role) if simplified_prompt else None)
-    parts = [_load_persona_system_prompt(persona, role)]
-    overlay = Path(__file__).with_name("prompts") / "shared_harness_overlay.md"
-    if overlay.exists():
-        parts.append(overlay.read_text(encoding="utf-8").strip())
-    soul_overlay = _safe_read_soul_overlay(
-        persona.soul_overlay_path,
-        hermes_profile=getattr(persona, "hermes_profile", None),
-    )
-    if soul_overlay:
-        parts.append(soul_overlay)
-    from agent.skill_commands import build_preloaded_skills_prompt
-    from agent.skill_utils import required_preload_skill_ids
-
-    required_skills = required_preload_skill_ids(
-        list(persona.skills),
-        surface="mission_worker",
-        root_node_mode=root_node_mode,
-    )
-    if required_skills:
-        required_prompt, loaded_required, missing_required = build_preloaded_skills_prompt(
-            required_skills,
-            task_id=task_id,
-            required_skill_names=set(required_skills),
-        )
-        if missing_required:
-            raise ValueError(
-                "Required skill preload failed: " + ", ".join(missing_required)
-            )
-        if set(loaded_required) != set(required_skills):
-            raise ValueError("Required skill preload receipt did not match policy")
-        parts.append(required_prompt)
-    skill_guidance = _recommended_skill_guidance(list(persona.skills))
-    if skill_guidance:
-        parts.append(skill_guidance)
-    specialist_guidance = _specialist_dev_guidance(persona)
-    if specialist_guidance:
-        parts.append(specialist_guidance)
-    normal_flow_guidance = _normal_worker_flow_guidance(persona)
-    if normal_flow_guidance:
-        parts.append(normal_flow_guidance)
-    simplified_contract_guidance = _simplified_contract_guidance(persona, cfg=cfg)
-    if simplified_contract_guidance:
-        parts.append(simplified_contract_guidance)
-    parts.extend(
-        [
-            "# Universal Harness Rules\n"
-            "You are a task-bound Agent Runtime Harness persona. Return exactly one AgentDecision JSON object. "
-            "Do not ask the human questions from inside a tick. Do not claim proof you did not receive from the harness. "
-            "Do not use delegated agents, cron jobs, memory writes, messaging, or Kanban side effects. "
-            "Do not use Kanban vocabulary or mutate Kanban state. The Autonomy / Tool Economy Contract in the tick context is Harness-generated public operating context; obey its budgets and do not add new AgentDecision keys unless the payload contract allows them. "
-            "When Mission HUD is present, read mission_hud.agent_hud as a two-sided dashboard: STATUS shows Harness-observed diff/proof/gate state, ACTION shows bounded steering or handoff choices. Prefer the recommended visible action, use only allowed payload keys, and treat unknown payload keys as invalid. Open only the named recommended_action.skill_ref when the HUD says deeper guidance is needed. "
-            "Generic Hermes core guidance about tool persistence, task completion, profile identity, or manual-session workflow is subordinate to this Harness contract: returning a valid AgentDecision is the action for this tick. "
-            "If the stage is no-edit, proof-backed, or explicitly requests Harness-owned proof, do not call extra tools just to satisfy generic tool-use guidance; emit the precise AgentDecision instead.",
-            "# Stage Ownership and Handoff\n"
-            "Act like an accountable teammate, not a stateless robot. Know your role, current task state, current stage, available proof_ids, and the next owner. "
-            "A stage is complete only when your payload says what you finished, what proof_ids support it, known gaps, and who receives the handoff. "
-            "PM/Neko hands scoped work to the graph-selected Dev specialist. Dev completes the current stage with real proof_ids and hands off to the next graph owner; request QA review only when the active blueprint includes a QA/verifier stage. "
-            "When QA is present, QA approves implementation only after reviewing proof_ids and attaching/verifying an implementation verdict; otherwise request tests/fixes or block with exact gaps. "
-            "If you discover a repeated workflow failure, report it as a Harness/skill intervention rather than looping.",
-            f"# AgentDecision JSON Schema\n```json\n{compact_schema}\n```",
-            f"# AgentDecision Payload Contracts\n{payload_contracts}\n"
-            "Use `recipe_id` when the Autonomy packet lists a matching `available_proof_recipes` entry; then omit commands and let the Harness supply the exact recipe commands, sandbox, dirty-check, marker checks, and proof metadata. "
-            "After Harness attaches command proof IDs, hand off to the next graph owner with those existing proof_ids; use QA only when the active blueprint includes a QA/verifier node. "
-            "Before blocking, inspect/grep your own run or event logs, keep the reason brief, and point at the redaction-safe log line number that proves the blocker. "
-            "If a previous decision parse failed, fix the exact missing/invalid key named in the repair context.",
-        ]
-    )
-    return "\n\n".join(part for part in parts if part)
-
-
-def _load_persona_system_prompt(persona: AgentPersona, role) -> str:
-    """Load the configured prompt when it is real, otherwise the bundled role prompt."""
-
-    from .prompt_sources import resolve_persona_system_prompt_path
-
-    configured = resolve_persona_system_prompt_path(persona)
-    if configured is not None:
-        try:
-            return configured.read_text(encoding="utf-8").strip()
-        except OSError:
-            pass
-    return load_bundled_prompt(role)
-
-
-def _simplified_contract_prompt_enabled(cfg) -> bool:
-    simplified = getattr(cfg, "simplified_agent_contract", None)
-    return bool(
-        getattr(simplified, "enabled", False)
-        and getattr(simplified, "expose_only_simplified_actions", True)
-    )
-
-
-def _simplified_contract_decisions_for_role(role) -> list[DecisionType]:
-    role_value = role.value if hasattr(role, "value") else str(role)
-    if role_value == "dev":
-        return [DecisionType.HAND_OFF, DecisionType.ESCALATE, DecisionType.BLOCK]
-    if role_value == "qa":
-        return [DecisionType.QA_VERDICT, DecisionType.ESCALATE, DecisionType.BLOCK]
-    if role_value == "alice_supervisor":
-        return [DecisionType.SCOPE_ROUTE, DecisionType.ESCALATE, DecisionType.BLOCK, DecisionType.RESOLVE_INCIDENT]
-    return [DecisionType.BLOCK]
-
-
-def _simplified_contract_guidance(persona: AgentPersona, *, cfg) -> str:
-    if not _simplified_contract_prompt_enabled(cfg):
-        return ""
-    role = str(role_from_persona(persona))
-    common = (
-        "# Simplified Agent Contract Active\n"
-        "Mission HUD mode is `simplified_agent_contract`. The visible ACTION menu is authoritative. "
-        "Ignore older bundled-prompt mentions of legacy decision names unless terminal feedback explicitly asks for a one-turn repair. "
-        "Do not emit legacy micro-decisions while this mode is active. "
-        "The Harness keeps legacy aliases only for archive/backcompat normalization and logs parity events when it maps one forward."
-    )
-    if role == "dev":
-        return (
-            common
-            + "\n\nFor Dev and Backend Dev, allowed public decisions are `hand_off`, `block`, and `escalate`. "
-            "For product-edit stages, no-edit proof stages, exact proof recipes, failed-gate repairs, and contract joins, emit `hand_off` when your slice is ready for Harness attribution/proof. "
-            "`hand_off` is the only Dev completion signal: the Harness captures the isolated-worktree diff and runs the authoritative gate/recipe. "
-            "Use `block` only for exact missing prerequisites, and `escalate` only for a discovered issue too large or unsafe to fold into this stage."
-        )
-    if role == "qa":
-        return (
-            common
-            + "\n\nFor QA, allowed public decisions are `qa_verdict`, `block`, and `escalate`. "
-            "`qa_verdict` is the QA completion signal; cite existing Harness proof IDs and findings. "
-            "Use `block` for missing proof and `escalate` for out-of-scope or systemic issues."
-        )
-    if role == "alice_supervisor":
-        return (
-            common
-            + "\n\nFor Neko Mission Lead, the normal public routing decision is `scope_route`. "
-            "Use `scope_route` for kickoff, rescope, graph-faithful owner/repo routing, and proof-gate release. "
-            "Open incidents are yours to adjudicate: when an incident's underlying run is already terminal "
-            "(cancelled/failed/hung-reaped), close it with `resolve_incident` and a redaction-safe reason — "
-            "never answer `block` for an incident you can close. Use `block` only for true external blockers "
-            "that genuinely need a human, and `escalate` for issue discovery."
-        )
-    return common
-
-
-def _specialist_dev_guidance(persona: AgentPersona) -> str:
-    if role_from_persona(persona) != "dev":
-        return ""
-    shared = (
-        "# Specialist Dev Loop Guard\n"
-        "Operate with Alice/Neko-style budget discipline: use one bounded repo-scoped search/read pass, then choose target files, patch, run a focused self-test, hand off, or block with exact evidence. "
-        "If repeated read/search/tool-loop warnings appear before patch/test/proof progress, stop immediately and return a smaller stage plan, `block`, or exact missing-input report so Neko can slice or steer. "
-        "Do not spend live ticks rediscovering the repo. Token management is part of correctness: narrow context beats broad audits."
-    )
-    persona_id = str(getattr(persona, "id", "") or "").lower()
-    repo_label = str(getattr(persona, "repo_scope_label", "") or "").lower()
-    if persona_id == "backend_dev" or "backend" in repo_label:
-        overlay = (
-            "# Backend Dev Specialist Overlay\n"
-            "You are Backend Dev for EterniaBackend. Think in API contracts, migrations, auth/security boundaries, and Postgres-backed verification. "
-            "Use the Postgres Docker full gate before deploy-ready claims when available; if Docker/Postgres is unavailable, block with exact environment evidence instead of substituting SQLite. "
-            "When frontend behavior depends on backend shape, produce a frontend-backend contract handoff with fields, status codes, migrations, compatibility/defaults, and focused backend test commands."
-        )
-    else:
-        overlay = (
-            "# Launcher Dev Specialist Overlay\n"
-            "You are Launcher Dev for EterniaLauncher. Think in Flutter widgets/state, Launcher_Brain conventions, Stage C/MCP semantic QA, and visual proof expectations. "
-            "Respect the dirty tree: identify pre-existing unrelated changes before patching and avoid touching posts/voice/bootstrap files unless they are directly in scope. "
-            "For UI or message/attachment work, prefer targeted Flutter tests/analyze plus MCP screenshot or local artifact proof when visual behavior is claimed."
-        )
-    return f"{shared}\n\n{overlay}"
-
-
-def _normal_worker_flow_guidance(persona: AgentPersona) -> str:
-    try:
-        cfg = load_root_runtime_config()
-    except Exception:
-        return ""
-    flow = getattr(cfg, "normal_worker_flow", None)
-    if not bool(getattr(flow, "enabled", False)):
-        return ""
-    role = str(role_from_persona(persona))
-    if role == "dev":
-        return (
-            "# Normal Worker Flow\n"
-            "For product-edit stages, do the work like one uninterrupted competent developer: inspect narrowly, edit files, run focused self-tests in-session with terminal/code tools, then emit `hand_off`. "
-            "Do not declare changed files, proof IDs, delivery packets, or `delivery.work_status`; Harness derives diff, delivery, and final-gate state. "
-            "Do not use `request_test_run` as your normal inner loop. Use Harness proof only when the Mission HUD exposes `request_gate`, the stage is no-edit/certification, QA requests a missing gate, or you are repairing a failed final gate. "
-            "After hand_off, the Harness owns the final deterministic gate and will return failed proof IDs to this same worker if repair is needed."
-        )
-    if role == "qa":
-        return (
-            "# Normal Worker Flow QA\n"
-            "Self-test evidence helps triage but is not release proof. Base implementation approval on Harness final gate proof IDs and required visual/MCP artifacts. "
-            "Request exactly one missing command or visual gate when proof is absent or stale; otherwise emit `qa_verdict` with cited proof IDs."
-        )
-    if role == "alice_supervisor":
-        return (
-            "# Normal Worker Flow Neko\n"
-            "Prefer same-worker repair over spawning new work. Wait/request-human only at kickoff or for true human/safety blockers. "
-            "Route with `scope_route` by attached evidence, failed proof IDs, and worker HUD state; release QA only when the active graph includes QA and final gate proof is attached. "
-            "For heavy investigation, spawn/steer instead of absorbing transcripts: sample only bounded progress_peek/topology status, pass pointers and repo handles, and leave child bytes in their artifacts."
-        )
-    return ""
-
-
-def _tool_budget_limits(ctx: AgentContext) -> dict[str, object] | None:
-    packet = ctx.autonomy_packet if isinstance(ctx.autonomy_packet, dict) else {}
-    budget = packet.get("inspection_budget") if isinstance(packet.get("inspection_budget"), dict) else None
-    safe: dict[str, object] = {}
-    if budget:
-        for key in ("read_search_limit", "proof_retry_limit", "proof_command_limit", "skill_load_limit"):
-            try:
-                value = int(budget.get(key))
-            except (TypeError, ValueError):
-                continue
-            if value > 0:
-                safe[key] = min(value, 20)
-    safe.update(_prior_stage_progress_flags(ctx))
-    return safe or None
-
-
-def _prior_stage_progress_flags(ctx: AgentContext) -> dict[str, bool]:
-    flags: dict[str, bool] = {}
-    run_progress = ctx.run.progress if isinstance(getattr(ctx.run, "progress", None), dict) else {}
-    if run_progress.get("has_patch_progress") is True or _safe_positive_counter(run_progress.get("patch_count")) > 0:
-        flags["has_patch_progress"] = True
-    if run_progress.get("has_test_progress") is True or _safe_positive_counter(run_progress.get("test_count")) > 0:
-        flags["has_test_progress"] = True
-    if run_progress.get("has_proof_progress") is True or _safe_positive_counter(run_progress.get("proof_count")) > 0:
-        flags["has_proof_progress"] = True
-    for event in ctx.recent_events or []:
-        payload = event.get("payload") if isinstance(event, dict) else None
-        if not isinstance(payload, dict):
-            payload = event if isinstance(event, dict) else {}
-        if payload.get("has_patch_progress") is True or _safe_positive_counter(payload.get("patch_count")) > 0 or str(payload.get("phase") or "") == "dev_work":
-            flags["has_patch_progress"] = True
-        if payload.get("has_test_progress") is True or _safe_positive_counter(payload.get("test_count")) > 0:
-            flags["has_test_progress"] = True
-        if payload.get("has_proof_progress") is True or _safe_positive_counter(payload.get("proof_count")) > 0 or payload.get("proof_id"):
-            flags["has_proof_progress"] = True
-    return flags
-
-
-def _safe_positive_counter(value: object) -> int:
-    if isinstance(value, bool):
-        return 0
-    try:
-        parsed = int(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return 0
-    return max(0, parsed)
-
-
-def _recommended_skill_guidance(skill_names: list[str]) -> str:
-    """Render persona skill hints without preloading full skill bodies.
-
-    Harness personas run through the normal Hermes ``AIAgent`` class, so when
-    the ``skills`` toolset is enabled they already receive Hermes' compact skill
-    index plus ``skills_list``/``skill_view``/``skill_manage`` tools.  Keep the
-    persona manifest as a relevance hint instead of stuffing every configured
-    SKILL.md into the system prompt.  This mirrors Alice-style operation: scan
-    the available skills, then load only the skills that match the current task.
-    """
-    cleaned = []
-    for name in skill_names:
-        clean = str(name).strip()
-        if clean and clean not in cleaned:
-            cleaned.append(clean)
-    if not cleaned:
-        return ""
-    lines = [
-        "# Recommended Harness Persona Skills",
-        (
-            "These are persona-recommended skills, not preloaded instructions. "
-            "When the skills toolset is available, skill use is the default for "
-            "non-trivial Harness ticks: start with skill_search(query=...) using "
-            "the current task, stage, repo, and proof gate, then load only the "
-            "single most relevant installed skill. Never preload or bulk-load "
-            "the whole manifest."
-        ),
-        (
-            "Prefer specific, stage-relevant loading over loading the whole "
-            "manifest. Stop after loading the single most relevant skill unless "
-            "another skill is clearly required for the active proof gate. Two "
-            "loaded skills is the normal maximum; more than two is allowed only "
-            "when each additional skill has an explicit, current-stage purpose "
-            "and you name that purpose in the final AgentDecision. After every "
-            "skill load, reassess whether to pivot to proof, QA handoff, or an "
-            "exact blocker. Fall back to skills_list/skill_view only when search "
-            "is unavailable; do not shell out to `hermes skills search` from a "
-            "Harness persona unless the native tool is missing."
-        ),
-        "Recommended skills:",
-    ]
-    lines.extend(f"- {name}" for name in cleaned)
-    return "\n".join(lines)
 
 
 def _safe_read_soul_overlay(

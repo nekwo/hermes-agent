@@ -16,7 +16,7 @@ from types import SimpleNamespace
 Task = SimpleNamespace
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.snapshot import _keyed, _parity_warnings, build_snapshot
-from agent_runtime.snapshot_audit import audit_snapshot, snapshot_size_budget
+from tests.agent_runtime.snapshot_bytes import audit_snapshot, snapshot_size_budget
 from agent_runtime.states import TaskState
 from agent_runtime.store import TaskStore
 import agent_runtime.snapshot as snapshot_mod

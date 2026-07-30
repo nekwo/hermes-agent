@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from hermes_time import now
 
-from agent_runtime.context_builder import build_context, render_context
-from agent_runtime.context_requests import add_context_request, has_unresolved_context_request
+from agent_runtime.context_requests import (
+    add_context_request,
+    has_unresolved_context_request,
+)
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.models import AgentRun
 from types import SimpleNamespace
@@ -24,19 +26,25 @@ def _run(task):
     return AgentRun(id="run_ctx", persona_id="dev", task_id=task.id, stage_id=None, state=RunState.RUNNING, started_at=ts, last_heartbeat_at=ts)
 
 
-def test_context_request_fulfills_safe_file_and_renders_next_dev_context(tmp_path):
+def test_context_request_fulfills_safe_file_into_the_task_bundle(tmp_path):
+    # S27: the "renders next dev context" half of this test asserted on
+    # ``render_context`` output; that renderer is removed with the tick-context
+    # lane. S29 then removed ``fulfilled_context_bundles``, the store-side
+    # collector S27 pointed this at — it was written for that same renderer and
+    # had no other consumer. The bundle is asserted where ``_fulfill_request``
+    # actually writes it, on the request row, the way the sibling tests below
+    # already do.
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "app.py").write_text("def main():\n    return 'ok'\n", encoding="utf-8")
     task = _task()
 
     req = add_context_request(task, actor="dev", payload={"paths": ["src/app.py"], "reason": "need code"}, root=tmp_path)
-    ctx = build_context(task, _run(task))
-    rendered = render_context(ctx)
 
     assert req["status"] == "fulfilled"
     assert req["bundle_id"]
-    assert "## Fulfilled File Context" in rendered
-    assert "def main" in rendered
+    assert req["bundle"]["bundle_id"] == req["bundle_id"]
+    assert "def main" in req["bundle"]["files"][0]["content"]
+    assert [entry["bundle_id"] for entry in task.context_requests] == [req["bundle_id"]]
     assert has_unresolved_context_request(task) is False
 
 
@@ -71,16 +79,14 @@ def test_context_request_returns_partial_bundle_with_per_path_feedback(tmp_path)
         payload={"paths": ["manage.py", "missing.py"], "reason": "need locator files"},
         root=cwd_root,
     )
-    ctx = build_context(task, _run(task))
-
     assert req["status"] == "fulfilled_partial"
     assert req["failure_reason"] == "partial_context_unavailable"
     assert req["bundle"]["files"][0]["path"] == "manage.py"
     assert {"path": "missing.py", "status": "unsupported", "failure_reason": "path_not_found"} in req["path_results"]
     assert has_unresolved_context_request(task) is False
-    feedback = ctx.mission_hud["terminal_feedback"]
-    assert feedback["action_result"] == "context_available_partial"
-    assert feedback["next_expected"] == "use_partial_context_then_request_one_missing_path_or_block"
+    # S27: the HUD's ``terminal_feedback`` row was produced by
+    # ``context_builder._terminal_feedback`` and went with the tick-context lane.
+    # The partial-fulfilment FACTS it restated are asserted above, at the source.
 
 
 def test_context_request_returns_bounded_directory_listing(tmp_path):

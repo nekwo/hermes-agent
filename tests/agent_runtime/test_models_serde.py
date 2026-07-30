@@ -3,8 +3,7 @@ from datetime import timedelta
 from hermes_time import now
 
 import agent_runtime.models as runtime_models
-from agent_runtime.models import AgentPersona, AgentRun, Event, Incident, Proof
-from agent_runtime.models import ProofType
+from agent_runtime.models import AgentPersona, AgentRun, Event, Incident
 from agent_runtime.serde import from_jsonable, to_jsonable
 from agent_runtime.states import RunState, TaskState
 
@@ -35,17 +34,10 @@ def test_all_stage_one_models_round_trip():
             started_at=ts,
             last_heartbeat_at=ts + timedelta(seconds=1),
         ),
-        Proof(
-            id="proof_1",
-            task_id="task_abc",
-            stage_id=None,
-            type=ProofType.TEST_RUN,
-            title="pytest",
-            path_or_value="proofs/task_abc/test-runs/proof_1.txt",
-            created_by="harness",
-            created_at=ts,
-        ),
-        Event(ts=ts, type="task.created", task_id="task_abc", run_id=None, persona_id=None),
+        # S27: ``Proof``/``ProofType`` left this set with the record itself --
+        # its own docstring scoped it to "until task records leave in S8".
+        # See test_s27_proof_record_removal.
+        Event(ts=ts, type="persona_instance.created", task_id="task_abc", run_id=None, persona_id=None),
         Incident(
             id="inc_1",
             task_id="task_abc",

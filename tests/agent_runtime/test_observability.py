@@ -34,11 +34,6 @@ class Store:
         return open_items, len(items) - len(open_items)
 
 
-class EmptyProofStore:
-    def list_for_task(self, task_id):
-        return []
-
-
 class EmptyAgentStore:
     def list_all(self):
         return []
@@ -52,25 +47,18 @@ class EventLogStub:
         return list(self.events)[-n:]
 
 
-def test_observability_flags_stale_daemon_stalled_run_and_repeated_context_requests():
+def test_observability_flags_stalled_run_and_open_incident_without_leaking_details():
+    # S28 removed the `tasks` / `proofs` / `daemon_status` parameters (both
+    # callers passed literals), so this case lost its stale-daemon and
+    # repeated-context-request halves. Its surviving subject — a stalled run and
+    # an open incident projected redaction-safely — is unchanged and is what the
+    # verb still measures. The daemon-lane pins moved to
+    # tests/agent_runtime/test_s28_status_observe_shrink.py.
     ts = now()
-    task = Task(
-        id="task_obs",
-        title="Mission",
-        description="d",
-        state=TaskState.RUNNING,
-        created_at=ts - timedelta(hours=2),
-        updated_at=ts - timedelta(minutes=30),
-        requested_by="human",
-        context_requests=[
-            {"actor": "dev", "paths": ["sensitive/path/one.dart"], "reason": "need private marker"},
-            {"actor": "dev", "paths": ["sensitive/path/two.dart"], "reason": "need private marker"},
-        ],
-    )
     run = AgentRun(
         id="run_obs",
         persona_id="dev",
-        task_id=task.id,
+        task_id="task_obs",
         stage_id=None,
         state=RunState.RUNNING,
         started_at=ts - timedelta(minutes=25),
@@ -78,7 +66,7 @@ def test_observability_flags_stale_daemon_stalled_run_and_repeated_context_reque
     )
     incident = Incident(
         id="inc_obs",
-        task_id=task.id,
+        task_id="task_obs",
         run_id=run.id,
         kind="model_invalid_output",
         summary="private marker should never leak",
@@ -87,29 +75,24 @@ def test_observability_flags_stale_daemon_stalled_run_and_repeated_context_reque
     )
 
     obs = build_observability(
-        tasks=[task],
         runs=[run],
         incidents=[incident],
-        proofs=[],
-        daemon_status={"state": "running", "pid": 123, "heartbeat_at": ts - timedelta(minutes=10)},
-        events=[Event(ts=ts, type="run.opened", task_id=task.id, run_id=run.id, persona_id="dev")],
+        events=[Event(ts=ts, type="run.opened", task_id="task_obs", run_id=run.id, persona_id="dev")],
         reference_time=ts,
     )
 
     assert obs["schema_version"] == 1
     assert obs["health"]["status"] == "critical"
-    assert obs["signals"]["stale_daemon"] is True
     assert obs["signals"]["stalled_running_runs"] == 1
     assert obs["active_runs"][0]["progress"] is None
-    assert obs["signals"]["repeated_context_request_tasks"] == 1
-    assert {item["kind"] for item in obs["interventions"]} >= {"daemon_stale", "run_stalled", "open_incident", "context_request_loop"}
+    assert {item["kind"] for item in obs["interventions"]} >= {"run_stalled", "open_incident"}
     incident_intervention = next(item for item in obs["interventions"] if item["kind"] == "open_incident")
     assert incident_intervention["ask"] == "Open model_invalid_output incident requires review"
     assert incident_intervention["risk_if_ignored"]
     assert incident_intervention["allowed_actions"] == ["answer_intervention", "retry_stage"]
     assert incident_intervention["expires_at"] is None
     assert incident_intervention["safe_refs"] == {
-        "task_id": task.id,
+        "task_id": "task_obs",
         "run_id": run.id,
         "incident_id": incident.id,
     }
@@ -117,7 +100,7 @@ def test_observability_flags_stale_daemon_stalled_run_and_repeated_context_reque
         {
             "ts": ts,
             "type": "run.opened",
-            "task_id": task.id,
+            "task_id": "task_obs",
             "run_id": run.id,
             "persona_id": "dev",
             "display_kind": "event",
@@ -127,24 +110,13 @@ def test_observability_flags_stale_daemon_stalled_run_and_repeated_context_reque
     encoded = json.dumps(obs, default=str)
     assert "private marker" not in encoded
     assert "C:/private" not in encoded
-    assert "sensitive/path" not in encoded
 
 
 def test_delivery_evidence_incidents_project_structured_operator_actions():
     ts = now()
-    task = Task(
-        id="task_stage_no_progress",
-        title="Mission",
-        description="d",
-        state=TaskState.BLOCKED,
-        created_at=ts,
-        updated_at=ts,
-        requested_by="human",
-        open_incident_ids=["inc_stage_no_progress"],
-    )
     incident = Incident(
         id="inc_stage_no_progress",
-        task_id=task.id,
+        task_id="task_stage_no_progress",
         run_id="run_empty",
         kind="stage_no_progress",
         summary="Stage repeated an empty delivery with no new proof evidence.",
@@ -153,11 +125,8 @@ def test_delivery_evidence_incidents_project_structured_operator_actions():
     )
 
     obs = build_observability(
-        tasks=[task],
         runs=[],
         incidents=[incident],
-        proofs=[],
-        daemon_status={"state": "idle"},
         events=[],
         reference_time=ts,
     )
@@ -189,11 +158,8 @@ def test_recent_events_include_redaction_safe_progress_summary():
     )
 
     obs = build_observability(
-        tasks=[],
         runs=[],
         incidents=[],
-        proofs=[],
-        daemon_status={"state": "offline"},
         events=[event],
         reference_time=ts,
     )
@@ -221,6 +187,10 @@ def test_recent_events_include_redaction_safe_progress_summary():
 
 
 def test_legacy_proof_event_uses_generic_display_but_keeps_safe_quality_fields():
+    # ``proof.attached`` was de-registered in S15 (no producer survives). This
+    # pins the read side: a HISTORICAL log row carrying a de-registered type
+    # still renders safely — the allowlist is checked on append only, never on
+    # read, so old events never become unreadable.
     ts = now()
     event = Event(
         ts=ts,
@@ -243,11 +213,8 @@ def test_legacy_proof_event_uses_generic_display_but_keeps_safe_quality_fields()
     )
 
     obs = build_observability(
-        tasks=[],
         runs=[],
         incidents=[],
-        proofs=[],
-        daemon_status={"state": "offline"},
         events=[event],
         reference_time=ts,
     )
@@ -296,11 +263,8 @@ def test_recent_events_project_self_test_display_metadata():
     )
 
     obs = build_observability(
-        tasks=[],
         runs=[],
         incidents=[],
-        proofs=[],
-        daemon_status={"state": "offline"},
         events=[event],
         reference_time=ts,
     )
@@ -328,11 +292,8 @@ def test_recent_events_drop_path_and_credential_like_summaries():
     ]
 
     obs = build_observability(
-        tasks=[],
         runs=[],
         incidents=[],
-        proofs=[],
-        daemon_status={"state": "offline"},
         events=[
             Event(
                 ts=ts,
@@ -356,11 +317,8 @@ def test_recent_events_drop_path_and_credential_like_summaries():
 def test_recent_events_drop_unsafe_values_from_new_dev_work_fields():
     ts = now()
     obs = build_observability(
-        tasks=[],
         runs=[],
         incidents=[],
-        proofs=[],
-        daemon_status={"state": "offline"},
         events=[
             Event(
                 ts=ts,
@@ -406,7 +364,7 @@ def test_active_runs_include_queued_starting_running_and_waiting_states():
         AgentRun(id="run_done", persona_id="pm", task_id=task.id, stage_id=None, state=RunState.COMPLETED, started_at=ts, last_heartbeat_at=ts, finished_at=ts),
     ]
 
-    obs = build_observability(tasks=[task], runs=runs, incidents=[], proofs=[], daemon_status={"state": "running", "pid": 1, "heartbeat_at": ts}, reference_time=ts)
+    obs = build_observability(runs=runs, incidents=[], reference_time=ts)
 
     assert obs["signals"]["active_runs"] == 5
     assert obs["signals"]["queued_runs"] == 1
@@ -437,7 +395,7 @@ def test_active_run_summary_includes_current_tool_command_label():
         },
     )
 
-    obs = build_observability(tasks=[task], runs=[run], incidents=[], proofs=[], daemon_status={"state": "offline"}, reference_time=ts)
+    obs = build_observability(runs=[run], incidents=[], reference_time=ts)
 
     active = obs["active_runs"][0]
     assert active["progress"]["command_label"] == "flutter analyze lib/features/posts test/features/posts"
@@ -449,45 +407,26 @@ def test_active_run_summary_includes_current_tool_command_label():
     }
 
 
-def test_non_offline_daemon_without_heartbeat_is_critical():
-    obs = build_observability(tasks=[], runs=[], incidents=[], proofs=[], daemon_status={"state": "running", "pid": 123}, execution_mode="daemon")
+# S28 retargeted the three daemon-mode cases that stood here
+# (`test_non_offline_daemon_without_heartbeat_is_critical`,
+# `test_manual_mode_does_not_page_stale_idle_daemon_status`,
+# `test_daemon_mode_treats_offline_daemon_as_critical`). Their subject was the
+# `daemon_status` parameter, which both callers passed as `None` — the Mission
+# Daemon was retired before this wave, so every daemon signal, freshness row,
+# and intervention was derived from a `{"state": "offline"}` default. The
+# removal contract lives at
+# tests/agent_runtime/test_s28_status_observe_shrink.py::test_the_daemon_and_task_intervention_families_are_gone.
+# What survives from them is the health-status derivation itself, which is
+# parameter-independent and is pinned here.
 
-    assert obs["signals"]["stale_daemon"] is True
-    assert any(item["kind"] == "daemon_stale" for item in obs["interventions"])
-    assert obs["health"]["status"] == "critical"
 
-
-def test_manual_mode_does_not_treat_offline_daemon_as_critical():
-    obs = build_observability(tasks=[], runs=[], incidents=[], proofs=[], daemon_status={"state": "offline"}, execution_mode="manual")
+def test_health_is_healthy_with_no_interventions_and_names_its_execution_mode():
+    obs = build_observability(runs=[], incidents=[], execution_mode="manual")
 
     assert obs["execution_mode"] == "manual"
-    assert not any(item["kind"] == "daemon_offline" for item in obs["interventions"])
+    assert obs["interventions"] == []
     assert obs["health"]["status"] == "healthy"
-
-
-def test_manual_mode_does_not_page_stale_idle_daemon_status():
-    ts = now()
-    obs = build_observability(
-        tasks=[],
-        runs=[],
-        incidents=[],
-        proofs=[],
-        daemon_status={"state": "idle", "pid": 123, "heartbeat_at": ts - timedelta(minutes=10)},
-        execution_mode="manual",
-        reference_time=ts,
-    )
-
-    assert obs["signals"]["stale_daemon"] is False
-    assert not any(item["kind"] == "daemon_stale" for item in obs["interventions"])
-    assert obs["health"]["status"] == "healthy"
-
-
-def test_daemon_mode_treats_offline_daemon_as_critical():
-    obs = build_observability(tasks=[], runs=[], incidents=[], proofs=[], daemon_status={"state": "offline"}, execution_mode="daemon")
-
-    assert obs["execution_mode"] == "daemon"
-    assert any(item["kind"] == "daemon_offline" for item in obs["interventions"])
-    assert obs["health"]["status"] == "critical"
+    assert obs["health"]["summary"] == "Mission runtime observability is healthy"
 
 
 def test_snapshot_embeds_observability_envelope():
@@ -498,7 +437,6 @@ def test_snapshot_embeds_observability_envelope():
         task_store=Store([task]),
         run_store=Store([]),
         agent_store=EmptyAgentStore(),
-        proof_store=EmptyProofStore(),
         incident_store=Store([]),
     )
 

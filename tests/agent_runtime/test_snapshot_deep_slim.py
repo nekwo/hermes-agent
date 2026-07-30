@@ -1,57 +1,54 @@
 """S8 — DEEP SLIM inside live rows (operator ruling 2026-07-17).
 
-Pins the goal head/detail split, the frame eviction of the skills-catalog table,
-runs history, persona_assignments.recent, stale chat_contexts, and the archived
-operator-channel transcript — plus the budget ratchet. Every eviction is
-accounted (a typed pointer / ``*_ref`` / ``detail_ref``), never a silent absence
-(house invariant), and the on-demand fetch reproduces the evicted bytes.
+Pins the frame eviction of the skills-catalog table, runs history,
+persona_assignments.recent and stale chat_contexts — plus the budget ratchet.
+Every eviction is accounted (a typed pointer / ``*_ref``), never a silent
+absence (house invariant), and the on-demand fetch reproduces the evicted bytes.
+
+RETARGETED (mission-lane removal): the goal head/detail split this module used to
+pin is gone. ``ceacca635`` ("remove mission rows from snapshot contract", doc 16
+S9) removed the ``goals`` section from the wire contract, and the follow-up
+snapshot residue cut removed the builders that fed it — ``_goal_head``,
+``GOAL_DETAIL_ONLY_FIELDS`` and ``goal_detail_for_task`` no longer exist. The
+head/detail assertions below now pin the *absence* of that lane; the surviving
+on-demand detail lane is ``persona_instance_detail_for_id``. The archived
+operator-channel transcript eviction went with the same cut and is pinned by
+``test_s18_snapshot_residue_removal.py`` instead.
 """
 
 from __future__ import annotations
 
-from hermes_time import now
-
 from agent_runtime import prompt_observability as po
-from types import SimpleNamespace
-
-Task = SimpleNamespace
-from agent_runtime.snapshot import (
-    GOAL_DETAIL_ONLY_FIELDS,
-    build_snapshot,
-    goal_detail_for_task,
-)
-from agent_runtime.snapshot_audit import snapshot_size_budget
-from agent_runtime.states import TaskState
-from agent_runtime.store import TaskStore
-
-
-def _seed_goal(store: TaskStore, task_id: str) -> None:
-    n = now()
-    store.create(
-        Task(
-            id=task_id,
-            title=f"Goal {task_id}",
-            description="Deep-slim fixture goal.",
-            state=TaskState.RUNNING,
-            created_at=n,
-            updated_at=n,
-            requested_by="tony",
-        )
-    )
+from agent_runtime import snapshot as snapshot_module
+from agent_runtime.snapshot import build_snapshot, persona_instance_detail_for_id
+from tests.agent_runtime.snapshot_bytes import snapshot_size_budget
 
 
 # --------------------------------------------------------------------------- #
-# Slice 1 — goal head / on-demand detail.
+# Slice 1 — the goal head / on-demand detail lane is RETIRED (ceacca635 + the
+# snapshot residue cut). What is pinned now is that it stays gone, and that the
+# on-demand detail lane which is NOT dead still answers honestly.
 # --------------------------------------------------------------------------- #
-def test_goal_frame_row_is_head_only(isolate_agent_runtime_root):
+def test_goal_section_is_absent_from_the_frame(isolate_agent_runtime_root):
     snap = build_snapshot()
     assert "goals" not in snap
     assert snap["parity"]["contract_version"] == 45
 
 
-def test_goal_detail_served_on_demand_carries_every_evicted_field(isolate_agent_runtime_root):
+def test_goal_detail_lane_is_removed_not_merely_empty(isolate_agent_runtime_root):
+    # The old lane returned ``None`` for every id because it had been neutered to
+    # an unconditional ``return None``. A neutered function is a liability, not a
+    # contract: the symbols are gone outright.
     assert "goals" not in build_snapshot()
-    assert goal_detail_for_task("g_missing") is None
+    for name in ("goal_detail_for_task", "_goal_head", "GOAL_DETAIL_ONLY_FIELDS"):
+        assert not hasattr(snapshot_module, name), f"{name} must stay removed"
+
+
+def test_surviving_on_demand_detail_lane_misses_honestly(isolate_agent_runtime_root):
+    # The detail-ref pattern itself is KEEP — persona-instance tool detail is the
+    # live consumer of it, and an unknown id is an honest miss, never a
+    # fabricated empty payload.
+    assert persona_instance_detail_for_id("personainst_missing") is None
 
 
 # --------------------------------------------------------------------------- #

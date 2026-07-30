@@ -13,7 +13,7 @@ from agent_runtime.persona_assignments import (
     PersonaAssignmentStore,
     PersonaInstanceStore,
 )
-from agent_runtime.runtime_instances import GoalRuntimeInstanceStore
+from agent_runtime.runtime_instances import GoalRuntimeInstanceStore, runtime_instances_summary
 from agent_runtime.states import TaskState
 from agent_runtime.store import TaskStore, WorkspaceStore, RealmStore
 
@@ -161,7 +161,14 @@ def test_lane_only_create_lane_does_not_park(isolate_agent_runtime_root):
     assert second.lane == second.id
     assert store.get(first.id).state == "running"
     assert store.get(second.id).state == "running"
-    assert store.active_foreground() is None
+    # S21 removed `active_foreground()`: it walked lanes into `TaskStore.get`,
+    # which the permanent `TaskStoreStub` always raises `NotFound` from, so it
+    # returned `None` by construction and not because no lane was elected. The
+    # honest pin is that lanes are a flat list with no foreground election.
+    assert not hasattr(store, "active_foreground")
+    lanes = runtime_instances_summary(store.list_all())["lanes"]
+    assert {row["lane_id"] for row in lanes} == {first.id, second.id}
+    assert "foreground" not in runtime_instances_summary(store.list_all())
 
 
 def test_stage42_goal_list_and_error_envelopes(isolate_agent_runtime_root):

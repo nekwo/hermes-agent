@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import replace
 from enum import StrEnum
-from pathlib import Path
 
 from .models import AgentPersona
 
@@ -21,8 +20,7 @@ class AutonomyLevel(StrEnum):
 
 
 # Roles/personas retired from the product flow. A persona instance persisted under one
-# of these — historically the legacy ``pm`` slot (``shared_harness_overlay.md``: "Treat
-# PM names ... as legacy compatibility only; do not present PM as the product flow") —
+# of these — historically the legacy ``pm`` slot, treated as legacy compatibility only —
 # must never render as a live product agent. The persona-instance reconciler prunes such
 # rows (archive, never delete). Single-sourced here so liveness/roster checks resolve a
 # mothballed role through this set instead of hand-rolling ``role == "pm"`` string tests.
@@ -161,12 +159,6 @@ def all_registered_toolsets() -> list[str]:
     from model_tools import get_available_toolsets
 
     return sorted(str(name) for name in get_available_toolsets().keys())
-
-
-def load_bundled_prompt(role: AgentRole | str) -> str:
-    token = role.value if isinstance(role, AgentRole) else str(role or "").strip()
-    path = Path(__file__).with_name("prompts") / f"{token}.md"
-    return path.read_text(encoding="utf-8")
 
 
 # ── profile → persona promotion ───────────────────────────────────────────────

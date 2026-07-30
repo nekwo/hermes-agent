@@ -1,5 +1,20 @@
 # 08 — Root Node + Self-Looped Sub-Agents (v4, implementation-ready)
 
+> **2026-07-30 — describes a removed subsystem.** The root-node execution model
+> (`run_node`/`steer_node`, stages N0–N3, `root_node_engine.py`) was removed by
+> [16 — Mission Lane Removal](16-mission-lane-removal.md). Retained because its
+> controlling principle — *no judgment in Python; the harness is substrate only* —
+> is the direct ancestor of the chat-only lane and the enforcement-free Agent
+> Console graph. Do not implement from it.
+
+> **Cleanup-wave correction (2026-07-30).** The historical account below also
+> names surfaces that outlived the subsystem briefly and are now gone:
+> `tools/node_control_tool.py` and its `run_node` / `steer_node` tools were
+> deleted by `de14b06d2`; the fork-added `node_control` toolset block was removed
+> by `e69db6e71`; and the caller-free `git_diff_since_baseline` and
+> `diff_weakens_tests` helpers were removed by `354d7555a`. Every later mention
+> of those names describes the retired design, not a live helper or tool.
+
 > **Verification status (2026-07-04, adversarial re-derivation + remediation —
 > doc-09 Prompt 2):** N0/N1/N2 implementation **VERIFIED**; N3 burn-in still
 > **PENDING / flip NOT approved.** Suite green (1347 passed after remediation).

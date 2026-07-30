@@ -3,7 +3,7 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
 from agent_runtime.config import AgentRuntimeConfig
-from agent_runtime.models import Incident
+from agent_runtime.models import AgentRun, Incident
 from types import SimpleNamespace
 
 Task = SimpleNamespace
@@ -28,9 +28,17 @@ def _persona_runtime_config() -> AgentRuntimeConfig:
 
 def _assert_no_mission_status() -> None:
     status = build_status()
-    assert status["open_tasks"] == 0
-    assert status["next_actions"] == []
-    assert status["undispatchable_missions"] == []
+    # S21 stopped publishing `next_actions` / `undispatchable_missions`: both were
+    # computed over the `tasks = []` literal, so they could only ever be `[]` —
+    # a constant reported in the shape of a measurement. Absence is now the pin.
+    # S28 finished that cut with `open_tasks` (and `running_runs`), which S21 had
+    # to retain while `_cmd_status` still printed them; this assertion used to
+    # read `status["open_tasks"] == 0` — a literal, not a measurement. See
+    # tests/agent_runtime/test_s28_status_observe_shrink.py.
+    assert "open_tasks" not in status
+    assert "running_runs" not in status
+    assert "next_actions" not in status
+    assert "undispatchable_missions" not in status
     assert not hasattr(TaskStore(), "create")
 
 
@@ -79,8 +87,20 @@ def test_status_surfaces_lanes_repo_locks_and_swarm_budget(isolate_agent_runtime
     GoalRuntimeInstanceStore().transition(lane.id, "activating", reason="activate")
     GoalRuntimeInstanceStore().transition(lane.id, "running", reason="run")
     acquire_repo_bundle_locks(lane_id=lane.id, task_id="task_lane", bundle_ids=["bundle_backend"], mode="write")
-    run = runs.open_run("dev", "task_lane")
-    run.llm = {"total_tokens": 12, "api_calls": 2}
+    # S17 removed RunStore.open_run as write-dead; ``update`` is the surviving
+    # write path and seeds the row directly. This case covers build_status, not
+    # the writer.
+    ts = now()
+    run = AgentRun(
+        id="run_lane",
+        persona_id="dev",
+        task_id="task_lane",
+        stage_id=None,
+        state=RunState.RUNNING,
+        started_at=ts,
+        last_heartbeat_at=ts,
+        llm={"total_tokens": 12, "api_calls": 2},
+    )
     runs.update(run)
 
     s = build_status(run_store=runs)

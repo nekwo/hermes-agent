@@ -21,10 +21,10 @@ from agent_runtime.store import TaskStore
 
 def test_event_log_appends_jsonl_and_tails_events(isolate_agent_runtime_root):
     log = EventLog()
-    first = Event(ts=now(), type="task.created", task_id="task_1", run_id=None, persona_id=None)
+    first = Event(ts=now(), type="persona_instance.created", task_id="task_1", run_id=None, persona_id=None)
     second = Event(
         ts=now(),
-        type="task.transition",
+        type="persona_instance.steered",
         task_id="task_1",
         run_id=None,
         persona_id="pm",
@@ -44,7 +44,7 @@ def test_event_log_appends_jsonl_and_tails_events(isolate_agent_runtime_root):
 def test_event_log_for_task_filters_before_decoding_and_preserves_order(isolate_agent_runtime_root):
     log = EventLog()
     for index in range(6):
-        log.append(Event(ts=now(), type="task.created", task_id=f"task_noise_{index}", run_id=None, persona_id=None))
+        log.append(Event(ts=now(), type="persona_instance.created", task_id=f"task_noise_{index}", run_id=None, persona_id=None))
         log.append(
             Event(
                 ts=now(),
@@ -234,14 +234,17 @@ def test_event_log_for_session_type_filter_counts_matches_not_raw_rows(isolate_a
                 session_id="chat_flooded",
             )
         )
-    for _ in range(50):
+    # Filler is any registered type OUTSIDE ``trace_types``; S25 retargeted it
+    # off run.opened (de-registered with its writer) onto a live chat-lane type.
+    for index in range(50):
         log.append(
             Event(
                 ts=now(),
-                type="run.opened",
+                type="persona_instance.created",
                 task_id=None,
                 run_id=None,
                 persona_id="base",
+                payload={"persona_instance_id": f"personainst_flood_{index}"},
                 session_id="chat_flooded",
             )
         )
@@ -253,12 +256,12 @@ def test_event_log_for_session_type_filter_counts_matches_not_raw_rows(isolate_a
 def test_operator_events_receive_redaction_safe_summaries(isolate_agent_runtime_root):
     log = EventLog()
     samples = [
-        Event(now(), "patch.proposed", "task_1", "run_1", "dev", {"changed_files": ["a.py"]}),
         Event(now(), "repo_bundle.assigned", "task_1", "run_1", "dev", {"repo_bundle_id": "bundle_1", "repo": "hermes-agent", "state": "assigned"}),
         Event(now(), "repo_bundle.updated", "task_1", "run_1", "dev", {"repo_bundle_id": "bundle_1", "repo": "hermes-agent", "state": "running"}),
-        Event(now(), "repo_bundle.delivered", "task_1", "run_1", "dev", {"repo_bundle_id": "bundle_1", "repo": "hermes-agent", "state": "delivered_waiting_for_qa", "proof_count": 0, "diff_captured": False}),
-        Event(now(), "role_session.closed", "task_1", "run_1", "qa", {"close_reason": "proof_passed"}),
-        Event(now(), "run.opened", "task_1", "run_1", "dev", {"stage_id": "impl"}),
+        # S25 retargeted two samples: off run.opened and off repo_bundle.delivered
+        # (both de-registered with their writers) onto live operator-summary arms.
+        Event(now(), "run.tool.started", "task_1", "run_1", "dev", {"tool_name": "terminal"}),
+        Event(now(), "run.tool.finished", "task_1", "run_1", "dev", {"tool_name": "terminal", "status": "passed"}),
         Event(now(), "run.closed", "task_1", "run_1", "dev", {"state": "completed", "decision_type": "deliver"}),
     ]
 
@@ -267,8 +270,8 @@ def test_operator_events_receive_redaction_safe_summaries(isolate_agent_runtime_
 
     events = list(log.iter_all())
     assert all(str(event.payload.get("summary") or "").strip() for event in events)
-    delivered = next(event for event in events if event.type == "repo_bundle.delivered")
-    assert "captured:false" in delivered.payload["summary"]
+    updated = next(event for event in events if event.type == "repo_bundle.updated")
+    assert updated.payload["summary"] == "Updated hermes-agent bundle to running."
 
 
 def test_run_progress_receives_stable_event_id(isolate_agent_runtime_root):
@@ -392,7 +395,7 @@ def test_event_log_rejects_payloads_over_4kb_and_does_not_write(isolate_agent_ru
     log = EventLog()
     event = Event(
         ts=now(),
-        type="task.created",
+        type="persona_instance.created",
         task_id="task_1",
         run_id=None,
         persona_id=None,

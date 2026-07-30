@@ -5,10 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-from agent_runtime.context_builder import build_context
 from agent_runtime.decision_contract_registry import (
     agent_decision_json_schema,
-    allowed_decisions_for_role,
     canonical_role_value,
     contract_hash,
     contract_manifest,
@@ -25,7 +23,6 @@ from agent_runtime.models import AgentRun
 from types import SimpleNamespace
 
 Task = SimpleNamespace
-from agent_runtime.persona_runtime import build_system_prompt
 from agent_runtime.personas import AgentRole
 from agent_runtime.states import RunState, TaskState
 from hermes_time import now
@@ -71,10 +68,22 @@ def test_registry_covers_every_decision_type_and_projects_schema():
     assert DECISION_SCHEMA == agent_decision_json_schema()
 
 
-def test_all_persona_role_tokens_share_the_registry_decisions():
-    expected = frozenset(DecisionType)
+def test_no_role_filtered_decision_surface_survives():
+    """S11 removed the role matrix; S15 removed the no-op shell it left behind.
+
+    Every declared role — enum member, hyphenated custom token, or bare profile —
+    reaches the whole registry, and there is no per-role decision accessor left to
+    reintroduce filtering through.
+    """
+
+    from agent_runtime import decision_contract_registry as registry
+
+    assert not hasattr(registry, "allowed_decisions_for_role")
+    published = set(contract_manifest()["decisions"])
+    assert published == {item.value for item in DecisionType}
     for role in [*AgentRole, "custom-reviewer", "profile"]:
-        assert allowed_decisions_for_role(role) == expected
+        assert set(hud_shape_index_for_stage(role)) <= set(contract_manifest()["hud_shapes"])
+        assert canonical_role_value(role)
 
 
 def test_hud_shapes_are_not_filtered_by_role():
@@ -113,26 +122,6 @@ def test_qa_registry_exposes_nested_and_enum_choices():
     assert screenshot["enum_choices"]["mcp_server"] == ["launcher_qa"]
     assert verdict["enum_choices"]["verdict"] == ["approved", "needs_fixes", "blocked"]
     assert "coverage" in verdict["allowed_payload_keys"]
-
-
-def test_prompt_contract_includes_registry_hash():
-    from agent_runtime.models import AgentPersona
-
-    persona = AgentPersona(
-        id="dev",
-        display_name="Dev",
-        role="dev",
-        model="test",
-        provider="test",
-        api_mode="codex_responses",
-        toolsets=[],
-        system_prompt_path="agent_runtime/prompts/dev.md",
-    )
-
-    prompt = build_system_prompt(persona)
-
-    assert contract_hash() in prompt
-    assert "request_test_run: required [stage_id]" in prompt
 
 
 def test_event_allowlist_is_catalog_projected():

@@ -1,19 +1,11 @@
 from __future__ import annotations
 
-from datetime import timedelta
+import inspect
 
-from hermes_time import now
+import pytest
 
-from agent_runtime.events import EventLog
 from agent_runtime.harness_doctor import run_harness_doctor
-from agent_runtime.models import AgentPersona, Event, Incident
-from types import SimpleNamespace
-
-Task = SimpleNamespace
-from agent_runtime.errors import NotFound
-from agent_runtime.states import RunState, TaskState, WorkerSessionState
-from agent_runtime.store import IncidentStore, RunStore, TaskStore
-from agent_runtime.worker_sessions import WorkerSessionStore
+from agent_runtime.models import AgentPersona
 
 
 def _persona() -> AgentPersona:
@@ -74,11 +66,8 @@ def test_harness_doctor_model_authority_clean_when_only_top_level(isolate_agent_
     assert authority["resolved"]["model"] == "gpt-5.6-luna"
 
 
-def test_harness_doctor_reports_stale_runtime_and_snapshot_null_ids(isolate_agent_runtime_root):
+def test_harness_doctor_reports_snapshot_null_ids(isolate_agent_runtime_root):
     report = run_harness_doctor(
-        stale_run_hours=1,
-        stale_worker_hours=1,
-        stale_task_days=1,
         include_worktrees=False,
         snapshot_builder=lambda: {"persona_instances": [{"persona_instance_id": None}]},
     )
@@ -92,13 +81,10 @@ def test_harness_doctor_reports_stale_runtime_and_snapshot_null_ids(isolate_agen
     assert report["mode"] == {"fix": False, "dry_run": False}
 
 
-def test_harness_doctor_fix_closes_stale_rows_and_is_idempotent(isolate_agent_runtime_root):
+def test_harness_doctor_fix_is_idempotent(isolate_agent_runtime_root):
     dry = run_harness_doctor(
         fix=True,
         dry_run=True,
-        stale_run_hours=1,
-        stale_worker_hours=1,
-        stale_task_days=1,
         include_worktrees=False,
         snapshot_builder=lambda: {},
     )
@@ -106,9 +92,6 @@ def test_harness_doctor_fix_closes_stale_rows_and_is_idempotent(isolate_agent_ru
 
     fixed = run_harness_doctor(
         fix=True,
-        stale_run_hours=1,
-        stale_worker_hours=1,
-        stale_task_days=1,
         include_worktrees=False,
         snapshot_builder=lambda: {},
     )
@@ -117,9 +100,6 @@ def test_harness_doctor_fix_closes_stale_rows_and_is_idempotent(isolate_agent_ru
 
     again = run_harness_doctor(
         fix=True,
-        stale_run_hours=1,
-        stale_worker_hours=1,
-        stale_task_days=1,
         include_worktrees=False,
         snapshot_builder=lambda: {},
     )
@@ -129,55 +109,48 @@ def test_harness_doctor_fix_closes_stale_rows_and_is_idempotent(isolate_agent_ru
     }
 
 
-def test_harness_doctor_sweeps_stale_duplicate_budget_incidents(isolate_agent_runtime_root):
-    dry = run_harness_doctor(
+def test_harness_doctor_rejects_the_removed_mission_era_parameters(isolate_agent_runtime_root):
+    # The legacy threshold/store kwargs and the compaction switch left with the
+    # mission lane (doc 16). The CLI stopped passing them in 126976088; the
+    # library surface follows.
+    for kwarg in (
+        "stale_run_hours",
+        "stale_worker_hours",
+        "stale_task_days",
+        "stale_incident_hours",
+        "stale_incident_days",
+        "compact_events",
+        "task_store",
+        "run_store",
+        "worker_store",
+        "incident_store",
+    ):
+        with pytest.raises(TypeError):
+            run_harness_doctor(
+                include_worktrees=False,
+                snapshot_builder=lambda: {},
+                **{kwarg: 1},
+            )
+    params = set(inspect.signature(run_harness_doctor).parameters)
+    assert params == {
+        "fix",
+        "dry_run",
+        "worktree_min_age_seconds",
+        "include_worktrees",
+        "event_log",
+        "snapshot_builder",
+    }
+
+
+def test_harness_doctor_thresholds_and_findings_carry_no_mission_rows(isolate_agent_runtime_root):
+    report = run_harness_doctor(
         fix=True,
         dry_run=True,
-        stale_incident_hours=1,
-        include_worktrees=False,
-        snapshot_builder=lambda: {},
-    )
-    assert "stale_incidents" not in dry["summary"]["finding_counts"]
-
-    fixed = run_harness_doctor(
-        fix=True,
-        stale_incident_hours=1,
-        include_worktrees=False,
-        snapshot_builder=lambda: {},
-    )
-    assert "closed_incident_ids" not in fixed["repairs"]
-
-
-def test_harness_doctor_accepts_stale_incident_days(isolate_agent_runtime_root):
-    dry = run_harness_doctor(
-        fix=True,
-        dry_run=True,
-        stale_incident_days=7,
         include_worktrees=False,
         snapshot_builder=lambda: {},
     )
 
-    assert dry["thresholds"]["stale_incident_hours"] == 168
-    assert dry["thresholds"]["stale_incident_days"] == 7
-    assert "stale_incidents" not in dry["summary"]["finding_counts"]
-
-
-def test_harness_doctor_reports_and_compacts_archived_event_rows(isolate_agent_runtime_root):
-    dry = run_harness_doctor(
-        fix=True,
-        dry_run=True,
-        compact_events=True,
-        include_worktrees=False,
-        snapshot_builder=lambda: {},
-    )
-
-    assert dry["findings"]["event_log_compaction"]["skipped"] == "mission_event_compaction_removed"
-
-    fixed = run_harness_doctor(
-        fix=True,
-        compact_events=True,
-        include_worktrees=False,
-        snapshot_builder=lambda: {},
-    )
-
-    assert fixed["findings"]["event_log_compaction"]["removed_event_count"] == 0
+    assert set(report["thresholds"]) == {"worktree_min_age_seconds", "include_worktrees"}
+    assert "event_log_compaction" not in report["findings"]
+    assert "stale_incidents" not in report["summary"]["finding_counts"]
+    assert "closed_incident_ids" not in report["repairs"]

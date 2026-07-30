@@ -23,8 +23,6 @@ def return_summary_to_parent_session(
     summary: str,
     proof_ids: list[str] | None = None,
     artifact_refs: list[str] | None = None,
-    task_id: str | None = None,
-    stage_id: str | None = None,
     event_log: EventLog | None = None,
     child_events_enabled: bool | None = None,
 ) -> dict[str, Any]:
@@ -69,7 +67,7 @@ def return_summary_to_parent_session(
         Event(
             ts=now(),
             type="steer.returned",
-            task_id=safe_assignment_text(task_id, limit=160),
+            task_id=None,
             run_id=None,
             persona_id=instance.persona_id,
             session_id=safe_session,
@@ -79,7 +77,6 @@ def return_summary_to_parent_session(
                 "source_node_id": safe_instance,
                 "target_node_id": safe_session,
                 "result": "summary_returned",
-                "stage_id": safe_assignment_text(stage_id, limit=160),
                 "persona_instance_id": safe_instance,
                 "proof_ids": proofs,
                 "artifact_refs": artifacts,
@@ -98,8 +95,6 @@ def return_summary_to_parent_session(
             summary=safe_summary,
             proof_ids=proofs,
             artifact_refs=artifacts,
-            task_id=task_id,
-            stage_id=stage_id,
             event_log=log,
         )
 
