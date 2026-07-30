@@ -12,7 +12,7 @@ from hermes_time import now
 from agent_runtime import paths
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.decision_schema import AgentDecision, DecisionType
-from agent_runtime.models import AgentPersona, AgentRun, Proof
+from agent_runtime.models import AgentPersona, AgentRun
 from types import SimpleNamespace
 
 Task = SimpleNamespace

@@ -7,7 +7,7 @@ from hermes_time import now
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.events import EventLog
-from agent_runtime.models import Event, Proof, RepoBundle
+from agent_runtime.models import Event, RepoBundle
 from types import SimpleNamespace
 
 Task = SimpleNamespace

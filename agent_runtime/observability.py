@@ -6,7 +6,7 @@ from typing import Any
 from hermes_time import now
 
 from .incidents import CRITICAL_INCIDENT_KINDS
-from .models import Event, Incident, Proof
+from .models import Event, Incident
 from .scope_control import untriaged_issue_discoveries
 from .states import PossessionState, RunState, TaskState, WorkerSessionState
 from .store import ACTIVE_RUN_STATES
@@ -23,7 +23,12 @@ def build_observability(
     tasks: list[Any],
     runs: list[Any],
     incidents: list[Incident],
-    proofs: list[Proof],
+    #: S27: the ``Proof`` record went with the mission lane. Both live callers
+    #: (``status.build_status`` and ``harness observe``) pass a ``[]`` literal
+    #: and the body only computes ``len(proofs)``, so this stays as an accepted
+    #: parameter -- keeping the ``proofs_total`` wire row honest at 0 -- rather
+    #: than annotating against a record no store can produce.
+    proofs: list[Any],
     daemon_status: dict[str, Any] | None,
     events: list[Event] | None = None,
     reference_time: datetime | None = None,
