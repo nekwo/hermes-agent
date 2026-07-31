@@ -436,6 +436,15 @@ def _cmd_persona_instance_open_chat(args) -> int:
                 print(emit_json(data) if args.json else data["error"])
                 return 2
             try:
+                # Local import: this file is exec'd into harness.py globals, and
+                # this name is NOT among them — as a free name it raised NameError
+                # on every --add-instance and the except below swallowed it,
+                # silently disabling the named-placement preservation described in
+                # the comment that follows (found by the 2026-07-31 audit).
+                from agent_runtime.persona_assignments import (
+                    persona_instance_id_for_placement,
+                )
+
                 previous_instance = PersonaInstanceStore().get(
                     persona_instance_id_for_placement(placement_id)
                 )

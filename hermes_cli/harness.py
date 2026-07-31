@@ -28,6 +28,7 @@ from agent_runtime.dispatch_session_policy import (
     session_established_payload,
 )
 from agent_runtime.operator_control import operator_takeover_worker
+from agent_runtime.realm_sync import read_realm_sync_sidecar
 from agent_runtime.coordinator_permissions import (
     CoordinatorPermissionScope,
     authorize_coordinator_action,
@@ -2003,7 +2004,6 @@ def _workspace_row(workspace, *, full: bool = False) -> dict:
                 "slug": workspace.slug,
                 "default_blueprint_id": workspace.default_blueprint_id,
                 "max_concurrent_lanes": workspace.max_concurrent_lanes,
-                "goal_ids": [getattr(task, "goal_id", None) or task.id for task in tasks],
                 "archived": bool(workspace.archived),
                 "created_at": workspace.created_at,
             }
@@ -2294,7 +2294,9 @@ def _realm_row(realm, *, full: bool = False) -> dict:
         "default_workspace_id": getattr(realm, "default_workspace_id", None),
         "default_workspace_version": getattr(realm, "default_workspace_version", 0),
         "workspaces": len(workspace_ids),
-        "sync": "in_sync",
+        # Honest sync state, same source as the snapshot's realm row: absent
+        # sidecar -> None ("not checked"), never a fake "in_sync" literal.
+        "sync": read_realm_sync_sidecar(realm.id),
         "updated_at": realm.updated_at,
     }
     if full:
@@ -2316,7 +2318,7 @@ def _cmd_realm_show(args) -> int:
 
 def _cmd_realm_create(args) -> int:
     if getattr(args, "dry_run", False):
-        row = {"id": f"realm_dry_{uuid.uuid4().hex[:6]}", "name": args.name, "server_id": args.server, "workspaces": 0, "sync": "in_sync", "updated_at": now()}
+        row = {"id": f"realm_dry_{uuid.uuid4().hex[:6]}", "name": args.name, "server_id": args.server, "workspaces": 0, "sync": None, "updated_at": now()}
         _print_stage42(_object_envelope("realm", row), args=args, default_output="json")
         return 0
     item = RealmStore().create(name=args.name, server_id=args.server)
