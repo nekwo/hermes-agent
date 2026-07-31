@@ -543,7 +543,13 @@ class GatewaySlashCommandsMixin:
         from tools.process_registry import format_uptime_short
 
         source = event.source
-        session_entry = self.session_store.get_or_create_session(source)
+        # Must go through the awaited facade, not the raw sync store: this is
+        # loop-side code and `session_store.get_or_create_session()` does
+        # blocking SQLite work that would stall every other gateway turn.
+        # Enforced by the AST guard in tests/gateway/test_async_session_store.py,
+        # which arrived with the 2026-07-31 upstream merge; this fork-owned
+        # handler predates the guard and was the single violation it found.
+        session_entry = await self.async_session_store.get_or_create_session(source)
         session_key = session_entry.session_key
         adapter = self.adapters.get(source.platform) if source else None
         pending_slot = getattr(adapter, "_pending_messages", {}) if adapter is not None else {}
