@@ -213,15 +213,6 @@ def self_test_summary(evidence: SelfTestEvidence) -> dict[str, Any]:
     }
 
 
-def _relative_runtime_path(path) -> str:
-    resolved = path.resolve()
-    root = paths.store_root().resolve()
-    try:
-        return resolved.relative_to(root).as_posix()
-    except ValueError:
-        return resolved.name
-
-
 def _read_evidence(path) -> SelfTestEvidence:
     raw = json.loads(path.read_text(encoding="utf-8"))
     return SelfTestEvidence(

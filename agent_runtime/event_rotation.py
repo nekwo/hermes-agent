@@ -311,20 +311,6 @@ def prepare_live_for_append(cap_bytes: int) -> Path:
     return live.path
 
 
-def rotate_if_needed(cap_bytes: int) -> dict[str, Any] | None:
-    """Explicit rotation check (tests / maintenance). Returns rotation info when
-    a rotation happened, else ``None``. MUST hold ``events_lock()``."""
-    sealed, live = _manifest_to_slices(_load_manifest())
-    cap = _normalize_cap(cap_bytes)
-    if cap <= 0:
-        return None
-    size = _live_size(live)
-    if size < cap:
-        return None
-    _new_live_path, info = _rotate(sealed, live, size)
-    return info
-
-
 def rotation_health() -> dict[str, Any]:
     """Accounting for ``event_log_health``: slice census + logical tail. Stat-only
     for bytes; reads slice files for line counts (a maintenance-path call)."""

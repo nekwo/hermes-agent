@@ -369,11 +369,6 @@ _PROFILE_READINESS_MEMO_MAX = 512
 _profile_readiness_memo: dict[tuple[Any, ...], dict[str, Any]] = {}
 
 
-def _profile_readiness_cache_clear() -> None:
-    """Test hook — drop the readiness TTL memo."""
-    _profile_readiness_memo.clear()
-
-
 def _cached_profile_readiness_for_visibility(
     persona_id: str,
     hermes_profile: str,

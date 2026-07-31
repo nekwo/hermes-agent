@@ -39,10 +39,6 @@ def default_board_id(workspace_id: str) -> str:
     return f"board_default_{workspace_id}"
 
 
-def is_default_board_id(board_id: str, workspace_id: str) -> bool:
-    return board_id == default_board_id(workspace_id)
-
-
 def default_board_columns() -> list[BoardColumn]:
     return [BoardColumn(column_id=cid, title=title, kind=kind, wip_limit=None) for cid, title, kind in DEFAULT_COLUMNS]
 

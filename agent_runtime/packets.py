@@ -798,11 +798,3 @@ def _looks_like_absolute_path(text: str) -> bool:
     return False
 
 
-def _truncate_free_fields(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {str(key): _truncate_free_fields(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_truncate_free_fields(item) for item in value[:20]]
-    if isinstance(value, str):
-        return value[:280] if len(value) > 280 else value
-    return value

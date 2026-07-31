@@ -119,7 +119,15 @@ def test_the_harness_namespace_no_longer_exposes_the_removed_names():
 
 
 def test_every_source_symbol_the_bindings_pointed_at_is_untouched():
-    """Negative gate: this stage removed bindings, never definitions."""
+    """Negative gate: THIS stage removed bindings, never definitions.
+
+    Two exceptions, and they are deliberate rather than a hole in the gate:
+    ``cli_format.human_task_line`` / ``task_summary`` were dead in their own
+    right (task-record formatters with no reader anywhere once this binding
+    went), so the very next cluster removed the definitions too. They are
+    asserted ABSENT here so this file states which side of that line each name
+    landed on instead of silently dropping them.
+    """
 
     from agent_runtime import cli_format, scope_control, states, terminal_envelope
     from agent_runtime import worker_sessions
@@ -129,8 +137,9 @@ def test_every_source_symbol_the_bindings_pointed_at_is_untouched():
     from agent_runtime.persona_assignments import default_chat_session_id_for_instance
     from agent_runtime.profile_runner import RunBudgetExceeded
 
-    assert callable(cli_format.human_task_line)
-    assert callable(cli_format.task_summary)
+    assert callable(cli_format.emit_json)
+    assert not hasattr(cli_format, "human_task_line")
+    assert not hasattr(cli_format, "task_summary")
     assert callable(worker_sessions.worker_session_summary)
     assert callable(operator_takeover_worker)
     assert callable(launcher_visual_cleanup_needed)

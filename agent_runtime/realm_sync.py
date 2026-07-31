@@ -34,7 +34,6 @@ from .store import RealmStore, WorkspaceStore
 logger = logging.getLogger(__name__)
 
 
-SYNC_STATES = {"in_sync", "behind", "ahead", "conflict", "publishing"}
 SECRET_PATH_MARKERS = {
     ".env",
     "auth.json",

@@ -702,16 +702,6 @@ def _append_worktree_excludes(worktree: Path, patterns: list[str]) -> None:
         _log_worktree_event("worktree_support_failed", {"worktree": str(worktree), "support": "git_exclude"})
 
 
-# ``b/<path>``. Reused by both the legacy handoff gate and the root-node evidence
-# stack so the two never drift.
-_DIFF_TEST_FILE_RE = re.compile(
-    r"(^|[/\\])(test|tests)[/\\].*\.(py|dart|js|ts|tsx|jsx)$|test_.*\.py|_test\.dart|\.spec\.",
-    re.IGNORECASE,
-)
-_DIFF_REMOVED_ASSERT_RE = re.compile(r"\b(assert|expect|self\.assert|pytest\.raises)\b")
-_DIFF_ADDED_SKIP_RE = re.compile(r"\b(skip|skipif|xfail|@pytest\.mark\.skip|Skip\()\b")
-
-
 def safe_affected_repo_labels(repos: list[str] | tuple[str, ...] | None) -> list[str]:
     labels: list[str] = []
     for repo in repos or []:

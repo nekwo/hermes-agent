@@ -97,15 +97,9 @@ KIND_PROFILE_MEMORY = "profile_memory"
 KIND_CORE_CONTEXT = "core_context"
 KIND_PERSONA_PROMPT = "persona_prompt"
 
-#: Member-ACCUMULATED state. Never a definition, never overwritten on divergence.
-MEMBER_STATE_KINDS: frozenset[str] = frozenset({KIND_PROFILE_MEMORY, KIND_CORE_CONTEXT})
-
 MEMORY_DESTINATION = "memories/MEMORY.md"
 CORE_CONTEXT_FILENAMES: tuple[str, ...] = ("AGENTS.md", "CLAUDE.md", "GEMINI.md")
 PERSONA_PROMPT_DIR = "personas"
-
-#: Legacy per-persona segment → the profile-relative destination it meant.
-_LEGACY_SEGMENTS = ("memories", "context", "system_prompt", "soul_overlay")
 
 #: Bound on an untrusted remote destination depth (a realm cannot make a member
 #: materialize an arbitrarily deep tree).

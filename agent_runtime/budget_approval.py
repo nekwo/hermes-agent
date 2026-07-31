@@ -7,10 +7,6 @@ from .states import RunState
 from .store import RunStore
 
 
-def eligible_budget_approval_incidents(incidents: list[Any], run_store: RunStore, *, cap: int = 2) -> list[Any]:
-    return [incident for incident in incidents if budget_incident_can_continue(incident, run_store, cap=cap)]
-
-
 def budget_incident_can_continue(incident: Any, run_store: RunStore, *, cap: int = 2) -> bool:
     if getattr(incident, "closed_at", None) is not None:
         return False

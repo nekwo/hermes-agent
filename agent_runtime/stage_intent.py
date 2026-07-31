@@ -124,20 +124,6 @@ def stage_requires_product_edit(task: Task, stage: object | None = None) -> bool
     return False
 
 
-def first_incomplete_product_edit_stage(task: Task, *, excluding_stage_id: str | None = None) -> object | None:
-    excluded = str(excluding_stage_id or "").strip()
-    for stage in []:
-        if excluded and stage.id == excluded:
-            continue
-        status = getattr(stage, "status", None)
-        status_value = status.value if hasattr(status, "value") else str(status or "")
-        if status_value in {"ready_for_qa", "passed"}:
-            continue
-        if stage_requires_product_edit(task, stage):
-            return stage
-    return None
-
-
 def no_product_edit_recipe_conflicts_with_stage(task: Task, stage: object | None, recipe_id: str | None) -> bool:
     safe_recipe_id = str(recipe_id or "").strip()
     if not no_product_edit_recipe_id(safe_recipe_id):
@@ -149,57 +135,6 @@ def no_product_edit_recipe_conflicts_with_stage(task: Task, stage: object | None
     if safe_recipe_id == no_product_edit_recipe_for_stage(stage) and not stage_requires_product_edit(task, stage):
         return False
     return stage_requires_product_edit(task, stage)
-
-
-def stage_is_committed_verification_gate(task: Task, stage: object | None) -> bool:
-    """Return true when an implementation-shaped stage should go straight to proof.
-
-    Live Neko can correctly preserve a Hermes code-change as an implementation
-    stage while also saying the fix is already committed and only focused proof
-    is required. In that shape, broad Dev inspection is waste; the Harness
-    should steer Dev to request the named proof command immediately.
-    """
-
-    if stage is None or not _stage_has_command_gate(stage):
-        return False
-    text = _combined_text(task, stage)
-    if not any(marker in text for marker in ("verify", "verification", "proof", "inspect")):
-        return False
-    if "committed" in text or "already landed" in text:
-        return True
-    if _explicit_no_product_edit(text) and any(marker in text for marker in ("focused test", "focused proof", "command proof")):
-        return True
-    return False
-
-
-def extract_single_known_stage_reference(task: Task, *, source_stage_id: str, text: str) -> str | None:
-    haystack = str(text or "")
-    if not haystack:
-        return None
-    matches = []
-    for stage in []:
-        sid = str(stage.id or "").strip()
-        if not sid or sid == source_stage_id:
-            continue
-        if sid in haystack:
-            matches.append(sid)
-    unique = sorted(set(matches))
-    if len(unique) != 1:
-        return None
-    lowered = haystack.lower()
-    route_markers = (
-        "advance",
-        "back to",
-        "current stage",
-        "return",
-        "route",
-        "set",
-        "switch",
-        "target",
-    )
-    if any(marker in lowered for marker in route_markers):
-        return unique[0]
-    return None
 
 
 def _combined_text(task: Task, stage: object | None) -> str:
@@ -320,26 +255,3 @@ def _looks_like_no_edit_contract_stage(stage: object) -> bool:
     return any(marker in text for marker in ("contract smoke", "smoke", "proof only", "verify", "verification"))
 
 
-def _stage_has_command_gate(stage: object) -> bool:
-    return any(_looks_like_command(item) for item in getattr(stage, "test_plan", []) or [])
-
-
-def _looks_like_command(value: Any) -> bool:
-    text = str(value or "").strip().lower()
-    return text.startswith(
-        (
-            "flutter ",
-            "dart ",
-            "python ",
-            "py ",
-            "pytest",
-            "powershell",
-            "cmd ",
-            "npm ",
-            "pnpm ",
-            "yarn ",
-            "node ",
-            ".\\",
-            "./",
-        )
-    )

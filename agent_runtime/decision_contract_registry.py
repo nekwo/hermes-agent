@@ -15,36 +15,6 @@ _CHECKLIST_PAYLOAD_KEYS = ("active_checklist_item_id", "checklist_updates", "sel
 
 
 @dataclass(frozen=True, slots=True)
-class FieldContract:
-    name: str
-    field_type: str = "any"
-    required: bool = False
-    enum: tuple[str, ...] = ()
-    item_type: str | None = None
-    min_items: int | None = None
-    object_contract: str | None = None
-    redaction: str = "safe"
-    normalization: str = "reject_unknown"
-    description: str = ""
-
-    def manifest(self) -> dict[str, Any]:
-        return _drop_empty(
-            {
-                "name": self.name,
-                "type": self.field_type,
-                "required": self.required,
-                "enum": list(self.enum),
-                "item_type": self.item_type,
-                "min_items": self.min_items,
-                "object_contract": self.object_contract,
-                "redaction": self.redaction,
-                "normalization": self.normalization,
-                "description": self.description,
-            }
-        )
-
-
-@dataclass(frozen=True, slots=True)
 class ObjectContract:
     id: str
     required_keys: tuple[str, ...] = ()

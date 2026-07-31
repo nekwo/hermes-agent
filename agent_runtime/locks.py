@@ -126,14 +126,6 @@ def events_lock() -> Iterator[None]:
 
 
 @contextlib.contextmanager
-def repo_land_lock(source_root: str | Path) -> Iterator[None]:
-    root = str(Path(source_root).resolve()).lower()
-    digest = hashlib.sha256(root.encode("utf-8")).hexdigest()[:24]
-    with _file_lock(paths.lock_dir() / "repo_land" / f"{digest}.lock"):
-        yield
-
-
-@contextlib.contextmanager
 def incident_lock(incident_id: str) -> Iterator[None]:
     with _file_lock(paths.lock_dir() / "incidents" / f"{incident_id}.lock"):
         yield

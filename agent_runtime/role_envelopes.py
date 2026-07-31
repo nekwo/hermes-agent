@@ -205,39 +205,6 @@ class RoleEnvelopeStore:
         return max(candidates, key=lambda item: item.updated_at or item.started_at)
 
 
-def role_envelope_summary(envelope: RoleEnvelope, *, checklist_store: RoleChecklistStore | None = None) -> dict[str, Any]:
-    checklist_store = checklist_store or RoleChecklistStore()
-    checklist = None
-    if envelope.checklist_id:
-        try:
-            checklist = checklist_store.get(envelope.task_id, envelope.checklist_id)
-        except Exception:
-            checklist = None
-    return {
-        "envelope_id": envelope.envelope_id,
-        "task_id": envelope.task_id,
-        "role_id": envelope.role_id,
-        "worker_session_id": envelope.worker_session_id,
-        "mission_stage_id": envelope.mission_stage_id,
-        "phase": envelope.phase,
-        "status": envelope.status,
-        "started_at": envelope.started_at,
-        "updated_at": envelope.updated_at,
-        "closed_at": envelope.closed_at,
-        "checklist_id": envelope.checklist_id,
-        "proof_batch_id": envelope.proof_batch_id,
-        "last_run_id": envelope.last_run_id,
-        "last_decision_type": envelope.last_decision_type,
-        "continuation_count": envelope.continuation_count,
-        "no_progress_count": envelope.no_progress_count,
-        "repair_count": envelope.repair_count,
-        "close_reason": envelope.close_reason,
-        "continuation_reason": envelope.continuation_reason,
-        "legacy_projection": envelope.legacy_projection,
-        "checklist": checklist_summary(checklist) if checklist is not None else None,
-    }
-
-
 def role_envelope_event_payload(envelope: RoleEnvelope) -> dict[str, Any]:
     return {
         "envelope_id": envelope.envelope_id,

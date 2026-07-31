@@ -63,8 +63,6 @@ PLAN_ACTIONS = frozenset(
         "refuse_invalid",
     }
 )
-RESULT_ACTIONS = frozenset({"promoted", "noop", "held", "refused", "dry_run"})
-
 _REALM_INBOX_DIRNAME = ".realm_inbox"
 _PROVENANCE_DIRNAME = ".provenance"
 _ARCHIVE_DIRNAME = ".archive"
@@ -131,7 +129,7 @@ class PromotionPlan:
 @dataclass(frozen=True)
 class PromotionResult:
     """Outcome of :func:`execute_promotion`. ``action`` is one of
-    :data:`RESULT_ACTIONS`.
+    ``promoted`` / ``noop`` / ``held`` / ``refused`` / ``dry_run``.
 
     ``reason_code`` is an optional MACHINE-readable companion to ``reason``:
     when the door refuses on installer-ownership policy it carries the matching

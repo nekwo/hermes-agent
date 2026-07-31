@@ -140,21 +140,6 @@ def harness_skill_hash_mismatches(skill_names: list[str], *, hermes_home: Path |
     return mismatches
 
 
-def harness_skill_installed_ok(skill: str, *, hermes_home: Path | None = None) -> bool:
-    from agent.skill_utils import skill_package_content_hash
-
-    if skill not in HARNESS_SKILLS:
-        return False
-    source = harness_skill_source(skill)
-    destination = harness_skill_destination(skill, hermes_home=hermes_home)
-    return (
-        source.exists()
-        and destination.exists()
-        and skill_package_content_hash(source.parent, source)
-        == skill_package_content_hash(destination.parent, destination)
-    )
-
-
 def file_sha256(path: Path) -> str:
     # mtime-cached: skill-hash checks run per skill × per persona × per resolver
     # pass during a snapshot build, all hashing the same unchanged files.

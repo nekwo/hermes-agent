@@ -3,7 +3,6 @@ from __future__ import annotations
 import re
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol
 
 
 class RedactionStatus(StrEnum):
@@ -140,11 +139,6 @@ SECRET_PATTERNS = [
     re.compile(r"(?i)Authorization:\s*Bearer\s+[A-Za-z0-9._\-]+"),
     re.compile(r"(?i)(X-Amz-Signature|Signature|Credential)=")
 ]
-
-
-class RedactionScanner(Protocol):
-    def scan_text(self, path: Path) -> RedactionStatus: ...
-    def scan_image(self, path: Path) -> RedactionStatus: ...
 
 
 class BasicRedactionScanner:

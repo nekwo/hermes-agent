@@ -210,16 +210,6 @@ def stagec_artifacts_dir() -> Path:
     return store_root() / "stagec_artifacts"
 
 
-def stagec_artifacts_task_dir(token: str) -> Path:
-    """Per-caller Stage C artifact subdirectory.
-
-    ``token`` is a naming token only — it groups one Stage C session's logs and is
-    never resolved back to a Task record.
-    """
-
-    return stagec_artifacts_dir() / _safe_path_token(token)
-
-
 def events_path() -> Path:
     """The pristine/base live event-log file.
 
@@ -348,14 +338,6 @@ def role_checklist_event_path(task_id: str, event_id: str) -> Path:
 
 def packet_artifacts_dir() -> Path:
     return store_root() / "packet_artifacts"
-
-
-def packet_artifacts_task_dir(task_id: str) -> Path:
-    return packet_artifacts_dir() / _safe_path_token(task_id)
-
-
-def packet_raw_artifact_path(task_id: str, packet_id: str) -> Path:
-    return packet_artifacts_task_dir(task_id) / f"{_safe_path_token(packet_id)}.raw.json"
 
 
 def worker_context_dir(task_id: str, persona_id: str) -> Path:

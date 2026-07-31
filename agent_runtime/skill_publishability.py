@@ -82,15 +82,6 @@ REASON_PROFILE_LOCAL_ONLY = "profile_local_only"
 REASON_EXTERNAL_DIR_ONLY = "external_dir_only"
 REASON_UNKNOWN_ROOT = "unknown_root"
 
-PUBLISHABLE_REASONS = frozenset(
-    {
-        REASON_SHARED_ROOT,
-        REASON_PROFILE_LOCAL_ONLY,
-        REASON_EXTERNAL_DIR_ONLY,
-        REASON_UNKNOWN_ROOT,
-    }
-)
-
 # ── Promotion-block reason codes (why the guarded door will not admit it) ───
 
 BLOCK_ALREADY_CANONICAL = "already_canonical"

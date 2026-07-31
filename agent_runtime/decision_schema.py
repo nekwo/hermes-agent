@@ -90,12 +90,6 @@ def validate_decision_for_role(decision: AgentDecision, role: AgentRole | str) -
     del decision, role
 
 
-def _extract_first_json_blob(text: str) -> str:
-    for blob in _extract_json_blobs(text):
-        return blob
-    raise ValueError("no JSON object found")
-
-
 def _extract_json_blobs(text: str) -> list[str]:
     fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL | re.IGNORECASE)
     if fenced:

@@ -491,26 +491,6 @@ def bundle_id_for(task_id: str, repo: str, *, stage_ids: list[str]) -> str:
     return f"bundle_{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:12]}"
 
 
-def find_best_bundle_for_action(task: Any, *, persona_id: str, stage_id: str | None = None, repo: str | None = None, store: RepoBundleStore | None = None) -> RepoBundle | None:
-    store = store or RepoBundleStore()
-    bundles = store.create_or_update_from_task(task)
-    wanted_stage = safe_token(stage_id)
-    wanted_repo = normalize_repo(repo)
-    wanted_persona = safe_token(persona_id)
-    if wanted_stage:
-        for bundle in bundles:
-            if wanted_stage in {safe_token(item) for item in bundle.stage_ids}:
-                return bundle
-    if wanted_repo:
-        for bundle in bundles:
-            if normalize_repo(bundle.repo) == wanted_repo:
-                return bundle
-    for bundle in bundles:
-        if safe_token(bundle.owner_persona_id) == wanted_persona:
-            return bundle
-    return bundles[0] if bundles else None
-
-
 def safe_bundle_state(value: str | None) -> str:
     state = safe_token(value)
     return state if state in REPO_BUNDLE_STATES else "planned"
