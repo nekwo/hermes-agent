@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Protocol, TYPE_CHECKING
+from typing import Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .tool_visibility import ToolVisibilityOptions
@@ -17,12 +17,6 @@ from .chat_lane_toolsets import (
     scope_chat_lane_toolsets,
 )
 from .config import chat_lane_restore_toolsets
-from .decision_schema import (
-    AgentDecision,
-    parse_structured_decision,
-    validate_decision_for_role,
-)
-from .decision_contracts import validate_planning_decision
 from .mcp_admission import (
     LANE_MISSION_CHAT,
     admission_enabled,
@@ -39,7 +33,6 @@ from .personas import all_registered_toolsets, blocked_tool_names, effective_too
 from .profile_context import resolve_persona_profile
 from .provider_health import assert_provider_health_for_persona
 from .terminal_envelope import (
-    LANE_MISSION_WORKER as TERMINAL_ENVELOPE_LANE_MISSION_WORKER,
     LANE_PERSONA_CHAT as TERMINAL_ENVELOPE_LANE_PERSONA_CHAT,
     scope_for_persona as terminal_envelope_scope_for_persona,
 )
@@ -47,7 +40,6 @@ from .profile_runner import (
     AgentRunRequest,
     AgentRunResult,
     ProfileAgentRunner,
-    RunBudgetExceeded,
     _blocked_tool_names_with_registry_hygiene,
 )
 from .progress import ChatProgressSink

@@ -87,14 +87,14 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 import json
 import logging
 import os
 from pathlib import Path
 import re
 import time
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Iterator, Mapping
 
 logger = logging.getLogger(__name__)
 

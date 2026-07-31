@@ -50,7 +50,7 @@ from typing import Any
 
 from hermes_time import now
 
-from . import event_rotation, paths
+from . import event_rotation
 
 PARITY_ENVELOPE_VERSION = 1
 

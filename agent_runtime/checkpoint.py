@@ -41,7 +41,6 @@ the schema — while the envelope reports what actually exists on disk.
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path

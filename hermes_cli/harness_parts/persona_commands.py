@@ -1345,8 +1345,6 @@ def _cmd_mission_chat_message(args) -> int:
     # explicit envelope provenance (relay_chain / relay_deadline_epoch), so
     # every transport into this handler gets the same depth/cycle/budget
     # answer; agent_chat_send carries the envelope but does not re-decide.
-    import time as _relay_time
-
     from agent_runtime import relay_policy
 
     relay_chain_in = relay_policy.normalize_chain(getattr(args, "relay_chain", None))

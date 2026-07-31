@@ -19,7 +19,7 @@ from hermes_time import now
 from hermes_constants import get_hermes_home
 from hermes_cli.profiles import list_profiles
 
-from agent_runtime.cli_format import emit_json, human_task_line, task_summary
+from agent_runtime.cli_format import emit_json
 from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config, mission_chat_clarify_token_binding, resolve_mission_chat_max_seconds
 from agent_runtime.continuity import return_summary_to_parent_session
 from agent_runtime.dispatch_session_policy import (
@@ -27,7 +27,6 @@ from agent_runtime.dispatch_session_policy import (
     resolve_dispatch_session_decision,
     session_established_payload,
 )
-from agent_runtime.operator_control import operator_takeover_worker
 from agent_runtime.realm_sync import read_realm_sync_sidecar
 from agent_runtime.coordinator_permissions import (
     CoordinatorPermissionScope,
@@ -36,7 +35,7 @@ from agent_runtime.coordinator_permissions import (
 )
 from agent_runtime.decision_contract_examples import verify_harness_skill_examples
 from agent_runtime.decision_contract_registry import canonical_role_value, contract_manifest, hud_shape_index_for_stage, verify_registry
-from agent_runtime.decision_schema import AgentDecision, DecisionType
+from agent_runtime.decision_schema import AgentDecision
 from agent_runtime.default_scope import (
     ensure_default_scope,
     preview_default_scope_migration,
@@ -48,7 +47,6 @@ from agent_runtime.errors import (
     DefaultScopeReconciliationRequired,
     EventPayloadTooLarge,
     InvalidTransition,
-    LegacyOrchestratorRemoved,
     NotFound,
     ProofMissing,
     RuntimeRootMismatch,
@@ -63,7 +61,6 @@ from agent_runtime.harness_doctor import (
     DEFAULT_WORKTREE_MIN_AGE_SECONDS,
     run_harness_doctor,
 )
-from agent_runtime.launcher_process_hygiene import launcher_visual_cleanup_needed
 from agent_runtime.models import AgentPersona, Event, apply_instance_model_overrides
 from agent_runtime import paths
 from agent_runtime.persona_assignments import (
@@ -79,7 +76,6 @@ from agent_runtime.persona_assignments import (
     canonical_chat_instance_id,
     canonical_persona_instance_id,
     chat_session_owner_instance_id,
-    default_chat_session_id_for_instance,
     migrate_retired_persona_assignment_task_ids,
     persona_assignment_store_enabled,
     persona_assignment_summary,
@@ -109,7 +105,6 @@ from agent_runtime.resolution import resolution_table, resolve_runtime
 from agent_runtime.migrations import effective_config_summary, migration_status
 from agent_runtime.mission_chat_turns import (
     MissionChatTurnPersistOutcome,
-    OPERATOR_RESOLVABLE_TURN_STATES,
     REPLY_RECOVERABLE_TURN_STATES,
     RESEND_BLOCKING_TURN_STATES,
     SETTLING_TURN_STATES,
@@ -154,15 +149,14 @@ from agent_runtime.prompt_observability import attach_prompt_observability_turn_
 from agent_runtime.provider_health import provider_health_for_personas
 from agent_runtime.skill_install import install_harness_skills, install_harness_skills_for_personas
 from agent_runtime.snapshot import build_snapshot, write_snapshot
-from agent_runtime.scope_control import find_discovery_task
-from agent_runtime.states import TaskState, RunState, WorkerSessionState
+from agent_runtime.states import WorkerSessionState
 from agent_runtime.status import build_status
 from agent_runtime.store import AgentStore
 from agent_runtime.store import RealmStore, WorkspaceStore
 from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
 from agent_runtime.tool_permissions import ChatToolPermissionStore, permission_state_for_chat
 from agent_runtime.tool_turn_history import persist_tool_turn_actual
-from agent_runtime.worker_sessions import WorkerSessionStore, worker_session_summary
+from agent_runtime.worker_sessions import WorkerSessionStore
 from agent_runtime.workspace_scope import exact_scoped_instance_ids
 
 PERSONA_CHAT_SESSION_SOURCE = "agent_runtime_persona_chat"

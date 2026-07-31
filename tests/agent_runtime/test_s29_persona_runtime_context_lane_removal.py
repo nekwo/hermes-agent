@@ -69,12 +69,33 @@ REMOVED_PERSONA_RUNTIME_IMPORTS = (
 )
 
 #: Imports on the SAME import lines that stay, because live code still uses them.
+#:
+#: RETARGETED 2026-07-31 (S41). ``AgentDecision`` and ``parse_structured_decision``
+#: were pinned here as live siblings. That was true when S29 landed and is not any
+#: more: the reachability audit found each had become a BINDING with no reader
+#: anywhere in ``persona_runtime`` (one line in the file — the import itself), so
+#: S41 cut them together with ``validate_decision_for_role`` and the whole
+#: ``decision_schema`` / ``decision_contracts`` import edge. They move to
+#: ``RETIRED_SINCE_S29`` below rather than quietly leaving this file, so the
+#: reversal stays visible instead of looking like the pin was never made. The two
+#: names still here are still called (``blocked_tool_names``, ``role_from_persona``).
 KEPT_PERSONA_RUNTIME_IMPORTS = (
-    "AgentDecision",
-    "parse_structured_decision",
     "blocked_tool_names",
     "role_from_persona",
 )
+
+#: Names this file once pinned as KEPT that a later pass proved dead. Asserting
+#: their ABSENCE keeps the witness honest in both directions.
+RETIRED_SINCE_S29 = (
+    "AgentDecision",
+    "parse_structured_decision",
+    "validate_decision_for_role",
+    "validate_planning_decision",
+)
+
+
+def test_the_names_this_witness_once_pinned_as_live_are_now_verified_dead():
+    assert [name for name in RETIRED_SINCE_S29 if hasattr(persona_runtime, name)] == []
 
 
 def test_the_agent_context_typed_helpers_are_gone():
