@@ -209,8 +209,7 @@ def test_the_live_repo_context_halves_survive():
         "worktree_patch_size_estimate",
         "repo_execution_context_for_task",
         "resolve_affected_repo_workdir",
-        "capture_repo_baseline",
-        "safe_affected_repo_labels",
+            "safe_affected_repo_labels",
     ):
         assert hasattr(repo_context, name), name
     # RepoContextExcerpt was flagged caller-free by an earlier audit; it is not.

@@ -67,14 +67,15 @@ def test_nothing_in_production_still_imports_the_shape():
 
 def test_the_agent_run_model_is_not_collateral():
     """``context_builder`` imported ``AgentRun`` to annotate the removed shape.
-    The model itself is live across the runtime and stays."""
+    The model itself is live across the runtime and stays, while S33 removed
+    persona_runtime's last repo-baseline-only import of it."""
 
     from agent_runtime.models import AgentRun
 
     assert AgentRun is not None
     from agent_runtime import persona_runtime
 
-    assert persona_runtime.AgentRun is AgentRun
+    assert not hasattr(persona_runtime, "AgentRun")
 
 
 def test_the_contract_45_mission_hud_observability_field_is_untouched():
