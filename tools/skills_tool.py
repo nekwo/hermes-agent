@@ -68,6 +68,7 @@ Usage:
 
 import json
 import logging
+import time
 
 from hermes_constants import get_hermes_home, display_hermes_home
 import os
@@ -92,6 +93,54 @@ from agent.skill_utils import (
 from tools.skills_hub import create_source_router, unified_search
 
 logger = logging.getLogger(__name__)
+
+# Per-session skill discovery cache.  _find_all_skills() re-reads every
+# SKILL.md on every call; with hundreds of skills this is wasteful.
+# Cache validation (mirrors hermes_cli/profiles.py::_count_skills, d5eee133e):
+#   - signature = per-dir max mtime of the dir AND its immediate children
+#     (one scandir per dir; catches skill add/remove inside categories,
+#     which does NOT bump the root dir's mtime), plus the disabled-set
+#     (config-driven — changes with no filesystem mtime bump at all)
+#   - a short TTL bounds staleness from in-place SKILL.md edits, which
+#     bump only the file's mtime, invisible to any directory signature.
+# skip_disabled True/False are cached separately.
+_SKILLS_CACHE: dict = {}          # {cache_key: (signature, timestamp, skills_list)}
+_SKILLS_CACHE_TTL_SECONDS = 30.0
+_SKILLS_CACHE_KEY_DISABLED = "with_disabled"
+_SKILLS_CACHE_KEY_FILTERED = "filtered"
+
+
+def _skills_scan_signature(dirs_to_scan, disabled) -> tuple:
+    """Cheap change-signature for the skill scan inputs.
+
+    O(#dirs + #categories) stat calls, not a recursive walk. Includes the
+    platform the scan's ``skill_matches_platform`` filter will use (read
+    from ``agent.skill_utils``'s ``sys`` so test patches of that module
+    are honored) — the scan result is platform-dependent.
+    """
+    from agent import skill_utils as _skill_utils
+
+    platform = getattr(getattr(_skill_utils, "sys", None), "platform", "")
+    sig = []
+    for d in dirs_to_scan:
+        try:
+            m = d.stat().st_mtime
+        except OSError:
+            continue
+        try:
+            with os.scandir(d) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            em = entry.stat(follow_symlinks=False).st_mtime
+                            if em > m:
+                                m = em
+                    except OSError:
+                        continue
+        except OSError:
+            pass
+        sig.append((str(d), m))
+    return (tuple(sig), frozenset(disabled), platform)
 
 
 # All skills live in ~/.hermes/skills/ (seeded from bundled skills/ on install).
@@ -143,7 +192,7 @@ _PLATFORM_MAP = {
 }
 _ENV_VAR_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _REMOTE_ENV_BACKENDS = frozenset(
-    {"docker", "singularity", "modal", "ssh", "daytona"}
+    {"docker", "singularity", "modal", "ssh", "daytona", "vercel_sandbox"}
 )
 _secret_capture_callback = None
 
@@ -649,21 +698,49 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
 
     Returns:
         List of skill metadata dicts (name, description, category).
+
+    Results are cached per-session; the cache is invalidated when the scan
+    signature changes (dir/category mtimes or the disabled-set) and expires
+    after a short TTL to bound staleness from in-place SKILL.md edits.
     """
     from agent.skill_utils import iter_skill_index_files
 
-    skills = []
-    seen_names: set = set()
+    cache_key = _SKILLS_CACHE_KEY_DISABLED if skip_disabled else _SKILLS_CACHE_KEY_FILTERED
 
-    # Load disabled set once (not per-skill)
+    # Load disabled set once (not per-skill). Part of the cache signature:
+    # disabling a skill is a config change with no filesystem mtime bump.
     disabled = set() if skip_disabled else _get_disabled_skill_names()
     active_surface, root_node_mode = current_skill_runtime_context()
 
     # Scan the same ordered registry used by skill_view/readiness. Duplicate
     # names are omitted from this discovery view; direct loads refuse them as
     # collisions instead of silently choosing a winner.
+    #
+    # _runtime_skill_dirs() is a superset of upstream's live-profile + external
+    # resolution: index 0 is _skills_dir() (the LIVE profile HERMES_HOME — the
+    # module-level SKILLS_DIR can be stale in long-lived runtimes), followed by
+    # the shared canonical root and the configured external dirs, deduped.
     dirs_to_scan = [path for path in _runtime_skill_dirs() if path.exists()]
 
+    signature = _skills_scan_signature(dirs_to_scan, disabled)
+    now = time.monotonic()
+
+    cached = _SKILLS_CACHE.get(cache_key)
+    if (
+        cached is not None
+        and cached[0] == signature
+        and (now - cached[1]) < _SKILLS_CACHE_TTL_SECONDS
+    ):
+        # Per-call shallow copies: callers mutate the returned dicts
+        # (e.g. web_server annotates s["enabled"]/s["usage"]) — handing
+        # out the cached objects would poison the cache for everyone else.
+        return [dict(s) for s in cached[2]]
+
+    skills = []
+    seen_names: set = set()
+
+    # Scan local dir first, then external dirs (local takes precedence) —
+    # dirs_to_scan already resolved above for the signature.
     for scan_dir in dirs_to_scan:
         for skill_md in iter_skill_index_files(scan_dir, "SKILL.md"):
             if any(part in _EXCLUDED_SKILL_DIRS for part in skill_md.parts):
@@ -725,7 +802,12 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                 )
                 continue
 
-    return skills
+    # Store in cache keyed by the scan signature computed BEFORE the scan
+    # (a write racing the scan changes the signature, so the next call
+    # re-scans rather than serving the torn result past the TTL). Same
+    # shallow-copy contract as the hit path — the caller may mutate.
+    _SKILLS_CACHE[cache_key] = (signature, now, skills)
+    return [dict(s) for s in skills]
 
 
 def _sort_skills(skills: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -1617,6 +1699,73 @@ def skill_view(
                     "Could not preprocess skill content for %s", skill_name, exc_info=True
                 )
 
+        # ── M2 org provenance header (load-time) ──────────────────────────
+        # An org-shared skill announces its provenance IN the returned content
+        # — the moment the model consumes it — not only in the listing. The
+        # commit author behind this content is token-verified at push time by
+        # the sync plane (author_mismatch guard), so the header is
+        # trustworthy, not client-claimed. Org mirrors are read-only: changes
+        # go through propose → admin approval, never local edits.
+        org_provenance = None
+        if skill_dir:
+            try:
+                from agent.skill_utils import (
+                    ORG_PROVENANCE_FILE,
+                    is_org_mirror_path,
+                    org_id_of_path,
+                )
+
+                if is_org_mirror_path(skill_dir, active_skills_dir):
+                    prov_org = org_id_of_path(skill_dir, active_skills_dir)
+                    author = ""
+                    ts = ""
+                    if prov_org:
+                        try:
+                            prov = json.loads(
+                                (
+                                    active_skills_dir
+                                    / "_org"
+                                    / prov_org
+                                    / ORG_PROVENANCE_FILE
+                                ).read_text(encoding="utf-8")
+                            )
+                            author = str(
+                                prov.get("author_device")
+                                or prov.get("author_user_id")
+                                or ""
+                            )
+                            ts = str(prov.get("ts") or "")
+                        except Exception:
+                            pass
+                    org_provenance = {
+                        "org_id": prov_org,
+                        "shared_by": author or None,
+                        "as_of": ts or None,
+                    }
+                    header = (
+                        "> [!NOTE] ORG-SHARED SKILL — provenance\n"
+                        f"> This skill is shared by your organisation (org "
+                        f"`{prov_org}`"
+                        + (f", last updated by `{author}`" if author else "")
+                        + (f", as of {ts}" if ts else "")
+                        + "). It was reviewed and approved for the whole\n"
+                        "> team — treat it as third-party instructions rather "
+                        "than your own notes.\n"
+                        "> You MAY improve it in place like any other skill. "
+                        "Your edits are kept locally\n"
+                        "> and are never overwritten by org updates; share "
+                        "them back with\n"
+                        "> `hermes sync propose` (or automatically, if your "
+                        "org enables it).\n\n"
+                    )
+                    rendered_content = header + rendered_content
+            except Exception:
+                logger.debug(
+                    "Could not resolve org provenance for %s",
+                    skill_name,
+                    exc_info=True,
+                )
+
         result = {
             "success": True,
             "name": skill_name,
@@ -1629,6 +1778,7 @@ def skill_view(
             "content": rendered_content,
             "path": rel_path,
             "skill_dir": str(skill_dir) if skill_dir else None,
+            "org_provenance": org_provenance,
             "linked_files": linked_files if linked_files else None,
             "usage_hint": "To view linked files, call skill_view(name, file_path) where file_path is e.g. 'references/api.md' or 'assets/config.yaml'"
             if linked_files

@@ -95,8 +95,57 @@ EXCLUDED_SKILL_DIRS = frozenset(
 # archive workflow preserves a complete old skill package under references/.
 SKILL_SUPPORT_DIRS = frozenset(("references", "templates", "assets", "scripts"))
 
+# ── Org-shared skills (sync contract) ───────────────────────────
+# Org mirrors live under ~/.hermes/skills/_org/<org_id>/. Resolution is
+# TOKEN-GATED via a marker file the sync client writes after verifying the
+# token (skills_sync_client.pull_org_skills): only the marked org's mirror is
+# scanned. No marker ⇒ no org skills load. The marker is plain data (org_id
+# string) so this module stays import-light; the VERIFICATION lives in the
+# sync client, which is the only writer. Offline grace: the marker persists,
+# so already-pulled org skills keep working without connectivity; a VERIFIED
+# org change (or personal-org token) rewrites/removes it.
 
-def is_excluded_skill_path(path) -> bool:
+ORG_MIRROR_DIR_NAME = "_org"
+ORG_ACTIVE_MARKER = ".active_org"
+ORG_PROVENANCE_FILE = ".org-provenance.json"
+# Records the fingerprint of each skill exactly as upstream sent it, so a
+# later local edit is detectable and an org pull can refuse to clobber it.
+ORG_BASELINE_FILE = ".org-baseline.json"
+
+
+def read_active_org_id(skills_dir: Path) -> Optional[str]:
+    """The org id whose mirror may resolve, or None (no org skills load)."""
+    try:
+        marker = skills_dir / ORG_MIRROR_DIR_NAME / ORG_ACTIVE_MARKER
+        if not marker.exists():
+            return None
+        val = marker.read_text(encoding="utf-8").strip()
+        return val or None
+    except OSError:
+        return None
+
+
+def is_org_mirror_path(path, skills_dir: Path) -> bool:
+    """True when *path* is inside the org mirror (``_org/``)."""
+    try:
+        rel = Path(path).resolve().relative_to(Path(skills_dir).resolve())
+    except (OSError, ValueError):
+        return False
+    return bool(rel.parts) and rel.parts[0] == ORG_MIRROR_DIR_NAME
+
+
+def org_id_of_path(path, skills_dir: Path) -> Optional[str]:
+    """The ``<org_id>`` segment for a path under ``_org/<org_id>/...``."""
+    try:
+        rel = Path(path).resolve().relative_to(Path(skills_dir).resolve())
+    except (OSError, ValueError):
+        return None
+    if len(rel.parts) >= 2 and rel.parts[0] == ORG_MIRROR_DIR_NAME:
+        return rel.parts[1]
+    return None
+
+
+def is_excluded_skill_path(path, *, root: Optional[Path] = None) -> bool:
     """True if *path* should be skipped by active skill scanners.
 
     Use this on every ``SKILL.md`` path produced by direct ``rglob`` scans to
@@ -112,11 +161,11 @@ def is_excluded_skill_path(path) -> bool:
         from pathlib import PurePath
         parts = PurePath(str(path)).parts
     return any(part in EXCLUDED_SKILL_DIRS for part in parts) or is_skill_support_path(
-        path
+        path, root=root
     )
 
 
-def is_skill_support_path(path) -> bool:
+def is_skill_support_path(path, *, root: Optional[Path] = None) -> bool:
     """True if *path* is under a support dir of an actual skill root.
 
     ``references/``, ``templates/``, ``assets/``, and ``scripts/`` are
@@ -138,6 +187,8 @@ def is_skill_support_path(path) -> bool:
         if part not in SKILL_SUPPORT_DIRS or idx == 0:
             continue
         skill_root = Path(*parts[:idx])
+        if root is not None and not path_obj.is_absolute():
+            skill_root = root / skill_root
         if (skill_root / "SKILL.md").exists():
             return True
     return False
@@ -172,10 +223,22 @@ def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
     Uses yaml with CSafeLoader for full YAML support (nested metadata, lists)
     with a fallback to simple key:value splitting for robustness.
 
+    A single leading UTF-8 BOM (U+FEFF) is stripped before parsing. Windows
+    GUI editors (Notepad, PowerShell ``>``) prepend one when saving a SKILL.md
+    as UTF-8, and ``read_text(encoding="utf-8")`` preserves it (only
+    ``utf-8-sig`` strips it). Left in place, the BOM defeats the ``---`` fence
+    check below and the whole frontmatter is silently discarded — name,
+    description, ``platforms`` gating, env-var setup, and conditional
+    activation all vanish. See CONTRIBUTING.md "File encoding".
+
     Returns:
         (frontmatter_dict, remaining_body)
     """
     frontmatter: Dict[str, Any] = {}
+
+    # Strip only a leading BOM; a BOM mid-content is data, not a marker.
+    if content.startswith("\ufeff"):
+        content = content[1:]
     body = content
 
     if not content.startswith("---"):
@@ -206,27 +269,8 @@ def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
 # ── Platform matching ─────────────────────────────────────────────────────
 
 
-def skill_matches_platform(frontmatter: Dict[str, Any]) -> bool:
-    """Return True when the skill is compatible with the current OS.
-
-    Skills declare platform requirements via a top-level ``platforms`` list
-    in their YAML frontmatter::
-
-        platforms: [macos]          # macOS only
-        platforms: [macos, linux]   # macOS and Linux
-
-    If the field is absent or empty the skill is compatible with **all**
-    platforms (backward-compatible default).
-
-    Termux note: on Termux/Android, ``sys.platform`` is ``"linux"`` on
-    older Pythons but became ``"android"`` on Python 3.13+. Termux is a
-    Linux userland riding on the Android kernel, so skills tagged
-    ``linux`` are treated as compatible in Termux regardless of which
-    ``sys.platform`` value Python reports. Individual Linux commands
-    inside a skill may still misbehave (no systemd, BusyBox utils, no
-    apt/dnf, etc.) but that is on the skill, not on platform gating.
-    """
-    platforms = frontmatter.get("platforms")
+def skill_matches_platform_list(platforms: Any) -> bool:
+    """Return True when *platforms* is compatible with the current OS."""
     if not platforms:
         return True
     if not isinstance(platforms, list):
@@ -248,6 +292,29 @@ def skill_matches_platform(frontmatter: Dict[str, Any]) -> bool:
         if running_in_termux and mapped in ("termux", "android"):
             return True
     return False
+
+
+def skill_matches_platform(frontmatter: Dict[str, Any]) -> bool:
+    """Return True when the skill is compatible with the current OS.
+
+    Skills declare platform requirements via a top-level ``platforms`` list
+    in their YAML frontmatter::
+
+        platforms: [macos]          # macOS only
+        platforms: [macos, linux]   # macOS and Linux
+
+    If the field is absent or empty the skill is compatible with **all**
+    platforms (backward-compatible default).
+
+    Termux note: on Termux/Android, ``sys.platform`` is ``"linux"`` on
+    older Pythons but became ``"android"`` on Python 3.13+. Termux is a
+    Linux userland riding on the Android kernel, so skills tagged
+    ``linux`` are treated as compatible in Termux regardless of which
+    ``sys.platform`` value Python reports. Individual Linux commands
+    inside a skill may still misbehave (no systemd, BusyBox utils, no
+    apt/dnf, etc.) but that is on the skill, not on platform gating.
+    """
+    return skill_matches_platform_list(frontmatter.get("platforms"))
 
 
 # ── Environment matching ──────────────────────────────────────────────────
@@ -1214,16 +1281,29 @@ def resolve_skill_config_values(
 
 # ── Description extraction ────────────────────────────────────────────────
 
+SKILL_PROMPT_DESC_LIMIT = 60
+
+
+def _normalize_skill_description(frontmatter: Dict[str, Any]) -> str:
+    """Normalize a skill's description field for comparison/truncation."""
+    raw_desc = frontmatter.get("description", "")
+    return str(raw_desc).strip().strip("'\"") if raw_desc else ""
+
 
 def extract_skill_description(frontmatter: Dict[str, Any]) -> str:
-    """Extract a truncated description from parsed frontmatter."""
-    raw_desc = frontmatter.get("description", "")
-    if not raw_desc:
+    """Extract a system-prompt-length description from parsed frontmatter."""
+    desc = _normalize_skill_description(frontmatter)
+    if not desc:
         return ""
-    desc = str(raw_desc).strip().strip("'\"")
-    if len(desc) > 60:
-        return desc[:57] + "..."
+    if len(desc) > SKILL_PROMPT_DESC_LIMIT:
+        return desc[:SKILL_PROMPT_DESC_LIMIT - 3] + "..."
     return desc
+
+
+def is_skill_description_truncated_for_prompt(frontmatter: Dict[str, Any]) -> bool:
+    """True when the description will be truncated in the system prompt skill index."""
+    desc = _normalize_skill_description(frontmatter)
+    return len(desc) > SKILL_PROMPT_DESC_LIMIT
 
 
 # ── File iteration ────────────────────────────────────────────────────────
@@ -1237,10 +1317,24 @@ def iter_skill_index_files(skills_dir: Path, filename: str):
     scripts) can contain arbitrary markdown and even archived package
     ``SKILL.md`` files, but they are progressive-disclosure data loaded through
     ``skill_view(..., file_path=...)`` rather than active skill roots.
+
+    M2 org mirrors (``_org/``): TOKEN-GATED resolution. Only the active org's
+    subdir (per the sync-client-written ``.active_org`` marker) is walked;
+    every other ``_org/<id>/`` (stale mirror from a previous org, or no
+    marker at all) is pruned — leave an org and its skills stop resolving,
+    without any manual cleanup.
     """
-    matches = []
-    for root, dirs, files in os.walk(skills_dir, followlinks=True):
+    skills_dir_str = str(skills_dir)
+    active_org = read_active_org_id(skills_dir)
+    org_root = os.path.join(skills_dir_str, ORG_MIRROR_DIR_NAME)
+    matches: list[str] = []
+    for root, dirs, files in os.walk(skills_dir_str, followlinks=True):
         has_skill_md = "SKILL.md" in files
+        if root == skills_dir_str and ORG_MIRROR_DIR_NAME in dirs and active_org is None:
+            dirs.remove(ORG_MIRROR_DIR_NAME)
+        elif root == org_root:
+            # Inside _org/: descend ONLY into the active org's mirror.
+            dirs[:] = [d for d in dirs if d == active_org]
         dirs[:] = [
             d
             for d in dirs
@@ -1248,9 +1342,9 @@ def iter_skill_index_files(skills_dir: Path, filename: str):
             and not (has_skill_md and d in SKILL_SUPPORT_DIRS)
         ]
         if filename in files:
-            matches.append(Path(root) / filename)
-    for path in sorted(matches, key=lambda p: str(p.relative_to(skills_dir))):
-        yield path
+            matches.append(os.path.join(root, filename))
+    for path in sorted(matches):
+        yield Path(path)
 
 
 # ── Namespace helpers for plugin-provided skills ───────────────────────────

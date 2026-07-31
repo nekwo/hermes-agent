@@ -62,11 +62,16 @@ def _resolve_review_runtime(agent: Any) -> Dict[str, Any]:
         "api_key": parent_runtime.get("api_key") or None,
         "base_url": parent_runtime.get("base_url") or None,
         "api_mode": parent_api_mode,
+        "credential_pool": getattr(agent, "_credential_pool", None),
+        "request_overrides": dict(getattr(agent, "request_overrides", {}) or {}),
+        "max_tokens": getattr(agent, "max_tokens", None),
+        "command": getattr(agent, "acp_command", None),
+        "args": list(getattr(agent, "acp_args", []) or []),
         "routed": False,
     }
     try:
-        from hermes_cli.config import load_config
-        cfg = load_config()
+        from hermes_cli.config import load_config_readonly
+        cfg = load_config_readonly()
     except Exception:
         return parent
     aux = cfg.get("auxiliary", {}) if isinstance(cfg.get("auxiliary"), dict) else {}
@@ -89,10 +94,15 @@ def _resolve_review_runtime(agent: Any) -> Dict[str, Any]:
         )
         return {
             "provider": rp.get("provider") or task_provider,
-            "model": task_model,
+            "model": rp.get("model") or task_model,
             "api_key": rp.get("api_key"),
             "base_url": rp.get("base_url"),
             "api_mode": rp.get("api_mode"),
+            "credential_pool": rp.get("credential_pool"),
+            "request_overrides": dict(rp.get("request_overrides") or {}),
+            "max_tokens": rp.get("max_output_tokens"),
+            "command": rp.get("command"),
+            "args": list(rp.get("args") or []),
             "routed": True,
         }
     except Exception as e:
@@ -199,7 +209,10 @@ _SKILL_REVIEW_PROMPT = (
     "conversation for skills the user loaded via /skill-name or you "
     "read via skill_view. If any of them covers the territory of the "
     "new learning, PATCH that one first. It is the skill that was in "
-    "play, so it's the right one to extend.\n"
+    "play, so it's the right one to extend — but only if it is "
+    "curator-managed. Bundled, hub, pinned, and user-owned skills are "
+    "off-limits to you no matter how relevant (see Protected skills "
+    "below); for those, fall through to the next option.\n"
     "  2. UPDATE AN EXISTING UMBRELLA (via skills_list + skill_view). "
     "If no loaded skill fits but an existing class-level skill does, "
     "patch it. Add a subsection, a pitfall, or broaden a trigger.\n"
@@ -241,10 +254,18 @@ _SKILL_REVIEW_PROMPT = (
     "Protected skills (DO NOT edit these):\n"
     "  • Bundled skills (shipped with Hermes, e.g. 'hermes-agent').\n"
     "  • Hub-installed skills (installed via 'hermes skills install').\n"
-    "Pinned skills (marked via 'hermes curator pin') CAN be improved — "
-    "pin only blocks deletion/archive/consolidation by the curator, not "
-    "content updates. Patch them when a pitfall or missing step turns up, "
-    "same as any other agent-created skill.\n"
+    "  • Skills in skills.external_dirs (externally owned).\n"
+    "  • PINNED skills (marked via 'hermes curator pin'). You are an "
+    "autonomous no-user-present actor, so pin blocks your writes too — "
+    "content updates included. Only the user, in a foreground session, "
+    "can change a pinned skill.\n"
+    "  • USER-OWNED skills — anything not curator-managed. A skill the "
+    "user hand-wrote, installed by URL, or asked a foreground agent to "
+    "create is theirs, not yours; your writes to it WILL be refused. "
+    "This includes skills that were loaded or consulted this session: "
+    "being in play does not make one yours to edit. If such a skill is "
+    "wrong or outdated, say so in your reply and recommend "
+    "'hermes curator adopt <name>' — do not try to patch it.\n"
     "If the only skills that need updating are protected, say\n"
     "'Nothing to save.' and stop.\n\n"
     "Do NOT capture (these become persistent self-imposed constraints "
@@ -299,7 +320,9 @@ _COMBINED_REVIEW_PROMPT = (
     "  1. UPDATE A CURRENTLY-LOADED SKILL. Check what skills were "
     "loaded via /skill-name or skill_view in the conversation. If one "
     "of them covers the learning, PATCH it first. It was in play; "
-    "it's the right place.\n"
+    "it's the right place — provided it is curator-managed. Protected "
+    "and user-owned skills are off-limits however relevant; fall "
+    "through when one of those is the best fit.\n"
     "  2. UPDATE AN EXISTING UMBRELLA (skills_list + skill_view to "
     "find the right one). Patch it.\n"
     "  3. ADD A SUPPORT FILE under an existing umbrella via "
@@ -327,10 +350,15 @@ _COMBINED_REVIEW_PROMPT = (
     "Protected skills (DO NOT edit these):\n"
     "  • Bundled skills (shipped with Hermes, e.g. 'hermes-agent').\n"
     "  • Hub-installed skills (installed via 'hermes skills install').\n"
-    "Pinned skills (marked via 'hermes curator pin') CAN be improved — "
-    "pin only blocks deletion/archive/consolidation by the curator, not "
-    "content updates. Patch them when a pitfall or missing step turns up, "
-    "same as any other agent-created skill.\n"
+    "  • Skills in skills.external_dirs (externally owned).\n"
+    "  • PINNED skills (marked via 'hermes curator pin'). Pin blocks "
+    "autonomous writes entirely — content updates included — because no "
+    "user is present to consent. Only a foreground session can change one.\n"
+    "  • USER-OWNED skills — anything not curator-managed (hand-written, "
+    "URL-installed, or created by a foreground agent at the user's "
+    "request). Your writes to these WILL be refused, including to skills "
+    "loaded or consulted this session. If one is wrong, say so in your "
+    "reply and recommend 'hermes curator adopt <name>' instead.\n"
     "If the only skills that need updating are protected, say\n"
     "'Nothing to save.' and stop.\n\n"
     "Do NOT capture as skills (these become persistent self-imposed "
@@ -680,6 +708,25 @@ def _run_review_in_thread(
             # Match parent's toolset config so ``tools[]`` is byte-identical
             # in the request body — Anthropic's cache key includes it.
             # (The runtime whitelist below still restricts dispatch.)
+            _fork_kwargs: Dict[str, Any] = {}
+            if isinstance(_rt.get("max_tokens"), int):
+                _fork_kwargs["max_tokens"] = _rt["max_tokens"]
+            if isinstance(_rt.get("command"), str) and _rt["command"]:
+                _fork_kwargs["acp_command"] = _rt["command"]
+                _fork_kwargs["acp_args"] = _rt.get("args") or []
+            # Match parent's reasoning config so the fork's ``thinking`` /
+            # ``output_config`` are byte-identical in the request body —
+            # Anthropic's cache key is namespaced by ``thinking`` presence.
+            # Same-model path only: when routed to a different aux model the
+            # cache is cold regardless (parity buys nothing) and the parent's
+            # effort vocabulary may not be valid for the routed model/provider
+            # (e.g. OpenRouter ``extra_body.reasoning.effort`` is forwarded
+            # unclamped; codex_responses passes ``max``/``ultra`` through
+            # unmapped except on gpt-5.6/xAI). Let the routed fork use
+            # provider defaults — matching the ``not _routed`` gate on
+            # _cached_system_prompt below.
+            if not _routed:
+                _fork_kwargs["reasoning_config"] = getattr(agent, "reasoning_config", None)
             review_agent = AIAgent(
                 model=_rt.get("model") or agent.model,
                 max_iterations=16,
@@ -689,11 +736,13 @@ def _run_review_in_thread(
                 api_mode=_rt.get("api_mode"),
                 base_url=_rt.get("base_url") or None,
                 api_key=_rt.get("api_key") or None,
-                credential_pool=getattr(agent, "_credential_pool", None),
+                credential_pool=_rt.get("credential_pool"),
+                request_overrides=_rt.get("request_overrides") or {},
                 parent_session_id=agent.session_id,
                 enabled_toolsets=getattr(agent, "enabled_toolsets", None),
                 disabled_toolsets=getattr(agent, "disabled_toolsets", None),
                 skip_memory=True,
+                **_fork_kwargs,
             )
             review_agent._memory_write_origin = "background_review"
             review_agent._memory_write_context = "background_review"
