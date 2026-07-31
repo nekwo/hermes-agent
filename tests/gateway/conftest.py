@@ -827,37 +827,18 @@ _ENV_GAPS: EnvGapRegistry = {
         ),
     ],
     # ── test-side portability defects (fixable at the source) ────────────
-    'test_config_env_bridge_authority.py': [
-        (
-            _WINDOWS,
-            '_run_gateway_import builds the child environment from a '
-            'POSIX-shaped allowlist (PATH, PYTHONPATH, VIRTUAL_ENV, HOME). On '
-            'POSIX the user site derives from HOME so that suffices; on Windows '
-            'it derives from APPDATA, which is not forwarded, so the child '
-            'loses every user-installed dependency and `from gateway import '
-            "run` dies with ModuleNotFoundError: No module named 'yaml'. "
-            'Forwarding APPDATA would retire this row',
-            {
-                'test_config_gateway_timeout_wins_over_stale_env',
-                'test_config_platform_connect_timeout_supplies_env_when_unset',
-                'test_env_platform_connect_timeout_wins_over_config',
-            },
-        ),
-    ],
-    'test_session_state_cleanup.py': [
-        (
-            _WINDOWS,
-            'the guard reads gateway/run.py with Path.read_text() and no '
-            "encoding=, so Python uses this host's cp1252 locale default and "
-            'chokes on the UTF-8 warning emoji in run.py '
-            '(UnicodeDecodeError on byte 0x8f). Passing encoding="utf-8" would '
-            'retire this row and let a useful architectural guard actually run '
-            'on Windows',
-            {
-                'TestNoMoreBareDeleteSites::test_no_bare_del_of_running_agents_in_gateway_run',
-            },
-        ),
-    ],
+    #
+    # RETIRED, not fenced — both rows that lived here were fixed at the source
+    # and now pass on this host:
+    #   * test_config_env_bridge_authority.py — _run_gateway_import's child-env
+    #     allowlist was POSIX-shaped (PATH/PYTHONPATH/VIRTUAL_ENV/HOME). It now
+    #     also forwards the Windows equivalents (APPDATA/USERPROFILE/
+    #     HOMEDRIVE+HOMEPATH for user-site and home resolution, SystemRoot/
+    #     SystemDrive for Winsock init).
+    #   * test_session_state_cleanup.py — the architectural guard read
+    #     gateway/run.py without encoding=, so the cp1252 locale default killed
+    #     it on Windows; it now reads encoding="utf-8" and the guard actually
+    #     runs here.
     'test_update_command.py': [
         (
             _WINDOWS,

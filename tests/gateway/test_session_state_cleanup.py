@@ -62,7 +62,12 @@ class TestNoMoreBareDeleteSites:
         from pathlib import Path
         import re
 
-        gateway_run = (Path(__file__).parent.parent.parent / "gateway" / "run.py").read_text()
+        # encoding= is load-bearing: without it Python uses the host locale
+        # default (cp1252 on Windows) and dies on run.py's UTF-8 bytes, which
+        # silently disables this architectural guard on that platform.
+        gateway_run = (
+            Path(__file__).parent.parent.parent / "gateway" / "run.py"
+        ).read_text(encoding="utf-8")
         # Match `del self._running_agents[...]` that is NOT inside a
         # triple-quoted docstring.  We scan non-docstring lines only.
         lines = gateway_run.splitlines()

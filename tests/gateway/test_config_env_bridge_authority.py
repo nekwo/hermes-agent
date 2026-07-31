@@ -56,8 +56,22 @@ def _run_gateway_import(hermes_home: Path, initial_env: dict[str, str]) -> dict[
     )
     env = dict(initial_env)
     env["HERMES_HOME"] = str(hermes_home)
-    # Keep PATH / PYTHONPATH so venv imports resolve.
-    for k in ("PATH", "PYTHONPATH", "VIRTUAL_ENV", "HOME"):
+    # Keep the vars the child interpreter needs to boot at all; the scrub is
+    # about HERMES_* precedence, not about starving Python.
+    #   HOME — POSIX home resolution (POSIX also falls back to pwd.getpwuid).
+    #   APPDATA / USERPROFILE / HOMEDRIVE+HOMEPATH — the Windows equivalents of
+    #     HOME for user-site and home resolution. Windows has no pwd fallback,
+    #     so without them home resolution raises "Could not determine home
+    #     directory." at import.
+    #   SystemRoot / SystemDrive — without these Windows cannot initialize
+    #     Winsock, and gateway.run's networking imports die with
+    #     "WinError 10106: The requested service provider could not be loaded
+    #     or initialized" before the bridge under test ever runs.
+    for k in (
+        "PATH", "PYTHONPATH", "VIRTUAL_ENV", "HOME",
+        "APPDATA", "USERPROFILE", "HOMEDRIVE", "HOMEPATH",
+        "SystemRoot", "SystemDrive",
+    ):
         if k in os.environ and k not in env:
             env[k] = os.environ[k]
 
