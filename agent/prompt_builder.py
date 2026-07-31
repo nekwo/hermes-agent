@@ -33,10 +33,25 @@ from agent.skill_utils import (
     parse_frontmatter,
     read_active_org_id,
     skill_frontmatter_runtime_compatibility,
-    skill_matches_environment,
     skill_matches_platform,
     skill_matches_platform_list,
 )
+# Fail-safe import, NOT a style choice. `skill_matches_environment` is imported
+# separately and guarded so that its absence degrades prompt assembly instead
+# of killing it: pulling it into the block above makes an out-of-step
+# agent/skill_utils.py a hard ImportError that takes the whole system-prompt
+# builder down. The fallback fails OPEN only for skills that declare no
+# `environments` key — a skill that declares one is still withheld, so the
+# gate is never weakened. Guarded by
+# tests/agent/test_skill_environment_fallback.py, which is fork-owned (zero
+# upstream history). The 2026-07-31 `upstream/main` merge dropped this by
+# taking upstream's consolidated import block wholesale; restored here.
+try:
+    from agent.skill_utils import skill_matches_environment
+except ImportError:
+    def skill_matches_environment(frontmatter):
+        environments = frontmatter.get("environments") if isinstance(frontmatter, dict) else None
+        return not environments
 from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
