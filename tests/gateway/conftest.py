@@ -38,6 +38,15 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tests._env_gap_fence import (
+    HOST_DEPENDENCY_GAP as _HOST,
+    WINDOWS_ENV_GAP as _WINDOWS,
+    EnvGapRegistry,
+    StaleEntryTracker,
+    apply_marks,
+    register_marks,
+)
+
 
 def make_async_session_db(sync_mock=None):
     """Wrap a sync mock SessionDB in AsyncSessionDB so gateway code that awaits
@@ -463,7 +472,12 @@ def pytest_configure(config):
        fingerprint of the gateway test file mtimes/sizes.  Concurrent
        subprocesses acquire a lock; only the first performs the scan;
        the rest wait and read the cached result.
+    Also registers the environment-gap marks (see the ``_ENV_GAPS`` block at
+    the bottom of this file). That happens before the xdist-worker early return
+    below, because every process needs the marks declared.
     """
+    register_marks(config)
+
     # Only run on the xdist controller (or in non-xdist runs). Skip on
     # worker subprocesses so we don't scan the filesystem N times.
     if hasattr(config, "workerinput"):
@@ -524,4 +538,208 @@ def pytest_configure(config):
             raise pytest.UsageError(msg)
         else:
             cache_file.write_text("clean", encoding="utf-8")
+
+
+# ── Pre-existing environment-gap fence (2026-07-31 upstream sync) ───────────
+#
+# Every row below was reproduced individually on this Windows 10 workstation,
+# traced to a concrete host/platform cause, and proven PRE-EXISTING by running
+# the same node on the pre-merge fork tip `1adf0404f` — where each of these
+# files failed with a superset of these node ids (upstream's prune waves
+# removed the rest). None is caused by the `upstream/main` merge.
+#
+# These tests are NOT skipped and NOT xfailed: they still run, still execute
+# their real assertions, and still fail loudly on a plain
+# `pytest tests/gateway`. See `tests/_env_gap_fence` for the full contract and
+# the rules for adding a row.
+#
+#     python -m pytest tests/gateway -m "not windows_env_gap and not host_dependency_gap"
+#
+# Rows for files that arrived WITH the merge (no fork-side history at all) are
+# marked as such: there is no fork regression intent to preserve in them, and
+# "pre-existing" cannot be asked of a file that did not exist before.
+#
+# Three genuine defects were found in this directory during the same pass and
+# were FIXED in the code, not fenced:
+#   * gateway/slash_commands.py — the fork-owned `_handle_queue_status_command`
+#     called the raw sync session store from loop-side async code, which
+#     upstream's new AST guard (test_async_session_store.py) correctly flagged;
+#   * agent/prompt_builder.py — the merge dropped the fork's guarded
+#     `skill_matches_environment` import (see tests/agent/conftest.py);
+#   * tests/gateway/test_completion_delivery.py — upstream's redaction test was
+#     written against upstream's agent-turn delivery lane; the fork defaults to
+#     a direct send, so the test was RETARGETED (redaction intent preserved and
+#     now proven on the lane that actually ships), not fenced.
+_ENV_GAPS: EnvGapRegistry = {
+    'test_73771_media_resend_dedup.py': [
+        (
+            _WINDOWS,
+            'arrived with the merge (upstream-only). Asserts the raw filesystem '
+            'path appears in the delivered media reference; on Windows the '
+            'delivery form is a percent-encoded file:// URL '
+            '(file://C%3A%5CUsers%5C...), because the drive colon and '
+            'backslashes are not URL-safe',
+            {
+                'test_streamed_explicit_media_resend_is_delivered',
+            },
+        ),
+    ],
+    'test_api_server.py': [
+        (
+            _HOST,
+            'gateway/readiness.py flags disk usage >= 90% as degraded and this '
+            "host's HERMES_HOME volume is 93.8% full, so /health/detailed "
+            'correctly reports "degraded"; the test asserts an unconditional '
+            '"ok" without stubbing _probe_disk',
+            {
+                'TestHealthDetailedEndpoint::test_health_detailed_returns_ok',
+            },
+        ),
+    ],
+    'test_complete_path_at_filter.py': [
+        (
+            _WINDOWS,
+            'arrived with the merge (the node does not exist at 1adf0404f). The '
+            'test states its own assumption — "/etc exists on any POSIX box" — '
+            'so the absolute reading of "@/etc/" cannot resolve on Windows and '
+            'the cwd-relative decoy legitimately wins',
+            {
+                'test_leading_slash_prefers_a_real_absolute_path',
+            },
+        ),
+    ],
+    'test_media_spaced_paths_and_history_dedupe.py': [
+        (
+            _WINDOWS,
+            'arrived with the merge (upstream-only). The home-relative collapse '
+            'rebuilds the path as "C:\\Users\\beast" + "/" + the remainder, so '
+            'the collected form mixes separators and never equals the '
+            'all-backslash path the test builds from tmp_path',
+            {
+                'TestHistoryMediaDedupe::test_quoted_spaced_home_path_is_collected_in_delivery_form',
+            },
+        ),
+    ],
+    'test_post_stream_media_delivery.py': [
+        (
+            _WINDOWS,
+            'arrived with the merge (upstream-only). Same cause as '
+            'test_73771_media_resend_dedup.py: the Windows path is delivered '
+            'percent-encoded inside a file:// URL, not as the raw path',
+            {
+                'test_explicit_media_tag_still_delivers_post_stream',
+            },
+        ),
+    ],
+    'test_readiness.py': [
+        (
+            _HOST,
+            'arrived with the merge (upstream-only). _probe_disk() degrades at '
+            ">= 90% used and this host's HERMES_HOME volume is 93.8% full, so "
+            'the aggregate readiness is correctly "degraded"; the test asserts '
+            '"ok" without stubbing the disk probe',
+            {
+                'test_collect_runtime_readiness_reports_healthy_local_runtime',
+            },
+        ),
+    ],
+    'test_status_command.py': [
+        (
+            _WINDOWS,
+            'the profile footer collapses a home-prefixed path to "~/...". On '
+            'Windows pytest\'s tmp_path lives UNDER the user profile '
+            '(%LOCALAPPDATA%\\Temp), so the collapse rewrites the very path the '
+            'test asserts literally; on Linux /tmp is outside $HOME and nothing '
+            'is collapsed',
+            {
+                'test_profile_command_reports_source_stamped_profile',
+            },
+        ),
+    ],
+    'test_systemd_notify.py': [
+        (
+            _WINDOWS,
+            'arrived with the merge (upstream-only). gateway/systemd_notify.py '
+            'returns False up front when socket.AF_UNIX is absent, which it is '
+            'on Windows — there is no systemd notification socket to write to',
+            {
+                'test_notify_uses_nonblocking_datagram_send',
+                'test_watchdog_sends_ready_heartbeat_and_stopping',
+            },
+        ),
+    ],
+    'test_update_command.py': [
+        (
+            _WINDOWS,
+            'asserts the POSIX spawn shape (`bash -c`, setsid/nohup); the '
+            'Windows branch of _handle_update_command spawns the interpreter '
+            'directly, so argv[0] is the python.exe path',
+            {
+                'TestHandleUpdateCommand::test_fallback_when_no_setsid',
+            },
+        ),
+        (
+            _WINDOWS,
+            'the fixture writes U+2713 / U+2192 through Path.write_text() with '
+            "no encoding=, so Python's Windows default (cp1252) raises "
+            'UnicodeEncodeError before the assertion under test is reached',
+            {
+                'TestSendUpdateNotification::test_sends_notification_with_output',
+                'TestSendUpdateNotification::test_cleans_up_on_error',
+            },
+        ),
+    ],
+    'test_update_streaming.py': [
+        (
+            _WINDOWS,
+            'asserts PYTHONUNBUFFERED inside the `bash -c` command STRING; on '
+            'Windows the spawn is an argv list whose last element is the plain '
+            '`--gateway` flag and the env goes through Popen(env=...) instead',
+            {
+                'TestUpdateCommandGatewayFlag::test_spawns_with_gateway_flag',
+            },
+        ),
+    ],
+    'test_wecom_callback.py': [
+        (
+            _HOST,
+            "optional dependency 'defusedxml' is not installed, so "
+            'plugins/platforms/wecom/callback_adapter.py falls back to ET=None '
+            'and _build_event raises AttributeError before parsing anything',
+            {
+                'TestWecomCallbackEventConstruction::test_build_event_extracts_text_message',
+                'TestWecomCallbackPollLoop::test_poll_loop_dispatches_handle_message',
+            },
+        ),
+    ],
+    'test_whatsapp_bridge_pidfile.py': [
+        (
+            _HOST,
+            "dependency 'psutil' is not installed, so gateway.status."
+            '_get_process_start_time() returns None off /proc (its only '
+            'non-Linux source) and the pidfile is written without the '
+            'start-time line the test indexes',
+            {
+                'TestWriteAndRoundTrip::test_pidfile_records_pid_and_start_time',
+            },
+        ),
+    ],
+}
+
+_STALE = StaleEntryTracker(_ENV_GAPS, "tests/gateway/conftest.py")
+
+
+def pytest_collection_modifyitems(items):  # noqa: D401 — pytest hook
+    """Attach the environment-gap mark to every registered node id."""
+    apply_marks(items, _ENV_GAPS)
+
+
+def pytest_runtest_logreport(report):  # noqa: D401 — pytest hook
+    """Record registered environment-gap node ids that actually passed."""
+    _STALE.record(report)
+
+
+def pytest_terminal_summary(terminalreporter):  # noqa: D401 — pytest hook
+    """Surface registry rows that no longer describe a real failure."""
+    _STALE.report(terminalreporter)
 
