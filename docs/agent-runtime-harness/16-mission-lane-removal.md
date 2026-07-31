@@ -243,7 +243,7 @@ upstream `tools/terminal_tool.py:2101,2139` imports `envelope_decision` and
 python -m pytest tests/agent_runtime -q
 python -m pytest tests/hermes_cli -q
 cd "X:/Unreal Engine/Engine/Launcher/EterniaLauncher" && flutter test test/features/mission_control
-git diff --name-only e471c23d2..HEAD \
+git diff --name-only 2360f5b18..HEAD \
   | grep -vE '^(agent/|agent_runtime/|hermes_cli/harness)' \
   | grep -vE '^tools/(agent_chat_tool|mission_goal_tool)\.py$'
 ```
@@ -257,6 +257,20 @@ operator has accepted — expect `tests/`, `docs/`, and the deleted `tools/missi
 > `e471c23d2` ("fix mission control snapshot diagnostics"). If you branch or rebase, re-pin
 > the baseline rather than reaching for `upstream/main`. Verifying an S-stage introduced no
 > upstream edit is a question about *this range*, not about the fork's whole life.
+
+> **History folded 2026-07-31.** `main`'s pre-fold history (679 commits past the
+> upstream merge-base `9de9c25f6`) was folded into 7 tree-identical thematic commits.
+> Every commit hash cited in this doc remains permanently resolvable via the archive
+> refs `archive/pre-fold-main-20260731` (branch) and `pre-fold-main-20260731` (tag),
+> both pushed to origin. The baseline `e471c23d2` is no longer in `main`'s log; its
+> **byte-identical** fold equivalent is `2360f5b18` ("fix(harness): persona-chat +
+> runtime hardening to the pre-removal baseline"), and the gate command above is
+> re-pinned to it — the diff it produces is unchanged. Old→new fold map (all
+> tree-identical): `e471c23d2`→`2360f5b18` · `25e2651ac`→`2154f0542` ·
+> `91be96091`→`5a1267ef6` · `4f06910b5`→`0c9d48d9f` · `0c155cf4b`→`0ad80754f` ·
+> `ca4ebf6d5`→`101d95eeb` · `e2f47bdbe`→`a9fe20773`. Intermediate hashes (the S-stage
+> commits above, the wave-3 close `3d1e0049c`, the wave-3 merge `2f1c0671f`) exist
+> only on the archive branch — fetch it before checking them out.
 
 ## Hazards — five words with a keep-side and a remove-side meaning
 

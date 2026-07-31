@@ -17,6 +17,15 @@
 | Divergence | fork 612 commits · upstream 4,745 commits |
 | Doc-17 snapshot | `e0233f8fc` — **297 upstream commits behind** current |
 
+> **History folded 2026-07-31.** `main` was rewritten into 7 thematic commits whose
+> final tree is byte-identical to the pre-fold tip (`4f06910b5` → fold `0c9d48d9f`).
+> The rehearsed fork ref `0b7dadf0c` now resolves only via the archive refs
+> `archive/pre-fold-main-20260731` / tag `pre-fold-main-20260731` (both on origin).
+> The fold does not change this doc's substance: the merge base is still `9de9c25f6`
+> (verified post-fold) and the conflict inventory is a property of the *trees*, which
+> are unchanged — a re-rehearsal from folded `main` hits the same conflicts, minus
+> whatever upstream has moved since (see Standing guidance #2).
+
 **Result: 59 conflicted files** — 58 content + 1 modify/delete. Only one is named
 by doc 17. Cross-check: rehearsing against doc 17's older upstream SHA already
 produced 37 conflicts, so 36 predate the doc-17 snapshot and 22 arrived in the

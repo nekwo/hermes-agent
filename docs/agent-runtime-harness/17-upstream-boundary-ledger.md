@@ -8,6 +8,16 @@
 Upstream remote: `https://github.com/NousResearch/hermes-agent`, checked at
 `upstream/main = e0233f8fc` (2026-07-29). Refactor range: `e471c23d2..25e2651ac`.
 
+> **History folded 2026-07-31.** `main` was rewritten into 7 tree-identical thematic
+> commits; the hashes cited in this doc resolve via the permanent archive refs
+> `archive/pre-fold-main-20260731` / tag `pre-fold-main-20260731` (both on origin).
+> On the folded `main`, the refactor range is the single commit `2154f0542`
+> (tree-identical to `25e2651ac`), whose parent `2360f5b18` is tree-identical to the
+> baseline `e471c23d2` — the §2 boundary check is re-pinned accordingly and its
+> output is unchanged. The §4 revert target `933aa3d97` exists only on the archive
+> branch; fetch it before running the recipe (the recipe itself is unaffected —
+> `main`'s tree is byte-identical to the pre-fold tip `4f06910b5`).
+
 ## 1. Ownership correction to doc 16
 
 Doc 16's stage rows (S3, S4, S6) describe five files as "upstream-owned" edits made
@@ -34,15 +44,19 @@ all deletion-shaped.
 ## 2. Boundary check result (final)
 
 ```bash
-git diff --name-only e471c23d2..HEAD \
+git diff --name-only 2360f5b18..HEAD \
   | grep -vE '^(agent/|agent_runtime/|hermes_cli/harness)' \
   | grep -vE '^tools/(agent_chat_tool|mission_goal_tool)\.py$'
 ```
 
+(Baseline re-pinned 2026-07-31: `2360f5b18` is the fold commit tree-identical to the
+original baseline `e471c23d2` — see the fold note above.)
+
 Verified at the original removal boundary on 2026-07-30: 168 paths, all accounted for —
 8 × `docs/`, 155 × `tests/` (including regenerated stream-frame fixtures), and the
 original five files in §1. **Zero
-unexpected paths.** The baseline must remain `e471c23d2`, not `upstream/main`
+unexpected paths.** The baseline must remain the pre-removal baseline
+(`e471c23d2`; on the folded `main`, its tree-identical equivalent `2360f5b18`), not `upstream/main`
 (which carries 122 pre-existing out-of-boundary paths from fork history — see doc 16,
 final-gate correction).
 
