@@ -66,7 +66,7 @@ PROFILE_CHAT_FALLBACK_TOOLSETS = (
 
 # Fork registry hygiene (T6c, 2026-07-18). Upstream toolsets the fork's effective
 # registry must never resolve on ANY agent-runtime lane: the whole ``kanban``
-# toolset (9 tools — superseded by the fork board/mission system) and the
+# toolset (12 tools — superseded by the fork board/mission system) and the
 # ``feishu_doc`` + ``feishu_drive`` toolsets (5 tools — an irrelevant Feishu/Lark
 # integration). The upstream tool files stay untouched (fork-sync cleanliness);
 # this fork-owned constant is the deregistration mechanism. It is enforced in TWO
@@ -82,7 +82,7 @@ PROFILE_CHAT_FALLBACK_TOOLSETS = (
 # vs-profile-memory).
 REGISTRY_HYGIENE_BLOCKED_TOOLS = frozenset(
     {
-        # kanban toolset (9)
+        # kanban toolset (12)
         "kanban_show",
         "kanban_list",
         "kanban_create",
@@ -92,6 +92,13 @@ REGISTRY_HYGIENE_BLOCKED_TOOLS = frozenset(
         "kanban_comment",
         "kanban_unblock",
         "kanban_heartbeat",
+        # +3 from the 2026-07-31 upstream sync: the kanban card-attachment
+        # verbs. Blocked for the same reason as the rest of the toolset —
+        # upstream kanban itself is KEPT (it is not the fork board), it just
+        # must not resolve on an agent-runtime lane.
+        "kanban_attach",
+        "kanban_attach_url",
+        "kanban_attachments",
         # feishu_doc toolset (1)
         "feishu_doc_read",
         # feishu_drive toolset (4)

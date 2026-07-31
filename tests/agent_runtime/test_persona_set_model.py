@@ -694,12 +694,24 @@ def test_cli_instance_set_model_reasoning_only_applies(monkeypatch, capsys):
 
 
 def test_cli_instance_set_model_invalid_reasoning_rejected(monkeypatch, capsys):
+    from hermes_constants import VALID_REASONING_EFFORTS
+
     harness = _patched_harness(monkeypatch)
     persona = _persona()
     store = PersonaInstanceStore()
     _, b = _two_instances(store, persona)
 
-    code = harness._cmd_persona_instance_set_model(_instance_args(b.id, reasoning_effort="ultra"))
+    # The sentinel must be a level the runtime does NOT recognise. It used to be
+    # "ultra", which upstream promoted to a real level — the sentinel silently
+    # became valid and this rejection test started asserting on an accepted
+    # write. Pin the premise so a future upstream level fails HERE, loudly,
+    # instead of hollowing the regression out again.
+    invalid_effort = "turbo"
+    assert invalid_effort not in VALID_REASONING_EFFORTS
+
+    code = harness._cmd_persona_instance_set_model(
+        _instance_args(b.id, reasoning_effort=invalid_effort)
+    )
     assert code == 2
     data = json.loads(capsys.readouterr().out)
     assert data["error_code"] == "invalid_value"

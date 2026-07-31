@@ -1,7 +1,7 @@
 """Fork registry hygiene (T6c, Context Cost Workstream 2026-07-18).
 
 The fork's effective registry must never resolve the upstream ``kanban`` toolset
-(9 tools) or the ``feishu_doc`` / ``feishu_drive`` toolsets (5 tools) on ANY
+(12 tools) or the ``feishu_doc`` / ``feishu_drive`` toolsets (5 tools) on ANY
 agent-runtime lane. The upstream tool files stay untouched; the fork-owned
 ``REGISTRY_HYGIENE_BLOCKED_TOOLS`` constant plus the ``profile_runner``
 agent-construction chokepoint are the deregistration mechanism.
@@ -33,7 +33,11 @@ def test_hygiene_set_covers_exactly_the_kanban_and_feishu_toolsets():
         | _static_toolset_tools("feishu_drive")
     )
     assert REGISTRY_HYGIENE_BLOCKED_TOOLS == frozenset(expected)
-    assert len(_static_toolset_tools("kanban")) == 9
+    # 9 → 12 at the 2026-07-31 upstream sync (kanban card attachments:
+    # kanban_attach / kanban_attach_url / kanban_attachments). The detector did
+    # its job; the constant was extended deliberately rather than the count
+    # loosened.
+    assert len(_static_toolset_tools("kanban")) == 12
     assert len(_static_toolset_tools("feishu_doc") | _static_toolset_tools("feishu_drive")) == 5
 
 

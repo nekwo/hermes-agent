@@ -12,8 +12,19 @@ def _persona(persona_id: str):
     return next(persona for persona in sample_personas() if persona.id == persona_id)
 
 
-def test_return_summary_posts_bounded_parent_message_and_records_lineage(tmp_path, monkeypatch):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+def test_return_summary_posts_bounded_parent_message_and_records_lineage():
+    # Deliberately NO per-test ``HERMES_HOME`` override. ``tests/conftest.py``
+    # already hands every test its own home, and its step 3b re-pins
+    # ``hermes_state.DEFAULT_DB_PATH`` (a module constant computed at import
+    # time) to THAT home. An extra override here moved only the *writer* —
+    # production resolves the chat database from the live env through
+    # ``chat_session_scope`` — while the argless ``SessionDB()`` this test reads
+    # through stayed pinned to the conftest home, so the row was written to one
+    # database and looked for in another. Sharing the conftest home keeps writer
+    # and reader on one file, which is also what makes the read below a real
+    # routing assertion: the summary must land in the ambient operator-visible
+    # database, not in a profile-scoped one (defect D2,
+    # docs/agent-runtime-harness/chat-session-presence-authority.md).
     store = PersonaInstanceStore()
     parent = store.ensure_for_goal(_persona("neko_supervisor"), goal_id="task_r3", spawned_by=None)
     child = store.ensure_for_goal(_persona("dev"), goal_id="task_r3", spawned_by=parent.id)
