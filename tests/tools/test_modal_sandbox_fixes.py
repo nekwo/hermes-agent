@@ -35,13 +35,25 @@ class TestToolResolution:
     """Verify get_tool_definitions returns all expected tools for eval."""
 
     def test_terminal_and_file_toolsets_resolve_all_tools(self):
-        """enabled_toolsets=['terminal', 'file'] should produce 6 tools."""
+        """enabled_toolsets=['terminal', 'file'] resolves exactly those 6 tools.
+
+        Plus ``tool_describe``: the fork injects it into EVERY resolved lane,
+        independent of tool-search deferral (T6b details-on-demand — see
+        ``tests/tools/test_t6b_brief_descriptions.py::
+        test_tool_describe_injected_into_resolved_lane``). It is not a member
+        of either toolset, so it is named via the same constant the injector
+        uses and asserted separately — the toolset resolution itself is still
+        pinned exactly, and any OTHER stray tool still fails this test.
+        """
         from model_tools import get_tool_definitions
+        from tools.tool_search import TOOL_DESCRIBE_NAME
         tools = get_tool_definitions(
             enabled_toolsets=["terminal", "file"],
             quiet_mode=True,
         )
-        names = {t["function"]["name"] for t in tools}
+        all_names = [t["function"]["name"] for t in tools]
+        assert all_names.count(TOOL_DESCRIBE_NAME) == 1, all_names
+        names = set(all_names) - {TOOL_DESCRIBE_NAME}
         expected = {"terminal", "process", "read_file", "write_file", "search_files", "patch"}
         assert expected == names, f"Expected {expected}, got {names}"
 

@@ -29,8 +29,19 @@ def _tools_discovered():
 TRIMMED_TOOLS = sorted(FULL_TOOL_DESCRIPTIONS)
 
 
-def test_mirror_covers_thirty_five_tools():
-    assert len(TRIMMED_TOOLS) == 35
+def test_mirror_covers_thirty_four_tools():
+    """The mirror covers every tool whose wire description T6b trimmed.
+
+    T6b shipped 35 entries. ``mission_goal_create`` was retired with the
+    mission-lane removal (doc 16 acceptance), which correctly dropped its
+    mirror row but left this count asserting the pre-removal number — the
+    invariant has been red on every platform since. 34 is the honest count;
+    the mirror is complete. The companion checks below are what actually
+    keep the mirror and the live registry in step: every key must resolve to
+    a registered entry with a brief wire description.
+    """
+    assert len(TRIMMED_TOOLS) == 34
+    assert "mission_goal_create" not in TRIMMED_TOOLS
 
 
 def test_full_tool_description_resolves_for_every_trimmed_tool():
