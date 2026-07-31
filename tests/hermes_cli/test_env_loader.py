@@ -2,7 +2,31 @@ import importlib
 import os
 import sys
 
+import pytest
+
 from hermes_cli.env_loader import load_hermes_dotenv
+
+
+@pytest.fixture(autouse=True)
+def restore_hermes_cli_main_module():
+    """Confine the import-time dotenv test's module replacement."""
+    missing = object()
+    previous = sys.modules.get("hermes_cli.main", missing)
+    package = sys.modules.get("hermes_cli")
+    previous_package_attr = (
+        getattr(package, "main", missing) if package is not None else missing
+    )
+    yield
+    if previous is missing:
+        sys.modules.pop("hermes_cli.main", None)
+    else:
+        sys.modules["hermes_cli.main"] = previous
+    if package is not None:
+        if previous_package_attr is missing:
+            if hasattr(package, "main"):
+                delattr(package, "main")
+        else:
+            package.main = previous_package_attr
 
 
 def test_user_env_overrides_stale_shell_values(tmp_path, monkeypatch):
