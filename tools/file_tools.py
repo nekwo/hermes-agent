@@ -442,8 +442,18 @@ def _path_resolution_warning(filepath: str, resolved: Path, task_id: str = "defa
 def _is_blocked_device_path(path: str) -> bool:
     """Return True for concrete device/fd paths that can hang reads."""
     normalized = os.path.normpath(_expand_tilde(path))
-    if normalized in _BLOCKED_DEVICE_PATHS:
+    # os.path.normpath() rewrites "/" to "\" on Windows, so "/dev/zero" arrives
+    # here as "\dev\zero" and matches NONE of the POSIX literals below — the
+    # guard silently stopped guarding on Windows. It still MUST guard there:
+    # reads execute through Git Bash / WSL, where /dev/zero and /proc/<pid>/*
+    # are real and `wc -c < /dev/zero` never terminates (an unbounded hang, not
+    # a slow read). Compare the POSIX spelling as well; it can only ever match
+    # a path that is root-anchored at "/dev" or "/proc", so no native Windows
+    # path (always drive- or UNC-anchored) can be caught by it.
+    posix_form = normalized.replace(os.sep, "/") if os.sep != "/" else normalized
+    if normalized in _BLOCKED_DEVICE_PATHS or posix_form in _BLOCKED_DEVICE_PATHS:
         return True
+    normalized = posix_form
     # /proc/self/fd/0-2 and /proc/<pid>/fd/0-2 are Linux aliases for stdio
     if normalized.startswith("/proc/") and normalized.endswith(
         ("/fd/0", "/fd/1", "/fd/2")
