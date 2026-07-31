@@ -110,6 +110,18 @@ def _format_timeout_output(output: str | None, file_timeout: float) -> str:
     )
 
 
+def _is_retryable_timeout_result(
+    rc: int,
+    output: str,
+    summary: dict[str, int],
+) -> bool:
+    """Return true only for a nonzero, timeout-shaped result without failures."""
+    if rc == 0 or summary.get("failed", 0) > 0:
+        return False
+    lowered = output.lower()
+    return "timeout" in lowered or "timed out after" in lowered
+
+
 def _split_discovery_roots(raw: str) -> list[str]:
     """Split configured roots without cutting an absolute Windows drive path."""
     if Path(raw).exists():
@@ -929,6 +941,51 @@ def main() -> int:
         # control flow obvious.
         for fut in futures:
             fut.result() if fut.exception() is None else None
+
+    # A file can trip pytest-timeout only because eight import-heavy subprocesses
+    # are contending at once. Retry timeout-shaped nonzero results exactly once,
+    # serially, after the pool drains. Assertion failures are never retried.
+    retryable = [
+        (file, output, summary)
+        for file, output, summary in failures
+        if _is_retryable_timeout_result(1, output, summary)
+    ]
+    if retryable:
+        print()
+        print(
+            f"Retrying {len(retryable)} timeout-affected file"
+            f"{'s' if len(retryable) != 1 else ''} at 1-worker isolation "
+            "(single bounded retry):",
+            flush=True,
+        )
+    for file, original_output, original_summary in retryable:
+        print(f"  RETRY {_format_file(file, repo_root)}", flush=True)
+        fpath, rc, output, summary, subproc_wall = _run_one_file(
+            file,
+            pytest_passthrough,
+            repo_root,
+            args.file_timeout,
+        )
+        file_times.append((fpath, subproc_wall))
+        failures.remove((file, original_output, original_summary))
+        fail_count -= 1
+        tests_passed += summary.get("passed", 0)
+        tests_failed += summary.get("failed", 0)
+        if rc == 0:
+            pass_count += 1
+            print(
+                f"  RETRY PASS {_format_file(fpath, repo_root)} "
+                f"({subproc_wall:.1f}s at 1 worker)",
+                flush=True,
+            )
+        else:
+            fail_count += 1
+            failures.append((fpath, output, summary))
+            print(
+                f"  RETRY FAIL {_format_file(fpath, repo_root)} "
+                f"(exit {rc}, {subproc_wall:.1f}s at 1 worker)",
+                flush=True,
+            )
 
     elapsed = time.monotonic() - started
     print()

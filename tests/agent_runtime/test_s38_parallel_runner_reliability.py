@@ -29,3 +29,22 @@ def test_timeout_formatter_handles_missing_subprocess_output() -> None:
     assert "process tree terminated" in rendered
     assert "captured output unavailable" in rendered
     assert "None" not in rendered
+
+
+def test_only_timeout_shaped_nonzero_results_are_retryable() -> None:
+    assert _RUNNER._is_retryable_timeout_result(
+        1,
+        "++++ Timeout ++++",
+        {},
+    )
+    assert _RUNNER._is_retryable_timeout_result(
+        124,
+        "(timed out after 300s; process tree terminated)",
+        {},
+    )
+    assert not _RUNNER._is_retryable_timeout_result(
+        1,
+        "1 failed in 0.2s",
+        {"failed": 1},
+    )
+    assert not _RUNNER._is_retryable_timeout_result(0, "Timeout", {})
