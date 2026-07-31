@@ -126,7 +126,6 @@ def mission_chat_prompt_observability(
     workspace_id: str | None = None,
     workspace_name: str | None = None,
     workspace_agents: WorkspaceAgentsContext | None = None,
-    mission_hud: dict[str, Any] | None = None,
     situational_hud: dict[str, Any] | None = None,
     situational_hud_revision: str | None = None,
     situational_hud_delivery: str | None = None,
@@ -299,10 +298,6 @@ def mission_chat_prompt_observability(
         "chat": chat,
         "task_id": safe_assignment_token(task_id),
         "goal_id": safe_assignment_token(goal_id),
-        # The run-independent slice of the ``## Mission HUD`` the harness injects
-        # each turn (typed plan / stage / QA gate). Empty for personas with no
-        # bound task; Mission Control's runtime-HUD peek renders it verbatim.
-        "mission_hud": mission_hud if isinstance(mission_hud, dict) else {},
         # The full runtime situational HUD (runtime · scope · mission · lane ·
         # roster · mission_hud) — the single projection the operator's runtime
         # HUD strip and the agent's mission-chat turn both render, so operator
@@ -1698,12 +1693,6 @@ def _backfill_derived_fields(
     paths must not fabricate inline lists over them.
     """
     if built:
-        # Persisted rows are written at chat time and never carry the typed
-        # mission-HUD preview (chat turns don't compute one). Prefer the freshly
-        # built preview so the persisted row exposes the same upcoming-turn HUD.
-        built_hud = built.get("mission_hud")
-        if isinstance(built_hud, dict) and built_hud and not item.get("mission_hud"):
-            item["mission_hud"] = built_hud
         # Same rationale for the runtime situational HUD: persisted chat rows
         # never compute one, so prefer the freshly built projection.
         built_situational = built.get("situational_hud")

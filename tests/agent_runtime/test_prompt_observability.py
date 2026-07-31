@@ -370,24 +370,22 @@ def test_accessible_skills_hash_check_uses_persona_profile_home(monkeypatch, tmp
     assert captured["hermes_home"] == home
 
 
-def test_mission_chat_prompt_observability_carries_mission_hud():
-    hud = {"preview": True, "typed_current_stage": {"id": "dev"}}
+def test_mission_chat_prompt_observability_omits_retired_mission_hud_key():
     context = mission_chat_prompt_observability(
         persona=SimpleNamespace(id="dev", hermes_profile="dev", display_name="Dev", role="dev"),
         persona_instance_id="personainst_dev",
         task_id="task_live",
-        mission_hud=hud,
     )
-    assert context["mission_hud"] == hud
+    assert "mission_hud" not in context
 
 
-def test_mission_chat_prompt_observability_defaults_mission_hud_to_empty():
+def test_mission_chat_prompt_observability_has_no_empty_mission_hud_placeholder():
     context = mission_chat_prompt_observability(
         persona=SimpleNamespace(id="dev", hermes_profile="dev", display_name="Dev", role="dev"),
     )
-    # No task bound → no HUD; the key is always present so the launcher parser
-    # has a stable shape rather than a sometimes-missing field.
-    assert context["mission_hud"] == {}
+    # Fresh rows no longer manufacture an always-empty compatibility field.
+    # Historical persisted rows remain readable by context id in the Launcher.
+    assert "mission_hud" not in context
     from agent_runtime.decision_contract_registry import contract_hash
 
     assert context["prompt_contract_hash"] == contract_hash()
@@ -433,13 +431,12 @@ def test_unresolved_used_skill_never_claims_hash_tracking():
     assert receipt["content_hash"] is None
 
 
-def test_snapshot_leaves_mission_hud_empty_even_for_a_bound_task(monkeypatch):
+def test_snapshot_omits_mission_hud_even_for_a_bound_task(monkeypatch):
     """Retargeted in S19 (was ``..._previews_the_mission_hud_for_a_bound_task``).
 
-    The preview producer (``context_builder.mission_hud_preview``) is removed:
-    ``snapshot.py`` builds this section with ``tasks = []``, so the lookup this
-    test used to exercise could never resolve a task in production. The row
-    field survives as the honest empty dict rather than a fabricated preview.
+    The preview producer (``context_builder.mission_hud_preview``) is removed,
+    and S39 retires its writerless always-empty compatibility field. Historical
+    persisted rows remain fetchable by context id through the Launcher reader.
     """
 
     from agent_runtime import prompt_observability as po
@@ -461,10 +458,10 @@ def test_snapshot_leaves_mission_hud_empty_even_for_a_bound_task(monkeypatch):
 
     contexts = snapshot["chat_contexts"]
     assert len(contexts) == 1
-    assert contexts[0]["mission_hud"] == {}
+    assert "mission_hud" not in contexts[0]
 
 
-def test_snapshot_leaves_mission_hud_empty_for_unbound_instance(monkeypatch):
+def test_snapshot_omits_mission_hud_for_unbound_instance(monkeypatch):
     from agent_runtime import prompt_observability as po
 
     monkeypatch.setattr(po, "load_latest_prompt_observability_contexts", lambda: [])
@@ -475,7 +472,7 @@ def test_snapshot_leaves_mission_hud_empty_for_unbound_instance(monkeypatch):
         persona_instances=[instance],
         tasks=[SimpleNamespace(id="some_other_task")],
     )
-    assert snapshot["chat_contexts"][0]["mission_hud"] == {}
+    assert "mission_hud" not in snapshot["chat_contexts"][0]
 
 
 def test_snapshot_includes_situational_hud_for_instance(monkeypatch):
@@ -567,11 +564,11 @@ def test_chat_time_row_carries_situational_hud_verbatim():
     assert row["situational_hud"] == injected
 
 
-def test_backfill_copies_mission_hud_onto_persisted_row():
+def test_backfill_does_not_add_fresh_mission_hud_to_persisted_row():
     persisted = {"persona_instance_id": "x", "session_id": "s", "persona_id": "p"}
     built = {"mission_hud": {"preview": True, "phase": "in_progress"}}
     _backfill_derived_fields(persisted, built)
-    assert persisted["mission_hud"] == {"preview": True, "phase": "in_progress"}
+    assert "mission_hud" not in persisted
 
 
 def test_backfill_does_not_overwrite_an_existing_persisted_hud():
