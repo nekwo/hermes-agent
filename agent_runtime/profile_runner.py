@@ -167,6 +167,14 @@ class AgentRunRequest:
     tool_execution_scope_id: str | None = None
     conversation_history: list[dict[str, Any]] | None = None
     reuse_current_user_message: bool = False
+    # Typed presentation marker stamped on the NATIVE user row this turn
+    # persists (the row's ``finish_reason`` column; see
+    # ``hermes_state._rows_to_conversation`` and ``agent_runtime.relay_policy``).
+    # Its only producer today is relay sender attribution: an
+    # ``agent_chat_send`` hop resolves WHO is speaking at the CLI chokepoint,
+    # and the target's transcript must show the SENDING agent rather than the
+    # operator. ``None`` on operator/CLI sends leaves those rows byte-identical.
+    persona_chat_user_finish_reason: str | None = None
     client_message_id: str | None = None
     turn_id: str | None = None
     root_chat_session_id: str | None = None
@@ -536,9 +544,70 @@ def _finish_resident_persona_chat_agent(agent: Any) -> None:
         ("_current_task_id", None),
         ("_persona_chat_client_message_id", None),
         ("_persona_chat_turn_id", None),
+        ("_pending_cli_user_message", None),
     ):
         if hasattr(agent, name):
             setattr(agent, name, value)
+
+
+def _sanitized_user_message_text(text: str) -> str:
+    """The prologue's own view of this turn's clean user text.
+
+    ``build_turn_context`` sanitizes surrogates BEFORE comparing the staged
+    message below, so an unsanitized copy of a surrogate-bearing message would
+    silently fail the match and drop the marker. Falls back to the raw text if
+    the upstream helper ever moves — a no-op for every non-surrogate message.
+    """
+
+    try:
+        from agent.message_sanitization import _sanitize_surrogates
+    except Exception:  # pragma: no cover - upstream helper relocated
+        return text
+    try:
+        return _sanitize_surrogates(text)
+    except Exception:  # pragma: no cover - defensive
+        return text
+
+
+def stage_persona_chat_user_row_marker(
+    agent: Any, request: "AgentRunRequest"
+) -> dict[str, Any] | None:
+    """Stage this turn's user-message dict so its NATIVE row carries a marker.
+
+    Since native session continuity landed, the mission-chat lane no longer
+    appends the incoming operator row itself — the runtime persists it as part
+    of the turn. ``build_turn_context`` adopts an already-staged
+    ``_pending_cli_user_message`` whose clean text matches this turn's message,
+    appends THAT dict as the turn's user message, and preserves every extra key
+    on it; the session flush then writes ``finish_reason=msg.get(
+    "finish_reason")`` onto the persisted row. Staging here is therefore the one
+    seam where a fork-owned lane can TYPE the row the runtime writes — no second
+    write, no duplicate row, and the model's prompt is untouched.
+
+    Always writes the attribute: a stale dict left on a RESIDENT chat agent
+    would otherwise be adopted by a later turn. No marker (every operator/CLI
+    send) clears it, and the turn behaves exactly as it did before attribution
+    existed. Returns the staged dict, or ``None`` when nothing was staged.
+    """
+
+    marker = getattr(request, "persona_chat_user_finish_reason", None)
+    if (
+        not marker
+        # The retry lane reuses a row that is already durable (and already
+        # carries the marker from the attempt that wrote it); re-staging would
+        # be a no-op the prologue never reads.
+        or request.reuse_current_user_message
+        or not isinstance(request.user_message, str)
+    ):
+        agent._pending_cli_user_message = None
+        return None
+    staged = {
+        "role": "user",
+        "content": _sanitized_user_message_text(request.user_message),
+        "finish_reason": str(marker),
+    }
+    agent._pending_cli_user_message = staged
+    return staged
 
 
 class ProfileAgentRunner:
@@ -916,6 +985,9 @@ class ProfileAgentRunner:
                 agent._persona_chat_root_session_id = request.root_chat_session_id
                 agent._persona_chat_client_message_id = request.client_message_id
                 agent._persona_chat_turn_id = request.turn_id
+                # Type the user row the runtime is about to persist (relay
+                # sender attribution). Single write path, marker or not.
+                stage_persona_chat_user_row_marker(agent, request)
                 # Persona-chat continuity deliberately keeps a stable logical
                 # root while native compression advances to a child SessionDB
                 # tip.  Hermes' global default is in-place compaction, which

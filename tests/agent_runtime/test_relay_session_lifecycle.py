@@ -771,6 +771,278 @@ def test_unresolvable_sender_projects_as_agent_without_a_name(isolate_agent_runt
 
 
 # --------------------------------------------------------------------------- #
+# The relay sender-attribution WIRE (2026-07-31)                              #
+#                                                                             #
+# The four tests above pin the two ENDS: the resolver produces a marker, and a #
+# row that already carries one projects as the sending agent. They pinned      #
+# nothing in between — so when native session continuity (c60413e17) deleted   #
+# the mission-chat lane's own `_append_persona_operator_turn(relay_marker=)`   #
+# call site, all seven stayed green while every live relay went back to        #
+# rendering as the OPERATOR. These tests walk the middle: CLI chokepoint ->    #
+# mission_chat_reply -> AgentRunRequest -> the staged user-row dict -> the     #
+# native message projection -> the persisted row -> history parse ->          #
+# attribution.                                                                 #
+# --------------------------------------------------------------------------- #
+
+
+def _persona_commands_source() -> str:
+    import hermes_cli.harness as harness
+
+    return (
+        Path(harness.__file__).with_name("harness_parts") / "persona_commands.py"
+    ).read_text(encoding="utf-8")
+
+
+def _mission_chat_reply_call_in_chat_command():
+    """The `mission_chat_reply(...)` call inside `_cmd_mission_chat_message`.
+
+    persona_commands.py is exec'd into harness globals rather than imported, so
+    its wiring is pinned by parsing the exact source text that gets exec'd —
+    the same idiom as the record-at-injection and usage-single-writer guards.
+    """
+    import ast
+
+    tree = ast.parse(_persona_commands_source())
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FunctionDef) and node.name == "_cmd_mission_chat_message":
+            for call in ast.walk(node):
+                if (
+                    isinstance(call, ast.Call)
+                    and getattr(call.func, "attr", None) == "mission_chat_reply"
+                ):
+                    return node, call
+    raise AssertionError("mission_chat_reply call not found in _cmd_mission_chat_message")
+
+
+def test_the_chat_lane_resolves_the_sender_and_hands_it_to_the_runtime():
+    # Hop 1: the live lane must both CALL the resolver and forward its answer.
+    # A resolver with no caller is exactly the state c60413e17 left behind.
+    import ast
+
+    func, call = _mission_chat_reply_call_in_chat_command()
+    resolver_targets = [
+        node.targets[0].id
+        for node in ast.walk(func)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.value, ast.Call)
+        and getattr(node.value.func, "id", None) == "_resolve_relay_sender_marker"
+        and isinstance(node.targets[0], ast.Name)
+    ]
+    assert resolver_targets, (
+        "_cmd_mission_chat_message never calls _resolve_relay_sender_marker; "
+        "relayed rows will persist unattributed"
+    )
+    forwarded = [
+        keyword.value.id
+        for keyword in call.keywords
+        if keyword.arg == "relay_sender_marker" and isinstance(keyword.value, ast.Name)
+    ]
+    assert forwarded, "mission_chat_reply is not given relay_sender_marker"
+    assert set(forwarded) <= set(resolver_targets), (
+        "relay_sender_marker is forwarded from something other than the resolver"
+    )
+
+
+def test_mission_chat_reply_puts_the_marker_on_the_run_request(monkeypatch):
+    # Hop 2: the runtime request carries the marker to the runner.
+    from agent_runtime import persona_runtime
+    from agent_runtime.store import AgentStore
+
+    persona = next(item for item in AgentStore().list_all() if item.id == "qa")
+    captured: dict[str, object] = {}
+
+    class _StubRunner:
+        def run(self, request):
+            captured["request"] = request
+            raise RuntimeError("stop after request assembly")
+
+    runtime = persona_runtime.GPTPersonaRuntime()
+    runtime._runner = _StubRunner()
+    monkeypatch.setattr(
+        persona_runtime, "assert_provider_health_for_persona", lambda _persona: None
+    )
+    monkeypatch.setattr(
+        persona_runtime,
+        "resolve_persona_profile",
+        lambda _persona: PersonaProfileBinding(
+            persona_id="qa",
+            hermes_profile="qa",
+            profile_home=None,
+            readiness="ready",
+            summary="stubbed for the wire test",
+        ),
+    )
+    with pytest.raises(RuntimeError, match="stop after request assembly"):
+        runtime.mission_chat_reply(
+            persona,
+            "From Neko: status?",
+            session_id="persona_chat_personainst_qa_deadbeef",
+            permission_session_id="persona_chat_personainst_qa_deadbeef",
+            root_chat_session_id="persona_chat_personainst_qa_deadbeef",
+            client_message_id="cm-relay-wire",
+            relay_sender_marker="relay_from:neko:personainst_neko",
+        )
+    assert captured["request"].persona_chat_user_finish_reason == (
+        "relay_from:neko:personainst_neko"
+    )
+
+
+def test_the_runner_stages_the_marker_where_the_prologue_will_adopt_it():
+    # Hop 3: the runner stages the exact dict `build_turn_context` adopts.
+    # The adoption predicate is an equality check against the prologue's
+    # SANITIZED copy of this turn's message, so the staged content is asserted
+    # against that same sanitizer rather than the raw string.
+    from agent.message_sanitization import _sanitize_surrogates
+    from agent_runtime.profile_runner import (
+        AgentRunRequest,
+        stage_persona_chat_user_row_marker,
+    )
+
+    class _Agent:
+        pass
+
+    agent = _Agent()
+    request = AgentRunRequest(
+        profile="qa",
+        user_message="From Neko: status?\ud800",
+        root_chat_session_id="persona_chat_personainst_qa_deadbeef",
+        client_message_id="cm-relay-wire",
+        persona_chat_user_finish_reason="relay_from:neko:personainst_neko",
+    )
+    staged = stage_persona_chat_user_row_marker(agent, request)
+    assert staged is agent._pending_cli_user_message
+    assert staged["role"] == "user"
+    assert staged["finish_reason"] == "relay_from:neko:personainst_neko"
+    assert staged["content"] == _sanitize_surrogates(request.user_message)
+
+
+def test_an_operator_send_stages_nothing_and_clears_a_resident_leftover():
+    # The byte-identical guarantee, and the resident-agent hazard that comes
+    # with it: a marker staged for one relay turn must never be adopted by the
+    # NEXT turn on the same resident chat actor.
+    from agent_runtime.profile_runner import (
+        AgentRunRequest,
+        stage_persona_chat_user_row_marker,
+    )
+
+    class _Agent:
+        pass
+
+    agent = _Agent()
+    agent._pending_cli_user_message = {
+        "role": "user",
+        "content": "From Neko: status?",
+        "finish_reason": "relay_from:neko:personainst_neko",
+    }
+    request = AgentRunRequest(
+        profile="qa",
+        user_message="Operator: ping",
+        root_chat_session_id="persona_chat_personainst_qa_deadbeef",
+        client_message_id="cm-op-wire",
+    )
+    assert stage_persona_chat_user_row_marker(agent, request) is None
+    assert agent._pending_cli_user_message is None
+
+
+def test_the_staged_row_survives_the_native_projection_and_attributes(
+    isolate_agent_runtime_root,
+):
+    # Hops 4-6: the staged dict goes through the SAME native-message projection
+    # the session flush applies, is persisted as the turn's user row, and the
+    # read side attributes it to the SENDING agent.
+    from hermes_state import SessionDB
+
+    from hermes_cli import harness
+    from agent_runtime.operator_channels import operator_channel_summary
+    from agent_runtime.persona_chat_continuity import safe_native_message
+    from agent_runtime.persona_chat_history import PERSONA_RELAYED_MESSAGE_KIND
+    from agent_runtime.profile_runner import (
+        AgentRunRequest,
+        stage_persona_chat_user_row_marker,
+    )
+
+    store = PersonaInstanceStore()
+    sender_session = default_chat_session_id_for_instance(store, persona_id="neko")
+    store.open_chat(
+        persona_id="neko", session_id=sender_session, display_name="Neko Mission Lead"
+    )
+    sender_id = persona_instance_id_for("neko")
+    target_session = default_chat_session_id_for_instance(store, persona_id="qa")
+    store.open_chat(persona_id="qa", session_id=target_session, display_name="QA")
+
+    marker = harness._resolve_relay_sender_marker(
+        f"agent:{sender_session}", instance_store=store, relay_chain_in=("neko",)
+    )
+
+    class _Agent:
+        pass
+
+    agent = _Agent()
+    request = AgentRunRequest(
+        profile="qa",
+        user_message="From Neko: status?",
+        root_chat_session_id=target_session,
+        client_message_id="cm-relay-wire",
+        persona_chat_user_finish_reason=marker,
+    )
+    staged = stage_persona_chat_user_row_marker(agent, request)
+
+    # The flush hands every persona-chat row through safe_native_message before
+    # writing it; a projection that dropped finish_reason would silently strip
+    # the attribution.
+    native = safe_native_message(
+        {
+            **staged,
+            "root_chat_session_id": target_session,
+            "client_message_id": request.client_message_id,
+        }
+    )
+    assert native["finish_reason"] == marker
+
+    db = SessionDB()
+    harness._ensure_persona_chat_session(
+        session_db=db, session_id=target_session, persona_id="qa", title="QA chat"
+    )
+    db.append_message(
+        session_id=target_session,
+        role=native["role"],
+        content=native["content"],
+        finish_reason=native["finish_reason"],
+        platform_message_id=request.client_message_id,
+    )
+
+    rows = persona_chat_history_summary(
+        persona_instances=store.list_all(), session_db=db
+    )
+    channels = operator_channel_summary(
+        persona_instances=store.list_all(),
+        persona_chat_history=rows,
+        persona_chat_trace=[],
+    )
+    messages = _target_channel(channels, target_session)["conversation"]["messages"]
+    relayed = [m for m in messages if m.get("kind") == PERSONA_RELAYED_MESSAGE_KIND]
+    assert len(relayed) == 1
+    assert relayed[0]["actor_persona_id"] == "neko"
+    assert relayed[0]["actor_instance_id"] == sender_id
+    assert relayed[0]["actor_display_name"] == "Neko Mission Lead"
+
+
+def test_the_two_upstream_seams_the_marker_rides_are_still_present():
+    # The staging seam is only as durable as the two upstream lines it rides.
+    # Pin them by source so an upstream merge that reshapes either one fails
+    # HERE — loudly — instead of silently un-attributing every relay again.
+    import agent.turn_context as turn_context
+    import run_agent
+
+    prologue = Path(turn_context.__file__).read_text(encoding="utf-8")
+    assert 'pending_cli_message = getattr(agent, "_pending_cli_user_message", None)' in prologue
+    assert "user_msg = pending_cli_message" in prologue
+
+    flush = Path(run_agent.__file__).read_text(encoding="utf-8")
+    assert 'finish_reason=msg.get("finish_reason")' in flush
+
+
+# --------------------------------------------------------------------------- #
 # Task-scoped dispatch sessions (2026-07-27)                                  #
 #                                                                             #
 # The 2026-07-18 fix above made an omitted-session relay CONTINUE the target's #

@@ -2212,6 +2212,23 @@ def _cmd_mission_chat_message(args) -> int:
     native_revision_before = _persona_chat_native_revision(session_db, session_id)
     runtime_registry = persona_chat_runtime_registry()
     chat_message = message
+    # Relay sender attribution: resolve who sent this incoming message ONCE
+    # (agent_chat_send relays carry requested_by="agent:<caller session>") and
+    # hand the typed marker to the runtime, which stamps it on the native user
+    # row it persists for this turn. Without it the target's transcript renders
+    # a relayed message as the OPERATOR. Operator/CLI sends resolve to None →
+    # no marker → byte-identical persistence.
+    #
+    # This lane stopped appending the incoming row itself when native session
+    # continuity landed (c60413e17); the marker therefore rides
+    # `mission_chat_reply(relay_sender_marker=)` down to the single seam that
+    # types the row the RUNTIME writes (profile_runner.
+    # stage_persona_chat_user_row_marker) rather than a second write here.
+    relay_sender_marker = _resolve_relay_sender_marker(
+        getattr(args, "requested_by", None),
+        instance_store=instance_store,
+        relay_chain_in=relay_chain_in,
+    )
     from agent_runtime import turn_budget as _turn_budget
     from agent_runtime.mission_chat_turn_context import build_mission_chat_turn_context
     from agent_runtime.profile_runner import RunBudgetExceeded
@@ -2424,6 +2441,7 @@ def _cmd_mission_chat_message(args) -> int:
                 reuse_current_user_message=(
                     journal_state == TURN_STATE_PENDING and bool(replay.get("operator"))
                 ),
+                relay_sender_marker=relay_sender_marker,
                 root_chat_session_id=session_id,
                 client_message_id=client_message_id,
                 runtime_registry=runtime_registry,

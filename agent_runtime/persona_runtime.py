@@ -223,6 +223,14 @@ class GPTPersonaRuntime:
         situational_hud_content: str | None = None,
         conversation_history: list[dict] | None = None,
         reuse_current_user_message: bool = False,
+        # Relay sender attribution. An ``agent_chat_send`` relay resolves the
+        # SENDING agent once at the CLI chokepoint and hands the typed
+        # ``relay_from:<persona>:<instance>`` marker down here; the runner stamps
+        # it on the native user row this turn persists so the target's
+        # conversation attributes the message to the sender instead of the
+        # operator. ``None`` on every operator/CLI send — those rows stay
+        # byte-identical.
+        relay_sender_marker: str | None = None,
         root_chat_session_id: str | None = None,
         client_message_id: str | None = None,
         runtime_registry=None,
@@ -360,6 +368,7 @@ class GPTPersonaRuntime:
                 tool_execution_scope_id=root_chat_session_id or perm_session_id,
                 conversation_history=conversation_history,
                 reuse_current_user_message=reuse_current_user_message,
+                persona_chat_user_finish_reason=relay_sender_marker,
                 root_chat_session_id=root_chat_session_id or perm_session_id,
                 client_message_id=client_message_id,
                 turn_id=turn_id,
