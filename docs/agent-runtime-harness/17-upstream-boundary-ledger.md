@@ -43,6 +43,22 @@ all deletion-shaped.
 
 ## 2. Boundary check result (final)
 
+> **Baseline re-pinned 2026-07-31 (upstream sync).** The upstream merge
+> `b9721809e` (`upstream/main = 126ff7071`; doc 18's executed-merge record)
+> legitimately rewrote out-of-boundary paths across the whole tree, so any diff
+> spanning it is no longer a boundary signal. From the sync onward the baseline
+> is the last sync-branch code commit **`e7b32ec18`**:
+>
+> ```bash
+> git diff --name-only e7b32ec18..HEAD \
+>   | grep -vE '^(agent/|agent_runtime/|hermes_cli/harness)' \
+>   | grep -vE '^tools/(agent_chat_tool|mission_goal_tool)\.py$'
+> ```
+>
+> Docs-only commits that closed the sync (this file, doc 18, the resolve-shim
+> docstring) are accepted paths. The historical check below remains valid only
+> for the pre-sync range `2360f5b18..e7b32ec18^`.
+
 ```bash
 git diff --name-only 2360f5b18..HEAD \
   | grep -vE '^(agent/|agent_runtime/|hermes_cli/harness)' \

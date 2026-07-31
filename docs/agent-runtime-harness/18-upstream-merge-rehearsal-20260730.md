@@ -1,6 +1,9 @@
 # 18 — Upstream Merge Rehearsal (2026-07-30)
 
-> **Status: reference.** Results of a full `git merge upstream/main` rehearsal run in
+> **Status: EXECUTED 2026-07-31 — see the executed-merge record at the end of this
+> doc.** The conflict table below was the work order for the real sync (merge
+> `b9721809e`, upstream `126ff7071`) and is now historical. Original status:
+> results of a full `git merge upstream/main` rehearsal run in
 > an isolated clone (both rehearsed merges aborted, clone deleted, nothing pushed,
 > the working repo never written). Companion to
 > [17 — Upstream Boundary Ledger](17-upstream-boundary-ledger.md): doc 17 records
@@ -135,3 +138,137 @@ accepting the deletion, or retain the command.
    sync lands — upstream's `config_defaults.py` extraction may already provide
    the layering. Interim guard candidate: a data-only test asserting every
    profile's `launcher_qa` block is field-identical to `launcher-dev`'s.
+
+## Executed merge — 2026-07-31
+
+Merged `upstream/main = 126ff7071` into the fork (pre-merge tip `1adf0404f`) as
+merge commit `b9721809e` on `sync/upstream-20260731`, resolved in a dedicated
+short-root worktree by five composition agents with exclusive file ownership,
+then hardened by five triage/fix waves. Landed onto `main` ff-only.
+
+### Fresh rehearsal delta vs the table above
+
+Re-rehearsed same-day in an isolated clone before touching anything real:
+**63 conflicts vs the table's 59** (merge base `9de9c25f6` unchanged; 86 new
+upstream commits since `36e41c09e`). All 35 named non-test files still
+conflicted; `postinstall.py` still the lone modify/delete; the fork-owned
+collision audit still clean (zero upstream touches on `agent_runtime/`,
+`hermes_cli/harness*`, the three fork tools files). New conflicts:
+`scripts/run_tests_parallel.py` (fork worker cap vs upstream's new one-shot
+file retry — composed with disjoint retry ownership: in-pool retry never
+retries timeouts, the fork straggler pass owns them) plus three test files.
+
+### Non-negotiables, as landed
+
+- **Promote endpoint ported** into upstream's new `hermes_cli/web_routers/profiles.py`
+  (`ProfilePromoteRequest` declared in the router; registration order preserved
+  byte-for-byte; S11 template-vs-defaults behavior verified at the
+  `agent_runtime/personas.promote_profile_to_persona` sink; legacy re-export
+  block extended). The `agent_runtime/blueprints/resolve.py` shim stays,
+  docstring retargeted off `web_server.py:12671`.
+- **`postinstall` retained** (fork file + `main.py` wiring restored — upstream's
+  clean deletion had auto-merged away the import, registration, and
+  `_BUILTIN_SUBCOMMANDS` entry outside the conflict hunks). Retention was cheap;
+  no product decision needed. Coherence note: upstream removed pip self-update
+  (`d84e11af4`); the command's provisioning work is independent and still valid.
+- Doc-17 deletions verified still absent (`_profile_bound_in_live_runtime`,
+  `TaskState`, `mission_plan`: zero hits). `task_store_stub.py` untouched.
+
+### Merge-resolution defects found by the gates (all fixed on the branch)
+
+1. `hermes_cli/dep_ensure.py` — merge dropped `import os` (`6ffea44be`).
+2. `agent/prompt_builder.py` — merge dropped the fork's guarded
+   `skill_matches_environment` import fallback; caught by a fork-owned test
+   (`c7dcee760`).
+3. `gateway/slash_commands.py` — fork's `/queue-status` handler called the raw
+   sync session store from async code; caught by upstream's new AST guard
+   (`9df513f70`).
+4. `tools/environments/local.py` + `file_operations.py` — upstream's new
+   `_bash_safe_path()` argv rewrite contradicted `MSYS_NO_PATHCONV=1`, breaking
+   `search_files` content search on Windows AND corrupting backslash-bearing
+   patterns; fixed by splitting consumer classes (`_shell_arg_safe_path` emits
+   `C:/...` for argv; script constructs keep `/c/...`) (`93dc56bd9`). **The
+   contradiction exists in upstream itself — upstream-PR candidate #1.**
+
+### Upstream evolution reconciled (not defects)
+
+`VALID_REASONING_EFFORTS` gained `"ultra"` (fork invalid-sentinel test retargeted
+to `"turbo"` + premise assert); the kanban toolset grew 3 attachment verbs
+(blocked on agent-runtime lanes like their siblings); upstream's hermetic
+test-DB pin (`tests/conftest.py` step 3b) made a fork continuity test's
+redundant HERMES_HOME override self-defeating (`39f18bb4a`); the T6b mirror
+count was corrected to 34 (`mission_goal_create` was the retired 35th)
+(`217df138e`).
+
+### Test-suite reconciliation
+
+- Upstream's two prune waves (`6b81590c5`, `39975613b`: 46,820 → 19,757 test
+  functions) drove most test-file conflicts and the post-merge collection drop.
+  **Audited: all 8,023 test names dropped across tests/gateway + tests/agent are
+  merge-base-owned; zero fork-authored tests lost; the one fork-modified test
+  restored** (`e7b32ec18`).
+- Env-gap fences rebuilt honestly: `tests/hermes_cli` `_ENV_GAPS` restructured to
+  per-cause groups and purged of 163 orphaned + 4 stale rows (55 files/256 rows
+  to 45/93) (`ee0426693`); new shared `tests/_env_gap_fence.py` registry now
+  also covers tests/agent, tests/gateway, tests/tools (`001338b94`,
+  `a9b962ed2`); two Windows rows retired at the source instead of fenced
+  (`98cca0334`). Marks deselect only under `-m`; registered tests still run and
+  fail loudly on plain pytest, and stale (passing) rows are printed by the
+  registry's own detector.
+
+### Final gates at the landed tip
+
+- `python -m pytest tests/agent_runtime -q` → **3,145 passed / 0 failed** (exact
+  pre-merge baseline).
+- `python scripts/run_tests_parallel.py tests/<dir> -q -m "not windows_env_gap
+  and not host_dependency_gap"` → hermes_cli **3,660/0 exit 0** · gateway
+  **4,402/0 exit 0** · agent **3,421/0 exit 0** · tools **5,004/0 exit 0**.
+  (Count drops vs pre-merge are upstream's prune, per the audit above.)
+- Live checkpoints against the merged tree (live venv python +
+  `PYTHONPATH=<worktree>`, `HERMES_HOME=X:\Eternia\.hermes\profiles\alice`):
+  snapshot schema 2 / 2 boards / 0 warnings; `persona list` 15 total / 11 chat;
+  one real Dev mission-chat turn (`run_ids: []`, exact reply, Neko→Dev
+  `steered_by` edge in the HUD); Stage C MCP screenshot returned a real
+  2560×1400 `MEDIA:` PNG through the QA agent's launcher_qa lane.
+- Known operational caveat: `run_tests_parallel.py`'s per-file timeout is
+  load-sensitive on this host — concurrent-load reds (e.g. the `lark_oapi`
+  import chain) are suspect until rerun serially.
+
+### Upstream-PR candidates extracted from this sync
+
+1. `_bash_safe_path` vs `MSYS_NO_PATHCONV` argv contradiction (breaks
+   `search_files` on native Windows in upstream too).
+2. `run_tests_parallel.py --files` splits Windows drive letters — upstream's own
+   retry test fails on Windows without the fix.
+3. `tests/hermes_cli/test_gateway.py` module-level `import pty` kills collection
+   of the whole file on Windows.
+4. Git-Bash discovery: WSL-stub rejection on the PATH lookup (upstream dropped
+   it; a WSL stub passes `_bash_starts()` and then fails every Windows path).
+5. Retry-ownership split for the runner (in-pool flake retry re-running timeouts
+   pays the full file-timeout twice under contention).
+
+### Post-sync follow-ups (carried forward)
+
+- Standing guidance #5 (consolidate per-profile `launcher_qa` `mcp_servers`
+  blocks) is now unblocked: upstream's `config_defaults.py` extraction landed.
+- `hermes_state.py` carries two identical default-DB-path resolvers
+  (`_resolve_default_db_path` fork / `_default_db_path` upstream) — collapse to
+  one authority with an alias.
+- `tools/code_execution_tool.py` `build_execute_code_schema` computes
+  `tool_lines`/`cwd_note` and never uses them (T6b static-brief residue).
+- `tools/skills_sync.py`: upstream's rename-recovery helpers use import-time
+  `SKILLS_DIR` while the fork migrated to live `_skills_dir()` — divergent after
+  a profile switch; needs a deliberate migration pass.
+- `tools/environments/singularity.py:27` resolves `get_hermes_home()` at module
+  import time — imports of `tools.terminal_tool` fail under a scrubbed env.
+- Packaging: `psutil`/`fire` declared but absent on the ambient interpreter the
+  test fences were built against; `markdown` used by the matrix adapter but
+  declared nowhere. The env-gap registries are pinned to the ambient
+  `C:\Python312` — do not rerun the sweeps under the runtime venv and read the
+  stale-row report as truth.
+- Fork path-form translators (`_windows_to_msys_path`, `_bash_safe_path`,
+  `_shell_arg_safe_path`, `_msys_to_windows_path`) would be safer as one
+  `PathForm` value object with explicit consumer classes.
+- `gateway/platforms/base.py:1407` `_path_under_denied_prefix` uses bare
+  `expanduser("~")` while its sibling honors `$HOME` — aligning widens a denial
+  carve-out; operator call.
