@@ -483,6 +483,37 @@ self-heals: see the operator-owned leftovers item below.
   renders a historical non-empty payload. `situational_hud` remains the distinct live
   runtime/steering projection.
 
+### 2026-07-31 staleness audit (post-upstream-sync) — s40–s43 + live-defect fixes
+
+Ran after the executed upstream merge (doc 18). Fork-owned surface re-audited by
+AST reachability (3,625 defs / 139 files); the sync itself left **zero** fork
+symbols newly caller-free. Outcomes on `main`:
+
+- **Three live defects fixed** (`a21ab1a2a`): the exec'd free name
+  `persona_instance_id_for_placement` (NameError on every `--add-instance`,
+  swallowed — named-placement preservation was dead since introduction); the S8
+  `tasks` NameError crashing `workspace show`/`delete --dry-run`/`archive`; and
+  `_realm_row`'s hardcoded `"sync": "in_sync"` (now reads the sidecar honestly).
+- **Relay sender attribution restored** (`7c2a8a7d8`): `c60413e17` (07-20) had
+  deleted the marker call site — relayed rows rendered as the operator for 11
+  days while the resolver's own tests stayed green. Re-wired through the
+  continuity-era persistence path (staged `finish_reason` on the runtime's own
+  user-row flush; prompt byte-identical) + 6 wire tests walking chokepoint →
+  persisted row → attribution.
+- **Removal waves s40–s43** (`4d395f6be`, `0e0917bd5`, `22c5a473c`,
+  `e9c9b3d3d`): `objective_templates.py` whole, 20 dead import bindings, the
+  S28 `scope_control` open question closed (`untriaged_issue_discoveries` +
+  `find_discovery_task` cut; validators live), 8 harness_parts helpers, 30
+  individual symbols across 22 live modules. S27/S29 witnesses retargeted to
+  assert absence, never deleted. Event registry untouched at 88.
+- Launcher Mission Control ran its parallel wave same-day (s40–s46 + s50–s52,
+  −1,090 lib lines + QA-lane retirements; see the Launcher brain's Mission
+  Control note).
+- **Deferred debts and pending rulings are ledgered in
+  [19 — Deferred Debt Ledger](19-deferred-debt-ledger.md)** — notably the
+  role_envelopes/role_checklists family (would move the event count 88 → 82),
+  the Launcher goal-detail consumer knot, and the P0–P5/F-1–F-8 proposal sets.
+
 ### Operator-owned leftovers — nothing in this repo will clean these up
 
 Deliberate holds, not oversights. Each is outside git and safe to leave indefinitely;
