@@ -9,9 +9,15 @@ wrote issue discoveries onto a ``Task`` record deleted in S8 --
 ``apply_issue_triage`` even constructed ``Task(...)`` without importing it, a
 latent ``NameError`` that only survived because no caller was left to reach it.
 
-What remains is validation + lookup, which is all the live importers use:
-``decision_contracts`` (payload validation), ``observability`` (the untriaged
-list), and ``harness`` (the discovery lookup).
+What remains is payload VALIDATION, with exactly one importer:
+``decision_contracts``.
+
+S42 removed the lookup half that sentence used to also claim. Both of its named
+readers were already gone when it was written: S28 deleted
+``build_observability``'s ``tasks`` parameter -- the only production caller of
+``untriaged_issue_discoveries`` -- and the CLI merely BOUND
+``find_discovery_task`` without ever calling it (a binding S41 removed). Each
+walked ``Task.issue_discoveries``, and the ``Task`` record went in S8.
 """
 
 from __future__ import annotations
@@ -81,13 +87,3 @@ def validate_triage_payload(payload: dict[str, Any]) -> None:
             raise DecisionPayloadInvalid("child_description is required for fork_child")
         if not list_of_strings(payload, "child_acceptance_criteria", required=True):
             raise DecisionPayloadInvalid("child_acceptance_criteria must be non-empty for fork_child")
-
-
-def untriaged_issue_discoveries(task: Any) -> list[dict[str, Any]]:
-    return [item for item in getattr(task, "issue_discoveries", []) or [] if item.get("triage_status") == "untriaged"]
-def find_discovery_task(task_store, discovery_id: str) -> tuple[Any, dict[str, Any]]:
-    for task in task_store.list_all():
-        for item in getattr(task, "issue_discoveries", []) or []:
-            if item.get("id") == discovery_id:
-                return task, item
-    raise DecisionPayloadInvalid(f"unknown discovery_id: {discovery_id}")

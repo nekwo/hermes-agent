@@ -11,8 +11,10 @@ module                surviving external surface
 dev_discipline        ``update_progress_telemetry``   (progress.py)
 simplified_contract   ``public_decision_type_value``  (operator_channels, store)
 scope_control         ``validate_discovery_payload``, ``validate_triage_payload``
-                      (decision_contracts), ``untriaged_issue_discoveries``
-                      (observability), ``find_discovery_task`` (harness.py)
+                      (decision_contracts). RETARGETED 2026-07-31 (S42):
+                      ``untriaged_issue_discoveries`` and
+                      ``find_discovery_task`` were listed here too and are gone
+                      -- see the note on EXTERNAL_SURFACE below.
 role_checklists       ``validate_checklist_payload_structure``
                       (decision_contract_registry), ``RoleChecklistStore``,
                       ``checklist_summary``, ``normalize_role_id``
@@ -114,20 +116,16 @@ EXTERNAL_SURFACE = {
     "dev_discipline": {"update_progress_telemetry"},
     "simplified_contract": {"public_decision_type_value"},
     "scope_control": {
+        # S42 (2026-07-31) closed the question S28 left open here. Two names used
+        # to sit in this set as roots WITHOUT an external caller —
+        # `untriaged_issue_discoveries` (S28 deleted `build_observability`'s
+        # `tasks` parameter, its only production caller) and `find_discovery_task`
+        # (bound by `hermes_cli/harness.py`, never called). S28 kept them as roots
+        # purely to keep this module's unreachable-set honest and said a future
+        # pass should cut them or find them a caller. That pass cut them, so the
+        # roots go with them and this set is now exactly the verified surface.
         "validate_discovery_payload",
         "validate_triage_payload",
-        # S28 CORRECTION: `untriaged_issue_discoveries` was verified-live here
-        # on ONE production caller — `observability.build_observability`, which
-        # walked it over the `tasks` parameter both callers passed as `[]`. S28
-        # removed that parameter, so this name now has no production caller and
-        # is reachability-root-only: it is kept as a root to keep this module's
-        # unreachable-set honest, NOT because an external caller was re-verified.
-        # A future pass should cut it or find it a real caller. (Re-checked in
-        # the same pass: `find_discovery_task` is imported by `hermes_cli/harness.py:155`
-        # but has no call site anywhere in `hermes_cli/` — a bound name, not a
-        # use. Same question, different module; left for that pass.)
-        "untriaged_issue_discoveries",
-        "find_discovery_task",
     },
     "role_checklists": {
         "validate_checklist_payload_structure",
@@ -208,7 +206,11 @@ def test_the_live_external_surface_of_each_module_still_works():
 
     assert dev_discipline.update_progress_telemetry({}, "run.tool.finished", {})["tool_call_count"] == 1
     assert simplified_contract.public_decision_type_value("hand_off") == "hand_off"
-    assert scope_control.untriaged_issue_discoveries(object()) == []
+    # S42 retarget: this line used to exercise `untriaged_issue_discoveries`,
+    # which is now removed. `validate_discovery_payload` is scope_control's real
+    # surviving surface, so the negative gate exercises THAT instead of dropping
+    # the module from this check.
+    assert scope_control.validate_discovery_payload({"title": "t", "summary": "s"}) is None
     assert role_checklists.normalize_role_id("launcher_dev") == "dev"
     # Structure validation still rejects a malformed checklist payload.
     from agent_runtime.decision_schema import DecisionPayloadInvalid

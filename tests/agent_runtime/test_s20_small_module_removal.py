@@ -70,10 +70,12 @@ def test_scope_control_survives_on_its_payload_validation_callers():
     That import fed the ``issue_discovery_triage_needed`` interventions, which
     were computed over ``build_observability``'s ``tasks`` parameter — a ``[]``
     literal in both callers since S8 — so the import went with the parameter.
-    ``scope_control`` still survives on the two decision-contract callers below,
-    but ``untriaged_issue_discoveries`` itself now has NO production caller and
-    is a candidate for the next reachability pass (see the final report for
-    2026-07-30 S28).
+    ``scope_control`` still survives on the two decision-contract callers below.
+
+    S42 follow-through (2026-07-31): ``untriaged_issue_discoveries`` was the
+    "candidate for the next reachability pass" this docstring named. That pass
+    removed it from ``scope_control`` itself, so payload validation is now the
+    module's entire surviving surface.
     """
 
     from agent_runtime import decision_contracts, observability, scope_control
@@ -81,6 +83,7 @@ def test_scope_control_survives_on_its_payload_validation_callers():
     assert decision_contracts.validate_discovery_payload is scope_control.validate_discovery_payload
     assert decision_contracts.validate_triage_payload is scope_control.validate_triage_payload
     assert not hasattr(observability, "untriaged_issue_discoveries")
+    assert not hasattr(scope_control, "untriaged_issue_discoveries")
 
 
 def test_role_checklists_survives_on_its_role_envelope_callers():

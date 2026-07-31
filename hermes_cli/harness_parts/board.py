@@ -75,18 +75,6 @@ def _card_row(card, *, full: bool = False) -> dict:
     return row
 
 
-def _resolve_board_id_for_read(store, args) -> str | None:
-    board_id = getattr(args, "board", None) or getattr(args, "board_id", None)
-    if board_id:
-        return board_id
-    workspace = getattr(args, "workspace", None) or WorkspaceStore().active_id()
-    if not workspace:
-        return None
-    from agent_runtime import board_models
-
-    return board_models.default_board_id(workspace)
-
-
 def _cmd_board_list(args) -> int:
     store = _board_store()
     workspace = getattr(args, "workspace", None)

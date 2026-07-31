@@ -85,12 +85,6 @@ def _cmd_persona_instance_reconcile(args) -> int:
     return 0
 
 
-def _event_value(event, key: str):
-    if isinstance(event, dict):
-        return event.get(key)
-    return getattr(event, key, None)
-
-
 def _archived_task_summary(task_id: str) -> dict | None:
     root = paths.deleted_archive_dir()
     if not root.exists():
@@ -122,54 +116,11 @@ def _archived_task_summary(task_id: str) -> dict | None:
     return None
 
 
-def _task_events(task_id: str, *, limit: int, since_text: str | None) -> dict:
-    since = None
-    if since_text:
-        try:
-            since = datetime.fromisoformat(since_text.replace("Z", "+00:00"))
-        except ValueError:
-            return {"ok": False, "error": "invalid_since", "message": "--since must be an ISO-8601 timestamp", "items": []}
-    items = EventLog().for_task(task_id, limit=limit or 50, since=since)
-    return {
-        "ok": True,
-        "task_id": task_id,
-        "limit": limit or 50,
-        "since": since.isoformat() if since else None,
-        "count": len(items),
-        "items": items,
-    }
-
-
-def _clear_task_recovery_markers(task: Task) -> list[str]:
-    cleared: list[str] = []
-    data = task.harness_self_heal if isinstance(task.harness_self_heal, dict) else {}
-    stages = data.get("stages")
-    if not isinstance(stages, dict):
-        return cleared
-    for stage_id, stage_data in list(stages.items()):
-        if not isinstance(stage_data, dict):
-            continue
-        for key in (
-            "last_block_recovery_signal",
-            "last_closed_incident_id",
-            "incident_close_counter",
-            "block_recovery_attempted",
-            "last_budget_recovery_signal",
-        ):
-            if key in stage_data:
-                stage_data.pop(key, None)
-                cleared.append(f"stages.{stage_id}.{key}")
-        if not stage_data:
-            stages.pop(stage_id, None)
-    if not stages:
-        data.pop("stages", None)
-    task.harness_self_heal = data
-    return cleared
-
-
-def _safe_operator_text(value: str) -> str:
-    return " ".join(str(value or "").split())[:160] or "operator requested"
-
+# S42: ``_event_value`` (an Event field reader), ``_task_events`` (the
+# ``EventLog().for_task`` page), ``_clear_task_recovery_markers`` (it mutated
+# ``Task.harness_self_heal``, a record deleted in S8 — its own annotation named a
+# type this scope cannot resolve), and ``_safe_operator_text`` were removed here:
+# each had exactly one hit in the whole harness scope, its own ``def``.
 
 # S13: ``_cancel_task_active_runs`` / ``_close_task_active_workers`` (mission-lane
 # task teardown) and the ``_swarm_state_path`` / ``_read_swarm_state`` /
@@ -397,41 +348,10 @@ def _git_summary(root: Path) -> dict:
 # (_cmd_agent_list) is the live, richer implementation of the same listing.
 
 
-def _safe_issue_summary(item: dict) -> dict:
-    return {
-        "discovery_id": item.get("id"),
-        "parent_task_id": item.get("parent_task_id"),
-        "title": item.get("title"),
-        "severity": item.get("severity"),
-        "relationship_hint": item.get("relationship_hint"),
-        "triage_status": item.get("triage_status"),
-        "triage_decision": item.get("triage_decision"),
-        "child_task_id": item.get("child_task_id"),
-        "created_at": item.get("created_at"),
-        "updated_at": item.get("updated_at"),
-    }
-
-
-def _incident_cursor_ts(incident):
-    """The timestamp an incident is ordered/paged by: when it closed (history)
-    or when it opened (still live)."""
-
-    return getattr(incident, "closed_at", None) or getattr(incident, "opened_at", None)
-
-
-def _incident_history_row(incident) -> dict:
-    cursor = _incident_cursor_ts(incident)
-    return {
-        "incident_id": incident.id,
-        "task_id": incident.task_id,
-        "run_id": incident.run_id,
-        "kind": incident.kind,
-        "summary": incident.summary,
-        "is_open": incident.closed_at is None,
-        "opened_at": incident.opened_at,
-        "closed_at": incident.closed_at,
-        "cursor": cursor,
-    }
+# S42: ``_safe_issue_summary`` (an issue-discovery row projection) and the
+# ``_incident_history_row`` / ``_incident_cursor_ts`` pair (incident paging)
+# were removed here. Their readers were the mission-record verbs S8/S9 deleted;
+# the cursor helper's only caller was the row helper, so the pair went as one.
 
 
 def _cmd_persona_chat_history(args) -> int:
