@@ -109,7 +109,25 @@ class TestResolveProvider:
 class TestRuntimeProvider:
     """Verify resolve_runtime_provider() handles bedrock correctly."""
 
+    def test_bedrock_runtime_default_region(self, monkeypatch, tmp_path):
+        from hermes_cli.runtime_provider import resolve_runtime_provider
 
+        monkeypatch.setenv("AWS_PROFILE", "default")
+        monkeypatch.delenv("AWS_REGION", raising=False)
+        monkeypatch.delenv("AWS_DEFAULT_REGION", raising=False)
+        # Fork hardening: pin the AWS config/credential lookup at paths that do
+        # not exist and disable IMDS so the assertion below reads the code's
+        # us-east-1 fallback rather than whatever region the developer's real
+        # ~/.aws profile or an EC2 metadata endpoint happens to advertise.
+        monkeypatch.setenv("AWS_CONFIG_FILE", str(tmp_path / "missing-config"))
+        monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "missing-credentials"))
+        monkeypatch.setenv("AWS_EC2_METADATA_DISABLED", "true")
+
+        with patch("hermes_cli.runtime_provider.resolve_provider", return_value="bedrock"), \
+             patch("hermes_cli.runtime_provider._get_model_config", return_value={"provider": "bedrock"}):
+            result = resolve_runtime_provider(requested="bedrock")
+
+        assert result["region"] == "us-east-1"
 
     def test_bedrock_runtime_no_credentials_raises_on_auto_detect(self, monkeypatch):
         """When bedrock is auto-detected (not explicitly requested) and no
