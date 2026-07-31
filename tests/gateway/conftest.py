@@ -668,6 +668,196 @@ _ENV_GAPS: EnvGapRegistry = {
             },
         ),
     ],
+    # ── Windows home resolution is environment-only ──────────────────────
+    #
+    # These tests construct their subject under
+    # `@patch.dict(os.environ, {}, clear=True)`. The adapter's __init__ reaches
+    # `get_hermes_home()` -> `_get_platform_default_hermes_home()` ->, with
+    # LOCALAPPDATA cleared, `Path.home()`. On Windows `ntpath.expanduser` reads
+    # only USERPROFILE / HOMEDRIVE+HOMEPATH, so with the env scrubbed it returns
+    # "~" unchanged and pathlib raises `RuntimeError: Could not determine home
+    # directory.` POSIX falls back to `pwd.getpwuid(os.getuid()).pw_dir`, which
+    # needs no environment at all. Verified: all 38 feishu failures carry that
+    # exact message.
+    'test_feishu.py': [
+        (
+            _WINDOWS,
+            'the adapter is constructed under patch.dict(os.environ, {}, '
+            'clear=True); Windows home resolution is environment-only, so '
+            'Path.home() raises "Could not determine home directory." where '
+            'POSIX falls back to pwd.getpwuid()',
+            {
+                'TestAdapterBehavior::test_bot_origin_reactions_are_dropped_to_avoid_feedback_loops',
+                'TestAdapterBehavior::test_build_event_handler_registers_reaction_and_card_processors',
+                'TestAdapterBehavior::test_extract_audio_message_downloads_and_caches',
+                'TestAdapterBehavior::test_extract_post_message_downloads_embedded_resources',
+                'TestAdapterBehavior::test_extract_text_file_injects_content',
+                'TestAdapterBehavior::test_extract_text_message_starting_with_slash_becomes_command',
+                'TestAdapterBehavior::test_group_message_matches_bot_name_when_only_name_available',
+                'TestAdapterBehavior::test_media_batch_merges_rapid_photo_messages',
+                'TestAdapterBehavior::test_message_event_submits_to_adapter_loop',
+                'TestAdapterBehavior::test_process_inbound_message_uses_event_sender_identity_only',
+                'TestAdapterBehavior::test_reaction_on_peer_bot_message_is_not_routed',
+                'TestAdapterBehavior::test_send_document_reply_uses_thread_flag',
+                'TestAdapterBehavior::test_send_splits_fenced_code_blocks_into_separate_post_rows',
+                'TestAdapterBehavior::test_send_uses_post_for_every_chunk_of_multi_chunk_markdown',
+                'TestAdapterBehavior::test_text_batch_flushes_when_message_count_limit_is_hit',
+                'TestAdapterBehavior::test_url_verification_requires_configured_verification_token',
+                'TestAdapterBehavior::test_user_reaction_with_managed_emoji_is_still_routed',
+                'TestAdapterBehavior::test_webhook_request_uses_same_message_dispatch_path',
+                'TestBotNameResolution::test_fetches_and_caches_bot_name',
+                'TestBotNameResolution::test_returns_cached_bot_name_without_api_call',
+                'TestDedupTTL::test_duplicate_within_ttl_is_rejected',
+                'TestFeishuAdapterMessaging::test_connect_websocket_sets_channel_ua_tag',
+                'TestFeishuAdapterMessaging::test_edit_message_falls_back_to_text_when_post_update_is_rejected',
+                'TestGroupMentionAtAll::test_at_all_still_requires_policy_gate',
+                'TestHydrateBotIdentity::test_hydration_populates_open_id_from_bot_info',
+                'TestHydrateBotIdentity::test_hydration_refreshes_env_values_when_bot_info_available',
+                'TestPendingInboundQueue::test_drainer_replays_queued_events_when_loop_becomes_ready',
+                'TestPendingInboundQueue::test_event_queued_when_loop_not_ready',
+                'TestProcessingReactions::test_delete_failure_on_failure_outcome_skips_cross_mark',
+                'TestProcessingReactions::test_failure_removes_typing_then_adds_cross_mark',
+                'TestProcessingReactions::test_start_adds_typing_and_caches_reaction_id',
+                'TestProcessingReactions::test_success_removes_typing_and_adds_nothing',
+                'TestSenderNameResolution::test_fetches_and_caches_name_from_api',
+                'TestSenderNameResolution::test_returns_cached_name_within_ttl',
+                'TestWebhookSecurity::test_rate_limit_resets_after_window_expires',
+                'TestWebhookSecurity::test_signature_valid_passes',
+                'TestWebhookSecurity::test_webhook_connect_requires_inbound_auth_secret',
+                'TestWebhookSecurity::test_webhook_loads_auth_secrets_from_platform_extra',
+            },
+        ),
+    ],
+    'test_setup_feishu.py': [
+        (
+            _WINDOWS,
+            'same as test_feishu.py: FeishuAdapter(PlatformConfig()) is built '
+            'under a cleared os.environ, and Windows home resolution is '
+            'environment-only, so Path.home() raises "Could not determine home '
+            'directory."',
+            {
+                'TestSetupFeishuAdapterIntegration::test_qr_env_produces_valid_adapter_settings',
+            },
+        ),
+    ],
+    # ── os.path.expanduser ignores a monkeypatched HOME on Windows ───────
+    'test_platform_base.py': [
+        (
+            _WINDOWS,
+            'the test patches HOME and relies on the "a denied prefix that IS '
+            "the running user's home is exempt\" carve-out in "
+            '_path_under_denied_prefix, which resolves home with '
+            'os.path.expanduser("~") — and ntpath.expanduser prefers '
+            'USERPROFILE, so the carve-out never fires. NOTE: the sibling '
+            '_media_delivery_denied_paths() in the same file already prefers '
+            '$HOME (a fork addition the merge correctly preserved); making '
+            '_path_under_denied_prefix match it would retire this row and close '
+            'a real alt-home divergence, but it WIDENS a denial carve-out, so '
+            'it is an owner decision rather than a sync-time edit',
+            {
+                'TestMediaDeliveryDefaultMode::test_root_home_deliverable_is_accepted',
+            },
+        ),
+    ],
+    'test_runtime_footer.py': [
+        (
+            _WINDOWS,
+            '_home_relative_cwd() resolves home with os.path.expanduser("~"), '
+            'which ignores the monkeypatched HOME on Windows. Home becomes the '
+            "real profile, pytest's tmp_path lives UNDER it "
+            '(%LOCALAPPDATA%\\Temp), so the wrong prefix is collapsed and the '
+            'result carries backslashes where the assertion hardcodes "/"',
+            {
+                'test_home_relative_cwd_collapses_home',
+                'test_format_footer_all_fields',
+            },
+        ),
+        (
+            _WINDOWS,
+            'no HOME patch involved: _home_relative_cwd("/tmp/wd") calls '
+            'os.path.abspath, which drive-qualifies a root-relative path '
+            'against the current drive on Windows ("X:\\tmp\\wd"), so the '
+            'literal "/tmp/wd" cannot appear in the output',
+            {
+                'test_format_footer_skips_missing_context_length',
+            },
+        ),
+    ],
+    # ── missing host dependencies / undeclared packages ──────────────────
+    'test_memory_monitor.py': [
+        (
+            _HOST,
+            "declared dependency 'psutil' (psutil==7.2.2 in pyproject) is not "
+            'installed on this interpreter. gateway/memory_monitor.py reads RSS '
+            'via resource.getrusage (POSIX-only, absent on Windows) then falls '
+            'back to psutil; with both unavailable _get_rss_mb() returns None '
+            'and start_memory_monitoring() logs "monitoring unavailable" and '
+            'returns False',
+            {
+                'test_start_logs_baseline_and_returns_true',
+                'test_double_start_is_noop',
+                'test_stop_logs_shutdown_snapshot',
+            },
+        ),
+    ],
+    'test_status.py': [
+        (
+            _HOST,
+            "declared dependency 'psutil' is not installed on this interpreter, "
+            'so gateway/status.py::_get_process_start_time falls off /proc (its '
+            'only non-Linux source) into a failing psutil import and returns '
+            'None',
+            {
+                'TestGetProcessStartTime::test_live_process_is_stable_int',
+            },
+        ),
+    ],
+    'test_matrix.py': [
+        (
+            _HOST,
+            "Python-Markdown ('markdown') is not installed. "
+            'MatrixAdapter._markdown_to_html imports it inside a try/except and '
+            'silently drops to a regex converter with no table support, so the '
+            'output carries no <table>. NOTE: `markdown` is declared in NO '
+            'requirements file despite the docstring calling it "a core '
+            'dependency" — a real packaging gap, not just a host gap',
+            {
+                'TestMatrixMarkdownToHtml::test_matrix_markdown_preserves_table_structure',
+            },
+        ),
+    ],
+    # ── test-side portability defects (fixable at the source) ────────────
+    'test_config_env_bridge_authority.py': [
+        (
+            _WINDOWS,
+            '_run_gateway_import builds the child environment from a '
+            'POSIX-shaped allowlist (PATH, PYTHONPATH, VIRTUAL_ENV, HOME). On '
+            'POSIX the user site derives from HOME so that suffices; on Windows '
+            'it derives from APPDATA, which is not forwarded, so the child '
+            'loses every user-installed dependency and `from gateway import '
+            "run` dies with ModuleNotFoundError: No module named 'yaml'. "
+            'Forwarding APPDATA would retire this row',
+            {
+                'test_config_gateway_timeout_wins_over_stale_env',
+                'test_config_platform_connect_timeout_supplies_env_when_unset',
+                'test_env_platform_connect_timeout_wins_over_config',
+            },
+        ),
+    ],
+    'test_session_state_cleanup.py': [
+        (
+            _WINDOWS,
+            'the guard reads gateway/run.py with Path.read_text() and no '
+            "encoding=, so Python uses this host's cp1252 locale default and "
+            'chokes on the UTF-8 warning emoji in run.py '
+            '(UnicodeDecodeError on byte 0x8f). Passing encoding="utf-8" would '
+            'retire this row and let a useful architectural guard actually run '
+            'on Windows',
+            {
+                'TestNoMoreBareDeleteSites::test_no_bare_del_of_running_agents_in_gateway_run',
+            },
+        ),
+    ],
     'test_update_command.py': [
         (
             _WINDOWS,

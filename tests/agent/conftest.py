@@ -84,6 +84,22 @@ _ENV_GAPS: EnvGapRegistry = {
             },
         ),
     ],
+    'test_coding_context.py': [
+        (
+            _WINDOWS,
+            'Path.write_text() emits CRLF on Windows, and _git_init runs git '
+            'with HOME=<tmp_path> so only the system gitconfig applies '
+            '(core.autocrlf=true, the Git-for-Windows installer default) and '
+            'the index is normalized to LF. build_coding_workspace_block() then '
+            'runs git with the ambient env where the user global sets '
+            'core.autocrlf=false, so the CRLF worktree file differs from the LF '
+            'index and the workspace reports "1 modified" instead of "clean". '
+            'Same mechanism as tests/tools/test_working_diff.py',
+            {
+                'TestWorkspaceBlock::test_reports_branch_and_clean_status',
+            },
+        ),
+    ],
     'test_credential_pool_routing.py': [
         (
             _HOST,
