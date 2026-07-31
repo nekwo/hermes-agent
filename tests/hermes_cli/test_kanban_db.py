@@ -3391,12 +3391,11 @@ def test_resolve_hermes_argv_module_actually_runs():
     """
     import subprocess
     import hermes_cli.kanban_db as kb
-    import shutil
     import unittest.mock as mock
 
     with mock.patch.dict(os.environ, {}, clear=False):
         os.environ.pop("HERMES_BIN", None)
-        with mock.patch.object(shutil, "which", return_value=None):
+        with mock.patch.object(kb, "_safe_which_no_cwd", return_value=None):
             argv = kb._resolve_hermes_argv()
     r = subprocess.run(argv + ["--version"], capture_output=True, text=True, timeout=30)
     assert r.returncode == 0, (
