@@ -22,17 +22,18 @@ that no longer exists (a deleted module satisfies "does not have attribute X"
 vacuously):
 
 * ``tests/agent_runtime/test_s27_context_builder_lane_removal.py`` — 5 tests.
-  Its one gate that was NOT about the module's contents, the contract-45
-  ``mission_hud`` negative gate, is carried below rather than dropped.
+  Its one gate that was NOT about the module's contents was carried below and
+  later retargeted by S39 (``149a9ae53``) when fresh-row ``mission_hud`` writes
+  were retired while historical Launcher reads stayed supported.
 * Five gates in ``test_s19_context_builder_cluster_removal.py``; that file keeps
   its ``mission_hud_preview`` entry-point and live-HUD halves.
 * ``tests/agent_runtime/test_persona_memory_scope.py`` — 4 tests, all of
   ``_persona_run_uses_memory``.
 
-NOT collateral: ``AgentRun`` (``agent_runtime.models``, live everywhere) and the
-Launcher-read ``mission_hud`` observability field, whose producer is
-``prompt_observability`` and has nothing to do with the removed
-``context_builder._mission_hud``. Both are pinned below.
+NOT collateral: ``AgentRun`` (``agent_runtime.models``, live everywhere) and
+the distinct live ``situational_hud`` observability projection. Both are pinned
+below; S39 separately proves historical ``mission_hud`` rows remain readable
+without manufacturing that key on fresh rows.
 """
 
 from __future__ import annotations
@@ -78,12 +79,15 @@ def test_the_agent_run_model_is_not_collateral():
     assert not hasattr(persona_runtime, "AgentRun")
 
 
-def test_the_contract_45_mission_hud_observability_field_is_untouched():
-    """Negative gate, carried over from the deleted S27 contract.
-    ``context_builder._mission_hud`` (removed) is NOT ``prompt_observability``'s
-    ``mission_hud`` row (kept): the Launcher reads that key off the snapshot, so
-    it survives regardless of the name collision."""
+def test_the_contract_45_situational_hud_observability_field_survives_s39():
+    """Retarget the carried S27 gate to the live projection after S39.
+
+    S39 (``149a9ae53``) intentionally removed fresh ``mission_hud`` writes but
+    kept ``situational_hud`` as the distinct runtime/steering projection.
+    """
 
     from agent_runtime import prompt_observability
 
-    assert '"mission_hud"' in inspect.getsource(prompt_observability)
+    source = inspect.getsource(prompt_observability)
+    assert '"situational_hud"' in source
+    assert '"mission_hud"' not in source
