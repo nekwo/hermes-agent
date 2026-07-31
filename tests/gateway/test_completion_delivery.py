@@ -296,7 +296,18 @@ def test_autonomous_completion_redacts_real_command_and_output_secrets(monkeypat
     monkeypatch.setattr(pr_module, "process_registry", registry)
     monkeypatch.setattr(redact_module, "_REDACT_ENABLED", True)
 
-    adapter = SimpleNamespace(handle_message=AsyncMock())
+    # Retargeted for the fork's delivery default (2026-07-31 upstream sync).
+    # Upstream synthesizes an internal user message and runs a full agent turn,
+    # so its completion arrives through ``adapter.handle_message``. The fork
+    # gates that behind ``_background_agent_turns_enabled()`` and defaults to a
+    # compact direct ``adapter.send`` — a full turn per background completion is
+    # expensive and lets monitor traffic starve a real human message. The
+    # regression intent here is REDACTION of the delivered notification, and
+    # that intent is unchanged: it is asserted below on whichever lane actually
+    # delivered, so the test proves redaction on the fork's default path and
+    # keeps proving it if the gate is ever flipped back to upstream's. The
+    # handle_message lane is separately covered by the other tests in this file.
+    adapter = SimpleNamespace(handle_message=AsyncMock(), send=AsyncMock())
     runner = _runner(adapter)
 
     async def _instant_sleep(*_a, **_kw):
@@ -313,6 +324,14 @@ def test_autonomous_completion_redacts_real_command_and_output_secrets(monkeypat
         "notify_on_complete": True,
     }))
 
-    delivered = adapter.handle_message.await_args.args[0]
-    assert secret not in delivered.text
-    assert "HOME=/home/user" in delivered.text
+    if adapter.handle_message.await_args is not None:
+        delivered_text = adapter.handle_message.await_args.args[0].text
+    else:
+        # Direct-send lane: adapter.send(chat_id, text, reply_to=..., metadata=...)
+        assert adapter.send.await_args is not None, (
+            "the completion notification was not delivered on either lane"
+        )
+        delivered_text = adapter.send.await_args.args[1]
+
+    assert secret not in delivered_text
+    assert "HOME=/home/user" in delivered_text
