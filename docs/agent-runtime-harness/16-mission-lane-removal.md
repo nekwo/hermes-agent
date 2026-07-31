@@ -427,6 +427,48 @@ files (`.git` + `README.md`), so `_is_empty_husk` is false and the janitor
 classifies them `not_a_git_worktree_with_files` and **keeps them**. This never
 self-heals: see the operator-owned leftovers item below.
 
+### S33–S39 residue outcomes (2026-07-30)
+
+- **S33 repo-baseline retirement** (`a3296b437`): the zero-caller
+  `_repo_context_for_render`, `_repo_context_progress_payload`, and
+  `_attach_repo_baseline` trio left `persona_runtime.py`; its last-use imports and the
+  now-production-caller-free `capture_repo_baseline` went too. The worktree-creator
+  trio remains deliberate regression-test infrastructure.
+- **S34 `AgentRun.llm` retirement** (`e0190436f`): the zero-caller metadata writer and
+  exclusive helper cluster were removed with the model field and its unreachable read
+  arms. Persisted v1 rows carrying `llm` remain readable because model deserialization
+  ignores unknown historical keys.
+- **S35 assignment migration** (`5a1c107a1`): the dry-run-capable archive migration
+  classified 55 legacy live rows with non-null `task_id`; apply archived all 55, and the
+  idempotence check reported zero eligible / zero archived. `evidence_kind` is now the
+  free-floating discriminator and `goal_id` the live ownership key. The persisted model
+  slot remains for archived-row compatibility.
+- **Hermes CLI fixture containment** (`a56767cd8`, `faab6b556`): the three kanban
+  fixtures restore purged modules, the env-loader test restores both the module and
+  parent binding, dashboard auth restores `bound_host` / `bound_port`, and the kanban
+  subprocess probes are portable on Windows.
+- **S36 packet emit retirement** (`13e59568e`): `record_decision_packets`,
+  `record_packet`, `make_packet`, and their exclusive writer helpers were removed while
+  validation and historical packet readers stayed. `packet.recorded` was deregistered
+  and the event-count authority moved 91 → 90. The residue pass then proved that
+  `packet.duplicate` and `packet.normalized` also had no emitter and deregistered both
+  (`93473e94d`), moving 90 → 88 and the contract hash from
+  `68e2a44a60fc8587a6ca9ea0275a62b05dabba9120f52e8a85f5fdac16f0cbd1` to
+  `73ee514b5454b513cbfb74138a86cd12b5ee2312c071e4e55e46528821f5a9b1`.
+- **Canonical runner reliability** (`957589215`, `306ad3035`): missing output from
+  `communicate()` is safe on timeout and normal completion; automatic parallelism is
+  logged and bounded at `min(cpu_count, 8)` while explicit overrides remain uncapped;
+  timeout-shaped nonzero stragglers receive one logged retry after the pool drains at
+  one-worker isolation. Assertion failures are never retried.
+- **S39 `mission_hud` ruling** (`149a9ae53`; Launcher characterization
+  `3190babe`): the Launcher reader stays for historical data. Transcript rows retain
+  `runtime_context.context_id`; `harness prompt-context show` resolves the persisted row
+  from both the live and archive-never-delete observability stores. Fresh Hermes rows
+  therefore dropped only the always-empty `mission_hud` parameter, emitter, and
+  backfill, while the Launcher parser is pinned to tolerate an absent key and still
+  renders a historical non-empty payload. `situational_hud` remains the distinct live
+  runtime/steering projection.
+
 ### Operator-owned leftovers — nothing in this repo will clean these up
 
 Deliberate holds, not oversights. Each is outside git and safe to leave indefinitely;
