@@ -170,12 +170,12 @@ The common mistake is folding these into one template:
 1. **System prompt — per *persona*, stable.** The participation contract ("read the
    `## Mission HUD`, reply with a structured `AgentDecision`"). Lives on the persona
    (`persona_runtime.py`); not templated per node. Unchanged.
-2. **First message = templated objective — per *node*.** Replace raw
-   `ctx.current_stage.objective` / `task.description` with a `(owner_slot.role ×
-   output_type) → objective` registry (`agent_runtime/objective_templates.py`) that
-   renders *what* + *deliver-what* + *acceptance*, with the **goal** (first node) or the
-   **upstream output** (downstream node) filled in. Thin — states the objective, never
-   re-states the HUD.
+2. **First message = templated objective — per *node*.** *(Removed 2026-07-31.)*
+   This proposed replacing raw `ctx.current_stage.objective` / `task.description`
+   with a `(owner_slot.role × output_type) → objective` registry that rendered
+   *what* + *deliver-what* + *acceptance*. The stage graph it templated went with
+   S7, so the renderer module had no caller and was deleted; the sentence is kept
+   only so the three-layer framing below still reads.
 3. **HUD — live per-turn contract — per *node*, every turn.** Stage-shaped (above).
 
 Layer 2 opens the node once (prose objective); layer 3 steers every turn after (machine
