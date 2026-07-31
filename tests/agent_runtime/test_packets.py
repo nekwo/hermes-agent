@@ -1,100 +1,31 @@
-from hermes_time import now
+import json
 
+from agent_runtime import paths
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.events import EventLog
-from agent_runtime.models import AgentRun
-from types import SimpleNamespace
-
-Task = SimpleNamespace
-from agent_runtime.packets import latest_packet, make_packet, record_packet, validate_decision_packets
-from agent_runtime.states import RunState, TaskState
+from agent_runtime.packets import latest_packet, validate_decision_packets
 
 
-def _task() -> Task:
-    ts = now()
-    return Task(
-        id="task_packet",
-        title="Packet contract",
-        description="Verify handoff repair fields survive normalization.",
-        state=TaskState.RUNNING,
-        created_at=ts,
-        updated_at=ts,
-        requested_by="test",
-        acceptance_criteria=["QA can review handoff repair metadata"],
-        current_stage_id="stage_1",
-        harness_self_heal={},
-    )
-
-
-def _run() -> AgentRun:
-    ts = now()
-    return AgentRun(
-        id="run_packet",
-        persona_id="dev",
-        task_id="task_packet",
-        stage_id="stage_1",
-        state=RunState.RUNNING,
-        started_at=ts,
-        last_heartbeat_at=ts,
-    )
-
-
-def test_delivery_handoff_repair_fields_survive_packet_projection(isolate_agent_runtime_root):
-    task = _task()
-    run = _run()
+def test_delivery_handoff_repair_fields_survive_validation():
     delivery = {
         "work_status": "ready_for_qa",
         "changed_paths": ["agent_runtime/packets.py"],
-        "inspected_paths": ["agent_runtime/packets.py", "agent_runtime/context_builder.py"],
+        "inspected_paths": [
+            "agent_runtime/packets.py",
+            "agent_runtime/context_builder.py",
+        ],
         "dirty_baseline": {"present": True, "preserved": ["docs/operator-note.md"]},
         "coverage_claims": ["proof_passed covers packet normalization"],
         "known_non_coverage": ["visual proof not required"],
-        "proof_reuse_basis": {"proof_ids": ["proof_passed"], "basis": "metadata-only handoff repair"},
+        "proof_reuse_basis": {
+            "proof_ids": ["proof_passed"],
+            "basis": "metadata-only handoff repair",
+        },
         "failed_proof_classification": ["shell_wrapper_error:proof_failed"],
         "handoff_repair": {"metadata_only": True, "product_reedit": False},
         "proof_ids": ["proof_passed"],
-        "unknown_sidecar": {"raw": "preserve in artifact only"},
+        "unknown_sidecar": {"raw": "retired emitter no longer persists this"},
     }
-    decision = AgentDecision(
-        type=DecisionType.REQUEST_QA_REVIEW,
-        summary="handoff repair",
-        rationale="QA needs preserved delivery metadata.",
-        payload={"stage_id": "stage_1", "proof_ids": ["proof_passed"], "handoff": {"to": "qa", "stage_complete": True}, "delivery": delivery},
-    )
-
-    validate_decision_packets(decision)
-    packet = make_packet(task=task, decision=decision, packet_type="delivery", body=decision.payload["delivery"], actor="dev", run_id=run.id, stage_id=run.stage_id)
-    log = EventLog()
-    record_packet(packet, event_log=log)
-
-    # S27: this used to read the packet back through ``build_context``'s
-    # ``_safe_packet_projection``. That lane is removed; the normalization under
-    # test is ``packets``' own, so the recorded packet is read at its source.
-    recorded = latest_packet(task.id, "delivery", event_log=log)
-    body = recorded["body"]
-    assert body["changed_paths"] == ["agent_runtime/packets.py"]
-    assert body["inspected_paths"] == ["agent_runtime/packets.py", "agent_runtime/context_builder.py"]
-    assert body["dirty_baseline"]["present"] is True
-    assert body["coverage_claims"] == ["proof_passed covers packet normalization"]
-    assert body["known_non_coverage"] == ["visual proof not required"]
-    assert body["proof_reuse_basis"]["basis"] == "metadata-only handoff repair"
-    assert body["failed_proof_classification"] == ["shell_wrapper_error:proof_failed"]
-    assert body["handoff_repair"]["metadata_only"] is True
-    assert "unknown_sidecar" not in body
-    assert "unknown_sidecar" in recorded["dropped_fields"]
-
-
-def test_delivery_packet_carries_harness_cited_evidence_ids(isolate_agent_runtime_root):
-    task = _task()
-    task.harness_self_heal["delivery_no_progress_guard"] = {
-        "stage_1": {
-            "cited_evidence_ids": [
-                "proof_observed",
-                "delivery_capture:bundle_empty:worktree_missing_or_clean",
-            ],
-        }
-    }
-    run = _run()
     decision = AgentDecision(
         type=DecisionType.REQUEST_QA_REVIEW,
         summary="handoff repair",
@@ -103,23 +34,45 @@ def test_delivery_packet_carries_harness_cited_evidence_ids(isolate_agent_runtim
             "stage_id": "stage_1",
             "proof_ids": ["proof_passed"],
             "handoff": {"to": "qa", "stage_complete": True},
-            "delivery": {"proof_ids": ["proof_passed"], "summary": "Ready for QA."},
+            "delivery": delivery,
         },
     )
 
     validate_decision_packets(decision)
-    packet = make_packet(
-        task=task,
-        decision=decision,
-        packet_type="delivery",
-        body=decision.payload["delivery"],
-        actor="dev",
-        run_id=run.id,
-        stage_id=run.stage_id,
+
+    body = decision.payload["delivery"]
+    assert body["changed_paths"] == ["agent_runtime/packets.py"]
+    assert body["dirty_baseline"]["present"] is True
+    assert body["proof_reuse_basis"]["basis"] == "metadata-only handoff repair"
+    assert body["handoff_repair"]["metadata_only"] is True
+    assert "unknown_sidecar" not in body
+    assert "unknown_sidecar" in body["_normalization"]["dropped_fields"]
+
+
+def test_latest_packet_reads_historical_packet_recorded_rows(
+    isolate_agent_runtime_root,
+):
+    row = {
+        "ts": "2026-07-30T12:00:00+00:00",
+        "type": "packet.recorded",
+        "task_id": "task_packet",
+        "run_id": "run_packet",
+        "persona_id": "dev",
+        "payload": {
+            "packet_id": "packet_delivery_historical",
+            "packet_type": "delivery",
+            "stage_id": "stage_1",
+            "body": {"work_status": "ready_for_qa"},
+        },
+    }
+    paths.events_path().parent.mkdir(parents=True, exist_ok=True)
+    paths.events_path().write_text(
+        json.dumps(row, separators=(",", ":")) + "\n",
+        encoding="utf-8",
     )
 
-    assert packet.body["cited_evidence_ids"] == [
-        "proof_passed",
-        "proof_observed",
-        "delivery_capture:bundle_empty:worktree_missing_or_clean",
-    ]
+    recorded = latest_packet("task_packet", "delivery", event_log=EventLog())
+
+    assert recorded is not None
+    assert recorded["packet_id"] == "packet_delivery_historical"
+    assert recorded["body"]["work_status"] == "ready_for_qa"

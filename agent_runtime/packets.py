@@ -3,16 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from dataclasses import dataclass
 from typing import Any
 
-from hermes_time import now
-from utils import atomic_json_write
-
-from . import paths
 from .decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
 from .events import EventLog
-from .models import Event
 from .redaction import ENV_SECRET_ASSIGNMENT_RE
 from .serde import to_jsonable
 
@@ -46,8 +40,6 @@ def adapt_eternia_backend_manage_py_command(command: str) -> str:
         return f".EterniaBackendVirtualEnv/Scripts/python.exe manage.py{match.group('rest')}"
     return command
 
-PACKET_SCHEMA_VERSION = 1
-PACKET_REDACTION_STATUS = "passed"
 PACKET_TYPES = frozenset({"handoff_packet", "delivery", "qa_review"})
 _NORMALIZATION_KEY = "_normalization"
 
@@ -235,32 +227,6 @@ _AUTH_SHAPE_KEYS = frozenset(
 )
 
 
-@dataclass(frozen=True, slots=True)
-class Packet:
-    packet_id: str
-    packet_type: str
-    packet_version: int
-    task_id: str
-    run_id: str | None
-    stage_id: str | None
-    actor: str
-    created_at: Any
-    source_decision_type: str
-    content_hash: str
-    redaction_status: str
-    body: dict[str, Any]
-    assignment_id: str | None = None
-    target_owner: str | None = None
-    validation_status: str = "valid"
-    normalization_status: str = "unchanged"
-    raw_artifact_id: str | None = None
-    raw_artifact_path: str | None = None
-    normalized_at: Any | None = None
-    dropped_fields: tuple[str, ...] = ()
-    renamed_fields: tuple[str, ...] = ()
-    truncated_fields: tuple[str, ...] = ()
-
-
 def validate_decision_packets(decision: AgentDecision) -> None:
     payload = decision.payload if isinstance(decision.payload, dict) else {}
     for packet_type, packet in iter_packet_payloads(payload):
@@ -285,142 +251,6 @@ def iter_packet_payloads(payload: dict[str, Any]) -> list[tuple[str, dict[str, A
     if isinstance(handoff, dict) and handoff.get("delivery") is not None:
             packets.append(("delivery", _require_object(handoff.get("delivery"), "handoff.delivery")))
     return packets
-
-
-def _body_with_harness_citations(
-    task: Any,
-    *,
-    packet_type: str,
-    body: dict[str, Any],
-    stage_id: str | None,
-) -> dict[str, Any]:
-    if packet_type not in {"handoff_packet", "delivery"}:
-        return body
-    citations = _packet_cited_evidence_ids(task, body, stage_id=stage_id)
-    if not citations:
-        return body
-    enriched = dict(body)
-    enriched["cited_evidence_ids"] = _dedupe_strings(
-        [*_string_list(enriched.get("cited_evidence_ids")), *citations]
-    )[:25]
-    return enriched
-
-
-def _packet_cited_evidence_ids(task: Any, body: dict[str, Any], *, stage_id: str | None) -> list[str]:
-    cited: list[str] = []
-    for key in ("proof_ids", "self_test_evidence_ids", "consumed_proof_ids", "joined_proof_ids"):
-        cited.extend(_string_list(body.get(key)))
-    proof_gate = body.get("proof_gate") if isinstance(body.get("proof_gate"), dict) else {}
-    cited.extend(_string_list(proof_gate.get("required_proof_ids")))
-    heal = task.harness_self_heal if isinstance(getattr(task, "harness_self_heal", None), dict) else {}
-    observations = heal.get("stage_observations") if isinstance(heal.get("stage_observations"), dict) else {}
-    stage_key = str(stage_id or getattr(task, "current_stage_id", "") or "").strip()
-    observed = observations.get(stage_key) if stage_key else None
-    if isinstance(observed, dict):
-        cited.extend(_string_list(observed.get("observed_proof_ids")))
-        cited.extend(_string_list(observed.get("authoritative_gate_proof_ids")))
-    guard = heal.get("delivery_no_progress_guard") if isinstance(heal.get("delivery_no_progress_guard"), dict) else {}
-    guarded = guard.get(stage_key) if stage_key else None
-    if isinstance(guarded, dict):
-        cited.extend(_string_list(guarded.get("cited_evidence_ids")))
-    return _dedupe_strings(cited)
-
-
-def make_packet(*, task: Any, decision: AgentDecision, packet_type: str, body: dict[str, Any], actor: str, run_id: str | None, stage_id: str | None) -> Packet:
-    body = _body_with_harness_citations(task, packet_type=packet_type, body=body, stage_id=stage_id)
-    raw_body = _raw_packet_body_with_dropped_values(body)
-    core = compact_packet_body(packet_type, body)
-    normalization = _pop_normalization(core)
-    if packet_type == "delivery":
-        _validate_delivery_self_test_refs(task, core, stage_id=stage_id)
-    digest = content_hash(core)
-    packet_id = make_packet_id(packet_type, digest)
-    raw_artifact_path = _write_raw_packet_artifact(task_id=task.id, packet_id=packet_id, raw_body=raw_body)
-    return Packet(
-        packet_id=packet_id,
-        packet_type=packet_type,
-        packet_version=PACKET_SCHEMA_VERSION,
-        task_id=task.id,
-        run_id=run_id,
-        stage_id=stage_id,
-        actor=actor,
-        created_at=now(),
-        source_decision_type=decision.type.value if hasattr(decision.type, "value") else str(decision.type),
-        content_hash=digest,
-        redaction_status=PACKET_REDACTION_STATUS,
-        body=core,
-        assignment_id=_packet_assignment_id(decision, body),
-        target_owner=_packet_target_owner(packet_type, core),
-        normalization_status="normalized" if normalization else "unchanged",
-        raw_artifact_id=f"{packet_id}.raw",
-        raw_artifact_path=raw_artifact_path,
-        normalized_at=now() if normalization else None,
-        dropped_fields=tuple(normalization.get("dropped_fields") or ()),
-        renamed_fields=tuple(normalization.get("renamed_fields") or ()),
-        truncated_fields=tuple(normalization.get("truncated_fields") or ()),
-    )
-
-
-def record_decision_packets(task: Any, decision: AgentDecision, *, actor: str, run_id: str | None, event_log: EventLog | None = None, stage_id: str | None = None) -> list[Packet]:
-    event_log = event_log or EventLog()
-    packets: list[Packet] = []
-    for packet_type, body in iter_packet_payloads(decision.payload if isinstance(decision.payload, dict) else {}):
-        packet = make_packet(task=task, decision=decision, packet_type=packet_type, body=body, actor=actor, run_id=run_id, stage_id=stage_id or getattr(task, "current_stage_id", None))
-        recorded = record_packet(packet, event_log=event_log)
-        if recorded:
-            _emit_contract_repaired_progress(packet, event_log=event_log)
-        packets.append(packet)
-    return packets
-
-
-def record_packet(packet: Packet, *, event_log: EventLog) -> bool:
-    for event in event_log.for_task(packet.task_id, limit=0):
-        payload = event.payload if isinstance(event.payload, dict) else {}
-        if event.type == "packet.recorded" and payload.get("content_hash") == packet.content_hash:
-            event_log.append(
-                Event(
-                    ts=now(),
-                    type="packet.duplicate",
-                    task_id=packet.task_id,
-                    run_id=packet.run_id,
-                    persona_id=packet.actor,
-                    payload=_packet_event_payload(packet, duplicate_of=payload.get("packet_id")),
-                )
-            )
-            return False
-    event_log.append(
-        Event(
-            ts=now(),
-            type="packet.recorded",
-            task_id=packet.task_id,
-            run_id=packet.run_id,
-            persona_id=packet.actor,
-            payload=_packet_event_payload(packet),
-        )
-    )
-    if packet.normalization_status == "normalized":
-        event_log.append(
-            Event(
-                ts=now(),
-                type="packet.normalized",
-                task_id=packet.task_id,
-                run_id=packet.run_id,
-                persona_id=packet.actor,
-                payload={
-                    "packet_id": packet.packet_id,
-                    "packet_type": packet.packet_type,
-                    "normalization_status": packet.normalization_status,
-                    "dropped_fields": list(packet.dropped_fields),
-                    "renamed_fields": list(packet.renamed_fields),
-                    "truncated_fields": list(packet.truncated_fields),
-                    "raw_artifact_id": packet.raw_artifact_id,
-                    "raw_artifact_path": packet.raw_artifact_path,
-                },
-            )
-        )
-    return True
-
-
 def latest_packet(task_id: str, packet_type: str, *, event_log: EventLog | None = None, stage_id: str | None = None) -> dict[str, Any] | None:
     event_log = event_log or EventLog()
     for event in reversed(event_log.for_task(task_id, limit=0)):
@@ -439,141 +269,9 @@ def latest_packets_for_task(task_id: str, *, event_log: EventLog | None = None, 
         for packet_type in sorted(PACKET_TYPES)
         if (packet := latest_packet(task_id, packet_type, event_log=event_log, stage_id=stage_id)) is not None
     }
-
-
-def compact_packet_body(packet_type: str, body: dict[str, Any]) -> dict[str, Any]:
-    if packet_type == "handoff_packet":
-        allowed = HANDOFF_PACKET_KEYS
-    elif packet_type == "delivery":
-        allowed = DELIVERY_KEYS
-    else:
-        allowed = QA_REVIEW_KEYS
-    dropped = sorted(set(body.keys()) - allowed)
-    core = _truncate_free_fields({key: body[key] for key in body if key in allowed})
-    if dropped:
-        _merge_normalization(core, dropped_fields=dropped)
-    if packet_type == "delivery":
-        core = _compact_delivery_body(core)
-    return core
-
-
-def _compact_delivery_body(body: dict[str, Any]) -> dict[str, Any]:
-    compact = dict(body)
-    if "summary" in compact:
-        original = str(compact.get("summary") or "")
-        compact["summary"] = original[:240]
-        if len(original) > 240:
-            _merge_normalization(compact, truncated_fields=["summary"])
-    for key in (
-        "findings",
-        "recommendations",
-        "questions",
-        "known_gaps",
-        "known_non_coverage",
-        "inspected_paths",
-        "changed_paths",
-        "coverage_claims",
-    ):
-        if isinstance(compact.get(key), list):
-            original_items = list(compact[key])
-            limit = 8 if key in {"inspected_paths", "changed_paths", "coverage_claims"} else 4
-            compact[key] = [str(item)[:180] for item in original_items[:limit] if str(item).strip()]
-            if len(original_items) > len(compact[key]) or any(len(str(item)) > 180 for item in original_items[:limit]):
-                _merge_normalization(compact, truncated_fields=[key])
-    if isinstance(compact.get("model_options"), list):
-        original_items = list(compact["model_options"])
-        compact["model_options"] = [str(item)[:180] for item in original_items[:4] if str(item).strip()]
-        if len(original_items) > len(compact["model_options"]) or any(len(str(item)) > 180 for item in original_items[:4]):
-            _merge_normalization(compact, truncated_fields=["model_options"])
-    if "wd_tagger_assessment" in compact:
-        original = str(compact.get("wd_tagger_assessment") or "")
-        compact["wd_tagger_assessment"] = original[:360]
-        if len(original) > 360:
-            _merge_normalization(compact, truncated_fields=["wd_tagger_assessment"])
-    return compact
-
-
-def _validate_delivery_self_test_refs(task: Any, body: dict[str, Any], *, stage_id: str | None) -> None:
-    evidence_ids = body.get("self_test_evidence_ids")
-    if not evidence_ids:
-        return
-    if not isinstance(evidence_ids, list):
-        raise DecisionPayloadInvalid("delivery.self_test_evidence_ids must be a list")
-    from .self_test_evidence import SelfTestEvidenceStore
-
-    store = SelfTestEvidenceStore()
-    for raw_id in evidence_ids:
-        evidence_id = str(raw_id or "").strip()
-        if not evidence_id:
-            raise DecisionPayloadInvalid("delivery.self_test_evidence_ids contains an empty evidence id")
-        try:
-            evidence = store.get(evidence_id)
-        except FileNotFoundError as exc:
-            raise DecisionPayloadInvalid(
-                f"delivery.self_test_evidence_ids unknown evidence id: {evidence_id}"
-            ) from exc
-        if evidence.task_id != task.id:
-            raise DecisionPayloadInvalid(f"delivery.self_test_evidence_ids evidence {evidence_id} belongs to a different task")
-        if stage_id and evidence.stage_id and evidence.stage_id != stage_id:
-            raise DecisionPayloadInvalid(f"delivery.self_test_evidence_ids evidence {evidence_id} belongs to a different stage")
-
 def content_hash(body: dict[str, Any]) -> str:
     text = json.dumps(to_jsonable(body), sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
-def make_packet_id(packet_type: str, digest: str) -> str:
-    return f"packet_{packet_type.split('_')[0][:2]}_{digest[7:23]}"
-
-
-def _write_raw_packet_artifact(*, task_id: str, packet_id: str, raw_body: dict[str, Any]) -> str:
-    path = paths.packet_raw_artifact_path(task_id, packet_id)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    atomic_json_write(
-        path,
-        to_jsonable({
-            "packet_id": packet_id,
-            "task_id": task_id,
-            "created_at": now(),
-            "raw_body": raw_body,
-        }),
-        indent=2,
-        sort_keys=True,
-    )
-    try:
-        return str(path.relative_to(paths.store_root()))
-    except ValueError:
-        return str(path)
-
-
-def _raw_packet_body_with_dropped_values(body: dict[str, Any]) -> dict[str, Any]:
-    raw_body = json.loads(json.dumps(to_jsonable(body), sort_keys=True, default=str))
-    normalization = raw_body.get(_NORMALIZATION_KEY)
-    if isinstance(normalization, dict) and isinstance(normalization.get("raw_dropped_values"), dict):
-        for key, value in normalization["raw_dropped_values"].items():
-            raw_body.setdefault(key, value)
-    raw_body.pop(_NORMALIZATION_KEY, None)
-    return raw_body
-
-
-def _packet_assignment_id(decision: AgentDecision, body: dict[str, Any]) -> str | None:
-    for source in (body, decision.payload if isinstance(decision.payload, dict) else {}):
-        value = source.get("assignment_id") if isinstance(source, dict) else None
-        text = str(value or "").strip()
-        if text:
-            return text[:120]
-    return None
-
-
-def _packet_target_owner(packet_type: str, body: dict[str, Any]) -> str | None:
-    if packet_type == "qa_review":
-        value = body.get("next_owner")
-    else:
-        value = body.get("target_owner") or body.get("next_owner") or body.get("final_owner")
-    text = str(value or "").strip()
-    return text[:120] if text else None
-
-
 def _validate_handoff_packet(packet: dict[str, Any]) -> None:
     _normalize_unknown_packet_metadata(packet, HANDOFF_PACKET_KEYS, "handoff_packet")
     _scan_packet_redaction(packet)
@@ -946,62 +644,6 @@ def _validate_qa_review(packet: dict[str, Any], *, decision_type: DecisionType) 
         raise DecisionPayloadInvalid("qa_review cross-stack gaps must route to neko_supervisor")
     if str(packet.get("decision_basis", "")) in {"missing_proof", "proof_plus_targeted_file_check"} and cross_stack_gap and next_owner != "neko_supervisor":
         raise DecisionPayloadInvalid("qa_review missing-proof or contract gaps must route to neko_supervisor")
-
-
-def _packet_event_payload(packet: Packet, *, duplicate_of: str | None = None) -> dict[str, Any]:
-    summary = _packet_summary(packet.body)
-    payload = {
-        "packet_id": packet.packet_id,
-        "packet_type": packet.packet_type,
-        "packet_version": packet.packet_version,
-        "stage_id": packet.stage_id,
-        "assignment_id": packet.assignment_id,
-        "actor": packet.actor,
-        "target_owner": packet.target_owner,
-        "source_decision_type": packet.source_decision_type,
-        "content_hash": packet.content_hash,
-        "validation_status": packet.validation_status,
-        "normalization_status": packet.normalization_status,
-        "redaction_status": packet.redaction_status,
-        "raw_artifact_id": packet.raw_artifact_id,
-        "raw_artifact_path": packet.raw_artifact_path,
-        "normalized_at": packet.normalized_at,
-        "dropped_fields": list(packet.dropped_fields),
-        "renamed_fields": list(packet.renamed_fields),
-        "truncated_fields": list(packet.truncated_fields),
-        "summary": summary,
-        "body": _truncate_free_fields(packet.body),
-    }
-    if len(json.dumps(to_jsonable(payload), ensure_ascii=False).encode("utf-8")) > 3900:
-        payload["body"] = _event_safe_packet_body(packet.body)
-    if duplicate_of:
-        payload["duplicate_of"] = str(duplicate_of)
-    return payload
-
-
-def _event_safe_packet_body(body: dict[str, Any]) -> dict[str, Any]:
-    safe: dict[str, Any] = {}
-    for key, value in body.items():
-        if isinstance(value, list):
-            safe[key] = [str(item)[:100] for item in value[:3]]
-            continue
-        if isinstance(value, dict):
-            safe[key] = _truncate_free_fields(value)
-            continue
-        if isinstance(value, str):
-            safe[key] = value[:180]
-            continue
-        safe[key] = value
-    return safe
-
-
-def _packet_summary(body: dict[str, Any]) -> str:
-    for key in ("packet_kind", "work_status", "decision_basis", "mission_phase"):
-        if body.get(key):
-            return f"{key}={str(body.get(key))[:220]}"
-    return "packet recorded"
-
-
 def _normalize_unknown_packet_metadata(packet: dict[str, Any], allowed: frozenset[str], label: str) -> None:
     extra = sorted(set(packet.keys()) - allowed)
     if not extra:
@@ -1037,13 +679,6 @@ def _merge_normalization(
         "truncated_fields": _dedupe_strings([*(info.get("truncated_fields") or []), *(truncated_fields or [])]),
         "raw_dropped_values": {**prior_raw, **(raw_dropped_values or {})},
     }
-
-
-def _pop_normalization(packet: dict[str, Any]) -> dict[str, Any]:
-    raw = packet.pop(_NORMALIZATION_KEY, None)
-    return raw if isinstance(raw, dict) else {}
-
-
 def _dedupe_strings(items: list[Any]) -> list[str]:
     seen: set[str] = set()
     result: list[str] = []
@@ -1108,41 +743,6 @@ def _mask_path_segments(value: str) -> str:
         for part in parts
     ]
     return "".join(masked)
-
-
-def _emit_contract_repaired_progress(packet: Packet, *, event_log: EventLog) -> None:
-    summary = _contract_repair_summary(packet.body)
-    if not summary or not packet.run_id:
-        return
-    event_log.append(
-        Event(
-            ts=now(),
-            type="run.progress",
-            task_id=packet.task_id,
-            run_id=packet.run_id,
-            persona_id=packet.actor,
-            payload={
-                "step": "contract_repaired",
-                "status": "normalized",
-                "summary": summary,
-                "stage_id": packet.stage_id,
-            },
-        )
-    )
-
-
-def _contract_repair_summary(body: dict[str, Any]) -> str | None:
-    repairs: list[str] = []
-    operator_note = str(body.get("operator_note") or "")
-    if "ignored unsupported metadata keys:" in operator_note:
-        repairs.append("packet metadata normalized")
-    if _MASKED_SECRET_TERM in json.dumps(to_jsonable(body), sort_keys=True):
-        repairs.append("sensitive vocabulary masked")
-    if not repairs:
-        return None
-    return "; ".join(repairs[:2])
-
-
 def _require_object(value: Any, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise DecisionPayloadInvalid(f"{label} must be an object")

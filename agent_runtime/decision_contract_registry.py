@@ -1076,7 +1076,6 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "worker_session.closed": EventContract("worker_session.closed", "Worker closed", ("worker_session_id", "close_reason"), ("state",)),
     "self_test.recorded": EventContract("self_test.recorded", "Self-test recorded", ("evidence_id", "status"), ("stage_id", "command_label")),
     "self_test.loop_detected": EventContract("self_test.loop_detected", "Self-test loop detected", ("command_hash", "repeat_count"), ("stage_id",)),
-    "packet.recorded": EventContract("packet.recorded", "Packet recorded", ("packet_id", "packet_type"), ("content_hash",)),
     "packet.duplicate": EventContract("packet.duplicate", "Packet duplicate", ("packet_id", "duplicate_of"), ("content_hash",)),
     "packet.normalized": EventContract("packet.normalized", "Packet normalized", ("packet_id", "packet_type", "normalization_status"), ("dropped_fields", "renamed_fields", "truncated_fields", "raw_artifact_id")),
     "incident.opened": EventContract("incident.opened", "Incident opened", ("incident_id", "kind"), ("summary",)),

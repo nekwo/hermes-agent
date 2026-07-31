@@ -119,9 +119,11 @@ REMOVED_EVENT_TYPES = frozenset(
 # decision_contract.parity, whose sole emitter simplified_contract._record_parity
 # was deleted at S27 (5c16417f6) — owned by
 # tests/agent_runtime/test_s32_decision_contract_parity_retirement.py.
+# Then -1 at S36: packet.recorded, whose writerless make/record API is retired;
+# owned by tests/agent_runtime/test_s36_packet_emit_retirement.py.
 # This stays an absolute count on purpose: it is the one assertion that catches
 # a contract silently appearing or disappearing.
-SURVIVING_EVENT_COUNT = 91
+SURVIVING_EVENT_COUNT = 90
 
 
 def test_the_unemittable_event_types_are_no_longer_registered():

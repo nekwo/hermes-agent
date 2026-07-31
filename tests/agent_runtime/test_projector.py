@@ -105,18 +105,18 @@ def test_lease_excludes_second_projector(isolate_agent_runtime_root):
     assert Projector(read_model, config=RuntimeConfig()).acquire_lease() is False
 
 
-def test_unknown_event_kind_marks_section_stale_not_dropped(isolate_agent_runtime_root):
+def test_registered_event_rebuilds_snapshot_without_stale_sections(isolate_agent_runtime_root):
     read_model = ReadModel(isolate_agent_runtime_root / "read_model.db")
     snapshot = build_snapshot()
     read_model.apply_full_rebuild(snapshot, watermark=snapshot["parity"]["watermark"])
     EventLog().append(
         Event(
             ts=now(),
-            type="packet.recorded",
+            type="run.tool.finished",
             task_id=None,
             run_id=None,
             persona_id="dev",
-            payload={"packet_id": "packet_1", "packet_type": "handoff"},
+            payload={"tool_name": "terminal", "status": "passed"},
         )
     )
 
