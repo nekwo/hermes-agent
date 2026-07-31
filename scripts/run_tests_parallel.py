@@ -4,7 +4,7 @@
 The minimum-viable replacement for pytest-xdist + a subprocess-isolation
 plugin. Discovers test files under ``tests/`` (excluding integration/e2e
 unless explicitly requested), then runs one ``python -m pytest <file>``
-subprocess per file, with bounded parallelism (default: ``os.cpu_count()``).
+subprocess per file, with bounded parallelism (default: up to 8 workers).
 
 Why per-file rather than per-test?
     Per-test spawn overhead (~250ms × 17k tests = 70min CPU minimum)
@@ -31,7 +31,7 @@ Usage:
     a literal ``--`` is also passed through, and stacks with bare flags.
 
 Environment:
-    HERMES_TEST_WORKERS  Override worker count (default: os.cpu_count())
+    HERMES_TEST_WORKERS  Override worker count (default: min(os.cpu_count(), 8))
     HERMES_TEST_PATHS    Override discovery roots (colon-sep, default: 'tests')
 
 Exit code: 0 if every file's pytest exited 0; 1 otherwise.
@@ -85,10 +85,36 @@ _SKIP_PARTS = {"integration", "e2e", "docker"}
 # time while keeping a genuinely hung file bounded.
 _DEFAULT_FILE_TIMEOUT_SECONDS = 300.0
 
+# Import-heavy pytest subprocesses contend for memory and disk bandwidth well
+# before one worker per logical CPU is useful. Keep the automatic choice
+# conservative; explicit --jobs / HERMES_TEST_WORKERS values remain uncapped.
+_DEFAULT_MAX_WORKERS = 8
+
 # Duration cache: maps relative file paths to last-observed subprocess
 # wall-clock seconds. Used by ``--slice`` to distribute files across
 # CI jobs by estimated total time, so no one job gets all the slow files.
 _DURATIONS_FILE = "test_durations.json"
+
+
+def _adaptive_default_jobs(cpu_count: int | None) -> int:
+    """Choose a conservative automatic worker count for import-heavy tests."""
+    return min(cpu_count or 4, _DEFAULT_MAX_WORKERS)
+
+
+def _format_timeout_output(output: str | None, file_timeout: float) -> str:
+    """Render a timeout result even when ``communicate()`` returned ``None``."""
+    captured = output or "(captured output unavailable)"
+    return (
+        f"(timed out after {file_timeout:.0f}s; process tree terminated)\n"
+        f"{captured}"
+    )
+
+
+def _split_discovery_roots(raw: str) -> list[str]:
+    """Split configured roots without cutting an absolute Windows drive path."""
+    if Path(raw).exists():
+        return [raw]
+    return [value for value in raw.split(":") if value]
 
 
 def _approximately_count_tests(
@@ -290,10 +316,7 @@ def _run_one_file(
         except subprocess.TimeoutExpired:
             output = "(file timeout exceeded; output unavailable)"
         rc = 124  # de facto convention for "killed by timeout".
-        output = (
-            f"({file_timeout:.0f}s exceeded; "
-            f"process tree SIGKILL'd)\n{output}"
-        )
+        output = _format_timeout_output(output, file_timeout)
     except BaseException:
         # KeyboardInterrupt / runner crash — make sure no zombie
         # grandchildren outlive us.
@@ -304,7 +327,7 @@ def _run_one_file(
         # case it left grandchildren behind; already-dead is a no-op.
         _kill_tree(proc, pgid=pgid)
 
-        output +=  "\n"
+        output = (output or "") + "\n"
 
     if rc == 5:
         # No tests collected — every test in the file was filtered out.
@@ -600,8 +623,14 @@ def main() -> int:
         "-j",
         "--jobs",
         type=int,
-        default=int(os.environ.get("HERMES_TEST_WORKERS") or (os.cpu_count() or 4) * 2),
-        help="Parallel worker count (default: $HERMES_TEST_WORKERS or cpu_count*2)",
+        default=int(
+            os.environ.get("HERMES_TEST_WORKERS")
+            or _adaptive_default_jobs(os.cpu_count())
+        ),
+        help=(
+            "Parallel worker count (default: $HERMES_TEST_WORKERS or "
+            f"min(cpu_count, {_DEFAULT_MAX_WORKERS}))"
+        ),
     )
     parser.add_argument(
         "--paths",
@@ -757,7 +786,7 @@ def main() -> int:
         if args.paths_positional:
             roots = [repo_root / p for p in args.paths_positional]
         else:
-            roots = [repo_root / p for p in args.paths.split(":") if p]
+            roots = [repo_root / p for p in _split_discovery_roots(args.paths)]
 
         if args.include_integration:
             # Caller takes responsibility — typically used via explicit -k filter.
@@ -801,6 +830,21 @@ def main() -> int:
         # Recount after slicing.
         test_counts = {f: test_counts[f] for f in files if f in test_counts}
         approx_total_tests = sum(test_counts.values())
+
+    jobs_was_explicit = any(
+        token == "-j"
+        or token.startswith("-j")
+        or token == "--jobs"
+        or token.startswith("--jobs=")
+        for token in our_args
+    )
+    if not jobs_was_explicit and not os.environ.get("HERMES_TEST_WORKERS"):
+        print(
+            "Adaptive worker default: "
+            f"cpu_count={os.cpu_count() or 4}, "
+            f"cap={_DEFAULT_MAX_WORKERS}, selected={args.jobs}",
+            flush=True,
+        )
 
     if roots:
         roots_str = [str(r.relative_to(repo_root)) if r.is_relative_to(repo_root) else str(r) for r in roots]
