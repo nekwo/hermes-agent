@@ -230,7 +230,6 @@ def _severity_for_incident(incident: Incident) -> str:
 def _run_summary(run: Any) -> dict[str, Any]:
     final_decision = getattr(run, "final_decision", None)
     decision_type = final_decision.get("type") if isinstance(final_decision, dict) else None
-    llm = _safe_llm(getattr(run, "llm", None))
     progress = _safe_progress(getattr(run, "progress", None))
     return {
         "run_id": getattr(run, "id", None),
@@ -241,15 +240,8 @@ def _run_summary(run: Any) -> dict[str, Any]:
         "started_at": getattr(run, "started_at", None),
         "last_heartbeat_at": getattr(run, "last_heartbeat_at", None),
         "finished_at": getattr(run, "finished_at", None),
-        "decision_type": llm.get("decision_type") or decision_type,
-        "session_id": getattr(run, "session_id", None) or llm.get("session_id"),
-        "provider": llm.get("provider"),
-        "model": llm.get("model"),
-        "base_url_host": llm.get("base_url_host"),
-        "total_tokens": llm.get("total_tokens"),
-        "latency_ms": llm.get("latency_ms"),
-        "timing": llm.get("timing"),
-        "validation_status": llm.get("validation_status"),
+        "decision_type": decision_type,
+        "session_id": getattr(run, "session_id", None),
         "progress": progress,
         "active_tool": _active_tool_summary(progress),
     }
@@ -292,54 +284,6 @@ def _active_tool_summary(progress: dict[str, Any] | None) -> dict[str, Any] | No
     if isinstance(command_label, str) and command_label:
         summary["command_label"] = command_label
     return summary
-
-
-def _safe_llm(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    allowed = {
-        "provider", "model", "base_url_host", "session_id", "api_calls", "tool_turns",
-        "input_tokens", "output_tokens", "total_tokens", "latency_ms", "finish_reason",
-        "response_len", "validation_status", "decision_type",
-    }
-    safe = {key: value.get(key) for key in allowed if value.get(key) is not None}
-    timing = value.get("timing")
-    if isinstance(timing, dict):
-        safe_timing: dict[str, int] = {}
-        for key, item in timing.items():
-            if not isinstance(key, str) or not (key.endswith("_ms") or key.endswith("_count")):
-                continue
-            try:
-                parsed = int(item)
-            except (TypeError, ValueError):
-                continue
-            if parsed >= 0:
-                safe_timing[key[:64]] = parsed
-        if safe_timing:
-            safe["timing"] = safe_timing
-    metrics = value.get("decision_metrics")
-    if isinstance(metrics, dict):
-        safe_metrics: dict[str, Any] = {}
-        for key in (
-            "classification",
-            "api_calls",
-            "tool_turns",
-            "read_search_count",
-            "proof_count",
-            "patch_count",
-            "test_count",
-            "packet_repair_count",
-            "new_evidence_count",
-            "reason",
-        ):
-            item = metrics.get(key)
-            if isinstance(item, str):
-                safe_metrics[key] = item[:160]
-            elif isinstance(item, int) and item >= 0:
-                safe_metrics[key] = item
-        if safe_metrics:
-            safe["decision_metrics"] = safe_metrics
-    return safe
 
 
 def _self_heal_signals(runs: list[Any]) -> dict[str, Any]:

@@ -10,8 +10,8 @@ Two emitters, one dead key:
 
 * ``_run_free_floating_assignment_once`` emitted a literal ``"task_id": None``.
 * ``_queue_free_floating_assignment`` emitted ``"task_id": assignment.task_id``,
-  which is *also* always ``None`` — the spec at its single construction site is
-  built with ``task_id=None`` — and which the runner's ``data.update(...)``
+  which was *also* always ``None`` on the free-floating construction lane — and
+  which the runner's ``data.update(...)``
   then overwrote with its own ``None`` whenever ``auto_run`` was set. Two
   writers, both constant, neither read.
 
@@ -36,14 +36,9 @@ Launcher terminal parser the mission-chat lane uses:
   prints ``persona_assignment_summary``'s row, and the free-floating
   discriminators read the STORE MODEL's attribute, not this wire key.
 
-What stays, and why it is not an inconsistency: ``PersonaAssignmentSpec.task_id``
-survives. The wire key is dead; the FIELD is not. It is read live at
-``agent_runtime/persona_assignments.py`` (``create_or_resume``'s dedupe/archive
--scope/goal-fallback path) and by the free-floating discriminators in
-``persona_commands.py`` that select on ``task_id is None``, and persisted
-assignments from before the mission lane's retirement can still carry a real
-value for those readers. Reaping the field is a separate contract with a
-separate blast radius.
+S35 follow-up: the old split verdict is now retired. Persisted assignments with
+a non-null task_id are archived before the spec field and its live readers go;
+``evidence_kind`` is the sole free-floating discriminator.
 """
 
 from __future__ import annotations
@@ -131,20 +126,13 @@ def test_free_floating_envelopes_still_carry_every_key_the_launcher_reads():
         assert kept in queue, f"{kept} is a LIVE queued reply key and must survive S31"
 
 
-def test_persona_assignment_spec_keeps_its_task_id_field():
-    """The WIRE key went; the assignment field did not, and that is deliberate.
-
-    Pins the audit's split verdict so a later sweep does not read S31 as
-    licence to reap the field too: ``create_or_resume`` still selects on
-    ``spec.task_id`` (dedupe key, archive scope, goal fallback) and the
-    free-floating close/cleanup paths still discriminate on ``task_id is
-    None``. Those readers are live.
-    """
+def test_persona_assignment_spec_drops_its_migrated_task_id_field():
+    """S35 archives the pre-retirement rows and clears S31's old blocker."""
 
     from agent_runtime.persona_assignments import PersonaAssignmentSpec
 
     fields = {field.name for field in dataclasses.fields(PersonaAssignmentSpec)}
-    assert "task_id" in fields
+    assert "task_id" not in fields
 
 
 def test_free_floating_verbs_are_still_alive():

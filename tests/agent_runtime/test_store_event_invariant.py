@@ -33,10 +33,10 @@ EXEMPT: dict[str, str] = {
     "<module>._write_model": "write primitive — coupling is enforced on its callers",
     # Bare field refresh on a run row. S17 removed the evented RunStore writers
     # that had no production callers left (open_run/heartbeat/
-    # approve_continuation), so the two surviving production callers are
-    # progress.RunProgressSink (which appends its own run.progress /
-    # run.tool.* for the same mutation) and
-    # persona_runtime._attach_repo_baseline (a derived-field refresh). No
+    # approve_continuation), and S33 retired the caller-free
+    # persona_runtime._attach_repo_baseline path proven dead in a54e802cd.
+    # The sole surviving production caller is progress.RunProgressSink (which
+    # appends its own run.progress / run.tool.* for the same mutation). No
     # consumer is watermark-gated on run rows — S9 dropped `runs` from the
     # read model's ROW_TABLES — so the refresh converges without an event, and
     # appending here would double-bump the watermark on every progress tick.

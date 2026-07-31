@@ -11,8 +11,8 @@ the module itself, not a test. Both are superseded in place:
   ``_normalize_unknown_packet_metadata``, which every validator calls instead
   (accounting unknown keys rather than rejecting the packet).
 
-The rest of packets.py is KEPT, including the emit path. See the module note in
-this file's last test for the accounting on that.
+The validation and historical-read half stays. S36 later retires the writerless
+emit half under a separate explicit ruling; the last test reflects that split.
 """
 
 from __future__ import annotations
@@ -66,29 +66,15 @@ def test_unknown_packet_keys_are_still_accounted_not_silently_dropped():
     assert "dropped_fields" in packet["_normalization"]
 
 
-def test_the_live_packets_surface_survives():
-    """Names one bare-word grep away from the removal set -- all still callable.
-
-    ``make_packet`` / ``record_packet`` / ``record_decision_packets`` are the
-    ``packet.recorded`` emit path. It is retained deliberately: the event type is
-    a registered contract (``decision_contract_registry.py:1057``). Its only
-    remaining callers are tests -- the production caller left with the mission
-    lane -- so whether the emit path itself should retire is an operator call,
-    not something this removal slice decides.
-    """
+def test_the_live_packet_validation_and_history_surface_survives():
+    """S36 cuts emission while preserving decision validation/history reads."""
 
     for name in (
         "validate_decision_packets",
         "latest_packet",
         "latest_packets_for_task",
         "iter_packet_payloads",
-        "make_packet",
-        "record_packet",
-        "record_decision_packets",
-        "compact_packet_body",
         "content_hash",
-        "make_packet_id",
         "adapt_eternia_backend_manage_py_command",
     ):
         assert callable(getattr(packets, name)), name
-    assert packets.Packet is not None

@@ -15,6 +15,24 @@ from fastapi.testclient import TestClient
 from hermes_cli import web_server
 
 
+@pytest.fixture(autouse=True)
+def restore_server_binding_state():
+    """Keep start_server's process-global bind metadata inside each test."""
+    missing = object()
+    previous_host = getattr(web_server.app.state, "bound_host", missing)
+    previous_port = getattr(web_server.app.state, "bound_port", missing)
+    yield
+    for name, previous in (
+        ("bound_host", previous_host),
+        ("bound_port", previous_port),
+    ):
+        if previous is missing:
+            if hasattr(web_server.app.state, name):
+                delattr(web_server.app.state, name)
+        else:
+            setattr(web_server.app.state, name, previous)
+
+
 @pytest.fixture
 def client_loopback():
     # Pin the bound-host state for host_header_middleware so requests with

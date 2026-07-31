@@ -249,9 +249,8 @@ class AgentRunResult:
     latency_ms: int | None = None
     # Mostly ``_ms`` / ``_count`` integers, plus the one structured entry
     # ``run_budget`` (the accounting block from ``run_budget.RunBudgetLedger``).
-    # Downstream readers either copy the dict wholesale or filter to
-    # ``_ms``/``_count`` keys (``persona_runtime._record_timing_value``), so the
-    # structured entry is additive for every existing consumer.
+    # Live downstream readers copy the dict wholesale; S34 retired the dead
+    # run-record accumulator that used to filter it to ``_ms``/``_count`` keys.
     profile_timing: dict[str, Any] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
 

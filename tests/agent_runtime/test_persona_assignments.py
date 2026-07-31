@@ -197,7 +197,6 @@ def test_worker_projection_replaces_stale_goal_id_with_assignment_goal(isolate_a
             kind="task_stage",
             title="Implement",
             message="Run the active task.",
-            task_id="task_live",
             goal_id="goal_live",
             stage_id="implement",
         )
@@ -443,7 +442,7 @@ def test_assignment_store_create_or_resume_uses_signal_hash(isolate_agent_runtim
         kind="task_stage",
         title="Stage",
         message="Patch one file",
-        task_id="task_1",
+        goal_id="task_1",
         stage_id="stage_1",
         affected_paths=["a.py"],
         proof_targets=["pytest tests/a.py"],
@@ -457,7 +456,7 @@ def test_assignment_store_create_or_resume_uses_signal_hash(isolate_agent_runtim
             kind="task_stage",
             title="Stage",
             message="Patch one file differently",
-            task_id="task_1",
+            goal_id="task_1",
             stage_id="stage_1",
             affected_paths=["a.py"],
             proof_targets=["pytest tests/a.py"],
@@ -466,7 +465,7 @@ def test_assignment_store_create_or_resume_uses_signal_hash(isolate_agent_runtim
 
     assert second.id == first.id
     assert changed.id != first.id
-    assert [item.id for item in store.find_active(persona_id="dev", task_id="task_1", stage_id="stage_1")] == [first.id, changed.id]
+    assert [item.id for item in store.find_active(persona_id="dev", goal_id="task_1", stage_id="stage_1")] == [first.id, changed.id]
 
 
 def test_free_floating_assignment_is_taskless_non_production_evidence(isolate_agent_runtime_root):
@@ -479,7 +478,6 @@ def test_free_floating_assignment_is_taskless_non_production_evidence(isolate_ag
             title="Launcher Dev sandbox",
             message="Test this persona without a product task.",
             created_by="launcher",
-            task_id=None,
         )
     )
 
@@ -524,7 +522,6 @@ def test_diagnostic_assignment_summary_marks_not_production_proof(isolate_agent_
             title="QA diagnostic",
             message="Run a bounded QA diagnostic.",
             created_by="launcher",
-            task_id="task_diag",
         )
     )
 
@@ -543,14 +540,13 @@ def test_assignment_complete_is_idempotent_for_same_terminal_state(isolate_agent
             kind="diagnostic",
             title="Neko diagnostic",
             message="Run one scoped diagnostic.",
-            task_id="task_close_once",
         )
     )
 
     first = store.complete(assignment.id, state="completed")
     second = store.complete(assignment.id, state="completed")
 
-    events = [event for event in EventLog().for_task("task_close_once", limit=20) if event.type == "persona_assignment.closed"]
+    events = [event for event in EventLog().tail(20) if event.type == "persona_assignment.closed"]
     assert first.completed_at == second.completed_at
     assert [event.payload["assignment_id"] for event in events] == [assignment.id]
 
@@ -563,7 +559,6 @@ def test_attach_run_does_not_reopen_terminal_assignment(isolate_agent_runtime_ro
             kind="diagnostic",
             title="Neko diagnostic",
             message="Run one scoped diagnostic.",
-            task_id="task_attach_after_close",
         )
     )
     closed = store.complete(assignment.id, state="completed")
@@ -571,7 +566,7 @@ def test_attach_run_does_not_reopen_terminal_assignment(isolate_agent_runtime_ro
     attached = store.attach_run(assignment.id, "run_after_close")
     second = store.complete(assignment.id, state="completed")
 
-    events = [event for event in EventLog().for_task("task_attach_after_close", limit=20) if event.type == "persona_assignment.closed"]
+    events = [event for event in EventLog().tail(20) if event.type == "persona_assignment.closed"]
     assert attached.state == "completed"
     assert attached.run_ids == ["run_after_close"]
     assert second.completed_at == closed.completed_at
@@ -4473,7 +4468,6 @@ def test_persona_instance_close_cli_closes_only_free_floating_assignment(monkeyp
             kind="free_floating_message",
             title="Sandbox",
             message="Close me.",
-            task_id=None,
         )
     )
     instance_store = PersonaInstanceStore()
@@ -4512,7 +4506,6 @@ def test_coordinator_close_own_spawned_instance_with_scope(monkeypatch, isolate_
             kind="free_floating_message",
             title="Sandbox",
             message="Close me.",
-            task_id=None,
         )
     )
     instance_store = PersonaInstanceStore()
@@ -4553,7 +4546,6 @@ def test_coordinator_close_operator_placed_instance_needs_confirm(monkeypatch, c
             kind="free_floating_message",
             title="Sandbox",
             message="Do not close without operator.",
-            task_id=None,
         )
     )
     instance_store = PersonaInstanceStore()
@@ -4648,13 +4640,13 @@ def test_profile_persona_instance_summary_includes_tool_visibility(isolate_agent
 def test_close_for_task_releases_active_assignments_and_leaves_other_goals():
     store = PersonaAssignmentStore()
     a = store.create_or_resume(
-        PersonaAssignmentSpec(persona_id="neko_supervisor", kind="scope", title="scope", message="m", task_id="task_g1", goal_id="task_g1")
+        PersonaAssignmentSpec(persona_id="neko_supervisor", kind="scope", title="scope", message="m", goal_id="task_g1")
     )
     b = store.create_or_resume(
-        PersonaAssignmentSpec(persona_id="backend_dev", kind="task_stage", title="impl", message="m", task_id="task_g1", goal_id="task_g1", stage_id="s1")
+        PersonaAssignmentSpec(persona_id="backend_dev", kind="task_stage", title="impl", message="m", goal_id="task_g1", stage_id="s1")
     )
     store.create_or_resume(
-        PersonaAssignmentSpec(persona_id="dev", kind="task_stage", title="impl", message="m", task_id="task_g2", goal_id="task_g2")
+        PersonaAssignmentSpec(persona_id="dev", kind="task_stage", title="impl", message="m", goal_id="task_g2")
     )
 
     assert {"neko_supervisor", "backend_dev", "dev"} <= {x.persona_id for x in store.find_active()}
@@ -4699,7 +4691,7 @@ def test_contention_warning_self_heals_assignment_for_archived_goal():
     releasable, not contention."""
     assignment_store = PersonaAssignmentStore()
     stale = assignment_store.create_or_resume(
-        PersonaAssignmentSpec(persona_id="dev", kind="task_stage", title="impl", message="m", task_id="task_gone_archived", goal_id="task_gone_archived")
+        PersonaAssignmentSpec(persona_id="dev", kind="task_stage", title="impl", message="m", goal_id="task_gone_archived")
     )
 
     warnings = assignment_store.contention_warnings(persona_id="dev", goal_id="task_new_goal")
@@ -5072,7 +5064,6 @@ def test_retire_refuses_active_assignment(isolate_agent_runtime_root):
             kind="free_floating_message",
             title="Live work",
             message="Working.",
-            task_id=None,
         )
     )
     assert assignment.state in ACTIVE_ASSIGNMENT_STATES

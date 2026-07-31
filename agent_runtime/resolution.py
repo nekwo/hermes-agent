@@ -117,9 +117,18 @@ def resolution_payload(resolution: RuntimeResolution | None = None) -> dict[str,
     }
 
 
+# Directories that mark a runtime store the harness has actually written to. A
+# default-layer root carrying none of them is suspect: the process may be pointed at
+# a fresh/wrong root instead of the operator's live store. (``tasks/`` was the
+# mission-era marker; the chat-only store keeps persona/chat state instead.)
+STORE_MARKER_DIRS = ("persona_instances", "sessions", "agents")
+
+
 def suspect_default_root(resolution: RuntimeResolution | None = None) -> bool:
     item = resolution or resolve_runtime()
-    return item.layer == "default" and not (item.store_root / "tasks").is_dir()
+    if item.layer != "default":
+        return False
+    return not any((item.store_root / marker).is_dir() for marker in STORE_MARKER_DIRS)
 
 
 def _configured_store_root(config_path: Path) -> str:

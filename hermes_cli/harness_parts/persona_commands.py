@@ -242,6 +242,22 @@ def _cmd_persona_assignments(args) -> int:
     return 0
 
 
+def _cmd_persona_assignment_task_id_migration(args) -> int:
+    data = migrate_retired_persona_assignment_task_ids(
+        dry_run=bool(getattr(args, "dry_run", False))
+    )
+    if args.json:
+        print(emit_json(data))
+    else:
+        mode = "preview" if data["dry_run"] else "apply"
+        print(
+            f"assignment task-id migration {mode}: scanned={data['scanned']} "
+            f"eligible={data['eligible']} archived={data['archived']} "
+            f"held={len(data['held'])}"
+        )
+    return 0 if data["ok"] else 2
+
+
 def _cmd_persona_instance_create(args) -> int:
     display_name = safe_assignment_text(getattr(args, "display_name", None), limit=120)
     kill_active = bool(getattr(args, "kill_active", False))
@@ -964,8 +980,7 @@ def _cmd_persona_chat_delete(args) -> int:
             try:
                 assignment = assignment_store.get(assignment_id)
                 if (
-                    assignment.task_id is None
-                    and assignment.evidence_kind == "free_floating"
+                    assignment.evidence_kind == "free_floating"
                     and assignment.state not in {"completed", "blocked", "cancelled"}
                 ):
                     closed = assignment_store.complete(
@@ -3912,7 +3927,6 @@ def _queue_free_floating_assignment(
             title=title,
             message=message,
             created_by=requested_by,
-            task_id=None,
             evidence_kind="free_floating",
             production_proof_eligible=False,
             archive_scope="assignment",
@@ -3986,11 +4000,8 @@ def _queue_free_floating_assignment(
         "assignment_id": assignment.id,
         "persona_instance_id": assignment.persona_instance_id,
         "persona_id": normalized_persona,
-        # S31: see the runner's frame. This copy read `assignment.task_id`, but
-        # the spec below is built with `task_id=None` -- so it was equally
-        # constant, and on the auto_run path the runner's `data.update` wrote
-        # its own None straight over it. The FIELD stays (create_or_resume and
-        # the free-floating close paths select on it); only the wire key goes.
+        # S31 removed the constant task_id response key from both envelopes;
+        # S35 then retired the spec field after archiving legacy bound rows.
         "state": assignment.state,
         "kind": assignment.kind,
         "evidence_kind": assignment.evidence_kind,
@@ -5831,7 +5842,6 @@ def _close_free_floating_assignments(persona_instance_id: str, *, reason: str, j
         for item in store.list_all()
         if item.persona_instance_id == normalized_instance
         and item.evidence_kind == "free_floating"
-        and item.task_id is None
         and item.state not in {"completed", "blocked", "cancelled"}
     ]
     if not matches:

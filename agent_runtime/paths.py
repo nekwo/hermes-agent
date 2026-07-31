@@ -46,6 +46,10 @@ def persona_assignments_dir() -> Path:
     return store_root() / "persona_assignments"
 
 
+def persona_assignments_archive_dir() -> Path:
+    return store_root() / "persona_assignments_archive"
+
+
 def persona_chat_mint_receipts_dir() -> Path:
     """Durable idempotency receipts for server-minted persona chat roots."""
     return store_root() / "persona_chat_mint_receipts"

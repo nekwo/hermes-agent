@@ -16,7 +16,6 @@ from types import SimpleNamespace
 
 Task = SimpleNamespace
 from agent_runtime.persona_runtime import GPTPersonaRuntime
-from agent_runtime.persona_runtime import _apply_llm_metadata
 from agent_runtime.profile_runner import AgentRunResult
 from agent_runtime.personas import (
     REGISTRY_HYGIENE_BLOCKED_TOOLS,
@@ -107,32 +106,6 @@ def make_task_and_run():
         session_id="session_existing",
     )
     return task, run
-
-
-def test_apply_llm_metadata_tolerates_non_dict_raw_result():
-    _task, run = make_task_and_run()
-    result = AgentRunResult(
-        final_response='{"type":"report_qa_verdict","summary":"ok","rationale":"ok"}',
-        session_id="session_from_fake",
-        provider="openai-codex",
-        model="gpt-5.5",
-        base_url="https://chatgpt.com/backend-api/codex",
-        messages=[],
-        api_calls=1,
-        input_tokens=10,
-        output_tokens=5,
-        total_tokens=15,
-        latency_ms=123,
-        raw="text_response(finish_reason=stop)",  # type: ignore[arg-type]
-    )
-
-    _apply_llm_metadata(run, result, timing={})
-
-    assert run.llm["provider"] == "openai-codex"
-    assert "finish_reason" not in run.llm
-    assert run.llm["total_tokens"] == 15
-
-
 
 
 def _unbounded_chat_toolsets():
@@ -1020,50 +993,6 @@ def test_chat_reply_without_session_records_no_trace(tmp_path, monkeypatch):
     runtime.chat_reply(neko, "hi", session_id=None)
 
     assert EventLog().tail(10) == []
-
-
-def test_llm_timing_records_repeated_profile_attempts_without_losing_totals():
-    _, run = make_task_and_run()
-    first = AgentRunResult(
-        final_response="{}",
-        session_id="session_1",
-        provider="openai-codex",
-        model="gpt-5.5",
-        base_url="https://chatgpt.com/backend-api/codex",
-        messages=[],
-        latency_ms=100,
-        profile_timing={"conversation_call_ms": 90, "provider_stream_event_count": 4},
-    )
-    second = AgentRunResult(
-        final_response="{}",
-        session_id="session_1",
-        provider="openai-codex",
-        model="gpt-5.5",
-        base_url="https://chatgpt.com/backend-api/codex",
-        messages=[],
-        latency_ms=60,
-        profile_timing={"conversation_call_ms": 50, "provider_stream_event_count": 7},
-    )
-
-    _apply_llm_metadata(run, first, timing={"provider_call_ms": 110})
-    _apply_llm_metadata(run, second, timing={"provider_call_ms": 70})
-
-    timing = run.llm["timing"]
-    assert timing["provider_call_ms"] == 70
-    assert timing["provider_call_count"] == 2
-    assert timing["provider_call_total_ms"] == 180
-    assert timing["provider_call_max_ms"] == 110
-    assert timing["profile_conversation_call_ms"] == 50
-    assert timing["profile_conversation_call_count"] == 2
-    assert timing["profile_conversation_call_total_ms"] == 140
-    assert timing["profile_conversation_call_max_ms"] == 90
-    assert timing["profile_provider_stream_event_count"] == 11
-
-
-
-
-
-
 
 
 # S29: two tests lived here -- test_dev_grounds_in_task_affected_repo_without_

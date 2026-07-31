@@ -297,7 +297,6 @@ class AgentRun:
     max_total_tokens: int | None = None
     cost_usd: float = 0.0
     session_id: str | None = None
-    llm: dict[str, Any] | None = None
     final_decision: dict[str, Any] | None = None
     error: dict[str, Any] | None = None
     progress: dict[str, Any] | None = None

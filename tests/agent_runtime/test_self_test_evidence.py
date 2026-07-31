@@ -2,15 +2,10 @@ from hermes_time import now
 
 import pytest
 
-from agent_runtime.decision_schema import AgentDecision, DecisionPayloadInvalid, DecisionType
 from agent_runtime.events import EventLog
 from agent_runtime.models import AgentRun
-from types import SimpleNamespace
-
-Task = SimpleNamespace
-from agent_runtime.packets import make_packet
 from agent_runtime.self_test_evidence import SelfTestEvidenceStore, record_self_test_from_progress
-from agent_runtime.states import RunState, TaskState
+from agent_runtime.states import RunState
 
 
 def _run() -> AgentRun:
@@ -176,85 +171,6 @@ def test_repeated_failed_self_test_emits_loop_detection_event():
     assert [event.type for event in events].count("proof.attached") == 0
     loop_event = next(item for item in events if item.type == "self_test.loop_detected")
     assert loop_event.payload["repeat_count"] == 2
-
-
-def test_delivery_packet_rejects_unknown_self_test_evidence_ids():
-    run = _run()
-    evidence = record_self_test_from_progress(
-        run,
-        "run.tool.finished",
-        {"tool_name": "terminal", "command": "pytest tests/agent_runtime/test_self_test_evidence.py -q", "exit_code": 0},
-    )
-    assert evidence is not None
-    task = Task(
-        id=run.task_id,
-        title="Mission Control test",
-        description="d",
-        state=TaskState.RUNNING,
-        created_at=now(),
-        updated_at=now(),
-        requested_by="tony",
-        current_stage_id="stage_1",
-    )
-    decision = AgentDecision(
-        type=DecisionType.PROPOSE_PATCH,
-        summary="delivery",
-        rationale="self-test passed",
-        payload={},
-    )
-
-    packet = make_packet(
-        task=task,
-        decision=decision,
-        packet_type="delivery",
-        body={"work_status": "patch_proposed", "self_test_evidence_ids": [evidence.evidence_id]},
-        actor="dev",
-        run_id=run.id,
-        stage_id="stage_1",
-    )
-
-    assert packet.body["self_test_evidence_ids"] == [evidence.evidence_id]
-    with pytest.raises(DecisionPayloadInvalid, match="unknown evidence id"):
-        make_packet(
-            task=task,
-            decision=decision,
-            packet_type="delivery",
-            body={"work_status": "patch_proposed", "self_test_evidence_ids": ["selftest_missing"]},
-            actor="dev",
-            run_id=run.id,
-            stage_id="stage_1",
-        )
-
-
-def _delivery_task() -> Task:
-    return Task(
-        id="task_selftest",
-        title="Mission Control test",
-        description="d",
-        state=TaskState.RUNNING,
-        created_at=now(),
-        updated_at=now(),
-        requested_by="tony",
-        current_stage_id="stage_1",
-    )
-
-
-def test_delivery_packet_rejects_retired_mission_proof_id(isolate_agent_runtime_root):
-    task = _delivery_task()
-    decision = AgentDecision(type=DecisionType.PROPOSE_PATCH, summary="delivery", rationale="proof passed", payload={})
-
-    with pytest.raises(DecisionPayloadInvalid, match="unknown evidence id"):
-        make_packet(
-            task=task,
-            decision=decision,
-            packet_type="delivery",
-            body={"work_status": "patch_proposed", "self_test_evidence_ids": ["proof_retired"]},
-            actor="dev",
-            run_id="run_current",
-            stage_id="stage_1",
-        )
-
-
 def test_status_unknown_when_no_status_no_exit_code_and_no_crash_signal():
     """Observed-lane honesty (live 2026-07-03): a self-test with neither an
     explicit status nor an exit code must NOT be recorded as passed. It defaults

@@ -655,12 +655,6 @@ class RunStore:
     def update(self, run: AgentRun) -> bool:
         with run_lock(run.id):
             run.session_id = _safe_session_id(run.session_id)
-            if isinstance(run.llm, dict):
-                safe_llm_session_id = _safe_session_id(run.llm.get("session_id"))
-                if safe_llm_session_id:
-                    run.llm["session_id"] = safe_llm_session_id
-                else:
-                    run.llm.pop("session_id", None)
             try:
                 previous = self.get(run.id)
             except NotFound:
@@ -681,12 +675,6 @@ class RunStore:
         with run_lock(run_id):
             run = self.get(run_id)
             run.session_id = _safe_session_id(run.session_id)
-            if isinstance(run.llm, dict):
-                safe_llm_session_id = _safe_session_id(run.llm.get("session_id"))
-                if safe_llm_session_id:
-                    run.llm["session_id"] = safe_llm_session_id
-                else:
-                    run.llm.pop("session_id", None)
             if run.state in TERMINAL_RUN_STATES:
                 return run
             run.state = state if isinstance(state, RunState) else RunState(state)
@@ -699,18 +687,6 @@ class RunStore:
                     final_decision.setdefault("execution_type", raw_decision_type)
             run.final_decision = final_decision
             run.error = error
-            if isinstance(run.llm, dict):
-                if final_decision and isinstance(final_decision, dict):
-                    public_decision_type = public_decision_type_value(final_decision.get("type")) or final_decision.get("type")
-                    prior_decision_type = run.llm.get("decision_type")
-                    if prior_decision_type and public_decision_type and prior_decision_type != public_decision_type:
-                        run.llm.setdefault("raw_decision_type", prior_decision_type)
-                    if public_decision_type:
-                        run.llm["decision_type"] = public_decision_type
-                        run.llm.setdefault("public_decision_type", public_decision_type)
-                    run.llm.setdefault("validation_status", "valid")
-                elif error:
-                    run.llm.setdefault("validation_status", "invalid")
             _write_model(paths.run_path(run.id), run)
             payload = {"state": str(run.state)}
             if isinstance(final_decision, dict):
@@ -718,12 +694,6 @@ class RunStore:
                 payload["validation_status"] = "valid"
             if run.session_id:
                 payload["session_id"] = run.session_id
-            if isinstance(run.llm, dict):
-                for key in ("total_tokens", "input_tokens", "output_tokens", "api_calls", "tool_turns"):
-                    if run.llm.get(key) is not None:
-                        payload[key] = run.llm.get(key)
-                if run.llm.get("validation_status"):
-                    payload["validation_status"] = run.llm.get("validation_status")
             self.event_log.append(
                 Event(
                     ts=now(),

@@ -79,6 +79,7 @@ from agent_runtime.persona_assignments import (
     canonical_persona_instance_id,
     chat_session_owner_instance_id,
     default_chat_session_id_for_instance,
+    migrate_retired_persona_assignment_task_ids,
     persona_assignment_store_enabled,
     persona_assignment_summary,
     persona_chat_session_id_for,
@@ -854,6 +855,15 @@ def build_parser(parent_subparsers) -> None:
     persona_assignments.add_argument("--persona", dest="persona_id", default=None)
     persona_assignments.add_argument("--json", action="store_true")
     persona_assignments.set_defaults(func=_cmd_persona_assignments)
+    persona_assignment_task_id_migration = persona_subs.add_parser(
+        "migrate-assignment-task-ids",
+        help="Archive pre-retirement persona assignments whose task_id is non-null",
+    )
+    persona_assignment_task_id_migration.add_argument("--dry-run", action="store_true")
+    persona_assignment_task_id_migration.add_argument("--json", action="store_true")
+    persona_assignment_task_id_migration.set_defaults(
+        func=_cmd_persona_assignment_task_id_migration
+    )
     persona_chat = persona_subs.add_parser("chat", help="Manage durable persona chat sessions")
     persona_chat_subs = persona_chat.add_subparsers(dest="persona_chat_command")
     persona_chat_delete = persona_chat_subs.add_parser("delete", help="Delete a persona chat session and clear active persona bindings")
