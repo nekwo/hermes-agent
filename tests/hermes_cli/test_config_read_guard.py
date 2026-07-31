@@ -43,6 +43,17 @@ ALLOWLIST = {
     "hermes_cli/managed_scope.py",
     # Parse-health probe: intentionally answers "does the raw file parse?".
     "gateway/readiness.py",
+    # Reads a PULLED REALM SUBTREE's profiles/<name>/config.yaml — a foreign,
+    # published document that happens to share the filename, not this machine's
+    # user config. Same class as managed_scope.py above. The canonical loaders
+    # resolve the LIVE profile config and cannot address an arbitrary subtree
+    # path, and routing this read through them would be a bug, not a fix: it
+    # would apply this machine's managed-scope overlay and ${ENV} expansion to
+    # somebody else's realm document. read_remote_persona_defs() exists
+    # precisely to strip the publisher's machine paths / venv pointers /
+    # mcp_servers at the door, so overlaying local state onto it is the thing
+    # it is defending against.
+    "agent_runtime/persona_config_sync.py",
 }
 
 # Directories that never count (tests may build fixture configs freely).
