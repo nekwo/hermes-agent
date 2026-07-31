@@ -94,28 +94,33 @@ def disable_lazy_stt_install():
 # markdown and pathspec — under it the psutil and fire rows below would all
 # report as stale. Do not mix interpreters between the registry and the run.
 #
-# DELIBERATELY NOT FENCED — real defects, left red on purpose:
+# NEVER FENCED — the three real defects triage left red here were FIXED, not
+# marked. Recorded so nobody re-adds a row for them:
 #
 #   * `test_file_tools_live.py::TestSearch::*` and
 #     `test_search_error_guard.py::TestSearchErrorGuard::*[_search_with_rg]` —
-#     a genuine functional regression the merge IMPORTS from upstream.
-#     Upstream's new `_bash_safe_path()` in `ShellFileOperations.
-#     _escape_shell_arg` rewrites `C:\Users\x` to `/c/Users/x` for every shell
-#     arg, while `_apply_windows_msys_bash_env_defaults` (on both sides) sets
-#     MSYS_NO_PATHCONV=1 / MSYS2_ARG_CONV_EXCL=* so MSYS never converts it
-#     back — and a native (non-MSYS) ripgrep cannot resolve `/c/...`.
-#     `search_files` content search is BROKEN on Windows as a result. Fixing it
-#     is upstream's call, not a merge resolution; fencing it would hide a live
-#     user-facing breakage.
+#     `search_files` content search was genuinely BROKEN on Windows. Upstream's
+#     `_bash_safe_path()` rewrote every `ShellFileOperations._escape_shell_arg`
+#     argument from `C:\Users\x` to `/c/Users/x`, while
+#     `_apply_windows_msys_bash_env_defaults` sets MSYS_NO_PATHCONV=1 /
+#     MSYS2_ARG_CONV_EXCL=* so MSYS never converted it back for the NATIVE
+#     ripgrep that receives it. The two mechanisms contradicted each other.
+#     Reconciled by splitting the consumer classes: bash's own script
+#     constructs keep `_bash_safe_path`'s `/c/...` form, while program
+#     ARGUMENTS go through the new `_shell_arg_safe_path`, which emits the
+#     drive-qualified `C:/Users/x` form that the MSYS runtime AND native
+#     binaries both resolve. Quoting/escaping is untouched, and non-path
+#     arguments (search patterns, `python -c` snippets) are now left verbatim
+#     instead of having their backslashes rewritten. See `fix(sync): reconcile
+#     the MSYS path rewrite with MSYS_NO_PATHCONV`.
 #   * `test_t6b_brief_descriptions.py::test_mirror_covers_thirty_five_tools` —
-#     fork-owned test (zero upstream history) asserting 35 tools while
-#     FULL_TOOL_DESCRIPTIONS has 34, at BOTH `1adf0404f` and HEAD. The fork's
-#     own T6b invariant is broken on every platform. Pre-existing, but a code
-#     defect, not an environment gap.
+#     the count was stale, not the mirror: the mission-lane removal retired
+#     `mission_goal_create` and dropped its row without updating the assertion.
+#     Corrected to 34 and renamed.
 #   * `test_modal_sandbox_fixes.py::TestToolResolution::
-#     test_terminal_and_file_toolsets_resolve_all_tools` — upstream asserts an
+#     test_terminal_and_file_toolsets_resolve_all_tools` — upstream asserted an
 #     exact toolset; the fork injects `tool_describe` into every resolved lane.
-#     A real fork-vs-upstream contract collision, platform-independent.
+#     The fork contract won; the expectation was retargeted onto it.
 #
 # NOT fenced, deliberately: `test_file_read_guards.py` did not fail here — it
 # HUNG, unbounded, because os.path.normpath("/dev/zero") is "\dev\zero" on
@@ -139,8 +144,9 @@ _CP1252 = (
 )
 _SEP = (
     'asserts a path in its POSIX spelling; the code builds it with os.sep (or '
-    'via _bash_safe_path, which emits the /c/... MSYS form), so on Windows the '
-    'separators do not match'
+    'via _bash_safe_path, which emits the /c/... MSYS form, or '
+    '_shell_arg_safe_path, which emits the drive-qualified C:/... form), so on '
+    'Windows the separators do not match'
 )
 _GITBASH = (
     'the test depends on the POSIX spawn/coreutils shape — a shebang, an '
@@ -527,7 +533,15 @@ _ENV_GAPS: EnvGapRegistry = {
         }),
     ],
     'test_search_error_guard.py': [
-        (_WINDOWS, _GITBASH, {
+        (_HOST, 'the installed ripgrep (15.1.0) refuses the escaped literal '
+         r'"\\n" at regex-parse time — "the literal \"\n\" is not allowed in a '
+         'regex ... Consider enabling multiline mode" — for both the single- '
+         'and double-backslash spellings, so search() returns an error before '
+         'the newline-warning branch under test is ever reached. Verified by '
+         'invoking rg directly with the exact argv the tool builds. Not a '
+         'Windows gap: this row previously read as a Git Bash spawn-shape '
+         'failure only because the MSYS-form path bug masked it — with that '
+         'fixed, the real cause is the rg version on this host', {
             'TestSearchContentNewlineWarning::test_literal_backslash_n_pattern_does_not_warn',
         }),
     ],

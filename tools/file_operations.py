@@ -961,17 +961,20 @@ class ShellFileOperations(FileOperations):
     def _escape_shell_arg(self, arg: str) -> str:
         """Escape a string for safe use in shell commands.
 
-        On Windows native drive paths (``C:\\Users\\x`` / ``C:/Users/x``)
-        and mixed MSYS leftovers (``/c/Users\\x``) are rewritten to the
-        Git Bash ``/c/Users/x`` form via ``_bash_safe_path``: bash eats
-        backslashes and MSYS otherwise mangles drive paths into the
-        ``Directory \\drivers\\etc does not exist`` failure class. Reuses
-        the env-layer translator so shell file ops and the terminal ``cd``
-        agree on the path form. No-op off Windows and for plain POSIX paths.
+        On Windows native drive paths (``C:\\Users\\x``) and mixed MSYS
+        leftovers (``/c/Users\\x``) are normalized to the drive-qualified
+        forward-slash form ``C:/Users/x`` via ``_shell_arg_safe_path``:
+        bash eats bare backslashes, while the MSYS ``/c/...`` spelling is
+        unresolvable by the *native* Windows binaries these arguments are
+        handed to (``rg``, ``python.exe``) — and Hermes disables MSYS
+        argument conversion on every bash spawn, so nothing converts it
+        back. The drive-qualified form is the one spelling both the MSYS
+        runtime and native binaries accept. No-op off Windows, for plain
+        POSIX paths, and for non-path arguments.
         """
-        from tools.environments.local import _bash_safe_path
+        from tools.environments.local import _shell_arg_safe_path
 
-        arg = _bash_safe_path(arg)
+        arg = _shell_arg_safe_path(arg)
         # Use single quotes and escape any single quotes in the string
         return "'" + arg.replace("'", "'\"'\"'") + "'"
 

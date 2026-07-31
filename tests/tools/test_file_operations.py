@@ -286,13 +286,46 @@ class TestShellFileOpsHelpers:
         assert file_ops._escape_shell_arg("hello") == "'hello'"
 
 
-    def test_escape_shell_arg_rewrites_forward_slash_native_paths(self, monkeypatch, file_ops):
+    def test_escape_shell_arg_normalizes_windows_paths_for_native_consumers(
+        self, monkeypatch, file_ops,
+    ):
+        """Shell-arg paths land in NATIVE Windows binaries (rg, python.exe).
+
+        Those cannot resolve the MSYS ``/c/...`` spelling, and Hermes sets
+        MSYS_NO_PATHCONV=1 on every bash spawn so nothing converts it back —
+        so the arg form is the drive-qualified forward-slash one, which both
+        the MSYS runtime and native binaries accept. Backslashes must still
+        be gone (bash eats them), and the already-correct form is a no-op.
+        """
         import tools.environments.local as local_mod
 
         monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
+        # native backslash path -> drive-qualified forward slashes
+        assert file_ops._escape_shell_arg(
+            r"C:\Users\alice\notes.txt"
+        ) == "'C:/Users/alice/notes.txt'"
+        # already forward-slash: unchanged, still no backslashes
         assert file_ops._escape_shell_arg(
             "C:/Users/alice/notes.txt"
-        ) == "'/c/Users/alice/notes.txt'"
+        ) == "'C:/Users/alice/notes.txt'"
+        # mixed MSYS leftover -> same drive-qualified form
+        assert file_ops._escape_shell_arg(
+            r"/c/Users/alice\notes.txt"
+        ) == "'C:/Users/alice/notes.txt'"
+
+    def test_escape_shell_arg_leaves_non_path_arguments_verbatim(self, monkeypatch, file_ops):
+        """Only drive-qualified paths are rewritten.
+
+        ``_escape_shell_arg`` also quotes search patterns and ``python -c``
+        snippets; blanket backslash rewriting corrupted every regex
+        containing a backslash on Windows.
+        """
+        import tools.environments.local as local_mod
+
+        monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
+        assert file_ops._escape_shell_arg(r"absent\\npattern") == r"'absent\\npattern'"
+        assert file_ops._escape_shell_arg("relative/dir") == "'relative/dir'"
+        assert file_ops._escape_shell_arg("/tmp/posix") == "'/tmp/posix'"
 
     def test_read_file_uses_bash_safe_windows_paths(self, mock_env, monkeypatch):
         import tools.environments.local as local_mod
@@ -317,10 +350,10 @@ class TestShellFileOpsHelpers:
         result = ops.read_file(r"C:\Users\alice\notes.txt")
 
         assert result.error is None
-        assert commands[0] == "wc -c < '/c/Users/alice/notes.txt' 2>/dev/null"
-        assert commands[1] == "head -c 1000 '/c/Users/alice/notes.txt' 2>/dev/null"
-        assert commands[2] == "sed -n '1,500p' '/c/Users/alice/notes.txt'"
-        assert commands[3] == "wc -l < '/c/Users/alice/notes.txt'"
+        assert commands[0] == "wc -c < 'C:/Users/alice/notes.txt' 2>/dev/null"
+        assert commands[1] == "head -c 1000 'C:/Users/alice/notes.txt' 2>/dev/null"
+        assert commands[2] == "sed -n '1,500p' 'C:/Users/alice/notes.txt'"
+        assert commands[3] == "wc -l < 'C:/Users/alice/notes.txt'"
 
     def test_is_likely_binary_by_extension(self, file_ops):
         assert file_ops._is_likely_binary("photo.png") is True

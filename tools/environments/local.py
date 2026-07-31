@@ -130,6 +130,46 @@ def _bash_safe_path(path: str) -> str:
     return path
 
 
+def _shell_arg_safe_path(path: str) -> str:
+    """Return *path* in a form safe to pass as an ARGUMENT to a spawned program.
+
+    Sibling of :func:`_bash_safe_path`, and deliberately a different target
+    form. ``_bash_safe_path`` feeds paths that *bash itself* resolves —
+    ``source``, redirections, ``cd`` in the snapshot bootstrap — where the
+    MSYS ``/c/...`` spelling is exactly right. Program **arguments** are a
+    different consumer class: ``rg``, ``python.exe`` and friends on Windows
+    are frequently NATIVE binaries with no MSYS runtime, and they cannot
+    resolve ``/c/...`` at all (``IO error ... (os error 3)``).
+
+    The two Windows mechanisms in this module used to contradict each other
+    here: ``_apply_windows_msys_bash_env_defaults`` sets ``MSYS_NO_PATHCONV=1``
+    / ``MSYS2_ARG_CONV_EXCL=*`` on every bash spawn, so MSYS never converts an
+    ``/c/...`` argument back to a native path for such a binary — the rewrite
+    had no counterpart and content search was simply broken.
+
+    So emit the drive-qualified forward-slash form ``C:/Users/x``:
+
+    * the MSYS runtime resolves it (Git Bash ``cat``/``find``/``grep`` and
+      bash's own redirections all accept drive-qualified paths),
+    * native Windows binaries resolve it,
+    * with argument conversion disabled MSYS cannot re-mangle it into the
+      ``Directory \\drivers\\etc does not exist`` failure class — which is
+      what that class came from in the first place.
+
+    Mixed MSYS leftovers (``/c/Users\\Alexander\\Documents``) are folded into
+    the same form. Anything that is not a drive-qualified path — genuine POSIX
+    paths, relative paths, and non-path arguments such as a ``python -c``
+    snippet — is returned **verbatim**, so this never rewrites backslashes
+    inside argument text that merely happens to contain them.
+    """
+    if not _IS_WINDOWS or not path:
+        return path
+    native = _msys_to_windows_path(path)
+    if not re.match(r'^[a-zA-Z]:[\\/]', native):
+        return path
+    return native.replace('\\', '/')
+
+
 def _quote_bash_path(path: str) -> str:
     """Quote *path* for safe interpolation into a Git Bash script on Windows."""
     import shlex
