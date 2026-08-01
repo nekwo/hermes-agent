@@ -859,10 +859,11 @@ four that set it (alice, neko, base, unbounded) set it true and are unaffected.
 
 ### New debt this wave OPENED (measured, not inferred)
 
-- **Twenty-nine `RuntimeConfig` scalar fields have no production reader.** Found
-  by the new gate, carried in its FROZEN `UNRULED_DEBT` ledger with a per-field
-  reason: the whole `daemon_*` family, the four `live_run_*` budgets, the four
-  `liveness_*` knobs, the three `artifact_storage_*` watermarks,
+- ~~**Twenty-nine `RuntimeConfig` scalar fields have no production reader.**~~
+  **CLOSED at S57** (`23be05e00`) — all 29 CUT after per-field re-verification.
+  Found by the new gate, carried in its FROZEN `UNRULED_DEBT` ledger with a
+  per-field reason: the whole `daemon_*` family, the four `live_run_*` budgets,
+  the four `liveness_*` knobs, the three `artifact_storage_*` watermarks,
   `mission_max_total_tokens` / `mission_wall_clock_deadline_seconds`,
   `neko_recovery_attempt_cap` / `neko_extension_cap`, `heartbeat_ttl_seconds`,
   `max_actions_per_tick`, `root_node_mode`, `preferred_goal_execution_mode`,
@@ -870,24 +871,28 @@ four that set it (alice, neko, base, unbounded) set it true and are unaffected.
   `tool_wait_timeout_seconds`, `child_progress_min_interval_seconds`,
   `deploy_timeout_seconds`. PRE-EXISTING — most lost their reader when the
   mission/daemon lanes were retired; `run_lease_seconds` lost its last one in
-  this commit with `production_envelope`. Not ruled on, so not deleted on this
-  wave's authority. The bucket is size-pinned so a NEW unread field fails the
-  gate instead of being appended to it.
-- **`RepoBundleStore` now has ZERO production importers.** `status.py` was the
-  last one. Its checkpoint EntityClass row went (writer-less since S52,
-  reader-less as of now), but the module + `RepoBundle` model + paths helpers +
-  `migration_status` count were left standing — a whole-module cut is a different
-  lane. `runtime_instances` KEPT its checkpoint row deliberately: also
-  writer-less since S53, but its rows still ship on the status wire.
+  the S56 commit with `production_envelope`.
+- ~~**`RepoBundleStore` now has ZERO production importers.**~~ **CLOSED at S57**
+  (`23be05e00`) — module + `RepoBundle` model + `paths.repo_bundle_path` +
+  `migration.counts.repo_bundles` + the `serve` fingerprint entry DELETED WHOLE.
+  `status.py` was the last importer. `runtime_instances` KEPT its checkpoint row
+  deliberately: also writer-less since S53, but its rows still ship on the status
+  wire.
 - **`delivery_directive.read_bundle_promotion_record` /
   `bundle_promotion_record_path` are caller-less.** `repo_bundle_summary` was
-  their last production caller.
-- **Launcher: the whole `MissionRoleEnvelope` / `roleEnvelopes` lane is dead by
-  emptiness.** hermes S44 deleted `agent_runtime/role_envelopes.py`, so nothing
-  has produced the `role_envelopes` frame section since; the parse at
-  `mission_control_snapshot.dart:725` can only yield `[]`. Separate lane on a
-  separate contract move — reported, not swept, and the s54 text gate is scoped
-  around it rather than through it.
+  their last production caller. **STILL OPEN after S57** — that wave was ruled to
+  cut the STORE, and this pair is a separate lane. S57 did make the claim
+  legible: the module docstring's "what remains has live callers" heading now
+  states outright that this bullet is NOT covered by it, and
+  `paths.repo_bundles_dir` / `repo_bundles_task_dir` survive solely because this
+  pair still addresses the tree through them. Retiring the pair retires those two
+  helpers with it.
+- ~~**Launcher: the whole `MissionRoleEnvelope` / `roleEnvelopes` lane is dead by
+  emptiness.**~~ **CLOSED at Launcher s55** (`e81ed6fc`) — model, BOTH parses,
+  and every consumer removed. hermes S44 deleted `agent_runtime/role_envelopes.py`, so
+  nothing has produced the `role_envelopes` frame section since; the parse at
+  `mission_control_snapshot.dart:725` could only yield `[]`. The s54 text gate
+  was scoped AROUND it; s55 took it and gates it globally.
 - **`tests/agent_runtime/test_persona_assignments.py` is mixed-EOL in the index**
   (4,395 CRLF + 794 LF lines). The Edit tool silently normalizes such a file
   whole, turning a 95-line change into a 1,769-line diff. Restored byte-wise this
@@ -934,3 +939,214 @@ exactly the drift that file exists to catch.
   becoming unconditional: the three persona-chat `ProjectionAccountant`s now
   always run, so an empty runtime reports three zero rows instead of `{}`.
   `test_parity` was retargeted to the exact keyset rather than `== {}`.
+
+
+## S57 contract wave — the 29-field config ledger, the repo-bundle store, the Launcher role-envelope lane (hermes contract 47 -> 48 + Launcher s55, 2026-08-01)
+
+> One coherent contract move, bumped once. No event contracts moved: the
+> absolute count authority stays
+> `tests/agent_runtime/test_s15_event_contract_pruning.SURVIVING_EVENT_COUNT`.
+> This wave closes out the S49-S56 campaign — the reader gate's debt bucket is
+> EMPTY, the repo-bundle lane is gone in full, and the Launcher's last
+> dead-by-emptiness collection from the S44 store cut is retired.
+
+### Executed
+
+| Item | What went |
+| --- | --- |
+| S57 config | TWENTY-NINE `RuntimeConfig` scalars removed — dataclass row + `config.py` load line + `migrations` range validator each. Plus FOUR cross-field validators that related two or three DEAD knobs to each other (`live_run_max_total_tokens` <= `mission_max_total_tokens`; `liveness_poll_seconds` 30..120; `liveness_hung_seconds` < `heartbeat_ttl_seconds`; `artifact_storage_*` low<=high<=critical). `UNRULED_DEBT` shrinks 29 -> **0** and stays frozen there. |
+| S57 store | `agent_runtime/repo_bundles.py` DELETED WHOLE with `models.RepoBundle` (31 fields), `paths.repo_bundle_path`, `migration_status()`'s `counts.repo_bundles` row, and the `serve` `_FINGERPRINT_STORE_DIRS` entry. `tests/agent_runtime/test_repo_bundles.py` deleted; its ONE live case re-homed. |
+| S57 gate | S56's reader gate becomes a pure tripwire — with the bucket empty and `REPORT_ONLY` holding one wire/version field, a new unread `RuntimeConfig` field fails outright with nowhere to be parked. |
+| Launcher s55 | Contract pin 47 -> 48; `MissionRoleEnvelope` + `roleEnvelopes` cut whole (model, BOTH parses, 11 field/ctor sites, the two HUD pills); installer template drops `root_node_mode`; the `kHermesRuntimeConfigKeys` mirror drops THIRTY entries. |
+
+### The 29-field disposition table
+
+Every field re-verified by hand before the cut — AST attribute form, `getattr`
+string form, and a plain repo-wide text scan across `agent_runtime` /
+`hermes_cli` / `tools` / `tests` / yaml / dart. **Not one survived with a reader
+the gate had missed**, so the gate's scanner needed no correction and nothing was
+annotated as a false positive. The "only reference found" column is what the scan
+actually returned.
+
+| # | Field | Only reference found (outside the definition) | Disposition |
+| --- | --- | --- | --- |
+| 1 | `heartbeat_ttl_seconds` | `config.py` load; `_positive`; the `liveness_hung_seconds` cross-check | CUT |
+| 2 | `max_actions_per_tick` | `config.py` load; `_positive` | CUT |
+| 3 | `daemon_enabled` | `config.py` load | CUT |
+| 4 | `daemon_interval_seconds` | `config.py` load; `_positive` | CUT |
+| 5 | `daemon_idle_interval_seconds` | `config.py` load; `_positive` | CUT |
+| 6 | `daemon_heartbeat_seconds` | `config.py` load; `_positive` | CUT |
+| 7 | `task_create_auto_start_daemon` | `config.py` load | CUT |
+| 8 | `root_node_mode` | `config.py` load; a bool-type validator. **The 60 other hits are a ContextVar + kwarg of the SAME NAME** (`skill_utils`, `prompt_builder`, `skills_tool`) that never reads the config field | CUT |
+| 9 | `preferred_goal_execution_mode` | `config.py` load | CUT |
+| 10 | `live_run_max_wall_seconds` | `config.py` load; `_positive` | CUT |
+| 11 | `live_run_max_api_calls` | `config.py` load; `_positive` | CUT |
+| 12 | `live_run_max_total_tokens` | `config.py` load; `_positive`; the ceiling cross-check | CUT |
+| 13 | `live_run_iteration_budget` | `config.py` load; `_positive` | CUT |
+| 14 | `scope_wait_deadline_seconds` | `config.py` load; `_positive` | CUT |
+| 15 | `run_lease_seconds` | `config.py` load; `_positive` | CUT |
+| 16 | `tool_wait_timeout_seconds` | `config.py` load; `_positive` | CUT |
+| 17 | `liveness_enabled` | `config.py` load | CUT |
+| 18 | `liveness_poll_seconds` | `config.py` load; `_positive`; the 30..120 range check | CUT |
+| 19 | `liveness_quiet_strikes` | `config.py` load; `_positive` | CUT |
+| 20 | `liveness_hung_seconds` | `config.py` load; `_positive`; the ordering check | CUT |
+| 21 | `child_progress_min_interval_seconds` | `config.py` load; `_positive` | CUT |
+| 22 | `deploy_timeout_seconds` | `config.py` load; `_positive` | CUT |
+| 23 | `mission_max_total_tokens` | `config.py` load; `_positive`; the ceiling cross-check | CUT |
+| 24 | `mission_wall_clock_deadline_seconds` | `config.py` load; `_positive`; a `config.py` COMMENT deriving `MISSION_CHAT_MAX_MAX_SECONDS` from it | CUT (comment rewritten; 86400 is now that constant's own value) |
+| 25 | `neko_recovery_attempt_cap` | `config.py` load; `_positive` | CUT |
+| 26 | `neko_extension_cap` | `config.py` load; `_positive`; a TEST comment claiming two `snapshot.py` seams read it — **false**, see below | CUT |
+| 27 | `artifact_storage_low_watermark_mb` | `config.py` load; `_positive`; the ordering check | CUT |
+| 28 | `artifact_storage_high_watermark_mb` | `config.py` load; `_positive`; the ordering check | CUT |
+| 29 | `artifact_storage_critical_watermark_mb` | `config.py` load; `_positive`; the ordering check | CUT |
+| — | `lock_acquire_timeout_seconds` | **`locks.py:133`**, via `getattr(load_root_runtime_config(), "lock_acquire_timeout_seconds", 15)` | **KEPT** — the neighbour that proves the gate's shape |
+
+**Cut: 29. Kept-with-evidence: 0. Survivor in the same neighbourhood: 1
+(`lock_acquire_timeout_seconds`).**
+
+The keep matters more than any single cut. It sits among the removed scalars,
+reads identically, and is LIVE — through the `getattr` STRING form the S56 gate
+was built to see. A prefix-shaped trim (`*_seconds`) or an eyeball pass takes it.
+That is the whole argument for an AST + string-form resolver rather than a grep,
+and it is pinned in `test_s57_unruled_config_debt_removal`.
+
+### The claim that was false, and where it lived
+
+`test_root_config_pinning.test_neko_extension_cap_resolves_from_root` carried a
+comment asserting the field is "consumed inside embedded seams that need live
+Incident + RunStore state to reach (`snapshot._run_blocked_reason`,
+`snapshot._next_action_summary`); those read
+`load_root_runtime_config().neko_extension_cap`". Neither seam reads it. The
+bounded-continuation lane reads its own constants.
+
+This is the third time this campaign has found the same shape — a TEST COMMENT,
+not code, asserting a reader no scan can locate (S56 found it in
+`prompt_observability.load_final_model_input_for_context`'s docstring, S49 in
+`production_envelope`'s H6 prose). The comment is QUOTED in the inverted test
+rather than deleted, because the pattern is the finding.
+
+### The contract decision, with evidence
+
+**BUMPED, 47 -> 48.** `effective_config_summary` is `asdict(cfg)` and
+`snapshot.py:458` publishes it as the frame's `runtime_config` block, so the
+question was whether these fields actually reached the emitted frame. They did —
+measured, not inferred: `harness snapshot --json` under
+`HERMES_HOME=X:\Eternia\.hermes\profiles\alice` (store root
+`X:\Eternia\.hermes\agent-runtime`) returned `runtime_config` carrying ALL 29 at
+contract 47, alongside `migration.counts.repo_bundles: 0`. Removing them edits
+the wire, which is the S9/S10 rule, so the contract moves and the Launcher pin
+moves in the same wave.
+
+Note for a future reader: two of the 29 rode the wire as `"<redacted>"` rather
+than their value (`live_run_max_total_tokens`, `mission_max_total_tokens` — the
+`_redaction_safe_config` key filter matches "token"). They were on the frame
+either way.
+
+### `migration.counts.repo_bundles`, handled rather than dropped
+
+The ruling said re-home or retire it honestly if it read through the store. **It
+did not** — it was a direct `_count_nested_json(root / "repo_bundles")`
+filesystem read, so a "does it call the store?" check would have left it
+standing. It is RETIRED anyway, and the reason is recorded so it is not mistaken
+for a scope overrun: the last writer went at S52, the checkpoint EntityClass row
+went at S56, the module went here, and the live root has **no `repo_bundles/`
+directory at all** — the row reported `0` by construction on a wire operators
+read. There is nothing left to re-home it onto. The other seven counts are
+untouched and pinned by exact keyset.
+
+### Launcher role-envelope: the wire verification the ruling demanded
+
+The ruling required proving which `role_envelopes` field the Launcher parses, and
+stopping the sub-cut if it turned out to read a STILL-EMITTED one. There were
+**two** parses — the top-level frame section (`MissionControlSnapshot`) and a
+PLURAL field on agent rows (`MissionAgentLog`). Checked three ways against hermes
+`8740d227f`:
+
+1. `grep -rn role_envelopes agent_runtime hermes_cli tools` returns ONLY comments
+   recording the S44 retirement. No emitter, top-level or per-agent-row.
+2. `models.py` carries no `role_envelopes` field on any row that reaches the
+   frame, so no `asdict` path can produce one either.
+3. The LIVE frame settles it: `snapshot --json` contains **zero** occurrences of
+   the string `role_envelope`.
+
+**No contradiction with the scout — both parses were dead, and both were cut.**
+The surviving `role_checklists.validate_checklist_payload_structure` belongs to a
+DIFFERENT wire key and is untouched.
+
+### New debt this wave OPENED
+
+- **Launcher: `roleChecklists` and `proofBatches` are the SAME dead-by-emptiness
+  class.** Both are parsed on `MissionAgentLog` and on the top-level frame; S44
+  deleted the store family that fed both, and the live frame carries neither. The
+  `_RoleTaskHud` container in `agent_detail_terminal.dart` now renders only from
+  these two, i.e. never. NOT cut: outside this wave's ruled scope, and hermes
+  still keeps `role_checklists.validate_checklist_payload_structure` alive, which
+  deserves its own look before the launcher side is swept.
+- **Launcher: the bridge still forwards `raw['role_envelopes']`** as a
+  raw-section pass-through beside `role_checklists` / `proof_batches`. With no
+  parse behind it the key is inert; removing the forward belongs with the sibling
+  cut above rather than half-way through it.
+- **`agent_runtime/role_checklists.py` survives for one importer.**
+  `decision_contract_registry.py:177` imports
+  `validate_checklist_payload_structure` from it. Worth checking whether that
+  validator can still be reached by a payload the runtime produces, given S44
+  deleted the store family around it.
+
+### Superseded pins INVERTED rather than deleted (each carrying why)
+
+`test_config.test_config_loads_live_run_budget_fields` ->
+`test_live_run_budget_config_loads_and_is_ignored`; `test_migrations`'
+`rejects_bad_ceiling_order` / `rejects_bad_storage_watermark_order` -> the two
+"the cross-check is gone with both its fields" cases;
+`test_root_config_pinning.test_neko_extension_cap_resolves_from_root` ->
+load-and-ignore, with its false claim quoted and the root-over-profile property
+re-asserted on `lock_acquire_timeout_seconds` (the same retarget applied to
+`test_swarm_config_resolves_from_root`'s tail);
+`test_s56_config_block_removal`'s `root_node_mode` witness -> retargeted onto
+`supervision.child_events_enabled`; `test_s52`'s three module-reaching pins ->
+one module-absence pin plus a distinctive-name repo scan; `test_s24`'s "the READ
+side deliberately survives" and `test_s56_worker`'s
+`test_the_repo_bundle_store_read_side_survives` -> both inverted to absence;
+`test_s43`'s `repo_bundles` entry -> moved into `RETIRED_WHOLE_MODULES` (its
+fourth wave); `test_s56_worker`'s contract pin -> a FLOOR (`>= 47`) rather than a
+second copy of the current number; Launcher-side the s54 contract pin -> `>= 47`,
+and s48's `class MissionRoleEnvelope` survival pin -> `isFalse`.
+
+Fixtures still SEND every removed key — the 29 scalars, `swarm`, the six S56
+blocks, `role_envelopes` top-level AND on an agent row — so a stale producer
+cannot resurrect a reader.
+
+### A method note the removal tests needed
+
+Three assertions in this wave initially went RED against a correct tree: they
+scanned `inspect.getsource(...)` for a removed name and matched the RETIREMENT
+COMMENT this wave had just written. Fixed by round-tripping the function through
+`ast.parse` / `ast.unparse`, which drops comments and keeps every real name. Any
+"is this symbol gone?" test over source text has this bug latent in it the moment
+the cut documents itself; the helper is `_code_only` in
+`test_s57_unruled_config_debt_removal`.
+
+Related: a repo-wide `def <name>(` gate over the removed store methods is a false
+positive machine — `update`, `get`, `_write` are ordinary names every store has.
+The S52 pin was narrowed to the DISTINCTIVE subset (`create_or_update_from_task`,
+`wake_ready_dependencies`, `owner_for_repo`, ...), which is what actually
+discriminates a re-introduction from a coincidence.
+
+### Also recorded
+
+- `tests/agent_runtime/test_repo_bundles.py` was deleted with the module. Eight
+  of its ten cases were already hollow shells (`assert not hasattr(TaskStore(),
+  "create")`) and one was an inverted S52/S56 pin re-expressed in the new removal
+  contract. The tenth, `test_assignment_signal_hash_includes_repo_bundle_id`, is
+  LIVE and about a DIFFERENT store — `repo_bundle_id` is a component of
+  `assignment_signal_hash` and therefore decides assignment identity. RE-HOMED
+  into `test_persona_assignments.py`, appended byte-wise with CRLF endings and
+  the bare-LF count verified unchanged (796 before, 796 after) per this ledger's
+  own mixed-EOL warning.
+- `tests/agent_runtime/test_delivery_directive.py`'s `_bundle` helper built a
+  full 31-field `RepoBundle` to pass a `(task_id, bundle_id)` pair to the
+  promotion-record read. Replaced with a `SimpleNamespace`. That coupling is
+  exactly what made the model look load-bearing to a reachability scan.
+- `checkpoint.EntityClass`'s docstring used `repo_bundles/<task_id>/...` as its
+  example of a nested store. Retargeted to `self_tests/<task_id>/...`, a class
+  that still exists.
