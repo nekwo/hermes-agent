@@ -35,6 +35,7 @@ from agent_runtime import observability, runtime_instances, status, stream
 from agent_runtime.decision_contract_registry import event_catalog
 from agent_runtime.events import ALLOWED_EVENT_TYPES, OPERATOR_SUMMARY_EVENT_TYPES, Event, operator_event_summary
 from agent_runtime.runtime_instances import GoalRuntimeInstanceStore, runtime_instances_summary
+from tests.agent_runtime.test_s53_lane_write_lane_removal import seed_lane_row
 from agent_runtime.status import build_status
 from agent_runtime.stream import _delta_op
 from hermes_time import now
@@ -123,8 +124,14 @@ def test_the_lane_summary_drops_its_hardcoded_foreground_block(isolate_agent_run
 
 
 def test_the_lane_summary_still_carries_real_lanes(isolate_agent_runtime_root):
+    """S53 note: the lane is now SEEDED on disk rather than minted through
+    ``create_lane``, which was deleted with the write lane. The assertion is
+    unchanged and still the point of the test -- S21's finding was that the
+    summary's foreground fields were constants while the lane ROWS are real, and
+    the rows are still real."""
+
+    lane = seed_lane_row("goalrt_s21", task_id="task_s21", state="running")
     store = GoalRuntimeInstanceStore()
-    lane = store.create_lane(task_id="task_s21", started_by="test", state="running")
 
     summary = runtime_instances_summary(store.list_all())
 

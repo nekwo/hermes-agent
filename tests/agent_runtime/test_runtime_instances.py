@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 Task = SimpleNamespace
 from agent_runtime.runtime_instances import GoalRuntimeInstanceStore, runtime_instance_summary
+from tests.agent_runtime.test_s53_lane_write_lane_removal import seed_lane_row
 from agent_runtime.states import RunState, TaskState
 from agent_runtime.store import RunStore, TaskStore
 
@@ -46,17 +47,29 @@ def test_archive_preserves_runtime_instance_manifest(isolate_agent_runtime_root)
     assert not hasattr(TaskStore(), "archive")
 
 
-def test_lane_lifecycle_transitions_and_summary_fields(isolate_agent_runtime_root):
-    store = GoalRuntimeInstanceStore()
-    lane = store.create_lane(task_id="task_lane", started_by="test", lane_kind="production", priority=2)
+def test_lane_summary_fields_project_a_persisted_row(isolate_agent_runtime_root):
+    """S53 retargeted this from ``test_lane_lifecycle_transitions_and_summary_fields``.
 
-    assert lane.state == "queued"
-    lane = store.transition(lane.id, "activating", reason="activate")
-    lane = store.transition(lane.id, "running", reason="lease acquired", current_stage_id="stage_1", current_owner="dev")
-    lane = store.park_lane(lane.id, reason="operator pause")
-    lane = store.resume_lane(lane.id, reason="operator resume")
+    It used to drive the lifecycle -- create_lane, two transitions, park, resume
+    -- and then assert the summary. Every one of those writers was deleted for
+    want of a production caller, and this test was among their only callers.
 
-    summary = runtime_instance_summary(lane)
+    The half worth keeping is the READ half: ``runtime_instance_summary`` still
+    projects operator lane rows and ``status.py`` still publishes them. The row
+    is seeded on disk because nothing can mint one any more, which is the same
+    move ``test_status`` already makes for runs.
+    """
+
+    lane = seed_lane_row(
+        "goalrt_summary",
+        task_id="task_lane",
+        state="running",
+        priority=2,
+        current_stage_id="stage_1",
+        current_owner="dev",
+    )
+
+    summary = runtime_instance_summary(GoalRuntimeInstanceStore().get(lane.id))
     assert summary["lane_id"] == lane.id
     assert summary["lane_kind"] == "production"
     assert summary["state"] == "running"

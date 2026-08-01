@@ -953,10 +953,17 @@ _HUD_SHAPES: dict[str, HudShape] = {
 
 
 _EVENT_CONTRACTS: dict[str, EventContract] = {
-    "foreground_runtime.closed": EventContract("foreground_runtime.closed", "Foreground runtime closed", ("runtime_instance_id", "task_id", "lane", "state"), ("reason",)),
-    "lane.created": EventContract("lane.created", "Lane created", ("runtime_instance_id", "task_id", "state"), ("lane_kind", "reason")),
-    "lane.transitioned": EventContract("lane.transitioned", "Lane transitioned", ("runtime_instance_id", "task_id", "state"), ("reason",)),
-    "lane.transition_rejected": EventContract("lane.transition_rejected", "Lane transition rejected", ("runtime_instance_id", "from", "to"), ("reason",)),
+    # S53 (2026-08-01) de-registered foreground_runtime.closed, lane.created,
+    # lane.transitioned and lane.transition_rejected with their sole emitter:
+    # the GoalRuntimeInstanceStore WRITE lane (create_lane / transition /
+    # park_lane / resume_lane / park_open_task / mark_terminal_for_task and the
+    # `save` chokepoint they funnelled through). None had a production caller.
+    # Cut ORDER mattered: park_lane's one non-test caller was operator_control.py,
+    # deleted at S49 earlier in this same wave, so it only became callerless once
+    # that landed. S15 already de-registered the other six foreground_runtime.*
+    # types when the mission lane went; this is the last of that family. The
+    # store's READ side stays live -- status.py projects lanes off list_all. See
+    # tests/agent_runtime/test_s53_lane_write_lane_removal.py.
     # S17 de-registered run.heartbeat (RunStore.heartbeat) and run.approved
     # (RunStore.approve_continuation) with their writers; S25 finished the set
     # with run.opened once the two filler appends that were its last minters

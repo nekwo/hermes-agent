@@ -14,6 +14,7 @@ from agent_runtime.persona_assignments import (
     PersonaInstanceStore,
 )
 from agent_runtime.runtime_instances import GoalRuntimeInstanceStore, runtime_instances_summary
+from tests.agent_runtime.test_s53_lane_write_lane_removal import seed_lane_row
 from agent_runtime.states import TaskState
 from agent_runtime.store import TaskStore, WorkspaceStore, RealmStore
 
@@ -152,10 +153,20 @@ def test_goal_id_current_stage_and_assignment_grouping(
     assert first.mode in {"chat", "configured"}
 
 
-def test_lane_only_create_lane_does_not_park(isolate_agent_runtime_root):
+def test_lanes_stay_a_flat_list_with_no_foreground_election(isolate_agent_runtime_root):
+    """S53 retargeted this from ``test_lane_only_create_lane_does_not_park``.
+
+    The original name described a WRITER guarantee (``create_lane`` does not
+    park a sibling), and that writer is gone -- deleted with the lane write lane
+    for want of a production caller. What it actually pinned is a READ-side
+    finding and survives intact: lanes are a flat list, there is no foreground
+    election, and every persisted row comes back out of ``list_all``. Rows are
+    seeded on disk because nothing can mint one any more.
+    """
+
+    first = seed_lane_row("goalrt_one", task_id="task_one", state="running")
+    second = seed_lane_row("goalrt_two", task_id="task_two", state="running")
     store = GoalRuntimeInstanceStore()
-    first = store.create_lane(task_id="task_one", started_by="test", state="running")
-    second = store.create_lane(task_id="task_two", started_by="test", state="running")
 
     assert first.lane == first.id
     assert second.lane == second.id

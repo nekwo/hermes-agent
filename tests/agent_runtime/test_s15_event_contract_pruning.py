@@ -128,6 +128,16 @@ REMOVED_EVENT_TYPES = frozenset(
         "repo_bundle.verified",
         "repo_bundle.rejected",
         "repo_bundle.woke",
+        # S53 (2026-08-01). The lane family, de-registered with the
+        # GoalRuntimeInstanceStore WRITE lane that was their only emitter.
+        # ``foreground_runtime.closed`` is the LAST of the foreground_runtime.*
+        # family: S15 above already took the other six when the mission lane
+        # went, and this one outlived them only because
+        # ``mark_terminal_for_task`` was still standing.
+        "lane.created",
+        "lane.transitioned",
+        "lane.transition_rejected",
+        "foreground_runtime.closed",
     }
 )
 
@@ -166,9 +176,13 @@ REMOVED_EVENT_TYPES = frozenset(
 # operator-summary types, so events.OPERATOR_SUMMARY_EVENT_TYPES and their
 # formatter arm went with them; owned by
 # tests/agent_runtime/test_s52_repo_bundle_write_lane_removal.py.
+# Then -4 at S53: lane.created / .transitioned / .transition_rejected and
+# foreground_runtime.closed, de-registered with the GoalRuntimeInstanceStore
+# write lane (their only emitter); owned by
+# tests/agent_runtime/test_s53_lane_write_lane_removal.py.
 # This stays an absolute count on purpose: it is the one assertion that catches
 # a contract silently appearing or disappearing.
-SURVIVING_EVENT_COUNT = 72
+SURVIVING_EVENT_COUNT = 68
 
 
 def test_the_unemittable_event_types_are_no_longer_registered():

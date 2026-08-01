@@ -317,26 +317,32 @@ def test_cached_event_log_type_filter_matches_base(isolate_agent_runtime_root):
 
 
 def test_cached_event_log_does_not_duplicate_events_whose_payload_echoes_their_id(isolate_agent_runtime_root):
-    # A real ``lane.created`` row (runtime_instances.RuntimeInstanceStore.save)
-    # repeats the task id inside its own payload, so the serialized line carries
-    # the ``"task_id":"…"`` token twice. The cached index must still hand that
-    # line to the scan once.
+    # A row that repeats the task id inside its own payload serializes with the
+    # ``"task_id":"…"`` token TWICE. The cached index must still hand that line
+    # to the scan once.
+    #
+    # S53 retargeted the sample off ``lane.created``, which used to be the real
+    # example (``GoalRuntimeInstanceStore.save`` echoed the task id) but was
+    # de-registered with the lane write lane, so ``append`` now refuses it.
+    # ``persona_instance.reaped`` is the live replacement and echoes for the same
+    # reason: ``task_id`` is one of its declared optional payload fields, so a
+    # real emission carries it alongside the envelope column.
     from agent_runtime.events import CachedEventLog
 
     base = EventLog()
     base.append(
         Event(
             ts=now(),
-            type="lane.created",
+            type="persona_instance.reaped",
             task_id="task_lane",
             run_id=None,
             persona_id=None,
             payload={
-                "runtime_instance_id": "goalrt_abc123",
+                "persona_instance_id": "pi_abc123",
+                "reason": "stale_owner",
                 "task_id": "task_lane",
-                "lane": "goalrt_abc123",
-                "state": "queued",
-                "reason": "lane created",
+                "goal_id": "task_lane",
+                "owner_state": "closed",
             },
         )
     )

@@ -1,177 +1,53 @@
 from __future__ import annotations
 
-import uuid
-from dataclasses import replace
 from typing import Any
-
-from hermes_time import now
-from utils import atomic_json_write
 
 from . import paths
 from .events import EventLog
-from .models import Event, GoalRuntimeInstance
-from .serde import from_jsonable, to_jsonable
+from .models import GoalRuntimeInstance
+from .serde import from_jsonable
 
+# S53 removed the write lane, and with it every binding only a writer read:
+# ``uuid`` / ``dataclasses.replace`` / ``hermes_time.now`` /
+# ``utils.atomic_json_write`` / ``models.Event`` / ``serde.to_jsonable``, the
+# ``LANE_STATES`` vocabulary, and the ``_ALLOWED_TRANSITIONS`` table. The
+# transition table went because ``transition`` was its only reader: a state
+# machine with no writer to police is not a policy, it is a comment that
+# type-checks. ``EventLog`` stays because the constructor still accepts one.
+#
+# THREE of the four bare state constants survive, and only three:
+# ``active_for_task`` below still reads ACTIVE / PARKED / WAITING to decide
+# which persisted row is the live one. ``TERMINAL_STATE`` went with the lane --
+# its only readers were ``mark_terminal_for_task`` and the two tables above --
+# and it is cut rather than kept "for documentation", which is the same
+# decoration this wave exists to remove.
 ACTIVE_STATE = "active"
 PARKED_STATE = "parked"
-TERMINAL_STATE = "terminal"
 WAITING_STATE = "waiting"
-LANE_STATES = frozenset(
-    {
-        "queued",
-        "activating",
-        "running",
-        "parked_by_budget",
-        "parked_by_repo_lock",
-        "parked_by_operator",
-        "blocked",
-        "done",
-        "archiving",
-        "archived",
-        "failed_runtime",
-        ACTIVE_STATE,
-        PARKED_STATE,
-        TERMINAL_STATE,
-        WAITING_STATE,
-    }
-)
-_ALLOWED_TRANSITIONS = {
-    "queued": {"activating", "parked_by_operator", "failed_runtime"},
-    "activating": {"running", "parked_by_repo_lock", "parked_by_budget", "blocked", "failed_runtime"},
-    "running": {"parked_by_budget", "parked_by_repo_lock", "parked_by_operator", "blocked", "done", "failed_runtime"},
-    "parked_by_budget": {"running", "failed_runtime", "archived"},
-    "parked_by_repo_lock": {"running", "failed_runtime", "archived"},
-    "parked_by_operator": {"running", "archived", "failed_runtime"},
-    "blocked": {"running", "failed_runtime", "archived"},
-    "done": {"archiving"},
-    "archiving": {"archived"},
-    ACTIVE_STATE: {"running", PARKED_STATE, TERMINAL_STATE, "parked_by_operator", "done", "failed_runtime"},
-    PARKED_STATE: {"running", ACTIVE_STATE, TERMINAL_STATE, "parked_by_operator", "archived"},
-    WAITING_STATE: {"running", ACTIVE_STATE, PARKED_STATE, TERMINAL_STATE, "blocked"},
-    TERMINAL_STATE: {"archived"},
-}
 
 
 class GoalRuntimeInstanceStore:
     def __init__(self, event_log: EventLog | None = None):
         self.event_log = event_log or EventLog()
 
-    def create_lane(
-        self,
-        *,
-        task_id: str,
-        started_by: str = "cli",
-        lane_kind: str = "production",
-        priority: int = 5,
-        state: str = "queued",
-    ) -> GoalRuntimeInstance:
-        if lane_kind not in {"production", "playground"}:
-            raise ValueError("lane_kind must be production or playground")
-        if state not in LANE_STATES:
-            raise ValueError(f"unsupported lane state: {state}")
-        ts = now()
-        instance_id = f"goalrt_{uuid.uuid4().hex[:12]}"
-        instance = GoalRuntimeInstance(
-            id=instance_id,
-            task_id=task_id,
-            lane=instance_id,
-            state=state,
-            created_at=ts,
-            updated_at=ts,
-            started_by=_safe_token(started_by),
-            lane_kind=lane_kind,
-            priority=max(0, int(priority or 0)),
-            state_reason="lane created",
-        )
-        self.save(instance, event_type="lane.created", reason="lane created")
-        return instance
-
-    def transition(self, instance_id: str, state: str, *, reason: str, **updates: Any) -> GoalRuntimeInstance:
-        if state not in LANE_STATES:
-            raise ValueError(f"unsupported lane state: {state}")
-        instance = self.get(instance_id)
-        allowed = _ALLOWED_TRANSITIONS.get(instance.state, set())
-        if allowed and state not in allowed and state != instance.state:
-            self.event_log.append(
-                Event(
-                    ts=now(),
-                    type="lane.transition_rejected",
-                    task_id=instance.task_id,
-                    run_id=None,
-                    persona_id=None,
-                    payload={"runtime_instance_id": instance.id, "from": instance.state, "to": state, "reason": _safe_reason(reason)},
-                )
-            )
-            raise ValueError(f"invalid lane transition: {instance.state} -> {state}")
-        payload = {"state": state, "updated_at": now(), "state_reason": _safe_reason(reason), "parked_reason": _safe_reason(reason) if state.startswith("parked_") else None}
-        payload.update({key: value for key, value in updates.items() if hasattr(instance, key)})
-        updated = replace(instance, **payload)
-        return self.save(updated, event_type="lane.transitioned", reason=reason)
-
-    def park_lane(self, instance_id: str, *, reason: str, state: str = "parked_by_operator") -> GoalRuntimeInstance:
-        return self.transition(instance_id, state, reason=reason, active_run_ids=[])
-
-    def resume_lane(self, instance_id: str, *, reason: str = "lane resumed") -> GoalRuntimeInstance:
-        return self.transition(instance_id, "running", reason=reason, parked_reason=None)
-
-    def park_open_task(self, task_id: str, *, reason: str) -> GoalRuntimeInstance:
-        ts = now()
-        existing = self.active_for_task(task_id) or self.latest_for_task(task_id)
-        if existing:
-            instance = replace(
-                existing,
-                state="parked_by_operator",
-                updated_at=ts,
-                parked_reason=_safe_reason(reason),
-                active_run_ids=[],
-            )
-        else:
-            instance_id = f"goalrt_{uuid.uuid4().hex[:12]}"
-            instance = GoalRuntimeInstance(
-                id=instance_id,
-                task_id=task_id,
-                lane=instance_id,
-                state="parked_by_operator",
-                created_at=ts,
-                updated_at=ts,
-                started_by="harness",
-                parked_reason=_safe_reason(reason),
-            )
-        self.save(instance, event_type="lane.transitioned", reason=reason)
-        return instance
-
-    def mark_terminal_for_task(self, task_id: str, *, reason: str) -> list[str]:
-        closed: list[str] = []
-        for instance in self.list_for_task(task_id):
-            if instance.state == TERMINAL_STATE:
-                continue
-            updated = replace(instance, state=TERMINAL_STATE, updated_at=now(), parked_reason=_safe_reason(reason), active_run_ids=[])
-            self.save(updated, event_type="foreground_runtime.closed", reason=reason)
-            closed.append(updated.id)
-        return closed
-
-    def save(self, instance: GoalRuntimeInstance, *, event_type: str | None = None, reason: str = "") -> GoalRuntimeInstance:
-        path = paths.runtime_instance_path(instance.id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_json_write(path, to_jsonable(instance), indent=2, sort_keys=True)
-        if event_type:
-            self.event_log.append(
-                Event(
-                    ts=now(),
-                    type=event_type,
-                    task_id=instance.task_id,
-                    run_id=None,
-                    persona_id=None,
-                    payload={
-                        "runtime_instance_id": instance.id,
-                        "task_id": instance.task_id,
-                        "lane": instance.lane,
-                        "state": instance.state,
-                        "reason": _safe_reason(reason),
-                    },
-                )
-            )
-        return instance
+    # S53 (2026-08-01) removed this store's WRITE lane whole: ``create_lane``,
+    # ``transition``, ``park_lane``, ``resume_lane``, ``park_open_task``,
+    # ``mark_terminal_for_task``, and the single ``save`` chokepoint they all
+    # funnelled through. Not one had a production caller.
+    #
+    # ``park_lane`` had exactly one non-test caller and it was
+    # ``operator_control.py``, deleted at S49 in this same wave — so the cut
+    # ORDER mattered: park_lane only became callerless once S49 landed.
+    # ``resume_lane`` was not on the original cut list and is included because
+    # its entire body is one ``transition`` call: keeping it would have left a
+    # method that raises ``AttributeError`` on its first line. Zero production
+    # callers either way.
+    #
+    # The four contracts they emitted (``lane.created``, ``lane.transitioned``,
+    # ``lane.transition_rejected``, ``foreground_runtime.closed``) are
+    # de-registered with them. The READ side below is LIVE — ``status.py``
+    # projects lanes off ``list_all`` — so this is a write-lane cut, not a store
+    # removal. See tests/agent_runtime/test_s53_lane_write_lane_removal.py.
 
     def get(self, instance_id: str) -> GoalRuntimeInstance:
         return from_jsonable(GoalRuntimeInstance, _read_json(paths.runtime_instance_path(instance_id)))
@@ -254,11 +130,7 @@ def _read_json(path):
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _safe_reason(reason: str) -> str:
-    text = " ".join(str(reason or "").split())
-    return text[:160] or "runtime state updated"
-
-
-def _safe_token(value: str) -> str:
-    text = "".join(ch if ch.isalnum() or ch in "_.:-" else "_" for ch in str(value or "").strip())
-    return text[:80] or "harness"
+# S53: ``_safe_reason`` and ``_safe_token`` went with the write lane. Both were
+# write-time sanitisers -- reason text and started-by tokens on their way INTO a
+# lane row -- and every caller was a deleted writer. A private helper outliving
+# its only branch is the residue S25 named when it retired ``events._safe_int``.
