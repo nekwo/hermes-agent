@@ -33,6 +33,7 @@ from tools.environments.local import (
     _quote_bash_path,
     _resolve_safe_cwd,
     _sanitize_subprocess_env,
+    _shell_arg_safe_path,
     _windows_to_msys_path,
     hermes_subprocess_env,
 )
@@ -94,6 +95,43 @@ class TestBashSafePath:
         )
         assert "/c/Users/Alexander/AppData/Local/Temp/hermes-snap-abc.sh" in quoted
         assert "\\" not in quoted
+
+
+# ---------------------------------------------------------------------------
+# _shell_arg_safe_path — program-ARGUMENT form (native binaries + no pathconv)
+# ---------------------------------------------------------------------------
+
+class TestShellArgSafePath:
+    def test_noop_on_non_windows(self, monkeypatch):
+        monkeypatch.setattr(local_mod, "_IS_WINDOWS", False)
+        assert _shell_arg_safe_path(r"C:\Users\alice") == r"C:\Users\alice"
+
+    def test_native_path_becomes_drive_qualified_forward_slash(self, monkeypatch):
+        """NOT the ``/c/...`` form: with MSYS_NO_PATHCONV=1 set on every bash
+        spawn, nothing converts ``/c/...`` back for a native binary."""
+        monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
+        assert _shell_arg_safe_path(r"C:\Users\alice\notes.txt") == "C:/Users/alice/notes.txt"
+
+    def test_msys_leftover_folds_to_same_form(self, monkeypatch):
+        monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
+        assert _shell_arg_safe_path("/c/Users/alice") == "C:/Users/alice"
+
+    def test_regex_pattern_with_backslash_is_untouched(self, monkeypatch):
+        """The regression this exists for: ``search_files`` passes the PATTERN
+        through the same escaper as the path. Rewriting ``\\w`` to ``/w``
+        silently corrupts every backslash class in the user's regex."""
+        monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
+        assert _shell_arg_safe_path(r"func_\w+") == r"func_\w+"
+        assert _shell_arg_safe_path(r"\d{3}\s+\bword\b") == r"\d{3}\s+\bword\b"
+
+    def test_posix_and_relative_paths_untouched(self, monkeypatch):
+        monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
+        assert _shell_arg_safe_path("/home/alice") == "/home/alice"
+        assert _shell_arg_safe_path("src/tools") == "src/tools"
+
+    def test_empty_string(self, monkeypatch):
+        monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
+        assert _shell_arg_safe_path("") == ""
 
 
 # ---------------------------------------------------------------------------
