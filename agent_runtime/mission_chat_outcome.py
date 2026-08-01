@@ -51,8 +51,11 @@ __all__ = [
     "DELEGATED_ERROR_KIND_SOURCES",
     "ExecutionState",
     "FAILURE_EXECUTION_STATES",
+    "FinalizationWarning",
+    "FinalizationWarningKind",
     "MISSION_CHAT_EXIT_FAILURE",
     "MISSION_CHAT_EXIT_OK",
+    "MissionChatTurnPlan",
     "OK_EXECUTION_STATES",
     "TurnOutcome",
     "classify_turn_failure",
@@ -276,6 +279,94 @@ def classify_turn_failure(
     return _FAILURE_TABLE[
         (wall_budget_exceeded(exc, provider_submitted=provider_submitted), provider_submitted)
     ]
+
+
+# ---------------------------------------------------------------------------
+# the plan/commit boundary
+# ---------------------------------------------------------------------------
+@dataclass(frozen=True, slots=True)
+class MissionChatTurnPlan:
+    """Everything a mission-chat turn RESOLVED before it started writing.
+
+    ``_cmd_mission_chat_message`` used to be one 1,600-line body that re-entered
+    ITSELF once to take the chat-root lease
+    (``return _cmd_mission_chat_message(args)`` inside ``with lease:``). That
+    re-entry is why five durable writes ran TWICE per turn — the instance
+    derive, the mint, ``open_chat``, the session ensure, and the model-override
+    persist all happened before the lease and then again inside it — and why the
+    turn's phase state had to be smuggled across the boundary on ``args._*``
+    attributes, because a second pass would otherwise rediscover "the caller
+    named a session" and report every freshly minted dispatch thread as a plain
+    continuation.
+
+    This object is that boundary made explicit: the plan phase resolves it once,
+    and the commit phase runs ONCE, under the lease, from these fields. It is
+    frozen because a plan that could be mutated after the lease was taken would
+    reintroduce exactly the ambiguity the ``args._*`` attributes encoded.
+
+    Deliberately NOT yet true of the plan phase, and stated rather than implied:
+    it is not pure. Two durable writes still precede it — the instance
+    derive-from-workers that target resolution reads, and the mint that MAKES
+    the ``session_id`` this lease is keyed on (there is nothing to lock before a
+    thread exists). Retiring those two, and replacing the remaining
+    ``getattr(args, ...)`` reads with a request object, is the rest of the
+    proposal.
+
+    Fields are typed ``object`` on purpose: they carry CLI argparse namespaces
+    and store handles from ``hermes_cli``, which ``agent_runtime`` must not
+    import (the dependency runs the other way).
+    """
+
+    args: object
+    cfg: object
+    session_db: object
+    instance_store: object
+    persona: object
+    normalized_persona: str
+    persona_instance_id: object
+    display_name: str
+    session_id: str
+    client_message_id: str
+    session_established: object
+    clarify_binding: object
+    stated_session_id: object
+    requested_by_session: str
+    turn_relay_chain: object
+    relay_chain_in: object
+    relay_deadline: object
+
+
+class FinalizationWarningKind(StrEnum):
+    """Why a turn's POST-REPLY bookkeeping did not complete cleanly.
+
+    The reply is durable by the time any of these can happen, so none of them
+    fails the turn — but none of them may be silent either, which is what they
+    were: the instance-state commit that returns the agent to ``idle`` and
+    repoints its default chat thread sat inside a bare ``except Exception:
+    pass``, in three places. A cockpit showing an agent stuck ``busy`` after a
+    completed turn had no record anywhere of why.
+    """
+
+    #: The instance row could not be returned to idle / repointed at the thread.
+    INSTANCE_STATE_COMMIT_FAILED = "instance_state_commit_failed"
+    #: A turn-journal transition returned a non-``persisted`` outcome.
+    TURN_RECORD_NOT_PERSISTED = "turn_record_not_persisted"
+
+
+@dataclass(frozen=True, slots=True)
+class FinalizationWarning:
+    """One typed, wire-shaped account of a non-clean finalization step."""
+
+    kind: FinalizationWarningKind
+    detail: str
+    #: Which write/step it happened on, when there is more than one of a kind.
+    step: str | None = None
+
+    def as_dict(self) -> dict[str, str]:
+        row = {"kind": str(self.kind), "detail": self.detail}
+        if self.step:
+            row["step"] = self.step
+        return row
 
 
 # ---------------------------------------------------------------------------

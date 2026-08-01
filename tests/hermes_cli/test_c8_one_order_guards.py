@@ -102,7 +102,9 @@ def test_sessiondb_ack_injection_helper_is_gone():
 
 
 def test_pre_trace_callback_wires_to_the_emitter_ack():
-    func = _func(_tree(), "_cmd_mission_chat_message")
+    # The ack callback is wired at the provider call, which moved into the sole
+    # writer when the turn body was split (2026-07-31).
+    func = _func(_tree(), "_mission_chat_commit_turn")
     wired = False
     for node in ast.walk(func):
         if not isinstance(node, ast.keyword) or node.arg != "pre_trace_callback":

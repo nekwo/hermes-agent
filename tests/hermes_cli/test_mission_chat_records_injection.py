@@ -20,12 +20,17 @@ def _mission_chat_message_func():
     # text that gets exec'd.
     import hermes_cli.harness as harness
 
+    # Split on 2026-07-31: record-at-injection happens on the write side, which
+    # is now ``_mission_chat_commit_turn`` (the sole writer, under the lease).
+    # Both halves are searched so this guard follows the code if the boundary
+    # moves again instead of silently finding nothing.
     path = Path(harness.__file__).with_name("harness_parts") / "persona_commands.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "_cmd_mission_chat_message":
-            return node
-    raise AssertionError("_cmd_mission_chat_message not found in persona_commands")
+    for name in ("_mission_chat_commit_turn", "_cmd_mission_chat_message"):
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return node
+    raise AssertionError("the mission-chat turn body is not in persona_commands")
 
 
 def _observability_calls(func: ast.FunctionDef) -> list[ast.Call]:

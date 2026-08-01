@@ -35,16 +35,26 @@ import inspect
 
 
 def _mission_chat_message_source() -> str:
-    """Source of the mission-chat send handler.
+    """Source of the mission-chat send handler, BOTH halves.
 
     persona_commands.py is not an importable module: harness.py loads it via
     _load_command_parts() and execs it in its OWN globals, so the command
     bodies are attributes of hermes_cli.harness. Same access path as S26.
+
+    The handler was split on 2026-07-31 into a plan phase
+    (``_cmd_mission_chat_message``) and the sole writer
+    (``_mission_chat_commit_turn``), and the reply envelopes live in the writer.
+    Both are concatenated so this contract still reads the whole send handler —
+    reading only one half would let a ``task_id`` reappear in the other, which
+    is precisely the regression S30 exists to prevent.
     """
 
     from hermes_cli import harness
 
-    return inspect.getsource(harness._cmd_mission_chat_message)
+    return "\n".join(
+        inspect.getsource(getattr(harness, name))
+        for name in ("_cmd_mission_chat_message", "_mission_chat_commit_turn")
+    )
 
 
 def test_mission_chat_message_emits_no_task_id_response_key():

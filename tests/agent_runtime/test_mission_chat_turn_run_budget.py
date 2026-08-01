@@ -488,6 +488,13 @@ def test_the_projection_never_writes_the_journal_it_reads(isolate_agent_runtime_
 # ── the exec'd settle point, which no test can import ───────────────────────
 
 
+# Split on 2026-07-31: the plan phase stayed in ``_cmd_mission_chat_message``
+# and every durable write moved into ``_mission_chat_commit_turn``, which runs
+# under the chat-root lease. The run-budget settle points are writes, so they
+# live in the writer; both halves are searched so this guard follows the code.
+_TURN_BODY_FUNCTIONS = ("_mission_chat_commit_turn", "_cmd_mission_chat_message")
+
+
 def _mission_chat_message_func() -> ast.FunctionDef:
     """``harness_parts/persona_commands.py`` is ``exec``'d into harness.py's
     globals, never imported, so its body is only reachable as source text."""
@@ -495,10 +502,15 @@ def _mission_chat_message_func() -> ast.FunctionDef:
     import hermes_cli.harness as harness
 
     path = Path(harness.__file__).with_name("harness_parts") / "persona_commands.py"
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-        if isinstance(node, ast.FunctionDef) and node.name == "_cmd_mission_chat_message":
-            return node
-    raise AssertionError("_cmd_mission_chat_message not found in persona_commands")
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for name in _TURN_BODY_FUNCTIONS:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return node
+    raise AssertionError(
+        "the mission-chat turn body "
+        f"({' / '.join(_TURN_BODY_FUNCTIONS)}) is not in persona_commands"
+    )
 
 
 def _adapter_calls() -> list[ast.Call]:

@@ -1367,7 +1367,7 @@ def _cmd_mission_chat_message(args) -> int:
     from agent_runtime.mission_chat_outcome import (
         ChatErrorKind,
         ExecutionState,
-        classify_turn_failure,
+        MissionChatTurnPlan,
     )
     cfg = load_agent_runtime_config()
     try:
@@ -1488,15 +1488,15 @@ def _cmd_mission_chat_message(args) -> int:
     # What the CALLER named, before anything on this turn overwrites it. Kept so
     # the settlement can tell "they answered in the right thread because they
     # named it" from "they inherited it" — the adoption signal this whole
-    # binding is measured by. Carried on `args` for the same reason
-    # `_dispatch_session_established` is: by the lease re-entry BOTH the clarify
-    # bind and the omitted-session mint have written a session back onto
-    # `args.session_id`, so a second pass would read every sticky continuation
-    # as a thread the caller had named.
-    stated_session_id = getattr(args, "_stated_session_id", None)
-    if stated_session_id is None:
-        stated_session_id = session_id
-        args._stated_session_id = stated_session_id
+    # binding is measured by.
+    #
+    # It used to be stashed on `args._stated_session_id`, because the lease
+    # re-entry re-ran this line AFTER both the clarify bind and the
+    # omitted-session mint had written a session back onto `args.session_id` —
+    # so the second pass read every sticky continuation as a thread the caller
+    # had named. The plan/commit split runs this line exactly once, so a plain
+    # local is now the honest carrier.
+    stated_session_id = session_id
     # CLARIFY CONTINUITY. Resolved HERE — after the caller's session id is read,
     # BEFORE the target decision below — and both consequences are free:
     #
@@ -1509,15 +1509,15 @@ def _cmd_mission_chat_message(args) -> int:
     #      mints, never repoints the instance's default-thread pointer, and
     #      never runs the pre-mint gate.
     #
-    # Stashed on `args` for exactly the reason `_dispatch_session_established`
-    # is: this handler RE-ENTERS itself once to take the chat-root lease, and by
-    # then `args.session_id` has been rewritten — a second pass would rediscover
-    # "the caller named a session", report the turn as a plain
-    # `explicit_session_id` continuation, and settle the ticket twice.
-    clarify_binding = getattr(args, "_clarify_binding", None)
-    if clarify_binding is None:
-        clarify_binding = _resolve_mission_chat_clarify_binding(args, session_id=session_id)
-        args._clarify_binding = clarify_binding
+    # Resolved ONCE. It used to be stashed on `args._clarify_binding` because
+    # the handler re-entered itself to take the chat-root lease, and by then
+    # `args.session_id` had been rewritten — a second pass would rediscover "the
+    # caller named a session", report the turn as a plain `explicit_session_id`
+    # continuation, and settle the ticket TWICE. The plan/commit split retires
+    # the re-entry, so the local is the whole story.
+    clarify_binding = _resolve_mission_chat_clarify_binding(
+        args, session_id=session_id
+    )
     clarify_session_id = (
         safe_assignment_text((clarify_binding or {}).get("bound_session_id"), limit=240)
         if (clarify_binding or {}).get("bound_via") == "clarify_token"
@@ -1532,13 +1532,13 @@ def _cmd_mission_chat_message(args) -> int:
     # here for the explicit-session lane; re-decided by policy below when the
     # caller named no session.
     #
-    # Carried on `args` because this handler RE-ENTERS itself once to take the
-    # chat-root lease (see `_persona_chat_root_lease_acquired` below), and by
-    # then the resolved session has been written back onto `args.session_id` —
-    # so a second pass would rediscover "the caller named a session" and report
-    # every freshly minted dispatch thread as a plain continuation.
-    session_established = getattr(args, "_dispatch_session_established", None)
-    if session_established is None and session_id:
+    # It used to be carried on `args._dispatch_session_established` because this
+    # handler RE-ENTERED itself once to take the chat-root lease, and by then
+    # the resolved session had been written back onto `args.session_id` — so a
+    # second pass would rediscover "the caller named a session" and report every
+    # freshly minted dispatch thread as a plain continuation. One pass now.
+    session_established = None
+    if session_id:
         # No `policy=`: an explicit session id outranks deployment policy, and
         # the resolver short-circuits before loading it — this lane runs on
         # every mission-chat turn and `mission_chat_dispatch_session_policy()`
@@ -1551,7 +1551,6 @@ def _cmd_mission_chat_message(args) -> int:
             fresh=False,
             predecessor_session_id=None,
         )
-        args._dispatch_session_established = session_established
     # Sender identity for workspace-scoped target resolution: the chat-root
     # session of the agent that requested this send (agent-to-agent relay
     # threads it through the envelope; a bare operator CLI send omits it).
@@ -1561,7 +1560,9 @@ def _cmd_mission_chat_message(args) -> int:
     client_message_id = safe_assignment_text(
         getattr(args, "client_message_id", None), limit=200
     ) or f"agent-chat-send-{uuid.uuid4().hex[:12]}"
-    # Keep the generated fallback stable across the one-time lease recursion.
+    # Written back so the serve lane and the turn store agree on the id a
+    # generated fallback produced. (It also used to have to survive the lease
+    # recursion; that recursion is gone.)
     args.client_message_id = client_message_id
 
     # Ambiguous-target guard at the canonical persona chokepoint (sibling of the
@@ -1831,9 +1832,159 @@ def _cmd_mission_chat_message(args) -> int:
                 ),
             )
         args.session_id = session_id
-        # Survives the lease re-entry above, which sees args.session_id set.
-        args._dispatch_session_established = session_established
-    display_name = safe_assignment_text(getattr(persona, "display_name", None), limit=120) or _display_name_for_profile(normalized_persona)
+    # ── plan → commit ──────────────────────────────────────────────────────
+    # Everything above RESOLVED this turn; everything below WRITES it, once,
+    # under the chat-root lease.
+    #
+    # This boundary used to be a self-call: the body re-entered
+    # ``_cmd_mission_chat_message(args)`` from inside ``with lease:`` after
+    # setting an ``args._persona_chat_root_lease_acquired`` flag. Every
+    # resolution above therefore ran TWICE per turn, three durable writes with
+    # it (``open_chat``, the session ensure, the model-override persist), and
+    # the turn's phase state had to be smuggled across the re-entry on
+    # ``args._*`` attributes so the second pass would not re-decide it. The
+    # split retires the recursion, the double writes, and the smuggling
+    # together.
+    display_name = (
+        safe_assignment_text(getattr(persona, "display_name", None), limit=120)
+        or _display_name_for_profile(normalized_persona)
+    )
+    plan = MissionChatTurnPlan(
+        args=args,
+        cfg=cfg,
+        session_db=session_db,
+        instance_store=instance_store,
+        persona=persona,
+        normalized_persona=normalized_persona,
+        persona_instance_id=persona_instance_id,
+        display_name=display_name,
+        session_id=session_id,
+        client_message_id=client_message_id,
+        session_established=session_established,
+        clarify_binding=clarify_binding,
+        stated_session_id=stated_session_id,
+        requested_by_session=requested_by_session,
+        turn_relay_chain=turn_relay_chain,
+        relay_chain_in=relay_chain_in,
+        relay_deadline=relay_deadline,
+    )
+    try:
+        with persona_chat_root_lease(
+            session_id,
+            owner_id=safe_assignment_token(getattr(args, "serve_request_id", None)),
+            observer_kind="serve" if persona_chat_runtime_registry() is not None else "cli",
+        ):
+            return _mission_chat_commit_turn(plan)
+    except PersonaChatBusyError as exc:
+        data = {
+            "ok": False,
+            "capability_id": "mission.chat.message",
+            "execution_state": ExecutionState.REJECTED,
+            "error_kind": ChatErrorKind.CHAT_BUSY,
+            "chat_busy": True,
+            "root_chat_session_id": session_id,
+            "session_id": session_id,
+            "lease_owner": exc.owner,
+            "client_message_id": client_message_id,
+            "error": str(exc),
+        }
+        if getattr(args, "stream", False):
+            _emit_chat_final(data)
+        else:
+            print(emit_json(data) if args.json else data["error"])
+        return 2
+
+
+def _mission_chat_commit_turn(plan) -> int:
+    """The SOLE writer for a mission-chat turn. Runs under the chat-root lease.
+
+    Every durable write from ``open_chat`` onward lives here, so the lease that
+    serialises a chat root actually covers them — before the plan/commit split
+    the first three ran outside it, twice, on the way to acquiring it.
+
+    The unpack below is deliberate and load-bearing: it rebinds each planned
+    value to the name the turn body has always used, so the body itself is
+    unchanged by the extraction. A renaming pass through 1,000 lines of the
+    most-live code in the harness is a separate risk from moving the lease, and
+    they do not have to be taken together.
+    """
+
+    # Function-local: this file is exec'd into harness.py's globals (see the
+    # note in _cmd_mission_chat_message). ``relay_policy`` is here rather than
+    # inherited, because the plan phase's own local import does NOT reach across
+    # the split — a free name here would be a NameError on a LIVE turn and
+    # nothing but a live turn would find it.
+    from agent_runtime import relay_policy
+    from agent_runtime.mission_chat_outcome import (
+        ChatErrorKind,
+        ExecutionState,
+        FinalizationWarning,
+        FinalizationWarningKind,
+        classify_turn_failure,
+    )
+
+    args = plan.args
+    cfg = plan.cfg
+    session_db = plan.session_db
+    instance_store = plan.instance_store
+    persona = plan.persona
+    normalized_persona = plan.normalized_persona
+    persona_instance_id = plan.persona_instance_id
+    display_name = plan.display_name
+    session_id = plan.session_id
+    client_message_id = plan.client_message_id
+    session_established = plan.session_established
+    clarify_binding = plan.clarify_binding
+    stated_session_id = plan.stated_session_id
+    requested_by_session = plan.requested_by_session
+    turn_relay_chain = plan.turn_relay_chain
+    relay_chain_in = plan.relay_chain_in
+    relay_deadline = plan.relay_deadline
+    # ── finalization accounting ────────────────────────────────────────────
+    # Bookkeeping that fails AFTER the reply is durable does not fail the turn —
+    # and used to leave no trace at all. Two classes of silence lived here:
+    #
+    #   1. the instance-state commit (return the agent to idle, repoint its
+    #      default chat thread) sat inside a bare ``except Exception: pass``, so
+    #      a cockpit showing an agent stuck ``busy`` after a completed turn had
+    #      no record anywhere of why;
+    #   2. eight ``transition_mission_chat_turn`` calls DISCARDED their
+    #      ``MissionChatTurnPersistOutcome``, so a skipped or rejected journal
+    #      write (lock timeout, stale transition, invalid state) was
+    #      indistinguishable from a clean one.
+    #
+    # Both now record a typed reason and ride the envelope as
+    # ``finalization_warnings``. The key is ABSENT on a clean turn, so the wire
+    # is unchanged for every healthy send — its presence is the whole signal.
+    finalization_warnings: list[FinalizationWarning] = []
+
+    def _warn(kind, detail: object, *, step: str | None = None) -> None:
+        finalization_warnings.append(
+            FinalizationWarning(
+                kind=kind,
+                detail=safe_assignment_text(str(detail), limit=200) or "unknown",
+                step=step,
+            )
+        )
+
+    def _route_turn_write(outcome, *, step: str):
+        """Account for a turn-journal transition. No write is lost silently."""
+
+        if outcome is not MissionChatTurnPersistOutcome.PERSISTED:
+            _warn(
+                FinalizationWarningKind.TURN_RECORD_NOT_PERSISTED,
+                getattr(outcome, "value", None) or "no_outcome",
+                step=step,
+            )
+        return outcome
+
+    def _stamp_finalization(data: dict) -> dict:
+        if finalization_warnings:
+            data["finalization_warnings"] = [
+                warning.as_dict() for warning in finalization_warnings
+            ]
+        return data
+
     try:
         instance = instance_store.open_chat(
             persona_id=normalized_persona,
@@ -1950,36 +2101,6 @@ def _cmd_mission_chat_message(args) -> int:
         else:
             print(emit_json(data) if args.json else data["error"])
         return 2
-    if not bool(getattr(args, "_persona_chat_root_lease_acquired", False)):
-        try:
-            with persona_chat_root_lease(
-                session_id,
-                owner_id=safe_assignment_token(getattr(args, "serve_request_id", None)),
-                observer_kind="serve" if persona_chat_runtime_registry() is not None else "cli",
-            ):
-                args._persona_chat_root_lease_acquired = True
-                try:
-                    return _cmd_mission_chat_message(args)
-                finally:
-                    args._persona_chat_root_lease_acquired = False
-        except PersonaChatBusyError as exc:
-            data = {
-                "ok": False,
-                "capability_id": "mission.chat.message",
-                "execution_state": ExecutionState.REJECTED,
-                "error_kind": ChatErrorKind.CHAT_BUSY,
-                "chat_busy": True,
-                "root_chat_session_id": session_id,
-                "session_id": session_id,
-                "lease_owner": exc.owner,
-                "client_message_id": client_message_id,
-                "error": str(exc),
-            }
-            if getattr(args, "stream", False):
-                _emit_chat_final(data)
-            else:
-                print(emit_json(data) if args.json else data["error"])
-            return 2
     # Resolve the effective instance once. Prompt receipts and execution must
     # observe the same model and skill assignment authority.
     persona = apply_instance_model_overrides(persona, instance)
@@ -2009,7 +2130,7 @@ def _cmd_mission_chat_message(args) -> int:
         recovered_reply = _redact_persona_chat_text(
             replay["assistant"].get("content"), limit=PERSONA_CHAT_REPLY_LIMIT
         )
-        transition_mission_chat_turn(
+        _settled = transition_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=journal.get("turn_id") or client_message_id,
@@ -2027,6 +2148,7 @@ def _cmd_mission_chat_message(args) -> int:
             },
             elements=journal.get("elements") or [],
         )
+        _route_turn_write(_settled, step="reply_recovery_native_commit")
         journal = mission_chat_turn_record(
             session_id=session_id, client_message_id=client_message_id
         ) or {}
@@ -2039,7 +2161,7 @@ def _cmd_mission_chat_message(args) -> int:
                 replay["assistant"].get("content"),
                 limit=PERSONA_CHAT_REPLY_LIMIT,
             )
-        transition_mission_chat_turn(
+        _settled = transition_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=journal.get("turn_id") or client_message_id,
@@ -2050,6 +2172,7 @@ def _cmd_mission_chat_message(args) -> int:
             },
             elements=journal.get("elements") or [],
         )
+        _route_turn_write(_settled, step="settling_projection_commit")
         journal = mission_chat_turn_record(
             session_id=session_id, client_message_id=client_message_id
         ) or {}
@@ -2075,6 +2198,7 @@ def _cmd_mission_chat_message(args) -> int:
             "error": "this turn already ended on its wall-clock budget; it is settled and needs no resolution",
             "next_expected": "send a new client_message_id to continue; no turn-resolve is required",
         }
+        _stamp_finalization(data)
         if getattr(args, "stream", False):
             _emit_chat_final(data)
         else:
@@ -2084,13 +2208,14 @@ def _cmd_mission_chat_message(args) -> int:
     # outstanding: refuse the resend and route to the resolve verb.
     if journal_state in RESEND_BLOCKING_TURN_STATES:
         if journal_state == TURN_STATE_EXECUTING:
-            transition_mission_chat_turn(
+            _settled = transition_mission_chat_turn(
                 session_id=session_id,
                 client_message_id=client_message_id,
                 turn_id=journal.get("turn_id") or client_message_id,
                 state=TURN_STATE_OUTCOME_UNKNOWN,
                 metadata={"provider_submitted": True},
             )
+            _route_turn_write(_settled, step="resend_settle_outcome_unknown")
         data = {
             "ok": False,
             "capability_id": "mission.chat.message",
@@ -2103,6 +2228,7 @@ def _cmd_mission_chat_message(args) -> int:
             "error": "the prior provider outcome cannot be proven; resolve this turn before resending",
             "next_expected": "resolve the exact outcome_unknown turn with action=abandon, then send a new client_message_id",
         }
+        _stamp_finalization(data)
         if getattr(args, "stream", False):
             _emit_chat_final(data)
         else:
@@ -2146,6 +2272,7 @@ def _cmd_mission_chat_message(args) -> int:
             "idempotent_replay": True,
             "journal_state": TURN_STATE_PROJECTED,
         }
+        _stamp_finalization(data)
         if getattr(args, "stream", False):
             _emit_chat_final(data)
         else:
@@ -2155,34 +2282,38 @@ def _cmd_mission_chat_message(args) -> int:
         reply_text = _redact_persona_chat_text(
             replay["assistant"].get("content"), limit=PERSONA_CHAT_REPLY_LIMIT
         )
-        transition_mission_chat_turn(
+        _settled = transition_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=client_message_id,
             state=TURN_STATE_PENDING,
             metadata={"root_chat_session_id": session_id, "pending_user_message": message},
         )
-        transition_mission_chat_turn(
+        _route_turn_write(_settled, step="replay_walk_pending")
+        _settled = transition_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=client_message_id,
             state=TURN_STATE_EXECUTING,
             metadata={"provider_submitted": True},
         )
-        transition_mission_chat_turn(
+        _route_turn_write(_settled, step="replay_walk_executing")
+        _settled = transition_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=client_message_id,
             state=TURN_STATE_NATIVE_COMMITTED,
             metadata={"native_committed": True, "stored_reply": reply_text},
         )
-        transition_mission_chat_turn(
+        _route_turn_write(_settled, step="replay_walk_native_committed")
+        _settled = transition_mission_chat_turn(
             session_id=session_id,
             client_message_id=client_message_id,
             turn_id=client_message_id,
             state=TURN_STATE_PROJECTED,
             metadata={"projection_committed": True, "stored_reply": reply_text},
         )
+        _route_turn_write(_settled, step="replay_walk_projected")
         _publish_persona_chat_projection_event(
             session_id=session_id,
             client_message_id=client_message_id,
@@ -2224,6 +2355,7 @@ def _cmd_mission_chat_message(args) -> int:
             "idempotent_replay": True,
             "next_expected": "duplicate client message id replayed from the canonical Mission Control chat transcript",
         }
+        _stamp_finalization(data)
         if getattr(args, "stream", False):
             _emit_chat_final(data)
         else:
@@ -2651,6 +2783,7 @@ def _cmd_mission_chat_message(args) -> int:
                 )
             ),
         }
+        _stamp_finalization(data)
         if wall_budget_exceeded:
             data.update(
                 {
@@ -2716,7 +2849,7 @@ def _cmd_mission_chat_message(args) -> int:
             active_session_id=active_session_id,
             revision=native_revision,
         )
-    transition_mission_chat_turn(
+    _settled = transition_mission_chat_turn(
         session_id=session_id,
         client_message_id=client_message_id,
         turn_id=stream_emitter.turn_id,
@@ -2739,6 +2872,7 @@ def _cmd_mission_chat_message(args) -> int:
             **budget_metadata,
         },
     )
+    _route_turn_write(_settled, step="native_commit")
     # The native reply is durable. Projection/bookkeeping failures deliberately
     # leave `native_committed` intact so an idempotent retry can repair the
     # projection without ever invoking the provider again.
@@ -2761,8 +2895,17 @@ def _cmd_mission_chat_message(args) -> int:
             instance.state = WorkerSessionState.IDLE
             instance.default_chat_session_id = session_id
             instance_store.update(instance)
-        except Exception:
-            pass
+        except Exception as instance_commit_exc:
+            # NOT silent any more. This write is what returns the agent to idle
+            # and repoints its default thread; swallowing its failure is why a
+            # cockpit could render an agent ``busy`` forever after a completed
+            # turn with nothing anywhere saying so. It still must not fail the
+            # turn — the reply is durable — so it becomes a typed warning.
+            _warn(
+                FinalizationWarningKind.INSTANCE_STATE_COMMIT_FAILED,
+                type(instance_commit_exc).__name__,
+                step="return_instance_to_idle",
+            )
 
         # Clarify accounting, in this order and only now that the reply is
         # durable: SETTLE the question this turn answered before MINTING a
@@ -2887,6 +3030,7 @@ def _cmd_mission_chat_message(args) -> int:
                 else "agent replied through the canonical Mission Control chat path; refresh Harness snapshot for transcript and Initial Chat Context"
             ),
         }
+        _stamp_finalization(data)
         stream_emitter.finish(
             state="completed",
             input_tokens=data.get("input_tokens"),
@@ -2986,6 +3130,7 @@ def _cmd_mission_chat_message(args) -> int:
             "model_selection": model_selection,
             "next_expected": "retry this client_message_id to repair projection from the native committed reply",
         }
+        _stamp_finalization(data)
         if getattr(args, "stream", False):
             _emit_chat_final(data)
         else:
@@ -5667,8 +5812,13 @@ def _run_free_floating_assignment_once(
     from agent_runtime.mission_chat_outcome import (
         ChatErrorKind,
         ExecutionState,
+        FinalizationWarning,
+        FinalizationWarningKind,
     )
 
+    # See the mission-chat lane: post-reply bookkeeping that fails is reported
+    # on the envelope, never swallowed. Absent when nothing went wrong.
+    finalization_warnings: list[FinalizationWarning] = []
     session_id: str | None = None
     try:
         session_db = _default_persona_session_db()
@@ -5830,8 +5980,17 @@ def _run_free_floating_assignment_once(
                 instance.mode = "free_floating"
             instance.default_chat_session_id = session_id
             instance_store.update(instance)
-        except Exception:
-            pass
+        except Exception as instance_commit_exc:
+            # The mission-chat lane's swallow, duplicated here. Same fix: the
+            # reply is durable so this cannot fail the turn, but an agent left
+            # rendering ``busy`` must not be a mystery.
+            finalization_warnings.append(
+                FinalizationWarning(
+                    kind=FinalizationWarningKind.INSTANCE_STATE_COMMIT_FAILED,
+                    detail=type(instance_commit_exc).__name__,
+                    step="return_instance_to_idle",
+                )
+            )
 
         # Auto-title is a SessionDB-only side effect nothing in the emitted
         # frame depends on, and it costs a synchronous auxiliary-LLM RTT on a
@@ -5866,6 +6025,15 @@ def _run_free_floating_assignment_once(
             "latency_ms": getattr(chat_result, "latency_ms", None),
             "profile_timing": dict(getattr(chat_result, "profile_timing", None) or {}) or None,
             "next_expected": "agent replied conversationally; refresh Harness snapshot for the chat transcript",
+            **(
+                {
+                    "finalization_warnings": [
+                        warning.as_dict() for warning in finalization_warnings
+                    ]
+                }
+                if finalization_warnings
+                else {}
+            ),
         }
         stream_emitter.finish(
             state="completed",
@@ -5918,6 +6086,15 @@ def _run_free_floating_assignment_once(
             "reply": reply_text,
             "blocker": safe_assignment_text(str(exc), limit=240),
             "next_expected": "the agent replied but recording the turn failed; inspect the blocker and retry the message",
+            **(
+                {
+                    "finalization_warnings": [
+                        warning.as_dict() for warning in finalization_warnings
+                    ]
+                }
+                if finalization_warnings
+                else {}
+            ),
         }
         if failed_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
             data["turn_persist_outcome"] = failed_outcome.value
@@ -5925,6 +6102,13 @@ def _run_free_floating_assignment_once(
 
 
 def _close_free_floating_assignments(persona_instance_id: str, *, reason: str, json_output: bool, terminal_state: str) -> int:
+    # Function-local: this file is exec'd into harness.py's globals (see the
+    # note in _cmd_mission_chat_message).
+    from agent_runtime.mission_chat_outcome import (
+        FinalizationWarning,
+        FinalizationWarningKind,
+    )
+
     cfg = load_agent_runtime_config()
     if not persona_assignment_store_enabled(cfg):
         data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
@@ -5944,6 +6128,7 @@ def _close_free_floating_assignments(persona_instance_id: str, *, reason: str, j
         print(emit_json(data) if json_output else data["error"])
         return 2
     closed = [store.complete(item.id, state=terminal_state, error=reason) for item in matches]
+    finalization_warnings: list[FinalizationWarning] = []
     try:
         instance_store = PersonaInstanceStore()
         instance = instance_store.get(normalized_instance)
@@ -5951,14 +6136,32 @@ def _close_free_floating_assignments(persona_instance_id: str, *, reason: str, j
             instance.current_assignment_id = None
             instance.mode = "configured"
             instance_store.update(instance)
-    except Exception:
-        pass
+    except Exception as instance_commit_exc:
+        # Third copy of the same swallow. The assignments ARE closed by this
+        # point, so a failure here leaves the instance pointing at work that no
+        # longer exists — reported, not hidden.
+        finalization_warnings.append(
+            FinalizationWarning(
+                kind=FinalizationWarningKind.INSTANCE_STATE_COMMIT_FAILED,
+                detail=type(instance_commit_exc).__name__,
+                step="clear_instance_assignment",
+            )
+        )
     data = {
         "ok": True,
         "persona_instance_id": normalized_instance,
         "closed_assignment_ids": [item.id for item in closed],
         "state": terminal_state,
         "production_proof_eligible": False,
+        **(
+            {
+                "finalization_warnings": [
+                    warning.as_dict() for warning in finalization_warnings
+                ]
+            }
+            if finalization_warnings
+            else {}
+        ),
     }
     print(emit_json(data) if json_output else f"closed {len(closed)} free-floating assignments for {normalized_instance}")
     return 0

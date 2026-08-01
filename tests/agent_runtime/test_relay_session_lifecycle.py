@@ -793,8 +793,17 @@ def _persona_commands_source() -> str:
     ).read_text(encoding="utf-8")
 
 
+# The mission-chat turn body was split on 2026-07-31 into a PLAN phase
+# (``_cmd_mission_chat_message``: resolve, refuse, decide) and the SOLE WRITER
+# (``_mission_chat_commit_turn``: everything under the chat-root lease). The
+# relay marker is resolved and forwarded inside the writer. Both halves are
+# searched so this guard follows the code if the boundary moves again, rather
+# than silently finding nothing and passing.
+_TURN_BODY_FUNCTIONS = ("_mission_chat_commit_turn", "_cmd_mission_chat_message")
+
+
 def _mission_chat_reply_call_in_chat_command():
-    """The `mission_chat_reply(...)` call inside `_cmd_mission_chat_message`.
+    """The `mission_chat_reply(...)` call inside the mission-chat turn body.
 
     persona_commands.py is exec'd into harness globals rather than imported, so
     its wiring is pinned by parsing the exact source text that gets exec'd —
@@ -803,15 +812,19 @@ def _mission_chat_reply_call_in_chat_command():
     import ast
 
     tree = ast.parse(_persona_commands_source())
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "_cmd_mission_chat_message":
-            for call in ast.walk(node):
-                if (
-                    isinstance(call, ast.Call)
-                    and getattr(call.func, "attr", None) == "mission_chat_reply"
-                ):
-                    return node, call
-    raise AssertionError("mission_chat_reply call not found in _cmd_mission_chat_message")
+    for name in _TURN_BODY_FUNCTIONS:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                for call in ast.walk(node):
+                    if (
+                        isinstance(call, ast.Call)
+                        and getattr(call.func, "attr", None) == "mission_chat_reply"
+                    ):
+                        return node, call
+    raise AssertionError(
+        "mission_chat_reply call not found in the mission-chat turn body "
+        f"({' / '.join(_TURN_BODY_FUNCTIONS)})"
+    )
 
 
 def test_the_chat_lane_resolves_the_sender_and_hands_it_to_the_runtime():

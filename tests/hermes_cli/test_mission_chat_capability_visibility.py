@@ -59,15 +59,28 @@ _POLICY_CALLS = (
 )
 
 
+# The mission-chat turn body was split on 2026-07-31: the PLAN phase kept the
+# name ``_cmd_mission_chat_message`` (resolve, refuse, decide) and every durable
+# write moved into ``_mission_chat_commit_turn``, the sole writer, which runs
+# under the chat-root lease. What these guards pin lives in the writer; both
+# halves are named so the assertion follows the code if the boundary moves
+# again, rather than silently finding nothing and passing.
+_TURN_BODY_FUNCTIONS = ("_mission_chat_commit_turn", "_cmd_mission_chat_message")
+
+
 def _mission_chat_message_func() -> ast.FunctionDef:
     import hermes_cli.harness as harness
 
     path = Path(harness.__file__).with_name("harness_parts") / "persona_commands.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "_cmd_mission_chat_message":
-            return node
-    raise AssertionError("_cmd_mission_chat_message not found in persona_commands")
+    for name in _TURN_BODY_FUNCTIONS:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == name:
+                return node
+    raise AssertionError(
+        "the mission-chat turn body "
+        f"({' / '.join(_TURN_BODY_FUNCTIONS)}) is not in persona_commands"
+    )
 
 
 def _calls_named(func: ast.FunctionDef, name: str) -> list[ast.Call]:

@@ -47,6 +47,15 @@ def _func(tree: ast.AST, name: str) -> ast.FunctionDef:
     raise AssertionError(f"{name} not found in persona_commands.py")
 
 
+# The mission-chat turn body was split on 2026-07-31: the PLAN phase kept the
+# name ``_cmd_mission_chat_message`` (resolve, refuse, decide) and every durable
+# write moved into ``_mission_chat_commit_turn``, the sole writer, which runs
+# under the chat-root lease. What these guards pin lives in the writer; both
+# halves are named so the assertion follows the code if the boundary moves
+# again, rather than silently finding nothing and passing.
+_TURN_BODY_FUNCTIONS = ("_mission_chat_commit_turn", "_cmd_mission_chat_message")
+
+
 def _call_name(node: ast.Call):
     callee = node.func
     if isinstance(callee, ast.Name):
@@ -68,7 +77,7 @@ def _stmt_has_call(stmt: ast.stmt, name: str) -> bool:
 
 
 def test_main_handler_emits_terminal_frame_before_titling():
-    func = _func(_persona_commands_tree(), "_cmd_mission_chat_message")
+    func = _func(_persona_commands_tree(), _TURN_BODY_FUNCTIONS[0])
     # The success turn tail is one try-body that both emits the terminal frame
     # AND (now) titles. Find that try and assert emit precedes title within it.
     outer = None
@@ -99,7 +108,7 @@ def test_main_handler_emits_terminal_frame_before_titling():
 
 
 def test_main_handler_titles_exactly_once():
-    func = _func(_persona_commands_tree(), "_cmd_mission_chat_message")
+    func = _func(_persona_commands_tree(), _TURN_BODY_FUNCTIONS[0])
     assert len(_calls_named(func, TITLE)) == 1, (
         "the moved title call must not be duplicated across paths"
     )

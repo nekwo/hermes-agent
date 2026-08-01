@@ -47,7 +47,9 @@ def _open_chat_calls(func: ast.FunctionDef) -> list[ast.Call]:
 
 
 def test_send_path_open_chat_passes_default_display_name_not_authoritative():
-    calls = _open_chat_calls(_func("_cmd_mission_chat_message"))
+    # ``open_chat`` is a durable write, so it moved into the sole writer when
+    # the turn body was split (2026-07-31).
+    calls = _open_chat_calls(_func("_mission_chat_commit_turn"))
     assert calls, "the mission-chat send path no longer binds a chat session via open_chat"
     for call in calls:
         keywords = {kw.arg for kw in call.keywords}
