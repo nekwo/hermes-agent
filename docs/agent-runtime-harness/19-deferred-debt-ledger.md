@@ -92,28 +92,51 @@
 ## Proposal ledger (decision-ready; full text in the 2026-07-31 audit reports)
 
 Hermes fork-owned:
-- **P0 exec-namespace guard test** for harness_parts (the live NameError class;
-  the :440 defect itself is fixed). Companion: the module-ization proposal
-  (123 re-exported names vs 7 real harness-local helpers; unlocks ruff F821).
-- **P1 turn-outcome vocabulary** (execution_state 26 sites / error_kind 35
-  sites) -> owned StrEnums + classify_turn_failure; one-liner available at
-  persona_commands.py:3186 (OPERATOR_RESOLVABLE_TURN_STATES).
-- **P2 mission-chat turn envelope**: plan_turn (pure) -> commit_turn (sole
-  writer, holds the lease); retires the five pre-lease durable writes and the
-  args._* phase-state mutation; folds P6's silent-swallow cluster
-  (worst: the IDLE-return + default-session commit at :2696-2703 inside
-  except: pass).
-- **P3 frozen-HERMES_HOME ratchet**: probe reads not declarations; collapse
-  hermes_state dual resolvers (fork side keeps _resolve_default_db_path);
-  finish the skills_sync SKILLS_DIR migration (12 sites).
-- **P4 PathForm value object** + 4x4 characterization test over the four path
-  translators (fork-side early-warning; upstream-PR candidate #1).
-- **P5 launcher_qa mcp_servers template**: canonical template constant + new
-  issue code on the existing machine_roots.mcp_server_issues() ->
-  profile_readiness lane. NOTE: drift already exists (variant A with
-  STAGEC_LAUNCH_HELPER: alice/base/neko/unbounded; variant B without:
-  backend-dev/gpt-launcher/launcher-dev/launcher-qa/qa) - doc-18's
-  "field-identical to launcher-dev" guard would canonicalize the WRONG variant.
+- ~~**P0 exec-namespace guard test + explicit imports.**~~ **EXECUTED
+  2026-08-01** — `79a7c6542` (symtable-based namespace guard, identity-based
+  collision check, self-cleaning ledger), `a07b6c6dd` (`harness_support.py`:
+  the 7 spec'd helpers pulled a 20-member dependency closure), `e887cdf26`
+  (per-part import headers, 158 bound names; ghost `Callable` retired —
+  `runtime_commands.Task` was already comment-only; `__file__` trap →
+  `harness_repo_root()`), `21f7b9f3a` (F821 on for agent_runtime/ +
+  harness_parts/, 782 -> 0; found + fixed a real never-fired NameError:
+  `persona_chat_history.py` `_default_event_log`). Parts remain exec'd; CLI
+  shape proven byte-identical via full argparse dump diff. RESIDUALS:
+  harness.py keeps 62 ignored F821 (the reverse direction — retired only by
+  full module conversion, the still-open companion proposal);
+  `PERSONA_CHAT_SESSION_SOURCE` still defined twice in agent_runtime (3 -> 2);
+  ~1,153 upstream F821 hits ignored as upstream-PR candidates, incl. a genuine
+  `tools/patch_parser.py:345` undefined `PatchResult`.
+- ~~**P1 turn-outcome vocabulary.**~~ **EXECUTED 2026-07-31** — `1f64833c4`.
+  `agent_runtime/mission_chat_outcome.py`: ExecutionState (7) / ChatErrorKind
+  (19) StrEnums, classify_turn_failure, import-time coverage guard; literal
+  sites replaced; wire byte-identical.
+- ~~**P2 mission-chat turn envelope.**~~ **EXECUTED 2026-07-31** — `68ae37a29`.
+  plan (`_cmd_mission_chat_message`) -> `with persona_chat_root_lease` ->
+  `_mission_chat_commit_turn`; P6 silent-swallow cluster surfaced as typed
+  `finalization_warnings` (additive). Known deviations (pinned by test):
+  ERROR_EXIT_CODES untouched; mint precedes the lease by necessity.
+- ~~**P3 frozen-HERMES_HOME ratchet (fork slice).**~~ **EXECUTED 2026-08-01** —
+  `878115fa1` + `afaf087b6`. Runtime probe (nonce-named tmpdir HERMES_HOME,
+  subprocess import, file-not-stdout results) replaces the column-0 regex.
+  The ledger GREW 29 -> 51 names — the regex only saw first-hop freezes
+  (derived constants like `JOBS_FILE = CRON_DIR/...` were invisible); this is
+  unmeasured debt now measured, every entry reasoned, stale entries fail.
+  2 UNPROBED on this host (fire/termios), carried with reasons.
+  `read_model._default_db_path` -> `_read_model_db_path` (grep-poison name
+  retired). Upstream slice (hermes_state dual resolvers, skills_sync
+  SKILLS_DIR) untouched — stays an upstream-PR candidate.
+- ~~**P4-lite path-form characterization.**~~ **EXECUTED 2026-07-31** —
+  `3ac7bb6ba`. 49 pins over the four translators incl. the backslash-pattern
+  and verbatim-return edges; purity guard. The PathForm value object itself
+  (production change) remains upstream-PR candidate #1.
+- ~~**P5 launcher_qa mcp_servers template.**~~ **EXECUTED 2026-07-31** —
+  `6190e4d9d`. `CANONICAL_LAUNCHER_QA_MCP_SERVER` (variant A ruled canonical),
+  `mcp_server_template_diffs`, advisory `mcp_server_template_drift` issue
+  (opt-in via include_template_drift), data test listing variant-B's missing
+  env var as expected-drift with per-profile yaml patches in the failure
+  message. OPEN OPERATOR DECISIONS: flip advisory -> blocking; apply the five
+  variant-B config patches (live action).
 - ~~**B-4 read-model serve path** / **B-5 dead parity warnings**.~~ **EXECUTED
   2026-07-31** — `76504fd84`. B-4: `resolve_snapshot_frame(prefer_cache=...)`
   returns `(frame, FrameSource)` over a StrEnum {`built`, `cache`,
@@ -138,15 +161,38 @@ Hermes fork-owned:
   wire between them never asserted) - extend the "does the chokepoint actually
   invoke the seam" AST tests to the other persona_commands chokepoints.
 
-Launcher Mission Control (F-1..F-8, full text in the audit report):
-- F-1 selection-state chokepoint adoption (~25 bypass sites, reconciliation in
-  build()); F-2 delete the second instance resolver (_agentInstanceById);
-  F-3 extract MissionTranscriptProjector (the pinning test currently mirrors
-  instead of exercising); F-4 MissionTurnPhase enum (4 divergent boolean
-  cascades); F-5 HermesVisibilitySource honest-degradation enum; F-6 one
-  PM->Neko copy authority; F-7 Capped<T> + "+N more" (incl. the office
-  selected-goal eviction); F-8 MissionOfficeAuthoringPolicy.
-  Sequencing: F-4 -> F-3 -> F-2 -> F-1; F-5/F-6/F-7 independent; F-8 with F-2.
+Launcher Mission Control (F-1..F-8):
+- ~~F-1..F-8~~ **ALL EXECUTED 2026-07-31/08-01**, on launcher origin/main
+  through `e88efde5`: F-4 `136e8992` (MissionTurnPhase + named predicates —
+  NOTE the audit's subset guess was WRONG and landed inverted:
+  isTransientHistoryFrame ⊇ hasUndeliveredWork, because latching
+  runtimeCallCompleted into the dispose guard would leak it permanently;
+  characterization table carries the evidence), F-3 `d5f544f8` (pure
+  MissionTranscriptProjector, −989 panel lines, required-key row factories,
+  cache key = value object + contentDigest — `revision` deliberately NOT in
+  the key), F-5 `e82f202b` (HermesVisibilitySource + honest degradation
+  notes), F-6 `5465ee06` (MissionCopyNormalization.nekoFirst; bridge rewriter
+  was already dead via s49 — absorbed as a strict-superset history test),
+  F-7 `011e4fff` (Capped<T>/MoreIndicator over all 7 cap sites; office
+  selected-goal eviction fixed via ofIncluding), F-8 `738babb4`
+  (MissionOfficeAuthoringPolicy + typed scene mutation + hidden-goal pill),
+  F-2 `ff368c21` (second resolver deleted; widenToSnapshotRoster opt-in at
+  the four ex-exact-guard sites; grep gate scoped to the page library),
+  F-1 `e88efde5` (MissionSelectionStore, ONE typed write path,
+  compiler-enforced — fields have no setters).
+  LAUNCHER RESIDUALS (opened by execution):
+  - **F-1 reducer relocation**: reconciliation still runs in build() (as typed
+    transitions); the ref.listen relocation + Riverpod Notifier promotion are
+    ONE follow-up change (Riverpod asserts on mutation-in-build).
+  - **F-2-adjacent `persona:` unwrap**: still hand-rolled at
+    mission_chat_directory.dart:611/:633 and mission_control_snapshot.dart:2228
+    — same class the F-2 authority retired; fold onto
+    missionAgentIdentityAliases.
+  - **F-3 cache key is O(messages) in time** (contentDigest); O(1) needs an
+    adapter-minted conversation revision (wire change).
+  - **F-7/F-8 office**: goal-overflow pill live-invisible while
+    goalDioramaEnabled:false; MissionOfficeSceneMutation `dropped` lane is
+    debug-assert only; MissionOfficeRenderProbe lacks a goals-hidden field.
 - **F-9 dead `open_incident_budget_exceeded` alert (opened by B-5,
   2026-07-31).** `mission_control_snapshot.dart:994` branches the snapshot-alert
   label on `warningCodes.contains('open_incident_budget_exceeded')`. The hermes
