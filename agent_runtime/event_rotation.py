@@ -3,8 +3,12 @@
 The event log (``events.jsonl``) is append-only and, historically, never
 rotated — the live root reached 81 MB / 130k lines. But a naive rotate breaks
 the platform: **byte-offset tailing is load-bearing.** ``EventLog.iter_from_offset``
-resumes a streaming tailer from a byte cursor (``stream.py``, ``projector.py``,
-``liveness.py``, ``child_events.py``), and the checkpoint watermark keys on
+resumes a streaming tailer from a byte cursor — today that is ``stream.py``
+alone. (This list used to read ``stream.py``, ``projector.py``, ``liveness.py``,
+``child_events.py``. S46 removed ``projector.py`` with the incremental
+projection lane and re-checked the rest while it was here: ``liveness.py`` no
+longer exists and ``child_events.py`` does not tail by offset at all, so both
+were already stale.) The checkpoint watermark keys on
 ``event_offset`` (``checkpoint.py`` / ``parity.events_watermark``), which is the
 log's total byte size. Renaming or truncating the live file resets that cursor
 to zero and silently drops or duplicates every event.

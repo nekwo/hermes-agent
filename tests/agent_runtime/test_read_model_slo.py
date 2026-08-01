@@ -6,15 +6,15 @@ import time
 from hermes_time import now
 
 from agent_runtime.models import Event
-from agent_runtime.projector import Projector
-from agent_runtime.read_model import ReadModel
-from agent_runtime.runtime_config import ReadModelConfig, RuntimeConfig
 from agent_runtime.serde import to_jsonable
 from agent_runtime.snapshot import build_snapshot
-from agent_runtime.events import EventLog
 
 SLO_FULL_BUILD_MS = 2000
-SLO_INCREMENTAL_APPLY_MS = 150
+# S46: ``SLO_INCREMENTAL_APPLY_MS = 150`` stood here. Its only two assertions
+# were in ``test_synthetic_incremental_apply_within_rd3_slo`` (below) and
+# ``test_apply_pending_is_o_delta_on_rd0_fixture`` — both timing
+# ``Projector.apply_pending``, a lane with no production caller. The lane was
+# ruled RETIRE (ledger item 9), so the budget went with the thing it budgeted.
 SLO_CONSUMER_VISIBLE_LAG_MS = 1500
 
 SYNTHETIC_EVENT_COUNT = 10_000
@@ -34,23 +34,10 @@ def test_synthetic_snapshot_full_build_within_rd0_slo(isolate_agent_runtime_root
     assert build_ms <= SLO_FULL_BUILD_MS
 
 
-def test_synthetic_incremental_apply_within_rd3_slo(isolate_agent_runtime_root):
-    _seed_synthetic_runtime(isolate_agent_runtime_root)
-    snapshot = build_snapshot()
-    read_model = ReadModel(isolate_agent_runtime_root / "read_model.db")
-    read_model.apply_full_rebuild(snapshot, watermark=snapshot["parity"]["watermark"])
-    EventLog().append(
-        Event(now(), "persona.updated", None, None, "profile:alice", {"source": "rd3_slo"})
-    )
-
-    result = Projector(
-        read_model,
-        config=RuntimeConfig(read_model=ReadModelConfig(enabled=True)),
-    ).apply_pending()
-
-    assert result.applied_events == 1
-    assert result.to_offset > result.from_offset
-    assert result.incremental_apply_ms <= SLO_INCREMENTAL_APPLY_MS
+# S46: ``test_synthetic_incremental_apply_within_rd3_slo`` stood here, timing
+# ``Projector.apply_pending`` against the retired incremental lane. Absence is
+# asserted by ``test_s46_incremental_projection_lane_removal.py`` rather than
+# left to a reader noticing the gap.
 
 
 def _seed_synthetic_runtime(root) -> None:

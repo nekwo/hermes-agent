@@ -274,11 +274,13 @@ class ReadModel:
     def _reset_for_schema_change(self, conn: sqlite3.Connection, stored_version: int) -> None:
         """Clear a database written by an older projection layout.
 
-        Dropping the watermark is what makes the next ``Projector.apply_pending``
-        take the full-rebuild branch and the next ``render_snapshot`` report a
-        miss, so the rebuild happens by the normal path rather than by leaving
-        stale rows readable. ``VACUUM`` returns the freed pages to the
-        filesystem — without it a deleted duplicate keeps costing disk.
+        Dropping the watermark is what makes the next ``render_snapshot`` report
+        a miss, so the frame gets rebuilt by the normal path rather than left as
+        stale rows that still read. (Until S46 this also named
+        ``Projector.apply_pending``, whose no-watermark branch fell through to a
+        full rebuild; that lane is retired, so the reported miss is now the
+        whole mechanism.) ``VACUUM`` returns the freed pages to the filesystem —
+        without it a deleted duplicate keeps costing disk.
         """
 
         for table in ROW_TABLES:
