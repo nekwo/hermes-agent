@@ -82,11 +82,22 @@ def profile_readiness_for_persona(
                 # nobody can trust, and it fails here loudly rather than at tool
                 # time. Report-only — readiness never rewrites a config; the
                 # issue's fix_hint carries the pasteable canonical block.
+                #
+                # SCOPE (widened 2026-08-01, ledger item 10). ``required`` is
+                # passed as a scope, not a filter: the lane validates the
+                # required names AND every configured block that has a canonical
+                # template. The two classes answer different questions —
+                # "this DECLARATION is wrong" is a defect whoever requires it,
+                # while "this server is MISSING" (``missing_mcp`` above) only
+                # means anything against a requirement and stays required-scoped.
+                # Scoping both to ``required`` is what made the blocking drift
+                # check evaluate nothing on the live snapshot lane, where every
+                # persona's required list is empty.
                 machine_root_issues.extend(
                     issue.row()
                     for issue in mcp_server_issues(
                         _configured_mcp_servers(raw or {}),
-                        only=effective_required_mcp,
+                        required=effective_required_mcp,
                     )
                 )
                 runtime_issue = _runtime_dependency_issue(persona)

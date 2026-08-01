@@ -875,14 +875,61 @@ def mcp_server_template_issues(
     return issues
 
 
+# ── Readiness scoping: which configured blocks get validated ────────────────
+#
+# TWO scopes, ONE lane. The split is about what a finding MEANS:
+#
+# * CONFIGURED scope — a block that IS declared here and is wrong (drifted from
+#   its canonical template, or carrying a path token that cannot bind on this
+#   machine) is a defect no matter who requires it. The profile made the
+#   declaration; readiness holds it to it.
+# * REQUIRED scope — "this server is MISSING" is only meaningful against a
+#   requirement. That class is not computed here at all: ``profile_readiness``
+#   derives it from the required list, and it stays required-scoped. A profile
+#   that simply does not declare an un-required server is not broken.
+#
+# Before 2026-08-01 BOTH classes were scoped to ``required``, which made the
+# blocking drift check a runtime no-op on the live tree: every snapshot
+# persona's required list is empty, so nothing was ever compared and the line
+# was held only by the CI data test (ledger item 10, RULED: execute the
+# widening).
+#
+# The configured scope is deliberately gated on "has a canonical template":
+# those are the names this module can state a correct shape for. Widening the
+# binding checks to EVERY configured block of every profile would turn an
+# operator's unrelated experimental server into a readiness failure for a
+# persona that never asked for it — a different ruling, not taken here.
+
+
+def mcp_servers_in_issue_scope(
+    servers: Mapping[str, Any],
+    *,
+    required: Iterable[str] | None = None,
+) -> dict[str, Any]:
+    """The configured blocks readiness validates, over the two scopes above.
+
+    ``required=None`` means "no requirement context" — every configured block is
+    in scope, which is what a caller handing over a specific map already means.
+    """
+
+    if required is None:
+        return {str(name): cfg for name, cfg in servers.items()}
+    wanted = {str(item) for item in required}
+    return {
+        str(name): cfg
+        for name, cfg in servers.items()
+        if str(name) in wanted or canonical_mcp_server_template(str(name)) is not None
+    }
+
+
 def mcp_server_issues(
     servers: Mapping[str, Any],
     *,
-    only: Iterable[str] | None = None,
+    required: Iterable[str] | None = None,
     roots: MachineRoots | None = None,
     check_target_exists: bool = True,
 ) -> list[PathTokenIssue]:
-    """Typed reasons the named MCP servers are not correctly declared here.
+    """Typed reasons the configured MCP servers in scope are not usable here.
 
     Two kinds, one lane, one meaning: the block cannot BIND on this machine
     (unbound root, missing target, wrong platform), or it does not match its
@@ -890,19 +937,19 @@ def mcp_server_issues(
     opt-in extra because live configs still carried it; the five divergent
     profiles were canonicalized on 2026-08-01 and the opt-in was retired with
     them, so every caller now sees drift by default.
+
+    ``required`` is a SCOPE, not a filter — it replaced the old ``only=``, which
+    filtered honestly and, at the one readiness call site, filtered everything
+    away. The required names are validated, and so is every configured block
+    that has a canonical template — see :func:`mcp_servers_in_issue_scope`.
     """
 
-    wanted = {str(item) for item in only} if only is not None else None
     collected: list[PathTokenIssue] = []
 
     def _collect(_name: str, issue: PathTokenIssue) -> None:
         collected.append(issue)
 
-    subset = {
-        name: cfg
-        for name, cfg in servers.items()
-        if wanted is None or str(name) in wanted
-    }
+    subset = mcp_servers_in_issue_scope(servers, required=required)
     resolve_mcp_servers(
         subset,
         roots=roots,

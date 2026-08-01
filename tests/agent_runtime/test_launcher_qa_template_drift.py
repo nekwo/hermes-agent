@@ -272,21 +272,19 @@ def test_drift_rides_the_binding_lane_by_default():
         mcp_server_issues(servers, include_template_drift=True)  # type: ignore[call-arg]
 
 
-def test_readiness_fails_loudly_on_drift_and_names_the_field(
-    tmp_path, monkeypatch
-):
+def _readiness_for_config(tmp_path, monkeypatch, config_yaml: str, *, required: list[str]):
+    """Readiness for a persona bound to a throwaway profile carrying ``config_yaml``."""
+
     from agent_runtime import profile_context
     from agent_runtime.models import AgentPersona
 
     profile_home = tmp_path / "profiles" / "qa"
     profile_home.mkdir(parents=True)
-    (profile_home / "config.yaml").write_text(
-        "mcp_servers:\n  launcher_qa:\n    command: launcher-qa\n", encoding="utf-8"
-    )
+    (profile_home / "config.yaml").write_text(config_yaml, encoding="utf-8")
     monkeypatch.setattr(profile_context, "profile_exists", lambda name: name == "qa")
     monkeypatch.setattr(profile_context, "get_profile_dir", lambda name: profile_home)
 
-    readiness = profile_readiness_for_persona(
+    return profile_readiness_for_persona(
         AgentPersona(
             id="qa",
             display_name="QA",
@@ -298,8 +296,19 @@ def test_readiness_fails_loudly_on_drift_and_names_the_field(
             system_prompt_path="personas/qa/system.md",
             hermes_profile="qa",
             skills=[],
-            required_mcp_servers=[SERVER],
+            required_mcp_servers=list(required),
         )
+    )
+
+
+def test_readiness_fails_loudly_on_drift_and_names_the_field(
+    tmp_path, monkeypatch
+):
+    readiness = _readiness_for_config(
+        tmp_path,
+        monkeypatch,
+        "mcp_servers:\n  launcher_qa:\n    command: launcher-qa\n",
+        required=[SERVER],
     )
 
     # Drift rides the one issue list...
@@ -312,3 +321,63 @@ def test_readiness_fails_loudly_on_drift_and_names_the_field(
     assert "STAGEC_LAUNCH_HELPER" in readiness["summary"]
     # ...and the retired advisory channel is not quietly still there.
     assert "mcp_template_drift" not in readiness
+
+
+def test_a_configured_but_unrequired_drifted_block_degrades_readiness(
+    tmp_path, monkeypatch
+):
+    """The ledger item 10 widening, pinned — the case that was a runtime no-op.
+
+    ARRANGE — the live snapshot lane's exact shape: the persona requires
+    NOTHING (every snapshot agent's ``required_mcp_servers`` is empty on the
+    live tree) while its profile DOES declare a drifted ``launcher_qa`` block.
+
+    BEFORE (until 2026-08-01): readiness called
+    ``mcp_server_issues(only=effective_required_mcp)``, and ``only`` was a
+    filter — with an empty required list the subset handed to the checker was
+    ``{}``, so the blocking drift check compared nothing, ``machine_root_issues``
+    came back empty, and the verdict was a clean ``ready`` that said nothing
+    about the configured block. The drift line was held solely by the CI data
+    test at the top of this file.
+
+    AFTER: ``required`` is a scope, not a filter — the configured block is
+    validated because it has a canonical template, whoever requires it.
+    """
+
+    readiness = _readiness_for_config(
+        tmp_path,
+        monkeypatch,
+        "mcp_servers:\n  launcher_qa:\n    command: launcher-qa\n",
+        required=[],
+    )
+
+    assert readiness["effective_required_mcp_servers"] == []
+    # Not a missing-server finding — that class is still required-scoped, and
+    # nothing is required here.
+    assert readiness["missing_mcp_servers"] == []
+    (row,) = readiness["machine_root_issues"]
+    assert row["code"] == ISSUE_MCP_TEMPLATE_DRIFT
+    assert row["field"] == f"mcp_servers.{SERVER}"
+    assert readiness["readiness"] == READINESS_MCP_ATTENTION
+    assert "STAGEC_LAUNCH_HELPER" in readiness["summary"]
+
+
+def test_an_unrequired_block_with_no_template_stays_out_of_scope(tmp_path, monkeypatch):
+    """The widening is gated on "has a canonical template", not on "configured".
+
+    An operator's own unrequired block — here one that cannot even bind, its
+    root being unbound in this sandbox — is NOT this lane's business: nothing
+    states a correct shape for it, and failing a persona that never asked for it
+    would be a different ruling than the one taken.
+    """
+
+    readiness = _readiness_for_config(
+        tmp_path,
+        monkeypatch,
+        "mcp_servers:\n  operator_probe:\n"
+        "    command: ${roots.definitely_unbound_root}/probe\n",
+        required=[],
+    )
+
+    assert readiness["machine_root_issues"] == []
+    assert readiness["readiness"] == "ready"

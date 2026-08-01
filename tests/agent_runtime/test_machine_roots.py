@@ -18,6 +18,7 @@ import pytest
 from agent_runtime import machine_roots
 from agent_runtime.machine_roots import (
     ISSUE_INVALID_ROOT_TOKEN,
+    ISSUE_MCP_TEMPLATE_DRIFT,
     ISSUE_PLATFORM_UNSUPPORTED,
     ISSUE_ROOT_TARGET_MISSING,
     ISSUE_UNBOUND_ROOT,
@@ -29,6 +30,7 @@ from agent_runtime.machine_roots import (
     load_machine_roots,
     machine_roots_cache_clear,
     mcp_server_issues,
+    mcp_servers_in_issue_scope,
     path_token_issues,
     platform_supported,
     resolve_mcp_servers,
@@ -271,17 +273,57 @@ def test_unresolvable_server_is_dropped_rather_than_handed_a_literal_token(tmp_p
     assert reported == [ISSUE_UNBOUND_ROOT]
 
 
-def test_mcp_server_issues_filters_to_the_requested_capability(tmp_path):
+def test_mcp_server_issues_scopes_to_the_required_capability(tmp_path):
     roots, _repo = _roots(tmp_path)
-    # Both names are template-free on purpose — the filter is what is under test,
-    # and a ``launcher_qa`` stub would now also report blocking template drift.
+    # Both names are template-free on purpose — the REQUIRED scope is what is
+    # under test here, and a ``launcher_qa`` stub would ride in on the CONFIGURED
+    # scope (and report blocking template drift), answering a different question.
     servers = {
         "stagec_probe": {"command": "${roots.eternia_launcher}/build/x"},
         "backend_mcp": {"command": "${roots.eternia_backend}/manage.py"},
     }
-    assert mcp_server_issues(servers, only=["stagec_probe"], roots=roots) == []
-    codes = [issue.code for issue in mcp_server_issues(servers, only=["backend_mcp"], roots=roots)]
+    assert mcp_server_issues(servers, required=["stagec_probe"], roots=roots) == []
+    codes = [issue.code for issue in mcp_server_issues(servers, required=["backend_mcp"], roots=roots)]
     assert codes == [ISSUE_UNBOUND_ROOT]
+
+
+def test_a_templated_block_is_validated_even_when_nothing_requires_it(tmp_path):
+    """The CONFIGURED scope: a canonical name is checked wherever it is declared.
+
+    Before 2026-08-01 ``required=`` was spelled ``only=`` and meant a filter, so
+    a declared-but-unrequired block was never looked at — the case that made the
+    blocking drift check a no-op on the live snapshot lane (ledger item 10).
+    """
+
+    roots, _repo = _roots(tmp_path)
+    servers = {
+        # Has a canonical template -> in scope regardless of ``required``. Its
+        # root is unbound here, so the binding class fires on it too.
+        "launcher_qa": {"command": "${roots.eternia_backend}/x"},
+        # No template and not required -> still out of scope.
+        "backend_mcp": {"command": "${roots.eternia_backend}/manage.py"},
+    }
+    codes = sorted(
+        issue.code for issue in mcp_server_issues(servers, required=[], roots=roots)
+    )
+    assert codes == [ISSUE_MCP_TEMPLATE_DRIFT, ISSUE_UNBOUND_ROOT]
+    fields = {issue.field for issue in mcp_server_issues(servers, required=[], roots=roots)}
+    assert fields == {"mcp_servers.launcher_qa", "mcp_servers.launcher_qa.command"}
+
+
+def test_the_retired_only_filter_fails_loudly_rather_than_silently_widening(tmp_path):
+    roots, _repo = _roots(tmp_path)
+    with pytest.raises(TypeError):
+        mcp_server_issues({}, only=["x"], roots=roots)  # type: ignore[call-arg]
+
+
+def test_no_requirement_context_means_every_configured_block_is_in_scope():
+    servers = {"a": {"command": "x"}, "b": {"command": "y"}}
+    assert set(mcp_servers_in_issue_scope(servers)) == {"a", "b"}
+    assert set(mcp_servers_in_issue_scope(servers, required=["a"])) == {"a"}
+    assert set(mcp_servers_in_issue_scope({**servers, "launcher_qa": {}}, required=[])) == {
+        "launcher_qa"
+    }
 
 
 # ── Registry ────────────────────────────────────────────────────────────────
