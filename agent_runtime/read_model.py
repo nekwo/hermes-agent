@@ -124,7 +124,7 @@ def _resolved(frame: dict, source: FrameSource) -> ResolvedFrame:
 
 class ReadModel:
     def __init__(self, db_path: Path | None = None):
-        self.db_path = Path(db_path) if db_path is not None else self._default_db_path()
+        self.db_path = Path(db_path) if db_path is not None else self._read_model_db_path()
 
     def connect(self) -> sqlite3.Connection:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -346,7 +346,16 @@ class ReadModel:
             )
 
     @staticmethod
-    def _default_db_path() -> Path:
+    def _read_model_db_path() -> Path:
+        """The read model's own database path.
+
+        Named for what it resolves rather than for being "the default": the
+        old ``_default_db_path`` collided by name with hermes_state's
+        unrelated ``_default_db_path`` / ``_resolve_default_db_path`` pair
+        (the *session* store's), so grepping either one landed on both and
+        every reader had to re-derive which store was meant.
+        """
+
         from .config import load_root_runtime_config
 
         cfg = load_root_runtime_config()

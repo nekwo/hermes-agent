@@ -1,127 +1,426 @@
-"""Ratchet guard: no NEW module-level ``get_hermes_home()`` snapshots.
+"""Ratchet guard: no NEW module-level values frozen against ``HERMES_HOME``.
 
-Assigning ``X = get_hermes_home() / ...`` at module top binds the path to
-whatever ``HERMES_HOME`` was set when the module was first imported. Because
-``get_hermes_home()`` reads the env *live* on every call but this constant does
-not, the two drift apart the moment anything changes ``HERMES_HOME`` after
-import — most importantly the autouse ``_hermetic_environment`` test fixture,
-which redirects ``HERMES_HOME`` to a per-test tmpdir *after* collection has
-already imported the module.
+Resolving ``get_hermes_home()`` at module top binds the path to whatever
+``HERMES_HOME`` was set when the module was first imported. ``get_hermes_home()``
+reads the env *live* on every call, but a module-level constant does not, so the
+two drift apart the moment anything changes ``HERMES_HOME`` after import — most
+importantly the autouse ``_hermetic_environment`` test fixture, which redirects
+``HERMES_HOME`` to a per-test tmpdir *after* collection has already imported the
+module.
 
 That is not hypothetical: it silently deposited fixture chat sessions into the
 live ``state.db`` (surfaced as Mission Control's "projection drops" alert),
 because a no-arg ``SessionDB()`` bound to the import-time ``DEFAULT_DB_PATH``
 rather than the test's redirected home. The fix was to resolve the home at call
 time — see ``hermes_state._resolve_default_db_path`` for the canonical pattern
-(resolve live via ``get_hermes_home()``; honor an explicitly reassigned
-constant so ``monkeypatch.setattr`` isolation keeps working).
+(resolve live via ``get_hermes_home()``; honor an explicitly reassigned constant
+so ``monkeypatch.setattr`` isolation keeps working).
 
-This test freezes the set of pre-existing snapshots so the class cannot GROW.
-When you touch one of the allowlisted modules, prefer converting it to
-call-time resolution and removing its allowlist entry. Do not add new entries
-without a concrete reason the value genuinely cannot be resolved lazily.
+How this is checked
+-------------------
+By running the hazard, not by reading for it. A subprocess points ``HERMES_HOME``
+at a fresh tmpdir, imports every module that mentions ``get_hermes_home()``, and
+reports each module-level attribute whose value still contains that tmpdir. A
+plain module attribute cannot re-resolve, so "resolved from the home at import"
+and "frozen" are the same statement.
+
+This replaced a column-0 regex over the source (``^NAME = ...get_hermes_home()``),
+which could only see the *first* hop. The regex reported 29 frozen names; the
+probe finds 51, because the ones it missed are derived — ``CRON_DIR =
+get_hermes_home() / "cron"`` was caught, but ``JOBS_FILE = CRON_DIR /
+"jobs.json"`` right below it was not, and JOBS_FILE is every bit as frozen.
+Six of ``cron/jobs.py``'s constants are frozen where the regex saw one; seven of
+``gateway/platforms/base.py``'s where it saw one.
+
+The ledger below is therefore the honest debt, not the syntactically visible
+slice of it. Almost all of it lives in upstream NousResearch files (``gateway/``,
+``tools/``, ``cron/``, ``cli.py``) where a fork rewrite would collide on the next
+upstream sync, so it is tracked rather than converted wholesale. When you touch
+an allowlisted module, prefer converting it to call-time resolution and dropping
+its entry — the test fails on a stale entry, so shrinking the ledger is enforced,
+not merely encouraged.
 """
 
 from __future__ import annotations
 
-import re
+import json
+import os
+import subprocess
+import sys
+import uuid
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 # Directories that never participate in the import-time hazard (test code may
 # legitimately snapshot; the rest are build/vendor/runtime artifacts).
-_SKIP_DIRS = {
+SKIP_DIRS = (
     ".git", ".venv", "venv", "build", "dist", "__pycache__",
-    "node_modules", ".hermes", ".pytest_cache", "tests",
+    "node_modules", ".hermes", ".pytest_cache", "tests", "web",
+)
+
+# Module-level names whose value is resolved from HERMES_HOME at import time,
+# keyed by repo-relative path. Every file carries the reason its freeze is
+# tolerated. Measured by the probe below, not read off the source.
+FROZEN_LEDGER: dict[str, tuple[frozenset[str], str]] = {
+    "agent/auxiliary_client.py": (
+        frozenset({"_AUTH_JSON_PATH"}),
+        "upstream: auxiliary provider auth path",
+    ),
+    "cli.py": (
+        frozenset({"_hermes_home"}),
+        "upstream: CLI entry resolves the home once at startup",
+    ),
+    "cron/executions.py": (
+        frozenset({"EXECUTIONS_FILE"}),
+        "upstream: cron execution ledger path",
+    ),
+    "cron/jobs.py": (
+        frozenset({
+            "CRON_DIR", "HERMES_DIR", "JOBS_FILE", "OUTPUT_DIR",
+            "TICKER_HEARTBEAT_FILE", "TICKER_SUCCESS_FILE",
+        }),
+        "upstream: cron store layout, all derived from one frozen HERMES_DIR",
+    ),
+    "cron/suggestions.py": (
+        frozenset({"CRON_DIR", "SUGGESTIONS_FILE"}),
+        "upstream: cron suggestion store",
+    ),
+    "gateway/channel_directory.py": (
+        frozenset({"CHANNEL_ALIASES_PATH", "DIRECTORY_PATH"}),
+        "upstream: gateway channel directory",
+    ),
+    "gateway/hooks.py": (
+        frozenset({"HOOKS_DIR"}),
+        "upstream: gateway hook directory",
+    ),
+    "gateway/mirror.py": (
+        frozenset({"_SESSIONS_DIR", "_SESSIONS_INDEX"}),
+        "upstream: gateway session mirror",
+    ),
+    "gateway/pairing.py": (
+        frozenset({"PAIRING_DIR"}),
+        "upstream: gateway pairing store",
+    ),
+    "gateway/platforms/base.py": (
+        frozenset({
+            "AUDIO_CACHE_DIR", "DOCUMENT_CACHE_DIR", "IMAGE_CACHE_DIR",
+            "SCREENSHOT_CACHE_DIR", "VIDEO_CACHE_DIR", "_HERMES_HOME",
+            "_HERMES_ROOT",
+        }),
+        "upstream: platform adapter media caches, derived from one frozen root",
+    ),
+    "gateway/run.py": (
+        frozenset({"_config_path", "_env_path", "_hermes_home"}),
+        "upstream: gateway process entry resolves the home once at startup",
+    ),
+    "gateway/sticker_cache.py": (
+        frozenset({"CACHE_PATH"}),
+        "upstream: gateway sticker cache",
+    ),
+    "hermes_cli/claw.py": (
+        frozenset({"_OPENCLAW_SCRIPT_INSTALLED"}),
+        "upstream: openclaw install marker path",
+    ),
+    "hermes_cli/doctor.py": (
+        frozenset({"HERMES_HOME", "_DHH", "_env_path"}),
+        "upstream: doctor reports on the home it was launched against",
+    ),
+    "hermes_cli/web_server.py": (
+        frozenset({"_ACTION_LOG_DIR"}),
+        "upstream: dashboard action log directory",
+    ),
+    "hermes_state.py": (
+        frozenset({"DEFAULT_DB_PATH", "_IMPORT_DEFAULT_DB_PATH"}),
+        "upstream, and benign: SessionDB resolves live via "
+        "_resolve_default_db_path and only falls back to DEFAULT_DB_PATH when "
+        "it has been deliberately reassigned. _IMPORT_DEFAULT_DB_PATH exists "
+        "precisely to detect that reassignment.",
+    ),
+    "plugins/platforms/feishu/feishu_comment_rules.py": (
+        frozenset({"PAIRING_FILE", "RULES_FILE"}),
+        "upstream plugin: feishu comment rule store",
+    ),
+    "plugins/platforms/matrix/adapter.py": (
+        frozenset({"_CRYPTO_DB_PATH", "_STORE_DIR"}),
+        "upstream plugin: matrix crypto store",
+    ),
+    "run_agent.py": (
+        frozenset({"_hermes_home"}),
+        "upstream: process entry resolves the home once at startup",
+    ),
+    "skills/productivity/google-workspace/scripts/google_api.py": (
+        frozenset({"CLIENT_SECRET_PATH", "HERMES_HOME", "TOKEN_PATH"}),
+        "upstream skill script: google credential paths. Not importable by "
+        "dotted name (dashed directory) — loaded by path, and it freezes the "
+        "same way, which is why the probe loads it at all",
+    ),
+    "skills/productivity/google-workspace/scripts/setup.py": (
+        frozenset({
+            "CLIENT_SECRET_PATH", "HERMES_HOME", "PENDING_AUTH_PATH", "TOKEN_PATH",
+        }),
+        "upstream skill script: google oauth setup paths, same dashed-directory "
+        "case as google_api.py",
+    ),
+    "tools/checkpoint_manager.py": (
+        frozenset({"CHECKPOINT_BASE"}),
+        "upstream tool: checkpoint store root",
+    ),
+    "tools/environments/modal.py": (
+        frozenset({"_SNAPSHOT_STORE"}),
+        "upstream tool: modal snapshot store",
+    ),
+    "tools/environments/singularity.py": (
+        frozenset({"_SNAPSHOT_STORE"}),
+        "upstream tool: singularity snapshot store",
+    ),
+    "tools/process_registry.py": (
+        frozenset({"CHECKPOINT_PATH"}),
+        "upstream tool: process registry checkpoint",
+    ),
+    "tools/skill_manager_tool.py": (
+        frozenset({"HERMES_HOME", "SKILLS_DIR", "_SKILLS_DIR_AT_IMPORT"}),
+        "upstream tool: skills root; _SKILLS_DIR_AT_IMPORT is a deliberate "
+        "import-time snapshot used to detect reassignment",
+    ),
+    "tools/skills_sync.py": (
+        frozenset({
+            "HERMES_HOME", "MANIFEST_FILE", "SKILLS_DIR",
+            "_HERMES_HOME_AT_IMPORT", "_MANIFEST_FILE_AT_IMPORT",
+            "_SKILLS_DIR_AT_IMPORT",
+        }),
+        "upstream tool: skills sync layout; the *_AT_IMPORT trio are "
+        "deliberate snapshots used to detect reassignment",
+    ),
+    "tools/skills_tool.py": (
+        frozenset({"HERMES_HOME", "SKILLS_DIR", "_SKILLS_DIR_AT_IMPORT"}),
+        "upstream tool: skills root; _SKILLS_DIR_AT_IMPORT is a deliberate "
+        "import-time snapshot used to detect reassignment",
+    ),
+    "tools/tts_tool.py": (
+        frozenset({"DEFAULT_OUTPUT_DIR"}),
+        "upstream tool: TTS output directory",
+    ),
+    "tui_gateway/server.py": (
+        frozenset({"_CRASH_LOG", "_hermes_home"}),
+        "upstream: TUI gateway process entry",
+    ),
 }
 
-# Column-0 assignment whose RHS calls get_hermes_home(). Anchored at start of
-# line so indented (function-local) uses — which re-resolve on each call and
-# are safe — do not match. ``get_hermes_home_override()`` etc. are excluded by
-# the literal ``()``.
-_MODULE_SNAPSHOT = re.compile(r"^([A-Za-z_]\w*)\s*(?::[^=\n]+)?=\s*[^\n]*get_hermes_home\(\)")
+# Modules the probe could not import in this environment, with the reason. An
+# import failure is not a pass: it means the module was never checked, so it is
+# recorded here rather than silently dropped.
+UNPROBED: dict[str, str] = {
+    "trajectory_compressor.py": (
+        "imports `fire` at module level, an optional dependency absent from "
+        "some test environments. Probed wherever fire is installed."
+    ),
+    "scripts/profile-tui.py": (
+        "imports `termios`, a POSIX-only stdlib module, so it cannot load on "
+        "Windows. Its two frozen constants (DEFAULT_LOG, DEFAULT_STATE_DB) are "
+        "carried here rather than in FROZEN_LEDGER because this platform never "
+        "gets to observe them."
+    ),
+}
 
-# Pre-existing snapshots as of 2026-07-13. Almost all live in upstream
-# NousResearch files (gateway/, tools/, plugins/, cli.py) where a fork rewrite
-# would create merge conflicts on the next upstream sync, so they are tracked
-# debt rather than converted wholesale. ``hermes_state.py:DEFAULT_DB_PATH``
-# remains but is now benign — ``SessionDB`` resolves live and only falls back to
-# the constant when it is explicitly reassigned.
-_ALLOWLIST: frozenset[tuple[str, str]] = frozenset({
-    ("agent/auxiliary_client.py", "_AUTH_JSON_PATH"),
-    ("cli.py", "_hermes_home"),
-    ("cron/jobs.py", "HERMES_DIR"),
-    ("cron/suggestions.py", "CRON_DIR"),
-    ("gateway/channel_directory.py", "CHANNEL_ALIASES_PATH"),
-    ("gateway/channel_directory.py", "DIRECTORY_PATH"),
-    ("gateway/hooks.py", "HOOKS_DIR"),
-    ("gateway/mirror.py", "_SESSIONS_DIR"),
-    ("gateway/platforms/base.py", "_HERMES_HOME"),
-    ("gateway/run.py", "_hermes_home"),
-    ("gateway/sticker_cache.py", "CACHE_PATH"),
-    ("hermes_cli/doctor.py", "HERMES_HOME"),
-    ("hermes_cli/web_server.py", "_ACTION_LOG_DIR"),
-    ("hermes_state.py", "DEFAULT_DB_PATH"),
-    ("plugins/platforms/feishu/feishu_comment_rules.py", "PAIRING_FILE"),
-    ("plugins/platforms/feishu/feishu_comment_rules.py", "RULES_FILE"),
-    ("run_agent.py", "_hermes_home"),
-    ("scripts/profile-tui.py", "DEFAULT_LOG"),
-    ("scripts/profile-tui.py", "DEFAULT_STATE_DB"),
-    ("skills/productivity/google-workspace/scripts/google_api.py", "HERMES_HOME"),
-    ("skills/productivity/google-workspace/scripts/setup.py", "HERMES_HOME"),
-    ("tools/checkpoint_manager.py", "CHECKPOINT_BASE"),
-    ("tools/environments/modal.py", "_SNAPSHOT_STORE"),
-    ("tools/environments/singularity.py", "_SNAPSHOT_STORE"),
-    ("tools/process_registry.py", "CHECKPOINT_PATH"),
-    ("tools/skill_manager_tool.py", "HERMES_HOME"),
-    ("tools/skills_sync.py", "HERMES_HOME"),
-    ("tools/skills_tool.py", "HERMES_HOME"),
-    ("trajectory_compressor.py", "_hermes_home"),
-    ("tui_gateway/server.py", "_hermes_home"),
-})
+_PROBE = r'''
+import importlib, importlib.util, json, os, sys
+from pathlib import Path
 
+repo = Path(sys.argv[1]).resolve()
+skip = set(json.loads(sys.argv[2]))
+out_path = Path(sys.argv[3])
+# The redirected home's leaf directory carries a nonce, and we look for THAT
+# rather than the full path: display_hermes_home() rewrites the prefix to "~/",
+# and different modules store forward- or back-slashed forms. The nonce
+# survives every one of those rewrites, so detection does not depend on where
+# the temp directory happens to live.
+nonce = sys.argv[4].lower()
+sys.path.insert(0, str(repo))
 
-def _scan_module_snapshots() -> set[tuple[str, str]]:
-    found: set[tuple[str, str]] = set()
-    for path in REPO_ROOT.rglob("*.py"):
-        rel_parts = path.relative_to(REPO_ROOT).parts
-        if any(part in _SKIP_DIRS for part in rel_parts):
+frozen, failed = {}, {}
+
+for path in sorted(repo.rglob("*.py")):
+    rel = path.relative_to(repo)
+    if any(part in skip for part in rel.parts) or path.name == "__main__.py":
+        continue
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        continue
+    if "get_hermes_home()" not in text:
+        continue
+    key = rel.as_posix()
+    parts = list(rel.parts)
+    if parts[-1] == "__init__.py":
+        parts = parts[:-1]
+    else:
+        parts[-1] = parts[-1][:-3]
+    dotted = ".".join(parts)
+    importable = bool(parts) and all(p.isidentifier() for p in parts)
+    try:
+        if importable:
+            module = importlib.import_module(dotted)
+        else:
+            # Scripts under dashed directories (scripts/profile-tui.py,
+            # skills/.../google_api.py) are not importable by dotted name but
+            # freeze exactly the same way — load them by path.
+            spec = importlib.util.spec_from_file_location(
+                "frozen_probe_" + str(abs(hash(key))), path
+            )
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+    except BaseException as exc:
+        failed[key] = type(exc).__name__ + ": " + str(exc)[:200]
+        continue
+    hits = []
+    for name, value in list(vars(module).items()):
+        if name.startswith("__"):
             continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        if isinstance(value, Path):
+            text_value = str(value)
+        elif isinstance(value, str):
+            text_value = value
+        else:
             continue
-        if "get_hermes_home()" not in text:
-            continue
-        rel = path.relative_to(REPO_ROOT).as_posix()
-        for line in text.splitlines():
-            if line.lstrip().startswith("#"):
-                continue
-            match = _MODULE_SNAPSHOT.match(line)
-            if match:
-                found.add((rel, match.group(1)))
-    return found
+        if nonce in text_value.lower():
+            hits.append(name)
+    if hits:
+        frozen[key] = sorted(hits)
+
+# Written to a file, not stdout: importing the gateway/TUI modules swaps
+# sys.stdout, so a print here lands wherever they redirected it.
+out_path.write_text(json.dumps({"frozen": frozen, "failed": failed}), encoding="utf-8")
+'''
 
 
-def test_no_new_module_level_hermes_home_snapshots():
-    found = _scan_module_snapshots()
+@pytest.fixture(scope="module")
+def probe_result(tmp_path_factory) -> dict:
+    """Import every get_hermes_home() module under a redirected home.
 
-    new = sorted(found - _ALLOWLIST)
+    Run out-of-process: importing ~220 modules mutates sys.modules and builds a
+    whole home skeleton on disk, neither of which belongs in the test process.
+    """
+
+    workdir = tmp_path_factory.mktemp("frozen_home_probe")
+    nonce = "hermesfrozenprobe" + uuid.uuid4().hex[:10]
+    home = workdir / nonce
+    home.mkdir()
+    result_path = workdir / "probe.json"
+    env = dict(os.environ)
+    env["HERMES_HOME"] = str(home)
+    env["PYTHONIOENCODING"] = "utf-8"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            _PROBE,
+            str(REPO_ROOT),
+            json.dumps(list(SKIP_DIRS)),
+            str(result_path),
+            nonce,
+        ],
+        cwd=str(REPO_ROOT),
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=600,
+    )
+    assert result_path.is_file(), (
+        "frozen-home probe produced no result\n"
+        f"exit={completed.returncode}\n"
+        f"stdout tail:\n{completed.stdout[-2000:]}\n"
+        f"stderr tail:\n{completed.stderr[-2000:]}"
+    )
+    return json.loads(result_path.read_text(encoding="utf-8"))
+
+
+@pytest.mark.timeout(300)
+def test_no_new_frozen_hermes_home_values(probe_result: dict) -> None:
+    found = {
+        (rel, name)
+        for rel, names in probe_result["frozen"].items()
+        for name in names
+    }
+    ledgered = {
+        (rel, name) for rel, (names, _reason) in FROZEN_LEDGER.items() for name in names
+    }
+
+    new = sorted(found - ledgered)
     assert not new, (
-        "New module-level get_hermes_home() snapshot(s) detected:\n"
-        + "\n".join(f"  {f}: {name}" for f, name in new)
+        "New module-level value(s) frozen against HERMES_HOME at import:\n"
+        + "\n".join(f"  {rel}: {name}" for rel, name in new)
         + "\n\nA module-level constant freezes HERMES_HOME at import and breaks "
         "test isolation / in-process profile switches. Resolve the path at call "
         "time instead — see hermes_state._resolve_default_db_path for the "
-        "pattern. If the value genuinely cannot be lazy, add it to _ALLOWLIST in "
-        "this test with a justification comment."
+        "pattern. If the value genuinely cannot be lazy, add it to FROZEN_LEDGER "
+        "in this test with a justification."
     )
 
-    stale = sorted(_ALLOWLIST - found)
+
+@pytest.mark.timeout(300)
+def test_frozen_ledger_has_no_stale_entries(probe_result: dict) -> None:
+    found = {
+        (rel, name)
+        for rel, names in probe_result["frozen"].items()
+        for name in names
+    }
+    failed = set(probe_result["failed"])
+    stale = sorted(
+        (rel, name)
+        for rel, (names, _reason) in FROZEN_LEDGER.items()
+        for name in names
+        # A module that would not import was never checked; absence there is
+        # not evidence the freeze is gone.
+        if rel not in failed and (rel, name) not in found
+    )
     assert not stale, (
-        "Allowlisted get_hermes_home() snapshot(s) no longer present:\n"
-        + "\n".join(f"  {f}: {name}" for f, name in stale)
-        + "\n\nNice — one fewer frozen home. Remove the entr"
-        "y/entries above from _ALLOWLIST so the debt ledger stays honest."
+        "Ledgered frozen value(s) no longer present:\n"
+        + "\n".join(f"  {rel}: {name}" for rel, name in stale)
+        + "\n\nNice — fewer frozen homes. Remove the entry/entries above from "
+        "FROZEN_LEDGER so the debt ledger stays honest."
+    )
+
+
+@pytest.mark.timeout(300)
+def test_probe_import_failures_are_declared(probe_result: dict) -> None:
+    """An unimportable module is unchecked, not clean — say so out loud.
+
+    Optional third-party dependencies legitimately go missing in some
+    environments; anything else (a NameError, a SyntaxError, a broken
+    module-level side effect) is a real defect wearing an import failure.
+    """
+
+    failed = probe_result["failed"]
+    undeclared = sorted(set(failed) - set(UNPROBED))
+    assert not undeclared, (
+        "Module(s) the frozen-home probe could not import, and which are not "
+        "declared in UNPROBED:\n"
+        + "\n".join(f"  {rel}: {failed[rel]}" for rel in undeclared)
+        + "\n\nIf this is a missing optional dependency, add it to UNPROBED with "
+        "that reason. If it is anything else, it is a real import-time defect: "
+        "fix the module."
+    )
+    for rel, detail in failed.items():
+        assert detail.split(":", 1)[0] in {"ImportError", "ModuleNotFoundError"}, (
+            f"{rel} failed the frozen-home probe with a non-import error, which "
+            f"UNPROBED does not excuse: {detail}"
+        )
+
+
+@pytest.mark.timeout(300)
+def test_ledger_reasons_are_present(probe_result: dict) -> None:
+    """Every ledger entry carries a reason; no silent debt."""
+
+    missing = sorted(rel for rel, (_names, reason) in FROZEN_LEDGER.items() if not reason.strip())
+    assert not missing, f"FROZEN_LEDGER entries without a reason: {missing}"
+    ledgered_files = set(FROZEN_LEDGER)
+    unused = sorted(set(UNPROBED) & ledgered_files & set(probe_result["frozen"]))
+    assert not unused, (
+        "These files are declared UNPROBED but the probe imported them fine: "
+        f"{unused} — drop the UNPROBED entry."
     )

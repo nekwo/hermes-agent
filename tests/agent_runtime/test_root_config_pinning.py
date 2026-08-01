@@ -148,7 +148,7 @@ def test_read_model_db_filename_reads_root_not_profile(tmp_path, monkeypatch):
             db_filename: profile_rm.db
         """,
     )
-    assert ReadModel._default_db_path().name == "root_rm.db"
+    assert ReadModel._read_model_db_path().name == "root_rm.db"
 
 
 def test_neko_extension_cap_resolves_from_root(tmp_path, monkeypatch):
