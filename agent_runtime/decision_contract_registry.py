@@ -980,12 +980,15 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     # NOT the same thing: agent_runtime/parity.py is the read-model
     # ProjectionAccountant and never emitted this (or any) event type.
     "run.closed": EventContract("run.closed", "Run closed", ("state", "decision_type"), ("total_tokens",)),
-    "role_envelope.opened": EventContract("role_envelope.opened", "Role envelope opened", ("envelope_id", "role_id"), ("mission_stage_id", "checklist_id")),
-    "role_envelope.continued": EventContract("role_envelope.continued", "Role envelope continued", ("envelope_id", "status"), ("decision_type", "proof_count", "no_progress_count")),
-    "role_envelope.paused": EventContract("role_envelope.paused", "Role envelope paused", ("envelope_id", "status"), ("decision_type", "proof_count", "no_progress_count")),
-    "role_envelope.closed": EventContract("role_envelope.closed", "Role envelope closed", ("envelope_id", "close_reason"), ("role_id", "mission_stage_id")),
-    "role_checklist.created": EventContract("role_checklist.created", "Role checklist created", ("checklist_id", "role_id"), ("mission_stage_id",)),
-    "role_checklist.item_updated": EventContract("role_checklist.item_updated", "Role checklist item updated", ("checklist_id", "revision"), ("item_ids", "role_id")),
+    # S44 de-registered the six role_envelope.* / role_checklist.* contracts that
+    # sat on this line. Their ONLY emitters were RoleEnvelopeStore.save and
+    # RoleChecklistStore.save, both deleted with the store family; the two runtime
+    # directories had already been archived aside as writer-less on 2026-07-30.
+    # Same rule as S25/S36/S37: a contract with no writer is a shape
+    # EventLog.append accepts and no reader will ever see. Historical rows are
+    # unaffected (append type-checks on WRITE only), and none of the six was in
+    # events.OPERATOR_SUMMARY_EVENT_TYPES, so no summary arm went with them. See
+    # tests/agent_runtime/test_s44_role_envelope_family_removal.py.
     "persona_instance.created": EventContract("persona_instance.created", "Persona instance created", ("persona_instance_id",), ("persona_id",)),
     "persona_instance.attributed": EventContract("persona_instance.attributed", "Persona instance attributed to a goal", ("persona_instance_id", "goal_id"), ("persona_id", "spawned_by")),
     "persona_instance.steered": EventContract("persona_instance.steered", "Persona instance steering edge changed", ("persona_instance_id", "goal_id"), ("persona_id", "spawned_by", "steered_by", "added", "removed", "detached")),

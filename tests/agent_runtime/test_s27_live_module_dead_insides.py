@@ -16,17 +16,27 @@ scope_control         ``validate_discovery_payload``, ``validate_triage_payload`
                       ``find_discovery_task`` were listed here too and are gone
                       -- see the note on EXTERNAL_SURFACE below.
 role_checklists       ``validate_checklist_payload_structure``
-                      (decision_contract_registry), ``RoleChecklistStore``,
-                      ``checklist_summary``, ``normalize_role_id``
-                      (role_envelopes)
+                      (decision_contract_registry). RETARGETED 2026-07-31
+                      (S44): ``RoleChecklistStore``, ``checklist_summary`` and
+                      ``normalize_role_id`` were listed here as surface too,
+                      held up SOLELY by the ``role_envelopes`` importer -- see
+                      the correction below.
 ===================== =========================================================
 
 Two symbols were mislabelled in the plan for this wave; both corrections are
 pinned below so the record is not lost:
 
-* ``role_checklists.checklist_for_task_stage`` was listed for removal. It is
-  **LIVE** — ``RoleChecklistStore.open_or_create`` calls it and
-  ``role_envelopes.py:91`` calls that. Skipped.
+* ``role_checklists.checklist_for_task_stage`` was listed for removal. It was
+  **LIVE** at S27 — ``RoleChecklistStore.open_or_create`` called it and
+  ``role_envelopes.py:91`` called that. Skipped then.
+  **TRANSITIVELY FALSIFIED at S44 (2026-07-31).** The whole justification was
+  the ``role_envelopes`` import; that module was production-caller-free and was
+  deleted whole, so the chain is dead from its root and
+  ``checklist_for_task_stage`` went with it, along with the store, the
+  templates, ``checklist_summary``, ``item_summary`` and ``normalize_role_id``.
+  This is the reason a "live" ruling is only ever as good as its named caller:
+  the ruling was correct and still expired. See
+  ``tests/agent_runtime/test_s44_role_envelope_family_removal.py``.
 * ``role_checklists.stage_checklist_hud`` was listed as KEEP. It is **DEAD** —
   its last caller left in ``8fa9ee283`` (the S19 context_builder HUD cluster
   cut), and no test referenced it. Removed.
@@ -108,6 +118,16 @@ REMOVED = {
         "validate_decision_checklist_payload",
         "sanitize_decision_checklist_payload",
         "apply_decision_checklist_updates",
+        # S44 additions: the store half, whose only importer was the deleted
+        # ``role_envelopes``. Recorded here rather than only in the S44 file so
+        # this module's removal history stays in one place.
+        "RoleChecklistStore",
+        "RoleChecklist",
+        "RoleChecklistItem",
+        "checklist_for_task_stage",
+        "checklist_summary",
+        "item_summary",
+        "normalize_role_id",
     ),
 }
 
@@ -128,10 +148,12 @@ EXTERNAL_SURFACE = {
         "validate_triage_payload",
     },
     "role_checklists": {
+        # S44 (2026-07-31): the other three roots here — `RoleChecklistStore`,
+        # `checklist_summary`, `normalize_role_id` — were reached only from
+        # `role_envelopes`, which was itself production-caller-free. Deleting
+        # that module left them unreachable, so they went and this set is now
+        # exactly the one verified production caller.
         "validate_checklist_payload_structure",
-        "RoleChecklistStore",
-        "checklist_summary",
-        "normalize_role_id",
     },
 }
 
@@ -188,17 +210,23 @@ def test_nothing_is_left_unreachable_from_the_external_surface():
     assert {name: found for name, found in leftovers.items() if found} == {}
 
 
-def test_checklist_for_task_stage_is_live_and_stays():
-    """CORRECTION: listed for removal, but ``RoleChecklistStore.open_or_create``
-    calls it and ``role_envelopes`` calls that."""
+def test_the_checklist_for_task_stage_ruling_was_transitively_falsified():
+    """RETARGETED at S44. This test used to prove the S27 correction: that
+    ``checklist_for_task_stage`` was LIVE because
+    ``RoleChecklistStore.open_or_create`` called it and ``role_envelopes``
+    called that.
 
-    assert callable(role_checklists.checklist_for_task_stage)
-    assert "checklist_for_task_stage(" in inspect.getsource(
-        role_checklists.RoleChecklistStore.open_or_create
-    )
-    from agent_runtime import role_envelopes
+    Every link in that chain is now gone, and the ORDER is the finding worth
+    keeping: nothing about ``checklist_for_task_stage`` changed. Its justifying
+    caller was removed one level up, and a two-hop liveness argument evaporates
+    the moment its root does. That is why S44 re-derived every name in this
+    family from current callers instead of trusting the wave-3 ruling."""
 
-    assert "open_or_create(" in inspect.getsource(role_envelopes)
+    from importlib.util import find_spec
+
+    assert find_spec("agent_runtime.role_envelopes") is None
+    assert not hasattr(role_checklists, "checklist_for_task_stage")
+    assert not hasattr(role_checklists, "RoleChecklistStore")
 
 
 def test_the_live_external_surface_of_each_module_still_works():
@@ -211,7 +239,10 @@ def test_the_live_external_surface_of_each_module_still_works():
     # surviving surface, so the negative gate exercises THAT instead of dropping
     # the module from this check.
     assert scope_control.validate_discovery_payload({"title": "t", "summary": "s"}) is None
-    assert role_checklists.normalize_role_id("launcher_dev") == "dev"
+    # S44 retarget: this line used to exercise `normalize_role_id`, which went
+    # with the store family. `validate_checklist_payload_structure` is
+    # role_checklists' only remaining surface, so the negative gate exercises
+    # THAT — the module stays in this check rather than being dropped from it.
     # Structure validation still rejects a malformed checklist payload.
     from agent_runtime.decision_schema import DecisionPayloadInvalid
     import pytest

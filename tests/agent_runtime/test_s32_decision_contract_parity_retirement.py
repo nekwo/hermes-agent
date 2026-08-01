@@ -109,16 +109,27 @@ def test_the_recorder_and_its_projection_half_stay_gone():
 
 def test_the_decision_lane_is_not_collateral():
     """``parity`` was the only decision-flavoured contract without a writer; the
-    live decision/run types around it stay registered and emittable."""
+    live decision/run types around it stay registered and emittable.
+
+    S44 retarget: the four ``role_envelope.*`` types were pinned here as live
+    collateral to protect. That was true at S32 — ``RoleEnvelopeStore.save`` was
+    still their emitter. S44 deleted that store under the operator's ruling, so
+    they moved to the retired side and are asserted below as gone. The run types
+    they sat beside are untouched, which is exactly what this test exists to
+    prove."""
 
     live = {
         "run.progress",
         "run.closed",
         "run.tool.started",
         "run.tool.finished",
+    }
+    assert live <= ALLOWED_EVENT_TYPES
+
+    retired_at_s44 = {
         "role_envelope.opened",
         "role_envelope.continued",
         "role_envelope.paused",
         "role_envelope.closed",
     }
-    assert live <= ALLOWED_EVENT_TYPES
+    assert retired_at_s44 & ALLOWED_EVENT_TYPES == set()

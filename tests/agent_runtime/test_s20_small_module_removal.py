@@ -86,19 +86,30 @@ def test_scope_control_survives_on_its_payload_validation_callers():
     assert not hasattr(scope_control, "untriaged_issue_discoveries")
 
 
-def test_role_checklists_survives_on_its_role_envelope_callers():
-    """Role envelopes own a checklist store.
+def test_role_checklists_no_longer_survives_on_role_envelope_callers():
+    """RETARGETED at S44 — this witness recorded the exact edge that later died.
 
-    S27 note: the snapshot no longer summarizes checklists -- that reader was in
-    the ``_role_streams`` island -- so ``role_envelopes`` is the whole live
-    surface, alongside ``decision_contract_registry``'s payload-structure check.
+    It used to assert three re-export identities proving ``role_envelopes`` was
+    ``role_checklists``' live surface (``RoleChecklistStore``,
+    ``normalize_role_id``, ``checklist_summary``). S27 had already narrowed that
+    surface to the single importer once the snapshot's ``_role_streams`` island
+    went. S44 deleted ``role_envelopes`` whole, so all three re-exports are gone
+    and the module now survives on ONE caller that never went through the store:
+    ``decision_contract_registry``'s payload-structure check.
+
+    Kept as an absence assertion rather than deleted — this file is the record of
+    which small modules survived a removal wave and why, so a reversal has to be
+    visible here or the reasoning silently rots.
     """
 
-    from agent_runtime import role_checklists, role_envelopes
+    from importlib.util import find_spec
 
-    assert role_envelopes.RoleChecklistStore is role_checklists.RoleChecklistStore
-    assert role_envelopes.normalize_role_id is role_checklists.normalize_role_id
-    assert role_envelopes.checklist_summary is role_checklists.checklist_summary
+    from agent_runtime import role_checklists
+
+    assert find_spec("agent_runtime.role_envelopes") is None
+    for name in ("RoleChecklistStore", "normalize_role_id", "checklist_summary"):
+        assert not hasattr(role_checklists, name), name
+    assert callable(role_checklists.validate_checklist_payload_structure)
 
 
 def test_repo_context_keeps_the_worktree_inventory_half():

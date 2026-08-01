@@ -16,7 +16,12 @@ from agent_runtime.persona_assignments import PersonaAssignmentSpec, PersonaAssi
 from agent_runtime.projector import Projector
 from agent_runtime.read_model import ReadModel
 from agent_runtime.repo_bundles import RepoBundleStore
-from agent_runtime.role_envelopes import RoleEnvelopeStore
+
+# S44: `from agent_runtime.role_envelopes import RoleEnvelopeStore` stood here
+# and was never used by a single test in this file — it was the ONLY importer of
+# that module anywhere, production or test. An unused import is what a
+# module-level reachability gate counts as a caller, which is how the store
+# family survived three earlier removal waves.
 from agent_runtime.runtime_config import RuntimeConfig, ReadModelConfig
 from agent_runtime.runtime_instances import GoalRuntimeInstanceStore
 from agent_runtime.snapshot import build_snapshot

@@ -85,9 +85,21 @@ def test_checkpoint_keeps_every_class_that_still_has_a_writer():
         "flow_graphs",
         "boards",
         "repo_bundles",
-        "role_envelopes",
-        "role_checklists",
+        # S44 (2026-07-31) removed `role_envelopes` and `role_checklists` from
+        # this list — they were pinned here as "still has a writer", and that
+        # stopped being true when the two stores were deleted. Their absence is
+        # asserted below rather than merely dropped, so the reversal of an
+        # explicit keep-side claim stays visible in the file that made it.
         "self_tests",
         "packet_artifacts",
     ):
         assert name in checkpoint.ENTITY_CLASS_NAMES
+
+
+def test_checkpoint_dropped_the_two_role_classes_when_their_stores_went():
+    """S44 retarget of this file's keep-side claim (see the note above)."""
+
+    assert "role_envelopes" not in checkpoint.ENTITY_CLASS_NAMES
+    assert "role_checklists" not in checkpoint.ENTITY_CLASS_NAMES
+    for name in ("role_envelopes_dir", "role_checklists_dir", "role_checklist_path"):
+        assert not hasattr(paths, name), name

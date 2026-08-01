@@ -304,36 +304,11 @@ def self_test_record_path(task_id: str, evidence_id: str) -> Path:
 
 
 
-def role_envelopes_dir() -> Path:
-    return store_root() / "role_envelopes"
-
-
-def role_envelopes_task_dir(task_id: str) -> Path:
-    return role_envelopes_dir() / _safe_path_token(task_id)
-
-
-def role_envelope_path(task_id: str, envelope_id: str) -> Path:
-    return role_envelopes_task_dir(task_id) / f"{_safe_path_token(envelope_id)}.json"
-
-
-def role_checklists_dir() -> Path:
-    return store_root() / "role_checklists"
-
-
-def role_checklists_task_dir(task_id: str) -> Path:
-    return role_checklists_dir() / _safe_path_token(task_id)
-
-
-def role_checklist_path(task_id: str, checklist_id: str) -> Path:
-    return role_checklists_task_dir(task_id) / f"{_safe_path_token(checklist_id)}.json"
-
-
-def role_checklist_events_dir(task_id: str) -> Path:
-    return role_checklists_task_dir(task_id) / "events"
-
-
-def role_checklist_event_path(task_id: str, event_id: str) -> Path:
-    return role_checklist_events_dir(task_id) / f"{_safe_path_token(event_id)}.json"
+# S44 removed the eight role_envelope* / role_checklist* path helpers that lived
+# here. They addressed the two store directories archived aside as writer-less on
+# 2026-07-30; their last readers were the deleted stores and the two checkpoint
+# EntityClass rows retired in the same commit. Same rule as S23's writer-less
+# path sweep.
 
 
 def packet_artifacts_dir() -> Path:

@@ -99,8 +99,11 @@ ENTITY_CLASSES: tuple[EntityClass, ...] = (
     EntityClass("flow_graphs", _flow_graphs_dir),
     EntityClass("boards", paths.boards_root, recursive=True),
     EntityClass("repo_bundles", paths.repo_bundles_dir, recursive=True),
-    EntityClass("role_envelopes", paths.role_envelopes_dir, recursive=True),
-    EntityClass("role_checklists", paths.role_checklists_dir, recursive=True),
+    # S44 retired the role_envelopes / role_checklists classes with their stores.
+    # Both directories were archived aside as writer-less on 2026-07-30 and no
+    # surviving code can fill them again, so the rows described a shape
+    # `checkpoint fetch` could only ever report as absent — the same rule S23
+    # applied to `proofs`.
     EntityClass("self_tests", paths.self_tests_dir, recursive=True),
     EntityClass("packet_artifacts", paths.packet_artifacts_dir, recursive=True),
 )

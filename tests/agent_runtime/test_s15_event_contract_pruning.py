@@ -100,6 +100,17 @@ REMOVED_EVENT_TYPES = frozenset(
         "scope.override_recorded",
         "daemon.started",
         "daemon.stopped",
+        # S44 (2026-07-31). These six were NOT unemittable at S15 — their
+        # emitters were alive then. They joined this set when the
+        # role_envelopes / role_checklists store family was deleted, which is
+        # exactly why `role_envelope.paused` used to sit in the near-miss
+        # survivor set below and has now been re-derived onto this side.
+        "role_envelope.opened",
+        "role_envelope.continued",
+        "role_envelope.paused",
+        "role_envelope.closed",
+        "role_checklist.created",
+        "role_checklist.item_updated",
     }
 )
 
@@ -124,9 +135,14 @@ REMOVED_EVENT_TYPES = frozenset(
 # Then -2 at S37: packet.duplicate and packet.normalized, whose only literal
 # writer was retired with the same S36 packet emit API; owned by
 # tests/agent_runtime/test_s37_packet_contract_deregistration.py.
+# Then -6 at S44: role_envelope.opened / .continued / .paused / .closed and
+# role_checklist.created / .item_updated. Their only emitters were
+# RoleEnvelopeStore.save and RoleChecklistStore.save, both deleted with the store
+# family under the operator's 2026-07-31 ruling on deferred-debt item 1; owned by
+# tests/agent_runtime/test_s44_role_envelope_family_removal.py.
 # This stays an absolute count on purpose: it is the one assertion that catches
 # a contract silently appearing or disappearing.
-SURVIVING_EVENT_COUNT = 88
+SURVIVING_EVENT_COUNT = 82
 
 
 def test_the_unemittable_event_types_are_no_longer_registered():
@@ -158,8 +174,13 @@ def test_the_near_miss_survivors_stay_registered():
     survivors = {
         # child_events.py:32 is a live emit.
         "child.returned",
-        # role_envelopes.py:150 emits this on the else branch of a ternary.
-        "role_envelope.paused",
+        # RE-DERIVED at S44: `role_envelope.paused` was pinned here because
+        # `role_envelopes.py:150` emitted it on the else branch of a ternary —
+        # the subtlest live emit in the registry, and the reason this survivor
+        # set exists. That emitter is gone with the store family, so the type
+        # moved to REMOVED_EVENT_TYPES above. Re-derived, not deleted: a
+        # near-miss pin that silently loses its subject is how a survivor set
+        # rots into decoration.
         # progress.py emits these with the label profile_runner hands it.
         "run.tool.started",
         "run.tool.finished",

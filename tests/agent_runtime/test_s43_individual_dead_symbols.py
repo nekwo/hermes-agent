@@ -38,8 +38,19 @@ Deliberate KEEPS on the same lines, each pinned by the negative gate below:
   regexes go.
 * ``role_envelopes``'s store family — untouched; its event-count ruling is still
   pending, so ONLY ``role_envelope_summary`` is cut here.
+  **SUPERSEDED 2026-07-31 (S44):** the ruling came back CUT. ``role_envelopes``
+  was deleted whole, taking the store family and six event contracts with it.
 
-No event contract moves: ``event_catalog()`` stays at 88.
+No event contract moves *at S43*: ``event_catalog()`` stayed at 88 through this
+wave. S44 then moved it to 82. The absolute count has one owner either way —
+``tests/agent_runtime/test_s15_event_contract_pruning.SURVIVING_EVENT_COUNT``.
+
+RETARGETED 2026-07-31 (S44): one module this file pinned symbols on no longer
+exists. ``role_envelopes`` was deleted whole, so its ``REMOVED`` / ``KEPT``
+entries moved to ``RETIRED_WHOLE_MODULES`` below. They are NOT dropped: an
+individual-symbol witness that silently loses its module hides the bigger cut
+that swallowed it, and the KEPT half is the more interesting record — that name
+was correctly alive at S43 and died for an unrelated reason one wave later.
 """
 
 from __future__ import annotations
@@ -73,7 +84,6 @@ REMOVED = {
         "_DIFF_REMOVED_ASSERT_RE",
         "_DIFF_ADDED_SKIP_RE",
     ),
-    "agent_runtime.role_envelopes": ("role_envelope_summary",),
     "agent_runtime.runtime_instances": ("BACKGROUND_LANE",),
     "agent_runtime.self_test_evidence": ("_relative_runtime_path",),
     "agent_runtime.skill_install": ("harness_skill_installed_ok",),
@@ -89,14 +99,24 @@ REMOVED = {
     "agent_runtime.tool_visibility": ("_profile_readiness_cache_clear",),
 }
 
+#: Modules this file pinned symbols on that a LATER wave deleted whole. The
+#: original REMOVED / KEPT entries are preserved verbatim so the record survives
+#: the module: at S43 every KEPT name below had a verified caller and every
+#: REMOVED name did not. Two waves later the module itself went, for a reason
+#: that had nothing to do with these individual symbols.
+RETIRED_WHOLE_MODULES = {
+    # S44 — the role_envelopes / role_checklists store family (operator ruling
+    # on deferred-debt item 1). S43 cut only `role_envelope_summary` from it and
+    # explicitly kept `RoleEnvelopeStore` pending exactly that ruling.
+    "agent_runtime.role_envelopes": {
+        "removed_at_s43": ("role_envelope_summary",),
+        "kept_at_s43": ("RoleEnvelopeStore",),
+    },
+}
+
 #: module -> names on the SAME module (often the same line) that must survive.
 KEPT = {
     "agent_runtime.board_models": ("default_board_id",),
-    "agent_runtime.budget_approval": (
-        "budget_incident_can_continue",
-        "budget_incident_needs_scope_recovery",
-        "_safe_int",
-    ),
     "agent_runtime.cli_format": ("emit_json",),
     "agent_runtime.paths": ("packet_artifacts_dir", "stagec_artifacts_dir"),
     "agent_runtime.redaction": ("BasicRedactionScanner", "RedactionStatus"),
@@ -105,18 +125,11 @@ KEPT = {
         "_worktree_token",
         "_ensure_isolated_worktree",
     ),
-    "agent_runtime.role_envelopes": ("RoleEnvelopeStore",),
     "agent_runtime.skill_publishability": (
         "REASON_SHARED_ROOT",
         "REASON_PROFILE_LOCAL_ONLY",
         "REASON_EXTERNAL_DIR_ONLY",
         "REASON_UNKNOWN_ROOT",
-    ),
-    "agent_runtime.stage_intent": (
-        "stage_requires_product_edit",
-        "no_product_edit_recipe_id",
-        "no_product_edit_recipe_for_stage",
-        "no_product_edit_recipe_conflicts_with_stage",
     ),
     "agent_runtime.profile_artifact_sync": (
         "KIND_PROFILE_MEMORY",
@@ -160,4 +173,18 @@ def test_the_basic_redaction_scanner_still_scans(tmp_path):
 
 def test_every_touched_module_still_imports():
     for dotted in sorted(set(REMOVED) | set(KEPT)):
+        importlib.import_module(dotted)
+
+
+@pytest.mark.parametrize("dotted", sorted(RETIRED_WHOLE_MODULES))
+def test_the_later_whole_module_cuts_took_both_halves(dotted: str):
+    """S44/S45 retarget. Every name this file ruled on for these three modules —
+    the dead ones AND the ones it deliberately KEPT — is unreachable now,
+    because the module is gone. The KEPT half is the point: those names were
+    correctly alive at S43 and were not falsified, they were outlived."""
+
+    from importlib.util import find_spec
+
+    assert find_spec(dotted) is None
+    with pytest.raises(ModuleNotFoundError):
         importlib.import_module(dotted)
