@@ -67,8 +67,79 @@
    scope. Whoever takes item 5 (`workspaces[].goals`) should take this with it —
    both are constant-by-construction fields on the same wire.
 
-9. **`Projector.apply_pending` has no production caller (hermes; opened by B-4,
-   2026-07-31).** Working in the projector for B-4 surfaced that the entire
+9. ~~**`Projector.apply_pending` has no production caller (hermes; opened by
+   B-4, 2026-07-31).**~~ **RULED RETIRE + EXECUTED 2026-08-01 — `3d0935e51`
+   (S46).** Original entry preserved below; what shipped, and the split between
+   what was cut and what was kept, follows it.
+
+   **CUT** (reachability re-verified per symbol immediately before the cut, and
+   checked for dynamic dispatch — the repo contains no `getattr(projector, …)`
+   and no string literal naming these methods, so module-level reachability was
+   the whole story): `Projector.apply_pending` (5 test callers, 0 production);
+   `Projector.acquire_lease`; `Projector._count_pending`; `ProjectorResult`;
+   `LEASE_TTL_SECONDS`; the `meta['projector_lease']` row; the `event_log=`
+   constructor keyword; and `SLO_INCREMENTAL_APPLY_MS`. Six tests went with the
+   lane — the two named SLO tests plus `test_lease_excludes_second_projector`,
+   `test_registered_event_rebuilds_the_whole_frame`, and the two
+   `test_replay_equivalence_*` tests — along with four helpers in
+   `test_projector.py` (`_seed_open_task`, `_write_enterprise_config`,
+   `_row_diff`, `_goal`) that were the replay-equivalence pair's goal-row
+   comparison scaffolding and were already called by nothing.
+
+   **THE SPLIT ON THE LEASE, since the ruling asked for it explicitly:** the
+   lease had NO other live consumer. `full_rebuild` never acquired it — only
+   `apply_pending` did — so `acquire_lease`, `LEASE_TTL_SECONDS`, and the
+   `projector_lease` meta key died whole with their one caller, and nothing
+   about single-writer safety changed. (The projection unit had already been
+   the whole compact snapshot rather than row-level deltas, so there was no
+   concurrent-partial-write window for the lease to have been protecting.)
+   `agent.credential_pool.CredentialPool.acquire_lease` is an unrelated live
+   method on a different class with a real caller in `tools/delegate_tool.py`;
+   S46 asserts its survival rather than leaving it to a bare-word grep.
+
+   **KEPT:** `full_rebuild()` as the operator-invoked cache warmer behind
+   `hermes harness rebuild-read-model`, and the whole serve/read path —
+   `resolve_snapshot_frame`, `snapshot_watermark`,
+   `ReadModel.projection_watermark`, `read_projection`, `render_snapshot`.
+   `EventLog.iter_from_offset` also stays: `_count_pending` was one caller of
+   four, not the last one — `stream.py` keeps it load-bearing. No coverage was
+   lost with the replay-equivalence pair: `test_snapshot.py` pins
+   `contract_version` / no-`goals` / `boards` on `build_snapshot()`, and
+   `test_read_model.py::test_apply_full_rebuild_then_render_is_equivalent` pins
+   `render_snapshot() == build_snapshot()` through the read model, so the round
+   trip stays covered via the LIVE path.
+
+   **Contract:** `tests/agent_runtime/test_s46_incremental_projection_lane_removal.py`
+   (22 tests, written red first — 16 failed / 5 passed before the cut). Its
+   text gate strips docstrings and comments before matching, so it cannot fire
+   on the witness that records its own removal — the mechanical form of the
+   rule s45 stated in prose.
+
+   **Gates:** `tests/agent_runtime` 3,343 passed / 0 failed (3,327 baseline − 6
+   + 22), run in a clean worktree carrying only this change, because a parallel
+   agent's uncommitted snapshot/config work was failing 41 unrelated tests in
+   the shared checkout at the time. Canonical `tests/hermes_cli` runner: 3,682
+   passed / 0 failed, exit 0. Live smoke on alice through
+   `.hermes/venvs/hermes-agent`: `harness snapshot --json` → 2 boards,
+   `frame_source=built`, watermark `event_offset=86984208`;
+   `harness rebuild-read-model --json` → `ok: true` at the same offset, and
+   `harness read --projection snapshot` served the 29-key payload back — i.e.
+   the one surviving production path through the projector still round-trips.
+
+   **RESIDUALS this cut deliberately did NOT take** (each still true, none
+   ruled): `Projector.config` is stored and never read — an unused constructor
+   field, but not lane machinery, and removing it edits
+   `runtime_commands.py`; `SLO_CONSUMER_VISIBLE_LAG_MS` in
+   `test_read_model_slo.py` has zero assertions (RD4's live consumer-lag proof
+   was never written) — same shape as the constant this wave did take, one lane
+   over; and `read_model.enabled` is still `False` on the live alice root, so
+   `full_rebuild` runs only when an operator types the verb and the serve path
+   reports `frame_source=built` every time — retiring the incremental lane did
+   not change that, it just stopped pretending a second lane existed.
+
+   Original entry, as filed by B-4:
+
+   Working in the projector for B-4 surfaced that the entire
    INCREMENTAL projection lane — `acquire_lease`, the watermark diff, the
    pending-event count, `ProjectorResult`'s offset/timing fields — is reached
    only from five test call sites. Repo-wide, the sole production entry to the
@@ -87,7 +158,7 @@
    `apply_pending` + the lease + the SLO tests and keep `full_rebuild` as an
    operator-invoked cache warmer). NOT taken on B-4's authority: B-4 was
    scoped to the two constant result fields, and deleting a lane is a
-   direction call, not a cleanup.
+   direction call, not a cleanup. — *Answered: RETIRE. See the S46 block above.*
 
 ## Proposal ledger (decision-ready; full text in the 2026-07-31 audit reports)
 
