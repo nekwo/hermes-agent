@@ -514,6 +514,68 @@ symbols newly caller-free. Outcomes on `main`:
   role_envelopes/role_checklists family (would move the event count 88 → 82),
   the Launcher goal-detail consumer knot, and the P0–P5/F-1–F-8 proposal sets.
 
+### s44–s45 — the two ruled cuts (2026-07-31)
+
+The operator ruled CUT on ledger items 1 and 2 the same day they were opened.
+Both were executed on `main` with red-first removal contracts.
+
+- **S44 — role_envelopes / role_checklists store family** (`4e7aa0066`).
+  `agent_runtime/role_envelopes.py` deleted whole (275 lines): its ONE
+  production edge pointed **outward** (checkpoint's EntityClass read the
+  directory; nothing imported the module), and its only importer anywhere was
+  an **unused** import in `test_projector.py` — an unused import is what a
+  module-level reachability gate counts as a caller, which is how this family
+  survived three earlier waves. `RoleEnvelopeStore.open_or_resume` annotates
+  `task: Task`, deleted at S8 and never imported here: a latent `NameError`
+  hidden by `from __future__ import annotations`, the same tell S27 found.
+  `role_checklists.py` went 420 → 113 lines, keeping only
+  `validate_checklist_payload_structure` (live via
+  `decision_contract_registry.validate_payload_keys`) and staying in place as a
+  small leaf. Six contracts de-registered
+  (`role_envelope.opened/continued/paused/closed`,
+  `role_checklist.created/item_updated`) per the S36/S37 rule; the two
+  writer-less checkpoint EntityClass rows and eight orphaned path helpers went
+  too. **Event count 88 → 82; contract hash
+  `73ee514b5454b513cbfb74138a86cd12b5ee2312c071e4e55e46528821f5a9b1` →
+  `f655bd56bb378c1fa818f360a0f401d5d957c17df33b6a65cb2fd2a6982acfe6`.**
+  Wave-3's `checklist_for_task_stage`-is-live ruling was **transitively
+  falsified**, not overridden: it was correct when written, and its entire
+  justification was the `role_envelopes` import. S15's near-miss pin on
+  `role_envelope.paused` — the subtlest live emit in the registry, on the else
+  branch of a ternary — was re-derived onto the removed side rather than
+  deleted.
+- **S45 — the four test-only whole modules** (`be759935c`).
+  `budget_approval.py`, `context_requests.py`, `role_contracts.py`,
+  `stage_intent.py` (902 lines) deleted with their four dedicated test files
+  (21 tests). **Settled rule: a module whose entire importer set is the test
+  written to exercise it is a closed loop, not covered code.** S29 had already
+  recorded the contradiction verbatim for `context_requests` and deferred the
+  call; this executed it. Two traps are now pinned in the retargeted witnesses:
+  **internal self-reference is not liveness** (S29 kept `stage_intent` because
+  it called `stage_requires_product_edit` three times *internally*, at the exact
+  moment S29 deleted its last external caller — that check would have passed
+  forever), and **a module reported dead but left importable reads as live to
+  the next reachability pass**, which is why `context_requests` sat two extra
+  waves.
+- **Pre-existing gate bug fixed** (`703411f68`): `test_s40` forbade the strings
+  `objective_templates` / `render_objective` in **any** `.py` or `.md`, and
+  `2b0d8dd94` — the commit that opened the ledger — broke it by recording
+  "`objective_templates.py` whole" in this very file. The gate was already red on
+  `main`. `.py` keeps the absolute gate; Markdown is now gated on code forms
+  only. A prose gate that cannot tell "this code calls it" from "this document
+  says we removed it" makes the removal log unwritable.
+- **Verification.** Red proof 19 failed / 8 passed before the cuts. Isolated
+  committed-tree arithmetic: `tests/agent_runtime` 3300 → 3304 (−21 deleted
+  tests, −3 s43 re-parametrization, +1 s23, +27 new contract tests). Live alice
+  sanity: `harness snapshot --json` builds at schema 2 with 2 boards and the new
+  contract hash; `harness status` renders; `harness checkpoint classes` returns
+  8 classes with `role_envelopes` / `role_checklists` correctly absent.
+- **Opened, not swept:** the `role_envelope` runtime-config block (11 fields +
+  5 migrations validators) now governs nothing yet still ships on the live
+  snapshot wire reading `enabled: true`. Recorded as ledger item 8 — removing it
+  is a snapshot contract change needing Launcher lockstep, the same shape as
+  item 5.
+
 ### Operator-owned leftovers — nothing in this repo will clean these up
 
 Deliberate holds, not oversights. Each is outside git and safe to leave indefinitely;

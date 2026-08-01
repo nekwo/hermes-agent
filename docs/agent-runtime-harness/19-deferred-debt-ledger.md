@@ -10,17 +10,23 @@
 
 ## Operator-ruling items (blocked on a decision, not on work)
 
-1. **role_envelopes / role_checklists store family (hermes).** Production-
-   caller-free; cutting retires six events (role_envelope.opened/continued/
-   paused/closed, role_checklist.created/item_updated), moving
-   SURVIVING_EVENT_COUNT 88 -> 82 and the contract hash. Wave-3's
-   "checklist_for_task_stage is live" ruling is transitively falsified (its
-   only justification was the role_envelopes import). The runtime DIRECTORIES
-   of this family were already archived as writer-less on 2026-07-30.
-2. **Test-only whole modules (hermes):** budget_approval.py,
-   context_requests.py, role_contracts.py, most of stage_intent.py,
-   role_envelopes.py have zero production importers - ruling needed on whether
-   test-only-anchored counts as keep.
+1. ~~**role_envelopes / role_checklists store family (hermes).**~~ **RULED CUT
+   and EXECUTED 2026-07-31** — `4e7aa0066` (S44). `role_envelopes.py` deleted
+   whole (275 lines); `role_checklists.py` 420 -> 113 lines keeping only
+   `validate_checklist_payload_structure` (live via
+   `decision_contract_registry.validate_payload_keys`). Six events
+   de-registered, `SURVIVING_EVENT_COUNT` 88 -> 82, contract hash
+   `73ee514b…` -> `f655bd56…`. The two writer-less checkpoint EntityClass rows
+   and eight orphaned path helpers went with them. Wave-3's
+   "checklist_for_task_stage is live" ruling was confirmed transitively
+   falsified and the S27 witness records the reversal.
+2. ~~**Test-only whole modules (hermes).**~~ **RULED CUT and EXECUTED
+   2026-07-31** — `be759935c` (S45). `budget_approval.py`,
+   `context_requests.py`, `role_contracts.py` and `stage_intent.py` deleted
+   whole (902 lines) together with their four dedicated test files (21 tests).
+   Settled rule, so future waves stop re-deriving it: **a module whose entire
+   importer set is the test written to exercise it is a closed loop, not
+   covered code.** `role_envelopes.py` was listed here too and went with item 1.
 3. **Launcher goal-detail family (A21 remainder).** MissionGoalDetail body,
    MissionIntervention, proof-gate/flow-timeline/level-state/topology classes,
    _agentTopologyRuntimeGraphProjection, _missionActorsFromTopology, and the
@@ -41,6 +47,25 @@
    $HOME-preferring resolution - aligning widens a denial carve-out.
 7. **Packaging:** psutil/fire declared but absent on the ambient test
    interpreter; markdown used by the matrix adapter but declared nowhere.
+8. **`role_envelope` runtime-config block is now a knob that governs nothing
+   (hermes; opened by S44, 2026-07-31).** Cutting the store family left the
+   whole config lane behind and it is NOT residue-shaped — it is a live wire
+   telling an operator something false. Surface: `RoleEnvelopeConfig` (11
+   fields, `runtime_config.py:53`), `RuntimeConfig.role_envelope`
+   (`runtime_config.py:340`), `config.py:114/173/535-551`
+   (`_role_envelope_config`), and five `migrations.py:82-86` validators that
+   still range-check `max_same_session_continuations`,
+   `max_no_progress_repeats`, `max_fix_envelopes_per_stage`,
+   `max_checklist_items_rendered`, `max_foreign_checklist_summaries`. **It ships
+   on the live snapshot wire**: `harness snapshot --json` on alice emits
+   `runtime_config.role_envelope` with `enabled: true` — an operator once
+   deliberately turned this on (the default is `False`), and nothing has
+   implemented it since S44. Deliberately NOT swept on this wave's authority:
+   removal changes the snapshot contract and needs Launcher lockstep, so it is
+   S9/S10-shaped like item 5, not a narrow cut. Same precedent as S28 recording
+   `scope_control.untriaged_issue_discoveries` rather than reaching outside its
+   scope. Whoever takes item 5 (`workspaces[].goals`) should take this with it —
+   both are constant-by-construction fields on the same wire.
 
 ## Proposal ledger (decision-ready; full text in the 2026-07-31 audit reports)
 
