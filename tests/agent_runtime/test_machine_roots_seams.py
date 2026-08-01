@@ -25,6 +25,16 @@ def _clear_roots_cache():
     machine_roots_cache_clear()
 
 
+# The readiness seams below are about BINDING (unbound root, vanished target,
+# wrong platform) and nothing else. They deliberately name a server that has NO
+# canonical template: since 2026-08-01 template drift is a blocking readiness
+# issue too, so a stub block spelled ``launcher_qa`` would report drift on top of
+# the binding reason under test and these assertions would be measuring two
+# things at once. ``test_the_seam_server_has_no_canonical_template`` fails loudly
+# if a template is ever registered for this name.
+SEAM_SERVER = "stagec_probe"
+
+
 def _qa_persona(**overrides) -> AgentPersona:
     payload = dict(
         id="qa",
@@ -37,7 +47,7 @@ def _qa_persona(**overrides) -> AgentPersona:
         system_prompt_path="personas/qa/system.md",
         hermes_profile="qa",
         skills=[],
-        required_mcp_servers=["launcher_qa"],
+        required_mcp_servers=[SEAM_SERVER],
     )
     payload.update(overrides)
     return AgentPersona(**payload)
@@ -61,12 +71,25 @@ def _bind_profile(tmp_path, monkeypatch, config_text: str, *, registry: dict | N
 # ── Readiness ───────────────────────────────────────────────────────────────
 
 
+def test_the_seam_server_has_no_canonical_template():
+    """Keeps the binding seams free of template-drift rows they don't test.
+
+    If a canonical block is ever registered for ``SEAM_SERVER``, every readiness
+    assertion below would silently start carrying a second issue code. Fail here
+    instead, where the reason is readable.
+    """
+
+    from agent_runtime.machine_roots import canonical_mcp_server_template
+
+    assert canonical_mcp_server_template(SEAM_SERVER) is None
+
+
 def test_readiness_reports_an_unbound_root_with_the_exact_fix(tmp_path, monkeypatch):
     _bind_profile(
         tmp_path,
         monkeypatch,
         "mcp_servers:\n"
-        "  launcher_qa:\n"
+        f"  {SEAM_SERVER}:\n"
         "    command: ${roots.eternia_launcher}/tool/server${exe_suffix}\n",
     )
 
@@ -87,7 +110,7 @@ def test_readiness_is_clean_once_the_root_is_bound(tmp_path, monkeypatch):
         tmp_path,
         monkeypatch,
         "mcp_servers:\n"
-        "  launcher_qa:\n"
+        f"  {SEAM_SERVER}:\n"
         "    command: ${roots.eternia_launcher}/tool/server${exe_suffix}\n",
         registry={"eternia_launcher": str(repo)},
     )
@@ -102,7 +125,7 @@ def test_readiness_reports_a_root_bound_to_a_vanished_checkout(tmp_path, monkeyp
     _bind_profile(
         tmp_path,
         monkeypatch,
-        "mcp_servers:\n  launcher_qa:\n    command: ${roots.eternia_launcher}/tool/server\n",
+        f"mcp_servers:\n  {SEAM_SERVER}:\n    command: ${{roots.eternia_launcher}}/tool/server\n",
         registry={"eternia_launcher": str(tmp_path / "gone")},
     )
 
@@ -118,7 +141,7 @@ def test_readiness_reports_a_windows_only_capability_off_windows(tmp_path, monke
         tmp_path,
         monkeypatch,
         "mcp_servers:\n"
-        "  launcher_qa:\n"
+        f"  {SEAM_SERVER}:\n"
         "    command: powershell.exe\n"
         "    platforms:\n"
         "      - windows\n",
@@ -134,7 +157,7 @@ def test_readiness_ignores_tokenless_configs_entirely(tmp_path, monkeypatch):
     _bind_profile(
         tmp_path,
         monkeypatch,
-        "mcp_servers:\n  launcher_qa:\n    command: launcher-qa\n",
+        f"mcp_servers:\n  {SEAM_SERVER}:\n    command: stagec-probe\n",
     )
 
     readiness = profile_readiness_for_persona(_qa_persona())
@@ -147,7 +170,7 @@ def test_readiness_surfaces_an_unexpanded_persona_repo_scope(tmp_path, monkeypat
     _bind_profile(
         tmp_path,
         monkeypatch,
-        "mcp_servers:\n  launcher_qa:\n    command: launcher-qa\n",
+        f"mcp_servers:\n  {SEAM_SERVER}:\n    command: stagec-probe\n",
     )
 
     readiness = profile_readiness_for_persona(

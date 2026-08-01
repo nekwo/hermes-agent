@@ -78,17 +78,18 @@ ISSUE_ROOT_TARGET_MISSING = "root_target_missing"
 ISSUE_INVALID_ROOT_TOKEN = "invalid_root_token"
 ISSUE_INVALID_REGISTRY = "invalid_registry"
 ISSUE_PLATFORM_UNSUPPORTED = "platform_unsupported"
-ISSUE_MCP_TEMPLATE_DRIFT = "mcp_server_template_drift"
-
-# Codes that describe a config that is INCONSISTENT rather than UNUSABLE.
+# A configured MCP block that does not match its canonical template.
 #
-# Every other code in this module means "this capability would be dropped before
-# spawn" — a blocking fact a readiness dot must show. Template drift does not:
-# the drifted profiles still bind, still spawn, still work. Consumers partition
-# on this set so an advisory can be surfaced (and fixed) without a working
-# profile being reported as broken. Adding a code here is a deliberate ruling
-# that the condition is non-blocking, not a convenience.
-ADVISORY_ISSUE_CODES = frozenset({ISSUE_MCP_TEMPLATE_DRIFT})
+# BLOCKING since 2026-08-01 (operator ruling). It was advisory for exactly one
+# window — while live configs still carried the drift this describes, so that
+# reporting it could not call a running profile broken before anyone had been
+# given the chance to fix it. The rationale for the flip: a drifted block
+# "works" solely because some OTHER repo happens to carry a fallback for the
+# field it omits — agreement by coincidence, which is exactly the failure mode
+# that stays invisible until the fallback moves. Every code in this module now
+# means the same thing: this declaration is not usable as written, and readiness
+# must say so. Reporting stays report-only — nothing here rewrites a config.
+ISSUE_MCP_TEMPLATE_DRIFT = "mcp_server_template_drift"
 
 PLATFORM_WINDOWS = "windows"
 PLATFORM_MACOS = "macos"
@@ -842,9 +843,9 @@ def mcp_server_template_issues(
 ) -> list[PathTokenIssue]:
     """Typed drift rows for every configured server that has a canonical template.
 
-    Advisory by code (:data:`ADVISORY_ISSUE_CODES`): a drifted block still binds
-    and still spawns, so this must never be conflated with the blocking
-    binding failures :func:`mcp_server_issues` reports.
+    Blocking, same as the binding failures :func:`mcp_server_issues` reports —
+    see :data:`ISSUE_MCP_TEMPLATE_DRIFT`. Report-only: the rows name the fields
+    and carry a pasteable block; no caller here writes a config.
     """
 
     wanted = {str(item) for item in only} if only is not None else None
@@ -880,14 +881,15 @@ def mcp_server_issues(
     only: Iterable[str] | None = None,
     roots: MachineRoots | None = None,
     check_target_exists: bool = True,
-    include_template_drift: bool = False,
 ) -> list[PathTokenIssue]:
-    """Typed reasons the named MCP servers cannot bind on this machine.
+    """Typed reasons the named MCP servers are not correctly declared here.
 
-    ``include_template_drift`` additionally reports canonical-template drift on
-    the same lane. It is opt-in because drift is advisory, not blocking: a
-    caller that treats every returned issue as "capability unavailable" (the
-    original contract) must not start failing on a block that works.
+    Two kinds, one lane, one meaning: the block cannot BIND on this machine
+    (unbound root, missing target, wrong platform), or it does not match its
+    canonical template (:data:`ISSUE_MCP_TEMPLATE_DRIFT`). Drift used to be an
+    opt-in extra because live configs still carried it; the five divergent
+    profiles were canonicalized on 2026-08-01 and the opt-in was retired with
+    them, so every caller now sees drift by default.
     """
 
     wanted = {str(item) for item in only} if only is not None else None
@@ -907,6 +909,5 @@ def mcp_server_issues(
         on_issue=_collect,
         check_target_exists=check_target_exists,
     )
-    if include_template_drift:
-        collected.extend(mcp_server_template_issues(subset))
+    collected.extend(mcp_server_template_issues(subset))
     return collected

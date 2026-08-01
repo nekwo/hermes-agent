@@ -2,25 +2,24 @@
 
 Nine live profiles carry a ``launcher_qa`` block and they had split into two
 variants: one setting ``STAGEC_LAUNCH_HELPER`` explicitly, one omitting it. The
-omission is *silently* equivalent today — the Launcher's ``launch_manager.dart``
-falls back to the same helper path — which is precisely why it is debt: the two
-blocks agree only by coincidence of a fallback in another repo.
+omission was *silently* equivalent — the Launcher's ``launch_manager.dart``
+falls back to the same helper path — which is precisely why it was debt: the two
+blocks agreed only by coincidence of a fallback in another repo.
 
 Operator ruling (2026-07-31): the explicit variant is canonical
 (``machine_roots.CANONICAL_LAUNCHER_QA_MCP_SERVER``).
 
-This file is a DATA test over the live profile tree, and it is deliberately
-ratcheted rather than red:
+Executed 2026-08-01: the five variant-B profiles (backend-dev, gpt-launcher,
+launcher-dev, launcher-qa, qa) were patched live, the expected-drift ledger they
+occupied is gone, and the drift code was flipped from advisory to blocking.
 
-* the five known-divergent profiles are ledgered in :data:`EXPECTED_DRIFT`, so
-  the test documents current reality instead of failing on a state nobody has
-  been given the chance to fix;
-* any NEW drift — a different field, a different profile, a changed value —
-  fails immediately;
-* a ledgered profile that has been fixed also fails, so the ledger shrinks and
-  can never quietly outlive the drift it describes.
+This file is a DATA test over the live profile tree. With the ledger retired it
+is a plain TRIPWIRE: every profile that declares the server must match the
+template, so any new drift — a different field, a new profile, a changed value —
+fails on the next run. Re-introducing an expected-drift list would re-open the
+hole this closed; fix the config instead.
 
-Fixing the five is an operator/live action against files this repo does not
+Fixing a config is an operator/live action against files this repo does not
 own. The failure message therefore carries the exact YAML block to paste; no
 test and no production path here rewrites a config (the single config writer
 stays upstream ``save_config``).
@@ -36,7 +35,6 @@ import pytest
 import yaml
 
 from agent_runtime.machine_roots import (
-    ADVISORY_ISSUE_CODES,
     CANONICAL_LAUNCHER_QA_MCP_SERVER,
     ISSUE_MCP_TEMPLATE_DRIFT,
     canonical_mcp_server_template,
@@ -46,20 +44,13 @@ from agent_runtime.machine_roots import (
     mcp_server_template_diffs,
     mcp_server_template_issues,
 )
-from agent_runtime.profile_readiness import profile_readiness_for_persona
+from agent_runtime.profile_readiness import (
+    READINESS_MCP_ATTENTION,
+    profile_readiness_for_persona,
+)
 from hermes_constants import get_default_hermes_root
 
 SERVER = "launcher_qa"
-
-# profile -> {field path: drift kind}. Kind is pinned; the long expected VALUE
-# is not, so a template reformat does not have to be mirrored here.
-EXPECTED_DRIFT: dict[str, dict[str, str]] = {
-    "backend-dev": {"env.STAGEC_LAUNCH_HELPER": "missing"},
-    "gpt-launcher": {"env.STAGEC_LAUNCH_HELPER": "missing"},
-    "launcher-dev": {"env.STAGEC_LAUNCH_HELPER": "missing"},
-    "launcher-qa": {"env.STAGEC_LAUNCH_HELPER": "missing"},
-    "qa": {"env.STAGEC_LAUNCH_HELPER": "missing"},
-}
 
 
 @pytest.fixture(autouse=True)
@@ -154,62 +145,22 @@ def _patch_message(profile: str, diffs: list[str]) -> str:
     )
 
 
-def test_live_launcher_qa_blocks_match_the_template_or_are_ledgered_drift(monkeypatch):
-    blocks = _live_launcher_qa_blocks(monkeypatch)
-    unexpected: list[str] = []
-    for profile, cfg in blocks.items():
-        diffs = mcp_server_template_diffs(SERVER, cfg)
-        ledgered = EXPECTED_DRIFT.get(profile, {})
-        surprises = [
-            row
-            for row in diffs
-            if not any(
-                row.startswith(f"{field}: {kind}") for field, kind in ledgered.items()
-            )
-        ]
-        if surprises:
-            unexpected.append(_patch_message(profile, surprises))
-    assert not unexpected, (
-        f"NEW '{SERVER}' template drift (not in EXPECTED_DRIFT). The canonical block "
-        f"is agent_runtime.machine_roots.CANONICAL_LAUNCHER_QA_MCP_SERVER; apply the "
-        f"patch below by hand (this lane is report-only and never writes a config):"
-        + "".join(unexpected)
-    )
-
-
-def test_the_expected_drift_ledger_never_outlives_the_drift(monkeypatch):
-    """A ledgered profile that has been fixed must be de-ledgered, not left."""
+def test_every_live_launcher_qa_block_matches_the_canonical_template(monkeypatch):
+    """The tripwire. No ledger, no exemptions — drift here is a live defect."""
 
     blocks = _live_launcher_qa_blocks(monkeypatch)
-    stale: list[str] = []
-    for profile, ledgered in EXPECTED_DRIFT.items():
-        cfg = blocks.get(profile)
-        if cfg is None:
-            stale.append(f"{profile}: no longer declares '{SERVER}'")
-            continue
-        diffs = mcp_server_template_diffs(SERVER, cfg)
-        for field, kind in ledgered.items():
-            if not any(row.startswith(f"{field}: {kind}") for row in diffs):
-                stale.append(f"{profile}: '{field}' is no longer '{kind}' drift")
-    assert not stale, (
-        "EXPECTED_DRIFT has stale entries — the drift was fixed; delete these rows so "
-        "the ratchet keeps closing:\n  " + "\n  ".join(stale)
-    )
-
-
-def test_the_ledger_records_exactly_the_variant_b_profiles():
-    """Pins the audited split so a silent re-widening is visible in the diff."""
-
-    assert sorted(EXPECTED_DRIFT) == [
-        "backend-dev",
-        "gpt-launcher",
-        "launcher-dev",
-        "launcher-qa",
-        "qa",
+    drifted = [
+        _patch_message(profile, diffs)
+        for profile, cfg in blocks.items()
+        if (diffs := mcp_server_template_diffs(SERVER, cfg))
     ]
-    assert {field for rows in EXPECTED_DRIFT.values() for field in rows} == {
-        "env.STAGEC_LAUNCH_HELPER"
-    }
+    assert not drifted, (
+        f"'{SERVER}' template drift across {len(drifted)} of {len(blocks)} profiles "
+        f"({', '.join(sorted(blocks))}). The canonical block is "
+        f"agent_runtime.machine_roots.CANONICAL_LAUNCHER_QA_MCP_SERVER; apply the "
+        f"patch below by hand (this lane is report-only and never writes a config). "
+        f"Do NOT re-add an expected-drift ledger:" + "".join(drifted)
+    )
 
 
 # ── The template itself ─────────────────────────────────────────────────────
@@ -287,12 +238,11 @@ def test_a_server_with_no_template_is_never_drift():
     assert mcp_server_template_issues({"backend_mcp": {"command": "x"}}) == []
 
 
-def test_template_issues_carry_the_advisory_code_and_a_pasteable_hint():
+def test_template_issues_carry_the_typed_code_and_a_pasteable_hint():
     cfg = _plain(CANONICAL_LAUNCHER_QA_MCP_SERVER)
     cfg["env"].pop("STAGEC_LAUNCH_HELPER")
     (issue,) = mcp_server_template_issues({SERVER: cfg})
     assert issue.code == ISSUE_MCP_TEMPLATE_DRIFT
-    assert issue.code in ADVISORY_ISSUE_CODES
     assert issue.field == f"mcp_servers.{SERVER}"
     assert "STAGEC_LAUNCH_HELPER" in issue.summary
     assert "Report-only" in issue.fix_hint
@@ -308,19 +258,21 @@ def test_template_issues_honour_the_only_filter():
 # ── The lane ────────────────────────────────────────────────────────────────
 
 
-def test_drift_is_opt_in_on_the_binding_lane():
-    """The original contract — every returned issue means 'unavailable' — holds."""
+def test_drift_rides_the_binding_lane_by_default():
+    """No opt-in left: one lane, and every row on it is blocking."""
 
     # Tokenless and platform-agnostic: nothing here can fail to BIND, so the
-    # only thing the lane could report is the drift.
+    # only thing the lane can report is the drift — and it does, unasked.
     servers = {SERVER: {"command": "launcher-qa"}}
 
-    assert mcp_server_issues(servers) == []
-    codes = [issue.code for issue in mcp_server_issues(servers, include_template_drift=True)]
-    assert codes == [ISSUE_MCP_TEMPLATE_DRIFT]
+    assert [issue.code for issue in mcp_server_issues(servers)] == [
+        ISSUE_MCP_TEMPLATE_DRIFT
+    ]
+    with pytest.raises(TypeError):
+        mcp_server_issues(servers, include_template_drift=True)  # type: ignore[call-arg]
 
 
-def test_readiness_reports_drift_without_calling_a_working_profile_broken(
+def test_readiness_fails_loudly_on_drift_and_names_the_field(
     tmp_path, monkeypatch
 ):
     from agent_runtime import profile_context
@@ -350,11 +302,13 @@ def test_readiness_reports_drift_without_calling_a_working_profile_broken(
         )
     )
 
-    # Drift is visible...
-    assert [row["code"] for row in readiness["mcp_template_drift"]] == [
-        ISSUE_MCP_TEMPLATE_DRIFT
-    ]
-    # ...and does NOT masquerade as a binding failure or downgrade the verdict.
-    assert readiness["machine_root_issues"] == []
-    assert readiness["readiness"] == "ready"
-    assert ISSUE_MCP_TEMPLATE_DRIFT not in readiness["summary"]
+    # Drift rides the one issue list...
+    (row,) = readiness["machine_root_issues"]
+    assert row["code"] == ISSUE_MCP_TEMPLATE_DRIFT
+    assert row["field"] == f"mcp_servers.{SERVER}"
+    # ...it is BLOCKING...
+    assert readiness["readiness"] == READINESS_MCP_ATTENTION
+    # ...the verdict names the drifted field, not just "something is off"...
+    assert "STAGEC_LAUNCH_HELPER" in readiness["summary"]
+    # ...and the retired advisory channel is not quietly still there.
+    assert "mcp_template_drift" not in readiness

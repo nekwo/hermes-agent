@@ -37,8 +37,12 @@ def test_profile_readiness_checks_skills_inside_bound_profile(tmp_path, monkeypa
 
     profile_home = tmp_path / "profiles" / "qa"
     profile_home.mkdir(parents=True)
+    # A server with NO canonical template: this test is about skills resolving
+    # inside the bound profile, and since 2026-08-01 a stub ``launcher_qa`` block
+    # is (correctly) blocking template drift, which would answer a different
+    # question than the one asked here.
     (profile_home / "config.yaml").write_text(
-        "mcp:\n  servers:\n    launcher_qa:\n      command: launcher-qa\n",
+        "mcp:\n  servers:\n    stagec_probe:\n      command: stagec-probe\n",
         encoding="utf-8",
     )
     skill = profile_home / "skills" / "profile-only-skill" / "SKILL.md"
@@ -58,7 +62,7 @@ def test_profile_readiness_checks_skills_inside_bound_profile(tmp_path, monkeypa
         system_prompt_path="personas/qa/system.md",
         hermes_profile="qa",
         skills=["profile-only-skill"],
-        required_mcp_servers=["launcher_qa"],
+        required_mcp_servers=["stagec_probe"],
     )
 
     readiness = profile_readiness_for_persona(persona)

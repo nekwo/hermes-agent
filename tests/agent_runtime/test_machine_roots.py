@@ -273,11 +273,13 @@ def test_unresolvable_server_is_dropped_rather_than_handed_a_literal_token(tmp_p
 
 def test_mcp_server_issues_filters_to_the_requested_capability(tmp_path):
     roots, _repo = _roots(tmp_path)
+    # Both names are template-free on purpose — the filter is what is under test,
+    # and a ``launcher_qa`` stub would now also report blocking template drift.
     servers = {
-        "launcher_qa": {"command": "${roots.eternia_launcher}/build/x"},
+        "stagec_probe": {"command": "${roots.eternia_launcher}/build/x"},
         "backend_mcp": {"command": "${roots.eternia_backend}/manage.py"},
     }
-    assert mcp_server_issues(servers, only=["launcher_qa"], roots=roots) == []
+    assert mcp_server_issues(servers, only=["stagec_probe"], roots=roots) == []
     codes = [issue.code for issue in mcp_server_issues(servers, only=["backend_mcp"], roots=roots)]
     assert codes == [ISSUE_UNBOUND_ROOT]
 
