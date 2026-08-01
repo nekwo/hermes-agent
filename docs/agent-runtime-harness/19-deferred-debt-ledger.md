@@ -37,11 +37,87 @@
    Removal-contract groups s47–s49 in dead_symbol_removal_contract_test.dart.
    (This strike was recorded late — the pass landed before items 5/8/9 were
    executed; nothing else about the entry changed.)
-4. **CLI entity rows gain redaction/caps (hermes B-2).** Consolidating the five
-   duplicated entity-row projections onto snapshot-grade builders changes CLI
-   output (cards gain masking/truncation) - a deliberate output change needing
-   a ruling. The realm-sync lie and workspace-show crash halves were already
-   fixed narrowly (a21ab1a2a).
+4. ~~**CLI entity rows gain redaction/caps (hermes B-2).**~~ **RULED EXECUTE and
+   EXECUTED 2026-08-01 — `71a96b517` (S48).** Every `hermes harness` entity row
+   is now a RE-KEY of the snapshot builder that already owned the question; the
+   five hand-written twins are gone. The set was re-derived from the tree, not
+   from the audit's line numbers (S46/S47 and `e887cdf26` had reshaped these
+   files): `harness.py::_workspace_row` -> `_workspace_summary`,
+   `harness.py::_realm_row` -> `_realm_summary`, `board.py::_board_row` ->
+   `board_summary_row`, `board.py::_card_row` -> `_board_card_row`,
+   `office.py::_office_actor_row` -> `_office_actor_summary_row`. Two more went
+   with them: `office.py::_office_surface_row` (the container that held the
+   uncapped actor list) -> `office_summary_row`, and `_office_item_row` deleted
+   outright — it re-declared, key for key, the scene-item block the actor
+   builder already projects.
+
+   **What actually leaked.** Only the board/office tier: the CLI printed
+   `card.title` / `card.description` / `card.checklist[].text` RAW while the
+   wire masked all three, printed descriptions uncapped (the store accepts
+   4,000 characters; the projection bound is 2,048), and printed EVERY card /
+   EVERY actor on `--full` while the wire bounded them at 500 / 200. The
+   workspace and realm rows leaked nothing — what they carried was
+   DUPLICATION, and duplication is what shipped both prior defects (the `tasks`
+   NameError and the `"in_sync"` lie, `a21ab1a2a`).
+
+   **The visible output change.** Masking is VALUE-LEVEL and IN PLACE:
+   `"Rotate api_key: sk-live-… before Friday"` renders `"Rotate api_key:
+   [redacted] before Friday"` — no field is blanked, dropped or emptied for
+   containing a secret, the prose on both sides survives, and two secrets in one
+   string are masked independently. Caps are ACCOUNTED, never silent: the full
+   card row gains `description_truncated`, `board show --full` gains
+   `cards_truncated`, `office show --full` gains `actors_truncated`. Everything
+   else is byte-identical, including `--output table` / `--quiet` / `--fields`
+   (timestamps stay `datetime`; `emit_json` -> `to_jsonable` is this lane's
+   serialization authority). Live-verified on alice: `workspace show`,
+   `realm show|list`, `board list`, `board show --full`, `office show --full`,
+   and a `board card add` carrying a secret, which rendered the mask in place.
+
+   **No unmask flag was invented.** `_board_card_row` has no unredacted seam, so
+   none was used and none was added — see the residual below.
+
+   **The two new snapshot functions are extractions, not a second lane.**
+   `board_summary_row` / `office_summary_row` are the `_boards_summary` /
+   `_offices_summary` loop bodies lifted out unchanged; the loops route through
+   them (gated by test), and the live `harness snapshot --json` `boards` and
+   `offices` sections are byte-identical to the pre-change frame.
+
+   Pins: `tests/hermes_cli/test_entity_row_characterization.py` (22 — masked in
+   place with surrounding text intact, cap marker present when capped,
+   non-secret rows byte-identical, each row's key set frozen, and a sentinel
+   proving each row really routes through its builder) and
+   `tests/agent_runtime/test_s48_cli_entity_row_consolidation.py` (21 — removal
+   contract, delegation contract, and a self-check that the gate's own
+   source-stripping renders dotted attributes, because the S46-style token join
+   does NOT and those assertions would have passed vacuously). `a21ab1a2a`'s two
+   regression pins are unchanged and still green. Two dead import bindings went
+   with the duplication — `read_realm_sync_sidecar` and
+   `exact_scoped_instance_ids` in harness.py, S41's class.
+
+   RESIDUALS opened by execution:
+   - **`active_cards` vs `active_card_count`.** The CLI column counts cards NOT
+     in a `done` column; the wire's counts every non-archived card. Two
+     different questions with near-identical names. NOT consolidated —
+     collapsing them would silently change a number an operator reads, which is
+     worse than the duplication. Kept, with the reason pinned.
+   - **No unredacted seam exists.** If an operator debugging locally genuinely
+     needs raw secret-bearing card prose, there is no builder parameter for it;
+     the on-disk card JSON is the only source. Reported rather than invented on
+     this wave's authority.
+   - **Four synthetic row literals stay hand-written**, because no builder can
+     project an entity that does not exist: `realm create --dry-run`,
+     `board create --dry-run`, `office show` on an unauthored surface, and
+     `board card resolve-conflict` when the card resolved to archived. Nothing
+     gates that their key sets still agree with the real rows.
+   - **Cross-repo (Launcher; NOT introduced here).** The board capability lane
+     shells out to these very CLI verbs, and
+     `mission_board_write.dart::boardCardFromResultPayload` parses the reply
+     with the SNAPSHOT card shape — it reads `card_id`, `updated_by`,
+     `unpublished`, none of which the CLI row emits (it emits `id`). It
+     therefore always returns null and the read-your-writes path silently falls
+     back to `provisionalBoardCard`. Pre-existing, and exactly the "wire-test
+     idiom" class in the proposal ledger below: producer and consumer each
+     pinned, the wire between them never asserted.
 5. ~~**workspaces[].goals wire field (hermes B-3).**~~ **RULED CUT and EXECUTED
    2026-08-01 — hermes `d88ea8b55` (S47) + launcher `4739bd4f` (s53).** Taken
    together with item 8: same wire, same defect. The `tasks = []` seed and all
