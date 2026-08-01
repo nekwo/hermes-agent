@@ -243,14 +243,12 @@ def _cmd_observe(args) -> int:
     # call went with them — it was assigned and never used.
     runs = []
     incidents = []
-    workers = []
     execution_mode = "manual"
     data = build_observability(
         runs=runs,
         incidents=incidents,
         events=EventLog().tail(20),
         execution_mode=execution_mode,
-        worker_sessions=workers,
     )
     print(emit_json(data) if args.json else f"observability={data['health']['status']} interventions={len(data['interventions'])}")
     return 0

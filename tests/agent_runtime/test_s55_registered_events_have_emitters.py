@@ -323,17 +323,23 @@ def test_the_resolver_actually_resolves_each_emission_idiom():
     assert "persona.profile_rebound" in emitted
 
 
-def test_the_worker_session_family_needs_no_temporary_exemption():
-    """The wave's plan reserved an 'S51 pending' allowlist entry for these ten.
-    It is deliberately absent: they still have live emitters, so the gate passes
-    without it — and when S51 cuts that write lane, this gate goes RED unless
-    the same commit de-registers them. That is the point."""
+def test_the_worker_session_family_needed_no_temporary_exemption():
+    """INVERTED at S56, with its reason preserved.
 
-    emitted = emitted_event_types()
+    The S51 plan reserved an 'S51 pending' allowlist entry for these ten types.
+    It was deliberately never added: they still had live emitters, so the gate
+    passed without it — and the entry would have been a hole, because this gate
+    going RED is exactly what should happen if the write lane is cut without
+    de-registering the contracts in the SAME commit.
+
+    S56 cut the lane and de-registered all ten together, so the family is now
+    absent from BOTH sides. The assertion is inverted rather than deleted: it is
+    what catches a re-registration with no emitter behind it, and it must never
+    be satisfiable by an allowlist entry."""
+
     worker_types = sorted(name for name in event_catalog() if name.startswith("worker_session."))
-    assert len(worker_types) == 10, worker_types
-    assert [name for name in worker_types if name not in emitted] == []
-    assert [name for name in worker_types if name in DYNAMIC_DISPATCH_ALLOWLIST] == []
+    assert worker_types == []
+    assert [name for name in DYNAMIC_DISPATCH_ALLOWLIST if name.startswith("worker_session.")] == []
 
 
 def test_no_test_only_append_can_satisfy_the_gate():

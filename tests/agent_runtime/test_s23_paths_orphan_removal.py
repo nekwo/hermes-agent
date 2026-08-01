@@ -51,8 +51,14 @@ def test_the_lookalike_path_keep_set_survives():
     # store.py still writes Incident rows; only the .txt detail sidecar went.
     assert callable(paths.incidents_dir)
     assert callable(paths.incident_path)
-    # worker_sessions.py reads the sandbox ROOT; only the per-recipe leaves went.
-    assert callable(paths.proof_sandbox_root)
+    # INVERTED at S56 (2026-08-01). S23 kept ``proof_sandbox_root`` because
+    # ``worker_sessions.py`` read the sandbox ROOT while only the per-recipe
+    # leaves went. S56 deleted ``agent_runtime/worker_sessions.py`` whole, which
+    # took the helper's only reader with it, so the keep-side claim is now false
+    # by ruling. Inverted rather than deleted so S23's explicit keep stays on the
+    # record. The removal is owned by
+    # tests/agent_runtime/test_s56_worker_session_lane_removal.py.
+    assert not hasattr(paths, "proof_sandbox_root")
     # INVERTED at S54 (2026-08-01). S23 kept ``stagec_artifacts_dir`` here and
     # S43 kept it again while cutting its ``_task_dir`` leaf. By S54 the
     # directory helper itself had no reader anywhere -- the "deliberately not
@@ -83,22 +89,32 @@ def test_checkpoint_keeps_every_class_that_still_has_a_writer():
         "runs",
         "incidents",
         "runtime_instances",
-        "worker_sessions",
         "workspaces",
         "realms",
         "agents",
         "flow_graphs",
         "boards",
-        "repo_bundles",
         # S44 (2026-07-31) removed `role_envelopes` and `role_checklists` from
         # this list — they were pinned here as "still has a writer", and that
         # stopped being true when the two stores were deleted. Their absence is
         # asserted below rather than merely dropped, so the reversal of an
         # explicit keep-side claim stays visible in the file that made it.
+        #
+        # S56 (2026-08-01) removed `worker_sessions` and `repo_bundles` by the
+        # same rule; their absence is asserted below, not merely dropped.
         "self_tests",
         "packet_artifacts",
     ):
         assert name in checkpoint.ENTITY_CLASS_NAMES
+    # INVERTED at S56: both were pinned above as "still has a writer".
+    # `worker_sessions` lost its store when agent_runtime/worker_sessions.py was
+    # deleted whole; `repo_bundles` has been writer-less since S52 and became
+    # reader-less when S56 cut the four status projections. `runtime_instances`
+    # is DELIBERATELY still in the keep list above: it is writer-less too, but
+    # its rows still ship on the status wire, so dropping the class would drop
+    # state a reader can see.
+    assert "worker_sessions" not in checkpoint.ENTITY_CLASS_NAMES
+    assert "repo_bundles" not in checkpoint.ENTITY_CLASS_NAMES
 
 
 def test_checkpoint_dropped_the_two_role_classes_when_their_stores_went():

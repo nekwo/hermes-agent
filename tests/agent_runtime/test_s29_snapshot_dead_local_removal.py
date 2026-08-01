@@ -69,7 +69,14 @@ REMOVED_DEAD_LOCALS = (
 #: constant. The operator ruling cut the seed with the ``workspaces[].goals``
 #: field it fed (ledger item 5) — see
 #: ``tests/agent_runtime/test_s47_wire_constant_field_removal.py``.
-KEPT_LIVE_LOCALS = ("workers", "run_rows")
+#: ``workers`` left at S56 for the SAME reason, one stage later: S47 kept it as
+#: "the one surviving seed" because ``derive_from_workers(agents, workers)``
+#: still consumed it, but the list was always empty, so the projection could only
+#: ever emit a constant. S56 deleted ``agent_runtime/worker_sessions.py`` whole
+#: and renamed the projection to ``ensure_for_personas(personas)``, which takes
+#: no worker argument — the seed went with it. Its removal is asserted in
+#: ``test_the_lookalike_live_locals_survive`` rather than merely dropped here.
+KEPT_LIVE_LOCALS = ("run_rows",)
 
 
 def _function(name: str) -> ast.FunctionDef:
@@ -130,8 +137,10 @@ def test_the_named_dead_locals_are_not_bound_anywhere_in_the_builder():
 
 def test_the_lookalike_live_locals_survive():
     """Negative gate: the locals in the same function that LOOK like the removed
-    seeds and are load-bearing inputs to live projections. Two of the original
-    three remain; ``tasks`` left at S47 (see KEPT_LIVE_LOCALS)."""
+    seeds and are load-bearing inputs to live projections. ONE of the original
+    three remains; ``tasks`` left at S47 and ``workers`` at S56 (see
+    KEPT_LIVE_LOCALS). Both departures are INVERTED below rather than dropped,
+    so S29's explicit keep-side claim and its two reversals stay on the record."""
 
     builder = _function("_build_snapshot_uncoalesced")
     source = ast.get_source_segment(inspect.getsource(snapshot), builder) or ""
@@ -146,7 +155,13 @@ def test_the_lookalike_live_locals_survive():
         assert name in bound, name
     assert "tasks=tasks" not in source  # S47
     assert "run_summaries=run_rows" in source
-    assert "derive_from_workers(agents, workers)" in source
+    # INVERTED at S56: this asserted ``derive_from_workers(agents, workers)`` was
+    # the live consumer that justified keeping the ``workers`` seed. The seed and
+    # the worker argument are both gone; the surviving projection is pinned by
+    # name so the assertion still proves WHERE the roster comes from.
+    assert "workers" not in bound
+    assert "derive_from_workers(" not in source  # the CALL, not the prose note
+    assert "ensure_for_personas(agents)" in source
 
 
 def test_the_reachability_roots_are_back_to_the_real_external_surface():
@@ -201,7 +216,7 @@ def test_the_live_frame_is_unchanged(isolate_agent_runtime_root):
     """Negative gate: this is residue removal, not a contract move."""
 
     frame = snapshot.build_snapshot()
-    assert frame["parity"]["contract_version"] == 46
+    assert frame["parity"]["contract_version"] == 47
     for section in ("boards", "offices", "workspaces", "realms", "agents"):
         assert section in frame, f"{section} is a KEEP frame and must survive"
     for section in ("goals", "archived_tasks", "proofs", "incidents", "runs", "stage_verification"):

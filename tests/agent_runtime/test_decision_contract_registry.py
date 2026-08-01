@@ -128,7 +128,9 @@ def test_event_allowlist_is_catalog_projected():
     catalog = event_catalog()
 
     assert ALLOWED_EVENT_TYPES == set(catalog)
-    assert catalog["worker_session.context_absorbed"]["display_label"] == "Context absorbed"
+    # S56 de-registered the whole worker_session.* family with its emitter.
+    assert not [name for name in catalog if name.startswith("worker_session.")]
+    assert catalog["persona_assignment.created"]["display_label"] == "Persona assignment created"
     assert catalog["run.progress"]["summary_fields"]
 
 

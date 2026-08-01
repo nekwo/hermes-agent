@@ -169,7 +169,7 @@ def lease_witness(monkeypatch, isolate_agent_runtime_root):  # noqa: F811
 
         monkeypatch.setattr(target, attr, _wrapped)
 
-    _witness("derive_from_workers", PersonaInstanceStore, "derive_from_workers")
+    _witness("ensure_for_personas", PersonaInstanceStore, "ensure_for_personas")
     _witness("open_chat", PersonaInstanceStore, "open_chat")
     _witness("ensure_chat_session", harness, "_ensure_persona_chat_session")
     _witness("model_override", harness, "_resolve_chat_model_override")
@@ -208,7 +208,7 @@ def test_the_two_writes_that_cannot_be_leased_are_named_not_hidden(
     assert harness._cmd_mission_chat_message(_args("lease_turn")) == 0
     capsys.readouterr()
 
-    assert seen.get("derive_from_workers") is False
+    assert seen.get("ensure_for_personas") is False
 
 
 def test_each_leasable_write_happens_exactly_once_per_turn(

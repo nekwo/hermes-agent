@@ -4,7 +4,6 @@ from datetime import timedelta
 
 from hermes_time import now
 
-from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.events import EventLog
 from agent_runtime.models import Event, RepoBundle
@@ -12,8 +11,8 @@ from types import SimpleNamespace
 
 Task = SimpleNamespace
 from agent_runtime.persona_assignments import PersonaAssignmentSpec, PersonaAssignmentStore
-from agent_runtime.repo_bundles import RepoBundleStore, repo_lock_summary
-from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig, RepoBundleRoutingConfig, SimplifiedAgentContractConfig
+from agent_runtime import repo_bundles as repo_bundles_module
+from agent_runtime.repo_bundles import RepoBundleStore
 from agent_runtime.snapshot import build_snapshot
 from agent_runtime.states import TaskState
 from agent_runtime.store import IncidentStore, TaskStore
@@ -78,35 +77,30 @@ def test_repeated_empty_delivery_without_new_proof_waits_for_operator(isolate_ag
     assert not hasattr(TaskStore(), "create")
 
 
-def test_the_repo_lock_summary_survives_its_writers_and_reports_empty(isolate_agent_runtime_root):
-    """S52 retargeted the two lock tests that stood here.
+def test_the_repo_bundle_read_only_summaries_are_gone_after_s56(isolate_agent_runtime_root):
+    """S56 finished the cut this case has been tracking since S52.
 
-    They exercised ``acquire_repo_bundle_locks`` / ``release_repo_bundle_locks``
-    -- write-lock conflict parking and the playground read-only default -- and
-    both mutators were deleted with the write lane for want of a production
-    caller. Their whole caller set was this file plus ``test_status``.
+    S52 deleted the repo-bundle WRITE lane (``acquire_repo_bundle_locks`` /
+    ``release_repo_bundle_locks`` and the bundle mutators) for want of a
+    production caller. This case then stood as the honest witness that
+    ``repo_lock_summary`` survived as an asserted CONSTANT -- the S47 item-5
+    defect class, filed for a follow-up wave.
 
-    What replaces them records the CONSEQUENCE rather than pretending the lane
-    is still exercised: ``repo_lock_summary`` is still read by ``status.py`` and
-    still published as ``repo_locks``, but with no writer left it can only ever
-    report empty. That is the S47 item-5 defect class (a wire whose value no
-    code path can move), filed for the follow-up wave; this test is the honest
-    witness that it is now a constant, not coverage of a live lane.
+    S56 is that wave: the summaries themselves are gone, along with the
+    ``repo_bundles`` / ``repo_bundle_closeout`` / ``bundle_queue`` /
+    ``repo_locks`` rows they fed in ``build_status``. The pin is INVERTED rather
+    than dropped so a stale producer cannot resurrect a reader.
     """
 
-    assert repo_lock_summary() == {"lock_count": 0, "locks": []}
-
-
-def _bundle_config() -> AgentRuntimeConfig:
-    return AgentRuntimeConfig(
-        repo_bundle_routing=RepoBundleRoutingConfig(enabled=True),
-        simplified_agent_contract=SimplifiedAgentContractConfig(enabled=True),
-        enterprise_worker_sessions=EnterpriseWorkerSessionsConfig(
-            enabled=True,
-            persona_instance_runtime=True,
-            persona_assignment_store=True,
-        ),
-    )
+    for retired in (
+        "repo_bundle_summary",
+        "repo_bundle_delivery_summary",
+        "bundle_queue_summary",
+        "repo_lock_summary",
+        "REPO_BUNDLE_DELIVERY_CONTRACT",
+        "REPO_BUNDLE_CHECKOUT_STATUS",
+    ):
+        assert not hasattr(repo_bundles_module, retired), retired
 
 
 class CompleteDevRuntime:

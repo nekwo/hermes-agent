@@ -13,25 +13,20 @@ from .persona_assignments import (
     PersonaAssignmentStore,
     PersonaInstanceStore,
     active_persona_instance_agent_summaries,
-    persona_assignment_store_enabled,
     persona_assignment_summary,
-    persona_instance_runtime_enabled,
     persona_instance_summary,
 )
 from .persona_chat_history import DEFAULT_PERSONA_CHAT_MESSAGE_TAIL, persona_chat_history_summary, persona_chat_trace_summary
 from .profile_readiness import profile_readiness_for_persona
 from .provider_health import provider_health_for_personas
 from .migrations import effective_config_summary
-from .production_envelope import production_envelope_status
-from .repo_bundles import RepoBundleStore, bundle_queue_summary, repo_bundle_delivery_summary, repo_bundle_summary, repo_lock_summary
 from .runtime_instances import GoalRuntimeInstanceStore, runtime_instances_summary
 from .states import RunState
 from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, RunStore, TaskStore
-from .worker_sessions import WorkerSessionStore, worker_session_summary
 from .snapshot import _default_persona_session_db, _parity_envelope
 
 
-def build_status(task_store: TaskStore | None = None, run_store: RunStore | None = None, incident_store: IncidentStore | None = None, agent_store: AgentStore | None = None, event_log: EventLog | None = None, worker_session_store: WorkerSessionStore | None = None) -> dict:
+def build_status(task_store: TaskStore | None = None, run_store: RunStore | None = None, incident_store: IncidentStore | None = None, agent_store: AgentStore | None = None, event_log: EventLog | None = None) -> dict:
     _build_started = time.perf_counter()
     run_store = run_store or RunStore()
     incident_store = incident_store or IncidentStore()
@@ -40,23 +35,19 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
     # log; CachedEventLog reads events.jsonl once and serves all of them from
     # memory (same as build_snapshot — this was the 2s hog of a warm status).
     event_log = event_log or CachedEventLog()
-    worker_session_store = worker_session_store or WorkerSessionStore(event_log=event_log)
     tasks = []
     runs = run_store.list_all()
-    workers = worker_session_store.list_all()
     incidents = incident_store.list_all()
     cfg = load_agent_runtime_config()
     # The background Mission Daemon was retired; execution is always operator/
     # goal-runner driven ("manual").
     execution_mode = "manual"
     agents = agent_store.list_all() or ensure_persisted_personas(cfg)
-    repo_bundles = RepoBundleStore(event_log=event_log).list_all()
     runtime_instances = GoalRuntimeInstanceStore(event_log=event_log).list_all()
     active_runs = [r for r in runs if r.state in ACTIVE_RUN_STATES]
     queued_runs = [r for r in active_runs if r.state == RunState.QUEUED]
     waiting_runs = [r for r in active_runs if r.state in {RunState.WAITING_ON_TOOL, RunState.WAITING_ON_APPROVAL}]
-    active_workers = worker_session_store.find_active()
-    dirty_state = build_dirty_state(tasks=tasks, runs=runs, incidents=incidents, workers=workers, runtime_instances=runtime_instances)
+    dirty_state = build_dirty_state(tasks=tasks, runs=runs, incidents=incidents, runtime_instances=runtime_instances)
     foreground_dirty_state = dirty_state.get("runtime", {}).get("foreground", {})
     recent_events = event_log.tail(20)
     data = {
@@ -81,84 +72,86 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
         "waiting_runs": len(waiting_runs),
         "stale_runs": len([r for r in runs if r.state == RunState.STALE]),
         "open_incidents": len([i for i in incidents if i.closed_at is None]),
-        "active_worker_sessions": len(active_workers),
         "dirty": dirty_state["dirty"],
         "dirty_summary": dirty_state["summary"],
         "dirty_state": dirty_state,
         "runtime_health": provider_health_for_personas(agents),
         "runtime_config": effective_config_summary(cfg),
-        "production_envelope": production_envelope_status(cfg),
-        "swarm": {
-            "enabled": bool(getattr(getattr(cfg, "swarm", None), "enabled", False)),
-        },
+        # S56 (contract 47) removed six wire rows from this frame, each of which
+        # could only ever report one value once its producer was gone:
+        #   * `worker_sessions` / `active_worker_sessions` — the
+        #     WorkerSessionStore write lane went with this commit.
+        #   * `repo_bundles` / `repo_bundle_closeout` / `bundle_queue` /
+        #     `repo_locks` — S52 deleted every writer that could create a bundle
+        #     row or a repo-bundle lock; doc 19 filed `repo_lock_summary()` as
+        #     asserted-constant debt at the time.
+        #   * `lanes` — a duplicate of `runtime_instances["lanes"]`, empty by
+        #     construction since S53 removed the GoalRuntimeInstance writers.
+        #   * `production_envelope` / `swarm` / `swarm_budget` — the envelope was
+        #     hand-written prose keyed on flags, several of its claims false
+        #     against this tree (see the S56 removal contract); `swarm` and
+        #     `swarm_budget` echoed a config block nothing enforced.
+        # `runtime_instances` KEEPS its own `lanes` sub-key: that block is the
+        # projection, and removing the top-level duplicate changes no number a
+        # reader could not still get.
         "recursive_supervision": {
             "enabled": _recursive_supervision_enabled(cfg),
         },
         "foreground_runtime": runtime_instances_summary(runtime_instances),
-        "observability": build_observability(runs=runs, incidents=incidents, events=recent_events, execution_mode=execution_mode, worker_sessions=workers),
+        "observability": build_observability(runs=runs, incidents=incidents, events=recent_events, execution_mode=execution_mode),
         "agents": [_agent_status(a) for a in agents],
-        "worker_sessions": [worker_session_summary(worker) for worker in workers],
-        "repo_bundles": [repo_bundle_summary(bundle) for bundle in repo_bundles],
-        "repo_bundle_closeout": repo_bundle_delivery_summary(repo_bundles) if repo_bundles else None,
-        "bundle_queue": bundle_queue_summary(repo_bundles),
-        "repo_locks": repo_lock_summary(),
         "runtime_instances": runtime_instances_summary(runtime_instances),
-        "lanes": runtime_instances_summary(runtime_instances)["lanes"],
-        "swarm_budget": _swarm_budget_summary(cfg),
     }
-    if persona_instance_runtime_enabled(cfg):
-        instance_store = PersonaInstanceStore(event_log=event_log)
-        instances = instance_store.derive_from_workers(agents, workers)
-        personas_by_id = {str(getattr(agent, "id", "") or ""): agent for agent in agents}
-        data["agents"] = [
-            *data["agents"],
-            *active_persona_instance_agent_summaries(instances, personas_by_id),
-        ]
-        data["persona_instance_runtime"] = {
-            "enabled": True,
-            "assignment_store_enabled": persona_assignment_store_enabled(cfg),
-        }
-        data["persona_instances"] = [persona_instance_summary(instance) for instance in instances]
-        session_db = _default_persona_session_db()
-        assignments = (
-            PersonaAssignmentStore(event_log=event_log).list_all()
-            if persona_assignment_store_enabled(cfg)
-            else []
-        )
-        history_accountant = ProjectionAccountant("persona_chat_history")
-        trace_accountant = ProjectionAccountant("persona_chat_trace")
-        data["persona_chat_history"] = persona_chat_history_summary(
-            persona_instances=instances,
-            session_db=session_db,
-            message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
-            accountant=history_accountant,
-            persona_assignments=assignments,
-        )
-        data["persona_chat_trace"] = persona_chat_trace_summary(
-            persona_instances=instances,
-            event_log=event_log,
-            message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
-            accountant=trace_accountant,
-        )
-        data["operator_channels"] = operator_channel_summary(
-            persona_instances=instances,
-            persona_chat_history=data["persona_chat_history"],
-            persona_chat_trace=data["persona_chat_trace"],
-        )
-        completeness = {
-            "persona_chat_history": history_accountant.summary(),
-            "persona_chat_trace": trace_accountant.summary(),
-        }
-        drop_samples = history_accountant.drop_samples() + trace_accountant.drop_samples()
-        if persona_assignment_store_enabled(cfg):
-            data["persona_assignments"] = {
-                "active": [persona_assignment_summary(item) for item in assignments if item.state in {"queued", "assigned", "running", "waiting_on_tool", "waiting_on_proof", "needs_input"}],
-                "recent": [persona_assignment_summary(item) for item in assignments[-25:]],
-            }
-    else:
-        data["persona_instance_runtime"] = {"enabled": False}
-        completeness = {}
-        drop_samples = []
+    # S56: the persona-instance roster is UNCONDITIONAL. It used to be gated on
+    # `enterprise_worker_sessions.enabled AND .persona_instance_runtime`, a
+    # misnomer left over from the worker lane — the roster is the identity
+    # substrate every Mission Control surface keys on, and the enabled shape has
+    # been the only shape for months. The `persona_instance_runtime` WIRE block
+    # stays (the Launcher bridge reads it) and now reports the truth
+    # unconditionally.
+    instance_store = PersonaInstanceStore(event_log=event_log)
+    instances = instance_store.ensure_for_personas(agents)
+    personas_by_id = {str(getattr(agent, "id", "") or ""): agent for agent in agents}
+    data["agents"] = [
+        *data["agents"],
+        *active_persona_instance_agent_summaries(instances, personas_by_id),
+    ]
+    data["persona_instance_runtime"] = {
+        "enabled": True,
+        "assignment_store_enabled": True,
+    }
+    data["persona_instances"] = [persona_instance_summary(instance) for instance in instances]
+    session_db = _default_persona_session_db()
+    assignments = PersonaAssignmentStore(event_log=event_log).list_all()
+    history_accountant = ProjectionAccountant("persona_chat_history")
+    trace_accountant = ProjectionAccountant("persona_chat_trace")
+    data["persona_chat_history"] = persona_chat_history_summary(
+        persona_instances=instances,
+        session_db=session_db,
+        message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
+        accountant=history_accountant,
+        persona_assignments=assignments,
+    )
+    data["persona_chat_trace"] = persona_chat_trace_summary(
+        persona_instances=instances,
+        event_log=event_log,
+        message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
+        accountant=trace_accountant,
+    )
+    data["operator_channels"] = operator_channel_summary(
+        persona_instances=instances,
+        persona_chat_history=data["persona_chat_history"],
+        persona_chat_trace=data["persona_chat_trace"],
+    )
+    completeness = {
+        "persona_chat_history": history_accountant.summary(),
+        "persona_chat_trace": trace_accountant.summary(),
+    }
+    drop_samples = history_accountant.drop_samples() + trace_accountant.drop_samples()
+    data["persona_assignments"] = {
+        "active": [persona_assignment_summary(item) for item in assignments if item.state in {"queued", "assigned", "running", "waiting_on_tool", "waiting_on_proof", "needs_input"}],
+        "recent": [persona_assignment_summary(item) for item in assignments[-25:]],
+    }
     data["parity"] = _parity_envelope(
         data,
         build_started=_build_started,
@@ -170,39 +163,15 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
     return data
 
 
-def _swarm_budget_summary(cfg) -> dict:
-    swarm = getattr(cfg, "swarm", None)
-    soft_tokens = int(getattr(swarm, "global_token_soft_limit", 0) or 0)
-    hard_tokens = int(getattr(swarm, "global_token_hard_limit", 0) or 0)
-    soft_calls = int(getattr(swarm, "global_api_call_soft_limit", 0) or 0)
-    hard_calls = int(getattr(swarm, "global_api_call_hard_limit", 0) or 0)
-    return {
-        "state": "ok",
-        "global": {"total_tokens": 0, "api_calls": 0},
-        "limits": {
-            "global_token_soft_limit": soft_tokens,
-            "global_token_hard_limit": hard_tokens,
-            "global_api_call_soft_limit": soft_calls,
-            "global_api_call_hard_limit": hard_calls,
-            "per_lane_token_limit": int(getattr(swarm, "per_lane_token_limit", 0) or 0),
-            "per_lane_api_call_limit": int(getattr(swarm, "per_lane_api_call_limit", 0) or 0),
-        },
-        "by_task": {},
-    }
-
-
 def _recursive_supervision_enabled(cfg) -> bool:
+    # S56 pruned `supervision` to its one live field. The three other flags this
+    # OR-chain read (`recursive_enabled`, `hierarchical_budget_enabled`,
+    # `deploy_verification_enabled`) and `swarm.enabled` were config the runtime
+    # never consulted anywhere else, so they could only ever widen this answer
+    # without anything acting on it. `child_events_enabled` is real: continuity.py
+    # reads it to decide whether child.* events are emitted.
     supervision = getattr(cfg, "supervision", None)
-    swarm = getattr(cfg, "swarm", None)
-    return any(
-        [
-            bool(getattr(supervision, "child_events_enabled", False)),
-            bool(getattr(supervision, "recursive_enabled", False)),
-            bool(getattr(supervision, "hierarchical_budget_enabled", False)),
-            bool(getattr(supervision, "deploy_verification_enabled", False)),
-            bool(getattr(swarm, "enabled", False)),
-        ]
-    )
+    return bool(getattr(supervision, "child_events_enabled", False))
 
 
 # S21: the `next_actions` routing chain (`_next_action`, `_stopped_progress`,

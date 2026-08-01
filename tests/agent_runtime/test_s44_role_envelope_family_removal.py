@@ -215,8 +215,15 @@ def test_the_lookalike_keep_set_survives():
     """Names one bare-word grep away from this cut — every one still live."""
 
     # The checkpoint classes that DO still have a writer.
-    for name in ("persona_instances", "boards", "repo_bundles", "self_tests", "packet_artifacts"):
+    for name in ("persona_instances", "boards", "self_tests", "packet_artifacts"):
         assert name in checkpoint.ENTITY_CLASS_NAMES
+    # INVERTED at S56 (2026-08-01), not deleted: ``repo_bundles`` was pinned in
+    # the line above as a class that still has a writer. That stopped being true
+    # when S52 removed the bundle write lane and S56 removed the four status
+    # projections that were its last readers, so the class went by exactly the
+    # rule S44 applied to ``role_envelopes`` / ``role_checklists``. Owned by
+    # tests/agent_runtime/test_s52_repo_bundle_write_lane_removal.py.
+    assert "repo_bundles" not in checkpoint.ENTITY_CLASS_NAMES
     # ``self_tests`` shares the recursive per-task shape the two removals had.
     assert callable(paths.self_tests_dir)
     assert callable(paths.self_test_task_dir)

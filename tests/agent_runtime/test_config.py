@@ -181,11 +181,19 @@ def test_config_loads_read_model_flag_defaults_and_filename_guard(tmp_path):
     assert load_agent_runtime_config(bad).read_model.db_filename == "read_model.db"
 
 
-def test_normal_worker_flow_defaults_off_and_can_be_enabled(tmp_path):
+def test_normal_worker_flow_config_block_is_ignored_after_s56(tmp_path):
+    """INVERTED at S56, same shape as the ``role_envelope`` case below.
+
+    This used to prove ``normal_worker_flow`` loaded and could be turned on. The
+    block joined the worker-session lane that S56 deleted whole, so the contract
+    inverts: an operator yaml that still sets it must LOAD CLEANLY and produce NO
+    such attribute. The same yaml is still exercised end to end, so a re-grown
+    loader would fail here rather than pass silently.
+    """
+
     default_config = load_agent_runtime_config(tmp_path / "missing.yaml")
 
-    assert default_config.normal_worker_flow.enabled is False
-    assert not hasattr(default_config.normal_worker_flow, "auto_final_gate_after_delivery")
+    assert not hasattr(default_config, "normal_worker_flow")
 
     p = tmp_path / "config.yaml"
     p.write_text(
@@ -198,8 +206,60 @@ def test_normal_worker_flow_defaults_off_and_can_be_enabled(tmp_path):
 
     cfg = load_agent_runtime_config(p)
 
-    assert cfg.normal_worker_flow.enabled is True
-    assert cfg.normal_worker_flow.max_self_test_repeats_without_change == 2
+    assert not hasattr(cfg, "normal_worker_flow")
+    # A stale block must not poison the sibling blocks that DO still load.
+    assert cfg.supervision.child_events_enabled is False
+
+
+def test_retired_worker_lane_config_blocks_all_load_and_are_ignored_after_s56(tmp_path):
+    """The other six blocks S56 retired, exercised through the same yaml lane.
+
+    ``continuous_role_sessions``, ``enterprise_worker_sessions``,
+    ``repo_bundle_routing``, ``simplified_agent_contract`` and ``swarm`` are gone
+    outright; ``supervision`` was PRUNED to its one live field
+    (``child_events_enabled``, read by continuity.py) and must drop the other
+    three rather than reload them.
+    """
+
+    p = tmp_path / "config.yaml"
+    p.write_text(
+        "agent_runtime:\n"
+        "  continuous_role_sessions:\n"
+        "    enabled: true\n"
+        "  enterprise_worker_sessions:\n"
+        "    enabled: true\n"
+        "    worker_session_store: true\n"
+        "    persona_instance_runtime: true\n"
+        "    persona_assignment_store: true\n"
+        "  repo_bundle_routing:\n"
+        "    enabled: true\n"
+        "  simplified_agent_contract:\n"
+        "    enabled: true\n"
+        "  swarm:\n"
+        "    enabled: true\n"
+        "  supervision:\n"
+        "    child_events_enabled: true\n"
+        "    recursive_enabled: true\n"
+        "    hierarchical_budget_enabled: true\n"
+        "    deploy_verification_enabled: true\n",
+        encoding="utf-8",
+    )
+
+    cfg = load_agent_runtime_config(p)
+
+    for retired in (
+        "continuous_role_sessions",
+        "enterprise_worker_sessions",
+        "repo_bundle_routing",
+        "simplified_agent_contract",
+        "swarm",
+    ):
+        assert not hasattr(cfg, retired), retired
+
+    # `supervision` survives, pruned to the one field anything reads.
+    assert cfg.supervision.child_events_enabled is True
+    for pruned in ("recursive_enabled", "hierarchical_budget_enabled", "deploy_verification_enabled"):
+        assert not hasattr(cfg.supervision, pruned), pruned
 
 
 def test_legacy_mission_plan_config_is_ignored_after_stage_graph_removal(tmp_path):
@@ -219,7 +279,9 @@ def test_legacy_mission_plan_config_is_ignored_after_stage_graph_removal(tmp_pat
     cfg = load_agent_runtime_config(p)
 
     assert not hasattr(cfg, "mission_plan")
-    assert cfg.normal_worker_flow.enabled is False
+    # S56 retired `normal_worker_flow`; the sibling-block liveness check now
+    # reads the one supervision field that survived the prune.
+    assert cfg.supervision.child_events_enabled is False
 
 
 def test_role_envelope_config_block_is_ignored_after_s47(tmp_path):
@@ -246,7 +308,9 @@ def test_role_envelope_config_block_is_ignored_after_s47(tmp_path):
 
     assert not hasattr(cfg, "role_envelope")
     # A stale block must not poison the sibling blocks that DO still load.
-    assert cfg.normal_worker_flow.enabled is False
+    # S56 retired `normal_worker_flow`; `supervision.child_events_enabled` is
+    # the surviving live sibling.
+    assert cfg.supervision.child_events_enabled is False
 
 
 def test_config_persona_skills_merge_defaults_with_explicit_removals(tmp_path):

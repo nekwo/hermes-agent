@@ -53,7 +53,6 @@ from importlib.util import find_spec
 
 import pytest
 
-from agent_runtime import production_envelope
 from agent_runtime.decision_contract_registry import event_catalog
 from agent_runtime.events import ALLOWED_EVENT_TYPES, OPERATOR_SUMMARY_EVENT_TYPES
 
@@ -157,26 +156,29 @@ def test_no_operator_summary_arm_went_missing():
     assert OPERATOR_SUMMARY_EVENT_TYPES <= ALLOWED_EVENT_TYPES
 
 
-def test_the_production_envelope_stopped_advertising_the_deleted_workflow():
-    """The H6 item may not claim a control no code can perform.
+def test_the_production_envelope_that_advertised_the_deleted_workflow_is_itself_gone():
+    """SUPERSEDED at S56, inverted rather than deleted, with the reason kept.
 
-    Reads the EMITTED rows, not the module source. The S48 lesson applies to
-    this file too: the explanatory comment left at the cut site names the
-    removed claims on purpose, so a substring gate over the source would flag
-    the very note that documents the cut. What an operator reads is the
-    ``controls`` list, so that is what is asserted.
-    """
+    S49 rewrote H6's ``controls`` so the envelope would stop claiming a
+    ``worker.takeover`` workflow no operator could invoke, and this test pinned
+    the three surviving claims. S56 then found two of those three were false
+    too: only ``worker.resume`` was ever a registered capability (never
+    ``worker.pause``), both verbs' implementations went with the worker-session
+    write lane, and the "daemon stop/kill paths" claim outlived the retired
+    Mission Daemon. Rewording a third time would have been the third patch on a
+    recurring defect, so the whole prose block went instead.
 
-    item = production_envelope._h6_operator_control(None)
-    joined = " ".join(item["controls"])
-    for claim in ("takeover", "approve_destructive", "park/resume"):
-        assert claim not in joined, claim
+    The assertion is inverted because the ORIGINAL concern still stands: an
+    envelope item may not advertise a control no code can perform. The only way
+    that can be true now is if the envelope does not exist."""
+    from importlib.util import find_spec
 
-    # Negative gate: the item itself survives with its real controls.
-    assert item["id"] == "H6"
-    assert item["status"] == "implemented"
-    assert "worker.pause and worker.resume capabilities are registered" in item["controls"]
-    assert len(item["controls"]) == 3
+    assert find_spec("agent_runtime.production_envelope") is None
+    from agent_runtime.migrations import effective_config_summary
+    from agent_runtime.status import build_status
+
+    assert "production_envelope" not in effective_config_summary()
+    assert "production_envelope" not in build_status()
 
 
 def test_run_closed_survives_on_its_remaining_caller():

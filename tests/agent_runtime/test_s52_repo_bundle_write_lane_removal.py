@@ -35,14 +35,17 @@ that the frozenset may not name a de-registered type, and the function
 early-returns ``None`` outside it — so both the rows and the arm became
 unreachable the moment the registration went, and all three go in this commit.
 
-**A KNOWN CONSEQUENCE this wave deliberately does not fix.** With both lock
-mutators gone, nothing can write ``repo_bundle_locks.json``, so
-``repo_lock_summary()`` — still live, still published by ``status.py`` as
-``repo_locks`` — can only ever report ``{"lock_count": 0, "locks": []}``. That
-is the S47 item-5 defect class (a wire whose value no code path can move).
-Retiring it means editing the emitted status frame, which belongs to the
-read-side/contract wave this one was scoped out of. It is asserted as a constant
-below so it stays visible, and recorded in the deferred-debt ledger.
+**A KNOWN CONSEQUENCE this wave deliberately did not fix — CLOSED AT S56.** With
+both lock mutators gone, nothing could write ``repo_bundle_locks.json``, so
+``repo_lock_summary()`` — still live and still published by ``status.py`` as
+``repo_locks`` at the time — could only ever report
+``{"lock_count": 0, "locks": []}``: the S47 item-5 defect class (a wire whose
+value no code path can move). Retiring it meant editing the emitted status frame,
+which belonged to the read-side/contract wave this one was scoped out of. S56 is
+that wave: the summary and the ``repo_locks`` row are both gone, along with
+``repo_bundle_summary`` / ``repo_bundle_delivery_summary`` /
+``bundle_queue_summary`` and the three sibling rows. The pins below are INVERTED
+to absence rather than dropped, so a stale producer cannot resurrect a reader.
 
 Count: 79 -> 72. The absolute authority stays S15's ``SURVIVING_EVENT_COUNT``.
 """
@@ -108,13 +111,22 @@ REMOVED_MODULE_NAMES = (
     "_REPO_OWNER_RULES",
 )
 
-#: The read side the cut had to preserve.
-SURVIVING_READ_NAMES = (
-    "RepoBundleStore",
+#: The read side the S52 cut preserved. S56 took four of the five: the
+#: projection helpers fed `build_status` rows (`repo_bundles`,
+#: `repo_bundle_closeout`, `bundle_queue`, `repo_locks`) that no writer could
+#: move, so the summaries went with the rows. `RepoBundleStore` -- the read side
+#: proper -- is what S52 actually had to keep, and it is still here.
+SURVIVING_READ_NAMES = ("RepoBundleStore",)
+
+#: INVERTED at S56: these four were listed above as surviving reads; they are
+#: now absence pins so a stale producer cannot resurrect a reader.
+S56_REMOVED_READ_NAMES = (
     "repo_lock_summary",
     "bundle_queue_summary",
     "repo_bundle_summary",
     "repo_bundle_delivery_summary",
+    "REPO_BUNDLE_DELIVERY_CONTRACT",
+    "REPO_BUNDLE_CHECKOUT_STATUS",
 )
 
 
@@ -134,12 +146,21 @@ def test_the_read_side_survives_whole():
         assert callable(getattr(repo_bundles.RepoBundleStore, reader)), reader
 
 
-def test_status_still_projects_bundles_off_the_surviving_read_path():
-    """The wire, not just the two ends: ``status.py`` must still reach
-    ``list_all`` — that constructor is the reason the store stays at all."""
+def test_the_projection_helpers_went_at_s56():
+    """INVERTED at S56 from ``test_status_still_projects_bundles_off_the_surviving_read_path``.
+
+    That case pinned the WIRE: ``build_status`` had to reach
+    ``RepoBundleStore(event_log=event_log).list_all()``, because that constructor
+    was the reason S52 kept the store at all. S56 removed the four rows the wire
+    fed -- each empty by construction once S52 deleted the writers -- so the
+    constructor and the four summary helpers went with them. The pin inverts: the
+    helpers must stay gone, and ``build_status`` must not regrow the call.
+    """
+
+    assert [name for name in S56_REMOVED_READ_NAMES if hasattr(repo_bundles, name)] == []
 
     source = inspect.getsource(status.build_status)
-    assert "RepoBundleStore(event_log=event_log).list_all()" in source
+    assert "RepoBundleStore" not in source
 
 
 def test_the_seven_contracts_are_deregistered():
@@ -235,15 +256,17 @@ def test_historical_rows_still_read_back(isolate_agent_runtime_root):
 
 
 def test_the_repo_lock_wire_is_now_a_constant(isolate_agent_runtime_root):
-    """The consequence this wave records rather than fixes (S47 item-5 class).
+    """INVERTED at S56 — the follow-up wave this docstring was written for.
 
-    Both lock writers are gone, so the file behind this summary can never gain a
-    row. It is still read and still published by ``status.py``. Pinned as a
-    constant so the next wave finds it stated, not inferred.
+    S52 left ``repo_lock_summary`` readable and still published as
+    ``repo_locks``, with no writer able to give it a row: the S47 item-5 class,
+    pinned as a constant "so the next wave finds it stated, not inferred". S56 is
+    that wave. The summary and the wire row are both gone; the constant is now
+    an absence.
     """
 
-    assert repo_bundles.repo_lock_summary() == {"lock_count": 0, "locks": []}
-    assert status.build_status()["repo_locks"] == {"lock_count": 0, "locks": []}
+    assert not hasattr(repo_bundles, "repo_lock_summary")
+    assert "repo_locks" not in status.build_status()
 
 
 def test_the_registry_lost_exactly_seven_contracts():

@@ -154,7 +154,7 @@ class _TranscriptDB:
 def _seed(monkeypatch, provider):
     """Wire the handler onto a hermetic store plus the given provider."""
 
-    from agent_runtime.config import AgentRuntimeConfig, EnterpriseWorkerSessionsConfig
+    from agent_runtime.config import AgentRuntimeConfig
     from agent_runtime.personas import AgentPersona
     from agent_runtime.store import AgentStore
     from hermes_cli import harness
@@ -172,18 +172,10 @@ def _seed(monkeypatch, provider):
             hermes_profile="profile-dev",
         )
     )
-    monkeypatch.setattr(
-        harness,
-        "load_agent_runtime_config",
-        lambda: AgentRuntimeConfig(
-            enterprise_worker_sessions=EnterpriseWorkerSessionsConfig(
-                enabled=True,
-                worker_session_store=True,
-                persona_instance_runtime=True,
-                persona_assignment_store=True,
-            )
-        ),
-    )
+    # S56: this used to flip `enterprise_worker_sessions` on so the persona
+    # roster would project. The roster is unconditional now and the block is
+    # gone, so a bare config is the same fixture.
+    monkeypatch.setattr(harness, "load_agent_runtime_config", lambda: AgentRuntimeConfig())
     monkeypatch.setattr(harness, "_default_persona_session_db", lambda: _TranscriptDB())
     monkeypatch.setattr(harness, "GPTPersonaRuntime", provider)
     return harness

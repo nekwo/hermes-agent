@@ -9,9 +9,13 @@ is what still has production callers:
   ``wt_reaped_patches/`` capture-before-delete contract, dry-run write-freedom,
   opt-in legacy-temp handling, reparse-alias safety, and the registered
   ``worktree.orphans_reaped`` emission.
-* ``read_bundle_promotion_record`` — the read that lets
-  ``repo_bundles.repo_bundle_summary`` keep labelling historical promotions for
-  ``status.py`` now that nothing writes new ones.
+* ``read_bundle_promotion_record`` — the parse-safety contract on
+  already-written promotion records (absent / malformed / valid). S56 deleted
+  ``repo_bundles.repo_bundle_summary``, which was this read's last production
+  caller, so what remains here covers the reader's own safety, not a live
+  projection. See the S56 follow-up note: the read is now caller-less and is a
+  deletion candidate for a later wave — that is a PRODUCTION decision, not one
+  this test file may make.
 """
 
 from __future__ import annotations
@@ -28,7 +32,6 @@ from agent_runtime.delivery_directive import (
 )
 from agent_runtime.models import RepoBundle
 from agent_runtime.repo_context import RepoExecutionContext, isolated_repo_context_for_run
-from agent_runtime.repo_bundles import repo_bundle_summary
 
 import pytest
 
@@ -115,37 +118,14 @@ def test_promotion_record_read_is_absent_malformed_and_valid_safe(
     assert read_bundle_promotion_record(bundle.task_id, bundle.id) is None
 
 
-def test_bundle_summary_still_labels_a_historical_promotion(source_repo, isolate_agent_runtime_root):
-    """Nothing writes promotion records anymore; already-written ones must not
-    be relabelled as never-promoted."""
-
-    bundle = _bundle(source_repo)
-    _write_promotion_record(
-        bundle,
-        {
-            "promote": {"status": "promoted", "reason": None, "commit": "deadbee"},
-            "worktree": {"status": "reaped"},
-            "recorded_at": now().isoformat(),
-        },
-    )
-
-    summary = repo_bundle_summary(bundle)
-
-    assert summary["checkout_applied"] is True
-    assert summary["checkout_status"] == "promoted"
-    assert summary["delivery_contract"] == "delivery_directive"
-    assert summary["promotion"]["status"] == "promoted"
-    assert summary["promotion"]["commit"] == "deadbee"
-    assert "commit deadbee" in summary["closeout_label"]
-
-
-def test_bundle_summary_without_promotion_keeps_staged_contract(source_repo, isolate_agent_runtime_root):
-    bundle = _bundle(source_repo)
-    summary = repo_bundle_summary(bundle)
-    assert summary["checkout_applied"] is False
-    assert summary["checkout_status"] == "not_applied"
-    assert summary["promotion"] is None
-    assert summary["delivery_contract"] == "staged_bundle_not_applied"
+# S56 deleted the two bundle-summary cases that stood here
+# (``test_bundle_summary_still_labels_a_historical_promotion`` and
+# ``test_bundle_summary_without_promotion_keeps_staged_contract``). Their only
+# subject was ``repo_bundles.repo_bundle_summary`` and its
+# ``checkout_applied`` / ``checkout_status`` / ``delivery_contract`` /
+# ``closeout_label`` labelling, all deleted with the ``repo_bundles`` /
+# ``repo_bundle_closeout`` wire rows they fed. Nothing else in this file
+# depended on them; the janitor coverage below is untouched.
 
 
 def test_no_archive_choke_point_survives_to_run_a_directive(isolate_agent_runtime_root):

@@ -303,46 +303,10 @@ class AgentRun:
     schema_version: int = 1
 
 
-@dataclass(slots=True)
-class WorkerSession:
-    id: str
-    task_id: str
-    persona_id: str
-    role: str
-    display_name: str
-    state: WorkerSessionState
-    opened_at: datetime
-    last_heartbeat_at: datetime
-    goal_epoch: str | None = None
-    current_stage_id: str | None = None
-    current_assignment_id: str | None = None
-    active_run_id: str | None = None
-    session_id: str | None = None
-    last_context_receipt_at: datetime | None = None
-    closed_at: datetime | None = None
-    context_receipt_id: str | None = None
-    compression_receipt_id: str | None = None
-    skill_manifest_hash: str | None = None
-    prompt_contract_hash: str | None = None
-    model: str | None = None
-    provider: str | None = None
-    api_mode: str | None = None
-    decision_count: int = 0
-    proof_count: int = 0
-    repair_count: int = 0
-    handoff_count: int = 0
-    tool_budget_used: int = 0
-    read_search_budget_used: int = 0
-    token_budget_used: int = 0
-    watchdog_warning_count: int = 0
-    last_environment_fingerprint: str | None = None
-    last_failed_proof_id: str | None = None
-    last_repair_signal_hash: str | None = None
-    possession_state: PossessionState = PossessionState.AVAILABLE
-    lease_owner: str | None = None
-    lease_expires_at: datetime | None = None
-    close_reason: str | None = None
-    schema_version: int = 1
+# S56 deleted the ``WorkerSession`` dataclass with
+# ``agent_runtime/worker_sessions.py``. Nothing constructs, reads or persists a
+# worker row any more; ``WorkerSessionState`` survives because
+# ``PersonaInstance.state`` is typed on it.
 
 
 @dataclass(slots=True)
@@ -392,7 +356,6 @@ class PersonaInstance:
     model_override_issued_at: datetime | None = None
     current_assignment_id: str | None = None
     current_task_id: str | None = None
-    active_worker_session_id: str | None = None
     active_run_id: str | None = None
     # Durable pointer to the operator-owned Mission Control chat root.  This is
     # deliberately independent from worker/run sessions: a task bind may come

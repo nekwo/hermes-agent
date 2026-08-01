@@ -92,18 +92,25 @@ ENTITY_CLASSES: tuple[EntityClass, ...] = (
     EntityClass("runs", paths.runs_dir),
     EntityClass("incidents", paths.incidents_dir),
     EntityClass("runtime_instances", paths.runtime_instances_dir),
-    EntityClass("worker_sessions", paths.worker_sessions_dir),
     EntityClass("workspaces", paths.workspaces_dir),
     EntityClass("realms", paths.realms_dir),
     EntityClass("agents", paths.agents_dir),
     EntityClass("flow_graphs", _flow_graphs_dir),
     EntityClass("boards", paths.boards_root, recursive=True),
-    EntityClass("repo_bundles", paths.repo_bundles_dir, recursive=True),
     # S44 retired the role_envelopes / role_checklists classes with their stores.
     # Both directories were archived aside as writer-less on 2026-07-30 and no
     # surviving code can fill them again, so the rows described a shape
     # `checkpoint fetch` could only ever report as absent — the same rule S23
     # applied to `proofs`.
+    #
+    # S56 took two more by the same rule. `worker_sessions` went with the store
+    # itself (deleted whole). `repo_bundles` has been writer-less since S52 and,
+    # now that this commit removed the four status projections, reader-less too
+    # — no production code imports `RepoBundleStore` any more.
+    # `runtime_instances` is DELIBERATELY KEPT despite also being writer-less
+    # since S53: its rows still ship on the status wire (`runtime_instances` /
+    # `foreground_runtime`), so a checkpoint that omitted them would drop state a
+    # reader can still see.
     EntityClass("self_tests", paths.self_tests_dir, recursive=True),
     EntityClass("packet_artifacts", paths.packet_artifacts_dir, recursive=True),
 )

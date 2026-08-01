@@ -33,21 +33,15 @@ from agent_runtime.persona_instance_identity import (
     load_persona_instance_aliases,
     reconcile_persona_instances,
 )
-from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.serde import to_jsonable
 from agent_runtime.snapshot import build_snapshot
 from agent_runtime.states import WorkerSessionState
 
 
 def _runtime_config() -> AgentRuntimeConfig:
-    return AgentRuntimeConfig(
-        enterprise_worker_sessions=EnterpriseWorkerSessionsConfig(
-            enabled=True,
-            worker_session_store=True,
-            persona_instance_runtime=True,
-            persona_assignment_store=True,
-        )
-    )
+    # S56: the persona-instance runtime / assignment store are unconditional now;
+    # the enterprise_worker_sessions gate block was deleted.
+    return AgentRuntimeConfig()
 
 
 def _seed_row(
@@ -439,8 +433,10 @@ def test_classify_orphan_truth_table():
         _orphan_row("bdev", persona_id="backend_dev", role="dev", profile_id=None),
         _orphan_row("base", persona_id="base", role="profile", profile_id="base"),
         _orphan_row("alice", persona_id="profile:alice", role="profile", profile_id="alice"),
+        # S56: the fixture still SENDS active_worker_session_id (a stale producer
+        # can), but the reader no longer honors it — the row is a plain orphan now.
+        _orphan_row("stale_worker_session_field", active_worker_session_id="ws_1"),
         # Orphan-shaped but PROTECTED → held, not pruned.
-        _orphan_row("held_active", active_worker_session_id="ws_1"),
         _orphan_row("held_run", active_run_id="run_1"),
         _orphan_row("held_assign", current_assignment_id="a_1"),
         _orphan_row("held_taskbound", mode="task_bound"),
@@ -454,12 +450,16 @@ def test_classify_orphan_truth_table():
     prunable = {e["persona_instance_id"]: e["reason"] for e in res["prunable"]}
     held = {e["persona_instance_id"]: e["reason"] for e in res["held"]}
 
-    assert prunable == {"codex": "orphan-no-profile", "pm": "legacy-role"}
+    assert prunable == {
+        "codex": "orphan-no-profile",
+        "pm": "legacy-role",
+        # S56: a dead active_worker_session_id no longer protects a row.
+        "stale_worker_session_field": "orphan-no-profile",
+    }
     # No real agent appears anywhere.
     for real in ("dev", "qa", "neko", "bdev", "base", "alice"):
         assert real not in prunable and real not in held
     assert held == {
-        "held_active": "active-binding",
         "held_run": "active-binding",
         "held_assign": "active-binding",
         "held_taskbound": "task-bound",

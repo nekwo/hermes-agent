@@ -574,10 +574,13 @@ def test_resolve_sender_tier1_chat_session_owner_full_identity(isolate_agent_run
     assert marker == build_relay_sender_marker("neko", sender_id)
 
 
-def test_resolve_sender_tier2_worker_session_scan(isolate_agent_runtime_root):
-    # A worker/task-lane caller: the token is the instance's active worker
-    # session (not chat-shaped), matched by the store scan — full identity, and
-    # it wins over the tier-3 chain fallback.
+def test_resolve_sender_tier2_bound_session_scan(isolate_agent_runtime_root):
+    # A task-lane caller whose token is the instance's bound session but whose
+    # exact-mint owner is not a live row: tier 1 misses, the tier-2 store scan
+    # matches on default_chat_session_id — full identity, and it wins over the
+    # tier-3 chain fallback. S56 removed the active_worker_session_id candidate
+    # from this scan with the worker store that was its only writer; the
+    # bound-session candidate is what survives.
     from hermes_cli import harness
     from agent_runtime.relay_policy import build_relay_sender_marker
 
@@ -585,11 +588,10 @@ def test_resolve_sender_tier2_worker_session_scan(isolate_agent_runtime_root):
     inst = store.open_chat(
         persona_id="dev", session_id="persona_chat_seed_000000000000", display_name="Dev"
     )
-    inst.active_worker_session_id = "worker_dev_task_7"
-    store.update(inst)
+    assert inst.default_chat_session_id == "persona_chat_seed_000000000000"
 
     marker = harness._resolve_relay_sender_marker(
-        "agent:worker_dev_task_7", instance_store=store, relay_chain_in=("neko",)
+        "agent:persona_chat_seed_000000000000", instance_store=store, relay_chain_in=("neko",)
     )
     assert marker == build_relay_sender_marker("dev", inst.id)
 

@@ -21,10 +21,6 @@ def runs_dir() -> Path:
     return store_root() / "runs"
 
 
-def worker_sessions_dir() -> Path:
-    return store_root() / "worker_sessions"
-
-
 def persona_instances_dir() -> Path:
     return store_root() / "persona_instances"
 
@@ -274,10 +270,6 @@ def prompt_observability_index_path() -> Path:
     return store_root() / "prompt_observability_index.json"
 
 
-def proof_sandbox_root() -> Path:
-    return store_root() / "proof_sandbox"
-
-
 def self_tests_dir() -> Path:
     return store_root() / "self_tests"
 
@@ -307,20 +299,12 @@ def packet_artifacts_dir() -> Path:
     return store_root() / "packet_artifacts"
 
 
-def worker_context_dir(task_id: str, persona_id: str) -> Path:
-    return context_dir() / _safe_path_token(task_id) / _safe_path_token(persona_id)
-
-
 def task_path(task_id: str) -> Path:
     return goal_path(task_id)
 
 
 def goal_path(goal_id: str) -> Path:
     return goals_dir() / f"{_safe_path_token(goal_id)}.json"
-
-
-def worker_session_path(worker_session_id: str) -> Path:
-    return worker_sessions_dir() / f"{worker_session_id}.json"
 
 
 def persona_instance_path(persona_instance_id: str) -> Path:

@@ -475,7 +475,6 @@ def agent_chat_threads(*, persona_id=None, requested_by_session=None):
         sender_scope_workspace_id,
     )
     from agent_runtime.persona_chat_history import persona_chat_history_summary
-    from agent_runtime.worker_sessions import WorkerSessionStore
     from hermes_cli import harness as _harness
 
     # Optional filter → the canonical persona the caller means (accepts a handle).
@@ -494,7 +493,7 @@ def agent_chat_threads(*, persona_id=None, requested_by_session=None):
 
     cfg = load_agent_runtime_config()
     store = PersonaInstanceStore()
-    store.derive_from_workers(list(ensure_persisted_personas(cfg)), WorkerSessionStore().list_all())
+    store.ensure_for_personas(list(ensure_persisted_personas(cfg)))
     instances = store.list_all()
 
     # The DEFAULT / bare-persona listing is the sender-scoped ADDRESSABLE roster:
@@ -619,7 +618,6 @@ def agent_chat_open(*, persona_id, session_id=None, limit=20, requested_by_sessi
         MAX_PERSONA_CHAT_MESSAGE_TAIL,
         persona_chat_session_messages,
     )
-    from agent_runtime.worker_sessions import WorkerSessionStore
     from hermes_cli import harness as _harness
 
     target = str(persona_id or "").strip()
@@ -642,7 +640,7 @@ def agent_chat_open(*, persona_id, session_id=None, limit=20, requested_by_sessi
 
     cfg = load_agent_runtime_config()
     store = PersonaInstanceStore()
-    store.derive_from_workers(list(ensure_persisted_personas(cfg)), WorkerSessionStore().list_all())
+    store.ensure_for_personas(list(ensure_persisted_personas(cfg)))
 
     # A BARE persona resolves through the sender-scoped ADDRESSABLE roster: a
     # single in-scope placement is the target (placements shadow canonical), so

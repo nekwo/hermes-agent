@@ -22,7 +22,6 @@ from .models import (
     Event,
     PersonaAssignment,
     PersonaInstance,
-    WorkerSession,
     looks_like_persona_instance_id,
 )
 from .personas import profile_chat_toolsets
@@ -153,17 +152,6 @@ def _persona_instance_owner_release_state(instance: PersonaInstance) -> str | No
         return "failed"
     return "archived"
 ACTIVE_ASSIGNMENT_STATES = frozenset({"queued", "assigned", "running", "waiting_on_tool", "waiting_on_proof", "needs_input"})
-ACTIVE_PERSONA_WORKER_STATES = frozenset(
-    {
-        WorkerSessionState.ASSIGNED,
-        WorkerSessionState.RUNNING,
-        WorkerSessionState.WAITING_ON_TOOL,
-        WorkerSessionState.WAITING_ON_PROOF,
-        WorkerSessionState.SELF_HEALING,
-        WorkerSessionState.WAITING_ON_HUMAN,
-        WorkerSessionState.POSSESSED,
-    }
-)
 LIVE_RUN_STATES = frozenset(
     {
         RunState.QUEUED,
@@ -175,35 +163,32 @@ LIVE_RUN_STATES = frozenset(
 )
 
 
-def _worker_carries_live_binding(worker: WorkerSession) -> bool:
-    """Whether a worker may stamp its ``task_bound`` binding onto the persona
-    instance during snapshot derivation.
-
-    The binding follows the TASK's life, not the worker's: an idle worker
-    between ticks of a live task keeps the persona attached (agents must not
-    flicker off the goal topology between runs), but once the owning task is
-    terminal or archived the worker is history — it must not resurrect the
-    binding. Dead workers used to be picked as ``latest_by_persona`` and
-    re-stamp a settled mission's task/session onto the instance on every
-    snapshot build (undoing the terminal-task reaper and orphan sweep), so
-    Mission Control opened the persona's console on an empty dead mission
-    session instead of the latest chat (2026-07-08). A persona whose latest
-    worker is dead now falls through to the configured/idle reset below
-    instead. Precedence mirrors ``sweep_orphaned_task_bound_instances``: an
-    actively working session always carries (even mid-setup before its task
-    file lands); a non-active worker carries only while its task is live."""
-    if worker.state in ACTIVE_PERSONA_WORKER_STATES:
-        return True
-    task_id = safe_optional_token(worker.task_id)
-    return bool(task_id) and _owning_task_release_state(task_id) is None
+# S56 removed ``_worker_carries_live_binding``. It decided whether a WORKER row
+# could stamp its ``task_bound`` binding onto a persona instance during
+# derivation. Both of its inputs are gone: the worker session store was deleted
+# (nothing can write a worker row, and the live runtime root carries no
+# ``worker_sessions/`` directory at all), and ``build_snapshot`` had already
+# been passing a ``workers = []`` literal into the derivation for two waves — so
+# on the live tree the "carries" branch could never be taken and every persona
+# fell through to the configured/idle reset. That reset is now unconditional in
+# ``PersonaInstanceStore.ensure_for_personas``; the 2026-07-08 regression this
+# predicate was written to fix (dead workers re-stamping a settled mission onto
+# the instance) cannot recur, because there are no worker rows to re-stamp from.
 
 
 class ChatBusyError(AgentRuntimeError):
-    def __init__(self, instance: PersonaInstance, *, active_run_id: str | None, active_worker_session_id: str | None):
+    """The persona already holds a LIVE run binding and ``--kill-active`` was not
+    passed.
+
+    S56 removed the worker half (``active_worker_session_id``). The worker
+    session store is gone, so no instance can carry a worker binding for this
+    guard to find; the run arm below is the whole guard.
+    """
+
+    def __init__(self, instance: PersonaInstance, *, active_run_id: str | None):
         super().__init__("chat_busy")
         self.instance = instance
         self.active_run_id = active_run_id
-        self.active_worker_session_id = active_worker_session_id
 
 
 class StaleModelOverrideWrite(AgentRuntimeError):
@@ -1442,11 +1427,10 @@ class PersonaInstanceStore:
         if self._has_live_binding(instance):
             raise PersonaInstanceRetireError(
                 "instance_active",
-                f"{instance.id} has a live run/worker binding; never retire a working agent",
+                f"{instance.id} has a live run binding; never retire a working agent",
                 persona_instance_id=instance.id,
                 detail={
                     "active_run_id": safe_optional_token(instance.active_run_id),
-                    "active_worker_session_id": safe_optional_token(instance.active_worker_session_id),
                 },
             )
 
@@ -1865,62 +1849,17 @@ class PersonaInstanceStore:
         return False
 
     def _guard_or_replace_chat(self, instance: PersonaInstance, *, kill_active: bool) -> None:
-        active_run_id, active_worker_session_id = _live_chat_bindings(instance)
-        if not active_run_id and not active_worker_session_id:
+        active_run_id = _live_chat_binding(instance)
+        if not active_run_id:
             return
         if not kill_active:
-            raise ChatBusyError(
-                instance,
-                active_run_id=active_run_id,
-                active_worker_session_id=active_worker_session_id,
-            )
-        _terminate_live_chat_bindings(
-            active_run_id=active_run_id,
-            active_worker_session_id=active_worker_session_id,
-        )
+            raise ChatBusyError(instance, active_run_id=active_run_id)
+        _terminate_live_chat_binding(active_run_id=active_run_id)
 
-    def update_from_worker(self, worker: WorkerSession) -> PersonaInstance:
-        instance_id = persona_instance_id_for(worker.persona_id)
-        try:
-            instance = self.get(instance_id)
-        except Exception:
-            instance = PersonaInstance(
-                id=instance_id,
-                persona_id=worker.persona_id,
-                role=worker.role,
-                display_name=worker.display_name,
-                profile_id=None,
-                runtime_root=str(paths.store_root()),
-                state=worker.state,
-            )
-        instance.role = worker.role
-        instance.display_name = worker.display_name
-        instance.state = worker.state
-        instance.mode = "task_bound"
-        instance.current_assignment_id = worker.current_assignment_id
-        instance.current_task_id = worker.task_id
-        instance.goal_id = self._goal_id_for_worker(worker) or worker.task_id
-        instance.active_worker_session_id = worker.id if worker.state in ACTIVE_PERSONA_WORKER_STATES else None
-        instance.active_run_id = worker.active_run_id
-        instance.context_receipt_id = worker.context_receipt_id
-        instance.compression_receipt_id = worker.compression_receipt_id
-        instance.prompt_contract_hash = worker.prompt_contract_hash
-        instance.skill_manifest_hash = worker.skill_manifest_hash
-        instance.token_budget_used = worker.token_budget_used
-        instance.tool_budget_used = worker.tool_budget_used
-        instance.watchdog_warning_count = worker.watchdog_warning_count
-        instance.last_heartbeat_at = worker.last_heartbeat_at
-        return self.update(instance)
-
-    def _goal_id_for_worker(self, worker: WorkerSession) -> str | None:
-        assignment_id = safe_optional_token(worker.current_assignment_id)
-        if not assignment_id:
-            return None
-        try:
-            assignment = PersonaAssignmentStore().get(assignment_id)
-        except Exception:
-            return None
-        return safe_optional_token(assignment.goal_id or assignment.task_id)
+    # S56 removed ``update_from_worker`` and ``_goal_id_for_worker`` with the
+    # worker session store. They were the only way a persona instance could ever
+    # be stamped ``mode="task_bound"`` from a worker row, and the only writer of
+    # ``PersonaInstance.active_worker_session_id`` (a field that went with them).
 
     def list_all(self) -> list[PersonaInstance]:
         directory = paths.persona_instances_dir()
@@ -1934,21 +1873,25 @@ class PersonaInstanceStore:
                 continue
         return sorted(instances, key=lambda item: item.id)
 
-    def derive_from_workers(self, personas: list[AgentPersona], workers: list[WorkerSession]) -> list[PersonaInstance]:
+    def ensure_for_personas(self, personas: list[AgentPersona]) -> list[PersonaInstance]:
+        """Materialize an instance for every configured persona and settle any
+        instance still carrying a stale execution binding.
+
+        S56 renamed this from ``derive_from_workers(personas, workers)``. The
+        ``workers`` half is gone: ``build_snapshot`` had been passing a
+        ``workers = []`` literal for two waves, so the "a live worker carries
+        this persona's binding" branch could not be taken on the live tree, and
+        the worker session store it read has since been deleted. What remains —
+        the ensure pass plus the configured/idle reset — is exactly what ran
+        before, now unconditionally rather than for "every persona with no live
+        worker" (which was every persona).
+
+        ``chat`` / ``free_floating`` instances are still skipped: an operator
+        chat binding is not stale execution state.
+        """
         for persona in personas:
             self.ensure_for_persona(persona)
-        latest_by_persona: dict[str, WorkerSession] = {}
-        for worker in workers:
-            if not _worker_carries_live_binding(worker):
-                continue
-            existing = latest_by_persona.get(worker.persona_id)
-            if existing is None or (worker.last_heartbeat_at or worker.opened_at) >= (existing.last_heartbeat_at or existing.opened_at):
-                latest_by_persona[worker.persona_id] = worker
-        for worker in latest_by_persona.values():
-            self.update_from_worker(worker)
         for persona in personas:
-            if persona.id in latest_by_persona:
-                continue
             instance = self.ensure_for_persona(persona)
             if instance.mode in {"chat", "free_floating"}:
                 continue
@@ -1956,7 +1899,6 @@ class PersonaInstanceStore:
                 instance.state != WorkerSessionState.IDLE
                 or instance.current_assignment_id
                 or instance.current_task_id
-                or instance.active_worker_session_id
                 or instance.active_run_id
                 or instance.context_receipt_id
                 or instance.compression_receipt_id
@@ -1968,7 +1910,6 @@ class PersonaInstanceStore:
                 instance.goal_id = None
                 instance.spawned_by = None
                 instance.steered_by = []
-                instance.active_worker_session_id = None
                 instance.active_run_id = None
                 instance.context_receipt_id = None
                 instance.compression_receipt_id = None
@@ -1988,16 +1929,9 @@ class PersonaInstanceStore:
         return True
 
     def _has_live_binding(self, instance: PersonaInstance) -> bool:
-        worker_id = safe_optional_token(instance.active_worker_session_id)
-        if worker_id:
-            try:
-                from .worker_sessions import ACTIVE_WORKER_STATES, WorkerSessionStore
-
-                worker = WorkerSessionStore(event_log=self.event_log).get(worker_id)
-                if worker.state in ACTIVE_WORKER_STATES:
-                    return True
-            except Exception:
-                pass
+        # S56 removed the worker arm: the store it read is gone and no instance
+        # can carry ``active_worker_session_id`` any more. The run arm is the
+        # whole check.
         run_id = safe_optional_token(instance.active_run_id)
         if run_id:
             try:
@@ -2657,43 +2591,25 @@ def default_chat_session_id_for_instance(
     return persona_chat_session_id_for(canonical_chat_instance_id(persona_id, persona_instance_id))
 
 
-def _live_chat_bindings(instance: PersonaInstance) -> tuple[str | None, str | None]:
-    active_run_id = None
-    active_worker_session_id = None
-    if instance.active_run_id:
-        try:
-            from .store import RunStore
+def _live_chat_binding(instance: PersonaInstance) -> str | None:
+    # S56: was ``_live_chat_bindings`` returning a (run, worker) pair. The worker
+    # half read a field nothing can set and a store that no longer exists.
+    if not instance.active_run_id:
+        return None
+    try:
+        from .store import RunStore
 
-            run = RunStore().get(instance.active_run_id)
-            if run.state in LIVE_RUN_STATES:
-                active_run_id = run.id
-        except Exception:
-            active_run_id = instance.active_run_id
-    if instance.active_worker_session_id:
-        try:
-            from .worker_sessions import ACTIVE_WORKER_STATES, WorkerSessionStore
-
-            worker = WorkerSessionStore().get(instance.active_worker_session_id)
-            if worker.state in ACTIVE_WORKER_STATES:
-                active_worker_session_id = worker.id
-        except Exception:
-            active_worker_session_id = instance.active_worker_session_id
-    return active_run_id, active_worker_session_id
+        run = RunStore().get(instance.active_run_id)
+        return run.id if run.state in LIVE_RUN_STATES else None
+    except Exception:
+        return instance.active_run_id
 
 
-def _terminate_live_chat_bindings(*, active_run_id: str | None, active_worker_session_id: str | None) -> None:
+def _terminate_live_chat_binding(*, active_run_id: str | None) -> None:
     if active_run_id:
         from .store import RunStore
 
         RunStore().cancel(active_run_id, reason="operator replaced active persona chat")
-    if active_worker_session_id:
-        from .worker_sessions import WorkerSessionState, WorkerSessionStore
-
-        WorkerSessionStore().close(
-            active_worker_session_id,
-            reason="operator replaced active persona chat",
-            state=WorkerSessionState.CLOSED,
-        )
 
 
 def _free_floating_identity(persona_or_template: AgentPersona | str) -> tuple[str, str, str, str | None]:
@@ -2732,14 +2648,16 @@ def _profile_id_for_persona_or_template(persona_or_template_id: str) -> str | No
     return None
 
 
-def persona_instance_runtime_enabled(config) -> bool:
-    enterprise = getattr(config, "enterprise_worker_sessions", None)
-    return bool(getattr(enterprise, "enabled", False) and getattr(enterprise, "persona_instance_runtime", False))
-
-
-def persona_assignment_store_enabled(config) -> bool:
-    enterprise = getattr(config, "enterprise_worker_sessions", None)
-    return bool(getattr(enterprise, "enabled", False) and getattr(enterprise, "persona_assignment_store", False))
+# S56 removed ``persona_instance_runtime_enabled`` and
+# ``persona_assignment_store_enabled``. Both read
+# ``enterprise_worker_sessions``, a config block named for a lane that no longer
+# exists, and they gated the persona-instance ROSTER — the identity substrate
+# every Mission Control surface keys on. The enabled shape has been the only
+# shape for months (the live alice config sets all three fields true), and there
+# is no disable consumer: nothing in either repo branches on a false verdict
+# except the CLI's own "runtime is disabled" print. Both sections are now
+# unconditional; the ``persona_instance_runtime`` WIRE block survives and
+# reports the truth. See tests/agent_runtime/test_s56_roster_gate_removal.py.
 
 
 def persona_instance_summary(
@@ -2821,7 +2739,9 @@ def persona_instance_summary(
         "current_assignment_id": instance.current_assignment_id,
         "attached_task_id": instance.current_task_id,
         "current_task_id": instance.current_task_id,
-        "active_worker_session_id": instance.active_worker_session_id,
+        # S56 removed ``active_worker_session_id`` from this row (contract 47).
+        # Its only writer was ``update_from_worker``, which went with the worker
+        # session store; the field could never be non-null again.
         "active_run_id": instance.active_run_id,
         "default_chat_session_id": instance.default_chat_session_id,
         "chat_session_id": instance.default_chat_session_id,
@@ -2973,7 +2893,7 @@ def _persona_instance_is_active_lane(instance: PersonaInstance) -> bool:
         return True
     return any(
         bool(getattr(instance, attr, None))
-        for attr in ("current_task_id", "goal_id", "current_assignment_id", "active_worker_session_id", "active_run_id")
+        for attr in ("current_task_id", "goal_id", "current_assignment_id", "active_run_id")
     )
 
 

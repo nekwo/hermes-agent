@@ -78,12 +78,30 @@ def test_hydrate_frame_matches_golden_shape(isolate_agent_runtime_root):
     assert isinstance(live["core"], dict)
 
 
+# S56 (2026-08-01) moved the live frame to contract 47, and the golden moved
+# WITH it in the same change, per this fixture set's update rule: stream
+# goldens change only in a cross-stack landing that carries hermes + launcher
+# together (regenerate/edit, copy the bytes, update BOTH manifests). The golden
+# edit followed the S47 precedent — remove the keys the wave removed
+# (`enterprise_worker_sessions`, `swarm`, `normal_worker_flow`,
+# `repo_bundle_routing`, `simplified_agent_contract`,
+# `continuous_role_sessions`, `production_envelope`; `supervision` pruned to its
+# one live field) and bump `parity.contract_version` — rather than regenerating
+# from a fresh seeded root, which would also churn unrelated pre-existing
+# staleness in the same bytes.
+#
+# ONE constant, not two: the live frame and the golden must agree. A split pin
+# would let the launcher's `kSupportedMissionContractVersion` sit against a
+# golden nobody bumped, which is the drift this file exists to catch.
+CONTRACT_VERSION = 47
+
+
 def test_hydrate_core_pins_contract_version(isolate_agent_runtime_root):
     live = hydrate_frame()
     golden = _fixture("hydrate.json")
     for frame, origin in ((live, "live"), (golden, "golden")):
         parity = (frame.get("core") or {}).get("parity") or {}
-        assert parity.get("contract_version") == 46, (
+        assert parity.get("contract_version") == CONTRACT_VERSION, (
             f"{origin} hydrate core carries contract_version="
             f"{parity.get('contract_version')} — bumping it is a cross-stack "
             "change (launcher pins kSupportedMissionContractVersion)"

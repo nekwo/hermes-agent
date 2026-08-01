@@ -736,3 +736,187 @@ them) each held a SECOND copy of the absolute event count while their docstrings
 promised not to. Every later cut in the same wave then broke them. All four now
 assert only their own delta plus agreement with S15's single authority.
 
+
+## S56 contract wave — worker-session lane, seven config blocks, roster gate (hermes contract 46 -> 47 + Launcher s54, 2026-08-01)
+
+> One coherent contract move, bumped once. Events **68 -> 58**; `contract_hash()`
+> `f5c5663ffeedff3d7d791f505e56b27287592eaafdb4a98874d009d33b9d0b31` ->
+> `20639a26ccf30348e0c1317f409ad6c45b201f9f91c4c76bc6efb99d49cf7bc8`. The
+> absolute count authority remains
+> `tests/agent_runtime/test_s15_event_contract_pruning.SURVIVING_EVENT_COUNT`.
+
+### Executed
+
+| Item | What went |
+| --- | --- |
+| S56 worker lane | `agent_runtime/worker_sessions.py` DELETED WHOLE (618L). All 10 `worker_session.*` contracts de-registered in the SAME commit as their emitters (the S55 gate makes splitting them red, on purpose). `models.WorkerSession`, `PersonaInstance.active_worker_session_id`, `paths.worker_sessions_dir` / `worker_session_path` / `worker_context_dir` / `proof_sandbox_root`, `locks.worker_session_lock`, the `worker_sessions` checkpoint EntityClass, the `serve` fingerprint dir entry and the `migration_status` count all went with it. |
+| S56 worker-derived persona surface | `derive_from_workers` -> **`ensure_for_personas(personas)`** (worker-free, same behaviour); `update_from_worker`, `_goal_id_for_worker`, `_worker_carries_live_binding`, `ACTIVE_PERSONA_WORKER_STATES` deleted; `ChatBusyError` / `_live_chat_bindings` / `_terminate_live_chat_bindings` reduced to their run arm (`_live_chat_binding` / `_terminate_live_chat_binding`); `persona_profile_binding.BUSY_ACTIVE_WORKER` retired. |
+| S56 wire (status) | Removed `worker_sessions`, `active_worker_sessions`, `repo_bundles`, `repo_bundle_closeout`, `bundle_queue`, `repo_locks`, `lanes`, `production_envelope`, `swarm`, `swarm_budget`. `observability` lost its `worker_sessions=` parameter and everything it fed; `dirty_state` lost its `workers=` parameter and four rows. `runtime_instances` / `foreground_runtime` KEPT — the block's own `lanes` sub-key is the projection; only the top-level duplicate went. |
+| S56 config | SIX blocks removed whole — `continuous_role_sessions`, `enterprise_worker_sessions`, `normal_worker_flow`, `repo_bundle_routing`, `simplified_agent_contract`, `swarm` — plus `_apply_enterprise_role_session_compat` (one unread block mapped onto another) and their 20 `migrations` range validators. `supervision` PRUNED to `child_events_enabled`, the one field `continuity.py:88` reads. |
+| S56 roster gate | `persona_instance_runtime_enabled()` / `persona_assignment_store_enabled()` retired; the persona-instance roster and the persona-assignments section are UNCONDITIONAL in both `build_snapshot` and `build_status`. The `persona_instance_runtime` WIRE block survives (the Launcher bridge reads it) and now reports the truth. |
+| S56 gate | New structural gate: every `RuntimeConfig` field must have a production reader or an explicit ledger entry with a reason. |
+| Launcher s54 | Contract pin 46 -> 47; `activeWorkerSessionId` / `workerSessionId` and the four surfaces that consumed them removed; the installer config template fixed and gated. |
+
+### The guarded sub-step: the scout claim that DIED, and the method note that outlives it
+
+The S51 ruling allowed cutting the worker-derived persona surface only if no
+live persona instance carried a non-null `active_worker_session_id`. The first
+scan said it did — **three of four** instances under
+`X:\Eternia\.hermes\profiles\alice\agent_runtime\persona_instances` carry one
+(`personainst_backend_dev` -> `worker_237134aae4bd`, `_neko_supervisor` ->
+`worker_ff10543cffdc`, `_qa` -> `worker_e392c8d410a2`), beside a
+`worker_sessions/` directory holding sixteen rows.
+
+**That tree is not the live runtime root.** Under
+`HERMES_HOME=...\profiles\alice`, `paths.store_root()` resolves to
+`X:\Eternia\.hermes\agent-runtime` — the root `runtime_commands` pins for
+`live-tony` — where there are **fifteen** persona instances, **every one** with
+`active_worker_session_id: null`, and **no `worker_sessions/` directory at
+all**. The profile-scoped tree was last written 2026-06-18 and nothing resolves
+to it. The guard's condition held on the root that matters, so the surface was
+CUT (and with it `close`, the tenth event, and the whole module).
+
+Method note, worth more than the result: **a profile directory that LOOKS like a
+store root is not evidence about the store root.** Ask `paths.store_root()`.
+
+### The read-side split, as landed
+
+There is none — the split collapsed. Once the write lane went, the only
+remaining consumers of `WorkerSessionStore` were `derive_from_workers` (which
+`build_snapshot` had been feeding a `workers = []` literal since S47, so the
+worker branch was unreachable on the live tree) and `_live_chat_bindings` /
+`_has_live_binding`, whose worker arms read a field nothing can set. All three
+went, so the read side had no consumer left and the module was deleted whole
+rather than kept as a store nobody calls.
+
+### production_envelope verdict: DELETED
+
+Checked claim by claim against the tree rather than reworded a third time:
+
+- H6 "worker.pause and worker.resume capabilities are registered" — only
+  `worker.resume` was ever registered (`coordinator_permissions.py:12`), and
+  both verbs' implementations went with the write lane. **FALSE.**
+- H6 "daemon stop/kill paths exist", H8 "stale runs are recoverable through the
+  ticker", H8 "mid-run daemon loss ... a restarted ticker", H9 "daemon queue mode
+  is lane-based" — the Mission Daemon was retired; `status` hardcodes
+  `execution_mode="manual"`. **FALSE.**
+- H8 "role envelopes ... are file-backed" — S44 deleted that store. **FALSE.**
+- H9 "repo bundle queueing gates dependent handoffs" — S52 deleted every writer.
+  **FALSE.**
+- H7/H9 swarm-ceiling arms — the enforcement never existed. **FALSE.**
+- H10's five entries are prose about unit tests with no executable backing.
+
+After the config cuts, what remained was hand-written prose keyed on flags that
+no longer exist. Deleted from the wire (`status` and `effective_config_summary`)
+and the module removed. The Launcher never parsed it. S49's pin on the H6 claims
+is INVERTED, not deleted, with the reason kept.
+
+### Roster gate as landed, and the counterfactual
+
+Made unconditional; no disable consumer exists in either repo — the CLI's
+"runtime is disabled" print was the only branch, and it reported the flag rather
+than acting on it. Counterfactual pinned in `test_s56_config_block_removal.py`:
+an operator config that still sets the old block to `false` no longer suppresses
+the roster, and the block-absent DEFAULT (`enabled` / `persona_instance_runtime`
+both `False`) no longer omits the section. **Not vacuous**: six live profiles —
+qa, launcher-dev, backend-dev, launcher-qa, gpt-launcher, aliceimagecron — set
+no `enterprise_worker_sessions` block at all and therefore GAIN the roster; the
+four that set it (alice, neko, base, unbounded) set it true and are unaffected.
+
+### Debt entries this wave STRIKES
+
+- ~~**`repo_lock_summary()` can only report a constant.**~~ CLOSED — the wire row
+  `repo_locks` and the function are gone.
+- ~~**`status.py`'s `lanes` is empty by construction.**~~ CLOSED — the duplicate
+  top-level row is gone; `runtime_instances["lanes"]` (the projection) stays.
+- ~~**The Launcher's generated hermes `config.yaml` is an unaudited producer.**~~
+  CLOSED — the template now writes only `redaction_mode`, `read_model`,
+  `default_api_mode`, `root_node_mode`. Six blocks removed
+  (`enterprise_worker_sessions`, `normal_worker_flow`, `mission_plan`,
+  `repo_bundle_routing`, `simplified_agent_contract`, `swarm`), including four
+  PHANTOM sub-keys the dataclasses never had
+  (`repo_bundle_routing.auto_create_from_mission_plan`,
+  `normal_worker_flow.auto_final_gate_after_delivery` and
+  `.max_auto_final_gate_repairs_per_stage`,
+  `simplified_agent_contract.allow_legacy_decision_aliases`). Gated by
+  `mission_control_hermes_installer_template_test.dart`, whose red-proof is
+  EXECUTED: the pre-fix template is preserved verbatim in the test and a passing
+  case asserts the gate fails on it, naming exactly those six.
+
+### New debt this wave OPENED (measured, not inferred)
+
+- **Twenty-nine `RuntimeConfig` scalar fields have no production reader.** Found
+  by the new gate, carried in its FROZEN `UNRULED_DEBT` ledger with a per-field
+  reason: the whole `daemon_*` family, the four `live_run_*` budgets, the four
+  `liveness_*` knobs, the three `artifact_storage_*` watermarks,
+  `mission_max_total_tokens` / `mission_wall_clock_deadline_seconds`,
+  `neko_recovery_attempt_cap` / `neko_extension_cap`, `heartbeat_ttl_seconds`,
+  `max_actions_per_tick`, `root_node_mode`, `preferred_goal_execution_mode`,
+  `scope_wait_deadline_seconds`, `run_lease_seconds`,
+  `tool_wait_timeout_seconds`, `child_progress_min_interval_seconds`,
+  `deploy_timeout_seconds`. PRE-EXISTING — most lost their reader when the
+  mission/daemon lanes were retired; `run_lease_seconds` lost its last one in
+  this commit with `production_envelope`. Not ruled on, so not deleted on this
+  wave's authority. The bucket is size-pinned so a NEW unread field fails the
+  gate instead of being appended to it.
+- **`RepoBundleStore` now has ZERO production importers.** `status.py` was the
+  last one. Its checkpoint EntityClass row went (writer-less since S52,
+  reader-less as of now), but the module + `RepoBundle` model + paths helpers +
+  `migration_status` count were left standing — a whole-module cut is a different
+  lane. `runtime_instances` KEPT its checkpoint row deliberately: also
+  writer-less since S53, but its rows still ship on the status wire.
+- **`delivery_directive.read_bundle_promotion_record` /
+  `bundle_promotion_record_path` are caller-less.** `repo_bundle_summary` was
+  their last production caller.
+- **Launcher: the whole `MissionRoleEnvelope` / `roleEnvelopes` lane is dead by
+  emptiness.** hermes S44 deleted `agent_runtime/role_envelopes.py`, so nothing
+  has produced the `role_envelopes` frame section since; the parse at
+  `mission_control_snapshot.dart:725` can only yield `[]`. Separate lane on a
+  separate contract move — reported, not swept, and the s54 text gate is scoped
+  around it rather than through it.
+- **`tests/agent_runtime/test_persona_assignments.py` is mixed-EOL in the index**
+  (4,395 CRLF + 794 LF lines). The Edit tool silently normalizes such a file
+  whole, turning a 95-line change into a 1,769-line diff. Restored byte-wise this
+  time; worth a deliberate normalization commit.
+
+### Superseded pins INVERTED rather than deleted (each carrying why)
+
+`test_s55_registered_events_have_emitters::test_the_worker_session_family_needs_no_temporary_exemption`
+(the ten types are now absent from BOTH sides, and the inverted form is what
+catches a re-registration with no emitter behind it);
+`test_s49_operator_control_removal`'s H6 controls pin (the envelope's absence is
+now the only way its original concern can be true); `test_s23_paths_orphan_removal`'s
+`proof_sandbox_root` keep and its checkpoint keep-set;
+`test_s44_role_envelope_family_removal`'s `repo_bundles` writer keep;
+`test_s24_delivery_directive_residue_removal`'s bundle-summary survival;
+`test_s29_snapshot_dead_local_removal`'s `KEPT_LIVE_LOCALS` `workers` entry;
+`test_s52_repo_bundle_write_lane_removal`'s two constant-wire pins;
+`test_s28_status_observe_shrink`'s worker signals;
+`test_root_config_pinning::test_swarm_config_resolves_from_root` (fixture kept,
+now proving load-and-ignore); Launcher-side the s53 contract pin, the
+`activeWorkerSessionId` parse expectations, the busy-reason table and the
+orphan-classification truth table — all with fixtures still SENDING the removed
+fields so a stale producer cannot resurrect a reader.
+
+### Stream goldens moved WITH the contract, in this change
+
+`tests/fixtures/stream_frames/{hydrate,delta,delta_batch}.json` +
+`MANIFEST.sha256`, and their byte-identical Launcher copies under
+`test/fixtures/harness_stream/`. Edited per the S47 precedent — drop the keys the
+wave removed, bump `parity.contract_version` — rather than regenerated from a
+fresh seeded root, which would churn unrelated pre-existing staleness in the same
+bytes. `test_stream_contract_fixture` holds ONE `CONTRACT_VERSION` constant, not
+a split live/golden pair: a split pin would let the launcher's
+`kSupportedMissionContractVersion` sit against a golden nobody bumped, which is
+exactly the drift that file exists to catch.
+
+### Also recorded
+
+- `tests/agent_runtime/test_worker_actions_blocked_menu.py` was expected to go
+  with the lane. It does NOT: it pins the retirement of
+  `agent_runtime.worker_actions`, a different module retired earlier, and never
+  touched the worker-session store. KEPT.
+- The `parity.completeness` block changed shape as a side effect of the roster
+  becoming unconditional: the three persona-chat `ProjectionAccountant`s now
+  always run, so an empty runtime reports three zero rows instead of `{}`.
+  `test_parity` was retargeted to the exact keyset rather than `== {}`.

@@ -104,7 +104,6 @@ _FINGERPRINT_STORE_DIRS = (
     "incidents",
     "agents",
     "proofs",
-    "worker_sessions",
     "repo_bundles",
     "runtime_instances",
     "persona_instances",

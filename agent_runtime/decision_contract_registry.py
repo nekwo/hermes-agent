@@ -1050,16 +1050,17 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     # frozenset may not name a de-registered type. The store's READ side stays
     # live; status.py still projects bundles off list_all. See
     # tests/agent_runtime/test_s52_repo_bundle_write_lane_removal.py.
-    "worker_session.opened": EventContract("worker_session.opened", "Worker opened", ("worker_session_id", "persona_id"), ("stage_id",)),
-    "worker_session.assigned": EventContract("worker_session.assigned", "Worker assigned", ("worker_session_id", "run_id"), ("stage_id",)),
-    "worker_session.resumed": EventContract("worker_session.resumed", "Worker resumed", ("worker_session_id",), ("session_id_present",)),
-    "worker_session.heartbeat": EventContract("worker_session.heartbeat", "Worker heartbeat", ("worker_session_id", "state"), ("heartbeat_age_seconds",)),
-    "worker_session.context_absorbed": EventContract("worker_session.context_absorbed", "Context absorbed", ("worker_session_id", "context_receipt_id"), ("watchdog_warnings",)),
-    "worker_session.steered": EventContract("worker_session.steered", "Worker steered", ("worker_session_id", "actor"), ("note",)),
-    "worker_session.possessed": EventContract("worker_session.possessed", "Worker possessed", ("worker_session_id", "lease_owner"), ("lease_expires_at",)),
-    "worker_session.released": EventContract("worker_session.released", "Worker released", ("worker_session_id", "actor"), ("handback",)),
-    "worker_session.watchdog_warning": EventContract("worker_session.watchdog_warning", "Worker warning", ("worker_session_id", "kind"), ("summary",)),
-    "worker_session.closed": EventContract("worker_session.closed", "Worker closed", ("worker_session_id", "close_reason"), ("state",)),
+    # S56 (2026-08-01) de-registered ALL TEN worker_session.* contracts --
+    # opened / assigned / resumed / heartbeat / context_absorbed / steered /
+    # possessed / released / watchdog_warning / closed -- in the SAME commit
+    # that deleted their emitters. `agent_runtime/worker_sessions.py` went
+    # whole: the write lane had no production caller, and once it was gone the
+    # module's entire remaining importer set was its own tests plus the
+    # worker-derived persona-instance surface, which went with it.
+    # Emitter and registration move together on purpose: S55's gate asserts
+    # every registered type HAS an emitter, so splitting the two across commits
+    # would turn this cut red rather than let it land silently.
+    # See tests/agent_runtime/test_s56_worker_session_lane_removal.py.
     "self_test.recorded": EventContract("self_test.recorded", "Self-test recorded", ("evidence_id", "status"), ("stage_id", "command_label")),
     "self_test.loop_detected": EventContract("self_test.loop_detected", "Self-test loop detected", ("command_hash", "repeat_count"), ("stage_id",)),
     "incident.opened": EventContract("incident.opened", "Incident opened", ("incident_id", "kind"), ("summary",)),

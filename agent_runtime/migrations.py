@@ -6,7 +6,6 @@ from typing import Any
 
 from . import paths
 from .config import AgentRuntimeConfig, persona_records_from_config, load_agent_runtime_config, load_root_runtime_config
-from .production_envelope import production_envelope_status
 
 CURRENT_RUNTIME_SCHEMA_VERSION = 1
 
@@ -22,7 +21,6 @@ def effective_config_summary(
     data["schema_version"] = int(getattr(cfg, "schema_version", CURRENT_RUNTIME_SCHEMA_VERSION) or CURRENT_RUNTIME_SCHEMA_VERSION)
     data["validation"] = validate_runtime_config(cfg)
     data["migration"] = migration if migration is not None else migration_status()
-    data["production_envelope"] = production_envelope_status(cfg)
     data["effective_personas"] = _effective_persona_summary(cfg)
     return _redaction_safe_config(data)
 
@@ -58,43 +56,14 @@ def validate_runtime_config(cfg: AgentRuntimeConfig | None = None) -> dict[str, 
     _positive(errors, "artifact_storage_low_watermark_mb", cfg.artifact_storage_low_watermark_mb)
     _positive(errors, "artifact_storage_high_watermark_mb", cfg.artifact_storage_high_watermark_mb)
     _positive(errors, "artifact_storage_critical_watermark_mb", cfg.artifact_storage_critical_watermark_mb)
-    crs = getattr(cfg, "continuous_role_sessions", None)
-    if crs is not None:
-        _positive(errors, "continuous_role_sessions.max_decisions_per_envelope", crs.max_decisions_per_envelope)
-        _positive(errors, "continuous_role_sessions.max_proofs_per_envelope", crs.max_proofs_per_envelope)
-        _positive(errors, "continuous_role_sessions.max_continuations_per_stage", crs.max_continuations_per_stage)
-    ews = getattr(cfg, "enterprise_worker_sessions", None)
-    if ews is not None:
-        if ews.mode not in {"observe_only", "enforce"}:
-            errors.append({"field": "enterprise_worker_sessions.mode", "reason": "must be observe_only or enforce"})
-        if ews.static_prompt_strategy not in {"capability_detect", "always_send", "receipt_only"}:
-            errors.append({"field": "enterprise_worker_sessions.static_prompt_strategy", "reason": "invalid static prompt strategy"})
-        _positive(errors, "enterprise_worker_sessions.worker_heartbeat_seconds", ews.worker_heartbeat_seconds)
-        _positive(errors, "enterprise_worker_sessions.worker_stale_seconds", ews.worker_stale_seconds)
-        _positive(errors, "enterprise_worker_sessions.possession_lease_seconds", ews.possession_lease_seconds)
-        _positive(errors, "enterprise_worker_sessions.max_same_worker_repairs_per_stage", ews.max_same_worker_repairs_per_stage)
-        _positive(errors, "enterprise_worker_sessions.max_worker_context_compressions_per_goal", ews.max_worker_context_compressions_per_goal)
-    nwf = getattr(cfg, "normal_worker_flow", None)
-    if nwf is not None:
-        _positive(errors, "normal_worker_flow.max_self_test_repeats_without_change", nwf.max_self_test_repeats_without_change)
     # S47 removed the five ``role_envelope.*`` range validators with the config
     # block they guarded — S44 had already deleted every reader of those knobs.
-    swarm = getattr(cfg, "swarm", None)
-    if swarm is not None:
-        for field in (
-            "max_active_lanes",
-            "global_token_soft_limit",
-            "global_token_hard_limit",
-            "global_api_call_soft_limit",
-            "global_api_call_hard_limit",
-            "per_lane_token_limit",
-            "per_lane_api_call_limit",
-        ):
-            _positive(errors, f"swarm.{field}", getattr(swarm, field))
-        if swarm.global_token_soft_limit > swarm.global_token_hard_limit:
-            errors.append({"field": "swarm.global_token_*_limit", "reason": "soft limit must be <= hard limit"})
-        if swarm.global_api_call_soft_limit > swarm.global_api_call_hard_limit:
-            errors.append({"field": "swarm.global_api_call_*_limit", "reason": "soft limit must be <= hard limit"})
+    # S56 removed the rest of that class in one pass: the three
+    # ``continuous_role_sessions.*``, the seven ``enterprise_worker_sessions.*``,
+    # the one ``normal_worker_flow.*`` and the nine ``swarm.*`` validators. A
+    # range check on a field no code path reads validates nothing — it only
+    # makes a dead knob look governed. The blocks themselves are gone; these
+    # arms would now range-check attributes that do not exist.
 
     if cfg.live_run_max_total_tokens > cfg.mission_max_total_tokens:
         errors.append({
@@ -161,7 +130,6 @@ def migration_status(root: Path | None = None) -> dict[str, Any]:
     counts = {
         "tasks": _count_json(root / "tasks"),
         "runs": _count_json(root / "runs"),
-        "worker_sessions": _count_json(root / "worker_sessions"),
         "repo_bundles": _count_nested_json(root / "repo_bundles"),
         "agents": _count_json(root / "agents"),
         "incidents": _count_json(root / "incidents"),

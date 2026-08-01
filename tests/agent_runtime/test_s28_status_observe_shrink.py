@@ -183,8 +183,10 @@ def test_the_daemon_and_task_intervention_families_are_gone():
 
 
 def test_the_surviving_interventions_still_fire():
-    """Keep-side: incidents, stalled runs, and stale workers are all fed by live
-    parameters and are the whole reason ``harness observe`` exists."""
+    """Keep-side: incidents and stalled runs are fed by live parameters and are
+    the whole reason ``harness observe`` exists. (S56 removed the third member of
+    this set, the ``worker_stale_heartbeat`` family, with the ``worker_sessions=``
+    parameter that fed it.)"""
 
     ts = now()
     incident = Incident(
@@ -204,7 +206,7 @@ def test_the_surviving_interventions_still_fire():
     assert envelope["signals"]["open_incidents"] == 1
 
 
-def test_the_live_run_and_worker_signals_are_untouched():
+def test_the_live_run_signals_are_untouched():
     ts = now()
     runs = [
         AgentRun(id="run_q", persona_id="dev", task_id=None, stage_id=None, state=RunState.QUEUED, started_at=ts, last_heartbeat_at=ts),
@@ -216,7 +218,12 @@ def test_the_live_run_and_worker_signals_are_untouched():
     assert signals["active_runs"] == 2
     assert signals["queued_runs"] == 1
     assert signals["running_runs"] == 1
-    assert signals["active_worker_sessions"] == 0
+    # INVERTED at S56 (was `signals["active_worker_sessions"] == 0`). The
+    # `worker_sessions=` parameter and both worker signals went with the
+    # WorkerSessionStore write lane; the run signals beside them are the live
+    # half this case exists to protect and are unchanged.
+    assert "active_worker_sessions" not in signals
+    assert "stale_worker_sessions" not in signals
 
 
 def test_status_still_embeds_a_working_observability_envelope(isolate_agent_runtime_root):

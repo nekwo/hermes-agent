@@ -12,7 +12,6 @@ import pytest
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.models import AgentPersona, PersonaInstance
 from agent_runtime.persona_assignments import PersonaInstanceStore
-from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.serde import from_jsonable, to_jsonable
 from agent_runtime.states import WorkerSessionState
 
@@ -32,14 +31,9 @@ def _persona(persona_id: str = "dev") -> AgentPersona:
 
 
 def _assignment_config() -> AgentRuntimeConfig:
-    return AgentRuntimeConfig(
-        enterprise_worker_sessions=EnterpriseWorkerSessionsConfig(
-            enabled=True,
-            worker_session_store=True,
-            persona_instance_runtime=True,
-            persona_assignment_store=True,
-        )
-    )
+    # S56: the persona-instance runtime / assignment store are unconditional now;
+    # the enterprise_worker_sessions gate block was deleted.
+    return AgentRuntimeConfig()
 
 
 def _make(store: PersonaInstanceStore, persona_id: str, *, goal_id: str = "g1") -> PersonaInstance:

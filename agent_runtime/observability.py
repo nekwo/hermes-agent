@@ -7,9 +7,8 @@ from hermes_time import now
 
 from .incidents import CRITICAL_INCIDENT_KINDS
 from .models import Event, Incident
-from .states import PossessionState, RunState, WorkerSessionState
+from .states import RunState
 from .store import ACTIVE_RUN_STATES
-from .worker_sessions import ACTIVE_WORKER_STATES, worker_session_summary
 
 DEFAULT_RUN_STALLED_AFTER_SECONDS = 900
 DELIVERY_EVIDENCE_INCIDENT_KINDS = frozenset({"patch_landed_nowhere", "stage_no_progress"})
@@ -35,7 +34,6 @@ def build_observability(
     reference_time: datetime | None = None,
     run_stalled_after_seconds: int = DEFAULT_RUN_STALLED_AFTER_SECONDS,
     execution_mode: str = "manual",
-    worker_sessions: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Build redaction-safe Mission Control observability envelope.
 
@@ -47,8 +45,6 @@ def build_observability(
     ref = reference_time or now()
     open_incidents = [incident for incident in incidents if incident.closed_at is None]
     active_runs = [run for run in runs if run.state in ACTIVE_RUN_STATES]
-    workers = list(worker_sessions or [])
-    active_workers = [worker for worker in workers if _worker_is_active(worker)]
     running_runs = [run for run in active_runs if run.state == RunState.RUNNING]
     queued_runs = [run for run in active_runs if run.state == RunState.QUEUED]
     waiting_runs = [run for run in active_runs if run.state in {RunState.WAITING_ON_TOOL, RunState.WAITING_ON_APPROVAL}]
@@ -58,12 +54,6 @@ def build_observability(
         for run in active_runs
         if _run_age_seconds(ref, run) is not None and _run_age_seconds(ref, run) > run_stalled_after_seconds
     ]
-    stale_workers = [
-        worker
-        for worker in active_workers
-        if _worker_age_seconds(ref, worker) is not None and _worker_age_seconds(ref, worker) > run_stalled_after_seconds
-    ]
-
     interventions: list[dict[str, Any]] = []
     for incident in open_incidents:
         intervention_kind = incident.kind if incident.kind in DELIVERY_EVIDENCE_INCIDENT_KINDS else "open_incident"
@@ -93,21 +83,6 @@ def build_observability(
                 age_seconds=_run_age_seconds(ref, run),
             )
         )
-    for worker in stale_workers:
-        interventions.append(
-            _intervention(
-                "worker_stale_heartbeat",
-                "high",
-                "worker_session",
-                getattr(worker, "task_id", None),
-                getattr(worker, "active_run_id", None),
-                "Worker session heartbeat is stale",
-                worker_session_id=getattr(worker, "id", None),
-                persona_id=getattr(worker, "persona_id", None),
-                age_seconds=_worker_age_seconds(ref, worker),
-            )
-        )
-
     health_status = _health_status(interventions)
     return {
         "schema_version": 1,
@@ -125,15 +100,12 @@ def build_observability(
             "active_runs": len(active_runs),
             "queued_runs": len(queued_runs),
             "waiting_runs": len(waiting_runs),
-            "active_worker_sessions": len(active_workers),
-            "stale_worker_sessions": len(stale_workers),
             "open_incidents": len(open_incidents),
             "stalled_running_runs": len(stalled_runs),
             "self_heal": _self_heal_signals(runs),
         },
         "interventions": interventions,
         "active_runs": [_run_summary(run) for run in active_runs],
-        "worker_sessions": [_worker_summary(worker, reference_time=ref) for worker in workers],
         "recent_events": [_event_summary(event) for event in (events or [])],
         "recent_runs": [_run_summary(run) for run in sorted(runs, key=lambda item: getattr(item, "started_at", ref), reverse=True)[:10]],
     }
@@ -184,7 +156,8 @@ def _intervention(
                 "task_id": task_id,
                 "run_id": run_id,
                 "incident_id": extra.get("incident_id"),
-                "worker_session_id": extra.get("worker_session_id"),
+                # S56: ``worker_session_id`` stood here. The
+                # ``worker_stale_heartbeat`` family was its only supplier.
             }.items()
             if value
         },
@@ -203,17 +176,16 @@ def _risk_if_ignored(kind: str, severity: str) -> str:
 
 def _allowed_actions(kind: str, subject: str) -> list[str]:
     # S28: the daemon, context-request, and issue-discovery arms went with the
-    # intervention families that produced those kinds. Every arm below is
-    # reachable from a live parameter (``incidents``, ``runs``,
-    # ``worker_sessions``).
+    # intervention families that produced those kinds. S56 took the
+    # ``worker_session`` arm the same way — its only producer was the
+    # ``worker_stale_heartbeat`` family. Every arm below is reachable from a
+    # live parameter (``incidents``, ``runs``).
     if kind in DELIVERY_EVIDENCE_INCIDENT_KINDS:
         return ["answer_intervention", "cancel_run", "rescope"]
     if kind == "open_incident":
         return ["answer_intervention", "retry_stage"]
     if subject == "run":
         return ["cancel_run", "retry_stage"]
-    if subject == "worker_session":
-        return ["nudge_worker", "cancel_run"]
     return ["answer_intervention"]
 
 
@@ -475,39 +447,15 @@ def _run_age_seconds(reference_time: datetime, run: Any) -> float | None:
     return _age_seconds(reference_time, heartbeat or started)
 
 
-def _worker_summary(worker: Any, *, reference_time: datetime) -> dict[str, Any]:
-    try:
-        return worker_session_summary(worker, reference_time=reference_time)
-    except Exception:
-        state = getattr(worker, "state", None)
-        possession_state = getattr(worker, "possession_state", None)
-        return {
-            "worker_session_id": getattr(worker, "id", None),
-            "task_id": getattr(worker, "task_id", None),
-            "persona_id": getattr(worker, "persona_id", None),
-            "state": getattr(state, "value", state),
-            "active_run_id": getattr(worker, "active_run_id", None),
-            "session_id_present": bool(getattr(worker, "session_id", None)),
-            "heartbeat_age_seconds": _worker_age_seconds(reference_time, worker),
-            "possession_state": getattr(possession_state, "value", possession_state),
-        }
-
-
-def _worker_is_active(worker: Any) -> bool:
-    state = getattr(worker, "state", None)
-    possession = getattr(worker, "possession_state", None)
-    if isinstance(state, WorkerSessionState):
-        state_active = state in ACTIVE_WORKER_STATES
-    else:
-        state_active = str(state or "") in {item.value for item in ACTIVE_WORKER_STATES}
-    possession_value = possession if isinstance(possession, PossessionState) else str(possession or "")
-    return state_active or possession_value == PossessionState.POSSESSED or possession_value == PossessionState.POSSESSED.value
-
-
-def _worker_age_seconds(reference_time: datetime, worker: Any) -> float | None:
-    heartbeat = _coerce_datetime(getattr(worker, "last_heartbeat_at", None))
-    opened = _coerce_datetime(getattr(worker, "opened_at", None))
-    return _age_seconds(reference_time, heartbeat or opened)
+# S56 removed the whole worker half of this envelope with the write lane that
+# was its only producer: the ``worker_sessions`` parameter (``_cmd_observe``
+# already passed a ``[]`` literal, and ``status.py`` was the only caller that
+# passed rows), the ``worker_stale_heartbeat`` intervention family, the
+# ``active_worker_sessions`` / ``stale_worker_sessions`` signals, the
+# ``worker_sessions`` row list, and the three helpers only they reached
+# (``_worker_summary``, ``_worker_is_active``, ``_worker_age_seconds``). No
+# worker can reach an ACTIVE state now that nothing writes one, so every one of
+# those was a constant by construction.
 
 
 def _age_seconds(reference_time: datetime, timestamp: datetime | None) -> float | None:

@@ -78,7 +78,8 @@ BINDING_SOURCE_UNBOUND = "unbound"
 #: Typed busy reasons. Ordered most- to least-authoritative; the first match wins.
 BUSY_LIVE_BINDING = "live_binding"
 BUSY_ACTIVE_RUN = "active_run"
-BUSY_ACTIVE_WORKER = "active_worker"
+# S56 removed BUSY_ACTIVE_WORKER with the worker session store: its arm read
+# ``active_worker_session_id``, a field no writer can set any more.
 BUSY_ASSIGNMENT_IN_FLIGHT = "assignment_in_flight"
 BUSY_TASK_BOUND = "task_bound"
 BUSY_NON_IDLE_STATE = "non_idle_state"
@@ -249,9 +250,8 @@ def instance_busy_reason(
     """PURE: the typed reason this persona-instance row is in flight, or None.
 
     ``live_binding`` is the store-verified liveness check
-    (``PersonaInstanceStore._has_live_binding``: the referenced worker/run is
-    actually in an active state) and outranks the raw pointers, which can be
-    stale. ``goal_id`` is deliberately NOT a busy signal — a chat instance can
+    (``PersonaInstanceStore._has_live_binding``: the referenced run is actually
+    in an active state) and outranks the raw pointers, which can be stale. ``goal_id`` is deliberately NOT a busy signal — a chat instance can
     carry a goal pointer while nothing is executing.
     """
 
@@ -259,8 +259,6 @@ def instance_busy_reason(
         return BUSY_LIVE_BINDING
     if _clean(row.get("active_run_id")):
         return BUSY_ACTIVE_RUN
-    if _clean(row.get("active_worker_session_id")):
-        return BUSY_ACTIVE_WORKER
     if assignment_in_flight or _clean(row.get("current_assignment_id")):
         return BUSY_ASSIGNMENT_IN_FLIGHT
     if _clean(row.get("current_task_id")):
@@ -910,7 +908,6 @@ __all__ = [
     "BINDING_SOURCE_STORE",
     "BINDING_SOURCE_UNBOUND",
     "BUSY_ACTIVE_RUN",
-    "BUSY_ACTIVE_WORKER",
     "BUSY_ASSIGNMENT_IN_FLIGHT",
     "BUSY_LIVE_BINDING",
     "BUSY_NON_IDLE_STATE",

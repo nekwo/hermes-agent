@@ -15,18 +15,25 @@ _MAX_STATUS_LINES = 10
 _MAX_STATUS_LINE_CHARS = 180
 
 
-def build_dirty_state(*, tasks=None, runs=None, incidents=None, workers=None, repos=None, runtime_instances=None) -> dict[str, Any]:
+def build_dirty_state(*, tasks=None, runs=None, incidents=None, repos=None, runtime_instances=None) -> dict[str, Any]:
     """Return a redaction-safe dirty-state indicator for Mission Control.
 
     Runtime dirtiness means the Harness still has open work or active/stale run
     state. Repo dirtiness means a known target worktree has pre-existing git
     changes; it is reported but never cleaned by the Harness.
+
+    S56 removed the ``workers`` parameter and the four rows it alone fed
+    (``active_worker_sessions`` / ``possessed_worker_sessions`` and their two id
+    lists), plus the ``workers=`` arm of the summary line. With the
+    WorkerSessionStore write lane gone nothing can put a worker into an ACTIVE
+    or POSSESSED state, so all four were constants by construction and could
+    never contribute to ``dirty``.
     """
 
     tasks = list(tasks or [])
     runs = list(runs or [])
     incidents = list(incidents or [])
-    runtime = _runtime_dirty_state(tasks=tasks, runs=runs, incidents=incidents, workers=list(workers or []), runtime_instances=list(runtime_instances or []))
+    runtime = _runtime_dirty_state(tasks=tasks, runs=runs, incidents=incidents, runtime_instances=list(runtime_instances or []))
     repo_items = repo_dirty_states(repos or DEFAULT_DIRTY_REPOS)
     repo_dirty = any(item.get("dirty") or item.get("error") for item in repo_items)
     runtime_dirty = bool(runtime["dirty"])
@@ -69,17 +76,11 @@ def repo_dirty_states(repos) -> list[dict[str, Any]]:
 # S54 removed ``no_product_edit_dirty_check``. ``build_dirty_state`` is the live
 # projection; this per-task variant lost its caller with the mission lane.
 
-def _runtime_dirty_state(*, tasks, runs, incidents, workers=None, runtime_instances=None) -> dict[str, Any]:
+def _runtime_dirty_state(*, tasks, runs, incidents, runtime_instances=None) -> dict[str, Any]:
     open_tasks = [task for task in tasks if _task_state(task) not in {TaskState.DONE, TaskState.CANCELLED}]
     active_runs = [run for run in runs if _run_state(run) in ACTIVE_RUN_STATES]
     stale_runs = [run for run in runs if _run_state(run) == RunState.STALE]
     open_incidents = [incident for incident in incidents if getattr(incident, "closed_at", None) is None]
-    active_workers = [worker for worker in (workers or []) if _worker_is_active(worker)]
-    possessed_workers = [
-        worker
-        for worker in (workers or [])
-        if str(getattr(getattr(worker, "possession_state", ""), "value", getattr(worker, "possession_state", ""))) == "possessed"
-    ]
     stage47_tasks = [task for task in open_tasks if _is_stage47_temp_task(task)]
     stage47_task_ids = {task.id for task in stage47_tasks}
     stage47_active_runs = [run for run in active_runs if getattr(run, "task_id", None) in stage47_task_ids]
@@ -89,7 +90,7 @@ def _runtime_dirty_state(*, tasks, runs, incidents, workers=None, runtime_instan
         if _active_run_is_orphaned(run, tasks_by_id={getattr(task, "id", ""): task for task in tasks})
     ]
     foreground = _foreground_runtime_state(runtime_instances or [], active_runs=active_runs, open_tasks=open_tasks)
-    dirty = bool(open_tasks or active_runs or open_incidents or stale_runs or active_workers or possessed_workers)
+    dirty = bool(open_tasks or active_runs or open_incidents or stale_runs)
     return {
         "dirty": dirty,
         "foreground": foreground,
@@ -97,8 +98,6 @@ def _runtime_dirty_state(*, tasks, runs, incidents, workers=None, runtime_instan
         "active_runs": len(active_runs),
         "stale_runs": len(stale_runs),
         "open_incidents": len(open_incidents),
-        "active_worker_sessions": len(active_workers),
-        "possessed_worker_sessions": len(possessed_workers),
         "stage47_temp_open_tasks": len(stage47_tasks),
         "stage47_temp_active_runs": len(stage47_active_runs),
         "orphan_active_runs": len(orphan_active_runs),
@@ -107,8 +106,6 @@ def _runtime_dirty_state(*, tasks, runs, incidents, workers=None, runtime_instan
         "stale_run_ids": _ids(stale_runs),
         "stage47_temp_task_ids": _ids(stage47_tasks),
         "orphan_active_run_ids": _ids(orphan_active_runs),
-        "active_worker_session_ids": _ids(active_workers),
-        "possessed_worker_session_ids": _ids(possessed_workers),
     }
 
 
@@ -163,8 +160,6 @@ def _summary(*, runtime: dict[str, Any], repos: list[dict[str, Any]]) -> str:
         )
     elif runtime.get("active_runs") or runtime.get("open_tasks"):
         parts.append(f"runtime={runtime.get('open_tasks', 0)} open task(s), {runtime.get('active_runs', 0)} active run(s)")
-    if runtime.get("active_worker_sessions"):
-        parts.append(f"workers={runtime.get('active_worker_sessions')} active")
     if runtime.get("open_incidents"):
         parts.append(f"incidents={runtime.get('open_incidents')} open")
     if repo_dirty:

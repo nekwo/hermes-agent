@@ -178,9 +178,15 @@ def test_neko_extension_cap_resolves_from_root(tmp_path, monkeypatch):
 
 
 def test_swarm_config_resolves_from_root(tmp_path, monkeypatch):
-    # The swarm CLI seams (_cmd_swarm_status/_cmd_swarm_enable) require full argv
-    # + CLI wiring to reach; they now read `load_root_runtime_config().swarm`.
-    # Exercise that pinned resolution directly (unit-level, no CLI setup).
+    # INVERTED at S56 (2026-08-01), not deleted. This pinned
+    # `load_root_runtime_config().swarm.max_active_lanes` for the swarm CLI
+    # seams; S56 deleted `SwarmConfig`, the `_swarm_config` loader and the
+    # report-only `status.swarm` / `swarm_budget` / `production_envelope` rows
+    # it fed. The FIXTURE is kept deliberately (both yamls still SET the block)
+    # so this now proves the other half of the ruling: an operator yaml that
+    # still carries a removed block must LOAD AND BE IGNORED, never start
+    # refusing to load. The removal itself is owned by
+    # tests/agent_runtime/test_s56_config_block_removal.py.
     from agent_runtime.config import load_root_runtime_config
 
     _write_root_and_profile(
@@ -197,4 +203,7 @@ def test_swarm_config_resolves_from_root(tmp_path, monkeypatch):
             max_active_lanes: 1
         """,
     )
-    assert load_root_runtime_config().swarm.max_active_lanes == 9
+    cfg = load_root_runtime_config()
+    assert not hasattr(cfg, "swarm")
+    # ...and the root pin itself is still live for the fields that survived.
+    assert cfg.neko_extension_cap is not None

@@ -29,7 +29,6 @@ from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.events import EventLog
 from agent_runtime.models import AgentPersona, PersonaInstance, looks_like_persona_instance_id
 from agent_runtime.persona_assignments import PersonaInstanceStore
-from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.runtime_hud import resolve_situational_hud
 from agent_runtime.states import WorkerSessionState
 
@@ -49,14 +48,9 @@ def _persona(persona_id: str = "dev") -> AgentPersona:
 
 
 def _assignment_config() -> AgentRuntimeConfig:
-    return AgentRuntimeConfig(
-        enterprise_worker_sessions=EnterpriseWorkerSessionsConfig(
-            enabled=True,
-            worker_session_store=True,
-            persona_instance_runtime=True,
-            persona_assignment_store=True,
-        )
-    )
+    # S56: the persona-instance runtime / assignment store are unconditional now;
+    # the enterprise_worker_sessions gate block was deleted.
+    return AgentRuntimeConfig()
 
 
 def _event_count() -> int:

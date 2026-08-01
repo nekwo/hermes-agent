@@ -183,7 +183,15 @@ def test_the_read_path_still_projects_a_persisted_lane(isolate_agent_runtime_roo
 
 def test_status_still_projects_lanes_off_the_surviving_read_path(isolate_agent_runtime_root):
     seed_lane_row("goalrt_s53status", task_id="task_s53_status", state="running")
-    assert [row["lane_id"] for row in status.build_status()["lanes"]] == ["goalrt_s53status"]
+    data = status.build_status()
+    # RETARGETED at S56 (2026-08-01), not deleted: S53's claim is that the READ
+    # path still projects lanes into `harness status` after the write lane went.
+    # That claim survives verbatim; only the wire key moved. `status["lanes"]`
+    # was a verbatim duplicate of `status["runtime_instances"]["lanes"]`, and
+    # S56 took the duplicate off the wire. The removal is asserted alongside the
+    # retargeted read so the pin cannot pass against a status that lost both.
+    assert "lanes" not in data
+    assert [row["lane_id"] for row in data["runtime_instances"]["lanes"]] == ["goalrt_s53status"]
 
 
 def test_the_four_contracts_are_deregistered():

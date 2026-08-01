@@ -122,13 +122,12 @@ def _seed_qa_placement(monkeypatch, tmp_path, placement_id="qa_agent_f24601ba"):
     from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
     from agent_runtime.persona_assignments import PersonaInstanceStore
     from agent_runtime.store import AgentStore
-    from agent_runtime.worker_sessions import WorkerSessionStore
     from tests.agent_runtime.persona_samples import sample_persona
 
     cfg = load_agent_runtime_config()
     AgentStore().save(sample_persona("qa"))
     store = PersonaInstanceStore()
-    store.derive_from_workers(list(ensure_persisted_personas(cfg)), WorkerSessionStore().list_all())
+    store.ensure_for_personas(list(ensure_persisted_personas(cfg)))
     placement = store.add_instance(
         persona_id="qa", placement_id=placement_id, display_name="QA Agent (2)"
     )

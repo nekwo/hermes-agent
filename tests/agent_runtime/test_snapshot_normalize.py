@@ -14,7 +14,6 @@ from agent_runtime.config import AgentRuntimeConfig
 from types import SimpleNamespace
 
 Task = SimpleNamespace
-from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.snapshot import _keyed, _parity_warnings, build_snapshot
 from tests.agent_runtime.snapshot_bytes import audit_snapshot, snapshot_size_budget
 from agent_runtime.states import TaskState
@@ -35,14 +34,9 @@ def _task(task_id: str, n) -> Task:
 
 
 def _runtime_cfg() -> AgentRuntimeConfig:
-    return AgentRuntimeConfig(
-        enterprise_worker_sessions=EnterpriseWorkerSessionsConfig(
-            enabled=True,
-            worker_session_store=True,
-            persona_instance_runtime=True,
-            persona_assignment_store=True,
-        )
-    )
+    # S56: the persona-instance roster is unconditional — the old
+    # enterprise_worker_sessions gate block no longer exists.
+    return AgentRuntimeConfig()
 
 
 # --------------------------------------------------------------------------- #
@@ -73,7 +67,8 @@ def test_goals_is_keyed_map_and_tasks_wire_section_retired(isolate_agent_runtime
 
 def test_goals_single_owner_carries_union_of_both_projections(isolate_agent_runtime_root):
     snap = build_snapshot()
-    assert snap["parity"]["contract_version"] == 46
+    # S56 bumped the snapshot parity contract 46 -> 47.
+    assert snap["parity"]["contract_version"] == 47
     assert set(("goals", "runs", "proofs", "incidents")).isdisjoint(snap)
 
 

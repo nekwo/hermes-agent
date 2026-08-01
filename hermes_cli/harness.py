@@ -76,10 +76,8 @@ from agent_runtime.persona_assignments import (
     canonical_persona_instance_id,
     chat_session_owner_instance_id,
     migrate_retired_persona_assignment_task_ids,
-    persona_assignment_store_enabled,
     persona_assignment_summary,
     persona_chat_session_id_for,
-    persona_instance_runtime_enabled,
     persona_instance_summary,
     persona_instance_id_for,
     resolve_default_chat_session_id_for_instance,
@@ -155,7 +153,6 @@ from agent_runtime.store import RealmStore, WorkspaceStore
 from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
 from agent_runtime.tool_permissions import ChatToolPermissionStore, permission_state_for_chat
 from agent_runtime.tool_turn_history import persist_tool_turn_actual
-from agent_runtime.worker_sessions import WorkerSessionStore
 
 from hermes_cli.harness_support import (
     ERROR_EXIT_CODES,

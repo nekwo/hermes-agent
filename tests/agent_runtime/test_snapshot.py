@@ -26,7 +26,7 @@ def _task() -> Task:
 
 def test_snapshot_builds_without_stage_graph(isolate_agent_runtime_root) -> None:
     snapshot = build_snapshot()
-    assert snapshot["parity"]["contract_version"] == 46
+    assert snapshot["parity"]["contract_version"] == 47
     assert "goals" not in snapshot
     assert "boards" in snapshot
 
@@ -40,5 +40,5 @@ def test_snapshot_stage_projections_are_empty_after_graph_removal(isolate_agent_
 def test_write_snapshot_remains_importable_and_persists(isolate_agent_runtime_root) -> None:
     result = write_snapshot(build_snapshot())
 
-    assert result["parity"]["contract_version"] == 46
+    assert result["parity"]["contract_version"] == 47
     assert paths.snapshot_path().exists()

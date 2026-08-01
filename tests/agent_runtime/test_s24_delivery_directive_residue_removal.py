@@ -176,8 +176,19 @@ def test_the_dead_bundle_delivery_path_is_gone():
 
 
 def test_the_bundle_summary_surface_status_renders_survives():
-    """``status.py`` reads these; the promotion label is the live consumer of
-    ``read_bundle_promotion_record``."""
+    """INVERTED at S56 (2026-08-01), not deleted.
+
+    S24 kept these four projections and ``read_bundle_promotion_record`` on the
+    keep side with an explicit reason: ``status.py`` read them, so they were the
+    live surface the delivery-directive residue had been feeding. That reason
+    stopped being true when S52 removed the bundle WRITE lane (nothing can mint
+    or promote a bundle any more) and S56 took the four rows —
+    ``repo_bundles``, ``repo_bundle_closeout``, ``bundle_queue``,
+    ``repo_locks`` — off the ``build_status`` wire, leaving the projections
+    caller-free. The pin is inverted rather than deleted so S24's keep-side
+    claim, and its reversal, both stay on the record here. The READ side
+    (``RepoBundleStore``) deliberately survives.
+    """
 
     for name in (
         "repo_bundle_summary",
@@ -185,8 +196,10 @@ def test_the_bundle_summary_surface_status_renders_survives():
         "bundle_queue_summary",
         "repo_lock_summary",
     ):
-        assert callable(getattr(repo_bundles, name)), name
-    assert "read_bundle_promotion_record" in inspect.getsource(repo_bundles)
+        assert not hasattr(repo_bundles, name), name
+    assert "read_bundle_promotion_record" not in inspect.getsource(repo_bundles)
+    # Keep-side, still true: the read half of the store is untouched.
+    assert callable(repo_bundles.RepoBundleStore)
 
 
 def test_the_caller_free_repo_context_symbols_are_gone():

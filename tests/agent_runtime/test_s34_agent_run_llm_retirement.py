@@ -22,7 +22,6 @@ from agent_runtime import (
     persona_runtime,
     status,
     store,
-    worker_sessions,
 )
 from agent_runtime.models import AgentRun
 from agent_runtime.serde import from_jsonable
@@ -54,7 +53,8 @@ def test_agent_run_no_longer_declares_the_writerless_llm_field():
 
 
 def test_the_direct_and_indirect_run_readers_no_longer_consume_llm():
-    for module in (observability, status, store, worker_sessions):
+    # S56 deleted ``worker_sessions`` whole; it was the fourth module here.
+    for module in (observability, status, store):
         source = inspect.getsource(module)
         assert "run.llm" not in source, module.__name__
         assert 'getattr(run, "llm"' not in source, module.__name__

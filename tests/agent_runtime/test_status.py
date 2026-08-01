@@ -2,27 +2,14 @@ from hermes_time import now
 import pytest
 
 pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
-from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.models import AgentRun, Incident
 from types import SimpleNamespace
 
 Task = SimpleNamespace
-from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.states import RunState, TaskState
 from agent_runtime.status import build_status
 from agent_runtime.store import IncidentStore, RunStore, TaskStore
 from agent_runtime.runtime_instances import GoalRuntimeInstanceStore
-
-
-def _persona_runtime_config() -> AgentRuntimeConfig:
-    return AgentRuntimeConfig(
-        enterprise_worker_sessions=EnterpriseWorkerSessionsConfig(
-            enabled=True,
-            worker_session_store=True,
-            persona_instance_runtime=True,
-            persona_assignment_store=True,
-        )
-    )
 
 
 def _assert_no_mission_status() -> None:
@@ -50,16 +37,16 @@ def test_status_lane_only_does_not_report_background_task_ids(isolate_agent_runt
 def test_status_omits_retired_burn_in_certification_state(isolate_agent_runtime_root):
     s = build_status()
 
-    assert s["swarm"]["enabled"] is False
-    assert "certification" not in s["swarm"]
+    # S56 removed the whole `swarm` row (it echoed a config block nothing
+    # enforced), which supersedes the narrower burn-in/certification pin this
+    # case used to carry. Absence of the row is now the assertion.
+    assert "swarm" not in s
 
 
-def test_status_projects_operator_channels_for_persona_instances(monkeypatch, isolate_agent_runtime_root):
-    monkeypatch.setattr(
-        "agent_runtime.status.load_agent_runtime_config",
-        lambda: _persona_runtime_config(),
-    )
-
+def test_status_projects_operator_channels_for_persona_instances(isolate_agent_runtime_root):
+    # S56 made the persona-instance roster unconditional; the
+    # `enterprise_worker_sessions` config this case used to monkeypatch in is
+    # gone, and the wire block now reports the truth for every config.
     s = build_status()
 
     assert s["persona_instance_runtime"]["enabled"] is True
@@ -81,18 +68,15 @@ def test_status_projects_operator_channels_for_persona_instances(monkeypatch, is
 
 
 def test_status_surfaces_lanes_repo_locks_and_retired_swarm_budget_shape(isolate_agent_runtime_root):
-    """S52/S53 retargeted the seeding half of this case.
+    """S56 finished the cut this case has been tracking since S52/S53.
 
-    It used to mint a lane (``create_lane`` + two ``transition`` calls) and take
-    a repo-bundle write lock, then assert those rows came back out of
-    ``build_status``. All four writers were deleted for want of a production
-    caller, and this test was among their only callers -- so the seeding is gone
-    and what remains is the honest reading: the sections still project, and the
-    two whose writers are gone now report EMPTY rather than a seeded row.
-
-    ``lanes`` and ``repo_locks`` reading empty by construction is the S47 item-5
-    defect class, recorded for the follow-up wave. Asserting the constant here
-    keeps it visible instead of letting a seeded fixture hide it.
+    It used to mint a lane and a repo-bundle lock and read the rows back; when
+    those writers were deleted it degraded to asserting the empty constants
+    (``lanes == []``, ``repo_locks`` with zero locks) so the S47 item-5
+    empty-by-construction debt stayed visible. S56 retired the rows themselves
+    -- ``lanes``, ``repo_locks``, ``swarm_budget`` and ``production_envelope``
+    are no longer published at all -- so the pins invert to absence rather than
+    being dropped, keeping a stale producer from resurrecting a reader.
     """
 
     runs = RunStore()
@@ -113,12 +97,14 @@ def test_status_surfaces_lanes_repo_locks_and_retired_swarm_budget_shape(isolate
 
     s = build_status(run_store=runs)
 
-    assert s["lanes"] == []
-    assert s["repo_locks"] == {"lock_count": 0, "locks": []}
-    assert s["swarm_budget"]["global"] == {"total_tokens": 0, "api_calls": 0}
-    assert s["swarm_budget"]["by_task"] == {}
-    assert s["production_envelope"]["production_ready"] is True
-    assert {item["id"] for item in s["production_envelope"]["items"]} >= {"H5", "H6", "H7", "H8", "H9", "H10"}
+    # S56: rows retired, pins inverted (superseded-pin-inversion).
+    assert "lanes" not in s
+    assert "repo_locks" not in s
+    assert "swarm_budget" not in s
+    assert "production_envelope" not in s
+    # `runtime_instances` keeps its own `lanes` sub-key -- that block is the
+    # projection the top-level row duplicated, and it still ships.
+    assert "lanes" in s["runtime_instances"]
 
 
 def test_status_marks_next_action_blocked_by_open_incident():

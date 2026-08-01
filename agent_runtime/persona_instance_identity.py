@@ -325,7 +325,6 @@ def classify_orphan_persona_instances(
         active = any(
             str(_row_get(row, key) or "").strip()
             for key in (
-                "active_worker_session_id",
                 "active_run_id",
                 "current_assignment_id",
                 "current_work_assignment_id",

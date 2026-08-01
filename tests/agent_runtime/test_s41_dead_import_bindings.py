@@ -63,7 +63,14 @@ REMOVED_BINDINGS = {
     "agent_runtime/observability.py": {"timedelta"},
     "agent_runtime/parity.py": {"paths"},
     "agent_runtime/terminal_envelope.py": {"field", "Sequence"},
-    "agent_runtime/worker_sessions.py": {"Path"},
+    # RETIRED at S56 (2026-08-01): the row was
+    # ``"agent_runtime/worker_sessions.py": {"Path"}`` — a dead ``Path`` binding
+    # in the worker-session store. S56 deleted that module WHOLE, so the row's
+    # subject no longer exists and a per-file parametrize case for it can only
+    # error on a missing path. The reason is preserved here rather than the row
+    # silently vanishing; the module's absence is asserted in
+    # ``test_every_source_symbol_the_bindings_pointed_at_is_untouched`` below and
+    # owned by tests/agent_runtime/test_s56_worker_session_lane_removal.py.
     "hermes_cli/harness_parts/persona_commands.py": {"_relay_time"},
 }
 
@@ -141,12 +148,20 @@ def test_every_source_symbol_the_bindings_pointed_at_is_untouched():
     The removals themselves are owned by
     tests/agent_runtime/test_s49_operator_control_removal.py and
     tests/agent_runtime/test_s50_launcher_process_hygiene_removal.py.
+
+    INVERTED again at S56 (2026-08-01) for ``worker_sessions``, by the same rule
+    and for the same reason: this pin asserted ``worker_session_summary`` was
+    still a callable definition whose ``Path`` binding S41 had merely unbound.
+    S56 deleted ``agent_runtime/worker_sessions.py`` whole, so the module is
+    asserted ABSENT rather than the pin being dropped. ``states``' companion
+    ``WorkerSessionState`` deliberately SURVIVES the cut (``PersonaInstance``
+    still types its ``state`` on it) and is pinned below so the two are not
+    confused for one another.
     """
 
     from importlib.util import find_spec
 
     from agent_runtime import cli_format, scope_control, states, terminal_envelope
-    from agent_runtime import worker_sessions
     from agent_runtime.decision_schema import DecisionType
     from agent_runtime.persona_assignments import default_chat_session_id_for_instance
     from agent_runtime.profile_runner import RunBudgetExceeded
@@ -154,7 +169,8 @@ def test_every_source_symbol_the_bindings_pointed_at_is_untouched():
     assert callable(cli_format.emit_json)
     assert not hasattr(cli_format, "human_task_line")
     assert not hasattr(cli_format, "task_summary")
-    assert callable(worker_sessions.worker_session_summary)
+    assert find_spec("agent_runtime.worker_sessions") is None
+    assert states.WorkerSessionState  # the survivor, not the deleted store
     assert find_spec("agent_runtime.operator_control") is None
     assert find_spec("agent_runtime.launcher_process_hygiene") is None
     assert callable(default_chat_session_id_for_instance)

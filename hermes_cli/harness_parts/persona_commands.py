@@ -87,11 +87,9 @@ from agent_runtime.persona_assignments import (
     canonical_persona_instance_id,
     chat_session_owner_instance_id,
     migrate_retired_persona_assignment_task_ids,
-    persona_assignment_store_enabled,
     persona_assignment_summary,
     persona_chat_session_id_for,
     persona_instance_id_for,
-    persona_instance_runtime_enabled,
     persona_instance_summary,
     resolve_default_chat_session_id_for_instance,
     safe_assignment_text,
@@ -123,7 +121,6 @@ from agent_runtime.store import AgentStore
 from agent_runtime.tool_permissions import ChatToolPermissionStore, permission_state_for_chat
 from agent_runtime.tool_turn_history import persist_tool_turn_actual
 from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
-from agent_runtime.worker_sessions import WorkerSessionStore
 from hermes_cli.harness_support import (
     PERSONA_CHAT_SESSION_SOURCE,
     _list_envelope,
@@ -144,14 +141,15 @@ def _persona_chat_fault_injection(boundary: str) -> None:
 def _cmd_persona_list(args) -> int:
     cfg = load_agent_runtime_config()
     store = PersonaInstanceStore()
-    workers = WorkerSessionStore().list_all()
     personas = ensure_persisted_personas(cfg)
     personas_by_id = {str(getattr(persona, "id", "") or ""): persona for persona in personas}
-    enabled = persona_instance_runtime_enabled(cfg)
-    instances = store.derive_from_workers(personas, workers) if enabled else []
+    # S56: the roster is unconditional; the two `enterprise_worker_sessions`
+    # gates went with the block. The reply keys stay so operator tooling that
+    # reads them keeps parsing, and now report the truth.
+    instances = store.ensure_for_personas(personas)
     data = {
-        "feature_enabled": enabled,
-        "assignment_store_enabled": persona_assignment_store_enabled(cfg),
+        "feature_enabled": True,
+        "assignment_store_enabled": True,
         "persona_instances": [
             persona_instance_summary(instance, personas_by_id.get(str(getattr(instance, "persona_id", "") or "")))
             for instance in instances
@@ -160,8 +158,6 @@ def _cmd_persona_list(args) -> int:
     if args.json:
         print(emit_json(data))
     else:
-        if not enabled:
-            print("Persona instance runtime is disabled.")
         for instance in data["persona_instances"]:
             print(f"{instance['persona_instance_id']}: {instance['display_name']} state={instance['state']} assignment={instance['current_assignment_id'] or '-'}")
     return 0
@@ -169,14 +165,10 @@ def _cmd_persona_list(args) -> int:
 
 def _cmd_persona_show(args) -> int:
     cfg = load_agent_runtime_config()
-    if not persona_instance_runtime_enabled(cfg):
-        data = {"ok": False, "feature_enabled": False, "error": "persona instance runtime is disabled"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
     store = PersonaInstanceStore()
     personas = ensure_persisted_personas(cfg)
     personas_by_id = {str(getattr(persona, "id", "") or ""): persona for persona in personas}
-    store.derive_from_workers(personas, WorkerSessionStore().list_all())
+    store.ensure_for_personas(personas)
     value = str(args.persona_id_or_instance_id or "").strip()
     instance_id = value if value.startswith("personainst_") else persona_instance_id_for(_normalize_cli_persona_id(value))
     try:
@@ -185,7 +177,7 @@ def _cmd_persona_show(args) -> int:
         data = {"ok": False, "feature_enabled": True, "error": f"persona instance not found: {value}"}
         print(emit_json(data) if args.json else data["error"])
         return 2
-    assignments = PersonaAssignmentStore().list_for_persona(instance.persona_id) if persona_assignment_store_enabled(cfg) else []
+    assignments = PersonaAssignmentStore().list_for_persona(instance.persona_id)
     data = {
         "ok": True,
         "feature_enabled": True,
@@ -351,10 +343,6 @@ def _cmd_persona_permission_set(args) -> int:
 
 def _cmd_persona_assignments(args) -> int:
     cfg = load_agent_runtime_config()
-    if not persona_assignment_store_enabled(cfg):
-        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
     store = PersonaAssignmentStore()
     if args.persona_id:
         assignments = store.list_for_persona(_normalize_cli_persona_id(args.persona_id))
@@ -362,7 +350,7 @@ def _cmd_persona_assignments(args) -> int:
         assignments = store.list_all()
     data = {
         "ok": True,
-        "feature_enabled": persona_instance_runtime_enabled(cfg),
+        "feature_enabled": True,
         "assignment_store_enabled": True,
         "assignments": [persona_assignment_summary(item) for item in assignments],
     }
@@ -419,10 +407,6 @@ def _cmd_persona_instance_create(args) -> int:
             return 2
         coordinator_scope = auth.scope
     if display_name:
-        if not persona_assignment_store_enabled(cfg):
-            data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-            print(emit_json(data) if args.json else data["error"])
-            return 2
         try:
             if add_instance:
                 if not placement_id:
@@ -525,10 +509,6 @@ def _cmd_persona_instance_open_chat(args) -> int:
     # agent_runtime.mission_chat_outcome; nothing re-spells its values.
     from agent_runtime.mission_chat_outcome import ChatErrorKind
     cfg = load_agent_runtime_config()
-    if not persona_assignment_store_enabled(cfg):
-        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
     persona_id = _normalize_cli_persona_or_template_id(args.persona_id)
     persona = _persona_by_id(cfg, persona_id)
     coordinator_id = _coordinator_actor_id(args)
@@ -988,11 +968,6 @@ def _cmd_persona_chat_delete(args) -> int:
     # agent_runtime.mission_chat_outcome; nothing re-spells its values.
     from agent_runtime.mission_chat_outcome import ChatErrorKind
     cfg = load_agent_runtime_config()
-    if not persona_assignment_store_enabled(cfg):
-        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
-
     session_id = safe_assignment_text(getattr(args, "session_id", None), limit=200)
     if not session_id:
         data = {"ok": False, "error": "session_id is required"}
@@ -1220,8 +1195,7 @@ def _chat_busy_payload(exc: ChatBusyError) -> dict[str, object]:
         "persona_instance_id": exc.instance.id,
         "persona_id": exc.instance.persona_id,
         "active_run_id": exc.active_run_id,
-        "active_worker_session_id": exc.active_worker_session_id,
-        "next_expected": "choose add_instance to keep the current chat, or retry with kill_active to cancel the current run/worker and replace it",
+        "next_expected": "choose add_instance to keep the current chat, or retry with kill_active to cancel the current run and replace it",
     }
 
 
@@ -1591,7 +1565,7 @@ def _cmd_mission_chat_message(args) -> int:
             print(emit_json(data) if args.json else data["error"])
         return 2
     instance_store = PersonaInstanceStore()
-    instance_store.derive_from_workers(ensure_persisted_personas(cfg), WorkerSessionStore().list_all())
+    instance_store.ensure_for_personas(ensure_persisted_personas(cfg))
     # Canonicalize a caller-supplied instance id at THIS boundary (the same
     # chokepoint open_chat uses), so an instance-shaped target can never mint a
     # variant row.
@@ -3687,15 +3661,6 @@ def _cmd_persona_instance_repair_steering(args) -> int:
     renders as a phantom "steered by <principal>" edge. Honors --dry-run
     (validate + preview, write nothing, emit nothing)."""
     cfg = load_agent_runtime_config()
-    if not persona_assignment_store_enabled(cfg):
-        data = {
-            "ok": False,
-            "feature_enabled": persona_instance_runtime_enabled(cfg),
-            "assignment_store_enabled": False,
-            "error": "persona assignment store is disabled",
-        }
-        print(emit_json(data) if args.json else data["error"])
-        return 2
     target = safe_optional_token(getattr(args, "persona_instance_id", None))
     scan_all = bool(getattr(args, "all", False))
     if not target and not scan_all:
@@ -3732,10 +3697,6 @@ def _cmd_persona_instance_repair_steering(args) -> int:
 
 def _cmd_persona_instance_steer(args) -> int:
     cfg = load_agent_runtime_config()
-    if not persona_assignment_store_enabled(cfg):
-        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
     persona_instance_id = safe_assignment_token(args.persona_instance_id)
     if not persona_instance_id:
         data = {"ok": False, "error": "persona_instance_id is required"}
@@ -3844,10 +3805,6 @@ def _cmd_persona_instance_return_summary(args) -> int:
 
 def _cmd_persona_instance_update_profile(args) -> int:
     cfg = load_agent_runtime_config()
-    if not persona_assignment_store_enabled(cfg):
-        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
     persona_instance_id = safe_assignment_token(args.persona_instance_id)
     if not persona_instance_id:
         data = {"ok": False, "error": "persona_instance_id is required"}
@@ -4001,10 +3958,6 @@ def _validated_set_model_request(args) -> dict:
 
 def _cmd_persona_instance_set_model(args) -> int:
     cfg = load_agent_runtime_config()
-    if not persona_assignment_store_enabled(cfg):
-        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-        print(emit_json(data) if args.json else data["error"])
-        return 2
     persona_instance_id = safe_assignment_token(args.persona_instance_id)
     if not persona_instance_id:
         data = {"ok": False, "error_code": "persona_not_found", "error": "persona_instance_id is required"}
@@ -4241,16 +4194,9 @@ def _queue_free_floating_assignment(
         ExecutionState,
     )
     cfg = load_agent_runtime_config()
-    if not persona_assignment_store_enabled(cfg):
-        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-        if stream:
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if json_output else data["error"])
-        return 2
     normalized_persona = _normalize_cli_persona_or_template_id(persona_id)
     instance_store = PersonaInstanceStore()
-    instance_store.derive_from_workers(ensure_persisted_personas(cfg), WorkerSessionStore().list_all())
+    instance_store.ensure_for_personas(ensure_persisted_personas(cfg))
     if persona_instance_id is None:
         if add_instance:
             if not placement_id:
@@ -5527,7 +5473,6 @@ def _bind_free_floating_chat_session(
     )
     instance.mode = "chat" if previous_mode == "chat" else "free_floating"
     instance.current_task_id = None
-    instance.active_worker_session_id = None
     instance.active_run_id = None
     instance.current_assignment_id = assignment_id
     instance_store.update(instance)
@@ -5674,12 +5619,12 @@ def _resolve_relay_sender_marker(
         # unknown rather than guessing.
         instance_id = owner
 
-    # Tier 2 — worker/task-lane callers: the caller session is the instance's
-    # active worker/bound session, not a chat-shaped id.
+    # Tier 2 — task-lane callers: the caller session is the instance's bound
+    # session, not a chat-shaped id. S56 removed the ``active_worker_session_id``
+    # candidate with the worker store that was its only writer.
     if instance_id is None and persona_id is None:
         for instance in instances:
             candidates = {
-                safe_assignment_text(instance.active_worker_session_id, limit=200),
                 safe_assignment_text(instance.default_chat_session_id, limit=200),
             }
             if token in candidates:
@@ -6242,10 +6187,6 @@ def _close_free_floating_assignments(persona_instance_id: str, *, reason: str, j
     )
 
     cfg = load_agent_runtime_config()
-    if not persona_assignment_store_enabled(cfg):
-        data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
-        print(emit_json(data) if json_output else data["error"])
-        return 2
     normalized_instance = safe_assignment_token(persona_instance_id)
     store = PersonaAssignmentStore()
     matches = [

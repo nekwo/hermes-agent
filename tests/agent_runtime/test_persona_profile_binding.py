@@ -22,7 +22,6 @@ from agent_runtime.persona_profile_binding import (
     BINDING_SOURCE_STORE,
     BINDING_SOURCE_UNBOUND,
     BUSY_ACTIVE_RUN,
-    BUSY_ACTIVE_WORKER,
     BUSY_ASSIGNMENT_IN_FLIGHT,
     BUSY_LIVE_BINDING,
     BUSY_NON_IDLE_STATE,
@@ -188,7 +187,10 @@ def test_binding_index_reports_the_config_store_disagreement(profiles, monkeypat
         ({"state": "idle", "goal_id": "goal_1"}, {}, None),
         ({"state": "idle"}, {"live_binding": True}, BUSY_LIVE_BINDING),
         ({"state": "idle", "active_run_id": "run_1"}, {}, BUSY_ACTIVE_RUN),
-        ({"state": "idle", "active_worker_session_id": "ws_1"}, {}, BUSY_ACTIVE_WORKER),
+        # S56 deleted BUSY_ACTIVE_WORKER with the worker-session store. The row
+        # still SENDS the field (a stale producer can) but it no longer makes an
+        # instance busy.
+        ({"state": "idle", "active_worker_session_id": "ws_1"}, {}, None),
         ({"state": "idle", "current_assignment_id": "as_1"}, {}, BUSY_ASSIGNMENT_IN_FLIGHT),
         ({"state": "idle"}, {"assignment_in_flight": True}, BUSY_ASSIGNMENT_IN_FLIGHT),
         ({"state": "idle", "current_task_id": "task_1"}, {}, BUSY_TASK_BOUND),

@@ -28,7 +28,6 @@ from agent_runtime.persona_assignments import (
     StaleModelOverrideWrite,
     persona_instance_summary,
 )
-from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.store import AgentStore
 
 
@@ -47,15 +46,11 @@ def _persona(persona_id: str = "dev", *, model: str | None = "gpt-test", provide
 
 
 def _cfg() -> AgentRuntimeConfig:
+    # S56: the persona-instance runtime / assignment store are unconditional now;
+    # the enterprise_worker_sessions gate block was deleted.
     return AgentRuntimeConfig(
         default_provider="openai-codex",
         default_model="cfg-default-model",
-        enterprise_worker_sessions=EnterpriseWorkerSessionsConfig(
-            enabled=True,
-            worker_session_store=True,
-            persona_instance_runtime=True,
-            persona_assignment_store=True,
-        ),
     )
 
 

@@ -88,11 +88,18 @@ def test_status_keeps_every_field_an_operator_can_still_learn_from(isolate_agent
         "agents",
         "observability",
         "runtime_instances",
-        "lanes",
         "parity",
         "decision_contract_hash",
     ):
         assert key in data, f"S21 dropped a live status field: {key}"
+    # RETARGETED at S56 (2026-08-01), not deleted: `lanes` was pinned here as a
+    # live top-level status field. It was a verbatim duplicate of
+    # `runtime_instances["lanes"]`, so S56 took the top-level copy off the wire
+    # and kept the block. The claim ("an operator can still learn lanes from
+    # `harness status`") is preserved by moving the pin to the surviving path,
+    # and the removal is asserted so the reversal stays visible here.
+    assert "lanes" not in data
+    assert "lanes" in data["runtime_instances"]
 
 
 # --------------------------------------------------------------------------

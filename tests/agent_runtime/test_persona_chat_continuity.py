@@ -52,10 +52,12 @@ def test_01_legacy_chat_pointer_migrates_without_worker_alias():
     assert row.default_chat_session_id == "persona_chat_personainst_dev_old"
 
 
-def test_02_worker_update_never_overwrites_default_chat(isolate_agent_runtime_root):
+def test_02_non_chat_session_write_never_overwrites_default_chat(isolate_agent_runtime_root):
+    # S56 deleted PersonaInstance.active_worker_session_id with the worker
+    # session store; the surviving guard is that a non-``persona_chat_*``
+    # session_id write must not clobber the default chat pointer.
     store = PersonaInstanceStore()
     row = store.open_chat(persona_id="dev", session_id="persona_chat_root")
-    row.active_worker_session_id = "worker_1"
     row.session_id = "worker_session"
     store.update(row)
     assert store.get(row.id).default_chat_session_id == "persona_chat_root"

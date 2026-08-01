@@ -32,7 +32,7 @@ def _seed_two_instances(monkeypatch, tmp_path, persona="dev"):
     """Fresh runtime root with two deliberate PLACEMENTS of ``persona``.
 
     The canonical operator channel (``personainst_dev``) is auto-ensured by
-    ``derive_from_workers``, but "placements shadow canonical" now drops it from
+    ``ensure_for_personas``, but "placements shadow canonical" now drops it from
     the addressable candidate set whenever a placement of the persona is in
     scope. So a genuinely ambiguous bare-persona send needs TWO placements
     (``personainst_dev_agent_2`` + ``personainst_dev_agent_3``, both runtime-
@@ -45,13 +45,12 @@ def _seed_two_instances(monkeypatch, tmp_path, persona="dev"):
     from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
     from agent_runtime.persona_assignments import PersonaInstanceStore
     from agent_runtime.store import AgentStore
-    from agent_runtime.worker_sessions import WorkerSessionStore
     from tests.agent_runtime.persona_samples import sample_persona
 
     cfg = load_agent_runtime_config()
     AgentStore().save(sample_persona(persona))
     store = PersonaInstanceStore()
-    store.derive_from_workers(list(ensure_persisted_personas(cfg)), WorkerSessionStore().list_all())
+    store.ensure_for_personas(list(ensure_persisted_personas(cfg)))
     store.add_instance(persona_id=persona, placement_id="dev_agent_2", display_name=f"{persona} (2)")
     store.add_instance(persona_id=persona, placement_id="dev_agent_3", display_name=f"{persona} (3)")
 
@@ -238,7 +237,7 @@ def _seed_dev_scoped(monkeypatch, tmp_path, placements, *, active="ws_home"):
     ``placements`` is ``[(placement_id, workspace_id), ...]`` for persona
     ``dev``. Every referenced workspace (and ``active``) is created with an
     explicit id and ``active`` is set active. The canonical ``personainst_dev``
-    auto-ensured by ``derive_from_workers`` is runtime-global (no workspace
+    auto-ensured by ``ensure_for_personas`` is runtime-global (no workspace
     pointer), so it is always in scope.
     """
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
@@ -246,7 +245,6 @@ def _seed_dev_scoped(monkeypatch, tmp_path, placements, *, active="ws_home"):
     from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
     from agent_runtime.persona_assignments import PersonaInstanceStore
     from agent_runtime.store import AgentStore, WorkspaceStore
-    from agent_runtime.worker_sessions import WorkerSessionStore
     from tests.agent_runtime.persona_samples import sample_persona
 
     cfg = load_agent_runtime_config()
@@ -257,7 +255,7 @@ def _seed_dev_scoped(monkeypatch, tmp_path, placements, *, active="ws_home"):
     ws_store.set_active(active)
 
     store = PersonaInstanceStore()
-    store.derive_from_workers(list(ensure_persisted_personas(cfg)), WorkerSessionStore().list_all())
+    store.ensure_for_personas(list(ensure_persisted_personas(cfg)))
     for placement_id, workspace_id in placements:
         store.add_instance(
             persona_id="dev",
@@ -350,7 +348,6 @@ def test_sender_session_scopes_candidates_to_sender_workspace(tmp_path, monkeypa
     from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
     from agent_runtime.persona_assignments import PersonaInstanceStore
     from agent_runtime.store import WorkspaceStore
-    from agent_runtime.worker_sessions import WorkerSessionStore
 
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     cfg = load_agent_runtime_config()
@@ -360,7 +357,7 @@ def test_sender_session_scopes_candidates_to_sender_workspace(tmp_path, monkeypa
     ws_store.set_active("ws_home")  # active is neither sender's ws nor a target's
 
     store = PersonaInstanceStore()
-    store.derive_from_workers(list(ensure_persisted_personas(cfg)), WorkerSessionStore().list_all())
+    store.ensure_for_personas(list(ensure_persisted_personas(cfg)))
     # TWO dev placements in ws_a (so the sender-scoped set stays ambiguous under
     # "placements shadow canonical"; canonical + one placement would auto-route)
     # plus one in ws_b that must never leak into ws_a's candidates.

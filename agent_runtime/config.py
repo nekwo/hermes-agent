@@ -12,7 +12,7 @@ from hermes_constants import get_config_path
 from .dispatch_session_policy import normalize_dispatch_session_policy
 from .personas import PROFILE_ROLE_SENTINEL, validate_toolsets
 from .redaction_mode import normalize_redaction_mode
-from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, EventLogConfig, McpAdmissionConfig, MissionChatConfig, NormalWorkerFlowConfig, PersonaChatConfig, ReadModelConfig, RepoBundleRoutingConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig, TerminalEnvelopeConfig
+from .runtime_config import CoordinatorPermissionConfig, EventLogConfig, McpAdmissionConfig, MissionChatConfig, PersonaChatConfig, ReadModelConfig, RuntimeConfig, SupervisionConfig, TerminalEnvelopeConfig
 
 logger = logging.getLogger(__name__)
 
@@ -108,25 +108,14 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
     resolved_provider, default_provider_source = _resolve_default_authority(
         raw.get("default_provider"), top_provider, "agent_runtime.default_provider", "model.provider"
     )
-    enterprise_worker_sessions = _enterprise_worker_sessions_config(raw.get("enterprise_worker_sessions") or {})
-    continuous_role_sessions = _continuous_role_sessions_config(raw.get("continuous_role_sessions") or {})
-    normal_worker_flow = _normal_worker_flow_config(raw.get("normal_worker_flow") or {})
-    repo_bundle_routing = _repo_bundle_routing_config(raw.get("repo_bundle_routing") or {})
-    simplified_agent_contract = _simplified_agent_contract_config(raw.get("simplified_agent_contract") or {})
     read_model = _read_model_config(raw.get("read_model") or {})
     persona_chat = _persona_chat_config(raw.get("persona_chat") or {})
     event_log = _event_log_config(raw.get("event_log") or {})
-    swarm = _swarm_config(raw.get("swarm") or {})
     supervision = _supervision_config(raw.get("supervision") or {})
     coordinator_permissions = _coordinator_permission_config(raw.get("coordinator_permissions") or {})
     mission_chat = _mission_chat_config(raw.get("mission_chat") or {})
     mcp_admission = _mcp_admission_config(raw.get("mcp_admission") or {})
     terminal_envelope = _terminal_envelope_config(raw.get("terminal_envelope") or {})
-    continuous_role_sessions = _apply_enterprise_role_session_compat(
-        continuous_role_sessions,
-        enterprise_worker_sessions=enterprise_worker_sessions,
-        raw_continuous=raw.get("continuous_role_sessions"),
-    )
     cfg = AgentRuntimeConfig(
         schema_version=int(raw.get("schema_version", 1)),
         store_root=raw.get("store_root"),
@@ -165,15 +154,9 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
         artifact_storage_low_watermark_mb=int(raw.get("artifact_storage_low_watermark_mb", 512)),
         artifact_storage_high_watermark_mb=int(raw.get("artifact_storage_high_watermark_mb", 1024)),
         artifact_storage_critical_watermark_mb=int(raw.get("artifact_storage_critical_watermark_mb", 2048)),
-        continuous_role_sessions=continuous_role_sessions,
-        enterprise_worker_sessions=enterprise_worker_sessions,
-        normal_worker_flow=normal_worker_flow,
-        repo_bundle_routing=repo_bundle_routing,
-        simplified_agent_contract=simplified_agent_contract,
         read_model=read_model,
         persona_chat=persona_chat,
         event_log=event_log,
-        swarm=swarm,
         supervision=supervision,
         coordinator_permissions=coordinator_permissions,
         mission_chat=mission_chat,
@@ -468,89 +451,6 @@ def _string_list(value: Any) -> list[str]:
     return [str(item).strip() for item in value if str(item).strip()]
 
 
-def _continuous_role_sessions_config(raw: dict[str, Any]) -> ContinuousRoleSessionConfig:
-    raw = raw if isinstance(raw, dict) else {}
-    defaults = ContinuousRoleSessionConfig()
-    return ContinuousRoleSessionConfig(
-        enabled=bool(raw.get("enabled", defaults.enabled)),
-        observe_only=bool(raw.get("observe_only", defaults.observe_only)),
-        max_decisions_per_envelope=_positive_int(raw.get("max_decisions_per_envelope"), defaults.max_decisions_per_envelope),
-        max_proofs_per_envelope=_positive_int(raw.get("max_proofs_per_envelope"), defaults.max_proofs_per_envelope),
-        max_continuations_per_stage=_positive_int(raw.get("max_continuations_per_stage"), defaults.max_continuations_per_stage),
-        continue_after_passing_proof=bool(raw.get("continue_after_passing_proof", defaults.continue_after_passing_proof)),
-        continue_after_failed_proof=bool(raw.get("continue_after_failed_proof", defaults.continue_after_failed_proof)),
-        close_on_state_owner_change=bool(raw.get("close_on_state_owner_change", defaults.close_on_state_owner_change)),
-        close_on_open_incident=bool(raw.get("close_on_open_incident", defaults.close_on_open_incident)),
-        close_on_invalid_output=bool(raw.get("close_on_invalid_output", defaults.close_on_invalid_output)),
-        close_on_budget_warning=bool(raw.get("close_on_budget_warning", defaults.close_on_budget_warning)),
-    )
-
-
-def _enterprise_worker_sessions_config(raw: dict[str, Any]) -> EnterpriseWorkerSessionsConfig:
-    raw = raw if isinstance(raw, dict) else {}
-    defaults = EnterpriseWorkerSessionsConfig()
-    mode = str(raw.get("mode", defaults.mode) or defaults.mode).strip() or defaults.mode
-    if mode not in {"observe_only", "enforce"}:
-        mode = defaults.mode
-    strategy = str(raw.get("static_prompt_strategy", defaults.static_prompt_strategy) or defaults.static_prompt_strategy).strip()
-    if strategy not in {"capability_detect", "always_send", "receipt_only"}:
-        strategy = defaults.static_prompt_strategy
-    return EnterpriseWorkerSessionsConfig(
-        enabled=bool(raw.get("enabled", defaults.enabled)),
-        mode=mode,
-        worker_session_store=bool(raw.get("worker_session_store", defaults.worker_session_store)),
-        persona_instance_runtime=bool(raw.get("persona_instance_runtime", defaults.persona_instance_runtime)),
-        persona_assignment_store=bool(raw.get("persona_assignment_store", defaults.persona_assignment_store)),
-        same_session_continuation=bool(raw.get("same_session_continuation", defaults.same_session_continuation)),
-        harness_owned_proof_recipes=bool(raw.get("harness_owned_proof_recipes", defaults.harness_owned_proof_recipes)),
-        no_edit_certification_sandbox=bool(raw.get("no_edit_certification_sandbox", defaults.no_edit_certification_sandbox)),
-        possession_controls=bool(raw.get("possession_controls", defaults.possession_controls)),
-        static_prompt_strategy=strategy,
-        worker_heartbeat_seconds=_positive_int(raw.get("worker_heartbeat_seconds"), defaults.worker_heartbeat_seconds),
-        worker_stale_seconds=_positive_int(raw.get("worker_stale_seconds"), defaults.worker_stale_seconds),
-        possession_lease_seconds=_positive_int(raw.get("possession_lease_seconds"), defaults.possession_lease_seconds),
-        max_same_worker_repairs_per_stage=_positive_int(raw.get("max_same_worker_repairs_per_stage"), defaults.max_same_worker_repairs_per_stage),
-        max_worker_context_compressions_per_goal=_positive_int(raw.get("max_worker_context_compressions_per_goal"), defaults.max_worker_context_compressions_per_goal),
-    )
-
-
-def _normal_worker_flow_config(raw: dict[str, Any]) -> NormalWorkerFlowConfig:
-    raw = raw if isinstance(raw, dict) else {}
-    defaults = NormalWorkerFlowConfig()
-    return NormalWorkerFlowConfig(
-        enabled=bool(raw.get("enabled", defaults.enabled)),
-        dev_self_tests_in_session=bool(raw.get("dev_self_tests_in_session", defaults.dev_self_tests_in_session)),
-        hide_request_test_run_until_gate=bool(raw.get("hide_request_test_run_until_gate", defaults.hide_request_test_run_until_gate)),
-        self_test_evidence_capture=bool(raw.get("self_test_evidence_capture", defaults.self_test_evidence_capture)),
-        max_self_test_repeats_without_change=_positive_int(raw.get("max_self_test_repeats_without_change"), defaults.max_self_test_repeats_without_change),
-        expose_worker_actions_in_contract_dump=bool(raw.get("expose_worker_actions_in_contract_dump", defaults.expose_worker_actions_in_contract_dump)),
-    )
-
-
-
-
-def _repo_bundle_routing_config(raw: dict[str, Any]) -> RepoBundleRoutingConfig:
-    raw = raw if isinstance(raw, dict) else {}
-    defaults = RepoBundleRoutingConfig()
-    return RepoBundleRoutingConfig(
-        enabled=bool(raw.get("enabled", defaults.enabled)),
-        strict_repo_ownership=bool(raw.get("strict_repo_ownership", defaults.strict_repo_ownership)),
-        queue_on_dependency_bundles=bool(raw.get("queue_on_dependency_bundles", defaults.queue_on_dependency_bundles)),
-        expose_in_snapshot=bool(raw.get("expose_in_snapshot", defaults.expose_in_snapshot)),
-    )
-
-
-def _simplified_agent_contract_config(raw: dict[str, Any]) -> SimplifiedAgentContractConfig:
-    raw = raw if isinstance(raw, dict) else {}
-    defaults = SimplifiedAgentContractConfig()
-    return SimplifiedAgentContractConfig(
-        enabled=bool(raw.get("enabled", defaults.enabled)),
-        expose_only_simplified_actions=bool(raw.get("expose_only_simplified_actions", defaults.expose_only_simplified_actions)),
-        keep_internal_state_machine=bool(raw.get("keep_internal_state_machine", defaults.keep_internal_state_machine)),
-        terminal_feedback_enabled=bool(raw.get("terminal_feedback_enabled", defaults.terminal_feedback_enabled)),
-    )
-
-
 def _read_model_config(raw: dict[str, Any]) -> ReadModelConfig:
     raw = raw if isinstance(raw, dict) else {}
     defaults = ReadModelConfig()
@@ -764,31 +664,11 @@ def _event_log_config(raw: dict[str, Any]) -> EventLogConfig:
     return EventLogConfig(rotation_cap_bytes=cap_int)
 
 
-def _swarm_config(raw: dict[str, Any]) -> SwarmConfig:
-    raw = raw if isinstance(raw, dict) else {}
-    defaults = SwarmConfig()
-    return SwarmConfig(
-        enabled=bool(raw.get("enabled", defaults.enabled)),
-        requires_certification=bool(raw.get("requires_certification", defaults.requires_certification)),
-        allow_uncertified_dev_swarm=bool(raw.get("allow_uncertified_dev_swarm", defaults.allow_uncertified_dev_swarm)),
-        max_active_lanes=_positive_int(raw.get("max_active_lanes"), defaults.max_active_lanes),
-        global_token_soft_limit=_positive_int(raw.get("global_token_soft_limit"), defaults.global_token_soft_limit),
-        global_token_hard_limit=_positive_int(raw.get("global_token_hard_limit"), defaults.global_token_hard_limit),
-        global_api_call_soft_limit=_positive_int(raw.get("global_api_call_soft_limit"), defaults.global_api_call_soft_limit),
-        global_api_call_hard_limit=_positive_int(raw.get("global_api_call_hard_limit"), defaults.global_api_call_hard_limit),
-        per_lane_token_limit=_positive_int(raw.get("per_lane_token_limit"), defaults.per_lane_token_limit),
-        per_lane_api_call_limit=_positive_int(raw.get("per_lane_api_call_limit"), defaults.per_lane_api_call_limit),
-    )
-
-
 def _supervision_config(raw: dict[str, Any]) -> SupervisionConfig:
     raw = raw if isinstance(raw, dict) else {}
     defaults = SupervisionConfig()
     return SupervisionConfig(
         child_events_enabled=bool(raw.get("child_events_enabled", defaults.child_events_enabled)),
-        recursive_enabled=bool(raw.get("recursive_enabled", defaults.recursive_enabled)),
-        hierarchical_budget_enabled=bool(raw.get("hierarchical_budget_enabled", defaults.hierarchical_budget_enabled)),
-        deploy_verification_enabled=bool(raw.get("deploy_verification_enabled", defaults.deploy_verification_enabled)),
     )
 
 
@@ -881,31 +761,6 @@ def _terminal_envelope_config(raw: dict[str, Any]) -> TerminalEnvelopeConfig:
             if parsed_lanes:
                 grants[str(role)] = parsed_lanes
     return TerminalEnvelopeConfig(grants=grants)
-
-
-def _apply_enterprise_role_session_compat(
-    config: ContinuousRoleSessionConfig,
-    *,
-    enterprise_worker_sessions: EnterpriseWorkerSessionsConfig,
-    raw_continuous: Any,
-) -> ContinuousRoleSessionConfig:
-    if not enterprise_worker_sessions.enabled or not enterprise_worker_sessions.same_session_continuation:
-        return config
-    if isinstance(raw_continuous, dict) and ("enabled" in raw_continuous or "observe_only" in raw_continuous):
-        return config
-    return ContinuousRoleSessionConfig(
-        enabled=enterprise_worker_sessions.mode == "enforce",
-        observe_only=enterprise_worker_sessions.mode != "enforce",
-        max_decisions_per_envelope=config.max_decisions_per_envelope,
-        max_proofs_per_envelope=config.max_proofs_per_envelope,
-        max_continuations_per_stage=config.max_continuations_per_stage,
-        continue_after_passing_proof=config.continue_after_passing_proof,
-        continue_after_failed_proof=config.continue_after_failed_proof,
-        close_on_state_owner_change=config.close_on_state_owner_change,
-        close_on_open_incident=config.close_on_open_incident,
-        close_on_invalid_output=config.close_on_invalid_output,
-        close_on_budget_warning=config.close_on_budget_warning,
-    )
 
 
 def _positive_int(value: Any, default: int) -> int:

@@ -31,9 +31,7 @@ from .persona_assignments import (
     PersonaAssignmentStore,
     PersonaInstanceStore,
     active_persona_instance_agent_summaries,
-    persona_assignment_store_enabled,
     persona_assignment_summary,
-    persona_instance_runtime_enabled,
     persona_instance_summary,
     persona_instance_visibility_ref,
 )
@@ -58,7 +56,6 @@ from .tool_visibility import (
     resolve_tool_visibility,
 )
 from .workspace_scope import exact_scoped_instance_ids
-from .worker_sessions import WorkerSessionStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -250,7 +247,6 @@ def build_snapshot(
     agent_store=None,
     incident_store=None,
     event_log=None,
-    worker_session_store=None,
     prompt_skills_catalogs=None,
 ) -> dict:
     custom_stores = any(
@@ -261,7 +257,6 @@ def build_snapshot(
             agent_store,
             incident_store,
             event_log,
-            worker_session_store,
         )
     )
     if custom_stores or prompt_skills_catalogs is not None:
@@ -276,7 +271,6 @@ def build_snapshot(
             agent_store=agent_store,
             incident_store=incident_store,
             event_log=event_log,
-            worker_session_store=worker_session_store,
             prompt_skills_catalogs=prompt_skills_catalogs,
         )
     state = _build_coalesce_state
@@ -326,7 +320,6 @@ def _build_snapshot_uncoalesced(
     agent_store=None,
     incident_store=None,
     event_log=None,
-    worker_session_store=None,
     prompt_skills_catalogs=None,
 ) -> dict:
     _build_started = time.perf_counter()
@@ -342,18 +335,18 @@ def _build_snapshot_uncoalesced(
     # warnings); the observability consumer it also named went with S9.
     with _timed_section(_sections_ms, "events"):
         recent_events = event_log.tail(20)
-    # S47: ``workers`` is the ONE surviving seed — it is still passed into a
-    # live projection (``derive_from_workers``). ``tasks`` sat beside it until
-    # S47: S29 kept it because three projections read it, but an always-empty
-    # list can only make a projection emit a constant, so the seed, the three
-    # ``tasks=`` parameters and ``workspaces[].goals`` went together (ledger
-    # item 5). The eight earlier look-alikes (``runs``, ``incidents``,
-    # ``proofs``, ``self_tests``, ``role_envelopes``, ``role_checklists``,
-    # ``repo_bundles``, ``runtime_instances``) fed the mission projections
-    # S9/S18/S27 removed and were assigned-never-read; so were
-    # ``execution_mode`` (the retired Mission Daemon's mode string) and
-    # ``live_channel_task_ids``.
-    workers = []
+    # S56 removed the LAST of these seeds. ``workers = []`` was kept by S47 as
+    # "the one surviving seed still passed into a live projection"
+    # (``derive_from_workers``) — but an always-empty list can only make a
+    # projection emit a constant, which is exactly why ``tasks`` and
+    # ``workspaces[].goals`` went at S47 (ledger item 5). The projection is now
+    # ``PersonaInstanceStore.ensure_for_personas(personas)`` and takes no worker
+    # argument; the worker session store it read is deleted. The eight earlier
+    # look-alikes (``runs``, ``incidents``, ``proofs``, ``self_tests``,
+    # ``role_envelopes``, ``role_checklists``, ``repo_bundles``,
+    # ``runtime_instances``) fed the mission projections S9/S18/S27 removed and
+    # were assigned-never-read; so were ``execution_mode`` (the retired Mission
+    # Daemon's mode string) and ``live_channel_task_ids``.
     cfg = load_agent_runtime_config()
     # Base-profile foundation: Mission Control shows the seeded store (base only). On a
     # cold store, fall back to the base seed itself — NOT ensure_persisted_personas, which
@@ -395,22 +388,24 @@ def _build_snapshot_uncoalesced(
             for agent in agents
         ]
     available_personas = _available_persona_summary(agents)
-    persona_assignments = []
-    persona_instances = []
-    topology_persona_instances = PersonaInstanceStore(event_log=event_log).list_all()
     personas_by_id = {str(getattr(agent, "id", "") or ""): agent for agent in agents}
-    if persona_instance_runtime_enabled(cfg):
-        instance_store = PersonaInstanceStore(event_log=event_log)
-        persona_instances = instance_store.derive_from_workers(agents, workers)
-        topology_persona_instances = persona_instances
-        agent_summaries = [
-            *agent_summaries,
-            *active_persona_instance_agent_summaries(
-                persona_instances, personas_by_id, readiness_by_persona_id
-            ),
-        ]
-        if persona_assignment_store_enabled(cfg):
-            persona_assignments = PersonaAssignmentStore(event_log=event_log).list_all()
+    # S56: the persona-instance roster is UNCONDITIONAL. It was gated on
+    # ``enterprise_worker_sessions.enabled AND .persona_instance_runtime`` — a
+    # misnomer inherited from the worker lane — and the assignment list on a
+    # second field of the same block. The roster IS the identity substrate every
+    # Mission Control surface keys on, the enabled shape has been the only shape
+    # for months, and no code in either repo branches on a disabled verdict. Both
+    # gates went with the config block.
+    instance_store = PersonaInstanceStore(event_log=event_log)
+    persona_instances = instance_store.ensure_for_personas(agents)
+    topology_persona_instances = persona_instances
+    agent_summaries = [
+        *agent_summaries,
+        *active_persona_instance_agent_summaries(
+            persona_instances, personas_by_id, readiness_by_persona_id
+        ),
+    ]
+    persona_assignments = PersonaAssignmentStore(event_log=event_log).list_all()
     session_db = _default_persona_session_db()
     # ``run_rows`` is the ordered run list ``operator_channel_summary`` takes as
     # ``run_summaries``. S9 removed ``runs`` as a frame section, so nothing
@@ -493,106 +488,101 @@ def _build_snapshot_uncoalesced(
         "available_personas": available_personas,
         "runtime_paths_diagnostic": _runtime_paths_diagnostic(available_personas),
     }
-    if persona_instance_runtime_enabled(cfg):
-        data["persona_instance_runtime"] = {
-            "enabled": True,
-            "assignment_store_enabled": persona_assignment_store_enabled(cfg),
-        }
-        # S4: persona_instances ships as an id-keyed map (the identity substrate
-        # the whole roster keys on — the store is already keyed on disk). The
-        # ROW LIST is built first because the identity_map alias resolver derives
-        # from the ordered rows; the frame then keys it by ``persona_instance_id``.
-        persona_instance_rows = [
-            persona_instance_summary(
-                instance,
-                personas_by_id.get(str(getattr(instance, "persona_id", "") or "")),
-                profile_readiness=readiness_by_persona_id.get(
-                    str(getattr(instance, "persona_id", "") or "")
-                ),
-            )
-            for instance in persona_instances
-        ]
-        # Legacy persona-instance id -> canonical id aliases (durable
-        # reconciler registry + structurally derivable drift still live in
-        # this snapshot). Consumers key dedup on this instead of heuristics.
-        data["identity_map"] = identity_aliases_for_rows(persona_instance_rows)
-        data["persona_instances"] = _keyed(persona_instance_rows, "persona_instance_id")
-        history_accountant = ProjectionAccountant("persona_chat_history")
-        trace_accountant = ProjectionAccountant("persona_chat_trace")
-        # Full history (with message tails) is computed once and used to build the
-        # operator_channels conversations (their tail slimming is S4's concern).
-        # The FRAME carries recency pointers only (S2) — the tail bytes leave, the
-        # anchors stay.
-        _persona_chat_started = time.perf_counter()
-        omitted_history_session_ids: set[str] = set()
-        persona_chat_history_full = persona_chat_history_summary(
-            persona_instances=persona_instances,
-            session_db=session_db,
-            message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
-            accountant=history_accountant,
-            persona_assignments=persona_assignments,
-            omitted_session_ids=omitted_history_session_ids,
+    data["persona_instance_runtime"] = {
+        "enabled": True,
+        "assignment_store_enabled": True,
+    }
+    # S4: persona_instances ships as an id-keyed map (the identity substrate
+    # the whole roster keys on — the store is already keyed on disk). The
+    # ROW LIST is built first because the identity_map alias resolver derives
+    # from the ordered rows; the frame then keys it by ``persona_instance_id``.
+    persona_instance_rows = [
+        persona_instance_summary(
+            instance,
+            personas_by_id.get(str(getattr(instance, "persona_id", "") or "")),
+            profile_readiness=readiness_by_persona_id.get(
+                str(getattr(instance, "persona_id", "") or "")
+            ),
         )
-        data["persona_chat_history"] = _persona_chat_history_frame(persona_chat_history_full)
-        data["persona_chat_trace"] = persona_chat_trace_summary(
-            persona_instances=persona_instances,
-            event_log=event_log,
-            message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
-            accountant=trace_accountant,
-        )
-        conversation_accountant = ProjectionAccountant("operator_conversation")
-        live_operator_channels = operator_channel_summary(
-            persona_instances=persona_instances,
-            persona_chat_history=persona_chat_history_full,
-            persona_chat_trace=data["persona_chat_trace"],
-            run_summaries=run_rows,
-            accountant=conversation_accountant,
-            intentionally_omitted_history_session_ids=omitted_history_session_ids,
-        )
-        _sections_ms["persona_chat"] = int(
-            max(0.0, (time.perf_counter() - _persona_chat_started)) * 1000
-        )
-        # S4: operator_channels ships as an id-keyed map (channel_id). S18
-        # removed the archived-task channels this used to be merged with, so the
-        # live channels are the whole input; ``_keyed`` still keeps the first
-        # occurrence on a duplicate id rather than silently overwriting.
-        data["operator_channels"] = _keyed(live_operator_channels, "channel_id")
-        # S8: the ``recent`` lane (last 50 assignments, ~86 KB of old residue)
-        # leaves the frame — the launcher roster only needs the ACTIVE
-        # assignments (a live instance's current assignment is always active).
-        # ``recent`` stays an (empty) list so the launcher fold that concatenates
-        # ``active`` + ``recent`` never trips; the eviction is accounted by
-        # ``recent_ref`` and served on demand by ``harness persona assignments``.
-        active_assignments = [
-            persona_assignment_summary(item)
-            for item in persona_assignments
-            if item.state in ACTIVE_ASSIGNMENT_STATES
-        ]
-        recent_count = len(persona_assignments[-50:])
-        data["persona_assignments"] = {
-            "active": active_assignments,
-            "recent": [],
-            "recent_ref": {
-                "evicted": True,
-                "count": recent_count,
-                "active_count": len(active_assignments),
-                "fetch": "harness persona assignments --json",
-            },
-        }
-        completeness = {
-            "persona_chat_history": history_accountant.summary(),
-            "persona_chat_trace": trace_accountant.summary(),
-            "operator_conversation": conversation_accountant.summary(),
-        }
-        drop_samples = (
-            history_accountant.drop_samples()
-            + trace_accountant.drop_samples()
-            + conversation_accountant.drop_samples()
-        )
-    else:
-        data["persona_instance_runtime"] = {"enabled": False}
-        completeness = {}
-        drop_samples = []
+        for instance in persona_instances
+    ]
+    # Legacy persona-instance id -> canonical id aliases (durable
+    # reconciler registry + structurally derivable drift still live in
+    # this snapshot). Consumers key dedup on this instead of heuristics.
+    data["identity_map"] = identity_aliases_for_rows(persona_instance_rows)
+    data["persona_instances"] = _keyed(persona_instance_rows, "persona_instance_id")
+    history_accountant = ProjectionAccountant("persona_chat_history")
+    trace_accountant = ProjectionAccountant("persona_chat_trace")
+    # Full history (with message tails) is computed once and used to build the
+    # operator_channels conversations (their tail slimming is S4's concern).
+    # The FRAME carries recency pointers only (S2) — the tail bytes leave, the
+    # anchors stay.
+    _persona_chat_started = time.perf_counter()
+    omitted_history_session_ids: set[str] = set()
+    persona_chat_history_full = persona_chat_history_summary(
+        persona_instances=persona_instances,
+        session_db=session_db,
+        message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
+        accountant=history_accountant,
+        persona_assignments=persona_assignments,
+        omitted_session_ids=omitted_history_session_ids,
+    )
+    data["persona_chat_history"] = _persona_chat_history_frame(persona_chat_history_full)
+    data["persona_chat_trace"] = persona_chat_trace_summary(
+        persona_instances=persona_instances,
+        event_log=event_log,
+        message_tail=DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
+        accountant=trace_accountant,
+    )
+    conversation_accountant = ProjectionAccountant("operator_conversation")
+    live_operator_channels = operator_channel_summary(
+        persona_instances=persona_instances,
+        persona_chat_history=persona_chat_history_full,
+        persona_chat_trace=data["persona_chat_trace"],
+        run_summaries=run_rows,
+        accountant=conversation_accountant,
+        intentionally_omitted_history_session_ids=omitted_history_session_ids,
+    )
+    _sections_ms["persona_chat"] = int(
+        max(0.0, (time.perf_counter() - _persona_chat_started)) * 1000
+    )
+    # S4: operator_channels ships as an id-keyed map (channel_id). S18
+    # removed the archived-task channels this used to be merged with, so the
+    # live channels are the whole input; ``_keyed`` still keeps the first
+    # occurrence on a duplicate id rather than silently overwriting.
+    data["operator_channels"] = _keyed(live_operator_channels, "channel_id")
+    # S8: the ``recent`` lane (last 50 assignments, ~86 KB of old residue)
+    # leaves the frame — the launcher roster only needs the ACTIVE
+    # assignments (a live instance's current assignment is always active).
+    # ``recent`` stays an (empty) list so the launcher fold that concatenates
+    # ``active`` + ``recent`` never trips; the eviction is accounted by
+    # ``recent_ref`` and served on demand by ``harness persona assignments``.
+    active_assignments = [
+        persona_assignment_summary(item)
+        for item in persona_assignments
+        if item.state in ACTIVE_ASSIGNMENT_STATES
+    ]
+    recent_count = len(persona_assignments[-50:])
+    data["persona_assignments"] = {
+        "active": active_assignments,
+        "recent": [],
+        "recent_ref": {
+            "evicted": True,
+            "count": recent_count,
+            "active_count": len(active_assignments),
+            "fetch": "harness persona assignments --json",
+        },
+    }
+    completeness = {
+        "persona_chat_history": history_accountant.summary(),
+        "persona_chat_trace": trace_accountant.summary(),
+        "operator_conversation": conversation_accountant.summary(),
+    }
+    drop_samples = (
+        history_accountant.drop_samples()
+        + trace_accountant.drop_samples()
+        + conversation_accountant.drop_samples()
+    )
     # Guarantee the documented section keys exist even when a lane was skipped
     # (e.g. persona_chat when persona-instance runtime is disabled) so consumers
     # can rely on a stable shape.
@@ -671,7 +661,24 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         # always-empty seed). Field removals, not section removals, but the
         # S9/S10 rule is the same: anything that leaves the wire bumps, and the
         # Launcher pin moves in the same wave.
-        "contract_version": 46,
+        # 47 (S56, 2026-08-01): one coherent wave, one bump. Leaving the frame:
+        # every `worker_session` trace (the store is deleted — `status`'s
+        # `worker_sessions` + `active_worker_sessions` rows, the
+        # `observability` worker signals/rows, `dirty_state`'s four worker
+        # counters, `persona_instances[].active_worker_session_id`); the
+        # constant-by-construction repo-bundle wires `repo_bundles` /
+        # `repo_bundle_closeout` / `bundle_queue` / `repo_locks` and the
+        # duplicate `lanes` (doc 19 filed the last two as asserted-constant
+        # debt); `production_envelope` (hand-written prose, several claims false
+        # against this tree) with `swarm` / `swarm_budget`; and SEVEN
+        # `runtime_config` blocks that no production code read —
+        # `continuous_role_sessions`, `enterprise_worker_sessions`,
+        # `normal_worker_flow`, `repo_bundle_routing`,
+        # `simplified_agent_contract`, `swarm`, plus three of the four
+        # `supervision` fields. The persona-instance roster stops being gated on
+        # `enterprise_worker_sessions.persona_instance_runtime` and ships
+        # unconditionally. The Launcher pin moves in the same wave.
+        "contract_version": 47,
         "generated_at": data.get("generated_at"),
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
         "redaction_observed": _redaction_observed(data),
@@ -1527,17 +1534,12 @@ def persona_instance_detail_for_id(entity_id: str, *, event_log=None) -> dict | 
     from .persona_assignments import persona_instance_tool_detail
 
     event_log = event_log or CachedEventLog()
-    cfg = load_agent_runtime_config()
     agents = AgentStore().list_all()
     personas_by_id = {str(getattr(a, "id", "") or ""): a for a in agents}
-    if persona_instance_runtime_enabled(cfg):
-        worker_session_store = WorkerSessionStore(event_log=event_log)
-        workers = worker_session_store.list_all()
-        instances = PersonaInstanceStore(event_log=event_log).derive_from_workers(agents, workers)
-        for instance in instances:
-            if str(getattr(instance, "id", "") or "") == token:
-                persona = personas_by_id.get(str(getattr(instance, "persona_id", "") or ""))
-                return persona_instance_tool_detail(instance, persona)
+    for instance in PersonaInstanceStore(event_log=event_log).ensure_for_personas(agents):
+        if str(getattr(instance, "id", "") or "") == token:
+            persona = personas_by_id.get(str(getattr(instance, "persona_id", "") or ""))
+            return persona_instance_tool_detail(instance, persona)
     persona = personas_by_id.get(token)
     if persona is not None:
         return _agent_tool_detail(persona)

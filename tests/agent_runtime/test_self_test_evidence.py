@@ -27,22 +27,26 @@ def test_run_progress_sink_captures_observed_proof_independent_of_config(monkeyp
     runner shape), and it must NOT depend on a re-loaded RuntimeConfig in the
     run-executing process. A config-gated capture resolved the contract as
     disabled in the run process and silently dropped every observed proof even
-    with the contract enabled at the file/ticker level."""
+    with the contract enabled at the file/ticker level.
+
+    RETARGETED at S56 (2026-08-01): the "disabled" config this test injected was
+    built from ``SimplifiedAgentContractConfig`` and ``NormalWorkerFlowConfig``,
+    two of the seven runtime-config blocks S56 deleted. The blocks are gone, so
+    the config can no longer express the disabled verdict at all — which makes
+    the regression structurally impossible rather than merely guarded. The test
+    keeps its actual subject: a stub ``load_agent_runtime_config`` is still
+    installed, so a capture path that reached back for a RuntimeConfig in the
+    run-executing process would still be observable here."""
 
     from agent_runtime import config as _cfg
     from agent_runtime.progress import RunProgressSink
-    from agent_runtime.runtime_config import (
-        NormalWorkerFlowConfig,
-        RuntimeConfig,
-        SimplifiedAgentContractConfig,
-    )
+    from agent_runtime.runtime_config import RuntimeConfig
     from agent_runtime.store import RunStore
 
-    disabled = RuntimeConfig(
-        simplified_agent_contract=SimplifiedAgentContractConfig(enabled=False),
-        normal_worker_flow=NormalWorkerFlowConfig(enabled=False),
-    )
-    monkeypatch.setattr(_cfg, "load_agent_runtime_config", lambda *a, **k: disabled, raising=False)
+    stub = RuntimeConfig()
+    assert not hasattr(stub, "simplified_agent_contract")  # S56
+    assert not hasattr(stub, "normal_worker_flow")  # S56
+    monkeypatch.setattr(_cfg, "load_agent_runtime_config", lambda *a, **k: stub, raising=False)
 
     # S17 removed RunStore.open_run as write-dead; ``update`` is the surviving
     # write path and seeds the row directly. This case covers the self-test

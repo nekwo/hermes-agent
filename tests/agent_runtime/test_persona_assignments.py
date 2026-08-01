@@ -37,12 +37,10 @@ from agent_runtime.persona_assignments import (
     persona_instance_id_for_placement,
 )
 from agent_runtime.persona_chat_history import persona_chat_history_summary
-from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.snapshot import build_snapshot
 from agent_runtime.states import RunState, TaskState, WorkerSessionState
 from agent_runtime.status import build_status
 from agent_runtime.store import AgentStore, RunStore, TaskStore
-from agent_runtime.worker_sessions import WorkerSessionStore
 from tests.agent_runtime.conftest import release_to_implementation
 
 
@@ -109,14 +107,9 @@ def _task(task_id: str = "task_assign", state: TaskState = TaskState.RUNNING) ->
 
 
 def _assignment_config() -> AgentRuntimeConfig:
-    return AgentRuntimeConfig(
-        enterprise_worker_sessions=EnterpriseWorkerSessionsConfig(
-            enabled=True,
-            worker_session_store=True,
-            persona_instance_runtime=True,
-            persona_assignment_store=True,
-        )
-    )
+    # S56: the persona-instance runtime / assignment store are unconditional now;
+    # the enterprise_worker_sessions gate block was deleted.
+    return AgentRuntimeConfig()
 
 
 def _assert_task_store_stub() -> None:
@@ -167,69 +160,38 @@ class _FakeSessionDB:
         return self.messages_by_session.get(session_id, [])
 
 
-def test_persona_instance_store_derives_singleton_from_worker_session(isolate_agent_runtime_root):
+def test_persona_instance_store_ensures_a_singleton_per_persona(isolate_agent_runtime_root):
+    # S56 renamed derive_from_workers(personas, workers) -> ensure_for_personas
+    # (the worker half is gone). The surviving contract is one canonical instance
+    # per configured persona.
     store = PersonaInstanceStore()
-    workers = WorkerSessionStore()
-    worker = workers.open(task_id="task_1", persona=_persona("dev"), stage_id="stage_1", assignment_id="assign_1")
 
-    instances = store.derive_from_workers([_persona("dev"), _persona("qa")], workers.list_all())
+    instances = store.ensure_for_personas([_persona("dev"), _persona("qa")])
 
     by_id = {item.persona_id: item for item in instances}
     assert by_id["dev"].id == "personainst_dev"
-    assert by_id["dev"].active_worker_session_id == worker.id
-    assert by_id["dev"].current_assignment_id == "assign_1"
     assert by_id["qa"].id == "personainst_qa"
 
 
-def test_worker_projection_replaces_stale_goal_id_with_assignment_goal(isolate_agent_runtime_root):
+def test_persona_instance_ensure_clears_a_stale_execution_binding(isolate_agent_runtime_root):
+    # S56: with the worker lane gone the reset pass is unconditional — an
+    # instance still carrying a dead task/assignment binding settles back to idle.
     store = PersonaInstanceStore()
-    assignments = PersonaAssignmentStore()
-    workers = WorkerSessionStore()
     stale = store.ensure_for_persona(_persona("dev"))
     stale.mode = "task_bound"
+    stale.state = WorkerSessionState.RUNNING
     stale.current_task_id = "task_stale"
+    stale.current_assignment_id = "assign_stale"
     stale.goal_id = "task_stale"
-    stale.spawned_by = "personainst_neko_supervisor"
-    stale = store.update(stale)
-    assignment = assignments.create_or_resume(
-        PersonaAssignmentSpec(
-            persona_id="dev",
-            kind="task_stage",
-            title="Implement",
-            message="Run the active task.",
-            goal_id="goal_live",
-            stage_id="implement",
-        )
-    )
-    worker = workers.open(
-        task_id="task_live",
-        persona=_persona("dev"),
-        stage_id="implement",
-        assignment_id=assignment.id,
-    )
+    store.update(stale)
 
-    updated = store.update_from_worker(worker)
-
-    assert updated.id == stale.id == "personainst_dev"
-    assert updated.current_task_id == "task_live"
-    assert updated.goal_id == "goal_live"
-
-
-def test_persona_instance_derivation_clears_stale_worker_projection(isolate_agent_runtime_root):
-    store = PersonaInstanceStore()
-    workers = WorkerSessionStore()
-    worker = workers.open(task_id="task_1", persona=_persona("dev"), stage_id="stage_1", assignment_id="assign_1")
-    workers.assign_run(worker.id, _seed_run("dev", "task_1", "stage_1", session_id="session_safe"))
-    store.derive_from_workers([_persona("dev")], workers.list_all())
-    workers.close(worker.id, reason="archived")
-
-    instances = store.derive_from_workers([_persona("dev")], workers.find_active())
+    instances = store.ensure_for_personas([_persona("dev")])
 
     instance = instances[0]
+    assert instance.id == "personainst_dev"
     assert instance.state == WorkerSessionState.IDLE
     assert instance.current_assignment_id is None
     assert instance.current_task_id is None
-    assert instance.active_worker_session_id is None
     assert instance.active_run_id is None
     assert instance.session_id is None
 
@@ -246,9 +208,10 @@ def test_task_terminal_reaps_task_bound_persona_instances(isolate_agent_runtime_
     _assert_task_store_stub()
 
 
-def test_persona_instance_sweep_reaps_orphans_but_preserves_live_workers(isolate_agent_runtime_root):
+def test_persona_instance_sweep_reaps_orphans_but_preserves_live_runs(isolate_agent_runtime_root):
+    # S56: _has_live_binding lost its worker arm, so the ACTIVE RUN is the whole
+    # liveness check the janitor honors.
     store = PersonaInstanceStore()
-    workers = WorkerSessionStore()
     orphan = store.ensure_for_goal(
         _persona("dev"),
         goal_id="task_archived",
@@ -256,16 +219,11 @@ def test_persona_instance_sweep_reaps_orphans_but_preserves_live_workers(isolate
     )
     live = store.ensure_for_goal(
         _persona("backend_dev"),
-        goal_id="task_missing_but_worker_live",
+        goal_id="task_missing_but_run_live",
         spawned_by="personainst_neko_supervisor",
     )
-    worker = workers.open(
-        task_id="task_missing_but_worker_live",
-        persona=_persona("backend_dev"),
-        stage_id="backend_implementation",
-        assignment_id="assign_live",
-    )
-    live.active_worker_session_id = worker.id
+    run = _seed_run("backend_dev", "task_missing_but_run_live", "backend_implementation")
+    live.active_run_id = run.id
     live.state = WorkerSessionState.RUNNING
     store.update(live)
     free = store.create_free_floating("profile:reviewer")
@@ -297,9 +255,10 @@ def test_create_free_floating_instance_reuses_canonical_idle_placement(isolate_a
     assert first.mode == "free_floating"
     assert first.state == WorkerSessionState.IDLE
     assert first.current_task_id is None
-    assert first.active_worker_session_id is None
+    # S56 removed PersonaInstance.active_worker_session_id outright.
+    assert not hasattr(first, "active_worker_session_id")
 
-    instances = store.derive_from_workers([_persona("dev")], [])
+    instances = store.ensure_for_personas([_persona("dev")])
     by_id = {item.id: item for item in instances}
 
     assert by_id[first.id].persona_id == "profile:reviewer"
@@ -573,17 +532,46 @@ def test_attach_run_does_not_reopen_terminal_assignment(isolate_agent_runtime_ro
     assert [event.payload["assignment_id"] for event in events] == [assignment.id]
 
 
-def test_status_and_snapshot_expose_persona_instances_when_enabled(monkeypatch, isolate_agent_runtime_root):
+def test_status_and_snapshot_expose_persona_instances_unconditionally(monkeypatch, isolate_agent_runtime_root):
     cfg = _assignment_config()
     monkeypatch.setattr("agent_runtime.status.load_agent_runtime_config", lambda: cfg)
     monkeypatch.setattr("agent_runtime.snapshot.load_agent_runtime_config", lambda: cfg)
-    workers = WorkerSessionStore()
-    workers.open(task_id="task_1", persona=_persona("dev"), stage_id="stage_1", assignment_id="assign_1")
+    # S56: the worker session that used to make ``dev`` an active-lane agent is
+    # gone; a chat instance carrying a live goal/assignment is the surviving way
+    # in (``ensure_for_personas`` settles every non-chat instance back to idle).
+    instance_store = PersonaInstanceStore()
+    live = instance_store.create_operator_chat(persona_id="dev", display_name="dev worker")
+    live.goal_id = "task_1"
+    live.current_assignment_id = "assign_1"
+    instance_store.update(live)
 
-    status = build_status(worker_session_store=workers)
-    snapshot = build_snapshot(worker_session_store=workers)
+    # S56: build_status / build_snapshot no longer take worker_session_store=,
+    # and the persona-instance roster ships unconditionally.
+    status = build_status()
+    snapshot = build_snapshot()
 
-    assert status["persona_instance_runtime"]["enabled"] is True
+    # The wire block survives as a fixed True/True pair for stale readers.
+    assert status["persona_instance_runtime"] == {
+        "enabled": True,
+        "assignment_store_enabled": True,
+    }
+    # S56 retired these build_status rows with the worker/bundle/envelope lanes.
+    for retired in (
+        "worker_sessions",
+        "active_worker_sessions",
+        "repo_bundles",
+        "repo_bundle_closeout",
+        "bundle_queue",
+        "repo_locks",
+        "lanes",
+        "production_envelope",
+        "swarm",
+        "swarm_budget",
+    ):
+        assert retired not in status, retired
+    # …while the runtime-instance rows deliberately STAY.
+    assert "runtime_instances" in status
+    assert "foreground_runtime" in status
     assert {item["persona_id"] for item in status["persona_instances"]} >= {"dev", "qa", "neko_supervisor", "backend_dev"}
     status_lane_agents = {item["persona_id"]: item for item in status["agents"]}
     assert "personainst_dev" in status_lane_agents
@@ -600,9 +588,14 @@ def test_status_and_snapshot_expose_persona_instances_when_enabled(monkeypatch, 
     assert snapshot["persona_instance_runtime"]["enabled"] is True
     assert {item["persona_id"] for item in list(snapshot["persona_instances"].values())} >= {"dev", "qa", "neko_supervisor", "backend_dev"}
     snapshot_lane_agents = {item["persona_id"]: item for item in snapshot["agents"]}
-    # S9 keeps instances in the dedicated agent_instances/persona_instances
-    # projection rather than duplicating them into the snapshot agent catalog.
-    assert "personainst_dev" not in snapshot_lane_agents
+    # S56 INVERSION: this used to pin "personainst_dev not in the snapshot agent
+    # catalog", but that only held because build_snapshot seeded ``workers = []``
+    # so the instance derived IDLE while build_status (handed the real worker
+    # store) saw it active. Both projections now share one unconditional roster,
+    # so an ACTIVE instance appears in both agent lanes; idle ones still don't
+    # (see test_snapshot_exposes_operator_created_idle_persona_instance).
+    assert "personainst_dev" in snapshot_lane_agents
+    assert snapshot_lane_agents["personainst_dev"]["source_persona_id"] == "dev"
 
 
 def test_snapshot_exposes_operator_created_idle_persona_instance(monkeypatch, isolate_agent_runtime_root):
@@ -622,7 +615,8 @@ def test_snapshot_exposes_operator_created_idle_persona_instance(monkeypatch, is
     assert by_id[created.id]["state"] == "idle"
     assert by_id[created.id]["lifecycle_mode"] == "free_floating"
     assert by_id[created.id]["mode"] == "free_floating"
-    assert by_id[created.id]["active_worker_session_id"] is None
+    # S56 dropped active_worker_session_id from the model and every wire row.
+    assert "active_worker_session_id" not in by_id[created.id]
 
 
 def test_persona_instance_create_cli_creates_free_floating_assignment_without_ticking(monkeypatch, isolate_agent_runtime_root):
@@ -1394,14 +1388,31 @@ def test_open_chat_cli_add_instance_omitted_name_uses_persona_config_not_title_c
     assert placed.display_name != "Qa"
 
 
+def _seed_live_run_binding(instance_store) -> AgentRun:
+    """Seed a live execution binding straight onto the instance row.
+
+    S56 deleted the worker session store (and ``update_from_worker``), so the
+    RUN is the only remaining live-binding authority; these two tests seed it
+    directly rather than through a worker projection.
+    """
+
+    run = _seed_run("dev", "task_live", "stage_1", session_id="persona_chat_personainst_dev_live")
+    live = instance_store.ensure_for_persona(_persona("dev"))
+    live.mode = "task_bound"
+    live.state = WorkerSessionState.RUNNING
+    live.current_task_id = "task_live"
+    live.goal_id = "task_live"
+    live.current_assignment_id = "assign_live"
+    live.active_run_id = run.id
+    live.session_id = "persona_chat_personainst_dev_live"
+    instance_store.update(live)
+    return run
+
+
 def test_open_chat_updates_only_default_chat_pointer_during_live_run(isolate_agent_runtime_root):
     instance_store = PersonaInstanceStore()
-    workers = WorkerSessionStore()
     runs = RunStore()
-    worker = workers.open(task_id="task_live", persona=_persona("dev"), stage_id="stage_1", assignment_id="assign_live")
-    run = _seed_run("dev", "task_live", "stage_1", session_id="persona_chat_personainst_dev_live")
-    worker = workers.assign_run(worker.id, run)
-    instance_store.update_from_worker(worker)
+    run = _seed_live_run_binding(instance_store)
 
     instance = instance_store.open_chat(
         persona_id="dev", session_id="persona_chat_personainst_dev_new"
@@ -1409,20 +1420,14 @@ def test_open_chat_updates_only_default_chat_pointer_during_live_run(isolate_age
 
     assert instance.default_chat_session_id == "persona_chat_personainst_dev_new"
     assert instance.active_run_id == run.id
-    assert instance.active_worker_session_id == worker.id
     assert instance.current_task_id == "task_live"
     assert runs.get(run.id).state == RunState.RUNNING
-    assert workers.get(worker.id).state == WorkerSessionState.RUNNING
 
 
-def test_open_chat_kill_active_flag_cannot_cancel_worker_lifecycle(isolate_agent_runtime_root):
+def test_open_chat_kill_active_flag_cannot_cancel_run_lifecycle(isolate_agent_runtime_root):
     instance_store = PersonaInstanceStore()
-    workers = WorkerSessionStore()
     runs = RunStore()
-    worker = workers.open(task_id="task_live", persona=_persona("dev"), stage_id="stage_1", assignment_id="assign_live")
-    run = _seed_run("dev", "task_live", "stage_1", session_id="persona_chat_personainst_dev_live")
-    worker = workers.assign_run(worker.id, run)
-    instance_store.update_from_worker(worker)
+    run = _seed_live_run_binding(instance_store)
 
     updated = instance_store.open_chat(
         persona_id="dev",
@@ -1431,12 +1436,10 @@ def test_open_chat_kill_active_flag_cannot_cancel_worker_lifecycle(isolate_agent
     )
 
     assert runs.get(run.id).state == RunState.RUNNING
-    assert workers.get(worker.id).state == WorkerSessionState.RUNNING
     assert updated.id == "personainst_dev"
     assert updated.session_id == "persona_chat_personainst_dev_replacement"
     assert updated.current_task_id == "task_live"
     assert updated.active_run_id == run.id
-    assert updated.active_worker_session_id == worker.id
 
 
 def test_add_instance_mints_distinct_placement_backed_instance(isolate_agent_runtime_root):

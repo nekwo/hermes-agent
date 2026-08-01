@@ -180,9 +180,14 @@ REMOVED_EVENT_TYPES = frozenset(
 # foreground_runtime.closed, de-registered with the GoalRuntimeInstanceStore
 # write lane (their only emitter); owned by
 # tests/agent_runtime/test_s53_lane_write_lane_removal.py.
+# Then -10 at S56: the whole worker_session.* family (opened / assigned /
+# resumed / heartbeat / context_absorbed / steered / possessed / released /
+# watchdog_warning / closed), de-registered in the same commit that deleted
+# agent_runtime/worker_sessions.py whole -- their only emitter; owned by
+# tests/agent_runtime/test_s56_worker_session_lane_removal.py.
 # This stays an absolute count on purpose: it is the one assertion that catches
 # a contract silently appearing or disappearing.
-SURVIVING_EVENT_COUNT = 68
+SURVIVING_EVENT_COUNT = 58
 
 
 def test_the_unemittable_event_types_are_no_longer_registered():

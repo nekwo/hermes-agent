@@ -53,8 +53,16 @@ from agent_runtime import config as config_module
 from agent_runtime import migrations, operator_channels, prompt_observability, runtime_config, snapshot, status
 
 
-#: The contract this wave moves to. Two emitted fields leave the frame.
+#: The contract this wave moved to. Two emitted fields left the frame.
 S47_CONTRACT_VERSION = 46
+
+#: S56 moved the contract again, 46 -> 47, for the same S9/S10 reason: it removes
+#: FIELDS from the emitted frame (the worker-session lane, the repo-bundle
+#: projection rows, and the production envelope). This file carries the only live
+#: pin on the emitted value, so it tracks the CURRENT contract while
+#: ``S47_CONTRACT_VERSION`` stays as this wave's historical mark -- the frame may
+#: never go back below it.
+CURRENT_CONTRACT_VERSION = 47
 
 
 def _function(module, name: str) -> ast.FunctionDef:
@@ -202,7 +210,10 @@ def test_status_no_longer_forwards_a_task_list_to_the_channel_projection():
 
 def test_the_live_frame_drops_both_fields_at_the_new_contract(isolate_agent_runtime_root):
     frame = snapshot.build_snapshot()
-    assert frame["parity"]["contract_version"] == S47_CONTRACT_VERSION
+    # S56 advanced the pin 46 -> 47 (see the module constants). S47's own two
+    # field cuts below are untouched; only the version moved.
+    assert frame["parity"]["contract_version"] == CURRENT_CONTRACT_VERSION
+    assert frame["parity"]["contract_version"] >= S47_CONTRACT_VERSION
     assert "role_envelope" not in frame["runtime_config"]
     for row in frame["workspaces"]:
         assert "goals" not in row, row.get("id")

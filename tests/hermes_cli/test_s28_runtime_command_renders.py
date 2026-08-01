@@ -64,6 +64,7 @@ def test_observe_passes_no_literal_fed_parameters(monkeypatch, capsys):
 
     assert args.func(args) == 0
 
-    assert set(observed) == {"runs", "incidents", "events", "execution_mode", "worker_sessions"}
+    # S56 removed the `worker_sessions=` keyword with the store it fed.
+    assert set(observed) == {"runs", "incidents", "events", "execution_mode"}
     assert capsys.readouterr().out.strip() == "observability=healthy interventions=0"
 

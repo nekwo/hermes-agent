@@ -5,48 +5,33 @@ from dataclasses import dataclass, field
 from agent_runtime.dispatch_session_policy import DEFAULT_DISPATCH_SESSION_POLICY
 
 
-@dataclass(slots=True)
-class ContinuousRoleSessionConfig:
-    enabled: bool = False
-    observe_only: bool = True
-    max_decisions_per_envelope: int = 4
-    max_proofs_per_envelope: int = 2
-    max_continuations_per_stage: int = 3
-    continue_after_passing_proof: bool = True
-    continue_after_failed_proof: bool = False
-    close_on_state_owner_change: bool = True
-    close_on_open_incident: bool = True
-    close_on_invalid_output: bool = True
-    close_on_budget_warning: bool = True
-
-
-@dataclass(slots=True)
-class EnterpriseWorkerSessionsConfig:
-    enabled: bool = False
-    mode: str = "observe_only"
-    worker_session_store: bool = True
-    persona_instance_runtime: bool = False
-    persona_assignment_store: bool = False
-    same_session_continuation: bool = False
-    harness_owned_proof_recipes: bool = False
-    no_edit_certification_sandbox: bool = False
-    possession_controls: bool = False
-    static_prompt_strategy: str = "capability_detect"
-    worker_heartbeat_seconds: int = 5
-    worker_stale_seconds: int = 600
-    possession_lease_seconds: int = 900
-    max_same_worker_repairs_per_stage: int = 1
-    max_worker_context_compressions_per_goal: int = 3
-
-
-@dataclass(slots=True)
-class NormalWorkerFlowConfig:
-    enabled: bool = False
-    dev_self_tests_in_session: bool = True
-    hide_request_test_run_until_gate: bool = True
-    self_test_evidence_capture: bool = True
-    max_self_test_repeats_without_change: int = 1
-    expose_worker_actions_in_contract_dump: bool = True
+# S56 (2026-08-01) removed FIVE whole config blocks and pruned a sixth. Every
+# one shipped on the ``runtime_config`` wire via ``asdict(cfg)`` and told an
+# operator something the runtime does not do:
+#
+#   * ``ContinuousRoleSessionConfig`` / ``continuous_role_sessions`` — no reader
+#     outside its own loader and range validators. Its
+#     ``_apply_enterprise_role_session_compat`` mapper went too: one unread block
+#     mapped onto another unread block.
+#   * ``EnterpriseWorkerSessionsConfig`` / ``enterprise_worker_sessions`` — 15
+#     fields. Twelve had no reader at all; the other three
+#     (``enabled`` / ``persona_instance_runtime`` / ``persona_assignment_store``)
+#     gated the persona-instance ROSTER, which S56 made unconditional. The block
+#     is named for the worker-session lane deleted in the same commit.
+#   * ``NormalWorkerFlowConfig`` / ``normal_worker_flow`` — no reader.
+#   * ``RepoBundleRoutingConfig`` / ``repo_bundle_routing`` — consulted by
+#     NOTHING, not even a validator arm that acted on it.
+#   * ``SimplifiedAgentContractConfig`` / ``simplified_agent_contract`` — S27
+#     left it report-only; the only thing that ever read it was the
+#     ``production_envelope`` prose block, itself removed here.
+#   * ``SwarmConfig`` / ``swarm`` — report-only. The enforcement the fields
+#     describe (global/per-lane token + API ceilings) was never implemented.
+#   * ``SupervisionConfig`` is PRUNED, not removed: ``child_events_enabled`` is
+#     live (``continuity.py`` reads it to gate child.* emission). The other three
+#     flags had no reader.
+#
+# An operator yaml that still sets any removed block LOADS AND IS IGNORED (S47
+# precedent, pinned by test).
 
 
 # S47 removed ``RoleEnvelopeConfig`` (11 fields) and ``RuntimeConfig.
@@ -55,22 +40,6 @@ class NormalWorkerFlowConfig:
 # code reads that still shipped on the snapshot wire — reading ``enabled:
 # true`` on the live root. See
 # ``tests/agent_runtime/test_s47_wire_constant_field_removal.py``.
-
-
-@dataclass(slots=True)
-class RepoBundleRoutingConfig:
-    enabled: bool = False
-    strict_repo_ownership: bool = True
-    queue_on_dependency_bundles: bool = True
-    expose_in_snapshot: bool = True
-
-
-@dataclass(slots=True)
-class SimplifiedAgentContractConfig:
-    enabled: bool = False
-    expose_only_simplified_actions: bool = True
-    keep_internal_state_machine: bool = True
-    terminal_feedback_enabled: bool = True
 
 
 @dataclass(slots=True)
@@ -126,25 +95,8 @@ class EventLogConfig:
 
 
 @dataclass(slots=True)
-class SwarmConfig:
-    enabled: bool = False
-    requires_certification: bool = True
-    allow_uncertified_dev_swarm: bool = False
-    max_active_lanes: int = 2
-    global_token_soft_limit: int = 2_000_000
-    global_token_hard_limit: int = 3_000_000
-    global_api_call_soft_limit: int = 200
-    global_api_call_hard_limit: int = 300
-    per_lane_token_limit: int = 1_000_000
-    per_lane_api_call_limit: int = 100
-
-
-@dataclass(slots=True)
 class SupervisionConfig:
     child_events_enabled: bool = False
-    recursive_enabled: bool = False
-    hierarchical_budget_enabled: bool = False
-    deploy_verification_enabled: bool = False
 
 
 @dataclass(slots=True)
@@ -331,15 +283,9 @@ class RuntimeConfig:
     artifact_storage_low_watermark_mb: int = 512
     artifact_storage_high_watermark_mb: int = 1024
     artifact_storage_critical_watermark_mb: int = 2048
-    continuous_role_sessions: ContinuousRoleSessionConfig = field(default_factory=ContinuousRoleSessionConfig)
-    enterprise_worker_sessions: EnterpriseWorkerSessionsConfig = field(default_factory=EnterpriseWorkerSessionsConfig)
-    normal_worker_flow: NormalWorkerFlowConfig = field(default_factory=NormalWorkerFlowConfig)
-    repo_bundle_routing: RepoBundleRoutingConfig = field(default_factory=RepoBundleRoutingConfig)
-    simplified_agent_contract: SimplifiedAgentContractConfig = field(default_factory=SimplifiedAgentContractConfig)
     read_model: ReadModelConfig = field(default_factory=ReadModelConfig)
     persona_chat: PersonaChatConfig = field(default_factory=PersonaChatConfig)
     event_log: EventLogConfig = field(default_factory=EventLogConfig)
-    swarm: SwarmConfig = field(default_factory=SwarmConfig)
     supervision: SupervisionConfig = field(default_factory=SupervisionConfig)
     coordinator_permissions: CoordinatorPermissionConfig = field(default_factory=CoordinatorPermissionConfig)
     mission_chat: MissionChatConfig = field(default_factory=MissionChatConfig)

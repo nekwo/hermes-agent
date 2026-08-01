@@ -211,12 +211,23 @@ def test_the_kept_incident_constant_is_addressed_by_value_somewhere_live():
 
 
 def test_s54_moved_no_event_contract():
-    """Negative gate: the wave's contract deltas belong to S49/S52/S53."""
+    """Negative gate: the wave's contract deltas belong to S49/S52/S53.
+
+    S56 correction (2026-08-01), the same housekeeping S49 applied to
+    test_s44_role_envelope_family_removal.py: the body carried ``== 68``, a
+    SECOND copy of the absolute catalog size inside a test whose whole claim is
+    that S54 moved NO contract. S56 legitimately moved the count (58, the ten
+    ``worker_session.*`` types deregistered) and broke this line, which is
+    exactly the failure mode the "one number to maintain" rule exists to stop.
+    The literal is dropped; the assertion now defers to the single authority,
+    ``test_s15_event_contract_pruning.SURVIVING_EVENT_COUNT``, which is the real
+    invariant here — this file's cut must not make the catalog disagree with it.
+    """
 
     from agent_runtime.decision_contract_registry import event_catalog
     from tests.agent_runtime.test_s15_event_contract_pruning import SURVIVING_EVENT_COUNT
 
-    assert len(event_catalog()) == SURVIVING_EVENT_COUNT == 68
+    assert len(event_catalog()) == SURVIVING_EVENT_COUNT
 
 
 def test_every_touched_module_still_imports():

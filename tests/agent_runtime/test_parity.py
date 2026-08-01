@@ -95,7 +95,19 @@ def test_drop_samples_carry_the_by_design_flag():
 def test_build_snapshot_completeness_rows_all_carry_by_design(isolate_agent_runtime_root):
     completeness = build_snapshot()["parity"]["completeness"]
     # S9's compact snapshot has no mission-row projections in an empty runtime.
-    assert completeness == {}
+    # RETARGETED at S56 (2026-08-01), not deleted: the three persona-chat
+    # accountants used to sit behind `persona_instance_runtime_enabled(cfg)`, so
+    # an empty runtime published `{}`. S56 deleted that gate — the roster and its
+    # accountants are unconditional now — so the empty-runtime frame carries the
+    # three rows at zero rather than no rows at all. The pin moves to the exact
+    # keyset so a FOURTH projection appearing (or one of these vanishing) still
+    # turns this red, which "== {}" would no longer do.
+    assert set(completeness) == {
+        "persona_chat_history",
+        "persona_chat_trace",
+        "operator_conversation",
+    }
+    assert all(row["considered"] == 0 for row in completeness.values())
     for projection, row in completeness.items():
         assert isinstance(row.get("by_design"), list), projection
 

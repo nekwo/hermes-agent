@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime.migrations import effective_config_summary, migration_status, validate_runtime_config
-from agent_runtime.runtime_config import SimplifiedAgentContractConfig
 from utils import atomic_json_write
 
 
@@ -70,70 +69,12 @@ def test_effective_config_summary_is_redaction_safe(isolate_agent_runtime_root):
     assert summary["personas"]["dev"]["api_token"] == "<redacted>"
     # S11 removed bundled role/persona defaults: configured data is authoritative.
     assert summary["effective_personas"]["dev"]["skills"] == []
-    assert summary["production_envelope"]["production_ready"] is True
-    assert {item["id"] for item in summary["production_envelope"]["items"]} >= {"H5", "H6", "H7", "H8", "H9", "H10", "recursive_supervision"}
-    assert summary["production_envelope"]["blockers"] == []
-
-
-def test_h5_envelope_advertises_behavioral_migration_and_rollback_controls():
-    summary = effective_config_summary(
-        AgentRuntimeConfig(simplified_agent_contract=SimplifiedAgentContractConfig(enabled=True))
-    )
-    h5 = next(item for item in summary["production_envelope"]["items"] if item["id"] == "H5")
-
-    assert h5["status"] == "implemented"
-    assert not h5["blockers"]
-    assert any("collapsed hand_off/block/escalate/scope_route/qa_verdict" in control for control in h5["controls"])
-    assert not any("proof-from-trace" in control for control in h5["controls"])
-    assert any("hand_off captures the grounded isolated-worktree diff" in control for control in h5["controls"])
-    assert any("legacy decision aliases are pruned" in control for control in h5["controls"])
-    assert any("disable simplified_agent_contract.enabled" in control for control in h5["controls"])
-
-
-def test_h6_h8_h9_envelope_names_real_enforcement_controls():
-    summary = effective_config_summary(AgentRuntimeConfig())
-    items = {item["id"]: item for item in summary["production_envelope"]["items"]}
-
-    assert summary["production_envelope"]["production_ready"] is True
-    assert items["H6"]["status"] == "implemented"
-    assert not items["H6"]["blockers"]
-    # INVERTED at S49 (2026-08-01). These two lines asserted the H6 item still
-    # ADVERTISED the audited worker.takeover workflow and its approve_destructive
-    # gate. Both claims described `operator_control.py`, which was deleted whole
-    # for want of a production caller -- so an envelope that still named them
-    # would be telling an operator about a control they cannot invoke. The pin is
-    # inverted, not dropped: H6 must keep its REAL controls and must not regrow
-    # the retired ones.
-    assert not any("takeover" in control for control in items["H6"]["controls"])
-    assert not any("approve_destructive" in control for control in items["H6"]["controls"])
-    assert any("worker.pause" in control for control in items["H6"]["controls"])
-    assert items["H8"]["status"] == "implemented"
-    assert any("heartbeat TTL" in control for control in items["H8"]["controls"])
-    assert any("terminal-idempotent" in control for control in items["H8"]["controls"])
-    assert items["H9"]["status"] == "implemented"
-    assert any("swarm hard token ceilings block" in control for control in items["H9"]["controls"])
-    assert any("repo bundle queueing" in control for control in items["H9"]["controls"])
-
-
-def test_swarm_ceiling_controls_disclose_gating_when_swarm_disabled():
-    # Honesty guard: the swarm hard-token-ceiling controls (H7/H9) must not read
-    # as active enforcement when swarm.enabled is False. With swarm off they must
-    # disclose the gate; with swarm on they read as active (no gated caveat).
-    from agent_runtime.runtime_config import SwarmConfig
-
-    off = effective_config_summary(AgentRuntimeConfig())
-    items_off = {item["id"]: item for item in off["production_envelope"]["items"]}
-    for hid in ("H7", "H9"):
-        ceiling = [c for c in items_off[hid]["controls"] if "swarm hard token ceilings" in c]
-        assert ceiling, hid
-        assert all("swarm.enabled" in c and "gated off" in c for c in ceiling), (hid, ceiling)
-
-    on = effective_config_summary(AgentRuntimeConfig(swarm=SwarmConfig(enabled=True)))
-    items_on = {item["id"]: item for item in on["production_envelope"]["items"]}
-    for hid in ("H7", "H9"):
-        ceiling = [c for c in items_on[hid]["controls"] if "swarm hard token ceilings" in c]
-        assert ceiling, hid
-        assert all("gated off" not in c for c in ceiling), (hid, ceiling)
+    # S56 deleted `production_envelope.py` whole: the envelope was hand-written
+    # prose keyed on config flags, several of its claims false against this tree.
+    # The pin inverts rather than being dropped so a stale producer cannot
+    # resurrect a reader. (The three H5/H6-H9/swarm-ceiling cases that had the
+    # envelope as their ONLY subject were deleted with it.)
+    assert "production_envelope" not in summary
 
 
 def test_migration_status_counts_existing_runtime_records(isolate_agent_runtime_root):
