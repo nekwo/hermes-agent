@@ -487,7 +487,14 @@ def persona_chat_trace_summary(
     carry no ``task_id``), so merging is a plain union with no double counting.
     """
 
-    log = event_log or _default_event_log()
+    # No event log, no trace lane to project — an honest empty page. This read
+    # `event_log or _default_event_log()`, naming a helper that has never
+    # existed in this module: any caller that omitted the argument got a
+    # NameError instead of the empty list two lines below. It never fired only
+    # because both production callers (snapshot.build_snapshot,
+    # status.build_status) resolve their own CachedEventLog first. Found by the
+    # F821 gate.
+    log = event_log
     if log is None:
         return []
     tail = _bounded_message_tail(message_tail)

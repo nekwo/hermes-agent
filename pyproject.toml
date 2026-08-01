@@ -415,12 +415,39 @@ preview = true  # required for PLW1514 (unspecified-encoding) — preview rule
 # which silently corrupts any non-ASCII file content.  We had three
 # separate Windows sandbox regressions in one debug session before
 # adding the explicit encoding.  This rule keeps new code honest.
-select = ["PLW1514"]
+# F821 (undefined-name) is the second rule earning its keep, added for the
+# fork surface (agent_runtime/, hermes_cli/).  A name that resolves nowhere is
+# a NameError waiting for whichever operator runs that one code path, and this
+# codebase has two structural reasons to grow them: the harness command parts
+# under hermes_cli/harness_parts/ are exec'd into harness.py's globals rather
+# than imported (so nothing else can see a name that arrives from neither),
+# and `from __future__ import annotations` means an annotation naming a type
+# nobody imported never evaluates and never complains.  Enabling it found a
+# live one in persona_chat_history (a call to a helper that has never existed
+# in that module).  The ignores below are upstream-owned trees we don't edit.
+select = ["PLW1514", "F821"]
 
 [tool.ruff.lint.per-file-ignores]
 # Tests can intentionally exercise locale-encoding edge cases.
-"tests/**" = ["PLW1514"]
+# F821: upstream test modules trip it (tests/gateway, tests/tools,
+# tests/e2e/conftest.py, tests/hermes_cli/test_config.py + test_mcp_config.py).
+"tests/**" = ["PLW1514", "F821"]
 # Skills and plugins are partially user-authored — their own conventions.
 "skills/**" = ["PLW1514"]
-"optional-skills/**" = ["PLW1514"]
-"plugins/**" = ["PLW1514"]
+"optional-skills/**" = ["PLW1514", "F821"]
+"plugins/**" = ["PLW1514", "F821"]
+# Upstream-owned trees: real F821 hits, but not ours to edit — fixing them is
+# an upstream-PR candidate, not a fork change.
+"agent/**" = ["F821"]
+"gateway/**" = ["F821"]
+"tools/**" = ["F821"]
+"tui_gateway/**" = ["F821"]
+"hermes_cli/web_server.py" = ["F821"]
+# harness.py is the one fork file that cannot be clean while the exec loader
+# lives: it calls the ~62 _cmd_* handlers that harness_parts/*.py define, so
+# the names genuinely are undefined until _load_command_parts() runs.  The
+# reverse direction — parts reading harness.py's names — IS clean, enforced by
+# the parts' explicit import headers and
+# tests/hermes_cli/test_harness_parts_namespace.py.  Retiring this entry needs
+# full module conversion of the parts, which is a later step.
+"hermes_cli/harness.py" = ["F821"]
