@@ -40,15 +40,59 @@
    output (cards gain masking/truncation) - a deliberate output change needing
    a ruling. The realm-sync lie and workspace-show crash halves were already
    fixed narrowly (a21ab1a2a).
-5. **workspaces[].goals wire field (hermes B-3).** The tasks = [] seed
-   (snapshot.py:332) feeds three projections that can only emit constants;
-   removal is a contract bump + Launcher lockstep, S9/S10-shaped.
+5. ~~**workspaces[].goals wire field (hermes B-3).**~~ **RULED CUT and EXECUTED
+   2026-08-01 — hermes `d88ea8b55` (S47) + launcher `4739bd4f` (s53).** Taken
+   together with item 8: same wire, same defect. The `tasks = []` seed and all
+   three constant projections are gone — `_workspace_summary`'s
+   `"goals": len(goals)`, `snapshot_prompt_observability`'s `tasks_by_id`, and
+   `operator_channel_summary`'s `_TaskLookup` — plus everything reachable only
+   through the resolved task: the synthetic `goal_input` conversation message,
+   the title fallback, the run-id indirection, `_task_time`, and the
+   `goal_id`/`task_id`/`updated_at` fallbacks. `status.build_status` passed its
+   OWN `tasks = []` literal to the same parameter, so no production caller could
+   supply a task at all; the parameters went with the projections per the
+   ledger-item-2 rule. `resolve_situational_hud` KEEPS `task`/`goal_task` — the
+   live mission-chat wrapper resolves them from the store per turn.
+
+   **What the Launcher did with it — why this mattered more than item 8:**
+   `MissionWorkspace.goalCount` parsed the field, the Manage Workspaces row
+   RENDERED it ("N goals · soft isolation"), and `buildWorkspaceManagerModel`
+   BLOCKED workspace delete on `goalCount > 0` with "Owns N goals — archive them
+   first", attributed to a hermes `workspace_has_goals` refusal that exists only
+   as a docstring example in `agent_runtime/errors.py`. An operator therefore
+   read a real-looking number that was structurally always 0, behind a guard
+   that could never fire and mirrored nothing. All four went with the field;
+   delete stays gated by the permission and realm-default arms, which are real.
+
+   Superseded pins INVERTED rather than deleted, each carrying why: S27's
+   `test_the_workspace_goals_wire_field_survives` (it protected the count from a
+   resemblance sweep — correct then; the ruling cuts it for a different reason),
+   S29's `KEPT_LIVE_LOCALS` entry for `tasks`, and Launcher-side the
+   policy/dialog/alert expectations — whose fixtures still send the removed
+   field, so a stale producer cannot resurrect a reader.
 6. **gateway/platforms/base.py:1407** bare expanduser("~") vs sibling's
    $HOME-preferring resolution - aligning widens a denial carve-out.
 7. **Packaging:** psutil/fire declared but absent on the ambient test
    interpreter; markdown used by the matrix adapter but declared nowhere.
-8. **`role_envelope` runtime-config block is now a knob that governs nothing
-   (hermes; opened by S44, 2026-07-31).** Cutting the store family left the
+8. ~~**`role_envelope` runtime-config block is now a knob that governs nothing
+   (hermes; opened by S44, 2026-07-31).**~~ **RULED CUT and EXECUTED 2026-08-01
+   — hermes `d88ea8b55` (S47) + launcher `4739bd4f` (s53).** The whole surface
+   below is gone: `RoleEnvelopeConfig`, `RuntimeConfig.role_envelope`, the
+   `config.py` `_role_envelope_config` loader and its two call sites, and the
+   five `migrations.py` range validators. Because `effective_config_summary` is
+   `asdict(cfg)`, dropping the dataclass field dropped the wire block; an
+   operator yaml that still sets it now loads and is ignored (pinned by test).
+
+   **CORRECTION to the original entry's attribution, found during execution:**
+   the live `enabled: true` was NOT an operator flip. The LAUNCHER wrote it —
+   `mission_control_hermes_installer.dart` generates `config.yaml` from a
+   template that carried the whole 11-field block with `enabled: true`. Removed
+   there in the same wave, so a fresh install stops seeding it. **No Launcher
+   PARSE of `runtime_config.role_envelope` existed** (the plural
+   `role_envelopes` on agent rows is a different, still-parsed field) — so the
+   lockstep here was producer-side, not consumer-side.
+
+   ORIGINAL ENTRY (preserved): Cutting the store family left the
    whole config lane behind and it is NOT residue-shaped — it is a live wire
    telling an operator something false. Surface: `RoleEnvelopeConfig` (11
    fields, `runtime_config.py:53`), `RuntimeConfig.role_envelope`
@@ -231,6 +275,20 @@ Hermes fork-owned:
 - **Wire-test idiom**: the relay regression class (producer and consumer pinned,
   wire between them never asserted) - extend the "does the chokepoint actually
   invoke the seam" AST tests to the other persona_commands chokepoints.
+- **The Launcher's generated hermes `config.yaml` is an unaudited producer
+  (opened by S47/s53, 2026-08-01).** Executing item 8 found that the live
+  `role_envelope.enabled: true` came from
+  `mission_control_hermes_installer.dart`'s config template, not from an
+  operator. The block is removed, but the template was never audited against
+  the runtime's actual config schema and still writes at least one more block
+  the runtime does not load: `mission_plan:` (enabled/enforce_routing/
+  enforce_hud/version) — `tests/agent_runtime/test_config.py` explicitly
+  asserts `not hasattr(cfg, "mission_plan")`. NOT swept on this wave's
+  authority (scoped to the ruled fields). The real fix is a gate, not another
+  one-off deletion: a test that every top-level key the installer template
+  writes under `agent_runtime:` resolves to a field the loader actually
+  consumes, so a retired config block fails a build instead of quietly seeding
+  operator roots for months.
 
 Launcher Mission Control (F-1..F-8):
 - ~~F-1..F-8~~ **ALL EXECUTED 2026-07-31/08-01**, on launcher origin/main
@@ -264,12 +322,15 @@ Launcher Mission Control (F-1..F-8):
   - **F-7/F-8 office**: goal-overflow pill live-invisible while
     goalDioramaEnabled:false; MissionOfficeSceneMutation `dropped` lane is
     debug-assert only; MissionOfficeRenderProbe lacks a goals-hidden field.
-- **F-9 dead `open_incident_budget_exceeded` alert (opened by B-5,
-  2026-07-31).** `mission_control_snapshot.dart:994` branches the snapshot-alert
-  label on `warningCodes.contains('open_incident_budget_exceeded')`. The hermes
-  producer is now deleted (it had been unreachable since contract 45 anyway), so
-  the branch is permanently false and the alert always renders the generic
-  "parity warnings N" arm. Launcher-side, one-line cut; deliberately NOT taken
-  on this wave's authority since it is the other repo.
-  `mission_control_bridge.dart:2862` only *mentions* the sibling
-  `open_tasks_without_task_rows` in a comment — reword when F-9 is taken.
+- ~~**F-9 dead `open_incident_budget_exceeded` alert (opened by B-5,
+  2026-07-31).**~~ **EXECUTED 2026-08-01 — launcher `4739bd4f`** (landed with
+  the s53 contract lockstep for items 5 + 8). The dead branch is cut and
+  `snapshotAlerts` renders the one honest "parity warnings N" arm; the codes
+  themselves stay visible in the chip's disclosure, and the retargeted test
+  still FEEDS `open_incident_budget_exceeded` so a resurrected producer cannot
+  quietly restore a label branch. The `mission_control_bridge.dart` comment was
+  reworded and CORRECTED while there: it claimed "the harness raises its own
+  `open_tasks_without_task_rows` warning on the same condition" — it does not,
+  B-5 deleted that producer too, so the comment was asserting a diagnostic
+  neither repo performs. A grep gate (`open_incident_budget_exceeded`, code
+  lines only) keeps the branch from returning.
