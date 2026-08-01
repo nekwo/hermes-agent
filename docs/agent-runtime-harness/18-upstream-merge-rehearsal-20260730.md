@@ -237,9 +237,13 @@ count was corrected to 34 (`mission_goal_create` was the retired 35th)
 ### Upstream-PR candidates extracted from this sync
 
 **Status 2026-08-01: prepared and pushed as fork branches cut from
-`upstream/main` (`470cf66b0`), awaiting `gh` install/auth to open the PRs
-(ready script + bodies staged in the session scratchpad; branches
-`upstream-pr/*` on nekwo/hermes-agent).**
+`upstream/main` (`470cf66b0`); filing PARKED by operator ruling as a later
+todo (needs `gh` install + auth when picked up). Branches `upstream-pr/*`
+live on nekwo/hermes-agent — everything needed to file is the branches + the
+PR bodies below; re-check upstream tip for conflicts/duplicate fixes at
+pickup (candidate 3 already went obsolete this way). PR body summaries: each
+branch's commit message carries the failure mode; fuller bodies were staged
+in a session scratchpad (ephemeral — regenerate from the commits if gone).**
 
 1. `_bash_safe_path` vs `MSYS_NO_PATHCONV` argv contradiction (breaks
    `search_files` on native Windows in upstream too).
