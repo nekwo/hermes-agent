@@ -207,6 +207,23 @@ FROZEN_LEDGER: dict[str, tuple[frozenset[str], str]] = {
         frozenset({"_CRASH_LOG", "_hermes_home"}),
         "upstream: TUI gateway process entry",
     ),
+    # ── Carried, not measured ──────────────────────────────────────────────
+    # These two do not import on this platform (see UNPROBED), so their names
+    # come from the pre-probe regex ledger rather than from a run. They are
+    # listed anyway so the guard does not report them as NEW on a host where
+    # they DO import. If that host finds additional derived names — likely,
+    # since the regex only ever saw the first hop — the failure message names
+    # them and they belong here.
+    "trajectory_compressor.py": (
+        frozenset({"_hermes_home"}),
+        "upstream: process entry. Carried from the regex ledger; needs `fire` "
+        "installed to be measured",
+    ),
+    "scripts/profile-tui.py": (
+        frozenset({"DEFAULT_LOG", "DEFAULT_STATE_DB"}),
+        "upstream script: TUI profiler log/db paths. Carried from the regex "
+        "ledger; needs a POSIX host (termios) to be measured",
+    ),
 }
 
 # Modules the probe could not import in this environment, with the reason. An
@@ -219,9 +236,7 @@ UNPROBED: dict[str, str] = {
     ),
     "scripts/profile-tui.py": (
         "imports `termios`, a POSIX-only stdlib module, so it cannot load on "
-        "Windows. Its two frozen constants (DEFAULT_LOG, DEFAULT_STATE_DB) are "
-        "carried here rather than in FROZEN_LEDGER because this platform never "
-        "gets to observe them."
+        "Windows. Probed on any POSIX host."
     ),
 }
 
@@ -418,9 +433,22 @@ def test_ledger_reasons_are_present(probe_result: dict) -> None:
 
     missing = sorted(rel for rel, (_names, reason) in FROZEN_LEDGER.items() if not reason.strip())
     assert not missing, f"FROZEN_LEDGER entries without a reason: {missing}"
-    ledgered_files = set(FROZEN_LEDGER)
-    unused = sorted(set(UNPROBED) & ledgered_files & set(probe_result["frozen"]))
-    assert not unused, (
-        "These files are declared UNPROBED but the probe imported them fine: "
-        f"{unused} — drop the UNPROBED entry."
+    unreasoned = sorted(rel for rel, reason in UNPROBED.items() if not reason.strip())
+    assert not unreasoned, f"UNPROBED entries without a reason: {unreasoned}"
+
+    # UNPROBED is per-environment: a module that needs `fire` or `termios`
+    # imports fine on a host that has them, and then it must ALSO be ledgered
+    # so the guard does not report its freezes as new. Both entries are
+    # therefore legitimate at once — what is not legitimate is an UNPROBED
+    # entry that neither fails to import nor freezes anything anywhere.
+    inert = sorted(
+        rel
+        for rel in UNPROBED
+        if rel not in probe_result["failed"]
+        and rel not in probe_result["frozen"]
+        and rel not in FROZEN_LEDGER
+    )
+    assert not inert, (
+        "These files are declared UNPROBED but imported fine here and froze "
+        f"nothing: {inert} — drop the UNPROBED entry."
     )
