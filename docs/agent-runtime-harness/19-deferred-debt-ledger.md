@@ -282,6 +282,34 @@
    scoped to the two constant result fields, and deleting a lane is a
    direction call, not a cleanup. — *Answered: RETIRE. See the S46 block above.*
 
+10. **Readiness only validates REQUIRED MCP servers, so the drift block is a
+    no-op on the live snapshot lane (hermes; opened by the P5 flip,
+    2026-08-01).** `profile_readiness_for_persona` scopes
+    `mcp_server_issues(only=effective_required_mcp_servers)`, and on the live
+    tree every snapshot agent's required list is EMPTY — so the now-blocking
+    `mcp_server_template_drift` check (and the binding checks it rides with)
+    evaluates nothing for them, and their `ready` verdict says nothing about
+    their configured `launcher_qa` block. Today the line is actually held by
+    the data test
+    (`test_every_live_launcher_qa_block_matches_the_canonical_template`),
+    which is a CI tripwire, not a runtime one. The ruling needed: should
+    readiness validate every CONFIGURED server block that has a canonical
+    template (drift checked wherever a block exists), with `required` scoping
+    kept only for the missing-server class? This scoping predates the flip —
+    deliberately not widened on the flip's authority.
+
+11. **Launcher board write path parses the CLI reply with the SNAPSHOT card
+    shape — read-your-writes has silently never worked (Launcher; surfaced by
+    S48, 2026-08-01).** `mission_board_write.dart::boardCardFromResultPayload`
+    reads `card_id`/`updated_by`/`unpublished`; the CLI card row emits `id`
+    and neither of the others, so the parse ALWAYS returns null and the lane
+    silently falls back to `provisionalBoardCard`. Pre-existing (not
+    introduced by S48, which changed no key names) and exactly the wire-test
+    idiom class: producer pinned, consumer pinned, wire never asserted. Fix
+    shape: parse the CLI row shape (or emit a shared shape), plus one wire
+    test walking verb → reply → parsed card. Small, self-contained,
+    Launcher-side.
+
 ## Proposal ledger (decision-ready; full text in the 2026-07-31 audit reports)
 
 Hermes fork-owned:

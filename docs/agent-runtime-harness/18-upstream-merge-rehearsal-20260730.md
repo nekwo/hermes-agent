@@ -236,16 +236,32 @@ count was corrected to 34 (`mission_goal_create` was the retired 35th)
 
 ### Upstream-PR candidates extracted from this sync
 
+**Status 2026-08-01: prepared and pushed as fork branches cut from
+`upstream/main` (`470cf66b0`), awaiting `gh` install/auth to open the PRs
+(ready script + bodies staged in the session scratchpad; branches
+`upstream-pr/*` on nekwo/hermes-agent).**
+
 1. `_bash_safe_path` vs `MSYS_NO_PATHCONV` argv contradiction (breaks
    `search_files` on native Windows in upstream too).
+   → `upstream-pr/windows-search-arg-pathconv` (`ba1ff49a9`).
 2. `run_tests_parallel.py --files` splits Windows drive letters — upstream's own
    retry test fails on Windows without the fix.
+   → `upstream-pr/windows-drive-letter-file-list` (`e181dc559`).
 3. `tests/hermes_cli/test_gateway.py` module-level `import pty` kills collection
-   of the whole file on Windows.
+   of the whole file on Windows. **OBSOLETE upstream-ward: upstream fixed it
+   themselves (`05504bd9f`, function-local import). FLOWS FORK-WARD instead —
+   the fork still carries the module-level import at test_gateway.py:20; adopt
+   at the next sync (currently fenced by the env-gap markers, so invisible in
+   the canonical runner).**
 4. Git-Bash discovery: WSL-stub rejection on the PATH lookup (upstream dropped
    it; a WSL stub passes `_bash_starts()` and then fails every Windows path).
+   → `upstream-pr/reject-wsl-bash-stub` (`322c3635c`), stub live-probed on this
+   host.
 5. Retry-ownership split for the runner (in-pool flake retry re-running timeouts
    pays the full file-timeout twice under contention).
+   → `upstream-pr/runner-retry-ownership` (`30d3f0d1e`), deliberately scoped to
+   the guard only — the fork's 8-worker cap excluded as host tuning, the serial
+   straggler-isolation pass offered in the body as follow-up.
 
 ### Post-sync follow-ups (carried forward)
 
