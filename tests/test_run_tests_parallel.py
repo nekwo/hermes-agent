@@ -378,3 +378,47 @@ def test_explicit_k_wins_over_node_id_inference(tmp_path: Path) -> None:
     # -k test_beta wins: one test ran, and it wasn't filtered to nothing.
     assert proc.returncode == 0, proc.stdout
     assert "1 tests passed" in proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# _split_path_list — colon-joined lists vs Windows drive letters
+# ---------------------------------------------------------------------------
+
+
+def _load_runner_module():
+    """Import scripts/run_tests_parallel.py as a module for unit testing."""
+    import importlib.util
+
+    repo_root = Path(__file__).resolve().parent.parent
+    path = repo_root / "scripts" / "run_tests_parallel.py"
+    spec = importlib.util.spec_from_file_location("_hermes_runner_under_test", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_split_path_list_preserves_windows_drive_letters() -> None:
+    """``C:\repo\test_a.py`` must not become ``["C", "\repo\test_a.py"]``.
+
+    Splitting it produced a lookup for a file literally named ``C`` under the
+    repo root, which is what broke ``--files`` (and therefore the CI generate
+    job and the retry test) on Windows.
+    """
+    split = _load_runner_module()._split_path_list
+
+    assert split(r"C:\repo\test_a.py") == [r"C:\repo\test_a.py"]
+    assert split("C:/repo/test_a.py") == ["C:/repo/test_a.py"]
+    assert split(r"C:\repo\test_a.py:D:\other\test_b.py") == [
+        r"C:\repo\test_a.py",
+        r"D:\other\test_b.py",
+    ]
+
+
+def test_split_path_list_still_splits_plain_relative_lists() -> None:
+    """The POSIX/CI behavior is unchanged for relative, colon-joined lists."""
+    split = _load_runner_module()._split_path_list
+
+    assert split("tests/a.py:tests/b.py") == ["tests/a.py", "tests/b.py"]
+    assert split("tests") == ["tests"]
+    # Empty segments are dropped, as before.
+    assert split("tests/a.py::tests/b.py") == ["tests/a.py", "tests/b.py"]

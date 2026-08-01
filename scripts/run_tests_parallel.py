@@ -100,6 +100,32 @@ _DEFAULT_FILE_RETRIES = 1
 _DURATIONS_FILE = "test_durations.json"
 
 
+def _split_path_list(raw: str) -> list[str]:
+    """Split a colon-joined path list without cutting Windows drive letters.
+
+    ``C:\\repo\\tests\\test_a.py`` naively ``split(":")``-ed becomes
+    ``["C", "\\repo\\tests\\test_a.py"]`` and the runner then tries to open a
+    file literally named ``C`` under the repo root. Re-join any single ASCII
+    letter that is immediately followed by a path separator — that is a drive
+    qualifier, not a list delimiter.
+    """
+    if Path(raw).exists():
+        return [raw]
+    parts = raw.split(":")
+    out: list[str] = []
+    index = 0
+    while index < len(parts):
+        piece = parts[index]
+        following = parts[index + 1] if index + 1 < len(parts) else ""
+        if len(piece) == 1 and piece.isalpha() and following[:1] in ("\\", "/"):
+            out.append(f"{piece}:{following}")
+            index += 2
+            continue
+        out.append(piece)
+        index += 1
+    return [value for value in out if value.strip()]
+
+
 def _approximately_count_tests(
     files: List[Path], repo_root: Path
 ) -> dict[Path, int]:
@@ -885,7 +911,8 @@ def main() -> int:
 
     # --files: explicit file list from the CI generate job — skip discovery.
     if args.files:
-        files = [repo_root / f for f in args.files.split(":") if f.strip()]
+        # Drive-letter-safe: a bare split(":") shreds `C:\repo\test_x.py`.
+        files = [repo_root / f for f in _split_path_list(args.files)]
         roots = []
     else:
         # Resolve discovery roots: positional path args override --paths if any
@@ -893,7 +920,7 @@ def main() -> int:
         if args.paths_positional:
             roots = [repo_root / p for p in args.paths_positional]
         else:
-            roots = [repo_root / p for p in args.paths.split(":") if p]
+            roots = [repo_root / p for p in _split_path_list(args.paths)]
 
         if args.include_integration:
             # Caller takes responsibility — typically used via explicit -k filter.
