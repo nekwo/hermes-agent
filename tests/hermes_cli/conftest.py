@@ -87,15 +87,20 @@ def _suppress_concurrent_hermes_gate(request, monkeypatch):
 #                        that `cmd_update` adds only on win32.
 #
 #   host_dependency_gap  A host package or capability is absent rather than a
-#                        platform property: `fire`, `psutil`, `croniter`,
-#                        `pywinpty`, `pathspec` are not installed (the last two
-#                        are declared project dependencies, so this is an
-#                        install gap on THIS box, not an optional extra); the
-#                        installed `rich` does not emit OSC-8 panel-title
-#                        hyperlinks; upstream has since added a standalone
-#                        `tool_describe` bridge tool to the minimal toolset;
-#                        and the host's git 2.31.1 does not honour
-#                        `--ignore-cr-at-eol` for `--name-only` output.
+#                        platform property: `croniter`, `pywinpty`, `pathspec`
+#                        are not installed (all three are declared project
+#                        dependencies, so this is an install gap on THIS box,
+#                        not an optional extra); the installed `rich` does not
+#                        emit OSC-8 panel-title hyperlinks; upstream has since
+#                        added a standalone `tool_describe` bridge tool to the
+#                        minimal toolset; and the host's git 2.31.1 does not
+#                        honour `--ignore-cr-at-eol` for `--name-only` output.
+#
+#                        `fire` and `psutil` USED to be in that list. They were
+#                        installed on the ambient interpreter on 2026-08-01
+#                        (ledger item 7, RULED EXECUTE) and every row naming
+#                        them retired — three groups here, and more in the
+#                        gateway/tools registries.
 #
 # ── 2026-07-31 upstream-sync sweep ─────────────────────────────────────────
 #
@@ -281,15 +286,6 @@ _ENV_GAPS: dict[str, list[tuple[str, str, set[str]]]] = {
                 'TestApplyProfileOverrideHermesHomeGuard::test_sudo_explicit_profile_resolves_invoking_users_profile',
                 'TestSupervisedChildIgnoresStickyProfile::test_non_supervised_run_still_follows_active_profile',
                 'TestSupervisedChildIgnoresStickyProfile::test_supervised_named_profile_flag_still_wins',
-            },
-        ),
-    ],
-    'test_arcee_provider.py': [
-        (
-            _HOST,
-            "optional dependency 'fire' is not installed",
-            {
-                'TestArceeURLMapping::test_trajectory_compressor_detects_arcee',
             },
         ),
     ],
@@ -480,17 +476,6 @@ _ENV_GAPS: dict[str, list[tuple[str, str, set[str]]]] = {
                 'TestHooksDoctor::test_flags_mtime_drift',
                 'TestHooksTest::test_fires_real_subprocess_and_parses_block',
                 'TestHooksTest::test_synthetic_payload_matches_production_shape',
-            },
-        ),
-    ],
-    'test_install_cua_driver.py': [
-        (
-            _HOST,
-            "declared dependency 'psutil' (psutil==7.2.2 in pyproject) is not "
-            'installed on this host',
-            {
-                'TestInstallerTimeoutKillsProcessGroup::test_windows_timeout_kills_descendants_and_parent',
-                'TestInstallerTimeoutKillsProcessGroup::test_windows_tree_enumeration_failure_falls_back_to_direct_kill',
             },
         ),
     ],
@@ -724,17 +709,6 @@ _ENV_GAPS: dict[str, list[tuple[str, str, set[str]]]] = {
             },
         ),
     ],
-    'test_update_interrupted_recovery.py': [
-        (
-            _HOST,
-            "declared dependency 'psutil' (psutil==7.2.2 in pyproject) is not "
-            "installed on this host, so monkeypatching 'psutil.Process' cannot "
-            'resolve the module',
-            {
-                'test_recovery_self_lock_does_not_clear_core_marker_via_import_probes',
-            },
-        ),
-    ],
     'test_update_stale_dashboard.py': [
         (
             _WINDOWS,
@@ -816,7 +790,7 @@ def pytest_configure(config):  # noqa: D401 — pytest hook
     config.addinivalue_line(
         "markers",
         f"{_HOST}: pre-existing failure caused by a missing host package or "
-        "toolchain (fire / psutil / croniter / pywinpty / pathspec, Node "
+        "toolchain (croniter / pywinpty / pathspec, Node "
         ">=20.19 for the Vite 8 web build, git >=2.31 semantics for "
         "`--name-only --ignore-cr-at-eol`, outbound HTTP). Not a fork "
         "regression; deselect with -m 'not host_dependency_gap'.",

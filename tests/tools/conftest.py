@@ -88,11 +88,19 @@ def disable_lazy_stt_install():
 #
 # INTERPRETER MATTERS. These rows describe ambient `C:\Python312\python.exe`,
 # the same interpreter the already-landed `tests/hermes_cli/conftest.py`
-# registry was built against (it likewise records `fire` / `pathspec` as
-# missing). The runtime venv at
-# `X:\Eternia\.hermes\venvs\hermes-agent\Scripts\python.exe` HAS psutil, fire,
-# markdown and pathspec — under it the psutil and fire rows below would all
-# report as stale. Do not mix interpreters between the registry and the run.
+# registry was built against. Do not mix interpreters between the registry and
+# the run: sweeping under the runtime venv at
+# `X:\Eternia\.hermes\venvs\hermes-agent\Scripts\python.exe` is a known trap.
+#
+# 2026-08-01 (ledger item 7, RULED EXECUTE): psutil==7.2.2, fire==0.7.1 and
+# Markdown==3.10.2 — all three DECLARED in `[project.dependencies]` and all
+# three resolved in uv.lock — were finally installed on this ambient
+# interpreter, which is what the declaration always said should be true. Every
+# row that named a missing psutil/fire/markdown was retired here; `pathspec`
+# and `croniter` remain uninstalled, so rows naming those stay. Two former
+# psutil rows in `test_process_registry.py` survived the install and were
+# RE-DIAGNOSED to the platform cause that the missing import had been masking
+# — see the inline notes there.
 #
 # NEVER FENCED — the three real defects triage left red here were FIXED, not
 # marked. Recorded so nobody re-adds a row for them:
@@ -163,12 +171,6 @@ _POSIX_PROC = (
     'depends on POSIX process primitives absent on Windows — os.getpgid, '
     'process groups, real signal delivery, or /proc/<pid>/'
 )
-_PSUTIL = (
-    "declared dependency 'psutil' (psutil==7.2.2 in pyproject) is not installed "
-    'on this interpreter, so the psutil fallback that every non-Linux process '
-    'probe relies on raises and the probe returns None'
-)
-_FIRE = "optional dependency 'fire' is not installed on this interpreter"
 _AF_UNIX = (
     'socket.AF_UNIX does not exist on Windows, so the unix-socket path under '
     'test cannot be exercised at all'
@@ -204,45 +206,45 @@ _ENV_GAPS: EnvGapRegistry = {
             'TestScanFile::test_detect_markdown_injection',
         }),
     ],
-    # ── missing host dependencies ────────────────────────────────────────
-    'test_browser_orphan_reaper.py': [
-        (_HOST, _PSUTIL, {
-            'TestReaperIdentityGuard::test_real_daemon_bound_via_cmdline_is_reapable',
-            'TestReaperIdentityGuard::test_daemon_bound_via_environ_is_reapable',
-            'TestReaperIdentityGuard::test_recycled_pid_browser_not_bound_to_our_dir_is_refused',
-            'TestReaperIdentityGuard::test_planted_pid_survives_full_reaper_path',
-        }),
-    ],
-    'test_config_null_guard.py': [
-        (_HOST, _FIRE, {
-            'TestTrajectoryCompressorNullGuard::test_null_base_url_does_not_crash',
-            'TestTrajectoryCompressorNullGuard::test_config_loading_null_base_url_keeps_default',
-        }),
-    ],
     'test_process_registry.py': [
-        (_HOST, _PSUTIL, {
-            'TestKillProcess::test_kill_detached_session_uses_host_pid',
-            'TestTerminateHostPidPosix::test_posix_walks_tree_and_terminates_children_then_parent',
-            'TestTerminateHostPidPosix::test_posix_oserror_falls_back_to_os_kill',
+        # 'TestPidReuseGuard::test_terminate_refuses_when_start_time_mismatches'
+        # was retired 2026-08-01 (ledger item 7): the start-time comparison it
+        # guards is a psutil read, so psutil==7.2.2 made it pass.
+        (_WINDOWS, _POSIX_PROC, {
+            'TestStdinHelpers::test_close_stdin_allows_eof_driven_process_to_finish',
+            # Re-diagnosed 2026-08-01 (ledger item 7): was registered as
+            # "psutil not installed". With psutil==7.2.2 now installed on the
+            # ambient interpreter the real cause is visible, and it is a
+            # platform property, not a host gap — patching `os.getpgid` raises
+            # AttributeError because Windows `os` has no such attribute.
             'TestPopenLeakOnSetupFailure::test_popen_killed_when_thread_creation_fails',
         }),
-        (_WINDOWS, _POSIX_PROC, {
-            'TestPidReuseGuard::test_terminate_refuses_when_start_time_mismatches',
-            'TestStdinHelpers::test_close_stdin_allows_eof_driven_process_to_finish',
+        # Re-diagnosed 2026-08-01 (ledger item 7): also previously registered
+        # as "psutil not installed". psutil is installed now and the assertion
+        # still cannot hold, because the seam it mocks is POSIX-only.
+        (_WINDOWS, 'the test mocks `psutil.Process(pid).terminate()` and '
+         'asserts it was called, but that is the POSIX kill path only: '
+         '`ProcessRegistry._terminate_host_pid` shells out to '
+         '`taskkill /PID <pid> /T /F` on Windows (process_registry.py:565,601) '
+         'and never constructs a psutil.Process, so the mocked terminate '
+         'records nothing. The kill itself succeeds (status == "killed"); only '
+         'the POSIX-specific call assertion fails', {
+            'TestKillProcess::test_kill_detached_session_uses_host_pid',
         }),
-        (_WINDOWS, 'the test scrubs os.environ, then the first import of '
-         'tools.terminal_tool pulls in tools/environments/singularity.py, which '
-         'resolves `get_hermes_home()` AT MODULE IMPORT TIME (line 27). With '
-         'the environment cleared, Windows home resolution — which reads only '
-         'USERPROFILE / HOMEDRIVE+HOMEPATH — raises "Could not determine home '
-         'directory."; POSIX falls back to pwd.getpwuid() and needs no env. '
-         'This node passed at 1adf0404f only because a sibling test that '
-         "upstream's prune wave removed used to warm that import first — the "
-         'import-time side effect is byte-identical on the fork tip, upstream, '
-         'and HEAD. Worth retiring at the source (resolve the snapshot store '
-         'lazily) rather than living as a registry row', {
-            'TestSpawnEnvSanitization::test_spawn_local_strips_blocked_vars_from_background_env',
-        }),
+        # 'TestSpawnEnvSanitization::test_spawn_local_strips_blocked_vars_from_
+        # _background_env' was retired 2026-08-01 (ledger item 7). Unlike every
+        # other retirement in that pass this one is NOT attributable to the
+        # psutil/fire/Markdown install: the stale detector reported it PASSING
+        # on the pre-install sweep as well, so the row had already stopped
+        # being a fence. Its recorded cause was an import-time
+        # `get_hermes_home()` resolution in tools/environments/singularity.py
+        # that raised once os.environ was scrubbed, and the row itself noted the
+        # node "passed at 1adf0404f only because a sibling test ... used to warm
+        # that import first". Something warms it again on this tip, in both
+        # whole-directory and per-file runs. Deleted per the fence contract — a
+        # passing row hides a future regression — and recorded here rather than
+        # silently dropped. The underlying fragility is unchanged and still
+        # worth retiring at the source (resolve the snapshot store lazily).
     ],
     'test_terminal_output_transform_hook.py': [
         (_HOST, 'arrived with the merge. The test drives a `python3` child, and '
@@ -406,10 +408,12 @@ _ENV_GAPS: EnvGapRegistry = {
     ],
     # ── Git Bash spawn / coreutils shape ─────────────────────────────────
     'test_approved_command_clean_slate.py': [
+        # 'test_execute_code_non_approved_still_interrupts_on_stale_bit' was
+        # retired 2026-08-01 (ledger item 7): installing psutil==7.2.2 on the
+        # ambient interpreter made it pass. Its two siblings below still fail.
         (_WINDOWS, _GITBASH, {
             'test_approved_command_genuine_interrupt_after_start_still_kills',
             'test_approved_note_enriched_not_misleading_on_interrupt',
-            'test_execute_code_non_approved_still_interrupts_on_stale_bit',
         }),
     ],
     'test_file_ops_cwd_tracking.py': [
@@ -502,13 +506,11 @@ _ENV_GAPS: EnvGapRegistry = {
             'TestTerminalOutputCleanliness::test_cat',
         }),
     ],
-    'test_mcp_stability.py': [
-        (_WINDOWS, "tests/conftest.py's live-system guard blocks the "
-         'os.kill(999999999, 15) the test uses to model a dead pid; on POSIX '
-         'that pid is safely out of range', {
-            'TestStdioPidTracking::test_kill_orphaned_handles_dead_pids',
-        }),
-    ],
+    # 'test_mcp_stability.py' had one row (TestStdioPidTracking::
+    # test_kill_orphaned_handles_dead_pids, "the live-system guard blocks
+    # os.kill(999999999, 15)"). Retired 2026-08-01 (ledger item 7): with
+    # psutil==7.2.2 installed the dead-pid probe no longer reaches that
+    # os.kill, so the guard never fires and the test passes.
     'test_mcp_tool.py': [
         (_WINDOWS, "KeyError 'ProgramFiles' — Windows environment variables are "
          'case-insensitive and the test indexes a fixed casing that os.environ '

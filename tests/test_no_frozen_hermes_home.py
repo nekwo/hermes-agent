@@ -208,16 +208,25 @@ FROZEN_LEDGER: dict[str, tuple[frozenset[str], str]] = {
         "upstream: TUI gateway process entry",
     ),
     # ── Carried, not measured ──────────────────────────────────────────────
-    # These two do not import on this platform (see UNPROBED), so their names
-    # come from the pre-probe regex ledger rather than from a run. They are
-    # listed anyway so the guard does not report them as NEW on a host where
+    # Entries here come from the pre-probe regex ledger rather than from a run,
+    # because the module does not import on this platform (see UNPROBED). They
+    # are listed anyway so the guard does not report them as NEW on a host where
     # they DO import. If that host finds additional derived names — likely,
     # since the regex only ever saw the first hop — the failure message names
     # them and they belong here.
+    #
+    # trajectory_compressor.py has since GRADUATED out of this bucket: `fire`
+    # was installed on the ambient interpreter on 2026-08-01 (ledger item 7,
+    # RULED EXECUTE), the probe imported the module for the first time, and the
+    # measurement CONFIRMED the carried regex ledger exactly — `_hermes_home`
+    # and nothing else. The regex's "first hop only" worry did not materialize.
+    # It keeps its UNPROBED row as well, deliberately: that row is what a host
+    # WITHOUT `fire` needs, and per test_ledger_reasons_are_present both entries
+    # are legitimate at once so long as the module is ledgered here.
     "trajectory_compressor.py": (
         frozenset({"_hermes_home"}),
-        "upstream: process entry. Carried from the regex ledger; needs `fire` "
-        "installed to be measured",
+        "upstream: process entry. Measured 2026-08-01 once `fire` was installed; "
+        "confirms the carried regex ledger with no additional derived names",
     ),
     "scripts/profile-tui.py": (
         frozenset({"DEFAULT_LOG", "DEFAULT_STATE_DB"}),
@@ -231,8 +240,11 @@ FROZEN_LEDGER: dict[str, tuple[frozenset[str], str]] = {
 # recorded here rather than silently dropped.
 UNPROBED: dict[str, str] = {
     "trajectory_compressor.py": (
-        "imports `fire` at module level, an optional dependency absent from "
-        "some test environments. Probed wherever fire is installed."
+        "imports `fire` at module level, a declared dependency absent from some "
+        "test environments. Probed wherever fire is installed — including this "
+        "ambient interpreter since 2026-08-01, where it now imports and its "
+        "FROZEN_LEDGER entry is measured rather than carried. The row stays for "
+        "hosts that still lack `fire`."
     ),
     "scripts/profile-tui.py": (
         "imports `termios`, a POSIX-only stdlib module, so it cannot load on "

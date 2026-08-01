@@ -784,48 +784,19 @@ _ENV_GAPS: EnvGapRegistry = {
         ),
     ],
     # ── missing host dependencies / undeclared packages ──────────────────
-    'test_memory_monitor.py': [
-        (
-            _HOST,
-            "declared dependency 'psutil' (psutil==7.2.2 in pyproject) is not "
-            'installed on this interpreter. gateway/memory_monitor.py reads RSS '
-            'via resource.getrusage (POSIX-only, absent on Windows) then falls '
-            'back to psutil; with both unavailable _get_rss_mb() returns None '
-            'and start_memory_monitoring() logs "monitoring unavailable" and '
-            'returns False',
-            {
-                'test_start_logs_baseline_and_returns_true',
-                'test_double_start_is_noop',
-                'test_stop_logs_shutdown_snapshot',
-            },
-        ),
-    ],
-    'test_status.py': [
-        (
-            _HOST,
-            "declared dependency 'psutil' is not installed on this interpreter, "
-            'so gateway/status.py::_get_process_start_time falls off /proc (its '
-            'only non-Linux source) into a failing psutil import and returns '
-            'None',
-            {
-                'TestGetProcessStartTime::test_live_process_is_stable_int',
-            },
-        ),
-    ],
-    'test_matrix.py': [
-        (
-            _HOST,
-            "Python-Markdown ('markdown') is not installed. "
-            'MatrixAdapter._markdown_to_html imports it inside a try/except and '
-            'silently drops to a regex converter with no table support, so the '
-            'output carries no <table>. NOTE: `markdown` is declared in NO '
-            'requirements file despite the docstring calling it "a core '
-            'dependency" — a real packaging gap, not just a host gap',
-            {
-                'TestMatrixMarkdownToHtml::test_matrix_markdown_preserves_table_structure',
-            },
-        ),
-    ],
+    #
+    # RETIRED 2026-08-01 (ledger item 7, RULED EXECUTE) — four groups lived
+    # here and all four now pass, because psutil==7.2.2 and Markdown==3.10.2
+    # were installed on the ambient interpreter:
+    #   * test_memory_monitor.py (3 nodes) — psutil
+    #   * test_status.py (1 node) — psutil
+    #   * test_whatsapp_bridge_pidfile.py (1 node) — psutil
+    #   * test_matrix.py (1 node) — Markdown. Its reason also asserted that
+    #     `markdown` was "declared in NO requirements file ... a real packaging
+    #     gap". That claim was FALSE and is retired with the row: pyproject.toml
+    #     has carried `Markdown==3.10.2` in [project.dependencies] since
+    #     c1eb2dcda, and uv.lock resolves it as a core dep. The original audit
+    #     grepped for lowercase `markdown` and missed the capitalized spelling.
     # ── test-side portability defects (fixable at the source) ────────────
     #
     # RETIRED, not fenced — both rows that lived here were fixed at the source
@@ -880,18 +851,6 @@ _ENV_GAPS: EnvGapRegistry = {
             {
                 'TestWecomCallbackEventConstruction::test_build_event_extracts_text_message',
                 'TestWecomCallbackPollLoop::test_poll_loop_dispatches_handle_message',
-            },
-        ),
-    ],
-    'test_whatsapp_bridge_pidfile.py': [
-        (
-            _HOST,
-            "dependency 'psutil' is not installed, so gateway.status."
-            '_get_process_start_time() returns None off /proc (its only '
-            'non-Linux source) and the pidfile is written without the '
-            'start-time line the test indexes',
-            {
-                'TestWriteAndRoundTrip::test_pidfile_records_pid_and_start_time',
             },
         ),
     ],
