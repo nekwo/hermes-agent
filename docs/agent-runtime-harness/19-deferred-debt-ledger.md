@@ -252,8 +252,19 @@ Hermes fork-owned:
   `mcp_server_template_diffs`, advisory `mcp_server_template_drift` issue
   (opt-in via include_template_drift), data test listing variant-B's missing
   env var as expected-drift with per-profile yaml patches in the failure
-  message. OPEN OPERATOR DECISIONS: flip advisory -> blocking; apply the five
-  variant-B config patches (live action).
+  message. BOTH OPEN OPERATOR DECISIONS EXECUTED 2026-08-01 — `d355787a3`.
+  (1) The five variant-B configs were patched live: each gained
+  `env.STAGEC_LAUNCH_HELPER` and nothing else; all nine declaring profiles now
+  match the template field-for-field (verified through the readiness lane, zero
+  drift rows). (2) Advisory -> BLOCKING: `ADVISORY_ISSUE_CODES` deleted (one
+  member, nothing left to partition), the `include_template_drift` opt-in
+  retired so drift rides the one `mcp_server_issues` lane by default, and
+  `profile_readiness` folds it into `machine_root_issues` -> `mcp_attention`
+  with the field-level diff in the summary. The advisory-only
+  `mcp_template_drift` readiness key went with the class. Report-only is
+  unchanged: readiness names the field and prints the pasteable block, and no
+  code path rewrites a config. The data test's expected-drift ledger is gone —
+  it is now a plain new-drift tripwire.
 - ~~**B-4 read-model serve path** / **B-5 dead parity warnings**.~~ **EXECUTED
   2026-07-31** — `76504fd84`. B-4: `resolve_snapshot_frame(prefer_cache=...)`
   returns `(frame, FrameSource)` over a StrEnum {`built`, `cache`,
