@@ -31,11 +31,14 @@ below so nobody registers a contract for an emitter that no longer exists.
 
 from __future__ import annotations
 
+import ast
+import importlib
 import inspect
+import textwrap
 
 import pytest
 
-from agent_runtime import delivery_directive, repo_bundles, repo_context
+from agent_runtime import delivery_directive, models, paths, repo_context
 
 
 REMOVED_DIRECTIVE_SYMBOLS = (
@@ -169,14 +172,15 @@ def test_the_live_janitor_still_emits_its_registered_event_type():
 
 
 def test_the_dead_bundle_delivery_path_is_gone():
-    present = [name for name in REMOVED_BUNDLE_SYMBOLS if hasattr(repo_bundles, name)]
-    assert present == []
-    assert not hasattr(repo_bundles.RepoBundleStore, "mark_delivered")
-    assert "delivery_directive" not in inspect.getsource(repo_bundles.RepoBundleStore)
+    """INVERTED again at S57: the module that held every symbol in
+    ``REMOVED_BUNDLE_SYMBOLS`` is itself deleted, which is strictly stronger than
+    ``not hasattr`` on each one."""
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("agent_runtime.repo_bundles")
 
 
 def test_the_bundle_summary_surface_status_renders_survives():
-    """INVERTED at S56 (2026-08-01), not deleted.
+    """INVERTED at S56 (2026-08-01), and AGAIN at S57. Not deleted.
 
     S24 kept these four projections and ``read_bundle_promotion_record`` on the
     keep side with an explicit reason: ``status.py`` read them, so they were the
@@ -185,21 +189,34 @@ def test_the_bundle_summary_surface_status_renders_survives():
     or promote a bundle any more) and S56 took the four rows —
     ``repo_bundles``, ``repo_bundle_closeout``, ``bundle_queue``,
     ``repo_locks`` — off the ``build_status`` wire, leaving the projections
-    caller-free. The pin is inverted rather than deleted so S24's keep-side
-    claim, and its reversal, both stay on the record here. The READ side
-    (``RepoBundleStore``) deliberately survives.
-    """
+    caller-free.
 
+    S24's last surviving keep-side claim here was "the READ side
+    (``RepoBundleStore``) deliberately survives". S57 retired that too: with the
+    projections gone the store had zero production importers, and the module, the
+    ``RepoBundle`` model and ``paths.repo_bundle_path`` went whole. Every claim
+    this case ever made is now an absence, and all of them are kept on the record
+    rather than dropped — the chain S24 -> S52 -> S56 -> S57 is the evidence that
+    a keep-side reason must be RE-CHECKED each wave, never inherited.
+    """
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("agent_runtime.repo_bundles")
+    assert not hasattr(models, "RepoBundle")
+    assert not hasattr(paths, "repo_bundle_path")
+
+    # ...and `status.py` has not regrown a reference under another name. CODE
+    # only: `build_status` carries a comment naming the removed rows.
+    from agent_runtime import status
+
+    source = ast.unparse(ast.parse(textwrap.dedent(inspect.getsource(status.build_status))))
     for name in (
+        "RepoBundleStore",
         "repo_bundle_summary",
         "repo_bundle_delivery_summary",
         "bundle_queue_summary",
         "repo_lock_summary",
     ):
-        assert not hasattr(repo_bundles, name), name
-    assert "read_bundle_promotion_record" not in inspect.getsource(repo_bundles)
-    # Keep-side, still true: the read half of the store is untouched.
-    assert callable(repo_bundles.RepoBundleStore)
+        assert name not in source, name
 
 
 def test_the_caller_free_repo_context_symbols_are_gone():

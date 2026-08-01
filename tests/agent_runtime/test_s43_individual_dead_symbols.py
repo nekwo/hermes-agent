@@ -52,6 +52,11 @@ entries moved to ``RETIRED_WHOLE_MODULES`` below. They are NOT dropped: an
 individual-symbol witness that silently loses its module hides the bigger cut
 that swallowed it, and the KEPT half is the more interesting record — those names
 were correctly alive at S43 and died for an unrelated reason two waves later.
+
+RETARGETED AGAIN 2026-08-01 (S57): ``repo_bundles`` joins that table. S43 cut one
+symbol from it (``find_best_bundle_for_action``) and left the store alone; S52
+took its write lane, S56 the four status projections that were its last
+customers, and S57 the module. Four waves, four different reasons, one module.
 """
 
 from __future__ import annotations
@@ -78,7 +83,6 @@ REMOVED = {
     "agent_runtime.profile_artifact_sync": ("MEMBER_STATE_KINDS", "_LEGACY_SEGMENTS"),
     "agent_runtime.realm_sync": ("SYNC_STATES",),
     "agent_runtime.redaction": ("RedactionScanner",),
-    "agent_runtime.repo_bundles": ("find_best_bundle_for_action",),
     "agent_runtime.repo_context": (
         "_DIFF_TEST_FILE_RE",
         "_DIFF_REMOVED_ASSERT_RE",
@@ -104,6 +108,17 @@ RETIRED_WHOLE_MODULES = {
     "agent_runtime.role_envelopes": {
         "removed_at_s43": ("role_envelope_summary",),
         "kept_at_s43": ("RoleEnvelopeStore",),
+    },
+    # S57 — the repo-bundle store, three waves after S43 pinned one dead symbol
+    # on it. S43 cut `find_best_bundle_for_action` and kept the rest; S52 took
+    # the write lane, S56 the four status projections, and S57 the module itself
+    # once those projections left it with zero production importers. The S43
+    # entry is preserved rather than deleted for the reason this table exists:
+    # the symbol was dead for its own reason, and the module died for a
+    # completely different one two years of waves later.
+    "agent_runtime.repo_bundles": {
+        "removed_at_s43": ("find_best_bundle_for_action",),
+        "kept_at_s43": (),
     },
     # S45 — test-only whole modules (operator ruling on deferred-debt item 2).
     "agent_runtime.budget_approval": {

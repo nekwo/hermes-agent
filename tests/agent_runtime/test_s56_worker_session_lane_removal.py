@@ -37,7 +37,9 @@ one of the ten, so unlike S52 there is no summary arm to retire alongside.
 
 from __future__ import annotations
 
+import importlib
 import inspect
+import pathlib
 from importlib.util import find_spec
 
 import pytest
@@ -51,7 +53,6 @@ from agent_runtime import (
     paths,
     persona_assignments,
     persona_profile_binding,
-    repo_bundles,
     snapshot,
     status,
 )
@@ -213,9 +214,20 @@ def test_a_stale_row_still_carrying_the_removed_field_cannot_resurrect_a_reader(
 
 
 def test_the_snapshot_contract_version_moved():
+    """S57 moved the frame again (47 -> 48) for its own removals, so this pin is
+    a FLOOR, not a second copy of the current number. The property this file owns
+    is that S56's move happened and can never regress; the current value has one
+    authority (``test_s47_wire_constant_field_removal.CURRENT_CONTRACT_VERSION``)
+    and this is deliberately not a second one."""
     src = inspect.getsource(snapshot._parity_envelope)
-    assert '"contract_version": 47,' in src
     assert '"contract_version": 46,' not in src
+    literals = [
+        int(line.strip().split(":", 1)[1].strip().rstrip(","))
+        for line in src.splitlines()
+        if line.strip().startswith('"contract_version":')
+    ]
+    assert len(literals) == 1, literals
+    assert literals[0] >= 47
 
 
 def test_build_snapshot_no_longer_accepts_a_worker_store():
@@ -269,13 +281,30 @@ def test_the_constant_only_repo_bundle_projections_are_gone(name):
     """doc 19 filed ``repo_lock_summary`` as a wire that could only ever report
     ``{"lock_count": 0, "locks": []}`` after S52 deleted both lock writers. The
     other three had the same shape for the same reason. ``status.py`` was the
-    sole caller of all four."""
-    assert not hasattr(repo_bundles, name)
+    sole caller of all four.
+
+    S57 deleted the MODULE they lived in, so the per-name absence check becomes a
+    module-absence check plus a repo-wide name check — the second half matters
+    because a projection could otherwise be reborn in ``status.py`` itself."""
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("agent_runtime.repo_bundles")
+    root = pathlib.Path(__file__).resolve().parents[2] / "agent_runtime"
+    blob = "\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in root.rglob("*.py"))
+    assert f"def {name}(" not in blob, name
 
 
-def test_the_repo_bundle_store_read_side_survives():
-    assert callable(repo_bundles.RepoBundleStore.list_all)
-    assert callable(repo_bundles.RepoBundleStore.get)
+def test_the_repo_bundle_store_read_side_went_at_s57():
+    """INVERTED at S57 (was ``test_the_repo_bundle_store_read_side_survives``).
+
+    S56 KEPT the store deliberately and said so here. That keep was correct for
+    exactly one commit: removing the four projections in the same change left the
+    store with zero production importers, which doc 19 recorded as newly-opened
+    debt. S57 took it. The pin inverts so the keep and its reversal both stay
+    legible — a store kept "because the read side is live" must be re-checked the
+    moment its last reader leaves."""
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("agent_runtime.repo_bundles")
+    assert not hasattr(models, "RepoBundle")
 
 
 def test_the_production_envelope_is_gone():

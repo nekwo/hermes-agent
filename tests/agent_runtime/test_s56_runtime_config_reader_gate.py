@@ -31,19 +31,24 @@ excluded whole: its loaders read yaml via ``raw.get("name")``, which this scan
 does not count anyway, while the accessor helpers beside them are real readers.
 
 **What running it found, beyond the seven ruled blocks.** TWENTY-NINE more
-scalar fields have no production reader either — the whole ``daemon_*`` family, the
+scalar fields had no production reader either — the whole ``daemon_*`` family, the
 ``live_run_*`` budgets, the ``liveness_*`` watchdog knobs, the
 ``artifact_storage_*`` watermarks, ``mission_max_total_tokens`` /
 ``mission_wall_clock_deadline_seconds``, ``neko_recovery_attempt_cap`` /
-``neko_extension_cap``, and others. They are PRE-EXISTING debt, not opened by
+``neko_extension_cap``, and others. They were PRE-EXISTING debt, not opened by
 S56: several lost their last reader when the mission/daemon lanes were retired,
-and one (``run_lease_seconds``) lost it in this very commit with
-``production_envelope``. They were NOT ruled on, so they are carried in
-``UNRULED_DEBT`` below — visible, frozen, and recorded in doc 19 — rather than
-deleted on this wave's authority or quietly waved through.
+and one (``run_lease_seconds``) lost it in the S56 commit itself with
+``production_envelope``. S56 was not ruled to delete them, so it carried them in
+``UNRULED_DEBT`` below — visible, frozen, recorded in doc 19.
 
-``UNRULED_DEBT`` is FROZEN: a test asserts its size, so a NEW field with no
-reader fails the gate instead of being appended to the bucket.
+**S57 (2026-08-01) cut all twenty-nine** and ``UNRULED_DEBT`` is now EMPTY. That
+is the outcome the bucket was shaped for: measured debt made visible, then ruled
+on, then retired — not absorbed. ``UNRULED_DEBT`` stays FROZEN at zero, so this
+file is a pure tripwire: a new ``RuntimeConfig`` field with no reader fails the
+gate, and there is no bucket left to append it to.
+
+The removal contract for the cut itself lives in
+``test_s57_unruled_config_debt_removal.py``.
 """
 
 from __future__ import annotations
@@ -99,44 +104,22 @@ REPORT_ONLY: dict[str, str] = {
 }
 
 #: PRE-EXISTING dead-config debt this gate MEASURED but was not ruled to fix.
-#: Every entry is a RuntimeConfig scalar whose only reader was
-#: ``validate_runtime_config`` (a range check on a knob nothing consults) or, in
-#: one case, the ``production_envelope`` prose block S56 deleted. Each entry
-#: names what would retire it. Recorded in doc 19.
 #:
-#: FROZEN. ``test_the_unruled_debt_bucket_is_frozen`` pins the size, so a new
-#: unread field cannot be waved through by appending to it.
-UNRULED_DEBT: dict[str, str] = {
-    "heartbeat_ttl_seconds": "run-heartbeat TTL; its consumer went with the daemon/ticker lane.",
-    "max_actions_per_tick": "per-tick action budget; the tick loop is retired.",
-    "daemon_enabled": "the background Mission Daemon was retired; status hardcodes execution_mode='manual'.",
-    "daemon_interval_seconds": "daemon lane retired; nothing schedules on it.",
-    "daemon_idle_interval_seconds": "daemon lane retired; nothing schedules on it.",
-    "daemon_heartbeat_seconds": "daemon lane retired; nothing schedules on it.",
-    "task_create_auto_start_daemon": "daemon lane retired; goal create never consults it.",
-    "root_node_mode": "every skill-gate call site now passes root_node_mode=False literally.",
-    "preferred_goal_execution_mode": "execution-mode selection went with the mission/dispatch lane.",
-    "live_run_max_wall_seconds": "per-run wall budget; the run opener that enforced it is retired.",
-    "live_run_max_api_calls": "per-run API budget; same retired lane.",
-    "live_run_max_total_tokens": "per-run token budget; same retired lane (still cross-checked in validation).",
-    "live_run_iteration_budget": "per-run iteration budget; same retired lane.",
-    "scope_wait_deadline_seconds": "the scope-wait lane it bounded is retired.",
-    "run_lease_seconds": "run lease; its last non-validator reader was production_envelope, deleted at S56.",
-    "tool_wait_timeout_seconds": "the tool-wait lane it bounded is retired.",
-    "liveness_enabled": "liveness watchdog knob; the watchdog reads its own constants, not this.",
-    "liveness_poll_seconds": "liveness watchdog knob; unread outside validation.",
-    "liveness_quiet_strikes": "liveness watchdog knob; unread outside validation.",
-    "liveness_hung_seconds": "liveness watchdog knob; unread outside validation.",
-    "child_progress_min_interval_seconds": "child.progress throttle; continuity.py does not read it.",
-    "deploy_timeout_seconds": "the deploy-verification lane it bounded was never wired.",
-    "mission_max_total_tokens": "mission ceiling; only the soft/hard cross-check in validation reads it.",
-    "mission_wall_clock_deadline_seconds": "mission deadline; no enforcer consults it.",
-    "neko_recovery_attempt_cap": "bounded-continuation cap; that lane reads its own constants.",
-    "neko_extension_cap": "bounded-continuation cap; that lane reads its own constants.",
-    "artifact_storage_low_watermark_mb": "artifact-storage watermark; no sweeper reads it.",
-    "artifact_storage_high_watermark_mb": "artifact-storage watermark; no sweeper reads it.",
-    "artifact_storage_critical_watermark_mb": "artifact-storage watermark; no sweeper reads it.",
-}
+#: **EMPTY as of S57 (2026-08-01).** The twenty-nine entries this bucket carried
+#: were RULED and CUT: field, ``config.py`` load line and ``migrations`` range
+#: validator, plus the four cross-field checks that only related two dead knobs
+#: to each other. Every one was re-verified by hand first (AST + string form, per
+#: the ``getattr`` trap this gate's resolver exists for) and every one was
+#: confirmed PRESENT on the live ``snapshot --json`` frame at contract 47, which
+#: is why S57 is a contract move (47 -> 48) and not a code-only cut.
+#:
+#: The bucket stays declared, empty, on purpose: it is the shape a future wave
+#: uses to record MEASURED-but-unruled debt, and its emptiness is what makes the
+#: gate a pure tripwire — any new ``RuntimeConfig`` field without a reader now
+#: fails outright instead of being appended here.
+#:
+#: FROZEN. ``test_the_unruled_debt_bucket_is_frozen`` pins the size at 0.
+UNRULED_DEBT: dict[str, str] = {}
 
 
 def _production_files() -> list[pathlib.Path]:
@@ -270,8 +253,11 @@ def test_the_unruled_debt_bucket_is_frozen():
     """The bucket exists to make MEASURED debt visible, not to absorb new debt.
     A field added tomorrow with no reader must fail the gate, not be appended
     here — so the size is pinned. Retiring an entry (wiring the field or
-    deleting it) means lowering this number in the same commit."""
-    assert len(UNRULED_DEBT) == 29
+    deleting it) means lowering this number in the same commit.
+
+    S57 lowered it from 29 to 0 by cutting all 29. The gate is now a pure
+    tripwire: there is no bucket left to hide a new unread knob in."""
+    assert len(UNRULED_DEBT) == 0
 
 
 # --------------------------------------------------------------------------

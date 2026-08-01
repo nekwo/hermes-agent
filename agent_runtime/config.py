@@ -19,8 +19,10 @@ logger = logging.getLogger(__name__)
 #: Bounds for ``agent_runtime.mission_chat.default_max_seconds``. Below the
 #: floor the graceful checkpoint reserve (``turn_budget``: ``max(60s, 15%)``,
 #: capped so 30 s of work survives) consumes the whole window and the turn can
-#: run no tool at all; above the ceiling one conversational turn outlives the
-#: mission wall-clock deadline (``mission_wall_clock_deadline_seconds``, 86400).
+#: run no tool at all; above the ceiling one conversational turn outlives a day.
+#: (The ceiling was originally derived from ``mission_wall_clock_deadline_seconds``,
+#: itself 86400; S57 removed that field as reader-less, so 86400 is now this
+#: constant's own value rather than a reference to another knob.)
 MISSION_CHAT_MIN_MAX_SECONDS = 30.0
 MISSION_CHAT_MAX_MAX_SECONDS = 86_400.0
 
@@ -124,36 +126,18 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
         default_model=resolved_model,
         default_api_mode=raw.get("default_api_mode", "codex_responses"),
         redaction_mode=normalize_redaction_mode(raw.get("redaction_mode") or os.environ.get("HERMES_REDACTION_MODE", "strict")),
-        heartbeat_ttl_seconds=int(raw.get("heartbeat_ttl_seconds", 900)),
-        max_actions_per_tick=int(raw.get("max_actions_per_tick", 1)),
-        daemon_enabled=bool((raw.get("daemon") or {}).get("enabled", raw.get("daemon_enabled", False))),
-        daemon_interval_seconds=int((raw.get("daemon") or {}).get("interval_seconds", raw.get("daemon_interval_seconds", 10))),
-        daemon_idle_interval_seconds=int((raw.get("daemon") or {}).get("idle_interval_seconds", raw.get("daemon_idle_interval_seconds", 30))),
-        daemon_heartbeat_seconds=int((raw.get("daemon") or {}).get("heartbeat_seconds", raw.get("daemon_heartbeat_seconds", 5))),
-        task_create_auto_start_daemon=bool(raw.get("task_create_auto_start_daemon", False)),
-        root_node_mode=bool(raw.get("root_node_mode", False)),
-        preferred_goal_execution_mode=str(raw.get("preferred_goal_execution_mode", "in_process_controller") or "in_process_controller"),
-        live_run_max_wall_seconds=float(raw.get("live_run_max_wall_seconds", 300.0)),
-        live_run_max_api_calls=int(raw.get("live_run_max_api_calls", 20)),
-        live_run_max_total_tokens=int(raw.get("live_run_max_total_tokens", 750_000)),
-        live_run_iteration_budget=int(raw.get("live_run_iteration_budget", 60)),
-        scope_wait_deadline_seconds=int(raw.get("scope_wait_deadline_seconds", 900)),
-        run_lease_seconds=int(raw.get("run_lease_seconds", 600)),
-        tool_wait_timeout_seconds=int(raw.get("tool_wait_timeout_seconds", 300)),
-        liveness_enabled=bool(raw.get("liveness_enabled", True)),
-        liveness_poll_seconds=_clamped_positive_int(raw.get("liveness_poll_seconds"), 60, minimum=30, maximum=120),
-        liveness_quiet_strikes=_positive_int(raw.get("liveness_quiet_strikes"), 2),
-        liveness_hung_seconds=_positive_int(raw.get("liveness_hung_seconds"), 300),
-        child_progress_min_interval_seconds=_positive_int(raw.get("child_progress_min_interval_seconds"), 30),
-        deploy_timeout_seconds=_positive_int(raw.get("deploy_timeout_seconds"), 120),
+        # S57 removed 29 load lines here — the whole ``daemon_*`` family, the four
+        # ``live_run_*`` budgets, the four ``liveness_*`` knobs, the three
+        # ``artifact_storage_*`` watermarks, the two mission ceilings, the two
+        # neko caps, ``heartbeat_ttl_seconds``, ``max_actions_per_tick``,
+        # ``root_node_mode``, ``preferred_goal_execution_mode``,
+        # ``scope_wait_deadline_seconds``, ``run_lease_seconds``,
+        # ``tool_wait_timeout_seconds``, ``child_progress_min_interval_seconds``
+        # and ``deploy_timeout_seconds``. None had a production reader (S56's gate
+        # measured it; S57 re-verified each by hand, AST + string form). A yaml
+        # that still sets any of them now loads and is IGNORED — ``raw`` is read
+        # by ``.get`` per key, so an unknown key is simply never consulted.
         lock_acquire_timeout_seconds=_positive_int(raw.get("lock_acquire_timeout_seconds"), 15),
-        mission_max_total_tokens=int(raw.get("mission_max_total_tokens", 1_000_000)),
-        mission_wall_clock_deadline_seconds=int(raw.get("mission_wall_clock_deadline_seconds", 86_400)),
-        neko_recovery_attempt_cap=int(raw.get("neko_recovery_attempt_cap", 2)),
-        neko_extension_cap=int(raw.get("neko_extension_cap", 2)),
-        artifact_storage_low_watermark_mb=int(raw.get("artifact_storage_low_watermark_mb", 512)),
-        artifact_storage_high_watermark_mb=int(raw.get("artifact_storage_high_watermark_mb", 1024)),
-        artifact_storage_critical_watermark_mb=int(raw.get("artifact_storage_critical_watermark_mb", 2048)),
         read_model=read_model,
         persona_chat=persona_chat,
         event_log=event_log,

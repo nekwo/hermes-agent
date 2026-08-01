@@ -23,14 +23,12 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-
-from hermes_time import now
+from types import SimpleNamespace
 
 from agent_runtime.delivery_directive import (
     bundle_promotion_record_path,
     read_bundle_promotion_record,
 )
-from agent_runtime.models import RepoBundle
 from agent_runtime.repo_context import RepoExecutionContext, isolated_repo_context_for_run
 
 import pytest
@@ -60,20 +58,20 @@ def source_repo(tmp_path) -> Path:
     return repo
 
 
-def _bundle(source_repo: Path, *, task_id: str = "task_dd01", run_id: str | None = "run_dd01") -> RepoBundle:
-    ts = now()
-    return RepoBundle(
+def _bundle(source_repo: Path, *, task_id: str = "task_dd01", run_id: str | None = "run_dd01"):
+    """A bundle IDENTITY (task_id + bundle id), not a typed row.
+
+    S57 deleted ``models.RepoBundle`` with ``RepoBundleStore``. This helper never
+    needed the model: the only thing the promotion-record read consumes is the
+    ``(task_id, bundle_id)`` pair that addresses the file on disk. Rebuilding a
+    31-field dataclass to carry two strings is what made that model look
+    load-bearing to a reachability scan.
+    """
+    return SimpleNamespace(
         id="bundle_dd0000000001",
         task_id=task_id,
         repo=str(source_repo),
-        owner_persona_id="dev",
-        state="delivered_waiting_for_qa",
-        title="Delivery directive slice",
-        objective="Change app.py and add a module.",
         active_run_id=run_id,
-        proof_ids=["proof_a"],
-        created_at=ts,
-        updated_at=ts,
     )
 
 
@@ -93,7 +91,7 @@ def _worktree_with_changes(source_repo: Path, *, task_id: str = "task_dd01", run
     return worktree
 
 
-def _write_promotion_record(bundle: RepoBundle, outcome: dict) -> Path:
+def _write_promotion_record(bundle, outcome: dict) -> Path:
     record_path = bundle_promotion_record_path(bundle.task_id, bundle.id)
     record_path.parent.mkdir(parents=True, exist_ok=True)
     record_path.write_text(json.dumps(outcome, sort_keys=True), encoding="utf-8")

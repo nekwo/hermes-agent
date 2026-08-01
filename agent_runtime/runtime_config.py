@@ -241,11 +241,48 @@ class TerminalEnvelopeConfig:
     grants: dict[str, dict[str, list[str]]] = field(default_factory=dict)
 
 
+# S57 (2026-08-01) emptied the S56 reader-gate's ``UNRULED_DEBT`` bucket: the
+# TWENTY-NINE scalar knobs it measured as reader-less are removed here, dataclass
+# row + ``config.py`` load line + ``migrations`` range validator, in one pass.
+#
+#   * the ``daemon_*`` family (``daemon_enabled`` / ``_interval_seconds`` /
+#     ``_idle_interval_seconds`` / ``_heartbeat_seconds``) and
+#     ``task_create_auto_start_daemon`` — the Mission Daemon is retired; ``status``
+#     hardcodes ``execution_mode="manual"``.
+#   * ``heartbeat_ttl_seconds`` / ``max_actions_per_tick`` — the run-heartbeat TTL
+#     and the per-tick action budget went with the ticker.
+#   * the four ``live_run_*`` budgets and ``run_lease_seconds`` /
+#     ``scope_wait_deadline_seconds`` / ``tool_wait_timeout_seconds`` — the run
+#     opener that enforced them is retired; ``run_lease_seconds`` lost its last
+#     non-validator reader at S56 with ``production_envelope``.
+#   * the four ``liveness_*`` knobs — the watchdog reads its own constants.
+#   * ``mission_max_total_tokens`` / ``mission_wall_clock_deadline_seconds`` — no
+#     enforcer consults either; the soft/hard cross-check that "read" the first
+#     was a validator arm on two dead fields.
+#   * ``neko_recovery_attempt_cap`` / ``neko_extension_cap`` — the
+#     bounded-continuation lane reads its own constants.
+#   * the three ``artifact_storage_*_watermark_mb`` — no sweeper reads them.
+#   * ``child_progress_min_interval_seconds`` (``continuity.py`` does not read it),
+#     ``deploy_timeout_seconds`` (the lane was never wired),
+#     ``preferred_goal_execution_mode`` (went with the mission/dispatch lane) and
+#     ``root_node_mode`` (every skill-gate call site passes the flag literally;
+#     the CONFIG field was never the source).
+#
+# ``lock_acquire_timeout_seconds`` STAYS: ``locks.py`` reads it. It is the only
+# scalar in this neighbourhood that survived the gate, which is exactly why the
+# gate is AST-based rather than prefix-based.
+#
+# Every one shipped on the ``runtime_config`` wire via ``asdict(cfg)`` and told an
+# operator it governed a budget, a deadline or a mode. Removing them EDITS the
+# emitted frame (verified against the live root: all 29 were present in
+# ``snapshot --json`` at contract 47), so this is a contract move — 47 -> 48 with
+# a Launcher lockstep pin. An operator yaml that still sets any of them LOADS AND
+# IS IGNORED (S47 precedent, pinned by test).
+
+
 @dataclass(slots=True)
 class RuntimeConfig:
     schema_version: int = 1
-    heartbeat_ttl_seconds: int = 900
-    max_actions_per_tick: int = 1
     default_provider: str | None = None
     default_model: str | None = None
     default_api_mode: str = "codex_responses"
@@ -255,34 +292,7 @@ class RuntimeConfig:
     # a field the frame stopped emitting at contract 45 — so the knob governed
     # nothing while riding the ``runtime_config`` wire advertising a budget that
     # could not be exceeded. No profile config sets it; no Launcher code reads it.
-    daemon_enabled: bool = False
-    daemon_interval_seconds: int = 10
-    daemon_idle_interval_seconds: int = 30
-    daemon_heartbeat_seconds: int = 5
-    task_create_auto_start_daemon: bool = False
-    root_node_mode: bool = False
-    preferred_goal_execution_mode: str = "in_process_controller"
-    live_run_max_wall_seconds: float = 300.0
-    live_run_max_api_calls: int = 20
-    live_run_max_total_tokens: int = 750_000
-    live_run_iteration_budget: int = 60
-    scope_wait_deadline_seconds: int = 900
-    run_lease_seconds: int = 600
-    tool_wait_timeout_seconds: int = 300
-    liveness_enabled: bool = True
-    liveness_poll_seconds: int = 60
-    liveness_quiet_strikes: int = 2
-    liveness_hung_seconds: int = 300
-    child_progress_min_interval_seconds: int = 30
-    deploy_timeout_seconds: int = 120
     lock_acquire_timeout_seconds: int = 15
-    mission_max_total_tokens: int = 1_000_000
-    mission_wall_clock_deadline_seconds: int = 86_400
-    neko_recovery_attempt_cap: int = 2
-    neko_extension_cap: int = 2
-    artifact_storage_low_watermark_mb: int = 512
-    artifact_storage_high_watermark_mb: int = 1024
-    artifact_storage_critical_watermark_mb: int = 2048
     read_model: ReadModelConfig = field(default_factory=ReadModelConfig)
     persona_chat: PersonaChatConfig = field(default_factory=PersonaChatConfig)
     event_log: EventLogConfig = field(default_factory=EventLogConfig)

@@ -155,8 +155,11 @@ def test_an_operator_yaml_that_still_sets_a_removed_block_loads_and_is_ignored(t
     for name in REMOVED_BLOCKS:
         assert not hasattr(cfg, name), name
     # The surviving keys in the SAME yaml still load, so this is an ignore, not
-    # a parse failure.
-    assert cfg.root_node_mode is True
+    # a parse failure. (S57 retargeted this witness: `root_node_mode` was the
+    # surviving scalar here until S57 removed it as reader-less too, so the
+    # "still loads" half now rides `supervision.child_events_enabled`, which
+    # `continuity.py` genuinely reads.)
+    assert not hasattr(cfg, "root_node_mode")
     assert cfg.supervision.child_events_enabled is True
     assert not hasattr(cfg.supervision, "recursive_enabled")
     assert migrations.validate_runtime_config(cfg)["ok"] is True

@@ -93,7 +93,12 @@ def test_hydrate_frame_matches_golden_shape(isolate_agent_runtime_root):
 # ONE constant, not two: the live frame and the golden must agree. A split pin
 # would let the launcher's `kSupportedMissionContractVersion` sit against a
 # golden nobody bumped, which is the drift this file exists to catch.
-CONTRACT_VERSION = 47
+#
+# S57 (2026-08-01) moved it again, 47 -> 48, and edited the goldens by the same
+# rule: drop the 29 reader-less `runtime_config` scalars and
+# `migration.counts.repo_bundles`, bump `parity.contract_version`, copy the bytes
+# to the Launcher, update BOTH manifests.
+CONTRACT_VERSION = 48
 
 
 def test_hydrate_core_pins_contract_version(isolate_agent_runtime_root):

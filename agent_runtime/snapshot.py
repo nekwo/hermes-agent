@@ -678,7 +678,23 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         # `supervision` fields. The persona-instance roster stops being gated on
         # `enterprise_worker_sessions.persona_instance_runtime` and ships
         # unconditionally. The Launcher pin moves in the same wave.
-        "contract_version": 47,
+        #
+        # 48 (S57, 2026-08-01): the S56 reader-gate's `UNRULED_DEBT` bucket is
+        # emptied and the last whole store of the repo-bundle lane goes. Leaving
+        # the frame: TWENTY-NINE `runtime_config` scalars with no production
+        # reader (the `daemon_*` family, the four `live_run_*` budgets, the four
+        # `liveness_*` knobs, the three `artifact_storage_*` watermarks, the two
+        # mission ceilings, the two neko caps, `heartbeat_ttl_seconds`,
+        # `max_actions_per_tick`, `root_node_mode`,
+        # `preferred_goal_execution_mode`, `scope_wait_deadline_seconds`,
+        # `run_lease_seconds`, `tool_wait_timeout_seconds`,
+        # `child_progress_min_interval_seconds`, `deploy_timeout_seconds`) —
+        # all VERIFIED present on the live frame at contract 47, so this edits
+        # the wire rather than only the code — together with the validator arms
+        # that range-checked them, and `migration.counts.repo_bundles`, the last
+        # wire trace of the `RepoBundleStore` deleted whole in the same wave. The
+        # Launcher pin moves in the same wave.
+        "contract_version": 48,
         "generated_at": data.get("generated_at"),
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
         "redaction_observed": _redaction_observed(data),

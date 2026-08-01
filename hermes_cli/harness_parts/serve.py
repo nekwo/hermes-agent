@@ -104,7 +104,11 @@ _FINGERPRINT_STORE_DIRS = (
     "incidents",
     "agents",
     "proofs",
-    "repo_bundles",
+    # S57 dropped "repo_bundles" here with the store: this list exists to
+    # invalidate the read cache when a store directory changes, and no code path
+    # can write that tree any more (S52 took the last writer, S57 the module).
+    # Stat'ing it every poll was cost against a directory that cannot move. Same
+    # rule S56 applied to "worker_sessions".
     "runtime_instances",
     "persona_instances",
     "persona_assignments",

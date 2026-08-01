@@ -5190,3 +5190,34 @@ def test_retire_cli_coordinator_operator_placed_needs_confirm(monkeypatch, capsy
     assert code == 2
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "needs_operator_confirm"
+
+
+def test_assignment_signal_hash_includes_repo_bundle_id(isolate_agent_runtime_root):
+    """RE-HOMED at S57 from ``tests/agent_runtime/test_repo_bundles.py``, which
+    was deleted with ``RepoBundleStore``.
+
+    This case never belonged to that store. ``repo_bundle_id`` is a field of
+    ``PersonaAssignmentSpec`` and a component of ``assignment_signal_hash``, so
+    it decides assignment IDENTITY -- two otherwise identical assignments naming
+    different bundles must not collapse into one resumed row. The only tie the
+    deleted module had to it was ``RepoBundleStore.find_for_assignment``, a
+    reader. Deleting a store must not silently take an identity-contract test
+    with it (the S44 lesson about cutting a knot one file at a time).
+    """
+    store = PersonaAssignmentStore()
+    base = dict(
+        persona_id="dev",
+        kind="repo_bundle",
+        title="Launcher",
+        message="Patch launcher.",
+        goal_id="task_bundle",
+        stage_id="launcher_impl",
+        repo="EterniaLauncher",
+    )
+
+    first = store.create_or_resume(PersonaAssignmentSpec(**base, repo_bundle_id="bundle_a"))
+    second = store.create_or_resume(PersonaAssignmentSpec(**base, repo_bundle_id="bundle_b"))
+
+    assert first.id != second.id
+    assert first.repo_bundle_id == "bundle_a"
+    assert second.repo_bundle_id == "bundle_b"

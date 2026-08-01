@@ -47,17 +47,27 @@ that wave: the summary and the ``repo_locks`` row are both gone, along with
 ``bundle_queue_summary`` and the three sibling rows. The pins below are INVERTED
 to absence rather than dropped, so a stale producer cannot resurrect a reader.
 
+**AND THE STORE ITSELF WENT AT S57.** S52's whole premise was "this is a
+write-lane cut, NOT a store removal", because ``status.py`` still projected off
+``list_all``. S56 removed those projections; that left ``RepoBundleStore`` with
+zero production importers, and S57 deleted ``agent_runtime/repo_bundles.py``
+whole with the ``RepoBundle`` model, ``paths.repo_bundle_path`` and the
+``migration_status`` count. Every pin in this file that reached INTO the module
+is therefore inverted once more, to module ABSENCE — a strictly stronger
+statement than "the mutator is missing", and the form that catches a re-import.
+
 Count: 79 -> 72. The absolute authority stays S15's ``SURVIVING_EVENT_COUNT``.
 """
 
 from __future__ import annotations
 
+import importlib
 import inspect
 
 import pytest
 
 from agent_runtime import events as events_module
-from agent_runtime import repo_bundles, status
+from agent_runtime import status
 from agent_runtime.decision_contract_registry import event_catalog
 from agent_runtime.events import ALLOWED_EVENT_TYPES, OPERATOR_SUMMARY_EVENT_TYPES
 
@@ -130,20 +140,56 @@ S56_REMOVED_READ_NAMES = (
 )
 
 
-def test_every_store_mutator_is_gone():
-    assert [name for name in REMOVED_STORE_METHODS if hasattr(repo_bundles.RepoBundleStore, name)] == []
+def test_the_whole_module_is_gone():
+    """INVERTED at S57, absorbing ``test_every_store_mutator_is_gone``,
+    ``test_every_orphaned_module_level_name_is_gone`` and
+    ``test_the_read_side_survives_whole``.
+
+    All three reached into ``agent_runtime.repo_bundles`` to assert what was
+    missing from it. The module itself is now missing, which subsumes every one
+    of those assertions and additionally catches the failure they could not: a
+    later wave re-creating the module and re-adding a mutator.
+    """
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("agent_runtime.repo_bundles")
 
 
-def test_every_orphaned_module_level_name_is_gone():
-    assert [name for name in REMOVED_MODULE_NAMES if hasattr(repo_bundles, name)] == []
+#: The subset of the removed names that is DISTINCTIVE enough to gate on
+#: repo-wide. ``update`` / ``_write`` / ``get`` and friends are ordinary method
+#: names every store in the tree has, so gating on them would be a false
+#: positive machine rather than a tripwire. Everything here is a name only the
+#: repo-bundle lane ever used.
+DISTINCTIVE_REMOVED_NAMES = (
+    "create_or_update_from_task",
+    "wake_ready_dependencies",
+    "cancel_superseded",
+    "acquire_repo_bundle_locks",
+    "release_repo_bundle_locks",
+    "desired_bundles_for_task",
+    "merge_desired_bundle",
+    "_repo_lock_conflicts",
+    "_write_repo_locks",
+    "bundle_id_for",
+    "safe_bundle_state",
+    "owner_for_repo",
+    "qa_waiting_on",
+)
 
 
-def test_the_read_side_survives_whole():
-    """Negative gate: this is a write-lane cut, not a store removal."""
+def test_the_names_this_wave_removed_cannot_come_back_through_another_module():
+    """The mutator/helper names, kept BY NAME rather than deleted with the module
+    they lived in, so the S52 ruling survives its own subject. A future
+    ``create_or_update_from_task`` anywhere in ``agent_runtime`` is a
+    re-introduction of the lane, not a coincidence."""
+    import pathlib
 
-    assert [name for name in SURVIVING_READ_NAMES if not hasattr(repo_bundles, name)] == []
-    for reader in ("get", "list_for_task", "list_all", "find_for_assignment"):
-        assert callable(getattr(repo_bundles.RepoBundleStore, reader)), reader
+    root = pathlib.Path(__file__).resolve().parents[2] / "agent_runtime"
+    blob = "\n".join(
+        path.read_text(encoding="utf-8", errors="ignore") for path in root.rglob("*.py")
+    )
+    assert "class PersonaAssignmentStore" in blob, "the scan read nothing"
+    for name in DISTINCTIVE_REMOVED_NAMES:
+        assert f"def {name}(" not in blob, name
 
 
 def test_the_projection_helpers_went_at_s56():
@@ -153,14 +199,21 @@ def test_the_projection_helpers_went_at_s56():
     ``RepoBundleStore(event_log=event_log).list_all()``, because that constructor
     was the reason S52 kept the store at all. S56 removed the four rows the wire
     fed -- each empty by construction once S52 deleted the writers -- so the
-    constructor and the four summary helpers went with them. The pin inverts: the
-    helpers must stay gone, and ``build_status`` must not regrow the call.
+    constructor and the four summary helpers went with them. S57 then removed the
+    store itself. The pin holds at the level that outlives all three: no name
+    from that family may reappear in ``build_status``.
     """
 
-    assert [name for name in S56_REMOVED_READ_NAMES if hasattr(repo_bundles, name)] == []
+    # CODE only: `build_status` carries a comment block naming every row S56
+    # removed, and a raw-text scan would read that retirement note as a surviving
+    # reference. Round-tripping through the AST drops comments, keeps names.
+    import ast
+    import textwrap
 
-    source = inspect.getsource(status.build_status)
+    source = ast.unparse(ast.parse(textwrap.dedent(inspect.getsource(status.build_status))))
     assert "RepoBundleStore" not in source
+    for name in S56_REMOVED_READ_NAMES:
+        assert name not in source, name
 
 
 def test_the_seven_contracts_are_deregistered():
@@ -262,10 +315,11 @@ def test_the_repo_lock_wire_is_now_a_constant(isolate_agent_runtime_root):
     ``repo_locks``, with no writer able to give it a row: the S47 item-5 class,
     pinned as a constant "so the next wave finds it stated, not inferred". S56 is
     that wave. The summary and the wire row are both gone; the constant is now
-    an absence.
+    an absence. (S57 deleted the module that held the summary, so the first half
+    of this pin is now covered by ``test_the_whole_module_is_gone`` and what
+    remains here is the WIRE half.)
     """
 
-    assert not hasattr(repo_bundles, "repo_lock_summary")
     assert "repo_locks" not in status.build_status()
 
 

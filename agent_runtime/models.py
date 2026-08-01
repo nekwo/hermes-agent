@@ -474,41 +474,13 @@ class PersonaAssignment:
     schema_version: int = 1
 
 
-@dataclass(slots=True)
-class RepoBundle:
-    id: str
-    task_id: str
-    repo: str
-    owner_persona_id: str | None
-    state: str
-    title: str
-    objective: str
-    stage_ids: list[str] = field(default_factory=list)
-    affected_paths: list[str] = field(default_factory=list)
-    acceptance: list[str] = field(default_factory=list)
-    non_goals: list[str] = field(default_factory=list)
-    proof_targets: list[str] = field(default_factory=list)
-    proof_requirements: list[str] = field(default_factory=list)
-    visual_requirements: list[str] = field(default_factory=list)
-    dependency_bundle_ids: list[str] = field(default_factory=list)
-    contract_input_ids: list[str] = field(default_factory=list)
-    contract_output_ids: list[str] = field(default_factory=list)
-    assignment_id: str | None = None
-    active_run_id: str | None = None
-    proof_ids: list[str] = field(default_factory=list)
-    queue_reason: str | None = None
-    wake_condition: str | None = None
-    delivered_at: datetime | None = None
-    verified_at: datetime | None = None
-    rejected_at: datetime | None = None
-    last_terminal_feedback: dict[str, Any] = field(default_factory=dict)
-    # Delivery-time capture facts (delivering run id, patch name, changed
-    # files) recorded by the delivery directive so the diff and worktree stay
-    # recoverable after ``active_run_id`` is cleared.
-    delivery_capture: dict[str, Any] = field(default_factory=dict)
-    created_at: datetime | None = None
-    updated_at: datetime | None = None
-    schema_version: int = 1
+# S57 (2026-08-01) removed ``RepoBundle`` (31 fields) with
+# ``agent_runtime/repo_bundles.py``, the only module that ever constructed or
+# decoded one. S52 had deleted every writer, S56 the four status projections that
+# were the read side's only customer, and the checkpoint EntityClass row went
+# with them; what was left was a typed row shape for a store no production code
+# imported and no writer could fill. A model that only its own deleted store
+# named is not a domain type, it is residue.
 
 
 @dataclass(slots=True)

@@ -151,15 +151,24 @@ def test_read_model_db_filename_reads_root_not_profile(tmp_path, monkeypatch):
     assert ReadModel._read_model_db_path().name == "root_rm.db"
 
 
-def test_neko_extension_cap_resolves_from_root(tmp_path, monkeypatch):
-    # neko_extension_cap is consumed inside embedded seams that need live
-    # Incident + RunStore state to reach (snapshot._run_blocked_reason,
-    # snapshot._next_action_summary); those read
-    # `load_root_runtime_config().neko_extension_cap`. Exercise that pinned
-    # resolution directly rather than standing up incidents.
-    # (S21 removed `status._has_budget_approval_path`, the third seam this
-    # comment used to name — the `next_actions` chain it belonged to ran over a
-    # `tasks = []` literal and could never fire.)
+def test_neko_extension_cap_config_loads_and_is_ignored(tmp_path, monkeypatch):
+    # INVERTED at S57 (2026-08-01), not deleted — the same treatment as the swarm
+    # pin below. The comment this test used to carry claimed neko_extension_cap
+    # "is consumed inside embedded seams that need live Incident + RunStore state
+    # to reach (snapshot._run_blocked_reason, snapshot._next_action_summary);
+    # those read load_root_runtime_config().neko_extension_cap".
+    #
+    # That claim was FALSE by the time S56's reader gate measured it, and S57
+    # re-verified it by hand (AST + string form): neither seam reads the config
+    # field, the bounded-continuation lane reads its own constants, and the only
+    # thing still touching the name was a `_positive` range validator. The field
+    # is gone. The old claim is quoted rather than deleted because it IS the
+    # failure mode this wave keeps finding — a test comment asserting a reader
+    # no scan can locate.
+    #
+    # The FIXTURE is kept (both yamls still set the key) so this proves
+    # load-and-ignore, and the root-over-profile property the test actually
+    # guards is re-asserted on a field that is still live.
     from agent_runtime.config import load_root_runtime_config
 
     _write_root_and_profile(
@@ -168,13 +177,19 @@ def test_neko_extension_cap_resolves_from_root(tmp_path, monkeypatch):
         root_yaml="""
         agent_runtime:
           neko_extension_cap: 7
+          lock_acquire_timeout_seconds: 42
         """,
         profile_yaml="""
         agent_runtime:
           neko_extension_cap: 3
+          lock_acquire_timeout_seconds: 9
         """,
     )
-    assert load_root_runtime_config().neko_extension_cap == 7
+    cfg = load_root_runtime_config()
+    assert not hasattr(cfg, "neko_extension_cap")
+    # The root-over-profile pin is unchanged, proven on a LIVE field:
+    # `locks.py` reads `lock_acquire_timeout_seconds`.
+    assert cfg.lock_acquire_timeout_seconds == 42
 
 
 def test_swarm_config_resolves_from_root(tmp_path, monkeypatch):
@@ -206,4 +221,6 @@ def test_swarm_config_resolves_from_root(tmp_path, monkeypatch):
     cfg = load_root_runtime_config()
     assert not hasattr(cfg, "swarm")
     # ...and the root pin itself is still live for the fields that survived.
-    assert cfg.neko_extension_cap is not None
+    # (S57 retargeted this from `neko_extension_cap`, which it removed, onto the
+    # scalar that still has a production reader.)
+    assert cfg.lock_acquire_timeout_seconds is not None

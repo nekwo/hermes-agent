@@ -120,7 +120,7 @@ def test_live_frame_still_carries_no_mission_sections(isolate_agent_runtime_root
     frame = snapshot.build_snapshot()
     for section in ("goals", "archived_tasks", "proofs", "incidents", "runs", "stage_verification"):
         assert section not in frame, f"{section} must not be a top-level frame section"
-    assert frame["parity"]["contract_version"] == 47
+    assert frame["parity"]["contract_version"] == 48
     # The kept frames the launcher renders every tick are still present.
     for section in ("boards", "workspaces", "realms", "agents"):
         assert section in frame, f"{section} is a KEEP frame and must survive"

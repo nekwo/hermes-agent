@@ -71,7 +71,7 @@ class EntityClass:
     * flat (``recursive=False``): ``<dir>/<actor_id>.json`` — the actor id is
       the filename stem (``persona_instances``, ``flow_graphs`` …).
     * nested (``recursive=True``): owner sub-directories hold the per-actor
-      files (``boards/<board_id>/…``, ``repo_bundles/<task_id>/…``). The actor key is
+      files (``boards/<board_id>/…``, ``self_tests/<task_id>/…``). The actor key is
       the POSIX relative path minus ``.json`` so every file is captured
       verbatim and uniquely — the truest "the store IS the checkpoint" form for
       a nested store.
@@ -106,7 +106,9 @@ ENTITY_CLASSES: tuple[EntityClass, ...] = (
     # S56 took two more by the same rule. `worker_sessions` went with the store
     # itself (deleted whole). `repo_bundles` has been writer-less since S52 and,
     # now that this commit removed the four status projections, reader-less too
-    # — no production code imports `RepoBundleStore` any more.
+    # — no production code imports `RepoBundleStore` any more. (S57 finished it:
+    # the module, the `RepoBundle` model, `paths.repo_bundle_path` and the
+    # `migration_status` count are all gone, so nothing can name that class.)
     # `runtime_instances` is DELIBERATELY KEPT despite also being writer-less
     # since S53: its rows still ship on the status wire (`runtime_instances` /
     # `foreground_runtime`), so a checkpoint that omitted them would drop state a

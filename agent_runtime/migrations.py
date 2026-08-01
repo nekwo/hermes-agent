@@ -29,33 +29,7 @@ def validate_runtime_config(cfg: AgentRuntimeConfig | None = None) -> dict[str, 
     cfg = cfg or load_root_runtime_config()
     errors: list[dict[str, str]] = []
 
-    _positive(errors, "heartbeat_ttl_seconds", cfg.heartbeat_ttl_seconds)
-    _positive(errors, "max_actions_per_tick", cfg.max_actions_per_tick)
-    _positive(errors, "daemon_interval_seconds", cfg.daemon_interval_seconds)
-    _positive(errors, "daemon_idle_interval_seconds", cfg.daemon_idle_interval_seconds)
-    _positive(errors, "daemon_heartbeat_seconds", cfg.daemon_heartbeat_seconds)
-    if not isinstance(getattr(cfg, "root_node_mode", False), bool):
-        errors.append({"field": "root_node_mode", "reason": "must be boolean"})
-    _positive(errors, "live_run_max_wall_seconds", cfg.live_run_max_wall_seconds)
-    _positive(errors, "live_run_max_api_calls", cfg.live_run_max_api_calls)
-    _positive(errors, "live_run_max_total_tokens", cfg.live_run_max_total_tokens)
-    _positive(errors, "live_run_iteration_budget", cfg.live_run_iteration_budget)
-    _positive(errors, "scope_wait_deadline_seconds", cfg.scope_wait_deadline_seconds)
-    _positive(errors, "run_lease_seconds", cfg.run_lease_seconds)
-    _positive(errors, "tool_wait_timeout_seconds", cfg.tool_wait_timeout_seconds)
-    _positive(errors, "liveness_poll_seconds", cfg.liveness_poll_seconds)
-    _positive(errors, "liveness_quiet_strikes", cfg.liveness_quiet_strikes)
-    _positive(errors, "liveness_hung_seconds", cfg.liveness_hung_seconds)
-    _positive(errors, "child_progress_min_interval_seconds", cfg.child_progress_min_interval_seconds)
-    _positive(errors, "deploy_timeout_seconds", cfg.deploy_timeout_seconds)
     _positive(errors, "lock_acquire_timeout_seconds", cfg.lock_acquire_timeout_seconds)
-    _positive(errors, "mission_max_total_tokens", cfg.mission_max_total_tokens)
-    _positive(errors, "mission_wall_clock_deadline_seconds", cfg.mission_wall_clock_deadline_seconds)
-    _positive(errors, "neko_recovery_attempt_cap", cfg.neko_recovery_attempt_cap)
-    _positive(errors, "neko_extension_cap", cfg.neko_extension_cap)
-    _positive(errors, "artifact_storage_low_watermark_mb", cfg.artifact_storage_low_watermark_mb)
-    _positive(errors, "artifact_storage_high_watermark_mb", cfg.artifact_storage_high_watermark_mb)
-    _positive(errors, "artifact_storage_critical_watermark_mb", cfg.artifact_storage_critical_watermark_mb)
     # S47 removed the five ``role_envelope.*`` range validators with the config
     # block they guarded — S44 had already deleted every reader of those knobs.
     # S56 removed the rest of that class in one pass: the three
@@ -64,25 +38,18 @@ def validate_runtime_config(cfg: AgentRuntimeConfig | None = None) -> dict[str, 
     # range check on a field no code path reads validates nothing — it only
     # makes a dead knob look governed. The blocks themselves are gone; these
     # arms would now range-check attributes that do not exist.
+    #
+    # S57 finished the class for the SCALARS. Twenty-six ``_positive`` arms, the
+    # ``root_node_mode`` bool check, and FOUR cross-field checks went with the 29
+    # fields they guarded: the ``live_run_max_total_tokens`` <=
+    # ``mission_max_total_tokens`` soft/hard ceiling, the
+    # ``liveness_poll_seconds`` 30..120 range, the ``liveness_hung_seconds`` <
+    # ``heartbeat_ttl_seconds`` ordering, and the low <= high <= critical
+    # ``artifact_storage_*`` ordering. Each related two dead knobs to each other,
+    # which is the same "looks governed" illusion one level up. What is left is
+    # the ONE scalar with a real reader (``locks.py`` reads
+    # ``lock_acquire_timeout_seconds``) plus the schema-version check.
 
-    if cfg.live_run_max_total_tokens > cfg.mission_max_total_tokens:
-        errors.append({
-            "field": "mission_max_total_tokens",
-            "reason": "mission token ceiling must be >= per-run token ceiling",
-        })
-    if int(getattr(cfg, "liveness_poll_seconds", 0) or 0) < 30 or int(getattr(cfg, "liveness_poll_seconds", 0) or 0) > 120:
-        errors.append({"field": "liveness_poll_seconds", "reason": "must be between 30 and 120"})
-    if int(getattr(cfg, "liveness_hung_seconds", 0) or 0) >= int(getattr(cfg, "heartbeat_ttl_seconds", 0) or 0):
-        errors.append({"field": "liveness_hung_seconds", "reason": "must be less than heartbeat_ttl_seconds"})
-    if not (
-        cfg.artifact_storage_low_watermark_mb
-        <= cfg.artifact_storage_high_watermark_mb
-        <= cfg.artifact_storage_critical_watermark_mb
-    ):
-        errors.append({
-            "field": "artifact_storage_*_watermark_mb",
-            "reason": "storage watermarks must be ordered low <= high <= critical",
-        })
     version = int(getattr(cfg, "schema_version", CURRENT_RUNTIME_SCHEMA_VERSION) or CURRENT_RUNTIME_SCHEMA_VERSION)
     if version != CURRENT_RUNTIME_SCHEMA_VERSION:
         errors.append({"field": "schema_version", "reason": f"unsupported runtime schema version {version}"})
@@ -130,7 +97,17 @@ def migration_status(root: Path | None = None) -> dict[str, Any]:
     counts = {
         "tasks": _count_json(root / "tasks"),
         "runs": _count_json(root / "runs"),
-        "repo_bundles": _count_nested_json(root / "repo_bundles"),
+        # S57 removed ``"repo_bundles"``. It was a real on-disk count, not a
+        # constant literal -- but it counted a store class whose LAST writer went
+        # at S52, whose four status projections went at S56, whose checkpoint
+        # EntityClass row went with them, and whose module + model + path helper
+        # are deleted in this commit. The live root has no ``repo_bundles/``
+        # directory at all, so the wire reported ``0`` by construction. Counting
+        # a store the runtime can no longer name is the S47 item-5 class wearing
+        # a filesystem read as a disguise; the honest move is to retire the row
+        # rather than leave an operator a counter that can only say zero. This
+        # edits the emitted frame, which is why it rides the same 47 -> 48
+        # contract move as the config-scalar cut.
         "agents": _count_json(root / "agents"),
         "incidents": _count_json(root / "incidents"),
         "proofs": _count_nested_json(root / "proofs"),

@@ -108,7 +108,16 @@ def test_config_merges_specialist_dev_repo_scope_fields(tmp_path):
     assert backend_dev.repo_scope_label == "EterniaBackend"
 
 
-def test_config_loads_live_run_budget_fields(tmp_path):
+def test_live_run_budget_config_loads_and_is_ignored(tmp_path):
+    """INVERTED at S57 (was ``test_config_loads_live_run_budget_fields``).
+
+    The four ``live_run_*`` budgets had no production reader — the run opener
+    that enforced them is retired — so the fields are gone. The pin is kept in
+    its inverted form rather than deleted, because the concern it originally
+    encoded ("an operator sets a per-run budget and the runtime carries it") is
+    now answered by absence: setting them must not raise, must not appear on the
+    config object, and must not quietly resurrect a reader.
+    """
     p = tmp_path / "config.yaml"
     p.write_text(
         "agent_runtime:\n"
@@ -121,10 +130,13 @@ def test_config_loads_live_run_budget_fields(tmp_path):
 
     cfg = load_agent_runtime_config(p)
 
-    assert cfg.live_run_max_wall_seconds == 12.5
-    assert cfg.live_run_max_api_calls == 7
-    assert cfg.live_run_max_total_tokens == 12345
-    assert cfg.live_run_iteration_budget == 9
+    for retired in (
+        "live_run_max_wall_seconds",
+        "live_run_max_api_calls",
+        "live_run_max_total_tokens",
+        "live_run_iteration_budget",
+    ):
+        assert not hasattr(cfg, retired), retired
 
 
 def test_persona_chat_hot_runtime_defaults_dark_and_is_bounded(tmp_path):

@@ -5,13 +5,23 @@ from agent_runtime.migrations import effective_config_summary, migration_status,
 from utils import atomic_json_write
 
 
-def test_validate_runtime_config_rejects_bad_ceiling_order():
-    cfg = AgentRuntimeConfig(live_run_max_total_tokens=500, mission_max_total_tokens=100)
+def test_the_token_ceiling_cross_check_is_gone_with_both_its_fields():
+    """INVERTED at S57 (was ``test_validate_runtime_config_rejects_bad_ceiling_order``).
 
-    result = validate_runtime_config(cfg)
+    The check related ``live_run_max_total_tokens`` to ``mission_max_total_tokens``.
+    NEITHER had a production reader — no run opener enforced the first, no
+    enforcer consulted the second — so the cross-check made two dead knobs look
+    like a governed budget pair. Both fields and the arm went at S57. The pin
+    inverts: constructing a config with the old "bad" ordering is not expressible
+    any more, and validation reports no such error.
+    """
+    for retired in ("live_run_max_total_tokens", "mission_max_total_tokens"):
+        assert not hasattr(AgentRuntimeConfig(), retired), retired
 
-    assert result["ok"] is False
-    assert any(item["field"] == "mission_max_total_tokens" for item in result["errors"])
+    result = validate_runtime_config(AgentRuntimeConfig())
+
+    assert result["ok"] is True
+    assert not any(item["field"] == "mission_max_total_tokens" for item in result["errors"])
 
 
 def test_validate_runtime_config_warns_on_shadowing_override(tmp_path, monkeypatch):
@@ -46,17 +56,26 @@ def test_validate_runtime_config_no_warning_when_authority_is_clean(tmp_path, mo
     assert result["warnings"] == []
 
 
-def test_validate_runtime_config_rejects_bad_storage_watermark_order():
-    cfg = AgentRuntimeConfig(
-        artifact_storage_low_watermark_mb=100,
-        artifact_storage_high_watermark_mb=50,
-        artifact_storage_critical_watermark_mb=200,
+def test_the_storage_watermark_ordering_check_is_gone_with_its_three_fields():
+    """INVERTED at S57 (was ``test_validate_runtime_config_rejects_bad_storage_watermark_order``).
+
+    Same shape as the token-ceiling case: three watermarks no sweeper reads,
+    ordered against each other by a validator, which is how an unimplemented
+    artifact-storage policy looked configured for months. All three fields and
+    the ordering arm went at S57.
+    """
+    for retired in (
+        "artifact_storage_low_watermark_mb",
+        "artifact_storage_high_watermark_mb",
+        "artifact_storage_critical_watermark_mb",
+    ):
+        assert not hasattr(AgentRuntimeConfig(), retired), retired
+
+    result = validate_runtime_config(AgentRuntimeConfig())
+
+    assert not any(
+        item["field"] == "artifact_storage_*_watermark_mb" for item in result["errors"]
     )
-
-    result = validate_runtime_config(cfg)
-
-    assert result["ok"] is False
-    assert any(item["field"] == "artifact_storage_*_watermark_mb" for item in result["errors"])
 
 
 def test_effective_config_summary_is_redaction_safe(isolate_agent_runtime_root):

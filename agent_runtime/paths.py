@@ -315,8 +315,13 @@ def persona_assignment_path(assignment_id: str) -> Path:
     return persona_assignments_dir() / f"{_safe_path_token(assignment_id)}.json"
 
 
-def repo_bundle_path(task_id: str, repo_bundle_id: str) -> Path:
-    return repo_bundles_task_dir(task_id) / f"{_safe_path_token(repo_bundle_id)}.json"
+# S57 removed ``repo_bundle_path``: its ONLY caller was ``RepoBundleStore.get``,
+# deleted with the module in the same commit. Same rule as S23's writer-less path
+# sweep and S44's role-envelope helpers. The two DIRECTORY helpers survive
+# (``repo_bundles_dir`` / ``repo_bundles_task_dir``) because
+# ``delivery_directive.bundle_promotion_record_path`` still addresses the tree
+# through them; that pair is its own caller-less debt entry in doc 19, on a
+# separate lane from this cut.
 
 
 def runtime_instance_path(instance_id: str) -> Path:
