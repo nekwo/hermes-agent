@@ -92,10 +92,26 @@ Hermes fork-owned:
   STAGEC_LAUNCH_HELPER: alice/base/neko/unbounded; variant B without:
   backend-dev/gpt-launcher/launcher-dev/launcher-qa/qa) - doc-18's
   "field-identical to launcher-dev" guard would canonicalize the WRONG variant.
-- **B-4 read-model serve path**: snapshot_frame resolver with typed source,
-  fix the silent {} on cache miss, unify the two watermark fallbacks, decide
-  blob-vs-rows (1.5x duplication); **B-5** dead parity warnings
-  (open_tasks/open_incidents keys can never exist) + typed summary object.
+- ~~**B-4 read-model serve path** / **B-5 dead parity warnings**.~~ **EXECUTED
+  2026-07-31** — `76504fd84`. B-4: `resolve_snapshot_frame(prefer_cache=...)`
+  returns `(frame, FrameSource)` over a StrEnum {`built`, `cache`,
+  `cache_miss_rebuilt`}, stamped onto `parity.frame_source`; the silent `{}`
+  serve is gone (`render_snapshot()` now returns `None` for "no cached frame"
+  and the resolver degrades to the built frame). `snapshot_watermark()` is the
+  single derivation — `write_snapshot`'s `{}` fallback (which recorded a frame
+  as caught-up-at-offset-0) and the projector's `events_watermark()` fallback
+  were the same question answered two ways. Blob-vs-rows RULED **blob**: the 27
+  duplicate per-section `projections_misc` rows are dropped and
+  `read_projection` slices the blob. Measured on live alice: 28 rows /
+  1,628,708 payload bytes, of which **543,247 (33%) were duplicates**; the
+  `READ_MODEL_SCHEMA_VERSION` 2 -> 3 clear + VACUUM took the file **4,194,304 ->
+  1,773,568 bytes**. `ProjectorResult.changed` / `.stale_sections` (constants
+  dressed as findings) deleted, and `apply_pending` counts the pending tail
+  instead of materializing it. B-5: both summary-keyed warnings, the
+  `open_incident_warning_threshold` knob, and the test that was the only
+  producer of `open_incidents` all cut; `SnapshotSummary` declares the block's
+  field set and `tests/agent_runtime/test_parity_warning_catalog.py` gates every
+  remaining warning code as executably producible.
 - **Wire-test idiom**: the relay regression class (producer and consumer pinned,
   wire between them never asserted) - extend the "does the chokepoint actually
   invoke the seam" AST tests to the other persona_commands chokepoints.
@@ -109,3 +125,12 @@ Launcher Mission Control (F-1..F-8, full text in the audit report):
   PM->Neko copy authority; F-7 Capped<T> + "+N more" (incl. the office
   selected-goal eviction); F-8 MissionOfficeAuthoringPolicy.
   Sequencing: F-4 -> F-3 -> F-2 -> F-1; F-5/F-6/F-7 independent; F-8 with F-2.
+- **F-9 dead `open_incident_budget_exceeded` alert (opened by B-5,
+  2026-07-31).** `mission_control_snapshot.dart:994` branches the snapshot-alert
+  label on `warningCodes.contains('open_incident_budget_exceeded')`. The hermes
+  producer is now deleted (it had been unreachable since contract 45 anyway), so
+  the branch is permanently false and the alert always renders the generic
+  "parity warnings N" arm. Launcher-side, one-line cut; deliberately NOT taken
+  on this wave's authority since it is the other repo.
+  `mission_control_bridge.dart:2862` only *mentions* the sibling
+  `open_tasks_without_task_rows` in a comment — reword when F-9 is taken.
