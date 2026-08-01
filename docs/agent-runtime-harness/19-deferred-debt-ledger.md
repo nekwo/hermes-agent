@@ -305,17 +305,46 @@
     kept only for the missing-server class? This scoping predates the flip —
     deliberately not widened on the flip's authority.
 
-11. **Launcher board write path parses the CLI reply with the SNAPSHOT card
+11. ~~**Launcher board write path parses the CLI reply with the SNAPSHOT card
     shape — read-your-writes has silently never worked (Launcher; surfaced by
-    S48, 2026-08-01).** `mission_board_write.dart::boardCardFromResultPayload`
-    reads `card_id`/`updated_by`/`unpublished`; the CLI card row emits `id`
-    and neither of the others, so the parse ALWAYS returns null and the lane
-    silently falls back to `provisionalBoardCard`. Pre-existing (not
-    introduced by S48, which changed no key names) and exactly the wire-test
-    idiom class: producer pinned, consumer pinned, wire never asserted. Fix
-    shape: parse the CLI row shape (or emit a shared shape), plus one wire
-    test walking verb → reply → parsed card. Small, self-contained,
-    Launcher-side.
+    S48, 2026-08-01).**~~ **RULED EXECUTE and EXECUTED 2026-08-01 — launcher
+    `97ba5cfc`** (on launcher `origin/main`).
+    `mission_board_write.dart::boardCardFromResultPayload` read
+    `card_id`/`updated_by`/`unpublished` (and, secondarily, a nested `card`
+    envelope); the CLI card row emits `id` and none of the others, so the parse
+    ALWAYS returned null and the lane silently fell back to
+    `provisionalBoardCard`. Pre-existing (not introduced by S48, which changed
+    no key names) and exactly the wire-test idiom class: producer pinned,
+    consumer pinned, wire never asserted.
+
+    **The empirical shape**, captured from the venv hermes (v0.19.1 /
+    2026.7.30, upstream `bc5fab7d`, post-S48 `71a96b517`) against a throwaway
+    `HERMES_HOME`: all five mutating card verbs plus `board resolve-conflict`
+    print `_object_envelope("card", _card_row(card, full=True))`, which is
+    FLAT — `{schema_version, kind:"card", id, column_id, title, priority,
+    state, updated_at, board_id, description, description_truncated, labels,
+    assignee, checklist, order_key, created_by, revision, created_at}`. No
+    `updated_by`, no `unpublished`, no `linked_goal_id`, and no nested `card`
+    key — `_object_envelope` splats the row into the root, so that branch had
+    no producer either. The parser now takes identity in DECLARED precedence
+    (`card_id` for a snapshot-shaped row, then `id` for the CLI envelope) and
+    rejects a payload whose `kind` names a different row type (`workspace`
+    replies also carry `id`).
+
+    **The gate**: `mission_board_write_wire_test.dart` walks verb → the
+    captured real reply → parsed card for every verb (golden fixture
+    `test/features/mission_control/fixtures/hermes_board_card_live.json`),
+    asserts the reply key set EQUALS {envelope metadata} ∪ {keys mapped to
+    model fields} so a hermes-side rename fails loudly instead of degrading
+    read-your-writes in silence, and carries a regression row proving the
+    pre-fix snapshot-shape parser returns null on every real reply. Sibling
+    audit found no second dead parse: `flow.apply`'s `reconciled[]` keys are
+    all emitted by `ingest_flow_graph`, the chat controller's
+    `chat_turn_outcome_unknown` branch reads three keys all present in the
+    refusal dict at `persona_commands.py:2351`, and every typed getter the
+    bridge promotes has a live producer. Launcher gates: `flutter analyze` 0
+    issues; `flutter test test/features/mission_control test/core/qa` 3288
+    passed / 2 skipped / 0 failed.
 
 ## Proposal ledger (decision-ready; full text in the 2026-07-31 audit reports)
 
