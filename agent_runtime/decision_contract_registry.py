@@ -156,9 +156,9 @@ def agent_decision_json_schema() -> dict[str, Any]:
     }
 
 
-def all_decision_contracts() -> dict[DecisionType, DecisionContract]:
-    return dict(_DECISION_CONTRACTS)
-
+# S54 removed ``all_decision_contracts`` / ``role_shape_ids`` /
+# ``object_contract``. S11/S16 retired role-shaped decision filtering and the
+# object-contract surface; these three were the accessors left pointing at it.
 
 def decision_contract(decision_type: DecisionType | str) -> DecisionContract:
     resolved = decision_type if isinstance(decision_type, DecisionType) else DecisionType(str(decision_type))
@@ -215,18 +215,9 @@ def hud_shape_index_for_stage(owner: str | AgentRole) -> dict[str, dict[str, Any
     return {shape_id: hud_shape(shape_id) for shape_id in _HUD_SHAPES}
 
 
-def role_shape_ids(role: str | AgentRole) -> list[str]:
-    del role
-    return list(_HUD_SHAPES)
-
-
 def context_expansion_shape_ids(role: str | AgentRole) -> list[str]:
     del role
     return ["common.request_file_reads", "common.needs_context"]
-
-
-def object_contract(contract_id: str) -> dict[str, Any]:
-    return _OBJECT_CONTRACTS[contract_id].manifest()
 
 
 def validate_object_payload(contract_id: str, payload: Any) -> None:

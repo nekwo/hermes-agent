@@ -7,7 +7,6 @@ import re
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any, Iterable
 
 from hermes_cli.profiles import get_profile_dir
@@ -844,25 +843,9 @@ def _evict_final_model_input(chat_contexts: list[dict[str, Any]]) -> None:
             )
 
 
-def load_final_model_input_for_context(context_id: str) -> dict[str, Any] | None:
-    """On-demand read of a persisted context's ``final_model_input``.
-
-    The S3 frame ships an eviction stub; the FULL payload stays on disk in the
-    persisted observability row (``persist_prompt_observability_context``). This
-    is the read the Context peek's on-demand fetch resolves — the launcher fetch
-    lane and a future ``harness prompt-context final-model-input`` CLI verb both
-    call through here (verb handoff filed; harness_cli is not this stage's to
-    edit). Returns the redaction-safe payload, or None when the row/field is
-    absent."""
-
-    data = load_persisted_context_row(context_id)
-    if not isinstance(data, dict):
-        return None
-    final_model_input = data.get("final_model_input")
-    if isinstance(final_model_input, dict) and not final_model_input.get("evicted"):
-        return final_model_input
-    return None
-
+# S54 removed ``load_final_model_input_for_context`` and
+# ``_mission_chat_template_prompt_chars``: a disk read-back accessor and a
+# template-size helper, neither with a production caller.
 
 def snapshot_prompt_observability(
     *,
@@ -2863,30 +2846,6 @@ def _workspace_agents_prompt_chars(
 
         body = str(workspace_agents.content or "").strip()
         return len(MISSION_CHAT_WORKSPACE_AGENTS_PREAMBLE) + len(body)
-    except Exception:
-        return None
-
-
-def _mission_chat_template_prompt_chars(persona: Any) -> int | None:
-    """Compatibility helper for runtime-identity + operative-rules characters.
-
-    Returns the combined size of those two independently reported layers,
-    excluding the profile SOUL and memory context-file rows. Retained for
-    callers that predate prompt-stack schema v2.
-
-    The two blocks are fed into the
-    surface message (the codex ``instructions``), EXCLUDING the soul overlay and
-    any profile memory — those ride their own file rows. ``None`` on failure."""
-
-    try:
-        from .persona_runtime import (
-            _mission_chat_identity_prompt,
-            _mission_chat_operative_rules,
-        )
-
-        identity = _mission_chat_identity_prompt(persona)
-        rules = _mission_chat_operative_rules()
-        return len(identity) + len(rules)
     except Exception:
         return None
 

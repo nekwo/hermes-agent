@@ -8,7 +8,6 @@ from agent_runtime.decision_schema import (
     DecisionPayloadInvalid,
     DecisionType,
     parse_structured_decision,
-    to_decision_jsonable,
     validate_decision_for_role,
 )
 from agent_runtime.personas import AgentRole
@@ -33,7 +32,14 @@ def test_every_decision_type_parses_and_serializes_losslessly(decision_type):
 
     assert isinstance(decision, AgentDecision)
     assert decision.type == decision_type
-    assert parse_structured_decision(json.dumps(to_decision_jsonable(decision))) == decision
+    # S54: this case used to close a round trip -- parse(to_decision_jsonable(d))
+    # == d. ``to_decision_jsonable`` had no production caller; this assertion
+    # WAS its only caller, so the loop proved only that the pair agreed with
+    # each other. The live half is the PARSER (every model turn enters through
+    # it), so what is asserted now is that parsing is deterministic over the
+    # same wire bytes -- a property of the surviving code, not of a helper kept
+    # alive to be tested.
+    assert parse_structured_decision(decision_blob(decision_type.value)) == decision
 
 
 def test_parser_extracts_first_fenced_json_block():

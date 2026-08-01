@@ -24,7 +24,6 @@ from agent_runtime.flow_graph import (
     FlowGraphDocError,
     FlowGraphStore,
     bound_agent_ids,
-    desired_parents_by_agent,
     ignored_non_owner_edges,
     ingest_flow_graph,
     owner_instance_id_of,
@@ -116,34 +115,6 @@ def test_owner_scoped_children_flags_only_owner_edges():
 
 
 # ------------------------------------------ desired parents (pure, whole-doc)
-
-
-def test_desired_parents_fan_in_preserves_edge_order_and_skips_unbound():
-    # This pure helper is the WHOLE-doc intent — NOT what ingest applies (ingest
-    # is owner-scoped). Kept as an analysis primitive; asserted so it stays honest.
-    doc = parse_flow_graph_doc(
-        _doc(
-            [
-                _node("lead", "personainst_lead"),
-                _node("dev", "personainst_dev"),
-                _node("qa", "personainst_qa"),
-                _node("ghost", None),  # authored, unbound: no runtime identity
-            ],
-            [
-                {"from": "lead", "to": "dev"},
-                {"from": "dev", "to": "qa"},
-                {"from": "lead", "to": "qa"},
-                {"from": "ghost", "to": "qa"},  # unbound parent: skipped
-                {"from": "lead", "to": "ghost"},  # edge INTO unbound: no entry
-            ],
-        )
-    )
-    desired = desired_parents_by_agent(doc)
-    assert desired == {
-        "personainst_lead": [],
-        "personainst_dev": ["personainst_lead"],
-        "personainst_qa": ["personainst_dev", "personainst_lead"],
-    }
 
 
 # ---------------------------------------------------- reconcile (owner-scoped)

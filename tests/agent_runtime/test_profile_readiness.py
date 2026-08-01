@@ -189,7 +189,6 @@ def test_profile_readiness_reports_runtime_dependency_missing_before_auth(monkey
 def test_profile_readiness_injects_launcher_qa_only_for_visual_scope(monkeypatch):
     from agent_runtime import profile_readiness
 
-    monkeypatch.setattr(profile_readiness, "_missing_skill_names", lambda _skills: [])
     monkeypatch.setattr(profile_readiness, "harness_skill_hash_mismatches", lambda _skills, hermes_home=None: [])
     monkeypatch.setattr(profile_readiness, "_runtime_dependency_issue", lambda _persona: None)
     monkeypatch.setattr(profile_readiness, "_provider_issue", lambda _persona: None)
@@ -224,7 +223,6 @@ def test_readiness_missing_set_is_single_source_derivation(tmp_path, monkeypatch
     import agent.skill_utils as skill_utils
     from agent_runtime.profile_readiness import (
         _missing_skill_ids,
-        _missing_skill_names,
         _resolve_skill_names,
     )
 
@@ -242,9 +240,10 @@ def test_readiness_missing_set_is_single_source_derivation(tmp_path, monkeypatch
     assert [row["skill_id"] for row in rows] == names
     derived = _missing_skill_ids(rows)
     assert derived == ["absent-one", "absent-two"]
-    # The compat wrapper (which re-resolves) agrees with the single-source
-    # derivation from the already-computed rows.
-    assert derived == _missing_skill_names(names)
+    # S54 removed the ``_missing_skill_names`` compat wrapper this case used to
+    # cross-check against. It had no production caller -- readiness derives the
+    # missing set from already-resolved rows, which is exactly what is asserted
+    # above -- so the wrapper was the only thing left claiming a second lane.
 
 
 def test_provider_issue_memo_is_scoped_per_profile_home(monkeypatch):

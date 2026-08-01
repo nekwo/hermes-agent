@@ -74,10 +74,12 @@ def test_the_type_never_had_an_operator_summary_row_to_retire():
     orphaned private helper — unlike run.opened and repo_bundle.delivered."""
 
     assert RETIRED not in OPERATOR_SUMMARY_EVENT_TYPES
+    # S52 removed the two repo_bundle.* rows from this frozenset when the
+    # RepoBundleStore write lane (their only emitter) was deleted. The pin still
+    # holds S32's point -- decision_contract.parity was never in here -- over the
+    # set as it now stands.
     assert OPERATOR_SUMMARY_EVENT_TYPES == frozenset(
         {
-            "repo_bundle.updated",
-            "repo_bundle.assigned",
             "run.closed",
             "run.progress",
             "run.tool.started",

@@ -91,10 +91,6 @@ def rebalance(count: int) -> list[str]:
     return keys
 
 
-def needs_rebalance(order_keys: list[str]) -> bool:
-    """True when a column's keys should be swept: any over-long key, or a
-    duplicate key (two cards allocated the same midpoint concurrently)."""
+# S54 removed ``needs_rebalance``: a rebalance predicate no board write path
+# consults. ``rebalance``/``MAX_KEY_LENGTH`` stay -- they have live callers.
 
-    if any(len(key) > MAX_KEY_LENGTH for key in order_keys):
-        return True
-    return len(set(order_keys)) != len(order_keys)

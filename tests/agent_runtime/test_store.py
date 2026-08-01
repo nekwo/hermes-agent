@@ -7,7 +7,7 @@ from hermes_time import now
 
 from agent_runtime import paths
 from agent_runtime.errors import NotFound
-from agent_runtime.events import EventLog, compact_archived_task_events
+from agent_runtime.events import EventLog
 from agent_runtime.models import AgentPersona, AgentRun, Event, Incident
 from types import SimpleNamespace
 

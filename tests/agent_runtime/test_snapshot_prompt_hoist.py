@@ -216,11 +216,15 @@ def test_final_model_input_fetchable_by_context(isolate_agent_runtime_root):
         {"context_id": "ctx_disk", "final_model_input": fmi, "persona_id": "dev"}
     )
 
-    fetched = po.load_final_model_input_for_context("ctx_disk")
-    assert fetched == fmi
-    # A stub on disk (should never happen) or a missing id resolves to None, not
-    # a fake-empty payload.
-    assert po.load_final_model_input_for_context("ctx_missing") is None
+    # S54 deleted ``load_final_model_input_for_context``. Its docstring claimed
+    # "the launcher fetch lane ... calls through here", but the Launcher repo has
+    # zero references to it and no CLI verb was ever wired -- an advertised seam
+    # with no caller. The DURABILITY property it was used to check is real and is
+    # asserted directly off the persisted row, which is live.
+    row = po.load_persisted_context_row("ctx_disk")
+    assert row is not None and row["final_model_input"] == fmi
+    # A missing id resolves to None, not a fake-empty payload.
+    assert po.load_persisted_context_row("ctx_missing") is None
 
 
 # --------------------------------------------------------------------------- #
@@ -283,8 +287,10 @@ def test_snapshot_prompt_observability_hoists_by_default(isolate_agent_runtime_r
     # final_model_input evicted to a stub carrying its size.
     assert row["final_model_input"]["evicted"] is True
     assert row["final_model_input"]["bytes"] > 0
-    # …but still fetchable on demand from disk.
-    assert po.load_final_model_input_for_context("ctx_alice") is not None
+    # …but the FULL payload still lives on disk in the persisted row.
+    persisted = po.load_persisted_context_row("ctx_alice")
+    assert persisted is not None
+    assert persisted["final_model_input"].get("evicted") is not True
 
 
 def test_fresh_live_context_advertises_only_collectable_catalog_refs(

@@ -122,36 +122,8 @@ def _cmd_persona_instance_reconcile(args) -> int:
     return 0
 
 
-def _archived_task_summary(task_id: str) -> dict | None:
-    root = paths.deleted_archive_dir()
-    if not root.exists():
-        return None
-    for manifest_path in sorted(root.glob("*/manifest.json"), reverse=True):
-        try:
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        for item in manifest.get("archived_tasks") or []:
-            if not isinstance(item, dict) or item.get("task_id") != task_id:
-                continue
-            task_path = manifest_path.parent / str(item.get("task_path") or "")
-            task_data = None
-            if task_path.exists():
-                try:
-                    task_data = json.loads(task_path.read_text(encoding="utf-8"))
-                except Exception:
-                    task_data = None
-            return {
-                "ok": True,
-                "task_id": task_id,
-                "archive_batch": manifest_path.parent.name,
-                "archive_dir": str(manifest_path.parent),
-                "manifest_path": str(manifest_path),
-                "archived_task": item,
-                "task": task_data,
-            }
-    return None
-
+# S54 removed ``_archived_task_summary``: an archived-task formatter left over
+# from the retired task surface.
 
 # S42: ``_event_value`` (an Event field reader), ``_task_events`` (the
 # ``EventLog().for_task`` page), ``_clear_task_recovery_markers`` (it mutated

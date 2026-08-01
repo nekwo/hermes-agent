@@ -176,10 +176,7 @@ def live_path() -> Path:
     return live.path
 
 
-def live_base_offset() -> int:
-    _sealed, live = _manifest_to_slices(_load_manifest())
-    return live.start_offset
-
+# S54 removed ``live_base_offset``: a rotation-offset accessor with no reader.
 
 def log_end_offset() -> int:
     """Logical tail offset = the total bytes ever appended = the cursor a tailer

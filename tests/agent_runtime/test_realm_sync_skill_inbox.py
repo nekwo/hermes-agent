@@ -45,7 +45,6 @@ from agent_runtime.realm_sync import (
     realm_sync_status,
 )
 from agent_runtime.skill_promotion import (
-    promotion_provenance,
     realm_inbox_dir,
 )
 from agent_runtime.store import RealmStore
@@ -106,6 +105,24 @@ def _write_subtree_skill_bytes(repo: Path, realm, slug: str, rel: str, data: byt
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(data)
     return pkg
+
+
+def _provenance(slug: str):
+    """Read a promotion provenance record straight off disk.
+
+    S54 deleted ``skill_promotion.promotion_provenance``, a read-back accessor
+    with no production caller. These cases assert what the PRODUCTION WRITER
+    put in the record, so the coverage is real and stays -- it just reads the
+    file the writer names instead of going through a reader kept alive to be
+    tested.
+    """
+
+    import json
+
+    path = get_shared_skills_dir() / ".provenance" / f"{slug.replace('/', '__')}.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _canonical(slug: str) -> Path:
@@ -189,7 +206,7 @@ def test_pull_auto_promotes_new_package_with_realm_provenance(tmp_path):
     assert result["skill_sync"]["held"] == []
     assert result["changed"] is True
 
-    prov = promotion_provenance("foo")
+    prov = _provenance("foo")
     assert prov is not None
     assert prov["source"] == {"kind": "realm", "realm_id": realm.id}
     assert "promoted_at" in prov
@@ -214,7 +231,7 @@ def test_pull_converges_identical_package_without_rewrite(tmp_path):
     assert result["skill_sync"]["held"] == []
     # Canonical bytes untouched, and a converge never writes provenance.
     assert _snapshot(_canonical("foo")) == before
-    assert promotion_provenance("foo") is None
+    assert _provenance("foo") is None
 
 
 def test_pull_converges_eol_only_difference(tmp_path):

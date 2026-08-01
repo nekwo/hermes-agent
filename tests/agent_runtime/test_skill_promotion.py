@@ -24,7 +24,6 @@ from agent_runtime.skill_promotion import (
     classify_promotion,
     execute_promotion,
     list_inbox_packages,
-    promotion_provenance,
     realm_inbox_dir,
     realm_inbox_root,
 )
@@ -80,6 +79,24 @@ def _snapshot(root: Path) -> dict[str, bytes]:
 
 
 # ── classify ───────────────────────────────────────────────────────────────
+
+
+def _provenance(shared, skill: str):
+    """Read a promotion provenance record straight off disk.
+
+    S54 deleted ``skill_promotion.promotion_provenance``, a read-back accessor
+    with no production caller. These cases assert what the PRODUCTION WRITER
+    put in the record, so the coverage is real and stays -- it just reads the
+    file the writer names instead of going through a reader kept alive to be
+    tested.
+    """
+
+    import json
+
+    path = shared / ".provenance" / f"{skill.replace('/', '__')}.json"
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 def test_classify_promote_new(tmp_path):
@@ -270,7 +287,7 @@ def test_execute_promote_new_writes_canonical_and_provenance(tmp_path):
     assert (canonical / "scripts" / "run.py").read_text(encoding="utf-8") == "print(1)\n"
     assert _pkg_hash(canonical) == plan.source_hash
 
-    prov = promotion_provenance("demo")
+    prov = _provenance(shared, "demo")
     assert prov is not None
     assert prov["skill"] == "demo"
     assert prov["content_hash"] == plan.source_hash
@@ -311,7 +328,7 @@ def test_execute_adopt_divergent_archives_previous_and_records_previous_hash(tmp
     # Canonical now carries V2.
     assert "# V2 diverged content" in (shared / "demo" / "SKILL.md").read_text(encoding="utf-8")
 
-    prov = promotion_provenance("demo")
+    prov = _provenance(shared, "demo")
     assert prov["previous_hash"] == v1_hash
     assert prov["content_hash"] == plan.source_hash
 
@@ -427,7 +444,7 @@ def test_execute_toctou_occupied_canonical_returns_refused_not_raise(tmp_path):
     assert "install time" in result.reason
     # Canonical untouched, no provenance written.
     assert _snapshot(shared) == before
-    assert promotion_provenance("demo") is None
+    assert _provenance(shared, "demo") is None
 
 
 # ── F3: mirror-level reserved-name skip ─────────────────────────────────────
@@ -497,7 +514,7 @@ def test_categorized_slug_round_trip(tmp_path):
     assert (shared / "software-development" / "hermes-agent" / "SKILL.md").is_file()
     # Provenance filename flattens '/' → '__' and lives outside the package.
     assert result.provenance_path == shared / ".provenance" / "software-development__hermes-agent.json"
-    prov = promotion_provenance("software-development/hermes-agent")
+    prov = _provenance(shared, "software-development/hermes-agent")
     assert prov is not None
     assert prov["skill"] == "software-development/hermes-agent"
     assert prov["source"] == {"kind": "realm", "realm_id": "realm_x"}
@@ -585,13 +602,6 @@ def test_list_inbox_packages_empty_when_no_inbox():
     _shared()
     assert list_inbox_packages() == []
     assert list_inbox_packages("nope") == []
-
-
-def test_promotion_provenance_none_for_unknown_and_invalid():
-    _shared()
-    assert promotion_provenance("never-promoted") is None
-    assert promotion_provenance("../evil") is None
-    assert promotion_provenance(".hidden") is None
 
 
 def test_plan_and_result_are_frozen_dataclasses(tmp_path):

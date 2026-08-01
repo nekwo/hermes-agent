@@ -19,7 +19,9 @@ def test_historical_packet_read_and_validation_surfaces_survive():
     for name in (
         "validate_decision_packets",
         "latest_packet",
-        "latest_packets_for_task",
+        # S54 INVERSION: see test_s23_packets_orphan_removal -- 
+        # ``latest_packets_for_task`` was the last accessor over a store nothing
+        # writes and went at S54.
         "iter_packet_payloads",
     ):
         assert callable(getattr(packets, name)), name

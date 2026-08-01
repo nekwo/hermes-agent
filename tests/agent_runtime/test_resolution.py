@@ -3,8 +3,6 @@ from __future__ import annotations
 import pytest
 
 from agent_runtime.resolution import (
-    RuntimeRootMismatch,
-    assert_pinned,
     resolution_table,
     resolve_runtime,
     suspect_default_root,
@@ -57,13 +55,6 @@ def test_resolve_runtime_default_layer_wins(tmp_path):
         f"config agent_runtime.store_root skipped: unset ({home / 'config.yaml'})",
         f"default won: {home / 'agent-runtime'}",
     )
-
-
-def test_assert_pinned_raises_typed_mismatch(tmp_path):
-    resolution = resolve_runtime({"HERMES_AGENT_RUNTIME_ROOT": str(tmp_path / "actual")})
-
-    with pytest.raises(RuntimeRootMismatch):
-        assert_pinned(resolution, pinned_root=str(tmp_path / "expected"))
 
 
 def test_suspect_default_root_and_parity_warning(monkeypatch, tmp_path):

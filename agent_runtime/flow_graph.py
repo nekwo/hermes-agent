@@ -166,36 +166,8 @@ def parse_flow_graph_doc(payload: Any) -> FlowGraphDoc:
     )
 
 
-def desired_parents_by_agent(doc: FlowGraphDoc) -> dict[str, list[str]]:
-    """The WHOLE drawing's runtime intent: for every BOUND agent, the ordered list
-    of bound parent agent ids (fan-in aware, edge order preserved, deduped).
-
-    Pure. Unbound nodes have no runtime identity: they neither receive an entry
-    nor contribute as parents — an authored placeholder is a position on the
-    map, not a steering edge yet. A bound agent with no resolvable drawn
-    parents maps to ``[]`` (drawn standalone).
-
-    NOTE: this is the whole-doc projection. It is NOT what [ingest_flow_graph]
-    applies — ingest is OWNER-SCOPED (a map asserts only its owner's edges; see
-    [reconcile_flow_graph_steering]). Kept as a pure helper / analysis primitive.
-    """
-
-    desired: dict[str, list[str]] = {}
-    for node_id, agent_id in doc.node_bindings.items():
-        if agent_id is None:
-            continue
-        parents: list[str] = []
-        for src, dst in doc.edges:
-            if dst != node_id:
-                continue
-            parent_agent = doc.node_bindings.get(src)
-            if parent_agent is None or parent_agent == agent_id:
-                continue
-            if parent_agent not in parents:
-                parents.append(parent_agent)
-        desired[agent_id] = parents
-    return desired
-
+# S54 removed ``desired_parents_by_agent``: a graph projection whose consumer
+# went with the steering lane it fed.
 
 def owner_instance_id_of(graph_id: str) -> str:
     """The owner instance id a [graph_id] addresses.

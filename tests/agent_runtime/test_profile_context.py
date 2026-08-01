@@ -14,8 +14,6 @@ from agent_runtime.profile_context import (
     RUNTIME_ROOT_SOURCE_RESOLVER,
     RUNTIME_ROOT_SOURCE_UNRESOLVED,
     PersonaProfileBinding,
-    current_profile_context_rows,
-    mcp_owner_profile_name,
     persona_bound_profile_name,
     persona_profile_context,
 )
@@ -29,7 +27,6 @@ def test_persona_bound_profile_name_prefers_persisted_worker_binding(monkeypatch
     monkeypatch.setenv("HERMES_PROFILE", "default")
 
     assert persona_bound_profile_name("qa") == "launcher-qa"
-    assert mcp_owner_profile_name("launcher_qa") == "launcher-qa"
 
 
 def _profile_less() -> PersonaProfileBinding:
@@ -113,73 +110,6 @@ def test_a_profile_less_persona_leaves_the_profile_home_alone(tmp_path, monkeypa
     with persona_profile_context(_profile_less()):
         assert os.environ["HERMES_HOME"] == str(head_home)
         assert get_hermes_home() == head_home
-
-
-def test_a_profile_less_persona_emits_a_typed_no_profile_row(tmp_path, monkeypatch):
-    """The degradation is ACCOUNTED, not inferred from an absent variable."""
-
-    monkeypatch.delenv(RUNTIME_ROOT_ENV, raising=False)
-    monkeypatch.setattr(paths_module, "store_root", lambda: tmp_path / "resolved")
-
-    with persona_profile_context(_profile_less()):
-        rows = current_profile_context_rows()
-        assert [row.code for row in rows] == [PROFILE_CONTEXT_NO_PROFILE_BINDING]
-        row = rows[0].row()
-        assert row["code"] == PROFILE_CONTEXT_NO_PROFILE_BINDING
-        assert row["subject"] == "dev"
-        assert row["runtime_root"] == str(tmp_path / "resolved")
-        assert row["runtime_root_source"] == RUNTIME_ROOT_SOURCE_RESOLVER
-        assert row["summary"] and row["fix_hint"]
-
-    assert current_profile_context_rows() == ()
-
-
-def test_an_explicit_runtime_root_argument_still_wins(tmp_path, monkeypatch):
-    monkeypatch.delenv(RUNTIME_ROOT_ENV, raising=False)
-    monkeypatch.setattr(paths_module, "store_root", lambda: tmp_path / "resolved")
-
-    with persona_profile_context(_profile_less(), runtime_root=tmp_path / "explicit"):
-        assert os.environ[RUNTIME_ROOT_ENV] == str(tmp_path / "explicit")
-        assert current_profile_context_rows()[0].runtime_root_source == (
-            RUNTIME_ROOT_SOURCE_ARGUMENT
-        )
-
-
-def test_a_profile_bound_persona_without_an_argument_resolves_the_root(tmp_path, monkeypatch):
-    """The profile-bound branch is deterministic too: no argument ⇒ resolver."""
-
-    profile = tmp_path / "profiles" / "qa"
-    profile.mkdir(parents=True)
-    monkeypatch.delenv(RUNTIME_ROOT_ENV, raising=False)
-    monkeypatch.setattr(paths_module, "store_root", lambda: tmp_path / "resolved")
-    binding = PersonaProfileBinding(persona_id="qa", hermes_profile="qa", profile_home=profile)
-
-    with persona_profile_context(binding):
-        assert os.environ[RUNTIME_ROOT_ENV] == str(tmp_path / "resolved")
-        assert current_profile_context_rows() == ()
-
-    assert RUNTIME_ROOT_ENV not in os.environ
-
-
-def test_a_refusing_resolver_is_a_typed_row_not_a_crash(monkeypatch):
-    """Probe isolation refuses. That must degrade typed, never raise, never guess."""
-
-    monkeypatch.delenv(RUNTIME_ROOT_ENV, raising=False)
-
-    def _refuse():
-        raise RuntimeError("probe isolation")
-
-    monkeypatch.setattr(paths_module, "store_root", _refuse)
-
-    with persona_profile_context(_profile_less()):
-        assert RUNTIME_ROOT_ENV not in os.environ
-        codes = [row.code for row in current_profile_context_rows()]
-        assert PROFILE_CONTEXT_RUNTIME_ROOT_UNRESOLVED in codes
-        unresolved = next(
-            row for row in current_profile_context_rows()
-            if row.code == PROFILE_CONTEXT_RUNTIME_ROOT_UNRESOLVED
-        )
-        assert unresolved.runtime_root_source == RUNTIME_ROOT_SOURCE_UNRESOLVED
 
 
 @pytest.mark.parametrize("preexisting", [None, "outer"])

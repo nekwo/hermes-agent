@@ -5,27 +5,12 @@ import importlib.util
 
 from hermes_time import now
 
-from agent_runtime.dirty_state import build_dirty_state, no_product_edit_dirty_check
+from agent_runtime.dirty_state import build_dirty_state
 from types import SimpleNamespace
 
 Task = SimpleNamespace
 from agent_runtime.states import TaskState
 from agent_runtime.store import TaskStore
-
-
-def test_dirty_state_reports_repo_dirty_without_absolute_paths(tmp_path):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True, text=True)
-    (repo / "changed.txt").write_text("dirty\n", encoding="utf-8")
-
-    result = no_product_edit_dirty_check(Task(id="t", title="T", description="d", state=TaskState.CREATED, created_at=now(), updated_at=now(), requested_by="test", affected_repos=[str(repo)]))
-
-    assert result["ok"] is False
-    assert result["dirty_count"] == 1
-    excerpt = result["repos"][0]["status_excerpt"][0]
-    assert "changed.txt" in excerpt
-    assert str(tmp_path) not in excerpt
 
 
 def test_dirty_state_reports_runtime_temp_state(monkeypatch):

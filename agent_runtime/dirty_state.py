@@ -66,17 +66,8 @@ def repo_dirty_states(repos) -> list[dict[str, Any]]:
     return states
 
 
-def no_product_edit_dirty_check(task) -> dict[str, Any]:
-    repos = list(getattr(task, "affected_repos", None) or DEFAULT_DIRTY_REPOS)
-    states = repo_dirty_states(repos)
-    dirty_items = [item for item in states if item.get("dirty") or item.get("error")]
-    return {
-        "ok": not dirty_items,
-        "repos": states,
-        "dirty_labels": [item["label"] for item in dirty_items],
-        "dirty_count": sum(int(item.get("dirty_count") or 0) for item in dirty_items),
-    }
-
+# S54 removed ``no_product_edit_dirty_check``. ``build_dirty_state`` is the live
+# projection; this per-task variant lost its caller with the mission lane.
 
 def _runtime_dirty_state(*, tasks, runs, incidents, workers=None, runtime_instances=None) -> dict[str, Any]:
     open_tasks = [task for task in tasks if _task_state(task) not in {TaskState.DONE, TaskState.CANCELLED}]

@@ -744,7 +744,8 @@ def test_archived_rows_resolve_through_prompt_context_fetch_lane(isolate_agent_r
     assert not (paths.prompt_observability_dir() / "ctx_fetch_0.json").exists()
     row = po.load_persisted_context_row("ctx_fetch_0")
     assert row is not None and row["context_id"] == "ctx_fetch_0"
-    # final_model_input stays fetchable off the archived row as well.
-    assert po.load_final_model_input_for_context("ctx_fetch_0") is not None
+    # final_model_input survives on the archived row as well (asserted off the
+    # row itself since S54 removed the callerless on-demand accessor).
+    assert row["final_model_input"].get("evicted") is not True
     # Honest miss for an unknown id — never a fabricated row.
     assert po.load_persisted_context_row("ctx_never_existed") is None

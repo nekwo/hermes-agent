@@ -7,7 +7,7 @@ from pathlib import Path
 from collections.abc import Mapping
 
 from .parse_cache import cached_yaml_file
-from .errors import ProbeIsolationViolation, RuntimeRootMismatch
+from .errors import ProbeIsolationViolation
 
 # Env marker a probe run sets to demand hard isolation. When truthy, the runtime root
 # MUST be a dedicated ``agent-runtime-probe-*`` temp dir won via the env layer, or every
@@ -54,14 +54,8 @@ def resolve_runtime(env: Mapping[str, str] | None = None) -> RuntimeResolution:
     return RuntimeResolution(root, "default", str(hermes_home), str(config_path), tuple(trace))
 
 
-def assert_pinned(resolution: RuntimeResolution, *, pinned_root: str) -> None:
-    expected = _normalized_path(Path(pinned_root).expanduser())
-    actual = _normalized_path(resolution.store_root)
-    if actual != expected:
-        raise RuntimeRootMismatch(
-            f"Runtime root mismatch: resolved {resolution.store_root} via {resolution.layer}, pinned {pinned_root}"
-        )
-
+# S54 removed ``assert_pinned``. The ``--runtime-root`` pinning flag it guarded
+# never shipped a caller; ``RuntimeResolution`` and the resolver stay live.
 
 def probe_isolation_required(env: Mapping[str, str] | None = None) -> bool:
     source = os.environ if env is None else env
@@ -178,8 +172,5 @@ def _platform_default_hermes_home(env: Mapping[str, str]) -> Path:
     return Path.home() / ".hermes"
 
 
-def _normalized_path(path: Path) -> str:
-    try:
-        return str(path.resolve(strict=False)).casefold()
-    except OSError:
-        return str(path.absolute()).casefold()
+# S54 took ``_normalized_path`` with ``assert_pinned``, its only caller.
+

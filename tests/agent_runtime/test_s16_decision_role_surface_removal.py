@@ -34,7 +34,6 @@ from dataclasses import fields
 from agent_runtime import decision_contract_registry as registry
 from agent_runtime.decision_contract_registry import (
     DecisionContract,
-    all_decision_contracts,
     canonical_role_value,
     contract_manifest,
     hud_shape_index_for_stage,
@@ -58,14 +57,18 @@ def test_the_decision_contract_no_longer_models_roles():
     # The dataclass is frozen+slots; a removed field must not linger as an
     # attribute default either.
     assert not hasattr(DecisionContract, "allowed_roles")
-    for contract in all_decision_contracts().values():
-        assert not hasattr(contract, "allowed_roles")
+    # S54 removed ``all_decision_contracts`` (a whole-map accessor with no
+    # production caller). The same ground is covered by walking the live
+    # DecisionType enum through the live ``decision_contract`` lookup.
+    for decision_type in DecisionType:
+        assert not hasattr(registry.decision_contract(decision_type), "allowed_roles")
 
 
 def test_no_decision_contract_publishes_a_role_gate_on_the_wire():
     """``manifest()`` used to append ``allowed_roles``; nothing may read it back."""
 
-    for decision_type, contract in all_decision_contracts().items():
+    for decision_type in DecisionType:
+        contract = registry.decision_contract(decision_type)
         manifest = contract.manifest()
         assert "allowed_roles" not in manifest, decision_type.value
         # manifest() is now exactly payload_contract() — no role tail.

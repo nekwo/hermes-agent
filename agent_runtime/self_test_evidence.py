@@ -198,20 +198,8 @@ def looks_like_self_test_command(command: object) -> bool:
     return any(marker in text for marker in markers)
 
 
-def self_test_summary(evidence: SelfTestEvidence) -> dict[str, Any]:
-    return {
-        "evidence_id": evidence.evidence_id,
-        "task_id": evidence.task_id,
-        "run_id": evidence.run_id,
-        "persona_id": evidence.persona_id,
-        "stage_id": evidence.stage_id,
-        "status": evidence.status,
-        "exit_code": evidence.exit_code,
-        "command_label": evidence.command_label,
-        "redaction_status": evidence.redaction_status,
-        "satisfies_release_gate": evidence.satisfies_release_gate,
-    }
-
+# S54 removed ``self_test_summary``: a projection of SelfTestEvidence with zero
+# references anywhere in the tree, tests included.
 
 def _read_evidence(path) -> SelfTestEvidence:
     raw = json.loads(path.read_text(encoding="utf-8"))

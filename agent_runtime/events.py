@@ -7,7 +7,6 @@ import re
 from collections import Counter
 from collections.abc import Collection, Iterator
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from . import event_rotation, paths
@@ -293,50 +292,9 @@ class EventLog:
                         yield evt
 
 
-def archive_task_events(task_id: str, archive_dir: Path) -> dict[str, Any]:
-    """Copy a task's event rows into its archive batch.
-
-    Reads across ALL event-log slices (rotated archive slices + live), oldest
-    first, so a task whose events span a rotation boundary is archived whole.
-    Pristine (single live slice) reads only ``events.jsonl`` — unchanged.
-    """
-
-    dest = archive_dir / f"events_{_safe_event_task_filename(task_id)}.jsonl"
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    sources = [source for source in event_rotation.ordered_line_sources() if source.exists()]
-    if not sources:
-        dest.write_text("", encoding="utf-8", newline="\n")
-        return {
-            "events_path": dest.name,
-            "event_count": 0,
-            "event_bytes": 0,
-            "compaction_eligible": True,
-        }
-    token = _task_id_json_token(task_id)
-    selected: list[str] = []
-    with events_lock():
-        for event_path in sources:
-            with open(event_path, encoding="utf-8") as handle:
-                for line in handle:
-                    if token not in line:
-                        continue
-                    if not line.strip():
-                        continue
-                    try:
-                        event = from_jsonable(Event, json.loads(line))
-                    except Exception:
-                        continue
-                    if event.task_id == task_id:
-                        selected.append(line if line.endswith("\n") else f"{line}\n")
-        with open(dest, "w", encoding="utf-8", newline="\n") as handle:
-            handle.writelines(selected)
-    return {
-        "events_path": dest.name,
-        "event_count": len(selected),
-        "event_bytes": sum(len(line.encode("utf-8")) for line in selected),
-        "compaction_eligible": True,
-    }
-
+# S54 removed ``archive_task_events`` and ``compact_archived_task_events``.
+# Both were task-scoped event archivers whose last caller went with the ``Task``
+# record at S8; the only references left were their own tests.
 
 def event_log_health() -> dict[str, Any]:
     path = paths.events_path()
@@ -362,75 +320,6 @@ def event_log_health() -> dict[str, Any]:
         "live_slice_bytes": rotation["live_slice_bytes"],
         "live_slice_lines": rotation["live_slice_lines"],
         "log_end_offset": rotation["log_end_offset"],
-    }
-
-
-def compact_archived_task_events(*, dry_run: bool = True) -> dict[str, Any]:
-    """Rewrite events.jsonl without rows already copied into archive slices.
-
-    Superseded by event-log rotation (C6a): once the log has rotated into sealed
-    slices, those slices are immutable and offset-load-bearing — rewriting one
-    would shift every later logical offset and invalidate live watermarks, and on
-    Windows a concurrent slice-spanning reader holds the file open. Rotation
-    already bounds the live log (compaction's goal), so this becomes a typed
-    no-op when any rotation slice exists. When the log is still a single live file
-    (pristine / legacy), it compacts that file exactly as before.
-    """
-
-    path = paths.events_path()
-    before = event_log_health()
-    archive = _archived_event_slices()
-    task_ids = sorted(archive["task_ids"])
-    if event_rotation.slice_count() > 1:
-        return {
-            "dry_run": bool(dry_run),
-            "eligible_task_ids": task_ids,
-            "removed_event_count": 0,
-            "removed_bytes": 0,
-            "before": before,
-            "after": before,
-            "watermark_reset": False,
-            "skipped_reason": "event_log_rotation_active",
-        }
-    if not path.exists() or not task_ids:
-        return {
-            "dry_run": bool(dry_run),
-            "eligible_task_ids": task_ids,
-            "removed_event_count": 0,
-            "removed_bytes": 0,
-            "before": before,
-            "after": before,
-            "watermark_reset": False,
-        }
-
-    archived_lines: Counter[str] = archive["line_counts"]
-    retained: list[str] = []
-    removed_count = 0
-    removed_bytes = 0
-    with events_lock():
-        with open(path, encoding="utf-8") as handle:
-            for line in handle:
-                normalized = line if line.endswith("\n") else f"{line}\n"
-                if _line_is_compacted_event(normalized, archived_lines, archive["task_ids"]):
-                    removed_count += 1
-                    removed_bytes += len(normalized.encode("utf-8"))
-                    continue
-                retained.append(normalized)
-        if not dry_run and removed_count:
-            tmp = path.with_suffix(".jsonl.compact_tmp")
-            with open(tmp, "w", encoding="utf-8", newline="\n") as handle:
-                handle.writelines(retained)
-            tmp.replace(path)
-
-    after = event_log_health() if not dry_run and removed_count else before
-    return {
-        "dry_run": bool(dry_run),
-        "eligible_task_ids": task_ids,
-        "removed_event_count": removed_count,
-        "removed_bytes": removed_bytes,
-        "before": before,
-        "after": after,
-        "watermark_reset": bool(not dry_run and removed_count),
     }
 
 
@@ -594,10 +483,10 @@ def _type_json_tokens(types: Collection[str] | None) -> tuple[str, ...] | None:
     )
 
 
-def _safe_event_task_filename(task_id: str) -> str:
-    text = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(task_id).strip())
-    return text[:80] or "task"
-
+# S54 also took ``_safe_event_task_filename`` and ``_line_is_compacted_event``
+# with the two archivers above -- each was reachable only from them. A private
+# helper outliving its only caller is the residue S25 named when it retired
+# ``_safe_int`` with the formatter arm that used it.
 
 def _archived_event_slices() -> dict[str, Any]:
     archive_root = paths.deleted_archive_dir()
@@ -641,19 +530,6 @@ def _archived_event_slices() -> dict[str, Any]:
                 }
             )
     return {"line_counts": line_counts, "task_ids": task_ids, "slices": slices, "row_count": row_count}
-
-
-def _line_is_compacted_event(line: str, archived_lines: Counter[str], archived_task_ids: set[str]) -> bool:
-    if archived_lines[line] <= 0:
-        return False
-    try:
-        event = from_jsonable(Event, json.loads(line))
-    except Exception:
-        return False
-    if event.task_id not in archived_task_ids:
-        return False
-    archived_lines[line] -= 1
-    return True
 
 
 def event_with_operator_summary(evt: Event) -> Event:

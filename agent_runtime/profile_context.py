@@ -37,8 +37,8 @@ PROFILE_CONTEXT_NO_PROFILE_BINDING = "persona_profile_context_no_profile_binding
 #: remaining path to an unset variable, and it is now named.
 PROFILE_CONTEXT_RUNTIME_ROOT_UNRESOLVED = "persona_profile_context_runtime_root_unresolved"
 
-MCP_SERVER_PERSONA_OWNERS = {"launcher_qa": "qa"}
-
+# S54 took ``MCP_SERVER_PERSONA_OWNERS`` with ``mcp_owner_profile_name``, its
+# only reader.
 
 @dataclass(frozen=True, slots=True)
 class ProfileContextRow:
@@ -74,11 +74,9 @@ _PROFILE_CONTEXT_ROWS: ContextVar[tuple[ProfileContextRow, ...]] = ContextVar(
 )
 
 
-def current_profile_context_rows() -> tuple[ProfileContextRow, ...]:
-    """The typed rows this run's :func:`persona_profile_context` emitted."""
-
-    return _PROFILE_CONTEXT_ROWS.get()
-
+# S54 removed ``current_profile_context_rows`` and ``mcp_owner_profile_name``.
+# The typed rows are still BUILT and exported on the resolution path; these two
+# were read-back accessors with no production consumer.
 
 def _resolved_runtime_root() -> Path | None:
     """The configured runtime root, via the ONE canonical ladder. Never raises.
@@ -160,13 +158,6 @@ def persona_bound_profile_name(persona_id: str | None) -> str:
         except (OSError, StopIteration, ValueError):
             logger.debug("Persona profile binding unavailable for %s", resolved_id, exc_info=True)
     return active_profile_name()
-
-
-def mcp_owner_profile_name(mcp_server: str) -> str:
-    """Resolve an MCP server's persisted owner profile, not its caller's."""
-
-    owner_persona_id = MCP_SERVER_PERSONA_OWNERS.get(str(mcp_server or "").strip())
-    return persona_bound_profile_name(owner_persona_id)
 
 
 def resolve_persona_profile(persona) -> PersonaProfileBinding:

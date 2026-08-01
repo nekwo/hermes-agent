@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import os
 from pathlib import Path
 import time
@@ -55,11 +54,8 @@ def _file_lock(path: Path, *, timeout_seconds: float | None = None) -> Iterator[
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
-@contextlib.contextmanager
-def tick_lock() -> Iterator[None]:
-    with _file_lock(paths.lock_dir() / "tick.lock"):
-        yield
-
+# S54 removed ``tick_lock``: the ticker it guarded went with the mission lane.
+# ``task_lock`` stays -- it still has callers.
 
 @contextlib.contextmanager
 def task_lock(task_id: str) -> Iterator[None]:

@@ -198,17 +198,9 @@ def incidents_dir() -> Path:
     return store_root() / "incidents"
 
 
-def stagec_artifacts_dir() -> Path:
-    """Stage C's own artifact drop — deliberately NOT under ``proofs/``.
-
-    Stage C visual proof is KEEP; the ``proofs/`` store is REMOVE (mission-lane
-    removal, S6/S9) and is already quarantined out of the live runtime root. Stage C
-    side artifacts (marionette rebuild stdout/stderr logs) therefore land here, in a
-    directory whose lifetime matches Stage C's rather than the retired proof store's.
-    """
-
-    return store_root() / "stagec_artifacts"
-
+# S54 removed ``stagec_artifacts_dir``. S43 KEPT it (its ``_task_dir`` leaf went
+# then); by S54 the directory helper itself had no production reader. See the
+# inverted S43/S23 pins.
 
 def events_path() -> Path:
     """The pristine/base live event-log file.

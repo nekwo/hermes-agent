@@ -9,7 +9,6 @@ from agent_runtime.prompt_observability import (
     _layer_text_size,
     _mission_chat_identity_prompt_chars,
     _mission_chat_operative_rules_chars,
-    _mission_chat_template_prompt_chars,
     _set_row_prompt_contribution,
     _workspace_agents_prompt_chars,
     attach_prompt_observability_turn_results,
@@ -685,7 +684,6 @@ def test_persona_envelope_layers_carry_separate_estimates():
     assert layers["runtime_identity"]["token_estimate"] == identity_chars // 4
     assert layers["operator_channel_rules"]["chars"] == rules_chars
     assert layers["operator_channel_rules"]["token_estimate"] == rules_chars // 4
-    assert _mission_chat_template_prompt_chars(persona) == identity_chars + rules_chars
 
 
 def test_persona_section_reconciles_identity_rules_and_soul_no_overlap():
@@ -706,8 +704,7 @@ def test_persona_section_reconciles_identity_rules_and_soul_no_overlap():
     )
     identity = PR._mission_chat_identity_prompt(persona)
     rules = PR._mission_chat_operative_rules()
-    template_chars = _mission_chat_template_prompt_chars(persona)
-    assert template_chars == len(identity) + len(rules)
+    template_chars = len(identity) + len(rules)
 
     # With a soul overlay pasted, the surface message == template + soul + the
     # two joiners (identity . soul . rules). No memory in this lane's surface

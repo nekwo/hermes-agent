@@ -265,12 +265,8 @@ def build_checkpoint(
     return envelope
 
 
-def discover_classes() -> list[str]:
-    """Entity classes whose store directory exists on the runtime root, in
-    registry order. The envelope lists what it FOUND, never a closed set."""
-
-    return [entity.name for entity in ENTITY_CLASSES if _class_dir(entity) is not None]
-
+# S54 removed ``discover_classes``. ``ENTITY_CLASSES`` / ``ENTITY_CLASS_NAMES``
+# are the live registry surface; this name-lister had no production reader.
 
 def class_manifest(*, event_log: EventLog | None = None) -> dict[str, Any]:
     """Cheap per-class census for ``harness checkpoint classes``: discovered

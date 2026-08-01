@@ -16,9 +16,9 @@ import os
 from agent_runtime import paths
 from agent_runtime.checkpoint import (
     CHECKPOINT_VERSION,
+    ENTITY_CLASS_NAMES,
     build_checkpoint,
     class_manifest,
-    discover_classes,
 )
 from agent_runtime.events import EventLog
 from agent_runtime.flow_graph import ingest_flow_graph
@@ -64,7 +64,7 @@ def test_checkpoint_bundles_actors_keyed_by_id():
     # counts mirror the bundled rows; discovery lists what was found.
     assert checkpoint["counts"]["persona_instances"] == 2
     for name in ("persona_instances", "flow_graphs"):
-        assert name in discover_classes()
+        assert name in ENTITY_CLASS_NAMES
     assert checkpoint["bytes_estimate"] > 0
 
 

@@ -263,12 +263,9 @@ def latest_packet(task_id: str, packet_type: str, *, event_log: EventLog | None 
     return None
 
 
-def latest_packets_for_task(task_id: str, *, event_log: EventLog | None = None, stage_id: str | None = None) -> dict[str, dict[str, Any]]:
-    return {
-        packet_type: packet
-        for packet_type in sorted(PACKET_TYPES)
-        if (packet := latest_packet(task_id, packet_type, event_log=event_log, stage_id=stage_id)) is not None
-    }
+# S54 removed ``latest_packets_for_task``. S36/S37 retired the packet emit API;
+# this was the last reader-side accessor over what nothing writes.
+
 def content_hash(body: dict[str, Any]) -> str:
     text = json.dumps(to_jsonable(body), sort_keys=True, separators=(",", ":"))
     return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()

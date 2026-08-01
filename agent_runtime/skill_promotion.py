@@ -744,20 +744,6 @@ def list_inbox_packages(realm_token: str | None = None) -> list[dict]:
     return rows
 
 
-def promotion_provenance(skill: str) -> dict | None:
-    """Return the recorded provenance sidecar for ``skill``, or ``None``.
+# S54 removed ``promotion_provenance``: a provenance read-back accessor whose
+# only callers were its own tests.
 
-    Returns ``None`` for an invalid slug (never reads outside ``.provenance``)
-    and for a skill that has never been promoted.
-    """
-
-    if _validate_slug(str(skill or "").strip()) is not None:
-        return None
-    path = _provenance_path(str(skill).strip())
-    if not path.is_file():
-        return None
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    return data if isinstance(data, dict) else None

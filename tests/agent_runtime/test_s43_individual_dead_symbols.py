@@ -135,7 +135,11 @@ RETIRED_WHOLE_MODULES = {
 KEPT = {
     "agent_runtime.board_models": ("default_board_id",),
     "agent_runtime.cli_format": ("emit_json",),
-    "agent_runtime.paths": ("packet_artifacts_dir", "stagec_artifacts_dir"),
+    # S54 INVERSION: ``stagec_artifacts_dir`` moved out of this KEEP set. It was
+    # correctly alive at S43 (only its ``_task_dir`` leaf was dead); by S54 the
+    # helper itself had no reader and was cut. ``packet_artifacts_dir`` stays --
+    # ``checkpoint`` still registers it as an EntityClass.
+    "agent_runtime.paths": ("packet_artifacts_dir",),
     "agent_runtime.redaction": ("BasicRedactionScanner", "RedactionStatus"),
     "agent_runtime.repo_context": (
         "isolated_repo_context_for_run",

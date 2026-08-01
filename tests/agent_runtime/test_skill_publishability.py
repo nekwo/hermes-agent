@@ -386,8 +386,6 @@ def test_dry_run_reports_the_refusal_not_a_promise_to_promote():
 def test_an_unowned_profile_package_still_promotes_through_the_same_door():
     """The guard must not become a wall: an operator's own package promotes
     exactly as before, with provenance recorded."""
-    from agent_runtime.skill_promotion import promotion_provenance
-
     pkg = _write_package(_profile_skills(), "my-own-skill")
     plan = classify_promotion("my-own-skill", pkg)
     result = execute_promotion(plan, source={"kind": "profile", "profile": "default"})
@@ -395,8 +393,14 @@ def test_an_unowned_profile_package_still_promotes_through_the_same_door():
     assert result.action == "promoted"
     assert result.reason_code is None
     assert (get_shared_skills_dir() / "my-own-skill" / "SKILL.md").is_file()
-    provenance = promotion_provenance("my-own-skill")
-    assert provenance is not None and provenance["source"]["kind"] == "profile"
+    # S54 deleted ``promotion_provenance`` (a callerless read-back accessor).
+    # What matters here is what the PRODUCTION WRITER recorded, so the record is
+    # read off disk directly.
+    import json
+
+    record = get_shared_skills_dir() / ".provenance" / "my-own-skill.json"
+    provenance = json.loads(record.read_text(encoding="utf-8"))
+    assert provenance["source"]["kind"] == "profile"
 
 
 # ── 5. CLI: --dry-run leaves the store byte-identical ──────────────────────

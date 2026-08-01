@@ -53,8 +53,13 @@ def test_the_lookalike_path_keep_set_survives():
     assert callable(paths.incident_path)
     # worker_sessions.py reads the sandbox ROOT; only the per-recipe leaves went.
     assert callable(paths.proof_sandbox_root)
-    # Stage C keeps its own artifact drop, deliberately not under proofs/.
-    assert callable(paths.stagec_artifacts_dir)
+    # INVERTED at S54 (2026-08-01). S23 kept ``stagec_artifacts_dir`` here and
+    # S43 kept it again while cutting its ``_task_dir`` leaf. By S54 the
+    # directory helper itself had no reader anywhere -- the "deliberately not
+    # under proofs/" note described WHERE it pointed, never that anything still
+    # called it. Inverted rather than deleted so the two prior keeps stay on the
+    # record. Owned by tests/agent_runtime/test_s54_individual_dead_symbols.py.
+    assert not hasattr(paths, "stagec_artifacts_dir")
 
 
 def test_queued_skills_directory_has_exactly_one_owner():

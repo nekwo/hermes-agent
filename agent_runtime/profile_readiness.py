@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 from hermes_cli.auth import AuthError
@@ -472,14 +471,10 @@ def _missing_skill_ids(skill_resolutions: list[dict[str, Any]]) -> list[str]:
     return [row["skill_id"] for row in skill_resolutions if row["status"] == "missing"]
 
 
-def _missing_skill_names(
-    skill_names: list[str], *, skill_root: Path | None = None
-) -> list[str]:
-    """Compatibility wrapper backed by the canonical effective resolver."""
-
-    del skill_root
-    return _missing_skill_ids(_resolve_skill_names(skill_names))
-
+# S54 removed ``_missing_skill_names``, a compatibility wrapper over
+# ``_missing_skill_ids(_resolve_skill_names(...))``. Re-verified dead AFTER item
+# 10 (d89059dd7) landed in this file: that commit did not touch it, and the
+# canonical resolver pair it wrapped is what readiness actually calls.
 
 def _effective_required_mcp_servers(persona, *, task=None, stage=None) -> list[str]:
     effective = list(getattr(persona, "required_mcp_servers", []) or [])

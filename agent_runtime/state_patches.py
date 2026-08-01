@@ -391,26 +391,6 @@ def emit_incident_remove(
     )
 
 
-def emit_task_refresh(
-    event_log: EventLog,
-    task_id: str,
-    *,
-    persona_id: str | None = None,
-    config: AgentRuntimeConfig | None = None,
-) -> bool:
-    """Emit a task ``refresh`` — a goal row (~80 KB, derived actor/stage labels)
-    cannot fold as a sub-4 KB patch, so a transition rides the accounted refresh
-    (its batch falls back to a full core; see :mod:`patch_coverage`). Dark unless
-    the flag is on."""
+# S54 removed ``emit_task_refresh``: the task-refresh patch op, orphaned since
+# the ``Task`` record went at S8.
 
-    if not delta_patches_enabled(config):
-        return False
-    return emit_state_patch(
-        event_log,
-        entity="task",
-        entity_id=task_id,
-        op=PATCH_OP_REFRESH,
-        task_id=task_id,
-        persona_id=persona_id,
-        config=config,
-    )

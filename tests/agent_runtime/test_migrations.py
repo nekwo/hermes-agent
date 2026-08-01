@@ -97,8 +97,16 @@ def test_h6_h8_h9_envelope_names_real_enforcement_controls():
     assert summary["production_envelope"]["production_ready"] is True
     assert items["H6"]["status"] == "implemented"
     assert not items["H6"]["blockers"]
-    assert any("worker.takeover" in control for control in items["H6"]["controls"])
-    assert any("approve_destructive" in control for control in items["H6"]["controls"])
+    # INVERTED at S49 (2026-08-01). These two lines asserted the H6 item still
+    # ADVERTISED the audited worker.takeover workflow and its approve_destructive
+    # gate. Both claims described `operator_control.py`, which was deleted whole
+    # for want of a production caller -- so an envelope that still named them
+    # would be telling an operator about a control they cannot invoke. The pin is
+    # inverted, not dropped: H6 must keep its REAL controls and must not regrow
+    # the retired ones.
+    assert not any("takeover" in control for control in items["H6"]["controls"])
+    assert not any("approve_destructive" in control for control in items["H6"]["controls"])
+    assert any("worker.pause" in control for control in items["H6"]["controls"])
     assert items["H8"]["status"] == "implemented"
     assert any("heartbeat TTL" in control for control in items["H8"]["controls"])
     assert any("terminal-idempotent" in control for control in items["H8"]["controls"])

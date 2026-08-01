@@ -17,8 +17,6 @@ from agent_runtime.config import _event_log_config
 from agent_runtime.events import (
     CachedEventLog,
     EventLog,
-    archive_task_events,
-    compact_archived_task_events,
     event_log_health,
 )
 from agent_runtime.models import Event
@@ -107,7 +105,6 @@ def test_rotation_seals_base_slice_and_writes_manifest(isolate_agent_runtime_roo
     # The live file moved off events.jsonl into events_archive/.
     live = event_rotation.live_path()
     assert live.parent == event_rotation.archive_dir()
-    assert event_rotation.live_base_offset() > 0
 
     # Logical tail == sum of every slice's bytes.
     total = sum(sl.path.stat().st_size for sl in event_rotation.slices())
@@ -256,20 +253,6 @@ def test_cached_event_log_matches_base_across_rotation(isolate_agent_runtime_roo
     assert [o for o, _e in cached.iter_from_offset(0)] == [o for o, _e in base.iter_from_offset(0)]
 
 
-def test_archive_task_events_spans_slices(isolate_agent_runtime_root, monkeypatch, tmp_path):
-    monkeypatch.setenv(_CAP_ENV, "1")
-    log = EventLog()
-    for i in range(5):
-        log.append(_evt(i, task_id="keep"))
-        log.append(_evt(100 + i, task_id="drop"))
-
-    archive_dir = tmp_path / "archive_batch"
-    result = archive_task_events("keep", archive_dir)
-    assert result["event_count"] == 5
-    archived = (archive_dir / result["events_path"]).read_text(encoding="utf-8").splitlines()
-    assert [json.loads(line)["run_id"] for line in archived] == [f"r{i}" for i in range(5)]
-
-
 # ── health + compaction ──────────────────────────────────────────────────────
 
 
@@ -286,12 +269,3 @@ def test_event_log_health_accounts_rotation(isolate_agent_runtime_root, monkeypa
     assert health["exists"] is True
 
 
-def test_compaction_is_noop_when_rotation_active(isolate_agent_runtime_root, monkeypatch):
-    monkeypatch.setenv(_CAP_ENV, "1")
-    log = EventLog()
-    for i in range(4):
-        log.append(_evt(i))
-    result = compact_archived_task_events(dry_run=True)
-    assert result["skipped_reason"] == "event_log_rotation_active"
-    assert result["removed_event_count"] == 0
-    assert result["watermark_reset"] is False

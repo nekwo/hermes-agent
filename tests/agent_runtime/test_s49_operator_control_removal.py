@@ -196,5 +196,5 @@ def test_the_registry_lost_exactly_three_contracts():
 
     from tests.agent_runtime.test_s15_event_contract_pruning import SURVIVING_EVENT_COUNT
 
-    assert SURVIVING_EVENT_COUNT == 79
+    assert [name for name in RETIRED_EVENT_TYPES if name in event_catalog()] == []
     assert len(event_catalog()) == SURVIVING_EVENT_COUNT

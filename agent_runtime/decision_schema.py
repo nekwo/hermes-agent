@@ -75,16 +75,8 @@ def parse_structured_decision(text: str) -> AgentDecision:
     raise DecisionPayloadInvalid("could not parse AgentDecision JSON: no JSON object found")
 
 
-def to_decision_jsonable(decision: AgentDecision) -> dict[str, Any]:
-    return {
-        "type": decision.type.value,
-        "summary": decision.summary,
-        "rationale": decision.rationale,
-        "payload": decision.payload,
-        "requires_approval": decision.requires_approval,
-        "schema_version": decision.schema_version,
-    }
-
+# S54 removed ``to_decision_jsonable``: the serialise half of a round-trip whose
+# only remaining exercise was the round-trip test itself.
 
 def validate_decision_for_role(decision: AgentDecision, role: AgentRole | str) -> None:
     del decision, role

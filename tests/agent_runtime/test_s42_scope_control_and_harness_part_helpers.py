@@ -111,7 +111,10 @@ def test_the_live_neighbours_of_each_removed_part_helper_survive():
     for name in (
         "_cmd_status",
         "_cmd_worktree_reap",
-        "_archived_task_summary",
+        # S54 INVERSION: ``_archived_task_summary`` left this live-neighbour
+        # list. S42 kept it as a surviving formatter beside the helpers it cut;
+        # by S54 it had no caller of its own and went. Asserted absent below.
         "_cmd_board_list",
     ):
         assert hasattr(harness, name), name
+    assert not hasattr(harness, "_archived_task_summary")

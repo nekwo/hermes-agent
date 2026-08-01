@@ -59,12 +59,6 @@ def test_rebalance_is_strictly_increasing_and_unique():
     assert len(set(keys)) == 500
 
 
-def test_needs_rebalance_detects_long_and_dupes():
-    assert board_order.needs_rebalance(["a" * (board_order.MAX_KEY_LENGTH + 1)])
-    assert board_order.needs_rebalance(["m", "m"])
-    assert not board_order.needs_rebalance(["a", "m", "z"])
-
-
 # ── default-board determinism ─────────────────────────────────────────────
 
 
