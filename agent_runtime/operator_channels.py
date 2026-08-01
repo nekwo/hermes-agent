@@ -85,7 +85,6 @@ def operator_channel_summary(
     persona_instances: Iterable[PersonaInstance],
     persona_chat_history: list[dict[str, Any]],
     persona_chat_trace: list[dict[str, Any]],
-    tasks: Iterable[Any] | None = None,
     run_summaries: list[dict[str, Any]] | None = None,
     accountant: Any = None,
     intentionally_omitted_history_session_ids: Iterable[str] | None = None,
@@ -100,9 +99,15 @@ def operator_channel_summary(
     ``run_summaries`` (the snapshot's already-built ``runs`` rows) feeds the
     conversation's goal-turn flow: per-run thinking/decision messages. Optional
     so the status-page caller keeps its cheaper v1 shape.
+
+    S47 removed the ``tasks`` parameter and the ``_TaskLookup`` it built. Both
+    production callers (``snapshot.build_snapshot`` and ``status.build_status``)
+    passed a ``[]`` literal, so the resolved task was permanently ``None`` and
+    everything downstream of it — the synthetic goal-input message, the title
+    and run-id fallbacks, the ``goal_id`` / ``task_id`` / ``updated_at``
+    fallbacks — was unreachable, not optional.
     """
 
-    task_lookup = _TaskLookup(tasks or [])
     run_lookup = _RunLookup(run_summaries or [])
     omitted_history_session_ids = {
         session_id
@@ -173,7 +178,6 @@ def operator_channel_summary(
         channel
         for channel in (
             builder.build(
-                task_lookup=task_lookup,
                 run_lookup=run_lookup,
                 accountant=accountant,
                 display_names=display_names,
@@ -239,7 +243,6 @@ class _OperatorChannelBuilder:
     def build(
         self,
         *,
-        task_lookup: "_TaskLookup",
         run_lookup: "_RunLookup | None" = None,
         accountant: Any = None,
         display_names: dict[str, str] | None = None,
@@ -312,13 +315,12 @@ class _OperatorChannelBuilder:
             getattr(canonical, "goal_id", None) if canonical is not None else None,
             history.get("goal_id") if history else None,
         )
-        task = task_lookup.get(task_id=task_id, goal_id=goal_id)
-        # Instances are sometimes keyed on the goal id instead of the task id
-        # (duplicate goal-keyed lifecycle rows); the resolved task's real id is
-        # the one runs are recorded under.
-        run_task_id = safe_assignment_text(getattr(task, "id", None), limit=160) or task_id
+        # S47: runs key on the channel's own ``task_id``. The resolved-task
+        # indirection that used to sit here (goal-keyed lifecycle rows resolving
+        # to their real task id) could never fire — its lookup was built from an
+        # always-empty seed.
         channel_runs = (
-            run_lookup.runs_for(task_id=run_task_id, persona_id=persona_id) if run_lookup is not None else []
+            run_lookup.runs_for(task_id=task_id, persona_id=persona_id) if run_lookup is not None else []
         )
         conversation = _conversation_contract(
             channel_id=channel_id,
@@ -330,12 +332,10 @@ class _OperatorChannelBuilder:
             title=_first_text(
                 history.get("title") if history else None,
                 getattr(canonical, "current_chat_goal", None) if canonical is not None else None,
-                getattr(task, "title", None) if task is not None else None,
                 "Mission run",
             )
             or "Mission run",
             state=safe_assignment_token(getattr(canonical, "state", None)) if canonical is not None else "unknown",
-            task=task,
             history=history,
             trace=trace,
             runs=channel_runs,
@@ -578,27 +578,10 @@ def _entry_runtime_ids(entry: dict[str, Any]) -> set[str]:
     return ids
 
 
-class _TaskLookup:
-    def __init__(self, tasks: Iterable[Any]):
-        self.by_task_id: dict[str, Any] = {}
-        self.by_goal_id: dict[str, Any] = {}
-        for task in tasks:
-            task_id = safe_assignment_text(getattr(task, "id", None), limit=160)
-            goal_id = safe_assignment_text(getattr(task, "goal_id", None), limit=160)
-            if task_id:
-                self.by_task_id[task_id] = task
-            if goal_id:
-                self.by_goal_id[goal_id] = task
-
-    def get(self, *, task_id: str | None, goal_id: str | None) -> Any | None:
-        if task_id and task_id in self.by_task_id:
-            return self.by_task_id[task_id]
-        if goal_id and goal_id in self.by_goal_id:
-            return self.by_goal_id[goal_id]
-        # Goal-keyed lifecycle rows store the goal id in current_task_id.
-        if task_id and task_id in self.by_goal_id:
-            return self.by_goal_id[task_id]
-        return None
+# S47 removed ``_TaskLookup``. It indexed the ``tasks`` argument by task id and
+# goal id so a channel could resolve its own goal row; both production callers
+# passed ``[]``, so every lookup returned ``None``. ``_RunLookup`` below is the
+# live sibling — it indexes rows the snapshot really builds.
 
 
 class _RunLookup:
@@ -645,23 +628,15 @@ def _conversation_contract(
     goal_id: str | None,
     title: str,
     state: str | None,
-    task: Any | None,
     history: dict[str, Any] | None,
     trace: dict[str, Any] | None,
     runs: list[dict[str, Any]] | None = None,
     accountant: Any = None,
     display_names: dict[str, str] | None = None,
 ) -> dict[str, Any]:
+    # S47: the leading synthetic "Goal:" input message went with the ``task``
+    # parameter — no caller could ever supply a task to mint it from.
     messages: list[dict[str, Any]] = []
-    if task is not None:
-        messages.append(
-            _conversation_goal_input(
-                task,
-                channel_id=channel_id,
-                persona_id=persona_id,
-                persona_instance_id=persona_instance_id,
-            )
-        )
     for index, row in enumerate(list((history or {}).get("messages") or [])):
         if isinstance(row, dict):
             message = _conversation_history_message(
@@ -716,8 +691,7 @@ def _conversation_contract(
     # projected. A brand-new chat with no sources at all is simply "empty" —
     # it must NOT surface an intervention row in Mission Control.
     had_sources = bool(
-        task is not None
-        or (history or {}).get("messages")
+        (history or {}).get("messages")
         or (trace or {}).get("entries")
         or runs
     )
@@ -733,8 +707,8 @@ def _conversation_contract(
     return {
         "schema_version": OPERATOR_CONVERSATION_SCHEMA_VERSION,
         "thread_id": channel_id,
-        "goal_id": goal_id or safe_assignment_text(getattr(task, "goal_id", None), limit=160),
-        "task_id": task_id or safe_assignment_text(getattr(task, "id", None), limit=160),
+        "goal_id": goal_id,
+        "task_id": task_id,
         "owner_persona_id": persona_id,
         "persona_instance_id": persona_instance_id,
         "session_id": session_id,
@@ -742,7 +716,7 @@ def _conversation_contract(
         "parent_thread_id": None if persona_id == "neko_supervisor" else (f"task:{task_id}:neko_supervisor" if task_id else None),
         "title": title,
         "state": state or "unknown",
-        "updated_at": _latest_message_timestamp(messages) or (history or {}).get("updated_at") or _task_time(task),
+        "updated_at": _latest_message_timestamp(messages) or (history or {}).get("updated_at"),
         "status": status,
         "incomplete_reason": reason,
         "messages": messages,
@@ -811,45 +785,8 @@ def _settle_terminal_tool_calls(
             tool["settled_reason"] = reason
 
 
-def _conversation_goal_input(
-    task: Any,
-    *,
-    channel_id: str,
-    persona_id: str,
-    persona_instance_id: str | None,
-) -> dict[str, Any]:
-    parts = [
-        f"Goal: {_safe_conversation_text(getattr(task, 'title', None), limit=500) or 'Untitled goal'}",
-    ]
-    objective = _safe_conversation_text(getattr(task, "description", None), limit=4000)
-    if objective:
-        parts.append(f"Objective: {objective}")
-    acceptance = [
-        item
-        for item in (
-            _safe_conversation_text(value, limit=500)
-            for value in (getattr(task, "acceptance_criteria", None) or [])
-        )
-        if item
-    ]
-    if acceptance:
-        parts.append("Acceptance:\n" + "\n".join(f"- {item}" for item in acceptance))
-    return {
-        "id": f"{channel_id}:goal_input:{getattr(task, 'id', 'task')}",
-        "seq": 0,
-        "timestamp": _task_time(task),
-        "actor_persona_id": "operator",
-        "actor_instance_id": None,
-        "target_persona_id": persona_id,
-        "target_persona_instance_id": persona_instance_id,
-        "role": "operator",
-        "kind": "goal_input",
-        "status": "delivered",
-        "display_title": "",
-        "display_text": "\n\n".join(parts),
-        "redaction_status": "safe",
-        "refs": {"task_id": getattr(task, "id", None), "goal_id": getattr(task, "goal_id", None)},
-    }
+# S47 removed ``_conversation_goal_input`` (the synthetic "Goal:" operator
+# message) with the ``task`` parameter that was its only input.
 
 
 def _conversation_history_message(
@@ -1644,10 +1581,8 @@ def _latest_message_timestamp(messages: list[dict[str, Any]]) -> Any:
     return dated[-1] if dated else None
 
 
-def _task_time(task: Any | None) -> Any:
-    if task is None:
-        return None
-    return getattr(task, "created_at", None) or getattr(task, "updated_at", None)
+# S47 removed ``_task_time`` — the conversation's ``updated_at`` fallback of
+# last resort, reachable only through a task no caller could supply.
 
 
 def _channel_key_for_instance(instance: PersonaInstance) -> str:

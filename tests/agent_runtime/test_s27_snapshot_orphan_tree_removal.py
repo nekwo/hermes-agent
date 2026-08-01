@@ -253,17 +253,30 @@ def test_the_live_frame_is_unchanged(isolate_agent_runtime_root):
     section the Launcher reads."""
 
     frame = snapshot.build_snapshot()
-    assert frame["parity"]["contract_version"] == 45
+    assert frame["parity"]["contract_version"] == 46
     for section in ("boards", "workspaces", "realms", "agents"):
         assert section in frame, f"{section} is a KEEP frame and must survive"
     for section in ("goals", "archived_tasks", "proofs", "incidents", "runs", "stage_verification"):
         assert section not in frame, f"{section} must not be a top-level frame section"
 
 
-def test_the_workspace_goals_wire_field_survives(isolate_agent_runtime_root):
-    """Contract field, not a mission row: ``_workspace_summary`` publishes
-    ``goals`` as a COUNT the Launcher reads. It is one bare-word grep away from
-    the removed mission lane and must not go with it."""
+def test_the_workspace_goals_wire_field_is_gone_at_s47(isolate_agent_runtime_root):
+    """SUPERSEDED PIN, recorded rather than deleted. S27 protected
+    ``_workspace_summary``'s ``goals`` count as "a contract field the Launcher
+    reads", correctly refusing to cut it by resemblance to the removed mission
+    lane. S47 cut it on an operator ruling for the OTHER reason: the count read
+    an always-empty seed, so the Launcher was reading a permanent 0 — it
+    rendered it and gated workspace deletion on it. The field is a contract
+    move (45 -> 46), not a resemblance sweep.
 
-    source = inspect.getsource(snapshot._workspace_summary)
-    assert '"goals": len(goals)' in source
+    See ``tests/agent_runtime/test_s47_wire_constant_field_removal.py``."""
+
+    emitted = {
+        key.value
+        for node in ast.walk(ast.parse(inspect.getsource(snapshot._workspace_summary)))
+        if isinstance(node, ast.Dict)
+        for key in node.keys
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    }
+    assert "goals" not in emitted
+    assert "tasks" not in inspect.signature(snapshot._workspace_summary).parameters

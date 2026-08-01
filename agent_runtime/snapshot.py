@@ -342,16 +342,17 @@ def _build_snapshot_uncoalesced(
     # warnings); the observability consumer it also named went with S9.
     with _timed_section(_sections_ms, "events"):
         recent_events = event_log.tail(20)
-    # S29: ``tasks`` / ``workers`` are the two surviving seeds — both are still
-    # passed into live projections below (``_workspace_summary`` /
-    # ``snapshot_prompt_observability`` / ``operator_channel_summary`` and
-    # ``derive_from_workers``). Their eight look-alike siblings (``runs``,
-    # ``incidents``, ``proofs``, ``self_tests``, ``role_envelopes``,
-    # ``role_checklists``, ``repo_bundles``, ``runtime_instances``) fed the
-    # mission projections S9/S18/S27 removed and were assigned-never-read; so
-    # were ``execution_mode`` (the retired Mission Daemon's mode string) and
+    # S47: ``workers`` is the ONE surviving seed — it is still passed into a
+    # live projection (``derive_from_workers``). ``tasks`` sat beside it until
+    # S47: S29 kept it because three projections read it, but an always-empty
+    # list can only make a projection emit a constant, so the seed, the three
+    # ``tasks=`` parameters and ``workspaces[].goals`` went together (ledger
+    # item 5). The eight earlier look-alikes (``runs``, ``incidents``,
+    # ``proofs``, ``self_tests``, ``role_envelopes``, ``role_checklists``,
+    # ``repo_bundles``, ``runtime_instances``) fed the mission projections
+    # S9/S18/S27 removed and were assigned-never-read; so were
+    # ``execution_mode`` (the retired Mission Daemon's mode string) and
     # ``live_channel_task_ids``.
-    tasks = []
     workers = []
     cfg = load_agent_runtime_config()
     # Base-profile foundation: Mission Control shows the seeded store (base only). On a
@@ -425,7 +426,6 @@ def _build_snapshot_uncoalesced(
             personas=agents,
             persona_instances=persona_instances,
             session_db=session_db,
-            tasks=tasks,
             daemon=None,
             realm=active_realm_name,
             workspace=active_workspace_name,
@@ -467,7 +467,6 @@ def _build_snapshot_uncoalesced(
         "workspaces": [
             _workspace_summary(
                 item,
-                tasks=tasks,
                 persona_instances=topology_persona_instances,
                 active_id=workspace_store.active_id(),
             )
@@ -546,7 +545,6 @@ def _build_snapshot_uncoalesced(
             persona_instances=persona_instances,
             persona_chat_history=persona_chat_history_full,
             persona_chat_trace=data["persona_chat_trace"],
-            tasks=tasks,
             run_summaries=run_rows,
             accountant=conversation_accountant,
             intentionally_omitted_history_session_ids=omitted_history_session_ids,
@@ -665,7 +663,15 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         # tool-detail payloads behind a typed ``visibility_ref`` (fetched via
         # ``harness persona-instance detail``) and ``agent_hud_state`` is RETIRED;
         # 45 removes mission rows while retaining chat/runtime graph projections.
-        "contract_version": 45,
+        #
+        # 46 (S47, 2026-08-01): two emitted fields whose values no code path
+        # could move leave the frame — ``runtime_config.role_envelope`` (the
+        # config block S44's store-family cut left governing nothing, shipping
+        # ``enabled: true``) and ``workspaces[].goals`` (a count over an
+        # always-empty seed). Field removals, not section removals, but the
+        # S9/S10 rule is the same: anything that leaves the wire bumps, and the
+        # Launcher pin moves in the same wave.
+        "contract_version": 46,
         "generated_at": data.get("generated_at"),
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
         "redaction_observed": _redaction_observed(data),
@@ -1474,11 +1480,9 @@ def persona_instance_detail_for_id(entity_id: str, *, event_log=None) -> dict | 
 def _workspace_summary(
     workspace,
     *,
-    tasks,
     persona_instances=(),
     active_id: str | None = None,
 ) -> dict:
-    goals = [task for task in tasks if getattr(task, "workspace_id", None) == workspace.id]
     roster_agent_ids = list(workspace.agent_ids or [])
     live_scoped_agent_ids = exact_scoped_instance_ids(
         persona_instances,
@@ -1502,7 +1506,9 @@ def _workspace_summary(
         "live_scoped_agent_ids": live_scoped_agent_ids,
         "roster_agent_count": len(roster_agent_ids),
         "roster_agent_ids": roster_agent_ids,
-        "goals": len(goals),
+        # S47 removed ``"goals": len(goals)``. It counted an always-empty seed,
+        # so the wire published a permanent 0 that the Launcher rendered as a
+        # count and gated workspace deletion on (ledger item 5).
         "isolation": workspace.isolation,
         "max_concurrent_lanes": workspace.max_concurrent_lanes,
         "default_blueprint_id": workspace.default_blueprint_id,

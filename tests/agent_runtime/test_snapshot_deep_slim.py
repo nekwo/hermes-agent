@@ -32,7 +32,7 @@ from tests.agent_runtime.snapshot_bytes import snapshot_size_budget
 def test_goal_section_is_absent_from_the_frame(isolate_agent_runtime_root):
     snap = build_snapshot()
     assert "goals" not in snap
-    assert snap["parity"]["contract_version"] == 45
+    assert snap["parity"]["contract_version"] == 46
 
 
 def test_goal_detail_lane_is_removed_not_merely_empty(isolate_agent_runtime_root):
@@ -148,7 +148,7 @@ def test_chat_contexts_keeps_live_roster_row(isolate_agent_runtime_root):
         current_task_id=None,
         goal_id=None,
     )
-    section = po.snapshot_prompt_observability(personas=[persona], persona_instances=[live], tasks=[])
+    section = po.snapshot_prompt_observability(personas=[persona], persona_instances=[live])
     ids = {row.get("persona_instance_id") for row in section["chat_contexts"]}
     assert "personainst_live_keep" in ids, "a live roster instance's row must be kept"
     assert "personainst_departed_keep" not in ids, "a departed instance's row is evicted"

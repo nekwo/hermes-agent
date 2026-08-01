@@ -144,7 +144,6 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
             persona_instances=instances,
             persona_chat_history=data["persona_chat_history"],
             persona_chat_trace=data["persona_chat_trace"],
-            tasks=tasks,
         )
         completeness = {
             "persona_chat_history": history_accountant.summary(),

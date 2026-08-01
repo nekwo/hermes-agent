@@ -49,19 +49,12 @@ class NormalWorkerFlowConfig:
     expose_worker_actions_in_contract_dump: bool = True
 
 
-@dataclass(slots=True)
-class RoleEnvelopeConfig:
-    enabled: bool = False
-    prefer_same_session: bool = True
-    checklist_hud_enabled: bool = True
-    self_approval_enabled: bool = True
-    qa_final_approval_required: bool = True
-    max_same_session_continuations: int = 8
-    max_no_progress_repeats: int = 1
-    max_fix_envelopes_per_stage: int = 2
-    max_checklist_items_rendered: int = 8
-    max_foreign_checklist_summaries: int = 3
-    enable_legacy_stage_projection: bool = True
+# S47 removed ``RoleEnvelopeConfig`` (11 fields) and ``RuntimeConfig.
+# role_envelope``. S44 deleted the ``role_envelopes`` / ``role_checklists``
+# store family the block governed; the config lane outlived it as a knob no
+# code reads that still shipped on the snapshot wire — reading ``enabled:
+# true`` on the live root. See
+# ``tests/agent_runtime/test_s47_wire_constant_field_removal.py``.
 
 
 @dataclass(slots=True)
@@ -341,7 +334,6 @@ class RuntimeConfig:
     continuous_role_sessions: ContinuousRoleSessionConfig = field(default_factory=ContinuousRoleSessionConfig)
     enterprise_worker_sessions: EnterpriseWorkerSessionsConfig = field(default_factory=EnterpriseWorkerSessionsConfig)
     normal_worker_flow: NormalWorkerFlowConfig = field(default_factory=NormalWorkerFlowConfig)
-    role_envelope: RoleEnvelopeConfig = field(default_factory=RoleEnvelopeConfig)
     repo_bundle_routing: RepoBundleRoutingConfig = field(default_factory=RepoBundleRoutingConfig)
     simplified_agent_contract: SimplifiedAgentContractConfig = field(default_factory=SimplifiedAgentContractConfig)
     read_model: ReadModelConfig = field(default_factory=ReadModelConfig)

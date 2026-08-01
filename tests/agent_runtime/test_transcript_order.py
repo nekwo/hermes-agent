@@ -518,7 +518,6 @@ def test_conversation_contract_orders_tool_call_before_its_reply():
         goal_id=None,
         title="Dev chat",
         state="open",
-        task=None,
         history=_history_for_conversation(),
         trace=_trace_for_conversation(),
         runs=[],
@@ -548,8 +547,7 @@ def test_conversation_contract_order_is_stable_under_source_shuffle():
             goal_id=None,
             title="Dev chat",
             state="open",
-            task=None,
-            history=history,
+                history=history,
             trace=_trace_for_conversation(),
             runs=[],
         )

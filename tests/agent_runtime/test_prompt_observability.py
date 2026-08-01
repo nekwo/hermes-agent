@@ -453,7 +453,6 @@ def test_snapshot_omits_mission_hud_even_for_a_bound_task(monkeypatch):
     snapshot = snapshot_prompt_observability(
         personas=[persona],
         persona_instances=[instance],
-        tasks=[SimpleNamespace(id="task_live")],
     )
 
     contexts = snapshot["chat_contexts"]
@@ -470,7 +469,6 @@ def test_snapshot_omits_mission_hud_for_unbound_instance(monkeypatch):
     snapshot = snapshot_prompt_observability(
         personas=[persona],
         persona_instances=[instance],
-        tasks=[SimpleNamespace(id="some_other_task")],
     )
     assert "mission_hud" not in snapshot["chat_contexts"][0]
 
@@ -496,7 +494,6 @@ def test_snapshot_includes_situational_hud_for_instance(monkeypatch):
     snapshot = snapshot_prompt_observability(
         personas=[persona],
         persona_instances=[instance],
-        tasks=[],
         daemon=None,
         realm="default",
         workspace="default",
@@ -523,7 +520,7 @@ def test_snapshot_situational_hud_without_daemon_scope_still_carries_lane(monkey
         mode="configured",
     )
     snapshot = snapshot_prompt_observability(
-        personas=[persona], persona_instances=[instance], tasks=[]
+        personas=[persona], persona_instances=[instance]
     )
     situational = snapshot["chat_contexts"][0]["situational_hud"]
     # No daemon/scope threaded → those sub-blocks are absent, but the lane

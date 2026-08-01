@@ -12,7 +12,7 @@ from hermes_constants import get_config_path
 from .dispatch_session_policy import normalize_dispatch_session_policy
 from .personas import PROFILE_ROLE_SENTINEL, validate_toolsets
 from .redaction_mode import normalize_redaction_mode
-from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, EventLogConfig, McpAdmissionConfig, MissionChatConfig, NormalWorkerFlowConfig, PersonaChatConfig, ReadModelConfig, RepoBundleRoutingConfig, RoleEnvelopeConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig, TerminalEnvelopeConfig
+from .runtime_config import ContinuousRoleSessionConfig, CoordinatorPermissionConfig, EnterpriseWorkerSessionsConfig, EventLogConfig, McpAdmissionConfig, MissionChatConfig, NormalWorkerFlowConfig, PersonaChatConfig, ReadModelConfig, RepoBundleRoutingConfig, RuntimeConfig, SimplifiedAgentContractConfig, SupervisionConfig, SwarmConfig, TerminalEnvelopeConfig
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +111,6 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
     enterprise_worker_sessions = _enterprise_worker_sessions_config(raw.get("enterprise_worker_sessions") or {})
     continuous_role_sessions = _continuous_role_sessions_config(raw.get("continuous_role_sessions") or {})
     normal_worker_flow = _normal_worker_flow_config(raw.get("normal_worker_flow") or {})
-    role_envelope = _role_envelope_config(raw.get("role_envelope") or {})
     repo_bundle_routing = _repo_bundle_routing_config(raw.get("repo_bundle_routing") or {})
     simplified_agent_contract = _simplified_agent_contract_config(raw.get("simplified_agent_contract") or {})
     read_model = _read_model_config(raw.get("read_model") or {})
@@ -169,7 +168,6 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
         continuous_role_sessions=continuous_role_sessions,
         enterprise_worker_sessions=enterprise_worker_sessions,
         normal_worker_flow=normal_worker_flow,
-        role_envelope=role_envelope,
         repo_bundle_routing=repo_bundle_routing,
         simplified_agent_contract=simplified_agent_contract,
         read_model=read_model,
@@ -529,24 +527,6 @@ def _normal_worker_flow_config(raw: dict[str, Any]) -> NormalWorkerFlowConfig:
     )
 
 
-
-
-def _role_envelope_config(raw: dict[str, Any]) -> RoleEnvelopeConfig:
-    raw = raw if isinstance(raw, dict) else {}
-    defaults = RoleEnvelopeConfig()
-    return RoleEnvelopeConfig(
-        enabled=bool(raw.get("enabled", defaults.enabled)),
-        prefer_same_session=bool(raw.get("prefer_same_session", defaults.prefer_same_session)),
-        checklist_hud_enabled=bool(raw.get("checklist_hud_enabled", defaults.checklist_hud_enabled)),
-        self_approval_enabled=bool(raw.get("self_approval_enabled", defaults.self_approval_enabled)),
-        qa_final_approval_required=bool(raw.get("qa_final_approval_required", defaults.qa_final_approval_required)),
-        max_same_session_continuations=_positive_int(raw.get("max_same_session_continuations"), defaults.max_same_session_continuations),
-        max_no_progress_repeats=_positive_int(raw.get("max_no_progress_repeats"), defaults.max_no_progress_repeats),
-        max_fix_envelopes_per_stage=_positive_int(raw.get("max_fix_envelopes_per_stage"), defaults.max_fix_envelopes_per_stage),
-        max_checklist_items_rendered=_positive_int(raw.get("max_checklist_items_rendered"), defaults.max_checklist_items_rendered),
-        max_foreign_checklist_summaries=_positive_int(raw.get("max_foreign_checklist_summaries"), defaults.max_foreign_checklist_summaries),
-        enable_legacy_stage_projection=bool(raw.get("enable_legacy_stage_projection", defaults.enable_legacy_stage_projection)),
-    )
 
 
 def _repo_bundle_routing_config(raw: dict[str, Any]) -> RepoBundleRoutingConfig:

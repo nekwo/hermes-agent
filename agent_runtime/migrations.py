@@ -77,13 +77,8 @@ def validate_runtime_config(cfg: AgentRuntimeConfig | None = None) -> dict[str, 
     nwf = getattr(cfg, "normal_worker_flow", None)
     if nwf is not None:
         _positive(errors, "normal_worker_flow.max_self_test_repeats_without_change", nwf.max_self_test_repeats_without_change)
-    role_env = getattr(cfg, "role_envelope", None)
-    if role_env is not None:
-        _positive(errors, "role_envelope.max_same_session_continuations", role_env.max_same_session_continuations)
-        _positive(errors, "role_envelope.max_no_progress_repeats", role_env.max_no_progress_repeats)
-        _positive(errors, "role_envelope.max_fix_envelopes_per_stage", role_env.max_fix_envelopes_per_stage)
-        _positive(errors, "role_envelope.max_checklist_items_rendered", role_env.max_checklist_items_rendered)
-        _positive(errors, "role_envelope.max_foreign_checklist_summaries", role_env.max_foreign_checklist_summaries)
+    # S47 removed the five ``role_envelope.*`` range validators with the config
+    # block they guarded — S44 had already deleted every reader of those knobs.
     swarm = getattr(cfg, "swarm", None)
     if swarm is not None:
         for field in (

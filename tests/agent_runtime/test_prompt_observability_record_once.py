@@ -482,7 +482,6 @@ def _build_frame_section() -> dict:
     return po.snapshot_prompt_observability(
         personas=[_persona()],
         persona_instances=[_instance("personainst_live", "sess_current")],
-        tasks=[],
     )
 
 
@@ -608,7 +607,6 @@ def test_frame_read_is_roster_sized(isolate_agent_runtime_root):
             _instance("personainst_l0", "sess_l0"),
             _instance("personainst_l1", "sess_l1"),
         ],
-        tasks=[],
     )
     read = section["chat_contexts_ref"]["read"]
     assert read["source"] == "index"
@@ -648,7 +646,6 @@ def test_frame_read_excludes_old_sessions_for_live_instance(isolate_agent_runtim
     section = po.snapshot_prompt_observability(
         personas=[_persona()],
         persona_instances=[_instance("personainst_live", "sess_current")],
-        tasks=[],
     )
 
     read = section["chat_contexts_ref"]["read"]
@@ -669,7 +666,6 @@ def test_deleted_indexed_file_typed_miss_fallback_then_heal(isolate_agent_runtim
     section = po.snapshot_prompt_observability(
         personas=[_persona()],
         persona_instances=[_instance("personainst_l0", "sess_l0")],
-        tasks=[],
     )
     read = section["chat_contexts_ref"]["read"]
     assert read["index_misses"] == 1
@@ -697,7 +693,6 @@ def test_deleted_indexed_file_typed_miss_fallback_then_heal(isolate_agent_runtim
     section = po.snapshot_prompt_observability(
         personas=[_persona()],
         persona_instances=[_instance("personainst_l0", "sess_l0")],
-        tasks=[],
     )
     read = section["chat_contexts_ref"]["read"]
     assert read["source"] == "index"
@@ -712,7 +707,6 @@ def test_corrupt_index_falls_back_then_heals_at_next_persist(isolate_agent_runti
     section = po.snapshot_prompt_observability(
         personas=[_persona()],
         persona_instances=[_instance("personainst_l0", "sess_l0")],
-        tasks=[],
     )
     read = section["chat_contexts_ref"]["read"]
     assert read["source"] == "glob_fallback"

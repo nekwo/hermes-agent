@@ -869,7 +869,6 @@ def snapshot_prompt_observability(
     personas: Iterable[Any],
     persona_instances: Iterable[Any],
     session_db: Any | None = None,
-    tasks: Iterable[Any] | None = None,
     daemon: dict[str, Any] | None = None,
     realm: str | None = None,
     workspace: str | None = None,
@@ -883,18 +882,17 @@ def snapshot_prompt_observability(
     from . import workspace_scope
     from .runtime_hud import resolve_situational_hud
 
-    tasks_by_id = {
-        safe_assignment_token(getattr(task, "id", None)): task
-        for task in (tasks or [])
-        if safe_assignment_token(getattr(task, "id", None))
-    }
+    # S47: the ``tasks`` parameter and the ``tasks_by_id`` index built from it
+    # are gone. Its only production caller seeded ``tasks = []``, so every lane
+    # resolved ``task=None, goal_task=None`` — a constant dressed as a lookup.
+    # ``resolve_situational_hud`` KEEPS both parameters: the live mission-chat
+    # wrapper (``runtime_hud``) resolves them from the store per turn.
     # Materialize once: the roster is reused for every lane's situational HUD
     # (thread count + on-level list) and the input may be a one-shot iterable.
     roster = list(persona_instances)
 
-    def _situational_for(instance: Any, task_id: str | None) -> dict[str, Any]:
+    def _situational_for(instance: Any) -> dict[str, Any]:
         try:
-            goal_id = getattr(instance, "goal_id", None)
             # Scope the ADDRESSABLE roster to this lane's own workspace so the
             # recorded snapshot advertises the exact same "On level" set the
             # live mission-chat turn feeds — a placement in another workspace
@@ -918,8 +916,6 @@ def snapshot_prompt_observability(
                 workspace=workspace,
                 roster=scoped_roster,
                 identity_roster=roster,
-                task=tasks_by_id.get(safe_assignment_token(task_id) or ""),
-                goal_task=tasks_by_id.get(safe_assignment_token(goal_id) or ""),
             )
         except Exception:
             # Same guarantee as the preview: a situational-HUD failure degrades
@@ -957,7 +953,7 @@ def snapshot_prompt_observability(
                 surface_prompt="",
                 limiting_wrapper_active=False,
                 session_db=session_db,
-                situational_hud=_situational_for(instance, task_id),
+                situational_hud=_situational_for(instance),
                 instance_skill_overrides=(
                     list(getattr(instance, "skill_overrides", None) or [])
                     if getattr(instance, "skill_overrides", None) is not None

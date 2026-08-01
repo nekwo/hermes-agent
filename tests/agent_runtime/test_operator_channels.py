@@ -1,7 +1,8 @@
 from agent_runtime.models import PersonaInstance
-from types import SimpleNamespace
 
-Task = SimpleNamespace
+# S47 removed the ``Task = SimpleNamespace`` stand-in and the three task
+# fixtures built from it: ``operator_channel_summary`` no longer takes a
+# ``tasks`` argument, so nothing in this module can bind a task any more.
 from agent_runtime.operator_channels import (
     _conversation_history_message,
     operator_channel_summary,
@@ -10,7 +11,7 @@ from agent_runtime.persona_chat_history import (
     PERSONA_PRE_TRACE_ACK_KIND,
     PERSONA_TURN_BUDGET_EXHAUSTED_KIND,
 )
-from agent_runtime.states import TaskState, WorkerSessionState
+from agent_runtime.states import WorkerSessionState
 from hermes_time import now
 
 
@@ -362,7 +363,6 @@ def test_operator_channel_session_without_history_fires_when_turns_flow():
         persona_instances=[_dev_task_instance(ts)],
         persona_chat_history=[],
         persona_chat_trace=[],
-        tasks=[_goal_task(ts)],
         run_summaries=[
             _dev_run_summary(
                 "run_flow", started="2026-07-05T05:50:00Z", finished="2026-07-05T05:51:00Z"
@@ -392,7 +392,6 @@ def test_operator_channel_trace_empty_fires_for_task_bound_channel_without_trace
         persona_instances=[_dev_task_instance(ts)],
         persona_chat_history=[],
         persona_chat_trace=[],
-        tasks=[_goal_task(ts)],
     )
 
     assert len(channels) == 1
@@ -543,17 +542,6 @@ def test_operator_channel_keeps_per_session_channels_without_instance_binding():
 
 def test_operator_channel_projects_canonical_goal_conversation_and_filters_telemetry():
     ts = now()
-    task = Task(
-        id="task_live",
-        goal_id="goal_live",
-        title="Live Neko observability proof",
-        description="Route the goal prompt into Neko and show safe progress.",
-        state=TaskState.RUNNING,
-        created_at=ts,
-        updated_at=ts,
-        requested_by="tony",
-        acceptance_criteria=["Agent Console shows the initial goal input."],
-    )
     channels = operator_channel_summary(
         persona_instances=[
             PersonaInstance(
@@ -637,23 +625,23 @@ def test_operator_channel_projects_canonical_goal_conversation_and_filters_telem
                 ],
             }
         ],
-        tasks=[task],
     )
 
     conversation = channels[0]["conversation"]
     assert conversation["status"] == "complete"
     assert conversation["task_id"] == "task_live"
     assert conversation["goal_id"] == "goal_live"
+    # S47 removed the synthetic leading ``goal_input`` message: it could only be
+    # minted from a resolved task, and no caller could supply one. The projected
+    # rows are now exactly the real source rows.
     assert [message["kind"] for message in conversation["messages"]] == [
-        "goal_input",
         "handoff",
         "handoff",
     ]
-    assert "Goal: Live Neko observability proof" in conversation["messages"][0]["display_text"]
-    assert conversation["messages"][1]["display_title"] == "Subagent prompt"
-    assert "Prompted dev." in conversation["messages"][1]["display_text"]
-    assert "Inspect the canonical conversation" in conversation["messages"][1]["display_text"]
-    assert conversation["messages"][1]["target_persona_id"] == "dev"
+    assert conversation["messages"][0]["display_title"] == "Subagent prompt"
+    assert "Prompted dev." in conversation["messages"][0]["display_text"]
+    assert "Inspect the canonical conversation" in conversation["messages"][0]["display_text"]
+    assert conversation["messages"][0]["target_persona_id"] == "dev"
     assert "Provider Call completed" not in "\n".join(
         message["display_text"] for message in conversation["messages"]
     )
@@ -670,16 +658,6 @@ def test_operator_channel_projects_canonical_goal_conversation_and_filters_telem
 
 def test_operator_channel_mirrors_child_assignment_without_claiming_child_instance():
     ts = now()
-    task = Task(
-        id="task_live",
-        goal_id="goal_live",
-        title="Neko root handoff proof",
-        description="Show child prompts on the root conversation.",
-        state=TaskState.RUNNING,
-        created_at=ts,
-        updated_at=ts,
-        requested_by="tony",
-    )
     channels = operator_channel_summary(
         persona_instances=[
             PersonaInstance(
@@ -763,7 +741,6 @@ def test_operator_channel_mirrors_child_assignment_without_claiming_child_instan
                 ],
             },
         ],
-        tasks=[task],
     )
 
     root = next(channel for channel in channels if channel["persona_id"] == "neko_supervisor")
@@ -793,19 +770,6 @@ def _dev_task_instance(ts) -> PersonaInstance:
         goal_id="goal_goal",
         session_id="20260705_dev_session",
         updated_at=ts,
-    )
-
-
-def _goal_task(ts) -> Task:
-    return Task(
-        id="task_goal",
-        goal_id="goal_goal",
-        title="Enterprise-grade Petdex library menu",
-        description="Complete the implement-stage proof package.",
-        state=TaskState.RUNNING,
-        created_at=ts,
-        updated_at=ts,
-        requested_by="tony",
     )
 
 
@@ -868,7 +832,6 @@ def test_goal_conversation_projects_turns_and_tool_calls_as_flow_messages():
                 ],
             }
         ],
-        tasks=[_goal_task(ts)],
         run_summaries=[
             _dev_run_summary("run_a", started="2026-07-05T05:48:00Z", finished="2026-07-05T05:49:00Z")
         ],
@@ -879,7 +842,8 @@ def test_goal_conversation_projects_turns_and_tool_calls_as_flow_messages():
     conversation = channel["conversation"]
     assert conversation["schema_version"] == 2
     kinds = [message["kind"] for message in conversation["messages"]]
-    assert kinds[0] == "goal_input"
+    # S47: no synthetic goal_input row precedes the projected flow any more.
+    assert "goal_input" not in kinds
     assert "thinking_summary" in kinds
     assert "turn" in kinds
     assert kinds.count("tool_call") == 2
@@ -959,7 +923,6 @@ def test_goal_conversation_projects_per_step_thinking_between_tool_calls():
                 ],
             }
         ],
-        tasks=[_goal_task(ts)],
         run_summaries=[
             _dev_run_summary("run_a", started="2026-07-05T05:48:00Z", finished="2026-07-05T05:49:00Z")
         ],
@@ -1037,7 +1000,6 @@ def test_tool_call_messages_carry_operator_detail():
                 ],
             }
         ],
-        tasks=[_goal_task(ts)],
         run_summaries=[],
     )
 
@@ -1098,7 +1060,6 @@ def test_tool_call_message_carries_dispatch_target_and_order():
                 ],
             }
         ],
-        tasks=[_goal_task(ts)],
         run_summaries=[],
     )
 
@@ -1202,7 +1163,6 @@ def test_trace_empty_warning_suppressed_when_flow_messages_exist_without_trace()
         persona_instances=[_dev_task_instance(ts)],
         persona_chat_history=[],
         persona_chat_trace=[],
-        tasks=[_goal_task(ts)],
         run_summaries=[
             _dev_run_summary("run_b", started="2026-07-05T05:50:00Z", finished="2026-07-05T05:51:00Z")
         ],
@@ -1218,7 +1178,6 @@ def test_trace_empty_warning_suppressed_when_flow_messages_exist_without_trace()
         persona_instances=[_dev_task_instance(ts)],
         persona_chat_history=[],
         persona_chat_trace=[],
-        tasks=[_goal_task(ts)],
     )[0]
     assert any(warning["code"] == "trace_empty" for warning in legacy["warnings"])
 
@@ -1229,7 +1188,6 @@ def test_failed_run_projects_blocker_turn():
         persona_instances=[_dev_task_instance(ts)],
         persona_chat_history=[],
         persona_chat_trace=[],
-        tasks=[_goal_task(ts)],
         run_summaries=[
             _dev_run_summary(
                 "run_err",
@@ -1264,14 +1222,14 @@ def test_conversation_caps_and_emits_turns_collapsed_marker():
         persona_instances=[_dev_task_instance(ts)],
         persona_chat_history=[],
         persona_chat_trace=[],
-        tasks=[_goal_task(ts)],
         run_summaries=run_summaries,
     )
 
     messages = channels[0]["conversation"]["messages"]
-    assert len(messages) <= 201  # cap + goal_input protection headroom
+    assert len(messages) <= 201  # conversation cap
     kinds = [message["kind"] for message in messages]
-    assert kinds[0] == "goal_input"
+    # S47: the goal_input row the cap used to reserve headroom for is gone.
+    assert "goal_input" not in kinds
     assert "turns_collapsed" in kinds
     marker = next(m for m in messages if m["kind"] == "turns_collapsed")
     assert "collapsed" in marker["display_text"]
@@ -1303,7 +1261,6 @@ def test_conversation_message_ids_stable_across_rebuilds():
                 ],
             }
         ],
-        tasks=[_goal_task(ts)],
         run_summaries=[
             _dev_run_summary("run_a", started="2026-07-05T05:48:00Z", finished="2026-07-05T05:49:00Z")
         ],
@@ -1320,7 +1277,6 @@ def test_operator_channel_reports_empty_conversation_for_new_chats():
         persona_instances=[],
         persona_chat_history=[],
         persona_chat_trace=[],
-        tasks=[],
     )
 
     assert channels == []
@@ -1339,7 +1295,6 @@ def test_operator_channel_reports_empty_conversation_for_new_chats():
             }
         ],
         persona_chat_trace=[],
-        tasks=[],
     )[0]
 
     assert orphan["conversation_status"] == "empty"
@@ -1360,7 +1315,6 @@ def test_operator_channel_reports_incomplete_when_sources_exist_but_nothing_proj
             }
         ],
         persona_chat_trace=[],
-        tasks=[],
     )[0]
 
     assert orphan["conversation_status"] == "incomplete"

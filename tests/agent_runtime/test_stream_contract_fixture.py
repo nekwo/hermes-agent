@@ -83,7 +83,7 @@ def test_hydrate_core_pins_contract_version(isolate_agent_runtime_root):
     golden = _fixture("hydrate.json")
     for frame, origin in ((live, "live"), (golden, "golden")):
         parity = (frame.get("core") or {}).get("parity") or {}
-        assert parity.get("contract_version") == 45, (
+        assert parity.get("contract_version") == 46, (
             f"{origin} hydrate core carries contract_version="
             f"{parity.get('contract_version')} — bumping it is a cross-stack "
             "change (launcher pins kSupportedMissionContractVersion)"

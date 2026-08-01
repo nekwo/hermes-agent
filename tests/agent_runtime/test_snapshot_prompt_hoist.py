@@ -318,7 +318,6 @@ def test_fresh_live_context_advertises_only_collectable_catalog_refs(
     section = po.snapshot_prompt_observability(
         personas=[persona],
         persona_instances=[instance],
-        tasks=[],
         catalog_sink=catalogs,
     )
 

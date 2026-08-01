@@ -64,7 +64,12 @@ REMOVED_DEAD_LOCALS = (
 )
 
 #: Same-shaped locals in the SAME function that are live inputs to a projection.
-KEPT_LIVE_LOCALS = ("tasks", "workers", "run_rows")
+#: ``tasks`` stood here until S47: it WAS passed to three projections, which is
+#: why S29 kept it, but an always-empty list can only make a projection emit a
+#: constant. The operator ruling cut the seed with the ``workspaces[].goals``
+#: field it fed (ledger item 5) — see
+#: ``tests/agent_runtime/test_s47_wire_constant_field_removal.py``.
+KEPT_LIVE_LOCALS = ("workers", "run_rows")
 
 
 def _function(name: str) -> ast.FunctionDef:
@@ -124,8 +129,9 @@ def test_the_named_dead_locals_are_not_bound_anywhere_in_the_builder():
 
 
 def test_the_lookalike_live_locals_survive():
-    """Negative gate: three locals in the same function that LOOK like the
-    removed seeds and are load-bearing inputs to live projections."""
+    """Negative gate: the locals in the same function that LOOK like the removed
+    seeds and are load-bearing inputs to live projections. Two of the original
+    three remain; ``tasks`` left at S47 (see KEPT_LIVE_LOCALS)."""
 
     builder = _function("_build_snapshot_uncoalesced")
     source = ast.get_source_segment(inspect.getsource(snapshot), builder) or ""
@@ -138,7 +144,7 @@ def test_the_lookalike_live_locals_survive():
     }
     for name in KEPT_LIVE_LOCALS:
         assert name in bound, name
-    assert "tasks=tasks" in source
+    assert "tasks=tasks" not in source  # S47
     assert "run_summaries=run_rows" in source
     assert "derive_from_workers(agents, workers)" in source
 
@@ -195,7 +201,7 @@ def test_the_live_frame_is_unchanged(isolate_agent_runtime_root):
     """Negative gate: this is residue removal, not a contract move."""
 
     frame = snapshot.build_snapshot()
-    assert frame["parity"]["contract_version"] == 45
+    assert frame["parity"]["contract_version"] == 46
     for section in ("boards", "offices", "workspaces", "realms", "agents"):
         assert section in frame, f"{section} is a KEEP frame and must survive"
     for section in ("goals", "archived_tasks", "proofs", "incidents", "runs", "stage_verification"):

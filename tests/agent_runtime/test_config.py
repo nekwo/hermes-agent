@@ -222,11 +222,15 @@ def test_legacy_mission_plan_config_is_ignored_after_stage_graph_removal(tmp_pat
     assert cfg.normal_worker_flow.enabled is False
 
 
-def test_role_envelope_config_defaults_off_and_can_be_enabled(tmp_path):
-    default_config = load_agent_runtime_config(tmp_path / "missing.yaml")
+def test_role_envelope_config_block_is_ignored_after_s47(tmp_path):
+    """This test used to prove the ``role_envelope`` block loaded and could be
+    turned on. S44 deleted every reader of those knobs and S47 deleted the block
+    itself, so the contract inverted: an operator yaml that still sets it must
+    load cleanly and produce NO such attribute. Retargeted, not weakened — the
+    same yaml is still exercised end to end."""
 
-    assert default_config.role_envelope.enabled is False
-    assert default_config.role_envelope.checklist_hud_enabled is True
+    default_config = load_agent_runtime_config(tmp_path / "missing.yaml")
+    assert not hasattr(default_config, "role_envelope")
 
     p = tmp_path / "config.yaml"
     p.write_text(
@@ -240,9 +244,9 @@ def test_role_envelope_config_defaults_off_and_can_be_enabled(tmp_path):
 
     cfg = load_agent_runtime_config(p)
 
-    assert cfg.role_envelope.enabled is True
-    assert cfg.role_envelope.max_same_session_continuations == 6
-    assert cfg.role_envelope.max_no_progress_repeats == 2
+    assert not hasattr(cfg, "role_envelope")
+    # A stale block must not poison the sibling blocks that DO still load.
+    assert cfg.normal_worker_flow.enabled is False
 
 
 def test_config_persona_skills_merge_defaults_with_explicit_removals(tmp_path):
