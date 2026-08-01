@@ -27,6 +27,7 @@ from tools.environments.local import (
     LocalEnvironment,
     _bash_safe_path,
     _git_bash_bin_dirs,
+    _is_windows_system_shim,
     _make_run_env,
     _msys_to_windows_path,
     _prepend_git_bash_dirs,
@@ -340,3 +341,34 @@ class TestWrapCommandWindowsNativeCwd:
         script = captured["script"]
         assert "/c/Users/Alexander/AppData/Local/Temp/hermes-snap-deadbeef.sh" in script
         assert r"C:\Users\Alexander\AppData" not in script
+
+
+# ---------------------------------------------------------------------------
+# _is_windows_system_shim — never mistake the WSL launcher for Git Bash
+# ---------------------------------------------------------------------------
+
+class TestIsWindowsSystemShim:
+    def test_rejects_system32_wsl_stub(self, monkeypatch):
+        monkeypatch.setenv("SystemRoot", r"C:\Windows")
+        assert _is_windows_system_shim(r"C:\Windows\System32\bash.exe")
+        assert _is_windows_system_shim(r"C:\Windows\SysWOW64\bash.exe")
+        assert _is_windows_system_shim(r"C:\Windows\Sysnative\bash.exe")
+
+    def test_case_and_separator_insensitive(self, monkeypatch):
+        monkeypatch.setenv("SystemRoot", r"C:\Windows")
+        assert _is_windows_system_shim("c:/windows/system32/bash.exe")
+        assert _is_windows_system_shim(r"C:\WINDOWS\System32\bash.exe")
+
+    def test_honors_relocated_systemroot(self, monkeypatch):
+        monkeypatch.setenv("SystemRoot", r"D:\Win")
+        assert _is_windows_system_shim(r"D:\Win\System32\bash.exe")
+        assert not _is_windows_system_shim(r"C:\Windows\System32\bash.exe")
+
+    def test_accepts_real_git_bash(self, monkeypatch):
+        monkeypatch.setenv("SystemRoot", r"C:\Windows")
+        assert not _is_windows_system_shim(r"C:\Program Files\Git\bin\bash.exe")
+        assert not _is_windows_system_shim(
+            r"C:\Users\alice\AppData\Local\hermes\git\bin\bash.exe"
+        )
+        assert not _is_windows_system_shim("/usr/bin/bash")
+        assert not _is_windows_system_shim("")

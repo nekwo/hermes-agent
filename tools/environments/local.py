@@ -706,6 +706,32 @@ def build_subprocess_env(
     return env
 
 
+def _is_windows_system_shim(path: str) -> bool:
+    """True when ``path`` lives under the Windows system dirs that host the
+    WSL launcher (``C:\\Windows\\System32\\bash.exe`` and friends).
+
+    ``shutil.which("bash")`` happily returns that stub on any box with the
+    WSL optional feature enabled, and routing the agent's terminal through it
+    invokes ``wsl`` — which fails with "no installed distributions" on a
+    normal Windows host. We must never treat it as Git Bash.
+    """
+    if not path:
+        return False
+    system_root = os.environ.get("SystemRoot") or os.environ.get("windir") or r"C:\Windows"
+
+    def _norm(p: str) -> str:
+        # Separator- and case-agnostic so mixed C:\...\ / forward-slash forms
+        # (and POSIX-hosted unit tests) compare correctly.
+        return p.replace("\\", "/").rstrip("/").lower()
+
+    norm = _norm(path)
+    root = _norm(system_root)
+    for sub in ("system32", "syswow64", "sysnative"):
+        if norm.startswith(f"{root}/{sub}/"):
+            return True
+    return False
+
+
 def _find_bash() -> str:
     """Find bash for command execution."""
     if not _IS_WINDOWS:
@@ -753,8 +779,11 @@ def _find_bash() -> str:
         if candidate and os.path.isfile(candidate) and candidate not in candidates:
             candidates.append(candidate)
 
+    # Last resort: PATH, but reject the System32 WSL launcher stub. It passes
+    # `os.path.isfile` and even `_bash_starts`, then fails every real Windows
+    # path the terminal hands it.
     found = shutil.which("bash")
-    if found and found not in candidates:
+    if found and not _is_windows_system_shim(found) and found not in candidates:
         candidates.append(found)
 
     # Prefer the first candidate that can actually start.  A stale
@@ -790,7 +819,8 @@ def _find_bash() -> str:
     raise RuntimeError(
         "Git Bash not found. Hermes Agent requires Git for Windows on Windows.\n"
         "Install it from: https://git-scm.com/download/win\n"
-        "Or set HERMES_GIT_BASH_PATH to your bash.exe location."
+        "Or set HERMES_GIT_BASH_PATH to your bash.exe location.\n"
+        "(The Windows System32 'bash.exe' is the WSL launcher and is not used.)"
     )
 
 
