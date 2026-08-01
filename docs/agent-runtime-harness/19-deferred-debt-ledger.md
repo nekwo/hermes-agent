@@ -67,6 +67,28 @@
    scope. Whoever takes item 5 (`workspaces[].goals`) should take this with it —
    both are constant-by-construction fields on the same wire.
 
+9. **`Projector.apply_pending` has no production caller (hermes; opened by B-4,
+   2026-07-31).** Working in the projector for B-4 surfaced that the entire
+   INCREMENTAL projection lane — `acquire_lease`, the watermark diff, the
+   pending-event count, `ProjectorResult`'s offset/timing fields — is reached
+   only from five test call sites. Repo-wide, the sole production entry to the
+   projector is `full_rebuild()` from `_cmd_rebuild_read_model`
+   (`runtime_commands.py:437`). The RD3 design (doc 05:348) specified a "ticker
+   chokepoint" that would call `apply_pending()` when the lease is held; it was
+   never wired. So the tests that assert an incremental SLO
+   (`test_apply_pending_is_o_delta_on_rd0_fixture`,
+   `test_synthetic_incremental_apply_within_rd3_slo`) are measuring a lane
+   nothing runs — the same closed-loop shape as ledger item 2, one level down
+   (a METHOD whose whole importer set is its tests, not a module). Compounding
+   it: `read_model.enabled` is `False` on the live alice root, so even
+   `full_rebuild` only runs when an operator types the verb, and the serve path
+   reports `frame_source=built` every time. The ruling needed is whether the
+   read-model lane is being finished (wire the ticker) or retired (delete
+   `apply_pending` + the lease + the SLO tests and keep `full_rebuild` as an
+   operator-invoked cache warmer). NOT taken on B-4's authority: B-4 was
+   scoped to the two constant result fields, and deleting a lane is a
+   direction call, not a cleanup.
+
 ## Proposal ledger (decision-ready; full text in the 2026-07-31 audit reports)
 
 Hermes fork-owned:
