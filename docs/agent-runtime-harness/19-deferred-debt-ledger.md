@@ -148,8 +148,15 @@
    S29's `KEPT_LIVE_LOCALS` entry for `tasks`, and Launcher-side the
    policy/dialog/alert expectations — whose fixtures still send the removed
    field, so a stale producer cannot resurrect a reader.
-6. **gateway/platforms/base.py:1407** bare expanduser("~") vs sibling's
-   $HOME-preferring resolution - aligning widens a denial carve-out.
+6. ~~**gateway/platforms/base.py:1407** bare expanduser("~") vs sibling's
+   $HOME-preferring resolution - aligning widens a denial carve-out.~~
+   **RECLASSIFIED upstream-ward 2026-08-01:** the file is upstream-owned and
+   the fork boundary forbids editing it (edits become upstream-PR candidates)
+   — moved to the parked upstream-PR bucket (doc 18). The denial-carve-out
+   concern travels with it: any future PR must state that aligning the two
+   resolvers WIDENS the `~` denial carve-out, which upstream may or may not
+   want — it is a behavior question for the upstream maintainers, not a
+   mechanical fix.
 7. **Packaging:** psutil/fire declared but absent on the ambient test
    interpreter; markdown used by the matrix adapter but declared nowhere.
 8. ~~**`role_envelope` runtime-config block is now a knob that governs nothing

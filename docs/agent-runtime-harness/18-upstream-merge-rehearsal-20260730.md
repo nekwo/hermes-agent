@@ -266,6 +266,11 @@ in a session scratchpad (ephemeral — regenerate from the commits if gone).**
    → `upstream-pr/runner-retry-ownership` (`30d3f0d1e`), deliberately scoped to
    the guard only — the fork's 8-worker cap excluded as host tuning, the serial
    straggler-isolation pass offered in the body as follow-up.
+6. (Added 2026-08-01, reclassified from ledger item 6 — no branch prepared yet.)
+   `gateway/platforms/base.py:1407` bare `expanduser("~")` vs the sibling's
+   $HOME-preferring resolution. NOT mechanical: aligning WIDENS the `~` denial
+   carve-out — the PR must present that as a behavior question for upstream,
+   not a bugfix. Prepare the branch at filing time.
 
 ### Post-sync follow-ups (carried forward)
 
