@@ -225,15 +225,21 @@ def test_the_surviving_operator_summaries_still_render():
     )
     assert operator_event_summary(tool) == "terminal started."
 
-    bundle = Event(
+    # S52: the third case here rendered ``repo_bundle.assigned`` as
+    # "Assigned launcher bundle (assigned)." That type was the last
+    # repo_bundle.* survivor in OPERATOR_SUMMARY_EVENT_TYPES and it left the
+    # frozenset with the RepoBundleStore write lane, taking its shared formatter
+    # arm with it. Replaced by a still-live arm rather than dropped, so this test
+    # keeps covering more than one renderer branch.
+    progress = Event(
         ts=now(),
-        type="repo_bundle.assigned",
+        type="run.progress",
         task_id=None,
-        run_id=None,
-        persona_id=None,
-        payload={"repo": "launcher", "state": "assigned"},
+        run_id="run_1",
+        persona_id="dev",
+        payload={"phase": "proof", "step": "compile", "status": "running"},
     )
-    assert operator_event_summary(bundle) == "Assigned launcher bundle (assigned)."
+    assert operator_event_summary(progress) == "Progress: proof compile running."
 
 
 # --------------------------------------------------------------------------

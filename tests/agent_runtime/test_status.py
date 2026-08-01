@@ -12,7 +12,6 @@ from agent_runtime.states import RunState, TaskState
 from agent_runtime.status import build_status
 from agent_runtime.store import IncidentStore, RunStore, TaskStore
 from agent_runtime.runtime_instances import GoalRuntimeInstanceStore
-from agent_runtime.repo_bundles import acquire_repo_bundle_locks
 
 
 def _persona_runtime_config() -> AgentRuntimeConfig:
@@ -82,11 +81,21 @@ def test_status_projects_operator_channels_for_persona_instances(monkeypatch, is
 
 
 def test_status_surfaces_lanes_repo_locks_and_retired_swarm_budget_shape(isolate_agent_runtime_root):
+    """S52/S53 retargeted the seeding half of this case.
+
+    It used to mint a lane (``create_lane`` + two ``transition`` calls) and take
+    a repo-bundle write lock, then assert those rows came back out of
+    ``build_status``. All four writers were deleted for want of a production
+    caller, and this test was among their only callers -- so the seeding is gone
+    and what remains is the honest reading: the sections still project, and the
+    two whose writers are gone now report EMPTY rather than a seeded row.
+
+    ``lanes`` and ``repo_locks`` reading empty by construction is the S47 item-5
+    defect class, recorded for the follow-up wave. Asserting the constant here
+    keeps it visible instead of letting a seeded fixture hide it.
+    """
+
     runs = RunStore()
-    lane = GoalRuntimeInstanceStore().create_lane(task_id="task_lane", started_by="test")
-    GoalRuntimeInstanceStore().transition(lane.id, "activating", reason="activate")
-    GoalRuntimeInstanceStore().transition(lane.id, "running", reason="run")
-    acquire_repo_bundle_locks(lane_id=lane.id, task_id="task_lane", bundle_ids=["bundle_backend"], mode="write")
     # S17 removed RunStore.open_run as write-dead; ``update`` is the surviving
     # write path and seeds the row directly. This case covers build_status, not
     # the writer.
@@ -104,8 +113,8 @@ def test_status_surfaces_lanes_repo_locks_and_retired_swarm_budget_shape(isolate
 
     s = build_status(run_store=runs)
 
-    assert s["lanes"][0]["lane_id"] == lane.id
-    assert s["repo_locks"]["lock_count"] == 1
+    assert s["lanes"] == []
+    assert s["repo_locks"] == {"lock_count": 0, "locks": []}
     assert s["swarm_budget"]["global"] == {"total_tokens": 0, "api_calls": 0}
     assert s["swarm_budget"]["by_task"] == {}
     assert s["production_envelope"]["production_ready"] is True

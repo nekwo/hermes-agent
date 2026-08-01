@@ -1,0 +1,255 @@
+"""S52 removes the ``RepoBundleStore`` WRITE lane and its seven contracts.
+
+Operator-ruled CUT on 2026-08-01. This is a write-lane cut, NOT a store removal:
+``status.py`` still constructs a ``RepoBundleStore`` and projects every operator
+bundle row off ``list_all``, so the read side is live and stays.
+
+What was re-verified against the tree, receiver-aware, before the cut:
+
+* ``create_or_update_from_task``, ``attach_assignment``, ``mark_running``,
+  ``mark_verified``, ``mark_rejected``, ``wake_ready_dependencies`` — zero
+  production callers. Their whole caller set was ``tests/agent_runtime/
+  test_repo_bundles.py``.
+* ``update`` — the one that needed care, because a bare ``.update(`` grep is
+  meaningless (every dict in the tree has one). Checked by receiver: its only
+  call sites were the five sibling mutators above, all of which were themselves
+  callerless. With them gone it had none.
+* ``acquire_repo_bundle_locks`` / ``release_repo_bundle_locks`` /
+  ``qa_waiting_on`` — module-level and equally callerless outside tests.
+* The transitive closure that had to go WITH them or become residue: the hollow
+  ``cancel_superseded`` seam (``return []``, an S21-class shape), the private
+  writers ``_write`` / ``_event``, the lock helpers ``_repo_lock_conflicts`` /
+  ``_write_repo_locks``, the projection pair ``desired_bundles_for_task`` /
+  ``merge_desired_bundle``, and the write-time helpers ``bundle_id_for`` /
+  ``safe_bundle_state`` / ``normalize_repo`` / ``safe_token`` / ``safe_text`` /
+  ``_dedupe_preserve_order`` / ``owner_for_repo``. Each was reachable only from
+  a deleted writer and had no importer outside the module. Leaving them would be
+  the residue S25 named when it retired ``events._safe_int`` alongside the
+  formatter arm that was its only caller.
+
+**Two of the seven contracts were operator-summary types, and that is the part
+S44 did not have to handle.** ``repo_bundle.updated`` and
+``repo_bundle.assigned`` sat in ``events.OPERATOR_SUMMARY_EVENT_TYPES`` and
+shared one formatter arm in ``operator_event_summary``. The S21/S25 invariant is
+that the frozenset may not name a de-registered type, and the function
+early-returns ``None`` outside it — so both the rows and the arm became
+unreachable the moment the registration went, and all three go in this commit.
+
+**A KNOWN CONSEQUENCE this wave deliberately does not fix.** With both lock
+mutators gone, nothing can write ``repo_bundle_locks.json``, so
+``repo_lock_summary()`` — still live, still published by ``status.py`` as
+``repo_locks`` — can only ever report ``{"lock_count": 0, "locks": []}``. That
+is the S47 item-5 defect class (a wire whose value no code path can move).
+Retiring it means editing the emitted status frame, which belongs to the
+read-side/contract wave this one was scoped out of. It is asserted as a constant
+below so it stays visible, and recorded in the deferred-debt ledger.
+
+Count: 79 -> 72. The absolute authority stays S15's ``SURVIVING_EVENT_COUNT``.
+"""
+
+from __future__ import annotations
+
+import inspect
+
+import pytest
+
+from agent_runtime import events as events_module
+from agent_runtime import repo_bundles, status
+from agent_runtime.decision_contract_registry import event_catalog
+from agent_runtime.events import ALLOWED_EVENT_TYPES, OPERATOR_SUMMARY_EVENT_TYPES
+
+
+#: The seven contracts retired with the write lane.
+RETIRED_EVENT_TYPES = (
+    "repo_bundle.created",
+    "repo_bundle.updated",
+    "repo_bundle.assigned",
+    "repo_bundle.running",
+    "repo_bundle.verified",
+    "repo_bundle.rejected",
+    "repo_bundle.woke",
+)
+
+#: Every mutator that left ``RepoBundleStore``.
+REMOVED_STORE_METHODS = (
+    "create_or_update_from_task",
+    "update",
+    "attach_assignment",
+    "mark_running",
+    "mark_verified",
+    "mark_rejected",
+    "wake_ready_dependencies",
+    "cancel_superseded",
+    "_write",
+    "_event",
+)
+
+#: Module-level names that went with them (mutators + their exclusive helpers).
+REMOVED_MODULE_NAMES = (
+    "acquire_repo_bundle_locks",
+    "release_repo_bundle_locks",
+    "qa_waiting_on",
+    "desired_bundles_for_task",
+    "merge_desired_bundle",
+    "_repo_lock_conflicts",
+    "_write_repo_locks",
+    "bundle_id_for",
+    "safe_bundle_state",
+    "normalize_repo",
+    "safe_token",
+    "safe_text",
+    "_dedupe_preserve_order",
+    "owner_for_repo",
+    "REPO_BUNDLE_STATES",
+    "TERMINAL_REPO_BUNDLE_STATES",
+    "DELIVERED_REPO_BUNDLE_STATES",
+    "REPO_LOCK_MODES",
+    "WAKE_DEPENDENCY_DELIVERED",
+    "_REPO_OWNER_RULES",
+)
+
+#: The read side the cut had to preserve.
+SURVIVING_READ_NAMES = (
+    "RepoBundleStore",
+    "repo_lock_summary",
+    "bundle_queue_summary",
+    "repo_bundle_summary",
+    "repo_bundle_delivery_summary",
+)
+
+
+def test_every_store_mutator_is_gone():
+    assert [name for name in REMOVED_STORE_METHODS if hasattr(repo_bundles.RepoBundleStore, name)] == []
+
+
+def test_every_orphaned_module_level_name_is_gone():
+    assert [name for name in REMOVED_MODULE_NAMES if hasattr(repo_bundles, name)] == []
+
+
+def test_the_read_side_survives_whole():
+    """Negative gate: this is a write-lane cut, not a store removal."""
+
+    assert [name for name in SURVIVING_READ_NAMES if not hasattr(repo_bundles, name)] == []
+    for reader in ("get", "list_for_task", "list_all", "find_for_assignment"):
+        assert callable(getattr(repo_bundles.RepoBundleStore, reader)), reader
+
+
+def test_status_still_projects_bundles_off_the_surviving_read_path():
+    """The wire, not just the two ends: ``status.py`` must still reach
+    ``list_all`` — that constructor is the reason the store stays at all."""
+
+    source = inspect.getsource(status.build_status)
+    assert "RepoBundleStore(event_log=event_log).list_all()" in source
+
+
+def test_the_seven_contracts_are_deregistered():
+    catalog = event_catalog()
+    assert [name for name in RETIRED_EVENT_TYPES if name in catalog] == []
+    assert [name for name in RETIRED_EVENT_TYPES if name in ALLOWED_EVENT_TYPES] == []
+
+
+def test_appending_a_retired_repo_bundle_event_is_refused():
+    from hermes_time import now
+
+    from agent_runtime.events import Event, EventLog
+
+    for event_type in RETIRED_EVENT_TYPES:
+        with pytest.raises(ValueError):
+            EventLog().append(
+                Event(ts=now(), type=event_type, task_id="task_1", run_id=None, persona_id=None)
+            )
+
+
+def test_the_two_operator_summary_rows_and_their_shared_arm_went_too():
+    """The S21/S25 rule: the frozenset may not name a de-registered type, and a
+    formatter arm behind that frozenset is unreachable once the row leaves."""
+
+    from hermes_time import now
+
+    from agent_runtime.events import Event, operator_event_summary
+
+    assert set(RETIRED_EVENT_TYPES) & OPERATOR_SUMMARY_EVENT_TYPES == set()
+    assert OPERATOR_SUMMARY_EVENT_TYPES <= ALLOWED_EVENT_TYPES
+    assert not any(name.startswith("repo_bundle.") for name in OPERATOR_SUMMARY_EVENT_TYPES)
+
+    for event_type in ("repo_bundle.assigned", "repo_bundle.updated"):
+        evt = Event(
+            ts=now(),
+            type=event_type,
+            task_id=None,
+            run_id=None,
+            persona_id=None,
+            payload={"repo": "launcher", "state": "running", "reason": "run started"},
+        )
+        assert operator_event_summary(evt) is None
+
+    # The arm's own text is gone from the renderer, read through the function
+    # source rather than the module so the cut-site comment does not self-flag.
+    arm_source = inspect.getsource(events_module.operator_event_summary)
+    for phrase in ("Assigned {repo} bundle", "Updated {repo} bundle"):
+        assert phrase not in arm_source, phrase
+
+
+def test_the_surviving_operator_summary_types_still_render():
+    """Negative gate: this cut takes the repo_bundle arm and nothing else."""
+
+    from hermes_time import now
+
+    from agent_runtime.events import Event, operator_event_summary
+
+    assert {"run.closed", "run.progress", "run.tool.started", "run.tool.finished"} <= OPERATOR_SUMMARY_EVENT_TYPES
+
+    closed = Event(
+        ts=now(),
+        type="run.closed",
+        task_id=None,
+        run_id=None,
+        persona_id="dev",
+        payload={"state": "completed", "decision_type": "hand_off"},
+    )
+    assert operator_event_summary(closed) == "Closed dev run as completed after hand_off."
+
+
+def test_historical_rows_still_read_back(isolate_agent_runtime_root):
+    """S36/S44 precedent: deregistration gates APPENDS, not reads."""
+
+    import json
+
+    from agent_runtime import paths
+    from agent_runtime.events import EventLog
+
+    line = {
+        "ts": "2026-07-01T00:00:00+00:00",
+        "type": "repo_bundle.verified",
+        "task_id": "task_historical",
+        "run_id": None,
+        "persona_id": "dev",
+        "payload": {"repo_bundle_id": "bundle_abc", "repo": "launcher", "state": "verified"},
+    }
+    paths.events_path().parent.mkdir(parents=True, exist_ok=True)
+    paths.events_path().write_text(json.dumps(line) + "\n", encoding="utf-8")
+
+    rows = list(EventLog().iter_from_offset(0))
+    assert [evt.type for _offset, evt in rows] == ["repo_bundle.verified"]
+    assert rows[0][1].payload["repo_bundle_id"] == "bundle_abc"
+
+
+def test_the_repo_lock_wire_is_now_a_constant(isolate_agent_runtime_root):
+    """The consequence this wave records rather than fixes (S47 item-5 class).
+
+    Both lock writers are gone, so the file behind this summary can never gain a
+    row. It is still read and still published by ``status.py``. Pinned as a
+    constant so the next wave finds it stated, not inferred.
+    """
+
+    assert repo_bundles.repo_lock_summary() == {"lock_count": 0, "locks": []}
+    assert status.build_status()["repo_locks"] == {"lock_count": 0, "locks": []}
+
+
+def test_the_registry_lost_exactly_seven_contracts():
+    """Delta-only; the absolute authority is S15's SURVIVING_EVENT_COUNT."""
+
+    from tests.agent_runtime.test_s15_event_contract_pruning import SURVIVING_EVENT_COUNT
+
+    assert SURVIVING_EVENT_COUNT == 72
+    assert len(event_catalog()) == SURVIVING_EVENT_COUNT

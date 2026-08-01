@@ -247,10 +247,16 @@ def test_event_log_for_session_type_filter_counts_matches_not_raw_rows(isolate_a
 def test_operator_events_receive_redaction_safe_summaries(isolate_agent_runtime_root):
     log = EventLog()
     samples = [
-        Event(now(), "repo_bundle.assigned", "task_1", "run_1", "dev", {"repo_bundle_id": "bundle_1", "repo": "hermes-agent", "state": "assigned"}),
-        Event(now(), "repo_bundle.updated", "task_1", "run_1", "dev", {"repo_bundle_id": "bundle_1", "repo": "hermes-agent", "state": "running"}),
         # S25 retargeted two samples: off run.opened and off repo_bundle.delivered
         # (both de-registered with their writers) onto live operator-summary arms.
+        # S52 retargeted the two that remained, for the same reason one lane
+        # further along: repo_bundle.assigned / repo_bundle.updated were the last
+        # repo_bundle.* summary types, and they left OPERATOR_SUMMARY_EVENT_TYPES
+        # with the RepoBundleStore write lane that emitted them. The assertion on
+        # the "Updated ... bundle to running." sentence went with the formatter
+        # arm that produced it; run.progress takes its place as a live arm whose
+        # sentence is derived from the payload rather than a constant.
+        Event(now(), "run.progress", "task_1", "run_1", "dev", {"phase": "proof", "step": "compile", "status": "running"}),
         Event(now(), "run.tool.started", "task_1", "run_1", "dev", {"tool_name": "terminal"}),
         Event(now(), "run.tool.finished", "task_1", "run_1", "dev", {"tool_name": "terminal", "status": "passed"}),
         Event(now(), "run.closed", "task_1", "run_1", "dev", {"state": "completed", "decision_type": "deliver"}),
@@ -261,8 +267,8 @@ def test_operator_events_receive_redaction_safe_summaries(isolate_agent_runtime_
 
     events = list(log.iter_all())
     assert all(str(event.payload.get("summary") or "").strip() for event in events)
-    updated = next(event for event in events if event.type == "repo_bundle.updated")
-    assert updated.payload["summary"] == "Updated hermes-agent bundle to running."
+    progress = next(event for event in events if event.type == "run.progress")
+    assert progress.payload["summary"] == "Progress: proof compile running."
 
 
 def test_run_progress_receives_stable_event_id(isolate_agent_runtime_root):

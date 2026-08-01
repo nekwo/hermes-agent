@@ -1034,19 +1034,24 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "persona_instance.profile_updated": EventContract("persona_instance.profile_updated", "Persona instance runtime profile updated", ("persona_instance_id",), ("persona_id", "display_name", "current_chat_goal", "goal_id", "skill_overrides", "provider", "model", "api_mode", "requested_by")),
     "persona_assignment.created": EventContract("persona_assignment.created", "Persona assignment created", ("assignment_id", "persona_instance_id", "kind"), ("state",)),
     "persona_assignment.closed": EventContract("persona_assignment.closed", "Persona assignment closed", ("assignment_id", "state"), ("kind",)),
-    "repo_bundle.created": EventContract("repo_bundle.created", "Repo bundle created", ("repo_bundle_id", "repo", "state"), ("owner_persona_id",)),
-    "repo_bundle.updated": EventContract("repo_bundle.updated", "Repo bundle updated", ("repo_bundle_id", "repo", "state"), ("wake_condition",)),
-    "repo_bundle.assigned": EventContract("repo_bundle.assigned", "Repo bundle assigned", ("repo_bundle_id", "repo", "state"), ("assignment_id", "run_id")),
-    "repo_bundle.running": EventContract("repo_bundle.running", "Repo bundle running", ("repo_bundle_id", "repo", "state"), ("run_id",)),
     # S25 de-registered repo_bundle.delivered one commit behind its emitter: S24
     # (354d7555a) deleted RepoBundleStore.mark_delivered with the
     # delivery-capture path, and it was the only writer that ever produced the
-    # type. Every OTHER repo_bundle.* below still rides a live
-    # RepoBundleStore.update call. See
-    # tests/agent_runtime/test_s25_repo_bundle_delivered_retirement.py.
-    "repo_bundle.verified": EventContract("repo_bundle.verified", "Repo bundle verified", ("repo_bundle_id", "repo", "state"), ("proof_count",)),
-    "repo_bundle.rejected": EventContract("repo_bundle.rejected", "Repo bundle rejected", ("repo_bundle_id", "repo", "state"), ("reason",)),
-    "repo_bundle.woke": EventContract("repo_bundle.woke", "Repo bundle woke", ("repo_bundle_id", "repo", "state"), ("wake_condition",)),
+    # type. At the time, every OTHER repo_bundle.* still rode a live
+    # RepoBundleStore.update call.
+    #
+    # S49-54 wave (2026-08-01): that is no longer true. S52 deleted the
+    # RepoBundleStore WRITE lane whole -- update, create_or_update_from_task,
+    # attach_assignment, mark_running, mark_verified, mark_rejected,
+    # wake_ready_dependencies -- because not one had a production caller. The
+    # remaining SEVEN repo_bundle.* contracts followed their emitters out:
+    # created / updated / assigned / running / verified / rejected / woke.
+    # Unlike S44, two of them (updated, assigned) WERE operator-summary types,
+    # so events.OPERATOR_SUMMARY_EVENT_TYPES and their shared formatter arm in
+    # operator_event_summary went with them -- the S21/S25 rule that the
+    # frozenset may not name a de-registered type. The store's READ side stays
+    # live; status.py still projects bundles off list_all. See
+    # tests/agent_runtime/test_s52_repo_bundle_write_lane_removal.py.
     "worker_session.opened": EventContract("worker_session.opened", "Worker opened", ("worker_session_id", "persona_id"), ("stage_id",)),
     "worker_session.assigned": EventContract("worker_session.assigned", "Worker assigned", ("worker_session_id", "run_id"), ("stage_id",)),
     "worker_session.resumed": EventContract("worker_session.resumed", "Worker resumed", ("worker_session_id",), ("session_id_present",)),

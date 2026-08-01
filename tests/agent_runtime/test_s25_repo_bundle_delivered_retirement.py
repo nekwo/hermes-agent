@@ -71,11 +71,24 @@ def test_the_operator_summary_row_and_its_formatter_arm_went_with_the_contract()
     assert operator_event_summary(evt) is None
 
 
-def test_the_repo_bundle_lane_is_not_collateral():
-    """Every other repo_bundle type still rides a live RepoBundleStore.update;
-    only ``delivered`` lost its writer."""
+def test_the_rest_of_the_repo_bundle_lane_followed_at_s52():
+    """INVERTED at S52 (2026-08-01), the S47 precedent.
 
-    live = {
+    This test was ``test_the_repo_bundle_lane_is_not_collateral`` and it pinned
+    the seven sibling types as LIVE, riding ``RepoBundleStore.update``. That was
+    true when S25 wrote it and is false now: S52 deleted the store's WRITE lane
+    whole -- ``update`` included -- for want of a production caller, so all
+    seven followed ``delivered`` out of the registry for exactly the reason this
+    file already documents.
+
+    The pin is INVERTED rather than deleted, and it keeps asserting the
+    operator-summary half, because that half is what changed shape: at S25 the
+    two summary arms had to SURVIVE the cut; at S52 they had to go WITH it, or
+    ``OPERATOR_SUMMARY_EVENT_TYPES`` would name de-registered types and break
+    the S21 invariant. A pin whose subject reverses is evidence, not litter.
+    """
+
+    retired_with_the_write_lane = {
         "repo_bundle.created",
         "repo_bundle.updated",
         "repo_bundle.assigned",
@@ -84,27 +97,21 @@ def test_the_repo_bundle_lane_is_not_collateral():
         "repo_bundle.rejected",
         "repo_bundle.woke",
     }
-    assert live <= ALLOWED_EVENT_TYPES
+    assert retired_with_the_write_lane & ALLOWED_EVENT_TYPES == set()
+    assert retired_with_the_write_lane & OPERATOR_SUMMARY_EVENT_TYPES == set()
 
-    assigned = Event(
-        ts=now(),
-        type="repo_bundle.assigned",
-        task_id=None,
-        run_id=None,
-        persona_id=None,
-        payload={"repo": "launcher", "state": "assigned"},
-    )
-    assert operator_event_summary(assigned) == "Assigned launcher bundle (assigned)."
-
-    updated = Event(
-        ts=now(),
-        type="repo_bundle.updated",
-        task_id=None,
-        run_id=None,
-        persona_id=None,
-        payload={"repo": "launcher", "state": "running", "reason": "run started"},
-    )
-    assert operator_event_summary(updated) == "Updated launcher bundle to running: run started."
+    # The formatter arm that rendered them is unreachable and gone: the two
+    # types that used to produce a sentence now produce nothing at all.
+    for event_type in ("repo_bundle.assigned", "repo_bundle.updated"):
+        evt = Event(
+            ts=now(),
+            type=event_type,
+            task_id=None,
+            run_id=None,
+            persona_id=None,
+            payload={"repo": "launcher", "state": "running", "reason": "run started"},
+        )
+        assert operator_event_summary(evt) is None
 
 
 def test_the_delivered_only_int_helper_went_with_its_arm():

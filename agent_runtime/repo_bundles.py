@@ -1,88 +1,46 @@
 from __future__ import annotations
 
-import hashlib
 import json
-from dataclasses import replace
 from typing import Any
-
-from hermes_time import now
-from utils import atomic_json_write
 
 from . import paths
 from .delivery_directive import read_bundle_promotion_record
 from .events import EventLog
-from .models import Event, RepoBundle
-from .serde import from_jsonable, to_jsonable
+from .models import RepoBundle
+from .serde import from_jsonable
 
-REPO_BUNDLE_STATES = frozenset(
-    {
-        "planned",
-        "queued_waiting_dependency",
-        "assigned",
-        "running",
-        "delivered_waiting_for_qa",
-        "delivered",
-        "blocked",
-        "verified",
-        "rejected",
-        "cancelled",
-        "archived",
-    }
-)
-TERMINAL_REPO_BUNDLE_STATES = frozenset({"verified", "blocked", "cancelled", "archived"})
-DELIVERED_REPO_BUNDLE_STATES = frozenset({"delivered_waiting_for_qa", "delivered", "verified"})
-REPO_LOCK_MODES = frozenset({"read", "write", "exclusive_maintenance"})
+# S52 removed the write lane, and with it every binding only a writer read:
+# ``hashlib`` / ``dataclasses.replace`` / ``hermes_time.now`` /
+# ``utils.atomic_json_write`` / ``models.Event`` / ``serde.to_jsonable``, plus
+# the ``REPO_BUNDLE_STATES`` / ``TERMINAL_*`` / ``DELIVERED_*`` /
+# ``REPO_LOCK_MODES`` / ``WAKE_DEPENDENCY_DELIVERED`` vocabularies and the
+# ``_REPO_OWNER_RULES`` table. A dead import is not free (the S41 rule): it keeps
+# a retired symbol reachable by name, so the next reachability pass counts it as
+# used. ``EventLog`` stays because the constructor still accepts one.
 REPO_BUNDLE_DELIVERY_CONTRACT = "staged_bundle_not_applied"
 REPO_BUNDLE_CHECKOUT_STATUS = "not_applied"
-
-WAKE_DEPENDENCY_DELIVERED = "dependency_bundle_delivered"
-
-_REPO_OWNER_RULES: tuple[tuple[str, str], ...] = (
-    ("eternialauncher", "dev"),
-    ("launcher", "dev"),
-    ("eterniabackend", "backend_dev"),
-    ("backend", "backend_dev"),
-    ("hermes-agent", "backend_dev"),
-    ("hermes", "backend_dev"),
-)
 
 
 class RepoBundleStore:
     def __init__(self, event_log: EventLog | None = None):
         self.event_log = event_log or EventLog()
 
-    def create_or_update_from_task(self, task: Any) -> list[RepoBundle]:
-        desired = desired_bundles_for_task(task)
-        result: list[RepoBundle] = []
-        for bundle in desired:
-            try:
-                existing = self.get(task.id, bundle.id)
-            except Exception:
-                self._write(bundle)
-                self._event("repo_bundle.created", bundle, {"state": bundle.state})
-                result.append(self.get(task.id, bundle.id))
-                continue
-            merged = merge_desired_bundle(existing, bundle)
-            if to_jsonable(merged) != to_jsonable(existing):
-                self._write(merged)
-                self._event("repo_bundle.updated", merged, {"state": merged.state})
-                result.append(self.get(task.id, merged.id))
-            else:
-                result.append(existing)
-        self.cancel_superseded(task, desired_ids={bundle.id for bundle in desired})
-        return sorted(result, key=lambda item: (item.repo.lower(), item.id))
+    # S52 (2026-08-01) removed this store's WRITE lane whole:
+    # ``create_or_update_from_task``, ``update``, ``attach_assignment``,
+    # ``mark_running``, ``mark_verified``, ``mark_rejected``,
+    # ``wake_ready_dependencies``, the hollow ``cancel_superseded`` seam
+    # (``return []``), and the two private writers ``_write`` / ``_event`` that
+    # only they reached. Not one had a production caller: the last one went with
+    # the mission/dispatch lane, and what remained was a store that could only
+    # ever be written by its own tests. The seven ``repo_bundle.*`` contracts
+    # they emitted are de-registered with them. The READ side below is LIVE --
+    # ``status.py`` builds every operator bundle row off ``list_all`` -- so this
+    # is a write-lane cut, not a store removal. See
+    # tests/agent_runtime/test_s52_repo_bundle_write_lane_removal.py.
 
     def get(self, task_id: str, bundle_id: str) -> RepoBundle:
         raw = json.loads(paths.repo_bundle_path(task_id, bundle_id).read_text(encoding="utf-8"))
         return from_jsonable(RepoBundle, raw)
-
-    def update(self, bundle: RepoBundle, *, event_type: str = "repo_bundle.updated", payload: dict[str, Any] | None = None) -> RepoBundle:
-        bundle.updated_at = now()
-        bundle.state = safe_bundle_state(bundle.state)
-        self._write(bundle)
-        updated = self.get(bundle.task_id, bundle.id)
-        self._event(event_type, updated, {"state": updated.state, **(payload or {})})
-        return updated
 
     def list_for_task(self, task_id: str) -> list[RepoBundle]:
         directory = paths.repo_bundles_task_dir(task_id)
@@ -118,160 +76,27 @@ class RepoBundleStore:
         except Exception:
             return None
 
-    def attach_assignment(self, bundle: RepoBundle, assignment_id: str | None, *, run_id: str | None = None) -> RepoBundle:
-        changed = False
-        if assignment_id and bundle.assignment_id != assignment_id:
-            bundle.assignment_id = assignment_id
-            changed = True
-        if run_id and bundle.active_run_id != run_id:
-            bundle.active_run_id = run_id
-            changed = True
-        if bundle.state == "planned":
-            bundle.state = "assigned"
-            changed = True
-        if not changed:
-            return bundle
-        return self.update(bundle, event_type="repo_bundle.assigned", payload={"assignment_id": assignment_id, "run_id": run_id})
 
-    def mark_running(self, bundle: RepoBundle, *, run_id: str | None) -> RepoBundle:
-        bundle.active_run_id = run_id or bundle.active_run_id
-        if bundle.state not in TERMINAL_REPO_BUNDLE_STATES:
-            bundle.state = "running"
-        return self.update(bundle, event_type="repo_bundle.running", payload={"run_id": run_id})
-
-    def mark_verified(self, bundle: RepoBundle, *, proof_ids: list[str] | None = None) -> RepoBundle:
-        for proof_id in proof_ids or []:
-            safe = safe_token(proof_id)
-            if safe and safe not in bundle.proof_ids:
-                bundle.proof_ids.append(safe)
-        bundle.state = "verified"
-        bundle.verified_at = now()
-        bundle.active_run_id = None
-        return self.update(bundle, event_type="repo_bundle.verified", payload={"proof_count": len(bundle.proof_ids)})
-
-    def mark_rejected(self, bundle: RepoBundle, *, reason: str = "") -> RepoBundle:
-        bundle.state = "rejected"
-        bundle.rejected_at = now()
-        bundle.active_run_id = None
-        bundle.last_terminal_feedback = {"reason": safe_text(reason, limit=500)}
-        return self.update(bundle, event_type="repo_bundle.rejected", payload={"reason": safe_text(reason, limit=200)})
-
-    def wake_ready_dependencies(self, task_id: str) -> list[RepoBundle]:
-        bundles = self.list_for_task(task_id)
-        by_id = {bundle.id: bundle for bundle in bundles}
-        woke: list[RepoBundle] = []
-        for bundle in bundles:
-            if bundle.state != "queued_waiting_dependency":
-                continue
-            if all(by_id.get(dep_id) and by_id[dep_id].state in DELIVERED_REPO_BUNDLE_STATES for dep_id in bundle.dependency_bundle_ids):
-                bundle.state = "planned"
-                bundle.queue_reason = None
-                bundle.wake_condition = WAKE_DEPENDENCY_DELIVERED
-                woke.append(self.update(bundle, event_type="repo_bundle.woke", payload={"wake_condition": WAKE_DEPENDENCY_DELIVERED}))
-        return woke
-
-    def cancel_superseded(self, task: Any, *, desired_ids: set[str]) -> list[RepoBundle]:
-        return []
-
-    def _write(self, bundle: RepoBundle) -> None:
-        bundle.state = safe_bundle_state(bundle.state)
-        bundle.updated_at = bundle.updated_at or now()
-        bundle.created_at = bundle.created_at or bundle.updated_at
-        path = paths.repo_bundle_path(bundle.task_id, bundle.id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_json_write(path, to_jsonable(bundle), indent=2, sort_keys=True)
-
-    def _event(self, event_type: str, bundle: RepoBundle, payload: dict[str, Any]) -> None:
-        self.event_log.append(
-            Event(
-                ts=now(),
-                type=event_type,
-                task_id=bundle.task_id,
-                run_id=bundle.active_run_id,
-                persona_id=bundle.owner_persona_id,
-                payload={
-                    "repo_bundle_id": bundle.id,
-                    "repo": safe_text(bundle.repo, limit=160),
-                    **payload,
-                },
-            )
-        )
-
-
-def desired_bundles_for_task(task: Any) -> list[RepoBundle]:
-    repos = list(getattr(task, "affected_repos", None) or [])
-    if not repos:
-        return []
-    created_at = now()
-    bundles: list[RepoBundle] = []
-    for repo in _dedupe_preserve_order(repos):
-        repo_text = safe_text(repo, limit=160)
-        bundles.append(
-            RepoBundle(
-                id=bundle_id_for(task.id, repo_text, stage_ids=[]),
-                task_id=task.id,
-                repo=repo_text,
-                owner_persona_id=owner_for_repo(repo_text),
-                state="planned",
-                title=f"{repo_text} bundle",
-                objective=task.description,
-                acceptance=list(getattr(task, "acceptance_criteria", None) or []),
-                non_goals=list(getattr(task, "non_goals", None) or []),
-                proof_targets=list(getattr(task, "proof_expectations", None) or []),
-                proof_requirements=[],
-                visual_requirements=["visual_proof"] if getattr(task, "requires_visual_proof", False) else [],
-                created_at=created_at,
-                updated_at=created_at,
-            )
-        )
-    return bundles
-
-
-def acquire_repo_bundle_locks(*, lane_id: str, task_id: str, bundle_ids: list[str], mode: str = "write", lane_kind: str = "production") -> dict[str, Any]:
-    mode = mode if mode in REPO_LOCK_MODES else "write"
-    if lane_kind == "playground" and mode != "read":
-        return {"ok": False, "park_state": "parked_by_repo_lock", "reason": "playground lanes are read-locked by default", "conflicts": []}
-    locks = _read_repo_locks()
-    desired = [str(item).strip() for item in bundle_ids if str(item).strip()]
-    conflicts = []
-    for bundle_id in desired:
-        for lock in locks:
-            if lock.get("bundle_id") != bundle_id or lock.get("lane_id") == lane_id:
-                continue
-            if _repo_lock_conflicts(mode, str(lock.get("mode") or "write")):
-                conflicts.append({"bundle_id": bundle_id, "owner_lane_id": lock.get("lane_id"), "owner_task_id": lock.get("task_id"), "mode": lock.get("mode")})
-    if conflicts:
-        return {"ok": False, "park_state": "parked_by_repo_lock", "reason": "repo bundle lock held by another lane", "conflicts": conflicts}
-    now_text = now()
-    kept = [lock for lock in locks if lock.get("lane_id") != lane_id or lock.get("bundle_id") not in desired]
-    kept.extend({"lane_id": lane_id, "task_id": task_id, "bundle_id": bundle_id, "mode": mode, "acquired_at": now_text} for bundle_id in desired)
-    _write_repo_locks(kept)
-    return {"ok": True, "locks": [lock for lock in kept if lock.get("lane_id") == lane_id and lock.get("bundle_id") in desired]}
-
-
-def release_repo_bundle_locks(*, lane_id: str | None = None, task_id: str | None = None) -> dict[str, Any]:
-    locks = _read_repo_locks()
-    kept = []
-    released = []
-    for lock in locks:
-        if (lane_id and lock.get("lane_id") == lane_id) or (task_id and lock.get("task_id") == task_id):
-            released.append(lock)
-        else:
-            kept.append(lock)
-    if released:
-        _write_repo_locks(kept)
-    return {"released_count": len(released), "released": released}
+# S52 also removed the two module-level repo-lock MUTATORS,
+# ``acquire_repo_bundle_locks`` / ``release_repo_bundle_locks``, plus the two
+# helpers only they reached (``_repo_lock_conflicts``, ``_write_repo_locks``),
+# and ``desired_bundles_for_task`` / ``merge_desired_bundle`` / ``qa_waiting_on``
+# — the first two reachable only from the deleted
+# ``create_or_update_from_task``, the third with no caller at all.
+#
+# KNOWN CONSEQUENCE, deliberately left for the follow-up wave rather than taken
+# here: with both writers gone, nothing can create a row in
+# ``repo_bundle_locks.json``, so ``repo_lock_summary()`` below can now only ever
+# report ``{"lock_count": 0, "locks": []}`` — and ``status.py`` publishes it as
+# ``repo_locks``. That is the S47 item-5 defect class (a wire whose value no
+# code path can move), but retiring it means editing the emitted status frame,
+# which belongs with the read-side/contract work this wave was scoped out of.
+# Recorded in docs/agent-runtime-harness/19-deferred-debt-ledger.md.
 
 
 def repo_lock_summary() -> dict[str, Any]:
     locks = _read_repo_locks()
     return {"lock_count": len(locks), "locks": locks}
-
-
-def _repo_lock_conflicts(requested: str, held: str) -> bool:
-    if requested == "read" and held == "read":
-        return False
-    return requested in {"write", "exclusive_maintenance"} or held in {"write", "exclusive_maintenance"}
 
 
 def _repo_locks_path():
@@ -288,49 +113,6 @@ def _read_repo_locks() -> list[dict[str, Any]]:
         return []
     locks = data.get("locks") if isinstance(data, dict) else data
     return [item for item in locks if isinstance(item, dict)] if isinstance(locks, list) else []
-
-
-def _write_repo_locks(locks: list[dict[str, Any]]) -> None:
-    atomic_json_write(_repo_locks_path(), to_jsonable({"schema_version": 1, "locks": locks, "updated_at": now()}), indent=2, sort_keys=True)
-
-
-def merge_desired_bundle(existing: RepoBundle, desired: RepoBundle) -> RepoBundle:
-    mutable_state = existing.state if existing.state in REPO_BUNDLE_STATES else desired.state
-    if mutable_state in {"running", "delivered_waiting_for_qa", "delivered", "verified", "blocked", "rejected", "cancelled", "archived"}:
-        desired_state = mutable_state
-    else:
-        desired_state = desired.state
-    return replace(
-        existing,
-        repo=desired.repo,
-        owner_persona_id=desired.owner_persona_id,
-        state=desired_state,
-        title=desired.title,
-        objective=desired.objective,
-        stage_ids=desired.stage_ids,
-        affected_paths=desired.affected_paths,
-        acceptance=desired.acceptance,
-        non_goals=desired.non_goals,
-        proof_targets=desired.proof_targets,
-        proof_requirements=desired.proof_requirements,
-        visual_requirements=desired.visual_requirements,
-        dependency_bundle_ids=desired.dependency_bundle_ids,
-        queue_reason=desired.queue_reason if desired_state == "queued_waiting_dependency" else existing.queue_reason,
-        wake_condition=desired.wake_condition if desired_state == "queued_waiting_dependency" else existing.wake_condition,
-        updated_at=now(),
-    )
-
-
-def owner_for_repo(repo: str | None) -> str | None:
-    normalized = normalize_repo(repo)
-    for marker, owner in _REPO_OWNER_RULES:
-        if marker in normalized:
-            return owner
-    return None
-
-
-def qa_waiting_on(bundles: list[RepoBundle]) -> list[str]:
-    return [bundle.id for bundle in bundles if bundle.state not in DELIVERED_REPO_BUNDLE_STATES and bundle.state not in TERMINAL_REPO_BUNDLE_STATES]
 
 
 def bundle_queue_summary(bundles: list[RepoBundle]) -> list[dict[str, Any]]:
@@ -478,44 +260,11 @@ def _repo_bundle_task_closeout_label(
     return "Task repo bundles are staged only; checkout not modified by bundle delivery."
 
 
-def bundle_id_for(task_id: str, repo: str, *, stage_ids: list[str]) -> str:
-    payload = json.dumps(
-        {
-            "task_id": safe_token(task_id),
-            "repo": normalize_repo(repo),
-            "stage_ids": sorted(safe_token(item) for item in stage_ids if safe_token(item)),
-        },
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return f"bundle_{hashlib.sha256(payload.encode('utf-8')).hexdigest()[:12]}"
-
-
-def safe_bundle_state(value: str | None) -> str:
-    state = safe_token(value)
-    return state if state in REPO_BUNDLE_STATES else "planned"
-
-
-def normalize_repo(value: str | None) -> str:
-    return "".join(ch.lower() for ch in str(value or "").strip() if ch.isalnum() or ch in {"_", "-", ".", "/", "\\"})
-
-
-def safe_token(value: Any) -> str:
-    text = "".join(ch if ch.isalnum() or ch in {"_", "-", "."} else "_" for ch in str(value or "").strip())
-    return text.strip("._-")[:120]
-
-
-def safe_text(value: Any, *, limit: int) -> str:
-    return " ".join(str(value or "").replace("\x00", " ").split())[:limit]
-
-
-def _dedupe_preserve_order(items: list[Any]) -> list[Any]:
-    seen: set[str] = set()
-    result: list[Any] = []
-    for item in items:
-        key = str(item)
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        result.append(item)
-    return result
+# S52: ``bundle_id_for`` / ``safe_bundle_state`` / ``normalize_repo`` /
+# ``safe_token`` / ``safe_text`` / ``_dedupe_preserve_order`` and the
+# ``owner_for_repo`` + ``_REPO_OWNER_RULES`` pair went with the write lane. Every
+# one was reachable ONLY from a deleted writer (id minting, state coercion, and
+# payload sanitising are write-time concerns), and none had an importer outside
+# this module. Leaving them would be the residue S25 named when it retired
+# ``events._safe_int`` with the formatter arm that was its only caller: a private
+# helper outliving its only branch.

@@ -82,12 +82,19 @@ ALLOWED_EVENT_TYPES = allowed_event_types()
 # went at S8. ``repo_bundle.delivered`` went in the same pass and for the same
 # rule, one commit behind its emitter: S24 deleted
 # ``RepoBundleStore.mark_delivered``, the only writer that ever produced it,
-# while every other ``repo_bundle.*`` type still rides a live
+# while every other ``repo_bundle.*`` type still rode a live
 # ``RepoBundleStore.update``.
+#
+# S52 (2026-08-01) finished that lane: the whole ``RepoBundleStore`` WRITE side
+# was deleted for want of a production caller, so ``repo_bundle.updated`` and
+# ``repo_bundle.assigned`` -- the last two ``repo_bundle.*`` types in this
+# frozenset -- were de-registered with it and removed from here. The S21/S25
+# invariant is why this edit is not optional: this frozenset may not name a
+# de-registered type, and ``operator_event_summary`` early-returns ``None``
+# outside it, so their shared formatter arm became unreachable the moment the
+# registration went and was removed in the same commit.
 OPERATOR_SUMMARY_EVENT_TYPES = frozenset(
     {
-        "repo_bundle.updated",
-        "repo_bundle.assigned",
         "run.closed",
         "run.progress",
         "run.tool.started",
@@ -692,13 +699,12 @@ def operator_event_summary(evt: Event) -> str | None:
         state = _safe_text(payload.get("state")) or "closed"
         decision = _safe_text(payload.get("decision_type"))
         return f"Closed {actor} run as {state}" + (f" after {decision}." if decision else ".")
-    if event_type in {"repo_bundle.assigned", "repo_bundle.updated"}:
-        repo = _safe_text(payload.get("repo")) or _safe_text(payload.get("repo_bundle_id")) or "repo bundle"
-        state = _safe_text(payload.get("state"))
-        if event_type == "repo_bundle.assigned":
-            return f"Assigned {repo} bundle" + (f" ({state})." if state else ".")
-        reason = _safe_text(payload.get("reason"))
-        return f"Updated {repo} bundle" + (f" to {state}" if state else "") + (f": {reason}." if reason else ".")
+    # S52 removed the shared ``repo_bundle.assigned`` / ``repo_bundle.updated``
+    # arm that stood here. Both types left OPERATOR_SUMMARY_EVENT_TYPES with the
+    # RepoBundleStore write lane, and this function early-returns None above for
+    # anything outside that frozenset, so the arm was unreachable the moment the
+    # registration went -- the same S25 rule that retired the ``delivered`` arm
+    # and its ``_safe_int`` helper.
     if event_type == "run.progress":
         parts = [
             _safe_text(payload.get("phase")),

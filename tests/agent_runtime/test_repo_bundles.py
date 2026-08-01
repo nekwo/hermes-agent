@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 Task = SimpleNamespace
 from agent_runtime.persona_assignments import PersonaAssignmentSpec, PersonaAssignmentStore
-from agent_runtime.repo_bundles import RepoBundleStore, acquire_repo_bundle_locks, desired_bundles_for_task, qa_waiting_on, release_repo_bundle_locks, repo_lock_summary
+from agent_runtime.repo_bundles import RepoBundleStore, repo_lock_summary
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig, RepoBundleRoutingConfig, SimplifiedAgentContractConfig
 from agent_runtime.snapshot import build_snapshot
 from agent_runtime.states import TaskState
@@ -78,25 +78,23 @@ def test_repeated_empty_delivery_without_new_proof_waits_for_operator(isolate_ag
     assert not hasattr(TaskStore(), "create")
 
 
-def test_repo_bundle_write_lock_conflict_parks_second_lane(isolate_agent_runtime_root):
-    first = acquire_repo_bundle_locks(lane_id="lane_1", task_id="task_1", bundle_ids=["bundle_backend"], mode="write")
-    second = acquire_repo_bundle_locks(lane_id="lane_2", task_id="task_2", bundle_ids=["bundle_backend"], mode="write")
+def test_the_repo_lock_summary_survives_its_writers_and_reports_empty(isolate_agent_runtime_root):
+    """S52 retargeted the two lock tests that stood here.
 
-    assert first["ok"] is True
-    assert second["ok"] is False
-    assert second["park_state"] == "parked_by_repo_lock"
-    assert second["conflicts"][0]["owner_lane_id"] == "lane_1"
-    assert repo_lock_summary()["lock_count"] == 1
+    They exercised ``acquire_repo_bundle_locks`` / ``release_repo_bundle_locks``
+    -- write-lock conflict parking and the playground read-only default -- and
+    both mutators were deleted with the write lane for want of a production
+    caller. Their whole caller set was this file plus ``test_status``.
 
-    released = release_repo_bundle_locks(lane_id="lane_1")
-    assert released["released_count"] == 1
+    What replaces them records the CONSEQUENCE rather than pretending the lane
+    is still exercised: ``repo_lock_summary`` is still read by ``status.py`` and
+    still published as ``repo_locks``, but with no writer left it can only ever
+    report empty. That is the S47 item-5 defect class (a wire whose value no
+    code path can move), filed for the follow-up wave; this test is the honest
+    witness that it is now a constant, not coverage of a live lane.
+    """
 
-
-def test_playground_lane_cannot_acquire_write_lock_by_default(isolate_agent_runtime_root):
-    result = acquire_repo_bundle_locks(lane_id="lane_play", task_id="task_play", bundle_ids=["bundle_backend"], mode="write", lane_kind="playground")
-
-    assert result["ok"] is False
-    assert result["reason"] == "playground lanes are read-locked by default"
+    assert repo_lock_summary() == {"lock_count": 0, "locks": []}
 
 
 def _bundle_config() -> AgentRuntimeConfig:
@@ -170,58 +168,38 @@ class ShouldNotRunRuntime:
         raise AssertionError("queued assignment should not launch persona runtime")
 
 
-def test_desired_bundles_project_affected_repos_without_stage_dependencies(isolate_agent_runtime_root):
-    task = _task_with_plan()
+def test_the_store_is_read_only_after_s52(isolate_agent_runtime_root):
+    """S52 retargeted the three projection/idempotency tests that stood here.
 
-    bundles = desired_bundles_for_task(task)
-    by_repo = {bundle.repo: bundle for bundle in bundles}
+    They drove ``desired_bundles_for_task``, ``create_or_update_from_task``,
+    ``update`` and ``wake_ready_dependencies`` -- the whole write lane, whose
+    only callers were these tests. A store that can only be written by its own
+    tests is a closed loop, not covered code (the settled ledger-item-2 rule),
+    so the lane went and the tests went with it.
 
-    assert set(by_repo) == {"EterniaBackend", "EterniaLauncher"}
-    assert by_repo["EterniaBackend"].owner_persona_id == "backend_dev"
-    assert by_repo["EterniaLauncher"].owner_persona_id == "dev"
-    assert by_repo["EterniaLauncher"].state == "planned"
-    assert by_repo["EterniaLauncher"].dependency_bundle_ids == []
-    assert by_repo["EterniaLauncher"].visual_requirements == ["visual_proof"]
-    assert all("qa_release" not in bundle.stage_ids for bundle in bundles)
+    What survives is the boundary the cut had to respect: the READ side is live,
+    ``status.py`` projects operator bundle rows off ``list_all``, and the store
+    must no longer expose a single mutator.
+    """
 
-
-def test_repo_bundle_store_is_idempotent_without_stage_dependencies(isolate_agent_runtime_root):
-    task = _task_with_plan()
     store = RepoBundleStore()
+    for mutator in (
+        "create_or_update_from_task",
+        "update",
+        "attach_assignment",
+        "mark_running",
+        "mark_verified",
+        "mark_rejected",
+        "wake_ready_dependencies",
+        "cancel_superseded",
+        "_write",
+        "_event",
+    ):
+        assert not hasattr(store, mutator), mutator
 
-    first = store.create_or_update_from_task(task)
-    second = store.create_or_update_from_task(task)
-    assert [bundle.id for bundle in second] == [bundle.id for bundle in first]
-
-    backend = next(bundle for bundle in first if bundle.repo == "EterniaBackend")
-    # S24 removed ``mark_delivered`` with the delivery-capture path; the wake
-    # rule under test is about dependency state, not about how it got there.
-    backend.state = "delivered_waiting_for_qa"
-    store.update(backend)
-    woke = store.wake_ready_dependencies(task.id)
-
-    assert woke == []
-
-
-def test_repo_bundle_store_keeps_repo_projection_stable_without_stage_graph(isolate_agent_runtime_root):
-    ts = now()
-    task = Task(
-        id="task_supersede",
-        title="Before plan",
-        description="No plan yet.",
-        state=TaskState.CREATED,
-        created_at=ts,
-        updated_at=ts,
-        requested_by="tony",
-        affected_repos=["hermes-agent"],
-    )
-    store = RepoBundleStore()
-    placeholder = store.create_or_update_from_task(task)[0]
-
-    bundles = store.create_or_update_from_task(task)
-
-    assert [bundle.id for bundle in bundles] == [placeholder.id]
-    assert store.get(task.id, placeholder.id).state == "planned"
+    # The read side still answers, and answers empty on a clean root.
+    assert store.list_all() == []
+    assert store.list_for_task("task_absent") == []
 
 
 def test_assignment_signal_hash_includes_repo_bundle_id(isolate_agent_runtime_root):

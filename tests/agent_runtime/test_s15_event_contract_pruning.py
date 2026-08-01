@@ -117,6 +117,17 @@ REMOVED_EVENT_TYPES = frozenset(
         "operator.takeover.requested",
         "operator.takeover.approval_required",
         "operator.takeover.applied",
+        # S52 (2026-08-01). The last seven repo_bundle.* types, de-registered
+        # with the RepoBundleStore WRITE lane that was their only emitter.
+        # ``repo_bundle.delivered`` reached this set at S25 for the same reason,
+        # one writer earlier.
+        "repo_bundle.created",
+        "repo_bundle.updated",
+        "repo_bundle.assigned",
+        "repo_bundle.running",
+        "repo_bundle.verified",
+        "repo_bundle.rejected",
+        "repo_bundle.woke",
     }
 )
 
@@ -150,9 +161,14 @@ REMOVED_EVENT_TYPES = frozenset(
 # whose sole emitter agent_runtime/operator_control.py was deleted whole under
 # the operator's 2026-08-01 cut ruling; owned by
 # tests/agent_runtime/test_s49_operator_control_removal.py.
+# Then -7 at S52: the remaining repo_bundle.* family, de-registered with the
+# RepoBundleStore write lane (their only emitter). Two of the seven were also
+# operator-summary types, so events.OPERATOR_SUMMARY_EVENT_TYPES and their
+# formatter arm went with them; owned by
+# tests/agent_runtime/test_s52_repo_bundle_write_lane_removal.py.
 # This stays an absolute count on purpose: it is the one assertion that catches
 # a contract silently appearing or disappearing.
-SURVIVING_EVENT_COUNT = 79
+SURVIVING_EVENT_COUNT = 72
 
 
 def test_the_unemittable_event_types_are_no_longer_registered():
