@@ -27,14 +27,16 @@
    Settled rule, so future waves stop re-deriving it: **a module whose entire
    importer set is the test written to exercise it is a closed loop, not
    covered code.** `role_envelopes.py` was listed here too and went with item 1.
-3. **Launcher goal-detail family (A21 remainder).** MissionGoalDetail body,
-   MissionIntervention, proof-gate/flow-timeline/level-state/topology classes,
-   _agentTopologyRuntimeGraphProjection, _missionActorsFromTopology, and the
-   bridge goal-mapping region still have live compile-time consumers in six
-   files (instance picker x9, secondary_drawers:177, shared_widgets:512,
-   chat adapter :847/:867, selection policy :333, page :3770). Needs ONE
-   follow-up pass owning all of them together; cutting one side strands a
-   non-compiling tree.
+3. ~~**Launcher goal-detail family (A21 remainder).**~~ **RULED "run the pass"
+   and EXECUTED 2026-07-31** — Launcher s47–s49 knot pass (pushed via
+   `c6d256c7`, −2,099 lib lines): MissionGoalDetail body, MissionIntervention,
+   proof-gate/flow-timeline/level-state/topology classes,
+   _agentTopologyRuntimeGraphProjection, _missionActorsFromTopology, the
+   bridge goal-mapping region, and all six consumer files taken in ONE pass
+   (the strand-a-non-compiling-tree hazard this item existed to flag).
+   Removal-contract groups s47–s49 in dead_symbol_removal_contract_test.dart.
+   (This strike was recorded late — the pass landed before items 5/8/9 were
+   executed; nothing else about the entry changed.)
 4. **CLI entity rows gain redaction/caps (hermes B-2).** Consolidating the five
    duplicated entity-row projections onto snapshot-grade builders changes CLI
    output (cards gain masking/truncation) - a deliberate output change needing
