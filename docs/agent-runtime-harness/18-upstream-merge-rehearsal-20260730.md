@@ -271,6 +271,25 @@ in a session scratchpad (ephemeral — regenerate from the commits if gone).**
    $HOME-preferring resolution. NOT mechanical: aligning WIDENS the `~` denial
    carve-out — the PR must present that as a behavior question for upstream,
    not a bugfix. Prepare the branch at filing time.
+7. (Added 2026-08-01 from the S49–S55 cut wave — no branch prepared yet.)
+   **`tests/tools/test_approved_command_clean_slate.py` interpolates an
+   unquoted Windows `tmp_path` into a shell command and litters the repo root.**
+   Two cases build `command=f"touch {sentinel}; sleep 5; echo DONE"` where
+   `sentinel` is a `WindowsPath`
+   (`C:\Users\...\pytest-NNNNN\...\cmd_started_c`). Unquoted, the drive colon
+   and every backslash are consumed, so `touch` receives ONE mangled argument
+   and creates a file named `C<U+F03A>UsersbeastAppData…cmd_started_c` **in the
+   process CWD — the repo root** — instead of at `sentinel`.
+   Characterised on this host rather than assumed: the tests do **not** pass
+   vacuously, they **FAIL** (`_wait_for_sentinel` returns False → "command did
+   not start"), and they are FENCED as `windows_env_gap` in
+   `tests/tools/conftest.py` (the 2026-08-01 fence-retirement pass explicitly
+   kept them: "Its two siblings below still fail"), so the canonical runner
+   deselects them and the failure is invisible there. The litter still lands on
+   any unfenced run — 12 such files were sitting in the repo root and were
+   removed during this wave. Upstream-owned test, upstream-shaped fix (quote the
+   interpolation, or convert to a POSIX path before handing it to the shell).
+   Recorded here rather than fixed, per the parked-PR rule.
 
 ### Post-sync follow-ups (carried forward)
 

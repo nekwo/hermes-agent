@@ -637,3 +637,102 @@ Launcher Mission Control (F-1..F-8):
   B-5 deleted that producer too, so the comment was asserting a diagnostic
   neither repo performs. A grep gate (`open_incident_budget_exceeded`, code
   lines only) keeps the branch from returning.
+
+## S49-S55 mechanical cut wave (hermes, 2026-08-01)
+
+> Scout findings -> operator ruling CUT -> executed. Every claim was
+> re-verified against the tree immediately before cutting; two did not survive
+> that re-verification and are recorded below as **DIED**, not forced. Event
+> contract count moved **82 -> 68** across three of the five cuts;
+> `contract_hash()` moved
+> `f655bd56bb378c1fa818f360a0f401d5d957c17df33b6a65cb2fd2a6982acfe6` ->
+> `f5c5663ffeedff3d7d791f505e56b27287592eaafdb4a98874d009d33b9d0b31`. The
+> absolute count authority remains
+> `tests/agent_runtime/test_s15_event_contract_pruning.SURVIVING_EVENT_COUNT`.
+
+### Executed
+
+| Cut | What went | Contracts | Commit |
+| --- | --- | --- | --- |
+| S49 | `agent_runtime/operator_control.py` whole (145L) | -3 (`operator.takeover.*`), 82 -> 79 | `c58d759b9` |
+| S50 | `agent_runtime/launcher_process_hygiene.py` whole (164L) | none | `c58d759b9` |
+| S52 | `RepoBundleStore` WRITE lane; `repo_bundles.py` 521 -> 270 | -7 (`repo_bundle.*`), 79 -> 72 | `15ee23b21` |
+| S53 | `GoalRuntimeInstanceStore` WRITE lane; `runtime_instances.py` 264 -> 135 | -4 (`lane.*`, `foreground_runtime.closed`), 72 -> 68 | `2f8f74b9e` |
+| S54 | 30 individually dead symbols across 21 modules | none | `90dbe908a` |
+| S55 | Structural gate: registered event type => production emitter | n/a | `134c8dc9d` |
+
+`S51` (worker_sessions), the config-block items and the roster gate were NOT in
+this wave's scope and are untouched.
+
+### Claims that DIED on re-verification (reported, not forced)
+
+1. **`repo_context.isolated_repo_context_for_run` + `repo_execution_context_for_task`
+   are NOT a closed loop.** Ruled cut on the basis that their only callers were
+   tests. `isolated_repo_context_for_run` is the constructor
+   `tests/agent_runtime/test_delivery_directive.py` builds real worktrees with
+   (NINE call sites) to test the LIVE
+   `delivery_directive.reap_orphan_worktrees` janitor. Its own S24 docstring
+   records that the suite pins two live-incident regressions reachable only
+   through it — junction severing that once emptied the backend venv
+   (2026-07-01) and the backend `.env` copy whose absence broke every read-only
+   proof (2026-07-03) — and states the lane must be "retired together or not at
+   all". `repo_execution_context_for_task` shares `_context_for_workdir` with
+   that kept lane. **The whole file was excluded; the S43 KEEP stands.** A cut
+   was prepared (953 -> 537 lines) and reverted once the janitor dependency
+   surfaced. Pinned in `test_s54_individual_dead_symbols.py` so it is not
+   re-attempted.
+2. **The gate's "24 emitter-less pre-cut" figure is a REACHABILITY count, not a
+   presence count.** A static presence scan reports 3 both before and after the
+   wave, because the 14 de-registered types had emitters that were physically
+   present inside dead write lanes. S55 therefore gates presence and says so
+   explicitly; the unreachable-but-present class stays with the per-cut
+   removal-contract tests. Consequence: the planned temporary "S51 pending"
+   allowlist entry for the ten `worker_session.*` types **was not added and is
+   not needed** — they still have live emitters. Adding it would have been a
+   hole, since S55 is exactly what should go red if S51 cuts that write lane
+   without de-registering them in the same commit. **There is nothing here for
+   the follow-up wave to remove.**
+
+### New debt opened by this wave (S47 item-5 class: wires that can only report a constant)
+
+- **`repo_lock_summary()` can no longer be non-empty.** S52 deleted both
+  `acquire_repo_bundle_locks` and `release_repo_bundle_locks`, so nothing can
+  write `repo_bundle_locks.json`. The summary is still read and still published
+  by `status.py` as `repo_locks`, where it can only ever report
+  `{"lock_count": 0, "locks": []}`.
+- **`status.py`'s `lanes` is the same shape after S53** — no writer can create a
+  `GoalRuntimeInstance` row, so the projection is empty by construction.
+
+Both are asserted as constants in the S52/S53 removal tests so they stay
+visible rather than being inferred later. Retiring either edits the emitted
+status frame (a contract move + Launcher lockstep), which is why this wave —
+scoped to mechanical removal — did not take them.
+
+### Deliberate KEEP a reference count calls dead
+
+- **`incidents.MODEL_INVALID_OUTPUT`.** Nothing reads the NAME, but its VALUE is
+  live as a bare string literal in `observability.py` (`incident.kind in
+  {"model_invalid_output"}`) and in two tests. Cutting the constant would leave
+  a live concept addressed only by a duplicated literal. The real fix is a
+  single-name-authority one at the `observability.py` end (read the constant
+  instead of re-typing the string); it was not on the ruled list, so it is
+  recorded here rather than taken. Pinned with its reason in
+  `test_s54_individual_dead_symbols.py`.
+
+### A seam that advertised a caller it never had
+
+- `prompt_observability.load_final_model_input_for_context` documented itself as
+  the read "the launcher fetch lane and a future `harness prompt-context
+  final-model-input` CLI verb both call through". The Launcher repo has **zero**
+  references to it and the verb was never wired. Cut as ruled — an advertised
+  seam with no caller is the same defect class as a registered event with no
+  emitter — and noted here because the docstring, not the code, was the thing
+  asserting something false.
+
+### Housekeeping correction to an inherited pattern
+
+Three "delta-only" removal tests (S44, and then S49/S52/S53 as this wave wrote
+them) each held a SECOND copy of the absolute event count while their docstrings
+promised not to. Every later cut in the same wave then broke them. All four now
+assert only their own delta plus agreement with S15's single authority.
+
