@@ -157,8 +157,108 @@
    resolvers WIDENS the `~` denial carve-out, which upstream may or may not
    want — it is a behavior question for the upstream maintainers, not a
    mechanical fix.
-7. **Packaging:** psutil/fire declared but absent on the ambient test
-   interpreter; markdown used by the matrix adapter but declared nowhere.
+7. ~~**Packaging:** psutil/fire declared but absent on the ambient test
+   interpreter; markdown used by the matrix adapter but declared nowhere.~~
+   **RULED EXECUTE and EXECUTED 2026-08-01 — hermes `6d3611da0`.** The item had
+   two halves. Only one of them was real.
+
+   **The packaging half was a FALSE finding, and the correction matters more
+   than the fix.** `markdown` is not "declared nowhere". `pyproject.toml` has
+   carried it in `[project.dependencies]` since upstream `c1eb2dcda`, as
+   `"Markdown==3.10.2"` (line 79) under an eight-line comment explaining why it
+   is core rather than matrix-scoped; `uv.lock` corroborates, listing `markdown`
+   in the `hermes-agent` package's core `dependencies` array with no
+   `extra ==` marker and pinning `markdown==3.10.2` in `requires-dist`. The
+   original audit grepped case-sensitively for lowercase `markdown` and missed
+   the capitalized spelling — PEP 503 treats the two as one package, `grep`
+   does not. **No pyproject edit was made or needed**: all three packages were
+   already correctly declared core — `fire==0.7.1` (line 43),
+   `Markdown==3.10.2` (line 79), `psutil==7.2.2` (line 99). Worth carrying
+   forward as a method note: "declared nowhere" claims sourced from a
+   case-sensitive grep of a packaging file are not evidence.
+
+   **The environment half was real, and was the whole of the actual work.** The
+   ambient test interpreter `C:\Python312\python.exe` (3.12.5) — the one the
+   env-gap fence registries are pinned to — did not have them. Installed at
+   exactly the declared pins: `psutil 7.2.2`, `fire 0.7.1`, `Markdown 3.10.2`,
+   plus `termcolor 3.3.0` pulled transitively by fire. No pin was invented or
+   floated; each matches pyproject and uv.lock.
+
+   **The cascade: 22 fence rows / 11 groups retired (305 → 283 nodes, 139 → 128
+   groups), 2 re-diagnosed, 0 left on a stale reason.** Swept under the AMBIENT
+   interpreter — never the runtime venv, which is the inversion the
+   `tests/tools/conftest.py` header warns about — and diffed pre/post BY NAME,
+   because the suites flake by ±1 and a count-only diff would have masked a new
+   failure behind a retirement. Retired: gateway `test_memory_monitor.py` (3),
+   `test_status.py` (1), `test_whatsapp_bridge_pidfile.py` (1),
+   `test_matrix.py` (1); hermes_cli `test_arcee_provider.py` (1),
+   `test_install_cua_driver.py` (2), `test_update_interrupted_recovery.py` (1);
+   tools `test_browser_orphan_reaper.py` (4), `test_config_null_guard.py` (2),
+   `test_process_registry.py::TestTerminateHostPidPosix` (2).
+
+   **Four more rows came from the stale-row DETECTOR, not from grepping
+   reasons** — their reason text never named a package, so no amount of reading
+   the registry would have found them; only running the suite did:
+   `test_approved_command_clean_slate` (1, the kill path stops tripping the
+   live-system guard), `test_mcp_stability` (1, same), and
+   `test_process_registry::TestPidReuseGuard` (1, its start-time comparison is
+   a psutil read). The fourth,
+   `test_process_registry::TestSpawnEnvSanitization`, is **NOT attributable to
+   this install**: the detector reported it passing on the PRE-install sweep as
+   well, so that row had already silently stopped being a fence. Deleted per
+   the contract, with its recorded cause preserved in a comment — the
+   underlying import-time `get_hermes_home()` fragility in
+   `tools/environments/singularity.py` is unchanged and still worth retiring at
+   the source.
+
+   **Two rows survived the install, and they are the most valuable part: the
+   missing import had been MASKING two real platform defects.** Both
+   `test_process_registry.py` nodes were registered as "psutil is not
+   installed". With psutil present they still fail, for causes the absent
+   import had hidden — `test_popen_killed_when_thread_creation_fails` patches
+   `os.getpgid`, which does not exist on Windows at all (`mock` raises
+   `AttributeError`); and `test_kill_detached_session_uses_host_pid` asserts
+   `psutil.Process(pid).terminate()` was called, which is the POSIX kill path
+   only, since `_terminate_host_pid` shells out to `taskkill /PID <pid> /T /F`
+   on Windows and never constructs a `psutil.Process` — so the kill SUCCEEDS
+   and only the POSIX call assertion fails. Both were re-marked
+   `windows_env_gap` with the real cause inline. This is the fence contract
+   working exactly as designed: a row naming the wrong cause has stopped being
+   a fence, and the only way to discover that is to remove the cause it names.
+
+   **Frozen-home ledger (`tests/test_no_frozen_hermes_home.py`).** With `fire`
+   installed the probe imported `trajectory_compressor.py` for the first time
+   on this host. Its `FROZEN_LEDGER` entry had been carried from the pre-probe
+   regex ledger, whose own caveat was that the regex "only ever saw the first
+   hop" and a real run might find more names. It did not: the measurement found
+   exactly `_hermes_home`. The reason was updated from carried to measured, and
+   the entry deliberately KEEPS its `UNPROBED` row — per that test's own
+   `test_ledger_reasons_are_present`, `UNPROBED` is per-environment and both
+   entries are legitimate at once so long as the module is ledgered. 4/4
+   passing, no new frozen names, no stale ledger entries.
+
+   **Discovered, not fixed (pre-existing, recorded so it is not silent):**
+   `tests/hermes_cli/test_update_interrupted_recovery.py` fails under a
+   whole-directory `pytest tests/hermes_cli` run but passes per-file. Its
+   sibling `test_marker_round_trip` — never fenced — fails the same way both
+   before and after this change, so the file carries a pre-existing
+   order/pollution dependence (`_write_update_incomplete_marker()` not
+   producing the marker under suite ordering). Not re-fenced: fence rules 3–4
+   forbid registering a defect in our own code, and the canonical per-file
+   runner is unaffected.
+
+   **Gates.** `tests/agent_runtime`: 3383 passed / 1 skipped / 0 failed. The +5
+   against the ledger's 3378 baseline is entirely the parallel agent's items
+   10–11 (`d89059dd7`, `587dbd6c7`) adding tests to
+   `test_launcher_qa_template_drift.py` and `test_machine_roots.py`; this
+   change touches no file under `agent_runtime/` or `tests/agent_runtime/`. The
+   1 skip (not 2) is environmental and predates the install — measured at 1
+   before any package was touched — `no live profile tree at
+   %LOCALAPPDATA%\hermes\profiles`. Canonical hermes_cli runner: exit 0, 3708
+   passed / 0 failed, with deselection dropping 93 → 89, i.e. exactly the four
+   retired hermes_cli nodes now selected and passing. gateway 69 → 63 failed
+   (−6 fixed, 0 new, by name); tools 135 → 124 failed (−11 fixed, 0 new, by
+   name). Every suite's stale-row detector clean.
 8. ~~**`role_envelope` runtime-config block is now a knob that governs nothing
    (hermes; opened by S44, 2026-07-31).**~~ **RULED CUT and EXECUTED 2026-08-01
    — hermes `d88ea8b55` (S47) + launcher `4739bd4f` (s53).** The whole surface
