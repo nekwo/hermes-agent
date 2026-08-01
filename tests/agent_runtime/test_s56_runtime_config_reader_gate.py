@@ -30,8 +30,8 @@ check on a field nothing reads validates nothing — that is exactly how
 excluded whole: its loaders read yaml via ``raw.get("name")``, which this scan
 does not count anyway, while the accessor helpers beside them are real readers.
 
-**What running it found, beyond the seven ruled blocks.** THIRTY more scalar
-fields have no production reader either — the whole ``daemon_*`` family, the
+**What running it found, beyond the seven ruled blocks.** TWENTY-NINE more
+scalar fields have no production reader either — the whole ``daemon_*`` family, the
 ``live_run_*`` budgets, the ``liveness_*`` watchdog knobs, the
 ``artifact_storage_*`` watermarks, ``mission_max_total_tokens`` /
 ``mission_wall_clock_deadline_seconds``, ``neko_recovery_attempt_cap`` /
