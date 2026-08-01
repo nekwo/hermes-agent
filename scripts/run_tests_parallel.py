@@ -85,6 +85,10 @@ _SKIP_PARTS = {"integration", "e2e", "docker"}
 # time while keeping a genuinely hung file bounded.
 _DEFAULT_FILE_TIMEOUT_SECONDS = 300.0
 
+# Exit code stamped on a file we killed for exceeding ``file_timeout``. Not a
+# pytest exit code — 124 is the de facto "killed by timeout" convention.
+_TIMEOUT_RC = 124
+
 # One-shot retry of failing test FILES. A file that exits non-zero is re-run
 # once in a fresh subprocess; if the re-run passes, the file counts as passed
 # but is loudly reported as FLAKY so it gets fixed rather than hidden.
@@ -92,6 +96,13 @@ _DEFAULT_FILE_TIMEOUT_SECONDS = 300.0
 # laundered into green by this (it would have to flake in our favor twice in
 # a row on the same runner, which is exactly the definition of a flake).
 # Set to 0 to disable (env: HERMES_TEST_FILE_RETRIES).
+#
+# This retry owns ASSERTION-shaped failures only. A timeout is deliberately
+# excluded (see the guard in ``_run_one_file``): the re-run happens
+# immediately, under the very pool contention that produced the timeout, so
+# it almost always times out again — and each attempt costs a full
+# ``file_timeout``. One hung file would burn 10 minutes at the default rather
+# than 5, delaying the whole run without ever changing the verdict.
 _DEFAULT_FILE_RETRIES = 1
 
 # Duration cache: maps relative file paths to last-observed subprocess
@@ -244,7 +255,8 @@ def _run_one_file(
     passed but the output is prefixed with a FLAKY banner and the file/output
     are recorded in ``_FLAKY_RESULTS`` so the summary can call it out. A
     deterministic failure fails every attempt, so real regressions cannot
-    be laundered green.
+    be laundered green. A timeout (``_TIMEOUT_RC``) is never retried — see
+    the guard below.
 
     ``summary_counts`` is the result of ``_parse_pytest_summary(output)`` —
 
@@ -271,7 +283,10 @@ def _run_one_file(
         file, pytest_args, repo_root, file_timeout
     )
     attempt = 0
-    while rc != 0 and attempt < retries:
+    # ``rc != _TIMEOUT_RC``: a timeout is not a flake signal. Retrying it here
+    # re-runs the file under the same contention that produced the timeout and
+    # costs another full ``file_timeout`` to reach the same answer.
+    while rc != 0 and rc != _TIMEOUT_RC and attempt < retries:
         attempt += 1
         first_output = output
         file, rc, output, summary, subproc_wall2 = _run_one_file_once(
@@ -343,7 +358,7 @@ def _run_one_file_once(
             output, _ = proc.communicate(timeout=10)
         except subprocess.TimeoutExpired:
             output = "(file timeout exceeded; output unavailable)"
-        rc = 124  # de facto convention for "killed by timeout".
+        rc = _TIMEOUT_RC  # de facto convention for "killed by timeout".
         output = (
             f"({file_timeout:.0f}s exceeded; "
             f"process tree SIGKILL'd)\n{output}"

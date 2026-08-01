@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -378,3 +379,81 @@ def test_explicit_k_wins_over_node_id_inference(tmp_path: Path) -> None:
     # -k test_beta wins: one test ran, and it wasn't filtered to nothing.
     assert proc.returncode == 0, proc.stdout
     assert "1 tests passed" in proc.stdout
+
+
+# ---------------------------------------------------------------------------
+# Retry ownership: the in-pool flake retry must not re-run timeouts
+# ---------------------------------------------------------------------------
+
+
+
+
+def test_timeout_is_not_retried_by_the_flake_retry() -> None:
+    """A timed-out file is run ONCE, even with ``--file-retries 1``.
+
+    The flake retry re-runs immediately, under the same pool contention that
+    produced the timeout, so it reaches the same verdict — after paying a
+    second full ``--file-timeout``. Assertion-shaped failures are still
+    retried (see test_file_retry_self_heals_and_prints_both_attempts).
+
+    Deterministic, not timing-based: the probe records one line per
+    invocation, so the marker file counts attempts directly.
+
+    The probe lives under the repo root and is passed to ``--files``
+    repo-relative on purpose: ``--files`` splits its value on ``:``, so an
+    absolute Windows path would not survive the parse.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    runner = repo_root / "scripts" / "run_tests_parallel.py"
+    probe_dir = repo_root / ".hermes-timeout-probe"
+    probe_dir.mkdir(exist_ok=True)
+    marker = probe_dir / "attempts.log"
+    probe = probe_dir / "test_hang_probe.py"
+
+    try:
+        probe.write_text(
+            textwrap.dedent(
+                f"""
+                import time
+                from pathlib import Path
+
+                with Path(__file__).with_name({marker.name!r}).open("a") as fh:
+                    fh.write("attempt ")
+
+                def test_hangs():
+                    time.sleep(600)
+                """
+            ),
+            encoding="utf-8",
+        )
+
+        started = time.monotonic()
+        proc = subprocess.run(
+            [
+                sys.executable, str(runner),
+                "--files", str(probe.relative_to(repo_root).as_posix()),
+                "--file-retries", "1",
+                "--file-timeout", "5",
+                "-j", "1", "-q",
+            ],
+            cwd=repo_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+        )
+        elapsed = time.monotonic() - started
+
+        assert proc.returncode != 0, f"a hung file must fail the run:\n{proc.stdout}"
+        attempts = marker.read_text().count("attempt")
+        assert attempts == 1, (
+            f"timed-out file was run {attempts}x — the flake retry re-ran a "
+            f"timeout, paying the file timeout twice:\n{proc.stdout}"
+        )
+        # Secondary sanity check: one timeout's worth of wall time, not two.
+        assert elapsed < 40, f"run took {elapsed:.1f}s:\n{proc.stdout}"
+        # A timeout is a failure, never laundered into the FLAKY bucket.
+        assert "FLAKY" not in proc.stdout, proc.stdout
+    finally:
+        shutil.rmtree(probe_dir, ignore_errors=True)
