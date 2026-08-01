@@ -229,9 +229,18 @@ def test_the_lookalike_keep_set_survives():
 
 
 def test_the_registry_lost_exactly_six_contracts():
-    """Delta-only; the absolute authority is S15's SURVIVING_EVENT_COUNT."""
+    """Delta-only; the absolute authority is S15's SURVIVING_EVENT_COUNT.
+
+    S49 correction: this test's docstring said "delta-only" while the body
+    pinned ``SURVIVING_EVENT_COUNT == 82`` — a SECOND copy of the absolute
+    count, in the one file that promised not to hold one. Every later wave that
+    legitimately moves the count broke this line, which is precisely the
+    "one number to maintain" rule it was written to honour. The absolute
+    assertion is dropped; what stays is S44's actual invariant — its six types
+    are gone, and the catalog still agrees with the single authority.
+    """
 
     from tests.agent_runtime.test_s15_event_contract_pruning import SURVIVING_EVENT_COUNT
 
-    assert SURVIVING_EVENT_COUNT == 82
+    assert [name for name in RETIRED_EVENT_TYPES if name in event_catalog()] == []
     assert len(event_catalog()) == SURVIVING_EVENT_COUNT

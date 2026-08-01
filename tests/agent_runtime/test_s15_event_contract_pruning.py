@@ -111,6 +111,12 @@ REMOVED_EVENT_TYPES = frozenset(
         "role_envelope.closed",
         "role_checklist.created",
         "role_checklist.item_updated",
+        # S49 (2026-08-01). Same shape as the S44 six: live emitters at S15,
+        # de-registered only once `agent_runtime/operator_control.py` — the sole
+        # producer of all three — was deleted whole.
+        "operator.takeover.requested",
+        "operator.takeover.approval_required",
+        "operator.takeover.applied",
     }
 )
 
@@ -140,9 +146,13 @@ REMOVED_EVENT_TYPES = frozenset(
 # RoleEnvelopeStore.save and RoleChecklistStore.save, both deleted with the store
 # family under the operator's 2026-07-31 ruling on deferred-debt item 1; owned by
 # tests/agent_runtime/test_s44_role_envelope_family_removal.py.
+# Then -3 at S49: operator.takeover.requested / .approval_required / .applied,
+# whose sole emitter agent_runtime/operator_control.py was deleted whole under
+# the operator's 2026-08-01 cut ruling; owned by
+# tests/agent_runtime/test_s49_operator_control_removal.py.
 # This stays an absolute count on purpose: it is the one assertion that catches
 # a contract silently appearing or disappearing.
-SURVIVING_EVENT_COUNT = 82
+SURVIVING_EVENT_COUNT = 79
 
 
 def test_the_unemittable_event_types_are_no_longer_registered():
@@ -185,8 +195,11 @@ def test_the_near_miss_survivors_stay_registered():
         "run.tool.started",
         "run.tool.finished",
         "run.progress",
-        # RunStore.cancel -> close_run is LIVE (operator takeover, persona-chat
-        # replacement), so run.closed stays emittable. run.heartbeat and
+        # RunStore.cancel -> close_run is LIVE, so run.closed stays emittable.
+        # RE-DERIVED at S49: this note used to cite TWO callers (operator
+        # takeover, persona-chat replacement). S49 deleted operator_control.py,
+        # so only the persona-chat replacement in persona_assignments.py still
+        # reaches it — one caller, still live, still emittable. run.heartbeat and
         # run.approved went with their writers at S17; run.opened followed at
         # S25 once its two filler minters were retargeted — all three are pinned
         # as removed by the tests that own those deltas.

@@ -26,10 +26,18 @@ line-range cut that swallows it silently removes the redaction gate on a live
 event. It is pinned below by behavior, not by ``hasattr``.
 
 THE OTHER TRAP: ``run.closed`` is NOT de-registered with its three siblings.
-``RunStore.cancel`` is live in two production paths (``operator_control``'s
-operator takeover and ``persona_assignments._terminate_live_chat_bindings``),
-and ``cancel`` delegates to ``close_run``, which appends ``run.closed``.
-De-registering it would convert a live operator action into a crash.
+``RunStore.cancel`` is live, and ``cancel`` delegates to ``close_run``, which
+appends ``run.closed``. De-registering it would convert a live operator action
+into a crash.
+
+RE-DERIVED at S49 (2026-08-01): this note used to cite TWO production paths —
+``operator_control``'s operator takeover and
+``persona_assignments._terminate_live_chat_bindings``. S49 deleted
+``agent_runtime/operator_control.py`` whole, so the first is gone and the
+persona-chat replacement is now the SOLE live caller. The trap still holds for
+exactly one reason instead of two; re-derived rather than left standing,
+because a liveness note that outlives one of the callers it names is how a pin
+rots into decoration.
 """
 
 from __future__ import annotations

@@ -70,11 +70,16 @@ def _h6_operator_control(cfg: Any) -> dict[str, Any]:
         "operator_control",
         "implemented",
         controls=[
+            # S49/S53 (2026-08-01) retired the two claims that used to head this
+            # list. The audited `worker.takeover` workflow and its
+            # `operator.takeover.*` events lived in `operator_control.py`, which
+            # had no production caller and was deleted whole; the
+            # `GoalRuntimeInstanceStore` lane park/resume lane went with it. An
+            # envelope item that advertises a control an operator cannot invoke
+            # is the same defect class as a registered event with no emitter, so
+            # the claims are removed rather than reworded.
             "worker.pause and worker.resume capabilities are registered",
-            "GoalRuntimeInstanceStore supports lane park/resume",
             "daemon stop/kill paths exist for foreground runtime control",
-            "worker.takeover is a single audited operator workflow: it parks active lanes, pauses peer workers, possesses the target under a lease, and emits operator.takeover.* events",
-            "takeover cancellation of an active run is destructive and requires approve_destructive; without it the run remains alive and an approval_required event is recorded",
             "irreversible/prod actions require explicit approval through command safety and promotion gates",
         ],
         flags={

@@ -963,8 +963,13 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     # (tests/agent_runtime/test_events.py) were retargeted onto live types — see
     # tests/agent_runtime/test_s25_run_opened_retirement.py, which owns that
     # delta. run.closed is NOT in this set: it is still LIVE via
-    # RunStore.cancel -> close_run (operator takeover and persona-chat
-    # replacement both reach it).
+    # RunStore.cancel -> close_run. RE-DERIVED at S49: that chain used to have
+    # TWO production callers and this comment named both. S49 deleted
+    # operator_control.py, so the "operator takeover" caller is gone and the
+    # persona-chat replacement (persona_assignments.py, "operator replaced
+    # active persona chat") is now the SOLE reason run.closed stays emittable.
+    # Re-derived rather than left standing: a liveness note that outlives one of
+    # the two callers it cites is how a survivor pin rots into decoration.
     "run.progress": EventContract("run.progress", "Run progress", ("phase", "step", "status", "summary"), ("next_expected", "proof_id")),
     "child.returned": EventContract("child.returned", "Child returned", ("parent_node_id", "child_node_id", "summary"), ("proof_ids", "artifact_refs", "stage_id", "persona_instance_id")),
     "run.tool.started": EventContract("run.tool.started", "Tool started", ("tool_name",), ("run_id",)),
@@ -1007,9 +1012,14 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     # envelope: by construction the owner no longer resolves to a row.
     "flow_graph.pruned": EventContract("flow_graph.pruned", "Owner-less runtime flow graph archived", ("graph_id", "owner_instance_id", "reason"), ("drawn_agent_count", "archived_to")),
     "steer.returned": EventContract("steer.returned", "Steer returned", ("action_id", "verb", "source_node_id", "target_node_id"), ("result", "stage_id", "persona_instance_id")),
-    "operator.takeover.requested": EventContract("operator.takeover.requested", "Operator takeover requested", ("worker_session_id", "actor"), ("reason", "cancel_active_run")),
-    "operator.takeover.approval_required": EventContract("operator.takeover.approval_required", "Operator takeover approval required", ("worker_session_id", "actor", "approval"), ("reason",)),
-    "operator.takeover.applied": EventContract("operator.takeover.applied", "Operator takeover applied", ("worker_session_id", "actor"), ("parked_lane_ids", "paused_worker_ids", "cancelled_run_id", "approval_required")),
+    # S49 de-registered the three operator.takeover.* contracts with their SOLE
+    # emitter, agent_runtime/operator_control.py. That module's only importers
+    # were two tests and an S41 binding pin; no production caller ever reached
+    # `operator_takeover_worker`, and "worker.takeover" was never a registered
+    # capability id — it was a string in the function's own return dict. Same
+    # rule as S25/S36/S37/S44: a contract with no writer is a shape
+    # EventLog.append accepts and no reader will ever see. See
+    # tests/agent_runtime/test_s49_operator_control_removal.py.
     "persona_instance.chat_opened": EventContract("persona_instance.chat_opened", "Persona instance chat opened", ("persona_instance_id", "session_id"), ("persona_id",)),
     "persona_chat.projected": EventContract("persona_chat.projected", "Persona chat turn projection committed", ("persona_instance_id", "root_chat_session_id", "client_message_id", "turn_id", "change_kind"), ("active_session_id", "native_revision")),
     "persona_chat.metadata_updated": EventContract("persona_chat.metadata_updated", "Persona chat session metadata updated", ("persona_instance_id", "root_chat_session_id", "change_kind"), ()),

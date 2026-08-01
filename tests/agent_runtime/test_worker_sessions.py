@@ -17,9 +17,6 @@ from types import SimpleNamespace
 
 Task = SimpleNamespace
 from agent_runtime.observability import build_observability
-from agent_runtime.events import EventLog
-from agent_runtime.operator_control import operator_takeover_worker
-from agent_runtime.runtime_instances import GoalRuntimeInstanceStore
 from agent_runtime.runtime_config import EnterpriseWorkerSessionsConfig
 from agent_runtime.snapshot import build_snapshot
 from agent_runtime.states import RunState, TaskState, WorkerSessionState
@@ -143,66 +140,6 @@ def test_worker_cli_lists_and_controls_sessions(isolate_agent_runtime_root):
     )
     assert result.returncode != 0
     assert "invalid choice" in result.stderr
-
-
-def test_operator_takeover_freezes_peers_and_requires_destructive_approval(isolate_agent_runtime_root):
-    runs = RunStore()
-    workers = WorkerSessionStore()
-    runtimes = GoalRuntimeInstanceStore()
-    target = workers.open(task_id="task_takeover", persona=_persona("dev"), stage_id="stage_1", session_id="session_target")
-    peer = workers.open(task_id="task_peer", persona=_persona("qa"), stage_id="stage_1", session_id="session_peer")
-    run = _seed_run("dev", "task_takeover", stage_id="stage_1", session_id="session_target")
-    workers.assign_run(target.id, run)
-    lane = runtimes.create_lane(task_id="task_peer", started_by="test", state="running")
-
-    result = operator_takeover_worker(
-        target.id,
-        actor="qa",
-        reason="inspect live failure",
-        cancel_active_run=True,
-        approve_destructive=False,
-    )
-
-    assert result["ok"] is True
-    assert result["capability_id"] == "worker.takeover"
-    assert result["approval_required"] is True
-    assert result["cancelled_run_id"] is None
-    assert result["parked_lane_ids"] == [lane.id]
-    assert result["paused_worker_ids"] == [peer.id]
-    assert workers.get(target.id).possession_state.value == "possessed"
-    assert workers.get(target.id).active_run_id == run.id
-    assert runs.get(run.id).state == RunState.RUNNING
-    assert workers.get(peer.id).state == WorkerSessionState.WAITING_ON_HUMAN
-    assert runtimes.get(lane.id).state == "parked_by_operator"
-    event_types = [event.type for event in EventLog().for_task("task_takeover")]
-    requested_at = event_types.index("operator.takeover.requested")
-    approval_at = event_types.index("operator.takeover.approval_required")
-    applied_at = event_types.index("operator.takeover.applied")
-    assert requested_at < approval_at < applied_at
-
-
-def test_operator_takeover_with_approval_cancels_run_then_possesses_worker(isolate_agent_runtime_root):
-    runs = RunStore()
-    workers = WorkerSessionStore()
-    target = workers.open(task_id="task_takeover_cancel", persona=_persona("dev"), stage_id="stage_1", session_id="session_target")
-    run = _seed_run("dev", "task_takeover_cancel", stage_id="stage_1", session_id="session_target")
-    workers.assign_run(target.id, run)
-
-    result = operator_takeover_worker(
-        target.id,
-        actor="operator",
-        reason="stop runaway run",
-        cancel_active_run=True,
-        approve_destructive=True,
-    )
-
-    updated = workers.get(target.id)
-    assert result["approval_required"] is False
-    assert result["cancelled_run_id"] == run.id
-    assert runs.get(run.id).state == RunState.CANCELLED
-    assert updated.state == WorkerSessionState.POSSESSED
-    assert updated.possession_state.value == "possessed"
-    assert updated.active_run_id is None
 
 
 def test_terminal_run_update_marks_worker_idle_and_clears_active_run(isolate_agent_runtime_root):

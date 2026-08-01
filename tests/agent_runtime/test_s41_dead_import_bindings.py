@@ -121,19 +121,33 @@ def test_the_harness_namespace_no_longer_exposes_the_removed_names():
 def test_every_source_symbol_the_bindings_pointed_at_is_untouched():
     """Negative gate: THIS stage removed bindings, never definitions.
 
-    Two exceptions, and they are deliberate rather than a hole in the gate:
+    Four exceptions, and they are deliberate rather than a hole in the gate:
+
     ``cli_format.human_task_line`` / ``task_summary`` were dead in their own
     right (task-record formatters with no reader anywhere once this binding
     went), so the very next cluster removed the definitions too. They are
     asserted ABSENT here so this file states which side of that line each name
     landed on instead of silently dropping them.
+
+    INVERTED at S49/S50 (2026-08-01), same rule, the S47 precedent: this pin
+    asserted ``operator_takeover_worker`` and ``launcher_visual_cleanup_needed``
+    were still callable *definitions* whose bindings S41 had merely unbound.
+    That was true at S41 and is now false by ruling — removing this binding is
+    exactly what left each module importer-free, so S49/S50 deleted
+    ``agent_runtime/operator_control.py`` and
+    ``agent_runtime/launcher_process_hygiene.py`` whole. The assertions are
+    INVERTED (module absent), never weakened or deleted: a definitions-untouched
+    gate that silently loses its subject is how a pin rots into decoration.
+    The removals themselves are owned by
+    tests/agent_runtime/test_s49_operator_control_removal.py and
+    tests/agent_runtime/test_s50_launcher_process_hygiene_removal.py.
     """
+
+    from importlib.util import find_spec
 
     from agent_runtime import cli_format, scope_control, states, terminal_envelope
     from agent_runtime import worker_sessions
     from agent_runtime.decision_schema import DecisionType
-    from agent_runtime.launcher_process_hygiene import launcher_visual_cleanup_needed
-    from agent_runtime.operator_control import operator_takeover_worker
     from agent_runtime.persona_assignments import default_chat_session_id_for_instance
     from agent_runtime.profile_runner import RunBudgetExceeded
 
@@ -141,8 +155,8 @@ def test_every_source_symbol_the_bindings_pointed_at_is_untouched():
     assert not hasattr(cli_format, "human_task_line")
     assert not hasattr(cli_format, "task_summary")
     assert callable(worker_sessions.worker_session_summary)
-    assert callable(operator_takeover_worker)
-    assert callable(launcher_visual_cleanup_needed)
+    assert find_spec("agent_runtime.operator_control") is None
+    assert find_spec("agent_runtime.launcher_process_hygiene") is None
     assert callable(default_chat_session_id_for_instance)
     assert issubclass(RunBudgetExceeded, Exception)
     assert terminal_envelope.LANE_MISSION_WORKER
