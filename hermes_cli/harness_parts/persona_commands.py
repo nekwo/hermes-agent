@@ -259,6 +259,11 @@ def _cmd_persona_assignment_task_id_migration(args) -> int:
 
 
 def _cmd_persona_instance_create(args) -> int:
+    # Function-local: this file is exec'd into harness.py's globals, so a
+    # module-level import here would need a matching harness.py import or it
+    # is a NameError on a LIVE turn. The turn-outcome vocabulary is owned by
+    # agent_runtime.mission_chat_outcome; nothing re-spells its values.
+    from agent_runtime.mission_chat_outcome import ChatErrorKind
     display_name = safe_assignment_text(getattr(args, "display_name", None), limit=120)
     kill_active = bool(getattr(args, "kill_active", False))
     add_instance = bool(getattr(args, "add_instance", False))
@@ -328,7 +333,7 @@ def _cmd_persona_instance_create(args) -> int:
         except PersonaChatPersistenceError as exc:
             data = {
                 "ok": False,
-                "error_kind": "chat_session_persist_failed",
+                "error_kind": ChatErrorKind.CHAT_SESSION_PERSIST_FAILED,
                 "persistence_operation": exc.operation,
                 "error": str(exc),
                 "persona_id": instance.persona_id,
@@ -382,6 +387,11 @@ def _cmd_persona_instance_create(args) -> int:
 
 
 def _cmd_persona_instance_open_chat(args) -> int:
+    # Function-local: this file is exec'd into harness.py's globals, so a
+    # module-level import here would need a matching harness.py import or it
+    # is a NameError on a LIVE turn. The turn-outcome vocabulary is owned by
+    # agent_runtime.mission_chat_outcome; nothing re-spells its values.
+    from agent_runtime.mission_chat_outcome import ChatErrorKind
     cfg = load_agent_runtime_config()
     if not persona_assignment_store_enabled(cfg):
         data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
@@ -510,7 +520,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
             ):
                 data = {
                     "ok": False,
-                    "error_kind": "unknown_chat_session",
+                    "error_kind": ChatErrorKind.UNKNOWN_CHAT_SESSION,
                     "error": f"unknown explicit persona chat root: {args.session_id}",
                 }
                 print(emit_json(data) if args.json else data["error"])
@@ -535,7 +545,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
                 ):
                     data = {
                         "ok": False,
-                        "error_kind": "foreign_chat_session",
+                        "error_kind": ChatErrorKind.FOREIGN_CHAT_SESSION,
                         "error": f"explicit chat root is not owned by the target instance: {args.session_id}",
                         "persona_id": persona_id,
                         "session_id": args.session_id,
@@ -560,7 +570,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
             except ValueError as exc:
                 data = {
                     "ok": False,
-                    "error_kind": "foreign_chat_session",
+                    "error_kind": ChatErrorKind.FOREIGN_CHAT_SESSION,
                     "error": safe_assignment_text(str(exc), limit=320),
                     "persona_id": persona_id,
                     "session_id": args.session_id,
@@ -587,7 +597,7 @@ def _cmd_persona_instance_open_chat(args) -> int:
     except PersonaChatPersistenceError as exc:
         data = {
             "ok": False,
-            "error_kind": "chat_session_persist_failed",
+            "error_kind": ChatErrorKind.CHAT_SESSION_PERSIST_FAILED,
             "persistence_operation": exc.operation,
             "error": str(exc),
             "persona_id": instance.persona_id,
@@ -654,17 +664,22 @@ def _persona_instance_updated_at(instance) -> str | None:
 
 def _cmd_persona_instance_open_new_chat(args, *, persona_id: str, coordinator_scope) -> int:
     """Mint one exact-instance chat root with durable retry semantics."""
+    # Function-local: this file is exec'd into harness.py's globals, so a
+    # module-level import here would need a matching harness.py import or it
+    # is a NameError on a LIVE turn. The turn-outcome vocabulary is owned by
+    # agent_runtime.mission_chat_outcome; nothing re-spells its values.
+    from agent_runtime.mission_chat_outcome import ChatErrorKind
     if bool(getattr(args, "add_instance", False)):
         return _emit_persona_open_chat_error(
             args,
-            error_kind="invalid_request",
+            error_kind=ChatErrorKind.INVALID_REQUEST,
             error="new_session and add_instance are mutually exclusive",
             persona_id=persona_id,
         )
     if safe_assignment_text(getattr(args, "session_id", None), limit=200):
         return _emit_persona_open_chat_error(
             args,
-            error_kind="invalid_request",
+            error_kind=ChatErrorKind.INVALID_REQUEST,
             error="session_id must be omitted when new_session is true",
             persona_id=persona_id,
         )
@@ -683,7 +698,7 @@ def _cmd_persona_instance_open_new_chat(args, *, persona_id: str, coordinator_sc
     except Exception:
         return _emit_persona_open_chat_error(
             args,
-            error_kind="persona_instance_not_found",
+            error_kind=ChatErrorKind.PERSONA_INSTANCE_NOT_FOUND,
             error=f"persona instance not found: {target_instance_id}",
             persona_id=persona_id,
             persona_instance_id=target_instance_id,
@@ -692,7 +707,7 @@ def _cmd_persona_instance_open_new_chat(args, *, persona_id: str, coordinator_sc
     if current.persona_id != persona_id:
         return _emit_persona_open_chat_error(
             args,
-            error_kind="persona_instance_mismatch",
+            error_kind=ChatErrorKind.PERSONA_INSTANCE_MISMATCH,
             error=(
                 f"persona instance {target_instance_id!r} belongs to "
                 f"{current.persona_id!r}, not {persona_id!r}"
@@ -730,7 +745,7 @@ def _cmd_persona_instance_open_new_chat(args, *, persona_id: str, coordinator_sc
                 except PersonaChatPersistenceError as exc:
                     data = {
                         "ok": False,
-                        "error_kind": "chat_session_persist_failed",
+                        "error_kind": ChatErrorKind.CHAT_SESSION_PERSIST_FAILED,
                         "persistence_operation": exc.operation,
                         "error": str(exc),
                         "persona_id": persona_id,
@@ -835,6 +850,11 @@ def _emit_persona_open_chat_error(
 
 
 def _cmd_persona_chat_delete(args) -> int:
+    # Function-local: this file is exec'd into harness.py's globals, so a
+    # module-level import here would need a matching harness.py import or it
+    # is a NameError on a LIVE turn. The turn-outcome vocabulary is owned by
+    # agent_runtime.mission_chat_outcome; nothing re-spells its values.
+    from agent_runtime.mission_chat_outcome import ChatErrorKind
     cfg = load_agent_runtime_config()
     if not persona_assignment_store_enabled(cfg):
         data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
@@ -863,7 +883,7 @@ def _cmd_persona_chat_delete(args) -> int:
         data = {
             "ok": False,
             "session_id": session_id,
-            "error_kind": "chat_session_db_unavailable",
+            "error_kind": ChatErrorKind.CHAT_SESSION_DB_UNAVAILABLE,
             "persistence_operation": exc.operation,
             "error": str(exc),
         }
@@ -904,7 +924,7 @@ def _cmd_persona_chat_delete(args) -> int:
         data = {
             "ok": False,
             "capability_id": "persona.chat.delete",
-            "error_kind": "foreign_chat_session",
+            "error_kind": ChatErrorKind.FOREIGN_CHAT_SESSION,
             "error": "chat root is not owned by the requested persona instance",
             "session_id": session_id,
             "persona_instance_id": requested_instance or None,
@@ -929,7 +949,7 @@ def _cmd_persona_chat_delete(args) -> int:
             data = {
                 "ok": False,
                 "capability_id": "persona.chat.delete",
-                "error_kind": "chat_busy",
+                "error_kind": ChatErrorKind.CHAT_BUSY,
                 "session_id": session_id,
                 "lease_owner": exc.owner,
                 "error": str(exc),
@@ -1087,6 +1107,13 @@ def _retired_persona_instance_refusal(
     *,
     persona_instance_id: str,
     archive_path: object,
+    # The ONE ``error_kind`` in this file still spelled as a literal, and it is
+    # structural rather than an oversight: a default argument is evaluated when
+    # the ``def`` executes, and this file is EXEC'd into harness.py's globals —
+    # so ``ChatErrorKind`` cannot be bound yet without a module-level import
+    # here, which is exactly the namespace collision the exec'd-part discipline
+    # forbids. The value is pinned to ``ChatErrorKind.RETIRED_PERSONA_INSTANCE``
+    # by tests/agent_runtime/test_mission_chat_outcome.py, so it cannot drift.
     error_kind: str = "retired_persona_instance",
 ) -> dict[str, object]:
     """ONE retired-target refusal body, whether or not an exception carried it.
@@ -1095,10 +1122,15 @@ def _retired_persona_instance_refusal(
     but the caller must not be able to tell the difference: same ``error_kind``,
     same fields, same ``next_expected``. Two spellings of this payload would be
     two contracts."""
+    # Function-local: this file is exec'd into harness.py's globals, so a
+    # module-level import here would need a matching harness.py import or it
+    # is a NameError on a LIVE turn. The turn-outcome vocabulary is owned by
+    # agent_runtime.mission_chat_outcome; nothing re-spells its values.
+    from agent_runtime.mission_chat_outcome import ExecutionState
 
     return {
         "ok": False,
-        "execution_state": "refused",
+        "execution_state": ExecutionState.REFUSED,
         "error_kind": error_kind,
         "error": (
             f"persona instance {persona_instance_id} was retired with its "
@@ -1183,6 +1215,14 @@ def _cmd_persona_instance_message(args) -> int:
 
 
 def _cmd_mission_chat_steer(args) -> int:
+    # Function-local: this file is exec'd into harness.py's globals, so a
+    # module-level import here would need a matching harness.py import or it
+    # is a NameError on a LIVE turn. The turn-outcome vocabulary is owned by
+    # agent_runtime.mission_chat_outcome; nothing re-spells its values.
+    from agent_runtime.mission_chat_outcome import (
+        ChatErrorKind,
+        ExecutionState,
+    )
     session_id = safe_assignment_text(getattr(args, "session_id", None), limit=200)
     client_message_id = safe_assignment_text(getattr(args, "client_message_id", None), limit=200)
     message = safe_assignment_text(getattr(args, "message", None), limit=12000)
@@ -1190,10 +1230,10 @@ def _cmd_mission_chat_steer(args) -> int:
         data = {
             "ok": False,
             "capability_id": "mission.chat.steer",
-            "execution_state": "rejected",
+            "execution_state": ExecutionState.REJECTED,
             "session_id": session_id,
             "client_message_id": client_message_id,
-            "error_kind": "invalid_request",
+            "error_kind": ChatErrorKind.INVALID_REQUEST,
             "error": "session_id, client_message_id, and non-empty message are required",
         }
         print(emit_json(data) if args.json else data["error"])
@@ -1211,10 +1251,10 @@ def _cmd_mission_chat_steer(args) -> int:
         data = {
             "ok": False,
             "capability_id": "mission.chat.steer",
-            "execution_state": "rejected",
+            "execution_state": ExecutionState.REJECTED,
             "session_id": session_id,
             "client_message_id": client_message_id,
-            "error_kind": "invalid_request",
+            "error_kind": ChatErrorKind.INVALID_REQUEST,
             "error": safe_assignment_text(str(exc), limit=240),
         }
         print(emit_json(data) if args.json else data["error"])
@@ -1320,6 +1360,15 @@ def _publish_persona_chat_metadata_event(
 
 
 def _cmd_mission_chat_message(args) -> int:
+    # Function-local: this file is exec'd into harness.py's globals, so a
+    # module-level import here would need a matching harness.py import or it
+    # is a NameError on a LIVE turn. The turn-outcome vocabulary is owned by
+    # agent_runtime.mission_chat_outcome; nothing re-spells its values.
+    from agent_runtime.mission_chat_outcome import (
+        ChatErrorKind,
+        ExecutionState,
+        classify_turn_failure,
+    )
     cfg = load_agent_runtime_config()
     try:
         normalized_persona = _resolve_mission_chat_persona_id(
@@ -1329,8 +1378,8 @@ def _cmd_mission_chat_message(args) -> int:
         data = {
             "ok": False,
             "capability_id": "mission.chat.message",
-            "execution_state": "rejected",
-            "error_kind": "unsupported_persona",
+            "execution_state": ExecutionState.REJECTED,
+            "error_kind": ChatErrorKind.UNSUPPORTED_PERSONA,
             "error": safe_assignment_text(str(exc), limit=240),
             "persona_id": safe_assignment_token(args.persona_id),
             "next_expected": "pass a seeded persona id (e.g. neko_supervisor, dev), profile:<name>, or a known personainst_* instance id",
@@ -1358,7 +1407,7 @@ def _cmd_mission_chat_message(args) -> int:
         data = {
             "ok": False,
             "capability_id": "mission.chat.message",
-            "execution_state": "rejected",
+            "execution_state": ExecutionState.REJECTED,
             "error_kind": relay_decision.error_kind,
             "error": safe_assignment_text(relay_decision.reason, limit=400),
             "persona_id": normalized_persona,
@@ -1379,8 +1428,8 @@ def _cmd_mission_chat_message(args) -> int:
         data = {
             "ok": False,
             "capability_id": "mission.chat.message",
-            "execution_state": "rejected",
-            "error_kind": "unsupported_persona",
+            "execution_state": ExecutionState.REJECTED,
+            "error_kind": ChatErrorKind.UNSUPPORTED_PERSONA,
             "error": f"unknown persona {safe_assignment_token(args.persona_id)}",
             "persona_id": safe_assignment_token(args.persona_id),
             "next_expected": "persist the persona, use profile:<name>, or address a known personainst_* instance",
@@ -1397,8 +1446,8 @@ def _cmd_mission_chat_message(args) -> int:
         data = {
             "ok": False,
             "capability_id": "mission.chat.message",
-            "execution_state": "failed",
-            "error_kind": "chat_session_db_unavailable",
+            "execution_state": ExecutionState.FAILED,
+            "error_kind": ChatErrorKind.CHAT_SESSION_DB_UNAVAILABLE,
             "persistence_operation": exc.operation,
             "error": str(exc),
             "persona_id": normalized_persona,
@@ -1541,7 +1590,7 @@ def _cmd_mission_chat_message(args) -> int:
         data = {
             "ok": False,
             "capability_id": "mission.chat.message",
-            "execution_state": "rejected",
+            "execution_state": ExecutionState.REJECTED,
             "error_kind": target_decision.error_kind,
             "error": safe_assignment_text(target_decision.reason, limit=400),
             "persona_id": normalized_persona,
@@ -1565,8 +1614,8 @@ def _cmd_mission_chat_message(args) -> int:
         data = {
             "ok": False,
             "capability_id": "mission.chat.message",
-            "execution_state": "rejected",
-            "error_kind": "unknown_chat_session",
+            "execution_state": ExecutionState.REJECTED,
+            "error_kind": ChatErrorKind.UNKNOWN_CHAT_SESSION,
             "error": f"unknown explicit persona chat root: {session_id}",
             "session_id": session_id,
             "next_expected": "open a server-minted chat root before sending",
@@ -1595,8 +1644,8 @@ def _cmd_mission_chat_message(args) -> int:
             data = {
                 "ok": False,
                 "capability_id": "mission.chat.message",
-                "execution_state": "rejected",
-                "error_kind": "foreign_chat_session",
+                "execution_state": ExecutionState.REJECTED,
+                "error_kind": ChatErrorKind.FOREIGN_CHAT_SESSION,
                 "error": f"explicit chat root is not owned by the target instance: {session_id}",
                 "session_id": session_id,
                 "persona_instance_id": persona_instance_id or None,
@@ -1846,8 +1895,8 @@ def _cmd_mission_chat_message(args) -> int:
         data = {
             "ok": False,
             "capability_id": "mission.chat.message",
-            "execution_state": "failed",
-            "error_kind": "chat_session_persist_failed",
+            "execution_state": ExecutionState.FAILED,
+            "error_kind": ChatErrorKind.CHAT_SESSION_PERSIST_FAILED,
             "persistence_operation": exc.operation,
             "error": str(exc),
             "persona_id": normalized_persona,
@@ -1888,7 +1937,7 @@ def _cmd_mission_chat_message(args) -> int:
     except Exception as exc:
         data = {
             "ok": False,
-            "error_kind": "chat_model_override_persist_failed",
+            "error_kind": ChatErrorKind.CHAT_MODEL_OVERRIDE_PERSIST_FAILED,
             "error": safe_assignment_text(str(exc), limit=320) or type(exc).__name__,
             "persona_instance_id": instance.id,
             "persona_id": normalized_persona,
@@ -1917,8 +1966,8 @@ def _cmd_mission_chat_message(args) -> int:
             data = {
                 "ok": False,
                 "capability_id": "mission.chat.message",
-                "execution_state": "rejected",
-                "error_kind": "chat_busy",
+                "execution_state": ExecutionState.REJECTED,
+                "error_kind": ChatErrorKind.CHAT_BUSY,
                 "chat_busy": True,
                 "root_chat_session_id": session_id,
                 "session_id": session_id,
@@ -2013,8 +2062,8 @@ def _cmd_mission_chat_message(args) -> int:
         data = {
             "ok": False,
             "capability_id": "mission.chat.message",
-            "execution_state": "budget_exhausted",
-            "error_kind": "chat_turn_budget_exhausted",
+            "execution_state": ExecutionState.BUDGET_EXHAUSTED,
+            "error_kind": ChatErrorKind.CHAT_TURN_BUDGET_EXHAUSTED,
             "budget_exhausted": True,
             "turn_resolution_required": False,
             "journal_state": TURN_STATE_BUDGET_EXHAUSTED,
@@ -2045,8 +2094,8 @@ def _cmd_mission_chat_message(args) -> int:
         data = {
             "ok": False,
             "capability_id": "mission.chat.message",
-            "execution_state": "blocked",
-            "error_kind": "chat_turn_outcome_unknown",
+            "execution_state": ExecutionState.BLOCKED,
+            "error_kind": ChatErrorKind.CHAT_TURN_OUTCOME_UNKNOWN,
             "root_chat_session_id": session_id,
             "session_id": session_id,
             "client_message_id": client_message_id,
@@ -2092,7 +2141,7 @@ def _cmd_mission_chat_message(args) -> int:
             "session_established": session_established,
             "client_message_id": client_message_id,
             "turn_id": journal.get("turn_id") or client_message_id,
-            "execution_state": "completed",
+            "execution_state": ExecutionState.COMPLETED,
             "reply": reply_text,
             "idempotent_replay": True,
             "journal_state": TURN_STATE_PROJECTED,
@@ -2159,7 +2208,7 @@ def _cmd_mission_chat_message(args) -> int:
             # dead key held alive by a dead reader. The Launcher dropped the
             # reader first (23bd05c6); the goal key went the same way in S26.
             "client_message_id": client_message_id,
-            "execution_state": "completed",
+            "execution_state": ExecutionState.COMPLETED,
             "kind": "mission_chat_message",
             "intent_hint": safe_assignment_token(getattr(args, "intent_hint", None))
             or "chat",
@@ -2229,7 +2278,6 @@ def _cmd_mission_chat_message(args) -> int:
     )
     from agent_runtime import turn_budget as _turn_budget
     from agent_runtime.mission_chat_turn_context import build_mission_chat_turn_context
-    from agent_runtime.profile_runner import RunBudgetExceeded
     # Function-local on purpose: this file is exec'd into harness.py's globals,
     # so a module-level name here would need a matching harness.py import or it
     # is a NameError on a LIVE turn (nothing a test run would notice). A local
@@ -2529,10 +2577,11 @@ def _cmd_mission_chat_message(args) -> int:
         # row) and hand back an honest synthesized account of what did run —
         # the live 2026-07-26 failure mode this replaces froze both ends of a
         # relay at `outcome_unknown` and cost a full re-brief.
-        wall_budget_exceeded = bool(
-            provider_submitted
-            and isinstance(exc, RunBudgetExceeded)
-            and getattr(exc, "wall_budget", None)
+        # ONE decision, made by the owned vocabulary rather than a nested
+        # conditional spelled inline three times (state, kind, exit code).
+        turn_outcome = classify_turn_failure(exc, provider_submitted=provider_submitted)
+        wall_budget_exceeded = (
+            turn_outcome.execution_state is ExecutionState.BUDGET_EXHAUSTED
         )
         failed_outcome = None
         if wall_budget_exceeded:
@@ -2579,20 +2628,8 @@ def _cmd_mission_chat_message(args) -> int:
         data = {
             "ok": False,
             "capability_id": "mission.chat.message",
-            "execution_state": (
-                "budget_exhausted"
-                if wall_budget_exceeded
-                else ("blocked" if provider_submitted else "failed")
-            ),
-            "error_kind": (
-                "chat_turn_budget_exhausted"
-                if wall_budget_exceeded
-                else (
-                    "chat_turn_outcome_unknown"
-                    if provider_submitted
-                    else "chat_turn_not_submitted"
-                )
-            ),
+            "execution_state": turn_outcome.execution_state,
+            "error_kind": turn_outcome.error_kind,
             "persona_instance_id": instance.id,
             "persona_id": normalized_persona,
             "session_id": session_id,
@@ -2632,7 +2669,7 @@ def _cmd_mission_chat_message(args) -> int:
             _emit_chat_final(data)
         else:
             print(emit_json(data) if args.json else data["blocker"])
-        return 2
+        return turn_outcome.exit_code
 
     reply_text = _redact_persona_chat_text(getattr(chat_result, "final_response", "") or "", limit=PERSONA_CHAT_REPLY_LIMIT)
     active_session_id = _persona_chat_native_tip(session_db, session_id)
@@ -2783,7 +2820,11 @@ def _cmd_mission_chat_message(args) -> int:
             # so relay callers do not treat it as an error; the typed
             # `execution_state` + `budget_exhausted` flag carry the truncation,
             # and the operator is never told to run turn-resolve.
-            "execution_state": "budget_exhausted" if budget_engaged else "completed",
+            "execution_state": (
+                ExecutionState.BUDGET_EXHAUSTED
+                if budget_engaged
+                else ExecutionState.COMPLETED
+            ),
             **(
                 {
                     "budget_exhausted": True,
@@ -2923,8 +2964,8 @@ def _cmd_mission_chat_message(args) -> int:
         data = {
             "ok": False,
             "capability_id": "mission.chat.message",
-            "execution_state": "failed",
-            "error_kind": "chat_projection_incomplete",
+            "execution_state": ExecutionState.FAILED,
+            "error_kind": ChatErrorKind.CHAT_PROJECTION_INCOMPLETE,
             "persistence_operation": (
                 exc.operation if isinstance(exc, PersonaChatPersistenceError) else None
             ),
@@ -3141,6 +3182,12 @@ def _cmd_mission_chat_clarify_tickets(args) -> int:
 
 
 def _cmd_mission_chat_turn_resolve(args) -> int:
+    # Function-local: this file is exec'd into harness.py's globals, so a
+    # module-level import here would need a matching harness.py import or it
+    # is a NameError on a LIVE turn. The turn-outcome vocabulary is owned by
+    # agent_runtime.mission_chat_outcome; nothing re-spells its values.
+    from agent_runtime.mission_chat_outcome import ChatErrorKind
+    from agent_runtime.mission_chat_turns import OPERATOR_RESOLVABLE_TURN_STATES
     session_id = safe_assignment_text(getattr(args, "session_id", None), limit=240)
     client_message_id = safe_assignment_text(
         getattr(args, "client_message_id", None), limit=240
@@ -3154,7 +3201,7 @@ def _cmd_mission_chat_turn_resolve(args) -> int:
         data = {
             "ok": False,
             "capability_id": "mission.chat.turn.resolve",
-            "error_kind": "invalid_request",
+            "error_kind": ChatErrorKind.INVALID_REQUEST,
             "error": "action=abandon and persona_instance_id are required",
         }
         print(emit_json(data) if args.json else data["error"])
@@ -3173,7 +3220,7 @@ def _cmd_mission_chat_turn_resolve(args) -> int:
         data = {
             "ok": False,
             "capability_id": "mission.chat.turn.resolve",
-            "error_kind": "foreign_chat_session",
+            "error_kind": ChatErrorKind.FOREIGN_CHAT_SESSION,
             "error": "chat root is not owned by the requested persona instance",
             "session_id": session_id,
             "persona_instance_id": persona_instance_id,
@@ -3196,7 +3243,7 @@ def _cmd_mission_chat_turn_resolve(args) -> int:
             data = {
                 "ok": False,
                 "capability_id": "mission.chat.turn.resolve",
-                "error_kind": "chat_busy",
+                "error_kind": ChatErrorKind.CHAT_BUSY,
                 "session_id": session_id,
                 "lease_owner": exc.owner,
                 "error": str(exc),
@@ -3208,13 +3255,15 @@ def _cmd_mission_chat_turn_resolve(args) -> int:
     )
     if (
         not record
-        or record.get("state") != "outcome_unknown"
+        # The resolvable set is the turn store's own table, never a literal
+        # spelled here — see mission_chat_turns' vocabulary guard.
+        or record.get("state") not in OPERATOR_RESOLVABLE_TURN_STATES
         or safe_assignment_token(record.get("turn_id")) != turn_id
     ):
         data = {
             "ok": False,
             "capability_id": "mission.chat.turn.resolve",
-            "error_kind": "chat_turn_resolution_mismatch",
+            "error_kind": ChatErrorKind.CHAT_TURN_RESOLUTION_MISMATCH,
             "error": "resolution requires the exact matching outcome_unknown root/client/turn",
             "session_id": session_id,
             "client_message_id": client_message_id,
@@ -3906,6 +3955,14 @@ def _queue_free_floating_assignment(
     spawned_by: str | None = None,
     coordinator_permission_scope: CoordinatorPermissionScope | None = None,
 ) -> int:
+    # Function-local: this file is exec'd into harness.py's globals, so a
+    # module-level import here would need a matching harness.py import or it
+    # is a NameError on a LIVE turn. The turn-outcome vocabulary is owned by
+    # agent_runtime.mission_chat_outcome; nothing re-spells its values.
+    from agent_runtime.mission_chat_outcome import (
+        ChatErrorKind,
+        ExecutionState,
+    )
     cfg = load_agent_runtime_config()
     if not persona_assignment_store_enabled(cfg):
         data = {"ok": False, "feature_enabled": persona_instance_runtime_enabled(cfg), "assignment_store_enabled": False, "error": "persona assignment store is disabled"}
@@ -4003,8 +4060,8 @@ def _queue_free_floating_assignment(
             pass
         data = {
             "ok": False,
-            "execution_state": "blocked",
-            "error_kind": "chat_transcript_persist_failed",
+            "execution_state": ExecutionState.BLOCKED,
+            "error_kind": ChatErrorKind.CHAT_TRANSCRIPT_PERSIST_FAILED,
             "persistence_operation": exc.operation,
             "error": str(exc),
             "assignment_id": assignment.id,
@@ -4033,7 +4090,7 @@ def _queue_free_floating_assignment(
         "production_proof_eligible": assignment.production_proof_eligible,
         "archive_scope": assignment.archive_scope,
         "client_message_id": assignment.client_message_id,
-        "execution_state": "queued",
+        "execution_state": ExecutionState.QUEUED,
         "lifecycle_mode": "free_floating",
         "auto_run": bool(auto_run),
         "chat_session_id": session_id,
@@ -4630,10 +4687,15 @@ def _invalid_chat_model_override_payload(
     from TWO points of one turn — the pre-mint gate (no session exists yet, so
     the session fields are honestly null) and the post-``open_chat`` resolve —
     and one envelope with two spellings is how ``error_kind`` drifts."""
+    # Function-local: this file is exec'd into harness.py's globals, so a
+    # module-level import here would need a matching harness.py import or it
+    # is a NameError on a LIVE turn. The turn-outcome vocabulary is owned by
+    # agent_runtime.mission_chat_outcome; nothing re-spells its values.
+    from agent_runtime.mission_chat_outcome import ChatErrorKind
 
     return {
         "ok": False,
-        "error_kind": "invalid_chat_model_override",
+        "error_kind": ChatErrorKind.INVALID_CHAT_MODEL_OVERRIDE,
         "error": safe_assignment_text(str(exc), limit=320),
         "persona_instance_id": persona_instance_id,
         "persona_id": persona_id,
@@ -5598,6 +5660,14 @@ def _run_free_floating_assignment_once(
     auxiliary-LLM title call stays off the turn's critical path. This runner
     never writes stdout, so the title cannot be run post-emit from in here.
     """
+    # Function-local: this file is exec'd into harness.py's globals, so a
+    # module-level import here would need a matching harness.py import or it
+    # is a NameError on a LIVE turn. The turn-outcome vocabulary is owned by
+    # agent_runtime.mission_chat_outcome; nothing re-spells its values.
+    from agent_runtime.mission_chat_outcome import (
+        ChatErrorKind,
+        ExecutionState,
+    )
 
     session_id: str | None = None
     try:
@@ -5628,8 +5698,8 @@ def _run_free_floating_assignment_once(
             pass
         return 2, {
             "ok": False,
-            "execution_state": "blocked",
-            "error_kind": "chat_transcript_persist_failed",
+            "execution_state": ExecutionState.BLOCKED,
+            "error_kind": ChatErrorKind.CHAT_TRANSCRIPT_PERSIST_FAILED,
             "persistence_operation": exc.operation,
             "session_id": session_id,
             "client_message_id": client_message_id,
@@ -5641,7 +5711,7 @@ def _run_free_floating_assignment_once(
         PersonaAssignmentStore().complete(assignment_id, state="blocked", error="unknown persona")
         return 2, {
             "ok": False,
-            "execution_state": "blocked",
+            "execution_state": ExecutionState.BLOCKED,
             "session_id": session_id,
             "blocker": f"unknown persona {safe_assignment_token(persona_id)}",
             "next_expected": "configure the persona before chatting",
@@ -5720,7 +5790,7 @@ def _run_free_floating_assignment_once(
         PersonaAssignmentStore().complete(assignment_id, state="blocked", error=safe_assignment_text(str(exc), limit=240))
         data = {
             "ok": False,
-            "execution_state": "blocked",
+            "execution_state": ExecutionState.BLOCKED,
             "session_id": session_id,
             "blocker": safe_assignment_text(str(exc), limit=240),
             "next_expected": "fix the runtime blocker and retry the persona chat turn",
@@ -5780,7 +5850,7 @@ def _run_free_floating_assignment_once(
 
         data = {
             "ok": True,
-            "execution_state": "completed",
+            "execution_state": ExecutionState.COMPLETED,
             "session_id": session_id,
             "reply": reply_text,
             "turn_id": stream_emitter.turn_id,
@@ -5838,8 +5908,8 @@ def _run_free_floating_assignment_once(
                 pass
         data = {
             "ok": False,
-            "execution_state": "blocked",
-            "error_kind": "post_turn_persist_failed",
+            "execution_state": ExecutionState.BLOCKED,
+            "error_kind": ChatErrorKind.POST_TURN_PERSIST_FAILED,
             "persistence_operation": (
                 exc.operation if isinstance(exc, PersonaChatPersistenceError) else None
             ),
