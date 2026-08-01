@@ -578,8 +578,17 @@ Hermes fork-owned:
 - **Wire-test idiom**: the relay regression class (producer and consumer pinned,
   wire between them never asserted) - extend the "does the chokepoint actually
   invoke the seam" AST tests to the other persona_commands chokepoints.
-- **The Launcher's generated hermes `config.yaml` is an unaudited producer
-  (opened by S47/s53, 2026-08-01).** Executing item 8 found that the live
+- ~~**The Launcher's generated hermes `config.yaml` is an unaudited producer
+  (opened by S47/s53, 2026-08-01).**~~ **RULED EXECUTE and EXECUTED 2026-08-01 —
+  launcher `e7ee54af` (s54).** The gate this entry asked for exists:
+  `mission_control_hermes_installer_template_test.dart` asserts every top-level
+  key the template writes under `agent_runtime:` resolves to a field the loader
+  consumes, and its red-proof is EXECUTED (the pre-fix template is preserved
+  verbatim; a passing case asserts the gate fails on it). SIX blocks were seeded
+  that the runtime does not load — `enterprise_worker_sessions`,
+  `normal_worker_flow`, `repo_bundle_routing`, `simplified_agent_contract`,
+  `swarm` and `mission_plan` — plus four PHANTOM sub-keys the dataclasses never
+  had. The template now writes four keys. ORIGINAL ENTRY preserved: Executing item 8 found that the live
   `role_envelope.enabled: true` came from
   `mission_control_hermes_installer.dart`'s config template, not from an
   operator. The block is removed, but the template was never audited against
@@ -695,18 +704,23 @@ this wave's scope and are untouched.
 
 ### New debt opened by this wave (S47 item-5 class: wires that can only report a constant)
 
-- **`repo_lock_summary()` can no longer be non-empty.** S52 deleted both
-  `acquire_repo_bundle_locks` and `release_repo_bundle_locks`, so nothing can
-  write `repo_bundle_locks.json`. The summary is still read and still published
-  by `status.py` as `repo_locks`, where it can only ever report
-  `{"lock_count": 0, "locks": []}`.
-- **`status.py`'s `lanes` is the same shape after S53** — no writer can create a
-  `GoalRuntimeInstance` row, so the projection is empty by construction.
+- ~~**`repo_lock_summary()` can no longer be non-empty.**~~ **CLOSED at S56.**
+  S52 deleted both `acquire_repo_bundle_locks` and `release_repo_bundle_locks`,
+  so nothing could write `repo_bundle_locks.json`; the summary was still read
+  and still published by `status.py` as `repo_locks`, where it could only ever
+  report `{"lock_count": 0, "locks": []}`. The wire row and the function are
+  gone, together with `bundle_queue_summary` / `repo_bundle_summary` /
+  `repo_bundle_delivery_summary`, which had the same shape for the same reason.
+- ~~**`status.py`'s `lanes` is the same shape after S53**~~ **CLOSED at S56** —
+  no writer can create a `GoalRuntimeInstance` row, so the top-level projection
+  was empty by construction. Only the DUPLICATE went;
+  `runtime_instances["lanes"]` is the projection and stays.
 
-Both are asserted as constants in the S52/S53 removal tests so they stay
+Both were asserted as constants in the S52/S53 removal tests so they stayed
 visible rather than being inferred later. Retiring either edits the emitted
 status frame (a contract move + Launcher lockstep), which is why this wave —
-scoped to mechanical removal — did not take them.
+scoped to mechanical removal — did not take them; S56 did, and both pins are
+inverted there.
 
 ### Deliberate KEEP a reference count calls dead
 
