@@ -1,6 +1,138 @@
 # Loaded by hermes_cli.harness via _load_command_parts(); executed in harness.py globals.
 # Keep command bodies here so parser registration stays separate from persona/chat behavior.
 
+# Explicit import header. Still exec'd into harness.py's globals by
+# _load_command_parts — that mechanism is unchanged — but no longer dependent
+# on it: these names used to arrive implicitly from whatever harness.py
+# imported, so a wrong one surfaced as a NameError only when an operator ran
+# the one verb that touched it. Re-importing a name harness.py also imports
+# rebinds it to the identical object; both halves are checked by
+# tests/hermes_cli/test_harness_parts_namespace.py.
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import sys
+import time
+import uuid
+from collections.abc import Callable
+from dataclasses import asdict
+from datetime import datetime, timedelta, timezone
+
+from agent_runtime import paths
+from agent_runtime.chat_session_scope import is_canonical_session_persistence
+from agent_runtime.cli_format import emit_json
+from agent_runtime.config import (
+    ensure_persisted_personas,
+    load_agent_runtime_config,
+    mission_chat_clarify_token_binding,
+    resolve_mission_chat_max_seconds,
+)
+from agent_runtime.continuity import return_summary_to_parent_session
+from agent_runtime.coordinator_permissions import (
+    CoordinatorPermissionScope,
+    authorize_coordinator_action,
+    scope_for_persona,
+)
+from agent_runtime.dispatch_session_policy import (
+    derive_dispatch_title,
+    resolve_dispatch_session_decision,
+    session_established_payload,
+)
+from agent_runtime.events import EventLog
+from agent_runtime.mcp_admission import LANE_MISSION_CHAT, resolve_mcp_admission
+from agent_runtime.mcp_lane import HARNESS_LANE
+from agent_runtime.mission_chat_steer import (
+    start_active_mission_chat_turn,
+    submit_mission_chat_steer,
+)
+from agent_runtime.mission_chat_turns import (
+    MissionChatTurnPersistOutcome,
+    REPLY_RECOVERABLE_TURN_STATES,
+    RESEND_BLOCKING_TURN_STATES,
+    SETTLING_TURN_STATES,
+    TURN_STATE_ABANDONED,
+    TURN_STATE_BUDGET_EXHAUSTED,
+    TURN_STATE_COMPLETED,
+    TURN_STATE_EXECUTING,
+    TURN_STATE_FAILED,
+    TURN_STATE_NATIVE_COMMITTED,
+    TURN_STATE_OUTCOME_UNKNOWN,
+    TURN_STATE_PENDING,
+    TURN_STATE_PROJECTED,
+    TURN_STATE_RUNNING,
+    abandon_mission_chat_turn,
+    mark_stale_inflight_turns_interrupted,
+    mission_chat_turn_record,
+    mission_chat_turn_records,
+    persist_mission_chat_turn,
+    transition_mission_chat_turn,
+)
+from agent_runtime.mission_chat_workdir import mission_chat_workdir_for_persona
+from agent_runtime.models import AgentPersona, Event, apply_instance_model_overrides
+from agent_runtime.persona_assignments import (
+    CHAT_BINDING_CLEARED_REASON_DELETED,
+    ChatBusyError,
+    PERSONA_INSTANCE_ID_PREFIX,
+    PersonaAssignmentSpec,
+    PersonaAssignmentStore,
+    PersonaInstanceRetireError,
+    PersonaInstanceStore,
+    RetiredPersonaInstanceError,
+    StaleModelOverrideWrite,
+    canonical_chat_instance_id,
+    canonical_persona_instance_id,
+    chat_session_owner_instance_id,
+    migrate_retired_persona_assignment_task_ids,
+    persona_assignment_store_enabled,
+    persona_assignment_summary,
+    persona_chat_session_id_for,
+    persona_instance_id_for,
+    persona_instance_runtime_enabled,
+    persona_instance_summary,
+    resolve_default_chat_session_id_for_instance,
+    safe_assignment_text,
+    safe_assignment_token,
+    safe_optional_token,
+)
+from agent_runtime.persona_chat_continuity import (
+    CLARIFY_TICKET_TTL_SECONDS,
+    PersonaChatBusyError,
+    PersonaChatClarifyTicketStore,
+    PersonaChatMintReceiptStore,
+    native_history_revision,
+    persona_chat_root_lease,
+    persona_chat_runtime_registry,
+    safe_native_history,
+)
+from agent_runtime.persona_chat_mints import PersonaChatMintError, reserve_persona_chat_mint
+from agent_runtime.persona_runtime import GPTPersonaRuntime, chat_lane_capability_drops
+from agent_runtime.personas import profile_chat_toolsets
+from agent_runtime.prompt_observability import (
+    attach_prompt_observability_turn_results,
+    mission_chat_prompt_observability,
+    persist_prompt_observability_context,
+    slim_chat_final_observability,
+    turn_usage_from_result,
+)
+from agent_runtime.states import WorkerSessionState
+from agent_runtime.store import AgentStore
+from agent_runtime.tool_permissions import ChatToolPermissionStore, permission_state_for_chat
+from agent_runtime.tool_turn_history import persist_tool_turn_actual
+from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
+from agent_runtime.worker_sessions import WorkerSessionStore
+from hermes_cli.harness_support import (
+    PERSONA_CHAT_SESSION_SOURCE,
+    _list_envelope,
+    _print_stage42,
+    _sort_rows,
+)
+from hermes_constants import get_hermes_home
+from hermes_time import now
+
 
 def _persona_chat_fault_injection(boundary: str) -> None:
     """Named live-proof seam; inert unless the exact boundary is requested."""

@@ -1,6 +1,43 @@
 # Loaded by hermes_cli.harness via _load_command_parts(); executed in harness.py globals.
 # Runtime/task/lane/worker/stream command bodies live here to keep harness.py focused on CLI wiring.
 
+# Explicit import header. Still exec'd into harness.py's globals by
+# _load_command_parts — that mechanism is unchanged — but no longer dependent
+# on it: these names used to arrive implicitly from whatever harness.py
+# imported, so a wrong one surfaced as a NameError only when an operator ran
+# the one verb that touched it. Re-importing a name harness.py also imports
+# rebinds it to the identical object; both halves are checked by
+# tests/hermes_cli/test_harness_parts_namespace.py.
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+from agent_runtime import paths
+from agent_runtime.cli_format import emit_json
+from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
+from agent_runtime.decision_contract_examples import verify_harness_skill_examples
+from agent_runtime.decision_contract_registry import (
+    canonical_role_value,
+    contract_manifest,
+    hud_shape_index_for_stage,
+    verify_registry,
+)
+from agent_runtime.events import EventLog
+from agent_runtime.migrations import effective_config_summary, migration_status
+from agent_runtime.observability import build_observability
+from agent_runtime.profile_context import active_profile_name
+from agent_runtime.provider_health import provider_health_for_personas
+from agent_runtime.status import build_status
+from hermes_cli.harness_support import harness_repo_root
+
+
 def _cmd_worktree_reap(args) -> int:
     from agent_runtime.delivery_directive import reap_orphan_worktrees
 
@@ -166,7 +203,11 @@ def _cmd_migrate(args) -> int:
 def _cmd_verify(args) -> int:
     cfg = load_agent_runtime_config()
     started = datetime.now(timezone.utc)
-    repo_root = Path(__file__).resolve().parents[1]
+    # Not ``Path(__file__)``: this file is exec'd into harness.py's globals, so
+    # ``__file__`` reads as *harness.py's* path and ``parents[1]`` lands on the
+    # repo root only by accident of harness.py sitting one level down. Anchor
+    # to the support module instead, so the answer is the same either way.
+    repo_root = harness_repo_root()
     packet = {
         "schema_version": 1,
         "verification_id": f"harness_runtime_verify_{started.strftime('%Y%m%dT%H%M%SZ')}",

@@ -1,6 +1,5 @@
-# Exec'd command part (see harness._load_command_parts) — names like emit_json
-# and Path resolve from hermes_cli.harness's globals, exactly as in
-# persona_commands.py / runtime_commands.py.
+# Exec'd command part (see harness._load_command_parts), with its own explicit
+# import header — exactly as in persona_commands.py / runtime_commands.py.
 #
 # The flow lane (2026-07-16): the Launcher's authored agent map travels as ONE
 # JSON document. `flow set` stores it and reconciles steering for the EXISTING
@@ -10,6 +9,20 @@
 # detach_parents). Steering is OWNER-SCOPED (2026-07-18): the graph id names the
 # owner instance, and the map asserts only that owner's `owner -> child` edges;
 # non-owner edges are reported (ignored_non_owner_edges), never applied.
+
+# Explicit import header. Still exec'd into harness.py's globals by
+# _load_command_parts — that mechanism is unchanged — but no longer dependent
+# on it: these names used to arrive implicitly from whatever harness.py
+# imported, so a wrong one surfaced as a NameError only when an operator ran
+# the one verb that touched it. Re-importing a name harness.py also imports
+# rebinds it to the identical object; both halves are checked by
+# tests/hermes_cli/test_harness_parts_namespace.py.
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from agent_runtime.cli_format import emit_json
 
 
 def _cmd_flow_set(args) -> int:

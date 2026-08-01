@@ -1,15 +1,36 @@
 # Mission Board CLI tier: `hermes harness board …`.
 #
 # This module is exec'd into hermes_cli/harness.py's globals (see
-# _load_command_parts), so it reuses the shared Stage-42 envelope/printer/error
-# helpers (_print_stage42, _list_envelope, _object_envelope, emit_harness_error,
-# _load_request_json, _sort_rows) defined there. Skinny rows by default (≤7
-# keys); --full drills into card bodies. All writes go through the BoardStore
-# chokepoint — the same one the launcher capability lane and agent tools use.
+# _load_command_parts) and shares the Stage-42 envelope/printer/error helpers
+# with every other tier — imported from hermes_cli.harness_support below, not
+# inherited. Skinny rows by default (≤7 keys); --full drills into card bodies.
+# All writes go through the BoardStore chokepoint — the same one the launcher
+# capability lane and agent tools use.
 #
 # Board resolution rule (shared with agent tools, spec §10): explicit --board >
 # the active workspace's default board. A card verb resolves the owning board
 # from the card id itself.
+
+# Explicit import header. Still exec'd into harness.py's globals by
+# _load_command_parts — that mechanism is unchanged — but no longer dependent
+# on it: these names used to arrive implicitly from whatever harness.py
+# imported, so a wrong one surfaced as a NameError only when an operator ran
+# the one verb that touched it. Re-importing a name harness.py also imports
+# rebinds it to the identical object; both halves are checked by
+# tests/hermes_cli/test_harness_parts_namespace.py.
+
+from __future__ import annotations
+
+from agent_runtime.store import WorkspaceStore
+from hermes_cli.harness_support import (
+    _list_envelope,
+    _load_request_json,
+    _object_envelope,
+    _print_stage42,
+    _sort_rows,
+    emit_harness_error,
+)
+from hermes_time import now
 
 
 def _board_store():

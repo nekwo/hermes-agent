@@ -1,15 +1,33 @@
 # Mission Office CLI tier: `hermes harness office …`.
 #
 # This module is exec'd into hermes_cli/harness.py's globals (see
-# _load_command_parts), so it reuses the shared Stage-42 envelope/printer/error
-# helpers (_print_stage42, _list_envelope, _object_envelope, emit_harness_error,
-# _load_request_json) defined there. All writes go through the OfficeStore
-# chokepoint — the same one the launcher capability lane uses.
+# _load_command_parts) and shares the Stage-42 envelope/printer/error helpers
+# with every other tier — imported from hermes_cli.harness_support below, not
+# inherited. All writes go through the OfficeStore chokepoint — the same one
+# the launcher capability lane uses.
 #
 # Design contract: EterniaLauncher
 # docs/mission_control/OFFICE_LAYOUT_REALM_SYNC_PLAN_2026-07-17.md. Actor keys
 # are minted store-side (canonical_persona_instance_id at the boundary); the
 # CLI passes the identity triple through verbatim.
+
+# Explicit import header. Still exec'd into harness.py's globals by
+# _load_command_parts — that mechanism is unchanged — but no longer dependent
+# on it: these names used to arrive implicitly from whatever harness.py
+# imported, so a wrong one surfaced as a NameError only when an operator ran
+# the one verb that touched it. Re-importing a name harness.py also imports
+# rebinds it to the identical object; both halves are checked by
+# tests/hermes_cli/test_harness_parts_namespace.py.
+
+from __future__ import annotations
+
+from agent_runtime.store import WorkspaceStore
+from hermes_cli.harness_support import (
+    _load_request_json,
+    _object_envelope,
+    _print_stage42,
+    emit_harness_error,
+)
 
 
 def _office_store():

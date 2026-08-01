@@ -54,16 +54,7 @@ PART_FILENAMES = (
 # Free names a part reads that the post-load namespace does not provide.
 # Every entry needs a reason; an entry that no longer reproduces is a stale
 # ledger row and fails the test (see test_known_unresolved_ledger_is_not_stale).
-KNOWN_UNRESOLVED: dict[str, dict[str, str]] = {
-    "persona_commands.py": {
-        "Callable": (
-            "Ghost annotation: read only by two `Callable[[], None] | None` "
-            "annotations, which never evaluate under the inherited "
-            "`from __future__ import annotations`. Retired by the explicit "
-            "import header (P0 step 3)."
-        ),
-    },
-}
+KNOWN_UNRESOLVED: dict[str, dict[str, str]] = {}
 
 
 def _annotations_compiler_flag() -> int:

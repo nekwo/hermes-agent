@@ -1,6 +1,6 @@
-# Exec'd command part (see harness._load_command_parts) — names like emit_json
-# resolve from hermes_cli.harness's globals, exactly as in flow_commands.py /
-# persona_commands.py / runtime_commands.py.
+# Exec'd command part (see harness._load_command_parts), with its own explicit
+# import header — exactly as in flow_commands.py / persona_commands.py /
+# runtime_commands.py.
 #
 # The checkpoint lane (Stage S5, 2026-07-16): the read model's recovery/hydrate
 # substrate. Operator ruling — "entity classes, persisted per-actor, like
@@ -9,6 +9,18 @@
 # the EXISTING on-disk per-actor store files into one keyed transport envelope
 # (keyed by entity class → actor id), reading every row verbatim. Nothing is
 # written anywhere.
+
+# Explicit import header. Still exec'd into harness.py's globals by
+# _load_command_parts — that mechanism is unchanged — but no longer dependent
+# on it: these names used to arrive implicitly from whatever harness.py
+# imported, so a wrong one surfaced as a NameError only when an operator ran
+# the one verb that touched it. Re-importing a name harness.py also imports
+# rebinds it to the identical object; both halves are checked by
+# tests/hermes_cli/test_harness_parts_namespace.py.
+
+from __future__ import annotations
+
+from agent_runtime.cli_format import emit_json
 
 
 def _checkpoint_split_classes(value):
