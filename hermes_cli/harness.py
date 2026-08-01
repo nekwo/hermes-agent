@@ -27,7 +27,6 @@ from agent_runtime.dispatch_session_policy import (
     resolve_dispatch_session_decision,
     session_established_payload,
 )
-from agent_runtime.realm_sync import read_realm_sync_sidecar
 from agent_runtime.coordinator_permissions import (
     CoordinatorPermissionScope,
     authorize_coordinator_action,
@@ -157,7 +156,6 @@ from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_vi
 from agent_runtime.tool_permissions import ChatToolPermissionStore, permission_state_for_chat
 from agent_runtime.tool_turn_history import persist_tool_turn_actual
 from agent_runtime.worker_sessions import WorkerSessionStore
-from agent_runtime.workspace_scope import exact_scoped_instance_ids
 
 from hermes_cli.harness_support import (
     ERROR_EXIT_CODES,
@@ -1695,35 +1693,56 @@ def _cmd_prompt_context_show(args) -> int:
 
 
 def _workspace_row(workspace, *, full: bool = False) -> dict:
-    roster_agent_ids = list(workspace.agent_ids or [])
-    live_scoped_agent_ids = exact_scoped_instance_ids(
-        PersonaInstanceStore().list_all(),
-        workspace_id=workspace.id,
-    )
+    """`workspace list|show|…` row — a RE-KEY of the snapshot's own workspace
+    builder, never a second projection (S48, ledger item 4).
+
+    The hand-rolled twin this replaces is what shipped the ``tasks`` NameError
+    (`a21ab1a2a`): a field the snapshot row had already dropped survived here
+    because nothing tied the two together. Every value below now comes from
+    ``_workspace_summary``; the CLI owns only the key SUBSET (skinny vs
+    ``--full``).
+
+    Deliberate deviations, each with a reason:
+
+    * ``created_at`` is CLI-only — the wire never carried it, and an operator
+      reading ``workspace show`` does. It is a plain timestamp off the model,
+      not a re-derivation of anything the builder computes.
+    * timestamps stay as ``datetime`` rather than the builder's value, because
+      the Stage-42 printer (``emit_json`` -> ``to_jsonable``) is the
+      serialization authority for this lane; pre-serializing here would change
+      the ``--output table`` rendering for no reason. ``_workspace_summary``
+      passes ``updated_at`` through unconverted anyway, so this is a no-op for
+      workspaces and kept only for symmetry with the board/office rows.
+
+    The builder import is FUNCTION-LOCAL on purpose (all six rows do this): a
+    module-level ``from … import _workspace_summary`` binds whichever
+    definition existed at CLI import time, which is itself a second reference
+    to the authority. Resolving through the module on every call means there is
+    exactly one live definition and it is the snapshot module's.
+    """
+
+    from agent_runtime.snapshot import _workspace_summary
+
+    summary = _workspace_summary(workspace, persona_instances=PersonaInstanceStore().list_all())
     row = {
-        "id": workspace.id,
-        "name": workspace.name,
-        "realm_id": workspace.realm_id,
-        "agents": len(live_scoped_agent_ids),
-        "agent_ids": live_scoped_agent_ids,
-        "live_scoped_agent_count": len(live_scoped_agent_ids),
-        "live_scoped_agent_ids": live_scoped_agent_ids,
-        "roster_agent_count": len(roster_agent_ids),
-        "roster_agent_ids": roster_agent_ids,
-        "isolation": workspace.isolation,
-        "updated_at": workspace.updated_at,
-    }
-    if full:
-        row.update(
-            {
-                "kind": "workspace",
-                "slug": workspace.slug,
-                "default_blueprint_id": workspace.default_blueprint_id,
-                "max_concurrent_lanes": workspace.max_concurrent_lanes,
-                "archived": bool(workspace.archived),
-                "created_at": workspace.created_at,
-            }
+        key: summary[key]
+        for key in (
+            "id",
+            "name",
+            "realm_id",
+            "agents",
+            "agent_ids",
+            "live_scoped_agent_count",
+            "live_scoped_agent_ids",
+            "roster_agent_count",
+            "roster_agent_ids",
+            "isolation",
         )
+    }
+    row["updated_at"] = workspace.updated_at
+    if full:
+        row.update({key: summary[key] for key in ("kind", "slug", "default_blueprint_id", "max_concurrent_lanes", "archived")})
+        row["created_at"] = workspace.created_at
     return row
 
 
@@ -2001,22 +2020,28 @@ def _cmd_workspace_archive(args) -> int:
 
 
 def _realm_row(realm, *, full: bool = False) -> dict:
-    workspaces = [item for item in WorkspaceStore().list_all(include_archived=True) if item.realm_id == realm.id]
-    workspace_ids = list(dict.fromkeys([*(realm.workspace_ids or []), *[item.id for item in workspaces]]))
+    """`realm list|show|…` row — a RE-KEY of the snapshot's own realm builder
+    (S48, ledger item 4).
+
+    The hand-rolled twin this replaces is where ``"sync": "in_sync"`` was
+    hardcoded (`a21ab1a2a`) — the exact fake ``_realm_summary`` forbids. The
+    honest sidecar read now happens in ONE place, so the CLI cannot drift from
+    the wire again. CLI-only additions (never on the wire, both plain model
+    scalars): ``sync_manifest_ref`` and ``created_at``.
+    """
+
+    from agent_runtime.snapshot import _realm_summary
+
+    summary = _realm_summary(realm, workspaces=WorkspaceStore().list_all(include_archived=True))
     row = {
-        "id": realm.id,
-        "name": realm.name,
-        "server_id": realm.server_id,
-        "default_workspace_id": getattr(realm, "default_workspace_id", None),
-        "default_workspace_version": getattr(realm, "default_workspace_version", 0),
-        "workspaces": len(workspace_ids),
-        # Honest sync state, same source as the snapshot's realm row: absent
-        # sidecar -> None ("not checked"), never a fake "in_sync" literal.
-        "sync": read_realm_sync_sidecar(realm.id),
-        "updated_at": realm.updated_at,
+        key: summary[key]
+        for key in ("id", "name", "server_id", "default_workspace_id", "default_workspace_version", "workspaces", "sync")
     }
+    row["updated_at"] = realm.updated_at
     if full:
-        row.update({"kind": "realm", "slug": realm.slug, "workspace_ids": workspace_ids, "default_workspace_name": getattr(realm, "default_workspace_name", "Default"), "default_workspace_version": getattr(realm, "default_workspace_version", 0), "sync_manifest_ref": realm.sync_manifest_ref, "archived": bool(realm.archived), "created_at": realm.created_at})
+        row.update({key: summary[key] for key in ("kind", "slug", "workspace_ids", "default_workspace_name", "archived")})
+        row["sync_manifest_ref"] = realm.sync_manifest_ref
+        row["created_at"] = realm.created_at
     return row
 
 

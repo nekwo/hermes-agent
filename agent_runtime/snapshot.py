@@ -808,6 +808,58 @@ def _board_conflict_card_ids(board_id: str) -> list[str]:
     return sorted(ids)
 
 
+def board_summary_row(
+    board,
+    cards,
+    *,
+    card_unpublished=None,
+    board_unpublished: bool | None = None,
+    orphaned: bool = False,
+) -> dict:
+    """ONE board projection row — the single authority for the board card
+    projection bound, the card-body masking and the truncation accounting.
+
+    Extracted from ``_boards_summary``'s loop body verbatim (S48, ledger item
+    4) so the ``hermes harness board`` CLI tier renders the SAME row instead of
+    hand-rolling a second, unmasked, uncapped one. ``cards`` is the caller's
+    already-fetched active card list (the CLI needs it for its own non-done
+    count, and a second store read would be a second answer).
+
+    ``card_unpublished`` is the caller-owned per-card baseline probe; a caller
+    with no realm baseline passes ``None`` and the per-card flag is omitted
+    entirely, exactly as the un-extracted loop did.
+    """
+
+    projected = cards[:MAX_BOARD_CARDS_PROJECTED]
+    row = {
+        "board_id": board.board_id,
+        "workspace_id": board.workspace_id,
+        "title": board.title,
+        "revision": board.revision,
+        "updated_at": to_jsonable(board.updated_at),
+        "columns": [
+            {"column_id": c.column_id, "title": c.title, "kind": c.kind, "wip_limit": c.wip_limit}
+            for c in board.columns
+        ],
+        "cards": [
+            _board_card_row(c, unpublished=(card_unpublished(c) if card_unpublished is not None else None))
+            for c in projected
+        ],
+        "active_card_count": len(cards),
+        "cards_truncated": max(0, len(cards) - len(projected)),
+        "conflict_card_ids": _board_conflict_card_ids(board.board_id),
+        "archived_card_ids": list(board.archived_card_ids),
+        # A board whose workspace no longer resolves is accounted, never
+        # silently hidden (repair via archive) — parity warning below.
+        "orphaned": orphaned,
+    }
+    # Publication honesty is only meaningful for realm-bound boards; omit the
+    # flag entirely otherwise (mirrors the office ``unpublished=None`` posture).
+    if board_unpublished is not None:
+        row["unpublished"] = board_unpublished
+    return row
+
+
 def _boards_summary(board_store, workspaces) -> list[dict]:
     """Mission Board projection rows, keyed by board_id. Local reads only:
     conflict card ids from local sidecar files, ``unpublished`` (per board and
@@ -823,7 +875,6 @@ def _boards_summary(board_store, workspaces) -> list[dict]:
     boards: list[dict] = []
     for board in board_store.list_all():
         cards = board_store.list_cards(board.board_id)  # active, (order_key, card_id) sorted
-        projected = cards[:MAX_BOARD_CARDS_PROJECTED]
         realm_id = realm_by_workspace.get(board.workspace_id)
         baseline: dict[str, str] | None = None
         if realm_id:
@@ -844,28 +895,15 @@ def _boards_summary(board_store, workspaces) -> list[dict]:
         if baseline is not None:
             board_unpublished = baseline.get(f"{board.board_id}:board") != board_content_hash(board)
 
-        row = {
-            "board_id": board.board_id,
-            "workspace_id": board.workspace_id,
-            "title": board.title,
-            "revision": board.revision,
-            "updated_at": to_jsonable(board.updated_at),
-            "columns": [
-                {"column_id": c.column_id, "title": c.title, "kind": c.kind, "wip_limit": c.wip_limit}
-                for c in board.columns
-            ],
-            "cards": [_board_card_row(c, unpublished=_card_unpublished(c)) for c in projected],
-            "active_card_count": len(cards),
-            "cards_truncated": max(0, len(cards) - len(projected)),
-            "conflict_card_ids": _board_conflict_card_ids(board.board_id),
-            "archived_card_ids": list(board.archived_card_ids),
-            # A board whose workspace no longer resolves is accounted, never
-            # silently hidden (repair via archive) — parity warning below.
-            "orphaned": board.workspace_id not in workspace_ids,
-        }
-        if board_unpublished is not None:
-            row["unpublished"] = board_unpublished
-        boards.append(row)
+        boards.append(
+            board_summary_row(
+                board,
+                cards,
+                card_unpublished=_card_unpublished,
+                board_unpublished=board_unpublished,
+                orphaned=board.workspace_id not in workspace_ids,
+            )
+        )
     return boards
 
 
@@ -929,6 +967,43 @@ def _office_actor_summary_row(actor, *, unpublished: bool | None) -> dict:
     return row
 
 
+def office_summary_row(
+    surface,
+    actors,
+    *,
+    conflict_actor_keys=(),
+    actor_unpublished=None,
+    orphaned: bool = False,
+) -> dict:
+    """ONE Mission Office surface projection row — the single authority for the
+    actor projection bound and its truncation accounting.
+
+    Extracted from ``_offices_summary``'s loop body verbatim (S48, ledger item
+    4), same reason as :func:`board_summary_row`: the ``hermes harness office``
+    CLI tier rendered its own uncapped actor list. ``actors`` and
+    ``conflict_actor_keys`` are the caller's already-fetched store reads.
+    """
+
+    projected = actors[:MAX_OFFICE_ACTORS_PROJECTED]
+    return {
+        "workspace_id": surface.workspace_id,
+        "folders": list(surface.folders),
+        "actors": [
+            _office_actor_summary_row(a, unpublished=(actor_unpublished(a) if actor_unpublished is not None else None))
+            for a in projected
+        ],
+        "actor_count": len(actors),
+        "actors_truncated": max(0, len(actors) - len(projected)),
+        "conflict_actor_keys": list(conflict_actor_keys),
+        "archived_actor_keys": list(surface.archived_actor_keys),
+        "revision": surface.revision,
+        "updated_at": to_jsonable(surface.updated_at),
+        # A surface whose workspace no longer resolves is accounted, never
+        # silently hidden — parity warning below.
+        "orphaned": orphaned,
+    }
+
+
 def _offices_summary(office_store, workspaces) -> list[dict]:
     """Mission Office projection rows, keyed by workspace_id. Local reads only:
     conflict state from local sidecar files, ``unpublished`` from the local
@@ -946,7 +1021,6 @@ def _offices_summary(office_store, workspaces) -> list[dict]:
         except Exception:
             continue
         actors = office_store.list_actors(workspace_token)
-        projected = actors[:MAX_OFFICE_ACTORS_PROJECTED]
         realm_id = realm_by_workspace.get(surface.workspace_id)
         baseline: dict[str, str] | None = None
         if realm_id:
@@ -966,20 +1040,13 @@ def _offices_summary(office_store, workspaces) -> list[dict]:
             return baseline.get(f"{surface.workspace_id}:actor:{actor.actor_key}") != office_content_hash(actor)
 
         offices.append(
-            {
-                "workspace_id": surface.workspace_id,
-                "folders": list(surface.folders),
-                "actors": [_actor_summary for _actor_summary in (_office_actor_summary_row(a, unpublished=_actor_unpublished(a)) for a in projected)],
-                "actor_count": len(actors),
-                "actors_truncated": max(0, len(actors) - len(projected)),
-                "conflict_actor_keys": office_store.conflict_actor_keys(workspace_token),
-                "archived_actor_keys": list(surface.archived_actor_keys),
-                "revision": surface.revision,
-                "updated_at": to_jsonable(surface.updated_at),
-                # A surface whose workspace no longer resolves is accounted,
-                # never silently hidden — parity warning below.
-                "orphaned": surface.workspace_id not in workspace_ids,
-            }
+            office_summary_row(
+                surface,
+                actors,
+                conflict_actor_keys=office_store.conflict_actor_keys(workspace_token),
+                actor_unpublished=_actor_unpublished,
+                orphaned=surface.workspace_id not in workspace_ids,
+            )
         )
     return offices
 
