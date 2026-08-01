@@ -7,7 +7,12 @@ from hermes_cli.auth import AuthError
 from hermes_cli.runtime_environment import missing_runtime_packages_for
 from hermes_cli.runtime_provider import resolve_runtime_provider
 
-from .machine_roots import contains_path_tokens, mcp_server_issues, path_token_issues
+from .machine_roots import (
+    ADVISORY_ISSUE_CODES,
+    contains_path_tokens,
+    mcp_server_issues,
+    path_token_issues,
+)
 from .parse_cache import cached_yaml_file
 from .profile_context import persona_profile_context, resolve_persona_profile
 from .skill_install import harness_skill_hash_mismatches
@@ -49,6 +54,7 @@ def profile_readiness_for_persona(
     skill_hash_mismatches: list[str] = []
     skill_resolutions: list[dict[str, Any]] = []
     machine_root_issues: list[dict[str, Any]] = []
+    mcp_template_drift: list[dict[str, Any]] = []
     effective_required_mcp = _effective_required_mcp_servers(persona, task=task, stage=stage)
     machine_root_issues.extend(_persona_path_token_issues(persona))
 
@@ -71,12 +77,22 @@ def profile_readiness_for_persona(
                 # no longer exists, gated to another OS) is not "present" — it
                 # would be dropped before spawn. Report the typed reason rather
                 # than letting the agent discover a dead path at tool time.
-                machine_root_issues.extend(
-                    issue.row()
-                    for issue in mcp_server_issues(
-                        _configured_mcp_servers(raw or {}), only=effective_required_mcp
-                    )
-                )
+                #
+                # The same lane also carries canonical-template drift, which is
+                # ADVISORY: the block still binds and still spawns, so it must
+                # not flip a working profile's readiness. Partition on the typed
+                # code — not on a hand-maintained list of "the soft ones" here —
+                # so a future advisory code routes correctly without touching
+                # this site.
+                for issue in mcp_server_issues(
+                    _configured_mcp_servers(raw or {}),
+                    only=effective_required_mcp,
+                    include_template_drift=True,
+                ):
+                    if issue.code in ADVISORY_ISSUE_CODES:
+                        mcp_template_drift.append(issue.row())
+                    else:
+                        machine_root_issues.append(issue.row())
                 runtime_issue = _runtime_dependency_issue(persona)
                 if runtime_issue:
                     issues.append(runtime_issue)
@@ -143,6 +159,10 @@ def profile_readiness_for_persona(
         "effective_required_mcp_servers": list(effective_required_mcp),
         "missing_mcp_servers": missing_mcp,
         "machine_root_issues": machine_root_issues,
+        # Advisory rows only — never folded into ``issues``/``readiness``. They
+        # are visible so drift is never silent, and separate so an operator
+        # cannot mistake "declared differently" for "cannot run".
+        "mcp_template_drift": mcp_template_drift,
     }
 
 
