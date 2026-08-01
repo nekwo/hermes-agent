@@ -49,7 +49,7 @@ def test_synthetic_incremental_apply_within_rd3_slo(isolate_agent_runtime_root):
     ).apply_pending()
 
     assert result.applied_events == 1
-    assert result.changed == {"sections": ["snapshot"]}
+    assert result.to_offset > result.from_offset
     assert result.incremental_apply_ms <= SLO_INCREMENTAL_APPLY_MS
 
 

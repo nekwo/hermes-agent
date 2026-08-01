@@ -7,6 +7,7 @@ import threading
 import time
 import hashlib
 from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 # The snapshot roster does not render per-profile model/provider settings. Use
@@ -58,6 +59,27 @@ from .tool_visibility import (
 )
 from .workspace_scope import exact_scoped_instance_ids
 from .worker_sessions import WorkerSessionStore
+
+
+@dataclass(frozen=True, slots=True)
+class SnapshotSummary:
+    """The frame's ``summary`` block, as a CLOSED set of fields.
+
+    ``summary`` was a bare dict literal, and two parity warnings kept reading
+    ``open_tasks`` / ``open_incidents`` out of it for the two contract versions
+    after the mission-row removal stopped emitting them — a dict answers
+    ``.get()`` for any key, so the branches read ``None``, evaluated false, and
+    the warnings simply never fired. Nothing failed; the checks just quietly
+    stopped existing. Declaring the field set here means a reader of a field the
+    summary does not emit is an ``AttributeError`` where it is written, not a
+    silent no-op that survives audits.
+    """
+
+    persona_instances: int
+
+    def as_dict(self) -> dict[str, int]:
+        return {"persona_instances": int(self.persona_instances)}
+
 
 # S2 read-model — history out of the live frame (operator move 6).
 # The persona-chat message tails are append-only HISTORY: read on demand at
@@ -426,9 +448,7 @@ def _build_snapshot_uncoalesced(
         "decision_contract_hash": contract_hash(),
         "event_contract_version": CONTRACT_SCHEMA_VERSION,
         "generated_at": now(),
-        "summary": {
-            "persona_instances": len(topology_persona_instances),
-        },
+        "summary": SnapshotSummary(persona_instances=len(topology_persona_instances)).as_dict(),
         # Single runtime-default authority, resolved + provenance-stamped, as a
         # typed top-level block so surfaces (launcher model-switcher caption,
         # `hermes harness config show`) report what agents actually follow
@@ -1257,31 +1277,19 @@ def _parity_warnings(data) -> list[dict]:
                     }
                 )
 
-    summary = data.get("summary") or {}
-    if (summary.get("open_tasks") or 0) > 0 and not (data.get("goals")):
-        warnings.append(
-            {
-                "code": "open_tasks_without_task_rows",
-                "detail": "summary reports open tasks but no goal rows were mapped",
-            }
-        )
-    try:
-        threshold = int(getattr(load_root_runtime_config(), "open_incident_warning_threshold", 100))
-    except Exception:
-        threshold = 100
-    try:
-        open_incidents = int(summary.get("open_incidents") or 0)
-    except Exception:
-        open_incidents = 0
-    if threshold > 0 and open_incidents > threshold:
-        warnings.append(
-            {
-                "code": "open_incident_budget_exceeded",
-                "detail": f"summary reports {open_incidents} open incidents, above the configured budget of {threshold}",
-                "count": open_incidents,
-                "threshold": threshold,
-            }
-        )
+    # B5 (2026-07-31): two more warnings stood here — ``open_tasks_without_task_rows``
+    # (keyed on ``summary.open_tasks``) and ``open_incident_budget_exceeded``
+    # (keyed on ``summary.open_incidents``, gated by the
+    # ``open_incident_warning_threshold`` config knob). Neither key has existed
+    # on ``summary`` since the mission-row removal (S9/contract 45) reduced the
+    # block to ``persona_instances``, so both branches were unreachable by
+    # construction: an operator tuning the threshold was tuning nothing, and the
+    # Launcher's ``open_incident_budget_exceeded`` alert could never fire. The
+    # config knob went with them. ``SnapshotSummary`` now declares the block's
+    # field set so the next warning cannot be written against a field the
+    # summary does not emit, and
+    # ``tests/agent_runtime/test_parity_warning_catalog.py`` fails if any
+    # warning code in this module stops being producible.
     return warnings
 
 
@@ -1391,8 +1399,11 @@ def write_snapshot(snapshot: dict | None = None) -> dict:
     if bool(getattr(read_model_cfg, "enabled", False)):
         from .read_model import ReadModel
 
-        watermark = (snapshot.get("parity") or {}).get("watermark") or {}
-        ReadModel().apply_full_rebuild(snapshot, watermark=watermark)
+        # Watermark derivation lives in ``read_model.snapshot_watermark`` — this
+        # site used to fall back to ``{}`` where the projector fell back to a
+        # measured ``events_watermark()``, so one frame could be stamped
+        # caught-up-at-offset-0 or correctly depending on which writer got it.
+        ReadModel().apply_full_rebuild(snapshot)
     return snapshot
 
 

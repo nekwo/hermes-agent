@@ -4,12 +4,11 @@ import json
 import os
 import time
 from contextlib import closing
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from hermes_time import now
 
 from .events import EventLog
-from .parity import events_watermark
 from .read_model import ReadModel
 from .snapshot import build_snapshot
 
@@ -19,12 +18,21 @@ LEASE_TTL_SECONDS = 30
 
 @dataclass(slots=True)
 class ProjectorResult:
+    """What one projection pass actually did.
+
+    B4 removed two fields that could only ever hold one value: ``changed`` was
+    the literal ``{"sections": ["snapshot"]}`` whenever anything was applied
+    (the projection unit has been the whole frame since mission rows left), and
+    ``stale_sections`` was ``[]`` on every path — a partial-refresh accounting
+    field left behind by the row-delta design it belonged to. Reporting a
+    constant as if it were a measurement is a lie a caller can act on;
+    ``applied_events`` already carries the fact both were standing in for.
+    """
+
     applied_events: int = 0
     from_offset: int = 0
     to_offset: int = 0
     incremental_apply_ms: int = 0
-    changed: dict[str, list[str]] = field(default_factory=dict)
-    stale_sections: list[str] = field(default_factory=list)
     lease_acquired: bool = False
 
 
@@ -80,33 +88,37 @@ class Projector:
                 lease_acquired=True,
             )
         from_offset = int(watermark.get("event_offset") or 0)
-        events = list(self.event_log.iter_from_offset(from_offset))
-        if not events:
+        applied_events = self._count_pending(from_offset)
+        if not applied_events:
             return ProjectorResult(
                 from_offset=from_offset,
                 to_offset=from_offset,
                 incremental_apply_ms=int((time.perf_counter() - started) * 1000),
                 lease_acquired=True,
             )
-        snapshot = build_snapshot()
-        self.read_model.apply_full_rebuild(
-            snapshot,
-            watermark=(snapshot.get("parity") or {}).get("watermark") or events_watermark(),
-        )
+        self.full_rebuild()
         current = self.read_model.projection_watermark("snapshot") or {}
         return ProjectorResult(
-            applied_events=len(events),
+            applied_events=applied_events,
             from_offset=from_offset,
             to_offset=int(current.get("event_offset") or 0),
             incremental_apply_ms=int((time.perf_counter() - started) * 1000),
-            changed={"sections": ["snapshot"]},
-            stale_sections=[],
             lease_acquired=True,
         )
 
+    def _count_pending(self, from_offset: int) -> int:
+        """How many events sit past ``from_offset`` — counted, not collected.
+
+        The pass only ever needs the COUNT (the projection unit is the whole
+        frame), so materializing the tail into a list held every pending event
+        in memory to call ``len`` on it. On a multi-hundred-MB log after a long
+        idle that is the whole tail resident for one integer.
+        """
+
+        pending = iter(self.event_log.iter_from_offset(from_offset))
+        if next(pending, None) is None:
+            return 0
+        return 1 + sum(1 for _ in pending)
+
     def full_rebuild(self) -> None:
-        snapshot = build_snapshot()
-        self.read_model.apply_full_rebuild(
-            snapshot,
-            watermark=(snapshot.get("parity") or {}).get("watermark") or events_watermark(),
-        )
+        self.read_model.apply_full_rebuild(build_snapshot())

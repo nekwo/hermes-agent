@@ -73,7 +73,7 @@ def test_replay_equivalence_goal_row_carries_bundle_assignment_and_lane_state(is
         config=RuntimeConfig(read_model=ReadModelConfig(enabled=True)),
     ).apply_pending()
 
-    assert result.changed == {"sections": ["snapshot"]}
+    assert result.applied_events == 1
     assert "boards" in incremental.render_snapshot()
 
 
@@ -91,7 +91,7 @@ def test_apply_pending_is_o_delta_on_rd0_fixture(isolate_agent_runtime_root):
     ).apply_pending()
 
     assert result.applied_events == 1
-    assert result.changed == {"sections": ["snapshot"]}
+    assert result.from_offset < result.to_offset
     assert result.incremental_apply_ms <= SLO_INCREMENTAL_APPLY_MS
 
 
@@ -110,7 +110,7 @@ def test_lease_excludes_second_projector(isolate_agent_runtime_root):
     assert Projector(read_model, config=RuntimeConfig()).acquire_lease() is False
 
 
-def test_registered_event_rebuilds_snapshot_without_stale_sections(isolate_agent_runtime_root):
+def test_registered_event_rebuilds_the_whole_frame(isolate_agent_runtime_root):
     read_model = ReadModel(isolate_agent_runtime_root / "read_model.db")
     snapshot = build_snapshot()
     read_model.apply_full_rebuild(snapshot, watermark=snapshot["parity"]["watermark"])
@@ -131,8 +131,12 @@ def test_registered_event_rebuilds_snapshot_without_stale_sections(isolate_agent
     ).apply_pending()
 
     assert result.applied_events == 1
-    assert result.stale_sections == []
-    assert result.changed == {"sections": ["snapshot"]}
+    # B4: ``changed`` / ``stale_sections`` were constants dressed as findings.
+    # The observable claim is that the pass rebuilt the frame past the old mark.
+    assert not hasattr(result, "changed")
+    assert not hasattr(result, "stale_sections")
+    assert result.to_offset > result.from_offset
+    assert read_model.render_snapshot()["generated_at"]
 
 
 def test_rebuild_and_read_projection_cli(isolate_agent_runtime_root, capsys):

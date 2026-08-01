@@ -380,16 +380,25 @@ def _cmd_persona_chat_history(args) -> int:
 
 
 def _cmd_snapshot(args) -> int:
+    # This module is exec'd into harness.py's globals — every new name is a
+    # function-local import.
     from agent_runtime.config import load_root_runtime_config
+    from agent_runtime.read_model import resolve_snapshot_frame
 
-    cfg = load_root_runtime_config()
-    snap = write_snapshot(build_snapshot())
-    read_model_cfg = getattr(cfg, "read_model", None)
-    if bool(getattr(read_model_cfg, "enabled", False)) and bool(getattr(read_model_cfg, "serve_snapshot_from_db", True)):
-        from agent_runtime.read_model import ReadModel
-
-        snap = ReadModel().render_snapshot()
-    print(emit_json(snap) if args.json else "snapshot written")
+    read_model_cfg = getattr(load_root_runtime_config(), "read_model", None)
+    prefer_cache = bool(getattr(read_model_cfg, "enabled", False)) and bool(
+        getattr(read_model_cfg, "serve_snapshot_from_db", True)
+    )
+    # The serve source (built / cache / cache_miss_rebuilt) rides the frame's
+    # parity envelope. The old branch replaced the freshly built frame with
+    # ``render_snapshot()`` unconditionally, so an unpopulated read model made
+    # ``harness snapshot --json`` print ``{}`` — an empty runtime, silently.
+    resolved = resolve_snapshot_frame(prefer_cache=prefer_cache)
+    print(
+        emit_json(resolved.frame)
+        if args.json
+        else f"snapshot written (frame_source={resolved.source})"
+    )
     return 0
 
 

@@ -27,6 +27,10 @@ def test_apply_full_rebuild_then_render_is_equivalent(isolate_agent_runtime_root
     assert to_jsonable(rendered) == to_jsonable(snapshot)
     assert read_model.projection_watermark("snapshot")["event_offset"] == snapshot["parity"]["watermark"]["event_offset"]
     assert read_model.read_projection("agent_instances")["rows"] == []
+    # B4: sections are read as slices of the one stored frame, not from
+    # duplicate per-section rows.
+    assert read_model.read_projection("parity")["payload"] == to_jsonable(snapshot["parity"])
+    assert read_model.read_projection("snapshot")["payload"] == to_jsonable(snapshot)
 
 
 def test_wal_crash_mid_transaction_leaves_db_consistent(isolate_agent_runtime_root, tmp_path):
@@ -106,8 +110,12 @@ def test_harness_snapshot_serves_from_read_model_when_enabled(isolate_agent_runt
 
     assert harness._cmd_snapshot(Namespace(json=True)) == 0
 
+    printed = json.loads(capsys.readouterr().out)
     rendered = ReadModel(isolate_agent_runtime_root / "read_model.db").render_snapshot()
-    assert to_jsonable(rendered) == json.loads(capsys.readouterr().out)
+    # The serve stamps its own provenance onto the frame it hands back; the rest
+    # of the frame is the cached one, byte for byte.
+    assert printed["parity"].pop("frame_source") == "cache"
+    assert to_jsonable(rendered) == printed
 
 
 def test_render_budget(isolate_agent_runtime_root):

@@ -196,17 +196,13 @@ def test_build_snapshot_carries_redaction_mode_from_env(isolate_agent_runtime_ro
     assert snapshot["parity"]["redaction_mode"] == "observe"
 
 
-def test_parity_warnings_flags_open_incident_budget(monkeypatch):
-    monkeypatch.delenv("HERMES_REDACTION_MODE", raising=False)
-    warnings = _parity_warnings(
-        {
-            "persona_instance_runtime": {"enabled": True},
-            "persona_instances": [],
-            "persona_chat_trace": [],
-            "operator_channels": [],
-            "summary": {"open_tasks": 0, "open_incidents": 101},
-            "tasks": [],
-        }
-    )
-
-    assert "open_incident_budget_exceeded" in [warning["code"] for warning in warnings]
+# B5 (2026-07-31): ``test_parity_warnings_flags_open_incident_budget`` stood
+# here, hand-feeding ``summary: {"open_tasks": 0, "open_incidents": 101}`` — a
+# summary shape ``build_snapshot`` has not emitted since contract 45 reduced the
+# block to ``persona_instances``. This test WAS the only thing in the repo that
+# ever produced ``open_incidents``, so it kept an unreachable production branch
+# looking covered and green: a closed loop, not coverage (the same rule that
+# retired the test-only modules in ledger item 2). The branch, the
+# ``open_incident_warning_threshold`` knob it read, and this test went together.
+# Reachability of every remaining warning code is now gated executably by
+# tests/agent_runtime/test_parity_warning_catalog.py.

@@ -7,7 +7,10 @@ from agent_runtime.snapshot import build_snapshot
 
 
 def test_s9_snapshot_contract_removes_mission_rows_and_bumps_versions(tmp_path):
-    assert READ_MODEL_SCHEMA_VERSION == 2
+    # B4 bumped 2 -> 3 when the duplicate per-section projections_misc rows were
+    # dropped; the version is what makes an old database clear and rebuild
+    # instead of serving rows no writer maintains any more.
+    assert READ_MODEL_SCHEMA_VERSION == 3
     assert ROW_TABLES == ("agent_instances", "operator_channels")
 
     snapshot = build_snapshot()

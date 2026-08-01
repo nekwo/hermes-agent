@@ -136,7 +136,6 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
         default_model=resolved_model,
         default_api_mode=raw.get("default_api_mode", "codex_responses"),
         redaction_mode=normalize_redaction_mode(raw.get("redaction_mode") or os.environ.get("HERMES_REDACTION_MODE", "strict")),
-        open_incident_warning_threshold=_positive_int(raw.get("open_incident_warning_threshold"), 100),
         heartbeat_ttl_seconds=int(raw.get("heartbeat_ttl_seconds", 900)),
         max_actions_per_tick=int(raw.get("max_actions_per_tick", 1)),
         daemon_enabled=bool((raw.get("daemon") or {}).get("enabled", raw.get("daemon_enabled", False))),

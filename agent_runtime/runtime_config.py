@@ -305,7 +305,11 @@ class RuntimeConfig:
     default_model: str | None = None
     default_api_mode: str = "codex_responses"
     redaction_mode: str = "strict"
-    open_incident_warning_threshold: int = 100
+    # B5 (2026-07-31): ``open_incident_warning_threshold`` stood here. Its sole
+    # reader was a snapshot parity warning keyed on ``summary.open_incidents``,
+    # a field the frame stopped emitting at contract 45 — so the knob governed
+    # nothing while riding the ``runtime_config`` wire advertising a budget that
+    # could not be exceeded. No profile config sets it; no Launcher code reads it.
     daemon_enabled: bool = False
     daemon_interval_seconds: int = 10
     daemon_idle_interval_seconds: int = 30
