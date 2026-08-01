@@ -154,14 +154,22 @@ def test_the_separately_ruled_repo_execution_context_cluster_is_now_gone():
         assert not hasattr(persona_runtime, name), name
 
 
-def test_the_stage_intent_module_is_not_collateral():
-    """``stage_requires_product_edit`` loses its ``persona_runtime`` importer,
-    not its life: ``stage_intent`` still calls it three times internally."""
+def test_the_stage_intent_module_was_collateral_after_all_two_waves_later():
+    """RETARGETED at S45. This test asserted the opposite, and was right when it
+    was written: S29 removed ``persona_runtime``'s importer of
+    ``stage_requires_product_edit``, and the module was judged to keep its life
+    because it called that function three times INTERNALLY.
 
-    from agent_runtime import stage_intent
+    That reasoning is the trap this retarget records. **Internal self-reference
+    is not liveness.** The three internal calls kept the module reachable from
+    itself at the very moment its last external production caller — the one S29
+    had just deleted — went away. What was left was a closed loop anchored only
+    by ``test_stage_intent.py``, precisely the shape S45 was authorized to cut.
+    The count-the-internal-calls check would have gone on passing forever."""
 
-    assert callable(stage_intent.stage_requires_product_edit)
-    assert inspect.getsource(stage_intent).count("stage_requires_product_edit(") >= 3
+    from importlib.util import find_spec
+
+    assert find_spec("agent_runtime.stage_intent") is None
 
 
 def test_no_module_level_name_is_unreachable_from_the_external_surface():

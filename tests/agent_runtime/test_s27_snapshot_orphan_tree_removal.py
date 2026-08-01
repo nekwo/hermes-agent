@@ -20,6 +20,12 @@ names ``_stopped_progress`` / ``_has_budget_incident``). Those collisions are
 what kept this island looking alive; the pins below record them so a future pass
 does not re-derive the same false liveness.
 
+RETARGETED 2026-07-31 (S45): one of the nine collisions no longer exists.
+``agent_runtime/budget_approval.py`` was deleted whole as a test-only module, so
+``_safe_int`` collides with nothing now. The pin below asserts its ABSENCE
+instead of being dropped — a collision witness that quietly loses one of its
+nine hides the fact that the count changed.
+
 S18's own keep-side pin is corrected here, not deleted: it justified
 ``_archived_task_summaries`` as "the fetch lane behind ``harness task
 history``". S8 removed that CLI verb (``tests/agent_runtime/
@@ -205,16 +211,27 @@ def test_no_module_level_name_is_unreachable_from_the_external_surface():
 
 def test_the_lookalike_keep_set_survives():
     """Nine removed names collide with live private helpers in other modules —
-    the exact collisions that made a text grep report this island as live."""
+    the exact collisions that made a text grep report this island as live.
 
-    from agent_runtime import board_store, budget_approval, observability
+    S45 retarget: one of the nine, ``budget_approval._safe_int``, no longer
+    exists — see below. The other eight are untouched."""
+
+    from agent_runtime import board_store, observability
 
     assert callable(observability._run_summary)
     assert callable(observability._event_display_kind)
     assert callable(observability._event_display_title)
     assert callable(observability._event_display_projection)
     assert callable(board_store._read_json)
-    assert callable(budget_approval._safe_int)
+    # S45: ``budget_approval._safe_int`` was the ninth collision pinned here — a
+    # live private helper sharing a name with a removed snapshot local. The
+    # collision was real and this file was right to pin it; the module was then
+    # deleted whole at S45 as test-only, so the name now collides with nothing.
+    # Asserted as ABSENT rather than dropped, so the reversal of an explicit
+    # keep-side claim stays visible in the file that made it.
+    from importlib.util import find_spec
+
+    assert find_spec("agent_runtime.budget_approval") is None
     # ``status.py`` only NAMES snapshot's ``_stopped_progress`` /
     # ``_has_budget_incident`` in a comment; its own chain went in S21.
     from agent_runtime import status

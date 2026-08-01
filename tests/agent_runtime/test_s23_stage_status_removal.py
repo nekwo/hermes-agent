@@ -40,30 +40,23 @@ def test_the_sibling_state_enums_survive():
     assert states.PossessionState.RELEASE_PENDING == "release_pending"
 
 
-def test_stage_intent_still_reads_a_plain_status_string():
-    """The one consumer never depended on the enum -- prove it on a bare str."""
+def test_the_last_stage_status_consumer_outlived_the_enum_and_then_went_too():
+    """RETARGETED at S45.
 
-    from types import SimpleNamespace
+    This test used to construct a duck-typed stage with ``status="implementing"``
+    and prove ``stage_intent.stage_requires_product_edit`` handled a bare string,
+    because ``stage_intent`` was the ONE consumer S23 had to keep working after
+    ``StageStatus`` was deleted.
 
-    from agent_runtime.stage_intent import stage_requires_product_edit
+    S45 deleted ``stage_intent`` whole — zero production importers, anchored only
+    by ``test_stage_intent.py``. So the enum's last consumer is gone as well,
+    which retires the question this test asked rather than answering it. Kept as
+    an absence assertion: S23's whole justification for dropping ``StageStatus``
+    was "the one remaining consumer reads a plain string", and a reader hitting
+    that reasoning should be able to see the consumer no longer exists."""
 
-    task = SimpleNamespace(
-        id="task_s23",
-        title="No product edits",
-        description="Request the existing proof recipe without editing product code.",
-        affected_repos=["EterniaBackend"],
-        risk_flags=["no_product_edits"],
-    )
-    stage = SimpleNamespace(
-        id="backend_contract_smoke",
-        title="Backend Contract Smoke",
-        objective="Request the existing backend_contract_smoke no_product_edit proof recipe without modifying product repositories.",
-        status="implementing",
-        acceptance_criteria=["No product repository edits are made."],
-        test_plan=["request_test_run with stage_id=backend_contract_smoke and recipe_id=backend_contract_smoke"],
-        affected_paths=[],
-        audit_notes=[],
-        corrections=[],
-    )
+    from importlib.util import find_spec
 
-    assert stage_requires_product_edit(task, stage) is False
+    assert find_spec("agent_runtime.stage_intent") is None
+    # The enum stays gone, and now for a second, independent reason.
+    assert not hasattr(states, "StageStatus")

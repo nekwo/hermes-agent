@@ -45,12 +45,13 @@ No event contract moves *at S43*: ``event_catalog()`` stayed at 88 through this
 wave. S44 then moved it to 82. The absolute count has one owner either way —
 ``tests/agent_runtime/test_s15_event_contract_pruning.SURVIVING_EVENT_COUNT``.
 
-RETARGETED 2026-07-31 (S44): one module this file pinned symbols on no longer
-exists. ``role_envelopes`` was deleted whole, so its ``REMOVED`` / ``KEPT``
+RETARGETED 2026-07-31 (S44/S45): three modules this file pinned symbols on no
+longer exist. ``role_envelopes`` (S44) and ``budget_approval`` / ``stage_intent``
+(S45, test-only whole modules) were deleted, so their ``REMOVED`` / ``KEPT``
 entries moved to ``RETIRED_WHOLE_MODULES`` below. They are NOT dropped: an
 individual-symbol witness that silently loses its module hides the bigger cut
-that swallowed it, and the KEPT half is the more interesting record — that name
-was correctly alive at S43 and died for an unrelated reason one wave later.
+that swallowed it, and the KEPT half is the more interesting record — those names
+were correctly alive at S43 and died for an unrelated reason two waves later.
 """
 
 from __future__ import annotations
@@ -63,7 +64,6 @@ import pytest
 #: module -> the names that must no longer exist on it.
 REMOVED = {
     "agent_runtime.board_models": ("is_default_board_id",),
-    "agent_runtime.budget_approval": ("eligible_budget_approval_incidents",),
     "agent_runtime.cli_format": ("task_summary", "human_task_line"),
     "agent_runtime.decision_contract_registry": ("FieldContract",),
     "agent_runtime.decision_schema": ("_extract_first_json_blob",),
@@ -89,13 +89,6 @@ REMOVED = {
     "agent_runtime.skill_install": ("harness_skill_installed_ok",),
     "agent_runtime.skill_promotion": ("RESULT_ACTIONS",),
     "agent_runtime.skill_publishability": ("PUBLISHABLE_REASONS",),
-    "agent_runtime.stage_intent": (
-        "first_incomplete_product_edit_stage",
-        "stage_is_committed_verification_gate",
-        "extract_single_known_stage_reference",
-        "_stage_has_command_gate",
-        "_looks_like_command",
-    ),
     "agent_runtime.tool_visibility": ("_profile_readiness_cache_clear",),
 }
 
@@ -107,10 +100,34 @@ REMOVED = {
 RETIRED_WHOLE_MODULES = {
     # S44 — the role_envelopes / role_checklists store family (operator ruling
     # on deferred-debt item 1). S43 cut only `role_envelope_summary` from it and
-    # explicitly kept `RoleEnvelopeStore` pending exactly that ruling.
+    # explicitly kept `RoleEnvelopeStore` pending that ruling.
     "agent_runtime.role_envelopes": {
         "removed_at_s43": ("role_envelope_summary",),
         "kept_at_s43": ("RoleEnvelopeStore",),
+    },
+    # S45 — test-only whole modules (operator ruling on deferred-debt item 2).
+    "agent_runtime.budget_approval": {
+        "removed_at_s43": ("eligible_budget_approval_incidents",),
+        "kept_at_s43": (
+            "budget_incident_can_continue",
+            "budget_incident_needs_scope_recovery",
+            "_safe_int",
+        ),
+    },
+    "agent_runtime.stage_intent": {
+        "removed_at_s43": (
+            "first_incomplete_product_edit_stage",
+            "stage_is_committed_verification_gate",
+            "extract_single_known_stage_reference",
+            "_stage_has_command_gate",
+            "_looks_like_command",
+        ),
+        "kept_at_s43": (
+            "stage_requires_product_edit",
+            "no_product_edit_recipe_id",
+            "no_product_edit_recipe_for_stage",
+            "no_product_edit_recipe_conflicts_with_stage",
+        ),
     },
 }
 
