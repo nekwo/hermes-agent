@@ -289,21 +289,67 @@
    scoped to the two constant result fields, and deleting a lane is a
    direction call, not a cleanup. — *Answered: RETIRE. See the S46 block above.*
 
-10. **Readiness only validates REQUIRED MCP servers, so the drift block is a
+10. ~~**Readiness only validates REQUIRED MCP servers, so the drift block is a
     no-op on the live snapshot lane (hermes; opened by the P5 flip,
-    2026-08-01).** `profile_readiness_for_persona` scopes
+    2026-08-01).**~~ **RULED EXECUTE and EXECUTED 2026-08-01 — `d89059dd7`**
+    (third slice of the P5 lane, after `6190e4d9d` and `d355787a3`).
+    `profile_readiness_for_persona` scoped
     `mcp_server_issues(only=effective_required_mcp_servers)`, and on the live
-    tree every snapshot agent's required list is EMPTY — so the now-blocking
-    `mcp_server_template_drift` check (and the binding checks it rides with)
-    evaluates nothing for them, and their `ready` verdict says nothing about
-    their configured `launcher_qa` block. Today the line is actually held by
-    the data test
-    (`test_every_live_launcher_qa_block_matches_the_canonical_template`),
-    which is a CI tripwire, not a runtime one. The ruling needed: should
-    readiness validate every CONFIGURED server block that has a canonical
-    template (drift checked wherever a block exists), with `required` scoping
-    kept only for the missing-server class? This scoping predates the flip —
-    deliberately not widened on the flip's authority.
+    tree every snapshot agent's required list is EMPTY — so the subset handed
+    to the checker was `{}`, the now-blocking `mcp_server_template_drift` check
+    (and the binding checks it rides with) evaluated NOTHING for them, and
+    their `ready` verdict said nothing about their configured `launcher_qa`
+    block. The line was held only by the data test
+    (`test_every_live_launcher_qa_block_matches_the_canonical_template`) — a CI
+    tripwire, not a runtime one.
+
+    **The scoping split as landed.** One lane still (no second checker), with
+    the split explicit in code rather than implied by call sites: the new
+    `machine_roots.mcp_servers_in_issue_scope(servers, required=…)` resolves
+    which configured blocks `mcp_server_issues` validates, and the old
+    `only=` parameter is DELETED (a stale caller gets a `TypeError`, pinned,
+    rather than silently keeping the no-op).
+
+    - **CONFIGURED scope** — every configured block that has a canonical
+      template, validated wherever it is declared and whoever requires it.
+      That carries both issue classes that are about a DECLARATION being
+      wrong: `mcp_server_template_drift` AND the binding failures on the same
+      block (`unbound_root`, `root_target_missing`, `invalid_root_token`,
+      `platform_unsupported`).
+    - **REQUIRED scope** — the required names, validated exactly as before,
+      plus the missing-server class, which stays required-scoped and is still
+      computed in `profile_readiness` from the required list (a profile that
+      does not declare an un-required server is not a defect).
+    - The widening is gated on *has a canonical template* — the only names the
+      module can state a correct shape for. Validating every configured block
+      of every profile would fail a persona over an operator's unrelated
+      experimental server; that is a different ruling and was not taken.
+
+    Semantics untouched: R-1 (profile-declares-the-server) and the
+    spawn/admission paths (`resolve_mcp_servers`, `mcp_admission.py`,
+    `tools/mcp_tool.py`) are unchanged — this is readiness REPORTING only, and
+    no path here writes a config. Nothing in the codebase gates on the
+    readiness verdict; it is reported through `snapshot`/`status`/
+    `tool_visibility` and read by operators.
+
+    **Live proof (live venv, `HERMES_HOME=X:\Eternia\.hermes\profiles\alice`).**
+    All 9 profiles that declare `launcher_qa` (alice, backend-dev, base,
+    gpt-launcher, launcher-dev, launcher-qa, neko, qa, unbounded) now enter the
+    configured scope and report ZERO issue rows; the non-templated blocks they
+    also carry (`dart`, `marionette`) correctly stay out of scope. The
+    6-persona roster's readiness rows are IDENTICAL computed under the old
+    filter scope and the widened scope (all `ready` except the pre-existing
+    `pm` → `missing_profile`, unchanged by this), so the widening changes no
+    live verdict today — as expected on a tree the P5 fix already
+    canonicalized. The counterfactual is pinned by
+    `test_a_configured_but_unrequired_drifted_block_degrades_readiness` and
+    re-demonstrated on a scratch `HERMES_HOME`: a drifted, configured,
+    UNREQUIRED `launcher_qa` block reads `ready` under the old scope and
+    `mcp_attention` (naming `env.STAGEC_LAUNCH_HELPER`) under the new one.
+
+    Gates: `tests/agent_runtime` 3,383 passed / 1 skipped against a
+    same-box clean-HEAD baseline of 3,378 / 1 (delta = the 5 new tests);
+    hermes_cli canonical runner exit 0, 3,704 tests, 0 failed.
 
 11. ~~**Launcher board write path parses the CLI reply with the SNAPSHOT card
     shape — read-your-writes has silently never worked (Launcher; surfaced by
@@ -404,7 +450,11 @@ Hermes fork-owned:
   `mcp_template_drift` readiness key went with the class. Report-only is
   unchanged: readiness names the field and prints the pasteable block, and no
   code path rewrites a config. The data test's expected-drift ledger is gone —
-  it is now a plain new-drift tripwire.
+  it is now a plain new-drift tripwire. THIRD SLICE 2026-08-01 — `d89059dd7`:
+  the readiness SCOPE the flip inherited (`only=effective_required_mcp_servers`,
+  empty for every snapshot agent) was widened per ledger item 10, so drift and
+  the binding checks now run over every CONFIGURED block that has a canonical
+  template while the missing-server class stays `required`-scoped.
 - ~~**B-4 read-model serve path** / **B-5 dead parity warnings**.~~ **EXECUTED
   2026-07-31** — `76504fd84`. B-4: `resolve_snapshot_frame(prefer_cache=...)`
   returns `(frame, FrameSource)` over a StrEnum {`built`, `cache`,
