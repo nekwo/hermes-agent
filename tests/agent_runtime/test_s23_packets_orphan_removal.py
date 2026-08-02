@@ -66,20 +66,15 @@ def test_unknown_packet_keys_are_still_accounted_not_silently_dropped():
     assert "dropped_fields" in packet["_normalization"]
 
 
-def test_the_live_packet_validation_and_history_surface_survives():
-    """S36 cuts emission while preserving decision validation/history reads."""
+def test_the_live_packet_validation_surface_survives():
+    """S58 also cuts the orphaned history accessor; validation stays live."""
 
     for name in (
         "validate_decision_packets",
-        "latest_packet",
-        # S54 INVERSION: ``latest_packets_for_task`` left this survivor list.
-        # S23/S36 kept it as part of the read side after emission was retired;
-        # by S54 it was the last accessor over a store nothing writes, with no
-        # production reader of its own. ``latest_packet`` stays -- it is still
-        # reached from the decision validation path.
         "iter_packet_payloads",
         "content_hash",
         "adapt_eternia_backend_manage_py_command",
     ):
         assert callable(getattr(packets, name)), name
+    assert not hasattr(packets, "latest_packet")
     assert not hasattr(packets, "latest_packets_for_task")

@@ -42,14 +42,6 @@ class WorkerSessionState(StrEnum):
     CLOSED = "closed"
 
 
-class PossessionState(StrEnum):
-    AVAILABLE = "available"
-    REQUESTED = "requested"
-    POSSESSED = "possessed"
-    RELEASE_PENDING = "release_pending"
-    DISABLED = "disabled"
-
-
 _LEGACY_RUNNING_TASK_STATE_VALUES = frozenset(
     {
         "pm_triage",

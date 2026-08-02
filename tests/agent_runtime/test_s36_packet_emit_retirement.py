@@ -1,4 +1,4 @@
-"""S36 retires the writerless packet emit API while preserving history reads."""
+"""S36 retires packet emission; S58 removes the final orphaned history read."""
 
 from __future__ import annotations
 
@@ -15,15 +15,13 @@ def test_packet_recorded_is_no_longer_an_advertised_write_contract():
     assert "packet.recorded" not in event_catalog()
 
 
-def test_historical_packet_read_and_validation_surfaces_survive():
+def test_validation_survives_after_the_historical_accessors_retire():
     for name in (
         "validate_decision_packets",
-        "latest_packet",
-        # S54 INVERSION: see test_s23_packets_orphan_removal -- 
-        # ``latest_packets_for_task`` was the last accessor over a store nothing
-        # writes and went at S54.
         "iter_packet_payloads",
     ):
         assert callable(getattr(packets, name)), name
+    assert not hasattr(packets, "latest_packet")
+    assert not hasattr(packets, "latest_packets_for_task")
     assert packets.HANDOFF_PACKET_KEYS
     assert packets.HANDOFF_MODES

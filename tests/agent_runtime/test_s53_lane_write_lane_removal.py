@@ -154,9 +154,10 @@ def test_the_three_state_constants_the_read_path_uses_survive():
         assert name in source, name
 
 
-def test_the_read_side_survives_whole():
-    for reader in ("get", "list_all", "list_for_task", "latest_for_task", "active_for_task"):
+def test_the_read_side_survives_without_the_orphaned_latest_alias():
+    for reader in ("get", "list_all", "list_for_task", "active_for_task"):
         assert callable(getattr(GoalRuntimeInstanceStore, reader)), reader
+    assert not hasattr(GoalRuntimeInstanceStore, "latest_for_task")
     assert callable(runtime_instances.runtime_instance_summary)
     assert callable(runtime_instances.runtime_instances_summary)
 

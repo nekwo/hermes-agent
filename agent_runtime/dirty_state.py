@@ -211,20 +211,6 @@ def _is_stage47_temp_task(task) -> bool:
     return str(getattr(task, "requested_by", "") or "") == "stage47_burn_in" or str(getattr(task, "id", "") or "").startswith("task_burn_")
 
 
-def _worker_is_active(worker) -> bool:
-    state = str(getattr(getattr(worker, "state", ""), "value", getattr(worker, "state", "")))
-    possession = str(getattr(getattr(worker, "possession_state", ""), "value", getattr(worker, "possession_state", "")))
-    return state in {
-        "assigned",
-        "running",
-        "waiting_on_tool",
-        "waiting_on_proof",
-        "self_healing",
-        "waiting_on_human",
-        "possessed",
-    } or possession == "possessed"
-
-
 def _task_state(task) -> TaskState:
     state = getattr(task, "state", None)
     return state if isinstance(state, TaskState) else TaskState(state)

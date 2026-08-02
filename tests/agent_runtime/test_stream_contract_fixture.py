@@ -98,7 +98,7 @@ def test_hydrate_frame_matches_golden_shape(isolate_agent_runtime_root):
 # rule: drop the 29 reader-less `runtime_config` scalars and
 # `migration.counts.repo_bundles`, bump `parity.contract_version`, copy the bytes
 # to the Launcher, update BOTH manifests.
-CONTRACT_VERSION = 48
+CONTRACT_VERSION = 49
 
 
 def test_hydrate_core_pins_contract_version(isolate_agent_runtime_root):

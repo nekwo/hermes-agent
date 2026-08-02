@@ -67,10 +67,6 @@ class GoalRuntimeInstanceStore:
     def list_for_task(self, task_id: str) -> list[GoalRuntimeInstance]:
         return [item for item in self.list_all() if item.task_id == task_id]
 
-    def latest_for_task(self, task_id: str) -> GoalRuntimeInstance | None:
-        items = self.list_for_task(task_id)
-        return items[-1] if items else None
-
     def active_for_task(self, task_id: str) -> GoalRuntimeInstance | None:
         for item in reversed(self.list_for_task(task_id)):
             if item.state in {ACTIVE_STATE, WAITING_STATE, PARKED_STATE, "queued", "activating", "running", "blocked", "parked_by_budget", "parked_by_repo_lock", "parked_by_operator"}:

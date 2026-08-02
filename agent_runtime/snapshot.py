@@ -455,7 +455,7 @@ def _build_snapshot_uncoalesced(
             "model_source": getattr(cfg, "default_model_source", "unset"),
             "provider_source": getattr(cfg, "default_provider_source", "unset"),
         },
-        "runtime_config": effective_config_summary(cfg, migration=migration),
+        "runtime_config": effective_config_summary(cfg),
         "migration": migration,
         "prompt_observability": prompt_observability_section,
         "repo_scopes": _repo_scopes_summary(),
@@ -694,7 +694,12 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         # that range-checked them, and `migration.counts.repo_bundles`, the last
         # wire trace of the `RepoBundleStore` deleted whole in the same wave. The
         # Launcher pin moves in the same wave.
-        "contract_version": 48,
+        #
+        # 49 (S58, 2026-08-01): ``runtime_config.migration`` was a byte-for-byte
+        # duplicate of the authoritative top-level ``migration`` block. The
+        # Launcher reads neither copy; its supported-contract pin moves in
+        # lockstep with this emitted-field removal.
+        "contract_version": 49,
         "generated_at": data.get("generated_at"),
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
         "redaction_observed": _redaction_observed(data),

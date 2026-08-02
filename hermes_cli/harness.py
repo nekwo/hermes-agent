@@ -41,18 +41,8 @@ from agent_runtime.default_scope import (
     reconcile_default_scope_to_legacy,
 )
 from agent_runtime.errors import (
-    AgentRuntimeError,
-    AlreadyExists,
     DefaultScopeReconciliationRequired,
-    EventPayloadTooLarge,
-    InvalidTransition,
     NotFound,
-    ProofMissing,
-    RuntimeRootMismatch,
-    StaleRevision,
-    StaleRun,
-    StoreCorrupt,
-    SyncConflict,
     WorkspaceDeleteBlocked,
 )
 from agent_runtime.events import EventLog
@@ -129,7 +119,6 @@ from agent_runtime.persona_chat_continuity import (
     PersonaChatMintReceiptStore,
     PERSONA_CHAT_SESSION_SOURCE,
     native_history_revision,
-    initialize_persona_chat_runtime_registry,
     persona_chat_root_lease,
     persona_chat_runtime_registry,
     safe_native_history,
@@ -145,7 +134,6 @@ from agent_runtime.personas import profile_chat_toolsets
 from agent_runtime.prompt_observability import attach_prompt_observability_turn_results, mission_chat_prompt_observability, persist_prompt_observability_context, slim_chat_final_observability, turn_usage_from_result
 from agent_runtime.provider_health import provider_health_for_personas
 from agent_runtime.skill_install import install_harness_skills, install_harness_skills_for_personas
-from agent_runtime.snapshot import build_snapshot, write_snapshot
 from agent_runtime.states import WorkerSessionState
 from agent_runtime.status import build_status
 from agent_runtime.store import AgentStore
@@ -158,20 +146,12 @@ from hermes_cli.harness_support import (
     ERROR_EXIT_CODES,
     PERSONA_CHAT_SESSION_SOURCE,
     STAGE42_SCHEMA_VERSION,
-    _apply_fields,
-    _error_code_for_exception,
     _error_envelope,
-    _error_hint,
     _list_envelope,
-    _load_request_json,
     _object_envelope,
     _print_stage42,
-    _quiet_output,
-    _redact_paths,
     _require_yes,
-    _safe_error_message,
     _sort_rows,
-    _table_output,
     emit_harness_error,
     harness_repo_root,
 )

@@ -4,7 +4,7 @@ from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any
 
-from .states import PossessionState, RunState, WorkerSessionState
+from .states import RunState, WorkerSessionState
 
 
 # The structural prefix every persona-instance id carries. Defined at this low

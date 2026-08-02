@@ -1,9 +1,5 @@
-import json
-
-from agent_runtime import paths
 from agent_runtime.decision_schema import AgentDecision, DecisionType
-from agent_runtime.events import EventLog
-from agent_runtime.packets import latest_packet, validate_decision_packets
+from agent_runtime.packets import validate_decision_packets
 
 
 def test_delivery_handoff_repair_fields_survive_validation():
@@ -47,32 +43,3 @@ def test_delivery_handoff_repair_fields_survive_validation():
     assert body["handoff_repair"]["metadata_only"] is True
     assert "unknown_sidecar" not in body
     assert "unknown_sidecar" in body["_normalization"]["dropped_fields"]
-
-
-def test_latest_packet_reads_historical_packet_recorded_rows(
-    isolate_agent_runtime_root,
-):
-    row = {
-        "ts": "2026-07-30T12:00:00+00:00",
-        "type": "packet.recorded",
-        "task_id": "task_packet",
-        "run_id": "run_packet",
-        "persona_id": "dev",
-        "payload": {
-            "packet_id": "packet_delivery_historical",
-            "packet_type": "delivery",
-            "stage_id": "stage_1",
-            "body": {"work_status": "ready_for_qa"},
-        },
-    }
-    paths.events_path().parent.mkdir(parents=True, exist_ok=True)
-    paths.events_path().write_text(
-        json.dumps(row, separators=(",", ":")) + "\n",
-        encoding="utf-8",
-    )
-
-    recorded = latest_packet("task_packet", "delivery", event_log=EventLog())
-
-    assert recorded is not None
-    assert recorded["packet_id"] == "packet_delivery_historical"
-    assert recorded["body"]["work_status"] == "ready_for_qa"

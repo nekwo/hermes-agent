@@ -1848,14 +1848,6 @@ class PersonaInstanceStore:
                 return True
         return False
 
-    def _guard_or_replace_chat(self, instance: PersonaInstance, *, kill_active: bool) -> None:
-        active_run_id = _live_chat_binding(instance)
-        if not active_run_id:
-            return
-        if not kill_active:
-            raise ChatBusyError(instance, active_run_id=active_run_id)
-        _terminate_live_chat_binding(active_run_id=active_run_id)
-
     # S56 removed ``update_from_worker`` and ``_goal_id_for_worker`` with the
     # worker session store. They were the only way a persona instance could ever
     # be stamped ``mode="task_bound"`` from a worker row, and the only writer of

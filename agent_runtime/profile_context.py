@@ -137,29 +137,6 @@ def active_profile_name() -> str:
     return normalize_profile_name(active or "default")
 
 
-def persona_bound_profile_name(persona_id: str | None) -> str:
-    """Return the persisted persona binding used by its Harness worker.
-
-    Visual proof requests run on the owning worker's MCP lane, so their
-    ``hermes_profile`` pin must follow that persona binding rather than the
-    operator process' active profile.  Falling back keeps generic/unbound
-    profiles compatible while making a configured QA worker deterministic.
-    """
-
-    resolved_id = str(persona_id or "").strip()
-    if resolved_id:
-        try:
-            from .config import get_persisted_persona
-
-            persona = get_persisted_persona(resolved_id)
-            bound = str(getattr(persona, "hermes_profile", None) or "").strip()
-            if bound:
-                return normalize_profile_name(bound)
-        except (OSError, StopIteration, ValueError):
-            logger.debug("Persona profile binding unavailable for %s", resolved_id, exc_info=True)
-    return active_profile_name()
-
-
 def resolve_persona_profile(persona) -> PersonaProfileBinding:
     if not persona.hermes_profile:
         return PersonaProfileBinding(

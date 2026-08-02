@@ -251,20 +251,10 @@ def iter_packet_payloads(payload: dict[str, Any]) -> list[tuple[str, dict[str, A
     if isinstance(handoff, dict) and handoff.get("delivery") is not None:
             packets.append(("delivery", _require_object(handoff.get("delivery"), "handoff.delivery")))
     return packets
-def latest_packet(task_id: str, packet_type: str, *, event_log: EventLog | None = None, stage_id: str | None = None) -> dict[str, Any] | None:
-    event_log = event_log or EventLog()
-    for event in reversed(event_log.for_task(task_id, limit=0)):
-        payload = event.payload if isinstance(event.payload, dict) else {}
-        if event.type != "packet.recorded" or payload.get("packet_type") != packet_type:
-            continue
-        if stage_id is not None and payload.get("stage_id") not in {None, stage_id}:
-            continue
-        return payload
-    return None
 
 
-# S54 removed ``latest_packets_for_task``. S36/S37 retired the packet emit API;
-# this was the last reader-side accessor over what nothing writes.
+# S54 removed ``latest_packets_for_task``. S58 removed the remaining singular
+# accessor after receiver-aware verification found no production caller.
 
 def content_hash(body: dict[str, Any]) -> str:
     text = json.dumps(to_jsonable(body), sort_keys=True, separators=(",", ":"))
@@ -793,5 +783,4 @@ def _looks_like_absolute_path(text: str) -> bool:
     if normalized.startswith(("/Users/", "/home/", "/mnt/", "/opt/", "/var/", "/tmp/", "/Volumes/")):
         return True
     return False
-
 

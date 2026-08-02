@@ -216,7 +216,7 @@ def test_the_live_frame_is_unchanged(isolate_agent_runtime_root):
     """Negative gate: this is residue removal, not a contract move."""
 
     frame = snapshot.build_snapshot()
-    assert frame["parity"]["contract_version"] == 48
+    assert frame["parity"]["contract_version"] == 49
     for section in ("boards", "offices", "workspaces", "realms", "agents"):
         assert section in frame, f"{section} is a KEEP frame and must survive"
     for section in ("goals", "archived_tasks", "proofs", "incidents", "runs", "stage_verification"):

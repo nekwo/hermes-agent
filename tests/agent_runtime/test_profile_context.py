@@ -5,7 +5,6 @@ import pytest
 from hermes_constants import get_hermes_home
 
 import agent_runtime.paths as paths_module
-import agent_runtime.config as config_module
 from agent_runtime.profile_context import (
     PROFILE_CONTEXT_NO_PROFILE_BINDING,
     PROFILE_CONTEXT_RUNTIME_ROOT_UNRESOLVED,
@@ -14,19 +13,8 @@ from agent_runtime.profile_context import (
     RUNTIME_ROOT_SOURCE_RESOLVER,
     RUNTIME_ROOT_SOURCE_UNRESOLVED,
     PersonaProfileBinding,
-    persona_bound_profile_name,
     persona_profile_context,
 )
-
-
-def test_persona_bound_profile_name_prefers_persisted_worker_binding(monkeypatch):
-    class Persona:
-        hermes_profile = "launcher-qa"
-
-    monkeypatch.setattr(config_module, "get_persisted_persona", lambda persona_id: Persona())
-    monkeypatch.setenv("HERMES_PROFILE", "default")
-
-    assert persona_bound_profile_name("qa") == "launcher-qa"
 
 
 def _profile_less() -> PersonaProfileBinding:

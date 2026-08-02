@@ -7,10 +7,6 @@ threaded it through without ever reading it:
     snapshot.build_snapshot -> _build_snapshot_uncoalesced
         -> prompt_observability.snapshot_prompt_observability
             -> runtime_hud.resolve_situational_hud            (never read)
-    runtime_hud.situational_hud_content_for_instance
-        -> situational_hud_for_instance
-            -> resolve_situational_hud                        (never read)
-
 Zero production call sites passed anything but ``None``; the terminal consumer
 had no body reference at all. A parameter that only ever carries ``None`` into a
 function that never reads it is a signature lying about what the lane needs.
@@ -33,7 +29,6 @@ PROOF_STORE_FREE_SIGNATURES = (
     (prompt_observability, "snapshot_prompt_observability"),
     (runtime_hud, "resolve_situational_hud"),
     (runtime_hud, "situational_hud_for_instance"),
-    (runtime_hud, "situational_hud_content_for_instance"),
 )
 
 
@@ -76,5 +71,5 @@ def test_the_chain_still_works_end_to_end(isolate_agent_runtime_root):
     )
     hud = runtime_hud.resolve_situational_hud(instance, roster=[instance])
     assert isinstance(hud, dict) and hud
-    assert isinstance(runtime_hud.situational_hud_content_for_instance(instance), str)
-    assert snapshot.build_snapshot()["parity"]["contract_version"] == 48
+    assert not hasattr(runtime_hud, "situational_hud_content_for_instance")
+    assert snapshot.build_snapshot()["parity"]["contract_version"] == 49

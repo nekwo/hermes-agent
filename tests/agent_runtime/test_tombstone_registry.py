@@ -58,6 +58,9 @@ ROW FORMS
                 names, dotted attributes and string-literal forms in one row,
                 because ``ast.unparse`` renders all three.
 ``PATH``        the file or directory must not exist.
+``IMPORT``      a named top-level import binding must not exist in the scoped
+                source file; used for exec-namespace duplicate bindings where
+                the symbol itself legitimately survives in a command part.
 
 =============================================================================
 WHAT IS DELIBERATELY *NOT* A ROW HERE
@@ -160,6 +163,7 @@ class Form(Enum):
     EVENT = "event"
     CODE = "code"
     PATH = "path"
+    IMPORT = "import"
 
 
 @dataclass(frozen=True)
@@ -1220,6 +1224,99 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "artifact_storage_high_watermark_mb",
         "artifact_storage_critical_watermark_mb",
     ),
+    # -- S58 / campaign Wave 3 — wave orphans + duplicate wire block -------
+    *rows(
+        "s58",
+        "PENDING_W3_CUT",
+        Form.ATTR,
+        "receiver-aware production scan found no caller",
+        "_worker_is_active",
+        scope=("agent_runtime.dirty_state",),
+    ),
+    *rows(
+        "s58",
+        "PENDING_W3_CUT",
+        Form.ATTR,
+        "receiver-aware production scan found no caller",
+        "context_dir",
+        scope=("agent_runtime.paths",),
+    ),
+    *rows(
+        "s58",
+        "PENDING_W3_CUT",
+        Form.ATTR,
+        "the packet emitter lane is retired and the historical accessor had no production caller",
+        "latest_packet",
+        scope=("agent_runtime.packets",),
+    ),
+    *rows(
+        "s58",
+        "PENDING_W3_CUT",
+        Form.ATTR,
+        "receiver-aware production scan found no caller",
+        "persona_bound_profile_name",
+        scope=("agent_runtime.profile_context",),
+    ),
+    *rows(
+        "s58",
+        "PENDING_W3_CUT",
+        Form.CLASS_ATTR,
+        "the list_for_task alias was never called in production",
+        "runtime_instances.GoalRuntimeInstanceStore.latest_for_task",
+        scope=_AR,
+    ),
+    *rows(
+        "s58",
+        "PENDING_W3_CUT",
+        Form.ATTR,
+        "the enum's last models import was itself unused; WorkerSessionState remains live",
+        "PossessionState",
+        scope=("agent_runtime.states",),
+    ),
+    *rows(
+        "s58",
+        "PENDING_W3_CUT",
+        Form.ATTR,
+        "the rendered HUD wrapper had zero production callers",
+        "situational_hud_content_for_instance",
+        scope=("agent_runtime.runtime_hud",),
+    ),
+    *rows(
+        "s58",
+        "PENDING_W3_CUT",
+        Form.CLASS_ATTR,
+        "the private chat-binding guard had zero callers",
+        "persona_assignments.PersonaInstanceStore._guard_or_replace_chat",
+        scope=_AR,
+    ),
+    *rows(
+        "s58",
+        "PENDING_W3_CUT",
+        Form.IMPORT,
+        "dead duplicate top-level harness import; real consumers bind their own dependencies",
+        "AgentRuntimeError",
+        "AlreadyExists",
+        "EventPayloadTooLarge",
+        "InvalidTransition",
+        "ProofMissing",
+        "RuntimeRootMismatch",
+        "StaleRevision",
+        "StaleRun",
+        "StoreCorrupt",
+        "SyncConflict",
+        "initialize_persona_chat_runtime_registry",
+        "build_snapshot",
+        "write_snapshot",
+        "_apply_fields",
+        "_error_code_for_exception",
+        "_error_hint",
+        "_load_request_json",
+        "_quiet_output",
+        "_redact_paths",
+        "_safe_error_message",
+        "_table_output",
+        scope=("hermes_cli/harness.py",),
+    ),
 )
 
 
@@ -1328,6 +1425,17 @@ ATTR_ROWS = tuple(row for row in TOMBSTONES if row.form is Form.ATTR)
 CLASS_ATTR_ROWS = tuple(row for row in TOMBSTONES if row.form is Form.CLASS_ATTR)
 EVENT_ROWS = tuple(row for row in TOMBSTONES if row.form is Form.EVENT)
 PATH_ROWS = tuple(row for row in TOMBSTONES if row.form is Form.PATH)
+IMPORT_ROWS = tuple(row for row in TOMBSTONES if row.form is Form.IMPORT)
+
+
+def _top_level_import_bindings(source: str) -> set[str]:
+    tree = ast.parse(source)
+    bindings: set[str] = set()
+    for node in tree.body:
+        if not isinstance(node, (ast.Import, ast.ImportFrom)):
+            continue
+        bindings.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
+    return bindings
 
 
 # -------------------------------------------------------------------------
@@ -1397,6 +1505,11 @@ def test_the_scanner_keeps_string_literals():
     assert "repo_bundle.created" in rendered
 
 
+def test_the_import_binding_scanner_is_ast_based():
+    source = '"""build_snapshot in a docstring"""\n# build_snapshot in a comment\nfrom x import live\n'
+    assert _top_level_import_bindings(source) == {"live"}
+
+
 def test_the_scanner_is_not_vacuous():
     """A LIVE neighbour must still be found, in every scoped package.
 
@@ -1453,6 +1566,15 @@ def test_tombstoned_attribute_is_gone(row: Tombstone):
     for dotted in row.scope:
         module = _resolve(dotted)
         assert not hasattr(module, row.text), f"{dotted}.{row.text}: {row.reason}"
+
+
+@pytest.mark.parametrize("row", IMPORT_ROWS, ids=lambda row: row.label)
+def test_tombstoned_top_level_import_binding_is_gone(row: Tombstone):
+    for relative in row.scope:
+        source = (HERMES_ROOT / relative).read_text(encoding="utf-8")
+        assert row.text not in _top_level_import_bindings(source), (
+            f"{relative} imports {row.text}: {row.reason}"
+        )
 
 
 @pytest.mark.parametrize("row", CLASS_ATTR_ROWS, ids=lambda row: row.label)

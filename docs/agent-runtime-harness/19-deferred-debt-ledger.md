@@ -1414,3 +1414,32 @@ an over-cap `role_checklists` / `proof_batches` payload that no producer emits.*
 A fixture manufacturing the very data whose absence made the surface dead. Its
 inversion now asserts the Run Inspector still mounts (non-vacuity) BEFORE
 asserting the HUD does not.
+
+## S58 contract wave — Wave 3 orphan audit (contract 48 -> 49, 2026-08-01)
+
+Executed in the campaign cut commit recorded in the tombstone registry: eight
+receiver-verified production orphans, the 21 redundant top-level Harness import
+bindings, and the byte-for-byte duplicate `runtime_config.migration` frame block.
+The authoritative top-level `migration` block remains. The Launcher had no
+reader of either migration copy; only its supported-contract pin and fixtures
+move in lockstep.
+
+Deliberately kept and filed for operator ruling because these are persisted-row
+or historical projection surfaces, not safe name-only cuts:
+
+- `PersonaInstanceStore.ensure_for_goal` and
+  `PersonaAssignmentStore.list_for_goal`, `attach_run`, `attach_proof`, and
+  `record_context`: zero production callers at this HEAD, but each creates,
+  reads, or mutates persisted assignment/instance row shapes used by historical
+  compatibility tests.
+- `SelfTestEvidence.worker_session_id`: a disk-schema field read from existing
+  evidence JSON and accepted from historical progress payloads.
+- `PersonaAssignment.repo_bundle_id` and its signal-hash/projection chain: a
+  persisted assignment field with explicit historical round-trip coverage.
+- `task.transition` trace branches in `persona_chat_history.py`: a historical
+  event projection; removing it would change rendering of old event-log rows.
+- Observability allowlist keys `worker_session_id`, `worker_state`,
+  `worker_heartbeat_age_seconds`, `possession_state`, and `lease_owner`:
+  projection compatibility keys. In addition, `tools/kanban_tools.py` still
+  stamps `worker_session_id`, so the prompt's implied zero-producer premise is
+  false at this HEAD.

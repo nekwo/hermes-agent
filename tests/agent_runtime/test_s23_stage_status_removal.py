@@ -34,10 +34,11 @@ def test_the_sibling_state_enums_survive():
     # TaskState: board/office rows and the chat lane still read it; its legacy
     # value coercion is the reason it cannot be replaced by a bare string.
     assert states.TaskState("dev_implementing") is states.TaskState.RUNNING
-    # RunState / WorkerSessionState / PossessionState are imported by models.py.
+    # RunState / WorkerSessionState remain imported by models.py. S58 removed
+    # PossessionState after its final import proved dead.
     assert states.RunState.WAITING_ON_APPROVAL == "waiting_on_approval"
     assert states.WorkerSessionState.POSSESSED == "possessed"
-    assert states.PossessionState.RELEASE_PENDING == "release_pending"
+    assert not hasattr(states, "PossessionState")
 
 
 def test_the_last_stage_status_consumer_outlived_the_enum_and_then_went_too():

@@ -108,7 +108,7 @@ S47_CONTRACT_VERSION = 46
 #: live pin on the emitted value, so it tracks the CURRENT contract while
 #: ``S47_CONTRACT_VERSION`` stays as this wave's historical mark -- the frame may
 #: never go back below it.
-CURRENT_CONTRACT_VERSION = 48
+CURRENT_CONTRACT_VERSION = 49
 
 
 def _function(module, name: str) -> ast.FunctionDef:

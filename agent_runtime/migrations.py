@@ -12,15 +12,12 @@ CURRENT_RUNTIME_SCHEMA_VERSION = 1
 
 def effective_config_summary(
     cfg: AgentRuntimeConfig | None = None,
-    *,
-    migration: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     cfg = cfg or load_agent_runtime_config()
     data = asdict(cfg)
     data["store_root"] = str(paths.store_root())
     data["schema_version"] = int(getattr(cfg, "schema_version", CURRENT_RUNTIME_SCHEMA_VERSION) or CURRENT_RUNTIME_SCHEMA_VERSION)
     data["validation"] = validate_runtime_config(cfg)
-    data["migration"] = migration if migration is not None else migration_status()
     data["effective_personas"] = _effective_persona_summary(cfg)
     return _redaction_safe_config(data)
 

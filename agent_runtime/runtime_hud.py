@@ -1142,10 +1142,3 @@ def situational_hud_for_instance(
         )
     except Exception:
         return {}
-
-
-def situational_hud_content_for_instance(instance: Any) -> str:
-    """Rendered-block form of `situational_hud_for_instance` (same authority);
-    kept for callers that only need the fed text."""
-
-    return render_situational_hud_block(situational_hud_for_instance(instance))

@@ -241,10 +241,6 @@ def deleted_archive_dir() -> Path:
     return store_root() / "deleted_archive"
 
 
-def context_dir() -> Path:
-    return store_root() / "context"
-
-
 def prompt_observability_dir() -> Path:
     return store_root() / "prompt_observability"
 
