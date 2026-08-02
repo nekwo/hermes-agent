@@ -1359,6 +1359,8 @@ tests were inverted the same way with their fixtures intact (see s56 below).
 
 ### Wave 4 — s1-s39 registry migration (executed 2026-08-01)
 
+Cut commit: `f5cadc9cb`.
+
 The previously deferred older layer is now consolidated. The pre-change tree at
 `e05f1066a` contained exactly **50** s1-s39 files and **6,198** lines. The
 survivors now contain **5,472** lines (726 removed), and three files whose whole
