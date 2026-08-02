@@ -77,5 +77,4 @@ def sample_personas() -> list[AgentPersona]:
         skills=["harness-qa-verdict", "launcher-stagec-mcp-screenshot"],
     )
     qa.display_name = "QA Agent"
-    qa.required_mcp_servers = ["launcher_qa"]
     return [neko, dev, backend, qa, sample_persona("base", hermes_profile="base")]
