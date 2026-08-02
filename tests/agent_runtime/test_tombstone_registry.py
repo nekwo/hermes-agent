@@ -2158,7 +2158,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     # -- S59 / Round 2 — closed-loop readers and chat-busy residue ---------
     *rows(
         "s59",
-        "pending",
+        "799249fbf",
         Form.ATTR,
         "the S58 guard removal left no constructor or caller; the live "
         "PersonaChatBusyError lease class is a separate continuity lane",
@@ -2169,7 +2169,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s59",
-        "pending",
+        "799249fbf",
         Form.ATTR,
         "the payload formatter was reachable only from dead ChatBusyError catches",
         "_chat_busy_payload",
@@ -2177,7 +2177,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s59",
-        "pending",
+        "799249fbf",
         Form.IMPORT,
         "dead import bindings for an exception no production path can raise",
         "ChatBusyError",
@@ -2189,14 +2189,14 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s59",
-        "pending",
+        "799249fbf",
         Form.CODE,
         "all five exception arms were unreachable after S58 removed the sole raiser",
         "except ChatBusyError",
     ),
     *rows(
         "s59",
-        "pending",
+        "799249fbf",
         Form.ATTR,
         "the last production caller left at S58; its sole remaining importer was its own test",
         "get_persisted_persona",
@@ -2204,7 +2204,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s59",
-        "pending",
+        "799249fbf",
         Form.CODE,
         "distinctive closed-loop names are banned repo-wide after their test-only consumers were removed",
         "get_persisted_persona",

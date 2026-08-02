@@ -878,15 +878,11 @@ four that set it (alice, neko, base, unbounded) set it true and are unaffected.
   `status.py` was the last importer. `runtime_instances` KEPT its checkpoint row
   deliberately: also writer-less since S53, but its rows still ship on the status
   wire.
-- **`delivery_directive.read_bundle_promotion_record` /
-  `bundle_promotion_record_path` are caller-less.** `repo_bundle_summary` was
-  their last production caller. **STILL OPEN after S57** — that wave was ruled to
-  cut the STORE, and this pair is a separate lane. S57 did make the claim
-  legible: the module docstring's "what remains has live callers" heading now
-  states outright that this bullet is NOT covered by it, and
-  `paths.repo_bundles_dir` / `repo_bundles_task_dir` survive solely because this
-  pair still addresses the tree through them. Retiring the pair retires those two
-  helpers with it.
+- ~~**`delivery_directive.read_bundle_promotion_record` /
+  `bundle_promotion_record_path` are caller-less.**~~ **CLOSED at S59**
+  (`799249fbf`) — receiver-aware verification confirmed the pair called only
+  each other and tests. Both functions and their sole path support,
+  `paths.repo_bundles_dir` / `repo_bundles_task_dir`, were removed together.
 - ~~**Launcher: the whole `MissionRoleEnvelope` / `roleEnvelopes` lane is dead by
   emptiness.**~~ **CLOSED at Launcher s55** (`e81ed6fc`) — model, BOTH parses,
   and every consumer removed. hermes S44 deleted `agent_runtime/role_envelopes.py`, so
@@ -1465,3 +1461,122 @@ or historical projection surfaces, not safe name-only cuts:
   projection compatibility keys. In addition, `tools/kanban_tools.py` still
   stamps `worker_session_id`, so the prompt's implied zero-producer premise is
   false at this HEAD.
+
+## S59 / Launcher w3 — Round 2 dead-code closeout (2026-08-02)
+
+Executed in hermes cut `799249fbf` and Launcher cut `68d9449a`. The registries
+gain 14 hermes rows and 12 Launcher rows; both additions were red-proved with a
+scratch production offender, then proved comment-immune, then reverted.
+
+### The Wave-1 L2 ruling is explicitly reversed
+
+Round 1 reported `MissionControlCounts` as "remained live." That was wrong and
+the deviation existed only in chat, which is itself a ledger defect. The
+producer set is closed: `SnapshotSummary` emits only `persona_instances`, while
+the Launcher bridge read four impossible summary keys and converted all four
+absences into zero. Its only consumer then compared the invented
+`running_agents == 0` with real running agent rows and emitted a false parity
+warning. Launcher w3 removes the class, snapshot field/parse, bridge synthesis,
+count-mismatch alert and drawer row, and the mapper's false `counts: summary`
+lockstep claim. The four obsolete literals are scoped tombstones.
+
+### Hermes S59 cuts and deviations from the brief
+
+- Removed the dead `ChatBusyError`, `_live_chat_binding`,
+  `_terminate_live_chat_binding`, `_chat_busy_payload`, and all imports and
+  classifiers. The order named three catch arms and two import bindings; HEAD
+  actually contained **five** catch arms plus a third import and an
+  `isinstance` classifier in `harness_support.py`. Receiver-aware AST and string
+  scans found no raiser, caller, `getattr`, or string dispatch, so the complete
+  cluster was cut. The separate `PersonaChatBusyError` continuity lease remains
+  untouched.
+- Removed `get_persisted_persona`; its sole remaining importer was its own
+  test. The base-profile test now reaches the persisted merge behavior through
+  the live `ensure_persisted_personas` authority.
+- Removed `read_bundle_promotion_record`, `bundle_promotion_record_path`,
+  `repo_bundles_dir`, and `repo_bundles_task_dir` after receiver-aware tracing
+  confirmed that the first pair called only each other/tests and the path pair
+  served only that closed loop.
+- Repaired `delta_batch.json` minimally to contract 49, removed its stale
+  nested `runtime_config.migration`, `role_envelope`, `mission_plan`, and
+  `open_incident_warning_threshold`, copied it byte-identically to Launcher,
+  and updated both manifests. The agent-runtime fixture gate now pins all three
+  frame-bearing goldens plus the live hydrate fixture to contract 49.
+- Made the noninteractive-git environment test deterministic by setting hostile
+  ambient GCM/Git values and proving the helper hardens only its returned copy.
+  The whole-file CLI timeout was not suite-order pollution: a renderer-only
+  doctor test invoked the real worktree janitor, which ran `git diff` across the
+  operator's registered worktrees. It now injects the minimal doctor report
+  whose rendering it actually tests.
+
+Mixed-EOL proof for `tests/agent_runtime/test_persona_assignments.py`: before,
+4,427 CRLF and 796 bare-LF endings; after the intended one-line deletion, 4,426
+CRLF and 796 bare-LF endings. No whole-file normalization occurred.
+
+### Launcher 27-lead receiver-aware verdicts
+
+Five leads were CUT as test-only closed loops:
+`missionAgentLatestChatHistoryEntry`, `missionAgentLatestChatSessionId`,
+`MissionConversationNavigationPolicy`,
+`buildMissionPetPickerDialogForTest`, and
+`runtimeOverviewGraphForSelection`. The navigation policy's private result and
+reason types died with it. Petdex coverage now instantiates the living shared
+`PetdexPickerDialog` directly; graph tests call the living runtime projection
+authority directly.
+
+Twenty-two leads were KEPT with these living production callers:
+
+- `AgentRuntimeContextRow`, `AgentRuntimeDetailsView`, and
+  `missionContextOccupancyLabel`: `agents_drawer.dart` builds the details view,
+  which builds the context row, which formats the occupancy label.
+- `missionAgentHasRuntimeGraphContext`,
+  `missionAgentIsCoordinatorPersona`,
+  `missionAgentIsRelatedRuntimeInstance`,
+  `missionAgentRuntimeGraphInstances`, `missionAgentRuntimeHomeOwner`,
+  `missionAgentRuntimeUpstreamStageFor`,
+  `missionAgentRuntimeUpstreamStagesFor`, and
+  `missionAgentGraphPointerForPersona`: internal edges of
+  `missionAgentRuntimeGraphProjection`, rooted by the instance picker, Mission
+  Control page/flow editor, and agents drawer production projections.
+- `missionAgentStatusToChatStatus`: live adapter construction for both
+  configured and free-floating chat agents.
+- `resolveBoundNodeDisplay`: called by the production
+  `BoundNodeDisplayResolver.resolve` path.
+- `bridgeErrorCodeFromString`: called by bridge-error envelope parsing.
+- `missionTimestampUtc`: called by the persisted history `createdAtUtc` and
+  `updatedAtUtc` getters.
+- `missionOfficeRenameDraft`: called by the office rename submission path.
+- `agentFlowRoster`: called by the live flow projection.
+- `MissionPersonaNewChatAction`: the callback type of two production picker
+  surfaces.
+- `missionChatHistoryQaLabel`: generates the live history-row QA label in the
+  instance picker and is reachable through the Stage C QA surface.
+- `missionConversationBodyStateFor`: called by the production conversation
+  model's `bodyState` getter.
+- `missionLocalRowOrderInputs` and `missionPendingRowOrderInputs`: called while
+  constructing ordered local and pending transcript rows.
+
+No kept item relies solely on a test import, string-keyed dispatch, or a
+test-only QA seam.
+
+### Discovered but not cut (contract authority required)
+
+- Removing the last worker-chat replacement path also exposed
+  `RunStore.cancel` -> `close_run` -> `run.closed` as production-callerless.
+  `run.closed` is a registered event contract, so this campaign did not remove
+  the methods or event. The stale S17 liveness prose and behavior-test name were
+  corrected to describe an explicit compatibility hold pending an operator
+  event ruling.
+- The full agent-runtime gate exposed one more superseded survival assertion in
+  S49 that still named the deleted persona replacement caller. It was removed;
+  S17's compatibility-hold behavior test is the sole pin for `run.closed` now.
+- The current hydrate and delta fixtures still carry older configuration keys
+  (`mission_plan` / `open_incident_warning_threshold`, and `role_envelope` in
+  delta). Item D authorized the stale `delta_batch` repair, not a broader
+  golden rewrite. They are filed here for a later contract-fixture ruling.
+
+Housekeeping: the landed Launcher Round-1 worktree registration and 13 stale
+Temp registrations were removed/pruned. Windows denied deletion of the old
+unregistered Round-1 directory, so it was preserved rather than manually
+deleted. Hermes `rescue/wave4-20260801` was verified as an ancestor of `main`
+and deleted locally; no origin branch existed.

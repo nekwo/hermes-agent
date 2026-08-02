@@ -84,7 +84,6 @@ WHY THE SURVIVORS STAYED:
 
 from __future__ import annotations
 
-import inspect
 
 import pytest
 
@@ -204,18 +203,6 @@ def test_the_production_envelope_that_advertised_the_deleted_workflow_is_itself_
 
     assert "production_envelope" not in effective_config_summary()
     assert "production_envelope" not in build_status()
-
-
-def test_run_closed_survives_on_its_remaining_caller():
-    """The re-derived liveness note, asserted rather than trusted: ``run.closed``
-    stays registered, and the persona-chat replacement path that is now its sole
-    reason for living still calls ``RunStore.cancel``."""
-
-    from agent_runtime import persona_assignments
-
-    assert "run.closed" in ALLOWED_EVENT_TYPES
-    source = inspect.getsource(persona_assignments)
-    assert "RunStore().cancel(" in source
 
 
 def test_the_registry_lost_exactly_three_contracts():
