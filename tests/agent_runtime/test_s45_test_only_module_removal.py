@@ -38,13 +38,41 @@ being deleted — so even the attribute-shaped false positive is gone.
 Every S-witness that named these modules is RETARGETED to assert absence, never
 deleted — the s41-s43 precedent. A witness that quietly loses its subject hides
 the reversal; a witness that asserts the subject is gone records it.
+
+=============================================================================
+MIGRATED to ``tests/agent_runtime/test_tombstone_registry.py`` (2026-08-01)
+=============================================================================
+
+The two absence forms this file asserted are now registry rows:
+
+* the four modules — ``Form.MODULE`` rows (``find_spec`` is ``None``). Both the
+  ``find_spec`` pin AND the ``pytest.raises(ModuleNotFoundError)`` pin went:
+  they are one fact stated twice, since a module with no spec cannot be
+  imported.
+* the four closed-loop test files that went with their subjects — ``Form.PATH``
+  rows (``tests/agent_runtime/test_budget_approval.py``,
+  ``test_context_requests.py``, ``test_stage_intent.py``,
+  ``test_stage53_contracts.py``). ``DELETED_TEST_FILES`` existed only to feed
+  that pin and went with it.
+
+``REMOVED_MODULES`` STAYS, because one test still needs it and that test is NOT
+a registry row. ``test_no_surviving_module_imports_any_of_the_four`` gates the
+IMPORT-STATEMENT forms (``from .x import`` / ``from agent_runtime.x import`` /
+``import x``) rather than a bare word, and the registry deliberately carries no
+``Form.CODE`` row for ``budget_approval`` / ``context_requests`` /
+``role_contracts`` / ``stage_intent``. Banning those four bare names repo-wide
+would be a different, wider claim than "no surviving module imports them", and
+this file makes the narrow one.
+
+WHY THE OTHER SURVIVORS STAYED: ``test_the_lookalike_keep_set_survives`` is a
+KEEP pin over the live neighbours one bare-word grep away from the cut (plus a
+``inspect.getsource`` characterization that ``observability`` no longer even
+mentions ``context_requests``, which the registry's docstring-stripping scanner
+cannot state); ``test_the_package_still_imports_end_to_end`` is a negative gate
+that four module deletions did not strand a package import.
 """
 
 from __future__ import annotations
-
-from importlib.util import find_spec
-
-import pytest
 
 
 REMOVED_MODULES = (
@@ -53,36 +81,6 @@ REMOVED_MODULES = (
     "agent_runtime.role_contracts",
     "agent_runtime.stage_intent",
 )
-
-#: The test files deleted WITH their subject. Each one's every test targeted only
-#: the dead module; none also pinned live behaviour, so none needed retargeting.
-DELETED_TEST_FILES = (
-    "tests/agent_runtime/test_budget_approval.py",
-    "tests/agent_runtime/test_context_requests.py",
-    "tests/agent_runtime/test_stage_intent.py",
-    "tests/agent_runtime/test_stage53_contracts.py",
-)
-
-
-@pytest.mark.parametrize("dotted", REMOVED_MODULES)
-def test_the_test_only_module_is_gone(dotted: str):
-    assert find_spec(dotted) is None
-
-
-@pytest.mark.parametrize("dotted", REMOVED_MODULES)
-def test_importing_it_raises(dotted: str):
-    import importlib
-
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module(dotted)
-
-
-@pytest.mark.parametrize("relative", DELETED_TEST_FILES)
-def test_the_closed_loop_test_file_went_with_its_subject(relative: str):
-    from pathlib import Path
-
-    repo_root = Path(__file__).resolve().parents[2]
-    assert not (repo_root / relative).exists()
 
 
 def test_no_surviving_module_imports_any_of_the_four():

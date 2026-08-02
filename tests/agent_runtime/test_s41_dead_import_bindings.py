@@ -23,6 +23,51 @@ Source symbols are untouched. ``LANE_MISSION_WORKER`` still lives in
 are still imported directly by their real users.
 
 No event contract moves: ``event_catalog()`` stays at 88.
+
+=============================================================================
+MIGRATED to ``tests/agent_runtime/test_tombstone_registry.py`` (2026-08-01)
+=============================================================================
+
+The pure ABSENCE half of this file is now registry rows, so it is asserted once
+instead of once per wave. What moved, and in which form:
+
+* ``hermes_cli/harness.py`` — eight of the twelve bindings (``human_task_line``,
+  ``task_summary``, ``operator_takeover_worker``, ``LegacyOrchestratorRemoved``,
+  ``launcher_visual_cleanup_needed``, ``OPERATOR_RESOLVABLE_TURN_STATES``,
+  ``find_discovery_task``, ``worker_session_summary``) are ``Form.ATTR`` rows
+  scoped to ``hermes_cli.harness``. The namespace IS the gate there — the parts
+  are ``exec``'d into those globals — so ``not hasattr`` is strictly stronger
+  than the AST binding scan and nothing was weakened by the move.
+* ``agent_runtime/persona_runtime.py`` — all seven bindings, same form, scoped
+  to that module. The whole entry went; nothing is left here to scan.
+* ``agent_runtime/cli_format`` — ``human_task_line`` / ``task_summary`` are
+  ``Form.ATTR`` rows. The definitions-absent half of
+  ``test_every_source_symbol_the_bindings_pointed_at_is_untouched`` therefore
+  overlaps the registry deliberately: that test is a KEEP pin with two inverted
+  arms, and inverted pins are never dissolved into a row (see below).
+
+WHY THE AST SCAN SURVIVES, TRIMMED. The registry's ``ATTR`` form asks "does the
+module expose this name". That is the wrong question for the six rows left in
+``REMOVED_BINDINGS``:
+
+* ``os``, ``timedelta``, ``paths``, ``field``, ``Sequence`` are stdlib/sibling
+  names. ``hasattr(agent_runtime.checkpoint, "os")`` is a fact about whether a
+  module happens to re-export a stdlib module, not about whether THIS file still
+  carries a dead ``import os`` — and a sibling module that legitimately imports
+  ``os`` would make a repo-wide row unfixably red. Only a per-file AST walk over
+  ``ast.Import`` / ``ast.ImportFrom`` can state the binding fact.
+* ``hermes_cli/harness_parts/persona_commands.py::_relay_time`` is in a part
+  that is ``exec``'d, never imported, so it has no module object to ``hasattr``
+  against.
+* ``DecisionType``, ``default_chat_session_id_for_instance``, ``TaskState`` and
+  ``RunState`` are LIVE symbols elsewhere (``decision_schema``,
+  ``persona_assignments``, ``states``) that harness.py merely stopped binding.
+  A registry row on their names would be a lie about the tree; the fact is
+  file-local, so it stays file-local.
+
+The retained-half pins, the harness-namespace pin, the definitions-untouched
+pin (with its S49/S50/S56 inversions) and the still-imports pin are UNCHANGED —
+none of them is a pure absence row.
 """
 
 from __future__ import annotations
@@ -35,29 +80,24 @@ import pytest
 
 
 #: module path -> binding names that must no longer be bound in it.
+#:
+#: TRIMMED 2026-08-01 to exactly the rows the tombstone registry CANNOT express
+#: (see the migration note in the module docstring). Every name still here is an
+#: import-binding fact about ONE file: either a stdlib/sibling name whose
+#: ``hasattr`` form would be meaningless or unfixably red, a name in an exec'd
+#: harness part that has no module object at all, or a symbol that is LIVE
+#: elsewhere and merely stopped being bound here. The eight harness.py bindings
+#: and all seven persona_runtime.py bindings whose absence IS expressible as
+#: ``not hasattr(module, name)`` are now ``Form.ATTR`` rows in
+#: ``test_tombstone_registry.py`` and were removed from this table, not dropped.
 REMOVED_BINDINGS = {
+    # Live symbols elsewhere (decision_schema / persona_assignments / states)
+    # that harness.py merely stopped importing. Their names cannot be banned.
     "hermes_cli/harness.py": {
-        "human_task_line",
-        "task_summary",
-        "operator_takeover_worker",
         "DecisionType",
-        "LegacyOrchestratorRemoved",
-        "launcher_visual_cleanup_needed",
         "default_chat_session_id_for_instance",
-        "OPERATOR_RESOLVABLE_TURN_STATES",
-        "find_discovery_task",
         "TaskState",
         "RunState",
-        "worker_session_summary",
-    },
-    "agent_runtime/persona_runtime.py": {
-        "Protocol",
-        "AgentDecision",
-        "parse_structured_decision",
-        "validate_decision_for_role",
-        "validate_planning_decision",
-        "TERMINAL_ENVELOPE_LANE_MISSION_WORKER",
-        "RunBudgetExceeded",
     },
     "agent_runtime/checkpoint.py": {"os"},
     "agent_runtime/observability.py": {"timedelta"},

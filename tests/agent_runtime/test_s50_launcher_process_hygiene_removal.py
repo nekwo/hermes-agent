@@ -29,28 +29,44 @@ None``. Its one real gate was an unrelated removal pin
 RETARGETED under an honest name rather than deleted with the rest. A vacuous
 assertion is not coverage, and deleting it silently would have hidden that the
 file's real pin lived inside it.
+
+-----------------------------------------------------------------------------
+MIGRATED TO ``test_tombstone_registry.py`` (2026-08-01)
+-----------------------------------------------------------------------------
+
+Two pure-ABSENCE cases left this file:
+
+* ``test_the_hygiene_module_is_gone`` -> ``MODULE`` row
+  ``agent_runtime.launcher_process_hygiene``.
+* ``test_none_of_the_removed_names_survives_anywhere_in_agent_runtime`` -> four
+  repo-wide ``CODE`` rows (``clean_launcher_visual_processes``,
+  ``launcher_visual_cleanup_needed``, ``_parse_tasklist_csv``,
+  ``_safe_process_names``). ``REMOVED_NAMES`` went with it. The registry row is
+  STRICTLY STRONGER twice over: this file's scan was scoped to ``agent_runtime``
+  only and matched only ``FunctionDef``/``AsyncFunctionDef`` NODES, so a
+  copy-pasted helper landing in ``hermes_cli`` — or surviving as a call, an
+  import binding or a string — passed it. The registry scans seven production
+  packages over rendered code.
+
+WHY THE SURVIVORS STAYED:
+
+* ``test_no_production_module_still_imports_it`` — the import-graph gate (the
+  S49 note applies verbatim: ``find_spec is None`` says nothing about a file
+  that still writes the import).
+* ``test_s50_moved_no_event_contract`` — a COUNT pin against S15's single
+  authority, plus a PREFIX assertion (no registered type may carry
+  ``launcher``) that no finite list of rows can express: it must also hold for a
+  type nobody has invented yet.
+* ``test_the_dirty_state_lane_this_module_sat_beside_is_untouched`` — a KEEP.
 """
 
 from __future__ import annotations
 
 import ast
 import pathlib
-from importlib.util import find_spec
 
 import agent_runtime
 from agent_runtime.decision_contract_registry import event_catalog
-
-
-REMOVED_NAMES = (
-    "clean_launcher_visual_processes",
-    "launcher_visual_cleanup_needed",
-    "_parse_tasklist_csv",
-    "_safe_process_names",
-)
-
-
-def test_the_hygiene_module_is_gone():
-    assert find_spec("agent_runtime.launcher_process_hygiene") is None
 
 
 def test_no_production_module_still_imports_it():
@@ -75,25 +91,6 @@ def test_no_production_module_still_imports_it():
                     for alias in node.names:
                         if "launcher_process_hygiene" in alias.name:
                             offenders.append(f"{path.relative_to(root)}:{node.lineno}")
-    assert offenders == [], offenders
-
-
-def test_none_of_the_removed_names_survives_anywhere_in_agent_runtime():
-    """The names, not just the file: a helper copy-pasted into a neighbour
-    during the cut would keep the lane alive under a new address."""
-
-    root = pathlib.Path(agent_runtime.__file__).resolve().parent
-    offenders = []
-    for path in root.rglob("*.py"):
-        if "__pycache__" in path.parts:
-            continue
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
-        except SyntaxError:
-            continue
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in REMOVED_NAMES:
-                offenders.append(f"{path.relative_to(root)}:{node.lineno}:{node.name}")
     assert offenders == [], offenders
 
 

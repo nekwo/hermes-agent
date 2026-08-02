@@ -57,11 +57,60 @@ is therefore inverted once more, to module ABSENCE — a strictly stronger
 statement than "the mutator is missing", and the form that catches a re-import.
 
 Count: 79 -> 72. The absolute authority stays S15's ``SURVIVING_EVENT_COUNT``.
+
+-----------------------------------------------------------------------------
+MIGRATED TO ``test_tombstone_registry.py`` (2026-08-01)
+-----------------------------------------------------------------------------
+
+Four pure-ABSENCE cases left this file:
+
+* ``test_the_whole_module_is_gone`` -> ``MODULE`` row
+  ``agent_runtime.repo_bundles`` + ``PATH`` row
+  ``agent_runtime/repo_bundles.py`` (both S57 rows; this case had already been
+  inverted to module absence when S57 took the store).
+* ``test_the_names_this_wave_removed_cannot_come_back_through_another_module``
+  -> nineteen repo-wide ``CODE`` rows carrying the SAME distinctive-subset
+  ruling this file made (``update`` / ``_write`` / ``get`` are deliberately NOT
+  rows — gating ordinary store method names is a false-positive machine). The
+  registry scan is wider (seven packages, not just ``agent_runtime``) and reads
+  RENDERED code rather than raw text, so a re-grown reference can no longer hide
+  behind, or be faked by, a comment. ``DISTINCTIVE_REMOVED_NAMES`` went with it,
+  and its hand-rolled anti-vacuity assert is now the registry's
+  ``test_the_scanner_is_not_vacuous``.
+* ``test_the_projection_helpers_went_at_s56`` -> the S56 ``CODE`` rows
+  ``repo_lock_summary`` / ``bundle_queue_summary`` / ``repo_bundle_summary`` /
+  ``repo_bundle_delivery_summary`` / ``REPO_BUNDLE_DELIVERY_CONTRACT`` /
+  ``REPO_BUNDLE_CHECKOUT_STATUS`` plus the S57 ``CODE`` row ``RepoBundleStore``.
+  ``S56_REMOVED_READ_NAMES`` went with it. Repo-wide again subsumes the old
+  ``build_status``-scoped form.
+* ``test_the_seven_contracts_are_deregistered`` -> seven ``EVENT`` rows (and the
+  registry additionally carries ``repo_bundle.delivered``, the S25 row that was
+  retired one commit BEHIND its writer).
+
+WHY THE SURVIVORS STAYED — this file owns the "de-registration gates APPENDS,
+not reads" family, and the registry deliberately has no form for any of it:
+
+* ``test_appending_a_retired_repo_bundle_event_is_refused`` — a call, not a
+  scan.
+* ``test_historical_rows_still_read_back`` — a persisted row must still
+  deserialize. Nothing on the READ path consults the registry.
+* ``test_the_two_operator_summary_rows_and_their_shared_arm_went_too`` and
+  ``test_the_surviving_operator_summary_types_still_render`` — the S21/S25
+  frozenset invariant plus a rendered-string characterization of the arm that
+  survived.
+* ``test_the_repo_lock_wire_is_now_a_constant`` — a produced-dict check on
+  ``build_status()``, and an INVERTED pin recording S56's closure of the debt
+  S52 opened.
+* ``test_the_registry_lost_exactly_seven_contracts`` — agreement with S15.
+
+``REMOVED_STORE_METHODS`` / ``REMOVED_MODULE_NAMES`` / ``SURVIVING_READ_NAMES``
+are left in place: they stopped feeding tests when S57 inverted this file to
+module absence, and they remain the wave's written record of exactly what left
+the lane and in which order.
 """
 
 from __future__ import annotations
 
-import importlib
 import inspect
 
 import pytest
@@ -125,101 +174,10 @@ REMOVED_MODULE_NAMES = (
 #: projection helpers fed `build_status` rows (`repo_bundles`,
 #: `repo_bundle_closeout`, `bundle_queue`, `repo_locks`) that no writer could
 #: move, so the summaries went with the rows. `RepoBundleStore` -- the read side
-#: proper -- is what S52 actually had to keep, and it is still here.
+#: proper -- is what S52 actually had to keep, and S57 then took THAT once S56
+#: left it with zero production importers. Kept here as the record of a keep
+#: that was correct for exactly one commit; the absence is a registry CODE row.
 SURVIVING_READ_NAMES = ("RepoBundleStore",)
-
-#: INVERTED at S56: these four were listed above as surviving reads; they are
-#: now absence pins so a stale producer cannot resurrect a reader.
-S56_REMOVED_READ_NAMES = (
-    "repo_lock_summary",
-    "bundle_queue_summary",
-    "repo_bundle_summary",
-    "repo_bundle_delivery_summary",
-    "REPO_BUNDLE_DELIVERY_CONTRACT",
-    "REPO_BUNDLE_CHECKOUT_STATUS",
-)
-
-
-def test_the_whole_module_is_gone():
-    """INVERTED at S57, absorbing ``test_every_store_mutator_is_gone``,
-    ``test_every_orphaned_module_level_name_is_gone`` and
-    ``test_the_read_side_survives_whole``.
-
-    All three reached into ``agent_runtime.repo_bundles`` to assert what was
-    missing from it. The module itself is now missing, which subsumes every one
-    of those assertions and additionally catches the failure they could not: a
-    later wave re-creating the module and re-adding a mutator.
-    """
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("agent_runtime.repo_bundles")
-
-
-#: The subset of the removed names that is DISTINCTIVE enough to gate on
-#: repo-wide. ``update`` / ``_write`` / ``get`` and friends are ordinary method
-#: names every store in the tree has, so gating on them would be a false
-#: positive machine rather than a tripwire. Everything here is a name only the
-#: repo-bundle lane ever used.
-DISTINCTIVE_REMOVED_NAMES = (
-    "create_or_update_from_task",
-    "wake_ready_dependencies",
-    "cancel_superseded",
-    "acquire_repo_bundle_locks",
-    "release_repo_bundle_locks",
-    "desired_bundles_for_task",
-    "merge_desired_bundle",
-    "_repo_lock_conflicts",
-    "_write_repo_locks",
-    "bundle_id_for",
-    "safe_bundle_state",
-    "owner_for_repo",
-    "qa_waiting_on",
-)
-
-
-def test_the_names_this_wave_removed_cannot_come_back_through_another_module():
-    """The mutator/helper names, kept BY NAME rather than deleted with the module
-    they lived in, so the S52 ruling survives its own subject. A future
-    ``create_or_update_from_task`` anywhere in ``agent_runtime`` is a
-    re-introduction of the lane, not a coincidence."""
-    import pathlib
-
-    root = pathlib.Path(__file__).resolve().parents[2] / "agent_runtime"
-    blob = "\n".join(
-        path.read_text(encoding="utf-8", errors="ignore") for path in root.rglob("*.py")
-    )
-    assert "class PersonaAssignmentStore" in blob, "the scan read nothing"
-    for name in DISTINCTIVE_REMOVED_NAMES:
-        assert f"def {name}(" not in blob, name
-
-
-def test_the_projection_helpers_went_at_s56():
-    """INVERTED at S56 from ``test_status_still_projects_bundles_off_the_surviving_read_path``.
-
-    That case pinned the WIRE: ``build_status`` had to reach
-    ``RepoBundleStore(event_log=event_log).list_all()``, because that constructor
-    was the reason S52 kept the store at all. S56 removed the four rows the wire
-    fed -- each empty by construction once S52 deleted the writers -- so the
-    constructor and the four summary helpers went with them. S57 then removed the
-    store itself. The pin holds at the level that outlives all three: no name
-    from that family may reappear in ``build_status``.
-    """
-
-    # CODE only: `build_status` carries a comment block naming every row S56
-    # removed, and a raw-text scan would read that retirement note as a surviving
-    # reference. Round-tripping through the AST drops comments, keeps names.
-    import ast
-    import textwrap
-
-    source = ast.unparse(ast.parse(textwrap.dedent(inspect.getsource(status.build_status))))
-    assert "RepoBundleStore" not in source
-    for name in S56_REMOVED_READ_NAMES:
-        assert name not in source, name
-
-
-def test_the_seven_contracts_are_deregistered():
-    catalog = event_catalog()
-    assert [name for name in RETIRED_EVENT_TYPES if name in catalog] == []
-    assert [name for name in RETIRED_EVENT_TYPES if name in ALLOWED_EVENT_TYPES] == []
 
 
 def test_appending_a_retired_repo_bundle_event_is_refused():

@@ -48,7 +48,9 @@ wave. S44 then moved it to 82. The absolute count has one owner either way —
 RETARGETED 2026-07-31 (S44/S45): three modules this file pinned symbols on no
 longer exist. ``role_envelopes`` (S44) and ``budget_approval`` / ``stage_intent``
 (S45, test-only whole modules) were deleted, so their ``REMOVED`` / ``KEPT``
-entries moved to ``RETIRED_WHOLE_MODULES`` below. They are NOT dropped: an
+entries moved to the ``RETIRED_WHOLE_MODULES`` table — which the 2026-08-01
+migration below preserves verbatim as prose, its assertion having become a
+registry ``Form.MODULE`` row. They are NOT dropped: an
 individual-symbol witness that silently loses its module hides the bigger cut
 that swallowed it, and the KEPT half is the more interesting record — those names
 were correctly alive at S43 and died for an unrelated reason two waves later.
@@ -57,6 +59,55 @@ RETARGETED AGAIN 2026-08-01 (S57): ``repo_bundles`` joins that table. S43 cut on
 symbol from it (``find_best_bundle_for_action``) and left the store alone; S52
 took its write lane, S56 the four status projections that were its last
 customers, and S57 the module. Four waves, four different reasons, one module.
+
+=============================================================================
+MIGRATED to ``tests/agent_runtime/test_tombstone_registry.py`` (2026-08-01)
+=============================================================================
+
+The ``REMOVED`` table and the ``RETIRED_WHOLE_MODULES`` absence assertion moved.
+Both were pure absence:
+
+* every one of the 24 names across the 18 live modules is now a ``Form.ATTR``
+  row scoped to its own module (``agent_runtime.board_models``,
+  ``.decision_contract_registry``, ``.decision_schema``, ``.event_rotation``,
+  ``.locks``, ``.packets``, ``.paths``, ``.profile_artifact_sync``,
+  ``.realm_sync``, ``.redaction``, ``.repo_context``, ``.runtime_instances``,
+  ``.self_test_evidence``, ``.skill_install``, ``.skill_promotion``,
+  ``.skill_publishability``, ``.tool_visibility``, and ``.cli_format``'s
+  ``human_task_line`` / ``task_summary``, which the registry carries under s41
+  because that is the wave that unbound them).
+* the four whole-module absences are ``Form.MODULE`` rows —
+  ``agent_runtime.role_envelopes`` (s44), ``agent_runtime.repo_bundles`` (s57),
+  ``agent_runtime.budget_approval`` and ``agent_runtime.stage_intent`` (s45).
+  ``find_spec is None`` there is the same assertion this file made, so the
+  parametrized ``test_the_later_whole_module_cuts_took_both_halves`` went with
+  its table.
+
+THE RECORD THAT TABLE CARRIED IS PRESERVED HERE, because it is the interesting
+half and a registry row cannot hold it. At S43 each KEPT name below had a
+verified caller and each REMOVED name did not; a later wave then took the whole
+module for a reason that had nothing to do with these individual symbols:
+
+===================================== ======================================== ==========================================================
+module (later cut)                    removed at S43                           deliberately KEPT at S43, then outlived
+===================================== ======================================== ==========================================================
+``role_envelopes`` (S44)              ``role_envelope_summary``                ``RoleEnvelopeStore`` (kept pending the operator ruling)
+``repo_bundles`` (S57)                ``find_best_bundle_for_action``          — (nothing; the store was left whole)
+``budget_approval`` (S45)             ``eligible_budget_approval_incidents``   ``budget_incident_can_continue``,
+                                                                               ``budget_incident_needs_scope_recovery``, ``_safe_int``
+``stage_intent`` (S45)                ``first_incomplete_product_edit_stage``, ``stage_requires_product_edit``,
+                                      ``stage_is_committed_verification_gate``,``no_product_edit_recipe_id``,
+                                      ``extract_single_known_stage_reference``,``no_product_edit_recipe_for_stage``,
+                                      ``_stage_has_command_gate``,             ``no_product_edit_recipe_conflicts_with_stage``
+                                      ``_looks_like_command``
+===================================== ======================================== ==========================================================
+
+WHAT STAYED, AND WHY NONE OF IT IS A ROW: the ``KEPT`` table and its
+parametrized pin (live neighbours on the same line, often the same import, as a
+cut name), the ``packet_artifacts`` EntityClass resolution (a fact about
+``checkpoint.ENTITY_CLASS_NAMES``, not about a name's absence), the
+``BasicRedactionScanner`` BEHAVIOUR pin (it scans a file and returns
+``UNSAFE``), and the still-imports negative gate.
 """
 
 from __future__ import annotations
@@ -65,86 +116,6 @@ import importlib
 
 import pytest
 
-
-#: module -> the names that must no longer exist on it.
-REMOVED = {
-    "agent_runtime.board_models": ("is_default_board_id",),
-    "agent_runtime.cli_format": ("task_summary", "human_task_line"),
-    "agent_runtime.decision_contract_registry": ("FieldContract",),
-    "agent_runtime.decision_schema": ("_extract_first_json_blob",),
-    "agent_runtime.event_rotation": ("rotate_if_needed",),
-    "agent_runtime.locks": ("repo_land_lock",),
-    "agent_runtime.packets": ("_truncate_free_fields",),
-    "agent_runtime.paths": (
-        "stagec_artifacts_task_dir",
-        "packet_artifacts_task_dir",
-        "packet_raw_artifact_path",
-    ),
-    "agent_runtime.profile_artifact_sync": ("MEMBER_STATE_KINDS", "_LEGACY_SEGMENTS"),
-    "agent_runtime.realm_sync": ("SYNC_STATES",),
-    "agent_runtime.redaction": ("RedactionScanner",),
-    "agent_runtime.repo_context": (
-        "_DIFF_TEST_FILE_RE",
-        "_DIFF_REMOVED_ASSERT_RE",
-        "_DIFF_ADDED_SKIP_RE",
-    ),
-    "agent_runtime.runtime_instances": ("BACKGROUND_LANE",),
-    "agent_runtime.self_test_evidence": ("_relative_runtime_path",),
-    "agent_runtime.skill_install": ("harness_skill_installed_ok",),
-    "agent_runtime.skill_promotion": ("RESULT_ACTIONS",),
-    "agent_runtime.skill_publishability": ("PUBLISHABLE_REASONS",),
-    "agent_runtime.tool_visibility": ("_profile_readiness_cache_clear",),
-}
-
-#: Modules this file pinned symbols on that a LATER wave deleted whole. The
-#: original REMOVED / KEPT entries are preserved verbatim so the record survives
-#: the module: at S43 every KEPT name below had a verified caller and every
-#: REMOVED name did not. Two waves later the module itself went, for a reason
-#: that had nothing to do with these individual symbols.
-RETIRED_WHOLE_MODULES = {
-    # S44 — the role_envelopes / role_checklists store family (operator ruling
-    # on deferred-debt item 1). S43 cut only `role_envelope_summary` from it and
-    # explicitly kept `RoleEnvelopeStore` pending that ruling.
-    "agent_runtime.role_envelopes": {
-        "removed_at_s43": ("role_envelope_summary",),
-        "kept_at_s43": ("RoleEnvelopeStore",),
-    },
-    # S57 — the repo-bundle store, three waves after S43 pinned one dead symbol
-    # on it. S43 cut `find_best_bundle_for_action` and kept the rest; S52 took
-    # the write lane, S56 the four status projections, and S57 the module itself
-    # once those projections left it with zero production importers. The S43
-    # entry is preserved rather than deleted for the reason this table exists:
-    # the symbol was dead for its own reason, and the module died for a
-    # completely different one two years of waves later.
-    "agent_runtime.repo_bundles": {
-        "removed_at_s43": ("find_best_bundle_for_action",),
-        "kept_at_s43": (),
-    },
-    # S45 — test-only whole modules (operator ruling on deferred-debt item 2).
-    "agent_runtime.budget_approval": {
-        "removed_at_s43": ("eligible_budget_approval_incidents",),
-        "kept_at_s43": (
-            "budget_incident_can_continue",
-            "budget_incident_needs_scope_recovery",
-            "_safe_int",
-        ),
-    },
-    "agent_runtime.stage_intent": {
-        "removed_at_s43": (
-            "first_incomplete_product_edit_stage",
-            "stage_is_committed_verification_gate",
-            "extract_single_known_stage_reference",
-            "_stage_has_command_gate",
-            "_looks_like_command",
-        ),
-        "kept_at_s43": (
-            "stage_requires_product_edit",
-            "no_product_edit_recipe_id",
-            "no_product_edit_recipe_for_stage",
-            "no_product_edit_recipe_conflicts_with_stage",
-        ),
-    },
-}
 
 #: module -> names on the SAME module (often the same line) that must survive.
 KEPT = {
@@ -175,12 +146,6 @@ KEPT = {
 }
 
 
-@pytest.mark.parametrize("dotted", sorted(REMOVED))
-def test_the_dead_symbols_are_gone(dotted: str):
-    module = importlib.import_module(dotted)
-    assert [name for name in REMOVED[dotted] if hasattr(module, name)] == []
-
-
 @pytest.mark.parametrize("dotted", sorted(KEPT))
 def test_the_live_neighbours_survive(dotted: str):
     module = importlib.import_module(dotted)
@@ -208,19 +173,5 @@ def test_the_basic_redaction_scanner_still_scans(tmp_path):
 
 
 def test_every_touched_module_still_imports():
-    for dotted in sorted(set(REMOVED) | set(KEPT)):
-        importlib.import_module(dotted)
-
-
-@pytest.mark.parametrize("dotted", sorted(RETIRED_WHOLE_MODULES))
-def test_the_later_whole_module_cuts_took_both_halves(dotted: str):
-    """S44/S45 retarget. Every name this file ruled on for these three modules —
-    the dead ones AND the ones it deliberately KEPT — is unreachable now,
-    because the module is gone. The KEPT half is the point: those names were
-    correctly alive at S43 and were not falsified, they were outlived."""
-
-    from importlib.util import find_spec
-
-    assert find_spec(dotted) is None
-    with pytest.raises(ModuleNotFoundError):
+    for dotted in sorted(KEPT):
         importlib.import_module(dotted)

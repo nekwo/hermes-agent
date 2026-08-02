@@ -30,6 +30,38 @@ so the namespace is the gate):
   removed.
 
 No event contract moves: ``event_catalog()`` stays at 88.
+
+=============================================================================
+MIGRATED to ``tests/agent_runtime/test_tombstone_registry.py`` (2026-08-01)
+=============================================================================
+
+BOTH absence tables moved, and the tests that read them went with them. Every
+name this wave cut is a pure ``module.name`` absence, which is exactly the
+``Form.ATTR`` row the registry owns:
+
+* ``scope_control.untriaged_issue_discoveries`` / ``find_discovery_task`` — one
+  cluster row scoped to ``agent_runtime.scope_control``.
+* the nine harness-part helpers (``_resolve_board_id_for_read``,
+  ``_event_value``, ``_task_events``, ``_clear_task_recovery_markers``,
+  ``_safe_operator_text``, ``_safe_issue_summary``, ``_incident_history_row``,
+  ``_incident_cursor_ts``, and S54's ``_archived_task_summary``) — one cluster
+  row scoped to ``hermes_cli.harness``. The scope is unchanged: the parts are
+  ``exec``'d into that module's globals, so the NAMESPACE is still the gate.
+
+WHAT STAYED, AND WHY EACH IS NOT A ROW. The three survivors are not absence
+assertions at all:
+
+* ``test_the_validation_half_of_scope_control_is_untouched`` is a KEEP pin, and
+  an identity one — it asserts ``decision_contracts.validate_discovery_payload
+  IS scope_control.validate_discovery_payload``, i.e. that the live lane still
+  routes through this module rather than through a second copy.
+* ``test_the_scope_control_docstring_no_longer_claims_retired_importers`` gates
+  a CLAIM in prose. The registry's scanner strips docstrings by construction, so
+  it is structurally incapable of asserting this and always will be.
+* ``test_the_live_neighbours_of_each_removed_part_helper_survive`` is a KEEP pin
+  carrying one INVERTED arm (S54's ``_archived_task_summary``). Inverted pins
+  record a reversal and stay whole where the reversal happened; dissolving one
+  into a row would lose which wave falsified which earlier ruling.
 """
 
 from __future__ import annotations
@@ -37,36 +69,6 @@ from __future__ import annotations
 import importlib
 
 from agent_runtime import scope_control
-
-
-REMOVED_SCOPE_CONTROL = (
-    "untriaged_issue_discoveries",
-    "find_discovery_task",
-)
-
-REMOVED_HARNESS_PART_HELPERS = (
-    # board.py
-    "_resolve_board_id_for_read",
-    # runtime_commands.py
-    "_event_value",
-    "_task_events",
-    "_clear_task_recovery_markers",
-    "_safe_operator_text",
-    "_safe_issue_summary",
-    "_incident_history_row",
-    "_incident_cursor_ts",
-)
-
-
-def test_the_scope_control_lookup_half_is_gone():
-    assert [name for name in REMOVED_SCOPE_CONTROL if hasattr(scope_control, name)] == []
-
-
-def test_the_dead_harness_part_helpers_are_gone():
-    harness = importlib.import_module("hermes_cli.harness")
-    assert [
-        name for name in REMOVED_HARNESS_PART_HELPERS if hasattr(harness, name)
-    ] == []
 
 
 def test_the_validation_half_of_scope_control_is_untouched():

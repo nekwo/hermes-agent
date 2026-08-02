@@ -1075,22 +1075,50 @@ DIFFERENT wire key and is untouched.
 
 ### New debt this wave OPENED
 
-- **Launcher: `roleChecklists` and `proofBatches` are the SAME dead-by-emptiness
-  class.** Both are parsed on `MissionAgentLog` and on the top-level frame; S44
-  deleted the store family that fed both, and the live frame carries neither. The
-  `_RoleTaskHud` container in `agent_detail_terminal.dart` now renders only from
-  these two, i.e. never. NOT cut: outside this wave's ruled scope, and hermes
-  still keeps `role_checklists.validate_checklist_payload_structure` alive, which
-  deserves its own look before the launcher side is swept.
-- **Launcher: the bridge still forwards `raw['role_envelopes']`** as a
+- ~~**Launcher: `roleChecklists` and `proofBatches` are the SAME dead-by-emptiness
+  class.**~~ **CLOSED at Launcher s56** — cut whole in one pass with the sibling
+  bullet below (models, BOTH parses each, the `_RoleTaskHud` container and
+  everything reachable only through it, the three inert bridge forwards).
+  ORIGINAL ENTRY: Both are parsed on `MissionAgentLog` and on the top-level
+  frame; S44 deleted the store family that fed both, and the live frame carries
+  neither. The `_RoleTaskHud` container in `agent_detail_terminal.dart` now
+  renders only from these two, i.e. never. NOT cut: outside this wave's ruled
+  scope, and hermes still keeps
+  `role_checklists.validate_checklist_payload_structure` alive, which deserves
+  its own look before the launcher side is swept.
+- ~~**Launcher: the bridge still forwards `raw['role_envelopes']`**~~ **CLOSED at
+  Launcher s56** — all three raw-section forwards (`role_envelopes`,
+  `role_checklists`, `proof_batches`) went in the same pass. ORIGINAL ENTRY: a
   raw-section pass-through beside `role_checklists` / `proof_batches`. With no
   parse behind it the key is inert; removing the forward belongs with the sibling
   cut above rather than half-way through it.
-- **`agent_runtime/role_checklists.py` survives for one importer.**
+- ~~**`agent_runtime/role_checklists.py` survives for one importer.**~~
+  **CHECKED at s56 — the importer is LIVE PRODUCTION; the module STAYS, and no
+  hermes-side cut was taken.** The chain is `hermes harness contracts
+  verify-examples` -> `runtime_commands._cmd_contracts_verify_examples` ->
+  `decision_contract_examples.verify_harness_skill_examples` ->
+  `decision_contracts.validate_planning_decision` ->
+  `decision_contract_registry.validate_payload_keys` ->
+  `role_checklists.validate_checklist_payload_structure`. Run live on alice
+  (`--json`, exit 0, `ok: true`, `contract_hash 20639a26…`, `event_count 58`), so
+  the validator is reached by a payload the runtime produces on every typed
+  decision, exactly as its docstring claims — the one seam in this campaign whose
+  advertised caller turned out to be real. ORIGINAL ENTRY:
   `decision_contract_registry.py:177` imports
   `validate_checklist_payload_structure` from it. Worth checking whether that
   validator can still be reached by a payload the runtime produces, given S44
   deleted the store family around it.
+
+  **The distinction that made the Launcher cut safe**, recorded because it is the
+  kind of thing a future wave will re-derive: the surviving validator belongs to
+  a DIFFERENT wire key. It validates a `checklist` block inside a DECISION
+  payload. Nothing in `agent_runtime` / `hermes_cli` / `tools` emits a
+  `role_checklists` or `proof_batches` frame SECTION — which is what the two
+  Launcher parses read — and the live contract-48 frame contains **zero**
+  occurrences of `role_checklist`, `proof_batch` or `role_envelope`. (The only
+  two `checklist` hits in that frame are board-CARD checklists, an unrelated live
+  concept.) A module surviving for one importer is not evidence that a wire
+  section survives.
 
 ### Superseded pins INVERTED rather than deleted (each carrying why)
 
@@ -1150,3 +1178,239 @@ discriminates a re-introduction from a coincidence.
 - `checkpoint.EntityClass`'s docstring used `repo_bundles/<task_id>/...` as its
   example of a nested store. Retargeted to `self_tests/<task_id>/...`, a class
   that still exists.
+
+
+## Tombstone-registry consolidation (both repos, 2026-08-01)
+
+> Not a contract move — no wire, no event and no production symbol changed on the
+> hermes side. This is the removal CAMPAIGN's own test debt being retired: the
+> per-wave absence contracts collapse into one data-driven registry per repo,
+> behind one shared AST scanner. Executed together with Launcher **s56**, the
+> role-checklist / proof-batch cut recorded at the end.
+
+### Why — the finding that forced it
+
+Twenty `test_sNN_*` files on the hermes side, and two grep-gate files on the
+Launcher side, each re-implemented the same question: *is this removed symbol
+still absent from production source?* Two defects rode along with that
+duplication, and both are recurrences, which is itself the finding.
+
+**1. The vacuous-gate class — four instances, three of them this week.** A
+removal test that greps raw source cannot tell a re-grown reference from the
+retirement COMMENT the cut just wrote.
+
+| Found by | The defect |
+| --- | --- |
+| S48 | `test_s46`'s token-join helper renders `card.title` as three newline-separated tokens, so every dotted-attribute assertion through it could never match and **passed vacuously**. |
+| S57 | Three assertions went **RED against a correct tree** because they matched the retirement comment that wave had just written. |
+| S40 (earlier) | Its repo-wide gate had already been red once for exactly the same reason. |
+| Launcher | `_offendersForForm` grew a `startsWith('//')` heuristic to paper over it, which misses doc comments, trailing comments and block comments. That heuristic is why several Launcher rows had to be **weakened** to DECLARE/READ forms (`final int goalCount`, `.goalCount`) instead of banning the bare name — the bare name would have fired on prose. |
+
+Each time the fix was the same: parse to an AST and re-render. Writing that fix
+once, in a shared scanner, is what this consolidation is.
+
+**2. Twenty different answers to "what counts as production source."** Six
+package tuples were in use across the hermes removal tests — `agent_runtime`
+alone; `+ hermes_cli + tools`; `+ gateway + agent + acp_adapter`; the
+twelve-package tuple; `pkgutil.iter_modules` over `agent_runtime` top level only,
+which does **not** descend into subpackages. A row's protection was whatever
+tuple its author happened to pick. Both registries now have exactly one scope,
+chosen as the WIDEST any migrated row used, so consolidation could only widen.
+That was a real hazard rather than a tidiness point: S40's rows were gated over
+every `.py` in the repo, so a six-package tuple would have silently dropped
+`cron` / `mobile_core` / `providers` / `tui_gateway` / `apps` and the root
+modules from that row's reach.
+
+### The two registries
+
+| | hermes | Launcher |
+| --- | --- | --- |
+| File | `tests/agent_runtime/test_tombstone_registry.py` | `test/features/mission_control/mission_control_tombstone_registry_test.dart` |
+| Scanner | `ast.parse` -> strip docstrings on the tree -> `ast.unparse` | `parseString` (the real Dart front end) -> walk the TOKEN STREAM |
+| Comment-immune because | comments never survive `ast.parse`; docstrings stripped explicitly | comments are not in the token stream at all — the scanner hangs them off `Token.precedingComments` and never links them into `next` |
+| Row forms | `MODULE` / `ATTR` / `CLASS_ATTR` / `EVENT` / `CODE` / `PATH` | `name` / `dotted` / `literal` |
+| Scope | S55's twelve-package tuple + repo-root modules | `lib/` + `tool/stagec_qa_mcp_server/lib/` |
+
+**Both keep string literals in scope, deliberately.** Event kinds, wire keys and
+QA capability ids are invoked BY NAME, never as identifiers — the S44/S55 lesson.
+A registry that only saw identifiers would protect half the surface, and would
+report every de-registered event type as absent while its emitter sat there
+spelling it out.
+
+**The Dart side takes the same mechanism as S48's, not S46's.** `ast.unparse` and
+the Dart token stream both render dotted attributes AS dotted attributes, which
+is precisely what S46's token-join could not do.
+
+`analyzer` is promoted from a transitive to an explicit Launcher dev dependency;
+it resolves to the same `9.0.0` the SDK already pulled in.
+
+### Protection parity — the acceptance criterion, computed rather than asserted
+
+Both sides were checked by a script diffing the **pre-change git blobs** against
+the registry table, not by reading. Both BEFORE sets are deliberate
+OVER-approximations — every symbol-shaped string literal harvested from the old
+files' ASTs, including some that were never bans — so a false "unmapped" row
+gets triaged by hand rather than filtered out silently. A filter is exactly how
+a parity check goes vacuous.
+
+**hermes: 750 BEFORE symbol-shaped literals across the 19 migrated files ->
+451 registry row texts + 585 still asserted in the shrunk survivors + 15
+superseded by a MODULE row + 8 old-scanner machinery + 4 subsumed by a broader
+CODE row. UNMAPPED = 0.**
+
+Three triage buckets are worth naming, because each is a real
+protection-preserving mechanism rather than an excuse:
+
+- **Superseded by a MODULE row (15, strictly stronger).** s43's
+  `RETIRED_WHOLE_MODULES` recorded per-symbol verdicts against four modules a
+  LATER wave then deleted whole (`role_envelopes` S44, `budget_approval` /
+  `stage_intent` S45, `repo_bundles` S57). A banned MODULE makes every name on
+  it unreachable, which is stronger than banning the names one at a time. The
+  script ASSERTS each claimed supersession against the registry's module rows
+  rather than trusting the mapping.
+- **Old-scanner machinery (8, never bans).** `*`, `.git`, `.venv`,
+  `node_modules`, `venvs`, `.md` and two pytest parametrize ids — glob patterns
+  and skip-dir names from the old files' own file walkers.
+- **Subsumed by a broader CODE row (4).** The CODE form matches by SUBSTRING
+  against rendered source, so one bare-name row bans every shape containing it.
+
+**That last bucket was a real gap the parity check FOUND, not a bookkeeping
+note.** S47 had gated the config key as three separate source SHAPES scoped to
+two modules — `raw.get("role_envelope")` and `role_envelope=` in `config.py`,
+`getattr(cfg, "role_envelope"` in `migrations.py` — and none of them had a
+registry row; the migration would have dropped all three. Closed by adding one
+`Form.CODE` row for the bare name, which subsumes all three AND widens them
+repo-wide. The text scanner could never have banned that bare name:
+`role_envelope` still appears in **six** production files today, every one of
+them a comment recording its own retirement. This is the consolidation paying
+for itself.
+
+**Launcher: 196 BEFORE subjects (the union of both old files) -> 197 registry
+rows + 15 kept shape pins + 15 strengthened spellings. UNMAPPED = 0.**
+
+Six Launcher rows are **strictly stronger** than what they replace: `goalCount`,
+`workerSessionId`, `roleEnvelopes`, `activeWorkerSessionId`, `goal_count` and
+`role_envelopes` are now banned as bare NAMES. The text scanners could not do
+that, because every one of them still appears in `lib/` today — in prose
+explaining its own removal. The registry also promotes six bridge wire keys
+(`goals`, `archived_tasks`, `mission_level_state`, `mission_flow_timeline`,
+`proof_gate_state`, `mission_plan`) from shape-only substring checks to real
+scoped literal rows.
+
+### Red-proof — run before any old file was deleted, in both repos
+
+Not a claim; a sabotage. A scratch production file was added carrying BOTH a
+re-introduced tombstone in real code AND a block of tombstoned names in its
+docstring and comments.
+
+- **hermes**, twice: a re-introduced NAME (`wake_ready_dependencies`) and a
+  re-introduced STRING LITERAL (`render_objective`) each failed the gate naming
+  their row, its wave and its reason — while eight tombstoned names in that same
+  file's docstring and comments fired **nothing**.
+- **Launcher**: a re-introduced literal (`role_envelopes`) and a re-introduced
+  name (`roleChecklists`) each failed naming their row and line — while five
+  tombstoned names in the comment and doc-comment block above them fired
+  **nothing**. Exactly two offenders, both real code.
+
+Both sabotages reverted. The comment-immunity half is ALSO pinned as a permanent
+test in each registry, so it cannot silently regress.
+
+### What is deliberately NOT a registry row
+
+Absence assertions whose subject is a runtime SHAPE rather than a name, because a
+name scan cannot honestly assert them and forcing them in would mean going back
+to substring matching for the whole table:
+
+- **parameter absence** — "passing `tasks=` must raise `TypeError`" is a
+  signature fact, checked by calling.
+- **wire-key absence** — "`build_status()` must not emit `repo_locks`" is a fact
+  about a produced dict.
+- **exact key-set / count pins** — `migration.counts`, `RunStore`'s public
+  surface, `OPERATOR_SUMMARY_EVENT_TYPES`.
+- **source SHAPES and scoped bodies** (Launcher) — `raw['goals']`,
+  `_int(json['goals']`, the two interpolated HUD pill expressions, YAML written
+  inside a Dart string, and `MissionGoalSummary`'s class-body-scoped `detail`.
+- **reader-side config gates** (Launcher) — the `kStageCQaCommandBus*` allowlists
+  and the MCP surface registry lists, which read live constants.
+
+These stay in their per-wave files alongside the behaviour pins. Nothing was
+dropped; the split is by what a row can honestly assert, and the header of each
+registry says so.
+
+### Files kept WHOLE, because they are rules or authorities rather than lists
+
+`test_s15_event_contract_pruning` (the single `SURVIVING_EVENT_COUNT` /
+`contract_hash` authority, imported by six other files), `test_s55` (the
+registered-event -> emitter structural gate), `test_s56_runtime_config_reader_gate`
+(the `RuntimeConfig`-field -> reader gate, whose `UNRULED_DEBT` s57 imports),
+`test_s47` (`CURRENT_CONTRACT_VERSION`), `test_s53` (exports `seed_lane_row` to
+s21), `test_s25_graph_prune_on_reap` and `test_s38` (characterization), the wire
+tests, and the "historical rows still read back" family (de-registration gates
+APPENDS, not reads).
+
+### Superseded pins INVERTED rather than deleted (Launcher)
+
+Eight assertions, each carrying why. s48 and s55 had both explicitly KEPT
+`MissionRoleChecklist` / `MissionProofBatch` **as a decision** — s55's test was
+even named "the sibling collections are deliberately KEPT" — and s56 reversed
+both after verifying the hermes side. Keeping the reversal legible, rather than
+quietly deleting a claim that turned out wrong, is the point. Two orphaned widget
+tests were inverted the same way with their fixtures intact (see s56 below).
+
+### The debt this consolidation does NOT close (measured, not inferred)
+
+The migration covered the **s40-s57 campaign files** — the ~20 that accumulated
+since the post-upstream-sync audit opened. **About 50 older `test_sNN_*` files
+(s1-s39) still carry roughly 150 absence rows in their own bespoke scanners**,
+and the enumeration found the vacuous-gate defect present in ~30 of them: they
+scan `inspect.getsource(...)` or `Path.read_text()` for a bare token with no
+comment stripping at all. Folding those in is mechanical now that the registry
+and its scanner exist — each row becomes a table entry — but it is a second wave,
+not a rider on this one, and it was left rather than half-done. Recorded here so
+it is not silent.
+
+### Retirement rule — rows are never dropped silently
+
+Written into both registry headers, and the two rules differ on purpose.
+
+- **hermes**: a row may be dropped only after **one upstream sync has merged
+  cleanly over that symbol's region**, and the sync commit is recorded on the row
+  when it goes. This is a FORK: a tombstone here is not only "we deleted it", it
+  is "upstream may still carry it, and a sync could hand it back". Until a sync
+  has passed over that region without conflict, the row is doing work.
+- **Launcher**: one stable month, because that repo has no upstream.
+
+Dropping a row EDITS THE VISIBLE TABLE in both. No expiry, no allowlist, no
+silent decay. **The next removal wave adds a ROW, not a FILE.**
+
+### Launcher s56 — the role-checklist / proof-batch knot (executed with this wave)
+
+The last dead-by-emptiness collection from the S44 store cut, filed by S57 and
+ruled the same class as s55's `MissionRoleEnvelope`. Verified three ways before
+cutting: a grep of hermes `agent_runtime` / `hermes_cli` / `tools` returns only
+retirement comments plus ONE live import; the LIVE contract-48 frame contains
+**zero** occurrences of `role_checklist`, `proof_batch` or `role_envelope` (its
+only two `checklist` hits are board-CARD checklists, an unrelated live concept);
+and the one live importer was traced end to end and **KEPT** — see the struck
+S57 bullet above for the full chain and the distinction that made the Launcher
+cut safe.
+
+Cut in ONE pass (the s47-s49 precedent — never strand a non-compiling tree):
+`MissionRoleChecklist` / `MissionRoleChecklistItem` / `MissionProofBatch`, BOTH
+parses of each collection (top-level frame AND agent row), the `_RoleTaskHud`
+container and everything reachable only through it (`_RoleChecklistRow`, the
+three display caps, `_missionElidedJoin`), and the three inert bridge raw-section
+forwards — `role_envelopes` went with its siblings, since a forward with no parse
+behind it can only carry an absent key.
+
+**The finding worth keeping.** The HUD's render condition was
+`roleChecklists.isNotEmpty || proofBatches.isNotEmpty`, false on every live
+frame, so an operator was told a "Role Task List" panel existed and could never
+see it. Two widget tests were its last live references and BOTH are inverted with
+their fixtures intact. One of them — F-7's cap-accounting proof in
+`mission_capped_surfaces_test.dart` — is the sharpest instance of this campaign's
+recurring shape: **it was green only because its own repository fixture hand-fed
+an over-cap `role_checklists` / `proof_batches` payload that no producer emits.**
+A fixture manufacturing the very data whose absence made the surface dead. Its
+inversion now asserts the Run Inspector still mounts (non-vacuity) BEFORE
+asserting the HUD does not.

@@ -28,6 +28,48 @@ substrate every Mission Control surface keys on — was gated on
 ``persona_assignments`` section on a third field of the same block. Both are now
 unconditional. The counterfactual is pinned below: a config that still sets the
 old block to ``false`` no longer suppresses the roster.
+
+-----------------------------------------------------------------------------
+MIGRATED TO ``test_tombstone_registry.py`` (2026-08-01)
+-----------------------------------------------------------------------------
+
+Four pure-ABSENCE cases left this file:
+
+* ``test_the_config_dataclass_is_gone`` -> six ``ATTR`` rows scoped to
+  ``agent_runtime.runtime_config`` (``ContinuousRoleSessionConfig`` …
+  ``SwarmConfig``). ``REMOVED_DATACLASSES`` went with it.
+* ``test_the_config_loader_is_gone`` -> seven ``ATTR`` rows scoped to
+  ``agent_runtime.config``, including ``_apply_enterprise_role_session_compat``.
+  ``REMOVED_LOADERS`` went with it.
+* ``test_the_roster_gate_helpers_are_gone`` -> two ``ATTR`` rows scoped to
+  ``agent_runtime.persona_assignments``.
+* ``test_no_production_module_still_calls_the_gate`` -> two repo-wide ``CODE``
+  rows for the same two names. Strictly stronger: this case scanned three
+  packages with a hand-rolled ``line.split("#", 1)[0]`` comment strip, which
+  only ever removed TRAILING comments on code lines and could not see a name
+  inside a docstring at all. The registry renders through the AST over seven
+  packages.
+
+WHY THE SURVIVORS STAYED:
+
+* ``test_the_dataclass_field_is_gone`` — a ``dataclasses.fields`` KEY-SET pin,
+  not a name scan. (``swarm`` is deliberately NOT a registry ``CODE`` row; it is
+  too generic to ban repo-wide.)
+* ``test_the_block_left_the_wire`` — a produced-dict check on
+  ``effective_config_summary()``.
+* ``test_supervision_is_pruned_to_its_one_live_field`` — an EXACT field-set pin.
+* ``test_the_migration_validators_for_the_removed_blocks_are_gone`` — three of
+  its four tokens have registry rows, but ``"swarm."`` does not (see above), so
+  the case stays whole rather than losing that arm.
+* ``test_an_operator_yaml_that_still_sets_a_removed_block_loads_and_is_ignored``
+  — the load-and-ignore proof. The registry bans the READER; only this proves a
+  stale operator root still LOADS.
+* The two counterfactual roster-gate proofs
+  (``test_the_roster_section_is_emitted_unconditionally``,
+  ``test_an_operator_config_that_still_disables_the_old_block_does_not_suppress_the_roster``)
+  and ``test_the_wire_block_survives_and_reports_the_truth`` — behaviour under a
+  config that still sets the retired flag, which is the whole reason the roster
+  cut was dangerous.
 """
 
 from __future__ import annotations
@@ -53,39 +95,10 @@ REMOVED_BLOCKS = (
     "swarm",
 )
 
-REMOVED_DATACLASSES = (
-    "ContinuousRoleSessionConfig",
-    "EnterpriseWorkerSessionsConfig",
-    "NormalWorkerFlowConfig",
-    "RepoBundleRoutingConfig",
-    "SimplifiedAgentContractConfig",
-    "SwarmConfig",
-)
-
-REMOVED_LOADERS = (
-    "_continuous_role_sessions_config",
-    "_enterprise_worker_sessions_config",
-    "_normal_worker_flow_config",
-    "_repo_bundle_routing_config",
-    "_simplified_agent_contract_config",
-    "_swarm_config",
-    "_apply_enterprise_role_session_compat",
-)
-
 
 @pytest.mark.parametrize("name", REMOVED_BLOCKS)
 def test_the_dataclass_field_is_gone(name):
     assert name not in {field.name for field in fields(RuntimeConfig)}
-
-
-@pytest.mark.parametrize("name", REMOVED_DATACLASSES)
-def test_the_config_dataclass_is_gone(name):
-    assert not hasattr(runtime_config, name)
-
-
-@pytest.mark.parametrize("name", REMOVED_LOADERS)
-def test_the_config_loader_is_gone(name):
-    assert not hasattr(config_module, name)
 
 
 @pytest.mark.parametrize("name", REMOVED_BLOCKS)
@@ -168,29 +181,6 @@ def test_an_operator_yaml_that_still_sets_a_removed_block_loads_and_is_ignored(t
 # --------------------------------------------------------------------------
 # The roster gate
 # --------------------------------------------------------------------------
-
-
-def test_the_roster_gate_helpers_are_gone():
-    from agent_runtime import persona_assignments
-
-    assert not hasattr(persona_assignments, "persona_instance_runtime_enabled")
-    assert not hasattr(persona_assignments, "persona_assignment_store_enabled")
-
-
-def test_no_production_module_still_calls_the_gate():
-    import pathlib
-
-    root = pathlib.Path(__file__).resolve().parents[2]
-    hits = []
-    for package in ("agent_runtime", "hermes_cli", "tools"):
-        for path in (root / package).rglob("*.py"):
-            text = path.read_text(encoding="utf-8", errors="ignore")
-            code = "\n".join(
-                line.split("#", 1)[0] for line in text.splitlines() if not line.strip().startswith("#")
-            )
-            if "persona_instance_runtime_enabled" in code or "persona_assignment_store_enabled" in code:
-                hits.append(str(path.relative_to(root)))
-    assert hits == []
 
 
 def test_the_roster_section_is_emitted_unconditionally():

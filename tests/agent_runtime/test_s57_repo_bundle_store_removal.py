@@ -56,17 +56,51 @@ not re-homed: there is nothing left to re-home it onto.
 
 RED-FIRST: written against the pre-cut tree, where ``test_the_module_is_gone``
 and ``test_the_model_is_gone`` both fail on a successful import.
+
+-----------------------------------------------------------------------------
+MIGRATED TO ``test_tombstone_registry.py`` (2026-08-01)
+-----------------------------------------------------------------------------
+
+Three pure-ABSENCE cases left this file — the three the RED-FIRST note above
+names, which is exactly the point: they were the mechanical half:
+
+* ``test_the_module_is_gone`` -> ``MODULE`` row ``agent_runtime.repo_bundles``
+  AND ``PATH`` row ``agent_runtime/repo_bundles.py`` (this case asserted both;
+  the registry has a form for each).
+* ``test_the_model_is_gone`` -> ``ATTR`` row ``RepoBundle``
+  (``agent_runtime.models``).
+* ``test_the_path_helper_is_gone`` -> ``ATTR`` row ``repo_bundle_path``
+  (``agent_runtime.paths``).
+
+The registry also carries a repo-wide ``CODE`` row for ``RepoBundleStore``, so
+the class name is now banned across seven production packages rather than the
+three scanned here.
+
+WHY THE SURVIVORS STAYED:
+
+* ``test_no_production_module_names_the_store_in_code`` — its subject is not the
+  NAME, it is the IMPORT FORMS (``from .repo_bundles``,
+  ``from agent_runtime.repo_bundles``, ``import repo_bundles``). ``find_spec``
+  returning ``None`` says a module cannot be found; it says nothing about a
+  production file that still writes the import and would fail at runtime. Same
+  reasoning as the S49/S50 import-graph gates. ``test_the_scan_above_is_not_vacuous``
+  is that scan's own anti-vacuity proof and stays with it.
+* Everything under "The wire" — ``migration_status()["counts"]``, the frame's
+  two ``counts`` maps and its contract version, the EXACT surviving key-set, the
+  ``serve._FINGERPRINT_STORE_DIRS`` tuple membership (both the removal and the
+  four KEEPs), and the ``checkpoint.ENTITY_CLASS_NAMES`` row plus its deliberate
+  ``runtime_instances`` counter-example. Produced dicts and exact key sets are
+  named in the registry's docstring as deliberately NOT rows.
+* ``test_the_two_directory_helpers_deliberately_survive`` — a KEEP, plus the
+  wire from ``bundle_promotion_record_path`` that justifies it.
 """
 
 from __future__ import annotations
 
-import importlib
 import inspect
 import pathlib
 
-import pytest
-
-from agent_runtime import checkpoint, migrations, models, paths, snapshot
+from agent_runtime import checkpoint, migrations, paths, snapshot
 from hermes_cli.harness_parts import serve
 
 
@@ -81,20 +115,6 @@ def _production_source() -> str:
         for path in (REPO_ROOT / package).rglob("*.py"):
             chunks.append(path.read_text(encoding="utf-8", errors="ignore"))
     return "\n".join(chunks)
-
-
-def test_the_module_is_gone():
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("agent_runtime.repo_bundles")
-    assert not (REPO_ROOT / "agent_runtime" / "repo_bundles.py").exists()
-
-
-def test_the_model_is_gone():
-    assert not hasattr(models, "RepoBundle")
-
-
-def test_the_path_helper_is_gone():
-    assert not hasattr(paths, "repo_bundle_path")
 
 
 def test_the_two_directory_helpers_deliberately_survive():

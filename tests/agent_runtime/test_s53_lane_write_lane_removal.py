@@ -40,6 +40,43 @@ mission lane went, and this one outlived them only because
 ``mark_terminal_for_task`` was still standing. None of the four was ever in
 ``events.OPERATOR_SUMMARY_EVENT_TYPES``, so unlike S52 there is no summary arm
 to retire alongside.
+
+-----------------------------------------------------------------------------
+MIGRATED TO ``test_tombstone_registry.py`` (2026-08-01)
+-----------------------------------------------------------------------------
+
+Three pure-ABSENCE cases left this file:
+
+* ``test_every_lane_writer_is_gone`` -> nine ``CLASS_ATTR`` rows on
+  ``runtime_instances.GoalRuntimeInstanceStore``. The registry carries TWO MORE
+  than ``REMOVED_STORE_METHODS`` did (``active_foreground``,
+  ``park_foreground_except``), so the migration widened the pin.
+  ``REMOVED_STORE_METHODS`` went with the case.
+* ``test_the_orphaned_module_level_names_are_gone`` -> five ``ATTR`` rows scoped
+  to ``agent_runtime.runtime_instances`` (``LANE_STATES``,
+  ``_ALLOWED_TRANSITIONS``, ``TERMINAL_STATE``, ``_safe_reason``,
+  ``_safe_token``). ``REMOVED_MODULE_NAMES`` went with it.
+* ``test_the_four_contracts_are_deregistered`` -> four ``EVENT`` rows.
+
+WHY THE SURVIVORS STAYED. Everything left is either the READ side proving it
+still works, a wire pin, or a set-level property:
+
+* ``seed_lane_row`` is EXPORTED — ``test_s21_hollow_seam_ring`` imports it, and
+  it is the only way any test can mint a persisted lane now that every writer is
+  gone. It is not migratable at all.
+* ``test_the_read_path_still_projects_a_persisted_lane`` /
+  ``test_status_still_projects_lanes_off_the_surviving_read_path`` — behaviour
+  against real on-disk state and the emitted ``harness status`` frame, including
+  the S56 retarget (``status["lanes"]`` gone, ``runtime_instances["lanes"]``
+  kept).
+* ``test_the_three_state_constants_the_read_path_uses_survive`` and
+  ``test_the_read_side_survives_whole`` — KEEPs.
+* ``test_the_foreground_runtime_family_is_now_empty`` — a PREFIX property
+  (``lane.*`` and ``foreground_runtime.*`` are both empty families). A list of
+  rows cannot state that about a type nobody has invented yet.
+* The APPEND refusal, ``test_historical_rows_still_read_back``,
+  ``test_no_operator_summary_arm_went_missing`` and the delta-vs-S15 count pin —
+  the same non-migratable set S44/S49/S52 keep.
 """
 
 from __future__ import annotations
@@ -64,26 +101,6 @@ RETIRED_EVENT_TYPES = (
     "lane.transitioned",
     "lane.transition_rejected",
     "foreground_runtime.closed",
-)
-
-#: Every write-lane name that left the store.
-REMOVED_STORE_METHODS = (
-    "create_lane",
-    "transition",
-    "park_lane",
-    "resume_lane",
-    "park_open_task",
-    "mark_terminal_for_task",
-    "save",
-)
-
-#: Module-level names that went with them.
-REMOVED_MODULE_NAMES = (
-    "LANE_STATES",
-    "_ALLOWED_TRANSITIONS",
-    "TERMINAL_STATE",
-    "_safe_reason",
-    "_safe_token",
 )
 
 
@@ -123,14 +140,6 @@ def seed_lane_row(
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_json_write(path, to_jsonable(instance), indent=2, sort_keys=True)
     return instance
-
-
-def test_every_lane_writer_is_gone():
-    assert [name for name in REMOVED_STORE_METHODS if hasattr(GoalRuntimeInstanceStore, name)] == []
-
-
-def test_the_orphaned_module_level_names_are_gone():
-    assert [name for name in REMOVED_MODULE_NAMES if hasattr(runtime_instances, name)] == []
 
 
 def test_the_three_state_constants_the_read_path_uses_survive():
@@ -192,12 +201,6 @@ def test_status_still_projects_lanes_off_the_surviving_read_path(isolate_agent_r
     # retargeted read so the pin cannot pass against a status that lost both.
     assert "lanes" not in data
     assert [row["lane_id"] for row in data["runtime_instances"]["lanes"]] == ["goalrt_s53status"]
-
-
-def test_the_four_contracts_are_deregistered():
-    catalog = event_catalog()
-    assert [name for name in RETIRED_EVENT_TYPES if name in catalog] == []
-    assert [name for name in RETIRED_EVENT_TYPES if name in ALLOWED_EVENT_TYPES] == []
 
 
 def test_the_foreground_runtime_family_is_now_empty():

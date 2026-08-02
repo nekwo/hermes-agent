@@ -53,6 +53,39 @@ The two new snapshot seams (`board_summary_row`, `office_summary_row`) are
 extractions of `_boards_summary` / `_offices_summary` loop bodies, not new
 lanes; the tests below assert the loops still route through them, so the
 extraction cannot fork into the very thing it retired.
+
+-----------------------------------------------------------------------------
+MIGRATED TO ``test_tombstone_registry.py`` (2026-08-01)
+-----------------------------------------------------------------------------
+
+ONE case left this file: ``test_the_retired_name_is_gone_from_the_harness_scope``
+and its ``REMOVED_HARNESS_NAMES`` tuple, now three ``ATTR`` rows scoped to
+``hermes_cli.harness`` (``_office_item_row``, ``read_realm_sync_sidecar``,
+``exact_scoped_instance_ids``). The scope is unchanged and the mechanism is the
+same ``hasattr`` on the post-exec namespace — the S41 rule — so nothing moved
+except the address.
+
+WHY EVERYTHING ELSE STAYED, and this is the important half: the registry can
+express "this name is absent from production code", but NOT "this name is absent
+from the body of THIS function while present elsewhere". That is what every
+surviving case here asserts, and the whole point of the S48 cut:
+
+* ``RETIRED_DERIVATIONS`` — each fragment (``card.title``, ``realm.workspace_ids``
+  …) is LIVE in the snapshot builder. A repo-wide row would fail against a
+  correct tree. Function-scoped is the only honest form.
+* ``REQUIRED_DELEGATIONS`` — a POSITIVE assertion (the row must CALL its
+  builder). A removal registry has no positive form; without it a row that
+  stopped projecting anything at all would pass the removal half.
+* ``test_no_cli_row_carries_its_own_masking_or_truncation`` — scoped to six
+  named row functions on purpose, because other harness tiers legitimately DO
+  redact. Repo-wide it would be false.
+* ``_code_without_prose`` + ``test_the_gate_itself_is_not_vacuous`` — the
+  reference anti-vacuity proof this file contributed to the campaign. The
+  registry's ``_code_only`` IS this mechanism; the pin stays where it was
+  written, and the registry carries its own copy of the same proof.
+* The CLI-only field/count characterizations (``test_the_cli_only_fields_are_the_declared_set``,
+  ``test_the_cli_only_count_is_deliberately_kept``) are exact-set pins and
+  documented KEEPs — never absence rows.
 """
 
 from __future__ import annotations
@@ -112,13 +145,6 @@ def test_the_gate_itself_is_not_vacuous():
     assert "doc" not in rendered
     assert "comment" not in rendered
 
-
-#: Names cut from the harness scope entirely (harness.py + the exec'd parts).
-REMOVED_HARNESS_NAMES = (
-    "_office_item_row",
-    "read_realm_sync_sidecar",
-    "exact_scoped_instance_ids",
-)
 
 #: row projection -> the hand-rolled derivations that must no longer appear in
 #: its body. Each is a field the builder now supplies.
@@ -181,13 +207,6 @@ REQUIRED_DELEGATIONS = {
     "_office_actor_row": "_office_actor_summary_row",
     "_office_surface_row": "office_summary_row",
 }
-
-
-@pytest.mark.parametrize("name", REMOVED_HARNESS_NAMES)
-def test_the_retired_name_is_gone_from_the_harness_scope(name: str):
-    import hermes_cli.harness as harness
-
-    assert not hasattr(harness, name)
 
 
 @pytest.mark.parametrize("name,retired", sorted((k, v) for k, v in RETIRED_DERIVATIONS.items()))

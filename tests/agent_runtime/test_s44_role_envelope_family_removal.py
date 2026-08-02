@@ -43,6 +43,38 @@ with them (unlike S25's ``run.opened``).
 Count: 88 -> 82. The absolute count authority stays
 ``tests/agent_runtime/test_s15_event_contract_pruning.SURVIVING_EVENT_COUNT``;
 this file asserts only its own -6 delta so there is one number to maintain.
+
+-----------------------------------------------------------------------------
+MIGRATED TO ``test_tombstone_registry.py`` (2026-08-01)
+-----------------------------------------------------------------------------
+
+Four pure-ABSENCE cases left this file for the data-driven registry, which
+enforces them over a WIDER production scope with one comment- and
+docstring-immune AST scanner instead of this file's hand-rolled ``hasattr``
+loops:
+
+* ``test_the_role_envelope_module_is_gone`` -> registry ``MODULE`` row
+  ``agent_runtime.role_envelopes``.
+* ``test_the_checklist_store_family_is_gone`` -> fourteen registry ``ATTR`` rows
+  scoped to ``agent_runtime.role_checklists`` (the registry carries FOUR MORE
+  than the tuple here did: ``stage_checklist_hud``,
+  ``validate_decision_checklist_payload``,
+  ``sanitize_decision_checklist_payload``,
+  ``apply_decision_checklist_updates``). ``REMOVED_CHECKLIST_NAMES`` went with
+  it.
+* ``test_the_orphaned_path_helpers_are_gone`` -> eight registry ``ATTR`` rows
+  scoped to ``agent_runtime.paths``. ``REMOVED_PATH_HELPERS`` went with it.
+* ``test_the_six_contracts_are_deregistered`` -> six registry ``EVENT`` rows.
+
+WHY THE SURVIVORS STAYED. Every remaining case asserts something a name-scan
+cannot: the surviving validator's REJECTION behaviour and the chokepoint wire
+that reaches it; the APPEND refusal and the "historical rows still read back"
+half of the S36 precedent (the registry checks registration, never the log);
+the ``OPERATOR_SUMMARY_EVENT_TYPES`` / ``checkpoint.ENTITY_CLASS_NAMES``
+key-set pins, which are facts about produced collections; the lookalike KEEP set
+and the ``repo_bundles`` inverted pin; and the delta test's agreement with S15's
+single count authority. ``RETIRED_EVENT_TYPES`` stays because three survivors
+read it.
 """
 
 from __future__ import annotations
@@ -65,44 +97,6 @@ RETIRED_EVENT_TYPES = (
     "role_checklist.created",
     "role_checklist.item_updated",
 )
-
-#: Everything that leaves ``role_checklists`` with the store.
-REMOVED_CHECKLIST_NAMES = (
-    "RoleChecklistStore",
-    "RoleChecklist",
-    "RoleChecklistItem",
-    "checklist_for_task_stage",
-    "checklist_summary",
-    "item_summary",
-    "normalize_role_id",
-    "TaskLike",
-    "_typed_stage_for_checklist",
-    "_promotion_rule",
-    "_template_items",
-    "_item",
-    "_safe_payload",
-    "_dedupe",
-)
-
-#: The path helpers that addressed the two archived store directories.
-REMOVED_PATH_HELPERS = (
-    "role_envelopes_dir",
-    "role_envelopes_task_dir",
-    "role_envelope_path",
-    "role_checklists_dir",
-    "role_checklists_task_dir",
-    "role_checklist_path",
-    "role_checklist_events_dir",
-    "role_checklist_event_path",
-)
-
-
-def test_the_role_envelope_module_is_gone():
-    assert find_spec("agent_runtime.role_envelopes") is None
-
-
-def test_the_checklist_store_family_is_gone():
-    assert [name for name in REMOVED_CHECKLIST_NAMES if hasattr(role_checklists, name)] == []
 
 
 def test_the_one_live_checklist_name_survives_and_still_rejects():
@@ -142,12 +136,6 @@ def test_the_registry_chokepoint_still_reaches_the_validator():
     source = inspect.getsource(validate_payload_keys)
     assert "from .role_checklists import validate_checklist_payload_structure" in source
     assert "validate_checklist_payload_structure(payload)" in source
-
-
-def test_the_six_contracts_are_deregistered():
-    catalog = event_catalog()
-    assert [name for name in RETIRED_EVENT_TYPES if name in catalog] == []
-    assert [name for name in RETIRED_EVENT_TYPES if name in ALLOWED_EVENT_TYPES] == []
 
 
 def test_appending_a_retired_role_event_is_refused():
@@ -205,10 +193,6 @@ def test_the_two_writerless_checkpoint_classes_are_gone():
         for entity in checkpoint.ENTITY_CLASSES
         if entity.name in {"role_envelopes", "role_checklists"}
     ] == []
-
-
-def test_the_orphaned_path_helpers_are_gone():
-    assert [name for name in REMOVED_PATH_HELPERS if hasattr(paths, name)] == []
 
 
 def test_the_lookalike_keep_set_survives():

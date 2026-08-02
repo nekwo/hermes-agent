@@ -36,6 +36,40 @@ audits.
 RED-FIRST: written against the pre-cut tree, where
 ``test_every_field_below_is_gone_from_the_dataclass`` fails naming all 29 and
 ``test_the_unruled_debt_bucket_is_empty`` fails at 29 != 0.
+
+-----------------------------------------------------------------------------
+MIGRATED TO ``test_tombstone_registry.py`` (2026-08-01) — AND WHY ALMOST
+NOTHING HERE COULD GO
+-----------------------------------------------------------------------------
+
+The registry carries a repo-wide ``CODE`` row for TWENTY-EIGHT of the 29 fields.
+**No test function left this file**, and that is a finding rather than an
+omission:
+
+* ``root_node_mode`` is the 29th and is DELIBERATELY NOT a registry ``CODE``
+  row. Sixty other hits in the tree are a ``ContextVar`` and a kwarg of the SAME
+  NAME (``skill_utils``, ``prompt_builder``, ``skills_tool``) that never read the
+  config field, so banning it repo-wide would fail against live code. The
+  registry says so beside its ``S57_FIELD_ONLY`` constant and points here. Every
+  parametrized case below runs over ``REMOVED_FIELDS``, which INCLUDES
+  ``root_node_mode`` — so deleting any of them would drop the only coverage that
+  name has.
+* ``test_every_field_below_is_gone_from_the_dataclass`` is a FIELD-set pin over
+  ``RuntimeConfig`` / ``AgentRuntimeConfig``, not a name scan, and is the pin the
+  registry defers to for ``root_node_mode``.
+* ``test_the_load_plumbing_is_gone_too`` and
+  ``test_no_range_validator_survives_its_field`` are scoped to the bodies of
+  ``config.load_agent_runtime_config`` and ``migrations.validate_runtime_config``
+  — narrower than the registry's repo-wide rows for the other 28, but the only
+  form that can carry the 29th.
+* Everything else is behaviour the registry has no form for: the load-and-ignore
+  proof (a root still setting all 29, plus the nested ``daemon:`` spelling, must
+  LOAD), the emitted-frame wire tests at contract 48, the surviving-scalar KEEP
+  (``lock_acquire_timeout_seconds``, live only through the ``getattr`` STRING
+  form at ``locks.py:133``), the four cross-field validator message pins, the
+  anti-vacuity proof that the validator did not become an empty function, the
+  count pin on the ruled set, and the ``UNRULED_DEBT == {}`` closeout plus the
+  pure-tripwire assertion over S56's gate.
 """
 
 from __future__ import annotations

@@ -33,24 +33,93 @@ the same commit as their emitters, because S55's gate asserts every registered
 type HAS an emitter — splitting them would have turned the cut red instead of
 letting it land silently. ``events.OPERATOR_SUMMARY_EVENT_TYPES`` never named
 one of the ten, so unlike S52 there is no summary arm to retire alongside.
+
+-----------------------------------------------------------------------------
+MIGRATED TO ``test_tombstone_registry.py`` (2026-08-01)
+-----------------------------------------------------------------------------
+
+Eight pure-ABSENCE cases left this file. Everything below the "The wire" banner
+stayed, in full:
+
+* ``test_the_worker_session_module_is_gone`` -> ``MODULE`` row
+  ``agent_runtime.worker_sessions`` (the registry row also carries the guarded
+  sub-step's method note about ``paths.store_root()``).
+* ``test_the_worker_session_model_is_gone`` -> ``ATTR`` row ``WorkerSession``
+  (``agent_runtime.models``).
+* ``test_the_orphaned_path_helpers_are_gone`` -> four ``ATTR`` rows
+  (``agent_runtime.paths``).
+* ``test_the_worker_session_lock_is_gone`` -> ``ATTR`` row
+  ``worker_session_lock`` (``agent_runtime.locks``).
+* ``test_the_worker_derived_surface_is_gone`` -> six ``ATTR`` rows
+  (``agent_runtime.persona_assignments``); the two roster-gate names ALSO carry
+  repo-wide ``CODE`` rows.
+* ``test_the_worker_derived_store_methods_are_gone`` -> three ``CLASS_ATTR``
+  rows on ``persona_assignments.PersonaInstanceStore``.
+* ``test_the_constant_only_repo_bundle_projections_are_gone`` -> the S56
+  ``CODE`` rows for the four constant-only summaries plus
+  ``REPO_BUNDLE_DELIVERY_CONTRACT`` / ``REPO_BUNDLE_CHECKOUT_STATUS``, and the
+  S57 ``MODULE`` row for the module they lived in. The registry matches RENDERED
+  code, so it also catches a rebirth that is not spelled ``def name(``.
+* ``test_the_production_envelope_is_gone`` -> the S49 ``MODULE`` row
+  ``agent_runtime.production_envelope`` + the S56 ``CODE`` row
+  ``_swarm_budget_summary``. **Its finding is preserved here rather than lost
+  with the case**: the envelope was DELETED, not reworded, because every
+  ``controls`` entry was hand-written prose with no executable backing and
+  several were FALSE against this tree — H6's "worker.pause and worker.resume
+  capabilities are registered" (only ``worker.resume`` was ever registered, and
+  both verbs' implementations went with the write lane), H6's "daemon stop/kill
+  paths" and H8/H9's ticker and daemon-queue claims (the Mission Daemon was
+  retired), H8's "role envelopes ... are file-backed" (S44 deleted that store),
+  H9's "repo bundle queueing gates dependent handoffs" (S52 deleted every
+  writer), and H7/H9's swarm-budget arms (the enforcement never existed). The
+  same reversal is still asserted as an INVERTED pin in
+  ``test_s49_operator_control_removal``.
+
+WHY THE SURVIVORS STAYED:
+
+* **The whole wire section (contract 47).** The contract-version FLOOR (the
+  current value has one authority,
+  ``test_s47_wire_constant_field_removal.CURRENT_CONTRACT_VERSION``), the four
+  PARAMETER-absence checks over ``build_snapshot`` /
+  ``_build_snapshot_uncoalesced`` / ``build_status`` / ``build_observability`` /
+  ``build_dirty_state``, the observability and dirty-state ENVELOPE shapes, the
+  ``build_status`` wire-key scan, and the ``runtime_instances["lanes"]`` KEEP.
+  The registry's own docstring names parameter absence and wire-key absence as
+  deliberately NOT rows.
+* ``test_the_persona_instance_worker_field_is_gone`` — a
+  ``__dataclass_fields__`` key-set pin.
+* ``test_every_worker_session_contract_is_de_registered`` — a PREFIX property
+  over the whole catalog, which twelve individual ``EVENT`` rows cannot state
+  about a thirteenth type nobody has invented yet. Same for
+  ``test_no_worker_session_type_was_an_operator_summary_type``.
+* ``test_the_event_count_delta_is_ten`` — agreement with S15's single authority.
+* The checkpoint ``ENTITY_CLASS_NAMES`` pins (both the removals and the
+  deliberate ``runtime_instances`` KEEP) — membership in a produced collection.
+* ``test_the_worker_session_state_enum_survives...``,
+  ``test_the_derivation_is_now_a_worker_free_ensure_pass``,
+  ``test_chat_busy_error_carries_only_the_run_binding``,
+  ``test_the_surviving_chat_guard_is_the_run_arm`` — KEEPs and signature pins.
+* ``test_the_busy_reason_vocabulary_lost_its_worker_arm`` — the ``ATTR`` half is
+  a registry row, but the ``__all__`` half is not: a name exported and NOT
+  defined is its own defect, so the case stays whole.
+* ``test_a_stale_row_still_carrying_the_removed_field_cannot_resurrect_a_reader``
+  — a load-and-ignore behaviour proof (the s53 precedent).
+* ``test_the_repo_bundle_store_read_side_went_at_s57`` — an INVERTED pin
+  recording that S56's deliberate KEEP was correct for exactly one commit.
 """
 
 from __future__ import annotations
 
 import importlib
 import inspect
-import pathlib
-from importlib.util import find_spec
 
 import pytest
 
 from agent_runtime import (
     checkpoint,
     dirty_state,
-    locks,
     models,
     observability,
-    paths,
     persona_assignments,
     persona_profile_binding,
     snapshot,
@@ -66,14 +135,6 @@ from agent_runtime.persona_assignments import PersonaInstanceStore
 # --------------------------------------------------------------------------
 
 
-def test_the_worker_session_module_is_gone():
-    assert find_spec("agent_runtime.worker_sessions") is None
-
-
-def test_the_worker_session_model_is_gone():
-    assert not hasattr(models, "WorkerSession")
-
-
 def test_the_worker_session_state_enum_survives_because_persona_instances_use_it():
     """The STATE vocabulary is not the store. ``PersonaInstance.state`` is typed
     on it, so cutting it would be a different (and wrong) change."""
@@ -86,23 +147,6 @@ def test_the_worker_session_state_enum_survives_because_persona_instances_use_it
 
 def test_the_persona_instance_worker_field_is_gone():
     assert "active_worker_session_id" not in models.PersonaInstance.__dataclass_fields__
-
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        "worker_sessions_dir",
-        "worker_session_path",
-        "worker_context_dir",
-        "proof_sandbox_root",
-    ],
-)
-def test_the_orphaned_path_helpers_are_gone(name):
-    assert not hasattr(paths, name)
-
-
-def test_the_worker_session_lock_is_gone():
-    assert not hasattr(locks, "worker_session_lock")
 
 
 def test_the_writer_less_checkpoint_rows_are_gone():
@@ -145,26 +189,6 @@ def test_the_event_count_delta_is_ten():
 # --------------------------------------------------------------------------
 # The worker-derived persona-instance surface
 # --------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        "ACTIVE_PERSONA_WORKER_STATES",
-        "_worker_carries_live_binding",
-        "_live_chat_bindings",
-        "_terminate_live_chat_bindings",
-        "persona_instance_runtime_enabled",
-        "persona_assignment_store_enabled",
-    ],
-)
-def test_the_worker_derived_surface_is_gone(name):
-    assert not hasattr(persona_assignments, name)
-
-
-@pytest.mark.parametrize("name", ["derive_from_workers", "update_from_worker", "_goal_id_for_worker"])
-def test_the_worker_derived_store_methods_are_gone(name):
-    assert not hasattr(PersonaInstanceStore, name)
 
 
 def test_the_derivation_is_now_a_worker_free_ensure_pass():
@@ -266,33 +290,6 @@ def test_the_dirty_state_envelope_dropped_every_worker_row():
         assert key not in runtime
 
 
-@pytest.mark.parametrize(
-    "name",
-    [
-        "repo_bundle_summary",
-        "repo_bundle_delivery_summary",
-        "bundle_queue_summary",
-        "repo_lock_summary",
-        "REPO_BUNDLE_DELIVERY_CONTRACT",
-        "REPO_BUNDLE_CHECKOUT_STATUS",
-    ],
-)
-def test_the_constant_only_repo_bundle_projections_are_gone(name):
-    """doc 19 filed ``repo_lock_summary`` as a wire that could only ever report
-    ``{"lock_count": 0, "locks": []}`` after S52 deleted both lock writers. The
-    other three had the same shape for the same reason. ``status.py`` was the
-    sole caller of all four.
-
-    S57 deleted the MODULE they lived in, so the per-name absence check becomes a
-    module-absence check plus a repo-wide name check — the second half matters
-    because a projection could otherwise be reborn in ``status.py`` itself."""
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("agent_runtime.repo_bundles")
-    root = pathlib.Path(__file__).resolve().parents[2] / "agent_runtime"
-    blob = "\n".join(p.read_text(encoding="utf-8", errors="ignore") for p in root.rglob("*.py"))
-    assert f"def {name}(" not in blob, name
-
-
 def test_the_repo_bundle_store_read_side_went_at_s57():
     """INVERTED at S57 (was ``test_the_repo_bundle_store_read_side_survives``).
 
@@ -305,21 +302,6 @@ def test_the_repo_bundle_store_read_side_went_at_s57():
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("agent_runtime.repo_bundles")
     assert not hasattr(models, "RepoBundle")
-
-
-def test_the_production_envelope_is_gone():
-    """Deleted, not reworded. Every ``controls`` entry was hand-written prose
-    with no executable backing, and several were FALSE against this tree: H6's
-    "worker.pause and worker.resume capabilities are registered" (only
-    ``worker.resume`` was ever registered, and both verbs' implementations went
-    with the write lane), H6's "daemon stop/kill paths" and H8/H9's ticker and
-    daemon-queue claims (the Mission Daemon was retired), H8's "role envelopes
-    ... are file-backed" (S44 deleted that store), H9's "repo bundle queueing
-    gates dependent handoffs" (S52 deleted every writer), and H7/H9's swarm
-    budget arms (the enforcement never existed). What remained after the config
-    cuts was prose keyed on flags that no longer exist."""
-    assert find_spec("agent_runtime.production_envelope") is None
-    assert not hasattr(status, "_swarm_budget_summary")
 
 
 def test_the_status_frame_dropped_every_constant_wire_row():

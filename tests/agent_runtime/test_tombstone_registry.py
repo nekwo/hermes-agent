@@ -124,10 +124,16 @@ HERMES_ROOT = Path(__file__).resolve().parents[2]
 
 #: Production packages every row is enforced over unless it narrows the scope.
 #:
-#: Chosen as the widest tuple any migrated row used, so consolidation could only
-#: WIDEN protection. ``tests`` is excluded on purpose (S55's rule: a symbol kept
-#: alive only by the test written to exercise it is a closed loop, not coverage)
-#: and so is this file, which names every banned symbol by definition.
+#: This is S55's tuple — the WIDEST any migrated row used — plus the repo-root
+#: modules, so consolidation could only widen protection and never narrow it.
+#: Picking a narrower tuple was a real hazard, not a hypothetical: S40's rows
+#: were gated over every ``.py`` in the repo, so a six-package tuple would have
+#: silently dropped ``cron`` / ``mobile_core`` / ``providers`` / ``tui_gateway``
+#: / ``apps`` and the root modules from that row's reach.
+#:
+#: ``tests`` is excluded on purpose (S55's rule: a symbol kept alive only by the
+#: test written to exercise it is a closed loop, not coverage) and so is this
+#: file, which names every banned symbol by definition.
 PRODUCTION_PACKAGES = (
     "agent_runtime",
     "hermes_cli",
@@ -136,6 +142,12 @@ PRODUCTION_PACKAGES = (
     "acp_adapter",
     "gateway",
     "scripts",
+    "cron",
+    "mobile_core",
+    "providers",
+    "tui_gateway",
+    "apps",
+    ".",  # repo-root modules (cli.py, hermes_state*.py, …), non-recursive
 )
 
 _SKIP_DIRS = {"__pycache__", ".venv", "venvs", "node_modules", ".git"}
@@ -592,6 +604,20 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "the loader for a config block nothing governs",
         "_role_envelope_config",
         scope=("agent_runtime.config",),
+    ),
+    *rows(
+        "s47",
+        "d88ea8b55",
+        Form.CODE,
+        'the config KEY itself. S47 gated it as THREE separate source SHAPES '
+        'scoped to two modules — `raw.get("role_envelope")` and '
+        '`role_envelope=` in config.py, `getattr(cfg, "role_envelope"` in '
+        'migrations.py. One name row subsumes all three and widens them '
+        'repo-wide, which the text scanner could not do: `role_envelope` still '
+        'appears in SIX production files today, every one of them a comment '
+        'recording its own retirement. By prefix it also catches the S44 wire '
+        'key `role_envelopes` and the eight `role_envelope*` path helpers',
+        "role_envelope",
     ),
     *rows(
         "s47",
@@ -1236,8 +1262,19 @@ def _code_only(source: str) -> str:
 
 
 def _production_files(packages: tuple[str, ...]) -> list[Path]:
+    """Every production ``.py`` in scope.
+
+    ``"."`` means the repo-root modules and is walked NON-recursively on
+    purpose: recursing from the root would pull in ``tests/``, ``node_modules``,
+    the venvs and the whole docs tree, and a gate whose scope is "everything"
+    is a gate that will be narrowed by the first false positive.
+    """
+
     files: list[Path] = []
     for package in packages:
+        if package == ".":
+            files.extend(sorted(HERMES_ROOT.glob("*.py")))
+            continue
         root = HERMES_ROOT / package.replace(".", "/")
         if not root.exists():
             continue
@@ -1443,3 +1480,34 @@ def test_tombstoned_path_does_not_exist(row: Tombstone):
 def test_tombstoned_name_is_absent_from_production_code(row: Tombstone):
     offenders = code_offenders(row)
     assert offenders == [], f"{row.label} reappeared in {offenders}: {row.reason}"
+
+
+#: S40 gated its two names in MARKDOWN too, on CODE FORMS ONLY — a doc may name
+#: a retired renderer (the removal log has to be writable) but may not carry a
+#: pasteable call or import of it. Carried here verbatim so deleting the s40
+#: file loses nothing; the AST scanner cannot help with prose, so this half
+#: stays a form gate, which is honest for exactly the same reason s40's was.
+DOC_CODE_FORMS = (
+    "def render_objective",
+    "render_objective(",
+    "import objective_templates",
+    "from .objective_templates",
+    "from agent_runtime.objective_templates",
+    "objective_templates.render",
+)
+
+
+def test_no_doc_carries_a_pasteable_call_to_a_retired_renderer():
+    offenders: list[str] = []
+    docs = [
+        path
+        for path in sorted((HERMES_ROOT / "docs").rglob("*.md"))
+        if not any(part in _SKIP_DIRS for part in path.parts)
+    ]
+    assert len(docs) > 10, "the doc scan found nothing — the gate would be vacuous"
+    for path in docs:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        for form in DOC_CODE_FORMS:
+            if form in text:
+                offenders.append(f"{path.relative_to(HERMES_ROOT)}: {form}")
+    assert offenders == []

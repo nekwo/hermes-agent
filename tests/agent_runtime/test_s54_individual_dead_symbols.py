@@ -56,6 +56,42 @@ described where it POINTED, never that anything called it.
 
 No event contract moves at S54: the wave's contract deltas all belong to
 S49/S52/S53. ``event_catalog()`` stays at 68 through this cut.
+
+-----------------------------------------------------------------------------
+MIGRATED TO ``test_tombstone_registry.py`` (2026-08-01)
+-----------------------------------------------------------------------------
+
+Two pure-ABSENCE cases left this file:
+
+* ``test_the_dead_symbols_are_gone`` -> the registry's whole ``-- S54 --``
+  section: every name in ``REMOVED`` is now an ``ATTR`` row carrying its own
+  module scope and a per-cluster reason. The registry also carries
+  ``events._safe_int``, which this file's table had dropped.
+* ``test_the_harness_part_helper_is_gone`` -> the S42 ``ATTR`` row
+  ``_archived_task_summary`` scoped to ``hermes_cli.harness``. That is the
+  honest gate for an exec'd part (the S41 rule this case's own docstring cites),
+  and it retires the comment-subtraction hack the source half needed —
+  ``.replace("# S54 removed ...", "")`` is exactly the self-flagging class the
+  registry's AST scanner exists to end.
+
+``REMOVED`` itself STAYS, and is no longer an absence table: it is the module
+list ``test_every_touched_module_still_imports`` walks, which is the assertion
+that the cut left every touched module importable.
+
+WHY THE SURVIVORS STAYED — this file is mostly KEEPs and refuted claims, none of
+which a removal registry can express:
+
+* ``test_the_live_neighbours_survive`` (``KEPT``) is the POSITIVE half; a
+  tombstone table has no positive form.
+* ``test_the_repo_context_worktree_lane_was_NOT_cut`` and
+  ``test_the_delivery_directive_janitor_still_builds_real_worktrees`` pin the
+  scout claim that DIED, including the wire from the janitor suite to the kept
+  constructor.
+* ``test_the_kept_incident_constant_is_addressed_by_value_somewhere_live``
+  records why ``incidents.MODEL_INVALID_OUTPUT`` is deliberately NOT a
+  tombstone — its value is live as a bare literal in ``observability.py``.
+* ``test_s54_moved_no_event_contract`` is a count pin against S15's single
+  authority.
 """
 
 from __future__ import annotations
@@ -65,7 +101,10 @@ import importlib
 import pytest
 
 
-#: module -> the names that must no longer exist on it.
+#: module -> the names S54 removed from it. The ABSENCE assertion moved to
+#: ``test_tombstone_registry`` (see the header); this table survives as the
+#: module set ``test_every_touched_module_still_imports`` walks, and as the
+#: wave's written record of which name left which module.
 REMOVED = {
     "agent_runtime.board_order": ("needs_rebalance",),
     "agent_runtime.checkpoint": ("discover_classes",),
@@ -133,30 +172,10 @@ KEPT = {
 }
 
 
-@pytest.mark.parametrize("dotted", sorted(REMOVED))
-def test_the_dead_symbols_are_gone(dotted: str):
-    module = importlib.import_module(dotted)
-    assert [name for name in REMOVED[dotted] if hasattr(module, name)] == []
-
-
 @pytest.mark.parametrize("dotted", sorted(KEPT))
 def test_the_live_neighbours_survive(dotted: str):
     module = importlib.import_module(dotted)
     assert [name for name in KEPT[dotted] if not hasattr(module, name)] == []
-
-
-def test_the_harness_part_helper_is_gone():
-    """``runtime_commands`` is exec'd into harness globals, so absence on the
-    module object is the honest gate (the S41 rule)."""
-
-    import inspect
-
-    from hermes_cli.harness_parts import runtime_commands
-
-    assert not hasattr(runtime_commands, "_archived_task_summary")
-    assert "_archived_task_summary" not in inspect.getsource(runtime_commands).replace(
-        "# S54 removed ``_archived_task_summary``", ""
-    )
 
 
 def test_the_repo_context_worktree_lane_was_NOT_cut():

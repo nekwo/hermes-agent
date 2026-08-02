@@ -51,6 +51,55 @@ to take the rest:
 The tests deleted with the lane are named in ``REMOVED_TESTS`` and asserted
 absent, never silently dropped — the s41-s45 precedent: a witness that quietly
 loses its subject hides a reversal; one that asserts absence records it.
+
+=============================================================================
+MIGRATED to ``tests/agent_runtime/test_tombstone_registry.py`` (2026-08-01)
+=============================================================================
+
+Two pure-absence pins moved, with their tables:
+
+* ``ProjectorResult`` / ``LEASE_TTL_SECONDS`` — ``Form.ATTR`` rows scoped to
+  ``agent_runtime.projector`` (was ``REMOVED_PROJECTOR_NAMES``).
+* ``Projector.apply_pending`` / ``.acquire_lease`` / ``._count_pending`` —
+  ``Form.CLASS_ATTR`` rows (was ``REMOVED_PROJECTOR_METHODS``). The registry
+  resolves the owner class and asserts ``not hasattr``, which is what this file
+  did.
+
+The registry also carries the four repo-wide ``Form.CODE`` bans this lane needs
+(``ProjectorResult``, ``projector_lease``, ``LEASE_TTL_SECONDS``,
+``SLO_INCREMENTAL_APPLY_MS``) — and its scanner is the AST re-render that S48
+proved correct, so it is docstring- and comment-immune by construction rather
+than by this file's local ``_code_without_prose`` helper.
+
+EVERYTHING ELSE STAYED, and none of it is expressible as a row:
+
+* ``test_the_projector_no_longer_takes_a_lease`` also bans ``monotonic`` and the
+  bare ``LEASE`` prefix INSIDE ``projector.py`` only. Neither is a repo-wide
+  name — ``monotonic`` is live stdlib elsewhere — so the claim is module-scoped
+  by nature.
+* ``test_the_projector_no_longer_tails_the_event_log`` is half source-scan and
+  half PARAMETER absence (``event_log`` not in ``Projector.__init__``); a
+  signature fact is checked by calling, never by a name scan.
+* ``test_no_surviving_module_re_grows_the_lane`` gates ``def apply_pending`` and
+  ``.apply_pending()`` — deliberately NOT registry rows, because the bare name
+  ``apply_pending`` is live in
+  ``agent.agent_runtime_helpers.apply_pending_steer_to_tool_results`` and a
+  repo-wide row on it would be red against a correct tree. This file states the
+  narrow CALL/DEF form the registry cannot.
+* the KEEP side is untouched: ``full_rebuild`` survives with its exact
+  three-parameter constructor, the whole serve/read path is named one by one,
+  ``EventLog.iter_from_offset`` survives (``_count_pending`` was one caller of
+  four), the rebuild CLI verb still reaches ``.full_rebuild()``, and the
+  lookalike keep set (``CredentialPool.acquire_lease``,
+  ``apply_pending_steer_to_tool_results``) is asserted rather than left to the
+  accident of a gate not matching it.
+* ``REMOVED_TESTS`` STAYS. Its rows assert ``def <name>(`` is absent from a
+  named file under ``tests/`` — and the registry scans PRODUCTION source only
+  (``tests`` is excluded on purpose, per S55's closed-loop rule), so it cannot
+  hold these and never will.
+* ``test_the_incremental_slo_constant_went_with_its_only_assertions`` is the
+  same shape one level down: it reads the ``test_read_model_slo`` module object
+  and pins the surviving ``SLO_FULL_BUILD_MS == 2000`` beside the absence.
 """
 
 from __future__ import annotations
@@ -95,13 +144,6 @@ def _code_without_prose(source: str) -> str:
         kept.append(token.string)
     return "\n".join(kept)
 
-#: Names cut from ``agent_runtime.projector``. Module attributes, so absence is
-#: checked against the imported module, not against a grep.
-REMOVED_PROJECTOR_NAMES = ("ProjectorResult", "LEASE_TTL_SECONDS")
-
-#: Methods cut from ``Projector``.
-REMOVED_PROJECTOR_METHODS = ("apply_pending", "acquire_lease", "_count_pending")
-
 #: Test functions that existed solely to exercise the retired lane, with the
 #: file that held them. Both files survive — each keeps tests that pin the live
 #: full-rebuild path — so this asserts the FUNCTIONS are gone, not the files.
@@ -123,20 +165,6 @@ SURVIVING_TEST_FILES = (
     "tests/agent_runtime/test_read_model_slo.py",
     "tests/agent_runtime/test_read_model_frame_source.py",
 )
-
-
-@pytest.mark.parametrize("name", REMOVED_PROJECTOR_NAMES)
-def test_the_lane_only_module_name_is_gone(name: str):
-    from agent_runtime import projector
-
-    assert not hasattr(projector, name)
-
-
-@pytest.mark.parametrize("name", REMOVED_PROJECTOR_METHODS)
-def test_the_incremental_method_is_gone(name: str):
-    from agent_runtime.projector import Projector
-
-    assert not hasattr(Projector, name)
 
 
 def test_the_projector_no_longer_takes_a_lease():

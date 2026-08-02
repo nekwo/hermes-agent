@@ -39,6 +39,50 @@ the emitted frame. That is the S9/S10 shape — ``docs/agent-runtime-harness/
 16-mission-lane-removal.md:188`` bumped ``contract_version`` 44 -> 45 for the
 same reason and S10 bumped the Launcher's ``kSupportedMissionContractVersion``
 in lockstep. So: **45 -> 46**, with the Launcher lockstep landing beside it.
+
+-----------------------------------------------------------------------------
+MIGRATED TO ``test_tombstone_registry.py`` (2026-08-01)
+-----------------------------------------------------------------------------
+
+Three pure-ABSENCE cases left this file. Each was a NAME scan, and each of the
+three was scanning through ``inspect.getsource``, which returns COMMENTS AND
+DOCSTRINGS — the vacuous/false-positive gate class the registry's shared AST
+scanner retires. The registry re-states them wider and comment-immune:
+
+* ``test_role_envelope_config_class_is_gone`` -> ``ATTR`` row
+  ``RoleEnvelopeConfig`` over ``agent_runtime.runtime_config`` AND
+  ``agent_runtime.config``, plus a repo-wide ``CODE`` row for the same name.
+* ``test_the_config_loader_plumbing_is_gone`` -> ``ATTR`` row
+  ``_role_envelope_config`` (``agent_runtime.config``) + the ``CODE`` row above.
+* ``test_the_five_range_validators_are_gone`` -> five repo-wide ``CODE`` rows,
+  ``role_envelope.max_same_session_continuations`` and its four siblings.
+
+The three SOURCE-SHAPE assertions those two cases also carried —
+``raw.get("role_envelope")`` and ``role_envelope=`` in ``config.py``,
+``getattr(cfg, "role_envelope"`` in ``migrations.py`` — are covered by the bare
+``CODE`` row ``role_envelope``, which bans the name repo-wide instead of in two
+hand-picked modules. That row is only SAFE because the scanner drops comments:
+``role_envelope`` survives in six production files and every one of them is a
+retirement note.
+
+``_TaskLookup`` also has an ``ATTR`` row now; the case that names it here
+(``test_the_two_cross_module_projections_dropped_the_dead_parameter``) STAYS
+because its real subject is the ``tasks=`` PARAMETER, which no name scan can
+honestly assert.
+
+WHY THE SURVIVORS STAYED. This file is the wire file. What is left is the
+emitted frame (``build_snapshot`` field/section presence), the
+``effective_config_summary`` produced dict, the ``RuntimeConfig``
+``__dataclass_fields__`` set, the load-and-ignore proof for a stale operator
+yaml, the AST parameter/keyword/local-binding pins over
+``_workspace_summary`` / ``snapshot_prompt_observability`` /
+``operator_channel_summary`` / ``build_status``, and the import smoke pass. The
+registry's own docstring names parameter absence, wire-key absence and exact
+key-set pins as deliberately NOT rows.
+
+**This file also holds ``CURRENT_CONTRACT_VERSION``** — the only live pin on the
+emitted contract value, floored against by
+``test_s56_worker_session_lane_removal``. It is not migratable and does not move.
 """
 
 from __future__ import annotations
@@ -89,35 +133,10 @@ def _params(module, name: str) -> set[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_role_envelope_config_class_is_gone():
-    assert not hasattr(runtime_config, "RoleEnvelopeConfig")
-    assert not hasattr(config_module, "RoleEnvelopeConfig")
-
-
 def test_runtime_config_no_longer_declares_the_field():
     cfg = runtime_config.RuntimeConfig()
     assert not hasattr(cfg, "role_envelope")
     assert "role_envelope" not in {field.name for field in cfg.__dataclass_fields__.values()}
-
-
-def test_the_config_loader_plumbing_is_gone():
-    assert not hasattr(config_module, "_role_envelope_config")
-    source = inspect.getsource(config_module)
-    for form in ('raw.get("role_envelope")', "role_envelope=", "RoleEnvelopeConfig"):
-        assert form not in source, form
-
-
-def test_the_five_range_validators_are_gone():
-    source = inspect.getsource(migrations)
-    assert 'getattr(cfg, "role_envelope"' not in source
-    for knob in (
-        "max_same_session_continuations",
-        "max_no_progress_repeats",
-        "max_fix_envelopes_per_stage",
-        "max_checklist_items_rendered",
-        "max_foreign_checklist_summaries",
-    ):
-        assert f"role_envelope.{knob}" not in source
 
 
 def test_an_operator_config_that_still_sets_the_block_loads_without_it(tmp_path, monkeypatch):

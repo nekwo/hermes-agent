@@ -44,12 +44,47 @@ there is no summary arm or formatter branch to retire alongside.
 Count: 82 -> 79. The absolute count authority stays
 ``tests/agent_runtime/test_s15_event_contract_pruning.SURVIVING_EVENT_COUNT``;
 this file asserts only its own -3 delta so there is one number to maintain.
+
+-----------------------------------------------------------------------------
+MIGRATED TO ``test_tombstone_registry.py`` (2026-08-01)
+-----------------------------------------------------------------------------
+
+Two pure-ABSENCE cases left this file:
+
+* ``test_the_operator_control_module_is_gone`` -> ``MODULE`` row
+  ``agent_runtime.operator_control``.
+* ``test_the_three_contracts_are_deregistered`` -> three ``EVENT`` rows,
+  ``operator.takeover.requested`` / ``.approval_required`` / ``.applied``.
+
+The registry additionally carries ``CODE`` rows for ``operator_takeover_worker``
+and the ``"worker.takeover"`` capability STRING — a repo-wide guarantee this
+file never made, and the S44/S55 reason literals survive the registry's AST
+round trip.
+
+WHY THE SURVIVORS STAYED:
+
+* ``test_no_production_module_still_imports_it`` — an IMPORT-GRAPH gate, not a
+  name gate. ``find_spec`` returning ``None`` says the module cannot be found;
+  it says nothing about a production file that still writes
+  ``from agent_runtime import operator_control`` and would blow up at runtime.
+  Imports are what resurrect a module, so imports are what this asserts. No
+  registry form expresses it.
+* The APPEND refusal and ``test_historical_rows_still_read_back`` — the S36
+  precedent's two halves. The registry checks REGISTRATION; only these check the
+  log.
+* ``test_no_operator_summary_arm_went_missing`` — a frozenset key-set pin.
+* ``test_the_production_envelope_that_advertised_the_deleted_workflow_is_itself_gone``
+  — an INVERTED pin recording S56's reversal of S49's own rewording, and its
+  second half reads the produced ``build_status`` / ``effective_config_summary``
+  dicts.
+* ``test_run_closed_survives_on_its_remaining_caller`` — a KEEP + a wire pin.
+* ``test_the_registry_lost_exactly_three_contracts`` — agreement with S15's
+  single absolute-count authority.
 """
 
 from __future__ import annotations
 
 import inspect
-from importlib.util import find_spec
 
 import pytest
 
@@ -63,10 +98,6 @@ RETIRED_EVENT_TYPES = (
     "operator.takeover.approval_required",
     "operator.takeover.applied",
 )
-
-
-def test_the_operator_control_module_is_gone():
-    assert find_spec("agent_runtime.operator_control") is None
 
 
 def test_no_production_module_still_imports_it():
@@ -104,12 +135,6 @@ def test_no_production_module_still_imports_it():
                         if "operator_control" in alias.name:
                             offenders.append(f"{path.relative_to(root)}:{node.lineno}")
     assert offenders == [], offenders
-
-
-def test_the_three_contracts_are_deregistered():
-    catalog = event_catalog()
-    assert [name for name in RETIRED_EVENT_TYPES if name in catalog] == []
-    assert [name for name in RETIRED_EVENT_TYPES if name in ALLOWED_EVENT_TYPES] == []
 
 
 def test_appending_a_retired_takeover_event_is_refused():
