@@ -6,7 +6,6 @@ module each kept its own private bookkeeping:
 ===================  ====================================  ================
 mechanism            expression                            enforcement
 ===================  ====================================  ================
-``_ToolBudgetGuard`` raises ``RunBudgetExceeded``           ``trips_run``
 wall checkpoint      steers + drains, turn lands a reply    ``lands_turn``
 wall hard timer      interrupts, raises                     ``trips_run``
 ``McpCallBudget``    refuses ONE call, turn continues       ``refuses_call``
@@ -50,8 +49,6 @@ from agent_runtime.profile_runner import (
     ProfileAgentRunner,
     RunBudgetExceeded,
     WallBudgetCheckpoint,
-    _progress_adapter,
-    _ToolBudgetGuard,
 )
 from agent_runtime.run_budget import (
     UNIT_CALLS,
@@ -109,18 +106,6 @@ class _Agent:
         return self._reply()
 
 
-def _read_search_agent(reads: int):
-    """An agent whose only behavior is N finished read/search tool calls."""
-
-    class _Reader(_Agent):
-        def run_conversation(self, user_message, system_message=None, task_id=None):
-            for _ in range(reads):
-                self.tool_complete_callback("run.tool.finished", "read_file", {}, "{}")
-            return self._reply()
-
-    return _Reader
-
-
 def _sleeping_agent(seconds: float):
     class _Sleeper(_Agent):
         def run_conversation(self, user_message, system_message=None, task_id=None):
@@ -148,7 +133,7 @@ def test_an_untripped_budget_still_accounts_its_headroom():
 
     ledger = RunBudgetLedger()
     ledger.declare(
-        RunBudgetKind.READ_SEARCH,
+        RunBudgetKind.API_CALLS,
         enforcement=RunBudgetEnforcement.TRIPS_RUN,
         unit=UNIT_CALLS,
         limit=6,
@@ -160,7 +145,7 @@ def test_an_untripped_budget_still_accounts_its_headroom():
     assert block["bounded_by"] is None
     assert block["trip_reason"] is None
     assert block["tripped"] == []
-    row = _rows(block)["read_search"]
+    row = _rows(block)["api_calls"]
     assert (row["limit"], row["consumed"], row["remaining"]) == (6, 2, 4)
     assert row["tripped"] is False
     assert row["enforcement"] == "trips_run"
@@ -232,17 +217,17 @@ def test_the_headline_is_the_most_terminal_bound_not_the_first():
 def test_first_trip_order_breaks_a_tie_between_equal_semantics():
     ledger = RunBudgetLedger()
     ledger.trip(
-        RunBudgetKind.READ_SEARCH,
-        RunBudgetTripReason.AGGREGATE_READ_SEARCH_EXCEEDED,
-        enforcement=RunBudgetEnforcement.TRIPS_RUN,
-    )
-    ledger.trip(
         RunBudgetKind.API_CALLS,
         RunBudgetTripReason.API_CALLS_EXCEEDED,
         enforcement=RunBudgetEnforcement.TRIPS_RUN,
     )
+    ledger.trip(
+        RunBudgetKind.TOTAL_TOKENS,
+        RunBudgetTripReason.TOTAL_TOKENS_EXCEEDED,
+        enforcement=RunBudgetEnforcement.TRIPS_RUN,
+    )
 
-    assert ledger.accounting()["bounded_by"] == "read_search"
+    assert ledger.accounting()["bounded_by"] == "api_calls"
 
 
 def test_the_wall_escalates_from_landed_to_killed_and_never_back():
@@ -342,8 +327,8 @@ def test_concurrent_trips_do_not_corrupt_the_ledger():
     def _worker(index: int) -> None:
         barrier.wait()
         ledger.trip(
-            RunBudgetKind.READ_SEARCH,
-            RunBudgetTripReason.AGGREGATE_READ_SEARCH_EXCEEDED,
+            RunBudgetKind.API_CALLS,
+            RunBudgetTripReason.API_CALLS_EXCEEDED,
             consumed=index,
         )
 
@@ -354,74 +339,12 @@ def test_concurrent_trips_do_not_corrupt_the_ledger():
         thread.join()
 
     block = ledger.accounting()
-    assert block["tripped"] == ["read_search"]
+    assert block["tripped"] == ["api_calls"]
     assert len(block["budgets"]) == 1
 
 
 # ---------------------------------------------------------------------------
-# Transition table — mechanism 1: the tool guard (TRIPS the run)
-# ---------------------------------------------------------------------------
-
-
-def test_read_search_untripped_completes_and_shows_headroom():
-    result = _run(
-        _read_search_agent(2),
-        stop_on_repeated_read_search=True,
-        tool_budget_limits={"read_search_limit": 4},
-    )
-
-    assert result.final_response == "ok"
-    block = result.profile_timing["run_budget"]
-    assert block["bounded_by"] is None
-    row = _rows(block)["read_search"]
-    assert (row["limit"], row["consumed"], row["tripped"]) == (4, 2, False)
-
-
-def test_read_search_tripped_raises_the_same_exception_it_always_did():
-    with pytest.raises(RunBudgetExceeded) as excinfo:
-        _run(
-            _read_search_agent(6),
-            stop_on_repeated_read_search=True,
-            tool_budget_limits={"read_search_limit": 3},
-        )
-
-    # Unchanged: type and message text.
-    assert str(excinfo.value) == "aggregate read/search budget exceeded: 3/3"
-    # New: the accounting survives the raised path, where no result exists.
-    block = excinfo.value.run_budget
-    assert block["bounded_by"] == "read_search"
-    assert block["trip_reason"] == "aggregate_read_search_exceeded"
-    assert block["enforcement"] == "trips_run"
-    row = _rows(block)["read_search"]
-    assert (row["limit"], row["consumed"], row["tripped"]) == (3, 3, True)
-
-
-def test_the_repeated_tool_loop_reports_its_own_typed_reason():
-    """Two counters, two reasons — not one blurred `read_search` verdict."""
-
-    guard = _ToolBudgetGuard.from_limits(
-        stop_on_repeated_read_search=True,
-        tool_budget_limits={"read_search_limit": 2},
-    )
-    emit = _progress_adapter(lambda _payload: None, "run.progress", guard=guard)
-
-    emit("tool.started", "read_file", None, {})
-    with pytest.raises(RunBudgetExceeded) as excinfo:
-        emit("tool.started", "read_file", None, {})
-
-    assert str(excinfo.value) == "repeated read/search loop: read_file"
-    assert excinfo.value.run_budget["trip_reason"] == "repeated_read_search_loop"
-    assert guard.tripped_reason == "repeated read/search loop: read_file"
-
-
-def test_a_run_that_does_not_stop_on_loops_declares_no_read_search_bound():
-    result = _run(_read_search_agent(9), stop_on_repeated_read_search=False)
-
-    assert "read_search" not in _rows(result.profile_timing["run_budget"])
-
-
-# ---------------------------------------------------------------------------
-# Transition table — mechanism 2: the wall checkpoint (LANDS the turn)
+# Transition table — wall checkpoint (LANDS the turn)
 # ---------------------------------------------------------------------------
 
 

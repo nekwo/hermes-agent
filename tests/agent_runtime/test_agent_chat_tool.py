@@ -253,12 +253,6 @@ def test_every_configured_role_gets_chat_capabilities(role):
     assert "agent_chat" in _augment_chat_capabilities(sample_persona(role=role), ["search"])
 
 
-def test_profile_chat_fallback_includes_agent_chat():
-    from agent_runtime.personas import PROFILE_CHAT_FALLBACK_TOOLSETS
-
-    assert "agent_chat" in PROFILE_CHAT_FALLBACK_TOOLSETS
-
-
 def test_chat_capability_augmentation_includes_agent_chat():
     from agent_runtime.persona_runtime import _CHAT_CAPABILITY_TOOLSETS
 

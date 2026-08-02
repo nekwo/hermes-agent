@@ -1,7 +1,19 @@
 from __future__ import annotations
 
 from agent_runtime.models import AgentPersona
-from agent_runtime.personas import AgentRole, AutonomyLevel, PROFILE_CHAT_FALLBACK_TOOLSETS, PROFILE_ROLE_SENTINEL
+from agent_runtime.personas import AgentRole, AutonomyLevel, PROFILE_ROLE_SENTINEL
+
+
+SAMPLE_PROFILE_TOOLSETS = [
+    "file",
+    "search",
+    "terminal",
+    "code_execution",
+    "session_search",
+    "skills",
+    "agent_chat",
+    "board",
+]
 
 
 def sample_persona(
@@ -26,7 +38,7 @@ def sample_persona(
         model=None,
         provider=None,
         api_mode="codex_responses",
-        toolsets=list(toolsets if toolsets is not None else PROFILE_CHAT_FALLBACK_TOOLSETS),
+        toolsets=list(toolsets if toolsets is not None else SAMPLE_PROFILE_TOOLSETS),
         system_prompt_path="",
         autonomy=AutonomyLevel.PROPOSE_ONLY.value,
         hermes_profile=hermes_profile,
@@ -65,4 +77,5 @@ def sample_personas() -> list[AgentPersona]:
         skills=["harness-qa-verdict", "launcher-stagec-mcp-screenshot"],
     )
     qa.display_name = "QA Agent"
+    qa.required_mcp_servers = ["launcher_qa"]
     return [neko, dev, backend, qa, sample_persona("base", hermes_profile="base")]

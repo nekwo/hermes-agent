@@ -765,6 +765,68 @@ def test_operator_channel_relationships_follow_custom_instance_graph_without_tra
     assert child["conversation"]["parent_thread_id"] == root["channel_id"]
 
 
+def _graph_instance(instance_id: str, persona_id: str, *, parents=()) -> PersonaInstance:
+    return PersonaInstance(
+        id=instance_id,
+        persona_id=persona_id,
+        role="custom",
+        display_name=persona_id.replace("_", " ").title(),
+        profile_id=None,
+        runtime_root="test-runtime",
+        state=WorkerSessionState.IDLE,
+        mode="configured",
+        steered_by=list(parents),
+        updated_at=now(),
+    )
+
+
+def test_operator_channel_relationships_follow_multi_hop_primary_ancestry():
+    instances = [
+        _graph_instance("personainst_root", "root"),
+        _graph_instance("personainst_middle", "middle", parents=("personainst_root",)),
+        _graph_instance("personainst_leaf", "leaf", parents=("personainst_middle",)),
+    ]
+    by_persona = {
+        row["persona_id"]: row
+        for row in operator_channel_summary(
+            persona_instances=instances,
+            persona_chat_history=[],
+            persona_chat_trace=[],
+        )
+    }
+
+    assert by_persona["leaf"]["conversation"]["root_thread_id"] == by_persona["root"]["channel_id"]
+    assert by_persona["leaf"]["conversation"]["parent_thread_id"] == by_persona["middle"]["channel_id"]
+
+
+def test_operator_channel_missing_parent_degrades_to_standalone():
+    (row,) = operator_channel_summary(
+        persona_instances=[
+            _graph_instance("personainst_leaf", "leaf", parents=("personainst_missing",))
+        ],
+        persona_chat_history=[],
+        persona_chat_trace=[],
+    )
+
+    assert row["conversation"]["root_thread_id"] == row["channel_id"]
+    assert row["conversation"]["parent_thread_id"] is None
+
+
+def test_operator_channel_ancestry_cycle_degrades_every_member_to_standalone():
+    rows = operator_channel_summary(
+        persona_instances=[
+            _graph_instance("personainst_alpha", "alpha", parents=("personainst_beta",)),
+            _graph_instance("personainst_beta", "beta", parents=("personainst_alpha",)),
+        ],
+        persona_chat_history=[],
+        persona_chat_trace=[],
+    )
+
+    for row in rows:
+        assert row["conversation"]["root_thread_id"] == row["channel_id"]
+        assert row["conversation"]["parent_thread_id"] is None
+
+
 def _dev_task_instance(ts) -> PersonaInstance:
     return PersonaInstance(
         id="personainst_dev",

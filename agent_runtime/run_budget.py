@@ -67,7 +67,6 @@ class RunBudgetKind(str, Enum):
     """WHICH bound. One member per mechanism an operator can hit."""
 
     WALL = "wall"
-    READ_SEARCH = "read_search"
     API_CALLS = "api_calls"
     TOTAL_TOKENS = "total_tokens"
     MCP_CALLS = "mcp_calls"
@@ -116,16 +115,10 @@ _ENFORCEMENT_SEVERITY: dict[RunBudgetEnforcement, int] = {
 class RunBudgetTripReason(str, Enum):
     """WHY it tripped. Typed so no downstream reader matches on a message.
 
-    Each member names one concrete exhaustion path, not a category: the two
-    read/search reasons are distinct because they are two different counters
-    (one per-tool repetition, one aggregate), and the two wall reasons are
-    distinct because one lands the turn and the other kills it.
+    Each member names one concrete exhaustion path, not a category. The two
+    wall reasons are distinct because one lands the turn and the other kills it.
     """
 
-    #: Per-tool repetition bound on a read/search tool (``_progress_adapter``).
-    REPEATED_READ_SEARCH_LOOP = "repeated_read_search_loop"
-    #: Aggregate read/search bound without patch/proof progress.
-    AGGREGATE_READ_SEARCH_EXCEEDED = "aggregate_read_search_exceeded"
     #: The graceful checkpoint opened; the turn lands with a final reply.
     WALL_CHECKPOINT_ENGAGED = "wall_checkpoint_engaged"
     #: The last-resort hard wall fired; the run is interrupted.
@@ -373,7 +366,6 @@ class RunBudgetLedger:
 
 _DEFAULT_ENFORCEMENT: dict[RunBudgetKind, RunBudgetEnforcement] = {
     RunBudgetKind.WALL: RunBudgetEnforcement.LANDS_TURN,
-    RunBudgetKind.READ_SEARCH: RunBudgetEnforcement.TRIPS_RUN,
     RunBudgetKind.API_CALLS: RunBudgetEnforcement.TRIPS_RUN,
     RunBudgetKind.TOTAL_TOKENS: RunBudgetEnforcement.TRIPS_RUN,
     RunBudgetKind.MCP_CALLS: RunBudgetEnforcement.REFUSES_CALL,
@@ -381,7 +373,6 @@ _DEFAULT_ENFORCEMENT: dict[RunBudgetKind, RunBudgetEnforcement] = {
 
 _DEFAULT_UNIT: dict[RunBudgetKind, str] = {
     RunBudgetKind.WALL: UNIT_SECONDS,
-    RunBudgetKind.READ_SEARCH: UNIT_CALLS,
     RunBudgetKind.API_CALLS: UNIT_CALLS,
     RunBudgetKind.TOTAL_TOKENS: UNIT_TOKENS,
     RunBudgetKind.MCP_CALLS: UNIT_CALLS,

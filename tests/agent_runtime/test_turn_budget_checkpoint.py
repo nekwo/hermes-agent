@@ -343,9 +343,7 @@ def test_the_tool_start_seam_actually_consults_the_checkpoint():
     agent = _FakeAgent()
     checkpoint = _checkpoint(now)
     checkpoint.bind(agent)
-    guard = _ToolBudgetGuard.from_limits(
-        stop_on_repeated_read_search=False, tool_budget_limits=None
-    )
+    guard = _ToolBudgetGuard()
     guard.wall_checkpoint = checkpoint
     seen: list[dict] = []
     emit = _progress_adapter(seen.append, "run.tool.started", guard=guard)

@@ -518,11 +518,16 @@ def _operator_conversation_relationships(
         root_thread_id = own_channel_id
         cursor = primary_parent_id
         seen = {instance_id}
-        while cursor and cursor not in seen:
+        ancestry_valid = True
+        while cursor:
+            if cursor in seen:
+                ancestry_valid = False
+                break
             seen.add(cursor)
             parent_channel_id = channel_by_instance_id.get(cursor)
             parent = instances_by_id.get(cursor)
             if parent_channel_id is None or parent is None:
+                ancestry_valid = False
                 break
             root_thread_id = parent_channel_id
             next_parents = [
@@ -531,6 +536,9 @@ def _operator_conversation_relationships(
                 if (parent_id := safe_assignment_text(raw, limit=160))
             ]
             cursor = next_parents[0] if next_parents else None
+        if not ancestry_valid:
+            root_thread_id = own_channel_id
+            parent_thread_id = None
         relationships[canonical_id] = (root_thread_id, parent_thread_id)
     return relationships
 

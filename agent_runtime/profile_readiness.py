@@ -477,25 +477,10 @@ def _missing_skill_ids(skill_resolutions: list[dict[str, Any]]) -> list[str]:
 # canonical resolver pair it wrapped is what readiness actually calls.
 
 def _effective_required_mcp_servers(persona, *, task=None, stage=None) -> list[str]:
-    effective = list(getattr(persona, "required_mcp_servers", []) or [])
-    if getattr(persona, "role", "") == "qa" and _visual_proof_required(task, stage) and "launcher_qa" not in effective:
-        effective.append("launcher_qa")
-    return effective
+    """Return only servers declared by the persona/profile authority.
 
+    ``task`` and ``stage`` remain accepted for caller compatibility, but neither
+    may manufacture an MCP requirement from a role label or work description.
+    """
 
-def _visual_proof_required(task, stage=None) -> bool:
-    if getattr(task, "requires_visual_proof", False):
-        return True
-    if getattr(stage, "requires_visual_proof", False):
-        return True
-    text_parts: list[str] = []
-    for value in (
-        getattr(task, "title", None),
-        getattr(task, "description", None),
-        getattr(stage, "title", None),
-        getattr(stage, "objective", None),
-    ):
-        if value:
-            text_parts.append(str(value).lower())
-    haystack = " ".join(text_parts)
-    return any(marker in haystack for marker in ("mission control", "screenshot", "video", "visual", "stage c", "mcp"))
+    return list(getattr(persona, "required_mcp_servers", []) or [])

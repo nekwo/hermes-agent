@@ -7,6 +7,9 @@ and parses them through its real decode + read-model pipeline
 
 - Generated from a **seeded isolated runtime root** (empty store + two
   `state.reconciled` events) — never from a live store.
+- Regenerate with `python scripts/generate_agent_runtime_stream_fixtures.py`;
+  the script calls the current production builders and normalizes only volatile
+  timestamps, timings, and the temporary root spelling.
 - `MANIFEST.sha256` pins the bytes; `test_stream_contract_fixture.py` fails if
   either drifts.
 - `delta_batch.json` pins the W1 coalescing shape (`events[]`,

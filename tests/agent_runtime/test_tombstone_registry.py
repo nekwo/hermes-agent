@@ -820,34 +820,6 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         Form.ATTR,
         "migrated from the pre-registry removal contract; exact scoped "
         "absence remains protected across upstream syncs",
-        'needs_supervisor_slicing',
-        'validate_dev_progress_gate',
-        '_BROAD_TITLE_MARKERS',
-        '_BROAD_DESCRIPTION_MARKERS',
-        '_BACKEND_FIRST_FLAGS',
-        '_BACKEND_SLICE_MARKERS',
-        '_HARNESS_SUPPORT_REPO_MARKERS',
-        '_PROGRESS_OK_DECISIONS',
-        '_BUDGET_PRESSURE_OK_DECISIONS',
-        '_repos_that_require_specialist_slicing',
-        '_is_harness_support_repo',
-        '_has_bounded_specialist_handoff_packet',
-        '_is_backend_first_slice',
-        '_has_empirical_progress',
-        '_has_budget_pressure',
-        '_decision_has_proof_ids',
-        '_validate_failed_proof_reuse',
-        '_dedupe_strings',
-        '_safe_string_list',
-        '_environment_changed',
-        scope=('agent_runtime.dev_discipline',),
-    ),
-    *rows(
-        "s27",
-        "5a1267ef6",
-        Form.ATTR,
-        "migrated from the pre-registry removal contract; exact scoped "
-        "absence remains protected across upstream syncs",
         'COLLAPSED_SIGNAL_TYPES',
         'DecisionProjection',
         'simplified_contract_enabled',
@@ -1243,14 +1215,6 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "individually dead: zero production references at the cut",
         "BACKGROUND_LANE",
         scope=("agent_runtime.runtime_instances",),
-    ),
-    *rows(
-        "s43",
-        "25ea4439a",
-        Form.ATTR,
-        "individually dead: zero production references at the cut",
-        "_relative_runtime_path",
-        scope=("agent_runtime.self_test_evidence",),
     ),
     *rows(
         "s43",
@@ -1804,14 +1768,6 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "90dbe908a",
         Form.ATTR,
         "individually dead at the cut",
-        "self_test_summary",
-        scope=("agent_runtime.self_test_evidence",),
-    ),
-    *rows(
-        "s54",
-        "90dbe908a",
-        Form.ATTR,
-        "individually dead at the cut",
         "promotion_provenance",
         scope=("agent_runtime.skill_promotion",),
     ),
@@ -2235,7 +2191,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     # -- S61 / Round 4 — persona authority + closed-loop read APIs -------
     *rows(
         "s61",
-        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
+        "c4a1fdef5",
         Form.CLASS_ATTR,
         "the free-chat execution island had no production caller; mission_chat_reply is the sole live chat runtime",
         "persona_runtime.GPTPersonaRuntime.chat_reply",
@@ -2243,7 +2199,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
+        "c4a1fdef5",
         Form.ATTR,
         "the free-chat prompt builder and compiled role voice died with the callerless free-chat lane; profile SOUL/config owns behavioral identity",
         "_persona_chat_system_prompt",
@@ -2252,7 +2208,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
+        "c4a1fdef5",
         Form.CODE,
         "compiled Neko/QA/Dev behavioral instructions must not return to persona_runtime; profile SOUL/config is the only behavioral prompt authority",
         "Chief-of-staff energy",
@@ -2262,7 +2218,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
+        "c4a1fdef5",
         Form.ATTR,
         "mission_chat is the only runtime that binds a terminal-envelope scope; the retired mission and free-chat lane vocabulary advertised branches no producer constructed",
         "LANE_MISSION_WORKER",
@@ -2276,7 +2232,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
+        "c4a1fdef5",
         Form.CLASS_ATTR,
         "task-era persona store readers and close helpers were called only by their own tests",
         "persona_assignments.PersonaInstanceStore.list_for_task",
@@ -2289,7 +2245,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
+        "c4a1fdef5",
         Form.CLASS_ATTR,
         "historical runtime-instance task election helpers had no production caller; get/list_all remain the live projection read path",
         "runtime_instances.GoalRuntimeInstanceStore.list_for_task",
@@ -2298,7 +2254,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
+        "c4a1fdef5",
         Form.ATTR,
         "the three decorative runtime-instance states were read only by the callerless task election helper",
         "ACTIVE_STATE",
@@ -2308,7 +2264,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
+        "c4a1fdef5",
         Form.CLASS_ATTR,
         "board convenience readers with no production or test caller",
         "board_store.BoardStore.default_board_for_workspace",
@@ -2317,7 +2273,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
+        "c4a1fdef5",
         Form.CLASS_ATTR,
         "whole-log convenience iterators were test-only; tests now observe the live logical-offset reader",
         "events.EventLog.iter_all",
@@ -2328,7 +2284,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
+        "c4a1fdef5",
         Form.CLASS_ATTR,
         "test-only convenience accessors were reasserted through their live underlying authorities",
         "read_model.ReadModel.integrity_check",
@@ -2338,7 +2294,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
+        "c4a1fdef5",
         Form.ATTR,
         "test-only or compatibility wrappers with no production caller",
         "default_chat_session_id_for_instance",
@@ -2346,7 +2302,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
+        "c4a1fdef5",
         Form.ATTR,
         "test-only or compatibility wrappers with no production caller",
         "diverged_bindings",
@@ -2354,7 +2310,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
+        "c4a1fdef5",
         Form.ATTR,
         "the one-skill queue wrapper had no caller; the live command uses the atomic batch API",
         "queue_skill_for_next_turn",
@@ -2362,7 +2318,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
+        "c4a1fdef5",
         Form.ATTR,
         "the batch-frame selector duplicated the live liveness-aware stream branch and was called only by direct unit tests",
         "select_batch_frame",
@@ -2370,7 +2326,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
+        "c4a1fdef5",
         Form.ATTR,
         "the artifact scanner implementation and its private vocabulary were a test-only closed loop; shared live redaction patterns remain",
         "BasicRedactionScanner",
@@ -2382,7 +2338,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     # -- S62 / Round 4 follow-up — compiled topology residue ------------
     *rows(
         "s62",
-        "cb0a235c0",
+        "f813115c8",
         Form.ATTR,
         "operator conversation ancestry now follows persisted steered_by relationships; no persona id receives synthetic root authority",
         "_mirror_child_assignment_trace_to_roots",
@@ -2394,7 +2350,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s62",
-        "cb0a235c0",
+        "f813115c8",
         Form.CODE,
         "prompt observability and conversation presentation contain no compiled Neko topology or voice fallback",
         "neko_two_dev_default",
@@ -2404,7 +2360,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s62",
-        "cb0a235c0",
+        "f813115c8",
         Form.CODE,
         "a raw profile visibility persona preserves its configured or instance role instead of being coerced to the legacy supervisor role",
         'role="alice_supervisor"',
@@ -2413,7 +2369,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     # -- S63 / Round 4 — operator-ruled contract cleanup ----------------
     *rows(
         "s63",
-        "e6a7424bc",
+        "6502b87f8",
         Form.MODULE,
         "the task progress lane was production-callerless; its telemetry and "
         "self-test evidence islands retired with it",
@@ -2422,7 +2378,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s63",
-        "e6a7424bc",
+        "6502b87f8",
         Form.ATTR,
         "caller-less task-run write surface removed after the operator contract ruling",
         "RunProgressSink",
@@ -2430,7 +2386,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s63",
-        "e6a7424bc",
+        "6502b87f8",
         Form.CLASS_ATTR,
         "caller-less close/cancel writer removed with the run.closed write contract",
         "store.RunStore.close_run",
@@ -2439,7 +2395,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s63",
-        "e6a7424bc",
+        "6502b87f8",
         Form.CLASS_ATTR,
         "profile declarations replaced the ignored role/lane MCP config language",
         "runtime_config.McpAdmissionConfig.roles",
@@ -2447,7 +2403,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s63",
-        "e6a7424bc",
+        "6502b87f8",
         Form.EVENT,
         "registered writers retired; historical rows remain readable and renderable",
         "run.closed",
@@ -2456,12 +2412,51 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s63",
-        "e6a7424bc",
+        "6502b87f8",
         Form.CODE,
         "retired configuration and packet/event vocabulary must not regrow in production",
         "MCP_NOT_ADMITTED_FOR_ROLE",
         "mcp_not_admitted_for_role",
         "self_test_evidence_ids",
+    ),
+    # -- S64 / integrated review — persona authority + inert guard cleanup --
+    *rows(
+        "s64",
+        "6502b87f8",
+        Form.ATTR,
+        "raw profiles no longer receive a compiled privileged toolset fallback",
+        "PROFILE_CHAT_FALLBACK_TOOLSETS",
+        scope=("agent_runtime.personas",),
+    ),
+    *rows(
+        "s64",
+        "6502b87f8",
+        Form.CLASS_ATTR,
+        "the only production AgentRunRequest caller never set the retired read/search guard controls",
+        "profile_runner.AgentRunRequest.stop_on_repeated_read_search",
+        "profile_runner.AgentRunRequest.tool_budget_limits",
+        scope=_AR,
+    ),
+    *rows(
+        "s64",
+        "6502b87f8",
+        Form.ATTR,
+        "the production-disabled read/search guard branch and helpers retired as one closed loop",
+        "_enforce_aggregate_read_search_budget",
+        "_read_search_warning_payload",
+        "_update_guard_progress",
+        "_interrupt_agent_for_budget",
+        scope=("agent_runtime.profile_runner",),
+    ),
+    *rows(
+        "s64",
+        "6502b87f8",
+        Form.CLASS_ATTR,
+        "the read/search budget kind and trip reasons had no producer after the guard retired",
+        "run_budget.RunBudgetKind.READ_SEARCH",
+        "run_budget.RunBudgetTripReason.REPEATED_READ_SEARCH_LOOP",
+        "run_budget.RunBudgetTripReason.AGGREGATE_READ_SEARCH_EXCEEDED",
+        scope=_AR,
     ),
 )
 

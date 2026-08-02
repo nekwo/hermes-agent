@@ -132,10 +132,6 @@ class RunBudgetExceeded(ProfileRunnerError):
 # deadline it can never reach, so it never engages and never arms a timer.
 _NO_WALL_BUDGET_SECONDS = 3650.0 * 24 * 3600
 
-READ_SEARCH_TOOLS = frozenset({"read_file", "search_files", "session_search", "browser_snapshot"})
-PATCH_TOOLS = frozenset({"patch", "apply_patch", "write_file", "edit_file", "file.write", "file.edit"})
-
-
 @dataclass(slots=True)
 class AgentRunRequest:
     profile: str | None
@@ -209,8 +205,6 @@ class AgentRunRequest:
     clarify_callback: Callable[[str, list[str] | None], str] | None = None
     runtime_root: Path | None = None
     workdir: Path | None = None
-    stop_on_repeated_read_search: bool = False
-    tool_budget_limits: dict[str, Any] | None = None
     # Resolved, side-effect-free MCP admission for this run (agent_runtime.
     # mcp_admission.resolve_mcp_admission). Unset on every lane that declares no
     # MCP servers or runs with the admission flag off — which is all of them
@@ -419,15 +413,8 @@ class WallBudgetCheckpoint:
 
 @dataclass(slots=True)
 class _ToolBudgetGuard:
-    stop_on_repeated_read_search: bool = False
-    read_search_limit: int = 6
-    skill_load_limit: int = 2
     repeated_counts: dict[tuple[str, str], int] = field(default_factory=dict)
     warned: set[tuple[str, str]] = field(default_factory=set)
-    aggregate_read_search_count: int = 0
-    has_patch_progress: bool = False
-    tripped_reason: str | None = None
-    interrupt_callback: Callable[[str], None] | None = None
     # Wall-clock checkpoint consulted before each tool execution. Distinct from
     # the tool-count budgets above: those TRIP the run, this one lands it.
     wall_checkpoint: WallBudgetCheckpoint | None = None
@@ -435,65 +422,9 @@ class _ToolBudgetGuard:
     # is made exactly where it was before, then declared here.
     ledger: RunBudgetLedger = field(default_factory=RunBudgetLedger)
 
-    @classmethod
-    def from_limits(
-        cls,
-        *,
-        stop_on_repeated_read_search: bool,
-        tool_budget_limits: dict[str, Any] | None,
-        ledger: RunBudgetLedger | None = None,
-    ):
-        limits = tool_budget_limits or {}
-        guard = cls(
-            stop_on_repeated_read_search=stop_on_repeated_read_search,
-            read_search_limit=_positive_limit(limits.get("read_search_limit"), fallback=6),
-            skill_load_limit=_positive_limit(limits.get("skill_load_limit"), fallback=2),
-            has_patch_progress=bool(limits.get("has_patch_progress")),
-            ledger=ledger or RunBudgetLedger(),
-        )
-        if stop_on_repeated_read_search:
-            # Declared only when the bound is actually enforced: a run that does
-            # not stop on read/search loops is not bounded by one, and a row
-            # claiming otherwise would be a bound that does not exist.
-            guard.ledger.declare(
-                RunBudgetKind.READ_SEARCH,
-                enforcement=RunBudgetEnforcement.TRIPS_RUN,
-                unit=UNIT_CALLS,
-                limit=guard.read_search_limit,
-                consumed_provider=lambda: guard.aggregate_read_search_count,
-            )
-        return guard
-
     @property
     def skill_warning_threshold(self) -> int:
-        return max(3, self.skill_load_limit + 1)
-
-    def set_interrupt_callback(self, callback: Callable[[str], None]) -> None:
-        self.interrupt_callback = callback
-
-    def trip(
-        self,
-        reason: str,
-        *,
-        kind: RunBudgetKind = RunBudgetKind.READ_SEARCH,
-        trip_reason: RunBudgetTripReason = RunBudgetTripReason.AGGREGATE_READ_SEARCH_EXCEEDED,
-    ) -> None:
-        """Trip this run. ``reason`` stays the exception's message, verbatim.
-
-        ``kind`` / ``trip_reason`` are the typed half of the SAME fact, recorded
-        for the accounting block so no downstream reader has to parse the
-        message string to learn which bound fired.
-        """
-
-        if not self.tripped_reason:
-            self.tripped_reason = reason
-            self.ledger.trip(kind, trip_reason, detail=reason)
-        if self.interrupt_callback is None:
-            return
-        try:
-            self.interrupt_callback(reason)
-        except Exception:
-            return
+        return 3
 
 
 def _prepare_resident_persona_chat_agent(agent: Any, candidate: Any) -> None:
@@ -853,11 +784,7 @@ class ProfileAgentRunner:
                     raise
                 runtime = {}
                 timing["runtime_resolve_ms"] = _emit_request_timing(request, "runtime_resolve", runtime_started, status="failed")
-            budget_guard = _ToolBudgetGuard.from_limits(
-                stop_on_repeated_read_search=request.stop_on_repeated_read_search,
-                tool_budget_limits=request.tool_budget_limits,
-                ledger=ledger,
-            )
+            budget_guard = _ToolBudgetGuard(ledger=ledger)
             # Wall-clock checkpoint. Built even when the run carries no wall
             # budget (deadline in the far future ⇒ it never engages) so the
             # tool-start gate below has one unconditional shape. The clock
@@ -1014,7 +941,6 @@ class ProfileAgentRunner:
                         )
             timing["agent_construct_ms"] = _emit_request_timing(request, "agent_construct", construct_started)
             _steer_mcp_admission_notice(agent, request, admission_outcome)
-            budget_guard.set_interrupt_callback(lambda reason: _interrupt_agent_for_budget(agent, reason))
             agent_ready_cleanup = _notify_agent_ready(request, agent)
             max_wall_seconds = _positive_float(request.max_wall_seconds)
             if max_wall_seconds is None:
@@ -1034,12 +960,6 @@ class ProfileAgentRunner:
                     raw_result = agent.run_conversation(**conversation_kwargs)
                     _attach_model_input_observability(raw_result, agent=agent, request=request)
                     timing["conversation_call_ms"] = _emit_request_timing(request, "conversation_call", conversation_started)
-                    if budget_guard.tripped_reason:
-                        raise RunBudgetExceeded(
-                            budget_guard.tripped_reason,
-                            session_id=getattr(agent, "session_id", None),
-                            run_budget=ledger.accounting(),
-                        )
                     timing["run_budget"] = ledger.accounting()
                     return raw_result, agent, timing
                 finally:
@@ -1132,12 +1052,6 @@ class ProfileAgentRunner:
                     f"live run budget exceeded: wall_seconds={max_wall_seconds:g}",
                     session_id=getattr(agent, "session_id", None),
                     wall_budget=wall_checkpoint.summary(),
-                    run_budget=ledger.accounting(),
-                )
-            if budget_guard.tripped_reason:
-                raise RunBudgetExceeded(
-                    budget_guard.tripped_reason,
-                    session_id=getattr(agent, "session_id", None),
                     run_budget=ledger.accounting(),
                 )
             # The checkpoint fired and the turn still landed a reply: hand the
@@ -1366,7 +1280,7 @@ def _emit_budget_pressure_warning(result: AgentRunResult, request: AgentRunReque
                 "severity": "warning",
                 "step": "budget_pressure",
                 "status": "warning",
-                "summary": "Run is approaching the live token budget; stop broad exploration and pivot to proof, QA handoff, or an exact blocker.",
+                "summary": "Run is approaching the live token budget; stop broad exploration and pivot to proof, a bounded handoff, or an exact blocker.",
                 "budget_kind": "total_tokens",
                 "budget_used": total_tokens,
                 "budget_limit": max_total_tokens,
@@ -1384,13 +1298,6 @@ def _validate_workdir(workdir: Path | None) -> None:
     path = Path(workdir).expanduser()
     if not path.is_dir():
         raise ProfileRunnerError("requested agent workdir does not exist or is not a directory")
-
-
-def _interrupt_agent_for_budget(agent: Any, reason: str) -> None:
-    interrupt = getattr(agent, "interrupt", None)
-    if not callable(interrupt):
-        return
-    interrupt(reason)
 
 
 @contextmanager
@@ -1549,17 +1456,12 @@ def _progress_adapter(
     callback: Callable[[dict[str, Any]], None] | None,
     event_type: str,
     *,
-    stop_on_repeated_read_search: bool = False,
-    tool_budget_limits: dict[str, Any] | None = None,
     guard: _ToolBudgetGuard | None = None,
 ):
-    if callback is None and guard is None and not stop_on_repeated_read_search:
+    if callback is None and guard is None:
         return None
     callback = callback or (lambda _payload: None)
-    guard = guard or _ToolBudgetGuard.from_limits(
-        stop_on_repeated_read_search=stop_on_repeated_read_search,
-        tool_budget_limits=tool_budget_limits,
-    )
+    guard = guard or _ToolBudgetGuard()
 
     def emit(*args, **kwargs):
         try:
@@ -1575,8 +1477,6 @@ def _progress_adapter(
             # the NEXT loop iteration from launching more.
             if guard.wall_checkpoint is not None and step == "tool_started":
                 guard.wall_checkpoint.gate()
-            _update_guard_progress(guard, payload)
-            _enforce_aggregate_read_search_budget(guard, callback, tool_name=tool_name)
             if event_type == "run.progress" and tool_name and step in {"tool_started", "tool_finished"}:
                 guard.repeated_counts[key] = guard.repeated_counts.get(key, 0) + 1
                 if tool_name == "skill_view" and guard.repeated_counts[key] >= guard.skill_warning_threshold and key not in guard.warned:
@@ -1589,37 +1489,12 @@ def _progress_adapter(
                             "step": "skill_loading_fanout",
                             "tool_name": tool_name,
                             "status": "warning",
-                            "summary": "Repeated skill_view calls detected; stop loading additional skills and pivot to the single most relevant skill, proof collection, QA handoff, or an exact blocker.",
-                            "skill_load_limit": guard.skill_load_limit,
+                            "summary": "Repeated skill_view calls detected; stop loading additional skills and pivot to the single most relevant skill, proof collection, a bounded handoff, or an exact blocker.",
+                            "skill_load_limit": guard.skill_warning_threshold - 1,
                             "next_expected": "stop_skill_loading_and_produce_proof_or_block",
                         }
                     )
                     return None
-                if (
-                    guard.stop_on_repeated_read_search
-                    and tool_name in READ_SEARCH_TOOLS
-                    and not guard.has_patch_progress
-                    and guard.repeated_counts[key] >= guard.read_search_limit
-                    and key not in guard.warned
-                ):
-                    guard.warned.add(key)
-                    warning = _read_search_warning_payload(
-                        event_type,
-                        tool_name=tool_name,
-                        read_search_count=guard.aggregate_read_search_count,
-                        read_search_limit=guard.read_search_limit,
-                        summary=f"Repeated {tool_name} calls indicate a read/search loop without proof, verdict, patch, or test progress; stop and produce a bounded verdict, proof handoff, Neko slicing request, or exact blocker.",
-                    )
-                    callback(warning)
-                    guard.trip(
-                        f"repeated read/search loop: {tool_name}",
-                        kind=RunBudgetKind.READ_SEARCH,
-                        trip_reason=RunBudgetTripReason.REPEATED_READ_SEARCH_LOOP,
-                    )
-                    raise RunBudgetExceeded(
-                        f"repeated read/search loop: {tool_name}",
-                        run_budget=guard.ledger.accounting(),
-                    )
                 if guard.repeated_counts[key] >= 6 and key not in guard.warned:
                     guard.warned.add(key)
                     callback(
@@ -1639,71 +1514,6 @@ def _progress_adapter(
             return None
 
     return emit
-
-
-def _update_guard_progress(guard: _ToolBudgetGuard, payload: dict[str, Any]) -> None:
-    tool_name = str(payload.get("tool_name") or "").lower()
-    if tool_name in PATCH_TOOLS or str(payload.get("phase") or "") == "dev_work":
-        guard.has_patch_progress = True
-    if payload.get("type") != "run.tool.finished":
-        return
-    if tool_name in READ_SEARCH_TOOLS:
-        guard.aggregate_read_search_count += 1
-
-
-def _enforce_aggregate_read_search_budget(guard: _ToolBudgetGuard, callback: Callable[[dict[str, Any]], None], *, tool_name: str) -> None:
-    if not guard.stop_on_repeated_read_search:
-        return
-    if guard.has_patch_progress:
-        return
-    if guard.aggregate_read_search_count < guard.read_search_limit:
-        return
-    key = ("aggregate_read_search_budget", "")
-    if key in guard.warned:
-        return
-    guard.warned.add(key)
-    warning = _read_search_warning_payload(
-        "run.progress",
-        tool_name=tool_name,
-        read_search_count=guard.aggregate_read_search_count,
-        read_search_limit=guard.read_search_limit,
-        summary="Aggregate read/search budget exceeded without patch, proof, or bounded handoff progress; interrupting this specialist run so Neko can steer instead of letting it burn tokens.",
-    )
-    callback(warning)
-    reason = f"aggregate read/search budget exceeded: {guard.aggregate_read_search_count}/{guard.read_search_limit}"
-    guard.trip(
-        reason,
-        kind=RunBudgetKind.READ_SEARCH,
-        trip_reason=RunBudgetTripReason.AGGREGATE_READ_SEARCH_EXCEEDED,
-    )
-    raise RunBudgetExceeded(reason, run_budget=guard.ledger.accounting())
-
-
-def _read_search_warning_payload(event_type: str, *, tool_name: str, read_search_count: int, read_search_limit: int, summary: str) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "type": event_type,
-        "phase": "runaway_warning",
-        "severity": "critical",
-        "step": "repeated_read_search_loop",
-        "status": "failed",
-        "summary": summary,
-        "read_search_count": read_search_count,
-        "read_search_limit": read_search_limit,
-        "next_expected": "bounded_verdict_proof_handoff_or_exact_blocker",
-    }
-    if tool_name:
-        payload["tool_name"] = tool_name
-    return payload
-
-
-def _positive_limit(value: Any, *, fallback: int) -> int:
-    if isinstance(value, bool):
-        return fallback
-    try:
-        parsed = int(value)
-    except (TypeError, ValueError):
-        return fallback
-    return max(1, parsed)
 
 
 def _progress_payload_from_callback(event_type: str, args: tuple[Any, ...], kwargs: dict[str, Any]) -> dict[str, Any]:

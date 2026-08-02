@@ -4152,9 +4152,46 @@ def test_profile_persona_resolution_does_not_borrow_role_skills(monkeypatch, iso
     assert persona.skills == []
     assert persona.model == "gpt-default"
     assert persona.provider == "openai-codex"
-    assert "terminal" in persona.toolsets
-    assert "code_execution" in persona.toolsets
-    assert "mission_goal" not in persona.toolsets
+    assert persona.toolsets == []
+
+
+def test_profile_persona_resolution_prefers_exact_id_over_profile_owner(
+    monkeypatch, isolate_agent_runtime_root
+):
+    from agent_runtime.personas import profile_chat_toolsets
+    from hermes_cli import harness
+
+    exact = _persona("profile:shared")
+    exact.hermes_profile = "different"
+    exact.toolsets = ["file"]
+    owner = _persona("profile_owner")
+    owner.hermes_profile = "shared"
+    owner.toolsets = ["terminal"]
+    monkeypatch.setattr(harness, "ensure_persisted_personas", lambda _cfg: [owner, exact])
+
+    assert harness._persona_by_id(_assignment_config(), "profile:shared") is exact
+    assert profile_chat_toolsets("shared", [owner, exact]) == ["file"]
+
+
+def test_ambiguous_profile_owners_do_not_supply_arbitrary_defaults(
+    monkeypatch, isolate_agent_runtime_root
+):
+    from agent_runtime.personas import profile_chat_toolsets
+    from hermes_cli import harness
+
+    first = _persona("first")
+    first.hermes_profile = "shared"
+    first.toolsets = ["file"]
+    second = _persona("second")
+    second.hermes_profile = "shared"
+    second.toolsets = ["terminal"]
+    monkeypatch.setattr(harness, "ensure_persisted_personas", lambda _cfg: [first, second])
+
+    resolved = harness._persona_by_id(_assignment_config(), "profile:shared")
+    assert resolved is not None
+    assert resolved.id == "profile:shared"
+    assert resolved.toolsets == []
+    assert profile_chat_toolsets("shared", [first, second]) == []
 
 
 def test_profile_prompt_observability_uses_profile_skills_and_chat_title(

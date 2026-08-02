@@ -11,7 +11,6 @@ import pytest
 
 from agent_runtime import board_models
 from agent_runtime.board_store import BoardStore
-from agent_runtime.personas import PROFILE_CHAT_FALLBACK_TOOLSETS
 from agent_runtime.persona_runtime import _CHAT_CAPABILITY_TOOLSETS
 from agent_runtime.runtime_hud import _board_digest_for_workspace, render_situational_hud_block
 from agent_runtime.store import TaskStore, WorkspaceStore
@@ -41,7 +40,6 @@ def test_board_tools_registered_in_board_toolset():
 
 def test_board_toolset_is_a_chat_capability():
     assert "board" in _CHAT_CAPABILITY_TOOLSETS
-    assert "board" in PROFILE_CHAT_FALLBACK_TOOLSETS
 
 
 # ── the chat-lane augmentation must not be role-keyed (mission-lane removal S1) ──

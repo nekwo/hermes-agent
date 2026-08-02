@@ -186,14 +186,14 @@ def test_profile_readiness_reports_runtime_dependency_missing_before_auth(monkey
     assert readiness["summary"] == "Missing runtime packages: openai"
 
 
-def test_profile_readiness_injects_launcher_qa_only_for_visual_scope(monkeypatch):
+def test_profile_readiness_requires_explicit_mcp_declaration_for_visual_scope(monkeypatch):
     from agent_runtime import profile_readiness
 
     monkeypatch.setattr(profile_readiness, "harness_skill_hash_mismatches", lambda _skills, hermes_home=None: [])
     monkeypatch.setattr(profile_readiness, "_runtime_dependency_issue", lambda _persona: None)
     monkeypatch.setattr(profile_readiness, "_provider_issue", lambda _persona: None)
 
-    persona = AgentPersona(
+    undeclared = AgentPersona(
         id="qa",
         display_name="QA",
         role="qa",
@@ -203,15 +203,28 @@ def test_profile_readiness_injects_launcher_qa_only_for_visual_scope(monkeypatch
         toolsets=["file"],
         system_prompt_path="personas/qa/system.md",
     )
+    declared = AgentPersona(
+        id="visual_reviewer",
+        display_name="Visual Reviewer",
+        role="custom_reviewer",
+        model=None,
+        provider=None,
+        api_mode=None,
+        toolsets=["file"],
+        system_prompt_path="personas/reviewer/system.md",
+        required_mcp_servers=["launcher_qa"],
+    )
     plain_task = Task(id="task_plain", title="Plain", description="Plain", state=TaskState.CREATED, created_at=now(), updated_at=now(), requested_by="test")
     visual_task = Task(id="task_visual", title="Mission Control", description="needs screenshot", state=TaskState.CREATED, created_at=now(), updated_at=now(), requested_by="test", requires_visual_proof=True)
 
-    plain = profile_readiness_for_persona(persona, task=plain_task)
-    visual = profile_readiness_for_persona(persona, task=visual_task)
+    plain = profile_readiness_for_persona(undeclared, task=plain_task)
+    visual = profile_readiness_for_persona(undeclared, task=visual_task)
+    explicit = profile_readiness_for_persona(declared, task=visual_task)
 
     assert plain["effective_required_mcp_servers"] == []
-    assert visual["effective_required_mcp_servers"] == ["launcher_qa"]
-    assert visual["missing_mcp_servers"] == ["launcher_qa"]
+    assert visual["effective_required_mcp_servers"] == []
+    assert explicit["effective_required_mcp_servers"] == ["launcher_qa"]
+    assert explicit["missing_mcp_servers"] == ["launcher_qa"]
 
 
 def test_readiness_missing_set_is_single_source_derivation(tmp_path, monkeypatch):

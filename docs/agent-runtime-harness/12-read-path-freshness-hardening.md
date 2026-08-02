@@ -38,7 +38,7 @@ the same-offset snapshot is rejected; any backstop must ADVANCE the offset.
 | Realm adopt / sync | `realms[]` | yes — `realm.adopted`, `realm.sync.pulled`, `realm.sync.published` | `realm_membership.py` / `realm_sync.py` |
 | Blueprint catalog mutation | removed | `blueprint.saved` was removed with the stage-graph/blueprint lane (`d3a414cac`) | no live `blueprint save` surface |
 | `AgentStore.save` | `agents[]` | yes — `persona.updated` | store layer |
-| `RunStore.cancel/close_run` | persisted historical run rows | yes — `run.closed`; it is live and remains registered | store layer; `run.heartbeat` and `run.approved` were removed by `8c1c8e6cc`, then `run.opened` by `06eee42fa` |
+| Historical `run.closed` rows | persisted event-log history | read-only — the writer and registration retired in S63; observability and operator-summary projections still render old rows | `observability._event_display_projection`; `events.operator_event_summary` |
 | stream watchdog | scope/catalog freshness | yes — `state.reconciled` | `agent_runtime/stream.py` |
 | background Mission Daemon | removed | its event family and heartbeat side channel are gone | heartbeat frames now carry only optional stream activity |
 

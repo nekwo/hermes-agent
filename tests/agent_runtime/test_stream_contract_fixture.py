@@ -136,12 +136,30 @@ def test_every_frame_bearing_golden_matches_live_core_shape(
     """
 
     live_core = hydrate_frame()["core"]
+    hydrate_golden_core = _fixture("hydrate.json")["core"]
+    assert "default_flow" not in live_core["prompt_observability"]
     for name in ("hydrate.json", "delta.json", "delta_batch.json"):
         golden_core = _fixture(name)["core"]
+        assert golden_core == hydrate_golden_core, (
+            f"{name} does not carry the exact generated hydrate core"
+        )
         assert set(golden_core) == set(live_core), f"{name} core keys drifted"
         assert set(golden_core["runtime_config"]) == set(
             live_core["runtime_config"]
         ), f"{name} core.runtime_config keys drifted"
+        assert golden_core["parity"]["capabilities"] == live_core["parity"][
+            "capabilities"
+        ], f"{name} core.parity.capabilities drifted"
+        assert set(golden_core["parity"]["completeness"]) == set(
+            live_core["parity"]["completeness"]
+        ), f"{name} core.parity.completeness keys drifted"
+        for section, live_completeness in live_core["parity"][
+            "completeness"
+        ].items():
+            assert set(golden_core["parity"]["completeness"][section]) == set(
+                live_completeness
+            ), f"{name} completeness.{section} keys drifted"
+        assert "default_flow" not in golden_core["prompt_observability"]
 
 
 def test_delta_frame_matches_golden_shape(isolate_agent_runtime_root):

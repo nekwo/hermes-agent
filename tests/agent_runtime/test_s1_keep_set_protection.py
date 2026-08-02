@@ -138,7 +138,7 @@ def test_promotion_clones_the_role_template_and_binds_the_profile():
 
 def test_promotion_unknown_role_does_not_clone_an_unrelated_stored_persona():
     from agent_runtime.models import AgentPersona
-    from agent_runtime.personas import PROFILE_CHAT_FALLBACK_TOOLSETS, promote_profile_to_persona
+    from agent_runtime.personas import promote_profile_to_persona
     from agent_runtime.store import AgentStore
 
     store = AgentStore()
@@ -161,7 +161,7 @@ def test_promotion_unknown_role_does_not_clone_an_unrelated_stored_persona():
 
     assert persona.role == "builder"
     assert persona.hermes_profile == "fresh-builder"
-    assert persona.toolsets == list(PROFILE_CHAT_FALLBACK_TOOLSETS)
+    assert persona.toolsets == []
 
 
 # ── items 3-5: the Stage C Python capture lane (retired in S14) ───────────

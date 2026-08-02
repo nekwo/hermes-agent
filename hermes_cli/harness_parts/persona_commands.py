@@ -1223,7 +1223,7 @@ def _coordinator_actor_id(args) -> str | None:
     if raw.lower().startswith("coordinator:"):
         return safe_assignment_token(raw.split(":", 1)[1])
     if raw.lower() == "coordinator":
-        return safe_assignment_token(getattr(args, "coordinator_id", "neko_supervisor"))
+        return safe_assignment_token(getattr(args, "coordinator_id", None))
     return None
 
 
@@ -1454,7 +1454,7 @@ def _cmd_mission_chat_message(args) -> int:
             "error_kind": ChatErrorKind.UNSUPPORTED_PERSONA,
             "error": safe_assignment_text(str(exc), limit=240),
             "persona_id": safe_assignment_token(args.persona_id),
-            "next_expected": "pass a seeded persona id (e.g. neko_supervisor, dev), profile:<name>, or a known personainst_* instance id",
+            "next_expected": "pass a configured persona id, profile:<name>, or a known personainst_* instance id",
         }
         if getattr(args, "stream", False):
             _emit_chat_final(data)
@@ -5743,18 +5743,26 @@ def _persona_by_id(cfg, persona_id: str):
     # ensure_persisted_personas returns the seeded base profile plus the dormant
     # resolvable catalog, so typed pipeline ids and profile model-inheritance both resolve.
     personas = list(ensure_persisted_personas(cfg))
+    normalized = _normalize_cli_persona_id(raw)
+    exact = next(
+        (persona for persona in personas if getattr(persona, "id", None) == raw),
+        None,
+    ) or next(
+        (persona for persona in personas if getattr(persona, "id", None) == normalized),
+        None,
+    )
+    if exact is not None:
+        return exact
     if raw.lower().startswith("profile:"):
         profile_id = safe_assignment_token(raw.split(":", 1)[1])
         if not profile_id:
             return None
-        matching_profile_persona = next(
-            (
-                persona
-                for persona in personas
-                if str(getattr(persona, "hermes_profile", "") or "") == profile_id
-            ),
-            None,
-        )
+        profile_matches = [
+            persona
+            for persona in personas
+            if str(getattr(persona, "hermes_profile", "") or "") == profile_id
+        ]
+        matching_profile_persona = profile_matches[0] if len(profile_matches) == 1 else None
         default_model = getattr(matching_profile_persona, "model", None) if matching_profile_persona is not None else None
         default_provider = getattr(matching_profile_persona, "provider", None) if matching_profile_persona is not None else None
         default_api_mode = getattr(matching_profile_persona, "api_mode", None) if matching_profile_persona is not None else None
@@ -5785,10 +5793,6 @@ def _persona_by_id(cfg, persona_id: str):
             include_core_context_files=default_include_core,
             readiness=default_readiness,
         )
-    normalized = _normalize_cli_persona_id(raw)
-    for persona in personas:
-        if getattr(persona, "id", None) == normalized:
-            return persona
     return None
 
 

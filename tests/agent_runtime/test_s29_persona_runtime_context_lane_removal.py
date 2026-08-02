@@ -78,10 +78,10 @@ REMOVED_PERSONA_RUNTIME_IMPORTS = (
 #: ``decision_schema`` / ``decision_contracts`` import edge. They move to
 #: ``RETIRED_SINCE_S29`` below rather than quietly leaving this file, so the
 #: reversal stays visible instead of looking like the pin was never made. The two
-#: names still here are still called (``blocked_tool_names``, ``role_from_persona``).
+#: ``role_from_persona`` moved out with the compiled role branch;
+#: ``blocked_tool_names`` remains the live sibling on the import line.
 KEPT_PERSONA_RUNTIME_IMPORTS = (
     "blocked_tool_names",
-    "role_from_persona",
 )
 
 #: Names this file once pinned as KEPT that a later pass proved dead. Asserting

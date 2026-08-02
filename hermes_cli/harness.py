@@ -227,7 +227,7 @@ def _add_stage42_global_args(parser, *, mutation: bool = False) -> None:
 
 
 def _add_coordinator_permission_args(parser) -> None:
-    parser.add_argument("--coordinator-id", default="neko_supervisor", help="Coordinator persona id when --requested-by is coordinator or coordinator:<id>")
+    parser.add_argument("--coordinator-id", default=None, help="Coordinator persona id when --requested-by is coordinator; coordinator:<id> carries it inline")
     parser.add_argument("--coordinator-max-spawns", type=int, default=None, help="In-scope create/spawn grant for this coordinator action")
     parser.add_argument("--coordinator-spawns-used", type=int, default=0, help="Create/spawn actions already used in this coordinator scope")
     parser.add_argument("--coordinator-may-kill-own", action="store_true", default=None, help="Allow killing instances spawned by this coordinator")
@@ -835,7 +835,7 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_open.add_argument("--placement-id", default=None, help="Scene itemId for an additional placement-backed instance")
     persona_instance_open.add_argument("--workspace-id", dest="workspace_id", default=None, help="Mission Control workspace the placement belongs to (scope-provenance pointer; only meaningful with --add-instance)")
     persona_instance_open.add_argument("--realm-id", dest="realm_id", default=None, help="Mission Control realm the placement belongs to (scope-provenance pointer; only meaningful with --add-instance)")
-    persona_instance_open.add_argument("--display-name", default=None, help="Authoritative name for a deliberately-placed additional instance (e.g. 'QA Agent (2)'); ignored unless --add-instance")
+    persona_instance_open.add_argument("--display-name", default=None, help="Authoritative name for a deliberately placed additional instance; ignored unless --add-instance")
     persona_instance_open.add_argument("--requested-by", default="cli")
     _add_coordinator_permission_args(persona_instance_open)
     persona_instance_open.add_argument("--json", action="store_true")
@@ -1178,7 +1178,7 @@ def build_parser(parent_subparsers) -> None:
         "set-profile",
         help="Rebind an agent to a different Hermes profile (the ONE door; cascades every instance projection)",
     )
-    agent_set_profile.add_argument("persona_id", help="Store-persisted agent id (e.g. neko_supervisor)")
+    agent_set_profile.add_argument("persona_id", help="Store-persisted agent id")
     agent_set_profile.add_argument("--profile", required=True, help="Target Hermes profile name; must exist and resolve ready")
     agent_set_profile.add_argument("--requested-by", default="operator")
     _add_stage42_global_args(agent_set_profile, mutation=True)

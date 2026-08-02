@@ -278,6 +278,25 @@ def test_recent_events_project_self_test_display_metadata():
     assert summary["evidence_id"] == "selftest_123"
 
 
+def test_recent_events_project_historical_run_closed_display_metadata():
+    ts = now()
+    event = Event(
+        ts=ts,
+        type="run.closed",
+        task_id="task_log",
+        run_id="run_log",
+        persona_id="custom_reviewer",
+        payload={"state": "completed", "reason": "handoff complete"},
+    )
+
+    obs = build_observability(runs=[], incidents=[], events=[event], reference_time=ts)
+
+    summary = obs["recent_events"][0]
+    assert summary["display_kind"] == "run_closed"
+    assert summary["display_title"] == "Run closed as completed"
+    assert summary["display_summary"] == "handoff complete"
+
+
 def test_recent_events_drop_path_and_credential_like_summaries():
     ts = now()
     unsafe_values = [

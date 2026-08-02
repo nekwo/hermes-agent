@@ -7,6 +7,13 @@
 > is the direct ancestor of the chat-only lane and the enforcement-free Agent
 > Console graph. Do not implement from it.
 
+> **2026-08-02 integrated-review correction.** `ProfileAgentRunner` remains the
+> live chat execution substrate, but the node-era `stop_on_repeated_read_search`
+> / `tool_budget_limits` request controls and their read/search trip branch are
+> gone: the sole production request builder never set either field. Live wall,
+> API-call, token, and MCP budgets remain. References below to node-specific
+> request caps or a fixed Neko/QA handoff describe the retired design only.
+
 > **Cleanup-wave correction (2026-07-30).** The historical account below also
 > names surfaces that outlived the subsystem briefly and are now gone:
 > `tools/node_control_tool.py` and its `run_node` / `steer_node` tools were

@@ -33,9 +33,8 @@ MOTHBALLED_PERSONA_IDS: frozenset[str] = frozenset({AgentRole.PM.value})
 # "profile" role sentinel (see ``hermes_cli.harness._persona_by_id``). They are not
 # a typed mission slot, so it is not a real ``AgentRole`` — passing it straight into
 # ``AgentRole(...)`` raises ``'profile' is not a valid AgentRole`` and kills the whole
-# operator chat turn. For capability/toolset resolution on that chat path a profile
-# behaves as the supervisor class: the most permissive ceiling, so the profile's own
-# configured toolsets pass the ``validate_toolsets`` intersection unchanged.
+# operator chat turn. Unknown roles remain data and ``validate_toolsets`` applies
+# no role-specific ceiling.
 PROFILE_ROLE_SENTINEL = "profile"
 def coerce_agent_role(role: AgentRole | str | None) -> AgentRole | str:
     """Resolve a persona role token to an ``AgentRole``.
@@ -51,18 +50,6 @@ def coerce_agent_role(role: AgentRole | str | None) -> AgentRole | str:
         return AgentRole(text)
     except ValueError:
         return text
-
-PROFILE_CHAT_FALLBACK_TOOLSETS = (
-    "file",
-    "search",
-    "terminal",
-    "code_execution",
-    "session_search",
-    "skills",
-    "agent_chat",
-    "board",
-)
-
 
 # Fork registry hygiene (T6c, 2026-07-18). Upstream toolsets the fork's effective
 # registry must never resolve on ANY agent-runtime lane: the whole ``kanban``
@@ -139,26 +126,29 @@ def effective_toolsets(persona: AgentPersona) -> list[str]:
 def profile_chat_toolsets(profile_id: str, personas: list[AgentPersona] | tuple[AgentPersona, ...] | None = None) -> list[str]:
     """Resolve the toolsets for a raw profile-backed operator chat persona.
 
-    A ``profile:<name>`` chat is not a typed blueprint slot, but when it backs a
-    known mission persona (Alice/Neko is the common case) it should inherit that
-    persona's production tool surface instead of a reduced legacy profile-chat
-    subset. If no typed persona owns the profile, fall back to the supervisor
-    chat ceiling so the operator channel remains command-capable.
+    Exact persona ids outrank profile ownership. A unique profile owner may
+    supply the declared toolsets; an unowned or multiply-owned profile inherits
+    nothing. Universal chat capabilities are added later by the chat runtime.
     """
 
     profile = str(profile_id or "").strip()
-    matching = next(
+    declared = list(personas or [])
+    exact = next(
         (
             persona
-            for persona in personas or []
-            if str(getattr(persona, "hermes_profile", "") or "").strip() == profile
+            for persona in declared
+            if str(getattr(persona, "id", "") or "").strip()
+            in {profile, f"profile:{profile}"}
         ),
         None,
     )
-    toolsets = list(getattr(matching, "toolsets", []) or []) if matching is not None else list(PROFILE_CHAT_FALLBACK_TOOLSETS)
-    for toolset in PROFILE_CHAT_FALLBACK_TOOLSETS:
-        if toolset == "agent_chat" and toolset not in toolsets:
-            toolsets.append(toolset)
+    profile_matches = [
+        persona
+        for persona in declared
+        if str(getattr(persona, "hermes_profile", "") or "").strip() == profile
+    ]
+    matching = exact or (profile_matches[0] if len(profile_matches) == 1 else None)
+    toolsets = list(getattr(matching, "toolsets", []) or []) if matching is not None else []
     return [toolset for toolset in toolsets if toolset]
 
 

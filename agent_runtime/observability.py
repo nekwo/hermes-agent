@@ -334,6 +334,8 @@ def _event_display_kind(event_type: str, payload: dict[str, Any]) -> str:
     # surviving producer of the ``blocker`` kind.
     if event_type == "self_test.recorded":
         return "self_test"
+    if event_type == "run.closed":
+        return "run_closed"
     if event_type == "packet.recorded":
         return "delivery" if str(payload.get("packet_type") or "") == "delivery" else "handoff"
     if event_type == "incident.opened":
@@ -352,6 +354,8 @@ def _event_display_title(event_type: str, payload: dict[str, Any], kind: str) ->
     # arm (its producer went with ``qa.verdict_recorded``).
     if kind == "self_test":
         return f"Self-test {payload.get('status') or 'recorded'}"
+    if kind == "run_closed":
+        return f"Run closed as {payload.get('state') or payload.get('status') or 'recorded'}"
     if kind == "delivery":
         return "Delivery packet"
     if kind == "blocker":

@@ -360,7 +360,10 @@ outcomes below are the commit-recorded decisions, not a filename-based deletion 
   `proof.attached`, or `daemon.*` arms.
 - **Store and event catalog:** writer-less proof/archive helpers, dead `RunStore`
   methods, and `run.heartbeat` / `run.approved` were removed (`8c1c8e6cc`).
-  **`run.closed` is live and stays registered** because live cancel paths reach
+  **Historical correction (S63/S64):** `run.closed` no longer stays registered;
+  its production-callerless cancel/close writer retired. Historical rows remain
+  readable through the operator summary and typed observability projections.
+  The original S7 ruling below said live cancel paths reached
   `close_run`. `realm.archived`, `persona_chat.deleted`, and
   `worktree.orphans_reaped` were registered from their real emitters
   (`a7e679972`). `moa.*` were explicitly skipped because they are TUI/display
