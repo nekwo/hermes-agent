@@ -1580,3 +1580,59 @@ Temp registrations were removed/pruned. Windows denied deletion of the old
 unregistered Round-1 directory, so it was preserved rather than manually
 deleted. Hermes `rescue/wave4-20260801` was verified as an ancestor of `main`
 and deleted locally; no origin branch existed.
+
+## S60 / Round 3 — rule-first dead-code closure (2026-08-02)
+
+Round 3 removed two remaining Hermes declaration-only surfaces after tracing
+receivers and string dispatch, not just symbol counts:
+
+- `harness_support.ERROR_EXIT_CODES['agent_busy']` was a stale compatibility
+  literal. The live busy refusal is `chat_busy`, backed by
+  `PersonaChatBusyError`; that lane is unchanged.
+- `persona_assignments.LIVE_RUN_STATES` had no production reader. Its former
+  run-liveness role had already moved elsewhere, so the constant and its now
+  unused `RunState` import were removed.
+
+The stream-fixture gate now compares the nested `runtime_config` key set for
+every frame-bearing golden (`hydrate`, `delta`, and `delta_batch`) with the
+live hydrate core. Contract 49 fixture repair was deliberately key-only:
+`mcp_admission`, `mission_chat`, `persona_chat`, and `terminal_envelope` were
+added; `mission_plan` and `open_incident_warning_threshold` were removed; the
+delta-only `role_envelope` residue was removed. Retained values and every
+non-`runtime_config` byte-equivalent JSON value stayed unchanged, and the three
+goldens remain byte-identical across Hermes and Launcher.
+
+### Test janitor containment
+
+Agent-runtime tests now pin both janitor base resolvers beneath each test's
+`tmp_path`; production fallback behavior requires an explicit fixture opt-in.
+The production default itself is unchanged. This is a safety boundary, not a
+new runtime policy: a renderer-only or unrelated test can no longer enumerate
+or reap `%TEMP%\hermes-agent-wt` or the operator's registered worktrees.
+
+The production janitor's global `%TEMP%\hermes-agent-wt` fallback remains a
+real blast-radius concern: it treats every sufficiently old directory under a
+shared machine-wide root as inventory. That behavior is held for compatibility
+in this campaign; changing it needs an operator ruling and a migration plan,
+not a test-suite side effect.
+
+### Report-only holds
+
+- `RunStore.cancel` -> `close_run` -> `run.closed` remains a registered event
+  compatibility chain. Do not cut it without an event-contract ruling.
+- `_safe_operator_reason` remains a policy boundary despite its low direct
+  call count.
+- The typed error chain, parity module, and remote gateway client remain
+  architectural seams, not dead-code candidates.
+
+### Round 3 proof
+
+- `tests/agent_runtime`: 4,216 passed / 1 skipped. The +4 versus the measured
+  4,212 baseline is the nested stream-golden coverage, janitor boundary guard,
+  and production-fallback characterization; no test disappeared.
+- Canonical isolated CLI runner: 3,708 passed / 0 failed / exit 0. Nine
+  timeout-affected files passed the runner's one-worker bounded retry.
+- Live installed runtime (`profiles/alice`): snapshot schema 2, parity contract
+  49, 2 boards, 15 persona instances, top-level migration present,
+  `runtime_config.migration` absent, warnings empty, and zero occurrences of
+  all cut names; status health `ok`; Neko chat `round3-20260802` completed.

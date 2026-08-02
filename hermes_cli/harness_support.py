@@ -100,7 +100,6 @@ ERROR_EXIT_CODES = {
     "duplicate_conflict": 4,
     "already_exists": 4,
     "stale_revision": 4,
-    "agent_busy": 4,
     "agent_already_assigned": 4,
     "lane_budget_exceeded": 4,
     "repo_locked": 4,

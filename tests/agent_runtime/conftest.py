@@ -1,5 +1,13 @@
 import pytest
 
+from agent_runtime import repo_context as _repo_context
+
+
+_PRODUCTION_WORKTREE_BASE_DIR = _repo_context._worktree_base_dir
+_PRODUCTION_LEGACY_WORKTREE_BASE_DIR = (
+    _repo_context.legacy_harness_worktree_base_dir
+)
+
 
 @pytest.fixture
 def persisted_persona_samples():
@@ -31,7 +39,25 @@ def bundled_persona_profiles():
 def isolate_agent_runtime_root(tmp_path, monkeypatch):
     root = tmp_path / "agent-runtime"
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(root))
+    # Structural janitor boundary: no agent-runtime test may discover the
+    # machine-global fallback or a live profile's worktrees by accident. Tests
+    # that exercise explicit bases may still layer their narrower pins on top.
+    monkeypatch.setattr(
+        _repo_context, "_worktree_base_dir", lambda: tmp_path / "worktrees"
+    )
+    monkeypatch.setattr(
+        _repo_context,
+        "legacy_harness_worktree_base_dir",
+        lambda: tmp_path / "legacy-worktrees",
+    )
     yield root
+
+
+@pytest.fixture
+def production_worktree_base_functions():
+    """Explicit opt-in for tests that characterize production base selection."""
+
+    return _PRODUCTION_WORKTREE_BASE_DIR, _PRODUCTION_LEGACY_WORKTREE_BASE_DIR
 
 
 # S7-B RULING-0 COMPAT STRIP (2026-07-16): the ``history_in_frame_config`` and

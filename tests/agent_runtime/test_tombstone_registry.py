@@ -2215,6 +2215,23 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "_live_chat_binding",
         "_terminate_live_chat_binding",
     ),
+    # -- S60 / Round 3 — Round-2 residue ---------------------------------
+    *rows(
+        "s60",
+        "pending",
+        Form.CODE,
+        "Round 2 removed the only agent_busy producer; the exit-code consumer "
+        "and its cross-stack parser retired together while chat_busy remains live",
+        "agent_busy",
+    ),
+    *rows(
+        "s60",
+        "pending",
+        Form.ATTR,
+        "the last reader (_live_chat_binding) retired in Round 2",
+        "LIVE_RUN_STATES",
+        scope=("agent_runtime.persona_assignments",),
+    ),
 )
 
 

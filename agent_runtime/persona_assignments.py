@@ -27,7 +27,7 @@ from .models import (
 from .personas import profile_chat_toolsets
 from .serde import from_jsonable, to_jsonable
 from .state_patches import emit_persona_instance_patch, emit_persona_instance_remove
-from .states import RunState, WorkerSessionState
+from .states import WorkerSessionState
 from .tool_visibility import (
     permission_state_for_persona,
     resolve_tool_visibility,
@@ -152,17 +152,6 @@ def _persona_instance_owner_release_state(instance: PersonaInstance) -> str | No
         return "failed"
     return "archived"
 ACTIVE_ASSIGNMENT_STATES = frozenset({"queued", "assigned", "running", "waiting_on_tool", "waiting_on_proof", "needs_input"})
-LIVE_RUN_STATES = frozenset(
-    {
-        RunState.QUEUED,
-        RunState.STARTING,
-        RunState.RUNNING,
-        RunState.WAITING_ON_TOOL,
-        RunState.WAITING_ON_APPROVAL,
-    }
-)
-
-
 # S56 removed ``_worker_carries_live_binding``. It decided whether a WORKER row
 # could stamp its ``task_bound`` binding onto a persona instance during
 # derivation. Both of its inputs are gone: the worker session store was deleted

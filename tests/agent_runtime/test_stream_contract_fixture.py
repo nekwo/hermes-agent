@@ -73,6 +73,10 @@ def test_hydrate_frame_matches_golden_shape(isolate_agent_runtime_root):
     golden = _fixture("hydrate.json")
     assert set(live) == set(golden)
     assert set(live["watermark"]) == set(golden["watermark"])
+    assert set(live["core"]) == set(golden["core"])
+    assert set(live["core"]["runtime_config"]) == set(
+        golden["core"]["runtime_config"]
+    )
     assert LAUNCHER_LOAD_BEARING_KEYS <= set(live)
     assert live["type"] == "hydrate"
     assert isinstance(live["core"], dict)
@@ -119,6 +123,25 @@ def test_every_frame_bearing_golden_pins_contract_version(isolate_agent_runtime_
             f"{parity.get('contract_version')} — bumping it is a cross-stack "
             "change (launcher pins kSupportedMissionContractVersion)"
         )
+
+
+def test_every_frame_bearing_golden_matches_live_core_shape(
+    isolate_agent_runtime_root,
+):
+    """A contract-version match is insufficient when nested keys drift.
+
+    Hydrate is the live full-core producer authority. Delta and delta_batch
+    carry that same full core, so all three committed frame goldens must agree
+    with its core and runtime_config key sets.
+    """
+
+    live_core = hydrate_frame()["core"]
+    for name in ("hydrate.json", "delta.json", "delta_batch.json"):
+        golden_core = _fixture(name)["core"]
+        assert set(golden_core) == set(live_core), f"{name} core keys drifted"
+        assert set(golden_core["runtime_config"]) == set(
+            live_core["runtime_config"]
+        ), f"{name} core.runtime_config keys drifted"
 
 
 def test_delta_frame_matches_golden_shape(isolate_agent_runtime_root):

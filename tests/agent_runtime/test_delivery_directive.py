@@ -83,6 +83,35 @@ def test_no_archive_choke_point_survives_to_run_a_directive(isolate_agent_runtim
     assert vars(TaskStore(event_log=object())) == {}
 
 
+def test_janitor_uses_the_suite_isolated_worktree_bases(
+    isolate_agent_runtime_root, tmp_path, monkeypatch
+):
+    """A janitor test without a local pin must never inspect machine worktrees."""
+
+    import tempfile
+
+    from agent_runtime import repo_context as repo_context_mod
+    from agent_runtime.delivery_directive import reap_orphan_worktrees
+
+    observed: list[Path] = []
+
+    def empty_inventory(*, include_legacy_temp=False):
+        observed.append(repo_context_mod.current_harness_worktree_base_dir())
+        if include_legacy_temp:
+            observed.append(repo_context_mod.legacy_harness_worktree_base_dir())
+        return []
+
+    monkeypatch.setattr(
+        repo_context_mod, "harness_worktree_inventory", empty_inventory
+    )
+    reap_orphan_worktrees(dry_run=True, include_legacy_temp=True)
+
+    assert observed
+    assert all(path.is_relative_to(tmp_path) for path in observed)
+    assert Path(tempfile.gettempdir()) / "hermes-agent-wt" not in observed
+    assert isolate_agent_runtime_root not in observed
+
+
 def test_reap_orphan_worktrees_capture_age_and_task_free_cleanup(source_repo, tmp_path, monkeypatch):
     import os
     import time

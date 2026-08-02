@@ -14,12 +14,12 @@
 >   `wt_reaped_patches/` capture-before-delete contract live with it. It is
 >   worktree-inventory-driven — it never touched `Task`, which is why it
 >   survived the lane it shipped in.
-> - `read_bundle_promotion_record` (+ `bundle_promotion_record_path`) is a live
->   read surface: `repo_bundles.repo_bundle_summary` uses it to label bundle
->   summaries (`delivery_contract: delivery_directive`) that `status.py`
->   renders. It can only ever describe *historical* promotion records — the
->   writer went with the executor — so its job now is to stop already-written
->   records from being relabelled as never-promoted.
+>
+> **ROUND 2 follow-up (2026-08-02).** The claimed historical read surface was
+> stale: `repo_bundles.repo_bundle_summary` retired with the repo-bundle store,
+> leaving `read_bundle_promotion_record` and `bundle_promotion_record_path` as a
+> test-only closed loop. Both readers were removed; the janitor is the module's
+> sole live production lane.
 >
 > **REMOVED in S24 — every one re-verified caller-free by text grep first.**
 > - The **declaration path**: `task_delivery_directive`,

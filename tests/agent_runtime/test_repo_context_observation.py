@@ -37,8 +37,8 @@ def test_isolated_repo_context_uses_distinct_worktrees_for_parallel_runs(tmp_pat
     assert (second.workdir / "shared.txt").read_text(encoding="utf-8") == "clean\n"
     assert (repo / "shared.txt").read_text(encoding="utf-8") == "dirty live checkout\n"
     assert _git(first.workdir, "rev-parse", "--abbrev-ref", "HEAD").stdout.strip() == "HEAD"
-    expected_wt = runtime_root / "wt"
-    assert first.workdir.parent == expected_wt or first.workdir.parent.name == "hermes-agent-wt"
+    assert first.workdir.parent == tmp_path / "worktrees"
+    assert first.workdir.parent.name != "hermes-agent-wt"
 
 
 def test_isolated_repo_context_gc_removes_old_clean_runtime_worktrees(tmp_path, monkeypatch):
@@ -271,9 +271,14 @@ def test_isolated_repo_context_uses_large_checkout_timeout(tmp_path, monkeypatch
     assert observed == [HARNESS_WORKTREE_ADD_TIMEOUT_SECONDS]
 
 
-def test_long_runtime_root_uses_short_temp_worktree_base(tmp_path, monkeypatch):
+def test_long_runtime_root_uses_short_temp_worktree_base(
+    tmp_path, monkeypatch, production_worktree_base_functions
+):
     import tempfile
     import agent_runtime.repo_context as rc
+
+    production_current, _ = production_worktree_base_functions
+    monkeypatch.setattr(rc, "_worktree_base_dir", production_current)
 
     long_root = tmp_path / ("runtime_" + ("x" * HARNESS_WORKTREE_BASE_MAX_CHARS))
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(long_root))
