@@ -218,7 +218,7 @@ def offset_reads(start: int) -> list[tuple[Path, int, int]]:
 
 
 def ordered_line_sources() -> list[Path]:
-    """Slice files oldest-first (for whole-log line scans: iter_all/iter_since)."""
+    """Slice files oldest-first for logical-offset scans across the whole log."""
     return [sl.path for sl in slices()]
 
 

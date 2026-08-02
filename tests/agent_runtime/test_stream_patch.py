@@ -43,7 +43,6 @@ from agent_runtime.stream import (
     STREAM_PATCH_SCHEMA_VERSION,
     delta_batch_frame,
     patch_batch_frame,
-    select_batch_frame,
     stream_frames,
 )
 
@@ -157,38 +156,6 @@ def test_patch_batch_frame_carries_remove_op():
     ((patch,)) = patch_batch_frame(batch, base_offset=399)["patches"]
     assert patch["op"] == "remove"
     assert "changed" not in patch
-
-
-def test_select_batch_frame_flag_off_is_full_core():
-    batch = [_op_event(10, "persona_instance", "p", PATCH_OP_UPSERT, {"steered_by": ["a"], "spawned_by": "a"})]
-    frame = select_batch_frame(batch, base_offset=0, delta_patches=False, snapshot={"stub": True})
-    assert frame["type"] == "delta"
-    assert frame["core"] == {"stub": True}
-
-
-def test_select_batch_frame_covered_is_patch():
-    batch = [_op_event(10, "persona_instance", "p", PATCH_OP_UPSERT, {"steered_by": ["a"], "spawned_by": "a"})]
-    frame = select_batch_frame(batch, base_offset=5, delta_patches=True, snapshot={"stub": True})
-    assert frame["type"] == "patch"
-    assert "core" not in frame
-    assert frame["base_offset"] == 5
-
-
-def test_select_batch_frame_refresh_falls_back_to_full_core():
-    batch = [
-        _op_event(10, "persona_instance", "p", PATCH_OP_UPSERT, {"steered_by": ["a"], "spawned_by": "a"}),
-        _op_event(11, "task", "t", PATCH_OP_REFRESH),
-    ]
-    frame = select_batch_frame(batch, base_offset=0, delta_patches=True, snapshot={"stub": True})
-    assert frame["type"] == "delta", "a refresh op in the batch → the whole batch is a full core"
-    assert frame["core"] == {"stub": True}
-
-
-def test_select_batch_frame_resync_forces_full_core():
-    batch = [_op_event(10, "persona_instance", "p", PATCH_OP_UPSERT, {"steered_by": ["a"], "spawned_by": "a"})]
-    frame = select_batch_frame(batch, base_offset=0, delta_patches=True, resync=True, snapshot={"stub": True})
-    assert frame["type"] == "delta", "an explicit resync request re-baselines with a full core"
-    assert frame["core"] == {"stub": True}
 
 
 # --------------------------------------------------------------------------- #

@@ -20,7 +20,7 @@ one-liner, which left three defects behind every time (live incident,
    ``{**catalog, **stored}`` — the STORE record wins wholesale. Editing
    ``config.yaml`` alone is inert and nothing said so.
    :func:`resolve_effective_binding` is the single statement of that rule and
-   :func:`diverged_bindings` makes the disagreement visible.
+   the binding index makes the disagreement visible.
 2. **``persona_instance.profile_id`` drifts.** It is a PROJECTION of the
    persona's ``hermes_profile``, but only the canonical
    ``personainst_<persona_id>`` row self-heals (``ensure_for_persona``); the
@@ -224,18 +224,6 @@ def binding_index(cfg=None) -> dict[str, EffectiveBinding]:
             store_row_present=store_row is not None,
         )
     return index
-
-
-def diverged_bindings(cfg=None) -> list[EffectiveBinding]:
-    """The config-vs-store disagreements, so they stop being silent.
-
-    Deliberately does NOT repair either side: which one is right is operator
-    judgment (``harness agent set-profile`` moves the store; editing
-    ``config.yaml`` moves the declaration). Detect and label — never silently
-    "fix" one side.
-    """
-
-    return [binding for binding in binding_index(cfg).values() if binding.diverged]
 
 
 # --------------------------------------------------------------------------- #
@@ -919,7 +907,6 @@ __all__ = [
     "STATUS_PARTIALLY_APPLIED",
     "binding_files",
     "binding_index",
-    "diverged_bindings",
     "instance_busy_reason",
     "rebind_persona_profile",
     "resolve_effective_binding",

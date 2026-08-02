@@ -44,8 +44,8 @@ envelope-gated classes, and it answers deterministically:
   command class, the exact ROOT-config key that would grant it, the lane and
   the role. Never a silent auto-approval; never an unexplained hard block.
 * **Governed lane + ungated command** ⇒ allowed, exactly as before.
-* **Ungoverned lane** (no scope bound: worker ticks, free-chat, ``hermes
-  chat``, cron, gateway, acp, plain CLI) ⇒ :func:`envelope_decision` returns
+* **Ungoverned lane** (no governed scope bound: ``hermes chat``, cron,
+  gateway, acp, plain CLI) ⇒ :func:`envelope_decision` returns
   ``None`` and the caller keeps the legacy behavior byte-for-byte. This slice
   changes ONE lane.
 
@@ -106,45 +106,10 @@ logger = logging.getLogger(__name__)
 
 LANE_MISSION_CHAT = "mission_chat"
 
-#: The other harness-constructed lanes. Each is a run the harness itself builds
-#: an ``AgentRunRequest`` for, so a scope is free to bind — and binding it is
-#: what makes "is this a harness run?" a fact the POLICY layer owns rather than
-#: a guess read off ``HERMES_AGENT_RUNTIME_ROOT`` (audit Q2).
-LANE_MISSION_WORKER = "mission_worker"
-LANE_MISSION_NODE = "mission_node"
-LANE_MISSION_ROOT_NODE = "mission_root_node"
-LANE_PERSONA_CHAT = "persona_chat"
-
-#: Every lane the harness constructs a run for. NOT a permission list — see
-#: :data:`GOVERNED_LANES` for that. This set exists so "no scope bound" can mean
-#: "not a harness run" **by construction**: anything outside it (``hermes
-#: chat``, cron, gateway, acp, plain CLI) binds no scope, and this module keeps
-#: returning ``None`` for it.
-#:
-#: ``hermes chat`` is absent on purpose and must STAY absent: it is the
-#: operator's own shell, and an envelope there is wrong. The exclusion is
-#: structural rather than a convention someone has to remember — that lane never
-#: reaches ``AgentRunRequest`` at all, so there is no site that could bind it.
-HARNESS_LANES: frozenset[str] = frozenset(
-    {
-        LANE_MISSION_CHAT,
-        LANE_MISSION_WORKER,
-        LANE_MISSION_NODE,
-        LANE_MISSION_ROOT_NODE,
-        LANE_PERSONA_CHAT,
-    }
-)
-
 #: Lanes whose gated classes an operator GRANT table can lift. Deliberately ONE
 #: lane: the operator ruling makes mission-chat the primary work lane, and it is
 #: the only lane where a config edit can allow a gated class. Widening this is a
 #: product decision, not a config edit.
-#:
-#: A harness lane outside this set is NOT ungoverned. It binds a scope, so this
-#: module still answers for it — with the legacy HARD BLOCK for every gated
-#: class and no config key that could lift it
-#: (:data:`ENVELOPE_LANE_NOT_GOVERNED`). That is the audit's Q2 shape: the
-#: envelope's activation is a bound scope, never an ambient variable.
 GOVERNED_LANES = frozenset({LANE_MISSION_CHAT})
 
 
@@ -323,13 +288,6 @@ ENVELOPE_COMMAND_REQUIRES_GRANT = "envelope_command_requires_grant"
 #: Reserved for any future gated class kept outside
 #: :data:`GRANTABLE_COMMAND_CLASSES`. Ruling R-2 leaves no current hard floors.
 ENVELOPE_COMMAND_NOT_GRANTABLE = "envelope_command_not_grantable"
-#: The run IS a harness run (a scope is bound) but its lane is outside
-#: :data:`GOVERNED_LANES`, so no grant table applies and every gated class is
-#: hard-blocked. Distinct from both codes above: the class may well be grantable
-#: — just not HERE — so the honest fix hint names the lane, not a config key
-#: that does not exist for it.
-ENVELOPE_LANE_NOT_GOVERNED = "envelope_lane_not_governed"
-
 #: ``grants`` config issue codes (never widen; always reported).
 GRANT_UNKNOWN_COMMAND_CLASS = "envelope_grant_unknown_command_class"
 GRANT_CLASS_NOT_GRANTABLE = "envelope_grant_class_not_grantable"
@@ -589,17 +547,13 @@ def envelope_decision(
     gateway, acp, plain CLI). Callers must treat ``None`` as "fall through",
     never as "allow".
 
-    Audit Q2: the answer is keyed on the bound scope alone. A harness lane
-    outside :data:`GOVERNED_LANES` still gets a typed answer here (the legacy
-    hard block, as :data:`ENVELOPE_LANE_NOT_GOVERNED`) rather than falling
-    through to ``tools/terminal_tool.py::_harness_safety_block``, whose gate is
-    the mere PRESENCE of ``HERMES_AGENT_RUNTIME_ROOT``. Answering here is what
-    makes those lanes deterministic without editing ``tools/``: the fall-through
-    never happens for a harness run, so the env-keyed gate cannot decide it.
+    Mission-chat is the only producer of a governed scope. A stale or external
+    scope carrying any other lane gets ``None`` and therefore cannot invent a
+    second grant surface.
     """
 
     resolved = scope if scope is not None else current_terminal_envelope_scope()
-    if resolved is None:
+    if resolved is None or not resolved.governed:
         return None
 
     command_class = classify_command(command)
@@ -613,25 +567,6 @@ def envelope_decision(
         )
 
     reason = legacy_reason_for_class(command_class)
-    if not resolved.governed:
-        return TerminalEnvelopeDecision(
-            outcome=OUTCOME_REFUSE,
-            lane=resolved.lane,
-            role=resolved.role,
-            command_class=command_class,
-            reason=reason,
-            failure_class=ENVELOPE_LANE_NOT_GOVERNED,
-            config_key=None,
-            summary=(
-                f"This command {CLASS_SUMMARY.get(command_class, 'is envelope-gated')} "
-                f"('{command_class}'), and the '{resolved.lane}' lane is not governed by "
-                "the terminal-envelope grant table, so nothing can lift it here."
-            ),
-            fix_hint=_ungoverned_lane_fix_hint(lane=resolved.lane, command_class=command_class),
-            persona_id=resolved.persona_id,
-            session_id=resolved.session_id,
-        )
-
     grants = resolve_terminal_envelope_grants(role=resolved.role, lane=resolved.lane, cfg=cfg)
     config_key = grants.config_key
 
@@ -695,30 +630,6 @@ def envelope_decision(
         persona_id=resolved.persona_id,
         session_id=resolved.session_id,
         grant_issues=grants.issues,
-    )
-
-
-def _ungoverned_lane_fix_hint(*, lane: str, command_class: str) -> str:
-    """The refusal an agent reads on a harness lane with no grant table.
-
-    Deliberately does NOT name a config key. ``grants.<role>.<lane>`` is
-    resolved per lane and only :data:`GOVERNED_LANES` is consulted, so pointing
-    an agent (or an operator) at a stanza for this lane would be a key that
-    grants nothing — the same class of lie the governed-lane fix hint was
-    written to retire.
-    """
-
-    return "\n".join(
-        [
-            f"The '{lane}' lane runs under the Harness execution safety envelope's hard "
-            f"block: '{command_class}' is refused here and NO configuration lifts it.",
-            f"Grants are resolved per lane and only the "
-            f"'{', '.join(sorted(GOVERNED_LANES))}' lane has a grant table today; widening "
-            "that set is a product decision, not a config edit.",
-            "Do NOT retry, reword, or split this command — every form of it resolves to the "
-            f"same '{command_class}' class and will be refused identically. Report the "
-            "refusal to the operator and continue with the work you can do.",
-        ]
     )
 
 
@@ -1067,19 +978,13 @@ __all__ = [
     "ENVELOPE_COMMAND_NOT_GRANTABLE",
     "ENVELOPE_COMMAND_REQUIRES_GRANT",
     "ENVELOPE_DECISION_LOG",
-    "ENVELOPE_LANE_NOT_GOVERNED",
     "GIT_PUSH",
     "GOVERNED_LANES",
     "GRANTABLE_COMMAND_CLASSES",
     "GRANT_CLASS_NOT_GRANTABLE",
     "GRANT_MALFORMED",
     "GRANT_UNKNOWN_COMMAND_CLASS",
-    "HARNESS_LANES",
     "LANE_MISSION_CHAT",
-    "LANE_MISSION_NODE",
-    "LANE_MISSION_ROOT_NODE",
-    "LANE_MISSION_WORKER",
-    "LANE_PERSONA_CHAT",
     "LEGACY_REASON_BY_CLASS",
     "NETWORK_EGRESS",
     "OUTCOME_ALLOW",

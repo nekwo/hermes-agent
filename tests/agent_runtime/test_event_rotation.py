@@ -225,15 +225,16 @@ def test_tail_spans_slices(isolate_agent_runtime_root, monkeypatch):
     assert _run_ids(log.tail(1)) == ["r11"]
 
 
-def test_iter_all_and_iter_since_span_slices(isolate_agent_runtime_root, monkeypatch):
+def test_logical_offset_scan_spans_slices(isolate_agent_runtime_root, monkeypatch):
     monkeypatch.setenv(_CAP_ENV, "1")
     log = EventLog()
     first = _evt(0)
     log.append(first)
     for i in range(1, 6):
         log.append(_evt(i))
-    assert _run_ids(list(log.iter_all())) == [f"r{i}" for i in range(6)]
-    assert len(list(log.iter_since(first.ts))) == 6
+    events = [event for _, event in log.iter_from_offset(0)]
+    assert _run_ids(events) == [f"r{i}" for i in range(6)]
+    assert len([event for event in events if event.ts >= first.ts]) == 6
 
 
 def test_cached_event_log_matches_base_across_rotation(isolate_agent_runtime_root, monkeypatch):
@@ -248,7 +249,7 @@ def test_cached_event_log_matches_base_across_rotation(isolate_agent_runtime_roo
     assert _run_ids(cached.for_task("t")) == _run_ids(base.for_task("t"))
     assert [e.type for e in cached.for_session("chat")] == [e.type for e in base.for_session("chat")]
     assert _run_ids(cached.tail(3)) == _run_ids(base.tail(3))
-    assert len(list(cached.iter_all())) == len(list(base.iter_all()))
+    assert len(list(cached.iter_from_offset(0))) == len(list(base.iter_from_offset(0)))
     # Logical offsets from the flat cache match the seeking base reader.
     assert [o for o, _e in cached.iter_from_offset(0)] == [o for o, _e in base.iter_from_offset(0)]
 
@@ -267,5 +268,4 @@ def test_event_log_health_accounts_rotation(isolate_agent_runtime_root, monkeypa
     assert health["live_slice_lines"] == 1
     assert health["log_end_offset"] == event_rotation.log_end_offset()
     assert health["exists"] is True
-
 

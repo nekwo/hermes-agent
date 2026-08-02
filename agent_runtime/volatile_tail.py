@@ -169,9 +169,6 @@ class VolatileTail:
 
         return [entry.row() for entry in self.entries]
 
-    def shortfall_rows(self) -> list[dict[str, Any]]:
-        return [entry.row() for entry in self.shortfalls]
-
 
 def _shortfall_note(entry: VolatileTailEntry) -> str:
     """The IN-BAND note an agent reads when it was not told everything.

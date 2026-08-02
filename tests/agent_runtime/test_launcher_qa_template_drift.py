@@ -246,6 +246,8 @@ def test_template_issues_carry_the_typed_code_and_a_pasteable_hint():
     assert issue.field == f"mcp_servers.{SERVER}"
     assert "STAGEC_LAUNCH_HELPER" in issue.summary
     assert "Report-only" in issue.fix_hint
+    assert canonical_mcp_server_yaml(SERVER) in issue.fix_hint
+    assert "canonical_mcp_server_yaml(" not in issue.fix_hint
 
 
 def test_template_issues_honour_the_only_filter():

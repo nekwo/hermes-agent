@@ -792,10 +792,6 @@ class IncidentStore:
             )
             return incident
 
-    def list_open(self) -> list[Incident]:
-        incidents, _ = self.list_open_with_closed_count()
-        return incidents
-
     def list_open_with_closed_count(self) -> tuple[list[Incident], int]:
         """Return live incidents without deserializing the closed-history tail.
 

@@ -54,7 +54,7 @@ def _assignment_config() -> AgentRuntimeConfig:
 
 
 def _event_count() -> int:
-    return sum(1 for _ in EventLog().iter_all())
+    return sum(1 for _ in EventLog().iter_from_offset(0))
 
 
 def _write_corrupt_row(store: PersonaInstanceStore, instance_id: str, *, steered_by, spawned_by) -> None:
@@ -170,7 +170,7 @@ def test_repair_real_strips_principal_and_emits_event():
     assert repaired.spawned_by is None  # bogus mirror cleared → clean standalone
     # Chat mode / other fields are NOT changed — this is a steering repair.
     assert repaired.mode == "chat"
-    types = [evt.type for evt in EventLog().iter_all()]
+    types = [evt.type for _, evt in EventLog().iter_from_offset(0)]
     assert "persona_instance.steered" in types
     assert _event_count() > before_events
 

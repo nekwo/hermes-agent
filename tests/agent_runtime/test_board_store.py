@@ -21,7 +21,7 @@ from agent_runtime.store import WorkspaceStore
 
 
 def _event_types() -> list[str]:
-    return [evt.type for evt in EventLog().iter_all()]
+    return [evt.type for _, evt in EventLog().iter_from_offset(0)]
 
 
 def _make_workspace(name: str = "Default") -> str:

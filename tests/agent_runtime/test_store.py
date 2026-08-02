@@ -275,11 +275,11 @@ def test_incident_store_open_close_and_list_open():
 
     store.open(incident)
     assert store.get("inc_1") == incident
-    assert store.list_open() == [incident]
+    assert store.list_open_with_closed_count()[0] == [incident]
 
     closed = store.close("inc_1")
     assert closed.closed_at is not None
-    assert store.list_open() == []
+    assert store.list_open_with_closed_count()[0] == []
 
 
 def test_incident_store_open_with_closed_count_skips_closed_model_coercion(

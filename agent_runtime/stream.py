@@ -204,36 +204,6 @@ def patch_batch_frame(
     }
 
 
-def select_batch_frame(
-    batch: list[tuple[int, Event]],
-    *,
-    base_offset: int,
-    delta_patches: bool,
-    resync: bool = False,
-    snapshot: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Choose the frame shape for one drained batch — the S6 fork in the road.
-
-    * ``delta_patches`` off (default / flag off) → the W1 full-core batch frame,
-      **byte-identical** to today. This is the only path a flag-off stream ever
-      takes, so the flag-off wire is provably unchanged.
-    * ``resync`` requested → a full-core frame even for a coverable batch. A
-      (re)connecting client that asked for a fresh baseline gets one full core
-      before any fold, so it never folds onto a stale/absent base.
-    * flag on + batch fully coverable (:func:`batch_is_patch_coverable`) → the
-      v2 ``patch`` frame (steer/profile ``upsert``, incident/instance ``remove``).
-    * flag on + any uncovered event in the batch → the **honest fallback**: a
-      full-core frame (e.g. a task transition — its ``refresh`` op plus the
-      persona_assignment closes it fans out are uncovered — a ``state.reconciled``
-      watchdog, or any planning.py chokepoint-less mutation rides the whole state
-      through the core).
-    """
-
-    if delta_patches and not resync and batch_is_patch_coverable(event for _, event in batch):
-        return patch_batch_frame(batch, base_offset=base_offset)
-    return delta_batch_frame(batch, snapshot=snapshot)
-
-
 #: Upper bound on events carried by one batched delta frame. Bounds both the
 #: frame's `events` list and the drain's in-memory buffer; a longer backlog
 #: emits multiple batch frames, each with its own (single) core.
@@ -351,8 +321,8 @@ def stream_frames(
     ``state.reconciled`` in the log names a producer bug to fix at source.
 
     S6: when ``read_model.delta_patches`` is on, a fully-coverable batch ships
-    as a sub-4KB v2 ``patch`` frame instead of a full-core delta (see
-    :func:`select_batch_frame`); uncovered batches keep the full-core lane. Each
+    as a sub-4KB v2 ``patch`` frame instead of a full-core delta; uncovered
+    batches keep the full-core lane. Each
     batch carries the ``base_offset`` it applies from so the launcher's fold can
     detect a gap. ``resync=True`` forces the FIRST post-hydrate batch to a full
     core — the "explicit resync request" a reconnecting client makes to re-baseline

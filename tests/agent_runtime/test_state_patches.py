@@ -87,11 +87,11 @@ def _persona(persona_id: str) -> AgentPersona:
 
 
 def _event_types() -> list[str]:
-    return [evt.type for evt in EventLog().iter_all()]
+    return [evt.type for _, evt in EventLog().iter_from_offset(0)]
 
 
 def _patches() -> list[Event]:
-    return [evt for evt in EventLog().iter_all() if evt.type == STATE_PATCHED_EVENT_TYPE]
+    return [evt for _, evt in EventLog().iter_from_offset(0) if evt.type == STATE_PATCHED_EVENT_TYPE]
 
 
 def _steered_child(store: PersonaInstanceStore):
@@ -201,14 +201,14 @@ def test_emit_off_is_inert(isolate_agent_runtime_root):
     cfg.read_model.delta_patches = False
     assert delta_patches_enabled(cfg) is False
     assert emit_state_patch(EventLog(), entity="incident", entity_id="i1", op=PATCH_OP_REMOVE, config=cfg) is False
-    assert list(EventLog().iter_all()) == []
+    assert list(EventLog().iter_from_offset(0)) == []
 
 
 def test_emit_empty_upsert_is_noop_even_when_on(isolate_agent_runtime_root):
     cfg = load_agent_runtime_config()
     cfg.read_model.delta_patches = True
     assert emit_state_patch(EventLog(), entity="task", entity_id="t1", op=PATCH_OP_UPSERT, changed={}, config=cfg) is False
-    assert list(EventLog().iter_all()) == []
+    assert list(EventLog().iter_from_offset(0)) == []
 
 
 def test_emit_on_appends_one_op_patch(isolate_agent_runtime_root):

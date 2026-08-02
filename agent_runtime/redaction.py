@@ -1,14 +1,6 @@
 from __future__ import annotations
 
 import re
-from enum import StrEnum
-from pathlib import Path
-
-
-class RedactionStatus(StrEnum):
-    SAFE = "safe"
-    NEEDS_SCAN = "needs_scan"
-    UNSAFE = "unsafe"
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -115,14 +107,6 @@ TEXT_SECRET_VALUE_ASSIGNMENT_RE = re.compile(
     r"(?i)(" + TEXT_SECRET_KEYS + r")" + SECRET_KEY_SEPARATOR + r"([^\s,;]+)"
 )
 
-#: Artifact file scanner (:class:`BasicRedactionScanner`). Detection only —
-#: one group. Uses the GATE vocabulary with a shorter (>= 12) minimum so a
-#: 12-15 char credential in a scanned file is still caught; unanchored,
-#: matching the lane it replaces.
-SCANNER_SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)(" + GATE_SECRET_KEYS + r")" + SECRET_KEY_SEPARATOR + r"['\"]?[A-Za-z0-9_./+=:-]{12,}"
-)
-
 #: Every secret-assignment pattern this module owns. The group-contract test
 #: iterates it, so a new pattern added here is automatically pinned.
 ALL_SECRET_ASSIGNMENT_PATTERNS = (
@@ -130,21 +114,4 @@ ALL_SECRET_ASSIGNMENT_PATTERNS = (
     ENV_SECRET_ASSIGNMENT_RE,
     TEXT_SECRET_ASSIGNMENT_RE,
     TEXT_SECRET_VALUE_ASSIGNMENT_RE,
-    SCANNER_SECRET_ASSIGNMENT_RE,
 )
-
-
-SECRET_PATTERNS = [
-    SCANNER_SECRET_ASSIGNMENT_RE,
-    re.compile(r"(?i)Authorization:\s*Bearer\s+[A-Za-z0-9._\-]+"),
-    re.compile(r"(?i)(X-Amz-Signature|Signature|Credential)=")
-]
-
-
-class BasicRedactionScanner:
-    def scan_text(self, path: Path) -> RedactionStatus:
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        return RedactionStatus.UNSAFE if any(p.search(text) for p in SECRET_PATTERNS) else RedactionStatus.SAFE
-
-    def scan_image(self, path: Path) -> RedactionStatus:
-        return RedactionStatus.NEEDS_SCAN

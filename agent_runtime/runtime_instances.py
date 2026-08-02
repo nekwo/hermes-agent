@@ -7,25 +7,6 @@ from .events import EventLog
 from .models import GoalRuntimeInstance
 from .serde import from_jsonable
 
-# S53 removed the write lane, and with it every binding only a writer read:
-# ``uuid`` / ``dataclasses.replace`` / ``hermes_time.now`` /
-# ``utils.atomic_json_write`` / ``models.Event`` / ``serde.to_jsonable``, the
-# ``LANE_STATES`` vocabulary, and the ``_ALLOWED_TRANSITIONS`` table. The
-# transition table went because ``transition`` was its only reader: a state
-# machine with no writer to police is not a policy, it is a comment that
-# type-checks. ``EventLog`` stays because the constructor still accepts one.
-#
-# THREE of the four bare state constants survive, and only three:
-# ``active_for_task`` below still reads ACTIVE / PARKED / WAITING to decide
-# which persisted row is the live one. ``TERMINAL_STATE`` went with the lane --
-# its only readers were ``mark_terminal_for_task`` and the two tables above --
-# and it is cut rather than kept "for documentation", which is the same
-# decoration this wave exists to remove.
-ACTIVE_STATE = "active"
-PARKED_STATE = "parked"
-WAITING_STATE = "waiting"
-
-
 class GoalRuntimeInstanceStore:
     def __init__(self, event_log: EventLog | None = None):
         self.event_log = event_log or EventLog()
@@ -63,15 +44,6 @@ class GoalRuntimeInstanceStore:
             except Exception:
                 continue
         return sorted(items, key=lambda item: (item.updated_at, item.id))
-
-    def list_for_task(self, task_id: str) -> list[GoalRuntimeInstance]:
-        return [item for item in self.list_all() if item.task_id == task_id]
-
-    def active_for_task(self, task_id: str) -> GoalRuntimeInstance | None:
-        for item in reversed(self.list_for_task(task_id)):
-            if item.state in {ACTIVE_STATE, WAITING_STATE, PARKED_STATE, "queued", "activating", "running", "blocked", "parked_by_budget", "parked_by_repo_lock", "parked_by_operator"}:
-                return item
-        return None
 
     # S21: `active_foreground()` and `park_foreground_except()` were removed here.
     # `active_foreground` walked lanes into `TaskStore.get`, which the permanent

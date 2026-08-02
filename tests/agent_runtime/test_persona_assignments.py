@@ -29,7 +29,7 @@ from agent_runtime.persona_assignments import (
     PersonaAssignmentSpec,
     PersonaAssignmentStore,
     PersonaInstanceStore,
-    default_chat_session_id_for_instance,
+    persona_chat_session_id_for,
     persona_instance_summary,
     persona_instance_tool_detail,
     persona_instance_id_for,
@@ -1246,7 +1246,7 @@ def test_open_chat_default_display_name_names_a_first_ever_holder(isolate_agent_
     # A brand-new chat holder with no name yet DOES take the persona default —
     # stamping only happens when the instance has none.
     store = PersonaInstanceStore()
-    minted = default_chat_session_id_for_instance(store, persona_id="qa")
+    minted = persona_chat_session_id_for(persona_instance_id_for("qa"))
     instance = store.open_chat(
         persona_id="qa", session_id=minted, default_display_name="QA Agent"
     )
@@ -3378,7 +3378,7 @@ def test_mission_chat_retry_recovers_native_reply_before_outcome_unknown(
     )["state"] == "projected"
     projected = [
         event
-        for event in EventLog().iter_all()
+        for _, event in EventLog().iter_from_offset(0)
         if event.type == "persona_chat.projected"
         and event.payload.get("client_message_id") == "client_recover_native"
     ]
@@ -3794,7 +3794,7 @@ def test_mission_chat_message_replays_duplicate_client_message_id(
     assert record["projection_event_emitted"] is True
     projected = [
         event
-        for event in EventLog().iter_all()
+        for _, event in EventLog().iter_from_offset(0)
         if event.type == "persona_chat.projected"
         and event.payload.get("client_message_id") == "client_dup_1"
     ]
@@ -3802,7 +3802,7 @@ def test_mission_chat_message_replays_duplicate_client_message_id(
     assert projected[0].payload["change_kind"] == "projection_committed"
     metadata_events = [
         event
-        for event in EventLog().iter_all()
+        for _, event in EventLog().iter_from_offset(0)
         if event.type == "persona_chat.metadata_updated"
         and event.payload.get("root_chat_session_id")
         == "persona_chat_personainst_dev"
@@ -4639,31 +4639,6 @@ def test_profile_persona_instance_summary_includes_tool_visibility(isolate_agent
     assert summary["tool_count"] == len(detail["tool_resolution"]["final_model_tools"])
 
 
-def test_close_for_task_releases_active_assignments_and_leaves_other_goals():
-    store = PersonaAssignmentStore()
-    a = store.create_or_resume(
-        PersonaAssignmentSpec(persona_id="neko_supervisor", kind="scope", title="scope", message="m", goal_id="task_g1")
-    )
-    b = store.create_or_resume(
-        PersonaAssignmentSpec(persona_id="backend_dev", kind="task_stage", title="impl", message="m", goal_id="task_g1", stage_id="s1")
-    )
-    store.create_or_resume(
-        PersonaAssignmentSpec(persona_id="dev", kind="task_stage", title="impl", message="m", goal_id="task_g2")
-    )
-
-    assert {"neko_supervisor", "backend_dev", "dev"} <= {x.persona_id for x in store.find_active()}
-
-    closed = store.close_for_task("task_g1", state="cancelled", reason="graveyard cleanup")
-
-    assert set(closed) == {a.id, b.id}
-    active_after = {x.persona_id for x in store.find_active()}
-    assert "neko_supervisor" not in active_after
-    assert "backend_dev" not in active_after
-    assert "dev" in active_after  # a different goal's assignment is untouched
-    assert store.get(a.id).state == "cancelled"
-    assert store.close_for_task("task_g1") == []  # idempotent
-
-
 def test_task_store_cancel_closes_persona_assignments():
     _assert_task_store_stub()
 
@@ -4686,20 +4661,6 @@ def test_contention_warning_self_heals_assignment_held_by_terminal_goal():
 
 def test_contention_warning_still_fires_for_genuinely_open_goal():
     _assert_task_store_stub()
-
-
-def test_contention_warning_self_heals_assignment_for_archived_goal():
-    """Owning task file gone from the live store (archived) → assignment is
-    releasable, not contention."""
-    assignment_store = PersonaAssignmentStore()
-    stale = assignment_store.create_or_resume(
-        PersonaAssignmentSpec(persona_id="dev", kind="task_stage", title="impl", message="m", goal_id="task_gone_archived")
-    )
-
-    warnings = assignment_store.contention_warnings(persona_id="dev", goal_id="task_new_goal")
-
-    assert warnings == []
-    assert assignment_store.get(stale.id).state == "completed"
 
 
 # ---------------------------------------------------------------------------

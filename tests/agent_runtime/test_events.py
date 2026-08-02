@@ -29,7 +29,7 @@ def test_event_log_appends_jsonl_and_tails_events(isolate_agent_runtime_root):
     assert len(raw_lines) == 2
     assert json.loads(raw_lines[1])["payload"] == {"from": "created", "to": "pm_triage"}
     assert log.tail(1) == [second]
-    assert list(log.iter_since(first.ts)) == [first, second]
+    assert [event for _, event in log.iter_from_offset(0) if event.ts >= first.ts] == [first, second]
 
 
 def test_event_log_for_task_filters_before_decoding_and_preserves_order(isolate_agent_runtime_root):
@@ -158,7 +158,7 @@ def test_cached_event_log_matches_base_and_reads_once(isolate_agent_runtime_root
     assert cached.for_task("task_a", limit=2)[-1].run_id == base.for_task("task_a", limit=2)[-1].run_id
     assert [e.type for e in cached.for_session("chat_z")] == [e.type for e in base.for_session("chat_z")]
     assert [e.type for e in cached.tail(2)] == [e.type for e in base.tail(2)]
-    assert len(list(cached.iter_all())) == len(list(base.iter_all()))
+    assert len(list(cached.iter_from_offset(0))) == len(list(base.iter_from_offset(0)))
 
     # The file is read exactly once regardless of how many reads happen.
     reads = {"n": 0}
@@ -265,7 +265,7 @@ def test_operator_events_receive_redaction_safe_summaries(isolate_agent_runtime_
     for event in samples:
         log.append(event)
 
-    events = list(log.iter_all())
+    events = [event for _, event in log.iter_from_offset(0)]
     assert all(str(event.payload.get("summary") or "").strip() for event in events)
     progress = next(event for event in events if event.type == "run.progress")
     assert progress.payload["summary"] == "Progress: proof compile running."
@@ -285,7 +285,7 @@ def test_run_progress_receives_stable_event_id(isolate_agent_runtime_root):
         )
     )
 
-    event = list(log.iter_all())[0]
+    event = list(log.iter_from_offset(0))[0][1]
     assert event.payload["event_id"] == "progress:run_1:proof:proof_command_running:1"
     assert event.payload["summary"] == "Progress: proof proof_command_running running."
 

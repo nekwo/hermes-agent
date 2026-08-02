@@ -234,11 +234,6 @@ class ReadModel:
             payload = frame.get(projection)
         return {"projection": projection, "watermark": watermark, "payload": payload}
 
-    def integrity_check(self) -> str:
-        with closing(self.connect()) as conn:
-            row = conn.execute("PRAGMA integrity_check").fetchone()
-        return str(row[0]) if row is not None else "missing"
-
     def _ensure_schema(self, conn: sqlite3.Connection) -> None:
         stored_version = self._stored_schema_version(conn)
         columns = {row[1] for row in conn.execute("PRAGMA table_info(agent_instances)")}

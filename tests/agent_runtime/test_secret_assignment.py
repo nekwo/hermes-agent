@@ -9,7 +9,7 @@ the entire publish surface, and every redaction lane surfaced JSON-encoded
 credentials verbatim.
 
 The fix is :data:`agent_runtime.redaction.SECRET_KEY_SEPARATOR`, consumed by
-all five composed patterns. These tests hold three lines:
+all four live composed patterns. These tests hold three lines:
 
 1. the publish gate actually REFUSES a JSON artifact carrying a secret
    (:func:`test_publish_gate_refuses_json_artifact_carrying_a_secret` — the one
@@ -30,7 +30,6 @@ from agent_runtime import realm_sync
 from agent_runtime.redaction import (
     ALL_SECRET_ASSIGNMENT_PATTERNS,
     ENV_SECRET_ASSIGNMENT_RE,
-    SCANNER_SECRET_ASSIGNMENT_RE,
     SECRET_ASSIGNMENT_RE,
     SECRET_KEY_SEPARATOR,
     TEXT_SECRET_ASSIGNMENT_RE,
@@ -248,7 +247,6 @@ def test_every_pattern_composes_the_shared_separator():
     (
         (SECRET_ASSIGNMENT_RE, 1),
         (ENV_SECRET_ASSIGNMENT_RE, 1),
-        (SCANNER_SECRET_ASSIGNMENT_RE, 1),
         (TEXT_SECRET_ASSIGNMENT_RE, 2),
         (TEXT_SECRET_VALUE_ASSIGNMENT_RE, 2),
     ),

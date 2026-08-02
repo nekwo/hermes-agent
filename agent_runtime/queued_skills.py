@@ -57,23 +57,6 @@ def _queue_lock(path, *, timeout_seconds: float = 3.0):
             pass
 
 
-def queue_skill_for_next_turn(
-    *,
-    persona_id: str,
-    session_id: str,
-    skill: str,
-    persona_instance_id: str | None = None,
-) -> dict[str, Any]:
-    """Backward-compatible one-skill wrapper around the atomic batch API."""
-
-    return queue_skills_for_next_turn(
-        persona_id=persona_id,
-        session_id=session_id,
-        skills=[skill],
-        persona_instance_id=persona_instance_id,
-    )
-
-
 def queue_skills_for_next_turn(
     *,
     persona_id: str,

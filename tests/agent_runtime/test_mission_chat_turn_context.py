@@ -222,7 +222,7 @@ def test_each_contributor_owns_its_own_budget_so_none_can_crowd_out_another():
     assert render_turn_budget_line(context.wall_budget) in context.volatile_tail.content
     # ...and the shortfall is visible in band AND as a typed row.
     assert "TRUNCATED" in context.volatile_tail.content
-    assert [row["name"] for row in context.volatile_tail.shortfall_rows()] == [
+    assert [row["name"] for row in (item.row() for item in context.volatile_tail.shortfalls)] == [
         TAIL_MCP_ADMISSION
     ]
 

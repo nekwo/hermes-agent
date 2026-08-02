@@ -1636,3 +1636,44 @@ not a test-suite side effect.
   49, 2 boards, 15 persona instances, top-level migration present,
   `runtime_config.migration` absent, warnings empty, and zero occurrences of
   all cut names; status health `ok`; Neko chat `round3-20260802` completed.
+
+## S61 — Profile-owned persona behavior and closed-loop retirement (2026-08-02)
+
+The operator ruling is now structural: SOUL/profile/persona configuration is
+the sole behavioral-prompt authority. The runtime no longer compiles role-name
+branches for Neko, QA, or developer voices. Mission chat still supplies one
+universal identity and operative/tool contract, so arbitrary custom roles keep
+the same chat capability without inheriting a built-in persona. A byte-parity
+test proves that changing only the role label does not change the runtime
+surface message.
+
+The unused `GPTPersonaRuntime.chat_reply` free-chat pipeline and its prompt and
+voice helpers were removed. `mission_chat_reply` is the only runtime chat turn.
+Likewise, `mission_chat` is the sole governed terminal-envelope lane; the
+retired mission-worker, mission-node, root-node, and persona-chat aliases no
+longer manufacture grants or typed refusals. Unknown/stale lane names are
+ignored rather than becoming an authority surface.
+
+Task-era persona residue was retired from persona instance, assignment, and
+runtime-instance stores. The same pass removed independently proven closed
+test loops: board default/archive wrappers, event-log convenience iterators,
+read-model integrity wrapper, incident open-list wrapper, volatile-tail row
+wrapper, diverged-binding wrapper, singular queued-skill wrapper, stream frame
+selector, and the standalone basic redaction scanner/status pair. Their live
+underlying readers, batch paths, and shared redaction patterns remain.
+
+`canonical_mcp_server_yaml` was promoted rather than cut: MCP template-drift
+issues now embed its exact pasteable YAML in the operator fix hint. The hint no
+longer tells an operator to invoke an internal Python helper.
+
+Deliberate holds remain unchanged: `McpAdmissionConfig.roles` and
+`MCP_NOT_ADMITTED_FOR_ROLE`, run-progress/self-test evidence, `RunStore.cancel`
+through `run.closed`, the typed error chain, parity, and the remote gateway.
+No unnamed decorative constant was removed without an independently proved
+closed reachability loop; those candidates remain deferred for a named audit.
+
+Red proof was captured before production cuts: the S61 registry additions
+failed 38 rows (759 passed). Green proof is recorded in the campaign handoff;
+on this Windows worktree the Bash wrapper cannot resolve its WSL/git worktree
+path, so focused verification uses the repository Python pytest environment
+and reports the wrapper limitation rather than claiming it ran.

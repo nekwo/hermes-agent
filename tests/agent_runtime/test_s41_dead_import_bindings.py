@@ -59,9 +59,9 @@ module expose this name". That is the wrong question for the six rows left in
 * ``hermes_cli/harness_parts/persona_commands.py::_relay_time`` is in a part
   that is ``exec``'d, never imported, so it has no module object to ``hasattr``
   against.
-* ``DecisionType``, ``default_chat_session_id_for_instance``, ``TaskState`` and
+* ``DecisionType``, ``TaskState`` and
   ``RunState`` are LIVE symbols elsewhere (``decision_schema``,
-  ``persona_assignments``, ``states``) that harness.py merely stopped binding.
+  ``states``) that harness.py merely stopped binding.
   A registry row on their names would be a lie about the tree; the fact is
   file-local, so it stays file-local.
 
@@ -95,7 +95,6 @@ REMOVED_BINDINGS = {
     # that harness.py merely stopped importing. Their names cannot be banned.
     "hermes_cli/harness.py": {
         "DecisionType",
-        "default_chat_session_id_for_instance",
         "TaskState",
         "RunState",
     },
@@ -203,7 +202,6 @@ def test_every_source_symbol_the_bindings_pointed_at_is_untouched():
 
     from agent_runtime import cli_format, scope_control, states, terminal_envelope
     from agent_runtime.decision_schema import DecisionType
-    from agent_runtime.persona_assignments import default_chat_session_id_for_instance
     from agent_runtime.profile_runner import RunBudgetExceeded
 
     assert callable(cli_format.emit_json)
@@ -213,9 +211,8 @@ def test_every_source_symbol_the_bindings_pointed_at_is_untouched():
     assert states.WorkerSessionState  # the survivor, not the deleted store
     assert find_spec("agent_runtime.operator_control") is None
     assert find_spec("agent_runtime.launcher_process_hygiene") is None
-    assert callable(default_chat_session_id_for_instance)
     assert issubclass(RunBudgetExceeded, Exception)
-    assert terminal_envelope.LANE_MISSION_WORKER
+    assert terminal_envelope.LANE_MISSION_CHAT
     assert states.TaskState and states.RunState
     assert DecisionType
     assert callable(scope_control.validate_discovery_payload)

@@ -38,19 +38,13 @@ from agent_runtime.terminal_envelope import (
     DESTRUCTIVE_GIT,
     ENVELOPE_COMMAND_REQUIRES_GRANT,
     ENVELOPE_DECISION_LOG,
-    ENVELOPE_LANE_NOT_GOVERNED,
     GIT_PUSH,
     GRANT_MALFORMED,
     GRANT_UNKNOWN_COMMAND_CLASS,
     GRANTABLE_COMMAND_CLASSES,
     COMMAND_CLASSES,
     GOVERNED_LANES,
-    HARNESS_LANES,
     LANE_MISSION_CHAT,
-    LANE_MISSION_NODE,
-    LANE_MISSION_ROOT_NODE,
-    LANE_MISSION_WORKER,
-    LANE_PERSONA_CHAT,
     LEGACY_REASON_BY_CLASS,
     NETWORK_EGRESS,
     OUTCOME_ALLOW,
@@ -666,25 +660,11 @@ def test_chat_lane_keeps_no_envelope_at_all(monkeypatch):
 
 
 def test_a_grant_does_not_leak_off_the_governed_lane(tmp_path):
-    """A grant on the governed lane refuses — never grants — on another lane.
-
-    The assertion moved (audit Q2): a harness lane outside ``GOVERNED_LANES``
-    used to get ``None`` ("no opinion, fall through to the env-keyed legacy
-    table"). It now gets a typed REFUSAL. The property under test is unchanged
-    and strictly stronger — the mission-chat grant does not reach the worker
-    lane — and it no longer depends on the ambient environment to hold.
-    """
+    """A mission-chat grant is never interpreted for an unknown lane."""
 
     cfg = _cfg(**{"dev": {LANE_MISSION_CHAT: [GIT_PUSH]}})
-    worker = TerminalEnvelopeScope(lane=LANE_MISSION_WORKER, role="dev", runtime_root=str(tmp_path))
-    decision = envelope_decision("git push origin main", scope=worker, cfg=cfg)
-    assert decision is not None
-    assert decision.outcome == OUTCOME_REFUSE
-    assert decision.granted is False
-    assert decision.failure_class == ENVELOPE_LANE_NOT_GOVERNED
-    # No config key is named, because none exists for this lane. Naming one
-    # would be the same lie the governed-lane fix hint was written to retire.
-    assert decision.config_key is None
+    stale = TerminalEnvelopeScope(lane="retired_lane", role="dev", runtime_root=str(tmp_path))
+    assert envelope_decision("git push origin main", scope=stale, cfg=cfg) is None
 
 
 def test_policy_import_failure_falls_back_to_the_hard_block(tmp_path, monkeypatch):
@@ -708,21 +688,6 @@ def test_policy_import_failure_falls_back_to_the_hard_block(tmp_path, monkeypatc
     assert payload["block_reason"] == "git_push_requires_operator_approval"
 
 
-# ── audit Q2: the per-lane {env set, env unset} matrix ──────────────────────
-#
-# The direct executable statement of the audit for the envelope: for EVERY lane,
-# the answer is the same with HERMES_AGENT_RUNTIME_ROOT present and absent. What
-# differs between lanes is the answer itself, and that difference is policy
-# (GOVERNED_LANES), not ancestry.
-
-_UNGOVERNED_HARNESS_LANES = (
-    LANE_MISSION_WORKER,
-    LANE_MISSION_NODE,
-    LANE_MISSION_ROOT_NODE,
-    LANE_PERSONA_CHAT,
-)
-
-
 def _outcome_signature(payload) -> tuple:
     """The observable outcome of the gate, reduced to what a caller can see."""
 
@@ -740,12 +705,11 @@ def _outcome_signature(payload) -> tuple:
     )
 
 
-@pytest.mark.parametrize("lane", sorted(HARNESS_LANES))
 @pytest.mark.parametrize("command", ["git push origin main", "echo hello"])
-def test_every_harness_lane_answers_identically_with_and_without_the_env_var(
-    lane, command, tmp_path, monkeypatch
+def test_mission_chat_answers_identically_with_and_without_the_env_var(
+    command, tmp_path, monkeypatch
 ):
-    scope = TerminalEnvelopeScope(lane=lane, role="dev", persona_id="dev", session_id="s1")
+    scope = TerminalEnvelopeScope(lane=LANE_MISSION_CHAT, role="dev", persona_id="dev", session_id="s1")
 
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "present"))
     with_env = _outcome_signature(_payload(command, scope=scope, cfg=_cfg(), monkeypatch=monkeypatch))
@@ -756,44 +720,6 @@ def test_every_harness_lane_answers_identically_with_and_without_the_env_var(
     assert with_env == without_env
 
 
-@pytest.mark.parametrize("lane", _UNGOVERNED_HARNESS_LANES)
-def test_an_ungoverned_harness_lane_hard_blocks_a_gated_class(lane, monkeypatch, tmp_path):
-    """A bound scope IS the activation signal — no env var involved.
-
-    Before this, these lanes fell through to
-    ``tools/terminal_tool.py::_harness_safety_block``, whose gate is
-    ``if not os.getenv("HERMES_AGENT_RUNTIME_ROOT", "").strip(): return None``.
-    A worker tick therefore blocked ``rm -rf`` or not depending on what had run
-    earlier in the same ``harness serve`` process.
-    """
-
-    monkeypatch.delenv("HERMES_AGENT_RUNTIME_ROOT", raising=False)
-    scope = TerminalEnvelopeScope(lane=lane, role="dev", runtime_root=str(tmp_path))
-    payload = _payload("rm -rf /tmp/x", scope=scope, cfg=_cfg(), monkeypatch=monkeypatch)
-    assert payload is not None
-    assert payload["blocked_by"] == "harness_execution_safety"
-    assert payload["block_reason"] == LEGACY_REASON_BY_CLASS[RECURSIVE_DELETE]
-    assert payload["failure_class"] == ENVELOPE_LANE_NOT_GOVERNED
-    assert payload["config_key"] is None
-
-
-@pytest.mark.parametrize("lane", _UNGOVERNED_HARNESS_LANES)
-def test_an_ungoverned_harness_lane_still_runs_ungated_commands(lane, monkeypatch, tmp_path):
-    monkeypatch.delenv("HERMES_AGENT_RUNTIME_ROOT", raising=False)
-    scope = TerminalEnvelopeScope(lane=lane, role="dev", runtime_root=str(tmp_path))
-    assert _payload("git status", scope=scope, cfg=_cfg(), monkeypatch=monkeypatch) is None
-
-
-def test_an_ungoverned_lane_refusal_names_no_config_key_to_chase(tmp_path):
-    """The refusal must not send an operator after a stanza that grants nothing."""
-
-    scope = TerminalEnvelopeScope(lane=LANE_MISSION_WORKER, role="dev", runtime_root=str(tmp_path))
-    decision = envelope_decision("git push origin main", scope=scope, cfg=_cfg())
-    assert "agent_runtime.terminal_envelope.grants" not in decision.fix_hint
-    assert LANE_MISSION_CHAT in decision.fix_hint  # says WHERE grants do apply
-    assert "Do NOT retry" in decision.fix_hint
-
-
 def test_hermes_chat_is_not_a_harness_lane():
     """The operator's own shell must never carry an envelope.
 
@@ -802,15 +728,17 @@ def test_hermes_chat_is_not_a_harness_lane():
     no lane spelling for it exists here to bind.
     """
 
-    assert not {lane for lane in HARNESS_LANES if "hermes" in lane or lane == "chat"}
-    assert LANE_PERSONA_CHAT != "chat"
+    assert envelope_decision(
+        "git push origin main",
+        scope=TerminalEnvelopeScope(lane="chat", role="operator"),
+        cfg=_cfg(),
+    ) is None
 
 
 def test_only_mission_chat_is_grant_governed():
     """Widening the grant table is a product decision; pin today's answer."""
 
     assert GOVERNED_LANES == frozenset({LANE_MISSION_CHAT})
-    assert GOVERNED_LANES < HARNESS_LANES
 
 
 # ── audit Q3: the legacy receipt writer's fork-owned replacement ─────────────

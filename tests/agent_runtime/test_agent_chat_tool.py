@@ -806,16 +806,18 @@ def _seed_persona_chat(persona_id: str, turns, *, persona_instance_id=None):
     Mirrors test_relay_session_lifecycle's end-to-end helper."""
     from agent_runtime.persona_assignments import (
         PersonaInstanceStore,
-        default_chat_session_id_for_instance,
+        canonical_chat_instance_id,
+        persona_chat_session_id_for,
+        resolve_default_chat_session_id_for_instance,
     )
     from agent_runtime.persona_chat_history import PERSONA_CHAT_SESSION_SOURCE
     from hermes_state import SessionDB
 
     store = PersonaInstanceStore()
     db = SessionDB()
-    session_id = default_chat_session_id_for_instance(
+    session_id = resolve_default_chat_session_id_for_instance(
         store, persona_id=persona_id, persona_instance_id=persona_instance_id
-    )
+    ) or persona_chat_session_id_for(canonical_chat_instance_id(persona_id, persona_instance_id))
     store.open_chat(
         persona_id=persona_id,
         persona_instance_id=persona_instance_id,

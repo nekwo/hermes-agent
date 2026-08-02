@@ -158,8 +158,9 @@ def test_every_shortfall_is_reachable_as_a_typed_row():
         ("capability", "y" * 5000, 300),
         ("mcp_admission", "", 2048),
     )
-    assert [row["name"] for row in tail.shortfall_rows()] == ["capability"]
-    row = tail.shortfall_rows()[0]
+    rows = [shortfall.row() for shortfall in tail.shortfalls]
+    assert [row["name"] for row in rows] == ["capability"]
+    row = rows[0]
     assert row["status"] == STATUS_TRUNCATED
     assert row["budget_bytes"] == 300
     assert row["original_bytes"] == 5000

@@ -30,7 +30,6 @@ from agent_runtime.persona_profile_binding import (
     PersonaProfileRebindError,
     binding_files,
     binding_index,
-    diverged_bindings,
     instance_busy_reason,
     rebind_persona_profile,
     resolve_effective_binding,
@@ -164,7 +163,7 @@ def test_binding_index_reports_the_config_store_disagreement(profiles, monkeypat
     monkeypatch.setattr("agent_runtime.config.persona_records_from_config", _catalog)
     monkeypatch.setattr("agent_runtime.config.load_agent_runtime_config", lambda *a, **k: _Cfg())
 
-    diverged = diverged_bindings()
+    diverged = [binding for binding in binding_index().values() if binding.diverged]
 
     assert [item.persona_id for item in diverged] == ["widget"]
     row = diverged[0].as_row()

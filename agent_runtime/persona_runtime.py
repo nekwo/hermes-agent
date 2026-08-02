@@ -29,13 +29,10 @@ from .mcp_lane import mission_chat_mcp_lane_line
 from .models import AgentPersona
 from .mission_chat_clarify import MissionChatClarifyCapture
 from .mission_chat_workdir import mission_chat_workdir_for_persona
-from .personas import all_registered_toolsets, blocked_tool_names, effective_toolsets, role_from_persona
+from .personas import all_registered_toolsets, blocked_tool_names, effective_toolsets
 from .profile_context import resolve_persona_profile
 from .provider_health import assert_provider_health_for_persona
-from .terminal_envelope import (
-    LANE_PERSONA_CHAT as TERMINAL_ENVELOPE_LANE_PERSONA_CHAT,
-    scope_for_persona as terminal_envelope_scope_for_persona,
-)
+from .terminal_envelope import scope_for_persona as terminal_envelope_scope_for_persona
 from .profile_runner import (
     AgentRunRequest,
     AgentRunResult,
@@ -70,113 +67,6 @@ class GPTPersonaRuntime:
             credential_pool=credential_pool,
             session_db=runner_session_db,
         )
-
-    def chat_reply(
-        self,
-        persona: AgentPersona,
-        message: str,
-        *,
-        session_id: str | None = None,
-        turn_id: str | None = None,
-        max_wall_seconds: float | None = 120.0,
-        # No API-call cap on the chat lane — align with base Hermes, where a
-        # conversational turn is bounded by the tool-calling loop
-        # (AgentRunRequest.max_iterations = 90) plus the wall-clock budget, not a
-        # hard call count. Operator chats and agent_chat_send relays share this
-        # path; both keep their wall deadline (max_wall_seconds / the shared
-        # relay budget), so a runaway turn is caught by time + iterations, not an
-        # arbitrary 8 that also throttled ordinary multi-step chat requests.
-        max_api_calls: int | None = None,
-        max_total_tokens: int | None = None,
-        stream_callback: Callable[[str | None], None] | None = None,
-        pre_trace_callback: Callable[[dict], None] | None = None,
-        trace_callback: Callable[[dict], None] | None = None,
-        # T10c follow-up: header-only cache-scope routing identity (codex
-        # cache-scope headers), NEVER a transcript/session-load key. The
-        # free-floating lane binds its chat session but calls with
-        # session_id=None (history is baked into the message) — without this,
-        # that lane ships no cache-scope headers and every turn is cache-cold.
-        cache_scope_id: str | None = None,
-    ) -> AgentRunResult:
-        """Run one plain conversational turn for an operator persona chat.
-
-        This deliberately bypasses the decision-contract pipeline: the agent
-        gets a conversational system prompt (no decision menu, no task scoping)
-        and the operator's raw message, and returns free-text. This is the
-        chat-first path — the harness task/decision machinery only engages when
-        the operator explicitly asks for work.
-
-        The Harness caller owns the redacted canonical transcript. Live
-        operator-chat paths should construct this runtime with
-        ``persist_agent_session=False`` so the internal model run cannot create
-        a private scratch session that later needs copy-back reconciliation.
-        """
-
-        binding = resolve_persona_profile(persona)
-        if binding.readiness == "missing_profile":
-            raise ValueError(binding.summary)
-        assert_provider_health_for_persona(persona)
-        clarify_capture = MissionChatClarifyCapture()
-        # Audit Q2: free-chat is harness-constructed, so it binds a scope and
-        # stops being decided by whether HERMES_AGENT_RUNTIME_ROOT happens to be
-        # exported. Its lane is NOT governed by the grant table — free-chat is a
-        # conversational surface, not the primary work lane — so gated classes
-        # keep the legacy hard block, now reached by construction.
-        #
-        # This is NOT ``hermes chat``: that is the operator's own shell, never
-        # reaches AgentRunRequest, and must never carry an envelope.
-        envelope_scope = terminal_envelope_scope_for_persona(
-            persona,
-            lane=TERMINAL_ENVELOPE_LANE_PERSONA_CHAT,
-            session_id=session_id,
-            runtime_root=paths.store_root(),
-        )
-        result = self._runner.run(
-            AgentRunRequest(
-                profile=binding.hermes_profile,
-                provider=persona.provider or self._default_provider,
-                model=persona.model or self._default_model or "",
-                api_mode=persona.api_mode,
-                terminal_envelope_scope=envelope_scope,
-                enabled_toolsets=_enabled_toolsets_for_chat(persona, session_id=session_id),
-                blocked_tool_names=_blocked_tool_names_for_chat(persona, session_id=session_id),
-                quiet_mode=True,
-                skip_context_files=not bool(getattr(persona, "include_core_context_files", False)),
-                # Profile memory (MEMORY.md / USER.md) is identity-adjacent: it
-                # carries the bound profile's worldview into the turn. Honor the
-                # persona's include_profile_memory opt-in instead of loading it
-                # unconditionally, so a persona bound to a supervisor profile for
-                # *capabilities* does not also inherit that profile's memory-model
-                # (the Alice "goal->Neko->Dev" mental model that made Neko relay
-                # to itself). A persona keeps its own profile's memory when the
-                # binding is its own; it drops a borrowed profile's memory.
-                skip_memory=not bool(getattr(persona, "include_profile_memory", False)),
-                platform=PERSONA_CHAT_SCRATCH_SOURCE,
-                skill_surface="mission_chat",
-                skill_root_node_mode=False,
-                session_id=session_id,
-                cache_scope_id=cache_scope_id,
-                max_wall_seconds=max_wall_seconds,
-                max_api_calls=max_api_calls,
-                max_total_tokens=max_total_tokens,
-                user_message=message,
-                system_message=_persona_chat_system_prompt(persona),
-                stream_callback=stream_callback,
-                clarify_callback=clarify_capture.callback,
-                progress_callback=_chat_trace_callback(
-                    session_id=session_id,
-                    persona=persona,
-                    turn_id=turn_id,
-                    before_first_trace=pre_trace_callback,
-                    on_trace=trace_callback,
-                ),
-                runtime_root=paths.store_root(),
-            )
-        )
-        ChatToolPermissionStore().consume_turn(persona_id=persona.id, session_id=session_id)
-        if clarify_capture.requested and isinstance(result.raw, dict):
-            result.raw["clarify_request"] = clarify_capture.request
-        return result
 
     def mission_chat_reply(
         self,
@@ -427,61 +317,6 @@ class GPTPersonaRuntime:
 PERSONA_CHAT_SCRATCH_SOURCE = "agent_runtime_persona_chat_scratch"
 
 
-def _persona_chat_system_prompt(persona: AgentPersona) -> str:
-    display = getattr(persona, "display_name", None) or getattr(persona, "id", "the agent")
-    role = str(role_from_persona(persona))
-    base = (
-        f"You are {display}, a Mission Control operator-channel agent (role: {role}). "
-        "You are in a direct, real-time chat with a single human operator — your teammate, not an end user. "
-        "You are embodied in the Mission Control office — a 2D/3D space shared with the other agents — and the "
-        "operator's HUD shows live state: the current realm, workspace, and each agent's name and steer handle. "
-        "A workspace board also exists; when you notice follow-up work worth tracking, you may add a card with the "
-        "board tools (advisory — a card is planning state only and never starts or changes a goal). "
-        f"{_persona_chat_voice(role, display)} "
-        "Voice: warm, plain text, teammate-tight. Lead with the answer; skip preamble, filler, and restating the question. "
-        "A sentence or two is usually enough — only go longer when the operator clearly wants depth. "
-        "If you need tools, acknowledge the action first in one short sentence, then use the tools, then report the result. "
-        "You have real tools. When the operator asks you to do something — run a command, read or edit a file, check or "
-        "change state — actually use your tools and report the real result. The operator's current permission grant is the "
-        "only gate on what you can do; there is no separate 'hand it off first' step. "
-        "Never fabricate: do not claim to have run a command, read a file, opened a path, or produced output unless you "
-        "actually invoked the tool and are reporting its real result. If a capability isn't available, or your permission "
-        "grant blocks it, say so plainly instead of inventing output. "
-        "Keep replies as clean teammate prose: never paste decision JSON, task scopes, acceptance criteria, handoff packets, "
-        "or raw tool/tick scaffolding into the message — your tool calls are tracked separately in the trace lane. "
-        "If an order is ambiguous or underspecified, use the `clarify` tool to ask before acting instead of guessing — you are "
-        "in a live channel, and on this surface clarify ends your turn with your question and the answer comes back as the "
-        "asker's next message (pass `choices` when the answer is one of a few known options). "
-        "If the operator just greets you or makes small talk, talk back like a teammate. "
-        "Recall: lean on the inline chat history for continuity. Reach for session_search only when the operator points at "
-        "something specific from a past session you can't already see, and consult your durable memory only when it actually "
-        "bears on the reply — don't fish."
-    )
-    # Same profile-owned SOUL lane as the mission-chat surface.
-    soul = _mission_chat_soul_overlay(persona)
-    return f"{base}\n\n{soul}" if soul else base
-
-
-def _persona_chat_voice(role: str, display: str) -> str:
-    if role == "alice_supervisor":
-        return (
-            f"As {display} you run point for the operator across the mission: you coordinate the dev/QA personas, track what's "
-            "in flight, and give crisp, decisive read-outs — and you act directly when the operator asks. Chief-of-staff "
-            "energy, not cheerleader."
-        )
-    if role == "qa":
-        return (
-            "You are the quality gate: skeptical, precise, evidence-first. You talk through risks and what you'd verify — and "
-            "when the operator asks, you actually run the checks and report what the evidence shows."
-        )
-    if role == "dev":
-        return (
-            "You are a senior engineer: concrete, pragmatic, fluent in the repo. You reason about approach and tradeoffs — and "
-            "when the operator asks, you make the change or run the command directly, within your granted permissions."
-        )
-    return f"You speak as {display}: a capable, straight-talking teammate."
-
-
 def _mission_chat_operative_rules() -> str:
     """Operative rules layered on top of the persona profile's own SOUL/identity
     for the canonical Mission Control operator chat.
@@ -560,8 +395,6 @@ def _mission_chat_identity_prompt(persona: AgentPersona) -> str:
 
     display = str(getattr(persona, "display_name", None) or getattr(persona, "id", "the agent")).strip()
     persona_id = str(getattr(persona, "id", "") or "").strip()
-    role = str(role_from_persona(persona))
-    voice = _persona_chat_voice(role, display)
     id_clause = f" (Mission Control persona id: `{persona_id}`)" if persona_id else ""
     never_self = (
         f" Never use `agent_chat_send` to message `{persona_id}`: that persona is you — "
@@ -570,7 +403,7 @@ def _mission_chat_identity_prompt(persona: AgentPersona) -> str:
         else ""
     )
     return (
-        f"You are {display}{id_clause}. {voice} You are already the persona speaking in this "
+        f"You are {display}{id_clause}. You are already the persona speaking in this "
         "channel — the operator is talking to you right now, so respond directly in your own "
         f"voice.{never_self} Other runtime personas are teammates you may brief with "
         "`agent_chat_send`; you are not your own relay target."

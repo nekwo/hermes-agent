@@ -225,28 +225,3 @@ def test_hud_digest_absent_when_only_done_cards():
     store.move_card(card.card_id, column_id="col_done")
     # only a done card → no OPEN cards → no digest line (nudged-never-forced)
     assert _board_digest_for_workspace(ws) is None
-
-
-# ── chat prompt board guidance ────────────────────────────────────────────
-# The chat system prompt is the only persona prompt path left (the bundled
-# mission-worker prompt builder and its shared_harness_overlay.md were removed
-# with the mission lane), so the board sentence is pinned here alone.
-
-
-def test_board_sentence_present_in_chat_prompt():
-    from agent_runtime.models import AgentPersona
-    from agent_runtime.persona_runtime import _persona_chat_system_prompt
-
-    persona = AgentPersona(
-        id="dev",
-        display_name="Dev",
-        role="dev",
-        model="",
-        provider="",
-        api_mode="chat",
-        toolsets=[],
-        system_prompt_path=None,
-    )
-    chat_prompt = _persona_chat_system_prompt(persona)
-    assert "workspace board" in chat_prompt.lower()
-    assert "may add a card" in chat_prompt.lower()

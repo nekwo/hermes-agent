@@ -31,8 +31,8 @@ What was re-verified against the tree before the cut:
 with no writer to police is not a policy), the ``LANE_STATES`` vocabulary,
 ``TERMINAL_STATE`` (readers were ``mark_terminal_for_task`` and the two tables),
 the write-time sanitisers ``_safe_reason`` / ``_safe_token``, and six imports.
-``ACTIVE_STATE`` / ``PARKED_STATE`` / ``WAITING_STATE`` survive because
-``active_for_task`` still reads them.
+The later persona-runtime cut also retires the task-era state aliases and their
+``active_for_task`` reader; ``get`` and ``list_all`` remain the live read side.
 
 Count: 72 -> 68. ``foreground_runtime.closed`` is the LAST of the
 ``foreground_runtime.*`` family — S15 de-registered the other six when the
@@ -81,7 +81,6 @@ still works, a wire pin, or a set-level property:
 
 from __future__ import annotations
 
-import inspect
 
 import pytest
 from hermes_time import now
@@ -142,21 +141,11 @@ def seed_lane_row(
     return instance
 
 
-def test_the_three_state_constants_the_read_path_uses_survive():
-    """Negative gate: the cut takes the constants nothing reads, and only those.
-    ``active_for_task`` still elects a live row with these three."""
-
-    assert runtime_instances.ACTIVE_STATE == "active"
-    assert runtime_instances.PARKED_STATE == "parked"
-    assert runtime_instances.WAITING_STATE == "waiting"
-    source = inspect.getsource(GoalRuntimeInstanceStore.active_for_task)
-    for name in ("ACTIVE_STATE", "WAITING_STATE", "PARKED_STATE"):
-        assert name in source, name
-
-
 def test_the_read_side_survives_without_the_orphaned_latest_alias():
-    for reader in ("get", "list_all", "list_for_task", "active_for_task"):
+    for reader in ("get", "list_all"):
         assert callable(getattr(GoalRuntimeInstanceStore, reader)), reader
+    for retired in ("list_for_task", "active_for_task"):
+        assert not hasattr(GoalRuntimeInstanceStore, retired)
     assert not hasattr(GoalRuntimeInstanceStore, "latest_for_task")
     assert callable(runtime_instances.runtime_instance_summary)
     assert callable(runtime_instances.runtime_instances_summary)
@@ -177,7 +166,7 @@ def test_the_read_path_still_projects_a_persisted_lane(isolate_agent_runtime_roo
 
     assert [row.id for row in store.list_all()] == [seeded.id]
     assert store.get(seeded.id).state == "running"
-    assert store.active_for_task("task_s53").id == seeded.id
+    assert store.get(seeded.id).id == seeded.id
 
     summary = runtime_instances.runtime_instance_summary(store.get(seeded.id))
     assert summary["lane_id"] == seeded.id

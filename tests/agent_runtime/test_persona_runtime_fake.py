@@ -127,7 +127,7 @@ def test_chat_permission_unbounded_reaches_actual_agent_request(tmp_path, monkey
     )
     runtime = GPTPersonaRuntime(default_provider="openai-codex", default_model="gpt-5.5", agent_factory=FakeAIAgent)
 
-    runtime.chat_reply(qa, "can you write now?", session_id=session_id)
+    runtime.mission_chat_reply(qa, "can you write now?", permission_session_id=session_id)
 
     fake = FakeAIAgent.instances[0]
     # `unbounded` resolves the whole live registry. The retired mission creation
@@ -154,7 +154,7 @@ def test_chat_permission_unbounded_one_turn_expires_after_success(tmp_path, monk
     )
     runtime = GPTPersonaRuntime(default_provider="openai-codex", default_model="gpt-5.5", agent_factory=FakeAIAgent)
 
-    runtime.chat_reply(neko, "run the command", session_id=session_id)
+    runtime.mission_chat_reply(neko, "run the command", permission_session_id=session_id)
 
     fake = FakeAIAgent.instances[0]
     assert fake.kwargs["enabled_toolsets"] == _unbounded_chat_toolsets()
@@ -179,7 +179,7 @@ def test_chat_reply_can_disable_internal_session_persistence(tmp_path, monkeypat
         persist_agent_session=False,
     )
 
-    runtime.chat_reply(neko, "hi", session_id=None)
+    runtime.mission_chat_reply(neko, "hi", session_id=None)
 
     fake = FakeAIAgent.instances[0]
     assert fake.kwargs["session_db"] is None
@@ -210,10 +210,10 @@ def test_chat_reply_routes_tool_calls_into_session_keyed_trace(tmp_path, monkeyp
     )
 
     pre_trace = []
-    runtime.chat_reply(
+    runtime.mission_chat_reply(
         neko,
         "run echo PARITY_OK_2026 and paste the output",
-        session_id=session_id,
+        permission_session_id=session_id,
         pre_trace_callback=pre_trace.append,
     )
 
@@ -272,29 +272,6 @@ def test_reasoning_summary_does_not_fire_pre_trace_ack(tmp_path, monkeypatch):
         {"type": "run.tool.started", "tool_name": "terminal", "status": "running"},
     )
     assert len(fired) == 1
-
-
-def test_persona_chat_prompt_allows_real_tools_and_forbids_fabrication():
-    from agent_runtime.persona_runtime import _persona_chat_system_prompt
-
-    neko = next(persona for persona in sample_personas() if persona.id == "neko_supervisor")
-    prompt = _persona_chat_system_prompt(neko)
-
-    # Full tool access: actually use tools, permission-gated, no escalation nudge.
-    assert "actually use your tools" in prompt
-    assert "permission grant is the only gate" in prompt
-    assert "hand it off as real work" not in prompt
-    assert "task pipeline" not in prompt
-    # Hard anti-fabrication invariant.
-    assert "Never fabricate" in prompt
-    assert "inventing output" in prompt
-    # Embodiment context: office + HUD state the operator can see.
-    assert "Mission Control office" in prompt
-    assert "steer handle" in prompt
-    # Operator channel is the ask-when-ambiguous surface (vs act_dont_ask on the
-    # autonomous goal path): clarify underspecified orders via the clarify tool
-    # instead of guessing.
-    assert "use the `clarify` tool to ask before acting" in prompt
 
 
 def test_clarify_enabled_and_unblocked_on_chat_lane_but_blocked_on_runs():
@@ -499,11 +476,6 @@ def test_persona_soul_overlay_layers_between_identity_and_rules(tmp_path, monkey
     # the surface invariants.
     assert rules in composed
 
-    # Persona-chat lane carries the same soul.
-    chat_prompt = pr._persona_chat_system_prompt(souled)
-    assert soul_marker in chat_prompt
-    assert chat_prompt.index("operator-channel agent") < chat_prompt.index(soul_marker)
-
     # A bogus explicit path degrades to no soul, never an error or an implicit
     # fallback that hides the bad override.
     bogus = replace(neko, soul_overlay_path="does_not_exist.md", hermes_profile="neko")
@@ -556,6 +528,28 @@ def test_mission_chat_identity_prompt_names_persona_and_forbids_self_relay():
     # No leaked Alice-identity / third-person "deploy Neko" framing.
     assert "Alice" not in identity
     assert "catgirl" not in identity.lower()
+
+
+def test_mission_chat_behavior_is_role_agnostic_and_profile_owned():
+    """Changing only the legacy role label cannot change prompt bytes.
+
+    Identity still names the selected instance, while behavioral voice comes
+    only from the profile-owned SOUL/config layers.
+    """
+
+    from dataclasses import replace
+
+    from agent_runtime.persona_runtime import _mission_chat_surface_message
+
+    base = next(persona for persona in sample_personas() if persona.id == "qa")
+    custom = replace(base, role="operator_authored_custom_role")
+    dev_labeled = replace(base, role="dev")
+
+    custom_prompt = _mission_chat_surface_message(custom, "")
+    assert custom_prompt == _mission_chat_surface_message(dev_labeled, "")
+    assert "quality gate" not in custom_prompt.lower()
+    assert "senior engineer" not in custom_prompt.lower()
+    assert "chief-of-staff" not in custom_prompt.lower()
 
 
 def test_mission_chat_reply_injects_operative_rules_into_system_message(tmp_path, monkeypatch):
@@ -971,7 +965,7 @@ def test_mission_chat_reply_honors_core_context_file_opt_in(tmp_path, monkeypatc
     assert _capture_skip(True) is False
 
 
-def test_chat_reply_without_session_records_no_trace(tmp_path, monkeypatch):
+def test_mission_chat_reply_without_session_records_no_trace(tmp_path, monkeypatch):
     # A sandbox chat turn with no durable session must not synthesize trace.
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
     FakeAIAgent.instances.clear()
@@ -990,7 +984,7 @@ def test_chat_reply_without_session_records_no_trace(tmp_path, monkeypatch):
         default_provider="openai-codex", default_model="gpt-5.5", agent_factory=ToolCallingAgent
     )
 
-    runtime.chat_reply(neko, "hi", session_id=None)
+    runtime.mission_chat_reply(neko, "hi", session_id=None)
 
     assert EventLog().tail(10) == []
 
@@ -1045,75 +1039,6 @@ def test_mission_chat_reply_sets_cache_scope_id_but_keeps_session_none(tmp_path,
     assert request.cache_scope_id == "chat-neko-stable-1"
     # …and the transcript/session-load key is left None (no re-bake).
     assert request.session_id is None
-
-
-def test_chat_reply_threads_cache_scope_id_to_run_request(tmp_path, monkeypatch):
-    # T10c follow-up: the FREE-FLOATING lane (operator console chats +
-    # agent_chat relays) calls chat_reply with session_id=None while holding a
-    # bound stable chat session id. chat_reply must thread that id through as
-    # the header-only cache_scope_id — this lane was cache-cold on every turn
-    # without it (live-observed: fmi.session_id='' and cache_read=0 post-T10c).
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    neko = next(persona for persona in sample_personas() if persona.id == "neko_supervisor")
-    captured = {}
-
-    class CapturingRunner:
-        def run(self, request):
-            captured["request"] = request
-            return AgentRunResult(
-                final_response="ok",
-                session_id="persona_chat_personainst_neko_free_1",
-                provider="openai-codex",
-                model="gpt-5.5",
-                base_url=None,
-                messages=[],
-            )
-
-    runtime = GPTPersonaRuntime(
-        default_provider="openai-codex", default_model="gpt-5.5", agent_runner=CapturingRunner()
-    )
-
-    runtime.chat_reply(
-        neko,
-        "hi",
-        session_id=None,
-        cache_scope_id="persona_chat_personainst_neko_free_1",
-    )
-
-    request = captured["request"]
-    assert request.cache_scope_id == "persona_chat_personainst_neko_free_1"
-    assert request.session_id is None
-
-
-def test_chat_reply_cache_scope_defaults_to_none(tmp_path, monkeypatch):
-    # Callers that pass a REAL session_id (transcript-loading chat lanes) get
-    # header routing via session_id at the transport seam; chat_reply must not
-    # invent a scope for them — absent stays absent.
-    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "runtime"))
-    neko = next(persona for persona in sample_personas() if persona.id == "neko_supervisor")
-    captured = {}
-
-    class CapturingRunner:
-        def run(self, request):
-            captured["request"] = request
-            return AgentRunResult(
-                final_response="ok",
-                session_id="s2",
-                provider="openai-codex",
-                model="gpt-5.5",
-                base_url=None,
-                messages=[],
-            )
-
-    runtime = GPTPersonaRuntime(
-        default_provider="openai-codex", default_model="gpt-5.5", agent_runner=CapturingRunner()
-    )
-
-    runtime.chat_reply(neko, "hi", session_id="real-session-7")
-
-    request = captured["request"]
-    assert request.cache_scope_id is None
-    assert request.session_id == "real-session-7"
 
 
 def test_mission_chat_reply_cache_scope_falls_back_to_session_when_no_perm(tmp_path, monkeypatch):

@@ -8,9 +8,8 @@ considered — the exchange was invisible in Mission Control, violating the tool
 own contract ("omit to continue the target's default chat session ... the whole
 exchange is visible in Mission Control").
 
-The fix routes the omitted-session path through
-``default_chat_session_id_for_instance`` — the single resolve-or-mint chokepoint,
-so every session this lane establishes is canonical, pointed, and visible.
+The live dispatch handler owns resolve-or-mint; these tests use the same
+canonical id derivation while exercising the persisted session contract.
 
 The live contract on top of that chokepoint is V3 (task-scoped dispatch,
 2026-07-27): an omitted session no longer means "continue", it means "open this
@@ -32,7 +31,8 @@ import pytest
 
 from agent_runtime.persona_assignments import (
     PersonaInstanceStore,
-    default_chat_session_id_for_instance,
+    canonical_chat_instance_id,
+    persona_chat_session_id_for,
     persona_instance_id_for,
     resolve_default_chat_session_id_for_instance,
 )
@@ -53,6 +53,24 @@ def _persist_explicit_chat_persona_data():
         store.save(persona)
 
 
+def _session_for_test(
+    store: PersonaInstanceStore,
+    *,
+    persona_id: str,
+    persona_instance_id: str | None = None,
+    mint: bool = False,
+) -> str:
+    """Seed a chat id with the same primitives used by live dispatch."""
+    existing = None if mint else resolve_default_chat_session_id_for_instance(
+        store,
+        persona_id=persona_id,
+        persona_instance_id=persona_instance_id,
+    )
+    return existing or persona_chat_session_id_for(
+        canonical_chat_instance_id(persona_id, persona_instance_id)
+    )
+
+
 def test_omitted_session_reuses_targets_existing_default_chat_session(
     isolate_agent_runtime_root,
 ):
@@ -61,8 +79,8 @@ def test_omitted_session_reuses_targets_existing_default_chat_session(
     # operator/clarify chat). An omitted-session relay must CONTINUE it.
     existing = store.create_operator_chat(persona_id="qa", display_name="QA")
 
-    first = default_chat_session_id_for_instance(store, persona_id="qa")
-    second = default_chat_session_id_for_instance(store, persona_id="qa")
+    first = _session_for_test(store, persona_id="qa")
+    second = _session_for_test(store, persona_id="qa")
 
     assert first == existing.session_id
     assert second == existing.session_id  # repeated relays thread into ONE session
@@ -73,7 +91,7 @@ def test_omitted_session_mints_canonical_default_when_target_never_chatted(
 ):
     store = PersonaInstanceStore()
 
-    minted = default_chat_session_id_for_instance(store, persona_id="qa")
+    minted = _session_for_test(store, persona_id="qa")
 
     # The minted default embeds the CANONICAL instance id (personainst_qa), not a
     # phantom personainst_qa_<hex>: prefix + single 12-hex session suffix.
@@ -92,11 +110,11 @@ def test_two_relays_thread_after_the_first_creates_the_session(
     # created, under the canonical instance id.
     store = PersonaInstanceStore()
 
-    relay1 = default_chat_session_id_for_instance(store, persona_id="qa")
+    relay1 = _session_for_test(store, persona_id="qa")
     instance = store.open_chat(persona_id="qa", session_id=relay1)
     assert instance.id == persona_instance_id_for("qa")  # canonical, no phantom mint
 
-    relay2 = default_chat_session_id_for_instance(store, persona_id="qa")
+    relay2 = _session_for_test(store, persona_id="qa")
     assert relay2 == relay1
     # The pointer is the canonical instance, updated through the normal write
     # path — no stray personainst_qa_<hex> row was created.
@@ -112,10 +130,10 @@ def test_instance_shaped_target_canonicalizes_and_does_not_mint_a_variant(
 
     # A caller may hand an instance id (with actor-token drift) instead of a
     # persona id; it must resolve to the SAME canonical instance's session.
-    from_instance = default_chat_session_id_for_instance(
+    from_instance = _session_for_test(
         store, persona_id="qa", persona_instance_id="personainst_qa"
     )
-    from_drift = default_chat_session_id_for_instance(
+    from_drift = _session_for_test(
         store, persona_id="qa", persona_instance_id="persona_personainst_qa"
     )
     assert from_instance == existing.session_id
@@ -131,7 +149,7 @@ def test_task_bound_session_pointer_is_not_absorbed_as_a_chat_lane(
     instance.session_id = "worker_session_task_42"  # not a persona_chat_* id
     store.update(instance)
 
-    minted = default_chat_session_id_for_instance(store, persona_id="qa")
+    minted = _session_for_test(store, persona_id="qa")
     assert minted == "persona_chat_seed_000000000000"
 
 
@@ -148,7 +166,7 @@ def test_relay_exchange_is_visible_in_the_snapshot_projection(
     db = SessionDB()
 
     def _relay(message: str, reply: str) -> str:
-        session_id = default_chat_session_id_for_instance(store, persona_id="qa")
+        session_id = _session_for_test(store, persona_id="qa")
         store.open_chat(persona_id="qa", session_id=session_id, display_name="QA")
         db.create_session(
             session_id=session_id,
@@ -199,8 +217,8 @@ def test_mint_mode_forces_a_fresh_canonical_session_even_with_a_default(
     store = PersonaInstanceStore()
     existing = store.create_operator_chat(persona_id="qa", display_name="QA")
 
-    assert default_chat_session_id_for_instance(store, persona_id="qa") == existing.session_id
-    fresh = default_chat_session_id_for_instance(store, persona_id="qa", mint=True)
+    assert _session_for_test(store, persona_id="qa") == existing.session_id
+    fresh = _session_for_test(store, persona_id="qa", mint=True)
     assert fresh != existing.session_id
     assert fresh.startswith(f"persona_chat_{persona_instance_id_for('qa')}_")
     tail = fresh[len(f"persona_chat_{persona_instance_id_for('qa')}_"):]
@@ -219,7 +237,7 @@ def test_new_session_mint_is_canonical_and_visible_in_the_projection(
     db = SessionDB()
 
     def _relay(message: str, reply: str, *, mint: bool) -> str:
-        session_id = default_chat_session_id_for_instance(store, persona_id="qa", mint=mint)
+        session_id = _session_for_test(store, persona_id="qa", mint=mint)
         store.open_chat(persona_id="qa", session_id=session_id, display_name="QA")
         db.create_session(
             session_id=session_id,
@@ -236,7 +254,7 @@ def test_new_session_mint_is_canonical_and_visible_in_the_projection(
     assert fresh != first, "new_session must start a distinct thread"
     # The fresh session became the instance's default going forward.
     assert resolve_default_chat_session_id_for_instance(store, persona_id="qa") == fresh
-    assert default_chat_session_id_for_instance(store, persona_id="qa") == fresh
+    assert _session_for_test(store, persona_id="qa") == fresh
 
     rows = persona_chat_history_summary(persona_instances=store.list_all(), session_db=db)
     fresh_rows = [row for row in rows if row["session_id"] == fresh]
@@ -269,7 +287,7 @@ def test_bare_persona_relay_never_adopts_a_sibling_session(
     sibling_session = sibling.session_id
 
     # SEND #1 — handle-targeted at the sibling instance.
-    s1 = default_chat_session_id_for_instance(
+    s1 = _session_for_test(
         store, persona_id="qa", persona_instance_id="personainst_qa_agent_2"
     )
     store.open_chat(persona_id="qa", persona_instance_id="personainst_qa_agent_2", session_id=s1)
@@ -277,7 +295,7 @@ def test_bare_persona_relay_never_adopts_a_sibling_session(
 
     # SEND #2 — bare persona id → the canonical primary. It must NOT adopt the
     # sibling's session; it mints the primary's own.
-    s2 = default_chat_session_id_for_instance(store, persona_id="qa")
+    s2 = _session_for_test(store, persona_id="qa")
     store.open_chat(persona_id="qa", session_id=s2)
 
     assert s2 != sibling_session, "bare-persona send stole the sibling's session"
@@ -312,7 +330,7 @@ def test_resolve_default_ignores_a_foreign_pointer_and_self_heals(
     )
     # Poison the canonical pointer directly (bypassing the write-guard) to model
     # the on-disk corrupted state.
-    primary = store.open_chat(persona_id="qa", session_id=default_chat_session_id_for_instance(store, persona_id="qa"))
+    primary = store.open_chat(persona_id="qa", session_id=_session_for_test(store, persona_id="qa"))
     primary.session_id = sibling.session_id
     store.update(primary)
     assert store.get(persona_instance_id_for("qa")).session_id == sibling.session_id
@@ -320,7 +338,7 @@ def test_resolve_default_ignores_a_foreign_pointer_and_self_heals(
     # Read side ignores the foreign legacy scalar and keeps the dedicated root.
     own_root = primary.default_chat_session_id
     assert resolve_default_chat_session_id_for_instance(store, persona_id="qa") == own_root
-    healed = default_chat_session_id_for_instance(store, persona_id="qa")
+    healed = _session_for_test(store, persona_id="qa")
     assert healed == own_root
     store.open_chat(persona_id="qa", session_id=healed)
     assert store.get(persona_instance_id_for("qa")).default_chat_session_id == healed
@@ -474,7 +492,7 @@ def test_relay_under_profile_override_persists_transcript_to_the_projection_home
     store = PersonaInstanceStore()
 
     with persona_profile_context(_qa_profile_binding(profile_home)):
-        session_id = default_chat_session_id_for_instance(store, persona_id="qa")
+        session_id = _session_for_test(store, persona_id="qa")
         store.open_chat(persona_id="qa", session_id=session_id, default_display_name="QA Agent")
         db = harness._default_persona_session_db()
         # The write path resolved the head home even though the override is live.
@@ -564,7 +582,7 @@ def test_resolve_sender_tier1_chat_session_owner_full_identity(isolate_agent_run
     from agent_runtime.relay_policy import build_relay_sender_marker
 
     store = PersonaInstanceStore()
-    sender_session = default_chat_session_id_for_instance(store, persona_id="neko")
+    sender_session = _session_for_test(store, persona_id="neko")
     store.open_chat(persona_id="neko", session_id=sender_session, display_name="Neko Mission Lead")
     sender_id = persona_instance_id_for("neko")
 
@@ -622,11 +640,11 @@ def test_relay_incoming_row_carries_marker_and_projects_relayed_with_sender_name
     from agent_runtime.persona_chat_history import PERSONA_RELAYED_MESSAGE_KIND
 
     store = PersonaInstanceStore()
-    sender_session = default_chat_session_id_for_instance(store, persona_id="neko")
+    sender_session = _session_for_test(store, persona_id="neko")
     store.open_chat(persona_id="neko", session_id=sender_session, display_name="Neko Mission Lead")
     sender_id = persona_instance_id_for("neko")
 
-    target_session = default_chat_session_id_for_instance(store, persona_id="qa")
+    target_session = _session_for_test(store, persona_id="qa")
     store.open_chat(persona_id="qa", session_id=target_session, display_name="QA")
 
     marker = harness._resolve_relay_sender_marker(
@@ -684,7 +702,7 @@ def test_operator_row_carries_no_marker_and_projects_as_operator(isolate_agent_r
     from agent_runtime.operator_channels import operator_channel_summary
 
     store = PersonaInstanceStore()
-    target_session = default_chat_session_id_for_instance(store, persona_id="qa")
+    target_session = _session_for_test(store, persona_id="qa")
     store.open_chat(persona_id="qa", session_id=target_session, display_name="QA")
 
     marker = harness._resolve_relay_sender_marker(
@@ -736,7 +754,7 @@ def test_unresolvable_sender_projects_as_agent_without_a_name(isolate_agent_runt
     from agent_runtime.relay_policy import build_relay_sender_marker
 
     store = PersonaInstanceStore()
-    target_session = default_chat_session_id_for_instance(store, persona_id="qa")
+    target_session = _session_for_test(store, persona_id="qa")
     store.open_chat(persona_id="qa", session_id=target_session, display_name="QA")
 
     marker = harness._resolve_relay_sender_marker(
@@ -977,12 +995,12 @@ def test_the_staged_row_survives_the_native_projection_and_attributes(
     )
 
     store = PersonaInstanceStore()
-    sender_session = default_chat_session_id_for_instance(store, persona_id="neko")
+    sender_session = _session_for_test(store, persona_id="neko")
     store.open_chat(
         persona_id="neko", session_id=sender_session, display_name="Neko Mission Lead"
     )
     sender_id = persona_instance_id_for("neko")
-    target_session = default_chat_session_id_for_instance(store, persona_id="qa")
+    target_session = _session_for_test(store, persona_id="qa")
     store.open_chat(persona_id="qa", session_id=target_session, display_name="QA")
 
     marker = harness._resolve_relay_sender_marker(

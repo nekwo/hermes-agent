@@ -166,15 +166,6 @@ class EventLog:
         tail_lines = collected[-n:]
         return [from_jsonable(Event, json.loads(line)) for line in tail_lines]
 
-    def iter_all(self) -> Iterator[Event]:
-        for source in event_rotation.ordered_line_sources():
-            if not source.exists():
-                continue
-            with open(source, encoding="utf-8") as handle:
-                for line in handle:
-                    if line.strip():
-                        yield from_jsonable(Event, json.loads(line))
-
     def iter_from_offset(self, offset: int) -> Iterator[tuple[int, Event]]:
         # Logical-offset tailing across slices: resolve which slice(s) a logical
         # offset lives in and seek there, yielding logical offsets throughout so
@@ -278,19 +269,6 @@ class EventLog:
             since=since,
             types=types,
         )
-
-    def iter_since(self, ts: datetime) -> Iterator[Event]:
-        for source in event_rotation.ordered_line_sources():
-            if not source.exists():
-                continue
-            with open(source, encoding="utf-8") as handle:
-                for line in handle:
-                    if not line.strip():
-                        continue
-                    evt = from_jsonable(Event, json.loads(line))
-                    if evt.ts >= ts:
-                        yield evt
-
 
 # S54 removed ``archive_task_events`` and ``compact_archived_task_events``.
 # Both were task-scoped event archivers whose last caller went with the ``Task``
@@ -433,11 +411,6 @@ class CachedEventLog(EventLog):
             return []
         return [from_jsonable(Event, json.loads(line)) for line in self._cached_lines()[-n:] if line.strip()]
 
-    def iter_all(self) -> Iterator[Event]:
-        for line in self._cached_lines():
-            if line.strip():
-                yield from_jsonable(Event, json.loads(line))
-
     def iter_from_offset(self, offset: int) -> Iterator[tuple[int, Event]]:
         current = 0
         start = max(0, int(offset or 0))
@@ -447,15 +420,6 @@ class CachedEventLog(EventLog):
             if current <= start or not line.strip():
                 continue
             yield current, from_jsonable(Event, json.loads(line))
-
-    def iter_since(self, ts: datetime) -> Iterator[Event]:
-        for line in self._cached_lines():
-            if not line.strip():
-                continue
-            evt = from_jsonable(Event, json.loads(line))
-            if evt.ts >= ts:
-                yield evt
-
 
 def _task_id_json_token(task_id: str) -> str:
     encoded = json.dumps(str(task_id), ensure_ascii=False, separators=(",", ":"))

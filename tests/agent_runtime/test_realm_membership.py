@@ -327,7 +327,7 @@ def test_adopt_upserts_granted_realms(isolate_agent_runtime_root, monkeypatch):
     # stream/read-model pipeline is invisible to event-less writes.
     from agent_runtime.events import EventLog
 
-    adopted_events = [e for e in EventLog().iter_all() if e.type == "realm.adopted"]
+    adopted_events = [e for _, e in EventLog().iter_from_offset(0) if e.type == "realm.adopted"]
     assert sorted(e.payload["realm_id"] for e in adopted_events) == ["realm_eternia", "realm_other"]
     assert adopted_events[0].payload["server_id"] == "srv_9"
 
@@ -452,7 +452,7 @@ def test_adopt_dry_run_persists_nothing(isolate_agent_runtime_root, monkeypatch)
 
     from agent_runtime.events import EventLog
 
-    assert [e for e in EventLog().iter_all() if e.type == "realm.adopted"] == []
+    assert [e for _, e in EventLog().iter_from_offset(0) if e.type == "realm.adopted"] == []
 
 
 def test_adopt_denied_maps_membership_denied(isolate_agent_runtime_root, monkeypatch):

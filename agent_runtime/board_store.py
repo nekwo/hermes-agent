@@ -131,10 +131,6 @@ class BoardStore:
         wanted = _safe_id(workspace_id)
         return [b for b in self.list_all() if b.workspace_id == wanted]
 
-    def default_board_for_workspace(self, workspace_id: str) -> Board | None:
-        board_id = board_models.default_board_id(_safe_id(workspace_id) or workspace_id)
-        return self.get(board_id) if self.exists(board_id) else None
-
     # --- board-level writes ----------------------------------------------
 
     def ensure_default_board(self, workspace_id: str, *, created_by: str = "operator") -> Board:
@@ -222,24 +218,6 @@ class BoardStore:
                 title=board.title,
                 revision=board.revision,
             )
-        return self.get(board_id)
-
-    def archive_board(self, board_id: str, *, updated_by: str = "operator", reason: str = "workspace_archived") -> Board:
-        """Workspace-lifecycle hook: archive every card, then stamp the board.
-
-        Boards never block workspace operations; archiving is same-lane + typed
-        events, archive-never-delete."""
-
-        with board_lock(board_id):
-            board = self.get(board_id)
-            for card in self._list_active_cards(board_id):
-                self._archive_card_locked(board, card, reason=reason, updated_by=updated_by)
-            board = self.get(board_id)
-            board.revision += 1
-            board.updated_at = now()
-            board.updated_by = _safe_actor(updated_by)
-            _write_board(board)
-            self._emit("board.updated", board_id=board.board_id, change="archived", revision=board.revision)
         return self.get(board_id)
 
     # --- card reads -------------------------------------------------------

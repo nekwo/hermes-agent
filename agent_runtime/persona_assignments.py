@@ -1225,71 +1225,6 @@ class PersonaInstanceStore:
                 return candidate
         return None
 
-    def list_for_task(self, task_id: str, *, goal_id: str | None = None) -> list[PersonaInstance]:
-        normalized = safe_optional_token(task_id)
-        normalized_goal = safe_optional_token(goal_id)
-        wanted = {item for item in (normalized, normalized_goal) if item}
-        if not wanted:
-            return []
-        return [
-            instance
-            for instance in self.list_all()
-            if instance.mode == "task_bound"
-            and (
-                safe_optional_token(instance.current_task_id) in wanted
-                or safe_optional_token(instance.goal_id) in wanted
-            )
-        ]
-
-    def close_for_task(
-        self,
-        task_id: str,
-        *,
-        goal_id: str | None = None,
-        reason: str = "task terminal",
-    ) -> dict[str, Any]:
-        """Remove task-bound persona instances from the live graph.
-
-        Task-bound persona instances are a live projection of worker/goal
-        membership, not an archive of completed work. Leaving them in the live
-        store after terminal transition makes snapshots and the Launcher graph
-        render old workers as live agents. Never reap an instance while its
-        active run or worker still resolves to a live record.
-        """
-        reaped: list[str] = []
-        skipped_active: list[str] = []
-        for instance in self.list_for_task(task_id, goal_id=goal_id):
-            if self._has_live_binding(instance):
-                skipped_active.append(instance.id)
-                continue
-            if self._delete(instance):
-                reaped.append(instance.id)
-                self._event(
-                    "persona_instance.reaped",
-                    instance,
-                    {
-                        "task_id": safe_optional_token(task_id),
-                        "goal_id": safe_optional_token(goal_id),
-                        "reason": safe_assignment_text(reason, limit=240),
-                    },
-                )
-                # S7-A producer: the instance left the active frame, so its keyed
-                # row is a REMOVE the launcher deletes (never a stale live agent).
-                # Dark by default (read_model.delta_patches off).
-                emit_persona_instance_remove(self.event_log, instance, reason=reason)
-                self._archive_office_placements(instance)
-        remaining = self.list_for_task(task_id, goal_id=goal_id)
-        return {
-            "task_id": safe_optional_token(task_id),
-            "goal_id": safe_optional_token(goal_id),
-            "reaped_persona_instance_ids": reaped,
-            "skipped_active_persona_instance_ids": skipped_active,
-            "remaining_task_bound_persona_instance_ids": [instance.id for instance in remaining],
-            "reaped_count": len(reaped),
-            "skipped_active_count": len(skipped_active),
-            "remaining_count": len(remaining),
-        }
-
     def _archive_office_placements(self, instance) -> None:
         """Mission Office prune-lane hook (office plan §4.3): a reaped instance
         must not leave a phantom desk file that re-materializes the agent —
@@ -2034,57 +1969,6 @@ class PersonaAssignmentStore:
             )
         )
 
-    def contention_warnings(self, *, persona_id: str | None = None, goal_id: str | None = None) -> list[dict[str, Any]]:
-        wanted_persona = safe_assignment_token(persona_id) if persona_id else None
-        wanted_goal = safe_optional_token(goal_id)
-        warnings: list[dict[str, Any]] = []
-        for assignment in self.list_all():
-            if assignment.state not in ACTIVE_ASSIGNMENT_STATES:
-                continue
-            if wanted_persona and assignment.persona_id != wanted_persona:
-                continue
-            existing_goal = safe_optional_token(assignment.goal_id)
-            if wanted_goal and existing_goal == wanted_goal:
-                continue
-            if self._release_if_owning_goal_terminal(assignment):
-                # Self-heal instead of warn: an assignment held by a goal that is
-                # already terminal (or archived out of the live store) is stale
-                # state, not real contention. Release it so the warning stays an
-                # honest signal of genuinely concurrent goals.
-                continue
-            warnings.append(
-                {
-                    "code": "agent_already_assigned",
-                    "message": f"{assignment.persona_id} already has an active assignment on another goal.",
-                    "persona_id": assignment.persona_id,
-                    "persona_instance_id": assignment.persona_instance_id,
-                    "assignment_id": assignment.id,
-                    "goal_id": existing_goal,
-                    "retryable": False,
-                }
-            )
-        return warnings
-
-    def _release_if_owning_goal_terminal(self, assignment: PersonaAssignment) -> bool:
-        """Release an active assignment whose owning goal is terminal/archived.
-
-        Returns True when the assignment was released. Free-floating assignments
-        (no owning task/goal) are never touched — their staleness cannot be
-        inferred from task state.
-        """
-        owner = safe_optional_token(assignment.goal_id)
-        if not owner:
-            return False
-        owner_state = _owning_task_release_state(owner)
-        if owner_state is None:
-            return False
-        self.complete(
-            assignment.id,
-            state="completed" if owner_state in {"done", "archived"} else "cancelled",
-            error=f"released stale assignment; owning goal is {owner_state}",
-        )
-        return True
-
     def get(self, assignment_id: str) -> PersonaAssignment:
         raw = json.loads(paths.persona_assignment_path(assignment_id).read_text(encoding="utf-8"))
         return from_jsonable(PersonaAssignment, raw)
@@ -2109,10 +1993,6 @@ class PersonaAssignmentStore:
     def list_for_persona(self, persona_id: str) -> list[PersonaAssignment]:
         normalized = safe_assignment_token(persona_id)
         return [assignment for assignment in self.list_all() if assignment.persona_id == normalized]
-
-    def list_for_task(self, task_id: str) -> list[PersonaAssignment]:
-        normalized = safe_optional_token(task_id)
-        return [assignment for assignment in self.list_all() if assignment.task_id == normalized]
 
     def list_for_goal(self, goal_id: str) -> list[PersonaAssignment]:
         """Group assignments by the canonical goal id.
@@ -2178,30 +2058,6 @@ class PersonaAssignmentStore:
         updated = self.update(assignment)
         self._event("persona_assignment.closed", updated, {"state": updated.state})
         return updated
-
-    def close_for_task(self, task_id: str, *, state: str = "completed", reason: str | None = None) -> list[str]:
-        """Close every still-active assignment bound to a task/goal.
-
-        Persona-instance assignments are otherwise only released on *archival*
-        (the files are moved out of the live dir). A task that reaches a
-        terminal state but is not archived keeps its slots ``active``, so
-        ``find_active``/``contention_warnings`` keep emitting
-        ``agent_already_assigned`` and a fresh goal can never claim the persona
-        — the "graveyard starvation" that wedges new goals at finalization.
-        Closing on the terminal transition prevents that.
-        """
-        normalized = safe_optional_token(task_id)
-        if not normalized:
-            return []
-        closed: list[str] = []
-        for assignment in self.list_all():
-            if assignment.state in TERMINAL_ASSIGNMENT_STATES:
-                continue
-            if safe_optional_token(assignment.task_id) != normalized and safe_optional_token(assignment.goal_id) != normalized:
-                continue
-            self.complete(assignment.id, state=state, error=reason)
-            closed.append(assignment.id)
-        return closed
 
     def _write(self, assignment: PersonaAssignment) -> None:
         path = paths.persona_assignment_path(assignment.id)
@@ -2483,8 +2339,7 @@ def resolve_default_chat_session_id_for_instance(
 ) -> str | None:
     """Return the target's EXISTING default chat session id WITHOUT minting.
 
-    The read-only counterpart to :func:`default_chat_session_id_for_instance`:
-    read the canonical instance pointer and return its bound session ONLY when it
+    Read the canonical instance pointer and return its bound session ONLY when it
     is a chat-shaped ``persona_chat_*`` session. Returns ``None`` when the target
     has never chatted (or its pointer is a task/worker session) — the honest
     "no thread yet" answer the read verbs (``agent_chat_threads`` /
@@ -2516,45 +2371,6 @@ def resolve_default_chat_session_id_for_instance(
         ):
             return existing_session
     return None
-
-
-def default_chat_session_id_for_instance(
-    store: "PersonaInstanceStore",
-    *,
-    persona_id: str,
-    persona_instance_id: str | None = None,
-    mint: bool = False,
-) -> str:
-    """Resolve the target's DEFAULT chat session id for an omitted-session send.
-
-    ``agent_chat_send`` (and any first-turn open) omits ``session_id``; the tool
-    contract promises repeated sends "thread into one conversation". That means:
-    CONTINUE the target instance's current chat session when it already has one,
-    and mint a fresh session ONLY when the target has never chatted — never a
-    new random session per send.
-
-    The instance pointer is the single source of truth for "the default chat
-    session"; this reads it (through the canonical instance id) instead of
-    minting a parallel ``persona_chat_*`` id every call, which is exactly the
-    defect that left agent-to-agent relays orphaned (a fresh unpointed session
-    per send, invisible to the snapshot projection). This is the same
-    resolve-or-mint rule ``_bind_free_floating_chat_session`` applies for
-    free-floating assignments — one id scheme, not a parallel pipeline.
-
-    ``mint=True`` is the ``agent_chat_send new_session`` lane: FORCE a fresh
-    canonical session even when a default already exists, using the same mint the
-    never-chatted branch uses (``persona_chat_session_id_for`` on the canonical
-    instance id) — no parallel pipeline, just skip the reuse read. The handler's
-    ``open_chat`` then repoints the instance at this session, so the pair's new
-    thread becomes the default going forward.
-    """
-    if not mint:
-        existing = resolve_default_chat_session_id_for_instance(
-            store, persona_id=persona_id, persona_instance_id=persona_instance_id
-        )
-        if existing:
-            return existing
-    return persona_chat_session_id_for(canonical_chat_instance_id(persona_id, persona_instance_id))
 
 
 def _free_floating_identity(persona_or_template: AgentPersona | str) -> tuple[str, str, str, str | None]:

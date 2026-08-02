@@ -867,8 +867,9 @@ def mcp_server_template_issues(
                 ),
                 fix_hint=(
                     f"Replace mcp_servers.{key} in this profile's config.yaml with the "
-                    f"canonical block (agent_runtime.machine_roots."
-                    f"canonical_mcp_server_yaml({key!r})). Report-only — no config is rewritten."
+                    "canonical block below (under `mcp_servers:`). Report-only — no "
+                    "config is rewritten:\n"
+                    f"{canonical_mcp_server_yaml(key)}"
                 ),
             )
         )

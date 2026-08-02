@@ -27,8 +27,8 @@ Deliberate KEEPS on the same lines, each pinned by the negative gate below:
 
 * ``paths.packet_artifacts_dir`` — LIVE via ``checkpoint``'s ``packet_artifacts``
   EntityClass, while its ``_task_dir`` / ``_raw_artifact_path`` leaves are dead.
-* ``redaction.BasicRedactionScanner`` — the ``RedactionScanner`` Protocol it
-  structurally satisfies is dead; the class itself is test-anchored and stays.
+* ``redaction.BasicRedactionScanner`` — retired with its test-only status enum;
+  the shared runtime redaction patterns remain the production authority.
 * ``skill_publishability.REASON_*`` — only the ``PUBLISHABLE_REASONS`` frozenset
   over them is dead.
 * ``cli_format.emit_json`` — the module's whole live surface.
@@ -106,8 +106,7 @@ WHAT STAYED, AND WHY NONE OF IT IS A ROW: the ``KEPT`` table and its
 parametrized pin (live neighbours on the same line, often the same import, as a
 cut name), the ``packet_artifacts`` EntityClass resolution (a fact about
 ``checkpoint.ENTITY_CLASS_NAMES``, not about a name's absence), the
-``BasicRedactionScanner`` BEHAVIOUR pin (it scans a file and returns
-``UNSAFE``), and the still-imports negative gate.
+and the still-imports negative gate.
 """
 
 from __future__ import annotations
@@ -126,7 +125,6 @@ KEPT = {
     # helper itself had no reader and was cut. ``packet_artifacts_dir`` stays --
     # ``checkpoint`` still registers it as an EntityClass.
     "agent_runtime.paths": ("packet_artifacts_dir",),
-    "agent_runtime.redaction": ("BasicRedactionScanner", "RedactionStatus"),
     "agent_runtime.repo_context": (
         "isolated_repo_context_for_run",
         "_worktree_token",
@@ -160,16 +158,6 @@ def test_the_packet_artifacts_class_still_resolves_its_directory():
     from agent_runtime import checkpoint
 
     assert "packet_artifacts" in checkpoint.ENTITY_CLASS_NAMES
-
-
-def test_the_basic_redaction_scanner_still_scans(tmp_path):
-    """The Protocol went; the concrete scanner is live (it takes a PATH)."""
-
-    from agent_runtime.redaction import BasicRedactionScanner, RedactionStatus
-
-    path = tmp_path / "artifact.txt"
-    path.write_text("API_KEY='abcdefghijklmnop'", encoding="utf-8")
-    assert BasicRedactionScanner().scan_text(path) == RedactionStatus.UNSAFE
 
 
 def test_every_touched_module_still_imports():

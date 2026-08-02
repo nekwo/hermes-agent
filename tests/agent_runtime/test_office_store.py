@@ -18,7 +18,7 @@ from agent_runtime.store import WorkspaceStore
 
 
 def _event_types() -> list[str]:
-    return [evt.type for evt in EventLog().iter_all()]
+    return [evt.type for _, evt in EventLog().iter_from_offset(0)]
 
 
 def _make_workspace(name: str = "Default") -> str:
@@ -264,7 +264,7 @@ def test_snapshot_offices_section_and_conflict_parity_warning():
 
 
 def _office_event_count() -> int:
-    return sum(1 for _ in EventLog().iter_all())
+    return sum(1 for _ in EventLog().iter_from_offset(0))
 
 
 def test_upsert_dry_run_is_byte_identical_and_eventless():
