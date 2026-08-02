@@ -1227,7 +1227,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     # -- S58 / campaign Wave 3 — wave orphans + duplicate wire block -------
     *rows(
         "s58",
-        "PENDING_W3_CUT",
+        "30f527180",
         Form.ATTR,
         "receiver-aware production scan found no caller",
         "_worker_is_active",
@@ -1235,7 +1235,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s58",
-        "PENDING_W3_CUT",
+        "30f527180",
         Form.ATTR,
         "receiver-aware production scan found no caller",
         "context_dir",
@@ -1243,7 +1243,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s58",
-        "PENDING_W3_CUT",
+        "30f527180",
         Form.ATTR,
         "the packet emitter lane is retired and the historical accessor had no production caller",
         "latest_packet",
@@ -1251,7 +1251,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s58",
-        "PENDING_W3_CUT",
+        "30f527180",
         Form.ATTR,
         "receiver-aware production scan found no caller",
         "persona_bound_profile_name",
@@ -1259,7 +1259,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s58",
-        "PENDING_W3_CUT",
+        "30f527180",
         Form.CLASS_ATTR,
         "the list_for_task alias was never called in production",
         "runtime_instances.GoalRuntimeInstanceStore.latest_for_task",
@@ -1267,7 +1267,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s58",
-        "PENDING_W3_CUT",
+        "30f527180",
         Form.ATTR,
         "the enum's last models import was itself unused; WorkerSessionState remains live",
         "PossessionState",
@@ -1275,7 +1275,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s58",
-        "PENDING_W3_CUT",
+        "30f527180",
         Form.ATTR,
         "the rendered HUD wrapper had zero production callers",
         "situational_hud_content_for_instance",
@@ -1283,7 +1283,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s58",
-        "PENDING_W3_CUT",
+        "30f527180",
         Form.CLASS_ATTR,
         "the private chat-binding guard had zero callers",
         "persona_assignments.PersonaInstanceStore._guard_or_replace_chat",
@@ -1291,7 +1291,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s58",
-        "PENDING_W3_CUT",
+        "30f527180",
         Form.IMPORT,
         "dead duplicate top-level harness import; real consumers bind their own dependencies",
         "AgentRuntimeError",
