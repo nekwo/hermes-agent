@@ -538,7 +538,6 @@ _OBJECT_CONTRACTS: dict[str, ObjectContract] = {
             "delivery_version",
             "source_handoff_packet_id",
             "work_status",
-            "self_test_evidence_ids",
             "repo_bundle_id",
             "changed_files",
             "changed_paths",
@@ -960,10 +959,8 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     # with run.opened once the two filler appends that were its last minters
     # (tests/agent_runtime/test_events.py) were retargeted onto live types — see
     # tests/agent_runtime/test_s25_run_opened_retirement.py, which owns that
-    # delta. Round 2 removed the last production caller of RunStore.cancel ->
-    # close_run, but run.closed remains contract-held: event de-registration is
-    # an operator contract decision outside this campaign's authority. See the
-    # S17 behavior pin and doc 19's Round 2 discovered-debt ledger.
+    # delta. Round 4 removed the last production caller of RunStore.cancel ->
+    # close_run and de-registered run.closed; historical rows remain readable.
     "run.progress": EventContract("run.progress", "Run progress", ("phase", "step", "status", "summary"), ("next_expected", "proof_id")),
     "child.returned": EventContract("child.returned", "Child returned", ("parent_node_id", "child_node_id", "summary"), ("proof_ids", "artifact_refs", "stage_id", "persona_instance_id")),
     "run.tool.started": EventContract("run.tool.started", "Tool started", ("tool_name",), ("run_id",)),
@@ -978,7 +975,6 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     # tests/agent_runtime/test_s32_decision_contract_parity_retirement.py.
     # NOT the same thing: agent_runtime/parity.py is the read-model
     # ProjectionAccountant and never emitted this (or any) event type.
-    "run.closed": EventContract("run.closed", "Run closed", ("state", "decision_type"), ("total_tokens",)),
     # S44 de-registered the six role_envelope.* / role_checklist.* contracts that
     # sat on this line. Their ONLY emitters were RoleEnvelopeStore.save and
     # RoleChecklistStore.save, both deleted with the store family; the two runtime
@@ -1057,8 +1053,6 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     # every registered type HAS an emitter, so splitting the two across commits
     # would turn this cut red rather than let it land silently.
     # See tests/agent_runtime/test_s56_worker_session_lane_removal.py.
-    "self_test.recorded": EventContract("self_test.recorded", "Self-test recorded", ("evidence_id", "status"), ("stage_id", "command_label")),
-    "self_test.loop_detected": EventContract("self_test.loop_detected", "Self-test loop detected", ("command_hash", "repeat_count"), ("stage_id",)),
     "incident.opened": EventContract("incident.opened", "Incident opened", ("incident_id", "kind"), ("summary",)),
     "incident.closed": EventContract("incident.closed", "Incident closed", ("incident_id",), ("reason",)),
     # Realm store mutations. Every RealmStore write MUST ride one of

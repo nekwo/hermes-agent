@@ -5,14 +5,9 @@ import re
 
 from hermes_time import now
 
-from .dev_discipline import update_progress_telemetry
 from .errors import EventPayloadTooLarge
 from .events import EventLog
 from .models import Event
-from .config import load_root_runtime_config
-from .self_test_evidence import record_self_test_from_progress
-from .states import RunState
-from .store import RunStore
 from .redaction_mode import redaction_observe_enabled
 
 _SAFE_PROGRESS_KEYS = {
@@ -69,76 +64,6 @@ _OPERATOR_DISPATCH_ORDER_MAX = 1500
 _OPERATOR_TOOL_INPUT_MAX = 1100
 _OPERATOR_TOOL_RESULT_MAX = 1700
 
-_INTERNAL_RUN_PROGRESS_KEYS = {
-    "repo_baseline",
-    "repo_execution",
-}
-
-
-class RunProgressSink:
-    def __init__(self, *, run_store: RunStore, event_log: EventLog | None = None, run_id: str, config=None):
-        self.run_store = run_store
-        self.event_log = event_log or EventLog()
-        self.run_id = run_id
-        self.config = config or load_root_runtime_config()
-
-    def emit(self, event_type: str, payload: dict[str, Any] | None = None) -> None:
-        try:
-            run = self.run_store.get(self.run_id)
-            if run.state in {RunState.COMPLETED, RunState.FAILED, RunState.STALE, RunState.CANCELLED}:
-                return None
-            merged_payload = update_progress_telemetry(run.progress, event_type, payload or {})
-            safe_payload = _safe_progress_payload(event_type, merged_payload)
-            preserved = {
-                key: value
-                for key, value in (run.progress or {}).items()
-                if key in _INTERNAL_RUN_PROGRESS_KEYS
-            }
-            run.progress = {**preserved, **safe_payload}
-            run.last_heartbeat_at = now()
-            if not self.run_store.update(run):
-                return None
-            _maybe_record_self_test(run, event_type, payload or {}, event_log=self.event_log)
-            _maybe_record_visual_screenshot(run, event_type, payload or {}, event_log=self.event_log)
-            persisted = self.run_store.get(self.run_id)
-            if persisted.state in {RunState.COMPLETED, RunState.FAILED, RunState.STALE, RunState.CANCELLED}:
-                return None
-            # ``phase: timing`` run.progress is pure performance telemetry, not a
-            # state-changing fact. Its durations are already rolled up, per turn,
-            # into the observability ``timing`` / ``profile_timing`` aggregate
-            # (persona_runtime / profile_runner build them independently of this
-            # event), and NO durable reader consumes the per-measurement events:
-            # persona_chat_history keeps only signal-bearing progress and
-            # observability keeps only ``reasoning_summary``/``decision_summary``
-            # steps — timing carries neither. So it was ~74% of events.jsonl read
-            # by nothing. The live ``run.progress`` snapshot + heartbeat were
-            # already updated above (liveness/real-time telemetry unaffected); the
-            # durable event log is the state-fact authority, and timing does not
-            # belong in it. Prune it at this one chokepoint — the only place run
-            # timing is persisted (the chat sink already drops it via the
-            # signal-key gate). This is a policy, not a silent drop: the value is
-            # retained in the aggregate, and the run's live progress still carries
-            # the latest timing.
-            is_timing_progress = (
-                event_type == "run.progress"
-                and str((payload or {}).get("phase") or "") == "timing"
-            )
-            if not is_timing_progress:
-                _append_bounded_event(
-                    self.event_log,
-                    Event(
-                        ts=now(),
-                        type=event_type,
-                        task_id=run.task_id,
-                        run_id=run.id,
-                        persona_id=run.persona_id,
-                        payload=safe_payload,
-                    ),
-                )
-        except Exception:
-            return None
-
-
 _CHAT_TRACE_EVENT_TYPES = {"run.tool.started", "run.tool.finished", "run.progress"}
 # run.progress payloads that carry one of these keys are real signal (a tool
 # step, a command, dev work, or a reasoning summary). Bare "Run progress update"
@@ -153,8 +78,8 @@ class ChatProgressSink:
     """Record redaction-safe tool/progress trace events for a conversational
     (non-task) persona chat turn.
 
-    Unlike :class:`RunProgressSink` there is no backing :class:`AgentRun`: an
-    operator chat turn runs free of the task/decision pipeline, so there is no
+    There is no backing :class:`AgentRun`: an operator chat turn runs free of
+    the retired task/decision pipeline, so there is no
     run row to update and no ``task_id`` to key on. Events are appended to the
     :class:`EventLog` keyed on ``session_id`` + ``persona_id`` instead, which is
     exactly what :func:`persona_chat_trace_summary` scans to surface chat-turn
@@ -290,28 +215,6 @@ def _rebuild_event_payload(event: Event, payload: dict[str, Any]) -> Event:
         session_id=event.session_id,
         turn_id=event.turn_id,
     )
-
-
-def _maybe_record_self_test(run, event_type: str, payload: dict[str, Any], *, event_log: EventLog) -> None:
-    # Observed self-test proofs are additive, redaction-safe records of what the
-    # agent actually ran in-session; they populate the HUD "observed" lane for a
-    # stage. Capture is UNCONDITIONAL for a task run: it must never depend on a
-    # re-loaded RuntimeConfig here, because the run-executing process can resolve
-    # a different config than the ticker that owns the authoritative one (config
-    # path / cross-process resolution). That mismatch silently dropped every
-    # observed proof even with the contract enabled. The downstream gate decides
-    # whether an observed proof is *required*; capturing one is always safe.
-    try:
-        record_self_test_from_progress(run, event_type, payload, event_log=event_log)
-    except Exception:
-        return
-
-
-def _maybe_record_visual_screenshot(run, event_type: str, payload: dict[str, Any], *, event_log: EventLog) -> None:
-    # Root-node substrate only: this recorder writes Proof rows as a side effect of
-    # the tool stream. Gated on root_node_mode so the flag-off legacy path is
-    # byte-for-byte unchanged (no new proofs from a shared progress sink).
-    return
 
 
 def _safe_progress_payload(event_type: str, payload: dict[str, Any]) -> dict[str, Any]:

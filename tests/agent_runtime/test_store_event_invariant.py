@@ -35,12 +35,9 @@ EXEMPT: dict[str, str] = {
     # that had no production callers left (open_run/heartbeat/
     # approve_continuation), and S33 retired the caller-free
     # persona_runtime._attach_repo_baseline path proven dead in a54e802cd.
-    # The sole surviving production caller is progress.RunProgressSink (which
-    # appends its own run.progress / run.tool.* for the same mutation). No
-    # consumer is watermark-gated on run rows — S9 dropped `runs` from the
-    # read model's ROW_TABLES — so the refresh converges without an event, and
-    # appending here would double-bump the watermark on every progress tick.
-    "RunStore.update": "sink callers emit their own run.* event; run rows are not watermark-gated",
+    # Run rows are historical/read-only residue and are not part of the
+    # watermark-gated read model; the method remains for import compatibility.
+    "RunStore.update": "run rows are not watermark-gated and have no production writer caller",
 }
 
 

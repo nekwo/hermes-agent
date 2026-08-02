@@ -14,7 +14,7 @@ def test_s9_snapshot_contract_removes_mission_rows_and_bumps_versions(tmp_path):
     assert ROW_TABLES == ("agent_instances", "operator_channels")
 
     snapshot = build_snapshot()
-    assert snapshot["parity"]["contract_version"] == 49
+    assert snapshot["parity"]["contract_version"] == 50
     for key in ("goals", "stage_verification", "runs", "proofs", "incidents"):
         assert key not in snapshot
 

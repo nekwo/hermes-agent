@@ -12,7 +12,6 @@ from agent_runtime.models import AgentPersona, AgentRun, Event, Incident
 from types import SimpleNamespace
 
 Task = SimpleNamespace
-from agent_runtime.self_test_evidence import record_self_test_from_progress
 from agent_runtime.states import RunState, TaskState
 from agent_runtime.store import AgentStore, IncidentStore, RunStore, TaskStore
 from agent_runtime.snapshot import build_snapshot
@@ -107,10 +106,6 @@ def test_archive_writes_task_event_slice_and_compaction_preserves_unarchived_row
     assert_task_store_stub()
 
 
-def test_archive_preserves_self_test_evidence(tmp_path, monkeypatch):
-    assert_task_store_stub()
-
-
 def test_incident_store_close_removes_task_open_incident_reference():
     task_store = TaskStore()
     task = make_task("task_with_incident", TaskState.BLOCKED)
@@ -166,7 +161,7 @@ def seed_run(
     after the mission lane went (``open_run``/``heartbeat``/``find_stale``/
     ``approve_continuation``/``latest_session_id``/``find_active``). ``update``
     is the surviving write path and tolerates a missing previous row, so the
-    tests below that cover the LIVE close/cancel/read surface seed through it.
+    tests below cover the surviving read/update surface and seed through it.
     """
 
     ts = now()
@@ -183,47 +178,9 @@ def seed_run(
     return run
 
 
-def test_run_store_close_run_records_final_decision_and_lists_for_task():
-    runs = RunStore()
-    run = seed_run(persona_id="pm")
-
-    closed = runs.close_run(run.id, state=RunState.COMPLETED, final_decision={"type": "complete"})
-    assert closed.finished_at is not None
-    assert closed.final_decision == {"type": "complete"}
-    assert runs.list_for_task("task_abc") == [closed]
-
-
-def test_run_store_cancel_marks_run_cancelled_with_operator_error():
-    runs = RunStore()
-    run = seed_run()
-
-    cancelled = runs.cancel(run.id, reason="operator stopped runaway smoke")
-
-    assert cancelled.state == RunState.CANCELLED
-    assert cancelled.error == {"type": "operator_cancelled", "summary": "operator requested cancellation"}
-    assert cancelled.finished_at is not None
-    event = EventLog().tail(1)[0]
-    assert event.type == "run.closed"
-    assert event.payload["state"] == "cancelled"
-
-
-def test_run_store_cancel_redacts_reason_and_does_not_overwrite_terminal_run():
-    runs = RunStore()
-    run = seed_run()
-    completed = runs.close_run(run.id, state=RunState.COMPLETED, final_decision={"type": "approve"})
-
-    cancelled = runs.cancel(run.id, reason="sk-live-secret-without-keyword")
-
-    assert cancelled.state == RunState.COMPLETED
-    assert cancelled.final_decision == completed.final_decision
-    assert cancelled.error == completed.error
-    assert "sk-live" not in str(cancelled.error)
-
-
 def test_run_store_update_does_not_overwrite_terminal_run_with_stale_object():
     runs = RunStore()
-    run = seed_run()
-    cancelled = runs.cancel(run.id, reason="operator stopped runaway smoke")
+    run = seed_run(state=RunState.COMPLETED)
     stale = run
     stale.state = RunState.RUNNING
     stale.progress = {"type": "run.progress", "summary": "stale"}
@@ -231,23 +188,18 @@ def test_run_store_update_does_not_overwrite_terminal_run_with_stale_object():
     runs.update(stale)
 
     saved = runs.get(run.id)
-    assert saved.state == RunState.CANCELLED
-    assert saved.progress == cancelled.progress
+    assert saved.state == RunState.COMPLETED
+    assert saved.progress is None
 
 
-def test_run_store_update_sanitizes_session_id_before_persist_and_close_event():
+def test_run_store_update_sanitizes_session_id_before_persist():
     runs = RunStore()
     run = seed_run()
     run.session_id = "session_secret_token_C:/Users/example/config"
 
     runs.update(run)
     saved = runs.get(run.id)
-    closed = runs.close_run(run.id, state=RunState.FAILED, error={"type": "test"})
-    event = EventLog().tail(1)[0]
-
     assert saved.session_id is None
-    assert closed.session_id is None
-    assert "session_id" not in event.payload
 
 
 # The duplicate-active-run guard went with its writer: it lived inside

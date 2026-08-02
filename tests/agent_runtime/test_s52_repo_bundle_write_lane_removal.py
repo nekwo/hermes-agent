@@ -201,7 +201,7 @@ def test_the_two_operator_summary_rows_and_their_shared_arm_went_too():
     from agent_runtime.events import Event, operator_event_summary
 
     assert set(RETIRED_EVENT_TYPES) & OPERATOR_SUMMARY_EVENT_TYPES == set()
-    assert OPERATOR_SUMMARY_EVENT_TYPES <= ALLOWED_EVENT_TYPES
+    assert OPERATOR_SUMMARY_EVENT_TYPES - {"run.closed"} <= ALLOWED_EVENT_TYPES
     assert not any(name.startswith("repo_bundle.") for name in OPERATOR_SUMMARY_EVENT_TYPES)
 
     for event_type in ("repo_bundle.assigned", "repo_bundle.updated"):

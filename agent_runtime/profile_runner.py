@@ -1213,7 +1213,7 @@ def _steer_mcp_admission_notice(agent: Any, request: AgentRunRequest, outcome: A
     Design §D3 says the agent's own turn context must state a denial, and the
     guaranteed lane for that is the runtime-context envelope's volatile tail —
     rendered before the turn by the mission-chat command, which is why it can
-    only carry RESOLUTION-time denials (``mcp_not_admitted_for_role``,
+    only carry RESOLUTION-time denials (``mcp_admission_disabled``,
     ``mcp_server_not_configured``, the machine-roots codes).
 
     EXECUTION-time degradations (``mcp_admission_timeout``,

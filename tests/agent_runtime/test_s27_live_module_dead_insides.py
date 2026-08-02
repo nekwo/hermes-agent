@@ -8,7 +8,6 @@ each module's actual external surface, which is small and exact:
 ===================== =========================================================
 module                surviving external surface
 ===================== =========================================================
-dev_discipline        ``update_progress_telemetry``   (progress.py)
 simplified_contract   ``public_decision_type_value``  (operator_channels, store)
 scope_control         ``validate_discovery_payload``, ``validate_triage_payload``
                       (decision_contracts). RETARGETED 2026-07-31 (S42):
@@ -57,32 +56,10 @@ from __future__ import annotations
 import ast
 import inspect
 
-from agent_runtime import dev_discipline, role_checklists, scope_control, simplified_contract
+from agent_runtime import role_checklists, scope_control, simplified_contract
 
 
 REMOVED = {
-    "dev_discipline": (
-        "needs_supervisor_slicing",
-        "validate_dev_progress_gate",
-        "_BROAD_TITLE_MARKERS",
-        "_BROAD_DESCRIPTION_MARKERS",
-        "_BACKEND_FIRST_FLAGS",
-        "_BACKEND_SLICE_MARKERS",
-        "_HARNESS_SUPPORT_REPO_MARKERS",
-        "_PROGRESS_OK_DECISIONS",
-        "_BUDGET_PRESSURE_OK_DECISIONS",
-        "_repos_that_require_specialist_slicing",
-        "_is_harness_support_repo",
-        "_has_bounded_specialist_handoff_packet",
-        "_is_backend_first_slice",
-        "_has_empirical_progress",
-        "_has_budget_pressure",
-        "_decision_has_proof_ids",
-        "_validate_failed_proof_reuse",
-        "_dedupe_strings",
-        "_safe_string_list",
-        "_environment_changed",
-    ),
     "simplified_contract": (
         "COLLAPSED_SIGNAL_TYPES",
         "DecisionProjection",
@@ -133,7 +110,6 @@ REMOVED = {
 
 #: The verified external surface each module must stay reachable from.
 EXTERNAL_SURFACE = {
-    "dev_discipline": {"update_progress_telemetry"},
     "simplified_contract": {"public_decision_type_value"},
     "scope_control": {
         # S42 (2026-07-31) closed the question S28 left open here. Two names used
@@ -158,7 +134,6 @@ EXTERNAL_SURFACE = {
 }
 
 MODULES = {
-    "dev_discipline": dev_discipline,
     "simplified_contract": simplified_contract,
     "scope_control": scope_control,
     "role_checklists": role_checklists,
@@ -209,7 +184,6 @@ def test_nothing_is_left_unreachable_from_the_external_surface():
 def test_the_live_external_surface_of_each_module_still_works():
     """Negative gate: the four names one bare-word grep away from the removals."""
 
-    assert dev_discipline.update_progress_telemetry({}, "run.tool.finished", {})["tool_call_count"] == 1
     assert simplified_contract.public_decision_type_value("hand_off") == "hand_off"
     # S42 retarget: this line used to exercise `untriaged_issue_discoveries`,
     # which is now removed. `validate_discovery_payload` is scope_control's real

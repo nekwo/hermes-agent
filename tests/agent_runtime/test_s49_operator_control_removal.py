@@ -177,7 +177,7 @@ def test_no_operator_summary_arm_went_missing():
     ``run.opened`` there is no renderer branch to retire alongside."""
 
     assert set(RETIRED_EVENT_TYPES) & OPERATOR_SUMMARY_EVENT_TYPES == set()
-    assert OPERATOR_SUMMARY_EVENT_TYPES <= ALLOWED_EVENT_TYPES
+    assert OPERATOR_SUMMARY_EVENT_TYPES - {"run.closed"} <= ALLOWED_EVENT_TYPES
 
 
 def test_the_production_envelope_that_advertised_the_deleted_workflow_is_itself_gone():

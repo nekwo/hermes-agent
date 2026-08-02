@@ -97,7 +97,6 @@ def test_checkpoint_keeps_every_class_that_still_has_a_writer():
         #
         # S56 (2026-08-01) removed `worker_sessions` and `repo_bundles` by the
         # same rule; their absence is asserted below, not merely dropped.
-        "self_tests",
         "packet_artifacts",
     ):
         assert name in checkpoint.ENTITY_CLASS_NAMES

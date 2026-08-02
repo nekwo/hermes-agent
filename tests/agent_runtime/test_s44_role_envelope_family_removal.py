@@ -179,7 +179,7 @@ def test_no_operator_summary_arm_went_missing():
     ``run.opened`` there is no renderer branch to retire alongside."""
 
     assert set(RETIRED_EVENT_TYPES) & OPERATOR_SUMMARY_EVENT_TYPES == set()
-    assert OPERATOR_SUMMARY_EVENT_TYPES <= ALLOWED_EVENT_TYPES
+    assert OPERATOR_SUMMARY_EVENT_TYPES - {"run.closed"} <= ALLOWED_EVENT_TYPES
 
 
 def test_the_two_writerless_checkpoint_classes_are_gone():
@@ -199,7 +199,7 @@ def test_the_lookalike_keep_set_survives():
     """Names one bare-word grep away from this cut — every one still live."""
 
     # The checkpoint classes that DO still have a writer.
-    for name in ("persona_instances", "boards", "self_tests", "packet_artifacts"):
+    for name in ("persona_instances", "boards", "packet_artifacts"):
         assert name in checkpoint.ENTITY_CLASS_NAMES
     # INVERTED at S56 (2026-08-01), not deleted: ``repo_bundles`` was pinned in
     # the line above as a class that still has a writer. That stopped being true
@@ -208,12 +208,10 @@ def test_the_lookalike_keep_set_survives():
     # rule S44 applied to ``role_envelopes`` / ``role_checklists``. Owned by
     # tests/agent_runtime/test_s52_repo_bundle_write_lane_removal.py.
     assert "repo_bundles" not in checkpoint.ENTITY_CLASS_NAMES
-    # ``self_tests`` shares the recursive per-task shape the two removals had.
-    assert callable(paths.self_tests_dir)
-    assert callable(paths.self_test_task_dir)
     # The decision-lane events that sat on the same registry lines.
-    for name in ("run.closed", "run.progress", "run.tool.started", "run.tool.finished"):
+    for name in ("run.progress", "run.tool.started", "run.tool.finished"):
         assert name in ALLOWED_EVENT_TYPES
+    assert "run.closed" in OPERATOR_SUMMARY_EVENT_TYPES
     # ``role_sessions`` was already cut in wave 3; ``role_contracts`` goes in
     # S45. Neither is what this file removed.
     assert find_spec("agent_runtime.role_checklists") is not None

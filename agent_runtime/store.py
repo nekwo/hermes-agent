@@ -18,7 +18,6 @@ from .locks import run_lock
 from .models import AgentPersona, AgentRun, Event, Incident, Realm, Workspace
 from .serde import from_jsonable, to_jsonable
 from .state_patches import emit_incident_remove
-from .simplified_contract import public_decision_type_value
 from .states import RunState
 
 T = TypeVar("T")
@@ -30,10 +29,6 @@ ACTIVE_RUN_STATES = frozenset({RunState.QUEUED, RunState.STARTING, RunState.RUNN
 # pulled the tombstone (the bounded-ledger idiom shared with the board/office
 # archived ledgers).
 DELETED_WORKSPACE_LEDGER_CAP = 500
-
-
-def _safe_operator_reason(reason: str) -> str:
-    return "operator requested cancellation"
 
 
 def _safe_session_id(value) -> str | None:
@@ -663,55 +658,6 @@ class RunStore:
                 return False
             _write_model(paths.run_path(run.id), run)
             return True
-
-    def close_run(
-        self,
-        run_id: str,
-        *,
-        state: RunState,
-        final_decision=None,
-        error=None,
-    ) -> AgentRun:
-        with run_lock(run_id):
-            run = self.get(run_id)
-            run.session_id = _safe_session_id(run.session_id)
-            if run.state in TERMINAL_RUN_STATES:
-                return run
-            run.state = state if isinstance(state, RunState) else RunState(state)
-            run.finished_at = now()
-            if final_decision and isinstance(final_decision, dict):
-                public_type = public_decision_type_value(final_decision.get("type"))
-                if public_type and public_type != final_decision.get("type"):
-                    raw_decision_type = final_decision.get("type")
-                    final_decision = {**final_decision, "type": public_type}
-                    final_decision.setdefault("execution_type", raw_decision_type)
-            run.final_decision = final_decision
-            run.error = error
-            _write_model(paths.run_path(run.id), run)
-            payload = {"state": str(run.state)}
-            if isinstance(final_decision, dict):
-                payload["decision_type"] = final_decision.get("type")
-                payload["validation_status"] = "valid"
-            if run.session_id:
-                payload["session_id"] = run.session_id
-            self.event_log.append(
-                Event(
-                    ts=now(),
-                    type="run.closed",
-                    task_id=run.task_id,
-                    run_id=run.id,
-                    persona_id=run.persona_id,
-                    payload=payload,
-                )
-            )
-            return run
-
-    def cancel(self, run_id: str, *, reason: str) -> AgentRun:
-        return self.close_run(
-            run_id,
-            state=RunState.CANCELLED,
-            error={"type": "operator_cancelled", "summary": _safe_operator_reason(reason)},
-        )
 
     def list_for_task(self, task_id: str) -> list[AgentRun]:
         return [run for run in self.list_all() if run.task_id == task_id]

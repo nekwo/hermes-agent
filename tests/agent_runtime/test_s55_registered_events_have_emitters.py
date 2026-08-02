@@ -311,10 +311,7 @@ def test_the_resolver_actually_resolves_each_emission_idiom():
 
     emitted = emitted_event_types()
 
-    # 1/2. keyword and POSITIONAL Event(...) construction.
-    assert "run.closed" in emitted            # keyword form, store.py
-    assert "self_test.recorded" in emitted    # positional form, self_test_evidence.py
-    # 3. wrapper forwarding (self._event / self._emit / _append_realm_sync_event).
+    # Wrapper forwarding (self._event / self._emit / _append_realm_sync_event).
     assert "board.card.created" in emitted
     assert "persona_instance.created" in emitted
     assert "realm.sync.published" in emitted

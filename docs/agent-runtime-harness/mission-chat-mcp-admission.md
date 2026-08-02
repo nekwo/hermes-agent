@@ -1,6 +1,11 @@
 # Selective MCP admission for mission-chat agents — design (2026-07-26)
 
-Status: **R0 + R1 + R2 code shipped, flag OFF; R2's LIVE PROOF still open.**
+Status: **R0 + R1 + R2 code shipped. Round 4 supersedes the role/lane policy.**
+The persona profile's MCP declarations are now the sole server authority.
+`agent_runtime.mcp_admission.roles` and `mcp_not_admitted_for_role` were inert
+after mission-lane S11 and are removed; role/lane remain informational fields
+on admission rows only. Historical design/log sections below are retained as a
+record and must not be read as current configuration guidance.
 Owner: fork (`agent_runtime/`, plus one config key). R0 — the typed
 `mcp_not_registered_on_lane` failure this document is the **producer** of —
 landed first and stands alone (`agent_runtime/mcp_lane.py`, commit `b6277e023`).
@@ -328,7 +333,7 @@ MCP-free forever. Admission happens at the one place that already knows
 the persona's profile) and before `self._agent_factory(...)` (`:343`).
 Modeled directly on `acp_adapter/server.py:792-820`.
 
-### A. Admission policy — role → allowed servers, deny-by-default
+### A. Admission policy — profile declarations, globally gated
 
 NEW `agent_runtime/mcp_admission.py`:
 
@@ -336,7 +341,7 @@ NEW `agent_runtime/mcp_admission.py`:
 @dataclass(frozen=True, slots=True)
 class McpAdmissionDenial:
     server: str
-    code: str          # mcp_not_admitted_for_role | mcp_not_registered_on_lane
+    code: str          # mcp_not_registered_on_lane
                        # | mcp_admission_disabled | mcp_admission_lane_busy
                        # | mcp_admission_timeout | <machine_roots code>
     summary: str
@@ -363,19 +368,15 @@ Resolution runs in order, and **every step can only narrow**:
    readiness *reporter* to the actual *request*. The role policy
    (`qa` + visual proof ⇒ `launcher_qa`) is already written there; **do not
    write a second copy.**
-2. **Admitted** = intersect with the lane's role allowlist, declared in root
-   runtime config, deny-by-default:
+2. **Admitted** = the servers declared by the persona profile, behind the root
+   runtime kill switch:
    ```yaml
    agent_runtime:
      mcp_admission:
        enabled: false                    # global kill switch
        connect_timeout_seconds: 20       # well under the chat turn budget
-       roles:
-         qa:
-           mission_chat: [launcher_qa]
    ```
-   A role with no entry admits **nothing**. An unknown lane admits
-   **nothing**. There is no wildcard.
+   Role and lane do not narrow this declaration.
 3. **Resolvable** = each admitted name must resolve out of the persona
    profile's `config.yaml` through the **existing** resolver,
    `machine_roots.resolve_mcp_servers` (`:583`), reusing its typed codes
@@ -762,9 +763,8 @@ touching `mcp_admission.py`, the policy shape is wrong.
   already asserts the positive and negative for cron.
 
 **R1 — policy, no side effects**
-- Deny-by-default table: unknown role ⇒ `()`; role present, lane absent ⇒
-  `()`; `enabled: false` ⇒ `()` with `mcp_admission_disabled`.
-- Requested-but-not-admitted ⇒ `mcp_not_admitted_for_role`.
+- `enabled: false` ⇒ `()` with `mcp_admission_disabled`.
+- Unknown roles and lanes preserve the profile-declared server set.
 - Admitted-but-unresolvable ⇒ the **existing** `machine_roots` code
   (`platform_unsupported` on a non-Windows host, `unbound_root` with no
   registry entry) — proving reuse, not a parallel resolver.
@@ -1038,11 +1038,10 @@ of R2 rather than a nice-to-have.
   | key | where | says |
   | --- | --- | --- |
   | the former floor | removed in S11 | no longer narrows profile data |
-  | the allowlist | `agent_runtime.mcp_admission.roles.<role>.<lane>` (ROOT config) | which servers this role gets on this lane |
+  | profile declarations | each profile's `required_mcp_servers` / `mcp_servers` | which servers this persona requests |
 
-  Neither key alone admits anything: a role inside the floor that the config
-  never names admits nothing, and a config that names a role outside the floor is
-  refused with `mcp_not_admitted_for_role`. Both directions are pinned
+  This historical two-key scheme was superseded by S11 profile authority and
+  removed in Round 4. The old directions were pinned
   (`test_dev_is_admitted_once_both_keys_name_it`,
   `test_dev_admitted_under_a_qa_only_config_is_still_denied`,
   `test_the_admission_floor_membership_is_pinned`). The live ruling is recorded
@@ -1192,7 +1191,7 @@ of R2 rather than a nice-to-have.
   ```
 
   Two delivery lanes, mirroring `turn_budget` exactly. **Resolution-time**
-  denials (`mcp_not_admitted_for_role`, `mcp_server_not_configured`,
+  denials (`mcp_server_not_configured`,
   `mcp_admission_disabled`, the `machine_roots` codes) ride the volatile envelope
   tail, rendered by `persona_runtime.mission_chat_admission_line` at the
   mission-chat command — the same place `render_turn_budget_line` is rendered.
@@ -1270,9 +1269,6 @@ of R2 rather than a nice-to-have.
     mcp_admission:
       enabled: true
       connect_timeout_seconds: 20
-      roles:
-        qa:
-          mission_chat: [launcher_qa]
   ```
 
   Inspect before flipping — this resolves policy only and never connects:

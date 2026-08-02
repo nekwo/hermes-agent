@@ -177,8 +177,9 @@ DE_REGISTERED_OPERATOR_SUMMARY_TYPES = frozenset(
 )
 
 
-def test_every_operator_summary_type_is_still_registered():
-    assert OPERATOR_SUMMARY_EVENT_TYPES <= frozenset(event_catalog())
+def test_every_live_operator_summary_type_is_still_registered():
+    assert OPERATOR_SUMMARY_EVENT_TYPES - {"run.closed"} <= frozenset(event_catalog())
+    assert "run.closed" not in event_catalog()
     assert OPERATOR_SUMMARY_EVENT_TYPES & DE_REGISTERED_OPERATOR_SUMMARY_TYPES == frozenset()
 
 

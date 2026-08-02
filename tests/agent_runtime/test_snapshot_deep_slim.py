@@ -32,7 +32,7 @@ from tests.agent_runtime.snapshot_bytes import snapshot_size_budget
 def test_goal_section_is_absent_from_the_frame(isolate_agent_runtime_root):
     snap = build_snapshot()
     assert "goals" not in snap
-    assert snap["parity"]["contract_version"] == 49
+    assert snap["parity"]["contract_version"] == 50
 
 
 def test_goal_detail_lane_is_removed_not_merely_empty(isolate_agent_runtime_root):

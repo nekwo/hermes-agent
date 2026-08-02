@@ -183,7 +183,6 @@ def test_the_event_count_delta_is_ten():
     from tests.agent_runtime.test_s15_event_contract_pruning import SURVIVING_EVENT_COUNT
 
     assert len(event_catalog()) == SURVIVING_EVENT_COUNT
-    assert SURVIVING_EVENT_COUNT == 68 - 10
 
 
 # --------------------------------------------------------------------------

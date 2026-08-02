@@ -258,24 +258,6 @@ def prompt_observability_index_path() -> Path:
     return store_root() / "prompt_observability_index.json"
 
 
-def self_tests_dir() -> Path:
-    return store_root() / "self_tests"
-
-
-def self_test_task_dir(task_id: str) -> Path:
-    return self_tests_dir() / _safe_path_token(task_id)
-
-
-def self_test_artifacts_dir(task_id: str) -> Path:
-    return self_test_task_dir(task_id) / "artifacts"
-
-
-def self_test_record_path(task_id: str, evidence_id: str) -> Path:
-    return self_test_task_dir(task_id) / f"{_safe_path_token(evidence_id)}.json"
-
-
-
-
 # S44 removed the eight role_envelope* / role_checklist* path helpers that lived
 # here. They addressed the two store directories archived aside as writer-less on
 # 2026-07-30; their last readers were the deleted stores and the two checkpoint

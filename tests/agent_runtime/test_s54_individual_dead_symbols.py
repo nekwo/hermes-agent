@@ -144,7 +144,6 @@ REMOVED = {
         "_mission_chat_template_prompt_chars",
     ),
     "agent_runtime.resolution": ("assert_pinned", "_normalized_path"),
-    "agent_runtime.self_test_evidence": ("self_test_summary",),
     "agent_runtime.skill_promotion": ("promotion_provenance",),
     "agent_runtime.state_patches": ("emit_task_refresh",),
 }
@@ -168,7 +167,6 @@ KEPT = {
     "agent_runtime.profile_readiness": ("_missing_skill_ids", "_resolve_skill_names"),
     "agent_runtime.prompt_observability": ("load_persisted_context_row", "snapshot_prompt_observability"),
     "agent_runtime.resolution": ("RuntimeResolution",),
-    "agent_runtime.self_test_evidence": ("SelfTestEvidence",),
 }
 
 

@@ -657,13 +657,13 @@ def _coordinator_permission_config(raw: dict[str, Any]) -> CoordinatorPermission
 
 
 def _mcp_admission_config(raw: dict[str, Any]) -> McpAdmissionConfig:
-    """Parse ``agent_runtime.mcp_admission`` — deny-by-default at every step.
+    """Parse the root MCP-admission controls.
 
-    A malformed block must never read as "allow": a non-mapping ``roles``, a
-    non-mapping lane map, or a non-list server list all collapse to the empty
-    allowlist, and any parse fault leaves ``enabled`` False. The connect budget
-    is clamped so a config typo cannot park a chat turn behind a capability
-    probe (or make the probe useless by rounding to zero).
+    Server authority lives in each persona profile.  Unknown keys, including
+    the retired ``roles`` policy table, are ignored like other removed config
+    fields.  The connect budget is clamped so a config typo cannot park a chat
+    turn behind a capability probe (or make the probe useless by rounding to
+    zero).
 
     ``max_tool_calls_per_run`` is clamped the same way and for the same reason,
     with one extra property: there is no way to spell "unlimited". A missing,
@@ -675,19 +675,6 @@ def _mcp_admission_config(raw: dict[str, Any]) -> McpAdmissionConfig:
 
     raw = raw if isinstance(raw, dict) else {}
     defaults = McpAdmissionConfig()
-    roles: dict[str, dict[str, list[str]]] = {}
-    raw_roles = raw.get("roles")
-    if isinstance(raw_roles, dict):
-        for role, lanes in raw_roles.items():
-            if not isinstance(lanes, dict):
-                continue
-            parsed_lanes = {
-                str(lane): _string_list(servers)
-                for lane, servers in lanes.items()
-                if _string_list(servers)
-            }
-            if parsed_lanes:
-                roles[str(role)] = parsed_lanes
     timeout = _optional_float(raw.get("connect_timeout_seconds"))
     if timeout is None or timeout <= 0:
         timeout = defaults.connect_timeout_seconds
@@ -700,7 +687,6 @@ def _mcp_admission_config(raw: dict[str, Any]) -> McpAdmissionConfig:
             minimum=1,
             maximum=MCP_ADMISSION_MAX_TOOL_CALLS_CEILING,
         ),
-        roles=roles,
     )
 
 

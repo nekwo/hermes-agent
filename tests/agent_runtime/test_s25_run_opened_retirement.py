@@ -52,11 +52,10 @@ def test_the_operator_summary_row_and_its_formatter_went_with_the_contract():
     assert operator_event_summary(evt) is None
 
 
-def test_run_closed_is_not_collateral():
-    """``RunStore.cancel -> close_run`` is LIVE (operator takeover, persona-chat
-    replacement), so the neighbouring contract must survive this retirement."""
+def test_historical_run_closed_rendering_is_not_collateral():
+    """The write contract retired later; historical display remains."""
 
-    assert "run.closed" in ALLOWED_EVENT_TYPES
+    assert "run.closed" not in ALLOWED_EVENT_TYPES
     assert "run.closed" in OPERATOR_SUMMARY_EVENT_TYPES
 
 

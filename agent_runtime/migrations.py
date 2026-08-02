@@ -108,7 +108,6 @@ def migration_status(root: Path | None = None) -> dict[str, Any]:
         "agents": _count_json(root / "agents"),
         "incidents": _count_json(root / "incidents"),
         "proofs": _count_nested_json(root / "proofs"),
-        "self_tests": _count_nested_json(root / "self_tests"),
         "archive_batches": _count_dirs(root / "deleted_archive"),
     }
     return {

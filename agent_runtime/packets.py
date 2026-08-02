@@ -76,7 +76,6 @@ DELIVERY_KEYS = frozenset(
         "delivery_version",
         "source_handoff_packet_id",
         "work_status",
-        "self_test_evidence_ids",
         "consumed_contract_packet_ids",
         "consumed_proof_ids",
         "produced_contract_packet_id",
@@ -454,7 +453,6 @@ def _validate_delivery(packet: dict[str, Any], *, decision_type: DecisionType) -
     _derive_delivery_work_status(packet, decision_type=decision_type)
     _optional_string_list(packet, "consumed_contract_packet_ids")
     _optional_string_list(packet, "consumed_proof_ids")
-    _optional_string_list(packet, "self_test_evidence_ids")
     _optional_string_list(packet, "changed_files")
     _optional_string_list(packet, "changed_paths")
     _optional_string_list(packet, "inspected_paths")
@@ -783,4 +781,3 @@ def _looks_like_absolute_path(text: str) -> bool:
     if normalized.startswith(("/Users/", "/home/", "/mnt/", "/opt/", "/var/", "/tmp/", "/Volumes/")):
         return True
     return False
-

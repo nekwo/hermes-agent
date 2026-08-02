@@ -472,7 +472,7 @@ def persona_chat_trace_summary(
 
     Two disjoint lanes feed a persona instance's trace, merged chronologically:
 
-    * **task-run trace** — events a task-bound run emits via ``RunProgressSink``,
+    * **historical task-run trace** — persisted events from the retired task lane,
       keyed on ``task_id`` (``session_id`` is ``None``). Grouped per task so each
       task's event log is scanned once and the fetch window can be sized for
       *all* its agents at once — a flat per-persona window let a busy

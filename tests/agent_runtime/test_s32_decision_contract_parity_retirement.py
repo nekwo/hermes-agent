@@ -94,12 +94,7 @@ def test_the_decision_lane_is_not_collateral():
     they sat beside are untouched, which is exactly what this test exists to
     prove."""
 
-    live = {
-        "run.progress",
-        "run.closed",
-        "run.tool.started",
-        "run.tool.finished",
-    }
+    live = {"run.progress", "run.tool.started", "run.tool.finished"}
     assert live <= ALLOWED_EVENT_TYPES
 
     retired_at_s44 = {

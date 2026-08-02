@@ -342,7 +342,7 @@ def _build_snapshot_uncoalesced(
     # ``workspaces[].goals`` went at S47 (ledger item 5). The projection is now
     # ``PersonaInstanceStore.ensure_for_personas(personas)`` and takes no worker
     # argument; the worker session store it read is deleted. The eight earlier
-    # look-alikes (``runs``, ``incidents``, ``proofs``, ``self_tests``,
+    # look-alikes (``runs``, ``incidents``, ``proofs``,
     # ``role_envelopes``, ``role_checklists``, ``repo_bundles``,
     # ``runtime_instances``) fed the mission projections S9/S18/S27 removed and
     # were assigned-never-read; so were ``execution_mode`` (the retired Mission
@@ -699,7 +699,7 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         # duplicate of the authoritative top-level ``migration`` block. The
         # Launcher reads neither copy; its supported-contract pin moves in
         # lockstep with this emitted-field removal.
-        "contract_version": 49,
+        "contract_version": 50,
         "generated_at": data.get("generated_at"),
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
         "redaction_observed": _redaction_observed(data),

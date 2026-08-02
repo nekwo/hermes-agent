@@ -119,7 +119,6 @@ logger = logging.getLogger(__name__)
 
 from .mcp_lane import MCP_NOT_REGISTERED_ON_LANE  # noqa: E402  (re-exported below)
 
-MCP_NOT_ADMITTED_FOR_ROLE = "mcp_not_admitted_for_role"
 MCP_ADMISSION_DISABLED = "mcp_admission_disabled"
 MCP_ADMISSION_LANE_BUSY = "mcp_admission_lane_busy"
 MCP_ADMISSION_TIMEOUT = "mcp_admission_timeout"
@@ -641,8 +640,7 @@ def resolve_mcp_admission(
                     ),
                     fix_hint=(
                         "Set agent_runtime.mcp_admission.enabled: true in the ROOT "
-                        "config.yaml (and name the role/lane under "
-                        "agent_runtime.mcp_admission.roles) to admit declared MCP servers."
+                        "config.yaml to admit servers declared by this persona profile."
                     ),
                 )
                 for name in requested
@@ -665,7 +663,7 @@ def resolve_mcp_admission(
                     server=name,
                     code=MCP_SERVER_NOT_CONFIGURED,
                     summary=(
-                        f"'{name}' is admitted for role '{role}', but the persona's profile "
+                        f"'{name}' was requested by role '{role}', but the persona's profile "
                         "declares no mcp_servers entry to spawn."
                     ),
                     fix_hint=(
@@ -975,8 +973,8 @@ def admitted_operating_skill_ids(
     Two gates, both required, and each one narrows:
 
     1. **Admitted.** ``admission.server_names`` is what actually survived the
-       whole deny-by-default ladder — flag, role/lane allowlist, stage floor,
-       machine resolvability, permission mode. Nothing else is consulted, so a
+       profile-declared admission path — flag, declaration, machine
+       resolvability, and permission mode. Nothing else is consulted, so a
        persona that merely DECLARES a server (and will get a typed denial line
        instead of tools) never pays for its manual.
     2. **Granted.** The skill must already be on the persona's own skill list.
@@ -985,8 +983,8 @@ def admitted_operating_skill_ids(
        with no second place to look.
 
     Order follows the persona's grant list rather than the server list, so the
-    preload set is stable against a config reordering of ``roles.<role>.<lane>``.
-    Pure: no registry read, no filesystem, no resolve.
+    preload set follows the profile grant order. Pure: no registry read, no
+    filesystem, no resolve.
     """
 
     if admission is None or admission.is_empty:

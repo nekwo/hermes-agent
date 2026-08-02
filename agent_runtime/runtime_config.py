@@ -176,13 +176,14 @@ class MissionChatConfig:
 
 @dataclass(slots=True)
 class McpAdmissionConfig:
-    """Which personas may have their declared MCP servers registered for a run.
+    """How profile-declared MCP servers are registered for a run.
 
     ``enabled`` is the single kill switch and defaults to **False**: admission is
     the first path on which an autonomous mission-chat agent can spawn a local
     executable, so it stays off until an operator turns it on deliberately.
-    ``roles`` is deny-by-default with no wildcard — a role with no entry, or a
-    lane with no entry under that role, admits nothing.
+    The persona profile is the admission authority: only servers declared by
+    that profile are considered.  Role and lane are retained on admission rows
+    for observability, not as a second policy language.
 
     ``max_tool_calls_per_run`` is the per-run MCP call budget (design §3's
     residual-risk mitigation, §7's ``mcp_admission_budget_exhausted`` row): once
@@ -202,15 +203,11 @@ class McpAdmissionConfig:
             enabled: true
             connect_timeout_seconds: 20
             max_tool_calls_per_run: 120
-            roles:
-              qa:
-                mission_chat: [launcher_qa]
     """
 
     enabled: bool = False
     connect_timeout_seconds: float = 20.0
     max_tool_calls_per_run: int = 120
-    roles: dict[str, dict[str, list[str]]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

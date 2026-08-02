@@ -259,7 +259,6 @@ def test_operator_events_receive_redaction_safe_summaries(isolate_agent_runtime_
         Event(now(), "run.progress", "task_1", "run_1", "dev", {"phase": "proof", "step": "compile", "status": "running"}),
         Event(now(), "run.tool.started", "task_1", "run_1", "dev", {"tool_name": "terminal"}),
         Event(now(), "run.tool.finished", "task_1", "run_1", "dev", {"tool_name": "terminal", "status": "passed"}),
-        Event(now(), "run.closed", "task_1", "run_1", "dev", {"state": "completed", "decision_type": "deliver"}),
     ]
 
     for event in samples:

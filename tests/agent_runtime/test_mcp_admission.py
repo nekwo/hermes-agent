@@ -79,6 +79,7 @@ def _declaring(persona_id: str, *servers: str):
 def _cfg(**kwargs) -> types.SimpleNamespace:
     """A stand-in runtime config carrying only the admission block."""
 
+    kwargs.pop("roles", None)  # retired input retained at call sites as a no-op regression
     return types.SimpleNamespace(mcp_admission=McpAdmissionConfig(**kwargs))
 
 
@@ -171,7 +172,6 @@ def test_flag_off_is_the_default_config():
     # The kill switch defaults closed. A deployment that never mentions
     # mcp_admission must never admit anything.
     assert McpAdmissionConfig().enabled is False
-    assert McpAdmissionConfig().roles == {}
 
 
 def test_persona_with_no_declaration_admits_nothing(tmp_path, monkeypatch):
@@ -1062,7 +1062,7 @@ def test_denial_rows_match_the_typed_issue_contract(qa_profile):
 # ── config parsing ──────────────────────────────────────────────────────────
 
 
-def test_config_block_parses_the_documented_shape(tmp_path):
+def test_config_block_parses_the_documented_shape_and_ignores_retired_roles(tmp_path):
     from agent_runtime.config import load_agent_runtime_config
 
     path = tmp_path / "config.yaml"
@@ -1081,7 +1081,7 @@ def test_config_block_parses_the_documented_shape(tmp_path):
 
     assert cfg.mcp_admission.enabled is True
     assert cfg.mcp_admission.connect_timeout_seconds == 20.0
-    assert cfg.mcp_admission.roles == {"qa": {"mission_chat": ["launcher_qa"]}}
+    assert not hasattr(cfg.mcp_admission, "roles")
 
 
 def test_absent_config_block_is_disabled(tmp_path):
@@ -1093,7 +1093,7 @@ def test_absent_config_block_is_disabled(tmp_path):
     assert load_agent_runtime_config(path).mcp_admission.enabled is False
 
 
-def test_a_malformed_roles_block_never_reads_as_allow(tmp_path):
+def test_a_legacy_roles_block_is_ignored(tmp_path):
     from agent_runtime.config import load_agent_runtime_config
 
     path = tmp_path / "config.yaml"
@@ -1105,7 +1105,7 @@ def test_a_malformed_roles_block_never_reads_as_allow(tmp_path):
         encoding="utf-8",
     )
 
-    assert load_agent_runtime_config(path).mcp_admission.roles == {}
+    assert not hasattr(load_agent_runtime_config(path).mcp_admission, "roles")
 
 
 def test_the_connect_budget_is_clamped(tmp_path):

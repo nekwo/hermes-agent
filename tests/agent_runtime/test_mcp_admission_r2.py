@@ -43,7 +43,6 @@ from agent_runtime.mcp_admission import (
     MCP_ADMISSION_LANE_BUSY,
     MCP_ADMISSION_TEARDOWN_FAILED,
     MCP_ADMISSION_TIMEOUT,
-    MCP_NOT_ADMITTED_FOR_ROLE,
     MCP_NOT_REGISTERED_ON_LANE,
     MCP_SERVER_NOT_CONFIGURED,
     READ_ONLY_ALLOWLIST_PROFILE,
@@ -86,6 +85,7 @@ def _persona(persona_id: str):
 
 
 def _cfg(**kwargs) -> types.SimpleNamespace:
+    kwargs.pop("roles", None)  # legacy role policy is intentionally ignored
     return types.SimpleNamespace(mcp_admission=McpAdmissionConfig(**kwargs))
 
 
@@ -703,7 +703,6 @@ def test_there_is_no_line_without_an_admission_object():
 @pytest.mark.parametrize(
     "code",
     [
-        MCP_NOT_ADMITTED_FOR_ROLE,
         MCP_SERVER_NOT_CONFIGURED,
         MCP_ADMISSION_DISABLED,
         MCP_ADMISSION_TIMEOUT,
@@ -729,7 +728,7 @@ def test_the_line_names_the_sanctioned_alternative_and_forbids_improvising():
     fencing every workaround the model can invent.
     """
 
-    line = render_mcp_admission_line(_denied(MCP_NOT_ADMITTED_FOR_ROLE))
+    line = render_mcp_admission_line(_denied(MCP_SERVER_NOT_CONFIGURED))
 
     assert "qa.request_screenshot" in line
     assert "PowerShell" in line
@@ -781,7 +780,7 @@ def test_the_policy_half_is_never_repeated_by_the_execution_half():
     """
 
     policy = McpAdmissionDenial(
-        server="other_server", code=MCP_NOT_ADMITTED_FOR_ROLE, summary="s", fix_hint="f"
+        server="other_server", code=MCP_SERVER_NOT_CONFIGURED, summary="s", fix_hint="f"
     )
     execution = McpAdmissionDenial(
         server="launcher_qa", code=MCP_ADMISSION_TIMEOUT, summary="s", fix_hint="f"
@@ -798,13 +797,13 @@ def test_the_policy_half_is_never_repeated_by_the_execution_half():
 
 
 def test_one_server_reports_once_even_with_both_a_policy_and_an_execution_row():
-    admission = _denied(MCP_NOT_ADMITTED_FOR_ROLE)
+    admission = _denied(MCP_SERVER_NOT_CONFIGURED)
 
     line = render_mcp_admission_line(admission, outcome=_timed_out_outcome())
 
     assert line.count("launcher_qa (") == 1
     # The narrower policy reason wins over the generic execution one.
-    assert MCP_NOT_ADMITTED_FOR_ROLE in line
+    assert MCP_SERVER_NOT_CONFIGURED in line
     assert MCP_ADMISSION_TIMEOUT not in line
 
 
@@ -814,7 +813,7 @@ def test_an_outcome_with_only_policy_rows_is_not_degraded():
         denied=(
             McpAdmissionDenial(
                 server="other_server",
-                code=MCP_NOT_ADMITTED_FOR_ROLE,
+                code=MCP_SERVER_NOT_CONFIGURED,
                 summary="s",
                 fix_hint="f",
             ),

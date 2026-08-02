@@ -90,13 +90,13 @@ to goal count — adding a goal is adding a chat.
 
 ### The harness trace entry (already emitted — this is a *projection*, not a new write)
 
-The worker **already** emits exactly this per tool/turn, via
-`RunProgressSink.emit` → it lands in two places: the latest `run.progress` on the RunStore
-**and** the append-only `EventLog` as `run.tool.started` / `run.tool.finished` /
-`run.progress` Events keyed by `task_id` + `run_id` + `persona_id`. Each payload is already
-run through `_safe_progress_payload` (allowlist `_SAFE_PROGRESS_KEYS`) — redacted and
-≤4 KB (the `EventLog` payload cap). So Stage 0 does **not** define a new write; it pins the
-client-facing projection of those existing Events:
+Historical task-run progress landed in the RunStore and append-only EventLog;
+that writer lane is retired. Live persona-chat traces use
+`ChatProgressSink.emit` to write `run.tool.started` / `run.tool.finished` /
+`run.progress` events keyed by session and persona. Each payload is run through
+`_safe_progress_payload` and bounded by the EventLog payload cap. Stage 0 pins
+the client-facing projection of those historical events; it does not define a
+new task-run writer:
 
 ```yaml
 # projected from an existing run.tool.* / run.progress EventLog Event
@@ -176,9 +176,9 @@ channel in the snapshot, **additively** — no new write path, no new emit point
 
 ### Approach
 
-- The events already exist: `RunProgressSink.emit` (`progress.py`) writes each
+- The chat trace events already exist: `ChatProgressSink.emit` (`progress.py`) writes each
   `run.tool.started` / `run.tool.finished` / `run.progress` to the `EventLog`, keyed by
-  `task_id` + `run_id` + `persona_id`, already redacted by `_safe_progress_payload`. So
+  `session_id` + `run_id` + `persona_id`, already redacted by `_safe_progress_payload`. So
   **do not** add writes at the `profile_runner.py` callbacks — they're the *source* of these
   events and stay as-is.
 - Add a projection helper (mirrors `persona_chat_history_summary`): for each task-bound

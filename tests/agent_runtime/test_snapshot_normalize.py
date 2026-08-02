@@ -68,7 +68,7 @@ def test_goals_is_keyed_map_and_tasks_wire_section_retired(isolate_agent_runtime
 def test_goals_single_owner_carries_union_of_both_projections(isolate_agent_runtime_root):
     snap = build_snapshot()
     # S56 bumped the snapshot parity contract 46 -> 47; S57 took it to 48.
-    assert snap["parity"]["contract_version"] == 49
+    assert snap["parity"]["contract_version"] == 50
     assert set(("goals", "runs", "proofs", "incidents")).isdisjoint(snap)
 
 

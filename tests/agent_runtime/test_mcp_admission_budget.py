@@ -63,6 +63,7 @@ def _persona(persona_id: str):
 
 
 def _cfg(**kwargs) -> types.SimpleNamespace:
+    kwargs.pop("roles", None)  # retired role/lane config remains a no-op input
     return types.SimpleNamespace(mcp_admission=McpAdmissionConfig(**kwargs))
 
 

@@ -138,6 +138,11 @@ REMOVED_EVENT_TYPES = frozenset(
         "lane.transitioned",
         "lane.transition_rejected",
         "foreground_runtime.closed",
+        # Round 4 contract ruling: all three writers were caller-less after the
+        # mission/task lane removal. Historical rows remain readable/renderable.
+        "run.closed",
+        "self_test.recorded",
+        "self_test.loop_detected",
     }
 )
 
@@ -187,7 +192,7 @@ REMOVED_EVENT_TYPES = frozenset(
 # tests/agent_runtime/test_s56_worker_session_lane_removal.py.
 # This stays an absolute count on purpose: it is the one assertion that catches
 # a contract silently appearing or disappearing.
-SURVIVING_EVENT_COUNT = 58
+SURVIVING_EVENT_COUNT = 55
 
 
 def test_the_unemittable_event_types_are_no_longer_registered():
@@ -230,18 +235,6 @@ def test_the_near_miss_survivors_stay_registered():
         "run.tool.started",
         "run.tool.finished",
         "run.progress",
-        # RunStore.cancel -> close_run is LIVE, so run.closed stays emittable.
-        # RE-DERIVED at S49: this note used to cite TWO callers (operator
-        # takeover, persona-chat replacement). S49 deleted operator_control.py,
-        # so only the persona-chat replacement in persona_assignments.py still
-        # reaches it — one caller, still live, still emittable. run.heartbeat and
-        # run.approved went with their writers at S17; run.opened followed at
-        # S25 once its two filler minters were retargeted — all three are pinned
-        # as removed by the tests that own those deltas.
-        "run.closed",
-        # self_test_evidence.py appends both directly.
-        "self_test.recorded",
-        "self_test.loop_detected",
         # the chat/board/office/realm keep set.
         "persona_instance.created",
         "board.card.created",

@@ -135,7 +135,6 @@ def test_the_lookalike_keep_set_survives():
         "agent_runtime.incidents",
         "agent_runtime.scope_control",
         "agent_runtime.simplified_contract",
-        "agent_runtime.dev_discipline",
     ):
         assert importlib.import_module(dotted) is not None
 

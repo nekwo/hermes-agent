@@ -2410,6 +2410,59 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         'role="alice_supervisor"',
         scope=("agent_runtime.persona_assignments",),
     ),
+    # -- S63 / Round 4 — operator-ruled contract cleanup ----------------
+    *rows(
+        "s63",
+        "e6a7424bc",
+        Form.MODULE,
+        "the task progress lane was production-callerless; its telemetry and "
+        "self-test evidence islands retired with it",
+        "agent_runtime.dev_discipline",
+        "agent_runtime.self_test_evidence",
+    ),
+    *rows(
+        "s63",
+        "e6a7424bc",
+        Form.ATTR,
+        "caller-less task-run write surface removed after the operator contract ruling",
+        "RunProgressSink",
+        scope=("agent_runtime.progress",),
+    ),
+    *rows(
+        "s63",
+        "e6a7424bc",
+        Form.CLASS_ATTR,
+        "caller-less close/cancel writer removed with the run.closed write contract",
+        "store.RunStore.close_run",
+        "store.RunStore.cancel",
+        scope=("agent_runtime",),
+    ),
+    *rows(
+        "s63",
+        "e6a7424bc",
+        Form.CLASS_ATTR,
+        "profile declarations replaced the ignored role/lane MCP config language",
+        "runtime_config.McpAdmissionConfig.roles",
+        scope=("agent_runtime",),
+    ),
+    *rows(
+        "s63",
+        "e6a7424bc",
+        Form.EVENT,
+        "registered writers retired; historical rows remain readable and renderable",
+        "run.closed",
+        "self_test.recorded",
+        "self_test.loop_detected",
+    ),
+    *rows(
+        "s63",
+        "e6a7424bc",
+        Form.CODE,
+        "retired configuration and packet/event vocabulary must not regrow in production",
+        "MCP_NOT_ADMITTED_FOR_ROLE",
+        "mcp_not_admitted_for_role",
+        "self_test_evidence_ids",
+    ),
 )
 
 

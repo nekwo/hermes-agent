@@ -25,12 +25,9 @@ value through it before copying it onto the ``incident.opened`` payload. A
 line-range cut that swallows it silently removes the redaction gate on a live
 event. It is pinned below by behavior, not by ``hasattr``.
 
-ROUND 2 RE-DERIVATION: ``RunStore.cancel`` / ``close_run`` and the
-``run.closed`` writer now have zero production callers after the obsolete
-worker-chat replacement lane was removed. They remain compatibility-held in
-this pass because removing an event contract is an operator contract decision,
-outside a dead-code campaign's authority. The behavior pin below records that
-held contract; it is no longer evidence of production reachability.
+Round 4 exercised the deferred operator ruling and removed the caller-less
+``RunStore.cancel`` / ``close_run`` writer with the ``run.closed`` write
+contract. Historical rows still render through ``events.operator_event_summary``.
 """
 
 from __future__ import annotations
@@ -39,9 +36,8 @@ import inspect
 
 
 import agent_runtime.store as store_module
-from agent_runtime.events import ALLOWED_EVENT_TYPES, EventLog
-from agent_runtime.models import AgentRun, Incident
-from agent_runtime.states import RunState
+from agent_runtime.events import EventLog
+from agent_runtime.models import Incident
 from agent_runtime.store import IncidentStore, RunStore
 from hermes_time import now
 
@@ -103,7 +99,7 @@ WRITE_DEAD_RUN_STORE_METHODS = (
     "find_active",
 )
 
-LIVE_RUN_STORE_METHODS = ("get", "update", "close_run", "cancel", "list_for_task", "list_all")
+LIVE_RUN_STORE_METHODS = ("get", "update", "list_for_task", "list_all")
 
 DE_REGISTERED_RUN_EVENT_TYPES = frozenset({"run.heartbeat", "run.approved"})
 
@@ -111,27 +107,6 @@ DE_REGISTERED_RUN_EVENT_TYPES = frozenset({"run.heartbeat", "run.approved"})
 # tests/agent_runtime/test_s15_event_contract_pruning.SURVIVING_EVENT_COUNT.
 # This file asserts only its own delta — two duplicated totals would just mean
 # two places to edit on every registry change, and one of them going stale.
-
-
-def _seed_run(*, run_id: str = "run_s17", persona_id: str = "dev", task_id: str = "task_s17") -> AgentRun:
-    """Create a run row without the removed writer.
-
-    ``RunStore.update`` is the surviving write path: it tolerates a missing
-    previous row (``NotFound`` -> ``previous is None``) and persists.
-    """
-
-    ts = now()
-    run = AgentRun(
-        id=run_id,
-        persona_id=persona_id,
-        task_id=task_id,
-        stage_id=None,
-        state=RunState.RUNNING,
-        started_at=ts,
-        last_heartbeat_at=ts,
-    )
-    assert RunStore().update(run) is True
-    return run
 
 
 
@@ -186,28 +161,3 @@ def test_the_surviving_run_store_surface_is_exactly_the_read_and_close_path():
         if not name.startswith("_")
     }
     assert public == set(LIVE_RUN_STORE_METHODS)
-
-
-
-
-def test_run_closed_compatibility_hold_still_emits_registered_event():
-    """Contract hold: removal needs a separate operator event ruling."""
-
-    assert "run.closed" in ALLOWED_EVENT_TYPES
-
-    run = _seed_run()
-    cancelled = RunStore().cancel(run.id, reason="operator stopped runaway smoke")
-
-    assert cancelled.state == RunState.CANCELLED
-    event = EventLog().tail(1)[0]
-    assert event.type == "run.closed"
-    assert event.payload["state"] == "cancelled"
-
-
-def test_the_surviving_read_path_still_answers():
-    run = _seed_run()
-    store = RunStore()
-
-    assert store.get(run.id).id == run.id
-    assert [item.id for item in store.list_for_task("task_s17")] == [run.id]
-    assert [item.id for item in store.list_all()] == [run.id]

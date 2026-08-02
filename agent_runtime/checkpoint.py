@@ -71,7 +71,7 @@ class EntityClass:
     * flat (``recursive=False``): ``<dir>/<actor_id>.json`` — the actor id is
       the filename stem (``persona_instances``, ``flow_graphs`` …).
     * nested (``recursive=True``): owner sub-directories hold the per-actor
-      files (``boards/<board_id>/…``, ``self_tests/<task_id>/…``). The actor key is
+      files (for example ``boards/<board_id>/…``). The actor key is
       the POSIX relative path minus ``.json`` so every file is captured
       verbatim and uniquely — the truest "the store IS the checkpoint" form for
       a nested store.
@@ -113,7 +113,6 @@ ENTITY_CLASSES: tuple[EntityClass, ...] = (
     # since S53: its rows still ship on the status wire (`runtime_instances` /
     # `foreground_runtime`), so a checkpoint that omitted them would drop state a
     # reader can still see.
-    EntityClass("self_tests", paths.self_tests_dir, recursive=True),
     EntityClass("packet_artifacts", paths.packet_artifacts_dir, recursive=True),
 )
 

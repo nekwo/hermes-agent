@@ -71,4 +71,4 @@ def test_the_chain_still_works_end_to_end(isolate_agent_runtime_root):
     )
     hud = runtime_hud.resolve_situational_hud(instance, roster=[instance])
     assert isinstance(hud, dict) and hud
-    assert snapshot.build_snapshot()["parity"]["contract_version"] == 49
+    assert snapshot.build_snapshot()["parity"]["contract_version"] == 50

@@ -24,14 +24,6 @@ REMOVED_MODULES = ("agent_runtime.role_sessions",)
 
 
 
-def test_dev_discipline_survives_on_its_progress_telemetry_caller():
-    """``progress.RunProgressSink`` merges telemetry through it on every run event."""
-
-    from agent_runtime import dev_discipline, progress
-
-    assert progress.update_progress_telemetry is dev_discipline.update_progress_telemetry
-
-
 def test_simplified_contract_survives_on_its_public_decision_type_callers():
     """Operator channels and the store project decision types through it.
 
@@ -45,12 +37,11 @@ def test_simplified_contract_survives_on_its_public_decision_type_callers():
 
     import inspect
 
-    from agent_runtime import operator_channels, simplified_contract, store
+    from agent_runtime import operator_channels, simplified_contract
 
     assert operator_channels.public_decision_type_value is simplified_contract.public_decision_type_value
-    assert store.public_decision_type_value is simplified_contract.public_decision_type_value
     # A live call site, not just a bound name.
-    for module in (operator_channels, store):
+    for module in (operator_channels,):
         assert "public_decision_type_value(" in inspect.getsource(module), module.__name__
 
 

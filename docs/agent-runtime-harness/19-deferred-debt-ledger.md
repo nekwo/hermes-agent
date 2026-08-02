@@ -1666,11 +1666,12 @@ underlying readers, batch paths, and shared redaction patterns remain.
 issues now embed its exact pasteable YAML in the operator fix hint. The hint no
 longer tells an operator to invoke an internal Python helper.
 
-Deliberate holds remain unchanged: `McpAdmissionConfig.roles` and
-`MCP_NOT_ADMITTED_FOR_ROLE`, run-progress/self-test evidence, `RunStore.cancel`
-through `run.closed`, the typed error chain, parity, and the remote gateway.
-No unnamed decorative constant was removed without an independently proved
-closed reachability loop; those candidates remain deferred for a named audit.
+At the end of this first cut, MCP role config, run-progress/self-test evidence,
+and `RunStore.cancel` through `run.closed` were held for an explicit contract
+ruling. The contract-authority cleanup below records the subsequent decision
+and retirement. No unnamed decorative constant was removed without an
+independently proved closed reachability loop; those candidates remain deferred
+for a named audit.
 
 Red proof was captured before production cuts: the S61 registry additions
 failed 38 rows (759 passed). Green proof is recorded in the campaign handoff;
@@ -1697,3 +1698,21 @@ configured role/tool surface without rewriting the raw id. Custom-role and
 empty-roster behavior tests pin all three boundaries. The read-model crash test
 now executes SQLite's `PRAGMA integrity_check` directly, preserving storage
 proof without restoring the deleted production convenience wrapper.
+
+## S61 / Round 4 — contract-authority cleanup (2026-08-02)
+
+The operator ruled the three Round-3 holds removable. The root MCP `roles`
+table and `mcp_not_admitted_for_role` vocabulary were inert after S11 made
+profile declarations authoritative, so parsing/serialization and stale
+guidance are gone. Role and lane remain informational admission metadata.
+
+The production-callerless task progress island (`RunProgressSink`,
+`dev_discipline.py`, `self_test_evidence.py`) retired with its self-test store,
+checkpoint/migration row, delivery evidence-id field, and the two self-test
+write contracts. Live `self_test_command` / `focused_self_test` packet fields
+and `ChatProgressSink` remain. Historical `self_test.recorded` display handling
+is intentionally preserved.
+
+`RunStore.cancel` / `close_run` and the `run.closed` write contract also
+retired. Historical `run.closed` rows still receive the existing operator
+summary. The event catalog moves 58 → 55 and snapshot contract 49 → 50.
