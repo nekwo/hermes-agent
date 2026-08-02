@@ -26,7 +26,6 @@ from agent_runtime.chat_lane_toolsets import (
 )
 from agent_runtime.config import chat_lane_restore_toolsets, load_agent_runtime_config
 from agent_runtime.models import AgentPersona
-from agent_runtime.personas import AgentRole
 from tests.agent_runtime.persona_samples import sample_personas
 from agent_runtime.tool_permissions import PERMISSION_MODE_UNBOUNDED
 from agent_runtime.tool_visibility import ToolVisibilityOptions
@@ -188,7 +187,7 @@ def _persona_with_dev_toolkit():
     return AgentPersona(
         id="neko_supervisor",
         display_name="Neko",
-        role=AgentRole.ALICE_SUPERVISOR.value,
+        role="alice_supervisor",
         model=None,
         provider=None,
         api_mode="codex_responses",

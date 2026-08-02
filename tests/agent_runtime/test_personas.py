@@ -35,7 +35,7 @@ def test_blocked_tools_are_exposed_for_runtime_filtering():
 
 
 def test_validate_toolsets_preserves_unknown_and_deduplicates_values():
-    assert validate_toolsets(AgentRole.QA, ["browser", "terminal", "code_execution", "made_up"]) == [
+    assert validate_toolsets("qa", ["browser", "terminal", "code_execution", "made_up"]) == [
         "browser", "terminal", "code_execution", "made_up",
     ]
 
@@ -52,7 +52,7 @@ def test_explicit_persona_samples_are_valid():
     assert {p.autonomy for p in personas} <= {level.value for level in AutonomyLevel}
     assert effective_toolsets(dev)
     backend_dev = next(p for p in personas if p.id == "backend_dev")
-    assert backend_dev.role == AgentRole.DEV.value
+    assert backend_dev.role == "dev"
     assert backend_dev.hermes_profile == "backend-dev"
     assert backend_dev.autonomy == AutonomyLevel.PROPOSE_ONLY.value
     assert effective_toolsets(backend_dev) == effective_toolsets(dev)

@@ -8,9 +8,6 @@ from .models import AgentPersona
 
 class AgentRole(StrEnum):
     PM = "pm"
-    DEV = "dev"
-    QA = "qa"
-    ALICE_SUPERVISOR = "alice_supervisor"
 
 
 class AutonomyLevel(StrEnum):

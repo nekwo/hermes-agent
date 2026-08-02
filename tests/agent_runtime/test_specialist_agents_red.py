@@ -8,7 +8,7 @@ pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
 
 from agent_runtime.config import AgentRuntimeConfig, persona_records_from_config
 from agent_runtime.models import AgentPersona
-from agent_runtime.personas import AgentRole, blocked_tool_names, effective_toolsets
+from agent_runtime.personas import blocked_tool_names, effective_toolsets
 from tests.agent_runtime.persona_samples import sample_personas
 import agent_runtime.repo_context as repo_context
 from agent_runtime.repo_context import repo_execution_context_for_task, resolve_affected_repo_workdir, safe_affected_repo_labels
@@ -26,12 +26,12 @@ def test_default_specialist_persona_collection_includes_backend_dev_and_frontend
 
     frontend = personas["dev"]
     assert frontend.display_name in {"Launcher Dev Agent", "Frontend Dev Agent", "Frontend Dev", "Compatibility Frontend Dev"}
-    assert frontend.role == AgentRole.DEV.value
+    assert frontend.role == "dev"
     assert "terminal" in effective_toolsets(frontend)
 
     backend = personas["backend_dev"]
     assert backend.display_name in {"Backend Dev Agent", "Backend Dev"}
-    assert backend.role == AgentRole.DEV.value
+    assert backend.role == "dev"
     assert backend.hermes_profile == "backend-dev"
     assert "terminal" in effective_toolsets(backend)
     assert "write_file" not in blocked_tool_names(backend)
@@ -58,7 +58,7 @@ def test_persona_records_from_config_support_collection_specialists_without_drop
 
     assert personas["backend_dev"].hermes_profile == "backend-dev"
     assert personas["ml_dev"].display_name == "ML Dev"
-    assert personas["ml_dev"].role == AgentRole.DEV.value
+    assert personas["ml_dev"].role == "dev"
     assert personas["ml_dev"].hermes_profile == "ml-dev"
 
 

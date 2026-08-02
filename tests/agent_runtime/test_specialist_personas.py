@@ -5,7 +5,7 @@ import pytest
 pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
 
 from agent_runtime.config import persona_records_from_config
-from agent_runtime.personas import AgentRole, blocked_tool_names, effective_toolsets
+from agent_runtime.personas import blocked_tool_names, effective_toolsets
 from agent_runtime.snapshot import _agent_summary
 
 
@@ -22,14 +22,14 @@ def test_config_personas_include_frontend_compatible_dev_and_backend_dev_binding
 
     frontend = personas["dev"]
     assert frontend.id == "dev", "persisted persona_id=dev must remain stable for active/archived runs"
-    assert frontend.role == AgentRole.DEV.value
+    assert frontend.role == "dev"
     assert frontend.display_name in {"Launcher Dev Agent", "Frontend Dev"}
     assert frontend.repo_scope_label == "EterniaLauncher"
     assert frontend.repo_scope is None or "EterniaLauncher" in frontend.repo_scope.replace("\\", "/")
     assert frontend.include_core_context_files is False
 
     backend = personas["backend_dev"]
-    assert backend.role == AgentRole.DEV.value
+    assert backend.role == "dev"
     assert backend.display_name in {"Backend Dev Agent", "Backend Dev"}
     assert backend.hermes_profile == "backend-dev"
     assert backend.repo_scope_label == "EterniaBackend"
@@ -43,7 +43,7 @@ def test_dev_specialists_share_implementation_toolsets_but_remain_non_qa_roles()
 
     for persona_id in ("dev", "backend_dev"):
         persona = personas[persona_id]
-        assert persona.role == AgentRole.DEV.value
+        assert persona.role == "dev"
         assert "terminal" in effective_toolsets(persona)
         assert "code_execution" in effective_toolsets(persona)
         assert "write_file" not in blocked_tool_names(persona)
@@ -51,7 +51,7 @@ def test_dev_specialists_share_implementation_toolsets_but_remain_non_qa_roles()
         assert "send_message" in blocked_tool_names(persona)
 
     qa = personas["qa"]
-    assert qa.role == AgentRole.QA.value
+    assert qa.role == "qa"
     assert "write_file" not in blocked_tool_names(qa)
     assert "patch" not in blocked_tool_names(qa)
 

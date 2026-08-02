@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from agent_runtime.models import AgentPersona
-from agent_runtime.personas import AgentRole, AutonomyLevel, PROFILE_ROLE_SENTINEL
+from agent_runtime.personas import AutonomyLevel, PROFILE_ROLE_SENTINEL
 
 
 SAMPLE_PROFILE_TOOLSETS = [
@@ -25,10 +25,10 @@ def sample_persona(
     skills: list[str] | None = None,
 ) -> AgentPersona:
     roles = {
-        "neko_supervisor": AgentRole.ALICE_SUPERVISOR.value,
-        "dev": AgentRole.DEV.value,
-        "backend_dev": AgentRole.DEV.value,
-        "qa": AgentRole.QA.value,
+        "neko_supervisor": "alice_supervisor",
+        "dev": "dev",
+        "backend_dev": "dev",
+        "qa": "qa",
         "base": PROFILE_ROLE_SENTINEL,
     }
     return AgentPersona(

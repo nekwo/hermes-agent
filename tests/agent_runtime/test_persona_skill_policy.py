@@ -8,7 +8,7 @@ import pytest
 pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
 
 from agent_runtime.models import AgentPersona
-from agent_runtime.personas import AgentRole, effective_toolsets, validate_toolsets
+from agent_runtime.personas import effective_toolsets, validate_toolsets
 from tests.agent_runtime.persona_samples import sample_personas
 
 
@@ -16,7 +16,7 @@ def _persona(**overrides) -> AgentPersona:
     data = {
         "id": "dev",
         "display_name": "Dev",
-        "role": AgentRole.DEV.value,
+        "role": "dev",
         "model": None,
         "provider": None,
         "api_mode": "codex_responses",
@@ -29,7 +29,7 @@ def _persona(**overrides) -> AgentPersona:
 
 
 def test_dev_role_allows_skills_toolset_for_alice_style_loading():
-    assert "skills" in validate_toolsets(AgentRole.DEV, ["file", "skills", "cronjob"])
+    assert "skills" in validate_toolsets("dev", ["file", "skills", "cronjob"])
     assert "skills" in effective_toolsets(_persona())
 
 
@@ -111,7 +111,7 @@ def test_harness_skill_install_allows_readiness_from_temp_home(tmp_path, monkeyp
     results = install_harness_skills(hermes_home=tmp_path)
     assert all(result.ok for result in results)
 
-    qa = _persona(id="qa", role=AgentRole.QA.value, system_prompt_path="personas/qa/system.md", skills=["harness-qa-verdict"])
+    qa = _persona(id="qa", role="qa", system_prompt_path="personas/qa/system.md", skills=["harness-qa-verdict"])
     readiness = profile_readiness_for_persona(qa)
 
     assert readiness["missing_skills"] == []
