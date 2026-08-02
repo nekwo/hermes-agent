@@ -1669,3 +1669,188 @@ def test_operator_channel_summary_names_relayed_sender_from_full_roster():
     assert relayed[0]["actor_persona_id"] == "neko"
     assert relayed[0]["actor_instance_id"] == "personainst_neko"
     assert relayed[0]["actor_display_name"] == "Neko Mission Lead"
+
+
+# ---------------------------------------------------------------------------
+# Conversation cap (S66 re-home)
+# ---------------------------------------------------------------------------
+#
+# ``_apply_conversation_cap`` is LIVE — ``_conversation_contract`` calls it on
+# every channel — but its only test was DELETED with the ``run_summaries=``
+# parameter that had fed the cap (S65, f9aa0faab), leaving the marker, the
+# collapsed count and the protected/trimmable partition with ZERO coverage: a
+# grep for ``turns_collapsed`` / ``collapsed_count`` across tests/ returned
+# nothing at all.
+#
+# Re-homed onto the CURRENT live vector rather than the removed one. The
+# trimmable kinds (thinking_summary / turn / tool_call / agent_update) are
+# produced by the TRACE lane, not by history — history rows project to
+# operator_message / reply / system_message, every one of which is PROTECTED —
+# so the cap is driven here the way production drives it: a long tool trace
+# with an operator prompt and a final reply around it.
+
+
+def _cap_trace_entries(turns: int) -> list[dict]:
+    entries: list[dict] = []
+    for index in range(turns):
+        stamp = f"2026-07-17T10:{index // 60:02d}:{index % 60:02d}Z"
+        entries.append({
+            "event": "tool_started",
+            "tool_name": "terminal",
+            "summary": f"Started {index}",
+            "status": "started",
+            "ts": stamp,
+            "turn_id": f"t{index}",
+        })
+        entries.append({
+            "event": "tool_finished",
+            "tool_name": "terminal",
+            "summary": f"Finished {index}",
+            "status": "passed",
+            "ts": stamp,
+            "turn_id": f"t{index}",
+        })
+    return entries
+
+
+_CAP_SESSION_ID = "persona_chat_personainst_dev_cap"
+
+
+def _cap_instance() -> PersonaInstance:
+    return PersonaInstance(
+        id="personainst_dev",
+        persona_id="dev",
+        role="dev",
+        display_name="Dev Agent",
+        profile_id="dev",
+        runtime_root="test-runtime",
+        state=WorkerSessionState.IDLE,
+        mode="chat",
+        session_id=_CAP_SESSION_ID,
+        updated_at="2026-07-17T11:00:00Z",
+    )
+
+
+def _capped_channel(*, turns: int, accountant=None, with_history: bool = True):
+    history = []
+    if with_history:
+        history = [{
+            "session_id": _CAP_SESSION_ID,
+            "persona_id": "dev",
+            "persona_instance_id": "personainst_dev",
+            "title": "Dev chat",
+            "message_count": 2,
+            "messages": [
+                {"role": "operator", "text": "go", "timestamp": "2026-07-17T09:59:00Z"},
+                {"role": "assistant", "text": "done", "timestamp": "2026-07-17T11:00:00Z"},
+            ],
+            "updated_at": "2026-07-17T11:00:00Z",
+        }]
+    return operator_channel_summary(
+        persona_instances=[_cap_instance()],
+        persona_chat_history=history,
+        persona_chat_trace=[{
+            "session_id": _CAP_SESSION_ID,
+            "persona_id": "dev",
+            "persona_instance_id": "personainst_dev",
+            "task_id": None,
+            "entries": _cap_trace_entries(turns),
+        }],
+        accountant=accountant,
+    )[0]
+
+
+def test_an_under_cap_conversation_is_not_collapsed():
+    """Non-vacuity guard: the marker must be ABSENT below the cap.
+
+    Without this, every assertion in the next test could be satisfied by a cap
+    that fires unconditionally.
+    """
+
+    from agent_runtime.operator_channels import _CONVERSATION_MESSAGE_CAP
+
+    messages = _capped_channel(turns=10)["conversation"]["messages"]
+    assert len(messages) < _CONVERSATION_MESSAGE_CAP
+    assert [m for m in messages if m["kind"] == "turns_collapsed"] == []
+    assert len([m for m in messages if m["kind"] == "tool_call"]) == 10
+
+
+def test_the_conversation_cap_trims_the_trimmable_side_and_accounts_for_it():
+    from agent_runtime.operator_channels import (
+        _CONVERSATION_MESSAGE_CAP,
+        _CONVERSATION_TRIMMABLE_KINDS,
+    )
+
+    turns = _CONVERSATION_MESSAGE_CAP + 60
+    messages = _capped_channel(turns=turns)["conversation"]["messages"]
+
+    # 1. The cap actually bounds the channel.
+    assert len(messages) <= _CONVERSATION_MESSAGE_CAP
+
+    # 2. The marker exists exactly once.
+    markers = [m for m in messages if m["kind"] == "turns_collapsed"]
+    assert len(markers) == 1
+    marker = markers[0]
+    assert marker["role"] == "system"
+    assert marker["actor_persona_id"] == "system"
+    assert marker["display_title"] == "Earlier activity collapsed"
+
+    # 3. collapsed_count is the REAL number dropped — derived, not restated.
+    kept_trimmable = [m for m in messages if m["kind"] in _CONVERSATION_TRIMMABLE_KINDS]
+    assert marker["refs"]["collapsed_count"] == turns - len(kept_trimmable)
+    assert marker["refs"]["collapsed_count"] > 0
+    assert str(marker["refs"]["collapsed_count"]) in marker["display_text"]
+
+    # 4. The partition: PROTECTED rows survive, TRIMMABLE rows are what went.
+    kinds = [m["kind"] for m in messages]
+    assert kinds.count("operator_message") == 1, "a protected operator row was trimmed"
+    assert kinds.count("reply") == 1, "a protected reply row was trimmed"
+    assert len(kept_trimmable) < turns, "nothing was trimmed"
+
+    # 5. The NEWEST turns are the ones kept — trimming is oldest-first.
+    kept_turn_ids = [m["turn_id"] for m in kept_trimmable]
+    assert kept_turn_ids[-1] == f"t{turns - 1}"
+    assert kept_turn_ids == [
+        f"t{index}" for index in range(turns - len(kept_trimmable), turns)
+    ]
+
+    # 6. seq is re-stamped densely over the SURVIVING set, marker included.
+    assert [m["seq"] for m in messages] == list(range(1, len(messages) + 1))
+
+
+def test_the_conversation_cap_reports_its_drop_to_the_accountant():
+    """The cap's drop is ACCOUNTED, never silent: ``turn_cap_trimmed`` is
+    recorded with the real count and the channel id, and the frame is marked
+    truncated."""
+
+    class _Accountant:
+        def __init__(self):
+            self.drops = []
+            self.truncated = False
+
+        def drop(self, reason, *, count=1, entity_id=None, by_design=False, **_kw):
+            self.drops.append((reason, count, entity_id, by_design))
+
+        def mark_truncated(self):
+            self.truncated = True
+
+        def __getattr__(self, _name):  # tolerate the wider accountant surface
+            return lambda *a, **k: None
+
+    from agent_runtime.operator_channels import _CONVERSATION_MESSAGE_CAP
+
+    accountant = _Accountant()
+    channel = _capped_channel(
+        turns=_CONVERSATION_MESSAGE_CAP + 60, accountant=accountant
+    )
+
+    trimmed = [row for row in accountant.drops if row[0] == "turn_cap_trimmed"]
+    assert len(trimmed) == 1, accountant.drops
+    _reason, count, entity_id, by_design = trimmed[0]
+    assert by_design is True
+    assert entity_id == channel["conversation"]["thread_id"]
+    marker = next(
+        m for m in channel["conversation"]["messages"] if m["kind"] == "turns_collapsed"
+    )
+    assert count == marker["refs"]["collapsed_count"]
+    assert accountant.truncated is True

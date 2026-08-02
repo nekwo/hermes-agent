@@ -1782,3 +1782,314 @@ Launcher-facing legacy contract field names remain compatibility aliases, but
 their hash now comes from the event-only registry. S64 tombstones protect the
 deleted modules, methods, path helpers, event types, and inactive action
 vocabulary from accidental resurrection.
+
+## S66 — Round-4 audit gap closure (2026-08-02)
+
+Nine items from a read-only audit of the round-4 persona de-hardcoding
+campaign. **No wire, event or contract moved**: parity contract stays 51, the
+event catalog stays 51, `contract_hash()` stays
+`4a55b49fce311a450ac568e593a853d3524b4bd9842a638934d406b613822c07`. One
+Launcher file moves in lockstep (the CLI contract fixture) because a CLI verb
+retired.
+
+### 1. `harness persona-instance sweep-orphans` was BROKEN ON MAIN — RETIRED
+
+Not dead code: a **live operator verb that raised `AttributeError` on every
+invocation**, while the Launcher's committed CLI contract advertised it with a
+full flag set. `f9aa0faab` (S65) deleted
+`PersonaInstanceStore.sweep_orphaned_task_bound_instances`; the caller survived
+as the first statement of `persona_commands.py::_cmd_persona_instance_sweep_orphans`
+and the subparser stayed registered at `harness.py:883`.
+
+**Intent, established from the tree rather than guessed — RETIRE.** Three
+independent proofs, all inside that one commit:
+
+1. The janitor's whole decision basis went with it —
+   `_persona_instance_owner_release_state` → `_owning_task_release_state` →
+   `paths.task_path` / `goal_path` / `goals_dir`. The `goals/` store does not
+   exist, so a task-bound instance's owner can never be resolved again.
+2. S65's own ledger entry names the cut: *"task-owner release inference
+   retired"*.
+3. **It is unrestorable without a contract move.** The reap emitted
+   `persona_instance.reaped`, which the same wave DE-REGISTERED — `EventLog.append`
+   would now refuse it. Restoring the verb means re-registering an event, i.e.
+   an operator ruling, not a repair.
+
+Executed: handler and subparser removed, each replaced by a comment carrying the
+reason. `persona instance retire` is the live end-of-life verb and is untouched.
+
+**Proof, both directions, against a throwaway `HERMES_HOME` (never the live
+root).** Pre-fix, HEAD code: `AttributeError: 'PersonaInstanceStore' object has
+no attribute 'sweep_orphaned_task_bound_instances'`. Post-fix: argparse rejects
+with exit 2 and lists the twelve surviving verbs including `retire`; the sibling
+`persona instance retire --help` still resolves on the same scratch root.
+
+Launcher lockstep: `test/features/mission_control/fixtures/hermes_cli_contract.json`
+regenerated — **149 → 148 command paths**, a 37-line surgical deletion, nothing
+else in the file moved.
+
+### 2. 104 uncovered cut symbols — 32 rows added, two stale rows corrected
+
+An independent audit found 104 of 382 named cut symbols in
+`4a21f0779..597715ba5` with no covering registry row.
+
+**The cause is worth keeping, because it will recur: s65's `Form.MODULE` rows
+protect modules DELETED WHOLE.** `decision_contract_registry.py` was **gutted**
+— 918 lines removed, the file kept as the event-contract authority — so not one
+of the twelve public names it lost was covered by anything. *A survivor module
+needs symbol rows.*
+
+Rows added (each verified genuinely absent before rowing, then red-proved):
+
+- `decision_contract_registry`: `DecisionContract`, `HudShape`,
+  `ObjectContract`, `agent_decision_json_schema`, `canonical_role_value`,
+  `context_expansion_shape_ids`, `decision_contract`, `hud_shape`,
+  `hud_shape_index_for_stage`, `payload_contract`, `validate_object_payload`,
+  `validate_payload_keys` (12, ATTR).
+- `AgentRole.ALICE_SUPERVISOR` / `.DEV` / `.QA` — **the campaign's central cut,
+  which had no resurrection guard at all.** Scoped `CLASS_ATTR`, because bare
+  `DEV` / `QA` are un-rowable: they are ordinary words in live code.
+- `paths.self_tests_dir` / `self_test_task_dir` / `self_test_record_path` /
+  `self_test_artifacts_dir` — the exact siblings of `goals_dir` / `goal_path` /
+  `task_path` / `packet_artifacts_dir`, which WERE rowed in the same commit.
+- `store.TERMINAL_RUN_STATES`; `profile_runner.PATCH_TOOLS` /
+  `READ_SEARCH_TOOLS`; `models.PersonaInstance.prompt_contract_hash`.
+- S66's own: `sweep_orphaned_task_bound_instances`,
+  `_cmd_persona_instance_sweep_orphans`, `sweep-orphans`, `verify-examples`,
+  `_cmd_contracts_verify_examples` (CODE); `run_lock`, `incident_lock`,
+  `emit_incident_remove`, `verify_registry` (ATTR).
+
+**`READ_SEARCH_TOOLS` is deliberately an ATTR row, not CODE**: the name is LIVE
+in `model_tools.py`, so a repo-wide ban would fail on correct code. The scoped
+attribute absence is what actually discriminates. Same reasoning as S57's
+`root_node_mode` note.
+
+Two stale row artifacts corrected rather than dropped:
+
+- **s16 `decision_contract_registry.DecisionContract.allowed_roles`** asserted an
+  attribute on a class this range deleted outright. Kept (the fork retirement
+  rule wants a clean upstream sync first) and superseded by the new
+  `DecisionContract` ATTR row, with the supersession written onto the row.
+- **s44's reason** still claimed `validate_checklist_payload_structure` was live
+  "because `decision_contract_registry.validate_payload_keys` calls it, live via
+  `hermes harness contracts verify-examples`". **Both the caller and the verb are
+  gone.** Reason corrected in place; the rows stay.
+
+### 3. The registry's own no-silent-decay guarantee, restored
+
+This range ADDED two silent-skip guards that turned a mis-scoped row into a
+permanent pass — `if find_spec(dotted) is None: continue` (ATTR) and
+`if owner is None: return` (CLASS_ATTR). The header promises "no expiry, no
+allowlist, no silent decay"; these were exactly silent decay.
+
+The legitimate case they reached for is real — a later wave often retires the
+whole owner module, a STRICTLY STRONGER absence. S66 keeps that case working but
+makes it **prove itself**: the stronger absence must be a row in this same
+table. `_module_row_covers` accepts the module row or any ancestor package row;
+for the class-deleted-but-module-survives case, `_attr_row_covers` requires a row
+banning the class itself. Anything else FAILS, naming what to add.
+
+Red-proved both arms before reverting: an ATTR row mis-scoped to
+`agent_runtime.state_patches_TYPO` and the s16 CLASS_ATTR row with its covering
+ATTR row removed each failed with an actionable message. **Under the old guards
+both passed silently.**
+
+### 4. Four orphans cut; and the gate that would have surfaced the fifth
+
+Receiver-aware verification found **zero** production references repo-wide —
+not even a test — for `locks.run_lock`, `locks.incident_lock` and
+`state_patches.emit_incident_remove`. These were orphaned by S65's OWN cuts:
+`RunStore` / `IncidentStore` became historical READERS there, and a reader takes
+no write lock; `IncidentStore.close` was `emit_incident_remove`'s only
+chokepoint. `decision_contract_registry.verify_registry` was test-only — its one
+caller restated an event count the line above already asserted off
+`event_catalog()` (the ledger's settled closed-loop rule). All four cut.
+
+**`patch_coverage.COVERED_DOMAIN_EVENT_TYPES` KEPT, but no longer flat.** Its
+`incident.closed` / `persona_instance.reaped` entries are a recorded intentional
+cross-stack fixture-compatibility keep — but the flat set could not tell them
+apart from live entries, so a fold vocabulary was outliving its producer
+invisibly. Split into `LIVE_COVERED_DOMAIN_EVENT_TYPES` and
+`HISTORICAL_COVERED_DOMAIN_EVENT_TYPES`, gated BOTH ways by
+`test_stream_patch.py::test_every_covered_domain_event_is_registered_or_declared_historical`:
+every LIVE entry must be in `event_catalog()`, every HISTORICAL entry must be
+OUT of it. So a new entry cannot be invented without a producer, a
+de-registration cannot happen out from under a live entry, and a resurrected
+contract forces its entry back onto the live half.
+
+### 5. Coverage this range deleted while the surface stayed live — re-homed
+
+`operator_channels._apply_conversation_cap` is LIVE (called at `:636`), but its
+only test was deleted with the `run_summaries=` vector it fed:
+`grep -rn "turns_collapsed\|collapsed_count" tests/` returned **0**.
+
+Re-homed onto the CURRENT live vector, not the removed one. The finding that
+made this non-obvious: **the trimmable kinds are produced by the TRACE lane, not
+by history.** History rows project to `operator_message` / `reply` /
+`system_message`, every one of which is PROTECTED — so a history-driven test
+could never reach the cap. The re-homed tests drive it the way production does:
+a long tool trace with an operator prompt and a final reply around it. Three
+tests assert the marker, `refs.collapsed_count` (derived, not restated), the
+protected/trimmable partition, that the NEWEST turns are the ones kept, dense
+`seq` re-stamping, and the `accountant.drop("turn_cap_trimmed", …)` accounting.
+A non-vacuity guard asserts the marker is ABSENT below the cap.
+
+### 6. A test helper that swallowed the argument its suite existed to vary
+
+`test_mcp_admission.py`'s `_cfg` did `kwargs.pop("roles", None)` with a comment
+conceding it was a regression. 43 call sites fed a discarded argument, collapsing
+the wrong-lane, non-`mission_chat`-lane, wildcard-expansion and
+`roles={}`-vs-`roles=_QA_ALLOW` contrasts into the same test.
+
+The pop is gone and all 43 dead arguments with it; `_cfg` now forwards straight
+to `McpAdmissionConfig`, so a stale caller gets a loud `TypeError`. **Six tests
+DELETED** because their subject no longer exists (each was byte-equivalent to a
+surviving happy-path case): `test_role_absent_from_config_still_admits_declared_server`,
+`test_lane_absent_from_role_config_still_admits_declared_server`,
+`test_legacy_wildcard_config_does_not_change_profile_authority`,
+`test_an_allowed_but_undeclared_server_is_never_admitted`,
+`test_dev_admitted_under_a_qa_only_config_uses_profile_authority`,
+`test_legacy_empty_role_list_does_not_hide_a_declared_servers_manual`. Two more
+collapsed into one; three renamed onto what they now prove. Several docstrings
+were asserting a role floor that does not exist.
+
+**Two production defects surfaced by that pass and fixed here.**
+`mcp_admission.py:125`'s comment still said "Declared + role-admitted".
+`mcp_admission.py:671` was worse — **live wire text** an operator and the agent
+both read on a denied turn: *"'{name}' was requested by role '{role}'"*. Nothing
+requests by role since S64; the request is `required_mcp_servers` ∪ the
+profile's `mcp_servers` block. Being told the wrong authority denied you sends
+the fix to the wrong file. Same class as the campaign's recurring
+"prose asserting a reader that does not exist" — one level worse, because it
+ships.
+
+### 7. The stream goldens were machine-local, not deterministic
+
+`hydrate` / `delta` / `delta_batch` embed `repo_scopes.{harness,frontend,backend}.resolved`,
+produced by `resolve_affected_repo_workdir()`, which probes **hardcoded absolute
+developer-machine paths** (`repo_context.py:907-923`). The generator's docstring
+claimed "byte-reproducible across machines". It was not.
+
+Fixed with **zero byte change**: `resolved` is pinned to the value the committed
+goldens already carry, so all nine files stay byte-identical across hermes and
+the Launcher and no manifest moved. Measured on a simulated foreign box (only
+the two Eternia alias roots made to report `is_dir() == False`): unpinned
+`hydrate.json` hashed `7095f747…` against the committed `0259c26c…`; pinned, it
+reproduces `0259c26c…` exactly. Docstring corrected to state what is now true and
+name what had been machine-dependent (`harness` never was — it resolves via
+`Path(__file__).parents[1]`).
+
+**A correction to the audit's stated mechanism, which matters more than the fix.**
+The audit expected CI to go red. It would not: each repo's manifest is
+self-consistent and **no test invokes the generator**. The real exposure is
+worse because it is SILENT — a regeneration on a machine lacking the checkouts
+rewrites a byte-pinned cross-repo golden, and nothing anywhere turns red.
+
+`FRAME_FILES` pinned 8 files while `main()` regenerated 4. Now structural:
+`GENERATED_FRAME_FILES` + `PINNED_ONLY_FILES` (each with its reason), with
+`main()` asserting the generated set so a frame cannot silently drop out of it.
+The split is not effort — it is structural: `patch_remove.json` is the
+`incident.closed` remove fold whose event S65 de-registered with its last
+writer, so no live producer exists.
+
+### 8. Stale claims, dead parameters, and one real bug
+
+- **A REAL BUG, live-reachable via `POST /api/profiles/{name}/promote`:**
+  `personas.py::promote_profile_to_persona` called
+  `profile_chat_toolsets(profile_name)` with no persona list, so `declared` was
+  always `[]` and **every promoted persona was minted with zero toolsets**. The
+  declared set was two branches up the whole time (the `known` map). Fixed.
+- **A permission-path alias with no ruling behind it.**
+  `terminal_envelope._ROLE_ALIASES` carried a THIRD entry, bare
+  `"neko" -> "alice_supervisor"`, feeding
+  `resolve_terminal_envelope_grants`. The S64 ruling covers only the
+  `alice_supervisor ⇄ neko_supervisor` pair. Removed. It was inert — the live
+  roster is `alice_supervisor` / `dev` / `profile` / `qa` and the configured
+  grants are `dev` / `backend_dev` — which is precisely why it sat unnoticed.
+- **A provenance report that renamed what it found.**
+  `config.describe_runtime_default_authority` reported a pin persisted under
+  `alice_supervisor` as `"persona_id": "neko_supervisor"` — an operator could not
+  find the key by searching for the name the report gave them. Now reports the
+  PERSISTED spelling, with the alias in a separate `persona_id_alias` field.
+- **Un-exclusion has no role backstop — say so.** `chat_lane_toolsets` and
+  `config.chat_lane_restore_toolsets` both justified safety with "(role gating
+  still applies)". It does not: `personas.validate_toolsets` is a pure dedupe
+  with no ceiling. The conclusion still holds, but ONLY via un-exclusion
+  semantics. Restated so a future reader does not relax un-exclusion believing a
+  backstop exists.
+- **Dead parameters removed through the chain:** `resolve_mcp_admission(task=,
+  stage=)` → `_requested_servers` → `_effective_required_mcp_servers`. Ignored at
+  the bottom, passed by no production caller.
+  `profile_readiness_for_persona`'s `task`/`stage` are KEPT and now documented as
+  deliberately ignored: `test_profile_readiness_requires_explicit_mcp_declaration_for_visual_scope`
+  calls it WITH a visual-scoped task to prove a work description can no longer
+  manufacture a `launcher_qa` requirement. Removing them would delete that pin's
+  only vector.
+- **Unused parameters removed:** `validate_toolsets(role, …)` and
+  `blocked_tool_names(persona)`. The latter returned the same constant for every
+  argument — a constant dressed as a per-persona lookup. Its test was renamed
+  from `test_sample_personas_keep_persona_blocklists` to
+  `test_the_chat_blocklist_is_runtime_wide_not_per_persona`: the old name and its
+  loop promised a contrast the runtime stopped drawing when the per-role deny
+  tables went.
+- **Ambiguous shared-profile ownership is now ACCOUNTED, still fail-CLOSED.**
+  `profile_chat_toolsets` returned `[]` indistinguishably for "two personas claim
+  this profile" (a configuration defect) and "no persona claims it" (normal).
+  Split into `profile_chat_toolset_resolution` returning a typed reason, with an
+  operator-visible warning on the ambiguous arm. **Behaviour unchanged.**
+- EOL: the two files this range newly mixed are normalized to pure CRLF —
+  `env-determinism-audit.md` (715/13 → 728/0) and `test_stage19_visibility.py`
+  (31/1 → 32/0). Every other touched file was byte-verified against its HEAD
+  blob: **no file flipped its dominant ending.**
+- Fork boundary: `scripts/generate_agent_runtime_stream_fixtures.py` is a
+  fork-added file in the upstream-owned `scripts/` directory and had **no row**
+  in doc 17. Added.
+
+### Method notes worth carrying forward
+
+- **`grep -c $'\r$'` under Git Bash on Windows lies.** It reported
+  `test_tombstone_registry.py` as 2,912 CRLF / 0 LF; the file is pure LF in git
+  and on disk. Every EOL claim in this wave was re-measured byte-wise in Python
+  against the HEAD blob. A wave that trusts that grep will "prove" it preserved
+  endings it never measured.
+- **A sabotage that does not apply is not a red-proof.** The first AgentRole
+  sabotage patched a CRLF pattern into an LF file, matched nothing, and the gate
+  went green — which reads exactly like a passing red-proof. Assert the
+  sabotage applied before believing the result.
+- **`prompt_contract_hash` is still on the live wire** — 9 occurrences under
+  `prompt_observability.chat_contexts[]` — as HISTORICAL PERSISTED rows echoed
+  through `_merge_latest_contexts(disk_rows=…)`, carrying stale contract hashes
+  (`73ee514b…` = contract 44, `20639a26…` = contract 46). No production code
+  writes it; `test_prompt_observability.py:388` pins that fresh rows do not
+  manufacture it. The `models.PersonaInstance` field row is correct and does not
+  conflict — and this is why it was rowed as a scoped CLASS_ATTR rather than a
+  CODE row. Recorded, not cut: it is persisted-row read-side compatibility.
+
+### Items 9 — OPERATOR RULINGS OWED (nothing implemented)
+
+1. **A structural gate that no test deleted in a wave leaves a still-live
+   production symbol uncovered.** This is the shared root cause of items 5 and 6,
+   and recurrence is itself the finding. Both were the same shape: a wave deleted
+   a test's INPUT VECTOR and took the test with it, without asking whether the
+   SUBJECT was still live. `_apply_conversation_cap` lost 100% of its coverage
+   and stayed on every channel; the `roles` kwarg lost its meaning and 43 call
+   sites kept feeding it. **Target shape:** a per-wave gate that diffs deleted
+   test node ids against the production symbols they reached (import graph +
+   receiver-aware call graph over the deleted bodies), and fails unless each
+   still-live symbol either retains another test or is named in an explicit
+   ledger row. **Blast radius:** test-infrastructure only; no production change.
+   **Test plan:** red-proof by deleting a test of a live symbol and asserting the
+   gate names it; green-proof by deleting a test whose subject went in the same
+   commit. Recommended — this class has now cost two waves.
+2. **`repo_context.py:907-923` hardcodes absolute developer-machine paths** as
+   the alias table for `resolve_affected_repo_workdir()`. Item 7 stopped it
+   leaking into byte-pinned goldens, but the PRODUCTION frame still ships an
+   operator-machine-shaped `repo_scopes.resolved` to every consumer, and the
+   Launcher is CLAUDE.md-bound not to hardcode personal machine paths. Retiring
+   it properly means config/env-driven repo roots with an explicit
+   "unconfigured" state rather than a silent `false` — a cross-stack refactor,
+   not a cleanup.
+3. **No item required a contract move**, so nothing from items 1–8 escalates on
+   that ground. Item 1 is the near miss and the reason it is worth naming: the
+   sweep verb could not have been RESTORED without re-registering
+   `persona_instance.reaped`. Retiring it moved nothing.

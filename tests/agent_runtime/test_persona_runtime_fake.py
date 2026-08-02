@@ -288,7 +288,7 @@ def test_clarify_enabled_and_unblocked_on_chat_lane_but_blocked_on_runs():
         assert "clarify" in _enabled_toolsets_for_chat(persona, session_id=None)
         assert "clarify" not in _blocked_tool_names_for_chat(persona, session_id=None)
         # Autonomous run lane still blocks clarify — no interactive answer there.
-        assert "clarify" in blocked_tool_names(persona)
+        assert "clarify" in blocked_tool_names()
 
 
 def test_mission_chat_surface_message_always_carries_operative_rules():

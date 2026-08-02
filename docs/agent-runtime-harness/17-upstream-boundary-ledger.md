@@ -36,6 +36,7 @@ more explicitly authorized upstream-owned path, `toolsets.py`.
 | `tools/board_tool.py` | −10/+3 | Drops `mission_goal` docstring pointers and the `linked_goal_id` projection field | S3/S4 | **no — never existed upstream** | None. Fork-created. Note: `TaskStore` is still imported unguarded at `:85` — the permanent `agent_runtime/task_store_stub.py` seam (ruling R-3) serves it. |
 | `tools/tool_full_descriptions.py` | net −3 | Removes the `mission_goal_create` entry and its cross-references | S4 | **no — never existed upstream** | None. Fork-created; its "fork-owned mirror" docstring is correct. |
 | `scripts/cert_streak.py` | −217 (deleted) | Whole-file delete of the certification streak runner | S6 | **no — never existed upstream** | None. Fork-created. |
+| `scripts/generate_agent_runtime_stream_fixtures.py` | +whole file (added) | Regenerates `tests/fixtures/stream_frames/` from the current production snapshot/stream builders in an isolated root | S64 | **no — never existed upstream** | None. Fork-created, and fork-only by construction: it imports `agent_runtime` builders that exist only on this fork. Filed at S66 — it had been sitting in the upstream-owned `scripts/` directory with no row, i.e. a fork-added file invisible to the boundary check. Added here so a sync that touches `scripts/` has it declared. |
 
 **Net fork-sync debt from the mission-lane removal and authorized cleanup: three
 files** (`hermes_cli/profiles.py`, `hermes_cli/web_server.py`, `toolsets.py`),

@@ -83,13 +83,14 @@ def contract_hash() -> str:
     ).hexdigest()
 
 
-def verify_registry() -> dict[str, Any]:
-    return {
-        "ok": True,
-        "schema_version": CONTRACT_SCHEMA_VERSION,
-        "contract_hash": contract_hash(),
-        "event_count": len(_EVENT_CONTRACTS),
-    }
+# S66 removed ``verify_registry``. It was the report body of the retired
+# ``hermes harness contracts verify`` lane; S65 took the last production entry
+# point with the decision-contract island, leaving one test caller
+# (``test_s15_event_contract_pruning``) asserting ``event_count`` — a fact the
+# line above it already asserted directly off ``event_catalog()``. That is the
+# ledger's settled closed-loop rule (item 2): a symbol whose whole importer set
+# is the test written to exercise it is not covered code. ``contract_manifest``
+# stays — it has a production reader.
 
 
 _EVENT_CONTRACTS: dict[str, EventContract] = {

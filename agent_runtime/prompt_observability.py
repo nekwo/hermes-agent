@@ -867,8 +867,12 @@ def snapshot_prompt_observability(
     # S47: the ``tasks`` parameter and the ``tasks_by_id`` index built from it
     # are gone. Its only production caller seeded ``tasks = []``, so every lane
     # resolved ``task=None, goal_task=None`` — a constant dressed as a lookup.
-    # ``resolve_situational_hud`` KEEPS both parameters: the live mission-chat
-    # wrapper (``runtime_hud``) resolves them from the store per turn.
+    # S47 recorded that ``resolve_situational_hud`` KEPT ``task``/``goal_task``
+    # because the live mission-chat wrapper resolved them from the store per
+    # turn. That stopped being true at ``3c3615beb``, which removed both
+    # parameters with the retired task HUD — there is no longer anything to
+    # pass. Corrected at S66 rather than left asserting a signature this tree
+    # does not have.
     # Materialize once: the roster is reused for every lane's situational HUD
     # (thread count + on-level list) and the input may be a one-shot iterable.
     roster = list(persona_instances)

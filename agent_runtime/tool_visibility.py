@@ -111,7 +111,7 @@ def resolve_tool_visibility(
     configured_toolsets = list(opts.configured_toolsets or resolved_toolsets)
     role_allowed_toolsets = list(resolved_toolsets)
     persona_toolsets = list(getattr(persona, "toolsets", []) or [])
-    persona_blocked = frozenset() if unbounded else blocked_tool_names(persona)
+    persona_blocked = frozenset() if unbounded else blocked_tool_names()
     requested_blocked = frozenset(_clean_names(opts.blocked_tool_names or []))
     if opts.chat_lane_blocked_tool_names is not None:
         # T9b chat-lane preview parity: use the chat-lane chokepoint's already

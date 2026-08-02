@@ -51,15 +51,39 @@ from .state_patches import FOLDABLE_PATCH_OPS, PATCH_OP_UPSERT, STATE_PATCHED_EV
 #: ``remove``. (``incident.opened`` is deliberately NOT covered: an open ships a
 #: full row that would be a create-on-absent, so opens ride the full core; only
 #: the resolving ``remove`` folds — see the plan's coverage table.)
-COVERED_DOMAIN_EVENT_TYPES: frozenset[str] = frozenset(
+#: The HISTORICAL half of the set below: fold-classifier entries whose domain
+#: event has been DE-REGISTERED and can no longer be emitted, kept deliberately
+#: so a cross-stack fixture replaying an old batch still classifies the way the
+#: launcher folded it when the event was live.
+#:
+#: This split exists because the flat set had become dishonest. S65 retired
+#: ``persona_instance.reaped`` and ``incident.closed`` from the event catalog
+#: with their last writers, and the surviving vocabulary was indistinguishable
+#: from the live entries — a classifier naming a producer nobody has. Naming
+#: the two halves separately makes the outliving VISIBLE, and
+#: ``test_patch_coverage`` gates the partition: every LIVE entry must be in
+#: ``event_catalog()``, every HISTORICAL entry must be OUT of it. A new entry
+#: therefore cannot be added to the live half without a registered contract
+#: behind it, and a contract cannot be de-registered out from under a live
+#: entry without this going red.
+HISTORICAL_COVERED_DOMAIN_EVENT_TYPES: frozenset[str] = frozenset(
     {
-        "persona_instance.steered",
-        "persona_instance.profile_updated",
-        # Legacy fold-classifier entries retained for cross-stack fixture
-        # compatibility; their domain events are no longer emittable.
         "persona_instance.reaped",
         "incident.closed",
     }
+)
+
+#: Domain events with a LIVE producer that ride alongside their ``state.patched``
+#: in the same coalesced batch.
+LIVE_COVERED_DOMAIN_EVENT_TYPES: frozenset[str] = frozenset(
+    {
+        "persona_instance.steered",
+        "persona_instance.profile_updated",
+    }
+)
+
+COVERED_DOMAIN_EVENT_TYPES: frozenset[str] = (
+    LIVE_COVERED_DOMAIN_EVENT_TYPES | HISTORICAL_COVERED_DOMAIN_EVENT_TYPES
 )
 
 

@@ -59,8 +59,6 @@ from agent_runtime.mcp_admission import (
 from tests.agent_runtime.persona_samples import sample_personas
 from agent_runtime.runtime_config import McpAdmissionConfig
 
-_QA_ALLOW = {"qa": {LANE_MISSION_CHAT: ["launcher_qa"]}}
-
 #: sha256 of the vendored snapshot of the LAUNCHER's own per-profile allowlist.
 #: Refresh instructions live in ``tests/agent_runtime/fixtures/README.md`` —
 #: changing this constant without re-checking the parity assertions below is
@@ -85,7 +83,8 @@ def _persona(persona_id: str):
 
 
 def _cfg(**kwargs) -> types.SimpleNamespace:
-    kwargs.pop("roles", None)  # legacy role policy is intentionally ignored
+    # Every keyword lands on the real McpAdmissionConfig — a retired field fails
+    # loudly here rather than being silently dropped.
     return types.SimpleNamespace(mcp_admission=McpAdmissionConfig(**kwargs))
 
 
@@ -274,7 +273,7 @@ def test_profile_default_then_read_only_subtracts_at_registration_time(
     from agent_runtime.mcp_admission import _default_registrar
 
     full = resolve_mcp_admission(
-        _persona("qa"), permission_mode="profile_default", cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+        _persona("qa"), permission_mode="profile_default", cfg=_cfg(enabled=True)
     )
     _default_registrar(full.server_configs)
     assert "mcp_launcher_qa_kill_launcher" in _raw_tool_names(
@@ -284,7 +283,7 @@ def test_profile_default_then_read_only_subtracts_at_registration_time(
     teardown_mcp_admission(full.server_names)
 
     reviewer = resolve_mcp_admission(
-        _persona("qa"), permission_mode="read_only", cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+        _persona("qa"), permission_mode="read_only", cfg=_cfg(enabled=True)
     )
     _default_registrar(reviewer.server_configs)
 
@@ -612,7 +611,7 @@ def test_the_two_lists_partition_the_known_surface(launcher_allowlist):
 
 def test_read_only_registers_the_reviewer_row_and_nothing_else(qa_profile):
     admission = resolve_mcp_admission(
-        _persona("qa"), permission_mode="read_only", cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+        _persona("qa"), permission_mode="read_only", cfg=_cfg(enabled=True)
     )
 
     include = admission.server_configs["launcher_qa"]["tools"]["include"]
@@ -634,7 +633,7 @@ def test_explain_shows_the_compiled_include_before_the_flag_is_flipped(qa_profil
     """
 
     explained = resolve_mcp_admission(
-        _persona("qa"), permission_mode="read_only", cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+        _persona("qa"), permission_mode="read_only", cfg=_cfg(enabled=True)
     ).explain()
 
     assert explained["tool_include"]["launcher_qa"] == sorted(
@@ -650,7 +649,7 @@ def test_profile_default_compiles_no_include_filter(qa_profile):
     """
 
     admission = resolve_mcp_admission(
-        _persona("qa"), permission_mode="profile_default", cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+        _persona("qa"), permission_mode="profile_default", cfg=_cfg(enabled=True)
     )
 
     assert "tools" not in admission.server_configs["launcher_qa"]
@@ -678,7 +677,7 @@ def test_a_clean_admission_names_what_it_admitted(qa_profile):
     the same thing, which is W3 from a third direction."""
 
     admission = resolve_mcp_admission(
-        _persona("qa"), cfg=_cfg(enabled=True, roles=_QA_ALLOW)
+        _persona("qa"), cfg=_cfg(enabled=True)
     )
 
     assert admission.server_names == ("launcher_qa",)

@@ -388,12 +388,21 @@ class TerminalEnvelopeDecision:
 
 # ── config (ROOT only) ──────────────────────────────────────────────────────
 
-#: Role aliases accepted in the grant table. The supervisor role's canonical
-#: value is ``alice_supervisor`` but the live persona is spelled ``neko`` —
-#: the same alias ``config.chat_lane_restore_toolsets`` already honors.
+#: Role aliases accepted in the grant table. EXACTLY the S64-ruled pair:
+#: ``alice_supervisor`` ⇄ ``neko_supervisor``, retained as wire/config
+#: compatibility so persisted role-envelope keys and historical decision-contract
+#: values still decode.
+#:
+#: S66 removed a THIRD entry, bare ``"neko" -> "alice_supervisor"``, which the
+#: S64 ruling never covered. This table feeds a PERMISSION path
+#: (``resolve_terminal_envelope_grants``), so an un-ruled alias here silently
+#: widens who a grant applies to. It was inert — no live persona carries role
+#: ``neko`` (the live roster is ``alice_supervisor`` / ``dev`` / ``profile`` /
+#: ``qa``, and the configured grants are ``dev`` / ``backend_dev``) — which is
+#: exactly why it could sit unnoticed. Do not re-add an alias to a permission
+#: table without a ruling that names it.
 _ROLE_ALIASES: Mapping[str, str] = {
     "neko_supervisor": "alice_supervisor",
-    "neko": "alice_supervisor",
 }
 
 

@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import replace
 from enum import StrEnum
 
 from .models import AgentPersona
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class AgentRole(StrEnum):
@@ -108,24 +111,64 @@ def role_from_persona(persona: AgentPersona) -> AgentRole | str:
     return coerce_agent_role(persona.role)
 
 
-def validate_toolsets(role: AgentRole | str, configured: list[str]) -> list[str]:
+def validate_toolsets(configured: list[str]) -> list[str]:
+    """Normalize a declared toolset list: strip, drop empties, dedupe in order.
+
+    S66 removed the ``role`` parameter. It had been unused since S61/S64 made
+    profile/persona declarations the sole capability authority and deleted the
+    per-role allow/deny tables (``ALLOWED_TOOLSETS_BY_ROLE`` /
+    ``PER_ROLE_TOOL_DENIES``, both s11 tombstones). Accepting a role here read
+    as a ceiling this function has not applied for two waves — see
+    ``chat_lane_toolsets``, whose safety argument was mis-stated in exactly that
+    way. There is NO role ceiling; this is a normalizer.
+    """
+
     return list(dict.fromkeys(str(toolset).strip() for toolset in configured if str(toolset).strip()))
 
 
-def blocked_tool_names(persona: AgentPersona) -> frozenset[str]:
+def blocked_tool_names() -> frozenset[str]:
+    """The runtime-wide chat blocklist.
+
+    S66 removed the ``persona`` parameter: the body has returned the module
+    constant for every persona since the per-role deny tables went, so the
+    argument made a constant look like a per-persona lookup. Callers that want
+    the constant directly may read ``PERSONA_BLOCKED_TOOLS``; this accessor
+    stays because it is the name the visibility/runtime lanes already call.
+    """
+
     return PERSONA_BLOCKED_TOOLS
 
 
 def effective_toolsets(persona: AgentPersona) -> list[str]:
-    return validate_toolsets(role_from_persona(persona), persona.toolsets)
+    return validate_toolsets(persona.toolsets)
 
 
-def profile_chat_toolsets(profile_id: str, personas: list[AgentPersona] | tuple[AgentPersona, ...] | None = None) -> list[str]:
-    """Resolve the toolsets for a raw profile-backed operator chat persona.
+#: Why a profile-backed chat persona inherited nothing. Typed so the fail-CLOSED
+#: outcome is ACCOUNTED rather than silent: an operator whose chat has no tools
+#: can be told which of these happened instead of reading an empty list.
+PROFILE_CHAT_TOOLSET_NO_MATCH = "no_persona_declares_this_profile"
+PROFILE_CHAT_TOOLSET_AMBIGUOUS = "profile_shared_by_multiple_personas"
+PROFILE_CHAT_TOOLSET_MATCHED_EXACT = "exact_persona_id"
+PROFILE_CHAT_TOOLSET_MATCHED_UNIQUE_PROFILE = "unique_profile_owner"
+
+
+def profile_chat_toolset_resolution(
+    profile_id: str,
+    personas: list[AgentPersona] | tuple[AgentPersona, ...] | None = None,
+) -> tuple[list[str], str, tuple[str, ...]]:
+    """``(toolsets, reason, candidate_persona_ids)`` for a profile-backed chat.
 
     Exact persona ids outrank profile ownership. A unique profile owner may
     supply the declared toolsets; an unowned or multiply-owned profile inherits
-    nothing. Universal chat capabilities are added later by the chat runtime.
+    nothing (S64's ruling — an ambiguous shared profile must never manufacture
+    capabilities). Universal chat capabilities are added later by the chat
+    runtime.
+
+    S66 split the reason out. The fail-closed arms are UNCHANGED and still
+    fail closed; what changed is that they are no longer silent. An ambiguous
+    shared profile used to return ``[]`` indistinguishable from "this profile
+    has no persona at all", so an operator staring at a toolless chat had no
+    way to tell a misconfiguration from a deliberate denial.
     """
 
     profile = str(profile_id or "").strip()
@@ -144,9 +187,41 @@ def profile_chat_toolsets(profile_id: str, personas: list[AgentPersona] | tuple[
         for persona in declared
         if str(getattr(persona, "hermes_profile", "") or "").strip() == profile
     ]
-    matching = exact or (profile_matches[0] if len(profile_matches) == 1 else None)
+    candidates = tuple(
+        str(getattr(persona, "id", "") or "").strip() for persona in profile_matches
+    )
+    if exact is not None:
+        matching, reason = exact, PROFILE_CHAT_TOOLSET_MATCHED_EXACT
+    elif len(profile_matches) == 1:
+        matching, reason = profile_matches[0], PROFILE_CHAT_TOOLSET_MATCHED_UNIQUE_PROFILE
+    elif len(profile_matches) > 1:
+        matching, reason = None, PROFILE_CHAT_TOOLSET_AMBIGUOUS
+    else:
+        matching, reason = None, PROFILE_CHAT_TOOLSET_NO_MATCH
     toolsets = list(getattr(matching, "toolsets", []) or []) if matching is not None else []
-    return [toolset for toolset in toolsets if toolset]
+    return [toolset for toolset in toolsets if toolset], reason, candidates
+
+
+def profile_chat_toolsets(profile_id: str, personas: list[AgentPersona] | tuple[AgentPersona, ...] | None = None) -> list[str]:
+    """The toolsets half of :func:`profile_chat_toolset_resolution`.
+
+    Emits an operator-visible warning on the ambiguous arm: inheriting nothing
+    because two personas share the profile is a CONFIGURATION defect, not a
+    normal state, and it must not read as an ordinary empty list.
+    """
+
+    toolsets, reason, candidates = profile_chat_toolset_resolution(profile_id, personas)
+    if reason == PROFILE_CHAT_TOOLSET_AMBIGUOUS:
+        _LOGGER.warning(
+            "profile_chat_toolsets: profile %r is claimed by %d personas (%s); "
+            "inheriting NO toolsets (fail-closed). Give the chat persona an "
+            "exact persona id, or leave exactly one persona bound to this "
+            "profile.",
+            profile_id,
+            len(candidates),
+            ", ".join(candidates),
+        )
+    return toolsets
 
 
 def all_registered_toolsets() -> list[str]:
@@ -233,7 +308,13 @@ def promote_profile_to_persona(
             model=cfg.default_model,
             provider=cfg.default_provider,
             api_mode=cfg.default_api_mode,
-            toolsets=profile_chat_toolsets(profile_name),
+            # S66 BUGFIX: this called ``profile_chat_toolsets(profile_name)``
+            # with no persona list, so ``declared`` was always ``[]`` and the
+            # promoted persona was ALWAYS minted with zero toolsets — reachable
+            # live through ``POST /api/profiles/{name}/promote``. The declared
+            # set is right here: ``known`` is the merged persona map this
+            # function already built two branches up to look for a template.
+            toolsets=profile_chat_toolsets(profile_name, list(known.values())),
             system_prompt_path="",
             autonomy=AutonomyLevel.PROPOSE_ONLY.value,
             hermes_profile=profile_name,

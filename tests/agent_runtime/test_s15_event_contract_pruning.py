@@ -23,7 +23,6 @@ from pathlib import Path
 from agent_runtime.decision_contract_registry import (
     contract_manifest,
     event_catalog,
-    verify_registry,
 )
 from agent_runtime.events import ALLOWED_EVENT_TYPES
 
@@ -207,8 +206,14 @@ def test_the_unemittable_event_types_are_no_longer_registered():
 
 def test_the_registry_publishes_exactly_the_surviving_event_count():
     assert len(event_catalog()) == SURVIVING_EVENT_COUNT
-    assert verify_registry()["event_count"] == SURVIVING_EVENT_COUNT
     assert set(event_catalog()) == ALLOWED_EVENT_TYPES
+    # S66 dropped the third assertion here. It read
+    # ``verify_registry()["event_count"]`` — a test-only wrapper whose whole
+    # importer set was this line, restating the count the line above already
+    # asserts off the live catalog. Its removal loses no coverage; the manifest
+    # (which DOES have a production reader, ``harness contracts show``) is
+    # asserted below.
+    assert contract_manifest()["events"] == event_catalog()
 
 
 def test_appending_a_de_registered_event_type_is_refused():

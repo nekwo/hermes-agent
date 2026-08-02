@@ -170,6 +170,15 @@ def _override_state(override: str | None, top_value: str | None) -> str:
     return "redundant" if override == top_value else "shadowing"
 
 
+#: Historical spellings a persisted persona key may also be known by. Reported
+#: ALONGSIDE the persisted key (``persona_id_alias``), never substituted for it:
+#: a provenance report that renames what it found is not provenance.
+_RUNTIME_DEFAULT_PERSONA_ALIASES: dict[str, str] = {
+    "alice_supervisor": "neko_supervisor",
+    "neko_supervisor": "alice_supervisor",
+}
+
+
 def describe_runtime_default_authority(config_path: Path | None = None) -> dict[str, Any]:
     """Pure, redaction-safe provenance report comparing the top-level ``model:``
     authority against any ``agent_runtime.*`` override and per-persona pins.
@@ -177,6 +186,9 @@ def describe_runtime_default_authority(config_path: Path | None = None) -> dict[
     Single source of truth for the migrations warning and the harness-doctor
     ``model_authority`` block, so the "shadowing vs redundant vs stale pin"
     classification is never re-derived divergently.
+
+    ``persona_pins[].persona_id`` is the key AS PERSISTED. Where that key has a
+    historical spelling, ``persona_id_alias`` carries it (``None`` otherwise).
     """
     from .parse_cache import cached_yaml_file
 
@@ -204,8 +216,17 @@ def describe_runtime_default_authority(config_path: Path | None = None) -> dict[
             pin_provider = _clean_config_str(overrides.get("provider"))
             if pin_model is None and pin_provider is None:
                 continue
+            # S66: report what is ACTUALLY IN THE CONFIG. This used to rewrite a
+            # pin persisted under ``alice_supervisor`` to ``neko_supervisor``,
+            # so an operator reading a PROVENANCE report was told a key their
+            # file does not contain — and could not find it by searching for the
+            # name the report gave them. The alias is still surfaced, but as a
+            # separate, clearly-labelled field rather than by falsifying the
+            # first one.
+            alias = _RUNTIME_DEFAULT_PERSONA_ALIASES.get(pid)
             persona_pins.append({
-                "persona_id": "neko_supervisor" if pid == "alice_supervisor" else pid,
+                "persona_id": pid,
+                "persona_id_alias": alias,
                 "model": pin_model,
                 "provider": pin_provider,
                 # None when the pin sets no model (provider-only pin); otherwise
@@ -289,8 +310,11 @@ def chat_lane_restore_toolsets(persona_id: str, cfg: AgentRuntimeConfig | None =
     operator / mission chat lane after the default policy
     (``chat_lane_toolsets.DEFAULT_CHAT_LANE_EXCLUDED_TOOLSETS``) would exclude
     them (browser / vision / heavy-dev). Restore is un-exclusion, not a grant —
-    a restored toolset is only kept if the persona's role/permission layer
-    already resolved it into the lane.
+    a restored toolset is only kept if the persona's own DECLARED toolsets
+    already resolved it into the lane. There is no role backstop behind that:
+    S61/S64 made profile/persona declarations the sole capability authority and
+    ``personas.validate_toolsets`` carries no role ceiling, so the intersection
+    IS the whole guarantee. See ``chat_lane_toolsets``' module docstring.
 
     Honors the legacy ``alice_supervisor`` ⇄ ``neko_supervisor`` alias so an
     older config keyed on either name is respected. Absent / malformed → ``[]``
@@ -377,7 +401,7 @@ def persona_records_from_config(cfg: AgentRuntimeConfig | None = None):
         if "required_mcp_servers" in overrides:
             p.required_mcp_servers = _string_list(overrides["required_mcp_servers"])
         if "toolsets" in overrides:
-            p.toolsets = validate_toolsets(p.role, list(overrides["toolsets"]))
+            p.toolsets = validate_toolsets(list(overrides["toolsets"]))
     return list(personas.values())
 
 
@@ -403,7 +427,7 @@ def _persona_from_overrides(persona_id: str, role: str, overrides: dict[str, Any
         model=overrides.get("model") or cfg.default_model,
         provider=overrides.get("provider") or cfg.default_provider,
         api_mode=overrides.get("api_mode") or cfg.default_api_mode,
-        toolsets=validate_toolsets(role, list(overrides.get("toolsets") or [])),
+        toolsets=validate_toolsets(list(overrides.get("toolsets") or [])),
         system_prompt_path=str(overrides.get("system_prompt_path") or ""),
         include_core_context_files=bool(overrides.get("include_core_context_files", False)),
     )

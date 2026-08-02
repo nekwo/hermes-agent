@@ -45,6 +45,14 @@ _SEVERITY = {
 def profile_readiness_for_persona(
     persona, *, task=None, stage=None, skill_resolver=None
 ) -> dict[str, Any]:
+    # ``task`` / ``stage`` are accepted and DELIBERATELY ignored. They are not
+    # residue: `test_profile_readiness_requires_explicit_mcp_declaration_for_
+    # visual_scope` calls this WITH a visual-scoped task precisely to prove that
+    # a work description can no longer manufacture a `launcher_qa` requirement
+    # (the policy S64 retired). Removing them would delete that regression pin's
+    # only vector. The rest of the chain — `resolve_mcp_admission`,
+    # `_requested_servers`, `_effective_required_mcp_servers` — had no such pin
+    # and lost the parameters at S66.
     binding = resolve_persona_profile(persona)
     issues: list[tuple[str, str]] = []
     missing_mcp: list[str] = []
@@ -52,7 +60,7 @@ def profile_readiness_for_persona(
     skill_hash_mismatches: list[str] = []
     skill_resolutions: list[dict[str, Any]] = []
     machine_root_issues: list[dict[str, Any]] = []
-    effective_required_mcp = _effective_required_mcp_servers(persona, task=task, stage=stage)
+    effective_required_mcp = _effective_required_mcp_servers(persona)
     machine_root_issues.extend(_persona_path_token_issues(persona))
 
     if binding.readiness != READINESS_READY:
@@ -476,11 +484,14 @@ def _missing_skill_ids(skill_resolutions: list[dict[str, Any]]) -> list[str]:
 # 10 (d89059dd7) landed in this file: that commit did not touch it, and the
 # canonical resolver pair it wrapped is what readiness actually calls.
 
-def _effective_required_mcp_servers(persona, *, task=None, stage=None) -> list[str]:
+def _effective_required_mcp_servers(persona) -> list[str]:
     """Return only servers declared by the persona/profile authority.
 
-    ``task`` and ``stage`` remain accepted for caller compatibility, but neither
-    may manufacture an MCP requirement from a role label or work description.
+    S64 retired the role/work-description policy that once widened this set;
+    S66 removed the ``task`` / ``stage`` parameters that were kept "for caller
+    compatibility" behind it. Nothing passed them and nothing read them, so the
+    signature now states the rule the body already enforced: **only a
+    declaration can create an MCP requirement.**
     """
 
     return list(getattr(persona, "required_mcp_servers", []) or [])

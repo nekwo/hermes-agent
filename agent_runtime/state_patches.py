@@ -369,28 +369,14 @@ def emit_persona_instance_remove(
     )
 
 
-def emit_incident_remove(
-    event_log: EventLog,
-    incident: Any,
-    *,
-    config: AgentRuntimeConfig | None = None,
-) -> bool:
-    """Emit an incident ``remove`` (close → open-only frame drops it). Dark
-    unless the flag is on."""
-
-    if not delta_patches_enabled(config):
-        return False
-    return emit_state_patch(
-        event_log,
-        entity="incident",
-        entity_id=incident.id,
-        op=PATCH_OP_REMOVE,
-        task_id=getattr(incident, "task_id", None),
-        run_id=getattr(incident, "run_id", None),
-        config=config,
-    )
-
-
 # S54 removed ``emit_task_refresh``: the task-refresh patch op, orphaned since
 # the ``Task`` record went at S8.
+#
+# S66 removed ``emit_incident_remove`` for the same reason one wave later: its
+# only chokepoint was ``IncidentStore.close``, which S65 retired when the store
+# became a historical reader. The paired ``incident.closed`` domain event was
+# de-registered in that same wave, so nothing could produce either half. See
+# ``patch_coverage.HISTORICAL_COVERED_DOMAIN_EVENT_TYPES``, which now names the
+# fold-classifier entries that outlived their producers instead of leaving them
+# indistinguishable from live ones.
 

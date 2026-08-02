@@ -3593,24 +3593,16 @@ def _cmd_persona_instance_retire(args) -> int:
     return 0
 
 
-def _cmd_persona_instance_sweep_orphans(args) -> int:
-    result = PersonaInstanceStore().sweep_orphaned_task_bound_instances(
-        reason=str(getattr(args, "reason", "") or "operator persona instance janitor"),
-    )
-    data = {"ok": True, "persona_instance_cleanup": result}
-    if args.json:
-        print(emit_json(data))
-    else:
-        print(
-            "persona instances: "
-            f"reconciled {result['before_task_bound_count']} -> {result['after_task_bound_count']}; "
-            f"reaped {result['reaped_count']}; "
-            f"active preserved {result['skipped_active_count']}"
-        )
-        remaining = result.get("remaining_task_bound_persona_instance_ids") or []
-        if remaining:
-            print("remaining orphan-candidate instances: " + ", ".join(remaining[:20]))
-    return 0
+# S66 removed ``_cmd_persona_instance_sweep_orphans`` and its ``sweep-orphans``
+# subparser. The janitor it invoked reaped instances whose OWNING TASK had gone
+# terminal, and S65 (`f9aa0faab`) retired that entire basis in ONE commit: the
+# store method, the owner-release inference behind it, and the goal/task path
+# helpers it read (`paths.task_path` / `goal_path` / `goals_dir`). Only the
+# caller survived, so the verb raised `AttributeError` on every invocation. It
+# is not restorable without a contract move either — the reap emitted
+# `persona_instance.reaped`, which the same wave DE-REGISTERED, so
+# `EventLog.append` would now refuse it. Retiring a placement is
+# `persona instance retire`, which is live and untouched.
 
 
 def _cmd_persona_instance_repair_steering(args) -> int:

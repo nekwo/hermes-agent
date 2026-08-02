@@ -41,7 +41,7 @@ def _tool_names(toolsets, blocked):
 def test_pm_actual_tool_schema_follows_its_configured_toolsets():
     pm = _explicit_pm()
 
-    names = _tool_names(effective_toolsets(pm), blocked_tool_names(pm))
+    names = _tool_names(effective_toolsets(pm), blocked_tool_names())
 
     assert "terminal" in names
     assert "write_file" in names
@@ -51,20 +51,34 @@ def test_pm_actual_tool_schema_follows_its_configured_toolsets():
 def test_qa_actual_tool_schema_follows_explicit_test_data():
     qa = _persona("qa")
 
-    names = _tool_names(effective_toolsets(qa), blocked_tool_names(qa))
+    names = _tool_names(effective_toolsets(qa), blocked_tool_names())
 
     assert "write_file" in names
     assert "patch" in names
     assert "terminal" in names
 
 
-def test_sample_personas_keep_persona_blocklists():
-    for persona in sample_personas():
-        assert "delegate_task" in blocked_tool_names(persona)
-        assert "memory" in blocked_tool_names(persona)
-    assert "write_file" not in blocked_tool_names(_persona("qa"))
-    assert "patch" not in blocked_tool_names(_persona("qa"))
-    assert "send_message" in blocked_tool_names(_persona("dev"))
+def test_the_chat_blocklist_is_runtime_wide_not_per_persona():
+    """S66 renamed this from ``test_sample_personas_keep_persona_blocklists``.
+
+    The old name and its per-persona loop promised a contrast the runtime has
+    not drawn since the per-role deny tables retired (s11's
+    ``PER_ROLE_TOOL_DENIES``): ``blocked_tool_names`` returned the same constant
+    for every argument, so the loop asserted one fact N times. The parameter is
+    gone; the fact it actually pins — WHICH tools the runtime-wide chat
+    blocklist holds, and which it deliberately does not — is asserted once, and
+    the invariance is now asserted directly instead of implied.
+    """
+
+    blocked = blocked_tool_names()
+    assert "delegate_task" in blocked
+    assert "memory" in blocked
+    assert "send_message" in blocked
+    # Implementation tools are deliberately NOT blocked at this layer.
+    assert "write_file" not in blocked
+    assert "patch" not in blocked
+    # It is a single runtime-wide frozenset, identical for every persona.
+    assert all(blocked_tool_names() is blocked for _ in sample_personas())
 
 
 def test_unbounded_permission_mode_exposes_available_unbounded_tools(monkeypatch):

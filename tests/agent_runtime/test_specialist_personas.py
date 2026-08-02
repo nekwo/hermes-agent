@@ -46,14 +46,14 @@ def test_dev_specialists_share_implementation_toolsets_but_remain_non_qa_roles()
         assert persona.role == "dev"
         assert "terminal" in effective_toolsets(persona)
         assert "code_execution" in effective_toolsets(persona)
-        assert "write_file" not in blocked_tool_names(persona)
-        assert "patch" not in blocked_tool_names(persona)
-        assert "send_message" in blocked_tool_names(persona)
+        assert "write_file" not in blocked_tool_names()
+        assert "patch" not in blocked_tool_names()
+        assert "send_message" in blocked_tool_names()
 
     qa = personas["qa"]
     assert qa.role == "qa"
-    assert "write_file" not in blocked_tool_names(qa)
-    assert "patch" not in blocked_tool_names(qa)
+    assert "write_file" not in blocked_tool_names()
+    assert "patch" not in blocked_tool_names()
 
 
 def test_snapshot_agent_summaries_are_collection_based_and_redaction_safe(monkeypatch):

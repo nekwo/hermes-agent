@@ -683,7 +683,13 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "s16",
         "5a1267ef6",
         Form.CLASS_ATTR,
-        "role gating was removed from the decision contract model; roles remain first-class HUD data",
+        "role gating was removed from the decision contract model; roles remain "
+        "first-class HUD data. SUPERSEDED at S66 by the s65 ATTR row banning "
+        "DecisionContract itself: f9aa0faab deleted the whole class while the "
+        "module survived, so this row's owner no longer resolves and the row "
+        "could never fail again. Kept rather than dropped — the fork retirement "
+        "rule requires a clean upstream sync over the region first, and the "
+        "member-level history is what records WHY role gating went",
         "decision_contract_registry.DecisionContract.allowed_roles",
         scope=_AR,
     ),
@@ -1297,10 +1303,15 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "s44",
         "4e7aa0066",
         Form.ATTR,
-        "role_checklists.py went 420 -> 113 lines. ONLY "
-        "validate_checklist_payload_structure survives, because "
-        "decision_contract_registry.validate_payload_keys calls it on every "
-        "typed decision (live via `hermes harness contracts verify-examples`)",
+        "role_checklists.py went 420 -> 113 lines around a surviving "
+        "validate_checklist_payload_structure. THAT SURVIVAL REASON HAS SINCE "
+        "EXPIRED and the row is kept on a corrected one (S66): S65 (f9aa0faab) "
+        "deleted decision_contract_registry.validate_payload_keys — the caller "
+        "the reason named — and the `hermes harness contracts verify-examples` "
+        "verb that reached it, then deleted agent_runtime.role_checklists "
+        "whole. The s65 MODULE row is now the stronger absence; these member "
+        "rows stay because a fork sync could hand any one of them back "
+        "individually",
         "RoleChecklistStore",
         "RoleChecklist",
         "RoleChecklistItem",
@@ -2576,6 +2587,154 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "run.cancel",
         scope=_AR,
     ),
+    # -- S65 BACKFILL (filed at S66) ------------------------------------
+    #
+    # An independent audit of `4a21f0779..597715ba5` found 104 of 382 named cut
+    # symbols with no covering row. The largest single hole is below, and its
+    # cause is worth stating because it will recur: s65's `Form.MODULE` rows
+    # protect modules that were DELETED WHOLE. `decision_contract_registry.py`
+    # was GUTTED — 918 lines removed, the file kept — so not one of the twelve
+    # public names it lost is covered by a module row. A survivor module needs
+    # symbol rows.
+    *rows(
+        "s65",
+        "f9aa0faab",
+        Form.ATTR,
+        "the structured AgentDecision contract island was cut out of a module "
+        "that SURVIVED as the event-contract authority; no MODULE row can "
+        "cover these, so each retired public name is rowed individually",
+        "DecisionContract",
+        "HudShape",
+        "ObjectContract",
+        "agent_decision_json_schema",
+        "canonical_role_value",
+        "context_expansion_shape_ids",
+        "decision_contract",
+        "hud_shape",
+        "hud_shape_index_for_stage",
+        "payload_contract",
+        "validate_object_payload",
+        "validate_payload_keys",
+        scope=("agent_runtime.decision_contract_registry",),
+    ),
+    *rows(
+        "s65",
+        "05798135e",
+        Form.CLASS_ATTR,
+        "THE CAMPAIGN'S CENTRAL CUT, previously with no resurrection guard: "
+        "S61/S64 made SOUL/profile/persona configuration the sole behavioral "
+        "authority and retired the compiled role constants. Rowed as scoped "
+        "CLASS_ATTR because the bare names DEV / QA are un-rowable — they are "
+        "ordinary words that appear throughout live code",
+        "personas.AgentRole.ALICE_SUPERVISOR",
+        "personas.AgentRole.DEV",
+        "personas.AgentRole.QA",
+        scope=_AR,
+    ),
+    *rows(
+        "s65",
+        "f9aa0faab",
+        Form.ATTR,
+        "the self-test evidence store went with the task-progress island; these "
+        "path helpers are the exact siblings of goals_dir / goal_path / "
+        "task_path / packet_artifacts_dir, which were rowed in the SAME commit",
+        "self_tests_dir",
+        "self_test_task_dir",
+        "self_test_record_path",
+        "self_test_artifacts_dir",
+        scope=("agent_runtime.paths",),
+    ),
+    *rows(
+        "s65",
+        "f9aa0faab",
+        Form.ATTR,
+        "RunStore became a historical reader; the terminal-state vocabulary its "
+        "retired write lane branched on went with it",
+        "TERMINAL_RUN_STATES",
+        scope=("agent_runtime.store",),
+    ),
+    *rows(
+        "s64",
+        "3619e0f66",
+        Form.ATTR,
+        "the repeated read/search policy fields and their closed guard branches "
+        "retired; these two tool partitions were their only inputs. NOT a CODE "
+        "row: READ_SEARCH_TOOLS is a live name in model_tools.py, so a "
+        "repo-wide ban would fail on correct code — the scoped attribute "
+        "absence is what actually discriminates",
+        "PATCH_TOOLS",
+        "READ_SEARCH_TOOLS",
+        scope=("agent_runtime.profile_runner",),
+    ),
+    *rows(
+        "s65",
+        "f9aa0faab",
+        Form.CLASS_ATTR,
+        "the prompt-contract hash rode the retired decision-contract island; no "
+        "writer survives to stamp it onto a persisted instance row",
+        "models.PersonaInstance.prompt_contract_hash",
+        scope=_AR,
+    ),
+    # -- S66 — the surviving caller of an S65 cut, and this wave's own ---
+    *rows(
+        "s66",
+        "HEAD",
+        Form.CODE,
+        "`hermes harness persona-instance sweep-orphans` was BROKEN ON MAIN, "
+        "not merely dead: S65 deleted the store method, the owning-task release "
+        "inference and the goals/ path helpers it decided on, but the CLI "
+        "handler and its subparser survived, so the verb raised AttributeError "
+        "on every invocation while the Launcher's committed CLI contract still "
+        "advertised it. It is also unrestorable without a contract move — S65 "
+        "de-registered `persona_instance.reaped`, the event the reap emitted. "
+        "The missing row is the whole point: a verb string and a handler name "
+        "are exactly what a symbol-only cut sweep misses",
+        "sweep_orphaned_task_bound_instances",
+        "_cmd_persona_instance_sweep_orphans",
+        "sweep-orphans",
+    ),
+    *rows(
+        "s66",
+        "HEAD",
+        Form.CODE,
+        "`hermes harness contracts verify-examples` went with the decision-"
+        "contract island at S65 — verb string and handler together, the same "
+        "pair shape the sweep-orphans defect was missing",
+        "verify-examples",
+        "_cmd_contracts_verify_examples",
+    ),
+    *rows(
+        "s66",
+        "HEAD",
+        Form.ATTR,
+        "orphaned by S65's OWN cuts, receiver-verified at zero production "
+        "references repo-wide: RunStore/IncidentStore became historical "
+        "READERS, and a reader takes no write lock; IncidentStore.close was "
+        "emit_incident_remove's only chokepoint",
+        "run_lock",
+        "incident_lock",
+        scope=("agent_runtime.locks",),
+    ),
+    *rows(
+        "s66",
+        "HEAD",
+        Form.ATTR,
+        "the incident `remove` patch had one chokepoint, IncidentStore.close, "
+        "retired at S65 together with the paired incident.closed contract",
+        "emit_incident_remove",
+        scope=("agent_runtime.state_patches",),
+    ),
+    *rows(
+        "s66",
+        "HEAD",
+        Form.ATTR,
+        "test-only after S65 took the contracts-verify lane: its single caller "
+        "restated an event count the same test already asserted off "
+        "event_catalog(). The ledger's settled closed-loop rule — a symbol "
+        "whose whole importer set is its own test is not covered code",
+        "verify_registry",
+        scope=("agent_runtime.decision_contract_registry",),
+    ),
 )
 
 
@@ -2810,6 +2969,56 @@ def test_no_production_file_failed_to_parse():
 
 
 # -------------------------------------------------------------------------
+# THE META-INVARIANT — an unresolvable scope must be COVERED, never SKIPPED
+# -------------------------------------------------------------------------
+#
+# A row whose scope no longer resolves cannot fail. Left alone, that is a
+# permanent pass wearing a row's clothes — precisely the "silent decay" this
+# registry's header promises does not exist here. Both skips below were added
+# as conveniences and each turned a mis-scoped row into a green forever:
+#
+#   ATTR:        ``if find_spec(dotted) is None: continue``
+#   CLASS_ATTR:  ``if owner is None: return``
+#
+# The legitimate case they were reaching for is real — a LATER wave often
+# retires the whole owner module, which is a STRICTLY STRONGER absence than the
+# member row. S66 keeps that case working, but makes it PROVE itself: the
+# stronger absence must be a row in this same table. An unresolvable scope with
+# no covering row is now a FAILURE naming what to add, so a typo'd scope, a
+# renamed module or an undeclared deletion surfaces instead of decaying.
+
+
+def _module_row_covers(dotted: str) -> bool:
+    """True when ``dotted`` — or any ancestor package — carries a MODULE row.
+
+    Banning a package bans everything under it, so an ancestor row is the
+    stronger absence and legitimately supersedes a member row beneath it.
+    """
+
+    banned = {row.text for row in MODULE_ROWS}
+    parts = dotted.split(".")
+    return any(".".join(parts[: index + 1]) in banned for index in range(len(parts)))
+
+
+def _attr_row_covers(dotted: str, name: str) -> bool:
+    """True when some ATTR row bans ``name`` on module ``dotted``."""
+
+    return any(
+        row.text == name and dotted in row.scope for row in ATTR_ROWS
+    )
+
+
+def _spec_missing(dotted: str) -> bool:
+    """``find_spec`` semantics, but a missing PARENT package counts as missing
+    rather than raising ``ModuleNotFoundError`` out of the gate."""
+
+    try:
+        return importlib.util.find_spec(dotted) is None
+    except (ImportError, ValueError):
+        return True
+
+
+# -------------------------------------------------------------------------
 # THE GATE
 # -------------------------------------------------------------------------
 
@@ -2822,9 +3031,17 @@ def test_tombstoned_module_is_not_importable(row: Tombstone):
 @pytest.mark.parametrize("row", ATTR_ROWS, ids=lambda row: row.label)
 def test_tombstoned_attribute_is_gone(row: Tombstone):
     for dotted in row.scope:
-        if importlib.util.find_spec(dotted) is None:
-            # A later wave may retire the whole owner module; that is a stronger
-            # absence than the original member tombstone.
+        if _spec_missing(dotted):
+            # A later wave may retire the whole owner module — a STRONGER
+            # absence than this member row, and the one case where not
+            # resolving the scope is correct. It must be DECLARED, not assumed.
+            assert _module_row_covers(dotted), (
+                f"{row.label}: scope module {dotted!r} does not exist and no "
+                f"MODULE row covers it, so this row can never fail again. "
+                f"Either add the MODULE tombstone for {dotted!r} (if the module "
+                f"was deleted) or retarget the row's scope (if it was renamed). "
+                f"Original reason: {row.reason}"
+            )
             continue
         module = _resolve(dotted)
         assert not hasattr(module, row.text), f"{dotted}.{row.text}: {row.reason}"
@@ -2842,9 +3059,29 @@ def test_tombstoned_top_level_import_binding_is_gone(row: Tombstone):
 @pytest.mark.parametrize("row", CLASS_ATTR_ROWS, ids=lambda row: row.label)
 def test_tombstoned_class_attribute_is_gone(row: Tombstone):
     module_name, class_name, attr = row.text.rsplit(".", 2)
-    module = _resolve(f"{row.scope[0]}.{module_name}")
+    dotted = f"{row.scope[0]}.{module_name}"
+    if _spec_missing(dotted):
+        assert _module_row_covers(dotted), (
+            f"{row.label}: owner module {dotted!r} does not exist and no MODULE "
+            f"row covers it, so this row can never fail again. Add the MODULE "
+            f"tombstone, or retarget the row's scope. "
+            f"Original reason: {row.reason}"
+        )
+        return
+    module = _resolve(dotted)
     owner = getattr(module, class_name, None)
     if owner is None:
+        # The owning CLASS went while its module survived. That is a stronger
+        # absence than this member row — but only if it is DECLARED, which for
+        # a surviving module means an ATTR row banning the class name itself.
+        # (A MODULE row also covers it, for the module-deleted-later case.)
+        assert _attr_row_covers(dotted, class_name) or _module_row_covers(dotted), (
+            f"{row.label}: class {dotted}.{class_name} no longer exists, so this "
+            f"row can never fail again, and nothing in the registry bans the "
+            f"class itself. Add an ATTR row for {class_name!r} scoped to "
+            f"{dotted!r} (superseding this one), or retarget this row. "
+            f"Original reason: {row.reason}"
+        )
         return
     assert not hasattr(owner, attr), f"{row.text}: {row.reason}"
 

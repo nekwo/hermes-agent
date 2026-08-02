@@ -122,9 +122,14 @@ from .mcp_lane import MCP_NOT_REGISTERED_ON_LANE  # noqa: E402  (re-exported bel
 MCP_ADMISSION_DISABLED = "mcp_admission_disabled"
 MCP_ADMISSION_LANE_BUSY = "mcp_admission_lane_busy"
 MCP_ADMISSION_TIMEOUT = "mcp_admission_timeout"
-#: Declared + role-admitted, but the persona's profile has no ``mcp_servers``
-#: entry to spawn. The readiness taxonomy already calls this ``mcp_attention``;
-#: this is its admission-side spelling.
+#: DECLARED (by ``required_mcp_servers`` or the profile's own ``mcp_servers``
+#: block), but the persona's profile has no ``mcp_servers`` entry to spawn. The
+#: readiness taxonomy already calls this ``mcp_attention``; this is its
+#: admission-side spelling.
+#:
+#: S66 dropped "role-admitted" from this line. There is no role admission — S64
+#: made declaration the sole authority — and the phrase named a gate that could
+#: not fire.
 MCP_SERVER_NOT_CONFIGURED = "mcp_server_not_configured"
 #: ``read_only`` can only admit a server whose mutating tools we can name. An
 #: unknown server has no reviewer-shaped subset, so read_only admits nothing
@@ -589,8 +594,6 @@ def resolve_mcp_admission(
     *,
     lane: str = LANE_MISSION_CHAT,
     permission_mode: str = "profile_default",
-    task: Any = None,
-    stage: Any = None,
     cfg: Any = None,
 ) -> McpAdmission:
     """Resolve which declared MCP servers this persona run may register.
@@ -598,6 +601,13 @@ def resolve_mcp_admission(
     Pure: reads config and the persona's profile declaration, and returns the
     compiled registration inputs. It performs **zero spawns** — a patched
     ``register_mcp_servers`` that fails the test if called is part of the suite.
+
+    S66 removed the ``task`` / ``stage`` parameters. They rode the whole chain
+    (here → ``_requested_servers`` → ``_effective_required_mcp_servers``) and
+    were ignored at the bottom of it; no production caller passed either. They
+    were residue of the retired role/work-description policy, and an accepted-
+    and-discarded argument is exactly the silent no-op this campaign keeps
+    finding.
     """
 
     from .personas import role_from_persona
@@ -609,7 +619,7 @@ def resolve_mcp_admission(
         role = str(role_from_persona(persona).value)
     except Exception:  # pragma: no cover - defensive
         role = str(getattr(persona, "role", "") or "")
-    requested = tuple(_requested_servers(persona, task=task, stage=stage))
+    requested = tuple(_requested_servers(persona))
     timeout = _positive_float(getattr(config, "connect_timeout_seconds", None)) or _DEFAULT_CONNECT_TIMEOUT_SECONDS
     # No "unlimited" spelling: a missing / zero / negative / unparseable value
     # falls back to the default rather than retiring the bound. The root parser
@@ -662,8 +672,15 @@ def resolve_mcp_admission(
                 McpAdmissionDenial(
                     server=name,
                     code=MCP_SERVER_NOT_CONFIGURED,
+                    # S66: this text used to read "was requested by role
+                    # '{role}'". That is WIRE TEXT an operator and the agent
+                    # both read on a denied turn, and it named the wrong
+                    # authority: nothing requests by role since S64: the request
+                    # is `required_mcp_servers` ∪ the profile's own
+                    # `mcp_servers` block. Being told a role denied you when a
+                    # declaration did sends the fix to the wrong file.
                     summary=(
-                        f"'{name}' was requested by role '{role}', but the persona's profile "
+                        f"'{name}' is declared by this persona/profile, but the profile "
                         "declares no mcp_servers entry to spawn."
                     ),
                     fix_hint=(
@@ -729,15 +746,19 @@ def resolve_mcp_admission(
     )
 
 
-def _requested_servers(persona, *, task=None, stage=None) -> list[str]:
+def _requested_servers(persona) -> list[str]:
     """What the persona DECLARES — required ∪ profile-configured.
 
     Reuses the two existing declaration surfaces rather than writing a third:
     ``profile_readiness.declared_mcp_server_names`` (required ∪ the profile's
     ``mcp_servers`` block, and deliberately NOT the ambient operator config for
-    an unbound persona) unioned with ``_effective_required_mcp_servers``, which
-    already carries the role policy (``role == "qa"`` + visual proof ⇒
-    ``launcher_qa``) written in ``profile_readiness.py``.
+    an unbound persona) unioned with ``_effective_required_mcp_servers``.
+
+    S64 retired the role policy this docstring used to advertise (``role ==
+    "qa"`` + visual proof ⇒ ``launcher_qa``). There is no role lane left here:
+    an MCP dependency exists ONLY where the persona/profile declares it, which
+    is why S66 also removed the ``task`` / ``stage`` parameters that fed it —
+    they were inert, and no production caller ever passed either.
     """
 
     from .profile_readiness import _effective_required_mcp_servers, declared_mcp_server_names
@@ -745,7 +766,7 @@ def _requested_servers(persona, *, task=None, stage=None) -> list[str]:
     names: list[str] = []
     for source in (
         declared_mcp_server_names(persona),
-        _effective_required_mcp_servers(persona, task=task, stage=stage),
+        _effective_required_mcp_servers(persona),
     ):
         for value in source or []:
             text = str(value or "").strip()

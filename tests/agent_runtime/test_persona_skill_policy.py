@@ -29,7 +29,7 @@ def _persona(**overrides) -> AgentPersona:
 
 
 def test_dev_role_allows_skills_toolset_for_alice_style_loading():
-    assert "skills" in validate_toolsets("dev", ["file", "skills", "cronjob"])
+    assert "skills" in validate_toolsets(["file", "skills", "cronjob"])
     assert "skills" in effective_toolsets(_persona())
 
 

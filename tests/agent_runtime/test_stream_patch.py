@@ -307,3 +307,51 @@ def test_coverage_manifest_agrees_with_classifier():
         # (planning.write / incident.opened) is correctly NOT foldable.
         if case["chokepoint"].endswith((".steered", ".profile_updated", ".reaped", ".closed")):
             assert case["chokepoint"] in COVERED_DOMAIN_EVENT_TYPES
+
+
+def test_every_covered_domain_event_is_registered_or_declared_historical():
+    """S66: a fold vocabulary must not silently outlive its producer.
+
+    ``COVERED_DOMAIN_EVENT_TYPES`` names domain events the launcher classifies.
+    S65 de-registered two of them (``persona_instance.reaped``,
+    ``incident.closed``) with their last writers, and the flat set could not
+    tell those apart from the live entries — the same "wire that can only report
+    a constant" class the ledger has hit repeatedly, one level down.
+
+    The partition is now explicit and gated BOTH ways: a LIVE entry must have a
+    registered contract (so a new entry cannot be invented without a producer,
+    and a de-registration cannot be done out from under one), and a HISTORICAL
+    entry must NOT be registered (so a resurrected contract forces the entry
+    back onto the live half instead of sitting in the compatibility bucket).
+    """
+
+    from agent_runtime.decision_contract_registry import event_catalog
+    from agent_runtime.patch_coverage import (
+        COVERED_DOMAIN_EVENT_TYPES,
+        HISTORICAL_COVERED_DOMAIN_EVENT_TYPES,
+        LIVE_COVERED_DOMAIN_EVENT_TYPES,
+    )
+
+    catalog = set(event_catalog())
+    # Non-vacuity: the catalog really is populated and really does overlap.
+    assert len(catalog) > 10, catalog
+    assert LIVE_COVERED_DOMAIN_EVENT_TYPES
+
+    assert LIVE_COVERED_DOMAIN_EVENT_TYPES <= catalog, (
+        "a covered domain event lost its registered contract without being "
+        "moved to HISTORICAL_COVERED_DOMAIN_EVENT_TYPES: "
+        f"{sorted(LIVE_COVERED_DOMAIN_EVENT_TYPES - catalog)}"
+    )
+    assert HISTORICAL_COVERED_DOMAIN_EVENT_TYPES.isdisjoint(catalog), (
+        "a historical fold entry is registered again — promote it back to "
+        "LIVE_COVERED_DOMAIN_EVENT_TYPES: "
+        f"{sorted(HISTORICAL_COVERED_DOMAIN_EVENT_TYPES & catalog)}"
+    )
+    # The two halves partition the exported set exactly — no third bucket, no
+    # member that belongs to neither.
+    assert (
+        LIVE_COVERED_DOMAIN_EVENT_TYPES | HISTORICAL_COVERED_DOMAIN_EVENT_TYPES
+    ) == COVERED_DOMAIN_EVENT_TYPES
+    assert LIVE_COVERED_DOMAIN_EVENT_TYPES.isdisjoint(
+        HISTORICAL_COVERED_DOMAIN_EVENT_TYPES
+    )

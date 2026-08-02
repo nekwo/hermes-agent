@@ -35,7 +35,7 @@ def test_blocked_tools_are_exposed_for_runtime_filtering():
 
 
 def test_validate_toolsets_preserves_unknown_and_deduplicates_values():
-    assert validate_toolsets("qa", ["browser", "terminal", "code_execution", "made_up"]) == [
+    assert validate_toolsets(["browser", "terminal", "code_execution", "made_up"]) == [
         "browser", "terminal", "code_execution", "made_up",
     ]
 

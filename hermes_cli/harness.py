@@ -880,10 +880,11 @@ def build_parser(parent_subparsers) -> None:
     _add_coordinator_permission_args(persona_instance_retire)
     persona_instance_retire.add_argument("--json", action="store_true")
     persona_instance_retire.set_defaults(func=_cmd_persona_instance_retire)
-    persona_instance_sweep = persona_instance_subs.add_parser("sweep-orphans", help="Reconcile orphaned persona instances: reap rows with no live owner, preserve active ones")
-    persona_instance_sweep.add_argument("--reason", default="operator persona instance janitor")
-    persona_instance_sweep.add_argument("--json", action="store_true")
-    persona_instance_sweep.set_defaults(func=_cmd_persona_instance_sweep_orphans)
+    # No `sweep-orphans`: S65 retired the owning-task release inference the
+    # janitor decided on (and de-registered the `persona_instance.reaped` event
+    # it emitted), leaving only this registration and a handler that raised
+    # AttributeError. Retired at S66 with them. `persona instance retire` is the
+    # live end-of-life verb.
     persona_instance_steer = persona_instance_subs.add_parser("steer", help="Re-route a persona instance's living-graph wiring (Stage 77 steering edge; supports multi-parent fan-in)")
     persona_instance_steer.add_argument("persona_instance_id")
     persona_instance_steer.add_argument("--parent", dest="parent_instance_id", default=None, help="Back-compat: REPLACE the steering set with this single parent (== --set-parents <p>)")

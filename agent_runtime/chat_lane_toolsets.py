@@ -43,10 +43,18 @@ the single tool cuts (T6a):
           chat_lane_restore_toolsets: [file, terminal, skill_manage]
 
 Restore is un-exclusion, not a grant: a restored toolset is only kept if it was
-already in the lane's resolved set (role gating still applies) — you cannot hand
-a PM chat the browser toolset through this knob. A restored single tool
-(``skill_manage``) is likewise only un-blocked, not injected; it reappears only
-because its toolset (``skills``) is enabled.
+already in the lane's resolved set — you cannot hand a chat persona the browser
+toolset through this knob. A restored single tool (``skill_manage``) is likewise
+only un-blocked, not injected; it reappears only because its toolset
+(``skills``) is enabled.
+
+**Why that is safe, stated exactly — do NOT relax un-exclusion believing a role
+backstop exists.** This clause used to read "(role gating still applies)". It no
+longer does: S61/S64 made SOUL/profile/persona declarations the sole capability
+authority, and ``personas.validate_toolsets`` is now a pure dedupe with no role
+ceiling of any kind. The ONLY thing standing between this knob and an arbitrary
+grant is the un-exclusion semantics themselves — the intersection with the
+already-resolved set. Widen restore into a grant and there is nothing behind it.
 
 Typed drop accounting (G5)
 --------------------------

@@ -526,7 +526,7 @@ def _blocked_tool_names_for_chat(persona: AgentPersona, *, session_id: str | Non
     options = permission_options_for_chat(persona, session_id=session_id)
     if permission_mode_is_unbounded(options.permission_mode):
         return []
-    names = set(blocked_tool_names(persona))
+    names = set(blocked_tool_names())
     names.update(extra_blocked_tools_for_permission_mode(options.permission_mode))
     # T6a chat-lane cost policy: drop single heavy tools whose whole toolset must
     # stay enabled. ``skill_manage`` (skill authoring) rides here so the ``skills``

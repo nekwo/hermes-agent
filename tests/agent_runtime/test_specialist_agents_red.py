@@ -34,7 +34,7 @@ def test_default_specialist_persona_collection_includes_backend_dev_and_frontend
     assert backend.role == "dev"
     assert backend.hermes_profile == "backend-dev"
     assert "terminal" in effective_toolsets(backend)
-    assert "write_file" not in blocked_tool_names(backend)
+    assert "write_file" not in blocked_tool_names()
 
 
 def test_persona_records_from_config_support_collection_specialists_without_dropping_unknown_dev_like_agent():

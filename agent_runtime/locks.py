@@ -56,16 +56,17 @@ def _file_lock(path: Path, *, timeout_seconds: float | None = None) -> Iterator[
 
 # S54 removed ``tick_lock``: the ticker it guarded went with the mission lane.
 # ``task_lock`` stays -- it still has callers.
+#
+# S66 removed ``run_lock`` and ``incident_lock``. They were orphaned by S65's
+# own cuts, not by an older wave: ``RunStore``/``IncidentStore`` became
+# historical READERS there (``update`` / ``list_for_task`` / ``open`` / ``close``
+# retired), and a reader needs no write lock. Receiver-aware scan at that HEAD
+# found zero references to either name outside its own definition — not even a
+# test.
 
 @contextlib.contextmanager
 def task_lock(task_id: str) -> Iterator[None]:
     with _file_lock(paths.lock_dir() / f"task_{task_id}.lock"):
-        yield
-
-
-@contextlib.contextmanager
-def run_lock(run_id: str) -> Iterator[None]:
-    with _file_lock(paths.lock_dir() / f"run_{run_id}.lock"):
         yield
 
 
@@ -112,12 +113,6 @@ def archive_lock() -> Iterator[None]:
 @contextlib.contextmanager
 def events_lock() -> Iterator[None]:
     with _file_lock(paths.lock_dir() / "events.lock"):
-        yield
-
-
-@contextlib.contextmanager
-def incident_lock(incident_id: str) -> Iterator[None]:
-    with _file_lock(paths.lock_dir() / "incidents" / f"{incident_id}.lock"):
         yield
 
 
