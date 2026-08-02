@@ -46,10 +46,19 @@ _VOLATILE_METRICS = {
     "event_log_bytes",
     "projection_age_ms",
 }
+_VOLATILE_METRIC_MAPS = {
+    # Each section is timed independently while the parity snapshot is built.
+    # Normalizing only the container key keeps configured/contractual durations
+    # elsewhere in the frame intact while removing scheduler and filesystem
+    # jitter from every current and future section name.
+    "sections_ms",
+}
 
 
 def _normalize(value: Any, *, isolated_root: Path, key: str = "") -> Any:
     if isinstance(value, dict):
+        if key in _VOLATILE_METRIC_MAPS:
+            return {str(item_key): 0 for item_key in value}
         normalized = {
             str(item_key): _normalize(item, isolated_root=isolated_root, key=str(item_key))
             for item_key, item in value.items()
