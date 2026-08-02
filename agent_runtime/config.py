@@ -404,7 +404,7 @@ def _persona_from_overrides(persona_id: str, role: str, overrides: dict[str, Any
         provider=overrides.get("provider") or cfg.default_provider,
         api_mode=overrides.get("api_mode") or cfg.default_api_mode,
         toolsets=validate_toolsets(role, list(overrides.get("toolsets") or [])),
-        system_prompt_path=str(overrides.get("system_prompt_path") or f"agent_runtime/prompts/{role}.md"),
+        system_prompt_path=str(overrides.get("system_prompt_path") or ""),
         include_core_context_files=bool(overrides.get("include_core_context_files", False)),
     )
 

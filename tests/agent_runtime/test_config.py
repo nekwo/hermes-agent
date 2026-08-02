@@ -13,6 +13,25 @@ def test_config_merges_persona_overrides(tmp_path):
     assert pm.toolsets == ["file", "terminal", "todo"]
 
 
+def test_config_does_not_derive_a_system_prompt_from_an_arbitrary_role(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "agent_runtime:\n"
+        "  personas:\n"
+        "    cartographer:\n"
+        "      role: research_cartographer\n",
+        encoding="utf-8",
+    )
+
+    cfg = load_agent_runtime_config(path)
+    persona = next(
+        item for item in persona_records_from_config(cfg) if item.id == "cartographer"
+    )
+
+    assert persona.role == "research_cartographer"
+    assert persona.system_prompt_path == ""
+
+
 def test_config_merges_profile_skills_and_readiness_fields(tmp_path):
     p = tmp_path / "config.yaml"
     p.write_text(
