@@ -55,8 +55,20 @@ def _cfg() -> AgentRuntimeConfig:
 
 
 def _two_instances(store: PersonaInstanceStore, persona: AgentPersona):
-    a = store.ensure_for_goal(persona, goal_id="goal_a", spawned_by=None, placement_id="goal_a:slot_a")
-    b = store.ensure_for_goal(persona, goal_id="goal_a", spawned_by=None, placement_id="goal_a:slot_b")
+    a = store.open_chat(
+        persona_id=persona.id,
+        persona_instance_id=f"personainst_{persona.id}_slot_a",
+        session_id="model_override_slot_a",
+        display_name=persona.display_name,
+        profile_id=persona.hermes_profile,
+    )
+    b = store.open_chat(
+        persona_id=persona.id,
+        persona_instance_id=f"personainst_{persona.id}_slot_b",
+        session_id="model_override_slot_b",
+        display_name=persona.display_name,
+        profile_id=persona.hermes_profile,
+    )
     assert a.id != b.id
     return a, b
 

@@ -385,9 +385,7 @@ def test_mission_chat_prompt_observability_has_no_empty_mission_hud_placeholder(
     # Fresh rows no longer manufacture an always-empty compatibility field.
     # Historical persisted rows remain readable by context id in the Launcher.
     assert "mission_hud" not in context
-    from agent_runtime.decision_contract_registry import contract_hash
-
-    assert context["prompt_contract_hash"] == contract_hash()
+    assert "prompt_contract_hash" not in context
     assert context["skill_manifest_hash"]
 
 

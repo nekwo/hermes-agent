@@ -17,7 +17,6 @@ from .persona_chat_history import (
     PERSONA_TURN_BUDGET_EXHAUSTED_KIND,
     PERSONA_TURN_INTERRUPTED_KIND,
 )
-from .simplified_contract import public_decision_type_value
 from .transcript_order import TURN_SEQ_CONTENT, order_transcript_rows
 
 OPERATOR_CHANNELS_SCHEMA_VERSION = 1
@@ -85,7 +84,6 @@ def operator_channel_summary(
     persona_instances: Iterable[PersonaInstance],
     persona_chat_history: list[dict[str, Any]],
     persona_chat_trace: list[dict[str, Any]],
-    run_summaries: list[dict[str, Any]] | None = None,
     accountant: Any = None,
     intentionally_omitted_history_session_ids: Iterable[str] | None = None,
 ) -> list[dict[str, Any]]:
@@ -96,10 +94,6 @@ def operator_channel_summary(
     code. This projection owns that join and emits loud warnings when the raw
     sources disagree.
 
-    ``run_summaries`` (the snapshot's already-built ``runs`` rows) feeds the
-    conversation's goal-turn flow: per-run thinking/decision messages. Optional
-    so the status-page caller keeps its cheaper v1 shape.
-
     S47 removed the ``tasks`` parameter and the ``_TaskLookup`` it built. Both
     production callers (``snapshot.build_snapshot`` and ``status.build_status``)
     passed a ``[]`` literal, so the resolved task was permanently ``None`` and
@@ -108,7 +102,6 @@ def operator_channel_summary(
     fallbacks — was unreachable, not optional.
     """
 
-    run_lookup = _RunLookup(run_summaries or [])
     omitted_history_session_ids = {
         session_id
         for item in (intentionally_omitted_history_session_ids or [])
@@ -178,7 +171,6 @@ def operator_channel_summary(
         channel
         for channel in (
             builder.build(
-                run_lookup=run_lookup,
                 accountant=accountant,
                 display_names=display_names,
                 omitted_history_session_ids=omitted_history_session_ids,
@@ -244,7 +236,6 @@ class _OperatorChannelBuilder:
     def build(
         self,
         *,
-        run_lookup: "_RunLookup | None" = None,
         accountant: Any = None,
         display_names: dict[str, str] | None = None,
         omitted_history_session_ids: set[str] | None = None,
@@ -321,13 +312,6 @@ class _OperatorChannelBuilder:
             getattr(canonical, "goal_id", None) if canonical is not None else None,
             history.get("goal_id") if history else None,
         )
-        # S47: runs key on the channel's own ``task_id``. The resolved-task
-        # indirection that used to sit here (goal-keyed lifecycle rows resolving
-        # to their real task id) could never fire — its lookup was built from an
-        # always-empty seed.
-        channel_runs = (
-            run_lookup.runs_for(task_id=task_id, persona_id=persona_id) if run_lookup is not None else []
-        )
         conversation = _conversation_contract(
             channel_id=channel_id,
             persona_id=persona_id,
@@ -344,7 +328,6 @@ class _OperatorChannelBuilder:
             state=safe_assignment_token(getattr(canonical, "state", None)) if canonical is not None else "unknown",
             history=history,
             trace=trace,
-            runs=channel_runs,
             accountant=accountant,
             display_names=display_names,
             root_thread_id=root_thread_id,
@@ -593,46 +576,6 @@ def _turn_identity_mismatched(messages: list[Any]) -> bool:
     return False
 
 
-# S47 removed ``_TaskLookup``. It indexed the ``tasks`` argument by task id and
-# goal id so a channel could resolve its own goal row; both production callers
-# passed ``[]``, so every lookup returned ``None``. ``_RunLookup`` below is the
-# live sibling — it indexes rows the snapshot really builds.
-
-
-class _RunLookup:
-    """Index the snapshot's run summaries by (task_id, canonical persona_id).
-
-    Reuses the rows already built for ``data["runs"]`` — the goal-turn flow
-    costs no extra store reads or event-log scans.
-    """
-
-    def __init__(self, run_summaries: Iterable[dict[str, Any]]):
-        self.by_task_persona: dict[tuple[str, str], list[dict[str, Any]]] = {}
-        for run in run_summaries:
-            if not isinstance(run, dict):
-                continue
-            task_id = safe_assignment_text(run.get("task_id"), limit=160)
-            persona_id = _canonical_persona_id(run.get("persona_id"))
-            run_id = safe_assignment_text(run.get("run_id"), limit=160)
-            if not task_id or not persona_id or not run_id:
-                continue
-            self.by_task_persona.setdefault((task_id, persona_id), []).append(run)
-
-    def runs_for(self, *, task_id: str | None, persona_id: str | None) -> list[dict[str, Any]]:
-        if not task_id or not persona_id:
-            return []
-        canonical = _canonical_persona_id(persona_id) or persona_id
-        runs = self.by_task_persona.get((task_id, canonical), [])
-        return sorted(runs, key=_run_sort_key)
-
-
-def _run_sort_key(run: dict[str, Any]) -> tuple[int, str, str]:
-    parsed = _parse_time(run.get("started_at"))
-    if parsed is not None:
-        return (1, parsed.isoformat(), str(run.get("run_id") or ""))
-    return (0, str(run.get("started_at") or ""), str(run.get("run_id") or ""))
-
-
 def _conversation_contract(
     *,
     channel_id: str,
@@ -645,7 +588,6 @@ def _conversation_contract(
     state: str | None,
     history: dict[str, Any] | None,
     trace: dict[str, Any] | None,
-    runs: list[dict[str, Any]] | None = None,
     accountant: Any = None,
     display_names: dict[str, str] | None = None,
     root_thread_id: str | None = None,
@@ -678,15 +620,6 @@ def _conversation_contract(
             if message is not None:
                 messages.append(message)
     messages.extend(
-        _conversation_turn_messages(
-            runs or [],
-            channel_id=channel_id,
-            persona_id=persona_id,
-            persona_instance_id=persona_instance_id,
-            accountant=accountant,
-        )
-    )
-    messages.extend(
         _conversation_tool_call_messages(
             list((trace or {}).get("entries") or []),
             channel_id=channel_id,
@@ -710,7 +643,6 @@ def _conversation_contract(
     had_sources = bool(
         (history or {}).get("messages")
         or (trace or {}).get("entries")
-        or runs
     )
     if messages:
         status = "complete"
@@ -1091,109 +1023,6 @@ def _conversation_assignment_message(
         "redaction_status": "safe",
         "refs": refs,
     }
-
-
-def _conversation_turn_messages(
-    runs: list[dict[str, Any]],
-    *,
-    channel_id: str,
-    persona_id: str,
-    persona_instance_id: str | None,
-    accountant: Any = None,
-) -> list[dict[str, Any]]:
-    """Per-run thinking + decision-boundary messages for the goal-turn flow.
-
-    A run is one model turn: its redaction-safe ``reasoning_summary`` becomes a
-    ``thinking_summary`` message and its decision boundary becomes a ``turn``
-    message. Ids are keyed on ``run_id`` so they are stable across snapshot
-    rebuilds — the launcher dedupes on id between polls.
-    """
-
-    messages: list[dict[str, Any]] = []
-    for run in runs:
-        run_id = safe_assignment_text(run.get("run_id"), limit=160)
-        if not run_id:
-            continue
-        if accountant is not None:
-            accountant.consider(1)
-        refs: dict[str, Any] = {"source": "run_summary", "run_id": run_id}
-        for key in ("task_id", "stage_id"):
-            value = safe_assignment_text(run.get(key), limit=160)
-            if value:
-                refs[key] = value
-        state = safe_assignment_token(run.get("state")) or "unknown"
-        has_error = bool(run.get("has_error"))
-        decision_summary = _safe_conversation_text(run.get("decision_summary"), limit=4000)
-        thinking = _safe_conversation_text(
-            run.get("reasoning_summary") or run.get("decision_rationale"), limit=4000
-        )
-        emitted = 0
-        if thinking and thinking != decision_summary:
-            messages.append(
-                {
-                    "id": f"{channel_id}:turn:{run_id}:thinking",
-                    "seq": 0,
-                    "timestamp": run.get("started_at") or run.get("finished_at"),
-                    "actor_persona_id": persona_id,
-                    "actor_instance_id": persona_instance_id,
-                    "role": "agent",
-                    "kind": "thinking_summary",
-                    "status": state,
-                    "display_title": "Thinking",
-                    "display_text": thinking,
-                    "redaction_status": "safe",
-                    "refs": dict(refs),
-                }
-            )
-            emitted += 1
-        decision_type = _public_turn_decision_type(run.get("decision_type"))
-        if decision_summary or decision_type or has_error:
-            turn_message: dict[str, Any] = {
-                "id": f"{channel_id}:turn:{run_id}",
-                "seq": 0,
-                "timestamp": run.get("finished_at") or run.get("started_at"),
-                "actor_persona_id": persona_id,
-                "actor_instance_id": persona_instance_id,
-                "role": "blocker" if has_error else "agent",
-                "kind": "turn",
-                "status": "failed" if has_error else state,
-                "display_title": _turn_title(decision_type, has_error=has_error),
-                "display_text": decision_summary
-                or ("Turn ended with an error." if has_error else "Turn completed."),
-                "redaction_status": "safe",
-                "refs": {**refs, **({"decision_type": decision_type} if decision_type else {})},
-            }
-            duration_ms = run.get("duration_ms")
-            if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool):
-                turn_message["duration_ms"] = int(duration_ms)
-            messages.append(turn_message)
-            emitted += 1
-        if accountant is not None:
-            if emitted:
-                accountant.include(emitted)
-            else:
-                # Anomalous: a run that produced no renderable turn signal is a
-                # run whose activity the operator can never see — lost data, not
-                # a bound this projection chose to apply.
-                accountant.drop("run_without_turn_signal", entity_id=run_id)
-    return messages
-
-
-def _turn_title(decision_type: str | None, *, has_error: bool) -> str:
-    if has_error:
-        return "Turn failed"
-    if not decision_type:
-        return "Turn"
-    if decision_type == "hand_off":
-        return "Turn"
-    label = decision_type.replace("_", " ").strip()
-    return f"Turn · {label[:1].upper()}{label[1:]}" if label else "Turn"
-
-
-def _public_turn_decision_type(decision_type: Any) -> str | None:
-    value = safe_assignment_token(decision_type)
-    public_value = public_decision_type_value(value)
-    return public_value or value
 
 
 def _conversation_tool_call_messages(

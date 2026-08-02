@@ -194,11 +194,11 @@ def test_event_log_for_task_type_filter_counts_matches_not_raw_rows(isolate_agen
             )
         )
     for _ in range(300):
-        log.append(Event(ts=now(), type="incident.opened", task_id="task_flooded", run_id=None, persona_id="dev"))
+        log.append(Event(ts=now(), type="persona.updated", task_id="task_flooded", run_id=None, persona_id="dev", payload={"persona_id": "dev"}))
 
     # Untyped fetch: the window is consumed by the flood (documents the trap).
     untyped = log.for_task("task_flooded", limit=10)
-    assert all(event.type == "incident.opened" for event in untyped)
+    assert all(event.type == "persona.updated" for event in untyped)
 
     # Typed fetch: limit counts matched trace rows, so the flood cannot starve it.
     typed = log.for_task("task_flooded", limit=10, types=trace_types)
@@ -305,7 +305,7 @@ def test_cached_event_log_type_filter_matches_base(isolate_agent_runtime_root):
                 payload={"summary": f"progress {index}"},
             )
         )
-        base.append(Event(ts=now(), type="incident.opened", task_id="task_typed", run_id=None, persona_id="dev"))
+        base.append(Event(ts=now(), type="persona.updated", task_id="task_typed", run_id=None, persona_id="dev", payload={"persona_id": "dev"}))
 
     cached = CachedEventLog()
     for limit in (0, 3, 6):
@@ -323,25 +323,22 @@ def test_cached_event_log_does_not_duplicate_events_whose_payload_echoes_their_i
     # S53 retargeted the sample off ``lane.created``, which used to be the real
     # example (``GoalRuntimeInstanceStore.save`` echoed the task id) but was
     # de-registered with the lane write lane, so ``append`` now refuses it.
-    # ``persona_instance.reaped`` is the live replacement and echoes for the same
-    # reason: ``task_id`` is one of its declared optional payload fields, so a
-    # real emission carries it alongside the envelope column.
+        # ``persona_instance.steered`` is the live replacement and can echo the
+        # task id in its detail payload alongside the envelope column.
     from agent_runtime.events import CachedEventLog
 
     base = EventLog()
     base.append(
         Event(
             ts=now(),
-            type="persona_instance.reaped",
+                type="persona_instance.steered",
             task_id="task_lane",
             run_id=None,
             persona_id=None,
             payload={
                 "persona_instance_id": "pi_abc123",
-                "reason": "stale_owner",
-                "task_id": "task_lane",
-                "goal_id": "task_lane",
-                "owner_state": "closed",
+                    "task_id": "task_lane",
+                    "goal_id": "task_lane",
             },
         )
     )

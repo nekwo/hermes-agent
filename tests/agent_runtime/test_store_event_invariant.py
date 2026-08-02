@@ -35,9 +35,6 @@ EXEMPT: dict[str, str] = {
     # that had no production callers left (open_run/heartbeat/
     # approve_continuation), and S33 retired the caller-free
     # persona_runtime._attach_repo_baseline path proven dead in a54e802cd.
-    # Run rows are historical/read-only residue and are not part of the
-    # watermark-gated read model; the method remains for import compatibility.
-    "RunStore.update": "run rows are not watermark-gated and have no production writer caller",
 }
 
 

@@ -14,29 +14,18 @@ from utils import atomic_json_write
 from . import paths
 from .errors import AlreadyExists, NotFound, WorkspaceDeleteBlocked
 from .events import EventLog
-from .locks import run_lock
 from .models import AgentPersona, AgentRun, Event, Incident, Realm, Workspace
 from .serde import from_jsonable, to_jsonable
-from .state_patches import emit_incident_remove
 from .states import RunState
 
 T = TypeVar("T")
 
-TERMINAL_RUN_STATES = frozenset({RunState.COMPLETED, RunState.FAILED, RunState.STALE, RunState.CANCELLED})
 ACTIVE_RUN_STATES = frozenset({RunState.QUEUED, RunState.STARTING, RunState.RUNNING, RunState.WAITING_ON_TOOL, RunState.WAITING_ON_APPROVAL})
 # Bound on Realm.deleted_workspace_ids — the workspace-delete resurrection
 # guard. Oldest entries fall off first; by then every member has long since
 # pulled the tombstone (the bounded-ledger idiom shared with the board/office
 # archived ledgers).
 DELETED_WORKSPACE_LEDGER_CAP = 500
-
-
-def _safe_session_id(value) -> str | None:
-    if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", value):
-        lowered = value.lower()
-        if not any(marker in lowered for marker in ("secret", "token", "password", "credential", "cookie", "key")):
-            return value
-    return None
 
 
 def _safe_model_id(value) -> str | None:
@@ -641,102 +630,16 @@ class RealmStore:
 
 
 class RunStore:
-    def __init__(self, event_log: EventLog | None = None):
-        self.event_log = event_log or EventLog()
-
     def get(self, run_id: str) -> AgentRun:
         return _read_model(AgentRun, paths.run_path(run_id))
-
-    def update(self, run: AgentRun) -> bool:
-        with run_lock(run.id):
-            run.session_id = _safe_session_id(run.session_id)
-            try:
-                previous = self.get(run.id)
-            except NotFound:
-                previous = None
-            if previous is not None and previous.state in TERMINAL_RUN_STATES:
-                return False
-            _write_model(paths.run_path(run.id), run)
-            return True
-
-    def list_for_task(self, task_id: str) -> list[AgentRun]:
-        return [run for run in self.list_all() if run.task_id == task_id]
 
     def list_all(self) -> list[AgentRun]:
         return _list_models(AgentRun, paths.runs_dir())
 
 
-def _safe_event_token(value, *, fallback: str | None) -> str | None:
-    if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value):
-        return value
-    return fallback
-
-
 class IncidentStore:
-    def __init__(self, event_log: EventLog | None = None):
-        self.event_log = event_log or EventLog()
-
-    def open(self, incident: Incident) -> Incident:
-        _write_model(paths.incident_path(incident.id), incident)
-        # NOTE: intentionally does NOT auto-link the incident into
-        # task.open_incident_ids. The settle boundary (ticker._settled_boundary)
-        # treats a linked incident as "Neko owns recovery" vs an unlinked one as
-        # a hard stop, so centralized linking here changes stop-vs-recover
-        # semantics. Linking must be done deliberately at the call sites that
-        # want recovery routing, paired with a recovery-semantics review.
-        metadata = incident.metadata if isinstance(getattr(incident, "metadata", None), dict) else {}
-        payload = {"incident_id": incident.id, "kind": incident.kind}
-        for key in ("proof_id", "check_id", "environment_fingerprint", "blocking_event_id", "stage_id", "persona_target", "lane_id", "lane_state_at_open"):
-            value = metadata.get(key)
-            if isinstance(value, str) and _safe_event_token(value, fallback=None):
-                payload[key] = value
-        if isinstance(metadata.get("budget_state"), dict):
-            payload["budget_state"] = metadata["budget_state"]
-        if isinstance(metadata.get("repo_lock_state"), dict):
-            payload["repo_lock_state"] = metadata["repo_lock_state"]
-        self.event_log.append(
-            Event(
-                ts=now(),
-                type="incident.opened",
-                task_id=incident.task_id,
-                run_id=incident.run_id,
-                persona_id=None,
-                payload=payload,
-            )
-        )
-        return incident
-
     def get(self, incident_id: str) -> Incident:
         return _read_model(Incident, paths.incident_path(incident_id))
-
-    def close(self, incident_id: str, *, reason: str | None = None) -> Incident:
-        from .locks import incident_lock
-
-        with incident_lock(incident_id):
-            incident = self.get(incident_id)
-            incident.closed_at = now()
-            _write_model(paths.incident_path(incident_id), incident)
-            payload = {"incident_id": incident.id}
-            if reason:
-                payload["reason"] = reason
-            self.event_log.append(
-                Event(
-                    ts=now(),
-                    type="incident.closed",
-                    task_id=incident.task_id,
-                    run_id=incident.run_id,
-                    persona_id=None,
-                    payload=payload,
-                )
-            )
-            # S7-A producer: incidents ship open-only in the frame (settled), so a
-            # close is a ``remove`` op — the launcher deletes the keyed row. Dark
-            # by default (read_model.delta_patches off).
-            emit_incident_remove(
-                self.event_log,
-                incident,
-            )
-            return incident
 
     def list_open_with_closed_count(self) -> tuple[list[Incident], int]:
         """Return live incidents without deserializing the closed-history tail.

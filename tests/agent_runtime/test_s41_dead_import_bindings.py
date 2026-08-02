@@ -117,7 +117,7 @@ REMOVED_BINDINGS = {
 #: source symbols the aliases pointed at. A cut that took these too would be a
 #: behavior change, not a binding removal.
 RETAINED_BINDINGS = {
-    "hermes_cli/harness.py": {"emit_json", "AgentDecision", "WorkerSessionState"},
+    "hermes_cli/harness.py": {"emit_json", "WorkerSessionState"},
     "agent_runtime/persona_runtime.py": {"Callable", "TYPE_CHECKING"},
     "agent_runtime/observability.py": {"datetime"},
     "agent_runtime/parity.py": {"event_rotation"},
@@ -200,8 +200,7 @@ def test_every_source_symbol_the_bindings_pointed_at_is_untouched():
 
     from importlib.util import find_spec
 
-    from agent_runtime import cli_format, scope_control, states, terminal_envelope
-    from agent_runtime.decision_schema import DecisionType
+    from agent_runtime import cli_format, states, terminal_envelope
     from agent_runtime.profile_runner import RunBudgetExceeded
 
     assert callable(cli_format.emit_json)
@@ -211,11 +210,11 @@ def test_every_source_symbol_the_bindings_pointed_at_is_untouched():
     assert states.WorkerSessionState  # the survivor, not the deleted store
     assert find_spec("agent_runtime.operator_control") is None
     assert find_spec("agent_runtime.launcher_process_hygiene") is None
+    assert find_spec("agent_runtime.scope_control") is None
+    assert find_spec("agent_runtime.decision_schema") is None
     assert issubclass(RunBudgetExceeded, Exception)
     assert terminal_envelope.LANE_MISSION_CHAT
     assert states.TaskState and states.RunState
-    assert DecisionType
-    assert callable(scope_control.validate_discovery_payload)
 
 
 def test_every_touched_module_still_imports():

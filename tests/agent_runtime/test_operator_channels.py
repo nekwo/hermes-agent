@@ -354,35 +354,6 @@ def test_operator_channel_newborn_chat_emits_no_warnings():
     assert "trace_empty" not in codes
 
 
-def test_operator_channel_session_without_history_fires_when_turns_flow():
-    """Content flowed as canonical turn messages (a run summary) but no curated
-    history row backs it — session_without_history is genuine projection loss
-    and must fire even when trace_empty is (correctly) suppressed by the flow."""
-    ts = now()
-    channels = operator_channel_summary(
-        persona_instances=[_dev_task_instance(ts)],
-        persona_chat_history=[],
-        persona_chat_trace=[],
-        run_summaries=[
-            _dev_run_summary(
-                "run_flow", started="2026-07-05T05:50:00Z", finished="2026-07-05T05:51:00Z"
-            )
-        ],
-    )
-
-    assert len(channels) == 1
-    channel = channels[0]
-    assert any(m["kind"] == "turn" for m in channel["conversation"]["messages"])
-    assert any(
-        warning["code"] == "session_without_history"
-        for warning in channel["warnings"]
-    )
-    # A channel whose turns flow is not an empty-trace anomaly.
-    assert not any(
-        warning["code"] == "trace_empty" for warning in channel["warnings"]
-    )
-
-
 def test_operator_channel_trace_empty_fires_for_task_bound_channel_without_trace():
     """A task-bound channel with a goal but no trace and no flow messages is a
     genuine empty-trace anomaly — trace_empty must still fire. The newborn
@@ -844,27 +815,7 @@ def _dev_task_instance(ts) -> PersonaInstance:
     )
 
 
-def _dev_run_summary(run_id: str, *, started: str, finished: str, **overrides):
-    run = {
-        "run_id": run_id,
-        "persona_id": "dev",
-        "task_id": "task_goal",
-        "stage_id": "implement",
-        "state": "completed",
-        "started_at": started,
-        "finished_at": finished,
-        "duration_ms": 1000,
-        "decision_type": "hand_off",
-        "decision_summary": f"Handed off the Petdex menu ({run_id}).",
-        "decision_rationale": None,
-        "reasoning_summary": f"Reviewed the Petdex widget tree before patching ({run_id}).",
-        "has_error": False,
-    }
-    run.update(overrides)
-    return run
-
-
-def test_goal_conversation_projects_turns_and_tool_calls_as_flow_messages():
+def test_goal_conversation_projects_trace_tool_calls_as_flow_messages():
     ts = now()
     channels = operator_channel_summary(
         persona_instances=[_dev_task_instance(ts)],
@@ -903,9 +854,6 @@ def test_goal_conversation_projects_turns_and_tool_calls_as_flow_messages():
                 ],
             }
         ],
-        run_summaries=[
-            _dev_run_summary("run_a", started="2026-07-05T05:48:00Z", finished="2026-07-05T05:49:00Z")
-        ],
     )
 
     assert len(channels) == 1
@@ -915,18 +863,7 @@ def test_goal_conversation_projects_turns_and_tool_calls_as_flow_messages():
     kinds = [message["kind"] for message in conversation["messages"]]
     # S47: no synthetic goal_input row precedes the projected flow any more.
     assert "goal_input" not in kinds
-    assert "thinking_summary" in kinds
-    assert "turn" in kinds
     assert kinds.count("tool_call") == 2
-
-    by_kind = {message["kind"]: message for message in conversation["messages"]}
-    thinking = by_kind["thinking_summary"]
-    assert thinking["display_title"] == "Thinking"
-    assert "Reviewed the Petdex widget tree" in thinking["display_text"]
-    turn = by_kind["turn"]
-    assert turn["display_title"] == "Turn"
-    assert turn["refs"]["decision_type"] == "hand_off"
-    assert turn["refs"]["run_id"] == "run_a"
 
     tool_calls = [message for message in conversation["messages"] if message["kind"] == "tool_call"]
     finished_call = next(m for m in tool_calls if m["tool"]["tool_name"] == "read_file")
@@ -942,9 +879,7 @@ def test_goal_conversation_projects_turns_and_tool_calls_as_flow_messages():
 
 
 def test_goal_conversation_projects_per_step_thinking_between_tool_calls():
-    """The streamed think→act loop: each progress row carrying real reasoning
-    becomes its own Thinking message in timeline order, and a per-step text
-    that repeats the per-run summary is deduped to a single bubble."""
+    """The streamed think→act loop projects each trace reasoning row in order."""
 
     ts = now()
     channels = operator_channel_summary(
@@ -982,8 +917,6 @@ def test_goal_conversation_projects_per_step_thinking_between_tool_calls():
                         "ts": "2026-07-05T05:48:08Z",
                     },
                     {
-                        # Final step repeats the run-summary reasoning — must
-                        # collapse into a single Thinking bubble.
                         "event": "progress",
                         "summary": "Agent thinking process updated",
                         "reasoning_summary": "Reviewed the Petdex widget tree before patching (run_a).",
@@ -993,9 +926,6 @@ def test_goal_conversation_projects_per_step_thinking_between_tool_calls():
                     },
                 ],
             }
-        ],
-        run_summaries=[
-            _dev_run_summary("run_a", started="2026-07-05T05:48:00Z", finished="2026-07-05T05:49:00Z")
         ],
     )
 
@@ -1071,7 +1001,6 @@ def test_tool_call_messages_carry_operator_detail():
                 ],
             }
         ],
-        run_summaries=[],
     )
 
     tool_calls = [
@@ -1131,7 +1060,6 @@ def test_tool_call_message_carries_dispatch_target_and_order():
                 ],
             }
         ],
-        run_summaries=[],
     )
 
     tool_calls = [
@@ -1228,87 +1156,6 @@ def test_native_reasoning_mints_thinking_row_and_reply_echo_is_deduped():
     assert len(replies) == 1
 
 
-def test_trace_empty_warning_suppressed_when_flow_messages_exist_without_trace():
-    ts = now()
-    channels = operator_channel_summary(
-        persona_instances=[_dev_task_instance(ts)],
-        persona_chat_history=[],
-        persona_chat_trace=[],
-        run_summaries=[
-            _dev_run_summary("run_b", started="2026-07-05T05:50:00Z", finished="2026-07-05T05:51:00Z")
-        ],
-    )
-
-    channel = channels[0]
-    kinds = [message["kind"] for message in channel["conversation"]["messages"]]
-    assert "turn" in kinds
-    assert not any(warning["code"] == "trace_empty" for warning in channel["warnings"])
-
-    # Without run summaries (status-page caller shape) the warning still fires.
-    legacy = operator_channel_summary(
-        persona_instances=[_dev_task_instance(ts)],
-        persona_chat_history=[],
-        persona_chat_trace=[],
-    )[0]
-    assert any(warning["code"] == "trace_empty" for warning in legacy["warnings"])
-
-
-def test_failed_run_projects_blocker_turn():
-    ts = now()
-    channels = operator_channel_summary(
-        persona_instances=[_dev_task_instance(ts)],
-        persona_chat_history=[],
-        persona_chat_trace=[],
-        run_summaries=[
-            _dev_run_summary(
-                "run_err",
-                started="2026-07-05T05:52:00Z",
-                finished="2026-07-05T05:52:30Z",
-                state="failed",
-                has_error=True,
-                decision_type=None,
-                decision_summary=None,
-                reasoning_summary=None,
-            )
-        ],
-    )
-
-    turn = next(m for m in channels[0]["conversation"]["messages"] if m["kind"] == "turn")
-    assert turn["role"] == "blocker"
-    assert turn["status"] == "failed"
-    assert turn["display_title"] == "Turn failed"
-
-
-def test_conversation_caps_and_emits_turns_collapsed_marker():
-    ts = now()
-    run_summaries = [
-        _dev_run_summary(
-            f"run_{index:04d}",
-            started=f"2026-07-05T0{5 + index // 3600}:{(index // 60) % 60:02d}:{index % 60:02d}Z",
-            finished=f"2026-07-05T0{5 + index // 3600}:{(index // 60) % 60:02d}:{index % 60:02d}Z",
-        )
-        for index in range(150)
-    ]
-    channels = operator_channel_summary(
-        persona_instances=[_dev_task_instance(ts)],
-        persona_chat_history=[],
-        persona_chat_trace=[],
-        run_summaries=run_summaries,
-    )
-
-    messages = channels[0]["conversation"]["messages"]
-    assert len(messages) <= 201  # conversation cap
-    kinds = [message["kind"] for message in messages]
-    # S47: the goal_input row the cap used to reserve headroom for is gone.
-    assert "goal_input" not in kinds
-    assert "turns_collapsed" in kinds
-    marker = next(m for m in messages if m["kind"] == "turns_collapsed")
-    assert "collapsed" in marker["display_text"]
-    assert marker["refs"]["collapsed_count"] > 0
-    # The newest turn survives the trim.
-    assert any(m["kind"] == "turn" and "run_0149" in m["refs"]["run_id"] for m in messages)
-
-
 def test_conversation_message_ids_stable_across_rebuilds():
     ts = now()
     kwargs = dict(
@@ -1331,9 +1178,6 @@ def test_conversation_message_ids_stable_across_rebuilds():
                     },
                 ],
             }
-        ],
-        run_summaries=[
-            _dev_run_summary("run_a", started="2026-07-05T05:48:00Z", finished="2026-07-05T05:49:00Z")
         ],
     )
 

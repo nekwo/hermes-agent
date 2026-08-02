@@ -75,12 +75,9 @@ def test_the_type_never_had_an_operator_summary_row_to_retire():
 
 
 def test_the_recorder_and_its_projection_half_stay_gone():
-    from agent_runtime import simplified_contract
+    from importlib.util import find_spec
 
-
-    # What survives is the wire-value normalizer its live importers read.
-    assert hasattr(simplified_contract, "public_decision_type")
-    assert hasattr(simplified_contract, "public_decision_type_value")
+    assert find_spec("agent_runtime.simplified_contract") is None
 
 
 def test_the_decision_lane_is_not_collateral():

@@ -73,7 +73,7 @@ _CHAT_TURN_COMMANDS = (("mission-chat", "message"), ("mission-chat", "steer"))
 #
 # The fingerprint stats the cheap change signals: events.jsonl (every store
 # mutation appends an event — the architecture's change feed), the turn store,
-# daemon status, scope pointers, the store directories (record add/rename
+# scope pointers, the live store directories (record add/rename
 # flips a directory's mtime), and the SessionDB files (chat writes; -wal /
 # -journal included because a SQLite WAL commit does not touch the main db's
 # mtime). Signals that live OUTSIDE the runtime root (git working trees for
@@ -94,16 +94,13 @@ _READ_CACHE_MAX_AGE_SECONDS = 20.0
 _FINGERPRINT_ROOT_FILES = (
     "events.jsonl",
     "mission_chat_turns.json",
-    "daemon_status.json",
     "active_realm.json",
     "active_workspace.json",
 )
 _FINGERPRINT_STORE_DIRS = (
-    "tasks",
     "runs",
     "incidents",
     "agents",
-    "proofs",
     # S57 dropped "repo_bundles" here with the store: this list exists to
     # invalidate the read cache when a store directory changes, and no code path
     # can write that tree any more (S52 took the last writer, S57 the module).
@@ -112,7 +109,6 @@ _FINGERPRINT_STORE_DIRS = (
     "runtime_instances",
     "persona_instances",
     "persona_assignments",
-    "goals",
     "workspaces",
     "realms",
 )

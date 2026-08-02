@@ -22,12 +22,8 @@ from pathlib import Path
 from agent_runtime import paths
 from agent_runtime.cli_format import emit_json
 from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
-from agent_runtime.decision_contract_examples import verify_harness_skill_examples
 from agent_runtime.decision_contract_registry import (
-    canonical_role_value,
     contract_manifest,
-    hud_shape_index_for_stage,
-    verify_registry,
 )
 from agent_runtime.events import EventLog
 from agent_runtime.migrations import effective_config_summary, migration_status
@@ -256,42 +252,11 @@ def _cmd_observe(args) -> int:
 
 def _cmd_contracts_dump(args) -> int:
     manifest = contract_manifest()
-    role = str(getattr(args, "role", "") or "").strip()
-    decision = str(getattr(args, "decision", "") or "").strip()
-    data = manifest
-    if role:
-        canonical_role = canonical_role_value(role)
-        data = {
-            "schema_version": manifest["schema_version"],
-            "contract_hash": manifest["contract_hash"],
-            "role": canonical_role,
-            "requested_role": role,
-            "allowed_decisions": manifest["decisions_available"],
-            "decision_menu_shape_ids": manifest["shape_ids"],
-            "context_expansion_shape_ids": manifest["context_expansion_shape_ids"],
-            "hud_shapes": hud_shape_index_for_stage(canonical_role),
-        }
-    if decision:
-        data = {
-            "schema_version": manifest["schema_version"],
-            "contract_hash": manifest["contract_hash"],
-            "decision": decision,
-            "contract": manifest["decisions"].get(decision),
-        }
     if args.json:
-        print(emit_json(data))
+        print(emit_json(manifest))
     else:
         print(f"contracts schema={manifest['schema_version']} hash={manifest['contract_hash'][:16]}")
-    return 0 if (not decision or data.get("contract")) else 2
-
-
-def _cmd_contracts_verify_examples(args) -> int:
-    data = verify_registry()
-    skill_examples = verify_harness_skill_examples()
-    data["skill_examples"] = skill_examples
-    data["ok"] = bool(data.get("ok")) and bool(skill_examples.get("ok"))
-    print(emit_json(data) if args.json else f"contracts ok={data['ok']} hash={data['contract_hash'][:16]}")
-    return 0 if data.get("ok") else 2
+    return 0
 
 
 def _run_verify_command(label: str, command: list[str], *, cwd: Path) -> dict:

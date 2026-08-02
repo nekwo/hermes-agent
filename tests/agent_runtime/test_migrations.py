@@ -106,7 +106,7 @@ def test_migration_status_counts_existing_runtime_records(isolate_agent_runtime_
     status = migration_status(root)
 
     assert status["pending"] is False
-    assert status["counts"]["tasks"] == 1
+    assert "tasks" not in status["counts"]
     assert status["counts"]["runs"] == 1
-    assert status["counts"]["proofs"] == 1
+    assert "proofs" not in status["counts"]
     assert status["counts"]["archive_batches"] == 1

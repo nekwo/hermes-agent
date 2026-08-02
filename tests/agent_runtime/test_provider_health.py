@@ -13,7 +13,7 @@ Task = SimpleNamespace
 from agent_runtime.persona_runtime import GPTPersonaRuntime
 from agent_runtime.provider_health import provider_health_for_personas
 from agent_runtime.status import build_status
-from agent_runtime.states import RunState, TaskState
+from agent_runtime.states import RunState
 from agent_runtime.store import TaskStore
 from hermes_time import now
 
@@ -42,7 +42,7 @@ def test_provider_health_reports_runtime_profile_and_interpreter(isolate_agent_r
 
 
 def test_status_includes_provider_runtime_health(isolate_agent_runtime_root):
-    status = build_status(task_store=TaskStore())
+    status = build_status()
 
     assert "runtime_health" in status
     assert "interpreter" in status["runtime_health"]

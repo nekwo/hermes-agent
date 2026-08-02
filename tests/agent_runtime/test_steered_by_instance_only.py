@@ -5,9 +5,6 @@ occupied-chat mint seeded ``steered_by=["operator"]`` (and mirrored the operator
 principal into ``spawned_by``), which the launcher HUD rendered as a phantom
 "steered by operator" relationship. This locks in:
 
-  * the WRITER — ``ensure_for_goal`` seeds ``steered_by`` only from an
-    instance-shaped spawn parent (a principal stays in ``spawned_by`` as
-    provenance, never in the steering set);
   * the CHOKEPOINT — ``set_parents`` / ``_apply_steer_edges`` reject a
     non-instance-shaped parent loudly with the reason;
   * the REPAIR verb — strips non-instance entries out of the steering fields,
@@ -88,30 +85,12 @@ def test_predicate_accepts_instance_ids_rejects_principals():
 # ── writer: mint never seeds a principal into steered_by ─────────────────────
 
 
-def test_ensure_for_goal_does_not_seed_steered_by_with_operator_principal():
-    store = PersonaInstanceStore()
-    inst = store.ensure_for_goal(_persona("neko_supervisor"), goal_id="g1", spawned_by="operator")
-    # The exact defect: the add-instance mint used spawned_by="operator".
-    assert inst.steered_by == []
-    # Provenance is preserved in the scalar, just never treated as steering.
-    assert inst.spawned_by == "operator"
-    # Survives a re-read (no read-time backfill of the principal either).
-    assert store.get(inst.id).steered_by == []
-
-
-def test_ensure_for_goal_seeds_steered_by_from_instance_shaped_spawn_parent():
-    store = PersonaInstanceStore()
-    inst = store.ensure_for_goal(_persona("dev"), goal_id="g1", spawned_by="personainst_neko")
-    assert inst.steered_by == ["personainst_neko"]
-    assert inst.spawned_by == "personainst_neko"
-
-
 # ── chokepoint: set_parents rejects a non-instance principal ─────────────────
 
 
 def test_set_parents_rejects_a_non_instance_principal_with_the_reason():
     store = PersonaInstanceStore()
-    child = store.ensure_for_goal(_persona("qa"), goal_id="g1", spawned_by=None)
+    child = store.ensure_for_persona(_persona("qa"))
     with pytest.raises(ValueError, match="persona-instance id"):
         store.set_parents(child.id, ["operator"])
     # A bare persona id is also not a resolved steer parent.
@@ -123,8 +102,8 @@ def test_set_parents_rejects_a_non_instance_principal_with_the_reason():
 
 def test_set_parents_still_accepts_a_real_instance_parent():
     store = PersonaInstanceStore()
-    child = store.ensure_for_goal(_persona("qa"), goal_id="g1", spawned_by=None)
-    parent = store.ensure_for_goal(_persona("dev"), goal_id="g1", spawned_by=None)
+    child = store.ensure_for_persona(_persona("qa"))
+    parent = store.ensure_for_persona(_persona("dev"))
     result = store.set_parents(child.id, [parent.id])
     assert result.steered_by == [parent.id]
     assert result.spawned_by == parent.id  # mirror restored to a real instance
@@ -177,7 +156,7 @@ def test_repair_real_strips_principal_and_emits_event():
 
 def test_repair_keeps_instance_parents_and_repoints_mirror():
     store = PersonaInstanceStore()
-    parent = store.ensure_for_goal(_persona("dev"), goal_id="g1", spawned_by=None)
+    parent = store.ensure_for_persona(_persona("dev"))
     iid = "personainst_neko_supervisor_agent_2"
     _write_corrupt_row(store, iid, steered_by=[parent.id, "operator"], spawned_by="operator")
 
@@ -191,7 +170,7 @@ def test_repair_keeps_instance_parents_and_repoints_mirror():
 
 def test_repair_scan_all_finds_and_skips_clean_rows():
     store = PersonaInstanceStore()
-    store.ensure_for_goal(_persona("qa"), goal_id="g1", spawned_by=None)  # clean
+    store.ensure_for_persona(_persona("qa"))  # clean
     _write_corrupt_row(store, "personainst_neko_supervisor_agent_2", steered_by=["operator"], spawned_by="operator")
 
     dry = store.repair_non_instance_steering(None, apply=False)

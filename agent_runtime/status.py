@@ -22,11 +22,11 @@ from .provider_health import provider_health_for_personas
 from .migrations import effective_config_summary
 from .runtime_instances import GoalRuntimeInstanceStore, runtime_instances_summary
 from .states import RunState
-from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, RunStore, TaskStore
+from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, RunStore
 from .snapshot import _default_persona_session_db, _parity_envelope
 
 
-def build_status(task_store: TaskStore | None = None, run_store: RunStore | None = None, incident_store: IncidentStore | None = None, agent_store: AgentStore | None = None, event_log: EventLog | None = None) -> dict:
+def build_status(run_store: RunStore | None = None, incident_store: IncidentStore | None = None, agent_store: AgentStore | None = None, event_log: EventLog | None = None) -> dict:
     _build_started = time.perf_counter()
     run_store = run_store or RunStore()
     incident_store = incident_store or IncidentStore()
@@ -35,7 +35,6 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
     # log; CachedEventLog reads events.jsonl once and serves all of them from
     # memory (same as build_snapshot — this was the 2s hog of a warm status).
     event_log = event_log or CachedEventLog()
-    tasks = []
     runs = run_store.list_all()
     incidents = incident_store.list_all()
     cfg = load_agent_runtime_config()
@@ -47,8 +46,7 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
     active_runs = [r for r in runs if r.state in ACTIVE_RUN_STATES]
     queued_runs = [r for r in active_runs if r.state == RunState.QUEUED]
     waiting_runs = [r for r in active_runs if r.state in {RunState.WAITING_ON_TOOL, RunState.WAITING_ON_APPROVAL}]
-    dirty_state = build_dirty_state(tasks=tasks, runs=runs, incidents=incidents, runtime_instances=runtime_instances)
-    foreground_dirty_state = dirty_state.get("runtime", {}).get("foreground", {})
+    dirty_state = build_dirty_state(runs=runs, incidents=incidents, runtime_instances=runtime_instances)
     recent_events = event_log.tail(20)
     data = {
         # S28 completed the S21 cut this comment used to defer: `open_tasks` and
@@ -60,13 +58,8 @@ def build_status(task_store: TaskStore | None = None, run_store: RunStore | None
         # `queued_runs` / `waiting_runs` / `stale_runs` counters below stay:
         # they read the same persisted rows, and a historical row in any of
         # those states is still information about the store.
-        "open_task_ids": dirty_state.get("runtime", {}).get("open_task_ids", []),
-        "background_open_tasks": foreground_dirty_state.get("background_open_tasks", 0),
-        "background_task_ids": foreground_dirty_state.get("background_task_ids", []),
-        "unparked_open_tasks": foreground_dirty_state.get("unparked_open_tasks", 0),
-        "unparked_open_task_ids": foreground_dirty_state.get("unparked_open_task_ids", []),
-        "decision_contract_version": CONTRACT_SCHEMA_VERSION,
-        "decision_contract_hash": contract_hash(),
+        "event_contract_version": CONTRACT_SCHEMA_VERSION,
+        "event_contract_hash": contract_hash(),
         "active_runs": len(active_runs),
         "queued_runs": len(queued_runs),
         "waiting_runs": len(waiting_runs),

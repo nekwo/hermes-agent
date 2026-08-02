@@ -3,6 +3,8 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
 from agent_runtime.models import AgentRun, Incident
+from agent_runtime import paths
+import agent_runtime.store as store_module
 from types import SimpleNamespace
 
 Task = SimpleNamespace
@@ -80,9 +82,8 @@ def test_status_surfaces_lanes_repo_locks_and_retired_swarm_budget_shape(isolate
     """
 
     runs = RunStore()
-    # S17 removed RunStore.open_run as write-dead; ``update`` is the surviving
-    # write path and seeds the row directly. This case covers build_status, not
-    # the writer.
+    # The run store is historical/read-only; seed the row directly. This case
+    # covers build_status, not a retired writer.
     ts = now()
     run = AgentRun(
         id="run_lane",
@@ -93,7 +94,7 @@ def test_status_surfaces_lanes_repo_locks_and_retired_swarm_budget_shape(isolate
         started_at=ts,
         last_heartbeat_at=ts,
     )
-    runs.update(run)
+    store_module._write_model(paths.run_path(run.id), run)
 
     s = build_status(run_store=runs)
 

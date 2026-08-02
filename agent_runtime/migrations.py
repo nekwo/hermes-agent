@@ -92,7 +92,6 @@ def _runtime_default_warnings() -> list[dict[str, str]]:
 def migration_status(root: Path | None = None) -> dict[str, Any]:
     root = root or paths.store_root()
     counts = {
-        "tasks": _count_json(root / "tasks"),
         "runs": _count_json(root / "runs"),
         # S57 removed ``"repo_bundles"``. It was a real on-disk count, not a
         # constant literal -- but it counted a store class whose LAST writer went
@@ -107,7 +106,6 @@ def migration_status(root: Path | None = None) -> dict[str, Any]:
         # contract move as the config-scalar cut.
         "agents": _count_json(root / "agents"),
         "incidents": _count_json(root / "incidents"),
-        "proofs": _count_nested_json(root / "proofs"),
         "archive_batches": _count_dirs(root / "deleted_archive"),
     }
     return {
@@ -134,12 +132,6 @@ def _count_json(path: Path) -> int:
     if not path.exists():
         return 0
     return sum(1 for item in path.glob("*.json") if item.is_file())
-
-
-def _count_nested_json(path: Path) -> int:
-    if not path.exists():
-        return 0
-    return sum(1 for item in path.rglob("*.json") if item.is_file())
 
 
 def _count_dirs(path: Path) -> int:

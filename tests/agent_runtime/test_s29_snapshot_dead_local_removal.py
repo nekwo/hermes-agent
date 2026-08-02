@@ -76,7 +76,9 @@ REMOVED_DEAD_LOCALS = (
 #: and renamed the projection to ``ensure_for_personas(personas)``, which takes
 #: no worker argument — the seed went with it. Its removal is asserted in
 #: ``test_the_lookalike_live_locals_survive`` rather than merely dropped here.
-KEPT_LIVE_LOCALS = ("run_rows",)
+#: S64 retired the last member, ``run_rows``: it was hard-coded empty and only
+#: fed the now-removed test-only run-summary operator projection.
+KEPT_LIVE_LOCALS = ()
 
 
 def _function(name: str) -> ast.FunctionDef:
@@ -135,10 +137,9 @@ def test_the_named_dead_locals_are_not_bound_anywhere_in_the_builder():
 
 def test_the_lookalike_live_locals_survive():
     """Negative gate: the locals in the same function that LOOK like the removed
-    seeds and are load-bearing inputs to live projections. ONE of the original
-    three remains; ``tasks`` left at S47 and ``workers`` at S56 (see
-    KEPT_LIVE_LOCALS). Both departures are INVERTED below rather than dropped,
-    so S29's explicit keep-side claim and its two reversals stay on the record."""
+    seeds and were once load-bearing inputs to projections. ``tasks`` left at
+    S47, ``workers`` at S56, and the hard-empty ``run_rows`` at S64. Each
+    departure is INVERTED below rather than silently dropped."""
 
     builder = _function("_build_snapshot_uncoalesced")
     source = ast.get_source_segment(inspect.getsource(snapshot), builder) or ""
@@ -152,7 +153,7 @@ def test_the_lookalike_live_locals_survive():
     for name in KEPT_LIVE_LOCALS:
         assert name in bound, name
     assert "tasks=tasks" not in source  # S47
-    assert "run_summaries=run_rows" in source
+    assert "run_summaries=run_rows" not in source
     # INVERTED at S56: this asserted ``derive_from_workers(agents, workers)`` was
     # the live consumer that justified keeping the ``workers`` seed. The seed and
     # the worker argument are both gone; the surviving projection is pinned by
@@ -214,7 +215,7 @@ def test_the_live_frame_is_unchanged(isolate_agent_runtime_root):
     """Negative gate: this is residue removal, not a contract move."""
 
     frame = snapshot.build_snapshot()
-    assert frame["parity"]["contract_version"] == 50
+    assert frame["parity"]["contract_version"] == 51
     for section in ("boards", "offices", "workspaces", "realms", "agents"):
         assert section in frame, f"{section} is a KEEP frame and must survive"
     for section in ("goals", "archived_tasks", "proofs", "incidents", "runs", "stage_verification"):

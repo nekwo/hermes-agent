@@ -260,7 +260,7 @@ def test_the_observability_envelope_dropped_every_worker_row():
 
 
 def test_the_dirty_state_envelope_dropped_every_worker_row():
-    runtime = dirty_state.build_dirty_state(tasks=[], runs=[], repos=[])["runtime"]
+    runtime = dirty_state.build_dirty_state(runs=[], repos=[])["runtime"]
     for key in (
         "active_worker_sessions",
         "possessed_worker_sessions",

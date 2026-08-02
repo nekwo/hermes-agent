@@ -125,18 +125,20 @@ def test_the_lookalike_keep_set_survives():
     assert callable(observability.build_observability)
     assert "context_requests" not in inspect.getsource(observability)
 
-    # ``decision_contracts`` / ``decision_contract_registry`` are the live
-    # contract lane; ``role_contracts`` was a second, unreached description of
-    # what a persona may decide.
+    # The shared registry survives as the event-contract authority; the
+    # structured decision/scope companions retired at S64.
+    for dotted in (
+        "agent_runtime.decision_contract_registry",
+        "agent_runtime.incidents",
+    ):
+        assert importlib.import_module(dotted) is not None
     for dotted in (
         "agent_runtime.decision_contracts",
-        "agent_runtime.decision_contract_registry",
         "agent_runtime.decision_schema",
-        "agent_runtime.incidents",
         "agent_runtime.scope_control",
         "agent_runtime.simplified_contract",
     ):
-        assert importlib.import_module(dotted) is not None
+        assert importlib.util.find_spec(dotted) is None
 
     # ``states`` keeps the four live enums S23 pinned when ``StageStatus`` went;
     # ``stage_intent`` was its last named consumer and outlived it by two waves.

@@ -33,7 +33,7 @@ from agent_runtime import state_patches as sp
 from agent_runtime.config import load_agent_runtime_config
 from agent_runtime.decision_contract_registry import allowed_event_types, validate_event_payload
 from agent_runtime.events import EVENT_PAYLOAD_LIMIT_BYTES, EventLog
-from agent_runtime.models import AgentPersona, Event, Incident
+from agent_runtime.models import AgentPersona, Event
 from types import SimpleNamespace
 
 Task = SimpleNamespace
@@ -48,7 +48,7 @@ from agent_runtime.state_patches import (
     emit_state_patch,
 )
 from agent_runtime.states import TaskState
-from agent_runtime.store import AgentStore, IncidentStore, TaskStore
+from agent_runtime.store import AgentStore, TaskStore
 
 
 # --------------------------------------------------------------------------- #
@@ -360,41 +360,3 @@ def test_flag_on_task_transition_emits_refresh(set_delta_patches, isolate_agent_
 
 def test_flag_off_task_transition_emits_no_patch(set_delta_patches, isolate_agent_runtime_root):
     assert not hasattr(TaskStore(), "update")
-
-
-# --------------------------------------------------------------------------- #
-# Chokepoint: incident close (remove). Open rides the full core (see coverage).
-# --------------------------------------------------------------------------- #
-def _incident(incident_id: str) -> Incident:
-    return Incident(
-        id=incident_id, task_id=None, run_id=None, kind="tool_failure",
-        summary="command failed", detail_path=None, opened_at=now(),
-    )
-
-
-def test_flag_on_incident_open_emits_no_patch(set_delta_patches, isolate_agent_runtime_root):
-    # Deliberately uncovered: an open would be a create-on-absent full row, so it
-    # rides the full core; only the resolving close folds (remove).
-    set_delta_patches(True)
-    IncidentStore().open(_incident("inc_patch"))
-    assert [p for p in _patches() if p.payload["entity"] == "incident"] == []
-
-
-def test_flag_on_incident_close_emits_remove(set_delta_patches, isolate_agent_runtime_root):
-    set_delta_patches(True)
-    store = IncidentStore()
-    store.open(_incident("inc_patch"))
-    store.close("inc_patch", reason="resolved")
-
-    removes = [p for p in _patches() if p.payload["entity"] == "incident" and p.payload["op"] == "remove"]
-    assert len(removes) == 1
-    assert removes[0].payload["id"] == "inc_patch"
-    assert "changed" not in removes[0].payload
-
-
-def test_flag_off_incident_close_emits_no_patch(set_delta_patches, isolate_agent_runtime_root):
-    set_delta_patches(False)
-    store = IncidentStore()
-    store.open(_incident("inc_patch"))
-    store.close("inc_patch", reason="resolved")
-    assert _patches() == []

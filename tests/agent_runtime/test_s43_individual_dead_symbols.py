@@ -25,8 +25,8 @@ analyze``-style checks and from a casual grep:
 
 Deliberate KEEPS on the same lines, each pinned by the negative gate below:
 
-* ``paths.packet_artifacts_dir`` — LIVE via ``checkpoint``'s ``packet_artifacts``
-  EntityClass, while its ``_task_dir`` / ``_raw_artifact_path`` leaves are dead.
+* ``paths.packet_artifacts_dir`` was live at S43 through checkpoint discovery;
+  S64 retired that final reader and inverted the old keep pin.
 * ``redaction.BasicRedactionScanner`` — retired with its test-only status enum;
   the shared runtime redaction patterns remain the production authority.
 * ``skill_publishability.REASON_*`` — only the ``PUBLISHABLE_REASONS`` frozenset
@@ -120,11 +120,6 @@ import pytest
 KEPT = {
     "agent_runtime.board_models": ("default_board_id",),
     "agent_runtime.cli_format": ("emit_json",),
-    # S54 INVERSION: ``stagec_artifacts_dir`` moved out of this KEEP set. It was
-    # correctly alive at S43 (only its ``_task_dir`` leaf was dead); by S54 the
-    # helper itself had no reader and was cut. ``packet_artifacts_dir`` stays --
-    # ``checkpoint`` still registers it as an EntityClass.
-    "agent_runtime.paths": ("packet_artifacts_dir",),
     "agent_runtime.repo_context": (
         "isolated_repo_context_for_run",
         "_worktree_token",
@@ -148,16 +143,6 @@ KEPT = {
 def test_the_live_neighbours_survive(dotted: str):
     module = importlib.import_module(dotted)
     assert [name for name in KEPT[dotted] if not hasattr(module, name)] == []
-
-
-def test_the_packet_artifacts_class_still_resolves_its_directory():
-    """``packet_artifacts_dir`` is the KEEP in the paths trio: ``checkpoint``
-    registers it as an EntityClass, so cutting it by name-similarity would break
-    a live checkpoint class."""
-
-    from agent_runtime import checkpoint
-
-    assert "packet_artifacts" in checkpoint.ENTITY_CLASS_NAMES
 
 
 def test_every_touched_module_still_imports():

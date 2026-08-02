@@ -83,7 +83,7 @@ from importlib.util import find_spec
 
 import pytest
 
-from agent_runtime import checkpoint, paths, role_checklists
+from agent_runtime import checkpoint, paths
 from agent_runtime.decision_contract_registry import event_catalog
 from agent_runtime.events import ALLOWED_EVENT_TYPES, OPERATOR_SUMMARY_EVENT_TYPES
 
@@ -97,45 +97,6 @@ RETIRED_EVENT_TYPES = (
     "role_checklist.created",
     "role_checklist.item_updated",
 )
-
-
-def test_the_one_live_checklist_name_survives_and_still_rejects():
-    """KEEP: the payload-structure validator, its exclusive helpers, and the
-    three vocabularies it raises with."""
-
-    from agent_runtime.decision_schema import DecisionPayloadInvalid
-
-    assert callable(role_checklists.validate_checklist_payload_structure)
-    assert callable(role_checklists._repair_message)
-    assert callable(role_checklists._safe_text)
-    assert role_checklists.CHECKLIST_ITEM_STATUSES
-    assert role_checklists.SELF_APPROVAL_STATUSES
-    assert role_checklists.CHECKLIST_UPDATE_KEYS
-
-    with pytest.raises(DecisionPayloadInvalid):
-        role_checklists.validate_checklist_payload_structure({"checklist_updates": "not-a-list"})
-    with pytest.raises(DecisionPayloadInvalid):
-        role_checklists.validate_checklist_payload_structure({"self_approval_status": "nonsense"})
-    # A well-formed payload is still accepted.
-    assert (
-        role_checklists.validate_checklist_payload_structure(
-            {"checklist_updates": [{"item_id": "patch", "status": "verified"}]}
-        )
-        is None
-    )
-
-
-def test_the_registry_chokepoint_still_reaches_the_validator():
-    """The wire, not just the two ends: ``validate_payload_keys`` must actually
-    invoke the surviving name (the relay-regression idiom)."""
-
-    import inspect
-
-    from agent_runtime.decision_contract_registry import validate_payload_keys
-
-    source = inspect.getsource(validate_payload_keys)
-    assert "from .role_checklists import validate_checklist_payload_structure" in source
-    assert "validate_checklist_payload_structure(payload)" in source
 
 
 def test_appending_a_retired_role_event_is_refused():
@@ -199,7 +160,7 @@ def test_the_lookalike_keep_set_survives():
     """Names one bare-word grep away from this cut — every one still live."""
 
     # The checkpoint classes that DO still have a writer.
-    for name in ("persona_instances", "boards", "packet_artifacts"):
+    for name in ("persona_instances", "boards"):
         assert name in checkpoint.ENTITY_CLASS_NAMES
     # INVERTED at S56 (2026-08-01), not deleted: ``repo_bundles`` was pinned in
     # the line above as a class that still has a writer. That stopped being true
@@ -214,7 +175,7 @@ def test_the_lookalike_keep_set_survives():
     assert "run.closed" in OPERATOR_SUMMARY_EVENT_TYPES
     # ``role_sessions`` was already cut in wave 3; ``role_contracts`` goes in
     # S45. Neither is what this file removed.
-    assert find_spec("agent_runtime.role_checklists") is not None
+    assert find_spec("agent_runtime.role_checklists") is None
 
 
 def test_the_registry_lost_exactly_six_contracts():

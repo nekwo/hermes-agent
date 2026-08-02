@@ -407,11 +407,6 @@ def _build_snapshot_uncoalesced(
     ]
     persona_assignments = PersonaAssignmentStore(event_log=event_log).list_all()
     session_db = _default_persona_session_db()
-    # ``run_rows`` is the ordered run list ``operator_channel_summary`` takes as
-    # ``run_summaries``. S9 removed ``runs`` as a frame section, so nothing
-    # populates it any more — but the parameter is still read by the live
-    # operator-channel projection and must be passed.
-    run_rows = []
     migration = migration_status()
     # Hoisted out of the ``data`` literal so their cost is attributable in
     # ``sections_ms`` (both were profiled hot: prompt_observability ~5s, the
@@ -439,6 +434,8 @@ def _build_snapshot_uncoalesced(
         )
     data = {
         "schema_version": 2,
+        # Legacy wire names retained for Launcher/core-fixture compatibility;
+        # the hash is now computed from the event-only registry.
         "decision_contract_version": CONTRACT_SCHEMA_VERSION,
         "decision_contract_hash": contract_hash(),
         "event_contract_version": CONTRACT_SCHEMA_VERSION,
@@ -539,7 +536,6 @@ def _build_snapshot_uncoalesced(
         persona_instances=persona_instances,
         persona_chat_history=persona_chat_history_full,
         persona_chat_trace=data["persona_chat_trace"],
-        run_summaries=run_rows,
         accountant=conversation_accountant,
         intentionally_omitted_history_session_ids=omitted_history_session_ids,
     )
@@ -699,7 +695,10 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         # duplicate of the authoritative top-level ``migration`` block. The
         # Launcher reads neither copy; its supported-contract pin moves in
         # lockstep with this emitted-field removal.
-        "contract_version": 50,
+        # 51 retires the last task/proof migration-count rows and the
+        # run-summary conversation source. The legacy contract-hash wire names
+        # remain compatibility aliases for the event-only registry.
+        "contract_version": 51,
         "generated_at": data.get("generated_at"),
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
         "redaction_observed": _redaction_observed(data),

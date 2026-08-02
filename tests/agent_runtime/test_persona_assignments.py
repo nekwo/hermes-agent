@@ -11,11 +11,10 @@ pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
 
 from hermes_time import now
 
-from agent_runtime.decision_schema import AgentDecision, DecisionType
 from agent_runtime.config import AgentRuntimeConfig
+from agent_runtime import paths
 from agent_runtime.events import EventLog
 from agent_runtime.models import AgentPersona, AgentRun, PersonaInstance
-from types import SimpleNamespace
 
 Task = SimpleNamespace
 from agent_runtime.mission_chat_turns import (
@@ -37,10 +36,12 @@ from agent_runtime.persona_assignments import (
 )
 from agent_runtime.persona_chat_history import persona_chat_history_summary
 from agent_runtime.snapshot import build_snapshot
+from agent_runtime.serde import to_jsonable
 from agent_runtime.states import RunState, TaskState, WorkerSessionState
 from agent_runtime.status import build_status
 from agent_runtime.store import AgentStore, RunStore, TaskStore
 from tests.agent_runtime.conftest import release_to_implementation
+from utils import atomic_json_write
 
 
 def _seed_run(
@@ -52,10 +53,8 @@ def _seed_run(
 ) -> AgentRun:
     """Persist a run row without ``RunStore.open_run``.
 
-    S17 removed ``open_run`` as write-dead: no production caller survived the
-    mission lane, so its only users were tests seeding a row. ``update`` is the
-    surviving write path (it tolerates a missing previous row and applies the
-    same ``_safe_session_id`` sanitisation ``open_run`` did).
+    The run store is now historical/read-only. Tests that exercise projections
+    seed a representative historical row directly.
     """
 
     ts = now()
@@ -69,7 +68,7 @@ def _seed_run(
         last_heartbeat_at=ts,
         session_id=session_id,
     )
-    assert RunStore().update(run) is True
+    atomic_json_write(paths.run_path(run.id), to_jsonable(run), indent=2, sort_keys=True)
     return run
 
 
@@ -118,26 +117,6 @@ def _assert_task_store_stub() -> None:
     assert not hasattr(store, "cancel")
     with pytest.raises(Exception):
         store.get("retired_task")
-
-
-class RequestProofRuntime:
-    def run_tick(self, persona, ctx, *, run):
-        return AgentDecision(
-            type=DecisionType.REQUEST_TEST_RUN,
-            summary="collect assignment proof",
-            rationale="The proof should attach to the active assignment.",
-            payload={"stage_id": "implement", "commands": ["python -c \"print('assignment-ok')\""]},
-        )
-
-
-class NekoAcceptanceRuntime:
-    def run_tick(self, persona, ctx, *, run):
-        return AgentDecision(
-            type=DecisionType.PROPOSE_ACCEPTANCE,
-            summary="scoped assignment runtime smoke",
-            rationale="The diagnostic assignment is already bounded and should stay attached to this Neko run.",
-            payload={"objective": "verify assignment reuse", "acceptance_criteria": ["one assignment identity"]},
-        )
 
 
 class _FakeSessionDB:
@@ -205,37 +184,6 @@ def test_dead_worker_of_settled_task_does_not_resurrect_binding(isolate_agent_ru
 
 def test_task_terminal_reaps_task_bound_persona_instances(isolate_agent_runtime_root):
     _assert_task_store_stub()
-
-
-def test_persona_instance_sweep_reaps_orphans_but_preserves_live_runs(isolate_agent_runtime_root):
-    # S56: _has_live_binding lost its worker arm, so the ACTIVE RUN is the whole
-    # liveness check the janitor honors.
-    store = PersonaInstanceStore()
-    orphan = store.ensure_for_goal(
-        _persona("dev"),
-        goal_id="task_archived",
-        spawned_by="personainst_neko_supervisor",
-    )
-    live = store.ensure_for_goal(
-        _persona("backend_dev"),
-        goal_id="task_missing_but_run_live",
-        spawned_by="personainst_neko_supervisor",
-    )
-    run = _seed_run("backend_dev", "task_missing_but_run_live", "backend_implementation")
-    live.active_run_id = run.id
-    live.state = WorkerSessionState.RUNNING
-    store.update(live)
-    free = store.create_free_floating("profile:reviewer")
-
-    report = store.sweep_orphaned_task_bound_instances(reason="test janitor")
-    remaining = {item.id for item in store.list_all()}
-
-    assert orphan.id not in remaining
-    assert live.id in remaining
-    assert free.id in remaining
-    assert report["reaped_persona_instance_ids"] == [orphan.id]
-    assert report["skipped_active_persona_instance_ids"] == [live.id]
-    assert report["remaining_task_bound_persona_instance_ids"] == [live.id]
 
 
 def test_task_archive_moves_task_bound_persona_instance_evidence(isolate_agent_runtime_root):
@@ -506,28 +454,6 @@ def test_assignment_complete_is_idempotent_for_same_terminal_state(isolate_agent
 
     events = [event for event in EventLog().tail(20) if event.type == "persona_assignment.closed"]
     assert first.completed_at == second.completed_at
-    assert [event.payload["assignment_id"] for event in events] == [assignment.id]
-
-
-def test_attach_run_does_not_reopen_terminal_assignment(isolate_agent_runtime_root):
-    store = PersonaAssignmentStore()
-    assignment = store.create_or_resume(
-        PersonaAssignmentSpec(
-            persona_id="neko_supervisor",
-            kind="diagnostic",
-            title="Neko diagnostic",
-            message="Run one scoped diagnostic.",
-        )
-    )
-    closed = store.complete(assignment.id, state="completed")
-
-    attached = store.attach_run(assignment.id, "run_after_close")
-    second = store.complete(assignment.id, state="completed")
-
-    events = [event for event in EventLog().tail(20) if event.type == "persona_assignment.closed"]
-    assert attached.state == "completed"
-    assert attached.run_ids == ["run_after_close"]
-    assert second.completed_at == closed.completed_at
     assert [event.payload["assignment_id"] for event in events] == [assignment.id]
 
 

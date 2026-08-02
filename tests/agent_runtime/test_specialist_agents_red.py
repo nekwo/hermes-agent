@@ -7,26 +7,12 @@ import pytest
 pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
 
 from agent_runtime.config import AgentRuntimeConfig, persona_records_from_config
-from agent_runtime.decision_schema import DecisionPayloadInvalid, parse_structured_decision, validate_decision_for_role
 from agent_runtime.models import AgentPersona
 from agent_runtime.personas import AgentRole, blocked_tool_names, effective_toolsets
 from tests.agent_runtime.persona_samples import sample_personas
 import agent_runtime.repo_context as repo_context
 from agent_runtime.repo_context import repo_execution_context_for_task, resolve_affected_repo_workdir, safe_affected_repo_labels
 from agent_runtime.snapshot import build_snapshot
-
-
-def _decision_blob(decision_type: str) -> str:
-    return (
-        '{'
-        f'"type":"{decision_type}",'
-        '"summary":"short useful summary",'
-        '"rationale":"because role safety must be proof gated",'
-        '"payload":{"review_scope":"implementation","verdict":"approved","proof_ids":["proof_1"]},'
-        '"requires_approval":false,'
-        '"schema_version":1'
-        '}'
-    )
 
 
 def _by_id(personas: list[AgentPersona]) -> dict[str, AgentPersona]:
@@ -159,22 +145,3 @@ def test_backend_dev_explicit_repo_scope_loads_backend_repo_context(tmp_path):
     assert ctx is not None
     assert ctx.repo_label == "eternia-backend"
     assert "CLAUDE.md" in ctx.context_files
-
-
-def test_dev_like_specialists_are_not_filtered_by_role():
-    request_test_run = parse_structured_decision(
-        _decision_blob("request_test_run").replace(
-            '"payload":{"review_scope":"implementation","verdict":"approved","proof_ids":["proof_1"]}',
-            '"payload":{"stage_id":"stage_1","commands":["pytest tests/agent_runtime/test_specialist_agents_red.py"]}',
-        )
-    )
-    approve = parse_structured_decision(_decision_blob("approve"))
-    qa_verdict = parse_structured_decision(_decision_blob("report_qa_verdict"))
-
-    validate_decision_for_role(request_test_run, AgentRole.DEV)
-    validate_decision_for_role(approve, AgentRole.DEV)
-    validate_decision_for_role(qa_verdict, AgentRole.DEV)
-
-    backend = _by_id(sample_personas())["backend_dev"]
-    assert backend.role == AgentRole.DEV.value
-    assert "send_message" in blocked_tool_names(backend)

@@ -9,7 +9,6 @@ pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
 
 from hermes_time import now
 
-from agent_runtime.decision_schema import DecisionPayloadInvalid, DecisionType
 from agent_runtime.events import EventLog
 from agent_runtime.models import AgentRun, Event
 from types import SimpleNamespace

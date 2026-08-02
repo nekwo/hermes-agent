@@ -6,15 +6,13 @@ mission goals, the proof runner, and parts of ``child_events``), and S13/S14 too
 the last few (``preflight`` → ``task.preflight``, ``missing_input`` →
 ``missing_input.requested``, ``worklog`` → ``persona.worklog``).
 
-An ``EventContract`` with no producer is not harmless: it is a shape the prompt
-contract advertises, the manifest publishes, and ``EventLog.append`` accepts —
+An ``EventContract`` with no producer is not harmless: it is a shape the
+manifest publishes and ``EventLog.append`` accepts —
 so a test (or an agent) can mint an event no reader will ever see in production.
 
 ``ALLOWED_EVENT_TYPES`` is checked **on append only**, so historical log rows
 carrying a de-registered type still read back fine. What does change is
-``contract_hash()``: it is stamped as ``prompt_contract_hash`` on live persona
-instances, which will read as contract-drifted after this stage. That is expected
-and self-heals on the next turn.
+``contract_hash()`` and the event-only snapshot/status contract fingerprint.
 """
 
 from __future__ import annotations
@@ -27,7 +25,6 @@ from agent_runtime.decision_contract_registry import (
     event_catalog,
     verify_registry,
 )
-from agent_runtime.decision_schema import DecisionType
 from agent_runtime.events import ALLOWED_EVENT_TYPES
 
 
@@ -143,6 +140,12 @@ REMOVED_EVENT_TYPES = frozenset(
         "run.closed",
         "self_test.recorded",
         "self_test.loop_detected",
+        # Final dead-code closeout: their only writers were retired with the
+        # goal-instance sweep and IncidentStore mutation surface.
+        "persona_instance.reaped",
+        "persona_instance.attributed",
+        "incident.opened",
+        "incident.closed",
     }
 )
 
@@ -190,9 +193,11 @@ REMOVED_EVENT_TYPES = frozenset(
 # watchdog_warning / closed), de-registered in the same commit that deleted
 # agent_runtime/worker_sessions.py whole -- their only emitter; owned by
 # tests/agent_runtime/test_s56_worker_session_lane_removal.py.
-# This stays an absolute count on purpose: it is the one assertion that catches
+# Then -4 in the final closeout: persona_instance.reaped/.attributed and
+# incident.opened/.closed lost their last writers. This stays an absolute count
+# on purpose: it is the one assertion that catches
 # a contract silently appearing or disappearing.
-SURVIVING_EVENT_COUNT = 55
+SURVIVING_EVENT_COUNT = 51
 
 
 def test_the_unemittable_event_types_are_no_longer_registered():
@@ -243,15 +248,6 @@ def test_the_near_miss_survivors_stay_registered():
         "state.reconciled",
     }
     assert survivors <= ALLOWED_EVENT_TYPES
-
-
-def test_the_s11_role_filtering_shells_are_gone():
-
-    # An always-empty list reported as if it were a real check result.
-    assert "role_shape_errors" not in verify_registry()
-
-    # What it stood in for is still true and still pinned: no role filtering.
-    assert {item.value for item in DecisionType} == set(contract_manifest()["decisions"])
 
 
 def test_the_cross_repo_stream_fixtures_still_match_their_manifest():

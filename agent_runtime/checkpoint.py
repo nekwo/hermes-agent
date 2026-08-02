@@ -113,7 +113,6 @@ ENTITY_CLASSES: tuple[EntityClass, ...] = (
     # since S53: its rows still ship on the status wire (`runtime_instances` /
     # `foreground_runtime`), so a checkpoint that omitted them would drop state a
     # reader can still see.
-    EntityClass("packet_artifacts", paths.packet_artifacts_dir, recursive=True),
 )
 
 ENTITY_CLASS_NAMES: tuple[str, ...] = tuple(entity.name for entity in ENTITY_CLASSES)

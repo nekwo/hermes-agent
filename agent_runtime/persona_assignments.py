@@ -36,7 +36,6 @@ from .tool_visibility import (
 from .tool_permissions import permission_options_for_chat
 
 TERMINAL_ASSIGNMENT_STATES = frozenset({"completed", "blocked", "cancelled"})
-_RELEASABLE_OWNER_TASK_STATES = frozenset({"done", "cancelled", "failed"})
 
 # Modes that only exist because the instance is holding a chat open; once its
 # last chat pointer is cleared the row demotes back to a plain configured agent.
@@ -114,43 +113,6 @@ def _session_presence_probe(session_db: Any | None = None) -> tuple[Any | None, 
     return probe, None
 
 
-def _owning_task_release_state(task_id: str) -> str | None:
-    """Terminal state name of the owning task, ``"archived"`` when the task file
-    has left the live store, or None when the task is live (or unreadable)."""
-    try:
-        path = paths.task_path(task_id)
-        if not path.exists():
-            return "archived"
-        state = str(json.loads(path.read_text(encoding="utf-8")).get("state") or "").strip().lower()
-    except Exception:
-        return None
-    return state if state in _RELEASABLE_OWNER_TASK_STATES else None
-
-
-def _persona_instance_owner_release_state(instance: PersonaInstance) -> str | None:
-    owners = {
-        owner
-        for owner in (
-            safe_optional_token(instance.current_task_id),
-            safe_optional_token(instance.goal_id),
-        )
-        if owner
-    }
-    if not owners:
-        return "taskless"
-    states: list[str] = []
-    for owner in owners:
-        state = _owning_task_release_state(owner)
-        if state is None:
-            return None
-        states.append(state)
-    if "done" in states:
-        return "done"
-    if "cancelled" in states:
-        return "cancelled"
-    if "failed" in states:
-        return "failed"
-    return "archived"
 ACTIVE_ASSIGNMENT_STATES = frozenset({"queued", "assigned", "running", "waiting_on_tool", "waiting_on_proof", "needs_input"})
 # S56 removed ``_worker_carries_live_binding``. It decided whether a WORKER row
 # could stamp its ``task_bound`` binding onto a persona instance during
@@ -403,70 +365,6 @@ class PersonaInstanceStore:
             existing.updated_at = now()
             self._write(existing)
         return self.get(instance_id)
-
-    def ensure_for_goal(self, persona: AgentPersona, *, goal_id: str, spawned_by: str | None, placement_id: str | None = None) -> PersonaInstance:
-        normalized_goal = safe_optional_token(goal_id)
-        placement = safe_assignment_token(placement_id) or safe_assignment_token(f"{normalized_goal}:{persona.id}")
-        instance_id = persona_instance_id_for_placement(placement)
-        try:
-            instance = self.get(instance_id)
-        except Exception:
-            ts = now()
-            instance = PersonaInstance(
-                id=instance_id,
-                persona_id=persona.id,
-                role=str(persona.role),
-                display_name=persona.display_name,
-                profile_id=persona.hermes_profile,
-                runtime_root=str(paths.store_root()),
-                state=WorkerSessionState.IDLE,
-                updated_at=ts,
-            )
-            self._write(instance)
-            self._event("persona_instance.created", instance, {"mode": "task_bound", "placement_id": placement})
-        changed = False
-        normalized_spawned_by = safe_optional_token(spawned_by)
-        # ``spawned_by`` is retained as the provenance/primary-parent scalar and
-        # can legitimately be a non-instance principal (the operator adds an
-        # instance ⇒ spawned_by="operator"). The authoritative parent SET is
-        # STEERING, so it is seeded from the spawn parent ONLY when that parent is
-        # instance-shaped; a principal is never a steering parent. Seeding a
-        # principal here was the writer that made the HUD render "steered by
-        # operator" for the add-instance/occupied-chat mint.
-        seed_parents = (
-            [normalized_spawned_by]
-            if looks_like_persona_instance_id(normalized_spawned_by)
-            else []
-        )
-        updates = {
-            "mode": "task_bound",
-            "current_task_id": normalized_goal,
-            "goal_id": normalized_goal,
-            "spawned_by": normalized_spawned_by,
-            # Kept in sync with the (instance-shaped) spawn parent at creation, so
-            # the on-disk record is self-consistent — not only healed by the
-            # read-time __post_init__ backfill (which now applies the same guard).
-            "steered_by": seed_parents,
-        }
-        for attr, value in updates.items():
-            if getattr(instance, attr) != value:
-                setattr(instance, attr, value)
-                changed = True
-        if changed:
-            instance.updated_at = now()
-            self._write(instance)
-            self._event(
-                "persona_instance.attributed",
-                instance,
-                {
-                    "goal_id": instance.goal_id,
-                    "spawned_by": instance.spawned_by,
-                    # Preserve the raw provenance in the durable log even when it
-                    # is a principal that does not enter the steering set.
-                    "steered_by": list(instance.steered_by),
-                },
-            )
-        return self.get(instance.id)
 
     def steer(
         self,
@@ -1225,65 +1123,19 @@ class PersonaInstanceStore:
                 return candidate
         return None
 
-    def _archive_office_placements(self, instance) -> None:
-        """Mission Office prune-lane hook (office plan §4.3): a reaped instance
-        must not leave a phantom desk file that re-materializes the agent —
-        and the fix lives HERE, never in a launcher-side filter (the
-        orphan-tombstone precedent). Best-effort: office archival never fails
-        the reap."""
+    def _archive_office_placements(self, instance: PersonaInstance) -> None:
+        """Archive office actors when a live placement is retired."""
         try:
             from .office_store import OfficeStore
 
-            OfficeStore(event_log=self.event_log).archive_actors_for_instance(instance.id, reason="instance_reaped")
+            OfficeStore(event_log=self.event_log).archive_actors_for_instance(
+                instance.id,
+                reason="instance_reaped",
+            )
         except Exception:
+            # Placement retirement remains authoritative even if the optional
+            # office projection is unavailable.
             pass
-
-    def sweep_orphaned_task_bound_instances(self, *, reason: str = "persona instance janitor") -> dict[str, Any]:
-        """Reap stale task-bound instances whose owner is terminal or gone.
-
-        Free-floating/profile chat instances are preserved. Instances with a
-        genuinely live active worker or run are reported but never touched.
-        """
-        before = [instance for instance in self.list_all() if instance.mode == "task_bound"]
-        reaped: list[str] = []
-        skipped_active: list[str] = []
-        preserved_live_owner: list[str] = []
-        for instance in before:
-            if self._has_live_binding(instance):
-                skipped_active.append(instance.id)
-                continue
-            owner_state = _persona_instance_owner_release_state(instance)
-            if owner_state is None:
-                preserved_live_owner.append(instance.id)
-                continue
-            if self._delete(instance):
-                reaped.append(instance.id)
-                self._event(
-                    "persona_instance.reaped",
-                    instance,
-                    {
-                        "task_id": safe_optional_token(instance.current_task_id),
-                        "goal_id": safe_optional_token(instance.goal_id),
-                        "reason": safe_assignment_text(reason, limit=240),
-                        "owner_state": owner_state,
-                    },
-                )
-                # S7-A producer: janitor reap also removes the keyed row.
-                emit_persona_instance_remove(self.event_log, instance, reason=reason)
-                self._archive_office_placements(instance)
-        after = [instance for instance in self.list_all() if instance.mode == "task_bound"]
-        return {
-            "before_task_bound_count": len(before),
-            "after_task_bound_count": len(after),
-            "reaped_persona_instance_ids": reaped,
-            "skipped_active_persona_instance_ids": skipped_active,
-            "preserved_live_owner_persona_instance_ids": preserved_live_owner,
-            "remaining_task_bound_persona_instance_ids": [instance.id for instance in after],
-            "reaped_count": len(reaped),
-            "skipped_active_count": len(skipped_active),
-            "preserved_live_owner_count": len(preserved_live_owner),
-            "remaining_count": len(after),
-        }
 
     def retire(
         self,
@@ -1838,7 +1690,7 @@ class PersonaInstanceStore:
             try:
                 from .store import ACTIVE_RUN_STATES, RunStore
 
-                run = RunStore(event_log=self.event_log).get(run_id)
+                run = RunStore().get(run_id)
                 if run.state in ACTIVE_RUN_STATES:
                     return True
             except Exception:
@@ -1994,20 +1846,6 @@ class PersonaAssignmentStore:
         normalized = safe_assignment_token(persona_id)
         return [assignment for assignment in self.list_all() if assignment.persona_id == normalized]
 
-    def list_for_goal(self, goal_id: str) -> list[PersonaAssignment]:
-        """Group assignments by the canonical goal id.
-
-        Matches on ``goal_id`` (the Stage 39 grouping key); for legacy records
-        where ``goal_id`` was never stamped, falls back to ``task_id`` so the
-        old ``goal_id == task.id`` records still resolve.
-        """
-        normalized = safe_optional_token(goal_id)
-        return [
-            assignment
-            for assignment in self.list_all()
-            if (assignment.goal_id or assignment.task_id) == normalized
-        ]
-
     def find_active(self, *, persona_id: str | None = None, goal_id: str | None = None, stage_id: str | None = None, kind: str | None = None) -> list[PersonaAssignment]:
         wanted_persona = safe_assignment_token(persona_id) if persona_id else None
         wanted_goal = safe_optional_token(goal_id) if goal_id else None
@@ -2022,29 +1860,6 @@ class PersonaAssignmentStore:
             and (wanted_stage is None or assignment.stage_id == wanted_stage)
             and (wanted_kind is None or assignment.kind == wanted_kind)
         ]
-
-    def attach_run(self, assignment_id: str, run_id: str) -> PersonaAssignment:
-        assignment = self.get(assignment_id)
-        safe_run_id = safe_optional_token(run_id)
-        if safe_run_id and safe_run_id not in assignment.run_ids:
-            assignment.run_ids.append(safe_run_id)
-        if assignment.state not in TERMINAL_ASSIGNMENT_STATES:
-            assignment.state = "running"
-        return self.update(assignment)
-
-    def attach_proof(self, assignment_id: str, proof_id: str) -> PersonaAssignment:
-        assignment = self.get(assignment_id)
-        safe_proof_id = safe_optional_token(proof_id)
-        if safe_proof_id and safe_proof_id not in assignment.proof_ids:
-            assignment.proof_ids.append(safe_proof_id)
-        return self.update(assignment)
-
-    def record_context(self, assignment_id: str, context_receipt_id: str | None) -> PersonaAssignment:
-        assignment = self.get(assignment_id)
-        safe_receipt = safe_optional_token(context_receipt_id)
-        if safe_receipt and safe_receipt not in assignment.context_receipt_ids:
-            assignment.context_receipt_ids.append(safe_receipt)
-        return self.update(assignment)
 
     def complete(self, assignment_id: str, *, state: str = "completed", error: str | None = None) -> PersonaAssignment:
         assignment = self.get(assignment_id)
@@ -2509,7 +2324,6 @@ def persona_instance_summary(
         "session_id": instance.default_chat_session_id,
         "context_receipt_id": instance.context_receipt_id,
         "compression_receipt_id": instance.compression_receipt_id,
-        "prompt_contract_hash": instance.prompt_contract_hash,
         "skill_manifest_hash": instance.skill_manifest_hash,
         "token_budget_used": instance.token_budget_used,
         "tool_budget_used": instance.tool_budget_used,

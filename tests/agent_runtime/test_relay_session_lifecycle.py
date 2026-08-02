@@ -2075,12 +2075,7 @@ def test_a_retired_target_is_refused_before_the_mint_lane_is_ever_entered(
 
 
 def _task_bound_goal_instance(goal_id: str = "goal_alpha", persona_id: str = "dev"):
-    """A goal-graph instance: placement-derived, ``task_bound``, with a root.
-
-    Built through ``ensure_for_goal`` — the store method the graph itself uses —
-    rather than by hand-writing ``mode``, so the fixture is the real shape the
-    guard has to recognise and cannot drift away from it.
-    """
+    """A representative historical task-bound row with a chat root."""
 
     from agent_runtime.models import AgentPersona
 
@@ -2096,7 +2091,11 @@ def _task_bound_goal_instance(goal_id: str = "goal_alpha", persona_id: str = "de
         hermes_profile=None,
     )
     store = PersonaInstanceStore()
-    instance = store.ensure_for_goal(persona, goal_id=goal_id, spawned_by=None)
+    instance = store.ensure_for_persona(persona)
+    instance.mode = "task_bound"
+    instance.goal_id = goal_id
+    instance.current_task_id = goal_id
+    instance = store.update(instance)
     assert instance.mode == "task_bound", instance.mode
     return instance
 

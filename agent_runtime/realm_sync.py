@@ -61,7 +61,6 @@ HARD_EXCLUDED_PATH_PARTS = {
     # box. It is the half of the portable-config split that must never travel —
     # publishing it would push one member's drive layout onto everyone else.
     MACHINE_ROOTS_FILENAME,
-    "packet_artifacts",
     "proofs",
     "runs",
     "state.db",

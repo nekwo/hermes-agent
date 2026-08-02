@@ -520,7 +520,6 @@ def test_conversation_contract_orders_tool_call_before_its_reply():
         state="open",
         history=_history_for_conversation(),
         trace=_trace_for_conversation(),
-        runs=[],
     )
     kinds = [message["kind"] for message in contract["messages"]]
     assert kinds == ["operator_message", "tool_call", "reply"], kinds
@@ -549,7 +548,6 @@ def test_conversation_contract_order_is_stable_under_source_shuffle():
             state="open",
                 history=history,
             trace=_trace_for_conversation(),
-            runs=[],
         )
         ids = [message["id"] for message in contract["messages"]]
         if baseline is None:

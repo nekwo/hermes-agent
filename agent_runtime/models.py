@@ -366,7 +366,6 @@ class PersonaInstance:
     session_id: str | None = None
     context_receipt_id: str | None = None
     compression_receipt_id: str | None = None
-    prompt_contract_hash: str | None = None
     skill_manifest_hash: str | None = None
     token_budget_used: int = 0
     tool_budget_used: int = 0

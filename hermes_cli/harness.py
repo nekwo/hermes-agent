@@ -32,9 +32,6 @@ from agent_runtime.coordinator_permissions import (
     authorize_coordinator_action,
     scope_for_persona,
 )
-from agent_runtime.decision_contract_examples import verify_harness_skill_examples
-from agent_runtime.decision_contract_registry import canonical_role_value, contract_manifest, hud_shape_index_for_stage, verify_registry
-from agent_runtime.decision_schema import AgentDecision
 from agent_runtime.default_scope import (
     ensure_default_scope,
     preview_default_scope_migration,
@@ -1101,16 +1098,11 @@ def build_parser(parent_subparsers) -> None:
     observe.add_argument("--json", action="store_true")
     observe.set_defaults(func=_cmd_observe)
 
-    contracts = subs.add_parser("contracts", help="Inspect canonical AgentDecision and Mission Control event contracts")
+    contracts = subs.add_parser("contracts", help="Inspect canonical Mission Control event contracts")
     contracts_subs = contracts.add_subparsers(dest="contracts_command")
     contracts_dump = contracts_subs.add_parser("dump", help="Dump redaction-safe contract registry")
-    contracts_dump.add_argument("--role", default=None)
-    contracts_dump.add_argument("--decision", default=None)
     contracts_dump.add_argument("--json", action="store_true")
     contracts_dump.set_defaults(func=_cmd_contracts_dump)
-    contracts_verify = contracts_subs.add_parser("verify-examples", help="Verify the contract registry is internally consistent")
-    contracts_verify.add_argument("--json", action="store_true")
-    contracts_verify.set_defaults(func=_cmd_contracts_verify_examples)
 
     worktree = subs.add_parser("worktree", help="Manage harness-managed git worktrees")
     worktree_subs = worktree.add_subparsers(dest="worktree_command", required=True)

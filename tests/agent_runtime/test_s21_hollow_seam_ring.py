@@ -77,7 +77,7 @@ def test_status_keeps_every_field_an_operator_can_still_learn_from(isolate_agent
         "observability",
         "runtime_instances",
         "parity",
-        "decision_contract_hash",
+        "event_contract_hash",
     ):
         assert key in data, f"S21 dropped a live status field: {key}"
     # RETARGETED at S56 (2026-08-01), not deleted: `lanes` was pinned here as a
@@ -152,9 +152,7 @@ def test_the_surviving_delta_op_routing_is_untouched():
         "run.progress": "chat.trace.appended",
         "persona_assignment.created": "instance.upserted",
         "persona_assignment.closed": "instance.upserted",
-        "incident.opened": "incident.opened",
-        "incident.closed": "incident.closed",
-        "board.card.created": "event.appended",
+            "board.card.created": "event.appended",
     }
     for event_type, expected in cases.items():
         assert event_type in ALLOWED_EVENT_TYPES

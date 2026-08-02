@@ -1431,7 +1431,7 @@ def test_incident_flood_does_not_starve_trace_window():
         )
     # Newest tail: a runaway incident loop far larger than the fetch window.
     for _ in range(600):
-        events.append(Event(ts=ts, type="incident.opened", task_id="task_flooded", run_id=None, persona_id="dev"))
+        events.append(Event(ts=ts, type="persona.updated", task_id="task_flooded", run_id=None, persona_id="dev", payload={"persona_id": "dev"}))
 
     rows = persona_chat_trace_summary(
         persona_instances=[_persona_instance("personainst_dev", "dev", "task_flooded")],

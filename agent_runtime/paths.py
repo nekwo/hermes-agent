@@ -13,10 +13,6 @@ def store_root() -> Path:
     return resolution.store_root
 
 
-def goals_dir() -> Path:
-    return store_root() / "goals"
-
-
 def runs_dir() -> Path:
     return store_root() / "runs"
 
@@ -263,18 +259,6 @@ def prompt_observability_index_path() -> Path:
 # 2026-07-30; their last readers were the deleted stores and the two checkpoint
 # EntityClass rows retired in the same commit. Same rule as S23's writer-less
 # path sweep.
-
-
-def packet_artifacts_dir() -> Path:
-    return store_root() / "packet_artifacts"
-
-
-def task_path(task_id: str) -> Path:
-    return goal_path(task_id)
-
-
-def goal_path(goal_id: str) -> Path:
-    return goals_dir() / f"{_safe_path_token(goal_id)}.json"
 
 
 def persona_instance_path(persona_instance_id: str) -> Path:

@@ -26,8 +26,9 @@ def test_return_summary_posts_bounded_parent_message_and_records_lineage():
     # database, not in a profile-scoped one (defect D2,
     # docs/agent-runtime-harness/chat-session-presence-authority.md).
     store = PersonaInstanceStore()
-    parent = store.ensure_for_goal(_persona("neko_supervisor"), goal_id="task_r3", spawned_by=None)
-    child = store.ensure_for_goal(_persona("dev"), goal_id="task_r3", spawned_by=parent.id)
+    parent = store.ensure_for_persona(_persona("neko_supervisor"))
+    child = store.ensure_for_persona(_persona("dev"))
+    child = store.set_parents(child.id, [parent.id], goal_id="task_r3")
     summary = "R3 continuity proof " + ("x" * (SUMMARY_LIMIT + 200))
     proof_ids = [f"proof_{idx}_{'p' * 200}" for idx in range(20)]
     artifact_refs = [f"artifact://r3/{idx}/{'a' * 200}" for idx in range(20)]
@@ -82,11 +83,7 @@ def test_return_summary_cli_uses_first_class_primitive(tmp_path, monkeypatch, ca
     """
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
-    child = PersonaInstanceStore().ensure_for_goal(
-        _persona("dev"),
-        goal_id="task_r3_cli",
-        spawned_by="personainst_neko_supervisor",
-    )
+    child = PersonaInstanceStore().ensure_for_persona(_persona("dev"))
 
     from hermes_cli import harness
 

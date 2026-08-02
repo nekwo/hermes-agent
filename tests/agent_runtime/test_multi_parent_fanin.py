@@ -37,7 +37,9 @@ def _assignment_config() -> AgentRuntimeConfig:
 
 
 def _make(store: PersonaInstanceStore, persona_id: str, *, goal_id: str = "g1") -> PersonaInstance:
-    return store.ensure_for_goal(_persona(persona_id), goal_id=goal_id, spawned_by=None)
+    instance = store.ensure_for_persona(_persona(persona_id))
+    instance.goal_id = goal_id
+    return store.update(instance)
 
 
 # --- store: set-operations + primary mirror -------------------------------

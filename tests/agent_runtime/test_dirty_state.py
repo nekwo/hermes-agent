@@ -15,11 +15,11 @@ from agent_runtime.store import TaskStore
 
 def test_dirty_state_reports_runtime_temp_state(monkeypatch):
     monkeypatch.setattr("agent_runtime.dirty_state.repo_dirty_states", lambda repos: [])
-    state = build_dirty_state(tasks=[], runs=[], repos=[])
+    state = build_dirty_state(runs=[], repos=[])
 
     assert state["dirty"] is False
-    assert state["runtime"]["stage47_temp_open_tasks"] == 0
-    assert state["runtime"]["stage47_temp_active_runs"] == 0
+    assert "open_tasks" not in state["runtime"]
+    assert "stage47_temp_open_tasks" not in state["runtime"]
     assert state["summary"] == "clean"
 
 

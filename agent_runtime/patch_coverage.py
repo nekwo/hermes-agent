@@ -55,6 +55,8 @@ COVERED_DOMAIN_EVENT_TYPES: frozenset[str] = frozenset(
     {
         "persona_instance.steered",
         "persona_instance.profile_updated",
+        # Legacy fold-classifier entries retained for cross-stack fixture
+        # compatibility; their domain events are no longer emittable.
         "persona_instance.reaped",
         "incident.closed",
     }

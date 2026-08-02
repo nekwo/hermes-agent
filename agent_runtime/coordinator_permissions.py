@@ -8,16 +8,11 @@ from .runtime_config import CoordinatorPermissionConfig
 STEER_ACTIONS = frozenset(
     {
         "mission.chat.message",
-        "worker.nudge",
-        "worker.resume",
-        "use_output",
-        "re_prompt",
-        "re_scope",
         "re_route",
     }
 )
 CREATE_ACTIONS = frozenset({"persona.instance.create", "persona.instance.open_chat"})
-KILL_ACTIONS = frozenset({"persona.instance.close", "persona.instance.retire", "run.cancel"})
+KILL_ACTIONS = frozenset({"persona.instance.close", "persona.instance.retire"})
 OPERATOR_ACTORS = frozenset({"operator", "tony", "cli"})
 
 

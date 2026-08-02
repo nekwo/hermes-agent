@@ -504,7 +504,6 @@ def mission_chat_prompt_observability(
         "preloaded_skills_loaded": loaded_names,
         "preloaded_skills_missing": missing_names,
         "skill_manifest_hash": skill_manifest_hash,
-        "prompt_contract_hash": _generated_prompt_contract_hash(),
         "skill_assignment_removals": skill_assignment_removals,
         # C1 RECORD-ONCE (2026-07-17): the built row carries ONE copy of each
         # fact — the pre-C1 alias keys (``skills_catalog`` ≡ available_skills,
@@ -2619,12 +2618,6 @@ def _skill_candidate_content_hash(candidate: Any | None) -> str | None:
     from agent.skill_utils import skill_package_content_hash
 
     return skill_package_content_hash(candidate.skill_dir, candidate.skill_md)
-
-
-def _generated_prompt_contract_hash() -> str:
-    from .decision_contract_registry import contract_hash
-
-    return contract_hash()
 
 
 def _list_used_skill_entries(final_model_input: dict[str, Any] | None) -> list[Any]:

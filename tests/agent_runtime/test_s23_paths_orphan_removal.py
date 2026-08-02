@@ -38,12 +38,11 @@ REMOVED_PATH_HELPERS = (
 def test_the_lookalike_path_keep_set_survives():
     """Names that merely look like the removal set -- all still have live callers."""
 
-    # goals/ is still read through task_path (persona_assignments.py) --
-    # ``goals_dir`` and ``goal_path`` are load-bearing, not mission residue.
-    assert callable(paths.goals_dir)
-    assert callable(paths.goal_path)
-    assert callable(paths.task_path)
-    # store.py still lists and writes AgentRun rows.
+    # The final task/goal ownership cut retired the remaining goal/task helpers.
+    assert not hasattr(paths, "goals_dir")
+    assert not hasattr(paths, "goal_path")
+    assert not hasattr(paths, "task_path")
+    # store.py still reads historical AgentRun rows.
     assert callable(paths.runs_dir)
     assert callable(paths.run_path)
     # store.py still writes Incident rows; only the .txt detail sidecar went.
@@ -97,7 +96,6 @@ def test_checkpoint_keeps_every_class_that_still_has_a_writer():
         #
         # S56 (2026-08-01) removed `worker_sessions` and `repo_bundles` by the
         # same rule; their absence is asserted below, not merely dropped.
-        "packet_artifacts",
     ):
         assert name in checkpoint.ENTITY_CLASS_NAMES
     # INVERTED at S56: both were pinned above as "still has a writer".
@@ -109,3 +107,4 @@ def test_checkpoint_keeps_every_class_that_still_has_a_writer():
     # state a reader can see.
     assert "worker_sessions" not in checkpoint.ENTITY_CLASS_NAMES
     assert "repo_bundles" not in checkpoint.ENTITY_CLASS_NAMES
+    assert "packet_artifacts" not in checkpoint.ENTITY_CLASS_NAMES

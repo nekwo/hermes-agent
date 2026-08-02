@@ -76,21 +76,18 @@ def _seed_archive_batch(root, *, count: int, description: str = "x") -> None:
 
 def _seed_incident(store, incident_id, *, closed_delta_hours=None) -> None:
     n = now()
-    store.open(
-        Incident(
-            id=incident_id,
-            task_id="t1",
-            run_id=None,
-            kind="proof_failure",
-            summary=f"summary {incident_id}",
-            detail_path=None,
-            opened_at=n,
-        )
+    incident = Incident(
+        id=incident_id,
+        task_id="t1",
+        run_id=None,
+        kind="proof_failure",
+        summary=f"summary {incident_id}",
+        detail_path=None,
+        opened_at=n,
     )
     if closed_delta_hours is not None:
-        incident = store.get(incident_id)
         incident.closed_at = n - timedelta(hours=closed_delta_hours)
-        _write_model(paths.incident_path(incident_id), incident)
+    _write_model(paths.incident_path(incident_id), incident)
 
 
 @pytest.fixture

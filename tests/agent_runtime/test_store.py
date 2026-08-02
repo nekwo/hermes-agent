@@ -56,28 +56,6 @@ def test_task_store_filters_open_and_by_state():
     assert_task_store_stub()
 
 
-def test_incident_events_preserve_lane_attribution(isolate_agent_runtime_root):
-    events = EventLog()
-    task_store = TaskStore(event_log=events)
-    incidents = IncidentStore(event_log=events)
-    ts = now()
-    incidents.open(
-        Incident(
-            id="inc_lane",
-            task_id="task_lane",
-            run_id=None,
-            kind="budget",
-            summary="budget",
-            detail_path=None,
-            opened_at=ts,
-            metadata={"lane_id": "lane_1", "lane_state_at_open": "parked_by_budget", "budget_state": {"state": "soft_limit"}},
-        )
-    )
-
-    payloads = [event.payload for event in events.tail(10)]
-    assert any(payload.get("incident_id") == "inc_lane" and payload.get("lane_id") == "lane_1" for payload in payloads)
-
-
 def test_task_store_list_all_tolerates_concurrent_archive_move(monkeypatch):
     assert_task_store_stub()
 
@@ -104,29 +82,6 @@ def test_archive_preserves_incidents_and_removes_live_blocker(tmp_path, monkeypa
 
 def test_archive_writes_task_event_slice_and_compaction_preserves_unarchived_rows(tmp_path, monkeypatch):
     assert_task_store_stub()
-
-
-def test_incident_store_close_removes_task_open_incident_reference():
-    task_store = TaskStore()
-    task = make_task("task_with_incident", TaskState.BLOCKED)
-    incident_store = IncidentStore()
-    incident_store.open(
-        Incident(
-            id="inc_stale",
-            task_id=task.id,
-            run_id=None,
-            kind="run_budget_exceeded",
-            summary="budget",
-            detail_path=None,
-            opened_at=now(),
-        )
-    )
-
-    incident_store.close("inc_stale", reason="resolved")
-
-    assert incident_store.get("inc_stale").closed_at is not None
-    with pytest.raises(NotFound):
-        task_store.get(task.id)
 
 
 def test_agent_store_save_get_and_list():
@@ -157,11 +112,8 @@ def seed_run(
 ) -> AgentRun:
     """Persist a run row without ``RunStore.open_run``.
 
-    S17 removed the RunStore write surface that had no production callers left
-    after the mission lane went (``open_run``/``heartbeat``/``find_stale``/
-    ``approve_continuation``/``latest_session_id``/``find_active``). ``update``
-    is the surviving write path and tolerates a missing previous row, so the
-    tests below cover the surviving read/update surface and seed through it.
+    The run store is historical/read-only. Seed representative persisted rows
+    directly so the tests cover only its surviving reader surface.
     """
 
     ts = now()
@@ -174,32 +126,17 @@ def seed_run(
         started_at=ts,
         last_heartbeat_at=ts,
     )
-    assert RunStore().update(run) is True
+    store_module._write_model(paths.run_path(run.id), run)
     return run
 
 
-def test_run_store_update_does_not_overwrite_terminal_run_with_stale_object():
+def test_run_store_is_historical_read_only():
     runs = RunStore()
     run = seed_run(state=RunState.COMPLETED)
-    stale = run
-    stale.state = RunState.RUNNING
-    stale.progress = {"type": "run.progress", "summary": "stale"}
 
-    runs.update(stale)
-
-    saved = runs.get(run.id)
-    assert saved.state == RunState.COMPLETED
-    assert saved.progress is None
-
-
-def test_run_store_update_sanitizes_session_id_before_persist():
-    runs = RunStore()
-    run = seed_run()
-    run.session_id = "session_secret_token_C:/Users/example/config"
-
-    runs.update(run)
-    saved = runs.get(run.id)
-    assert saved.session_id is None
+    assert runs.get(run.id) == run
+    assert not hasattr(runs, "update")
+    assert not hasattr(runs, "list_for_task")
 
 
 # The duplicate-active-run guard went with its writer: it lived inside
@@ -212,7 +149,7 @@ def test_mission_proof_store_is_removed():
     assert not hasattr(store_module, "ProofStore")
 
 
-def test_incident_store_open_close_and_list_open():
+def test_incident_store_reads_open_and_closed_history():
     ts = now()
     incident = Incident(
         id="inc_1",
@@ -225,13 +162,15 @@ def test_incident_store_open_close_and_list_open():
     )
     store = IncidentStore()
 
-    store.open(incident)
+    store_module._write_model(paths.incident_path(incident.id), incident)
     assert store.get("inc_1") == incident
     assert store.list_open_with_closed_count()[0] == [incident]
 
-    closed = store.close("inc_1")
-    assert closed.closed_at is not None
+    incident.closed_at = now()
+    store_module._write_model(paths.incident_path(incident.id), incident)
     assert store.list_open_with_closed_count()[0] == []
+    assert not hasattr(store, "open")
+    assert not hasattr(store, "close")
 
 
 def test_incident_store_open_with_closed_count_skips_closed_model_coercion(

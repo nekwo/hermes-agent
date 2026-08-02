@@ -99,7 +99,7 @@ WRITE_DEAD_RUN_STORE_METHODS = (
     "find_active",
 )
 
-LIVE_RUN_STORE_METHODS = ("get", "update", "list_for_task", "list_all")
+LIVE_RUN_STORE_METHODS = ("get", "list_all")
 
 DE_REGISTERED_RUN_EVENT_TYPES = frozenset({"run.heartbeat", "run.approved"})
 
@@ -115,46 +115,11 @@ def test_the_names_other_modules_import_from_store_survive():
     """Negative gate: the cut trimmed store.py's imports, and six modules read
     ``ACTIVE_RUN_STATES`` / ``_safe_session_id`` straight off this module."""
 
-    for name in ("ACTIVE_RUN_STATES", "TERMINAL_RUN_STATES", "_safe_session_id", "TaskStore"):
+    for name in ("ACTIVE_RUN_STATES", "TaskStore"):
         assert hasattr(store_module, name), name
 
 
-def test_safe_event_token_survived_the_cut_and_still_gates_incident_payloads():
-    """The live helper wedged between the two dead blocks.
-
-    ``IncidentStore.open`` copies metadata onto the ``incident.opened`` payload
-    only when ``_safe_event_token`` accepts the value. Pinned by behavior so a
-    future cut cannot delete the gate and keep the test green.
-    """
-
-    assert callable(getattr(store_module, "_safe_event_token", None))
-
-    IncidentStore().open(
-        Incident(
-            id="inc_s17",
-            task_id="task_s17",
-            run_id=None,
-            kind="tool_failure",
-            summary="s17",
-            detail_path="incidents/inc_s17.txt",
-            opened_at=now(),
-            metadata={
-                "stage_id": "stage_1",
-                # Rejected: spaces and a path separator are not token-safe.
-                "lane_id": "C:/Users/example/secret lane",
-            },
-        )
-    )
-
-    event = EventLog().tail(1)[0]
-    assert event.type == "incident.opened"
-    assert event.payload["stage_id"] == "stage_1"
-    assert "lane_id" not in event.payload
-
-
-
-
-def test_the_surviving_run_store_surface_is_exactly_the_read_and_close_path():
+def test_the_surviving_run_store_surface_is_exactly_the_historical_read_path():
     public = {
         name
         for name, _ in inspect.getmembers(RunStore, predicate=inspect.isfunction)

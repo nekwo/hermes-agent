@@ -91,6 +91,7 @@ RETIRED_SINCE_S29 = (
     "parse_structured_decision",
     "validate_decision_for_role",
     "validate_planning_decision",
+    "role_from_persona",
 )
 
 
