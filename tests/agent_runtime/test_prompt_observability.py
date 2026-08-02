@@ -472,6 +472,26 @@ def test_snapshot_omits_mission_hud_for_unbound_instance(monkeypatch):
     assert "mission_hud" not in snapshot["chat_contexts"][0]
 
 
+def test_snapshot_empty_roster_omits_compiled_flow_and_persona_context(monkeypatch):
+    from agent_runtime import prompt_observability as po
+
+    monkeypatch.setattr(po, "load_latest_prompt_observability_contexts", lambda: [])
+    snapshot = snapshot_prompt_observability(
+        personas=[
+            SimpleNamespace(
+                id="custom_research_lead",
+                hermes_profile="research",
+                display_name="Research Lead",
+                role="research_coordinator",
+            )
+        ],
+        persona_instances=[],
+    )
+
+    assert snapshot["chat_contexts"] == []
+    assert "default_flow" not in snapshot
+
+
 def test_snapshot_includes_situational_hud_for_instance(monkeypatch):
     from agent_runtime import prompt_observability as po
 

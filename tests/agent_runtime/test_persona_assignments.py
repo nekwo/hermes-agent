@@ -4639,6 +4639,64 @@ def test_profile_persona_instance_summary_includes_tool_visibility(isolate_agent
     assert summary["tool_count"] == len(detail["tool_resolution"]["final_model_tools"])
 
 
+def test_profile_visibility_preserves_custom_instance_role_without_config(monkeypatch):
+    from agent_runtime.persona_assignments import _profile_visibility_persona
+
+    monkeypatch.setattr("agent_runtime.config.load_agent_runtime_config", lambda: object())
+    monkeypatch.setattr("agent_runtime.config.ensure_persisted_personas", lambda cfg: [])
+    instance = PersonaInstance(
+        id="personainst_profile_researcher",
+        persona_id="profile:researcher",
+        role="literature_reviewer",
+        display_name="Researcher",
+        profile_id="researcher",
+        runtime_root=str(REPO_ROOT),
+        state=WorkerSessionState.IDLE,
+    )
+
+    persona = _profile_visibility_persona(instance)
+
+    assert persona.id == "profile:researcher"
+    assert persona.role == "literature_reviewer"
+    assert persona.hermes_profile == "researcher"
+
+
+def test_profile_visibility_uses_configured_custom_role_without_rewriting_raw_id(monkeypatch):
+    from agent_runtime.persona_assignments import _profile_visibility_persona
+
+    configured = AgentPersona(
+        id="configured_researcher",
+        display_name="Configured Researcher",
+        role="evidence_synthesist",
+        model="gpt-custom",
+        provider="custom-provider",
+        api_mode="chat_completions",
+        toolsets=["search"],
+        system_prompt_path="SOUL.md",
+        hermes_profile="researcher",
+    )
+    monkeypatch.setattr("agent_runtime.config.load_agent_runtime_config", lambda: object())
+    monkeypatch.setattr(
+        "agent_runtime.config.ensure_persisted_personas", lambda cfg: [configured]
+    )
+    instance = PersonaInstance(
+        id="personainst_profile_researcher",
+        persona_id="profile:researcher",
+        role="profile",
+        display_name="Raw Profile Chat",
+        profile_id="researcher",
+        runtime_root=str(REPO_ROOT),
+        state=WorkerSessionState.IDLE,
+    )
+
+    persona = _profile_visibility_persona(instance)
+
+    assert persona.id == "profile:researcher"
+    assert persona.display_name == "Raw Profile Chat"
+    assert persona.role == "evidence_synthesist"
+    assert persona.toolsets == ["search"]
+
+
 def test_task_store_cancel_closes_persona_assignments():
     _assert_task_store_stub()
 

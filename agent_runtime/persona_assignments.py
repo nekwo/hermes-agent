@@ -5,7 +5,7 @@ import json
 import logging
 import shutil
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -2673,16 +2673,41 @@ def _profile_visibility_persona(instance: PersonaInstance) -> AgentPersona | Non
         persisted_personas = list(ensure_persisted_personas(load_agent_runtime_config()))
     except Exception:
         persisted_personas = []
+    configured = next(
+        (
+            candidate
+            for candidate in persisted_personas
+            if safe_assignment_token(getattr(candidate, "id", None))
+            == safe_assignment_token(resolved_persona_id)
+            or (
+                profile_id
+                and safe_assignment_token(getattr(candidate, "hermes_profile", None))
+                == safe_assignment_token(profile_id)
+            )
+        ),
+        None,
+    )
+    if configured is not None:
+        return replace(
+            configured,
+            id=resolved_persona_id,
+            display_name=display_name,
+            hermes_profile=profile_id or configured.hermes_profile,
+            skills=(
+                list(instance.skill_overrides)
+                if instance.skill_overrides is not None
+                else list(configured.skills)
+            ),
+        )
     return AgentPersona(
         id=resolved_persona_id,
         display_name=display_name,
-        role="alice_supervisor",
-        model=None,
-        provider=None,
-        api_mode="codex_responses",
+        role=instance.role,
+        model=instance.model,
+        provider=instance.provider,
+        api_mode=instance.api_mode,
         toolsets=profile_chat_toolsets(profile_id, persisted_personas),
         system_prompt_path="",
-        autonomy="propose_only",
         hermes_profile=profile_id or None,
         skills=list(instance.skill_overrides or []),
     )

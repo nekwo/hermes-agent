@@ -656,46 +656,47 @@ def test_operator_channel_projects_canonical_goal_conversation_and_filters_telem
     )
 
 
-def test_operator_channel_mirrors_child_assignment_without_claiming_child_instance():
+def test_operator_channel_relationships_follow_custom_instance_graph_without_trace_mirroring():
     ts = now()
     channels = operator_channel_summary(
         persona_instances=[
             PersonaInstance(
-                id="personainst_neko_supervisor",
-                persona_id="neko_supervisor",
-                role="supervisor",
-                display_name="Neko Supervisor",
+                id="personainst_research_lead",
+                persona_id="research_lead",
+                role="research_coordinator",
+                display_name="Research Lead",
                 profile_id=None,
                 runtime_root="test-runtime",
                 state=WorkerSessionState.RUNNING,
                 mode="task_bound",
                 current_task_id="task_live",
                 goal_id="goal_live",
-                session_id="persona_chat_neko_live",
-                current_chat_goal="Neko root handoff proof",
+                session_id="persona_chat_research_live",
+                current_chat_goal="Research handoff proof",
                 updated_at=ts,
             ),
             PersonaInstance(
-                id="personainst_dev",
-                persona_id="dev",
-                role="developer",
-                display_name="Dev",
+                id="personainst_fact_checker",
+                persona_id="fact_checker",
+                role="evidence_reviewer",
+                display_name="Fact Checker",
                 profile_id=None,
                 runtime_root="test-runtime",
                 state=WorkerSessionState.RUNNING,
                 mode="task_bound",
                 current_task_id="task_live",
                 goal_id="goal_live",
-                session_id="persona_chat_dev_live",
-                current_chat_goal="Neko root handoff proof",
+                session_id="persona_chat_fact_checker_live",
+                current_chat_goal="Research handoff proof",
+                steered_by=["personainst_research_lead"],
                 updated_at=ts,
             ),
         ],
         persona_chat_history=[
             {
-                "session_id": "persona_chat_neko_live",
-                "persona_id": "neko_supervisor",
-                "persona_instance_id": "personainst_neko_supervisor",
+                "session_id": "persona_chat_research_live",
+                "persona_id": "research_lead",
+                "persona_instance_id": "personainst_research_lead",
                 "task_id": "task_live",
                 "goal_id": "goal_live",
                 "title": "Mission run",
@@ -706,32 +707,32 @@ def test_operator_channel_mirrors_child_assignment_without_claiming_child_instan
         ],
         persona_chat_trace=[
             {
-                "session_id": "persona_chat_neko_live",
-                "persona_id": "neko_supervisor",
-                "persona_instance_id": "personainst_neko_supervisor",
+                "session_id": "persona_chat_research_live",
+                "persona_id": "research_lead",
+                "persona_instance_id": "personainst_research_lead",
                 "task_id": "task_live",
                 "goal_id": "goal_live",
                 "entries": [
                     {
                         "event": "progress",
-                        "summary": "Neko routed work to Dev.",
+                        "summary": "Research lead routed work to the fact checker.",
                         "status": "handoff",
                         "ts": ts.isoformat(),
                     }
                 ],
             },
             {
-                "session_id": "persona_chat_dev_live",
-                "persona_id": "dev",
-                "persona_instance_id": "personainst_dev",
+                "session_id": "persona_chat_fact_checker_live",
+                "persona_id": "fact_checker",
+                "persona_instance_id": "personainst_fact_checker",
                 "task_id": "task_live",
                 "goal_id": "goal_live",
                 "entries": [
                     {
                         "event": "assignment_created",
-                        "persona_id": "dev",
-                        "persona_instance_id": "personainst_dev",
-                        "assignment_id": "assign_dev",
+                        "persona_id": "fact_checker",
+                        "persona_instance_id": "personainst_fact_checker",
+                        "assignment_id": "assign_fact_check",
                         "stage_id": "implement",
                         "title": "Implement",
                         "message": "Implement the scoped work and attach proof.",
@@ -743,17 +744,25 @@ def test_operator_channel_mirrors_child_assignment_without_claiming_child_instan
         ],
     )
 
-    root = next(channel for channel in channels if channel["persona_id"] == "neko_supervisor")
-    assert root["source_instance_ids"] == ["personainst_neko_supervisor"]
+    root = next(channel for channel in channels if channel["persona_id"] == "research_lead")
+    child = next(channel for channel in channels if channel["persona_id"] == "fact_checker")
+    assert root["source_instance_ids"] == ["personainst_research_lead"]
     assert not any(
         warning["code"] == "duplicate_instances_same_channel"
         for warning in root["warnings"]
     )
-    texts = "\n".join(
+    root_texts = "\n".join(
         message["display_text"] for message in root["conversation"]["messages"]
     )
-    assert "Prompted dev." in texts
-    assert "Implement the scoped work" in texts
+    child_texts = "\n".join(
+        message["display_text"] for message in child["conversation"]["messages"]
+    )
+    assert "Implement the scoped work" not in root_texts
+    assert "Implement the scoped work" in child_texts
+    assert root["conversation"]["root_thread_id"] == root["channel_id"]
+    assert root["conversation"]["parent_thread_id"] is None
+    assert child["conversation"]["root_thread_id"] == root["channel_id"]
+    assert child["conversation"]["parent_thread_id"] == root["channel_id"]
 
 
 def _dev_task_instance(ts) -> PersonaInstance:

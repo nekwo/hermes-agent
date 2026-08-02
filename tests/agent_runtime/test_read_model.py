@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import json
+import sqlite3
 import subprocess
 import sys
 import time
@@ -67,6 +68,8 @@ def test_wal_crash_mid_transaction_leaves_db_consistent(isolate_agent_runtime_ro
     assert reopened.render_snapshot() is not None
     assert reopened.projection_watermark("snapshot") == old_watermark
     assert reopened.read_projection("agent_instances")["rows"] == []
+    with sqlite3.connect(reopened.db_path) as connection:
+        assert connection.execute("PRAGMA integrity_check").fetchone() == ("ok",)
 
 
 def test_flag_off_is_inert(isolate_agent_runtime_root, monkeypatch):

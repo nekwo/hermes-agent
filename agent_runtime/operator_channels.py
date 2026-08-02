@@ -172,7 +172,7 @@ def operator_channel_summary(
             )
         builder.add_trace(row)
 
-    _mirror_child_assignment_trace_to_roots(channels.values(), persona_chat_trace)
+    conversation_relationships = _operator_conversation_relationships(channels.values())
 
     return [
         channel
@@ -182,6 +182,7 @@ def operator_channel_summary(
                 accountant=accountant,
                 display_names=display_names,
                 omitted_history_session_ids=omitted_history_session_ids,
+                conversation_relationships=conversation_relationships,
             )
             for builder in channels.values()
         )
@@ -247,6 +248,7 @@ class _OperatorChannelBuilder:
         accountant: Any = None,
         display_names: dict[str, str] | None = None,
         omitted_history_session_ids: set[str] | None = None,
+        conversation_relationships: dict[str, tuple[str, str | None]] | None = None,
     ) -> dict[str, Any] | None:
         history = self._bound_history() or _latest_history(self.history_rows)
         trace = _merged_trace(self.trace_rows)
@@ -311,6 +313,10 @@ class _OperatorChannelBuilder:
 
         entries = list(trace.get("entries") or []) if trace else []
         channel_id = f"{persona_id}::{session_id or canonical_id}"
+        root_thread_id, parent_thread_id = (conversation_relationships or {}).get(
+            canonical_id,
+            (channel_id, None),
+        )
         goal_id = _first_text(
             getattr(canonical, "goal_id", None) if canonical is not None else None,
             history.get("goal_id") if history else None,
@@ -341,6 +347,8 @@ class _OperatorChannelBuilder:
             runs=channel_runs,
             accountant=accountant,
             display_names=display_names,
+            root_thread_id=root_thread_id,
+            parent_thread_id=parent_thread_id,
         )
         if _turn_identity_dropped(entries, conversation.get("messages") or []):
             warnings.append(
@@ -447,76 +455,84 @@ class _OperatorChannelBuilder:
         }
 
 
-def _mirror_child_assignment_trace_to_roots(
+def _operator_conversation_relationships(
     builders: Iterable["_OperatorChannelBuilder"],
-    persona_chat_trace: list[dict[str, Any]],
-) -> None:
-    builders_list = list(builders)
-    roots_by_id: dict[str, list[_OperatorChannelBuilder]] = {}
-    for builder in builders_list:
-        if not _builder_is_neko_root(builder):
-            continue
-        for runtime_id in _builder_runtime_ids(builder):
-            roots_by_id.setdefault(runtime_id, []).append(builder)
+) -> dict[str, tuple[str, str | None]]:
+    """Resolve conversation ancestry from the persisted instance graph.
 
-    for row in persona_chat_trace:
-        entries = [
-            entry
-            for entry in list(row.get("entries") or [])
-            if isinstance(entry, dict)
-            and safe_assignment_token(entry.get("event")) in {"assignment_created", "assignment_closed"}
-            and safe_assignment_token(entry.get("persona_id")) != "neko_supervisor"
+    ``PersonaInstance.steered_by`` is the authority.  The conversation wire has
+    one parent field, so it follows the store's primary-parent convention (the
+    first entry, mirrored by ``spawned_by``).  A missing/out-of-roster parent or
+    a cycle degrades to a standalone thread; no persona id is promoted to root
+    by convention.
+    """
+
+    instances_by_id: dict[str, PersonaInstance] = {}
+    channel_by_instance_id: dict[str, str] = {}
+    canonical_instances: dict[str, PersonaInstance] = {}
+    for builder in builders:
+        history = builder._bound_history() or _latest_history(builder.history_rows)
+        trace = _merged_trace(builder.trace_rows)
+        canonical = _canonical_instance(builder.instances, history=history)
+        if canonical is None:
+            continue
+        persona_id = _first_text(
+            getattr(canonical, "persona_id", None),
+            history.get("persona_id") if history else None,
+            trace.get("persona_id") if trace else None,
+        )
+        persona_id = _canonical_persona_id(persona_id) or persona_id or "unknown"
+        canonical_id = _first_text(
+            getattr(canonical, "id", None),
+            history.get("persona_instance_id") if history else None,
+            trace.get("persona_instance_id") if trace else None,
+            persona_instance_id_for(persona_id),
+        )
+        session_id = _first_text(
+            history.get("session_id") if history else None,
+            trace.get("session_id") if trace else None,
+            getattr(canonical, "session_id", None),
+        )
+        channel_id = f"{persona_id}::{session_id or canonical_id}"
+        canonical_instances[canonical_id] = canonical
+        for instance in builder.instances:
+            instance_id = _safe_instance_id(instance)
+            if not instance_id:
+                continue
+            instances_by_id[instance_id] = instance
+            channel_by_instance_id[instance_id] = channel_id
+
+    relationships: dict[str, tuple[str, str | None]] = {}
+    for canonical_id, instance in canonical_instances.items():
+        instance_id = _safe_instance_id(instance)
+        if not instance_id:
+            continue
+        own_channel_id = channel_by_instance_id[instance_id]
+        parent_ids = [
+            parent_id
+            for raw in list(getattr(instance, "steered_by", None) or [])
+            if (parent_id := safe_assignment_text(raw, limit=160))
         ]
-        if not entries:
-            continue
-        runtime_ids = set(_row_runtime_ids(row))
-        for entry in entries:
-            runtime_ids.update(_entry_runtime_ids(entry))
-        targets: list[_OperatorChannelBuilder] = []
-        for runtime_id in runtime_ids:
-            for builder in roots_by_id.get(runtime_id, []):
-                if builder not in targets:
-                    targets.append(builder)
-        for builder in targets:
-            builder.add_trace({**row, "entries": entries, "_mirrored_to_root": True})
-
-
-def _builder_is_neko_root(builder: "_OperatorChannelBuilder") -> bool:
-    for instance in builder.instances:
-        if safe_assignment_token(getattr(instance, "persona_id", None)) == "neko_supervisor":
-            return True
-    for row in [*builder.history_rows, *builder.trace_rows]:
-        if safe_assignment_token(row.get("persona_id")) == "neko_supervisor":
-            return True
-    return False
-
-
-def _builder_runtime_ids(builder: "_OperatorChannelBuilder") -> set[str]:
-    ids: set[str] = set()
-    for instance in builder.instances:
-        for value in (
-            getattr(instance, "goal_id", None),
-            getattr(instance, "current_task_id", None),
-            getattr(instance, "assignment_task_id", None),
-        ):
-            normalized = safe_assignment_text(value, limit=160)
-            if normalized:
-                ids.add(normalized)
-    for row in [*builder.history_rows, *builder.trace_rows]:
-        ids.update(_row_runtime_ids(row))
-        for entry in list(row.get("entries") or []):
-            if isinstance(entry, dict):
-                ids.update(_entry_runtime_ids(entry))
-    return ids
-
-
-def _row_runtime_ids(row: dict[str, Any]) -> set[str]:
-    ids: set[str] = set()
-    for key in ("goal_id", "task_id"):
-        normalized = safe_assignment_text(row.get(key), limit=160)
-        if normalized:
-            ids.add(normalized)
-    return ids
+        primary_parent_id = parent_ids[0] if parent_ids else None
+        parent_thread_id = channel_by_instance_id.get(primary_parent_id or "")
+        root_thread_id = own_channel_id
+        cursor = primary_parent_id
+        seen = {instance_id}
+        while cursor and cursor not in seen:
+            seen.add(cursor)
+            parent_channel_id = channel_by_instance_id.get(cursor)
+            parent = instances_by_id.get(cursor)
+            if parent_channel_id is None or parent is None:
+                break
+            root_thread_id = parent_channel_id
+            next_parents = [
+                parent_id
+                for raw in list(getattr(parent, "steered_by", None) or [])
+                if (parent_id := safe_assignment_text(raw, limit=160))
+            ]
+            cursor = next_parents[0] if next_parents else None
+        relationships[canonical_id] = (root_thread_id, parent_thread_id)
+    return relationships
 
 
 def _turn_identity_dropped(entries: list[Any], messages: list[Any]) -> bool:
@@ -567,15 +583,6 @@ def _turn_identity_mismatched(messages: list[Any]) -> bool:
         if actual_turn_id != expected_turn_id:
             return True
     return False
-
-
-def _entry_runtime_ids(entry: dict[str, Any]) -> set[str]:
-    ids: set[str] = set()
-    for key in ("goal_id", "task_id"):
-        normalized = safe_assignment_text(entry.get(key), limit=160)
-        if normalized:
-            ids.add(normalized)
-    return ids
 
 
 # S47 removed ``_TaskLookup``. It indexed the ``tasks`` argument by task id and
@@ -633,6 +640,8 @@ def _conversation_contract(
     runs: list[dict[str, Any]] | None = None,
     accountant: Any = None,
     display_names: dict[str, str] | None = None,
+    root_thread_id: str | None = None,
+    parent_thread_id: str | None = None,
 ) -> dict[str, Any]:
     # S47: the leading synthetic "Goal:" input message went with the ``task``
     # parameter — no caller could ever supply a task to mint it from.
@@ -712,8 +721,8 @@ def _conversation_contract(
         "owner_persona_id": persona_id,
         "persona_instance_id": persona_instance_id,
         "session_id": session_id,
-        "root_thread_id": channel_id if persona_id == "neko_supervisor" else (f"task:{task_id}:neko_supervisor" if task_id else channel_id),
-        "parent_thread_id": None if persona_id == "neko_supervisor" else (f"task:{task_id}:neko_supervisor" if task_id else None),
+        "root_thread_id": root_thread_id or channel_id,
+        "parent_thread_id": parent_thread_id,
         "title": title,
         "state": state or "unknown",
         "updated_at": _latest_message_timestamp(messages) or (history or {}).get("updated_at"),
@@ -1129,7 +1138,7 @@ def _conversation_turn_messages(
                 }
             )
             emitted += 1
-        decision_type = _public_turn_decision_type(run.get("decision_type"), persona_id=persona_id)
+        decision_type = _public_turn_decision_type(run.get("decision_type"))
         if decision_summary or decision_type or has_error:
             turn_message: dict[str, Any] = {
                 "id": f"{channel_id}:turn:{run_id}",
@@ -1173,15 +1182,9 @@ def _turn_title(decision_type: str | None, *, has_error: bool) -> str:
     return f"Turn · {label[:1].upper()}{label[1:]}" if label else "Turn"
 
 
-def _public_turn_decision_type(decision_type: Any, *, persona_id: str) -> str | None:
+def _public_turn_decision_type(decision_type: Any) -> str | None:
     value = safe_assignment_token(decision_type)
     public_value = public_decision_type_value(value)
-    if persona_id in {"dev", "backend_dev"} and public_value == "hand_off":
-        return "hand_off"
-    if persona_id == "qa" and public_value == "qa_verdict":
-        return "qa_verdict"
-    if persona_id == "neko_supervisor" and public_value == "scope_route":
-        return "scope_route"
     return public_value or value
 
 
@@ -1449,7 +1452,7 @@ def _conversation_title_for_kind(kind: str) -> str:
         "proof": "Proof update",
         "blocker": "Blocked",
         "final": "Final update",
-    }.get(kind, "Neko update")
+    }.get(kind, "Agent update")
 
 
 def _safe_conversation_text(value: Any, *, limit: int) -> str | None:

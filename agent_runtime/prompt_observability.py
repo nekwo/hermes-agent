@@ -945,20 +945,6 @@ def snapshot_prompt_observability(
                 skill_resolver=skill_resolver,
             )
         )
-    if not contexts:
-        for persona in personas:
-            persona_id = safe_assignment_token(getattr(persona, "id", None))
-            if persona_id == "neko_supervisor":
-                contexts.append(
-                    mission_chat_prompt_observability(
-                        persona=persona,
-                        surface_prompt="",
-                        limiting_wrapper_active=False,
-                        session_db=session_db,
-                        skill_resolver=skill_resolver,
-                    )
-                )
-                break
     # S8: the frame keeps only LIVE persona instances' current-session context
     # rows; historical/stale rows (departed instances, closed sessions) leave the
     # frame (operator ruling 2026-07-17: "old residue and runs need to be
@@ -1033,12 +1019,6 @@ def snapshot_prompt_observability(
     # stub (count + fetch verb) — never a silent absence.
     return {
         "schema_version": 1,
-        "default_flow": {
-            "id": "neko_two_dev_default",
-            "lead": "neko_supervisor",
-            "dev_specialists": ["backend_dev", "dev"],
-            "qa_default": False,
-        },
         "surface_prompt_default": "",
         "chat_contexts": chat_contexts,
         # S8: honest accounting for the historical/stale context rows evicted
