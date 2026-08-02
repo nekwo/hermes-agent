@@ -16,13 +16,9 @@ snapshot from already-loaded runtime facts (pure — no I/O, unit-testable);
 prompt block injected into the chat turn. The snapshot exposes the same dict on
 each per-instance prompt context so the launcher renders exactly what is fed.
 
-The stage/QA-gate ``mission_hud`` slice is GONE (S19). It reused
-``context_builder.mission_hud_preview``, whose only inputs here were
-``task``/``goal_task`` — and both entry points can now only resolve ``None``
-(the snapshot builds with ``tasks = []``; the chat wrapper below reads through
-the permanent ``TaskStoreStub``, whose ``.get()`` always raises ``NotFound``).
-Its ``HUD_FIELDS`` row went with the producer, so the roster cannot advertise a
-slice nothing fills.
+The stage/QA-gate ``mission_hud`` slice is GONE (S19). Mission context is now
+limited to the persisted lane ``goal_id`` and the count of addressable lanes
+sharing it; retired task-store title/state projections are not reconstructed.
 
 Two delivery lanes, one authority
 ---------------------------------
@@ -456,18 +452,13 @@ def _lane_block(instance: Any) -> dict[str, Any]:
 def _mission_block(
     instance: Any,
     *,
-    task: Any,
-    goal_task: Any,
     roster: Iterable[Any],
 ) -> dict[str, Any]:
-    source = goal_task if goal_task is not None else task
-    goal_id = _text(getattr(instance, "goal_id", None)) or _text(getattr(source, "id", None))
-    if source is None and goal_id is None:
+    goal_id = _text(getattr(instance, "goal_id", None))
+    if goal_id is None:
         return {}
     mission = {
         "goal_id": goal_id,
-        "title": _text(getattr(source, "title", None)),
-        "state": _text(getattr(source, "state", None)),
         "thread_count": _thread_count(goal_id, roster),
     }
     return {key: value for key, value in mission.items() if _clean(value)}
@@ -590,8 +581,6 @@ def resolve_situational_hud(
     workspace: str | None = None,
     roster: Iterable[Any] = (),
     identity_roster: Iterable[Any] | None = None,
-    task: Any = None,
-    goal_task: Any = None,
     board: dict[str, Any] | None = None,
     turn_budget: dict[str, Any] | None = None,
     capability: dict[str, Any] | None = None,
@@ -631,7 +620,7 @@ def resolve_situational_hud(
     if lane:
         hud["lane"] = lane
 
-    mission = _mission_block(instance, task=task, goal_task=goal_task, roster=roster)
+    mission = _mission_block(instance, roster=roster)
     if mission:
         hud["mission"] = mission
 
@@ -1076,7 +1065,7 @@ def situational_hud_for_instance(
         # stores, and daemon all pull sizeable graphs).
         from . import workspace_scope
         from .persona_assignments import PersonaInstanceStore, is_canonical_persona_channel
-        from .store import RealmStore, TaskStore, WorkspaceStore
+        from .store import RealmStore, WorkspaceStore
 
         # The FULL roster stays available for identity (steering) resolution; the
         # ADDRESSABLE roster fed to advertising/thread-count is scoped to this
@@ -1117,16 +1106,6 @@ def situational_hud_for_instance(
             None,
         )
 
-        task_store = TaskStore()
-
-        def _safe_get(task_id: Any) -> Any:
-            if not task_id:
-                return None
-            try:
-                return task_store.get(task_id)
-            except Exception:
-                return None
-
         return resolve_situational_hud(
             instance,
             daemon=None,
@@ -1134,8 +1113,6 @@ def situational_hud_for_instance(
             workspace=workspace,
             roster=scoped_roster,
             identity_roster=identity_roster,
-            task=_safe_get(getattr(instance, "current_task_id", None)),
-            goal_task=_safe_get(getattr(instance, "goal_id", None)),
             board=_board_digest_for_workspace(scope_workspace_id),
             turn_budget=turn_budget,
             capability=capability,

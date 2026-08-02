@@ -48,23 +48,20 @@ def test_resolve_situational_hud_standing_by_lane_has_runtime_scope_lane_no_miss
     assert hud["roster"][0]["is_self"] is True
 
 
-def test_resolve_situational_hud_bound_lane_carries_mission_and_thread_count():
+def test_resolve_situational_hud_bound_lane_carries_goal_and_thread_count():
     instance = _instance(goal_id="goal_1", current_task_id="task_stage")
     peer = _instance(id="personainst_dev", display_name="Dev", goal_id="goal_1")
     other = _instance(id="personainst_x", display_name="X", goal_id="goal_other")
-    task = SimpleNamespace(id="task_stage", title="Stage task", state="in_progress")
-    goal_task = SimpleNamespace(id="goal_1", title="Neko default graph live token burn", state="queued")
     hud = resolve_situational_hud(
         instance,
         daemon={"state": "running", "loops": 3},
         realm="default",
         workspace="default",
         roster=[instance, peer, other],
-        task=task,
-        goal_task=goal_task,
     )
-    assert hud["mission"]["title"] == "Neko default graph live token burn"
-    assert hud["mission"]["state"] == "queued"
+    assert hud["mission"]["goal_id"] == "goal_1"
+    assert "title" not in hud["mission"]
+    assert "state" not in hud["mission"]
     # Two lanes share goal_1 (self + peer); the goal_other lane is excluded.
     assert hud["mission"]["thread_count"] == 2
 
@@ -72,20 +69,14 @@ def test_resolve_situational_hud_bound_lane_carries_mission_and_thread_count():
 def test_resolve_situational_hud_no_longer_carries_a_stage_qa_gate_slice():
     """Retargeted in S19 (was ``..._reuses_mission_hud_preview``).
 
-    The slice reused ``context_builder.mission_hud_preview``, whose only inputs
-    here were ``task``/``goal_task`` — and both entry points can now resolve
-    only ``None`` (the snapshot builds with ``tasks = []``; the chat wrapper
-    reads through the permanent ``TaskStoreStub``). Producer and ``HUD_FIELDS``
-    row went together, so even a hand-fed task yields no ``mission_hud`` key.
+    The slice reused retired task-store projections. The current HUD reads only
+    the instance's persisted goal id and addressable roster, so a current-task
+    pointer alone cannot manufacture mission context.
     """
 
-    hud = resolve_situational_hud(
-        _instance(current_task_id="task_stage"),
-        task=SimpleNamespace(id="task_stage", title="t", state="in_progress"),
-    )
+    hud = resolve_situational_hud(_instance(current_task_id="task_stage"))
     assert "mission_hud" not in hud
-    # The mission block itself is untouched: the bound task still names the lane.
-    assert hud["mission"]["title"] == "t"
+    assert "mission" not in hud
 
 
 def test_resolve_situational_hud_missing_daemon_and_scope_degrade_cleanly():
@@ -108,21 +99,17 @@ def test_roster_is_capped():
 
 def test_render_situational_hud_block_is_readonly_and_mirrors_widget_lines():
     instance = _instance(goal_id="goal_1", current_task_id="task_stage", role="supervisor")
-    task = SimpleNamespace(id="task_stage", title="Stage", state="in_progress")
-    goal_task = SimpleNamespace(id="goal_1", title="Live token burn", state="queued")
     hud = resolve_situational_hud(
         instance,
         realm="default",
         workspace="default",
         roster=[instance],
-        task=task,
-        goal_task=goal_task,
     )
     block = render_situational_hud_block(hud)
     assert block.startswith("## Runtime Situation")
     assert "read-only" in block
     assert "- Scope: realm default · workspace default" in block
-    assert "Live token burn" in block
+    assert "goal_1" in block
     assert "@personainst_neko" in block
     assert "- On level (1):" in block
 
@@ -657,8 +644,6 @@ def test_situational_hud_thread_count_uses_scoped_roster():
         target,
         roster=scoped,
         identity_roster=full,
-        task=SimpleNamespace(id="task_1", title="t", state="in_progress"),
-        goal_task=SimpleNamespace(id="goal_1", title="Ship it", state="queued"),
     )
     # Two ws_a threads (self + peer); the ws_b duplicate placement is excluded.
     assert hud["mission"]["thread_count"] == 2
@@ -697,8 +682,6 @@ def test_situational_hud_on_level_shadows_canonical_when_placement_in_scope():
         target,
         roster=addressable,
         identity_roster=full,
-        task=SimpleNamespace(id="task_1", title="t", state="in_progress"),
-        goal_task=SimpleNamespace(id="goal_1", title="Ship it", state="queued"),
     )
 
     ids = [entry["persona_instance_id"] for entry in hud["roster"]]
