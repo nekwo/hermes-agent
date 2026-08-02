@@ -791,7 +791,7 @@ def build_parser(parent_subparsers) -> None:
     persona_chat_history.set_defaults(func=_cmd_persona_chat_history)
 
     persona_set_model = persona_subs.add_parser("set-model", help="Persist a persona's default provider/model (profile-default lane; future instances inherit it)")
-    persona_set_model.add_argument("persona_id", help="Persona id, alias, or profile:<name>")
+    persona_set_model.add_argument("persona_id", help="Persona id or profile:<name>")
     persona_set_model.add_argument("--provider", default=None, help="Provider lane (canonical name or alias; api_mode is derived from it)")
     persona_set_model.add_argument("--model", default=None, help="Model id for the provider lane")
     persona_set_model.add_argument("--use-default", action="store_true", help="Clear the persona's model/provider/api_mode so the runtime default cascade applies")
