@@ -4,8 +4,13 @@ Status: **decision-ready audit, read-only.** No code changed by this document.
 Owner of every seam named here: fork (`agent_runtime/`, `hermes_cli/harness*`,
 `tools/terminal_tool.py`).
 
-**Landed since publication.** The audit text below is preserved as written;
-this table records what has since shipped, so nobody re-derives it:
+**Retirement note (S61/S62).** This document is a dated audit, not a current
+lane registry. The former harness free-chat entry point was deleted in S61;
+mission chat is the sole `GPTPersonaRuntime` chat turn. References below to the
+deleted free-chat method describe the 2026-07-26 comparison baseline only.
+
+**Landed since publication.** The audit text below is preserved as historical
+analysis; this table records what has since shipped, so nobody re-derives it:
 
 | Gap | State | Seam |
 |---|---|---|
@@ -68,7 +73,7 @@ capability is live today.
 | **mcp serve** | `mcp_serve.py:543-991` | **none** — this is an MCP *server*, no agent is built | n/a |
 | **send** | `hermes_cli/send_cmd.py:298-365` | **none** — "No LLM, no agent loop" | n/a |
 | **harness worker** (goal ticks) | `persona_runtime.py::run_tick` → `_invoke_agent` (L118-193) | `profile_runner.py::ProfileAgentRunner.run` | `effective_toolsets(persona)` — role ceiling, **no** chat-lane cost filter |
-| **harness free-chat** (legacy) | `GPTPersonaRuntime.chat_reply` (L196-289) | same runner | `_enabled_toolsets_for_chat` |
+| **harness free-chat** (historical; deleted S61) | Former callerless free-chat method | same runner | `_enabled_toolsets_for_chat` |
 | **mission-chat** (canonical) | `harness.py:1293` → `persona_commands.py::_cmd_mission_chat_message` (L1224) → `mission_chat_reply` (`persona_runtime.py:289`) | same runner | `_enabled_toolsets_for_chat` (`persona_runtime.py:881`) |
 
 Two structural facts that shape everything below:
@@ -83,9 +88,10 @@ Two structural facts that shape everything below:
   and calls the same `_cmd_*` handler. It constructs no agent; it inherits
   mission-chat's surface exactly.
 
-The shared construction chokepoint for the three harness lanes is
-`profile_runner.py::_execute_agent_run` (L460-697). Everything below that line
-is identical across harness lanes; everything above it is where they diverge.
+Historically, `profile_runner.py::_execute_agent_run` was the shared
+construction chokepoint for three harness lanes. After S61, mission chat is the
+only surviving `GPTPersonaRuntime` chat lane; the old comparison remains useful
+only for understanding why the cost-policy gaps were discovered.
 
 **Not a gap — do not re-derive:** *plugin* discovery is **not** lane-gated. It
 runs as a module-level side effect of importing `model_tools`
@@ -108,11 +114,10 @@ DEFAULT_CHAT_LANE_EXCLUDED_TOOLSETS: frozenset[str] = frozenset(
 )
 ```
 
-Applied at the one chat-lane chokepoint,
-`agent_runtime/persona_runtime.py:881-905` (`_enabled_toolsets_for_chat`), and
-therefore on **both** `chat_reply` (L249) and `mission_chat_reply` (L372). The
-worker lane never passes through it — `run_tick` calls
-`effective_toolsets(persona)` directly (`persona_runtime.py:154`).
+At publication this was applied to both the former free-chat method and
+`mission_chat_reply`. The former method and worker tick were deleted in S61;
+the live statement is only that mission chat passes through
+`_enabled_toolsets_for_chat`.
 
 **Worked example — the seeded Neko supervisor**
 (`agent_runtime/personas.py:239`, toolsets
@@ -542,7 +547,7 @@ tool-using time** before the checkpoint nudge drains the iteration budget.
 | `gateway run` | **inactivity** 1800 s (`gateway/run.py:19197-19308`) | none |
 | harness worker | wall `live_run_max_wall_seconds = 300.0`, per-persona overridable (`runtime_config.py:189`, `config.py:133`, `node_tools.py:202`) | `max_api_calls` / `max_total_tokens` enforced (`profile_runner.py:698-708`) |
 | **mission-chat** | **wall 240 s** CLI default; relay hops inherit the shared chain deadline (`persona_commands.py:2004-2019`) | same enforcement available, unset by default |
-| free-chat (`chat_reply`) | wall 120 s (`persona_runtime.py:204`) | unset |
+| free-chat (historical; deleted S61) | formerly wall 120 s | unset |
 
 mission-chat is the only lane with a **wall-clock** bound rather than an
 inactivity bound. That is the right primitive (an agent grinding on one long

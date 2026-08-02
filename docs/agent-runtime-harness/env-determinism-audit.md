@@ -299,22 +299,21 @@ radius, test plan. **Recommend clearly; the operator decides scope.**
 * **Recommendation.** Yes, scope-keyed, staged lane by lane starting with the
   worker lane (harness-constructed, so a scope is free) and explicitly **never**
   for `hermes chat` (the operator's own shell — an envelope there is wrong).
-* **RULED + LANDED (wave 4), without editing `tools/`.** The `tools/` half was
-  retired by construction rather than by a diff, which is the better outcome:
-  * `envelope_decision` now answers for **any bound scope**, not only a governed
-    lane. A harness lane outside `GOVERNED_LANES` gets a typed refusal
-    (`envelope_lane_not_governed`) carrying the same legacy reason code, and its
-    fix hint deliberately names **no** config key — grants resolve per lane, so
-    pointing anyone at a stanza for that lane would be a fresh lie.
+* **HISTORICAL — ruled and landed in wave 4, then retired in S61.** Wave 4 made
+  every harness-constructed lane scope-keyed. S61 subsequently removed every
+  non-mission runtime lane and its ungoverned-lane refusal vocabulary. The live
+  guarantee is narrower and simpler: `mission_chat` is the only runtime lane
+  that binds a terminal-envelope scope, and an unknown/stale lane name has no
+  authority.
+  * At wave 4, `envelope_decision` answered for any bound scope and returned a
+    typed refusal for a bound but ungoverned lane. That behavior is historical;
+    the refusal class and non-mission lane registry were deleted in S61.
   * `_harness_envelope_block` returns as soon as it gets a non-`None` decision,
     so `_harness_safety_block`'s env-presence gate is **unreachable from any
     harness run**. No upstream edit was needed to close it there.
-  * Scopes are bound at all four harness-constructed `AgentRunRequest` sites:
-    `persona_runtime.py` worker tick (`mission_worker`) and free-chat
-    (`persona_chat`), `node_tools.py` child node (`mission_node`),
-    `root_node_engine.py` root node (`mission_root_node`). `HARNESS_LANES`
-    names the set; `GOVERNED_LANES` stays `{mission_chat}` — widening it is
-    still a product decision.
+  * At wave 4, scopes were bound at four now-retired construction sites in
+    addition to mission chat. Those worker/free-chat/node/root paths and their
+    registry were removed in S61; they are not current extension points.
   * **`hermes chat` is excluded structurally, not by convention.** It never
     constructs an `AgentRunRequest`, so no site exists that could bind it, and
     no lane spelling for it exists to bind. A test pins that.
@@ -530,7 +529,7 @@ radius, test plan. **Recommend clearly; the operator decides scope.**
 | Q | Fix | Site | Guarantee |
 |---|---|---|---|
 | **Q1** | Unconditional runtime-root export + typed rows | `agent_runtime/profile_context.py` — `ProfileContextRow`, `current_profile_context_rows`, `_resolved_runtime_root` | Every persona runs with a resolved runtime root, profile-bound or not. The two ways it can degrade are named, not inferred from an absent variable. |
-| **Q2** | Scope-keyed envelope on every harness lane | `agent_runtime/terminal_envelope.py` (`HARNESS_LANES`, `ENVELOPE_LANE_NOT_GOVERNED`, decision answers on any bound scope) + `persona_runtime.py` ×2, `node_tools.py`, `root_node_engine.py` | "Is this a harness run?" is a fact the policy layer owns. `tools/`'s env-presence gate is unreachable from a harness run. `hermes chat` is excluded structurally. |
+| **Q2** | Historical wave-4 scope-keying; narrowed in S61 | Former non-mission lane sites were deleted; live authority is `agent_runtime/terminal_envelope.py` on `mission_chat` only | A runtime terminal envelope exists only for the persisted mission-chat path. Unknown or retired lane names do not acquire policy authority. `hermes chat` remains excluded structurally. |
 | **Q3** | Fork-owned legacy receipt ladder | `agent_runtime/terminal_envelope.py` `record_legacy_block` | A legacy block can leave a receipt with no variable exported. Upstream adoption is one line (§7.1), guarded against drift. |
 | **Q4** | An honest preflight assertion | `agent_runtime/preflight.py` `_runtime_root_check` | Reports winning layer / path / exists / store-shape; fails only on an uninitialized default root; a refusing resolver is its own typed token. |
 | **Q5** | A smoke run is always synthetic | `agent_runtime/smoke.py` `_runtime_root`, `SMOKE_RUNTIME_ROOT_ALWAYS_TEMP` | `hermes harness smoke` cannot write into the operator's live store, and says so when a caller asks it to. |

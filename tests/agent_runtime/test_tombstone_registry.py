@@ -2235,7 +2235,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     # -- S61 / Round 4 — persona authority + closed-loop read APIs -------
     *rows(
         "s61",
-        "pending",
+        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
         Form.CLASS_ATTR,
         "the free-chat execution island had no production caller; mission_chat_reply is the sole live chat runtime",
         "persona_runtime.GPTPersonaRuntime.chat_reply",
@@ -2243,7 +2243,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "pending",
+        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
         Form.ATTR,
         "the free-chat prompt builder and compiled role voice died with the callerless free-chat lane; profile SOUL/config owns behavioral identity",
         "_persona_chat_system_prompt",
@@ -2252,7 +2252,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "pending",
+        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
         Form.CODE,
         "compiled Neko/QA/Dev behavioral instructions must not return to persona_runtime; profile SOUL/config is the only behavioral prompt authority",
         "Chief-of-staff energy",
@@ -2262,7 +2262,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "pending",
+        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
         Form.ATTR,
         "mission_chat is the only runtime that binds a terminal-envelope scope; the retired mission and free-chat lane vocabulary advertised branches no producer constructed",
         "LANE_MISSION_WORKER",
@@ -2276,7 +2276,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "pending",
+        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
         Form.CLASS_ATTR,
         "task-era persona store readers and close helpers were called only by their own tests",
         "persona_assignments.PersonaInstanceStore.list_for_task",
@@ -2289,7 +2289,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "pending",
+        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
         Form.CLASS_ATTR,
         "historical runtime-instance task election helpers had no production caller; get/list_all remain the live projection read path",
         "runtime_instances.GoalRuntimeInstanceStore.list_for_task",
@@ -2298,7 +2298,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "pending",
+        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
         Form.ATTR,
         "the three decorative runtime-instance states were read only by the callerless task election helper",
         "ACTIVE_STATE",
@@ -2308,7 +2308,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "pending",
+        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
         Form.CLASS_ATTR,
         "board convenience readers with no production or test caller",
         "board_store.BoardStore.default_board_for_workspace",
@@ -2317,7 +2317,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "pending",
+        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
         Form.CLASS_ATTR,
         "whole-log convenience iterators were test-only; tests now observe the live logical-offset reader",
         "events.EventLog.iter_all",
@@ -2328,7 +2328,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "pending",
+        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
         Form.CLASS_ATTR,
         "test-only convenience accessors were reasserted through their live underlying authorities",
         "read_model.ReadModel.integrity_check",
@@ -2338,7 +2338,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "pending",
+        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
         Form.ATTR,
         "test-only or compatibility wrappers with no production caller",
         "default_chat_session_id_for_instance",
@@ -2346,7 +2346,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "pending",
+        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
         Form.ATTR,
         "test-only or compatibility wrappers with no production caller",
         "diverged_bindings",
@@ -2354,7 +2354,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "pending",
+        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
         Form.ATTR,
         "the one-skill queue wrapper had no caller; the live command uses the atomic batch API",
         "queue_skill_for_next_turn",
@@ -2362,7 +2362,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "pending",
+        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
         Form.ATTR,
         "the batch-frame selector duplicated the live liveness-aware stream branch and was called only by direct unit tests",
         "select_batch_frame",
@@ -2370,7 +2370,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s61",
-        "pending",
+        "c6397501c9bb4863d7eb2b84723a01c951bc3744",
         Form.ATTR,
         "the artifact scanner implementation and its private vocabulary were a test-only closed loop; shared live redaction patterns remain",
         "BasicRedactionScanner",
@@ -2378,6 +2378,37 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "SCANNER_SECRET_ASSIGNMENT_RE",
         "SECRET_PATTERNS",
         scope=("agent_runtime.redaction",),
+    ),
+    # -- S62 / Round 4 follow-up — compiled topology residue ------------
+    *rows(
+        "s62",
+        "cb0a235c0",
+        Form.ATTR,
+        "operator conversation ancestry now follows persisted steered_by relationships; no persona id receives synthetic root authority",
+        "_mirror_child_assignment_trace_to_roots",
+        "_builder_is_neko_root",
+        "_builder_runtime_ids",
+        "_row_runtime_ids",
+        "_entry_runtime_ids",
+        scope=("agent_runtime.operator_channels",),
+    ),
+    *rows(
+        "s62",
+        "cb0a235c0",
+        Form.CODE,
+        "prompt observability and conversation presentation contain no compiled Neko topology or voice fallback",
+        "neko_two_dev_default",
+        "Neko update",
+        "task:{task_id}:neko_supervisor",
+        scope=("agent_runtime.prompt_observability", "agent_runtime.operator_channels"),
+    ),
+    *rows(
+        "s62",
+        "cb0a235c0",
+        Form.CODE,
+        "a raw profile visibility persona preserves its configured or instance role instead of being coerced to the legacy supervisor role",
+        'role="alice_supervisor"',
+        scope=("agent_runtime.persona_assignments",),
     ),
 )
 

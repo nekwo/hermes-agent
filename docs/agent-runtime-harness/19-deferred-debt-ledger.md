@@ -1677,3 +1677,23 @@ failed 38 rows (759 passed). Green proof is recorded in the campaign handoff;
 on this Windows worktree the Bash wrapper cannot resolve its WSL/git worktree
 path, so focused verification uses the repository Python pytest environment
 and reports the wrapper limitation rather than claiming it ran.
+
+### S62 follow-up — remove surviving compiled topology
+
+Adversarial review found three active authority leaks after S61. Prompt
+observability still emitted a fixed Neko/two-developer `default_flow` and
+manufactured a Neko context for an empty instance roster. Operator
+conversations mirrored child assignment traces into a persona selected by id
+and synthesized every task thread beneath a Neko parent. Raw profile instances
+were also rewritten to the `alice_supervisor` role for visibility resolution.
+
+Commit `cb0a235c0` removes those assumptions. Prompt observability now contains
+only live instance contexts and omits absent flow. Operator conversation
+ancestry follows the persisted `PersonaInstance.steered_by` primary-parent
+chain; an absent/out-of-roster parent or cycle degrades to a standalone thread,
+and child trace remains on the child channel. Profile visibility preserves the
+raw profile identity and role, or overlays the matching persisted persona's
+configured role/tool surface without rewriting the raw id. Custom-role and
+empty-roster behavior tests pin all three boundaries. The read-model crash test
+now executes SQLite's `PRAGMA integrity_check` directly, preserving storage
+proof without restoring the deleted production convenience wrapper.
