@@ -106,7 +106,10 @@ def test_hydrate_frame_matches_golden_shape(isolate_agent_runtime_root):
 # S59 repaired the delta-batch fixture that the 48 -> 49 move missed. Pin every
 # frame-bearing golden here, not only hydrate: a partial fixture bump must fail
 # even when the live hydrate frame and its own golden agree.
-CONTRACT_VERSION = 50
+# Round 4 moved the contract through 50 to 51 as the event registry and its
+# writerless task/proof/run projection fields retired. These goldens are now
+# generated from the current production builders rather than hand-edited.
+CONTRACT_VERSION = 51
 
 
 def test_every_frame_bearing_golden_pins_contract_version(isolate_agent_runtime_root):

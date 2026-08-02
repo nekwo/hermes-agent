@@ -820,6 +820,34 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         Form.ATTR,
         "migrated from the pre-registry removal contract; exact scoped "
         "absence remains protected across upstream syncs",
+        'needs_supervisor_slicing',
+        'validate_dev_progress_gate',
+        '_BROAD_TITLE_MARKERS',
+        '_BROAD_DESCRIPTION_MARKERS',
+        '_BACKEND_FIRST_FLAGS',
+        '_BACKEND_SLICE_MARKERS',
+        '_HARNESS_SUPPORT_REPO_MARKERS',
+        '_PROGRESS_OK_DECISIONS',
+        '_BUDGET_PRESSURE_OK_DECISIONS',
+        '_repos_that_require_specialist_slicing',
+        '_is_harness_support_repo',
+        '_has_bounded_specialist_handoff_packet',
+        '_is_backend_first_slice',
+        '_has_empirical_progress',
+        '_has_budget_pressure',
+        '_decision_has_proof_ids',
+        '_validate_failed_proof_reuse',
+        '_dedupe_strings',
+        '_safe_string_list',
+        '_environment_changed',
+        scope=('agent_runtime.dev_discipline',),
+    ),
+    *rows(
+        "s27",
+        "5a1267ef6",
+        Form.ATTR,
+        "migrated from the pre-registry removal contract; exact scoped "
+        "absence remains protected across upstream syncs",
         'COLLAPSED_SIGNAL_TYPES',
         'DecisionProjection',
         'simplified_contract_enabled',
@@ -1215,6 +1243,14 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "individually dead: zero production references at the cut",
         "BACKGROUND_LANE",
         scope=("agent_runtime.runtime_instances",),
+    ),
+    *rows(
+        "s43",
+        "25ea4439a",
+        Form.ATTR,
+        "individually dead: zero production references at the cut",
+        "_relative_runtime_path",
+        scope=("agent_runtime.self_test_evidence",),
     ),
     *rows(
         "s43",
@@ -1762,6 +1798,14 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "assert_pinned",
         "_normalized_path",
         scope=("agent_runtime.resolution",),
+    ),
+    *rows(
+        "s54",
+        "90dbe908a",
+        Form.ATTR,
+        "individually dead at the cut",
+        "self_test_summary",
+        scope=("agent_runtime.self_test_evidence",),
     ),
     *rows(
         "s54",
@@ -2422,7 +2466,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     # -- S64 / integrated review — persona authority + inert guard cleanup --
     *rows(
         "s64",
-        "6502b87f8",
+        "3619e0f66",
         Form.ATTR,
         "raw profiles no longer receive a compiled privileged toolset fallback",
         "PROFILE_CHAT_FALLBACK_TOOLSETS",
@@ -2430,7 +2474,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s64",
-        "6502b87f8",
+        "3619e0f66",
         Form.CLASS_ATTR,
         "the only production AgentRunRequest caller never set the retired read/search guard controls",
         "profile_runner.AgentRunRequest.stop_on_repeated_read_search",
@@ -2439,7 +2483,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s64",
-        "6502b87f8",
+        "3619e0f66",
         Form.ATTR,
         "the production-disabled read/search guard branch and helpers retired as one closed loop",
         "_enforce_aggregate_read_search_budget",
@@ -2450,7 +2494,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s64",
-        "6502b87f8",
+        "3619e0f66",
         Form.CLASS_ATTR,
         "the read/search budget kind and trip reasons had no producer after the guard retired",
         "run_budget.RunBudgetKind.READ_SEARCH",
@@ -2461,7 +2505,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     # -- S65 / final dead-code closeout ---------------------------------
     *rows(
         "s65",
-        "pending-integration",
+        "f9aa0faab",
         Form.MODULE,
         "the structured decision, packet, scope, and role-checklist modules formed a closed contract island with no production entry point",
         "agent_runtime.decision_schema",
@@ -2475,7 +2519,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s65",
-        "pending-integration",
+        "f9aa0faab",
         Form.CLASS_ATTR,
         "task-era persona mutation and lookup APIs had no production callers after the chat-owned runtime became authoritative",
         "persona_assignments.PersonaInstanceStore.ensure_for_goal",
@@ -2487,7 +2531,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s65",
-        "pending-integration",
+        "f9aa0faab",
         Form.CLASS_ATTR,
         "run and incident stores now expose historical readers only; their caller-less mutation surfaces retired",
         "store.RunStore.update",
@@ -2498,7 +2542,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s65",
-        "pending-integration",
+        "f9aa0faab",
         Form.ATTR,
         "task/goal and packet-artifact directories lost their final production readers",
         "goals_dir",
@@ -2509,7 +2553,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s65",
-        "pending-integration",
+        "f9aa0faab",
         Form.EVENT,
         "the final writer for each event retired; historical log rows remain readable",
         "persona_instance.reaped",
@@ -2519,7 +2563,7 @@ TOMBSTONES: tuple[Tombstone, ...] = (
     ),
     *rows(
         "s65",
-        "pending-integration",
+        "f9aa0faab",
         Form.CODE,
         "test-only run projection, packet checkpointing, and inactive coordinator actions must not regrow into production",
         "run_summaries",
@@ -2735,12 +2779,11 @@ def test_the_scanner_is_not_vacuous():
     files = _production_files(PRODUCTION_PACKAGES)
     assert len(files) > 300, len(files)
     live = Tombstone(
-        "validate_checklist_payload_structure",
+        "validate_event_payload",
         Form.CODE,
         "canary",
         "n/a",
-        "LIVE — decision_contract_registry.validate_payload_keys calls it on "
-        "every typed decision; role_checklists.py survives for exactly this",
+        "LIVE — EventLog.append calls the event-only registry validator on every append",
     )
     assert code_offenders(live), "the scanner found no live reference"
     # The S57 survivor that proves the gate's SHAPE: read only through the
@@ -2779,6 +2822,10 @@ def test_tombstoned_module_is_not_importable(row: Tombstone):
 @pytest.mark.parametrize("row", ATTR_ROWS, ids=lambda row: row.label)
 def test_tombstoned_attribute_is_gone(row: Tombstone):
     for dotted in row.scope:
+        if importlib.util.find_spec(dotted) is None:
+            # A later wave may retire the whole owner module; that is a stronger
+            # absence than the original member tombstone.
+            continue
         module = _resolve(dotted)
         assert not hasattr(module, row.text), f"{dotted}.{row.text}: {row.reason}"
 
@@ -2796,7 +2843,9 @@ def test_tombstoned_top_level_import_binding_is_gone(row: Tombstone):
 def test_tombstoned_class_attribute_is_gone(row: Tombstone):
     module_name, class_name, attr = row.text.rsplit(".", 2)
     module = _resolve(f"{row.scope[0]}.{module_name}")
-    owner = getattr(module, class_name)
+    owner = getattr(module, class_name, None)
+    if owner is None:
+        return
     assert not hasattr(owner, attr), f"{row.text}: {row.reason}"
 
 
