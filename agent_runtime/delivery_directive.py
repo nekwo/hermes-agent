@@ -1,4 +1,4 @@
-"""Orphan-worktree janitor and the historical bundle-promotion read surface.
+"""Orphan-worktree janitor.
 
 This module used to carry a second, larger half: a declarative delivery
 directive DECLARED on a goal, stored on the ``Task``, and executed at terminal
@@ -15,16 +15,6 @@ What remains has live callers:
   ``harness doctor --fix``. Nothing is deleted with an uncaptured diff: dirty
   candidates are written to ``<store_root>/wt_reaped_patches/`` first, under
   collision-proof exclusive-create names.
-* :func:`read_bundle_promotion_record` — **CALLER-LESS since S56**; the "has live
-  callers" heading above does NOT cover this bullet any more. It read the
-  promotion records the removed executor used to write, so
-  ``repo_bundles.repo_bundle_summary`` could label historical bundles for
-  ``status.py``. S56 deleted that summary (its last caller) and S57 deleted
-  ``agent_runtime/repo_bundles.py`` whole. It survives S57 because it is a
-  SEPARATE ruled lane: doc 19 carries ``read_bundle_promotion_record`` /
-  ``bundle_promotion_record_path`` as their own debt entry, and this wave was
-  ruled to cut the STORE, not to sweep the residue beside it. Said plainly here
-  so the next reader does not have to re-derive it from the heading.
 """
 
 from __future__ import annotations
@@ -43,30 +33,6 @@ from .repo_context import (
     worktree_patch_size_estimate,
     worktree_patch_text,
 )
-
-
-def bundle_promotion_record_path(task_id: str, bundle_id: str) -> Path:
-    return paths.repo_bundles_task_dir(task_id) / f"{bundle_id}.promotion.json"
-
-
-def read_bundle_promotion_record(task_id: str, bundle_id: str) -> dict[str, Any] | None:
-    """Recorded outcome of a historical delivery-directive execution.
-
-    The writer went with the terminal-settle executor; this stays because bundle
-    summaries must keep describing records already on disk instead of silently
-    relabelling them as never-promoted.
-    """
-
-    import json
-
-    record_path = bundle_promotion_record_path(task_id, bundle_id)
-    if not record_path.is_file():
-        return None
-    try:
-        raw = json.loads(record_path.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    return raw if isinstance(raw, dict) else None
 
 
 def reap_orphan_worktrees(

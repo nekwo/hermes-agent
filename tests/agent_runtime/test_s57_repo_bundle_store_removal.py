@@ -41,11 +41,8 @@ not re-homed: there is nothing left to re-home it onto.
 
 **What deliberately did NOT go**, each named so absence is not read as oversight:
 
-* ``paths.repo_bundles_dir`` / ``repo_bundles_task_dir`` -- still reached by
-  ``delivery_directive.bundle_promotion_record_path``.
-* ``delivery_directive.read_bundle_promotion_record`` /
-  ``bundle_promotion_record_path`` -- caller-less since S56 and carried as their
-  OWN doc-19 entry. A separate ruled lane; this wave was ruled to cut the store.
+* The promotion-record reader and its two directory helpers were a separate
+  ruled lane. Round 2 removed them after receiver-aware re-verification.
 * ``PersonaAssignment.repo_bundle_id`` and its ``assignment_signal_hash``
   component -- a live identity field of a DIFFERENT store. Its identity test was
   re-homed into ``test_persona_assignments.py`` rather than deleted with
@@ -91,8 +88,8 @@ WHY THE SURVIVORS STAYED:
   four KEEPs), and the ``checkpoint.ENTITY_CLASS_NAMES`` row plus its deliberate
   ``runtime_instances`` counter-example. Produced dicts and exact key sets are
   named in the registry's docstring as deliberately NOT rows.
-* ``test_the_two_directory_helpers_deliberately_survive`` — a KEEP, plus the
-  wire from ``bundle_promotion_record_path`` that justifies it.
+* The former directory-helper KEEP is deliberately inverted by the Round 2
+  tombstone registry after its sole caller was removed.
 """
 
 from __future__ import annotations
@@ -115,20 +112,6 @@ def _production_source() -> str:
         for path in (REPO_ROOT / package).rglob("*.py"):
             chunks.append(path.read_text(encoding="utf-8", errors="ignore"))
     return "\n".join(chunks)
-
-
-def test_the_two_directory_helpers_deliberately_survive():
-    """Negative gate. ``bundle_promotion_record_path`` still addresses the tree
-    through them, so removing them here would break a caller-less-but-present
-    seam that belongs to a DIFFERENT ruled lane."""
-    assert callable(paths.repo_bundles_dir)
-    assert callable(paths.repo_bundles_task_dir)
-
-    from agent_runtime import delivery_directive
-
-    assert "repo_bundles_task_dir" in inspect.getsource(
-        delivery_directive.bundle_promotion_record_path
-    )
 
 
 def test_no_production_module_names_the_store_in_code():

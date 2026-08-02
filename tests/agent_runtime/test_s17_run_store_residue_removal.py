@@ -25,19 +25,12 @@ value through it before copying it onto the ``incident.opened`` payload. A
 line-range cut that swallows it silently removes the redaction gate on a live
 event. It is pinned below by behavior, not by ``hasattr``.
 
-THE OTHER TRAP: ``run.closed`` is NOT de-registered with its three siblings.
-``RunStore.cancel`` is live, and ``cancel`` delegates to ``close_run``, which
-appends ``run.closed``. De-registering it would convert a live operator action
-into a crash.
-
-RE-DERIVED at S49 (2026-08-01): this note used to cite TWO production paths —
-``operator_control``'s operator takeover and
-``persona_assignments._terminate_live_chat_bindings``. S49 deleted
-``agent_runtime/operator_control.py`` whole, so the first is gone and the
-persona-chat replacement is now the SOLE live caller. The trap still holds for
-exactly one reason instead of two; re-derived rather than left standing,
-because a liveness note that outlives one of the callers it names is how a pin
-rots into decoration.
+ROUND 2 RE-DERIVATION: ``RunStore.cancel`` / ``close_run`` and the
+``run.closed`` writer now have zero production callers after the obsolete
+worker-chat replacement lane was removed. They remain compatibility-held in
+this pass because removing an event contract is an operator contract decision,
+outside a dead-code campaign's authority. The behavior pin below records that
+held contract; it is no longer evidence of production reachability.
 """
 
 from __future__ import annotations
@@ -197,9 +190,8 @@ def test_the_surviving_run_store_surface_is_exactly_the_read_and_close_path():
 
 
 
-def test_run_closed_stays_registered_because_cancel_is_live():
-    """Negative gate. ``cancel`` -> ``close_run`` -> ``run.closed`` is reachable
-    from operator takeover and from replacing an active persona chat."""
+def test_run_closed_compatibility_hold_still_emits_registered_event():
+    """Contract hold: removal needs a separate operator event ruling."""
 
     assert "run.closed" in ALLOWED_EVENT_TYPES
 

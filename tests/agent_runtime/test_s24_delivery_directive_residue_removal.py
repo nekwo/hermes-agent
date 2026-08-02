@@ -19,9 +19,7 @@ This stage removes what those callers were the last consumers of:
 
 The module stays importable for the live half: ``reap_orphan_worktrees`` (two
 production callers — ``hermes harness worktree reap`` and ``harness doctor
---fix``) with its ``wt_reaped_patches/`` capture contract, and
-``read_bundle_promotion_record``, which ``repo_bundles.repo_bundle_summary``
-uses to label historical promotion records for ``status.py``.
+--fix``) with its ``wt_reaped_patches/`` capture contract.
 
 ``worktree.task_reaped`` and ``bundle.worktree_reaped`` were deliberately left
 unregistered by S16b because their emitters were residue. Those emitters are
@@ -71,8 +69,6 @@ LIVE_DIRECTIVE_SYMBOLS = (
     "reap_orphan_worktrees",
     "_write_reap_patch_exclusive",
     "_is_empty_husk",
-    "read_bundle_promotion_record",
-    "bundle_promotion_record_path",
 )
 
 # Emitted by the removed executors, never registered (S16b recorded the
@@ -132,12 +128,6 @@ def test_reap_orphan_worktrees_keeps_its_public_signature():
         parameter.kind is inspect.Parameter.KEYWORD_ONLY
         for parameter in signature.parameters.values()
     )
-
-
-def test_read_bundle_promotion_record_still_answers_for_a_missing_record(
-    isolate_agent_runtime_root,
-):
-    assert delivery_directive.read_bundle_promotion_record("task_none", "bundle_none") is None
 
 
 

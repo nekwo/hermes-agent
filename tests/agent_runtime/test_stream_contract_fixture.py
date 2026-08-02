@@ -98,16 +98,24 @@ def test_hydrate_frame_matches_golden_shape(isolate_agent_runtime_root):
 # rule: drop the 29 reader-less `runtime_config` scalars and
 # `migration.counts.repo_bundles`, bump `parity.contract_version`, copy the bytes
 # to the Launcher, update BOTH manifests.
+#
+# S59 repaired the delta-batch fixture that the 48 -> 49 move missed. Pin every
+# frame-bearing golden here, not only hydrate: a partial fixture bump must fail
+# even when the live hydrate frame and its own golden agree.
 CONTRACT_VERSION = 49
 
 
-def test_hydrate_core_pins_contract_version(isolate_agent_runtime_root):
+def test_every_frame_bearing_golden_pins_contract_version(isolate_agent_runtime_root):
     live = hydrate_frame()
-    golden = _fixture("hydrate.json")
-    for frame, origin in ((live, "live"), (golden, "golden")):
+    frames = [(live, "live hydrate")]
+    frames.extend(
+        (_fixture(name), f"golden {name}")
+        for name in ("hydrate.json", "delta.json", "delta_batch.json")
+    )
+    for frame, origin in frames:
         parity = (frame.get("core") or {}).get("parity") or {}
         assert parity.get("contract_version") == CONTRACT_VERSION, (
-            f"{origin} hydrate core carries contract_version="
+            f"{origin} core carries contract_version="
             f"{parity.get('contract_version')} — bumping it is a cross-stack "
             "change (launcher pins kSupportedMissionContractVersion)"
         )

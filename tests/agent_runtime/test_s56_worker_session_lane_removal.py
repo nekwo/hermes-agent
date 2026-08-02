@@ -201,25 +201,6 @@ def test_the_derivation_is_now_a_worker_free_ensure_pass():
     assert params == ["self", "personas"]
 
 
-def test_chat_busy_error_carries_only_the_run_binding():
-    params = list(inspect.signature(persona_assignments.ChatBusyError.__init__).parameters)
-    assert params == ["self", "instance", "active_run_id"]
-
-
-def test_the_surviving_chat_guard_is_the_run_arm():
-    assert callable(persona_assignments._live_chat_binding)
-    assert callable(persona_assignments._terminate_live_chat_binding)
-    # Text gate over CODE only — the comment recording the removal must not
-    # satisfy or trip its own contract (the s45/S46 rule).
-    for fn in (persona_assignments._live_chat_binding, persona_assignments._terminate_live_chat_binding):
-        code = [
-            line.split("#", 1)[0]
-            for line in inspect.getsource(fn).splitlines()
-            if not line.strip().startswith("#")
-        ]
-        assert "worker" not in " ".join(code).lower()
-
-
 def test_the_busy_reason_vocabulary_lost_its_worker_arm():
     assert not hasattr(persona_profile_binding, "BUSY_ACTIVE_WORKER")
     assert "BUSY_ACTIVE_WORKER" not in persona_profile_binding.__all__

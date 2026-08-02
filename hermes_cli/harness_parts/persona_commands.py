@@ -75,7 +75,6 @@ from agent_runtime.mission_chat_workdir import mission_chat_workdir_for_persona
 from agent_runtime.models import AgentPersona, Event, apply_instance_model_overrides
 from agent_runtime.persona_assignments import (
     CHAT_BINDING_CLEARED_REASON_DELETED,
-    ChatBusyError,
     PERSONA_INSTANCE_ID_PREFIX,
     PersonaAssignmentSpec,
     PersonaAssignmentStore,
@@ -434,10 +433,6 @@ def _cmd_persona_instance_create(args) -> int:
             data = _retired_persona_instance_payload(exc)
             print(emit_json(data) if args.json else data["error"])
             return 2
-        except ChatBusyError as exc:
-            data = _chat_busy_payload(exc)
-            print(emit_json(data) if args.json else data["error"])
-            return 2
         try:
             _ensure_persona_chat_session(
                 session_db=_default_persona_session_db(),
@@ -694,10 +689,6 @@ def _cmd_persona_instance_open_chat(args) -> int:
         data = _retired_persona_instance_payload(exc)
         print(emit_json(data) if args.json else data["error"])
         return 2
-    except ChatBusyError as exc:
-        data = _chat_busy_payload(exc)
-        print(emit_json(data) if args.json else data["error"])
-        return 2
     try:
         _ensure_persona_chat_session(
             session_db=_default_persona_session_db(),
@@ -879,18 +870,6 @@ def _cmd_persona_instance_open_new_chat(args, *, persona_id: str, coordinator_sc
                     )
                 except RetiredPersonaInstanceError as exc:
                     data = _retired_persona_instance_payload(exc)
-                    data.update(
-                        {
-                            "session_id": receipt.session_id,
-                            "mission_chat_root_id": receipt.session_id,
-                            "idempotent_replay": receipt.idempotent_replay,
-                            "mint_receipt_state": receipt.state,
-                        }
-                    )
-                    print(emit_json(data) if args.json else data["error"])
-                    return 2
-                except ChatBusyError as exc:
-                    data = _chat_busy_payload(exc)
                     data.update(
                         {
                             "session_id": receipt.session_id,
@@ -1184,19 +1163,6 @@ def _cmd_persona_chat_delete(args) -> int:
     }
     print(emit_json(data) if args.json else f"deleted persona chat {session_id}")
     return 0
-
-
-def _chat_busy_payload(exc: ChatBusyError) -> dict[str, object]:
-    return {
-        "ok": False,
-        "status": "chat_busy",
-        "chat_busy": True,
-        "error": "chat_busy",
-        "persona_instance_id": exc.instance.id,
-        "persona_id": exc.instance.persona_id,
-        "active_run_id": exc.active_run_id,
-        "next_expected": "choose add_instance to keep the current chat, or retry with kill_active to cancel the current run and replace it",
-    }
 
 
 def _retired_persona_instance_payload(
@@ -2114,13 +2080,6 @@ def _mission_chat_commit_turn(plan) -> int:
         # (`retire` preserves chat history by contract). This still refuses, and
         # still refuses with the same typed error.
         data = _retired_persona_instance_payload(exc)
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["error"])
-        return 2
-    except ChatBusyError as exc:
-        data = _chat_busy_payload(exc)
         if getattr(args, "stream", False):
             _emit_chat_final(data)
         else:
@@ -4260,13 +4219,6 @@ def _queue_free_floating_assignment(
         except Exception:
             pass
         data = _retired_persona_instance_payload(exc)
-        if stream:
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if json_output else data["error"])
-        return 2
-    except ChatBusyError as exc:
-        data = _chat_busy_payload(exc)
         if stream:
             _emit_chat_final(data)
         else:

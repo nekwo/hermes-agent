@@ -960,14 +960,10 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     # with run.opened once the two filler appends that were its last minters
     # (tests/agent_runtime/test_events.py) were retargeted onto live types — see
     # tests/agent_runtime/test_s25_run_opened_retirement.py, which owns that
-    # delta. run.closed is NOT in this set: it is still LIVE via
-    # RunStore.cancel -> close_run. RE-DERIVED at S49: that chain used to have
-    # TWO production callers and this comment named both. S49 deleted
-    # operator_control.py, so the "operator takeover" caller is gone and the
-    # persona-chat replacement (persona_assignments.py, "operator replaced
-    # active persona chat") is now the SOLE reason run.closed stays emittable.
-    # Re-derived rather than left standing: a liveness note that outlives one of
-    # the two callers it cites is how a survivor pin rots into decoration.
+    # delta. Round 2 removed the last production caller of RunStore.cancel ->
+    # close_run, but run.closed remains contract-held: event de-registration is
+    # an operator contract decision outside this campaign's authority. See the
+    # S17 behavior pin and doc 19's Round 2 discovered-debt ledger.
     "run.progress": EventContract("run.progress", "Run progress", ("phase", "step", "status", "summary"), ("next_expected", "proof_id")),
     "child.returned": EventContract("child.returned", "Child returned", ("parent_node_id", "child_node_id", "summary"), ("proof_ids", "artifact_refs", "stage_id", "persona_instance_id")),
     "run.tool.started": EventContract("run.tool.started", "Tool started", ("tool_name",), ("run_id",)),

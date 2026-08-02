@@ -26,7 +26,6 @@ from agent_runtime.mission_chat_turns import (
 )
 from agent_runtime.persona_assignments import (
     ACTIVE_ASSIGNMENT_STATES,
-    ChatBusyError,
     PersonaAssignmentSpec,
     PersonaAssignmentStore,
     PersonaInstanceStore,

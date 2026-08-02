@@ -1,4 +1,4 @@
-"""Live half of ``delivery_directive``: the orphan janitor + the promotion read.
+"""Live half of ``delivery_directive``: the orphan-worktree janitor.
 
 S24 removed the Task-declared directive path and the terminal-settle executors
 (see ``docs/agent-runtime-harness/delivery-directive.md``). What this file covers
@@ -9,26 +9,12 @@ is what still has production callers:
   ``wt_reaped_patches/`` capture-before-delete contract, dry-run write-freedom,
   opt-in legacy-temp handling, reparse-alias safety, and the registered
   ``worktree.orphans_reaped`` emission.
-* ``read_bundle_promotion_record`` — the parse-safety contract on
-  already-written promotion records (absent / malformed / valid). S56 deleted
-  ``repo_bundles.repo_bundle_summary``, which was this read's last production
-  caller, so what remains here covers the reader's own safety, not a live
-  projection. See the S56 follow-up note: the read is now caller-less and is a
-  deletion candidate for a later wave — that is a PRODUCTION decision, not one
-  this test file may make.
 """
 
 from __future__ import annotations
 
-import json
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
-
-from agent_runtime.delivery_directive import (
-    bundle_promotion_record_path,
-    read_bundle_promotion_record,
-)
 from agent_runtime.repo_context import RepoExecutionContext, isolated_repo_context_for_run
 
 import pytest
@@ -58,23 +44,6 @@ def source_repo(tmp_path) -> Path:
     return repo
 
 
-def _bundle(source_repo: Path, *, task_id: str = "task_dd01", run_id: str | None = "run_dd01"):
-    """A bundle IDENTITY (task_id + bundle id), not a typed row.
-
-    S57 deleted ``models.RepoBundle`` with ``RepoBundleStore``. This helper never
-    needed the model: the only thing the promotion-record read consumes is the
-    ``(task_id, bundle_id)`` pair that addresses the file on disk. Rebuilding a
-    31-field dataclass to carry two strings is what made that model look
-    load-bearing to a reachability scan.
-    """
-    return SimpleNamespace(
-        id="bundle_dd0000000001",
-        task_id=task_id,
-        repo=str(source_repo),
-        active_run_id=run_id,
-    )
-
-
 def _worktree_with_changes(source_repo: Path, *, task_id: str = "task_dd01", run_id: str = "run_dd01") -> Path:
     """Build a real dirty worktree for the janitor to find.
 
@@ -89,31 +58,6 @@ def _worktree_with_changes(source_repo: Path, *, task_id: str = "task_dd01", run
     (worktree / "app.py").write_text("print('v2')\n", encoding="utf-8")
     (worktree / "feature.py").write_text("FEATURE = True\n", encoding="utf-8")
     return worktree
-
-
-def _write_promotion_record(bundle, outcome: dict) -> Path:
-    record_path = bundle_promotion_record_path(bundle.task_id, bundle.id)
-    record_path.parent.mkdir(parents=True, exist_ok=True)
-    record_path.write_text(json.dumps(outcome, sort_keys=True), encoding="utf-8")
-    return record_path
-
-
-def test_promotion_record_read_is_absent_malformed_and_valid_safe(
-    source_repo, isolate_agent_runtime_root
-):
-    bundle = _bundle(source_repo)
-
-    assert read_bundle_promotion_record(bundle.task_id, bundle.id) is None
-
-    record_path = _write_promotion_record(bundle, {"promote": {"status": "promoted", "commit": "abc1234"}})
-    record = read_bundle_promotion_record(bundle.task_id, bundle.id)
-    assert record is not None and record["promote"]["commit"] == "abc1234"
-
-    record_path.write_text("{not json", encoding="utf-8")
-    assert read_bundle_promotion_record(bundle.task_id, bundle.id) is None
-
-    record_path.write_text('["a list, not a record"]', encoding="utf-8")
-    assert read_bundle_promotion_record(bundle.task_id, bundle.id) is None
 
 
 # S56 deleted the two bundle-summary cases that stood here

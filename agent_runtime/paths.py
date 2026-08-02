@@ -55,10 +55,6 @@ def persona_chat_mint_receipt_path(key_digest: str) -> Path:
     return persona_chat_mint_receipts_dir() / f"{_safe_path_token(key_digest)}.json"
 
 
-def repo_bundles_dir() -> Path:
-    return store_root() / "repo_bundles"
-
-
 def runtime_instances_dir() -> Path:
     return store_root() / "runtime_instances"
 
@@ -180,10 +176,6 @@ def profile_artifact_baseline_path(realm_id: str) -> Path:
     # realm-sync baseline sidecar for the per-profile FILE family (MEMORY.md,
     # core-context files, persona prompts); NEVER synced, NEVER published.
     return store_root() / "realm_sync" / _safe_path_token(realm_id) / "profile_artifact_baseline.json"
-
-
-def repo_bundles_task_dir(task_id: str) -> Path:
-    return repo_bundles_dir() / _safe_path_token(task_id)
 
 
 def agents_dir() -> Path:
@@ -311,13 +303,9 @@ def persona_assignment_path(assignment_id: str) -> Path:
     return persona_assignments_dir() / f"{_safe_path_token(assignment_id)}.json"
 
 
-# S57 removed ``repo_bundle_path``: its ONLY caller was ``RepoBundleStore.get``,
-# deleted with the module in the same commit. Same rule as S23's writer-less path
-# sweep and S44's role-envelope helpers. The two DIRECTORY helpers survive
-# (``repo_bundles_dir`` / ``repo_bundles_task_dir``) because
-# ``delivery_directive.bundle_promotion_record_path`` still addresses the tree
-# through them; that pair is its own caller-less debt entry in doc 19, on a
-# separate lane from this cut.
+# S57 removed ``repo_bundle_path`` with ``RepoBundleStore.get``. Round 2 then
+# removed the caller-less historical promotion-record reader and the two
+# directory helpers that survived solely to address its retired tree.
 
 
 def runtime_instance_path(instance_id: str) -> Path:

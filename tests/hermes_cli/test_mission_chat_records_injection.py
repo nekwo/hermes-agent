@@ -15,7 +15,7 @@ from pathlib import Path
 
 def _mission_chat_message_func():
     # persona_commands.py is an exec'd command part (harness._load_command_parts),
-    # not an importable module — its names (e.g. ChatBusyError) live in
+    # not an importable module — its names (e.g. PersonaChatBusyError) live in
     # hermes_cli.harness's globals. Parse the file source, which is exactly the
     # text that gets exec'd.
     import hermes_cli.harness as harness

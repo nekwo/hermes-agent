@@ -325,7 +325,32 @@ def test_harness_doctor_human_branch_renders_the_surviving_findings(tmp_path, mo
     report ships two, so every plain ``harness doctor`` died with KeyError.
     """
 
+    import hermes_cli.harness as harness_mod
+
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "agent-runtime"))
+    # This is a renderer test. Keep it hermetic instead of scanning every real
+    # harness worktree (and running git diff in each) merely to obtain the two
+    # finding keys whose formatting is under test.
+    monkeypatch.setattr(
+        harness_mod,
+        "run_harness_doctor",
+        lambda **_kwargs: {
+            "summary": {
+                "finding_counts": {
+                    "orphan_worktrees": 0,
+                    "snapshot_null_id_rows": 0,
+                }
+            },
+            "findings": {
+                "event_log": {
+                    "size_bytes": 0,
+                    "line_count": 0,
+                    "archived_event_slices": 0,
+                    "index_health": "ok",
+                }
+            },
+        },
+    )
     args = parser().parse_args(["harness", "doctor"])
 
     assert args.func(args) == 0

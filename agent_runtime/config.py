@@ -393,14 +393,6 @@ def ensure_persisted_personas(cfg: AgentRuntimeConfig | None = None):
     return list(merged.values())
 
 
-def get_persisted_persona(persona_id: str, cfg: AgentRuntimeConfig | None = None):
-    persona_id = str(persona_id or "").strip()
-    for persona in ensure_persisted_personas(cfg):
-        if persona.id == persona_id:
-            return persona
-    raise StopIteration(persona_id)
-
-
 def _persona_from_overrides(persona_id: str, role: str, overrides: dict[str, Any], cfg: AgentRuntimeConfig):
     from .models import AgentPersona
 

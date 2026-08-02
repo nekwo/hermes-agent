@@ -39,7 +39,6 @@ from agent_runtime.errors import (
     SyncConflict,
     WorkspaceDeleteBlocked,
 )
-from agent_runtime.persona_assignments import ChatBusyError
 from agent_runtime.persona_chat_continuity import PERSONA_CHAT_SESSION_SOURCE
 from agent_runtime.realm_sync import RealmSyncError
 
@@ -180,8 +179,6 @@ def _error_code_for_exception(exc: BaseException) -> str:
         return "not_found"
     if isinstance(exc, AlreadyExists):
         return "already_exists"
-    if isinstance(exc, ChatBusyError):
-        return "agent_busy"
     if isinstance(exc, RealmSyncError):
         return exc.code
     # A persisted-entity file that does not exist on disk is a lookup miss,

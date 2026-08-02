@@ -54,7 +54,6 @@ from agent_runtime.models import AgentPersona, Event, apply_instance_model_overr
 from agent_runtime import paths
 from agent_runtime.persona_assignments import (
     CHAT_BINDING_CLEARED_REASON_DELETED,
-    ChatBusyError,
     PERSONA_INSTANCE_ID_PREFIX,
     PersonaAssignmentSpec,
     PersonaInstanceRetireError,

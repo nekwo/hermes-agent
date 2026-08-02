@@ -176,21 +176,6 @@ LIVE_RUN_STATES = frozenset(
 # the instance) cannot recur, because there are no worker rows to re-stamp from.
 
 
-class ChatBusyError(AgentRuntimeError):
-    """The persona already holds a LIVE run binding and ``--kill-active`` was not
-    passed.
-
-    S56 removed the worker half (``active_worker_session_id``). The worker
-    session store is gone, so no instance can carry a worker binding for this
-    guard to find; the run arm below is the whole guard.
-    """
-
-    def __init__(self, instance: PersonaInstance, *, active_run_id: str | None):
-        super().__init__("chat_busy")
-        self.instance = instance
-        self.active_run_id = active_run_id
-
-
 class StaleModelOverrideWrite(AgentRuntimeError):
     """A model-override write carried an ``issued_at`` older than (or equal to)
     the last applied model write for the instance. The newer value wins; the
@@ -2581,27 +2566,6 @@ def default_chat_session_id_for_instance(
         if existing:
             return existing
     return persona_chat_session_id_for(canonical_chat_instance_id(persona_id, persona_instance_id))
-
-
-def _live_chat_binding(instance: PersonaInstance) -> str | None:
-    # S56: was ``_live_chat_bindings`` returning a (run, worker) pair. The worker
-    # half read a field nothing can set and a store that no longer exists.
-    if not instance.active_run_id:
-        return None
-    try:
-        from .store import RunStore
-
-        run = RunStore().get(instance.active_run_id)
-        return run.id if run.state in LIVE_RUN_STATES else None
-    except Exception:
-        return instance.active_run_id
-
-
-def _terminate_live_chat_binding(*, active_run_id: str | None) -> None:
-    if active_run_id:
-        from .store import RunStore
-
-        RunStore().cancel(active_run_id, reason="operator replaced active persona chat")
 
 
 def _free_floating_identity(persona_or_template: AgentPersona | str) -> tuple[str, str, str, str | None]:
