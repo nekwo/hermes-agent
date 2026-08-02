@@ -1357,17 +1357,37 @@ both after verifying the hermes side. Keeping the reversal legible, rather than
 quietly deleting a claim that turned out wrong, is the point. Two orphaned widget
 tests were inverted the same way with their fixtures intact (see s56 below).
 
-### The debt this consolidation does NOT close (measured, not inferred)
+### Wave 4 — s1-s39 registry migration (executed 2026-08-01)
 
-The migration covered the **s40-s57 campaign files** — the ~20 that accumulated
-since the post-upstream-sync audit opened. **About 50 older `test_sNN_*` files
-(s1-s39) still carry roughly 150 absence rows in their own bespoke scanners**,
-and the enumeration found the vacuous-gate defect present in ~30 of them: they
-scan `inspect.getsource(...)` or `Path.read_text()` for a bare token with no
-comment stripping at all. Folding those in is mechanical now that the registry
-and its scanner exist — each row becomes a table entry — but it is a second wave,
-not a rider on this one, and it was left rather than half-done. Recorded here so
-it is not silent.
+The previously deferred older layer is now consolidated. The pre-change tree at
+`e05f1066a` contained exactly **50** s1-s39 files and **6,198** lines. The
+survivors now contain **5,472** lines (726 removed), and three files whose whole
+contract was absorbed were deleted. Behavior, historical-read, wire-shape,
+exact count/hash, and characterization assertions remain in their original
+surviving files; only name/module/event absence moved into this registry.
+
+Protection parity was computed from the pre-change git blobs, not from the
+shrunk working files. The deliberately broad harvest found **1,609
+symbol-shaped literal occurrences** (1,287 distinct file/literal pairs):
+
+- 542 occurrences map to an exact registry row;
+- 1,037 map to a literal still present in a surviving assertion/authority;
+- 30 were manually triaged, leaving **UNMAPPED = 0**.
+
+The 30 manual rows are explicit rather than filtered: 18 are the fragments used
+to concatenate s11's full persona-policy names (the constructed names are
+registry rows); two s21 method names are superseded by scoped `CLASS_ATTR` rows
+and `status.` is old scanner machinery; two s25 values and three s32 values are
+fixture payloads; s29's `context_builder` fragment is superseded by the whole
+`agent_runtime.context_builder` module row; and s5's two method names are
+superseded by scoped `CLASS_ATTR` rows while `module_name` is the old pytest
+parameter id.
+
+Before those three files were deleted, a scratch production module supplied a
+real `run_node` binding and a real `"render_objective"` literal. Each failed its
+exact registry row and named the scratch file. Extra tombstones in the same
+module's comments and docstring produced no offender. The sabotage was then
+reverted and the deletions applied.
 
 ### Retirement rule — rows are never dropped silently
 

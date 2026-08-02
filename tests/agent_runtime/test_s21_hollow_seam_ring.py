@@ -31,7 +31,7 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
 
-from agent_runtime import observability, runtime_instances, status, stream
+from agent_runtime import observability
 from agent_runtime.decision_contract_registry import event_catalog
 from agent_runtime.events import ALLOWED_EVENT_TYPES, OPERATOR_SUMMARY_EVENT_TYPES, Event, operator_event_summary
 from agent_runtime.runtime_instances import GoalRuntimeInstanceStore, runtime_instances_summary
@@ -56,18 +56,6 @@ def test_status_drops_the_fields_computed_over_the_empty_task_list(isolate_agent
     assert "undispatchable_missions" not in data
 
 
-def test_status_drops_the_retired_dispatch_routing_helpers():
-    """The `next_actions` chain: routing policy for a lane that no longer exists."""
-
-    for name in (
-        "_next_action",
-        "_stopped_progress",
-        "_owner_for_action",
-        "_has_budget_approval_path",
-        "_has_budget_scope_recovery_path",
-        "_has_budget_incident",
-    ):
-        assert not hasattr(status, name), f"status.{name} survived S21"
 
 
 def test_status_keeps_every_field_an_operator_can_still_learn_from(isolate_agent_runtime_root):
@@ -107,17 +95,6 @@ def test_status_keeps_every_field_an_operator_can_still_learn_from(isolate_agent
 # --------------------------------------------------------------------------
 
 
-def test_the_foreground_lane_resolver_is_gone():
-    """`active_foreground` walked lanes into `TaskStore.get`, which always raises.
-
-    `TaskStoreStub.get` raises `NotFound` unconditionally (ruling R-3), so every
-    iteration hit `continue` and the method returned `None` by construction — not
-    because no lane was live.
-    """
-
-    assert not hasattr(GoalRuntimeInstanceStore, "active_foreground")
-    # Same hollow shape: it took a task_id and a reason and returned `[]`.
-    assert not hasattr(GoalRuntimeInstanceStore, "park_foreground_except")
 
 
 def test_the_lane_summary_drops_its_hardcoded_foreground_block(isolate_agent_runtime_root):
@@ -184,13 +161,6 @@ def test_the_surviving_delta_op_routing_is_untouched():
         assert _delta_op(Event(ts=now(), type=event_type, task_id=None, run_id=None, persona_id=None)) == expected
 
 
-def test_delta_op_has_no_leftover_prefix_literals():
-    source = (stream.__file__ or "")
-    assert source
-    with open(source, encoding="utf-8") as handle:
-        text = handle.read()
-    for literal in ('"task."', '"proof.attached"', '"daemon."', '"proof.added"', '"daemon.status"'):
-        assert literal not in text, f"stream.py still references {literal}"
 
 
 # --------------------------------------------------------------------------
@@ -276,15 +246,3 @@ def test_the_surviving_event_display_kinds_are_untouched():
     assert (
         observability._event_display_kind("run.progress", {"step": "reasoning_summary"}) == "thinking_summary"
     )
-
-
-def test_the_event_display_title_drops_kinds_its_classifier_cannot_produce():
-    """`_event_display_kind` never returns 'proof' or 'qa_verdict' — both arms were unreachable."""
-
-    source = observability.__file__ or ""
-    assert source
-    with open(source, encoding="utf-8") as handle:
-        text = handle.read()
-    assert 'kind == "proof"' not in text
-    assert 'kind == "qa_verdict"' not in text
-    assert '"qa.verdict_recorded"' not in text

@@ -38,32 +38,14 @@ without manufacturing that key on fresh rows.
 
 from __future__ import annotations
 
-import importlib
-import importlib.util
 import inspect
 
-import pytest
 
 
-def test_the_context_builder_module_is_gone():
-    assert importlib.util.find_spec("agent_runtime.context_builder") is None
 
 
-def test_importing_the_removed_module_raises_module_not_found():
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("agent_runtime.context_builder")
 
 
-def test_nothing_in_production_still_imports_the_shape():
-    """The import line WAS the lane's last liveness (S27's finding). It must not
-    come back under another name."""
-
-    from agent_runtime import persona_runtime
-
-    source = inspect.getsource(persona_runtime)
-    assert "context_builder" not in source
-    assert "AgentContext" not in source
-    assert not hasattr(persona_runtime, "AgentContext")
 
 
 def test_the_agent_run_model_is_not_collateral():
@@ -74,9 +56,7 @@ def test_the_agent_run_model_is_not_collateral():
     from agent_runtime.models import AgentRun
 
     assert AgentRun is not None
-    from agent_runtime import persona_runtime
 
-    assert not hasattr(persona_runtime, "AgentRun")
 
 
 def test_the_contract_45_situational_hud_observability_field_survives_s39():
@@ -90,4 +70,3 @@ def test_the_contract_45_situational_hud_observability_field_survives_s39():
 
     source = inspect.getsource(prompt_observability)
     assert '"situational_hud"' in source
-    assert '"mission_hud"' not in source

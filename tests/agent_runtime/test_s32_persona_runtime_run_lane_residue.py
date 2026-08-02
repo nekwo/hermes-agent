@@ -90,16 +90,8 @@ REMOVED_REPO_EXECUTION_CLUSTER = (
 )
 
 
-def test_the_caller_free_timing_emitter_is_gone():
-    assert [
-        name for name in REMOVED_RUN_LANE_SYMBOLS if hasattr(persona_runtime, name)
-    ] == []
 
 
-def test_its_last_use_imports_went_with_it():
-    assert [
-        name for name in REMOVED_RUN_LANE_IMPORTS if hasattr(persona_runtime, name)
-    ] == []
 
 
 def test_the_shared_progress_import_line_keeps_its_live_sibling():
@@ -115,8 +107,6 @@ def test_the_llm_metadata_cluster_was_retired_with_its_writerless_field():
     """S34 removed the sole writer, its exclusive callees, field, and readers
     as one lockstep contract."""
 
-    for name in REMOVED_LLM_METADATA_CLUSTER:
-        assert not hasattr(persona_runtime, name), name
 
     from agent_runtime.models import AgentRun
 
@@ -124,14 +114,6 @@ def test_the_llm_metadata_cluster_was_retired_with_its_writerless_field():
     assert "run.llm" not in inspect.getsource(persona_runtime)
 
 
-def test_the_repo_execution_cluster_was_retired_by_its_follow_up():
-    """S33 retargeted the contested pin and retired all three names together."""
-
-    for name in REMOVED_REPO_EXECUTION_CLUSTER:
-        assert not hasattr(persona_runtime, name), name
-
-    assert not hasattr(persona_runtime, "capture_repo_baseline")
-    assert not hasattr(persona_runtime, "RepoExecutionContext")
 
 
 def test_no_module_level_name_is_unreachable_from_the_external_surface():

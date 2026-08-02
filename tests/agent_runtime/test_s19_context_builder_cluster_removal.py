@@ -46,10 +46,8 @@ and the live chat-lane HUD.
 
 from __future__ import annotations
 
-from pathlib import Path
 from types import SimpleNamespace
 
-from agent_runtime import prompt_observability, runtime_hud
 from agent_runtime.runtime_hud import render_situational_hud_block, resolve_situational_hud
 
 
@@ -71,19 +69,6 @@ def _instance(**overrides) -> SimpleNamespace:
 # ── the removal ─────────────────────────────────────────────────────────────
 
 
-def test_the_mission_hud_preview_entry_points_are_gone():
-    """Both HUD entry points could only pass ``task=None``; the field row goes
-    with its only producer, so nothing advertises a HUD slice nothing fills."""
-
-    # Gate on the CODE forms (import + call), not on any mention: the removal
-    # rationale is recorded in ``runtime_hud``'s module docstring and naming the
-    # retired function there is the point.
-    for module in (prompt_observability, runtime_hud):
-        source = Path(module.__file__).read_text(encoding="utf-8")
-        assert "import mission_hud_preview" not in source, module.__name__
-        assert "mission_hud_preview(" not in source, module.__name__
-    assert runtime_hud.hud_field("mission_hud") is None
-    assert "mission_hud" not in {field.key for field in runtime_hud.HUD_FIELDS}
 
 
 # ── the keep set ────────────────────────────────────────────────────────────

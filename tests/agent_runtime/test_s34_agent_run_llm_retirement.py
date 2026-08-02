@@ -19,7 +19,6 @@ from hermes_time import now
 from agent_runtime import (
     observability,
     operator_channels,
-    persona_runtime,
     status,
     store,
 )
@@ -40,12 +39,6 @@ REMOVED_LLM_METADATA_CLUSTER = (
 )
 
 
-def test_the_caller_free_llm_metadata_cluster_is_gone():
-    assert [
-        name
-        for name in REMOVED_LLM_METADATA_CLUSTER
-        if hasattr(persona_runtime, name)
-    ] == []
 
 
 def test_agent_run_no_longer_declares_the_writerless_llm_field():

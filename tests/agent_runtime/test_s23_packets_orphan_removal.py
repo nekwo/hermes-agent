@@ -20,9 +20,6 @@ from __future__ import annotations
 from agent_runtime import packets
 
 
-def test_the_unreferenced_packet_symbols_are_gone():
-    assert not hasattr(packets, "UNSUPPORTED_HANDOFF_MODES")
-    assert not hasattr(packets, "_reject_unknown_packet_keys")
 
 
 def test_the_handoff_mode_vocabulary_is_unchanged():
@@ -76,5 +73,3 @@ def test_the_live_packet_validation_surface_survives():
         "adapt_eternia_backend_manage_py_command",
     ):
         assert callable(getattr(packets, name)), name
-    assert not hasattr(packets, "latest_packet")
-    assert not hasattr(packets, "latest_packets_for_task")

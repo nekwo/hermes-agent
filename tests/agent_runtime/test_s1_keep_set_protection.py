@@ -176,27 +176,6 @@ def test_promotion_unknown_role_does_not_clone_an_unrelated_stored_persona():
 # The removal itself is pinned in ``test_s14_stagec_python_capture_removal.py``.
 
 
-def test_s6_removed_the_mission_proof_modules():
-    import importlib.util
-
-    removed = (
-        "agent_runtime.gates",
-        "agent_runtime.final_gate",
-        "agent_runtime.proof_batches",
-        "agent_runtime.proof_command_policy",
-        "agent_runtime.promotion_gates",
-        "agent_runtime.proof_runner",
-        "agent_runtime.proof_rules",
-        "agent_runtime.proof_recipes",
-        "agent_runtime.proof_gates",
-        "agent_runtime.burn_in",
-        "agent_runtime.smoke",
-        "agent_runtime.replay_scenarios",
-        "agent_runtime.visual_proof",
-        "agent_runtime.visual_trace_evidence",
-    )
-
-    assert all(importlib.util.find_spec(name) is None for name in removed)
 
 
 def test_no_proofs_store_is_created_by_the_runtime():

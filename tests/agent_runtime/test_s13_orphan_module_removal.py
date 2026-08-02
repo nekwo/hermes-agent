@@ -10,7 +10,6 @@ bare-word grep cannot take them out with the orphans.
 
 from __future__ import annotations
 
-import importlib.util
 
 
 REMOVED_MODULES = (
@@ -25,16 +24,8 @@ REMOVED_MODULES = (
 )
 
 
-def test_orphan_modules_are_gone():
-    assert [name for name in REMOVED_MODULES if importlib.util.find_spec(name) is not None] == []
 
 
-def test_importing_an_orphan_module_raises_module_not_found():
-    import pytest
-
-    for name in REMOVED_MODULES:
-        with pytest.raises(ModuleNotFoundError):
-            __import__(name)
 
 
 def test_the_lookalike_keep_set_survives():

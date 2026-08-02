@@ -44,11 +44,9 @@ from __future__ import annotations
 
 import inspect
 
-import pytest
 
 import agent_runtime.store as store_module
-from agent_runtime.decision_contract_registry import event_catalog
-from agent_runtime.events import ALLOWED_EVENT_TYPES, Event, EventLog
+from agent_runtime.events import ALLOWED_EVENT_TYPES, EventLog
 from agent_runtime.models import AgentRun, Incident
 from agent_runtime.states import RunState
 from agent_runtime.store import IncidentStore, RunStore
@@ -143,9 +141,6 @@ def _seed_run(*, run_id: str = "run_s17", persona_id: str = "dev", task_id: str 
     return run
 
 
-def test_the_orphaned_store_helper_blocks_are_gone():
-    present = [name for name in DEAD_STORE_HELPERS if hasattr(store_module, name)]
-    assert present == []
 
 
 def test_the_names_other_modules_import_from_store_survive():
@@ -189,9 +184,6 @@ def test_safe_event_token_survived_the_cut_and_still_gates_incident_payloads():
     assert "lane_id" not in event.payload
 
 
-def test_the_write_dead_run_store_methods_are_gone():
-    present = [name for name in WRITE_DEAD_RUN_STORE_METHODS if hasattr(RunStore, name)]
-    assert present == []
 
 
 def test_the_surviving_run_store_surface_is_exactly_the_read_and_close_path():
@@ -203,15 +195,6 @@ def test_the_surviving_run_store_surface_is_exactly_the_read_and_close_path():
     assert public == set(LIVE_RUN_STORE_METHODS)
 
 
-def test_the_orphaned_run_event_contracts_are_de_registered():
-    assert DE_REGISTERED_RUN_EVENT_TYPES & ALLOWED_EVENT_TYPES == frozenset()
-    assert DE_REGISTERED_RUN_EVENT_TYPES & set(event_catalog()) == frozenset()
-    assert set(event_catalog()) == ALLOWED_EVENT_TYPES
-
-    with pytest.raises(ValueError):
-        EventLog().append(
-            Event(ts=now(), type="run.heartbeat", task_id=None, run_id="run_s17", persona_id="dev")
-        )
 
 
 def test_run_closed_stays_registered_because_cancel_is_live():

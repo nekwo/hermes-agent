@@ -138,17 +138,8 @@ REMOVED_SNAPSHOT_IMPORTS = (
 )
 
 
-def test_the_snapshot_orphan_island_is_gone():
-    assert [name for name in REMOVED_SNAPSHOT_SYMBOLS if hasattr(snapshot, name)] == []
 
 
-def test_the_island_only_imports_are_gone():
-    source = inspect.getsource(snapshot)
-    imports = [line for line in source.splitlines() if line.startswith(("import ", "from "))]
-    surviving = [
-        module for module in REMOVED_SNAPSHOT_IMPORTS if any(module in line for line in imports)
-    ]
-    assert surviving == []
 
 
 def test_no_module_level_name_is_unreachable_from_the_external_surface():
@@ -229,15 +220,10 @@ def test_the_lookalike_keep_set_survives():
     # deleted whole at S45 as test-only, so the name now collides with nothing.
     # Asserted as ABSENT rather than dropped, so the reversal of an explicit
     # keep-side claim stays visible in the file that made it.
-    from importlib.util import find_spec
 
-    assert find_spec("agent_runtime.budget_approval") is None
     # ``status.py`` only NAMES snapshot's ``_stopped_progress`` /
     # ``_has_budget_incident`` in a comment; its own chain went in S21.
-    from agent_runtime import status
 
-    assert not hasattr(status, "_stopped_progress")
-    assert not hasattr(status, "_has_budget_incident")
     # The live frames the launcher renders every tick.
     assert callable(snapshot.build_snapshot)
     assert callable(snapshot._boards_summary)

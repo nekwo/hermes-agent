@@ -51,7 +51,6 @@ pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
 
 from hermes_time import now
 
-from agent_runtime import observability, status
 from agent_runtime.models import AgentRun, Incident
 from agent_runtime.observability import build_observability
 from agent_runtime.states import RunState
@@ -85,11 +84,6 @@ def test_status_keeps_the_run_counters_a_reader_can_still_learn_from(isolate_age
         assert key in data, f"S28 dropped a live status field: {key}"
 
 
-def test_status_no_longer_imports_the_task_state_enum():
-    """``TaskState`` reached ``status`` only through the removed ``open_tasks``
-    comprehension."""
-
-    assert not hasattr(status, "TaskState")
 
 
 # --------------------------------------------------------------------------
@@ -159,27 +153,6 @@ def test_the_run_sourced_self_heal_counters_still_count():
     assert self_heal == {"skill_fanout": 2, "failed_proof_reused": 1, "failed_proof_ignored": 0}
 
 
-def test_the_daemon_and_task_intervention_families_are_gone():
-    """Retargeted from the three daemon-mode cases named in the module docstring.
-
-    Their subject was a lane that no longer reaches this builder: with no
-    ``daemon_status`` there is no daemon state to classify, and with no task
-    list there is no context-request or issue-discovery mission to page about.
-    """
-
-    source = inspect.getsource(observability)
-
-    for literal in (
-        '"daemon_offline"',
-        '"daemon_error"',
-        '"daemon_stale"',
-        '"context_request_loop"',
-        '"context_request_unfulfilled"',
-        '"issue_discovery_triage_needed"',
-        '"start_daemon"',
-        '"mission_daemon"',
-    ):
-        assert literal not in source, f"observability.py still references {literal}"
 
 
 def test_the_surviving_interventions_still_fire():

@@ -4,12 +4,9 @@ from __future__ import annotations
 
 
 def test_task_model_is_removed_and_store_name_is_the_permanent_stub():
-    from agent_runtime import models
     from agent_runtime.store import TaskStore
     from agent_runtime.task_store_stub import TaskStoreStub
 
-    assert not hasattr(models, "Task")
-    assert not hasattr(models, "Goal")
     assert TaskStore is TaskStoreStub
 
 

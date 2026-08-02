@@ -13,19 +13,11 @@ quietly take a neighbour with it.
 
 from __future__ import annotations
 
-from toolsets import TOOLSETS, get_toolset_names
+from toolsets import TOOLSETS
 
 
-def test_the_node_control_toolset_entry_is_gone():
-    assert "node_control" not in TOOLSETS
-    assert "node_control" not in get_toolset_names()
 
 
-def test_no_toolset_advertises_the_deleted_node_tools():
-    for name, definition in TOOLSETS.items():
-        tools = set(definition.get("tools") or ())
-        assert "run_node" not in tools, name
-        assert "steer_node" not in tools, name
 
 
 def test_the_upstream_neighbours_of_the_removed_block_survive():

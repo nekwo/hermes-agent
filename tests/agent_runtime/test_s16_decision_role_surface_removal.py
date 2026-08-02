@@ -44,19 +44,12 @@ from agent_runtime.decision_schema import DecisionType
 from agent_runtime.personas import AgentRole
 
 
-def test_the_caller_free_prompt_contract_builder_is_gone():
-    """Its only caller was ``persona_runtime.build_system_prompt`` (55bbb6ab7)."""
-
-    assert not hasattr(registry, "prompt_contract_markdown")
 
 
 def test_the_decision_contract_no_longer_models_roles():
     field_names = {item.name for item in fields(DecisionContract)}
 
     assert "allowed_roles" not in field_names
-    # The dataclass is frozen+slots; a removed field must not linger as an
-    # attribute default either.
-    assert not hasattr(DecisionContract, "allowed_roles")
     # S54 removed ``all_decision_contracts`` (a whole-map accessor with no
     # production caller). The same ground is covered by walking the live
     # DecisionType enum through the live ``decision_contract`` lookup.
@@ -80,14 +73,6 @@ def test_no_decision_contract_publishes_a_role_gate_on_the_wire():
         assert "allowed_roles" not in entry, decision_type
 
 
-def test_the_role_tuple_aliases_used_only_by_the_removed_gate_are_gone():
-    """``_PM_QA`` existed solely as an ``allowed_roles=`` value; the HUD shapes
-    never used it. The other aliases survive because ``HudShape.roles`` uses them."""
-
-    assert not hasattr(registry, "_PM_QA")
-    # Dead since the shape index stopped being role-filtered (S11/S15): a tuple
-    # of shape ids nothing reads.
-    assert not hasattr(registry, "_COMMON_SHAPE_IDS")
 
 
 def test_role_tokens_remain_first_class_data():

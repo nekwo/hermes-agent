@@ -253,10 +253,6 @@ def test_the_near_miss_survivors_stay_registered():
 
 
 def test_the_s11_role_filtering_shells_are_gone():
-    from agent_runtime import decision_contract_registry as registry
-
-    # A no-op that returned every decision for every role — zero callers.
-    assert not hasattr(registry, "allowed_decisions_for_role")
 
     # An always-empty list reported as if it were a real check result.
     assert "role_shape_errors" not in verify_registry()

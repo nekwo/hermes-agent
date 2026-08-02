@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import inspect
 
-from agent_runtime import persona_runtime, repo_context
+from agent_runtime import repo_context
 
 
 REMOVED_PERSONA_RUNTIME_SYMBOLS = (
@@ -29,32 +29,10 @@ REMOVED_PERSONA_RUNTIME_IMPORTS = (
 )
 
 
-def test_the_caller_free_persona_repo_baseline_cluster_is_gone():
-    assert [
-        name
-        for name in REMOVED_PERSONA_RUNTIME_SYMBOLS
-        if hasattr(persona_runtime, name)
-    ] == []
 
 
-def test_the_cluster_last_use_imports_are_gone_by_name():
-    assert [
-        name
-        for name in REMOVED_PERSONA_RUNTIME_IMPORTS
-        if hasattr(persona_runtime, name)
-    ] == []
 
 
-def test_the_production_caller_free_baseline_capture_is_gone():
-    for name in (
-        "capture_repo_baseline",
-        "_baseline_snapshot_dir",
-        "_is_harness_litter_path",
-        "_paths_from_status_line",
-        "_snapshot_tracked_dirty_files",
-        "_status_manifest",
-    ):
-        assert not hasattr(repo_context, name), name
 
 
 def test_the_worktree_creator_trio_stays_live_as_regression_infrastructure():

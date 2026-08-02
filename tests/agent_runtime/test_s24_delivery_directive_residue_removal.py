@@ -31,14 +31,10 @@ below so nobody registers a contract for an emitter that no longer exists.
 
 from __future__ import annotations
 
-import ast
-import importlib
 import inspect
-import textwrap
 
-import pytest
 
-from agent_runtime import delivery_directive, models, paths, repo_context
+from agent_runtime import delivery_directive, repo_context
 
 
 REMOVED_DIRECTIVE_SYMBOLS = (
@@ -113,9 +109,6 @@ REMOVED_REPO_CONTEXT_SYMBOLS = (
 )
 
 
-def test_the_residue_half_is_gone():
-    present = [name for name in REMOVED_DIRECTIVE_SYMBOLS if hasattr(delivery_directive, name)]
-    assert present == []
 
 
 def test_the_module_still_imports_and_the_live_half_is_callable():
@@ -147,20 +140,8 @@ def test_read_bundle_promotion_record_still_answers_for_a_missing_record(
     assert delivery_directive.read_bundle_promotion_record("task_none", "bundle_none") is None
 
 
-def test_the_task_state_import_left_with_the_executors():
-    source = inspect.getsource(delivery_directive)
-    assert "TaskState" not in source
-    assert "from .states import" not in source
 
 
-def test_the_unregistered_reap_events_are_now_emitter_free():
-    from agent_runtime.events import ALLOWED_EVENT_TYPES
-
-    source = inspect.getsource(delivery_directive)
-    for event_type in EMITTER_FREE_EVENT_TYPES:
-        assert event_type not in source, event_type
-        # Still unregistered — an emitter-free type must never gain a contract.
-        assert event_type not in ALLOWED_EVENT_TYPES, event_type
 
 
 def test_the_live_janitor_still_emits_its_registered_event_type():
@@ -171,57 +152,10 @@ def test_the_live_janitor_still_emits_its_registered_event_type():
     assert "worktree.orphans_reaped" in ALLOWED_EVENT_TYPES
 
 
-def test_the_dead_bundle_delivery_path_is_gone():
-    """INVERTED again at S57: the module that held every symbol in
-    ``REMOVED_BUNDLE_SYMBOLS`` is itself deleted, which is strictly stronger than
-    ``not hasattr`` on each one."""
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("agent_runtime.repo_bundles")
 
 
-def test_the_bundle_summary_surface_status_renders_survives():
-    """INVERTED at S56 (2026-08-01), and AGAIN at S57. Not deleted.
-
-    S24 kept these four projections and ``read_bundle_promotion_record`` on the
-    keep side with an explicit reason: ``status.py`` read them, so they were the
-    live surface the delivery-directive residue had been feeding. That reason
-    stopped being true when S52 removed the bundle WRITE lane (nothing can mint
-    or promote a bundle any more) and S56 took the four rows —
-    ``repo_bundles``, ``repo_bundle_closeout``, ``bundle_queue``,
-    ``repo_locks`` — off the ``build_status`` wire, leaving the projections
-    caller-free.
-
-    S24's last surviving keep-side claim here was "the READ side
-    (``RepoBundleStore``) deliberately survives". S57 retired that too: with the
-    projections gone the store had zero production importers, and the module, the
-    ``RepoBundle`` model and ``paths.repo_bundle_path`` went whole. Every claim
-    this case ever made is now an absence, and all of them are kept on the record
-    rather than dropped — the chain S24 -> S52 -> S56 -> S57 is the evidence that
-    a keep-side reason must be RE-CHECKED each wave, never inherited.
-    """
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("agent_runtime.repo_bundles")
-    assert not hasattr(models, "RepoBundle")
-    assert not hasattr(paths, "repo_bundle_path")
-
-    # ...and `status.py` has not regrown a reference under another name. CODE
-    # only: `build_status` carries a comment naming the removed rows.
-    from agent_runtime import status
-
-    source = ast.unparse(ast.parse(textwrap.dedent(inspect.getsource(status.build_status))))
-    for name in (
-        "RepoBundleStore",
-        "repo_bundle_summary",
-        "repo_bundle_delivery_summary",
-        "bundle_queue_summary",
-        "repo_lock_summary",
-    ):
-        assert name not in source, name
 
 
-def test_the_caller_free_repo_context_symbols_are_gone():
-    present = [name for name in REMOVED_REPO_CONTEXT_SYMBOLS if hasattr(repo_context, name)]
-    assert present == []
 
 
 def test_the_live_repo_context_halves_survive():
@@ -266,9 +200,3 @@ def test_the_worktree_creator_is_kept_as_declared_test_infrastructure():
         assert hasattr(repo_context, name), name
     doc = inspect.getdoc(repo_context.isolated_repo_context_for_run) or ""
     assert "no production caller" in doc.lower()
-
-
-def test_from_import_of_a_removed_name_raises_import_error():
-    for name in ("task_delivery_directive", "execute_delivery_directive", "capture_bundle_patch"):
-        with pytest.raises(ImportError):
-            exec(f"from agent_runtime.delivery_directive import {name}", {})

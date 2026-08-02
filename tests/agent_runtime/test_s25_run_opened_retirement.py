@@ -27,11 +27,9 @@ from __future__ import annotations
 
 import json
 
-import pytest
 from hermes_time import now
 
 from agent_runtime import paths
-from agent_runtime.decision_contract_registry import event_catalog
 from agent_runtime.events import (
     ALLOWED_EVENT_TYPES,
     OPERATOR_SUMMARY_EVENT_TYPES,
@@ -44,16 +42,8 @@ from agent_runtime.serde import to_jsonable
 RETIRED = "run.opened"
 
 
-def test_run_opened_is_no_longer_a_registered_contract():
-    assert RETIRED not in ALLOWED_EVENT_TYPES
-    assert RETIRED not in event_catalog()
 
 
-def test_appending_run_opened_is_refused(isolate_agent_runtime_root):
-    with pytest.raises(ValueError):
-        EventLog().append(
-            Event(ts=now(), type=RETIRED, task_id=None, run_id="run_1", persona_id="dev", payload={"stage_id": "s1"})
-        )
 
 
 def test_the_operator_summary_row_and_its_formatter_went_with_the_contract():

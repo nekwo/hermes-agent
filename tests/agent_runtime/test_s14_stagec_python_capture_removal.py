@@ -17,7 +17,6 @@ server, which is how Stage C is actually reached now.
 
 from __future__ import annotations
 
-import importlib.util
 
 
 REMOVED_MODULES = (
@@ -28,16 +27,8 @@ REMOVED_MODULES = (
 )
 
 
-def test_hardcoded_stagec_capture_modules_are_gone():
-    assert [name for name in REMOVED_MODULES if importlib.util.find_spec(name) is not None] == []
 
 
-def test_importing_a_retired_stagec_module_raises_module_not_found():
-    import pytest
-
-    for name in REMOVED_MODULES:
-        with pytest.raises(ModuleNotFoundError):
-            __import__(name)
 
 
 def test_the_mcp_side_stagec_path_is_untouched():

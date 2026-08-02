@@ -14,32 +14,16 @@ grep away is pinned below.
 
 from __future__ import annotations
 
-import importlib.util
-import inspect
 
-import pytest
 
 
 REMOVED_MODULES = ("agent_runtime.recovery_flags",)
 
 
-def test_the_module_is_gone():
-    assert [name for name in REMOVED_MODULES if importlib.util.find_spec(name) is not None] == []
 
 
-def test_importing_it_raises_module_not_found():
-    for name in REMOVED_MODULES:
-        with pytest.raises(ModuleNotFoundError):
-            __import__(name)
 
 
-def test_the_store_no_longer_carries_the_dangling_import():
-    """The import was the module's only liveness — an import is not a call."""
-
-    from agent_runtime import store
-
-    assert not hasattr(store, "mark_incident_closed_for_recovery")
-    assert "recovery_flags" not in inspect.getsource(store)
 
 
 def test_the_lookalike_keep_set_survives():

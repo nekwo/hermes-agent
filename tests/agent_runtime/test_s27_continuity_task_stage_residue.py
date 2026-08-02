@@ -42,10 +42,6 @@ def test_the_child_return_emitter_no_longer_declares_task_or_stage():
     assert "stage_id" not in parameters
 
 
-def test_neither_module_still_stamps_a_task_or_stage_row():
-    for module in (continuity, child_events):
-        source = inspect.getsource(module)
-        assert "stage_id" not in source, module.__name__
 
 
 def test_proof_refs_remain_live_in_the_parent_message():

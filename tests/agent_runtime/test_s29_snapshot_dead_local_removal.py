@@ -87,8 +87,6 @@ def _function(name: str) -> ast.FunctionDef:
     raise AssertionError(f"{name} is not defined in agent_runtime.snapshot")
 
 
-def test_the_test_pinned_history_helpers_are_gone():
-    assert [name for name in REMOVED_SNAPSHOT_SYMBOLS if hasattr(snapshot, name)] == []
 
 
 def test_no_function_assigns_a_local_it_never_reads():

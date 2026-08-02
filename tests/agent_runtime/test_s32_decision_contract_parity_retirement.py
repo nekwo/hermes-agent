@@ -30,43 +30,20 @@ deliberately kept.
 
 from __future__ import annotations
 
-import pytest
 from hermes_time import now
 
-from agent_runtime.decision_contract_registry import event_catalog
 from agent_runtime.events import (
     ALLOWED_EVENT_TYPES,
     OPERATOR_SUMMARY_EVENT_TYPES,
     Event,
-    EventLog,
     operator_event_summary,
 )
 
 RETIRED = "decision_contract.parity"
 
 
-def test_decision_contract_parity_is_no_longer_a_registered_contract():
-    assert RETIRED not in ALLOWED_EVENT_TYPES
-    assert RETIRED not in event_catalog()
 
 
-def test_appending_decision_contract_parity_is_refused(isolate_agent_runtime_root):
-    with pytest.raises(ValueError):
-        EventLog().append(
-            Event(
-                ts=now(),
-                type=RETIRED,
-                task_id=None,
-                run_id=None,
-                persona_id="dev",
-                payload={
-                    "mode": "shadow",
-                    "status": "match",
-                    "public_decision_type": "continue",
-                    "execution_decision_type": "continue",
-                },
-            )
-        )
 
 
 def test_the_type_never_had_an_operator_summary_row_to_retire():
@@ -100,9 +77,6 @@ def test_the_type_never_had_an_operator_summary_row_to_retire():
 def test_the_recorder_and_its_projection_half_stay_gone():
     from agent_runtime import simplified_contract
 
-    assert not hasattr(simplified_contract, "_record_parity")
-    assert not hasattr(simplified_contract, "project_decision_for_execution")
-    assert not hasattr(simplified_contract, "DecisionProjection")
 
     # What survives is the wire-value normalizer its live importers read.
     assert hasattr(simplified_contract, "public_decision_type")

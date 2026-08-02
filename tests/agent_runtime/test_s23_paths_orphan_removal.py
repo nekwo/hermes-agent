@@ -33,8 +33,6 @@ REMOVED_PATH_HELPERS = (
 )
 
 
-def test_orphan_path_helpers_are_gone():
-    assert [name for name in REMOVED_PATH_HELPERS if hasattr(paths, name)] == []
 
 
 def test_the_lookalike_path_keep_set_survives():
@@ -58,20 +56,17 @@ def test_the_lookalike_path_keep_set_survives():
     # by ruling. Inverted rather than deleted so S23's explicit keep stays on the
     # record. The removal is owned by
     # tests/agent_runtime/test_s56_worker_session_lane_removal.py.
-    assert not hasattr(paths, "proof_sandbox_root")
     # INVERTED at S54 (2026-08-01). S23 kept ``stagec_artifacts_dir`` here and
     # S43 kept it again while cutting its ``_task_dir`` leaf. By S54 the
     # directory helper itself had no reader anywhere -- the "deliberately not
     # under proofs/" note described WHERE it pointed, never that anything still
     # called it. Inverted rather than deleted so the two prior keeps stay on the
     # record. Owned by tests/agent_runtime/test_s54_individual_dead_symbols.py.
-    assert not hasattr(paths, "stagec_artifacts_dir")
 
 
 def test_queued_skills_directory_has_exactly_one_owner():
     from agent_runtime import queued_skills
 
-    assert not hasattr(paths, "queued_skills_dir")
     assert queued_skills._queue_dir().name == "queued_skills"
 
 
@@ -115,12 +110,3 @@ def test_checkpoint_keeps_every_class_that_still_has_a_writer():
     # state a reader can see.
     assert "worker_sessions" not in checkpoint.ENTITY_CLASS_NAMES
     assert "repo_bundles" not in checkpoint.ENTITY_CLASS_NAMES
-
-
-def test_checkpoint_dropped_the_two_role_classes_when_their_stores_went():
-    """S44 retarget of this file's keep-side claim (see the note above)."""
-
-    assert "role_envelopes" not in checkpoint.ENTITY_CLASS_NAMES
-    assert "role_checklists" not in checkpoint.ENTITY_CLASS_NAMES
-    for name in ("role_envelopes_dir", "role_checklists_dir", "role_checklist_path"):
-        assert not hasattr(paths, name), name

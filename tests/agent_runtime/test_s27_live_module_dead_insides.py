@@ -194,12 +194,6 @@ def _unreachable(module, roots: set[str]) -> list[str]:
     return sorted(set(defs) - seen)
 
 
-def test_every_dead_inside_is_gone():
-    offenders = {
-        name: [symbol for symbol in symbols if hasattr(MODULES[name], symbol)]
-        for name, symbols in REMOVED.items()
-    }
-    assert {name: found for name, found in offenders.items() if found} == {}
 
 
 def test_nothing_is_left_unreachable_from_the_external_surface():
@@ -210,23 +204,6 @@ def test_nothing_is_left_unreachable_from_the_external_surface():
     assert {name: found for name, found in leftovers.items() if found} == {}
 
 
-def test_the_checklist_for_task_stage_ruling_was_transitively_falsified():
-    """RETARGETED at S44. This test used to prove the S27 correction: that
-    ``checklist_for_task_stage`` was LIVE because
-    ``RoleChecklistStore.open_or_create`` called it and ``role_envelopes``
-    called that.
-
-    Every link in that chain is now gone, and the ORDER is the finding worth
-    keeping: nothing about ``checklist_for_task_stage`` changed. Its justifying
-    caller was removed one level up, and a two-hop liveness argument evaporates
-    the moment its root does. That is why S44 re-derived every name in this
-    family from current callers instead of trusting the wave-3 ruling."""
-
-    from importlib.util import find_spec
-
-    assert find_spec("agent_runtime.role_envelopes") is None
-    assert not hasattr(role_checklists, "checklist_for_task_stage")
-    assert not hasattr(role_checklists, "RoleChecklistStore")
 
 
 def test_the_live_external_surface_of_each_module_still_works():

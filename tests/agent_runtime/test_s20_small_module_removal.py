@@ -14,22 +14,14 @@ worktree *creator* half.
 
 from __future__ import annotations
 
-import importlib.util
 
-import pytest
 
 
 REMOVED_MODULES = ("agent_runtime.role_sessions",)
 
 
-def test_removed_modules_are_gone():
-    assert [name for name in REMOVED_MODULES if importlib.util.find_spec(name) is not None] == []
 
 
-def test_importing_a_removed_module_raises_module_not_found():
-    for name in REMOVED_MODULES:
-        with pytest.raises(ModuleNotFoundError):
-            __import__(name)
 
 
 def test_dev_discipline_survives_on_its_progress_telemetry_caller():
@@ -53,14 +45,13 @@ def test_simplified_contract_survives_on_its_public_decision_type_callers():
 
     import inspect
 
-    from agent_runtime import operator_channels, simplified_contract, snapshot, store
+    from agent_runtime import operator_channels, simplified_contract, store
 
     assert operator_channels.public_decision_type_value is simplified_contract.public_decision_type_value
     assert store.public_decision_type_value is simplified_contract.public_decision_type_value
     # A live call site, not just a bound name.
     for module in (operator_channels, store):
         assert "public_decision_type_value(" in inspect.getsource(module), module.__name__
-    assert not hasattr(snapshot, "public_decision_type_value")
 
 
 def test_scope_control_survives_on_its_payload_validation_callers():
@@ -78,12 +69,10 @@ def test_scope_control_survives_on_its_payload_validation_callers():
     module's entire surviving surface.
     """
 
-    from agent_runtime import decision_contracts, observability, scope_control
+    from agent_runtime import decision_contracts, scope_control
 
     assert decision_contracts.validate_discovery_payload is scope_control.validate_discovery_payload
     assert decision_contracts.validate_triage_payload is scope_control.validate_triage_payload
-    assert not hasattr(observability, "untriaged_issue_discoveries")
-    assert not hasattr(scope_control, "untriaged_issue_discoveries")
 
 
 def test_role_checklists_no_longer_survives_on_role_envelope_callers():
@@ -102,13 +91,9 @@ def test_role_checklists_no_longer_survives_on_role_envelope_callers():
     visible here or the reasoning silently rots.
     """
 
-    from importlib.util import find_spec
 
     from agent_runtime import role_checklists
 
-    assert find_spec("agent_runtime.role_envelopes") is None
-    for name in ("RoleChecklistStore", "normalize_role_id", "checklist_summary"):
-        assert not hasattr(role_checklists, name), name
     assert callable(role_checklists.validate_checklist_payload_structure)
 
 
@@ -135,12 +120,7 @@ def test_persona_runtime_drops_retired_repo_context_names_without_touching_the_m
     ``capture_repo_baseline`` and both last-use imports went with that lane.
     The live worktree-creator infrastructure in ``repo_context`` is untouched."""
 
-    from agent_runtime import persona_runtime, repo_context
+    from agent_runtime import repo_context
 
-    assert not hasattr(persona_runtime, "capture_repo_baseline")
-    assert not hasattr(persona_runtime, "RepoExecutionContext")
-    assert not hasattr(repo_context, "capture_repo_baseline")
-    assert not hasattr(persona_runtime, "isolated_repo_context_for_run")
-    assert not hasattr(persona_runtime, "repo_execution_context_for_task")
     assert callable(repo_context.repo_execution_context_for_task)
     assert callable(repo_context.isolated_repo_context_for_run)

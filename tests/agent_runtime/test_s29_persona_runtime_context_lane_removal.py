@@ -94,20 +94,10 @@ RETIRED_SINCE_S29 = (
 )
 
 
-def test_the_names_this_witness_once_pinned_as_live_are_now_verified_dead():
-    assert [name for name in RETIRED_SINCE_S29 if hasattr(persona_runtime, name)] == []
 
 
-def test_the_agent_context_typed_helpers_are_gone():
-    assert [
-        name for name in REMOVED_PERSONA_RUNTIME_SYMBOLS if hasattr(persona_runtime, name)
-    ] == []
 
 
-def test_the_only_use_imports_are_gone():
-    assert [
-        name for name in REMOVED_PERSONA_RUNTIME_IMPORTS if hasattr(persona_runtime, name)
-    ] == []
 
 
 def test_the_shared_import_lines_keep_their_live_names():
@@ -142,34 +132,8 @@ def test_the_chat_lane_block_list_survives():
     assert source.count("_blocked_tool_names_for_chat(") >= 4
 
 
-def test_the_separately_ruled_repo_execution_context_cluster_is_now_gone():
-    """Retargeted by S33: S29 correctly deferred this separate cluster, and
-    ``a54e802cd`` later supplied the caller evidence needed to retire it."""
-
-    for name in (
-        "_repo_context_for_render",
-        "_repo_context_progress_payload",
-        "_attach_repo_baseline",
-    ):
-        assert not hasattr(persona_runtime, name), name
 
 
-def test_the_stage_intent_module_was_collateral_after_all_two_waves_later():
-    """RETARGETED at S45. This test asserted the opposite, and was right when it
-    was written: S29 removed ``persona_runtime``'s importer of
-    ``stage_requires_product_edit``, and the module was judged to keep its life
-    because it called that function three times INTERNALLY.
-
-    That reasoning is the trap this retarget records. **Internal self-reference
-    is not liveness.** The three internal calls kept the module reachable from
-    itself at the very moment its last external production caller — the one S29
-    had just deleted — went away. What was left was a closed loop anchored only
-    by ``test_stage_intent.py``, precisely the shape S45 was authorized to cut.
-    The count-the-internal-calls check would have gone on passing forever."""
-
-    from importlib.util import find_spec
-
-    assert find_spec("agent_runtime.stage_intent") is None
 
 
 def test_no_module_level_name_is_unreachable_from_the_external_surface():

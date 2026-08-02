@@ -33,28 +33,14 @@ from __future__ import annotations
 
 import inspect
 
-import pytest
 
-from agent_runtime import models, observability
-
-
-def test_the_proof_record_and_its_type_enum_are_gone():
-    assert not hasattr(models, "Proof")
-    assert not hasattr(models, "ProofType")
+from agent_runtime import observability
 
 
-def test_importing_proof_from_the_package_root_fails():
-    import agent_runtime
-
-    assert not hasattr(agent_runtime, "Proof")
-    assert "Proof" not in agent_runtime.__all__
-    with pytest.raises(ImportError):
-        from agent_runtime.models import Proof  # noqa: F401
 
 
-def test_observability_no_longer_annotates_against_the_removed_record():
-    assert not hasattr(observability, "Proof")
-    assert "list[Proof]" not in inspect.getsource(observability)
+
+
 
 
 def test_the_observability_proofs_parameter_and_row_are_gone():

@@ -24,38 +24,20 @@ it, and their emitters are live.
 
 from __future__ import annotations
 
-import pytest
 from hermes_time import now
 
-from agent_runtime.decision_contract_registry import event_catalog
 from agent_runtime.events import (
     ALLOWED_EVENT_TYPES,
     OPERATOR_SUMMARY_EVENT_TYPES,
     Event,
-    EventLog,
     operator_event_summary,
 )
 
 RETIRED = "repo_bundle.delivered"
 
 
-def test_repo_bundle_delivered_is_no_longer_a_registered_contract():
-    assert RETIRED not in ALLOWED_EVENT_TYPES
-    assert RETIRED not in event_catalog()
 
 
-def test_appending_repo_bundle_delivered_is_refused(isolate_agent_runtime_root):
-    with pytest.raises(ValueError):
-        EventLog().append(
-            Event(
-                ts=now(),
-                type=RETIRED,
-                task_id=None,
-                run_id=None,
-                persona_id="dev",
-                payload={"repo_bundle_id": "bundle_1", "repo": "hermes-agent", "state": "delivered"},
-            )
-        )
 
 
 def test_the_operator_summary_row_and_its_formatter_arm_went_with_the_contract():
@@ -112,13 +94,3 @@ def test_the_rest_of_the_repo_bundle_lane_followed_at_s52():
             payload={"repo": "launcher", "state": "running", "reason": "run started"},
         )
         assert operator_event_summary(evt) is None
-
-
-def test_the_delivered_only_int_helper_went_with_its_arm():
-    """``_safe_int`` existed for the delivered arm's ``proof_count`` suffix and
-    had no other caller — a private helper outliving its only branch is the
-    residue this wave exists to stop leaving behind."""
-
-    from agent_runtime import events
-
-    assert not hasattr(events, "_safe_int")

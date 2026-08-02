@@ -43,10 +43,7 @@ subject.
 
 from __future__ import annotations
 
-import pkgutil
-from importlib.util import find_spec
 
-import agent_runtime
 
 
 #: The public surface this file used to pin as KEEP, awaiting a ruling.
@@ -64,55 +61,10 @@ S29_KEPT_PRIVATE_HELPERS = (
 )
 
 
-def test_the_bundle_reader_is_gone():
-    """S29's own cut, now subsumed: the whole module went at S45."""
-
-    assert find_spec("agent_runtime.context_requests") is None
-    assert not hasattr(agent_runtime, "context_requests")
 
 
-def test_the_surface_s29_deferred_went_with_the_module():
-    """The KEEP was explicitly provisional — "equally consumer-free today [...]
-    but removing them is a whole-module decision, not this cut". S45 was that
-    decision, so every deferred name went, not just the one S29 could reach."""
-
-    import importlib
-
-    import pytest
-
-    with pytest.raises(ModuleNotFoundError):
-        importlib.import_module("agent_runtime.context_requests")
-
-    for name in S29_KEPT_PENDING_RULING + S29_KEPT_PRIVATE_HELPERS:
-        assert not hasattr(agent_runtime, name), name
 
 
-def test_no_module_in_the_package_still_defines_or_calls_the_reader():
-    """Text gate, path-scoped to the package — never a bare word.
-
-    Gates on the CODE forms (definition, call, import), not on any mention: the
-    removal rationale is recorded in prose above and in the S45 contract test,
-    and naming the retired function there is the point. Widened at S45 from the
-    single reader to the module import itself."""
-
-    offenders = []
-    for module_info in pkgutil.iter_modules(agent_runtime.__path__):
-        path = f"{agent_runtime.__path__[0]}/{module_info.name}.py"
-        try:
-            with open(path, encoding="utf-8") as handle:
-                source = handle.read()
-        except OSError:
-            continue
-        for form in (
-            "def fulfilled_context_bundles",
-            "fulfilled_context_bundles(",
-            "import fulfilled_context_bundles",
-            "from .context_requests import",
-            "from agent_runtime.context_requests import",
-        ):
-            if form in source:
-                offenders.append(f"{module_info.name}:{form}")
-    assert offenders == []
 
 
 def test_the_nearest_miss_s29_named_is_itself_retired():
