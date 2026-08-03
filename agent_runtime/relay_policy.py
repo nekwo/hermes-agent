@@ -205,3 +205,75 @@ def parse_relay_sender_marker(value) -> "RelaySender | None":
     persona = parts[0].strip() if parts else ""
     instance = parts[1].strip() if len(parts) > 1 else ""
     return RelaySender(persona_id=persona or None, instance_id=instance or None)
+
+
+# ── Harness-delivery origin attribution ─────────────────────────────
+#
+# A dispatch delivery turn (agent_runtime.dispatch_delivery) is forged into the
+# SENDER's own chat session as a role="user" row — at rest indistinguishable
+# from a message the operator typed, exactly like a relay. Without a marker the
+# launcher attributes a result the HARNESS delivered to the operator ("You"),
+# which is the same attribution defect the relay marker above retired, one lane
+# over.
+#
+# It gets its OWN marker rather than borrowing ``relay_from:`` because it is not
+# a relay: no agent sent it, there is no sending persona to name, and a consumer
+# that grouped it with relayed messages would attribute a machine delivery to
+# whichever persona happened to be encoded. What a delivery carries instead is
+# the identity of the DISPATCH it settles, plus whether the dispatching agent
+# flagged the operator to be told — the two facts a consumer needs to render it
+# and to decide whether it is notification-worthy.
+#
+# Same column, same precedent, same single-authority rule: this module builds
+# and parses; nothing else pattern-matches the string.
+
+HARNESS_DELIVERY_FINISH_REASON_PREFIX = "harness_delivery:"
+
+
+@dataclass(frozen=True)
+class HarnessDeliveryOrigin:
+    """Provenance decoded from a harness-delivery marker.
+
+    ``dispatch_id`` is ``None`` when the segment was unreadable — the marker
+    still identifies the row as a delivery, because "the harness delivered this"
+    is the load-bearing fact and it does not stop being true when the id is
+    lost."""
+
+    dispatch_id: str | None = None
+    notify_operator: bool = False
+
+
+def build_harness_delivery_marker(
+    dispatch_id: str | None, notify_operator: bool = False
+) -> str:
+    """Encode a forged delivery turn's origin into a ``finish_reason`` marker.
+
+    Shape: ``harness_delivery:<dispatch_id>:<0|1>``. The id segment is emitted
+    empty when unknown; the flag is always one explicit character so a consumer
+    never has to infer "not flagged" from a missing field."""
+    dispatch = (dispatch_id or "").strip()
+    return (
+        f"{HARNESS_DELIVERY_FINISH_REASON_PREFIX}{dispatch}:"
+        f"{'1' if notify_operator else '0'}"
+    )
+
+
+def parse_harness_delivery_marker(value) -> "HarnessDeliveryOrigin | None":
+    """Decode a ``finish_reason`` value into a :class:`HarnessDeliveryOrigin`.
+
+    ``None`` for every non-marker value, so an operator row, a CLI send and a
+    relayed message all keep their existing projection untouched. Only ``"1"``
+    means flagged: an absent, empty or unparseable flag segment is read as NOT
+    flagged, because notifying on an unreadable marker would manufacture
+    operator interrupts out of corruption."""
+    if not isinstance(value, str) or not value.startswith(
+        HARNESS_DELIVERY_FINISH_REASON_PREFIX
+    ):
+        return None
+    remainder = value[len(HARNESS_DELIVERY_FINISH_REASON_PREFIX):]
+    parts = remainder.split(":", 2)
+    dispatch_id = parts[0].strip() if parts else ""
+    flag = parts[1].strip() if len(parts) > 1 else ""
+    return HarnessDeliveryOrigin(
+        dispatch_id=dispatch_id or None, notify_operator=flag == "1"
+    )

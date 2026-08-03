@@ -12,6 +12,7 @@ from .persona_chat_history import (
     _canonical_persona_id,
     canonical_persona_chat_turn_id,
     logical_persona_chat_client_message_id,
+    PERSONA_HARNESS_DELIVERY_KIND,
     PERSONA_PRE_TRACE_ACK_KIND,
     PERSONA_RELAYED_MESSAGE_KIND,
     PERSONA_TURN_BUDGET_EXHAUSTED_KIND,
@@ -817,7 +818,20 @@ def _conversation_history_message(
         if is_relayed_message
         else None
     )
-    if is_relayed_message:
+    # A dispatch delivery is a role="operator" row the HARNESS forged into the
+    # sender's own thread. Same shape as the relay case and the same reason for
+    # keeping role="operator" (lane semantics; a consumer that ignores the typed
+    # kind degrades to today's render) — but the actor is the runtime itself,
+    # not an agent, so there is no sender persona to name and none is invented.
+    is_harness_delivery = (
+        role == "operator"
+        and safe_assignment_token(row.get("kind")) == PERSONA_HARNESS_DELIVERY_KIND
+    )
+    if is_harness_delivery:
+        default_kind = PERSONA_HARNESS_DELIVERY_KIND
+        actor_persona_id = "harness"
+        actor_instance_id = None
+    elif is_relayed_message:
         default_kind = PERSONA_RELAYED_MESSAGE_KIND
         actor_persona_id = (
             safe_assignment_text(row.get("relay_sender_persona_id"), limit=160) or "agent"
@@ -852,6 +866,19 @@ def _conversation_history_message(
             key: value
             for key in ("context_id", "revision", "delivery")
             if (value := safe_assignment_text(runtime_context.get(key), limit=200))
+        }
+    # The delivery's own facts, as a typed sub-block rather than loose keys: a
+    # consumer needs BOTH to act, and a flag that can go missing independently
+    # of the id it belongs to is a flag that eventually gets read against the
+    # wrong dispatch. `notify_operator` is always present and always a bool —
+    # "the agent did not flag this" is an answer, not an absence.
+    if is_harness_delivery:
+        message["delivery"] = {
+            "dispatch_id": safe_assignment_text(
+                row.get("delivery_dispatch_id"), limit=200
+            )
+            or "",
+            "notify_operator": bool(row.get("delivery_notify_operator")),
         }
     # Name the sending agent ONLY when its instance id resolves in the roster —
     # never fabricate a name for an instance we cannot see.

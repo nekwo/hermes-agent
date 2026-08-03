@@ -17,7 +17,7 @@ from .parity import ProjectionAccountant
 from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
 from .redaction import TEXT_SECRET_ASSIGNMENT_RE
 from .redaction_mode import redaction_observe_enabled
-from .relay_policy import parse_relay_sender_marker
+from .relay_policy import parse_harness_delivery_marker, parse_relay_sender_marker
 from .run_budget import ACCOUNTING_KEY as RUN_BUDGET_ACCOUNTING_KEY
 from .runtime_hud import (
     extract_runtime_context_envelope,
@@ -45,6 +45,13 @@ PERSONA_PRE_TRACE_ACK_KIND = "pre_trace_ack"
 # conversation projection keys on this to attribute the message to the sending
 # AGENT instead of the operator. See agent_runtime/relay_policy.py.
 PERSONA_RELAYED_MESSAGE_KIND = "relayed_message"
+
+# Typed kind for the role="user" row a dispatch DELIVERY turn is forged under
+# (finish_reason=harness_delivery:<dispatch_id>:<0|1>). Same column, same
+# precedent, different origin: nobody sent this message — the harness brought
+# back the answer to work the agent dispatched. Without the kind it renders as
+# something the operator typed, which is the one thing it is not.
+PERSONA_HARNESS_DELIVERY_KIND = "harness_delivery"
 
 # ── terminal-turn marker vocabulary (ONE table, keyed on the turn state) ─────
 #
@@ -1249,9 +1256,25 @@ def _safe_curated_messages(
         # attribute the message to the sending AGENT rather than the operator.
         # Operator/CLI sends (finish_reason=None) parse to None → skipped, so the
         # operator row is byte-identical to today.
+        # HARNESS DELIVERY ATTRIBUTION: a dispatch delivery turn is forged into
+        # the SENDER's own thread as a role="user" row, so at rest it is
+        # indistinguishable from an operator message — the same defect the
+        # relay marker below retires, one lane over. The two facts carried are
+        # what the row settles and whether the operator was flagged; both come
+        # from the marker because by the time this is read the dispatch has
+        # already left every live projection.
         if role == "operator":
-            relay_sender = parse_relay_sender_marker(raw.get("finish_reason"))
-            if relay_sender is not None:
+            delivery = parse_harness_delivery_marker(raw.get("finish_reason"))
+            relay_sender = (
+                None
+                if delivery is not None
+                else parse_relay_sender_marker(raw.get("finish_reason"))
+            )
+            if delivery is not None:
+                row["kind"] = PERSONA_HARNESS_DELIVERY_KIND
+                row["delivery_dispatch_id"] = delivery.dispatch_id
+                row["delivery_notify_operator"] = delivery.notify_operator
+            elif relay_sender is not None:
                 row["kind"] = PERSONA_RELAYED_MESSAGE_KIND
                 row["relay_sender_persona_id"] = relay_sender.persona_id
                 row["relay_sender_instance_id"] = relay_sender.instance_id

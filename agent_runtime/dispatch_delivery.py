@@ -56,14 +56,18 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "DELIVERY_REQUESTED_BY",
     "delivery_client_message_id",
+    "delivery_requested_by",
     "drain_once",
     "format_dispatch_delivery",
+    "parse_delivery_requested_by",
     "start_delivery_drain",
 ]
 
 #: Provenance stamped on every forged delivery turn. The launcher renders turns
 #: by origin, so this is what lets a delivered result read as a delivered result
 #: instead of as something the operator typed.
+#:
+#: This is the PREFIX, not the whole value — see :func:`delivery_requested_by`.
 DELIVERY_REQUESTED_BY = "harness-delivery"
 
 #: Bound on the reply carried into the delivery message. Mirrors the relay
@@ -92,6 +96,58 @@ def delivery_client_message_id(dispatch_id: str) -> str:
     """
 
     return f"dispatch-delivery-{dispatch_id}"
+
+
+def delivery_requested_by(dispatch_id: str, *, notify_operator: bool = False) -> str:
+    """The ``requested_by`` provenance a forged delivery turn is sent under.
+
+    Shape: ``harness-delivery:<dispatch_id>:<0|1>``. Structured provenance in
+    this field is the ESTABLISHED convention on this lane, not a new one — an
+    ``agent_chat_send`` relay already travels as ``agent:<caller session id>``
+    and the mission-chat handler already decodes that into the marker its user
+    row is typed with. A delivery follows the same road.
+
+    Two facts ride along because the handler is the last place that has them and
+    the persisted row is the last place they can be recovered from: WHICH
+    dispatch this settles, and whether the dispatching agent flagged the
+    operator to be told. Without the second, the launcher would have to join a
+    delivery against a ``running_work`` row that no longer exists by then (a
+    dispatch leaves that projection the moment it stops running) to answer a
+    question the producer already knew the answer to.
+    """
+
+    return (
+        f"{DELIVERY_REQUESTED_BY}:{str(dispatch_id or '').strip()}:"
+        f"{'1' if notify_operator else '0'}"
+    )
+
+
+def parse_delivery_requested_by(value):
+    """Decode a ``requested_by`` value into a ``HarnessDeliveryOrigin`` or None.
+
+    Tolerates the bare ``harness-delivery`` (no suffix) that a pre-attribution
+    build stamped: those rows are still deliveries and must still render as
+    deliveries; they simply carry no dispatch id and no flag. Returns ``None``
+    for every other value, so operator, CLI, coordinator and relay sends are
+    untouched.
+    """
+
+    from .relay_policy import HarnessDeliveryOrigin
+
+    if not isinstance(value, str):
+        return None
+    token = value.strip()
+    if token == DELIVERY_REQUESTED_BY:
+        return HarnessDeliveryOrigin()
+    prefix = f"{DELIVERY_REQUESTED_BY}:"
+    if not token.startswith(prefix):
+        return None
+    parts = token[len(prefix):].split(":", 2)
+    dispatch_id = parts[0].strip() if parts else ""
+    flag = parts[1].strip() if len(parts) > 1 else ""
+    return HarnessDeliveryOrigin(
+        dispatch_id=dispatch_id or None, notify_operator=flag == "1"
+    )
 
 
 def _elapsed(seconds: float) -> str:
@@ -260,6 +316,8 @@ def forge_delivery_turn(
     persona_instance_id: str,
     message: str,
     client_message_id: str,
+    dispatch_id: str = "",
+    notify_operator: bool = False,
     max_seconds: float | None = None,
 ) -> tuple[bool, dict[str, Any] | None]:
     """Run one delivery as a real mission-chat turn. Returns ``(ok, payload)``.
@@ -288,7 +346,12 @@ def forge_delivery_turn(
         use_agent_default=False,
         surface_prompt="",
         intent_hint="chat",
-        requested_by=DELIVERY_REQUESTED_BY,
+        # Structured provenance: the handler decodes this into the typed marker
+        # the persisted user row carries, which is the ONLY reason a consumer
+        # can tell a delivered result from something the operator typed.
+        requested_by=delivery_requested_by(
+            dispatch_id, notify_operator=notify_operator
+        ),
         client_message_id=client_message_id,
         stream=False,
         max_seconds=float(max_seconds or mission_chat_default_max_seconds()),
@@ -377,6 +440,8 @@ def drain_once(*, forge: Callable | None = None, limit: int | None = None) -> di
                 persona_instance_id=instance_id,
                 message=format_dispatch_delivery(row),
                 client_message_id=delivery_client_message_id(dispatch_id),
+                dispatch_id=dispatch_id,
+                notify_operator=bool(row.get("notify_operator")),
             )
         except Exception:
             logger.warning("dispatch %s delivery turn failed", dispatch_id, exc_info=True)

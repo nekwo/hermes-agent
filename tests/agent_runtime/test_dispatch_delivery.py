@@ -110,6 +110,39 @@ def test_an_idle_sender_gets_the_completion_as_a_new_turn(
     assert get_dispatch(dispatch_id)["delivery_state"] == DELIVERY_DELIVERED
 
 
+def test_the_forged_turn_carries_the_dispatch_identity_for_attribution(
+    store_home, resolvable_sender, idle_sender
+):
+    """Without this the delivery persists as an unmarked operator row.
+
+    The forge is the LAST place that knows which dispatch this settles and
+    whether the agent flagged the operator — by the time a consumer reads the
+    thread, the dispatch has left every live projection. So both facts travel
+    with the turn or they are gone.
+    """
+
+    dispatch_id = _completed(notify_operator=True)
+    forge = _Forge()
+
+    drain_once(forge=forge)
+
+    call = forge.calls[0]
+    assert call["dispatch_id"] == dispatch_id
+    assert call["notify_operator"] is True
+
+
+def test_an_unflagged_dispatch_forges_an_unflagged_delivery(
+    store_home, resolvable_sender, idle_sender
+):
+    dispatch_id = _completed(notify_operator=False)
+    forge = _Forge()
+
+    drain_once(forge=forge)
+
+    assert forge.calls[0]["dispatch_id"] == dispatch_id
+    assert forge.calls[0]["notify_operator"] is False
+
+
 def test_a_busy_sender_requeues_instead_of_splicing(
     store_home, resolvable_sender, monkeypatch
 ):

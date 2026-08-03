@@ -743,6 +743,23 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         # parse ``sources`` as a map and ``kind`` as an open string. An
         # exhaustive five-lane enum switch would turn this ruling into a
         # fail-closed frame and would have needed the bump instead.
+        #
+        # 52 KEPT AGAIN (WP-L2 attribution, 2026-08-03) — the operator
+        # conversation gained a ``harness_delivery`` message ``kind`` and a
+        # typed ``delivery`` sub-block ({dispatch_id, notify_operator}) on the
+        # row a dispatch DELIVERY turn produces. The same two-part rule answers
+        # it: (a) nothing LEFT the wire — the row still projects role="operator"
+        # with the same id/text/timestamps, so a consumer that ignores the kind
+        # renders exactly what it renders today; and (b) it is not "invisible
+        # rather than merely unread" — the Launcher's conversation adapter falls
+        # through unknown kinds to a generic bubble BY DESIGN, and it parses
+        # this one in the SAME wave (WP-L2 lands both halves). The 52 entry
+        # above bumped because the Launcher had no parse for a whole new
+        # SECTION; here the section, the message list and the row are all
+        # pre-existing and already parsed. The constraint this puts on the
+        # consumer is the same one the dispatch lane put there: conversation
+        # ``kind`` stays an OPEN string. An exhaustive switch over it would turn
+        # this ruling into a fail-closed frame and would have needed the bump.
         "contract_version": 52,
         "generated_at": data.get("generated_at"),
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),

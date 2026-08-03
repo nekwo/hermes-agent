@@ -5572,15 +5572,36 @@ def _resolve_relay_sender_marker(
     instance_store,
     relay_chain_in,
 ) -> str | None:
-    """Resolve a relayed incoming message's sender into a finish_reason marker.
+    """Resolve an incoming message's ORIGIN into a finish_reason marker.
 
-    Only an ``agent_chat_send`` relay carries ``requested_by = "agent:<caller
-    session id>"`` (set by tools/agent_chat_tool.py from the CALLER's session).
-    Operator / CLI / coordinator sends do NOT, and must persist byte-identically
-    to today (this returns ``None`` for them → no marker). Resolution is tiered
-    most-to-least specific; each tier is a deliberate source of truth and the
-    bare ``relay_from::`` marker is the honest unknown, never a guessed operator.
+    This is the one site that decides what the persisted user row is typed
+    with, so both non-operator origins resolve here rather than in two places
+    that could disagree about the same column:
+
+    * ``requested_by = "harness-delivery:<dispatch>:<flag>"`` — a dispatch
+      delivery the harness forged into the sender's own thread. Checked FIRST
+      because it is an exact-prefix machine provenance, and because a delivery
+      is not a relay: no agent sent it and there is no sending persona to name.
+    * ``requested_by = "agent:<caller session id>"`` — an ``agent_chat_send``
+      relay (set by tools/agent_chat_tool.py from the CALLER's session).
+      Resolution is tiered most-to-least specific; each tier is a deliberate
+      source of truth and the bare ``relay_from::`` marker is the honest
+      unknown, never a guessed operator.
+
+    Operator / CLI / coordinator sends match neither, and must persist
+    byte-identically to today (this returns ``None`` for them → no marker).
+
+    The name is kept for the AST gate that pins ``_cmd_mission_chat_message``
+    to this single call site.
     """
+    from agent_runtime import dispatch_delivery as _dispatch_delivery
+    from agent_runtime import relay_policy as _relay_policy
+
+    delivery = _dispatch_delivery.parse_delivery_requested_by(requested_by)
+    if delivery is not None:
+        return _relay_policy.build_harness_delivery_marker(
+            delivery.dispatch_id, delivery.notify_operator
+        )
     if not isinstance(requested_by, str) or not requested_by.startswith("agent:"):
         return None
     token = requested_by[len("agent:"):].strip()
