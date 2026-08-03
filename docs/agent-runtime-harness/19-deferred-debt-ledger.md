@@ -2081,14 +2081,14 @@ writer, so no live producer exists.
    **Test plan:** red-proof by deleting a test of a live symbol and asserting the
    gate names it; green-proof by deleting a test whose subject went in the same
    commit. Recommended — this class has now cost two waves.
-2. **`repo_context.py:907-923` hardcodes absolute developer-machine paths** as
+2. ~~**`repo_context.py:907-923` hardcodes absolute developer-machine paths** as
    the alias table for `resolve_affected_repo_workdir()`. Item 7 stopped it
    leaking into byte-pinned goldens, but the PRODUCTION frame still ships an
    operator-machine-shaped `repo_scopes.resolved` to every consumer, and the
    Launcher is CLAUDE.md-bound not to hardcode personal machine paths. Retiring
    it properly means config/env-driven repo roots with an explicit
    "unconfigured" state rather than a silent `false` — a cross-stack refactor,
-   not a cleanup.
+   not a cleanup.~~ **RULED and EXECUTED 2026-08-03 — see S68 below.**
 3. **No item required a contract move**, so nothing from items 1–8 escalates on
    that ground. Item 1 is the near miss and the reason it is worth naming: the
    sweep verb could not have been RESTORED without re-registering
@@ -2175,3 +2175,41 @@ evidence is destructive risk: proceeding can replace operator `.env` and
 from Harness Settings, and its native-host test proves all four filesystem
 seams exist on every supported `dart:io` target. No event, wire, schema, or
 contract move was required by any S67 item.
+
+## S68 — correctness and portability closeout (2026-08-03)
+
+### Repository scopes now consume the machine-roots authority
+
+The S66 item-9 ruling is closed without a wire or contract move.
+`resolve_affected_repo_workdir()` retains explicit absolute paths and the
+Hermes install's self-root, but Eternia aliases now map to the existing logical
+`eternia_launcher` / `eternia_backend` bindings loaded by
+`agent_runtime.machine_roots`. The alternatives were rejected: adding absolute
+fields to `RuntimeConfig` would duplicate the machine-roots authority, and
+environment-variable/default-directory probing would recreate the unaccounted
+machine-local fallback this fix removes. An absent binding resolves `None`, so
+the unchanged frame shape reports `resolved: false` honestly.
+
+The Alice machine already carries both bindings in the machine-wide
+`machine_roots.json`; no live config write or Backend checkout edit was needed.
+Focused tests bind synthetic roots through `MachineRoots` and prove both aliases
+resolve there, then supply an empty registry and prove neither alias probes a
+compiled stranger layout. The live `repo_scopes` checkpoint remains all-true.
+
+S66's stream-fixture normalization stays. The generator intentionally runs with
+an isolated Hermes root and no operator bindings, while the committed cross-repo
+fixtures deliberately pin production-like true values. Normalization now
+separates that fixture choice from machine configuration; it no longer masks a
+compiled path. The frame files and both manifests do not move.
+
+### Launcher-QA template drift has an unconditional subject
+
+`test_launcher_qa_template_drift.py` now builds a profile-shaped synthetic tree
+from `CANONICAL_LAUNCHER_QA_MCP_SERVER` itself, so the fixture does not mirror
+the authority by hand. The same tripwire helper checks that tree on every run
+and rejects a deliberately drifted block naming
+`env.STAGEC_LAUNCH_HELPER: missing`. A separate live-tree case remains: it
+checks the real profiles when present and skips with an explicit environmental
+message when absent. Therefore the old single test can no longer turn a missing
+profile tree into a vacuous all-clear; on a bare machine only the additional
+live-environment checkpoint skips, while the synthetic drift logic passes.

@@ -7,6 +7,7 @@ import pytest
 pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
 
 from agent_runtime.config import AgentRuntimeConfig, persona_records_from_config
+from agent_runtime.machine_roots import MachineRoots
 from agent_runtime.models import AgentPersona
 from agent_runtime.personas import blocked_tool_names, effective_toolsets
 from tests.agent_runtime.persona_samples import sample_personas
@@ -104,17 +105,22 @@ def test_specialist_agents_snapshot_is_collection_based_redaction_safe_and_repo_
     assert "/.hermes/profiles" not in encoded
 
 
-def test_backend_dev_repo_grounding_uses_backend_alias_without_raw_path_leakage(tmp_path, monkeypatch):
+def test_repo_grounding_uses_machine_root_bindings_without_raw_path_leakage(tmp_path, monkeypatch):
     backend_root = tmp_path / "eternia-backend"
     launcher_root = tmp_path / "EterniaLauncher"
     backend_root.mkdir()
     launcher_root.mkdir()
-    monkeypatch.setitem(repo_context._REPO_ALIAS_PATHS, "eterniabackend", (str(backend_root),))
-    monkeypatch.setitem(repo_context._REPO_ALIAS_PATHS, "eternia-backend", (str(backend_root),))
-    monkeypatch.setitem(repo_context._REPO_ALIAS_PATHS, "backend", (str(backend_root),))
-    monkeypatch.setitem(repo_context._REPO_ALIAS_PATHS, "eternialauncher", (str(launcher_root),))
-    monkeypatch.setitem(repo_context._REPO_ALIAS_PATHS, "eternia-launcher", (str(launcher_root),))
-    monkeypatch.setitem(repo_context._REPO_ALIAS_PATHS, "launcher", (str(launcher_root),))
+    monkeypatch.setattr(
+        repo_context,
+        "load_machine_roots",
+        lambda: MachineRoots(
+            roots={
+                "eternia_backend": str(backend_root),
+                "eternia_launcher": str(launcher_root),
+            },
+            sources=("synthetic-machine-roots.json",),
+        ),
+    )
 
     backend = resolve_affected_repo_workdir("EterniaBackend")
     frontend = resolve_affected_repo_workdir("EterniaLauncher")
@@ -131,6 +137,13 @@ def test_backend_dev_repo_grounding_uses_backend_alias_without_raw_path_leakage(
     assert labels == ["EterniaBackend", "EterniaLauncher", "hermes-agent"]
     assert "Users" not in repr(labels)
     assert "Unreal Engine" not in repr(labels)
+
+
+def test_unbound_repo_aliases_do_not_probe_a_compiled_machine_layout(monkeypatch):
+    monkeypatch.setattr(repo_context, "load_machine_roots", lambda: MachineRoots())
+
+    assert resolve_affected_repo_workdir("EterniaBackend") is None
+    assert resolve_affected_repo_workdir("EterniaLauncher") is None
 
 
 def test_backend_dev_explicit_repo_scope_loads_backend_repo_context(tmp_path):

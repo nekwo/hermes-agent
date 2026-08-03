@@ -13,11 +13,11 @@ Executed 2026-08-01: the five variant-B profiles (backend-dev, gpt-launcher,
 launcher-dev, launcher-qa, qa) were patched live, the expected-drift ledger they
 occupied is gone, and the drift code was flipped from advisory to blocking.
 
-This file is a DATA test over the live profile tree. With the ledger retired it
-is a plain TRIPWIRE: every profile that declares the server must match the
-template, so any new drift — a different field, a new profile, a changed value —
-fails on the next run. Re-introducing an expected-drift list would re-open the
-hole this closed; fix the config instead.
+This file has an unconditional synthetic profile-tree tripwire plus a separate
+live-environment check. The synthetic tree is built from the canonical template
+authority, not from a hand-maintained mirror, so CI always executes the drift
+logic. The live case still checks every real profile when that tree is present
+and skips honestly when it is not.
 
 Fixing a config is an operator/live action against files this repo does not
 own. The failure message therefore carries the exact YAML block to paste; no
@@ -109,13 +109,14 @@ def _live_profiles_root(monkeypatch) -> Path:
     return get_default_hermes_root() / "profiles"
 
 
-def _live_launcher_qa_blocks(monkeypatch) -> dict[str, Any]:
-    root: Path = _live_profiles_root(monkeypatch)
+def _launcher_qa_blocks(root: Path, *, missing_is_skip: bool) -> dict[str, Any]:
     if not root.is_dir():
-        pytest.skip(
-            f"no live profile tree at {root} — this is NOT an all-clear; run with "
-            "HERMES_HOME pointed at the live Hermes root to actually check the configs"
-        )
+        if missing_is_skip:
+            pytest.skip(
+                f"no live profile tree at {root} — synthetic coverage is green, but "
+                "this live-environment check did not run"
+            )
+        pytest.fail(f"synthetic profile tree was not created: {root}")
     blocks: dict[str, Any] = {}
     for profile_dir in sorted(p for p in root.iterdir() if p.is_dir()):
         config = profile_dir / "config.yaml"
@@ -129,7 +130,9 @@ def _live_launcher_qa_blocks(monkeypatch) -> dict[str, Any]:
         if cfg is not None:
             blocks[profile_dir.name] = cfg
     if not blocks:
-        pytest.skip(f"no profile under {root} declares '{SERVER}'")
+        if missing_is_skip:
+            pytest.skip(f"no live profile under {root} declares '{SERVER}'")
+        pytest.fail(f"synthetic profile tree declares no '{SERVER}' block")
     return blocks
 
 
@@ -145,10 +148,7 @@ def _patch_message(profile: str, diffs: list[str]) -> str:
     )
 
 
-def test_every_live_launcher_qa_block_matches_the_canonical_template(monkeypatch):
-    """The tripwire. No ledger, no exemptions — drift here is a live defect."""
-
-    blocks = _live_launcher_qa_blocks(monkeypatch)
+def _assert_launcher_qa_blocks_match(blocks: dict[str, Any]) -> None:
     drifted = [
         _patch_message(profile, diffs)
         for profile, cfg in blocks.items()
@@ -161,6 +161,44 @@ def test_every_live_launcher_qa_block_matches_the_canonical_template(monkeypatch
         f"patch below by hand (this lane is report-only and never writes a config). "
         f"Do NOT re-add an expected-drift ledger:" + "".join(drifted)
     )
+
+
+def _write_synthetic_profile_tree(root: Path, block: dict[str, Any]) -> None:
+    profile = root / "profiles" / "synthetic-qa"
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text(
+        yaml.safe_dump({"mcp_servers": {SERVER: block}}, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
+def test_synthetic_profile_tree_executes_the_drift_tripwire_unconditionally(tmp_path):
+    root = tmp_path / "hermes"
+    _write_synthetic_profile_tree(root, _plain(CANONICAL_LAUNCHER_QA_MCP_SERVER))
+
+    blocks = _launcher_qa_blocks(root / "profiles", missing_is_skip=False)
+    _assert_launcher_qa_blocks_match(blocks)
+
+
+def test_synthetic_profile_tree_rejects_a_deliberately_drifted_block(tmp_path):
+    root = tmp_path / "hermes"
+    drifted = _plain(CANONICAL_LAUNCHER_QA_MCP_SERVER)
+    drifted["env"].pop("STAGEC_LAUNCH_HELPER")
+    _write_synthetic_profile_tree(root, drifted)
+
+    blocks = _launcher_qa_blocks(root / "profiles", missing_is_skip=False)
+    with pytest.raises(AssertionError, match="env.STAGEC_LAUNCH_HELPER: missing"):
+        _assert_launcher_qa_blocks_match(blocks)
+
+
+def test_every_live_launcher_qa_block_matches_the_canonical_template(monkeypatch):
+    """Environment checkpoint, separate from the unconditional CI tripwire."""
+
+    blocks = _launcher_qa_blocks(
+        _live_profiles_root(monkeypatch),
+        missing_is_skip=True,
+    )
+    _assert_launcher_qa_blocks_match(blocks)
 
 
 # ── The template itself ─────────────────────────────────────────────────────

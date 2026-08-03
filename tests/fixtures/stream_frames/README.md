@@ -28,13 +28,13 @@ under the update rule below; the generator only hashes them.
   the temporary root spelling, and `core.repo_scopes[*].resolved`.
 - **`repo_scopes[*].resolved` is a pinned fixture constant, not a measurement.**
   `snapshot._repo_scope_entry` derives it from
-  `resolve_affected_repo_workdir()`, which probes **hardcoded absolute paths**
-  (`agent_runtime/repo_context.py` `_REPO_ALIAS_PATHS`, e.g.
-  `X:/Unreal Engine/Engine/Launcher/EterniaLauncher`). Unpinned, `frontend` and
-  `backend` emit `true` on a box carrying those checkouts and `false` on CI, a
-  fresh clone, or macOS/Linux — so the golden bytes depended on who ran the
-  script. The pin asserts nothing about any machine's checkout layout. The three
-  `label` values are contractual and are **not** normalized.
+  `resolve_affected_repo_workdir()`, which now resolves the logical
+  `eternia_launcher` / `eternia_backend` bindings through the machine-local
+  `machine_roots.json` authority. The isolated generator deliberately has no
+  operator bindings, while the committed fixtures preserve the production-like
+  `true` values used by both repos. Normalization therefore remains necessary:
+  it separates a fixture choice from the generating machine's configuration.
+  The three `label` values are contractual and are **not** normalized.
 - `MANIFEST.sha256` pins the bytes; `test_stream_contract_fixture.py` fails if
   either drifts.
 - `delta_batch.json` pins the W1 coalescing shape (`events[]`,

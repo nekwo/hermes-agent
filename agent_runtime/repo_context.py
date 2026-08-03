@@ -16,6 +16,7 @@ from typing import Any
 from hermes_time import now
 
 from . import paths
+from .machine_roots import load_machine_roots
 from .redaction import TEXT_SECRET_VALUE_ASSIGNMENT_RE
 
 HARNESS_WORKTREE_GC_TTL_SECONDS = 24 * 60 * 60
@@ -755,11 +756,11 @@ def resolve_affected_repo_workdir(repo: str) -> Path | None:
         return _git_root_for(path) or path
 
     alias = _normalize_repo_alias(repo)
-    if alias in _REPO_ALIAS_PATHS:
-        for candidate in _REPO_ALIAS_PATHS[alias]:
-            resolved = Path(candidate).expanduser()
-            if resolved.is_dir():
-                return _git_root_for(resolved) or resolved
+    root_name = _REPO_ALIAS_MACHINE_ROOTS.get(alias)
+    if root_name is not None:
+        resolved = load_machine_roots().get(root_name)
+        if resolved is not None and resolved.is_dir():
+            return _git_root_for(resolved) or resolved
     if alias in _HARNESS_REPO_ALIASES:
         root = Path(__file__).resolve().parents[1]
         if root.is_dir():
@@ -904,22 +905,14 @@ def _normalize_repo_alias(value: str) -> str:
 
 
 _HARNESS_REPO_ALIASES = frozenset({"agent-runtime-harness", "hermes-agent"})
-_REPO_ALIAS_PATHS = {
-    "eterniabackend": (
-        "X:/Unreal Engine/Engine/EterniaBackend/eternia-backend",
-        "X:/Unreal Engine/Engine/EterniaBackend",
-        "X:/Unreal Engine/Engine/eternia-backend",
-    ),
-    "eternia-backend": (
-        "X:/Unreal Engine/Engine/EterniaBackend/eternia-backend",
-        "X:/Unreal Engine/Engine/EterniaBackend",
-        "X:/Unreal Engine/Engine/eternia-backend",
-    ),
-    "backend": ("X:/Unreal Engine/Engine/EterniaBackend/eternia-backend", "X:/Unreal Engine/Engine/EterniaBackend"),
-    "eternialauncher": ("X:/Unreal Engine/Engine/Launcher/EterniaLauncher",),
-    "eternia-launcher": ("X:/Unreal Engine/Engine/Launcher/EterniaLauncher",),
-    "frontend": ("X:/Unreal Engine/Engine/Launcher/EterniaLauncher",),
-    "launcher": ("X:/Unreal Engine/Engine/Launcher/EterniaLauncher",),
+_REPO_ALIAS_MACHINE_ROOTS = {
+    "eterniabackend": "eternia_backend",
+    "eternia-backend": "eternia_backend",
+    "backend": "eternia_backend",
+    "eternialauncher": "eternia_launcher",
+    "eternia-launcher": "eternia_launcher",
+    "frontend": "eternia_launcher",
+    "launcher": "eternia_launcher",
 }
 
 _REPO_ALIAS_DISPLAY_LABELS = {

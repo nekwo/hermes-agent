@@ -13,14 +13,12 @@ here so a future reader does not have to re-derive it.
 
 ``core.repo_scopes`` is built by ``snapshot._repo_scope_entry``, whose
 ``resolved`` flag is ``resolve_affected_repo_workdir(alias) is not None``. That
-resolver PROBES HARDCODED ABSOLUTE PATHS on the operator's disk — see
-``agent_runtime.repo_context._REPO_ALIAS_PATHS``, e.g.
-``X:/Unreal Engine/Engine/Launcher/EterniaLauncher`` and its EterniaBackend
-siblings. On a box carrying those checkouts ``frontend`` and ``backend`` resolve
-true; on CI, on a fresh clone, or on macOS/Linux they resolve false. The emitted
-bytes therefore depended on WHO RAN THE SCRIPT, and a regeneration anywhere else
-would have silently rewritten a byte-pinned cross-repo golden. (``harness`` was
-never machine-dependent: it resolves through ``Path(__file__).parents[1]``,
+resolver reads the logical ``eternia_launcher`` / ``eternia_backend`` bindings
+from the machine-local ``machine_roots.json`` authority. On a configured box
+``frontend`` and ``backend`` resolve true; in this deliberately isolated
+generator, CI, or a fresh clone they resolve false. The emitted bytes would
+therefore still depend on WHO RAN THE SCRIPT without normalization. (``harness``
+was never machine-dependent: it resolves through ``Path(__file__).parents[1]``,
 i.e. this repo, which always exists.)
 
 ``resolved`` is now pinned to a fixture constant. That constant asserts NOTHING
@@ -124,10 +122,9 @@ _MACHINE_PROBED_FLAGS = {
     #
     # The ONE value in the frame that answers a question about the operator's
     # DISK rather than about the isolated runtime root. See the module docstring
-    # for the full derivation: `repo_scopes[*].resolved` is a probe of hardcoded
-    # absolute paths in `agent_runtime.repo_context._REPO_ALIAS_PATHS`, so
-    # without this pin the script emitted different bytes on a machine that
-    # lacks those checkouts (CI, a fresh clone, macOS/Linux).
+    # for the full derivation: `repo_scopes[*].resolved` is a probe of
+    # machine-local root bindings, so without this pin the script emits
+    # different bytes on a configured operator box and an isolated generator.
     #
     # Only the flag is pinned. `label` is contractual and survives untouched, so
     # this stays a normalization rather than a rewrite of the section.
