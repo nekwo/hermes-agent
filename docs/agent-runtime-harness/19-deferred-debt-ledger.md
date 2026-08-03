@@ -2093,3 +2093,85 @@ writer, so no live producer exists.
    that ground. Item 1 is the near miss and the reason it is worth naming: the
    sweep verb could not have been RESTORED without re-registering
    `persona_instance.reaped`. Retiring it moved nothing.
+
+## S67 / Round 4 follow-on rulings (2026-08-02)
+
+### The deleted-test/input-vector recurrence is now a gate
+
+The item 9 ruling above is executed in `test_tombstone_registry.py`. The gate
+diffs round-4 test nodes from `4a21f0779`, resolves production imports and
+receiver-qualified module calls through ASTs, and asks one question for every
+deleted `test_*` node: does each production class/function it reached still
+exist, and if so does any current test still reference it? A live subject with
+no remaining test fails naming the deleted node and fully-qualified production
+symbol. A subject deleted with its test is ignored because it is no longer live.
+
+Running it exposed `decision_contract_registry.contract_hash`: its two direct
+tests had gone while the function still feeds snapshot/status. Coverage was
+re-homed into the surviving S15 contract authority by asserting the manifest's
+hash equals `contract_hash()`. Red proof then removed that reference and the
+gate failed naming both deleted tests and the live function; restoring it made
+the gate green. This is the mechanical version of the
+`_apply_conversation_cap` lesson, not another per-wave name list.
+
+### Persona precedence has one authority
+
+The audit claim survived re-verification. `personas.py` resolved exact persona
+id before unique profile owner for toolsets, while
+`persona_commands._persona_by_id` independently selected
+`profile_matches[0] if len(profile_matches) == 1` for model/provider/API mode,
+autonomy, core-context and readiness. `profile_persona_resolution` now owns the
+complete decision and typed reason; both the toolset resolver and CLI synthetic
+profile path consume it. Exact-id, unique-owner, ambiguous and unowned outcomes
+are unchanged, including fail-closed ambiguous ownership.
+
+### Registry scope rules made explicit
+
+The apparent private-helper row inconsistency is resolved as policy. Private
+helpers receive permanent rows only when name/string dispatch makes the
+spelling contractual, resurrection could bypass a surviving public tombstone,
+or a ruling explicitly makes the name stable vocabulary. Ordinary private
+implementation churn is governed by the surviving behavior pin, not permanent
+reservation of every underscore name. The registry header now says this.
+
+Wire-key absence likewise has a home: every future producer-key cut must add or
+identify an exact producer-frame behavior pin; a CODE tombstone is not a
+substitute. Cross-stack top-level snapshot reads are additionally governed by
+the Launcher's analyzer-AST producer-presence gate over the byte-pinned real
+hydrate/delta/delta-batch/heartbeat frames. Existing historical
+`prompt_contract_hash` compatibility remains the deliberate keep recorded in
+S66.
+
+### Janitor boundary claim DIED on re-verification
+
+No new janitor fixture was needed. S60 already installed an AUTOUSE
+`tests/agent_runtime/conftest.py::isolate_agent_runtime_root` boundary that pins
+both `_worktree_base_dir` and `legacy_harness_worktree_base_dir` to per-test
+temporary paths. `test_delivery_directive.py::test_janitor_uses_the_suite_isolated_worktree_bases`
+is the guard, and the original per-test pins remain as defense in depth. The
+production `reap_orphan_worktrees(dry_run=False)` default was not changed; that
+would be a user-visible janitor policy change outside this ruling.
+
+### Cross-repo rulings recorded here for campaign continuity
+
+The Launcher's typed `MissionBridgeErrorCode` lane remains cut. Stage C's
+mandated `error_id` is not that lane: the MCP dispatcher actively produces and
+returns `correlation_id`, `error_id`, and `diagnostic`, while the snapshot
+diagnostics fields were parsed and discarded and the UI reads `rawErrorCode`.
+The new Launcher producer-presence gate prevents top-level snapshot readers
+outliving all real frames and requires visible, reason-bearing compatibility
+annotations.
+
+The proposed Launcher `incident -> incidents` patch-mapping cut DIED. Although
+S65 removed the current writer, byte-pinned `patch_remove.json` is the explicit
+historical `incident.closed` compatibility frame and the cross-repo coverage
+manifest requires the Launcher to fold it. Removing the mapping made the full
+suite return `needsResync` where the manifest requires `applied`; the mapping
+therefore remains as a reasoned historical read.
+
+The repair restore-failure and missing-preflight paths remain fail-closed. The
+evidence is destructive risk: proceeding can replace operator `.env` and
+`SOUL.md`. Launcher copy now tells the operator to restart and retry Repair
+from Harness Settings, and its native-host test proves all four filesystem
+seams exist on every supported `dart:io` target. No event, wire, schema, or
+contract move was required by any S67 item.

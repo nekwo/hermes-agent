@@ -21,6 +21,7 @@ import json
 from pathlib import Path
 
 from agent_runtime.decision_contract_registry import (
+    contract_hash,
     contract_manifest,
     event_catalog,
 )
@@ -214,6 +215,7 @@ def test_the_registry_publishes_exactly_the_surviving_event_count():
     # (which DOES have a production reader, ``harness contracts show``) is
     # asserted below.
     assert contract_manifest()["events"] == event_catalog()
+    assert contract_manifest()["contract_hash"] == contract_hash()
 
 
 def test_appending_a_de_registered_event_type_is_refused():

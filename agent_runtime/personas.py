@@ -152,23 +152,16 @@ PROFILE_CHAT_TOOLSET_MATCHED_EXACT = "exact_persona_id"
 PROFILE_CHAT_TOOLSET_MATCHED_UNIQUE_PROFILE = "unique_profile_owner"
 
 
-def profile_chat_toolset_resolution(
+def profile_persona_resolution(
     profile_id: str,
     personas: list[AgentPersona] | tuple[AgentPersona, ...] | None = None,
-) -> tuple[list[str], str, tuple[str, ...]]:
-    """``(toolsets, reason, candidate_persona_ids)`` for a profile-backed chat.
+) -> tuple[AgentPersona | None, str, tuple[str, ...]]:
+    """Resolve the one persona allowed to supply profile-backed defaults.
 
     Exact persona ids outrank profile ownership. A unique profile owner may
-    supply the declared toolsets; an unowned or multiply-owned profile inherits
-    nothing (S64's ruling — an ambiguous shared profile must never manufacture
-    capabilities). Universal chat capabilities are added later by the chat
-    runtime.
-
-    S66 split the reason out. The fail-closed arms are UNCHANGED and still
-    fail closed; what changed is that they are no longer silent. An ambiguous
-    shared profile used to return ``[]`` indistinguishable from "this profile
-    has no persona at all", so an operator staring at a toolless chat had no
-    way to tell a misconfiguration from a deliberate denial.
+    supply defaults; an unowned or multiply-owned profile inherits nothing.
+    This is the single precedence authority for toolsets and the CLI's model,
+    provider, API mode, autonomy, core-context and readiness defaults.
     """
 
     profile = str(profile_id or "").strip()
@@ -191,13 +184,31 @@ def profile_chat_toolset_resolution(
         str(getattr(persona, "id", "") or "").strip() for persona in profile_matches
     )
     if exact is not None:
-        matching, reason = exact, PROFILE_CHAT_TOOLSET_MATCHED_EXACT
-    elif len(profile_matches) == 1:
-        matching, reason = profile_matches[0], PROFILE_CHAT_TOOLSET_MATCHED_UNIQUE_PROFILE
-    elif len(profile_matches) > 1:
-        matching, reason = None, PROFILE_CHAT_TOOLSET_AMBIGUOUS
-    else:
-        matching, reason = None, PROFILE_CHAT_TOOLSET_NO_MATCH
+        return exact, PROFILE_CHAT_TOOLSET_MATCHED_EXACT, candidates
+    if len(profile_matches) == 1:
+        return profile_matches[0], PROFILE_CHAT_TOOLSET_MATCHED_UNIQUE_PROFILE, candidates
+    if len(profile_matches) > 1:
+        return None, PROFILE_CHAT_TOOLSET_AMBIGUOUS, candidates
+    return None, PROFILE_CHAT_TOOLSET_NO_MATCH, candidates
+
+
+def profile_chat_toolset_resolution(
+    profile_id: str,
+    personas: list[AgentPersona] | tuple[AgentPersona, ...] | None = None,
+) -> tuple[list[str], str, tuple[str, ...]]:
+    """``(toolsets, reason, candidate_persona_ids)`` for a profile-backed chat.
+
+    Universal chat capabilities are added later by the chat runtime. Ambiguous
+    ownership remains fail-closed (S64's ruling).
+
+    S66 split the reason out. The fail-closed arms are UNCHANGED and still
+    fail closed; what changed is that they are no longer silent. An ambiguous
+    shared profile used to return ``[]`` indistinguishable from "this profile
+    has no persona at all", so an operator staring at a toolless chat had no
+    way to tell a misconfiguration from a deliberate denial.
+    """
+
+    matching, reason, candidates = profile_persona_resolution(profile_id, personas)
     toolsets = list(getattr(matching, "toolsets", []) or []) if matching is not None else []
     return [toolset for toolset in toolsets if toolset], reason, candidates
 

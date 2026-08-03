@@ -73,9 +73,21 @@ Absence assertions whose subject is a runtime SHAPE rather than a name:
   local called ``tasks``.
 * **wire-key absence** — "``build_status()`` must not emit ``repo_locks``". That
   is a fact about a produced dict, and the only honest way to check it is to
-  build the frame.
+  build the frame. Every future wire-key cut MUST therefore add or identify a
+  producer-frame behaviour pin (exact absence or exact key set); a CODE row is
+  not a substitute. Cross-stack readers additionally belong under the
+  Launcher's AST producer-presence gate, which derives its key set from the
+  byte-pinned real hydrate/delta/heartbeat frames.
 * **exact key-set / count pins** — ``migration.counts``, ``RunStore``'s public
   surface, ``OPERATOR_SUMMARY_EVENT_TYPES``.
+
+Private helpers are rowed only when they are name/string-dispatched, their
+owner module survives and resurrection could bypass a public tombstone, or a
+ruling explicitly treats the spelling as stable vocabulary. Ordinary private
+implementation churn is excluded: its invariant is the surviving public
+behaviour pin, not permanent reservation of every underscore-prefixed name.
+This is why some same-file private siblings have rows and others do not; the
+difference is policy, not an incomplete batch.
 
 Those stay in their per-wave files alongside the behaviour pins. Nothing was
 dropped in the consolidation; the split is by what a row can honestly assert.
@@ -114,7 +126,9 @@ from __future__ import annotations
 import ast
 import importlib
 import importlib.util
+import subprocess
 import textwrap
+import warnings
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -3116,6 +3130,142 @@ def test_tombstoned_path_does_not_exist(row: Tombstone):
 def test_tombstoned_name_is_absent_from_production_code(row: Tombstone):
     offenders = code_offenders(row)
     assert offenders == [], f"{row.label} reappeared in {offenders}: {row.reason}"
+
+
+_ROUND4_COVERAGE_BASE = "4a21f0779"
+_PRODUCTION_PACKAGES = ("agent_runtime", "hermes_cli")
+
+
+def _parsed(source: str) -> ast.Module | None:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            return ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+
+
+def _production_imports(tree: ast.AST) -> tuple[dict[str, tuple[str, str]], dict[str, str]]:
+    direct: dict[str, tuple[str, str]] = {}
+    modules: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith(
+            _PRODUCTION_PACKAGES
+        ):
+            for alias in node.names:
+                if alias.name != "*":
+                    direct[alias.asname or alias.name] = (node.module, alias.name)
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name.startswith(_PRODUCTION_PACKAGES):
+                    modules[alias.asname or alias.name.rsplit(".", 1)[-1]] = alias.name
+    return direct, modules
+
+
+def _production_references(
+    tree: ast.AST,
+    direct: dict[str, tuple[str, str]],
+    modules: dict[str, str],
+) -> set[tuple[str, str]]:
+    references: set[tuple[str, str]] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            if node.id in direct:
+                references.add(direct[node.id])
+        elif (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in modules
+        ):
+            references.add((modules[node.value.id], node.attr))
+    return references
+
+
+def _live_production_symbol(subject: tuple[str, str]) -> bool:
+    module_name, symbol = subject
+    source_path = HERMES_ROOT / f"{module_name.replace('.', '/')}.py"
+    if not source_path.is_file():
+        return False
+    tree = _parsed(source_path.read_text(encoding="utf-8", errors="replace"))
+    return bool(
+        tree
+        and any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+            and node.name == symbol
+            for node in tree.body
+        )
+    )
+
+
+def test_round4_deleted_tests_left_no_live_production_subject_uncovered():
+    """A removed input vector may not silently erase a live symbol's coverage."""
+
+    covered: set[tuple[str, str]] = set()
+    for path in (HERMES_ROOT / "tests").rglob("test_*.py"):
+        tree = _parsed(path.read_text(encoding="utf-8", errors="replace"))
+        if tree is None:
+            continue
+        direct, modules = _production_imports(tree)
+        covered.update(_production_references(tree, direct, modules))
+
+    changed_tests = subprocess.run(
+        [
+            "git",
+            "diff",
+            "--name-only",
+            f"{_ROUND4_COVERAGE_BASE}..HEAD",
+            "--",
+            "tests",
+        ],
+        cwd=HERMES_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    uncovered: list[str] = []
+    for relative in changed_tests:
+        old = subprocess.run(
+            ["git", "show", f"{_ROUND4_COVERAGE_BASE}:{relative}"],
+            cwd=HERMES_ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+        old_tree = _parsed(old.stdout) if old.returncode == 0 else None
+        if old_tree is None:
+            continue
+        current_path = HERMES_ROOT / relative
+        current_tree = (
+            _parsed(current_path.read_text(encoding="utf-8", errors="replace"))
+            if current_path.is_file()
+            else None
+        )
+        current_test_names = {
+            node.name
+            for node in (current_tree.body if current_tree else ())
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("test_")
+        }
+        module_direct, module_imports = _production_imports(old_tree)
+        for old_test in old_tree.body:
+            if not isinstance(old_test, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if not old_test.name.startswith("test_") or old_test.name in current_test_names:
+                continue
+            local_direct, local_imports = _production_imports(old_test)
+            subjects = _production_references(
+                old_test,
+                module_direct | local_direct,
+                module_imports | local_imports,
+            )
+            for subject in subjects:
+                if _live_production_symbol(subject) and subject not in covered:
+                    uncovered.append(
+                        f"{relative}::{old_test.name} deleted the last direct test "
+                        f"reference to {subject[0]}.{subject[1]}"
+                    )
+    assert uncovered == [], "\n".join(uncovered)
 
 
 #: S40 gated its two names in MARKDOWN too, on CODE FORMS ONLY — a doc may name

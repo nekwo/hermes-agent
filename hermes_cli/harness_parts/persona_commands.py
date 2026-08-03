@@ -107,7 +107,7 @@ from agent_runtime.persona_chat_continuity import (
 )
 from agent_runtime.persona_chat_mints import PersonaChatMintError, reserve_persona_chat_mint
 from agent_runtime.persona_runtime import GPTPersonaRuntime, chat_lane_capability_drops
-from agent_runtime.personas import profile_chat_toolsets
+from agent_runtime.personas import profile_chat_toolsets, profile_persona_resolution
 from agent_runtime.prompt_observability import (
     attach_prompt_observability_turn_results,
     mission_chat_prompt_observability,
@@ -5749,12 +5749,7 @@ def _persona_by_id(cfg, persona_id: str):
         profile_id = safe_assignment_token(raw.split(":", 1)[1])
         if not profile_id:
             return None
-        profile_matches = [
-            persona
-            for persona in personas
-            if str(getattr(persona, "hermes_profile", "") or "") == profile_id
-        ]
-        matching_profile_persona = profile_matches[0] if len(profile_matches) == 1 else None
+        matching_profile_persona, _, _ = profile_persona_resolution(profile_id, personas)
         default_model = getattr(matching_profile_persona, "model", None) if matching_profile_persona is not None else None
         default_provider = getattr(matching_profile_persona, "provider", None) if matching_profile_persona is not None else None
         default_api_mode = getattr(matching_profile_persona, "api_mode", None) if matching_profile_persona is not None else None
