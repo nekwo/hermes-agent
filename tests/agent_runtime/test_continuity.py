@@ -103,3 +103,99 @@ def test_return_summary_cli_uses_first_class_primitive(tmp_path, monkeypatch, ca
     assert '"capability_id": "persona.instance.return_summary"' in output
     assert '"parent_session_id": "parent_session_cli"' in output
     assert PersonaInstanceStore().get(child.id).returned_to == "parent_session_cli"
+
+
+def test_returned_summary_reaches_the_parent_thread_live_log():
+    """The child's "here is the distilled result" row is exactly what a head
+    agent grepping the parent thread's log is looking for.
+
+    This lane appends straight to SessionDB, so while the live-log mirror was
+    hooked by call-site convention it wrote a row that never reached the file.
+    It now goes through the ``mirrored_persona_chat_append`` seam like every
+    other explicit persona-chat append.
+    """
+
+    import json
+
+    from agent_runtime.chat_live_log import chat_live_log_path, reset_chat_live_log_state
+
+    reset_chat_live_log_state()
+    try:
+        store = PersonaInstanceStore()
+        parent = store.ensure_for_persona(_persona("neko_supervisor"))
+        child = store.ensure_for_persona(_persona("dev"))
+        child = store.set_parents(child.id, [parent.id], goal_id="task_mirror")
+
+        return_summary_to_parent_session(
+            child.id,
+            parent_session_id="parent_session_mirror",
+            summary="finished the sweep; two files changed",
+        )
+
+        path = chat_live_log_path("parent_session_mirror")
+        assert path is not None and path.exists()
+        rows = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        messages = [row for row in rows if row.get("kind") == "message"]
+        assert len(messages) == 1
+        assert messages[0]["role"] == "agent"
+        assert "finished the sweep; two files changed" in messages[0]["text"]
+    finally:
+        reset_chat_live_log_state()
+
+
+def test_a_failed_return_summary_append_is_not_mirrored():
+    """The mirror follows the durable write; a rejected row must stay invisible."""
+
+    import json
+
+    import agent_runtime.continuity as continuity
+    from agent_runtime.chat_live_log import chat_live_log_path, reset_chat_live_log_state
+
+    reset_chat_live_log_state()
+
+    class _ExplodingDB:
+        db_path = None
+
+        def ensure_session(self, *args, **kwargs):
+            return None
+
+        def append_message(self, *args, **kwargs):
+            raise RuntimeError("db down")
+
+    original = continuity._session_db
+    continuity._session_db = lambda: _ExplodingDB()
+    try:
+        store = PersonaInstanceStore()
+        parent = store.ensure_for_persona(_persona("neko_supervisor"))
+        child = store.ensure_for_persona(_persona("dev"))
+        store.set_parents(child.id, [parent.id], goal_id="task_mirror_fail")
+
+        try:
+            return_summary_to_parent_session(
+                child.id,
+                parent_session_id="parent_session_mirror_fail",
+                summary="this never lands",
+            )
+        except RuntimeError:
+            pass
+        else:  # pragma: no cover - the stub always raises
+            raise AssertionError("expected the durable append to fail")
+
+        path = chat_live_log_path("parent_session_mirror_fail")
+        rows = (
+            [
+                json.loads(line)
+                for line in path.read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            if path is not None and path.exists()
+            else []
+        )
+        assert [row for row in rows if row.get("kind") == "message"] == []
+    finally:
+        continuity._session_db = original
+        reset_chat_live_log_state()

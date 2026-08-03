@@ -186,7 +186,7 @@ def test_backfill_materializes_pre_feature_history_exactly_once(tmp_path, monkey
     db.append_message("persona_chat_s1", "assistant", "older answer")
     monkeypatch.setattr(chat_live_log, "_backfill_rows", _backfill_from(db))
 
-    path = ensure_chat_live_log("persona_chat_s1")
+    path = ensure_chat_live_log("persona_chat_s1", materialize=True)
     assert [row["text"] for row in _messages(path)] == ["older question", "older answer"]
     header = _lines(path)[0]
     assert header["kind"] == "log_opened" and header["backfilled"] == 2
@@ -209,7 +209,7 @@ def test_backfill_uses_the_real_projection_and_redacts(tmp_path, monkeypatch):
     db.append_message("persona_chat_s1", "user", "what is the token")
     db.append_message("persona_chat_s1", "assistant", 'here: {"api_key": "sk-live-abcdef1234567890"}')
 
-    path = ensure_chat_live_log("persona_chat_s1", session_db=db)
+    path = ensure_chat_live_log("persona_chat_s1", session_db=db, materialize=True)
     blob = path.read_text(encoding="utf-8")
     assert "sk-live-abcdef1234567890" not in blob
     assert "what is the token" in blob
@@ -235,7 +235,7 @@ def test_path_shaped_session_ids_are_refused(tmp_path, monkeypatch):
 
 def _backfill_from(db):
     def _rows(session_id, *, session_db=None):
-        return [
+        return ([
             {
                 "ts": "2026-08-03T00:00:00+00:00",
                 "kind": "message",
@@ -244,6 +244,234 @@ def _backfill_from(db):
                 "backfilled": True,
             }
             for message in db.get_messages(session_id)
-        ]
+        ], False)
 
     return _rows
+
+
+# ── review round 2: hot-path cost, atomic publication, dedupe key ───────────
+
+
+def test_persist_lane_never_pays_the_curated_projection(tmp_path, monkeypatch):
+    """FINDING 3. The chat hot path must be O(1) in the size of the thread.
+
+    Materializing on first touch re-ran the full curated projection (turn
+    journal re-parsed per row) INSIDE the persist seam, so the first message
+    after a deploy could stall a live turn for seconds on a long session.
+    """
+
+    monkeypatch.setenv("HERMES_HEAD_HOME", str(tmp_path))
+    calls = []
+
+    def _spy(session_id, *, session_db=None):
+        calls.append(session_id)
+        return [], False
+
+    monkeypatch.setattr(chat_live_log, "_backfill_rows", _spy)
+
+    record_chat_message(session_id="persona_chat_s1", role="user", text="go")
+    record_chat_tool(session_id="persona_chat_s1", tool="terminal", status="started")
+    record_chat_message(session_id="persona_chat_s1", role="assistant", text="done")
+    assert calls == []
+
+    path = chat_live_log_path("persona_chat_s1")
+    header = _lines(path)[0]
+    # Honest about it: the file says its history was never materialized.
+    assert header["kind"] == "log_opened" and header["backfill_pending"] is True
+    assert chat_live_log_stats("persona_chat_s1")["backfill_pending"] is True
+
+    # The TOOL lane is where that cost belongs, and it clears the flag.
+    ensure_chat_live_log("persona_chat_s1", materialize=True)
+    assert calls == ["persona_chat_s1"]
+    assert chat_live_log_stats("persona_chat_s1")["backfill_pending"] is False
+
+
+def test_completion_places_history_before_the_live_lines_it_already_holds(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HEAD_HOME", str(tmp_path))
+    record_chat_message(
+        session_id="persona_chat_s1", role="user", text="live one", client_message_id="cm-1"
+    )
+    record_chat_tool(session_id="persona_chat_s1", tool="terminal", status="started")
+
+    monkeypatch.setattr(
+        chat_live_log,
+        "_backfill_rows",
+        lambda session_id, session_db=None: (
+            [
+                {
+                    "ts": "2026-08-01T00:00:00Z",
+                    "kind": "message",
+                    "role": "operator",
+                    "text": "old",
+                    "backfilled": True,
+                },
+            ],
+            False,
+        ),
+    )
+    path = ensure_chat_live_log("persona_chat_s1", materialize=True)
+    rows = _lines(path)
+    assert [row.get("kind") for row in rows] == ["log_opened", "message", "message", "tool"]
+    assert [row.get("text") for row in rows if row.get("kind") == "message"] == ["old", "live one"]
+    assert rows[0]["backfill_pending"] is False
+
+
+def test_completion_keeps_lines_appended_while_the_projection_was_read(tmp_path, monkeypatch):
+    """FINDING 2. A concurrent appender's line must survive publication."""
+
+    monkeypatch.setenv("HERMES_HEAD_HOME", str(tmp_path))
+    record_chat_message(
+        session_id="persona_chat_s1", role="user", text="first", client_message_id="cm-1"
+    )
+
+    def _slow_backfill(session_id, *, session_db=None):
+        # Stands in for another process appending mid-materialization.
+        record_chat_message(
+            session_id="persona_chat_s1",
+            role="assistant",
+            text="arrived mid-materialization",
+            client_message_id="cm-2",
+        )
+        return [], False
+
+    monkeypatch.setattr(chat_live_log, "_backfill_rows", _slow_backfill)
+    path = ensure_chat_live_log("persona_chat_s1", materialize=True)
+    texts = [row["text"] for row in _messages(path)]
+    assert texts == ["first", "arrived mid-materialization"]
+
+
+def test_appender_never_writes_into_an_in_flight_materialization(tmp_path, monkeypatch):
+    """FINDING 2. The old create path wrote the backfill positionally into the
+    live file: an appender's line landed at an offset the creator then
+    overwrote, and the appender's dedupe mark suppressed it forever. Neither
+    may happen."""
+
+    monkeypatch.setenv("HERMES_HEAD_HOME", str(tmp_path))
+    monkeypatch.setattr(chat_live_log, "_CLAIM_WAIT_SECONDS", 0.05)
+    path = chat_live_log_path("persona_chat_s1")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    claim = path.with_name(path.name + ".materializing")
+    claim.write_text("half-built content", encoding="utf-8")
+
+    assert (
+        record_chat_message(
+            session_id="persona_chat_s1", role="agent", text="hello", client_message_id="cm-1"
+        )
+        is False
+    )
+    # Nothing was written into (or alongside) the half-built file.
+    assert not path.exists()
+
+    # And the skipped line was NOT marked recorded — the retry still writes it.
+    claim.unlink()
+    assert (
+        record_chat_message(
+            session_id="persona_chat_s1", role="agent", text="hello", client_message_id="cm-1"
+        )
+        is True
+    )
+    assert [row["text"] for row in _messages(path)] == ["hello"]
+
+
+def test_a_stale_claim_does_not_strand_the_mirror_forever(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HEAD_HOME", str(tmp_path))
+    monkeypatch.setattr(chat_live_log, "_CLAIM_STALE_SECONDS", -1.0)
+    path = chat_live_log_path("persona_chat_s1")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    claim = path.with_name(path.name + ".materializing")
+    claim.write_text("orphaned by a killed process", encoding="utf-8")
+
+    assert record_chat_message(session_id="persona_chat_s1", role="user", text="hi") is True
+    assert [row["text"] for row in _messages(path)] == ["hi"]
+
+
+def test_dedupe_key_is_the_logical_turn_id_not_the_flush_suffix(tmp_path, monkeypatch):
+    """FOLLOW-UP 7. The native flush stamps assistant rows
+    ``<client_message_id>:assistant:<n>``; the live hooks carry the bare id.
+    Keying on the raw value let a materialized file and a live append both
+    claim the same reply."""
+
+    monkeypatch.setenv("HERMES_HEAD_HOME", str(tmp_path))
+    assert chat_live_log._logical_client_key("cm-1:assistant:3") == "cm-1"
+    monkeypatch.setattr(
+        chat_live_log,
+        "_backfill_rows",
+        lambda session_id, session_db=None: (
+            [
+                {
+                    "ts": "2026-08-01T00:00:00Z",
+                    "kind": "message",
+                    "role": "agent",
+                    "text": "the reply",
+                    "client_message_id": chat_live_log._logical_client_key("cm-1:assistant:3"),
+                    "backfilled": True,
+                }
+            ],
+            False,
+        ),
+    )
+    path = ensure_chat_live_log("persona_chat_s1", materialize=True)
+    # The live hook now offers the SAME reply under the bare id.
+    record_chat_message(
+        session_id="persona_chat_s1",
+        role="assistant",
+        text="the reply",
+        client_message_id="cm-1",
+    )
+    assert len(_messages(path)) == 1
+
+
+def test_relay_attribution_rides_the_mirror_line(tmp_path, monkeypatch):
+    """FOLLOW-UP 5. A relayed message must not read as the operator."""
+
+    monkeypatch.setenv("HERMES_HEAD_HOME", str(tmp_path))
+    record_chat_message(
+        session_id="persona_chat_s1",
+        role="user",
+        text="from your teammate",
+        client_message_id="cm-1",
+        relay_marker="relay_from:neko_supervisor:personainst_neko_supervisor",
+    )
+    row = _messages(chat_live_log_path("persona_chat_s1"))[0]
+    assert row["relay_sender_persona_id"] == "neko_supervisor"
+    assert row["relay_sender_instance_id"] == "personainst_neko_supervisor"
+
+    # An operator/CLI send carries no marker and stays a plain operator row.
+    record_chat_message(
+        session_id="persona_chat_s1", role="user", text="from tony", client_message_id="cm-2"
+    )
+    plain = _messages(chat_live_log_path("persona_chat_s1"))[1]
+    assert "relay_sender_persona_id" not in plain
+
+
+def test_dedupe_survives_rotation_across_a_generation_boundary(tmp_path, monkeypatch):
+    """FOLLOW-UP 6. A rotation empties the live file's tail; a fresh process
+    must not re-append a resend whose line now lives in the ``.1`` sibling."""
+
+    monkeypatch.setenv("HERMES_HEAD_HOME", str(tmp_path))
+    monkeypatch.setattr(chat_live_log, "LIVE_LOG_ROTATE_BYTES", 300)
+    for index in range(8):
+        record_chat_message(
+            session_id="persona_chat_s1",
+            role="agent",
+            text=f"reply {index} " + "z" * 40,
+            client_message_id=f"cm-{index}",
+        )
+    path = chat_live_log_path("persona_chat_s1")
+    rotated = path.with_name(path.name + ".1")
+    assert rotated.exists()
+    rotated_ids = {row.get("client_message_id") for row in _messages(rotated)}
+    assert rotated_ids
+
+    reset_chat_live_log_state()
+    monkeypatch.setenv("HERMES_HEAD_HOME", str(tmp_path))
+    monkeypatch.setattr(chat_live_log, "LIVE_LOG_ROTATE_BYTES", 300)
+    resent = sorted(rotated_ids)[0]
+    before = len(_messages(path))
+    record_chat_message(
+        session_id="persona_chat_s1",
+        role="agent",
+        text="whatever the resend carries",
+        client_message_id=resent,
+    )
+    assert len(_messages(path)) == before

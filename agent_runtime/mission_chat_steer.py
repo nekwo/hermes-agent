@@ -198,6 +198,7 @@ def _process_request(handle: MissionChatSteerHandle, path: Path) -> None:
     try:
         steer(message)
         handle.processed_client_ids.add(client_message_id)
+        _mirror_steer_to_live_log(handle.session_id, message, client_message_id)
         _write_json_atomic(
             ack_path,
             _accepted(session_id=handle.session_id, client_message_id=client_message_id),
@@ -214,6 +215,34 @@ def _process_request(handle: MissionChatSteerHandle, path: Path) -> None:
         )
     finally:
         _unlink_quietly(path)
+
+
+def _mirror_steer_to_live_log(session_id: str, message: str, client_message_id: str) -> None:
+    """Put an accepted mid-turn steer into the session's live chat log.
+
+    ``handle.session_id`` is the ROOT chat session (``_agent_ready_for_steer``
+    binds the turn with it), so this lands in the same file the turn's order and
+    reply do. Without it a head agent tailing that file sees an agent visibly
+    change course with nothing in the stream explaining why — and would have to
+    wait for a rebuild to learn a steer had been sent at all.
+
+    Best effort: a steer is accepted the moment ``steer()`` returns, and a
+    mirror problem must never turn an accepted steer into a rejected one.
+    """
+
+    try:
+        from .chat_live_log import record_chat_message
+
+        record_chat_message(
+            session_id=session_id,
+            role="operator",
+            text=message,
+            client_message_id=client_message_id,
+            steered=True,
+        )
+    except Exception:
+        return None
+    return None
 
 
 def _accepted(*, session_id: str, client_message_id: str, duplicate: bool = False) -> dict[str, Any]:

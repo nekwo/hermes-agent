@@ -5,6 +5,7 @@ from typing import Any
 
 from hermes_time import now
 
+from .chat_live_log import mirrored_persona_chat_append
 from .events import EventLog
 from .models import Event
 from .child_events import emit_child_returned
@@ -50,12 +51,24 @@ def return_summary_to_parent_session(
 
     session_db = _session_db()
     session_db.ensure_session(safe_session, source="agent_runtime_persona_chat")
-    message_id = session_db.append_message(
+    # Wrapped in the live-log seam like every other explicit persona-chat
+    # append: "the child finished, here is the distilled result" is exactly the
+    # row a head agent grepping the parent thread's log is looking for, and this
+    # lane writing straight to SessionDB is how it went missing from the mirror
+    # in the first place.
+    with mirrored_persona_chat_append(
+        session_db=session_db,
         session_id=safe_session,
         role="assistant",
-        content=message,
-        platform_message_id=client_message_id,
-    )
+        text=message,
+        client_message_id=client_message_id,
+    ):
+        message_id = session_db.append_message(
+            session_id=safe_session,
+            role="assistant",
+            content=message,
+            platform_message_id=client_message_id,
+        )
 
     store = PersonaInstanceStore(event_log=event_log)
     instance = store.get(safe_instance)

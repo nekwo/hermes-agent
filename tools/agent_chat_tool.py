@@ -450,7 +450,7 @@ AGENT_CHAT_OPEN_SCHEMA = {
 AGENT_CHAT_LOG_PATH_SCHEMA = {
     "name": "agent_chat_log_path",
     "description": (
-        "Get the FILE PATH of a teammate thread's live transcript log so you can grep/glob/tail the WHOLE history with your own file tools — use this when 40 messages is not enough, when you need to search a long thread for something specific, or when you want to watch what a teammate is doing while they are still working. The file is append-only JSONL, keeps growing as the conversation and their tool activity continue (one line per message plus compact tool-start/finish lines), and is redaction-safe. Disambiguator: agent_chat_log_path gives you the full history as a greppable file; agent_chat_open is the quick bounded 40-message tail; agent_chat_threads lists your threads; agent_chat_send sends. Read-only: it never creates a chat session and never sends anything."
+        "Get the FILE PATH of a teammate thread's transcript log so you can grep/glob/tail it with your own file tools — use this when 40 messages is not enough, when you need to search a long thread for something specific, or when you want to watch what a teammate is doing while they are still working. The file is append-only JSONL and redaction-safe. It holds the thread's materialized history, and it KEEPS GROWING: appended as they happen are operator/relay messages, mid-turn steers, each turn's final reply, and compact tool start/finish lines (so you can see what they are doing right now). Not appended live: the runtime's non-final rows — the intermediate assistant messages between tool calls. Those are in the materialized history but will not show up in a live tail, so do not read their absence as 'it never happened'. Disambiguator: agent_chat_log_path gives you the thread as a greppable file; agent_chat_open is the quick bounded 40-message tail; agent_chat_threads lists your threads; agent_chat_send sends. Read-only: it never creates a chat session and never sends anything."
     ),
     "parameters": {
         "type": "object",
@@ -856,9 +856,12 @@ def agent_chat_log_path(
 
     threads = []
     for candidate in wanted:
-        # Materializes pre-feature history from the same projection
-        # agent_chat_open reads, exactly once, then live appends continue it.
-        path = ensure_chat_live_log(candidate)
+        # THIS is the lane that materializes history. The chat persist seams
+        # deliberately never do (they would pay the full curated projection —
+        # turn-journal re-parse per row — inside a live turn); they create a
+        # header-only file and append. A deliberate agent request can afford the
+        # read, so it completes any file still marked backfill_pending.
+        path = ensure_chat_live_log(candidate, materialize=True)
         if path is None:
             continue
         stats = chat_live_log_stats(candidate) or {}
@@ -871,6 +874,13 @@ def agent_chat_log_path(
                 "tool_count": stats.get("tool_count", 0),
                 "last_activity": stats.get("last_activity"),
                 "rotated_path": stats.get("rotated_path"),
+                # Honest on both ways history can be short: never materialized,
+                # or materialized only up to the declared bound. Either way the
+                # file may start later than the conversation does.
+                "history_complete": not (
+                    stats.get("backfill_pending", False)
+                    or stats.get("backfill_truncated", False)
+                ),
                 # Not a snapshot: this file keeps growing while the teammate
                 # works, so re-reading it later shows new activity.
                 "live": True,
@@ -885,6 +895,16 @@ def agent_chat_log_path(
             "count": len(threads),
             "threads": threads,
             "format": "jsonl",
+            # Say exactly what the growing part of the file carries. An agent
+            # that believes "full history, live" would draw wrong conclusions
+            # from the absence of a mid-turn steer it knows was sent.
+            "live_coverage": (
+                "appended as they happen: operator/relay messages, mid-turn steers "
+                "(steered: true), each turn's final reply, and tool start/finish "
+                "lines. The runtime's non-final rows (intermediate assistant messages "
+                "between tool calls) are NOT appended live — they appear in the "
+                "materialized history, not in the live tail."
+            ),
             "next_expected": (
                 "grep / tail the path with your own file tools; each line is JSON with "
                 "{ts, kind: message|tool, ...}. Re-read later to see new activity."

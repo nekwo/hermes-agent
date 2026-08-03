@@ -2623,6 +2623,9 @@ def _mission_chat_commit_turn(plan) -> int:
         # not only once the reply lands. Redacted through the same write
         # boundary the persisted row crosses; deduped on
         # (role, client_message_id) so a resend of this turn cannot double it.
+        # The relay marker rides along so a teammate's relayed message is
+        # attributed to the SENDER in the grep file instead of reading as the
+        # operator — the same attribution the conversation projection carries.
         _mirror_persona_chat_message(
             session_db=session_db,
             session_id=session_id,
@@ -2632,6 +2635,7 @@ def _mission_chat_commit_turn(plan) -> int:
             ),
             client_message_id=client_message_id,
             turn_id=stream_emitter.turn_id,
+            relay_marker=relay_sender_marker,
         )
         # Chained relays share one deadline: this hop's wall budget is capped
         # by the time left on the chain, and the deadline is seeded (root
@@ -5702,42 +5706,45 @@ def _persist_persona_chat_row(
     """THE explicit-append seam for persona-chat rows.
 
     Both ``_append_persona_operator_turn`` and ``_append_persona_assistant_text``
-    funnel their ``session_db.append_message`` through here so the SessionDB
-    write and its live-log mirror can never drift apart — one write, one mirror,
-    no copy-pasted hook per call site.
+    funnel their ``session_db.append_message`` through here, and the write is
+    wrapped in ``mirrored_persona_chat_append`` so the SessionDB row and its
+    live-log line can never drift apart — one write, one mirror, no hook
+    copy-pasted per call site.
 
-    Only *this* lane's rows pass through: since native session continuity
-    landed, the mission-chat handler no longer appends the operator/assistant
-    rows itself (the runtime persists them as part of the turn — see
-    ``profile_runner.stage_persona_chat_user_row_marker``), so that lane mirrors
-    from its own chokepoint via ``_mirror_persona_chat_message``. Two lanes,
-    two persistence mechanisms, ONE mirror helper.
+    The mirror is bound by a CONTEXT MANAGER rather than by a trailing call on
+    purpose. The first cut hooked append sites by convention and immediately
+    missed one (``agent_runtime.continuity.return_summary_to_parent_session``,
+    the child return-summary lane), so its rows never reached the live log. A
+    seam a new append site has to *wrap* is the version of that rule a reviewer
+    can actually check.
+
+    The mission-chat lane does not come through here: since native session
+    continuity landed it no longer appends the operator/assistant rows itself
+    (the runtime persists them with the turn — see
+    ``profile_runner.stage_persona_chat_user_row_marker``), so it mirrors from
+    its own two known points via ``_mirror_persona_chat_message``.
     """
 
-    # Materialize any PRE-EXISTING history into the mirror before the durable
-    # write lands. Ordering is load-bearing: the one-shot backfill reads the
-    # same SessionDB this is about to append to, so preparing afterwards would
-    # let the backfill and this row both claim the message.
-    _mirror_persona_chat_message(
-        session_db=session_db, session_id=session_id, prepare_only=True
-    )
+    from agent_runtime.chat_live_log import mirrored_persona_chat_append
+
     try:
-        session_db.append_message(
+        with mirrored_persona_chat_append(
+            session_db=session_db,
             session_id=session_id,
             role=role,
-            content=text,
-            finish_reason=relay_marker,
-            platform_message_id=client_message_id,
-        )
+            text=text,
+            client_message_id=client_message_id,
+            relay_marker=relay_marker,
+        ):
+            session_db.append_message(
+                session_id=session_id,
+                role=role,
+                content=text,
+                finish_reason=relay_marker,
+                platform_message_id=client_message_id,
+            )
     except Exception as exc:
         return _persona_chat_persistence_failed(step, exc, required=required)
-    _mirror_persona_chat_message(
-        session_db=session_db,
-        session_id=session_id,
-        role=role,
-        text=text,
-        client_message_id=client_message_id,
-    )
     return True
 
 
@@ -5745,23 +5752,20 @@ def _mirror_persona_chat_message(
     *,
     session_db=None,
     session_id: str,
-    role: str = "",
-    text: str = "",
+    role: str,
+    text: str,
     client_message_id: str | None = None,
     turn_id: str | None = None,
-    prepare_only: bool = False,
+    relay_marker: str | None = None,
 ) -> None:
     """Mirror ONE persisted persona-chat message into the live chat log.
 
-    The single hook every persona-chat persist lane calls. The text handed in
-    has ALREADY crossed the ``_redact_persona_chat_text`` write boundary (or the
-    read projection's), so the mirror is redaction-safe by construction; the
-    mirror re-runs the shared secret rule anyway, because "the caller already
-    did it" is exactly how a redaction boundary rots.
-
-    ``prepare_only`` materializes the session's pre-existing history without
-    recording anything — what a caller uses immediately BEFORE its durable
-    write, so the one-shot backfill cannot race the row being written.
+    The mission-chat lane's hook (the explicit-append lanes use the
+    ``mirrored_persona_chat_append`` seam instead). The text handed in has
+    ALREADY crossed the ``_redact_persona_chat_text`` write boundary, so the
+    mirror is redaction-safe by construction; the mirror re-runs the shared
+    secret rule anyway, because "the caller already did it" is exactly how a
+    redaction boundary rots.
 
     Best effort by contract: the mirror is a regenerable convenience artifact
     (``agent_runtime/chat_live_log.py``), and a mirror failure must never take
@@ -5773,20 +5777,15 @@ def _mirror_persona_chat_message(
     """
 
     try:
-        from agent_runtime.chat_live_log import (
-            ensure_chat_live_log,
-            record_chat_message,
-        )
+        from agent_runtime.chat_live_log import record_chat_message
 
-        if prepare_only:
-            ensure_chat_live_log(session_id, session_db=session_db)
-            return None
         record_chat_message(
             session_id=session_id,
             role=role,
             text=text,
             turn_id=turn_id,
             client_message_id=client_message_id,
+            relay_marker=relay_marker,
             session_db=session_db,
         )
     except Exception:

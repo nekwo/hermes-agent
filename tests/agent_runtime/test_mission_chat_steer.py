@@ -106,3 +106,80 @@ def test_empty_steer_text_is_rejected_before_inbox_write(tmp_path):
     assert result["error_kind"] == "invalid_request"
     assert list(inbox.glob("*.json")) == []
     assert agent.steers == []
+
+
+def test_accepted_steer_lands_in_the_session_live_log(tmp_path, monkeypatch):
+    """A head agent tailing the thread must see WHY the agent changed course.
+
+    Steered text is persisted by the runtime's native flush, outside every seam
+    the live-log mirror hooks, so without this the stream showed an agent
+    visibly redirecting itself with nothing explaining it until a rebuild.
+    """
+
+    import json
+
+    from agent_runtime.chat_live_log import chat_live_log_path, reset_chat_live_log_state
+
+    monkeypatch.setenv("HERMES_HEAD_HOME", str(tmp_path / "head"))
+    (tmp_path / "head").mkdir(parents=True, exist_ok=True)
+    reset_chat_live_log_state()
+    try:
+        agent = FakeSteerAgent()
+        handle = start_active_mission_chat_turn(
+            runtime_root=tmp_path,
+            session_id="session_live",
+            agent=agent,
+        )
+        try:
+            result = submit_mission_chat_steer(
+                runtime_root=tmp_path,
+                session_id="session_live",
+                message="actually check the backend first",
+                client_message_id="client_steer_1",
+            )
+        finally:
+            handle.close()
+
+        assert result["ok"] is True
+        path = chat_live_log_path("session_live")
+        rows = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        messages = [row for row in rows if row.get("kind") == "message"]
+        assert len(messages) == 1
+        assert messages[0]["text"] == "actually check the backend first"
+        assert messages[0]["role"] == "operator"
+        # Typed, so a reader can tell a mid-turn injection from the order that
+        # opened the turn.
+        assert messages[0]["steered"] is True
+    finally:
+        reset_chat_live_log_state()
+
+
+def test_a_broken_mirror_never_rejects_an_accepted_steer(tmp_path, monkeypatch):
+    from agent_runtime import chat_live_log
+
+    def _boom(**kwargs):
+        raise OSError("mirror volume gone")
+
+    monkeypatch.setattr(chat_live_log, "record_chat_message", _boom)
+    agent = FakeSteerAgent()
+    handle = start_active_mission_chat_turn(
+        runtime_root=tmp_path,
+        session_id="session_live",
+        agent=agent,
+    )
+    try:
+        result = submit_mission_chat_steer(
+            runtime_root=tmp_path,
+            session_id="session_live",
+            message="still steers",
+            client_message_id="client_steer_2",
+        )
+    finally:
+        handle.close()
+
+    assert result["ok"] is True and result["execution_state"] == "accepted"
+    assert agent.steers == ["still steers"]
