@@ -1431,6 +1431,87 @@ def _publish_persona_chat_metadata_event(
         return False
 
 
+def _mission_chat_emit(args, data, plain=None, *, stream=None) -> None:
+    """THE one place a mission-chat turn payload leaves this handler.
+
+    Every terminal payload — refusal, replay, blocker, reply — goes out through
+    here, so an in-process caller can take the payload DICT instead of scraping
+    it back out of stdout.
+
+    Why that matters, and why it is a seam rather than a convention: the
+    agent-to-agent relay (``tools/agent_chat_tool.agent_chat_send``) invoked
+    this handler in-process under ``contextlib.redirect_stdout`` and then parsed
+    the captured text back into JSON. ``redirect_stdout`` rebinds
+    ``sys.stdout`` PROCESS-GLOBALLY, so two concurrent relays — which is exactly
+    what a detached ``wait: false`` dispatch introduces — would interleave into
+    one buffer and, worse, briefly steal the serve process's own stdout
+    protocol from every other thread. Handing the caller the dict removes the
+    capture entirely.
+
+    ``args.payload_sink`` (absent on every argparse Namespace, so the CLI and
+    the serve bridge are untouched) is the seam. When it is present the payload
+    is handed over and NOTHING is printed: the caller owns the transport, and a
+    nested reply must never land in the OUTER turn's stdout capture. When it is
+    absent this prints byte-for-byte what each call site printed before.
+
+    ``plain`` is the non-JSON console line; ``None`` keeps the historical
+    ``data["error"]``. ``stream`` overrides the ``args.stream`` read for the one
+    site that had already resolved it into a local.
+    """
+
+    sink = getattr(args, "payload_sink", None)
+    if callable(sink):
+        sink(data)
+        return
+    streaming = getattr(args, "stream", False) if stream is None else stream
+    if streaming:
+        _emit_chat_final(data)
+    else:
+        print(emit_json(data) if args.json else (data["error"] if plain is None else plain))
+
+
+def _bind_mission_chat_delivery_capability() -> bool:
+    """Answer ``async_delivery_supported()`` HONESTLY for this lane. Returns it.
+
+    ``terminal(notify_on_complete / watch_patterns)`` and
+    ``delegate_task(background=true)`` consult that flag before promising to
+    deliver a result after the turn ends, and they were being told ``True`` on
+    the mission-chat lane for the worst possible reason: nothing had ever bound
+    the contextvar, so the default answered for it. Nothing in the serve process
+    drained the completion queue at all, which made every one of those promises
+    unkeepable — the tool registered a watcher, the turn ended, and the result
+    went nowhere.
+
+    Now the answer is bound to a fact:
+
+    * **serve-hosted turn ⇒ True.** The dispatch-delivery drain runs in this
+      process and forges completions back into the sender's thread when it is
+      idle. The registry that ``persona_chat_root_lease`` already uses to tell
+      serve from CLI is the ONE seam for that distinction; this reads it rather
+      than inventing a second serve detector.
+    * **cold one-shot CLI turn ⇒ False.** The process exits when the turn does.
+      ``terminal``'s notifications live only in this process's in-memory queue
+      and die with it, so that promise is simply false. ``delegate_task``'s
+      completions ARE durable and a later serve boot could deliver them — but
+      "your subagent result may reappear in some future session" is a worse
+      outcome than the inline/synchronous fallback ``False`` selects, which
+      returns the result inside the turn that asked for it. Refusing the promise
+      is the honest and the more useful answer.
+    """
+
+    from gateway.session_context import (
+        declare_async_delivery_channel,
+        declare_stateless_channel,
+    )
+
+    serve_hosted = persona_chat_runtime_registry() is not None
+    if serve_hosted:
+        declare_async_delivery_channel()
+    else:
+        declare_stateless_channel()
+    return serve_hosted
+
+
 def _cmd_mission_chat_message(args) -> int:
     # Function-local: this file is exec'd into harness.py's globals, so a
     # module-level import here would need a matching harness.py import or it
@@ -1441,6 +1522,9 @@ def _cmd_mission_chat_message(args) -> int:
         ExecutionState,
         MissionChatTurnPlan,
     )
+    # Per-request capability binding, at the very top so every path below —
+    # including the refusals — runs with the truthful answer bound.
+    _bind_mission_chat_delivery_capability()
     cfg = load_agent_runtime_config()
     try:
         normalized_persona = _resolve_mission_chat_persona_id(
@@ -1456,10 +1540,7 @@ def _cmd_mission_chat_message(args) -> int:
             "persona_id": safe_assignment_token(args.persona_id),
             "next_expected": "pass a configured persona id, profile:<name>, or a known personainst_* instance id",
         }
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["error"])
+        _mission_chat_emit(args, data)
         return 2
 
     # Relay-chain guard at the canonical persona chokepoint. The chain is
@@ -1486,10 +1567,7 @@ def _cmd_mission_chat_message(args) -> int:
             "relay_chain": list(relay_decision.chain),
             "next_expected": "answer your caller directly; do not relay onward on this chain",
         }
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["error"])
+        _mission_chat_emit(args, data)
         return 2
     # Chain for THIS turn: envelope chain + the persona now speaking. Seeded
     # into the ContextVars around the model turn so the turn's own
@@ -1506,10 +1584,7 @@ def _cmd_mission_chat_message(args) -> int:
             "persona_id": safe_assignment_token(args.persona_id),
             "next_expected": "persist the persona, use profile:<name>, or address a known personainst_* instance",
         }
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["error"])
+        _mission_chat_emit(args, data)
         return 2
 
     try:
@@ -1525,10 +1600,7 @@ def _cmd_mission_chat_message(args) -> int:
             "persona_id": normalized_persona,
             "next_expected": "restore canonical persona chat transcript storage and retry the message",
         }
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["error"])
+        _mission_chat_emit(args, data)
         return 2
     instance_store = PersonaInstanceStore()
     instance_store.ensure_for_personas(ensure_persisted_personas(cfg))
@@ -1673,10 +1745,7 @@ def _cmd_mission_chat_message(args) -> int:
                 "re-send to a specific instance by the @personainst_ handle listed in candidates"
             ),
         }
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["error"])
+        _mission_chat_emit(args, data)
         return 2
 
     if (
@@ -1693,10 +1762,7 @@ def _cmd_mission_chat_message(args) -> int:
             "session_id": session_id,
             "next_expected": "open a server-minted chat root before sending",
         }
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["error"])
+        _mission_chat_emit(args, data)
         return 2
     if session_id and is_canonical_session_persistence(session_db):
         owner = _persona_chat_session_owner(session_db, session_id)
@@ -1724,10 +1790,7 @@ def _cmd_mission_chat_message(args) -> int:
                 "persona_instance_id": persona_instance_id or None,
                 "next_expected": "use the server-minted root returned for this exact persona instance",
             }
-            if getattr(args, "stream", False):
-                _emit_chat_final(data)
-            else:
-                print(emit_json(data) if args.json else data["error"])
+            _mission_chat_emit(args, data)
             return 2
         persona_instance_id = owner
     if not session_id:
@@ -1827,14 +1890,7 @@ def _cmd_mission_chat_message(args) -> int:
                 persona_instance_id=persona_instance_id,
             )
             if premint_refusal is not None:
-                if getattr(args, "stream", False):
-                    _emit_chat_final(premint_refusal)
-                else:
-                    print(
-                        emit_json(premint_refusal)
-                        if args.json
-                        else premint_refusal["error"]
-                    )
+                _mission_chat_emit(args, premint_refusal)
                 return 2
             # A fresh thread is only navigable if it is NAMED: nine identical
             # "QA Agent chat" rows are worse than the mega-thread they replaced.
@@ -1883,10 +1939,7 @@ def _cmd_mission_chat_message(args) -> int:
                 # before its first session-visible one, so a refusal from either
                 # point precedes the titled row that used to survive it.
                 data = _retired_persona_instance_payload(exc)
-                if getattr(args, "stream", False):
-                    _emit_chat_final(data)
-                else:
-                    print(emit_json(data) if args.json else data["error"])
+                _mission_chat_emit(args, data)
                 return 2
             session_id = str(receipt["root_chat_session_id"])
             session_established = session_established_payload(
@@ -1960,10 +2013,7 @@ def _cmd_mission_chat_message(args) -> int:
             "client_message_id": client_message_id,
             "error": str(exc),
         }
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["error"])
+        _mission_chat_emit(args, data)
         return 2
 
 
@@ -2080,17 +2130,11 @@ def _mission_chat_commit_turn(plan) -> int:
         # (`retire` preserves chat history by contract). This still refuses, and
         # still refuses with the same typed error.
         data = _retired_persona_instance_payload(exc)
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["error"])
+        _mission_chat_emit(args, data)
         return 2
     except ValueError as exc:
         data = {"ok": False, "error": safe_assignment_text(str(exc), limit=240)}
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["error"])
+        _mission_chat_emit(args, data)
         return 2
 
     # The retired mission lane's re-entry point used to live here: --task/--goal
@@ -2120,10 +2164,7 @@ def _mission_chat_commit_turn(plan) -> int:
             "persona_instance_id": instance.id,
             "next_expected": "restore canonical persona chat transcript storage and retry the message",
         }
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["error"])
+        _mission_chat_emit(args, data)
         return 2
     try:
         requested_override = _requested_chat_model_override(args)
@@ -2145,10 +2186,7 @@ def _mission_chat_commit_turn(plan) -> int:
             persona_instance_id=instance.id,
             session_id=session_id,
         )
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["error"])
+        _mission_chat_emit(args, data)
         return 2
     except Exception as exc:
         data = {
@@ -2161,10 +2199,7 @@ def _mission_chat_commit_turn(plan) -> int:
             "chat_session_id": session_id,
             "next_expected": "inspect Harness session metadata storage; chat-scoped model override was not applied and Hermes profile defaults were not changed",
         }
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["error"])
+        _mission_chat_emit(args, data)
         return 2
     # Resolve the effective instance once. Prompt receipts and execution must
     # observe the same model and skill assignment authority.
@@ -2172,10 +2207,7 @@ def _mission_chat_commit_turn(plan) -> int:
     message = safe_assignment_text(getattr(args, "message", None), limit=12000)
     if not message:
         data = _missing_chat_message_payload()
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["error"])
+        _mission_chat_emit(args, data)
         return 2
 
     replay = _persona_chat_existing_turn(
@@ -2264,10 +2296,7 @@ def _mission_chat_commit_turn(plan) -> int:
             "next_expected": "send a new client_message_id to continue; no turn-resolve is required",
         }
         _stamp_finalization(data)
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["error"])
+        _mission_chat_emit(args, data)
         return 2
     # No proven reply and the journal says a provider call may still be
     # outstanding: refuse the resend and route to the resolve verb.
@@ -2294,10 +2323,7 @@ def _mission_chat_commit_turn(plan) -> int:
             "next_expected": "resolve the exact outcome_unknown turn with action=abandon, then send a new client_message_id",
         }
         _stamp_finalization(data)
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["error"])
+        _mission_chat_emit(args, data)
         return 2
     if journal_state == TURN_STATE_PROJECTED and journal.get("stored_reply") is not None:
         _publish_persona_chat_projection_event(
@@ -2338,10 +2364,7 @@ def _mission_chat_commit_turn(plan) -> int:
             "journal_state": TURN_STATE_PROJECTED,
         }
         _stamp_finalization(data)
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else f"mission chat reply for {normalized_persona}")
+        _mission_chat_emit(args, data, f"mission chat reply for {normalized_persona}")
         return 0
     if replay.get("assistant"):
         reply_text = _redact_persona_chat_text(
@@ -2421,14 +2444,7 @@ def _mission_chat_commit_turn(plan) -> int:
             "next_expected": "duplicate client message id replayed from the canonical Mission Control chat transcript",
         }
         _stamp_finalization(data)
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(
-                emit_json(data)
-                if args.json
-                else f"mission chat reply for {normalized_persona}"
-            )
+        _mission_chat_emit(args, data, f"mission chat reply for {normalized_persona}")
         return 0
 
     # SessionDB's native structured lineage is the sole continuation authority.
@@ -2884,10 +2900,7 @@ def _mission_chat_commit_turn(plan) -> int:
             )
         if failed_outcome is not None and failed_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
             data["turn_persist_outcome"] = failed_outcome.value
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["blocker"])
+        _mission_chat_emit(args, data, data["blocker"])
         return turn_outcome.exit_code
 
     reply_text = _redact_persona_chat_text(getattr(chat_result, "final_response", "") or "", limit=PERSONA_CHAT_REPLY_LIMIT)
@@ -3162,14 +3175,16 @@ def _mission_chat_commit_turn(plan) -> int:
             )
         if write_ahead_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
             data["turn_write_ahead_outcome"] = write_ahead_outcome.value
-        if stream:
-            # C3: `turn_elements` DROPPED from the terminal frame — the launcher
-            # never decoded them (turn structure arrives via the incremental v2
-            # frames), and the turn store is the element/replay authority for
-            # reconnect. Emitting them here was a pure duplicate carriage.
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else f"mission chat reply for {normalized_persona}")
+        # C3: `turn_elements` DROPPED from the terminal frame — the launcher
+        # never decoded them (turn structure arrives via the incremental v2
+        # frames), and the turn store is the element/replay authority for
+        # reconnect. Emitting them here was a pure duplicate carriage.
+        _mission_chat_emit(
+            args,
+            data,
+            f"mission chat reply for {normalized_persona}",
+            stream=stream,
+        )
         # Auto-title is a SessionDB-only side effect that NOTHING in the
         # emitted frame depends on, and it costs a synchronous auxiliary-LLM
         # RTT on a session's first turn. Run it AFTER the terminal frame so
@@ -3229,10 +3244,7 @@ def _mission_chat_commit_turn(plan) -> int:
             "next_expected": "retry this client_message_id to repair projection from the native committed reply",
         }
         _stamp_finalization(data)
-        if getattr(args, "stream", False):
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if args.json else data["blocker"])
+        _mission_chat_emit(args, data, data["blocker"])
         return 2
 
 

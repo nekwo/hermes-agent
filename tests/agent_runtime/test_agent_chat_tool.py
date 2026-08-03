@@ -18,6 +18,21 @@ from tools.agent_chat_tool import (
 from tools.registry import registry
 
 
+def _reply(args, payload):
+    """Model the handler's payload seam.
+
+    The relay no longer scrapes the handler's stdout — it hands ``args`` a
+    ``payload_sink`` and takes the payload dict back through it. A fake handler
+    that only printed would be modelling a contract that no longer exists, so
+    these fakes honour the seam and fall back to printing for the CLI shape.
+    """
+
+    sink = getattr(args, "payload_sink", None)
+    if sink is not None:
+        sink(payload)
+        return
+    print(json.dumps(payload))
+
 def test_tool_is_registered_on_the_agent_chat_toolset():
     entry = registry.get_entry("agent_chat_send")
     assert entry is not None
@@ -38,7 +53,7 @@ def test_instance_shaped_ids_are_relayed_for_canonical_resolution(monkeypatch):
 
     def fake_handler(args):
         seen["persona_id"] = args.persona_id
-        print(json.dumps({"ok": True, "reply": "ack"}))
+        _reply(args, {"ok": True, "reply": "ack"})
         return 0
 
     import hermes_cli.harness as harness
@@ -59,7 +74,7 @@ def test_omitted_session_is_forwarded_as_none_so_the_handler_threads(monkeypatch
 
     def fake_handler(args):
         seen["session_id"] = args.session_id
-        print(json.dumps({"ok": True, "reply": "ack"}))
+        _reply(args, {"ok": True, "reply": "ack"})
         return 0
 
     import hermes_cli.harness as harness
@@ -91,7 +106,7 @@ def test_relay_envelope_is_forwarded_explicitly(monkeypatch):
         seen["relay_chain"] = args.relay_chain
         seen["relay_deadline_epoch"] = args.relay_deadline_epoch
         seen["max_seconds"] = args.max_seconds
-        print(json.dumps({"ok": True, "reply": "ack"}))
+        _reply(args, {"ok": True, "reply": "ack"})
         return 0
 
     import time
@@ -120,7 +135,7 @@ def test_root_relay_mints_the_shared_deadline(monkeypatch):
     def fake_handler(args):
         seen["relay_chain"] = args.relay_chain
         seen["relay_deadline_epoch"] = args.relay_deadline_epoch
-        print(json.dumps({"ok": True, "reply": "ack"}))
+        _reply(args, {"ok": True, "reply": "ack"})
         return 0
 
     import time
@@ -157,15 +172,14 @@ def test_typed_chokepoint_refusals_propagate(monkeypatch):
     # Depth/cycle authority lives in the mission-chat handler; the tool must
     # surface its typed refusal, not re-decide.
     def fake_handler(args):
-        print(
-            json.dumps(
-                {
-                    "ok": False,
-                    "error_kind": "relay_cycle",
-                    "error": "relay cycle detected: 'dev' is already on this relay chain",
-                    "relay_chain": ["neko_supervisor", "dev"],
-                }
-            )
+        _reply(
+            args,
+            {
+                "ok": False,
+                "error_kind": "relay_cycle",
+                "error": "relay cycle detected: 'dev' is already on this relay chain",
+                "relay_chain": ["neko_supervisor", "dev"],
+            }
         )
         return 2
 
@@ -183,18 +197,17 @@ def test_happy_path_returns_compact_reply_without_observability(monkeypatch):
         assert args.persona_id == "neko_supervisor"
         assert args.stream is False and args.json is True
         assert args.requested_by == "agent:persona_chat_personainst_alice_x"
-        print(
-            json.dumps(
-                {
-                    "ok": True,
-                    "reply": "On it — briefing received.",
-                    "session_id": "persona_chat_personainst_neko_supervisor",
-                    "chat_session_id": "persona_chat_personainst_neko_supervisor",
-                    "persona_instance_id": "personainst_operator_abc",
-                    "total_tokens": 12345,
-                    "prompt_observability": {"huge": "x" * 1000},
-                }
-            )
+        _reply(
+            args,
+            {
+                "ok": True,
+                "reply": "On it — briefing received.",
+                "session_id": "persona_chat_personainst_neko_supervisor",
+                "chat_session_id": "persona_chat_personainst_neko_supervisor",
+                "persona_instance_id": "personainst_operator_abc",
+                "total_tokens": 12345,
+                "prompt_observability": {"huge": "x" * 1000},
+            }
         )
         return 0
 
@@ -217,7 +230,7 @@ def test_happy_path_returns_compact_reply_without_observability(monkeypatch):
 
 def test_failed_target_turn_surfaces_typed_error(monkeypatch):
     def fake_handler(args):
-        print(json.dumps({"ok": False, "error": "unknown persona pm2"}))
+        _reply(args, {"ok": False, "error": "unknown persona pm2"})
         return 2
 
     import hermes_cli.harness as harness
@@ -234,7 +247,7 @@ def test_tool_does_not_mutate_ambient_relay_state(monkeypatch):
     # tool only reads and forwards the envelope.
     def fake_handler(args):
         assert RELAY_CHAIN.get() == ()
-        print(json.dumps({"ok": True, "reply": "ack"}))
+        _reply(args, {"ok": True, "reply": "ack"})
         return 0
 
     import hermes_cli.harness as harness
@@ -381,7 +394,7 @@ def test_new_session_flag_is_forwarded_to_the_handler(monkeypatch):
     def fake_handler(args):
         seen["new_session"] = getattr(args, "new_session", None)
         seen["session_id"] = args.session_id
-        print(json.dumps({"ok": True, "reply": "ack", "session_id": "persona_chat_personainst_qa_fresh"}))
+        _reply(args, {"ok": True, "reply": "ack", "session_id": "persona_chat_personainst_qa_fresh"})
         return 0
 
     import hermes_cli.harness as harness
@@ -409,7 +422,7 @@ def test_registry_handler_does_not_default_new_session_to_false(monkeypatch):
 
     def fake_handler(args):
         seen["new_session"] = getattr(args, "new_session", None)
-        print(json.dumps({"ok": True, "reply": "ack"}))
+        _reply(args, {"ok": True, "reply": "ack"})
         return 0
 
     import hermes_cli.harness as harness
@@ -427,7 +440,7 @@ def test_string_boolean_new_session_is_not_inverted(monkeypatch):
 
     def fake_handler(args):
         seen["new_session"] = getattr(args, "new_session", None)
-        print(json.dumps({"ok": True, "reply": "ack"}))
+        _reply(args, {"ok": True, "reply": "ack"})
         return 0
 
     import hermes_cli.harness as harness
@@ -445,7 +458,7 @@ def test_title_names_the_thread_this_dispatch_opens(monkeypatch):
 
     def fake_handler(args):
         seen["title"] = getattr(args, "title", None)
-        print(json.dumps({"ok": True, "reply": "ack"}))
+        _reply(args, {"ok": True, "reply": "ack"})
         return 0
 
     import hermes_cli.harness as harness
@@ -468,19 +481,18 @@ def test_session_established_lineage_is_returned_to_the_caller(monkeypatch):
     # (superseding this one)" from "I continued what we had" — and it needs the
     # session id to continue THIS exchange rather than opening another thread.
     def fake_handler(args):
-        print(
-            json.dumps(
-                {
-                    "ok": True,
-                    "reply": "ack",
-                    "session_id": "persona_chat_personainst_qa_ffffffffffff",
-                    "session_established": {
-                        "fresh": True,
-                        "reason": "policy_new_per_dispatch",
-                        "predecessor_session_id": "persona_chat_personainst_qa_aaaaaaaaaaaa",
-                    },
-                }
-            )
+        _reply(
+            args,
+            {
+                "ok": True,
+                "reply": "ack",
+                "session_id": "persona_chat_personainst_qa_ffffffffffff",
+                "session_established": {
+                    "fresh": True,
+                    "reason": "policy_new_per_dispatch",
+                    "predecessor_session_id": "persona_chat_personainst_qa_aaaaaaaaaaaa",
+                },
+            }
         )
         return 0
 
@@ -500,7 +512,7 @@ def test_result_stays_compact_when_the_handler_reports_no_lineage(monkeypatch):
     # The compact result is the whole point of this lane (the handler payload is
     # ~75KB); an absent block must not become a null key on every reply.
     def fake_handler(args):
-        print(json.dumps({"ok": True, "reply": "ack"}))
+        _reply(args, {"ok": True, "reply": "ack"})
         return 0
 
     import hermes_cli.harness as harness
@@ -540,7 +552,7 @@ def test_clarify_token_is_offered_and_forwarded_verbatim(monkeypatch):
 
     def fake_handler(args):
         seen["clarify_token"] = args.clarify_token
-        print(json.dumps({"ok": True, "reply": "ack"}))
+        _reply(args, {"ok": True, "reply": "ack"})
         return 0
 
     import hermes_cli.harness as harness
@@ -563,7 +575,7 @@ def test_the_registry_handler_passes_the_clarify_token_through(monkeypatch):
 
     def fake_handler(args):
         seen["clarify_token"] = args.clarify_token
-        print(json.dumps({"ok": True, "reply": "ack"}))
+        _reply(args, {"ok": True, "reply": "ack"})
         return 0
 
     import hermes_cli.harness as harness
@@ -605,21 +617,20 @@ def test_clarify_binding_is_returned_to_the_answering_agent(monkeypatch):
     # Where the answer actually landed, and why — including a session_id the
     # token outranked, so the override is never silent to the caller either.
     def fake_handler(args):
-        print(
-            json.dumps(
-                {
-                    "ok": True,
-                    "reply": "ack",
-                    "session_id": "persona_chat_personainst_qa_ffffffffffff",
-                    "clarify_binding": {
-                        "token": "clarify-9f2c4ab17d03",
-                        "state": "bound",
-                        "bound_via": "clarify_token",
-                        "bound_session_id": "persona_chat_personainst_qa_ffffffffffff",
-                        "overrode_session_id": "persona_chat_personainst_qa_aaaaaaaaaaaa",
-                    },
-                }
-            )
+        _reply(
+            args,
+            {
+                "ok": True,
+                "reply": "ack",
+                "session_id": "persona_chat_personainst_qa_ffffffffffff",
+                "clarify_binding": {
+                    "token": "clarify-9f2c4ab17d03",
+                    "state": "bound",
+                    "bound_via": "clarify_token",
+                    "bound_session_id": "persona_chat_personainst_qa_ffffffffffff",
+                    "overrode_session_id": "persona_chat_personainst_qa_aaaaaaaaaaaa",
+                },
+            }
         )
         return 0
 
@@ -635,7 +646,7 @@ def test_clarify_binding_is_returned_to_the_answering_agent(monkeypatch):
 
     # Absent on every ordinary turn — the compact result must not grow a null key.
     def quiet_handler(args):
-        print(json.dumps({"ok": True, "reply": "ack"}))
+        _reply(args, {"ok": True, "reply": "ack"})
         return 0
 
     monkeypatch.setattr(harness, "_cmd_mission_chat_message", quiet_handler)
@@ -704,7 +715,7 @@ def test_send_forwards_a_personainst_handle_as_the_target_instance(monkeypatch):
     def fake_handler(args):
         seen["persona_id"] = args.persona_id
         seen["persona_instance_id"] = args.persona_instance_id
-        print(json.dumps({"ok": True, "reply": "ack"}))
+        _reply(args, {"ok": True, "reply": "ack"})
         return 0
 
     import hermes_cli.harness as harness

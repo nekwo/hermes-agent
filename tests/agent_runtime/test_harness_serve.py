@@ -523,3 +523,71 @@ def test_cancel_of_running_runtime_stream_is_cooperative_and_frees_worker():
     exits = {frame["id"]: frame for frame in frames if frame.get("event") == "exit"}
     assert exits["stream-1"]["code"] == 0
     assert exits["status-1"]["code"] == 0
+
+
+# --------------------------------------------------------------------------
+# detached-dispatch delivery drain (WP-H2)
+# --------------------------------------------------------------------------
+
+
+def test_the_delivery_drain_runs_for_the_life_of_the_serve_process(monkeypatch):
+    """Serve is the ONLY lane that can keep `wait: false`'s promise.
+
+    A detached dispatch's answer is delivered by a drain that has to outlive the
+    turn that dispatched it, so it belongs to the one long-lived process that
+    hosts persona turns. Started after `ready` (a cold boot is never delayed by
+    a delivery) and stopped before `shutdown` (it must not forge a turn into a
+    process on its way down).
+    """
+
+    from agent_runtime import dispatch_delivery
+
+    started = {}
+
+    def fake_start(*, stop_event, **kwargs):
+        started["stop_event"] = stop_event
+        started["ready_seen"] = True
+        return threading.Thread(target=lambda: None)
+
+    monkeypatch.setattr(dispatch_delivery, "start_delivery_drain", fake_start)
+
+    frames = _run([SHUTDOWN], dispatch=lambda argv: 0)
+
+    assert started["ready_seen"] is True
+    # Stopped by the same event the liveness pump uses, before the shutdown frame.
+    assert started["stop_event"].is_set()
+    assert frames[-1]["event"] == "shutdown"
+
+
+def test_a_drain_that_cannot_start_does_not_take_the_runtime_down(monkeypatch):
+    """Completions stay durable; the next boot picks them up."""
+
+    from agent_runtime import dispatch_delivery
+
+    def boom(**kwargs):
+        raise RuntimeError("no drain today")
+
+    monkeypatch.setattr(dispatch_delivery, "start_delivery_drain", boom)
+
+    frames = _run([SHUTDOWN], dispatch=lambda argv: 0)
+
+    assert frames[1]["event"] == "ready"
+    assert frames[-1]["event"] == "shutdown"
+
+
+def test_boot_reports_the_dispatches_it_settled(monkeypatch):
+    """A dispatch whose process died is reclassified BEFORE the drain starts.
+
+    Otherwise the sender waits forever on an answer nothing is left to produce.
+    """
+
+    from agent_runtime import dispatch_store
+
+    monkeypatch.setattr(
+        dispatch_store, "restore_undelivered_dispatches", lambda: {"restored": 2}
+    )
+
+    frames = _run([SHUTDOWN], dispatch=lambda argv: 0)
+
+    assert frames[1]["event"] == "ready"
+    assert frames[1]["dispatches_restored"] == 2

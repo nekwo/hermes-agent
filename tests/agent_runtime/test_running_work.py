@@ -1215,3 +1215,117 @@ def test_cancelling_a_delegation_this_process_does_not_hold_says_so(home, monkey
 
     assert result["code"] == "cancel_unavailable"
     assert result["detail"] == "not_in_process"
+
+
+# --------------------------------------------------------------------------
+# lane: detached dispatches (WP-H2)
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def dispatch_home(tmp_path, monkeypatch):
+    """A real background-work home the dispatch store and the lane BOTH resolve.
+
+    Not a stub: the class of bug this lane can have is the projection reading a
+    different directory than the store wrote, and a stubbed resolver cannot
+    disagree with anything.
+    """
+
+    home = tmp_path / "dispatch-home"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    monkeypatch.setenv("HERMES_HEAD_HOME", str(home))
+    return home
+
+
+def _record_dispatch(**overrides):
+    from agent_runtime.dispatch_store import mint_dispatch_id, record_dispatch
+
+    payload = {
+        "dispatch_id": mint_dispatch_id(),
+        "sender_session_id": "persona_chat_personainst_neko_aaaaaaaaaaaa",
+        "target_persona": "dev",
+        "title": "Run the suite",
+        "ask": "Run the full launcher suite and report failures.",
+    }
+    payload.update(overrides)
+    record_dispatch(**payload)
+    return payload["dispatch_id"]
+
+
+def test_the_dispatch_lane_is_declared_on_every_frame(dispatch_home):
+    """A lane with a producer MUST report health, even with nothing running.
+
+    "Nothing is running" and "I could not look" are different facts; the sources
+    block is the only place a consumer can tell them apart.
+    """
+
+    frame = build_running_work()
+
+    assert "dispatch" in RUNNING_WORK_SOURCES
+    assert frame["sources"]["dispatch"]["status"] == SOURCE_OK
+    assert [row for row in frame["rows"] if row["kind"] == "dispatch"] == []
+
+
+def test_an_in_flight_dispatch_surfaces_as_a_row(dispatch_home):
+    dispatch_id = _record_dispatch()
+
+    rows = [row for row in build_running_work()["rows"] if row["kind"] == "dispatch"]
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["work_id"] == f"dispatch:{dispatch_id}"
+    assert row["status"] == STATUS_RUNNING
+    assert row["pid_verified"] is True
+    assert row["owner"]["persona_id"] == "dev"
+    # The SENDER's root: the thread the answer is owed to.
+    assert row["owner"]["session_id"] == "persona_chat_personainst_neko_aaaaaaaaaaaa"
+    # No interrupt seam in v1 — a cancel button that cannot cancel is worse
+    # than no button.
+    assert row["cancellable"] is False
+
+
+def test_a_settled_dispatch_stops_being_running_work(dispatch_home):
+    from agent_runtime.dispatch_store import STATE_COMPLETED, record_completion
+
+    dispatch_id = _record_dispatch()
+    record_completion(dispatch_id, state=STATE_COMPLETED, reply="done")
+
+    assert [row for row in build_running_work()["rows"] if row["kind"] == "dispatch"] == []
+
+
+def test_a_dispatch_whose_owner_died_is_dropped_through_the_accountant(
+    dispatch_home, monkeypatch
+):
+    """Dropped, never silently: the boot sweep turns it into a delivered 'unknown'."""
+
+    _record_dispatch()
+    monkeypatch.setattr("gateway.status._pid_exists", lambda pid: False)
+    accountant = ProjectionAccountant("running_work")
+
+    frame = build_running_work(accountant)
+
+    assert [row for row in frame["rows"] if row["kind"] == "dispatch"] == []
+    assert accountant.summary()["reasons"]["owner_exited"] == 1
+
+
+def test_the_dispatch_lane_reports_unavailable_when_the_store_cannot_be_read(
+    dispatch_home, monkeypatch
+):
+    monkeypatch.setattr(
+        "agent_runtime.dispatch_store.running_dispatches",
+        lambda **kw: (_ for _ in ()).throw(RuntimeError("locked")),
+    )
+
+    entry = build_running_work()["sources"]["dispatch"]
+
+    assert entry["status"] == SOURCE_UNAVAILABLE
+    assert entry["reason"] == "store_unreadable"
+
+
+def test_cancelling_a_dispatch_is_a_typed_refusal_not_a_pretend_success(dispatch_home):
+    dispatch_id = _record_dispatch()
+
+    result = cancel_work(f"dispatch:{dispatch_id}")
+
+    assert result["code"] == "cancel_unsupported"

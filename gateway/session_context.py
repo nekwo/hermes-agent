@@ -407,6 +407,24 @@ def declare_stateless_channel() -> None:
     _SESSION_ASYNC_DELIVERY.set(False)
 
 
+def declare_async_delivery_channel() -> None:
+    """Declare that this session CAN receive an async background completion.
+
+    The symmetric partner of :func:`declare_stateless_channel`, and it exists
+    because "True by default" and "True because a drain is actually running" are
+    different facts that :func:`async_delivery_supported` could not previously
+    tell apart. The mission-chat lane answered True for a long time purely
+    because nothing had ever bound the contextvar there — while no consumer
+    existed in the serve process at all, so every ``notify_on_complete`` promise
+    it granted was quietly unkeepable.
+
+    A caller uses this only when it can name the consumer that will do the
+    delivering (serve's dispatch-delivery drain). Binding it does NOT latch
+    ``_session_context_engaged``, for the same reason its counterpart does not.
+    """
+    _SESSION_ASYNC_DELIVERY.set(True)
+
+
 def async_delivery_supported() -> bool:
     """Whether the current session can deliver a background completion later.
 

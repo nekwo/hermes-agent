@@ -50,6 +50,17 @@ def test_snapshot_carries_the_running_work_section(isolate_agent_runtime_root) -
     ``sources`` is asserted alongside ``rows`` on purpose — a consumer handed
     rows without the health block reads an unreadable lane as "nothing running",
     which is the exact silent lie the projection exists to retire.
+
+    ``dispatch`` joined this set at WP-H2 WITHOUT a contract bump, which is a
+    ruling rather than an oversight. The ledger's stated reason for bumping on
+    an ADDITION (the 52 entry in ``snapshot.py``) is that a new section arriving
+    under an unbumped version would be "invisible rather than merely unread" —
+    the consumer has no parse for it at all. That does not hold here: contract
+    52 shipped ``dispatch`` inside ``RUNNING_WORK_KINDS`` precisely so "the wire
+    vocabulary is complete from the first landing and a consumer does not have
+    to re-derive it when the lane arrives", and both ``sources`` and
+    ``rows[].kind`` are consumed as a map and a string, so a consumer pinned at
+    52 READS the lane instead of missing it.
     """
 
     section = build_snapshot()["running_work"]
@@ -60,6 +71,7 @@ def test_snapshot_carries_the_running_work_section(isolate_agent_runtime_root) -
         "terminal",
         "delegation",
         "chat_turn",
+        "dispatch",
         "mcp_server",
         "cron_job",
     }

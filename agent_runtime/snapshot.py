@@ -723,6 +723,26 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         # (``kSupportedMissionContractVersion``) moves to 52 in WP-L1, and the
         # live venv is refreshed only AFTER that lands — refreshing first
         # fail-closes the console with a ``newerContract`` banner.
+        #
+        # 52 KEPT (WP-H2, 2026-08-03) — ``running_work`` gained its sixth lane,
+        # ``dispatch``, and this entry records WHY that did not bump. The rule
+        # this ledger actually states is not "any wire change bumps"; it is
+        # (a) anything that LEAVES the wire bumps (the S9/S10 rule, cited at 46),
+        # and (b) an ADDITION bumps when it would otherwise be "invisible rather
+        # than merely unread" — the 52 entry above, where the Launcher had no
+        # parse for the new section at all. Neither applies here: nothing left
+        # the wire, and 52 itself published ``dispatch`` inside
+        # ``RUNNING_WORK_KINDS`` with the stated intent that "the wire
+        # vocabulary is complete from the first landing and a consumer does not
+        # have to re-derive it when the lane arrives". What arrives is a sixth
+        # key in a health MAP plus rows carrying a ``kind`` string the version
+        # already declared, both of which a consumer pinned at 52 consumes. The
+        # Launcher pin has also not moved to 52 yet (WP-L1 is pending), so the
+        # section and its sixth lane reach the Launcher in the SAME wave either
+        # way. The constraint this puts on WP-L1 is explicit and load-bearing:
+        # parse ``sources`` as a map and ``kind`` as an open string. An
+        # exhaustive five-lane enum switch would turn this ruling into a
+        # fail-closed frame and would have needed the bump instead.
         "contract_version": 52,
         "generated_at": data.get("generated_at"),
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),

@@ -29,6 +29,13 @@ from pathlib import Path
 
 TITLE = "_maybe_auto_title_persona_chat"
 EMIT = "_emit_chat_final"
+# WP-H2 routed every mission-chat terminal payload through ONE seam
+# (``_mission_chat_emit``), which owns the stream/print branch this guard used
+# to read directly. The main handler is pinned on the seam; the free-floating
+# lane still calls ``_emit_chat_final`` itself and is pinned on that. Naming
+# both is what keeps the guard following the code instead of quietly finding
+# nothing and passing.
+EMIT_SEAM = "_mission_chat_emit"
 
 
 def _persona_commands_tree() -> ast.Module:
@@ -84,16 +91,16 @@ def test_main_handler_emits_terminal_frame_before_titling():
     for node in ast.walk(func):
         if not isinstance(node, ast.Try):
             continue
-        if any(_stmt_has_call(s, EMIT) for s in node.body) and any(
+        if any(_stmt_has_call(s, EMIT_SEAM) for s in node.body) and any(
             _stmt_has_call(s, TITLE) for s in node.body
         ):
             outer = node
             break
     assert outer is not None, (
-        "no single try-body both emits chat.final AND titles — the success turn "
+        "no single try-body both emits the terminal payload AND titles — the success turn "
         "tail structure changed; re-verify the F4 ordering guard"
     )
-    emit_idx = next(i for i, s in enumerate(outer.body) if _stmt_has_call(s, EMIT))
+    emit_idx = next(i for i, s in enumerate(outer.body) if _stmt_has_call(s, EMIT_SEAM))
     title_idx = next(i for i, s in enumerate(outer.body) if _stmt_has_call(s, TITLE))
     assert emit_idx < title_idx, (
         "auto-title must run AFTER the terminal chat.final/print emit — not "

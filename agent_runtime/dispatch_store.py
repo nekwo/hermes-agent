@@ -1,0 +1,736 @@
+"""Durable store for DETACHED agent-to-agent dispatches (``wait: false``).
+
+A dispatch is one ``agent_chat_send(wait=false)``: the sender's turn returns
+immediately with a handle, the target's turn runs on a background executor, and
+the reply is delivered back into the SENDER's chat session later as a forged
+turn when that session is idle (see :mod:`agent_runtime.dispatch_delivery`).
+
+Why a durable store and not an in-memory record map
+---------------------------------------------------
+The whole value of the lane is that the sender does not have to sit still. That
+means the completion can land while the sender is mid-turn, and it means the
+process can die between "the target answered" and "the sender was told". An
+in-memory handle loses the answer in both cases, silently — the sender simply
+never hears back and has no way to tell that from "they are still working".
+
+So this reuses the ``async_delegation`` durable protocol WHOLESALE rather than
+inventing a second one:
+
+* ``delivery_state`` ∈ ``pending | delivered | dropped`` — the row's own record
+  of whether the sender has actually been told.
+* An expiring **claim** (:data:`CLAIM_EXPIRY_SECONDS`) so competing consumers —
+  and, after a crash, the same consumer on the next boot — cannot double-deliver
+  a completion or strand one behind a dead claimant.
+* An attempt cap (:data:`MAX_DELIVERY_ATTEMPTS`) so an undeliverable row
+  converges to a terminal ``dropped`` instead of replaying on every restart
+  forever.
+* Owner **PID + process start time**, because a bare PID is not identity: the
+  kernel recycles numbers, and this repo has already been bitten by a recycled
+  one landing on an unrelated process.
+* Restore-on-boot stamps ``restored=True`` and requires POSITIVE ownership proof
+  before delivery (#64484): a row restored from a previous process names the
+  chat root it must be delivered into, and the drain re-proves that root is a
+  real, current chat session before forging anything into it. Absence of
+  disproof is not proof.
+
+Where the database lives — and why that is not ``get_hermes_home()``
+--------------------------------------------------------------------
+``persona_profile_context`` flips ``HERMES_HOME`` PROCESS-GLOBALLY for the
+duration of a persona turn, and a dispatch is *made from inside* such a turn.
+Resolving the database through the ambient home at write time would persist an
+in-flight dispatch into the persona profile's database — which the serve drain,
+the Activity projection and the operator never open. That is the exact failure
+:func:`hermes_constants.get_hermes_background_work_home` was extracted to close,
+so this module resolves through that ONE authority and never re-derives it.
+
+Every mutation emits a registered EventLog event
+-------------------------------------------------
+``dispatch.recorded`` / ``dispatch.completed`` / ``dispatch.delivered`` /
+``dispatch.dropped``. This is the standing store rule, not decoration: the
+stream and read-model pipeline are watermark-gated on the EventLog, so a store
+write with no event is invisible to every consumer until an unrelated event
+happens to advance the offset. Payloads are bounded well inside the 4096-byte
+cap — summaries, never transcripts.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sqlite3
+import threading
+import time
+import uuid
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "CLAIM_EXPIRY_SECONDS",
+    "DELIVERY_DELIVERED",
+    "DELIVERY_DROPPED",
+    "DELIVERY_PENDING",
+    "MAX_DELIVERY_ATTEMPTS",
+    "STATE_ERROR",
+    "STATE_RUNNING",
+    "STATE_UNKNOWN",
+    "TERMINAL_STATES",
+    "claim_delivery",
+    "dispatch_db_path",
+    "list_dispatches",
+    "mark_delivered",
+    "mint_dispatch_id",
+    "pending_deliveries",
+    "record_completion",
+    "record_dispatch",
+    "release_delivery_claim",
+    "restore_undelivered_dispatches",
+    "running_dispatches",
+]
+
+_TABLE = "mission_chat_dispatches"
+_DB_LOCK = threading.Lock()
+
+DELIVERY_PENDING = "pending"
+DELIVERY_DELIVERED = "delivered"
+DELIVERY_DROPPED = "dropped"
+
+STATE_RUNNING = "running"
+STATE_COMPLETED = "completed"
+STATE_ERROR = "error"
+STATE_UNKNOWN = "unknown"
+
+#: The states a dispatch can END in. ``running`` is the only non-terminal one;
+#: everything else is a completion the sender is owed an answer about, including
+#: ``error`` and ``unknown`` — "it failed" and "nobody knows" are results a
+#: waiting agent must receive, not rows to quietly bury.
+TERMINAL_STATES = (STATE_COMPLETED, STATE_ERROR, STATE_UNKNOWN)
+
+#: How long a delivery claim is honoured before another consumer may take it.
+#: Same 300 s the delegation lane uses: long enough that a slow forge is not
+#: raced, short enough that a claimant killed mid-delivery does not strand the
+#: completion until the next reboot.
+CLAIM_EXPIRY_SECONDS = 300.0
+#: Terminal after this many failed delivery attempts. An unroutable row (its
+#: chat root deleted, say) must converge instead of replaying forever.
+MAX_DELIVERY_ATTEMPTS = 8
+
+#: Bound on the stored ask/reply text. The reply bound matches the relay tool's
+#: own ``_REPLY_LIMIT``; nothing downstream ever needs more, and the store is not
+#: a transcript (the thread itself is, and the row points at it).
+ASK_LIMIT = 4000
+REPLY_LIMIT = 8000
+
+_RETENTION_SECONDS = 7 * 24 * 60 * 60
+_MAX_RETAINED_TERMINAL = 200
+
+
+def mint_dispatch_id() -> str:
+    """A dispatch handle. Short, opaque, and stable across processes."""
+
+    return f"dispatch-{uuid.uuid4().hex[:12]}"
+
+
+def dispatch_db_path() -> Path:
+    """The store's database — ONE authority, resolved through ONE resolver.
+
+    Deliberately the same ``state.db`` the delegation lane writes: one
+    background-work database per home, two tables. A second file would need its
+    own fingerprint entry in the serve read-model cache and its own backup
+    story, for no isolation this lane actually needs.
+    """
+
+    from hermes_constants import get_hermes_background_work_home
+
+    return Path(get_hermes_background_work_home()) / "state.db"
+
+
+def _connect() -> sqlite3.Connection:
+    path = dispatch_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path, timeout=10)
+    try:
+        _initialize_schema(conn)
+    except Exception:
+        conn.close()
+        raise
+    return conn
+
+
+def _initialize_schema(conn: sqlite3.Connection) -> None:
+    from hermes_state import apply_wal_with_fallback
+
+    apply_wal_with_fallback(conn, db_label="state.db (mission_chat_dispatches)")
+    conn.execute(
+        f"""CREATE TABLE IF NOT EXISTS {_TABLE} (
+            dispatch_id TEXT PRIMARY KEY,
+            sender_session_id TEXT NOT NULL DEFAULT '',
+            sender_persona_id TEXT NOT NULL DEFAULT '',
+            target_persona TEXT NOT NULL DEFAULT '',
+            target_instance_id TEXT NOT NULL DEFAULT '',
+            target_session_id TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '',
+            ask TEXT NOT NULL DEFAULT '',
+            state TEXT NOT NULL,
+            notify_operator INTEGER NOT NULL DEFAULT 0,
+            dispatched_at REAL NOT NULL,
+            completed_at REAL,
+            updated_at REAL NOT NULL,
+            result_json TEXT,
+            delivery_state TEXT NOT NULL DEFAULT 'pending',
+            delivery_attempts INTEGER NOT NULL DEFAULT 0,
+            delivered_at REAL,
+            delivery_claim TEXT,
+            delivery_claimed_at REAL,
+            owner_pid INTEGER,
+            owner_started_at INTEGER,
+            relay_chain_json TEXT
+        )"""
+    )
+
+
+class _transaction:
+    """Open, commit/rollback, and ALWAYS close.
+
+    ``sqlite3.Connection.__exit__`` commits the transaction but does NOT close
+    the connection, so ``with _connect()`` leaks a handle — and its WAL/SHM file
+    descriptors — on every write, deferring the close to the garbage collector.
+    On a long-running serve process that eventually exhausts the fd limit; the
+    delegation lane learned this the expensive way (#69567).
+    """
+
+    def __enter__(self) -> sqlite3.Connection:
+        self._conn = _connect()
+        self._conn.__enter__()
+        return self._conn
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        try:
+            self._conn.__exit__(exc_type, exc, tb)
+        finally:
+            self._conn.close()
+
+
+def _text(value: Any, limit: int) -> str:
+    if value is None:
+        return ""
+    text = str(value)
+    return text[:limit]
+
+
+def _owner_identity() -> tuple[int, int | None]:
+    """``(pid, start_ticks)`` for THIS process.
+
+    The start time is what turns a PID into an identity. A ``None`` here is an
+    unreadable probe, not a claim of any kind, and every consumer treats it as
+    "cannot prove" rather than "not ours".
+    """
+
+    try:
+        from gateway.status import get_process_start_time
+
+        return os.getpid(), get_process_start_time(os.getpid())
+    except Exception:  # pragma: no cover - defensive
+        return os.getpid(), None
+
+
+def _emit(event_type: str, **payload: Any) -> None:
+    """Append the store event for a mutation. Best effort, never silent.
+
+    Mirrors ``agent_runtime.store._append_store_event``: the EventLog is the
+    change feed every watermark-gated consumer reads, so a mutation without one
+    is invisible; but a broken event log must not fail the durable write that
+    already happened.
+    """
+
+    try:
+        from hermes_time import now
+
+        from .events import EventLog
+        from .models import Event
+
+        body = {key: value for key, value in payload.items() if value is not None}
+        EventLog().append(Event(now(), event_type, None, None, None, body))
+    except Exception:
+        logger.warning("dispatch store event append failed: %s", event_type, exc_info=True)
+
+
+def _row_to_dict(row: tuple) -> dict[str, Any]:
+    (
+        dispatch_id,
+        sender_session_id,
+        sender_persona_id,
+        target_persona,
+        target_instance_id,
+        target_session_id,
+        title,
+        ask,
+        state,
+        notify_operator,
+        dispatched_at,
+        completed_at,
+        updated_at,
+        result_json,
+        delivery_state,
+        delivery_attempts,
+        delivered_at,
+        owner_pid,
+        owner_started_at,
+        relay_chain_json,
+    ) = row
+    try:
+        result = json.loads(result_json) if result_json else None
+    except Exception:
+        result = None
+    try:
+        relay_chain = json.loads(relay_chain_json) if relay_chain_json else []
+    except Exception:
+        relay_chain = []
+    return {
+        "dispatch_id": dispatch_id,
+        "sender_session_id": sender_session_id or "",
+        "sender_persona_id": sender_persona_id or "",
+        "target_persona": target_persona or "",
+        "target_instance_id": target_instance_id or "",
+        "target_session_id": target_session_id or "",
+        "title": title or "",
+        "ask": ask or "",
+        "state": state or "",
+        "notify_operator": bool(notify_operator),
+        "dispatched_at": float(dispatched_at or 0.0),
+        "completed_at": float(completed_at) if completed_at else None,
+        "updated_at": float(updated_at or 0.0),
+        "result": result,
+        "delivery_state": delivery_state or DELIVERY_PENDING,
+        "delivery_attempts": int(delivery_attempts or 0),
+        "delivered_at": float(delivered_at) if delivered_at else None,
+        "owner_pid": int(owner_pid) if owner_pid else None,
+        "owner_started_at": int(owner_started_at) if owner_started_at else None,
+        "relay_chain": relay_chain if isinstance(relay_chain, list) else [],
+    }
+
+
+_SELECT = f"""SELECT dispatch_id, sender_session_id, sender_persona_id, target_persona,
+                     target_instance_id, target_session_id, title, ask, state,
+                     notify_operator, dispatched_at, completed_at, updated_at,
+                     result_json, delivery_state, delivery_attempts, delivered_at,
+                     owner_pid, owner_started_at, relay_chain_json
+              FROM {_TABLE}"""
+
+
+# --------------------------------------------------------------------------
+# writes
+# --------------------------------------------------------------------------
+
+
+def record_dispatch(
+    *,
+    dispatch_id: str,
+    sender_session_id: str,
+    sender_persona_id: str = "",
+    target_persona: str,
+    target_instance_id: str = "",
+    title: str = "",
+    ask: str = "",
+    notify_operator: bool = False,
+    relay_chain: Any = None,
+    dispatched_at: float | None = None,
+) -> dict[str, Any]:
+    """Persist a dispatch BEFORE its target turn starts.
+
+    Order matters and is not negotiable: the row exists first, so a process that
+    dies one instruction into the target's turn leaves a record the boot sweep
+    can classify as ``unknown`` and still tell the sender about. A row written
+    after the fact would lose exactly the dispatches most worth reporting.
+    """
+
+    now_epoch = float(dispatched_at if dispatched_at is not None else time.time())
+    pid, started = _owner_identity()
+    row = {
+        "dispatch_id": str(dispatch_id),
+        "sender_session_id": _text(sender_session_id, 240),
+        "sender_persona_id": _text(sender_persona_id, 160),
+        "target_persona": _text(target_persona, 160),
+        "target_instance_id": _text(target_instance_id, 200),
+        "title": _text(title, 200),
+        "ask": _text(ask, ASK_LIMIT),
+        "notify_operator": bool(notify_operator),
+        "dispatched_at": now_epoch,
+    }
+    with _DB_LOCK, _transaction() as conn:
+        conn.execute(
+            f"""INSERT OR REPLACE INTO {_TABLE}
+                (dispatch_id, sender_session_id, sender_persona_id, target_persona,
+                 target_instance_id, target_session_id, title, ask, state,
+                 notify_operator, dispatched_at, updated_at, delivery_state,
+                 delivery_attempts, owner_pid, owner_started_at, relay_chain_json)
+                VALUES (?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)""",
+            (
+                row["dispatch_id"],
+                row["sender_session_id"],
+                row["sender_persona_id"],
+                row["target_persona"],
+                row["target_instance_id"],
+                row["title"],
+                row["ask"],
+                STATE_RUNNING,
+                1 if row["notify_operator"] else 0,
+                now_epoch,
+                now_epoch,
+                DELIVERY_PENDING,
+                pid,
+                started,
+                json.dumps(list(relay_chain or [])),
+            ),
+        )
+    _emit(
+        "dispatch.recorded",
+        dispatch_id=row["dispatch_id"],
+        target_persona=row["target_persona"],
+        sender_session_id=row["sender_session_id"],
+        notify_operator=row["notify_operator"],
+        title=row["title"][:120] or None,
+    )
+    return row
+
+
+def record_completion(
+    dispatch_id: str,
+    *,
+    state: str,
+    reply: str = "",
+    error: str = "",
+    target_session_id: str = "",
+    total_tokens: Any = None,
+) -> bool:
+    """Record the target turn's outcome and arm the row for delivery.
+
+    ``delivery_state`` is (re)set to ``pending`` here rather than at dispatch
+    time so a row only becomes deliverable once there is something to deliver.
+    """
+
+    settled = str(state or STATE_UNKNOWN)
+    if settled not in TERMINAL_STATES:
+        settled = STATE_UNKNOWN
+    now_epoch = time.time()
+    result = {
+        "status": settled,
+        "reply": _text(reply, REPLY_LIMIT),
+        "error": _text(error, 600),
+        "target_session_id": _text(target_session_id, 240),
+        "total_tokens": total_tokens,
+    }
+    with _DB_LOCK, _transaction() as conn:
+        cur = conn.execute(
+            f"""UPDATE {_TABLE} SET state=?, completed_at=?, updated_at=?, result_json=?,
+                   target_session_id=?, delivery_state=?, delivery_claim=NULL,
+                   delivery_claimed_at=NULL
+                WHERE dispatch_id=?""",
+            (
+                settled,
+                now_epoch,
+                now_epoch,
+                json.dumps(result),
+                result["target_session_id"],
+                DELIVERY_PENDING,
+                str(dispatch_id),
+            ),
+        )
+        updated = cur.rowcount == 1
+    if updated:
+        _emit(
+            "dispatch.completed",
+            dispatch_id=str(dispatch_id),
+            status=settled,
+            reply_chars=len(result["reply"]),
+            error=result["error"][:200] or None,
+            target_session_id=result["target_session_id"] or None,
+        )
+    _prune()
+    return updated
+
+
+def claim_delivery(dispatch_id: str, claim_id: str) -> bool:
+    """Take exclusive, EXPIRING ownership of one pending delivery.
+
+    Returns ``True`` only for the consumer that won the claim. A claim older
+    than :data:`CLAIM_EXPIRY_SECONDS` is takeable — that is what stops a
+    claimant killed mid-forge from stranding the completion forever.
+
+    The attempt counter increments HERE, on the claim, not on success: a
+    consumer that crashes between claiming and delivering must still burn an
+    attempt, or an input that reliably kills the drain would be retried
+    infinitely and never converge to ``dropped``.
+    """
+
+    now_epoch = time.time()
+    claimed = False
+    dropped = False
+    attempts = 0
+    with _DB_LOCK, _transaction() as conn:
+        row = conn.execute(
+            f"SELECT delivery_state, delivery_attempts FROM {_TABLE} WHERE dispatch_id=?",
+            (str(dispatch_id),),
+        ).fetchone()
+        if row is None:
+            return False
+        state, attempts = row
+        if state != DELIVERY_PENDING:
+            return False
+        if int(attempts or 0) >= MAX_DELIVERY_ATTEMPTS:
+            conn.execute(
+                f"""UPDATE {_TABLE} SET delivery_state=?, updated_at=?, delivery_claim=NULL,
+                       delivery_claimed_at=NULL
+                    WHERE dispatch_id=?""",
+                (DELIVERY_DROPPED, now_epoch, str(dispatch_id)),
+            )
+            dropped = True
+        else:
+            cur = conn.execute(
+                f"""UPDATE {_TABLE} SET delivery_claim=?, delivery_claimed_at=?,
+                       delivery_attempts=delivery_attempts+1, updated_at=?
+                    WHERE dispatch_id=? AND delivery_state=?
+                      AND (delivery_claim IS NULL OR delivery_claimed_at < ?)""",
+                (
+                    str(claim_id),
+                    now_epoch,
+                    now_epoch,
+                    str(dispatch_id),
+                    DELIVERY_PENDING,
+                    now_epoch - CLAIM_EXPIRY_SECONDS,
+                ),
+            )
+            claimed = cur.rowcount == 1
+    if dropped:
+        _emit(
+            "dispatch.dropped",
+            dispatch_id=str(dispatch_id),
+            reason="attempt_cap",
+            attempts=int(attempts or 0),
+        )
+        return False
+    return claimed
+
+
+def release_delivery_claim(dispatch_id: str) -> None:
+    """Hand a claimed-but-undelivered row back for a later attempt.
+
+    Used when the sender is BUSY: the completion is fine, the moment is wrong,
+    and holding the claim would block the next drain pass for the whole expiry
+    window.
+    """
+
+    with _DB_LOCK, _transaction() as conn:
+        conn.execute(
+            f"""UPDATE {_TABLE} SET delivery_claim=NULL, delivery_claimed_at=NULL, updated_at=?
+                WHERE dispatch_id=? AND delivery_state=?""",
+            (time.time(), str(dispatch_id), DELIVERY_PENDING),
+        )
+
+
+def mark_delivered(dispatch_id: str) -> bool:
+    """Atomically acknowledge that the sender was actually told."""
+
+    now_epoch = time.time()
+    with _DB_LOCK, _transaction() as conn:
+        cur = conn.execute(
+            f"""UPDATE {_TABLE} SET delivery_state=?, delivered_at=?, updated_at=?,
+                   delivery_claim=NULL, delivery_claimed_at=NULL
+                WHERE dispatch_id=? AND delivery_state!=?""",
+            (
+                DELIVERY_DELIVERED,
+                now_epoch,
+                now_epoch,
+                str(dispatch_id),
+                DELIVERY_DELIVERED,
+            ),
+        )
+        delivered = cur.rowcount == 1
+    if delivered:
+        _emit("dispatch.delivered", dispatch_id=str(dispatch_id))
+    return delivered
+
+
+def drop_delivery(dispatch_id: str, *, reason: str) -> bool:
+    """Terminally give up on delivering a row, with the reason recorded."""
+
+    now_epoch = time.time()
+    with _DB_LOCK, _transaction() as conn:
+        cur = conn.execute(
+            f"""UPDATE {_TABLE} SET delivery_state=?, updated_at=?, delivery_claim=NULL,
+                   delivery_claimed_at=NULL
+                WHERE dispatch_id=? AND delivery_state=?""",
+            (DELIVERY_DROPPED, now_epoch, str(dispatch_id), DELIVERY_PENDING),
+        )
+        dropped = cur.rowcount == 1
+    if dropped:
+        _emit("dispatch.dropped", dispatch_id=str(dispatch_id), reason=str(reason)[:120])
+    return dropped
+
+
+def _prune() -> None:
+    """Bound terminal history, preferring delivered rows for deletion."""
+
+    cutoff = time.time() - _RETENTION_SECONDS
+    try:
+        with _DB_LOCK, _transaction() as conn:
+            conn.execute(
+                f"DELETE FROM {_TABLE} WHERE delivery_state=? AND updated_at < ?",
+                (DELIVERY_DELIVERED, cutoff),
+            )
+            terminal = conn.execute(
+                f"SELECT COUNT(*) FROM {_TABLE} WHERE state != ?", (STATE_RUNNING,)
+            ).fetchone()[0]
+            excess = max(0, int(terminal) - _MAX_RETAINED_TERMINAL)
+            if excess:
+                conn.execute(
+                    f"""DELETE FROM {_TABLE} WHERE dispatch_id IN (
+                          SELECT dispatch_id FROM {_TABLE} WHERE state != ?
+                          ORDER BY CASE delivery_state WHEN ? THEN 0 ELSE 1 END,
+                                   updated_at ASC LIMIT ?
+                        )""",
+                    (STATE_RUNNING, DELIVERY_DELIVERED, excess),
+                )
+    except Exception:  # pragma: no cover - housekeeping must never fail a write
+        logger.debug("dispatch store prune failed", exc_info=True)
+
+
+# --------------------------------------------------------------------------
+# reads
+# --------------------------------------------------------------------------
+
+
+def _query(where: str, params: tuple) -> list[dict[str, Any]]:
+    path = dispatch_db_path()
+    if not path.exists():
+        # Read-only by contract: a projection asking "what is running" must
+        # never CREATE the background-work database as a side effect.
+        return []
+    try:
+        conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=5)
+    except Exception:
+        return []
+    try:
+        rows = conn.execute(f"{_SELECT} {where}", params).fetchall()
+    except sqlite3.OperationalError as exc:
+        # A state.db that predates this table is a store with no dispatches, not
+        # an unreadable store.
+        if "no such table" not in str(exc).lower():
+            raise
+        rows = []
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return [_row_to_dict(row) for row in rows]
+
+
+def running_dispatches(limit: int = 200) -> list[dict[str, Any]]:
+    """In-flight dispatches — the ``running_work`` kind=dispatch lane."""
+
+    return _query(
+        "WHERE state=? ORDER BY dispatched_at LIMIT ?", (STATE_RUNNING, int(limit))
+    )
+
+
+def pending_deliveries(limit: int = 50) -> list[dict[str, Any]]:
+    """Completed dispatches the sender has NOT yet been told about."""
+
+    return _query(
+        "WHERE state != ? AND delivery_state = ? ORDER BY completed_at, dispatch_id LIMIT ?",
+        (STATE_RUNNING, DELIVERY_PENDING, int(limit)),
+    )
+
+
+def get_dispatch(dispatch_id: str) -> dict[str, Any] | None:
+    rows = _query("WHERE dispatch_id=?", (str(dispatch_id),))
+    return rows[0] if rows else None
+
+
+def list_dispatches(
+    *, sender_session_id: str = "", limit: int = 25
+) -> list[dict[str, Any]]:
+    """The CALLER's dispatches, newest first.
+
+    Scoped by the sender's chat-root session id — the same identity the delivery
+    lane routes on — so ``agent_chat_dispatches`` can only ever list work the
+    caller actually dispatched. An empty scope lists nothing rather than
+    everything: a missing caller identity is a reason to show less, never more.
+    """
+
+    scope = _text(sender_session_id, 240)
+    if not scope:
+        return []
+    bounded = max(1, min(int(limit or 25), 100))
+    return _query(
+        "WHERE sender_session_id=? ORDER BY dispatched_at DESC LIMIT ?",
+        (scope, bounded),
+    )
+
+
+# --------------------------------------------------------------------------
+# boot recovery
+# --------------------------------------------------------------------------
+
+
+def restore_undelivered_dispatches() -> dict[str, int]:
+    """Reclassify dispatches orphaned by a dead process, at boot.
+
+    A row still marked ``running`` whose owner process is provably gone can
+    never complete: nothing is left to run its turn or write its result. It is
+    reclassified ``unknown`` — an outcome the sender is still owed, phrased
+    honestly — and armed for delivery.
+
+    Identity, not liveness: a PID that exists but whose start time differs from
+    the recorded baseline is a DIFFERENT process wearing a recycled number, and
+    counts as gone. A start time that cannot be READ is neither proof nor
+    disproof, so the row is left alone rather than being resurrected or buried
+    on a psutil hiccup.
+
+    Restored rows carry ``restored: True`` on the completion they produce (in
+    memory only — the flag is a property of THIS boot, not of the record), and
+    the drain must positively prove it owns the target chat root before
+    delivering one (#64484).
+    """
+
+    try:
+        from gateway.status import _pid_exists, get_process_start_time
+    except Exception:  # pragma: no cover - defensive
+        return {"restored": 0, "checked": 0}
+
+    rows = _query("WHERE state=?", (STATE_RUNNING,))
+    restored = 0
+    for row in rows:
+        pid = row.get("owner_pid")
+        if not pid:
+            continue
+        try:
+            alive = bool(_pid_exists(int(pid)))
+        except Exception:
+            continue
+        if alive:
+            baseline = row.get("owner_started_at")
+            if baseline is None:
+                # No identity baseline recorded: cannot disprove ownership.
+                continue
+            try:
+                observed = get_process_start_time(int(pid))
+            except Exception:
+                continue
+            if observed is None or int(observed) == int(baseline):
+                # Unreadable probe, or a genuine match — either way not disproof.
+                continue
+        record_completion(
+            row["dispatch_id"],
+            state=STATE_UNKNOWN,
+            error=(
+                "The process running this dispatch exited before recording a result; "
+                "the outcome is unknown. Re-send if you still need it."
+            ),
+            target_session_id=row.get("target_session_id", ""),
+        )
+        restored += 1
+    return {"restored": restored, "checked": len(rows)}

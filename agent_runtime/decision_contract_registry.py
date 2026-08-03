@@ -312,4 +312,21 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     # deleted them, so those two stay unregistered permanently rather than
     # provisionally, and no unemittable-contract debt was created.
     "worktree.orphans_reaped": EventContract("worktree.orphans_reaped", "Orphan worktrees reaped", ("reaped_count", "kept_count"), ("captured",)),
+    # Detached agent-to-agent dispatch (``agent_chat_send(wait=false)``). Every
+    # ``agent_runtime.dispatch_store`` mutation rides one of these — the same
+    # standing store rule realms/boards/offices follow: the stream and
+    # read-model pipeline are watermark-gated on the EventLog, so an event-less
+    # dispatch write is invisible to the Activity projection and the serve cache
+    # until an unrelated event happens to advance the offset. For a lane whose
+    # entire purpose is telling an operator that background work is in flight,
+    # that is precisely the silent failure it exists to retire.
+    #
+    # Payloads are SUMMARIES, never transcripts: the 4096-byte cap is a hard
+    # append-time refusal, and the reply itself already lives in the target's
+    # chat thread that ``target_session_id`` names. ``reply_chars`` carries the
+    # size so a consumer can see that a large answer arrived without carrying it.
+    "dispatch.recorded": EventContract("dispatch.recorded", "Detached dispatch recorded", ("dispatch_id", "target_persona"), ("sender_session_id", "notify_operator", "title")),
+    "dispatch.completed": EventContract("dispatch.completed", "Detached dispatch completed", ("dispatch_id", "status"), ("reply_chars", "error", "target_session_id")),
+    "dispatch.delivered": EventContract("dispatch.delivered", "Detached dispatch delivered to its sender", ("dispatch_id",), ()),
+    "dispatch.dropped": EventContract("dispatch.dropped", "Detached dispatch delivery abandoned", ("dispatch_id", "reason"), ("attempts",)),
 }

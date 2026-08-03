@@ -197,7 +197,13 @@ REMOVED_EVENT_TYPES = frozenset(
 # incident.opened/.closed lost their last writers. This stays an absolute count
 # on purpose: it is the one assertion that catches
 # a contract silently appearing or disappearing.
-SURVIVING_EVENT_COUNT = 51
+# Then +4 at WP-H2 (2026-08-03): dispatch.recorded / .completed / .delivered /
+# .dropped, registered in the SAME commit as their emitter
+# (``agent_runtime.dispatch_store``) — the S55 rule running in the additive
+# direction. This is the first ADDITION this counter has recorded, and it
+# behaved exactly as designed: it went red on a legitimate new lane and had to
+# be moved deliberately, rather than letting a contract slip in unnoticed.
+SURVIVING_EVENT_COUNT = 55
 
 
 def test_the_unemittable_event_types_are_no_longer_registered():

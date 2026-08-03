@@ -156,6 +156,13 @@ class MissionChatConfig:
             # via an echoed clarify_token, instead of trusting the replier to
             # reproduce the session_id. Default true.
             clarify_token_binding: true
+            # Wall budget for a DETACHED dispatch (agent_chat_send wait=false).
+            # Default 1800; clamped to [30, 86400]. Separate from
+            # default_max_seconds on purpose: a detached dispatch exists to host
+            # work that outlives a conversational window.
+            dispatch_max_seconds: 1800
+            # How many detached dispatches execute at once. Overflow queues.
+            dispatch_max_concurrent: 3
     """
 
     default_max_seconds: float = 240.0
@@ -172,6 +179,24 @@ class MissionChatConfig:
     #: reason ``dispatch_session_policy`` is — one profile's own config must not
     #: change how every other profile threads.
     clarify_token_binding: bool = True
+    #: Wall budget for a DETACHED dispatch — an ``agent_chat_send(wait=false)``
+    #: whose target turn runs on the background executor while the sender goes
+    #: back to work. Deliberately its OWN knob rather than a share of
+    #: ``default_max_seconds``: the whole point of a detached dispatch is work
+    #: that outlives a conversational window ("run the suite and tell me"), and
+    #: the 240 s conversational default would kill exactly the turns this lane
+    #: exists to host. Default **1800 s** (30 min, operator decision 2026-08-03),
+    #: clamped to the same ``[30, 86400]`` window ``default_max_seconds`` uses —
+    #: below it the checkpoint reserve leaves no working window, above it one
+    #: dispatch outlives the mission clock.
+    dispatch_max_seconds: float = 1800.0
+    #: How many detached dispatches may execute at once, mirroring
+    #: ``delegation.max_concurrent_children``. The cap is what keeps a head agent
+    #: that fires ten dispatches in one turn from putting ten model turns on the
+    #: provider at once; the overflow QUEUES on the executor rather than being
+    #: refused, because a dispatch is already asynchronous and a caller told
+    #: "dispatched" must not silently lose the work.
+    dispatch_max_concurrent: int = 3
 
 
 @dataclass(slots=True)

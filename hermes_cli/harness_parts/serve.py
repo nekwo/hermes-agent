@@ -638,6 +638,21 @@ def serve_loop(
             orphaned_repaired = repair_orphaned_chat_turns()
         except Exception:
             orphaned_repaired = []
+        # Same moment, same reason, for detached dispatches: a row still marked
+        # ``running`` whose owning process is provably gone can never finish, and
+        # the sender is owed that answer too. Reclassifying it here — BEFORE the
+        # drain starts — turns "the agent I dispatched went silent forever" into
+        # a delivered "the outcome is unknown, re-send if you still need it".
+        # Identity-verified (a recycled PID is not the old owner) and fail-open.
+        dispatches_restored = 0
+        try:
+            from agent_runtime.dispatch_store import restore_undelivered_dispatches
+
+            dispatches_restored = int(
+                (restore_undelivered_dispatches() or {}).get("restored") or 0
+            )
+        except Exception:
+            dispatches_restored = 0
         ready_frame: dict[str, Any] = {
             "event": "ready",
             "pid": os.getpid(),
@@ -646,6 +661,8 @@ def serve_loop(
         }
         if orphaned_repaired:
             ready_frame["orphaned_turns_repaired"] = len(orphaned_repaired)
+        if dispatches_restored:
+            ready_frame["dispatches_restored"] = dispatches_restored
         frames.emit(ready_frame)
         # Prewarm the first chat turn's one-time costs in the background:
         # lazy OpenAI SDK import (~1.7s), shared SSL context / CA-guard
@@ -689,6 +706,30 @@ def serve_loop(
             name="harness-serve-liveness",
             daemon=True,
         ).start()
+        # Detached-dispatch delivery. This is the half that makes
+        # `agent_chat_send(wait=false)` honest: the target's turn ran in the
+        # background, its answer is durable, and this thread forges it back into
+        # the SENDER's thread once that thread is idle. It lives HERE, and only
+        # here, because serve is the one long-lived process that hosts persona
+        # turns — a one-shot CLI exits long before a 30-minute dispatch lands.
+        #
+        # Started after `ready` (so a cold boot is never delayed by a delivery)
+        # and stopped with the liveness pump before `shutdown` (so it cannot
+        # forge a turn into a process that is on its way down). Best effort by
+        # contract: a runtime that cannot start the drain still serves, and the
+        # completions stay pending for the next boot rather than being lost.
+        try:
+            from agent_runtime.dispatch_delivery import start_delivery_drain
+
+            start_delivery_drain(stop_event=liveness_stop)
+        except Exception:
+            # Function-local: parts files are exec'd into harness.py's globals,
+            # which carry no module logger.
+            import logging as _logging
+
+            _logging.getLogger(__name__).debug(
+                "dispatch delivery drain did not start", exc_info=True
+            )
         with ThreadPoolExecutor(
             max_workers=max(1, pool_size), thread_name_prefix="harness-serve"
         ) as pool:

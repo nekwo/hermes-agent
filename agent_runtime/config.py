@@ -512,6 +512,22 @@ def _mission_chat_config(raw: dict[str, Any]) -> MissionChatConfig:
         clarify_token_binding=bool(
             raw.get("clarify_token_binding", defaults.clarify_token_binding)
         ),
+        # Same clamp window as ``default_max_seconds``, and for the same reasons
+        # (below 30 s the checkpoint reserve leaves no working window; above a
+        # day one turn outlives the mission clock) — a detached dispatch is a
+        # LONGER turn, not a differently-bounded one.
+        dispatch_max_seconds=_clamped_positive_float(
+            raw.get("dispatch_max_seconds"),
+            defaults.dispatch_max_seconds,
+            minimum=MISSION_CHAT_MIN_MAX_SECONDS,
+            maximum=MISSION_CHAT_MAX_MAX_SECONDS,
+        ),
+        dispatch_max_concurrent=_clamped_positive_int(
+            raw.get("dispatch_max_concurrent"),
+            defaults.dispatch_max_concurrent,
+            minimum=1,
+            maximum=32,
+        ),
     )
 
 
@@ -607,6 +623,65 @@ def resolve_mission_chat_max_seconds(
     except (TypeError, ValueError):
         return mission_chat_default_max_seconds(cfg)
     return value if value > 0 else mission_chat_default_max_seconds(cfg)
+
+
+def mission_chat_dispatch_max_seconds(cfg: AgentRuntimeConfig | None = None) -> float:
+    """The wall budget a DETACHED dispatch's target turn gets.
+
+    Loads through :func:`load_root_runtime_config` for exactly the reason
+    :func:`mission_chat_default_max_seconds` documents — a sticky-active
+    profile's own ``config.yaml`` must not be able to change how every other
+    profile's background work is budgeted — and degrades to the built-in
+    default rather than failing the dispatch."""
+
+    if cfg is not None:
+        return float(
+            getattr(cfg.mission_chat, "dispatch_max_seconds", MissionChatConfig().dispatch_max_seconds)
+        )
+    try:
+        return float(load_root_runtime_config().mission_chat.dispatch_max_seconds)
+    except Exception:  # pragma: no cover - defensive; a config fault must not kill a dispatch
+        logger.debug("mission_chat dispatch budget load failed; using the built-in default", exc_info=True)
+        return MissionChatConfig().dispatch_max_seconds
+
+
+def mission_chat_dispatch_max_concurrent(cfg: AgentRuntimeConfig | None = None) -> int:
+    """How many detached dispatches may run at once (executor width)."""
+
+    if cfg is not None:
+        return int(
+            getattr(
+                cfg.mission_chat,
+                "dispatch_max_concurrent",
+                MissionChatConfig().dispatch_max_concurrent,
+            )
+        )
+    try:
+        return int(load_root_runtime_config().mission_chat.dispatch_max_concurrent)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("mission_chat dispatch concurrency load failed; using the built-in default", exc_info=True)
+        return MissionChatConfig().dispatch_max_concurrent
+
+
+def resolve_mission_chat_dispatch_max_seconds(
+    requested: float | None, cfg: AgentRuntimeConfig | None = None
+) -> float:
+    """The DETACHED-dispatch budget precedence chokepoint.
+
+    Mirrors :func:`resolve_mission_chat_max_seconds` exactly — an explicit
+    caller-stated number always wins, ``None`` falls through to config — so the
+    two lanes cannot drift into two different precedence rules. It is a separate
+    function rather than a flag on the first because they resolve DIFFERENT
+    config keys, and collapsing them behind a boolean is precisely the
+    fragile-flag shape this repo's rulings forbid."""
+
+    if requested is None:
+        return mission_chat_dispatch_max_seconds(cfg)
+    try:
+        value = float(requested)
+    except (TypeError, ValueError):
+        return mission_chat_dispatch_max_seconds(cfg)
+    return value if value > 0 else mission_chat_dispatch_max_seconds(cfg)
 
 
 def mission_chat_workdir(persona_id: str, cfg: AgentRuntimeConfig | None = None) -> str | None:

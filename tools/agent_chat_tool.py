@@ -55,8 +55,6 @@ Scope contract (V2 — chained relays enabled 2026-07-08):
   anchor when it lands.
 """
 
-import contextlib
-import io
 import json
 import logging
 import os
@@ -131,13 +129,67 @@ AGENT_CHAT_SEND_SCHEMA = {
                     "you continue an existing thread."
                 ),
             },
+            # No schema ``default``, for the same reason ``new_session`` has
+            # none: a provider that materialises schema defaults would send 240
+            # on every call, and a wait=false dispatch would then silently be
+            # capped at a conversational window instead of the 30-minute
+            # background budget. Absent must stay distinguishable from stated.
             "max_seconds": {
                 "type": "number",
-                "description": "Wall budget for the target's reply turn. Default 240.",
-                "default": 240,
+                "description": (
+                    "Wall budget for the target's reply turn. Omit unless you need a specific "
+                    "window: waiting sends default to 240s, and a wait=false dispatch defaults to "
+                    "the background budget (30 min)."
+                ),
+            },
+            "wait": {
+                "type": "boolean",
+                "description": (
+                    "Pass false to DISPATCH AND KEEP WORKING: the call returns a dispatch_id "
+                    "immediately, their turn runs in the background on its own longer budget "
+                    "(default 30 min), and their answer is delivered to you as a new message in "
+                    "this conversation once you are idle. Use it for anything that takes real time "
+                    "— test suites, builds, long reviews — instead of blocking your turn on it. "
+                    "Default true: you wait for the reply inline, exactly as before. Check on "
+                    "in-flight work with agent_chat_dispatches."
+                ),
+            },
+            "notify_operator": {
+                "type": "boolean",
+                "description": (
+                    "Only meaningful with wait=false. Pass true when the operator is waiting on "
+                    "this result: the delivered turn will instruct you to tell them what came back. "
+                    "Default false."
+                ),
             },
         },
         "required": ["persona_id", "message"],
+    },
+}
+
+
+AGENT_CHAT_DISPATCHES_SCHEMA = {
+    "name": "agent_chat_dispatches",
+    "description": (
+        "List the background dispatches YOU sent with agent_chat_send(wait=false): who they went to, what you asked, whether they are still running or finished, and whether their answer has been delivered back to you yet. Read-only, bounded. Use it to check on long-running work without pestering the teammate. Disambiguator: this lists YOUR background dispatches; agent_chat_threads lists your threads; agent_chat_open reads one."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "description": "How many of your most recent dispatches to return. Default 10, clamped to 1..100.",
+                "default": 10,
+            },
+            "state": {
+                "type": "string",
+                "description": (
+                    "Optional filter: 'running' for only what is still in flight, 'done' for only "
+                    "what has finished. Omit for both."
+                ),
+            },
+        },
+        "required": [],
     },
 }
 
@@ -164,7 +216,9 @@ def agent_chat_send(
     clarify_token=None,
     new_session=None,
     title=None,
-    max_seconds=240,
+    max_seconds=None,
+    wait=None,
+    notify_operator=None,
     requested_by_session=None,
 ):
     scope = (os.environ.get("HERMES_AGENT_CHAT_SCOPE") or "open").strip().lower()
@@ -220,22 +274,73 @@ def agent_chat_send(
     chain = relay_policy.RELAY_CHAIN.get()
     deadline_epoch = relay_policy.RELAY_DEADLINE.get()
 
-    try:
-        wall_budget = max(10.0, min(float(max_seconds or 240), 600.0))
-    except (TypeError, ValueError):
-        wall_budget = 240.0
-    remaining = relay_policy.remaining_budget_seconds(deadline_epoch)
-    if remaining is not None:
-        if remaining < relay_policy.MIN_RELAY_BUDGET_SECONDS:
-            return _refusal(
-                f"relay budget exhausted: {max(remaining, 0.0):.1f}s left on the shared "
-                f"chain deadline (minimum {relay_policy.MIN_RELAY_BUDGET_SECONDS:.0f}s "
-                "per hop). Answer your caller with what you have.",
-                error_kind="relay_budget_exhausted",
-                relay_chain=list(chain),
-            )
-        wall_budget = min(wall_budget, remaining)
-    effective_deadline = deadline_epoch if deadline_epoch is not None else time.time() + wall_budget
+    # Detached or inline? TRI-STATE for the same reason ``new_session`` is —
+    # ``bool(None)`` would read "the caller said nothing" as "the caller said
+    # inline", which happens to be the right default but would make the two
+    # indistinguishable to anything downstream that needs to know which it was.
+    detached = coerce_optional_flag(wait) is False
+    notify = coerce_optional_flag(notify_operator) is True
+    sender_session = str(requested_by_session or "").strip()
+
+    if detached and not sender_session:
+        # A detached dispatch is a PROMISE to deliver the answer back into the
+        # caller's conversation. With no caller session there is nowhere to
+        # deliver it, so refuse the promise rather than run the work and drop
+        # the result on the floor — the failure mode a wait:false lane must
+        # never have is "it ran and nobody was told".
+        return _refusal(
+            "agent_chat_send(wait=false) needs a chat session to deliver the reply back into, "
+            "and this lane has none. Send it with wait=true (the default) and use the reply "
+            "inline.",
+            error_kind="async_delivery_unavailable",
+            target_persona=persona_id,
+        )
+
+    if detached:
+        # RELAY RULING (operator-approved 2026-08-03): a detached dispatch is a
+        # NEW CHAIN ROOT with its own deadline, and the chain is still forwarded.
+        #
+        # Both halves matter. Minting a fresh deadline is the whole point: the
+        # shared 4-minute chain budget exists so a synchronous hop cannot
+        # out-live the caller who is BLOCKED on it, and nobody is blocked here —
+        # clamping a 30-minute background job to whatever was left of a
+        # conversational window would kill exactly the work this lane exists to
+        # host, and the remaining-budget fast-fail would refuse most dispatches
+        # outright. Forwarding the chain unchanged is what keeps that from being
+        # a loophole: depth and cycle detection are decided downstream by
+        # ``evaluate_relay`` at the handler's canonical persona chokepoint, and
+        # they read the CHAIN, not the clock. So A→B→A is still refused across a
+        # detach, and the depth ceiling still holds — a detached hop buys time,
+        # never reach.
+        #
+        # The policy itself stays where it lives. Nothing here decides anything:
+        # this branch chooses which BUDGET rides the envelope, and the guard
+        # that could refuse the send runs, unchanged, in the handler.
+        from agent_runtime.config import resolve_mission_chat_dispatch_max_seconds
+
+        try:
+            stated = float(max_seconds) if max_seconds is not None else None
+        except (TypeError, ValueError):
+            stated = None
+        wall_budget = float(resolve_mission_chat_dispatch_max_seconds(stated))
+        effective_deadline = time.time() + wall_budget
+    else:
+        try:
+            wall_budget = max(10.0, min(float(max_seconds or 240), 600.0))
+        except (TypeError, ValueError):
+            wall_budget = 240.0
+        remaining = relay_policy.remaining_budget_seconds(deadline_epoch)
+        if remaining is not None:
+            if remaining < relay_policy.MIN_RELAY_BUDGET_SECONDS:
+                return _refusal(
+                    f"relay budget exhausted: {max(remaining, 0.0):.1f}s left on the shared "
+                    f"chain deadline (minimum {relay_policy.MIN_RELAY_BUDGET_SECONDS:.0f}s "
+                    "per hop). Answer your caller with what you have.",
+                    error_kind="relay_budget_exhausted",
+                    relay_chain=list(chain),
+                )
+            wall_budget = min(wall_budget, remaining)
+        effective_deadline = deadline_epoch if deadline_epoch is not None else time.time() + wall_budget
 
     requested_by = "agent-chat-relay"
     source_token = str(requested_by_session or "").strip()
@@ -291,29 +396,46 @@ def agent_chat_send(
         relay_deadline_epoch=effective_deadline,
     )
 
-    # The CLI handler prints its JSON payload; capture it so a nested reply can
-    # never interleave with the OUTER turn's stdout protocol.
-    buffer = io.StringIO()
+    if detached:
+        return _dispatch_detached(
+            args,
+            persona_id=persona_id,
+            target_instance_id=target_instance_id,
+            sender_session=sender_session,
+            message=message,
+            title=resolved_title,
+            notify_operator=notify,
+            chain=chain,
+            wall_budget=wall_budget,
+        )
+
+    # The handler hands its payload dict straight over through the
+    # ``payload_sink`` seam. This used to be a ``contextlib.redirect_stdout``
+    # capture plus a JSON re-parse of the captured text, which was wrong in two
+    # ways worth naming: ``redirect_stdout`` rebinds ``sys.stdout``
+    # PROCESS-GLOBALLY (so any other thread in this process — every other serve
+    # request — briefly wrote into this buffer), and a payload that already
+    # existed as a dict was serialised only to be parsed back. The seam removes
+    # both, and it is what makes the detached lane above safe to run concurrently.
+    payloads: list[dict] = []
+    args.payload_sink = payloads.append
     try:
         # persona_commands.py is exec'd into hermes_cli.harness globals by
         # _load_command_parts(); the handler is NOT importable from the part
         # module itself.
         from hermes_cli import harness as _harness
 
-        with contextlib.redirect_stdout(buffer):
-            exit_code = _harness._cmd_mission_chat_message(args)
+        exit_code = _harness._cmd_mission_chat_message(args)
     except Exception as exc:  # pragma: no cover - defensive; surfaced to the model
         logger.exception("agent_chat_send relay failed")
         return _refusal(f"{type(exc).__name__}: {exc}", target_persona=persona_id)
 
-    raw = buffer.getvalue().strip()
-    payload = _parse_last_json_object(raw)
+    payload = payloads[-1] if payloads else None
     if payload is None:
         return _refusal(
-            "relay produced no parseable reply payload",
+            "relay produced no reply payload",
             target_persona=persona_id,
             exit_code=exit_code,
-            output_excerpt=raw[-400:],
         )
 
     # Compact result: the caller needs the reply and the thread pointers, not
@@ -363,19 +485,168 @@ def agent_chat_send(
     return json.dumps(result, indent=2, default=str)
 
 
-def _parse_last_json_object(raw: str):
-    if not raw:
-        return None
-    # The handler emits exactly one JSON object in non-stream mode, but stay
-    # tolerant of stray log lines before it.
-    start = raw.find("{")
-    while start != -1:
-        candidate = raw[start:]
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
-            start = raw.find("{", start + 1)
-    return None
+def _dispatch_detached(
+    args,
+    *,
+    persona_id,
+    target_instance_id,
+    sender_session,
+    message,
+    title,
+    notify_operator,
+    chain,
+    wall_budget,
+):
+    """Record a detached dispatch durably, queue its turn, and return the handle.
+
+    ORDER IS THE CONTRACT. The durable row is written BEFORE the executor is
+    handed the work and before the caller is told anything, so there is no
+    window in which the target's turn is running (or has already finished)
+    against a dispatch nothing remembers. Written after, a process that died
+    early would leave work whose result had nowhere to go and no record that it
+    was ever asked for; a caller told ``dispatched: true`` for a row that failed
+    to persist would wait forever for a delivery that can never be attempted.
+    A store failure therefore REFUSES the dispatch instead of running it blind.
+    """
+
+    from agent_runtime.config import mission_chat_dispatch_max_concurrent
+    from agent_runtime.dispatch_store import mint_dispatch_id, record_dispatch
+    from tools.agent_chat_dispatch import dispatch_detached_turn
+
+    dispatch_id = mint_dispatch_id()
+    # The delivery turn is deduped on this id (see dispatch_delivery), so it is
+    # minted HERE, once, and travels with the row.
+    args.client_message_id = f"agent-dispatch-{dispatch_id}"
+    started_at = time.time()
+    try:
+        record_dispatch(
+            dispatch_id=dispatch_id,
+            sender_session_id=sender_session,
+            target_persona=persona_id,
+            target_instance_id=target_instance_id or "",
+            title=title or "",
+            ask=message,
+            notify_operator=bool(notify_operator),
+            relay_chain=list(chain),
+            dispatched_at=started_at,
+        )
+    except Exception as exc:
+        logger.exception("agent_chat_send could not record dispatch %s", dispatch_id)
+        return _refusal(
+            f"could not record the dispatch durably ({type(exc).__name__}); nothing was sent. "
+            "Send it with wait=true instead.",
+            error_kind="dispatch_store_unavailable",
+            target_persona=persona_id,
+        )
+
+    try:
+        dispatch_detached_turn(
+            dispatch_id=dispatch_id,
+            args=args,
+            max_concurrent=mission_chat_dispatch_max_concurrent(),
+        )
+    except Exception as exc:
+        from agent_runtime.dispatch_store import STATE_ERROR, record_completion
+
+        # The row exists and can never complete on its own, so settle it here.
+        # It becomes a delivered "this never started" message rather than a
+        # dispatch that stays `running` in the operator's HUD forever.
+        record_completion(
+            dispatch_id,
+            state=STATE_ERROR,
+            error=f"the dispatch could not be queued: {type(exc).__name__}",
+        )
+        logger.exception("agent_chat_send could not queue dispatch %s", dispatch_id)
+        return _refusal(
+            f"could not start the background dispatch ({type(exc).__name__}).",
+            error_kind="dispatch_queue_failed",
+            target_persona=persona_id,
+        )
+
+    return json.dumps(
+        {
+            "ok": True,
+            "dispatched": True,
+            "dispatch_id": dispatch_id,
+            "target_persona": persona_id,
+            "session_id": None,
+            "started_at": started_at,
+            "max_seconds": wall_budget,
+            "notify_operator": bool(notify_operator),
+            "relay_chain": list(chain),
+            # Say plainly what happens next. An agent that thinks this call
+            # failed to return a reply will re-send; an agent that knows the
+            # answer is coming as its own message will move on, which is the
+            # entire behaviour change this lane is for.
+            "next_expected": (
+                "Their reply is NOT in this result — they are working on it now. It will arrive "
+                "as a new message in this conversation when they finish and you are idle. Carry "
+                "on with something else; do not re-send. Use agent_chat_dispatches to check "
+                "whether it is still running."
+            ),
+        },
+        indent=2,
+        default=str,
+    )
+
+
+def agent_chat_dispatches(*, limit=10, state=None, requested_by_session=None):
+    """List the caller's background dispatches. Read-only; creates nothing."""
+
+    if _scope_off():
+        return _refusal(
+            "agent_chat is disabled on this runtime (HERMES_AGENT_CHAT_SCOPE=off). "
+            "Tell the operator instead of retrying."
+        )
+
+    from agent_runtime.dispatch_store import STATE_RUNNING, list_dispatches
+    from tools.agent_chat_dispatch import summarize_for_caller
+
+    scope = str(requested_by_session or "").strip()
+    if not scope:
+        # Scoped to the caller's own chat root. With no caller identity the
+        # honest answer is "I cannot tell which are yours", NOT everyone's.
+        return json.dumps(
+            {
+                "ok": True,
+                "count": 0,
+                "dispatches": [],
+                "next_expected": (
+                    "this lane carries no chat session, so there are no dispatches of yours to list"
+                ),
+            }
+        )
+
+    wanted = str(state or "").strip().lower()
+    try:
+        bounded = max(1, min(int(limit or 10), 100))
+    except (TypeError, ValueError):
+        bounded = 10
+
+    rows = list_dispatches(sender_session_id=scope, limit=bounded)
+    if wanted == "running":
+        rows = [row for row in rows if row.get("state") == STATE_RUNNING]
+    elif wanted == "done":
+        rows = [row for row in rows if row.get("state") != STATE_RUNNING]
+
+    summaries = [summarize_for_caller(row) for row in rows]
+    running = sum(1 for row in summaries if row["state"] == STATE_RUNNING)
+    return json.dumps(
+        {
+            "ok": True,
+            "count": len(summaries),
+            "running": running,
+            "dispatches": summaries,
+            "next_expected": (
+                "still running — their full reply will be delivered to you as a new message when "
+                "they finish; nothing to do"
+                if running
+                else "nothing in flight"
+            ),
+        },
+        indent=2,
+        default=str,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -959,11 +1230,30 @@ registry.register(
         # resolver as "unset", not as an explicit request to continue.
         new_session=args.get("new_session"),
         title=args.get("title"),
-        max_seconds=args.get("max_seconds", 240),
+        # No `240` default here either: an omitted max_seconds must reach the
+        # budget resolvers as "unset" so a wait=false dispatch gets the
+        # background budget rather than a silently-applied conversational one.
+        max_seconds=args.get("max_seconds"),
+        # Tri-state like new_session: omitted stays unset (= wait inline).
+        wait=args.get("wait"),
+        notify_operator=args.get("notify_operator"),
         requested_by_session=kw.get("session_id"),
     ),
-    description="Send a chat message to another Harness persona and return their reply (agent-to-agent chat).",
+    description="Send a chat message to another Harness persona and return their reply, or dispatch it in the background with wait=false (agent-to-agent chat).",
     emoji="🤝",
+)
+
+registry.register(
+    name="agent_chat_dispatches",
+    toolset="agent_chat",
+    schema=AGENT_CHAT_DISPATCHES_SCHEMA,
+    handler=lambda args, **kw: agent_chat_dispatches(
+        limit=args.get("limit", 10),
+        state=args.get("state"),
+        requested_by_session=kw.get("session_id"),
+    ),
+    description="List your in-flight and recent background dispatches (read-only).",
+    emoji="📡",
 )
 
 registry.register(

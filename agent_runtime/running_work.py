@@ -1,9 +1,9 @@
 """Unified ``running_work`` projection — what background work is running RIGHT NOW.
 
 One aggregator, six lanes (terminal background processes, background subagent
-delegations, in-flight mission-chat turns, MCP servers, cron jobs, and — once
-WP-H2 lands — detached dispatches), producing ONE row vocabulary so an operator
-surface never has to know which subsystem spawned a piece of work.
+delegations, in-flight mission-chat turns, detached agent-to-agent dispatches,
+MCP servers, and cron jobs), producing ONE row vocabulary so an operator surface
+never has to know which subsystem spawned a piece of work.
 
 Durable-first, and that is the whole architecture
 -------------------------------------------------
@@ -136,9 +136,10 @@ KIND_DELEGATION = "delegation"
 KIND_CHAT_TURN = "chat_turn"
 KIND_MCP_SERVER = "mcp_server"
 KIND_CRON_JOB = "cron_job"
-#: Reserved for WP-H2's detached dispatch store. Declared here so the wire
-#: vocabulary is complete from the first landing and a consumer does not have to
-#: re-derive it when the lane arrives.
+#: Detached agent-to-agent dispatches (``agent_chat_send(wait=false)``), backed
+#: by :mod:`agent_runtime.dispatch_store`. Declared in this tuple one wave
+#: BEFORE its producer existed, so the wire vocabulary was complete from the
+#: first landing and no consumer had to re-derive it when the lane arrived.
 KIND_DISPATCH = "dispatch"
 
 RUNNING_WORK_KINDS = (
@@ -150,15 +151,17 @@ RUNNING_WORK_KINDS = (
     KIND_DISPATCH,
 )
 
-#: The lanes that report a ``sources`` entry on every build. ``dispatch`` is
-#: absent until WP-H2 ships its store: declaring a source for a lane with no
-#: producer would be the dead-by-emptiness the parity rules forbid.
+#: The lanes that report a ``sources`` entry on every build. ``dispatch`` joined
+#: at WP-H2, when it acquired a producer (:mod:`agent_runtime.dispatch_store`);
+#: until then declaring a source for a lane nothing could write would have been
+#: the dead-by-emptiness the parity rules forbid.
 RUNNING_WORK_SOURCES = (
     KIND_TERMINAL,
     KIND_DELEGATION,
     KIND_CHAT_TURN,
     KIND_MCP_SERVER,
     KIND_CRON_JOB,
+    KIND_DISPATCH,
 )
 
 STATUS_RUNNING = "running"
@@ -1126,6 +1129,104 @@ def _collect_chat_turns(
 
 
 # --------------------------------------------------------------------------
+# lane: detached agent-to-agent dispatches
+# --------------------------------------------------------------------------
+
+
+def _collect_dispatches(
+    *, now: float, accountant: ProjectionAccountant | None
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """In-flight detached dispatches — durable-only, and honestly so.
+
+    The dispatch store is the whole truth here: a dispatch's row is written
+    BEFORE its turn starts and settled when it ends, from whichever process ran
+    it, so any lane reads the same answer and no live enrichment exists to add.
+    That is unusual among these lanes and it is a property of the store, not an
+    omission.
+
+    Owner identity is verified like every other lane — a row whose recorded PID
+    is gone is work that cannot still be running, and a recycled number is a
+    stranger. The difference from the terminal/delegation lanes is what happens
+    next: an orphaned dispatch is NOT lost, because
+    ``restore_undelivered_dispatches`` reclassifies it into a deliverable
+    ``unknown`` outcome at the next serve boot. So dropping it from the HUD is
+    honest — it stopped running — rather than a silent loss.
+    """
+
+    try:
+        from . import dispatch_store
+
+        rows = dispatch_store.running_dispatches(limit=_MAX_ROWS_PER_SOURCE * 2)
+    except Exception as exc:
+        return [], _source(
+            SOURCE_UNAVAILABLE,
+            lane=LANE_DURABLE,
+            reason="store_unreadable",
+            detail=type(exc).__name__,
+        )
+
+    collected: list[dict[str, Any]] = []
+    for record in rows:
+        if not isinstance(record, dict):
+            continue
+        dispatch_id = _safe_text(record.get("dispatch_id"), limit=200)
+        if not dispatch_id:
+            continue
+        if accountant is not None:
+            accountant.consider()
+        pid = record.get("owner_pid")
+        _alive, verified, verdict = _pid_identity(pid, record.get("owner_started_at"))
+        if verdict in {PID_DEAD, PID_RECYCLED}:
+            if accountant is not None:
+                accountant.drop(
+                    "owner_exited" if verdict == PID_DEAD else "pid_recycled",
+                    entity_id=dispatch_id,
+                    detail="dispatch owner process is gone; the boot sweep settles it as unknown",
+                    by_design=True,
+                )
+            continue
+        started = record.get("dispatched_at")
+        target = _safe_text(record.get("target_persona"), limit=120)
+        label = _safe_text(record.get("title"), limit=160) or (
+            f"{target}: {_safe_text(record.get('ask'), limit=120)}" if target else dispatch_id
+        )
+        collected.append(
+            _row(
+                kind=KIND_DISPATCH,
+                stable_id=dispatch_id,
+                label=label,
+                status=STATUS_RUNNING if verified else STATUS_UNKNOWN,
+                source_lane=LANE_DURABLE,
+                pid=pid,
+                pid_verified=verified,
+                persona_id=target,
+                persona_instance_id=_safe_text(record.get("target_instance_id"), limit=200),
+                # The SENDER's chat root: the thread the answer is owed to, and
+                # the row an operator would click through to.
+                session_id=_safe_text(record.get("sender_session_id"), limit=240),
+                started_at=_iso(started),
+                elapsed_seconds=_elapsed(
+                    float(started) if isinstance(started, (int, float)) else None, now=now
+                ),
+                # The target's turn owns its own progress signal; none of it
+                # survives to this store, so say so rather than emit zeros.
+                progress=_progress(available=False),
+                tail_preview=_preview(record.get("ask"), accountant),
+                # No interrupt seam in v1: the turn runs on a shared executor
+                # thread with no cancellation token. Claiming cancellable here
+                # would put a button on the HUD that cannot do anything.
+                cancellable=False,
+            )
+        )
+
+    collected.sort(key=lambda item: (item.get("started_at") or "", item["work_id"]))
+    capped = _cap(collected, source=KIND_DISPATCH, accountant=accountant)
+    if accountant is not None:
+        accountant.include(len(capped))
+    return capped, _source(SOURCE_OK, lane=LANE_DURABLE)
+
+
+# --------------------------------------------------------------------------
 # lane: MCP servers
 # --------------------------------------------------------------------------
 
@@ -1328,6 +1429,7 @@ _COLLECTORS = (
     (KIND_TERMINAL, _collect_terminal, True),
     (KIND_DELEGATION, _collect_delegations, True),
     (KIND_CHAT_TURN, _collect_chat_turns, True),
+    (KIND_DISPATCH, _collect_dispatches, True),
     (KIND_MCP_SERVER, _collect_mcp, False),
     (KIND_CRON_JOB, _collect_cron, False),
 )
