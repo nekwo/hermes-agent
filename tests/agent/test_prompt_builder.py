@@ -948,6 +948,24 @@ class TestOpenAIModelExecutionGuidance:
 
 
 
+    def test_safety_bullet_gates_on_destructiveness_not_side_effects(self):
+        # The old wording — "if the next step has side effects (file writes,
+        # commands, API calls), confirm scope before executing" — told EVERY
+        # gpt/codex/grok session to confirm before ordinary tool use, and showed
+        # up live (2026-08-03) as a persona ending its turn on a permission
+        # request instead of acting on a clear, non-destructive order. Gate the
+        # confirmation on destructiveness; leave the other bullets alone.
+        text = OPENAI_MODEL_EXECUTION_GUIDANCE
+        assert "side effects (file writes, commands, API calls)" not in text
+        assert "destructive or hard to reverse" in text
+        assert "proceeds without asking" in text
+        # The correctness/grounding/formatting checks must survive intact.
+        lowered = text.lower()
+        assert "correctness" in lowered
+        assert "grounding" in lowered
+        assert "formatting" in lowered
+
+
     def test_guidance_is_string(self):
         assert isinstance(OPENAI_MODEL_EXECUTION_GUIDANCE, str)
         assert len(OPENAI_MODEL_EXECUTION_GUIDANCE) > 100

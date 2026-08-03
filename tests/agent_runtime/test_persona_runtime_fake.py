@@ -347,6 +347,41 @@ def test_mission_chat_ack_is_the_first_hard_rule():
     assert "never open a turn with a silent tool call" in first
 
 
+def test_mission_chat_operative_rules_treat_a_clear_order_as_the_go_ahead():
+    # 2026-08-03 live regression: told to message the agents it steers, Neko
+    # ended its turn on a bare "Waiting for your go-ahead before I send the
+    # messages." — no tool calls, no plan restated, and NO harness approval gate
+    # involved (verified in logs; the pause was entirely model-side). Two halves
+    # must survive here: a clear non-destructive order is itself the go-ahead,
+    # and any pause that IS earned has to restate a concrete plan — so a bare
+    # hold is never the shape of a compliant turn. The ack rule stays first.
+    from agent_runtime.persona_runtime import _mission_chat_operative_rules
+
+    rules = _mission_chat_operative_rules()
+    bullets = [line for line in rules.splitlines() if line.startswith("- ")]
+    assert "HARD RULE" in bullets[0], "the acknowledge-before-acting rule must remain first"
+
+    go_ahead = next((line for line in bullets if "IS the go-ahead" in line), None)
+    assert go_ahead is not None, "operative rules must name a clear order as the go-ahead"
+    assert "SAME turn" in go_ahead
+    assert "Never end a turn asking permission" in go_ahead
+    # The pause is carved out to the two cases that earn it — not to side effects.
+    assert "destructive or irreversible" in go_ahead
+    assert "`clarify`" in go_ahead
+
+    restate = next((line for line in bullets if "waiting for your go-ahead" in line), None)
+    assert restate is not None, "a pause must be required to restate its concrete plan"
+    assert "state " in restate and "concretely" in restate
+    assert "never acceptable" in restate
+
+    # The clarify bullet must not read as a blanket "on this channel, ask" license.
+    clarify = next(
+        line for line in bullets if "use the `clarify` tool to ask before acting" in line
+    )
+    assert "here, ask." not in clarify
+    assert "never for permission to carry out a clear order" in clarify
+
+
 def test_mission_chat_operative_rules_teach_the_chat_session_verbs():
     # The chat-session verb set is taught in the busy operative-rules prompt (not
     # only the tool schemas): teammates are addressable by @personainst_* handles,
