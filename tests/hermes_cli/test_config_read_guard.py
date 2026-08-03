@@ -24,6 +24,7 @@ file to the allowlist without a reason of the same class.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 
@@ -62,6 +63,17 @@ EXCLUDED_DIR_PARTS = {
     "docs", "scripts", "examples", "apps",
 }
 
+# Marker file every PEP-405 virtual environment carries at its root. The
+# subject of this guard is FIRST-PARTY source: ``.venv`` was already excluded
+# by name above, but an operator-named sibling (``.venv-ci``, ``.venv-py313``,
+# ``venv/``) is the same thing under a different spelling and was being walked
+# and read in full. That was not just slow — it made the guard non-hermetic:
+# the offender set depended on which third-party packages happened to be
+# installed on the box, and any vendored library shipping a ``safe_load`` near
+# a ``"config.yaml"`` string would have failed OUR guard. Interpreter
+# environments are pruned by marker, not by name.
+VENV_MARKER = "pyvenv.cfg"
+
 # A safe_load within this many lines of a config.yaml reference is treated
 # as a raw user-config read.
 PROXIMITY = 6
@@ -71,11 +83,24 @@ CONFIG_YAML_RE = re.compile(r"""["']config\.yaml["']""")
 
 
 def _iter_source_files():
-    for path in REPO_ROOT.rglob("*.py"):
-        rel = path.relative_to(REPO_ROOT)
-        if any(part in EXCLUDED_DIR_PARTS for part in rel.parts):
-            continue
-        yield rel, path
+    # os.walk with in-place ``dirnames`` pruning rather than ``rglob`` + a
+    # post-filter: the post-filter still paid to enumerate every excluded
+    # subtree. Pruning a directory name here is exactly equivalent to the old
+    # "any part of the relative path is excluded" test, because a pruned
+    # directory can contribute no descendants.
+    for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
+        here = Path(dirpath)
+        dirnames[:] = [
+            name
+            for name in dirnames
+            if name not in EXCLUDED_DIR_PARTS
+            and not (here / name / VENV_MARKER).is_file()
+        ]
+        for name in filenames:
+            if not name.endswith(".py"):
+                continue
+            path = here / name
+            yield path.relative_to(REPO_ROOT), path
 
 
 def test_no_raw_config_yaml_reads_outside_owner_modules():

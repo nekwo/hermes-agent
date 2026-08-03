@@ -2213,3 +2213,62 @@ checks the real profiles when present and skips with an explicit environmental
 message when absent. Therefore the old single test can no longer turn a missing
 profile tree into a vacuous all-clear; on a bare machine only the additional
 live-environment checkpoint skips, while the synthetic drift logic passes.
+
+## S69 — the config read-guard was over budget by construction (2026-08-03)
+
+### The canonical CLI gate was red for a reason that was never contention
+
+`scripts/run_tests_parallel.py` returned `3,706 passed, 0 failed, exit 1` with
+no failing test. The exit code came from one file that produced no tests:
+`tests/hermes_cli/test_config_read_guard.py` was killed by the repo-wide
+`--timeout=30` per-test cap in `pyproject.toml`, and the runner's bounded
+1-worker straggler retry was killed the same way. Its 2 tests were exactly the
+3,706-vs-3,708 delta. The same file had been observed failing this way over
+several days by different operators and waved off as pool contention every time.
+
+Contention was the trigger, not the cause. `_iter_source_files()` walked
+`REPO_ROOT.rglob("*.py")` and applied `EXCLUDED_DIR_PARTS` as a POST-filter, so
+every excluded subtree was still enumerated in full. Worse, the exclusion set
+listed `.venv` by name and this machine's environment is `.venv-ci`: **5,606 of
+the 6,682 files the guard opened and regex-scanned line-by-line — 84% — were
+third-party site-packages**. Measured on the primary checkout:
+
+| | files enumerated | enumerate | guard test | file via canonical runner |
+|---|---|---|---|---|
+| before | 6,682 | 1.36s | 3.62s | 7.2s warm / 34.1s cold-and-idle / >30s under pool load |
+| after  | 1,076 | 0.17s | 1.13s | 4.5s |
+
+That is not a budget question, so no budget moved and nothing was fenced. Fence
+rules 3–4 forbid an env-gap fence over a defect in our own test, and this was
+one.
+
+### Scanning a virtualenv was also a correctness defect
+
+The offender set depended on which third-party packages happened to be
+installed on the box, and any vendored library shipping a `safe_load` within
+`PROXIMITY` lines of a `"config.yaml"` string would have failed OUR guard.
+`_iter_source_files()` now walks with `os.walk` and prunes `dirnames` in place —
+exactly equivalent to the old "any part of the relative path is excluded" test,
+because a pruned directory can contribute no descendants — and additionally
+prunes any directory carrying a `pyvenv.cfg` marker. Interpreter environments
+are excluded by MARKER, not by name, so `.venv-ci`, `.venv-py313` and `venv/`
+cannot reintroduce the hole the way `.venv-ci` did.
+
+Equivalence was measured, not assumed: old and new enumeration were diffed as
+sets against the primary checkout. 5,606 dropped, all under `.venv-ci`; **zero
+first-party files dropped and zero added**. Nothing the guard asserts changed.
+
+### Red-proof
+
+A `yaml.safe_load(open("config.yaml"))` was planted in
+`agent_runtime/machine_roots.py` (not allowlisted, first-party). The guard
+failed naming `agent_runtime/machine_roots.py:967` with the offender line, in
+1.50s. Sabotage reverted; the file went green in 4.5s through the canonical
+runner. No contract, wire, event or schema moved.
+
+### Durable finding
+
+A structural gate that walks the repo is only as hermetic as its prune list, and
+a prune list keyed on DIRECTORY NAMES rots the first time an operator names an
+environment something else. Prefer a marker/typed test over a name list for
+anything whose whole purpose is "this is not our code".
