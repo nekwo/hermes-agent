@@ -49,6 +49,7 @@ from .personas import effective_toolsets
 from .prompt_observability import _SkillObservabilityResolver, snapshot_prompt_observability
 from .realm_sync import read_realm_sync_sidecar
 from .repo_context import resolve_affected_repo_workdir
+from .running_work import build_running_work
 from .serde import to_jsonable
 from .store import AgentStore, RealmStore, WorkspaceStore
 from .tool_visibility import (
@@ -432,6 +433,9 @@ def _build_snapshot_uncoalesced(
             _offices_summary(OfficeStore(event_log=event_log), workspaces),
             "workspace_id",
         )
+    running_work_accountant = ProjectionAccountant("running_work")
+    with _timed_section(_sections_ms, "running_work"):
+        running_work_section = build_running_work(running_work_accountant)
     data = {
         "schema_version": 2,
         # Legacy wire names retained for Launcher/core-fixture compatibility;
@@ -478,6 +482,13 @@ def _build_snapshot_uncoalesced(
         # files and the `unpublished` honesty flag from the local baseline
         # sidecar; NEVER a git call in the snapshot path.
         "offices": offices_section,
+        # Unified background-work projection: terminal processes, subagent
+        # delegations, in-flight chat turns, MCP servers, cron jobs — one row
+        # vocabulary across six subsystems, durable-first so a cold CLI lane
+        # answers as honestly as the serve process that spawned the work. Every
+        # lane carries its own ok/unavailable health under ``sources``; an
+        # unreadable lane is REPORTED, never rendered as "nothing running".
+        "running_work": running_work_section,
         "active_workspace_id": workspace_store.active_id(),
         "active_realm_id": realm_store.active_id(),
         "warnings": _snapshot_warnings(persona_assignments),
@@ -573,11 +584,13 @@ def _build_snapshot_uncoalesced(
         "persona_chat_history": history_accountant.summary(),
         "persona_chat_trace": trace_accountant.summary(),
         "operator_conversation": conversation_accountant.summary(),
+        "running_work": running_work_accountant.summary(),
     }
     drop_samples = (
         history_accountant.drop_samples()
         + trace_accountant.drop_samples()
         + conversation_accountant.drop_samples()
+        + running_work_accountant.drop_samples()
     )
     # Guarantee the documented section keys exist even when a lane was skipped
     # (e.g. persona_chat when persona-instance runtime is disabled) so consumers
@@ -588,6 +601,7 @@ def _build_snapshot_uncoalesced(
         "events",
         "persona_chat",
         "boards_offices",
+        "running_work",
     ):
         _sections_ms.setdefault(_section_key, 0)
     _parity_started = time.perf_counter()
@@ -698,7 +712,18 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         # 51 retires the last task/proof migration-count rows and the
         # run-summary conversation source. The legacy contract-hash wire names
         # remain compatibility aliases for the event-only registry.
-        "contract_version": 51,
+        #
+        # 52 (WP-H1, 2026-08-03) ADDS the ``running_work`` section — the first
+        # additive move in several waves, and the reason the pin still has to
+        # travel: the Launcher's ``MissionSnapshotEnvelope.health()`` requires
+        # EXACT equality, so an additive section that arrives under an unbumped
+        # version would be invisible rather than merely unread. The section
+        # carries its own ``sources`` health block and a ``completeness``
+        # accountant row of the same name. The Launcher pin
+        # (``kSupportedMissionContractVersion``) moves to 52 in WP-L1, and the
+        # live venv is refreshed only AFTER that lands — refreshing first
+        # fail-closes the console with a ``newerContract`` banner.
+        "contract_version": 52,
         "generated_at": data.get("generated_at"),
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
         "redaction_observed": _redaction_observed(data),

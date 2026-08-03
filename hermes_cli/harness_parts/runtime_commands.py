@@ -423,3 +423,209 @@ def _cmd_read_projection(args) -> int:
     payload = ReadModel().read_projection(args.projection, since_offset=args.since_offset)
     print(emit_json(payload) if args.json else emit_json(payload))
     return 0
+
+
+# --- `harness work` — running background work -------------------------------
+#
+# Every import below is function-local ON PURPOSE. These bodies are exec'd into
+# hermes_cli/harness.py's globals rather than imported as a module, so a
+# module-level import here binds into a namespace shared with five other part
+# files; the failure mode is a NameError that fires only when an operator runs
+# this one verb, mid-turn (the `persona_commands.py:1435` precedent, pinned by
+# tests/hermes_cli/test_harness_parts_namespace.py).
+
+
+def _work_target_details(row: dict) -> dict:
+    """The identifying facts a confirmation prompt must show before a kill.
+
+    Deliberately the human-recognisable ones — what it is, which agent owns it,
+    which OS process it maps to — because ``terminal:sess-8f2c`` alone tells an
+    operator nothing about whether this is the build they want stopped or the
+    dev server they do not.
+    """
+
+    owner = row.get("owner") or {}
+    return {
+        "work_id": row.get("work_id"),
+        "kind": row.get("kind"),
+        "label": row.get("label"),
+        "command": row.get("command") or None,
+        "pid": row.get("pid"),
+        "pid_verified": row.get("pid_verified"),
+        "status": row.get("status"),
+        "elapsed_seconds": row.get("elapsed_seconds"),
+        "owner_persona_instance_id": owner.get("persona_instance_id"),
+        "owner_session_id": owner.get("session_id"),
+    }
+
+
+def _cmd_work_list(args) -> int:
+    from agent_runtime.running_work import RUNNING_WORK_KINDS, build_running_work
+
+    kind = str(getattr(args, "kind", None) or "").strip()
+    if kind and kind not in RUNNING_WORK_KINDS:
+        _print_stage42(
+            _error_envelope(
+                "invalid_request",
+                f"unknown work kind {kind!r}",
+                safe_details={"supported": list(RUNNING_WORK_KINDS)},
+            ),
+            args=args,
+            default_output="json",
+        )
+        return ERROR_EXIT_CODES["invalid_request"]
+
+    projection = build_running_work()
+    rows = [row for row in projection["rows"] if not kind or row.get("kind") == kind]
+    rows = _sort_rows(rows, getattr(args, "sort", None))
+
+    limit = getattr(args, "limit", None)
+    truncated = False
+    if isinstance(limit, int) and limit > 0 and len(rows) > limit:
+        rows = rows[:limit]
+        truncated = True
+
+    envelope = _list_envelope("running_work", rows, truncated=truncated)
+    # Per-source health rides the SAME envelope as the rows, never a separate
+    # call: a consumer that reads the rows without the health block would read
+    # an unreadable lane as "nothing running", which is the one answer this
+    # projection exists to make impossible.
+    envelope["sources"] = projection["sources"]
+    envelope["counts"] = projection["counts"]
+    _print_stage42(envelope, args=args, default_output="json")
+    return 0
+
+
+def _cmd_work_peek(args) -> int:
+    from agent_runtime.running_work import peek_work
+
+    payload = peek_work(str(getattr(args, "work_id", "") or ""))
+    if not payload.get("found"):
+        _print_stage42(
+            _error_envelope(
+                "invalid_request" if payload.get("error") == "malformed_work_id" else "not_found",
+                payload.get("error") or "no running work with that id",
+                safe_details={"work_id": payload.get("work_id")},
+            ),
+            args=args,
+            default_output="json",
+        )
+        return ERROR_EXIT_CODES[
+            "invalid_request" if payload.get("error") == "malformed_work_id" else "not_found"
+        ]
+    _print_stage42(
+        _object_envelope("work_peek", payload), args=args, default_output="json"
+    )
+    return 0
+
+
+def _cmd_work_cancel(args) -> int:
+    from datetime import datetime, timezone
+
+    from agent_runtime.running_work import cancel_work, find_work_row
+
+    work_id = str(getattr(args, "work_id", "") or "")
+    row = find_work_row(work_id)
+    if row is None:
+        _print_stage42(
+            _error_envelope(
+                "not_found",
+                "no running work with that id",
+                safe_details={"work_id": work_id},
+            ),
+            args=args,
+            default_output="json",
+        )
+        return ERROR_EXIT_CODES["not_found"]
+
+    # Replay guard. A cancel issued BEFORE this work started cannot have been
+    # aimed at it: work ids are stable per spawn, so a retried/queued command
+    # arriving after the original target died and a new one took its place would
+    # otherwise kill the wrong thing. Superseding is the same ruling the active
+    # realm/workspace writes make with --issued-at.
+    issued_at = str(getattr(args, "issued_at", None) or "").strip()
+    started_at = str(row.get("started_at") or "")
+    if issued_at and started_at:
+        def _epoch(text: str):
+            raw = text[:-1] + "+00:00" if text.endswith("Z") else text
+            try:
+                parsed = datetime.fromisoformat(raw)
+            except ValueError:
+                return None
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.timestamp()
+
+        issued_epoch, started_epoch = _epoch(issued_at), _epoch(started_at)
+        if issued_epoch is not None and started_epoch is not None and issued_epoch < started_epoch:
+            _print_stage42(
+                _error_envelope(
+                    "stale_revision",
+                    "cancel was issued before this work started; superseded",
+                    safe_details={
+                        "work_id": work_id,
+                        "issued_at": issued_at,
+                        "started_at": started_at,
+                    },
+                ),
+                args=args,
+                default_output="json",
+            )
+            return ERROR_EXIT_CODES["stale_revision"]
+
+    target = _work_target_details(row)
+    if not _require_yes(
+        args,
+        message=(
+            f"Cancelling {target['kind']} work {target['label']!r} "
+            f"(pid={target['pid']}) requires --yes."
+        ),
+        safe_details=target,
+    ):
+        return ERROR_EXIT_CODES["confirmation_required"]
+
+    if getattr(args, "dry_run", False):
+        _print_stage42(
+            _object_envelope(
+                "work_cancel",
+                {"dry_run": True, "would_cancel": target, "cancelled": False},
+            ),
+            args=args,
+            default_output="json",
+        )
+        return 0
+
+    result = cancel_work(work_id, reason=str(getattr(args, "reason", "") or "operator_cancel"))
+    if result.get("status") != "cancelled":
+        code = str(result.get("code") or "internal_error")
+        _print_stage42(
+            _error_envelope(
+                code,
+                str(result.get("detail") or f"cancel refused: {code}"),
+                safe_details={**target, "detail": result.get("detail")},
+            ),
+            args=args,
+            default_output="json",
+        )
+        return ERROR_EXIT_CODES.get(code, 1)
+
+    _print_stage42(
+        # ``status``/``code``/``kind`` are stripped from the spread: the first
+        # two are already expressed by the exit code, and ``kind`` would
+        # overwrite the envelope's own kind discriminator.
+        _object_envelope(
+            "work_cancel",
+            {
+                "cancelled": True,
+                "target": target,
+                **{
+                    key: value
+                    for key, value in result.items()
+                    if key not in {"status", "code", "kind"}
+                },
+            },
+        ),
+        args=args,
+        default_output="json",
+    )
+    return 0

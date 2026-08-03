@@ -109,7 +109,11 @@ def test_hydrate_frame_matches_golden_shape(isolate_agent_runtime_root):
 # Round 4 moved the contract through 50 to 51 as the event registry and its
 # writerless task/proof/run projection fields retired. These goldens are now
 # generated from the current production builders rather than hand-edited.
-CONTRACT_VERSION = 51
+# WP-H1 (2026-08-03) moved it 51 -> 52 and REGENERATED the four frames: the
+# `running_work` section joins the core, so this is a key-set change and not a
+# value edit — the shape assertions below would catch a hand-bumped version that
+# left the goldens without the section.
+CONTRACT_VERSION = 52
 
 
 def test_every_frame_bearing_golden_pins_contract_version(isolate_agent_runtime_root):

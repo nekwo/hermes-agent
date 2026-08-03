@@ -152,7 +152,7 @@ def test_the_frame_no_longer_carries_the_count(isolate_agent_runtime_root):
     frame = snapshot.build_snapshot()
     assert "repo_bundles" not in frame["migration"]["counts"]
     assert "migration" not in frame["runtime_config"]
-    assert frame["parity"]["contract_version"] == 51
+    assert frame["parity"]["contract_version"] == 52
 
 
 def test_the_surviving_counts_are_untouched(isolate_agent_runtime_root):

@@ -1215,6 +1215,27 @@ def build_parser(parent_subparsers) -> None:
     read_projection.add_argument("--json", action="store_true")
     read_projection.set_defaults(func=_cmd_read_projection)
 
+    # `harness work` — the operator's view of background work in flight
+    # (terminal processes, subagent delegations, in-flight chat turns, MCP
+    # servers, cron jobs). `list`/`peek` are strictly read-only; `cancel` is a
+    # stage42 mutation verb and carries the confirm + replay guards.
+    work = subs.add_parser("work", help="Background work running right now (list / peek / cancel)")
+    work_subs = work.add_subparsers(dest="work_command", required=True)
+    work_list = work_subs.add_parser("list", help="Every piece of running background work, with per-source health")
+    work_list.add_argument("--kind", default=None, help="Only rows of this kind (terminal, delegation, chat_turn, mcp_server, cron_job, dispatch)")
+    _add_stage42_global_args(work_list)
+    work_list.set_defaults(func=_cmd_work_list)
+    work_peek = work_subs.add_parser("peek", help="Bounded read-only look at one item's recent output/progress")
+    work_peek.add_argument("work_id", help="Work id from `harness work list`, e.g. terminal:sess-1")
+    _add_stage42_global_args(work_peek)
+    work_peek.set_defaults(func=_cmd_work_peek)
+    work_cancel = work_subs.add_parser("cancel", help="Interrupt one piece of running work through its owning subsystem")
+    work_cancel.add_argument("work_id", help="Work id from `harness work list`")
+    work_cancel.add_argument("--reason", default="operator_cancel", help="Recorded interrupt reason")
+    work_cancel.add_argument("--issued-at", dest="issued_at", default=None, help="ISO-8601 issue timestamp; a cancel issued before the work started is superseded instead of applied")
+    _add_stage42_global_args(work_cancel, mutation=True)
+    work_cancel.set_defaults(func=_cmd_work_cancel)
+
     pets = subs.add_parser("pets", help="Mission Control Petdex bridge")
     pets_subs = pets.add_subparsers(dest="pets_command", required=True)
     pets_gallery = pets_subs.add_parser("gallery", help="List Petdex pets for Launcher")

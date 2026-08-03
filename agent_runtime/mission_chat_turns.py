@@ -684,6 +684,61 @@ def inflight_chat_session_roots() -> list[str]:
     return roots
 
 
+def inflight_turn_rows() -> list[dict[str, Any]]:
+    """Every in-flight turn RECORD across every session, bounded and safe.
+
+    ``inflight_chat_session_roots`` answers "which sessions owe a sweep?" — a
+    set of ids. The ``running_work`` projection asks a different question:
+    "which turns are in flight right now, and since when?", which needs the
+    records themselves. Deriving that from the roots is not possible: the
+    session FILE stem is a one-way digest of the session KEY, while the root id
+    lives in record metadata and the two are not interchangeable, so a caller
+    holding only a root cannot get back to the records it came from.
+
+    Same scan discipline as the roots walk: read-only, torn/unreadable files
+    skipped, every record passed through ``_safe_record`` so callers see the
+    bounded, redaction-safe projection rather than raw journal contents. The
+    ``session_id`` carried on each row is the record's own root/active id — the
+    same field the roots walk reads — so a record predating that metadata
+    reports an empty session rather than a fabricated one.
+
+    Ordered by turn start (``started_at``, falling back to ``updated_at``) so
+    the oldest in-flight work sorts first, matching the C8 replay ordering
+    ``mission_chat_turn_records`` already uses.
+    """
+
+    _migrate_legacy_if_present()
+    rows: list[dict[str, Any]] = []
+    for path in _iter_session_files():
+        for message_key, record in _read_session_map(path).items():
+            if not isinstance(record, dict):
+                continue
+            if _record_state(record) not in INFLIGHT_TURN_STATES:
+                continue
+            safe_key = safe_assignment_text(message_key, limit=240)
+            if not safe_key:
+                continue
+            safe_record = _safe_record(record, client_message_id=safe_key)
+            if safe_record is None:
+                continue
+            # Elements are the turn's projected message content; the projection
+            # only needs identity + timing, and carrying them would put chat
+            # text on a HUD wire that has no reader for it.
+            safe_record.pop("elements", None)
+            safe_record["session_id"] = safe_assignment_text(
+                record.get("root_chat_session_id") or record.get("active_session_id"),
+                limit=240,
+            )
+            rows.append(safe_record)
+    return sorted(
+        rows,
+        key=lambda item: (
+            str(item.get("started_at") or item.get("updated_at") or ""),
+            str(item.get("client_message_id") or ""),
+        ),
+    )
+
+
 def _mutate_session(
     session_key: str,
     mutator: Callable[[dict[str, Any]], tuple[bool, _T]],

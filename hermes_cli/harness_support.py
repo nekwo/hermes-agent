@@ -130,6 +130,13 @@ ERROR_EXIT_CODES = {
     "missing_skill": 6,
     "skill_install_failed": 6,
     "profile_not_ready": 6,
+    # `harness work cancel` refusals. Split on WHY, because the operator's next
+    # move differs: `cancel_unsupported` means this kind of work has no
+    # interrupt seam at all (nothing to retry — a precondition, 6), while
+    # `cancel_unavailable` / `cancel_failed` mean the owning subsystem is not
+    # reachable from this process or refused the interrupt (an infra condition,
+    # 7, retryable from the lane that owns the work).
+    "cancel_unsupported": 6,
     "confirmation_required": 8,
     # Runtime / infra (7)
     "runtime_unavailable": 7,
@@ -146,6 +153,8 @@ ERROR_EXIT_CODES = {
     "install_venv_failed": 7,
     "install_postinstall_failed": 7,
     "install_dependency_missing": 7,
+    "cancel_unavailable": 7,
+    "cancel_failed": 7,
     # Data integrity (1)
     "store_corrupt": 1,
     "event_payload_too_large": 1,
@@ -353,11 +362,34 @@ def _table_output(data: dict, *, wide: bool = False) -> str:
     return "  ".join(str(data.get(key, "")) for key in keys) if keys else emit_json(data)
 
 
-def _require_yes(args, code: str = "confirmation_required") -> bool:
+def _require_yes(
+    args,
+    code: str = "confirmation_required",
+    *,
+    message: str | None = None,
+    safe_details: dict | None = None,
+) -> bool:
+    """The ONE confirmation chokepoint for destructive harness verbs.
+
+    ``message`` / ``safe_details`` exist so a verb can name WHAT it is about to
+    destroy. A caller told to re-run with ``--yes`` against a bare "this
+    destructive operation" string is confirming a SENTENCE, not a target — and
+    on a lane where ids are opaque (``terminal:sess-8f2c``) that is precisely
+    how the wrong thing gets killed. Both are optional and default to the
+    historical text, so every existing caller stays byte-identical; a verb that
+    CAN identify its target passes it here rather than printing a competing
+    confirmation envelope of its own.
+    """
+
     if getattr(args, "yes", False) or getattr(args, "dry_run", False):
         return True
     _print_stage42(
-        _error_envelope(code, "This destructive operation requires --yes.", retryable=False),
+        _error_envelope(
+            code,
+            message or "This destructive operation requires --yes.",
+            retryable=False,
+            safe_details=safe_details,
+        ),
         args=args,
         default_output="json",
     )

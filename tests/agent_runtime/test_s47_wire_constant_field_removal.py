@@ -107,8 +107,13 @@ S47_CONTRACT_VERSION = 46
 #: ``migration.counts.repo_bundles`` leave the frame. This file carries the only
 #: live pin on the emitted value, so it tracks the CURRENT contract while
 #: ``S47_CONTRACT_VERSION`` stays as this wave's historical mark -- the frame may
-#: never go back below it.
-CURRENT_CONTRACT_VERSION = 51
+#: never go back below it. WP-H1 moved it 51 -> 52 -- the first ADDITIVE move in
+#: this series (the ``running_work`` section arrives rather than fields
+#: leaving). The pin still has to travel: the Launcher's
+#: ``MissionSnapshotEnvelope.health()`` requires EXACT contract equality, so an
+#: additive section under an unbumped version would be invisible rather than
+#: merely unread.
+CURRENT_CONTRACT_VERSION = 52
 
 
 def _function(module, name: str) -> ast.FunctionDef:

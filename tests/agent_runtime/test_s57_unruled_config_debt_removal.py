@@ -262,7 +262,7 @@ def test_no_removed_field_reaches_the_emitted_frame(name, isolate_agent_runtime_
 def test_the_frame_still_carries_the_surviving_scalar(isolate_agent_runtime_root):
     frame = snapshot.build_snapshot()
     assert SURVIVING_SCALAR in frame["runtime_config"]
-    assert frame["parity"]["contract_version"] == 51
+    assert frame["parity"]["contract_version"] == 52
 
 
 # --------------------------------------------------------------------------

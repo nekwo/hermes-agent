@@ -113,6 +113,14 @@ _FINGERPRINT_STORE_DIRS = (
     "realms",
 )
 
+# The ``running_work`` durable stores (``processes.json``, ``state.db``) are
+# fingerprinted too, but they live under the HERMES **home** rather than the
+# agent-runtime store root — on a profiled install those are genuinely
+# different directories — so they cannot ride the two tuples above. Their one
+# path authority is ``agent_runtime.running_work.running_work_store_paths``,
+# called from ``_runtime_state_fingerprint`` below; duplicating the names here
+# would stand up a second list free to drift from the projection's.
+
 
 _FINGERPRINT_BOARD_CARD_CAP = 600  # bounded per-board card stat; remainder is rare + also evented
 
@@ -192,6 +200,18 @@ def _runtime_state_fingerprint() -> tuple | None:
         _stat(root / name)
     for name in _FINGERPRINT_STORE_DIRS:
         _stat(root / name)
+    # Background-work stores hang off the HERMES home, not the store root, and
+    # are resolved through the head-home scope for the same reason the chat
+    # SessionDB below is: ``persona_profile_context`` flips ambient HERMES_HOME
+    # process-globally while a persona turn runs in THIS process, so an ambient
+    # read here would fingerprint whichever profile happened to be mid-turn.
+    try:
+        from agent_runtime.running_work import running_work_store_paths
+
+        for path in running_work_store_paths():
+            _stat(path)
+    except Exception:
+        parts.append(("running_work_stores", -1, -1))
     # Event-log rotation (C6a) moves appends off the static "events.jsonl" onto a
     # rotating live slice, so the _FINGERPRINT_ROOT_FILES entry above freezes once
     # the log rotates. Stat the manifest (flips on each rotation) AND the resolved

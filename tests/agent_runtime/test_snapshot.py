@@ -26,7 +26,7 @@ def _task() -> Task:
 
 def test_snapshot_builds_without_stage_graph(isolate_agent_runtime_root) -> None:
     snapshot = build_snapshot()
-    assert snapshot["parity"]["contract_version"] == 51
+    assert snapshot["parity"]["contract_version"] == 52
     assert "goals" not in snapshot
     assert "boards" in snapshot
 
@@ -40,5 +40,41 @@ def test_snapshot_stage_projections_are_empty_after_graph_removal(isolate_agent_
 def test_write_snapshot_remains_importable_and_persists(isolate_agent_runtime_root) -> None:
     result = write_snapshot(build_snapshot())
 
-    assert result["parity"]["contract_version"] == 51
+    assert result["parity"]["contract_version"] == 52
     assert paths.snapshot_path().exists()
+
+
+def test_snapshot_carries_the_running_work_section(isolate_agent_runtime_root) -> None:
+    """Contract 52's addition: rows + per-source health, on every frame.
+
+    ``sources`` is asserted alongside ``rows`` on purpose — a consumer handed
+    rows without the health block reads an unreadable lane as "nothing running",
+    which is the exact silent lie the projection exists to retire.
+    """
+
+    section = build_snapshot()["running_work"]
+
+    assert set(section) == {"rows", "sources", "counts"}
+    assert isinstance(section["rows"], list)
+    assert set(section["sources"]) == {
+        "terminal",
+        "delegation",
+        "chat_turn",
+        "mcp_server",
+        "cron_job",
+    }
+    for name, entry in section["sources"].items():
+        assert entry["status"] in {"ok", "unavailable"}, name
+    assert section["counts"]["total"] == len(section["rows"])
+
+
+def test_running_work_reports_its_own_completeness_and_timing(
+    isolate_agent_runtime_root,
+) -> None:
+    """A new projection that skipped the accountant would drop rows invisibly."""
+
+    snapshot = build_snapshot()
+
+    completeness = snapshot["parity"]["completeness"]["running_work"]
+    assert set(completeness) >= {"considered", "included", "dropped", "reasons", "by_design"}
+    assert "running_work" in snapshot["parity"]["sections_ms"]

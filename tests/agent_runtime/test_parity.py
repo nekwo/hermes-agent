@@ -102,10 +102,16 @@ def test_build_snapshot_completeness_rows_all_carry_by_design(isolate_agent_runt
     # three rows at zero rather than no rows at all. The pin moves to the exact
     # keyset so a FOURTH projection appearing (or one of these vanishing) still
     # turns this red, which "== {}" would no longer do.
+    #
+    # WP-H1 (2026-08-03) is that fourth projection, and this red is the pin
+    # working: `running_work` accounts its own drops (exited PIDs, recycled
+    # PIDs, bounded tails, lane caps) and would otherwise have shed rows with no
+    # completeness row to declare them.
     assert set(completeness) == {
         "persona_chat_history",
         "persona_chat_trace",
         "operator_conversation",
+        "running_work",
     }
     assert all(row["considered"] == 0 for row in completeness.values())
     for projection, row in completeness.items():
