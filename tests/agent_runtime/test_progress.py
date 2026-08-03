@@ -434,3 +434,65 @@ def test_append_bounded_event_degrades_oversized_output(isolate_agent_runtime_ro
     assert "output" not in rows[0].payload
     assert rows[0].payload["output_truncated"] is True
     assert rows[0].payload["tool_name"] == "terminal"
+
+
+# ── live chat-log mirror ───────────────────────────────────────────────────
+#
+# The sink is the ONE seam that knows a chat turn is running a tool right now.
+# Mirroring compact tool lines into the session's live log is what makes "what
+# is this teammate doing?" answerable by grep/tail while the turn is still in
+# flight — the EventLog rows stay the authority.
+
+
+def test_chat_progress_sink_mirrors_tool_lines_into_the_live_chat_log(
+    isolate_agent_runtime_root, tmp_path, monkeypatch
+):
+    import json
+
+    from agent_runtime.chat_live_log import chat_live_log_path, reset_chat_live_log_state
+
+    monkeypatch.setenv("HERMES_HEAD_HOME", str(tmp_path))
+    reset_chat_live_log_state()
+    try:
+        sink = ChatProgressSink(
+            session_id="chat_1", persona_id="dev", event_log=EventLog(), turn_id="turn-1"
+        )
+        sink.emit("run.tool.started", {"type": "run.tool.started", "tool_name": "terminal"})
+        sink.emit(
+            "run.tool.finished",
+            {"type": "run.tool.finished", "tool_name": "terminal", "status": "passed"},
+        )
+        # run.progress carries signal but is NOT a tool transition — it stays off
+        # the mirror so the file reads as a transcript, not a second event log.
+        sink.emit(
+            "run.progress",
+            {"type": "run.progress", "reasoning_summary": "thinking about it"},
+        )
+
+        path = chat_live_log_path("chat_1")
+        rows = [
+            json.loads(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        tools = [row for row in rows if row.get("kind") == "tool"]
+        assert [(row["tool"], row["status"], row["turn_id"]) for row in tools] == [
+            ("terminal", "started", "turn-1"),
+            ("terminal", "passed", "turn-1"),
+        ]
+    finally:
+        reset_chat_live_log_state()
+
+
+def test_chat_progress_sink_survives_a_broken_mirror(isolate_agent_runtime_root, monkeypatch):
+    # A mirror failure must never cost the turn its canonical EventLog row.
+    from agent_runtime import chat_live_log
+
+    def _boom(**kwargs):
+        raise OSError("mirror gone")
+
+    monkeypatch.setattr(chat_live_log, "record_chat_tool", _boom)
+    log = EventLog()
+    sink = ChatProgressSink(session_id="chat_1", persona_id="dev", event_log=log)
+    sink.emit("run.tool.started", {"type": "run.tool.started", "tool_name": "terminal"})
+    assert [event.type for event in log.for_session("chat_1")] == ["run.tool.started"]

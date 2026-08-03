@@ -447,6 +447,43 @@ AGENT_CHAT_OPEN_SCHEMA = {
 }
 
 
+AGENT_CHAT_LOG_PATH_SCHEMA = {
+    "name": "agent_chat_log_path",
+    "description": (
+        "Get the FILE PATH of a teammate thread's live transcript log so you can grep/glob/tail the WHOLE history with your own file tools — use this when 40 messages is not enough, when you need to search a long thread for something specific, or when you want to watch what a teammate is doing while they are still working. The file is append-only JSONL, keeps growing as the conversation and their tool activity continue (one line per message plus compact tool-start/finish lines), and is redaction-safe. Disambiguator: agent_chat_log_path gives you the full history as a greppable file; agent_chat_open is the quick bounded 40-message tail; agent_chat_threads lists your threads; agent_chat_send sends. Read-only: it never creates a chat session and never sends anything."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "persona_id": {
+                "type": "string",
+                "description": (
+                    "Target teammate: a persona id (e.g. 'dev') or a personainst_* handle for a "
+                    "specific instance. Display names are not accepted."
+                ),
+            },
+            "session_id": {
+                "type": "string",
+                "description": (
+                    "Optional specific thread. Omit for the default thread with the target. Must "
+                    "belong to that teammate's chat lane; otherwise the request is refused."
+                ),
+            },
+            "all_threads": {
+                "type": "boolean",
+                "description": (
+                    "Pass true to get a path for EVERY thread you share with this teammate instead "
+                    "of just the current default one. Useful when a task was dispatched into its own "
+                    "thread and you do not know which."
+                ),
+                "default": False,
+            },
+        },
+        "required": ["persona_id"],
+    },
+}
+
+
 def _scope_off() -> bool:
     return (os.environ.get("HERMES_AGENT_CHAT_SCOPE") or "open").strip().lower() == "off"
 
@@ -597,12 +634,18 @@ def _session_belongs_to_chat_lane(session_id: str, *, handle: str, default_sessi
     return len(tail) == 12 and all(ch in "0123456789abcdef" for ch in tail.lower())
 
 
-def agent_chat_open(*, persona_id, session_id=None, limit=20, requested_by_session=None):
-    if _scope_off():
-        return _refusal(
-            "agent_chat is disabled on this runtime (HERMES_AGENT_CHAT_SCOPE=off). "
-            "Tell the operator instead of retrying."
-        )
+def _resolve_chat_lane_target(persona_id, *, requested_by_session=None, verb="agent_chat_open"):
+    """Resolve a teammate address to THIS caller's chat lane with them.
+
+    ONE authority for "which thread is *our* thread with this teammate", shared
+    by the read-only companions: ``agent_chat_open`` reads its bounded tail,
+    ``agent_chat_log_path`` hands over its live log file. Keeping the addressing
+    and default-thread resolution here is what makes the scope guard impossible
+    to drift between the two — a widening in one would otherwise be invisible in
+    the other.
+
+    Returns ``(target, refusal_json)``; exactly one of the two is ``None``.
+    """
 
     from agent_runtime import workspace_scope
     from agent_runtime.config import ensure_persisted_personas, load_agent_runtime_config
@@ -614,29 +657,22 @@ def agent_chat_open(*, persona_id, session_id=None, limit=20, requested_by_sessi
         safe_assignment_text,
         sender_scope_workspace_id,
     )
-    from agent_runtime.persona_chat_history import (
-        MAX_PERSONA_CHAT_MESSAGE_TAIL,
-        persona_chat_session_messages,
-    )
     from hermes_cli import harness as _harness
 
     target = str(persona_id or "").strip()
     if not target:
-        return _refusal("agent_chat_open requires a persona_id.")
+        return None, _refusal(f"{verb} requires a persona_id.")
     try:
         resolved_persona = _harness._resolve_mission_chat_persona_id(target, target)
     except ValueError as exc:
-        return _refusal(safe_assignment_text(str(exc), limit=240), error_kind="unsupported_persona")
+        return None, _refusal(
+            safe_assignment_text(str(exc), limit=240), error_kind="unsupported_persona"
+        )
     # A personainst_* handle targets THAT specific instance's thread (a persona may
     # run several) and is used as-is; a BARE persona id is resolved through the
     # sender-scoped addressable roster below (placements shadow canonical), not
     # collapsed straight onto the canonical channel.
     target_instance_id = target if _looks_like_instance_handle(target) else None
-
-    try:
-        bounded = max(1, min(int(limit or 20), MAX_PERSONA_CHAT_MESSAGE_TAIL))
-    except (TypeError, ValueError):
-        bounded = 20
 
     cfg = load_agent_runtime_config()
     store = PersonaInstanceStore()
@@ -670,10 +706,45 @@ def agent_chat_open(*, persona_id, session_id=None, limit=20, requested_by_sessi
         if len(placements) == 1:
             target_instance_id = placements[0].id
 
-    handle = canonical_chat_instance_id(resolved_persona, target_instance_id)
-    default_session = resolve_default_chat_session_id_for_instance(
-        store, persona_id=resolved_persona, persona_instance_id=target_instance_id
+    return (
+        SimpleNamespace(
+            persona=resolved_persona,
+            instance_id=target_instance_id,
+            handle=canonical_chat_instance_id(resolved_persona, target_instance_id),
+            default_session=resolve_default_chat_session_id_for_instance(
+                store, persona_id=resolved_persona, persona_instance_id=target_instance_id
+            ),
+            store=store,
+        ),
+        None,
     )
+
+
+def agent_chat_open(*, persona_id, session_id=None, limit=20, requested_by_session=None):
+    if _scope_off():
+        return _refusal(
+            "agent_chat is disabled on this runtime (HERMES_AGENT_CHAT_SCOPE=off). "
+            "Tell the operator instead of retrying."
+        )
+
+    from agent_runtime.persona_chat_history import (
+        MAX_PERSONA_CHAT_MESSAGE_TAIL,
+        persona_chat_session_messages,
+    )
+
+    target, refusal = _resolve_chat_lane_target(
+        persona_id, requested_by_session=requested_by_session, verb="agent_chat_open"
+    )
+    if refusal is not None:
+        return refusal
+    resolved_persona = target.persona
+    handle = target.handle
+    default_session = target.default_session
+
+    try:
+        bounded = max(1, min(int(limit or 20), MAX_PERSONA_CHAT_MESSAGE_TAIL))
+    except (TypeError, ValueError):
+        bounded = 20
 
     requested_session = (str(session_id).strip() or None) if session_id else None
     if requested_session is not None:
@@ -727,6 +798,134 @@ def agent_chat_open(*, persona_id, session_id=None, limit=20, requested_by_sessi
     )
 
 
+def agent_chat_log_path(
+    *, persona_id, session_id=None, all_threads=None, requested_by_session=None
+):
+    """Hand back the PATH of a teammate thread's live transcript log.
+
+    The 40-message tail ``agent_chat_open`` returns is the right size for "what
+    did we last say"; it is the wrong tool for "search this whole thread" or
+    "watch what they are doing right now". SessionDB is not greppable, so the
+    runtime keeps an append-only JSONL mirror per session
+    (``agent_runtime/chat_live_log.py``) and this tool tells the caller where it
+    is. The head agent then uses its OWN file tools on it — no new transport, no
+    payload in the tool result, no context flood.
+
+    Live, not an export: the file keeps growing while the teammate works (message
+    lines from the persist chokepoints, compact tool lines from the chat progress
+    sink), so a caller can tail it mid-task.
+
+    Scope: IDENTICAL to ``agent_chat_open`` — the caller's shared threads with
+    that teammate only, via ``_resolve_chat_lane_target`` +
+    ``_session_belongs_to_chat_lane``. Handing over a filesystem path is if
+    anything a stronger capability than reading a tail, so it gets exactly the
+    same guard and the same typed ``foreign_session`` refusal.
+    """
+
+    if _scope_off():
+        return _refusal(
+            "agent_chat is disabled on this runtime (HERMES_AGENT_CHAT_SCOPE=off). "
+            "Tell the operator instead of retrying."
+        )
+
+    from agent_runtime.chat_live_log import chat_live_log_stats, ensure_chat_live_log
+
+    target, refusal = _resolve_chat_lane_target(
+        persona_id, requested_by_session=requested_by_session, verb="agent_chat_log_path"
+    )
+    if refusal is not None:
+        return refusal
+
+    requested_session = (str(session_id).strip() or None) if session_id else None
+    if requested_session is not None:
+        if not _session_belongs_to_chat_lane(
+            requested_session, handle=target.handle, default_session=target.default_session
+        ):
+            return _refusal(
+                f"session {requested_session!r} is not part of {target.persona}'s chat lane; "
+                "agent_chat_log_path only hands over logs for your shared threads with the "
+                "target, not arbitrary sessions.",
+                error_kind="foreign_session",
+                target_persona=target.persona,
+            )
+        wanted = [requested_session]
+    elif coerce_optional_flag(all_threads) is True:
+        wanted = _chat_lane_session_ids(target)
+    else:
+        wanted = [target.default_session] if target.default_session else []
+
+    threads = []
+    for candidate in wanted:
+        # Materializes pre-feature history from the same projection
+        # agent_chat_open reads, exactly once, then live appends continue it.
+        path = ensure_chat_live_log(candidate)
+        if path is None:
+            continue
+        stats = chat_live_log_stats(candidate) or {}
+        threads.append(
+            {
+                "session_id": candidate,
+                "path": str(path),
+                "bytes": stats.get("bytes", 0),
+                "message_count": stats.get("message_count", 0),
+                "tool_count": stats.get("tool_count", 0),
+                "last_activity": stats.get("last_activity"),
+                "rotated_path": stats.get("rotated_path"),
+                # Not a snapshot: this file keeps growing while the teammate
+                # works, so re-reading it later shows new activity.
+                "live": True,
+            }
+        )
+
+    return json.dumps(
+        {
+            "ok": True,
+            "target_persona": target.persona,
+            "handle": target.handle,
+            "count": len(threads),
+            "threads": threads,
+            "format": "jsonl",
+            "next_expected": (
+                "grep / tail the path with your own file tools; each line is JSON with "
+                "{ts, kind: message|tool, ...}. Re-read later to see new activity."
+            )
+            if threads
+            else "no thread with this teammate yet — nothing to read",
+        },
+        default=str,
+    )
+
+
+def _chat_lane_session_ids(target) -> list:
+    """Every session in the caller's chat lane with *target*, newest last.
+
+    Derived from the SAME history projection ``agent_chat_threads`` reads and
+    filtered through the SAME ``_session_belongs_to_chat_lane`` guard, so
+    ``all_threads`` can never widen the scope beyond what a single-thread
+    request would allow — it only saves the caller from guessing which
+    task-scoped thread a dispatch opened.
+    """
+
+    from agent_runtime.persona_chat_history import persona_chat_history_summary
+
+    found: list[str] = []
+    try:
+        rows = persona_chat_history_summary(persona_instances=target.store.list_all())
+    except Exception:  # pragma: no cover - a projection glitch must not blank the answer
+        rows = []
+    for row in rows or []:
+        candidate = str((row or {}).get("session_id") or "")
+        if not candidate or candidate in found:
+            continue
+        if _session_belongs_to_chat_lane(
+            candidate, handle=target.handle, default_session=target.default_session
+        ):
+            found.append(candidate)
+    if target.default_session and target.default_session not in found:
+        found.append(target.default_session)
+    return found
+
+
 registry.register(
     name="agent_chat_send",
     toolset="agent_chat",
@@ -771,4 +970,18 @@ registry.register(
     ),
     description="Review the recent message tail of your shared thread with a teammate (read-only, no mint).",
     emoji="📖",
+)
+
+registry.register(
+    name="agent_chat_log_path",
+    toolset="agent_chat",
+    schema=AGENT_CHAT_LOG_PATH_SCHEMA,
+    handler=lambda args, **kw: agent_chat_log_path(
+        persona_id=args.get("persona_id"),
+        session_id=args.get("session_id"),
+        all_threads=args.get("all_threads"),
+        requested_by_session=kw.get("session_id"),
+    ),
+    description="Get the file path of a teammate thread's live transcript log to grep/tail the full history (read-only, no mint).",
+    emoji="🗂️",
 )

@@ -2616,6 +2616,23 @@ def _mission_chat_commit_turn(plan) -> int:
                 "provider_submitted": False,
             },
         )
+        # Live-log mirror, at the write-ahead point ON PURPOSE: this lane does
+        # not append the operator row itself (native continuity: the runtime
+        # persists it with the turn), and a head agent checking on a teammate
+        # MID-TASK needs to see the order it was given before the turn ends —
+        # not only once the reply lands. Redacted through the same write
+        # boundary the persisted row crosses; deduped on
+        # (role, client_message_id) so a resend of this turn cannot double it.
+        _mirror_persona_chat_message(
+            session_db=session_db,
+            session_id=session_id,
+            role="user",
+            text=_redact_persona_chat_text(
+                message, limit=PERSONA_CHAT_OPERATOR_MESSAGE_LIMIT
+            ),
+            client_message_id=client_message_id,
+            turn_id=stream_emitter.turn_id,
+        )
         # Chained relays share one deadline: this hop's wall budget is capped
         # by the time left on the chain, and the deadline is seeded (root
         # turns mint it) so deeper hops inherit the same clock. Both facts come
@@ -2938,6 +2955,18 @@ def _mission_chat_commit_turn(plan) -> int:
         },
     )
     _route_turn_write(_settled, step="native_commit")
+    # The reply is durable in SessionDB (the runtime persisted it natively) and
+    # in the turn journal — so mirror it now, at the one point on this lane that
+    # KNOWS a real recorded reply exists. Deduped on (role, client_message_id),
+    # which is what makes the recovery/replay walks above safe to re-enter.
+    _mirror_persona_chat_message(
+        session_db=session_db,
+        session_id=session_id,
+        role="assistant",
+        text=reply_text,
+        client_message_id=client_message_id,
+        turn_id=stream_emitter.turn_id,
+    )
     # The native reply is durable. Projection/bookkeeping failures deliberately
     # leave `native_committed` intact so an idempotent retry can repair the
     # projection without ever invoking the provider again.
@@ -5604,23 +5633,19 @@ def _append_persona_operator_turn(
     safe_message = _redact_persona_chat_text(message, limit=PERSONA_CHAT_OPERATOR_MESSAGE_LIMIT)
     if not safe_message:
         return True
-    try:
-        session_db.append_message(
-            session_id=session_id,
-            role="user",
-            content=safe_message,
-            # Relayed incoming rows carry the sending agent's identity here (the
-            # pre_trace_ack typed-marker-in-finish_reason precedent); operator/CLI
-            # sends pass relay_marker=None → finish_reason stays None, unchanged.
-            finish_reason=relay_marker,
-            platform_message_id=safe_assignment_text(client_message_id, limit=200)
-            or None,
-        )
-    except Exception as exc:
-        return _persona_chat_persistence_failed(
-            "operator_append", exc, required=required
-        )
-    return True
+    return _persist_persona_chat_row(
+        session_db=session_db,
+        session_id=session_id,
+        role="user",
+        text=safe_message,
+        client_message_id=safe_assignment_text(client_message_id, limit=200) or None,
+        # Relayed incoming rows carry the sending agent's identity here (the
+        # pre_trace_ack typed-marker-in-finish_reason precedent); operator/CLI
+        # sends pass relay_marker=None → finish_reason stays None, unchanged.
+        relay_marker=relay_marker,
+        step="operator_append",
+        required=required,
+    )
 
 
 def _append_persona_assistant_text(
@@ -5652,18 +5677,121 @@ def _append_persona_assistant_text(
         client_message_id=safe_client_message_id,
     ).get("assistant"):
         return True
+    return _persist_persona_chat_row(
+        session_db=session_db,
+        session_id=session_id,
+        role="assistant",
+        text=safe,
+        client_message_id=safe_client_message_id or None,
+        step="assistant_append",
+        required=required,
+    )
+
+
+def _persist_persona_chat_row(
+    *,
+    session_db,
+    session_id: str,
+    role: str,
+    text: str,
+    client_message_id: str | None,
+    step: str,
+    required: bool,
+    relay_marker: str | None = None,
+) -> bool:
+    """THE explicit-append seam for persona-chat rows.
+
+    Both ``_append_persona_operator_turn`` and ``_append_persona_assistant_text``
+    funnel their ``session_db.append_message`` through here so the SessionDB
+    write and its live-log mirror can never drift apart — one write, one mirror,
+    no copy-pasted hook per call site.
+
+    Only *this* lane's rows pass through: since native session continuity
+    landed, the mission-chat handler no longer appends the operator/assistant
+    rows itself (the runtime persists them as part of the turn — see
+    ``profile_runner.stage_persona_chat_user_row_marker``), so that lane mirrors
+    from its own chokepoint via ``_mirror_persona_chat_message``. Two lanes,
+    two persistence mechanisms, ONE mirror helper.
+    """
+
+    # Materialize any PRE-EXISTING history into the mirror before the durable
+    # write lands. Ordering is load-bearing: the one-shot backfill reads the
+    # same SessionDB this is about to append to, so preparing afterwards would
+    # let the backfill and this row both claim the message.
+    _mirror_persona_chat_message(
+        session_db=session_db, session_id=session_id, prepare_only=True
+    )
     try:
         session_db.append_message(
             session_id=session_id,
-            role="assistant",
-            content=safe,
-            platform_message_id=safe_client_message_id or None,
+            role=role,
+            content=text,
+            finish_reason=relay_marker,
+            platform_message_id=client_message_id,
         )
     except Exception as exc:
-        return _persona_chat_persistence_failed(
-            "assistant_append", exc, required=required
-        )
+        return _persona_chat_persistence_failed(step, exc, required=required)
+    _mirror_persona_chat_message(
+        session_db=session_db,
+        session_id=session_id,
+        role=role,
+        text=text,
+        client_message_id=client_message_id,
+    )
     return True
+
+
+def _mirror_persona_chat_message(
+    *,
+    session_db=None,
+    session_id: str,
+    role: str = "",
+    text: str = "",
+    client_message_id: str | None = None,
+    turn_id: str | None = None,
+    prepare_only: bool = False,
+) -> None:
+    """Mirror ONE persisted persona-chat message into the live chat log.
+
+    The single hook every persona-chat persist lane calls. The text handed in
+    has ALREADY crossed the ``_redact_persona_chat_text`` write boundary (or the
+    read projection's), so the mirror is redaction-safe by construction; the
+    mirror re-runs the shared secret rule anyway, because "the caller already
+    did it" is exactly how a redaction boundary rots.
+
+    ``prepare_only`` materializes the session's pre-existing history without
+    recording anything — what a caller uses immediately BEFORE its durable
+    write, so the one-shot backfill cannot race the row being written.
+
+    Best effort by contract: the mirror is a regenerable convenience artifact
+    (``agent_runtime/chat_live_log.py``), and a mirror failure must never take
+    down a chat turn whose transcript is already durable. Failures are counted
+    inside the mirror module rather than swallowed anonymously.
+
+    Function-local import: this file is exec'd into ``harness.py``'s globals, so
+    a module-level import here would NameError on a live turn.
+    """
+
+    try:
+        from agent_runtime.chat_live_log import (
+            ensure_chat_live_log,
+            record_chat_message,
+        )
+
+        if prepare_only:
+            ensure_chat_live_log(session_id, session_db=session_db)
+            return None
+        record_chat_message(
+            session_id=session_id,
+            role=role,
+            text=text,
+            turn_id=turn_id,
+            client_message_id=client_message_id,
+            session_db=session_db,
+        )
+    except Exception:
+        return None
+    return None
 
 
 def _update_persona_chat_token_counts(*, session_db, session_id: str, result) -> None:

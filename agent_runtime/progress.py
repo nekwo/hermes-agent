@@ -140,6 +140,7 @@ class ChatProgressSink:
                     self.before_first_trace(safe_payload)
             if self.on_trace is not None:
                 self.on_trace(safe_payload)
+            self._mirror_tool_line(event_type, safe_payload)
             _append_bounded_event(
                 self.event_log,
                 Event(
@@ -155,6 +156,36 @@ class ChatProgressSink:
             )
         except Exception:
             return None
+
+    def _mirror_tool_line(self, event_type: str, safe_payload: dict[str, Any]) -> None:
+        """Mirror tool starts/finishes into the session's live chat log.
+
+        The EventLog rows above are the authority; this is the greppable
+        companion. A head agent tailing
+        ``<head-home>/chat_live_logs/<session_id>.jsonl`` needs "what is this
+        teammate doing right now" in the SAME stream as the messages — otherwise
+        a long mid-task turn reads as silence. Compact by design (tool + status,
+        no payload) so the mirror stays a transcript, not a second event log.
+
+        Best effort, and deliberately ahead of the EventLog append so a mirror
+        problem can never be mistaken for — or caused by — an event problem.
+        """
+
+        if event_type not in {"run.tool.started", "run.tool.finished"}:
+            return None
+        try:
+            from .chat_live_log import record_chat_tool
+
+            record_chat_tool(
+                session_id=self.session_id,
+                tool=safe_payload.get("tool_name") or safe_payload.get("tool"),
+                status=safe_payload.get("status")
+                or ("started" if event_type.endswith("started") else "finished"),
+                turn_id=self.turn_id,
+            )
+        except Exception:
+            return None
+        return None
 
     def callback(self) -> "Callable[[dict[str, Any]], None]":
         """Adapter matching the runner's ``progress_callback`` contract."""

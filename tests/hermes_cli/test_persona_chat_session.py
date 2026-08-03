@@ -6,6 +6,8 @@ redaction-on-write boundary. The previous gap was that this orchestration was
 exception-wrapped and never directly asserted, so a regression would fail silently.
 """
 
+import pytest
+
 from hermes_cli.harness import (
     _append_persona_assistant_text,
     _append_persona_operator_turn,
@@ -269,3 +271,83 @@ def test_chat_body_truncation_is_marked_not_silent():
     safe = _redact_persona_chat_text("x" * 250, limit=200)
     assert safe.startswith("x" * 200)
     assert safe.endswith("… [truncated]")
+
+
+# ── live-log mirror at the persist chokepoint ──────────────────────────────
+#
+# ``_persist_persona_chat_row`` is the ONE explicit-append seam both helpers
+# funnel through, and the ONE place this lane mirrors from. These pin that the
+# mirror rides the write (not a separate call site that can be forgotten) and
+# that it inherits the redaction boundary rather than re-deciding it.
+
+
+def _mirror_lines(session_id):
+    import json
+
+    from agent_runtime.chat_live_log import chat_live_log_path
+
+    path = chat_live_log_path(session_id)
+    if path is None or not path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _mirror_messages(session_id):
+    return [row for row in _mirror_lines(session_id) if row.get("kind") == "message"]
+
+
+@pytest.fixture(autouse=True)
+def _clean_live_log_state():
+    from agent_runtime.chat_live_log import reset_chat_live_log_state
+
+    reset_chat_live_log_state()
+    yield
+    reset_chat_live_log_state()
+
+
+def test_persisted_rows_are_mirrored_into_the_live_log():
+    db = FakeSessionDB()
+    _append_persona_operator_turn(
+        session_db=db, session_id="s1", message="hi neko", client_message_id="cm-1"
+    )
+    _append_persona_assistant_text(
+        session_db=db, session_id="s1", text="on it", client_message_id="cm-1"
+    )
+    rows = _mirror_messages("s1")
+    assert [(row["role"], row["text"]) for row in rows] == [
+        ("operator", "hi neko"),
+        ("agent", "on it"),
+    ]
+    assert [row["client_message_id"] for row in rows] == ["cm-1", "cm-1"]
+
+
+def test_mirror_never_carries_a_secret_seeded_through_the_chokepoint():
+    # The redactor runs BEFORE the mirror sees the text (the mirror re-applies
+    # the shared rule as well), so a secret can never reach the greppable file.
+    db = FakeSessionDB()
+    _append_persona_operator_turn(
+        session_db=db, session_id="s1", message="deploy with api_key=sk-supersecret123 please"
+    )
+    _append_persona_assistant_text(
+        session_db=db, session_id="s1", text="using token: ghp_leakedtoken00000"
+    )
+    blob = str(_mirror_lines("s1"))
+    assert "sk-supersecret123" not in blob
+    assert "ghp_leakedtoken00000" not in blob
+
+
+def test_a_failed_sessiondb_append_is_not_mirrored():
+    # The mirror follows the durable write; it must never claim a message the
+    # transcript of record never accepted.
+    class ExplodingDB(FakeSessionDB):
+        def append_message(self, *args, **kwargs):
+            raise RuntimeError("db down")
+
+    assert not _append_persona_operator_turn(
+        session_db=ExplodingDB(), session_id="s1", message="hi"
+    )
+    assert _mirror_messages("s1") == []
