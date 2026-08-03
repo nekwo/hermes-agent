@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -46,6 +47,25 @@ def home(tmp_path, monkeypatch):
     head.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(running_work, "_head_home", lambda: (head, "test_home"))
     return head
+
+
+@pytest.fixture
+def real_home(tmp_path, monkeypatch):
+    """A real env-driven home, exercising the ACTUAL resolver rather than a stub.
+
+    The ``home`` fixture stubs ``_head_home`` so lane tests can be about lanes.
+    Convergence tests must not: the whole class of bug they cover is the reader
+    and the writer disagreeing about which directory they mean, and a stubbed
+    reader cannot disagree with anything.
+    """
+
+    profile = tmp_path / "profiles" / "neko"
+    head = tmp_path / "profiles" / "base"
+    profile.mkdir(parents=True, exist_ok=True)
+    head.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HERMES_HOME", str(profile))
+    monkeypatch.setenv("HERMES_HEAD_HOME", str(head))
+    return profile, head
 
 
 def _self_start_time() -> int | None:
@@ -92,6 +112,141 @@ def _seed_delegation_db(home, rows) -> None:
 
 def _rows_of_kind(payload, kind):
     return [row for row in payload["rows"] if row["kind"] == kind]
+
+
+# --- writer / reader convergence --------------------------------------------
+#
+# The projection reads two stores that OTHER processes write. If the two sides
+# resolve different directories the failure is silent and total: every source
+# reports `ok`, the row list is empty, and an operator watching a 20-minute
+# build is told nothing is running. These tests pin the agreement itself.
+
+
+def test_the_writers_and_the_reader_resolve_the_same_directory(real_home):
+    """Under the launcher's own layout: HERMES_HOME=profile, HEAD_HOME=base."""
+
+    from tools import process_registry
+    from tools.async_delegation import _db_path
+
+    profile, head = real_home
+    paths = running_work_store_paths()
+
+    assert process_registry.checkpoint_path() == paths[0]
+    assert _db_path() == paths[1]
+    # ...and that shared directory is the operator's head, not the profile the
+    # ambient env var happens to point at.
+    assert paths[0].parent == head
+    assert paths[0].parent != profile
+
+
+def test_a_checkpoint_written_by_the_writer_is_seen_by_the_reader(real_home):
+    """End-to-end: the writer's own path, read back through the projection."""
+
+    from tools import process_registry
+
+    _write_checkpoint(
+        process_registry.checkpoint_path().parent,
+        [
+            {
+                "session_id": "sess-converged",
+                "command": "npm run build",
+                "pid": os.getpid(),
+                "pid_scope": "host",
+                "host_start_time": _self_start_time(),
+                "started_at": 1_700_000_000.0,
+            }
+        ],
+    )
+
+    rows = _rows_of_kind(build_running_work(), KIND_TERMINAL)
+
+    assert [row["work_id"] for row in rows] == ["terminal:sess-converged"]
+
+
+def test_with_no_explicit_head_both_sides_fall_back_to_the_ambient_home(
+    tmp_path, monkeypatch
+):
+    """Gateway / TUI / plain CLI set no head — behaviour must be unchanged."""
+
+    from tools import process_registry
+    from tools.async_delegation import _db_path
+
+    ambient = tmp_path / "ambient"
+    ambient.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(ambient))
+    monkeypatch.delenv("HERMES_HEAD_HOME", raising=False)
+
+    assert process_registry.checkpoint_path() == ambient / "processes.json"
+    assert _db_path() == ambient / "state.db"
+    assert running_work_store_paths() == (
+        ambient / "processes.json",
+        ambient / "state.db",
+    )
+    assert _head_home_provenance() == "ambient_home"
+
+
+def test_an_explicit_head_is_reported_as_such_in_the_source_detail(real_home):
+    assert _head_home_provenance() == "head_home"
+
+
+def _head_home_provenance() -> str:
+    return running_work._head_home()[1]
+
+
+def test_the_checkpoint_path_is_resolved_per_call_not_frozen_at_import(
+    tmp_path, monkeypatch
+):
+    """An import-time bind depended on WHEN the module was first imported.
+
+    ``persona_profile_context`` flips HERMES_HOME process-globally mid-turn, so
+    a frozen path silently followed whichever profile happened to be active at
+    first import.
+    """
+
+    from tools import process_registry
+
+    first = tmp_path / "one"
+    second = tmp_path / "two"
+    first.mkdir()
+    second.mkdir()
+
+    monkeypatch.setenv("HERMES_HOME", str(first))
+    monkeypatch.delenv("HERMES_HEAD_HOME", raising=False)
+    assert process_registry.checkpoint_path().parent == first
+
+    monkeypatch.setenv("HERMES_HOME", str(second))
+    assert process_registry.checkpoint_path().parent == second
+
+
+def test_a_recorded_head_survives_a_persona_profile_flip(tmp_path, monkeypatch):
+    """The case the contextvar exists for: a turn running under a profile home.
+
+    ``persona_profile_context`` records the operator home BEFORE diverting the
+    ambient one, so background work spawned inside a persona turn still lands
+    where the operator's projection reads it.
+    """
+
+    from hermes_constants import (
+        record_hermes_head_home_if_unset,
+        reset_hermes_head_home,
+    )
+    from tools import process_registry
+
+    operator = tmp_path / "operator"
+    persona = tmp_path / "persona"
+    operator.mkdir()
+    persona.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(operator))
+    monkeypatch.delenv("HERMES_HEAD_HOME", raising=False)
+
+    token = record_hermes_head_home_if_unset(operator)
+    try:
+        # The flip persona_profile_context performs.
+        monkeypatch.setenv("HERMES_HOME", str(persona))
+        assert process_registry.checkpoint_path().parent == operator
+        assert running_work_store_paths()[0].parent == operator
+    finally:
+        reset_hermes_head_home(token)
 
 
 # --- per-source fail-closed -------------------------------------------------
@@ -262,6 +417,99 @@ def test_a_dead_pid_is_dropped_through_the_accountant_not_in_silence(home):
 
     assert rows == []
     assert accountant.summary()["reasons"]["process_exited"] == 1
+
+
+def test_an_unreadable_start_time_is_unknown_not_recycled(home, monkeypatch):
+    """Absence of proof is not proof of absence.
+
+    ``get_process_start_time`` returns None on a permissions failure or an
+    unsupported platform. Comparing that against a real baseline yields False,
+    so an unreadable probe used to be indistinguishable from a recycled PID —
+    and silently DELETED a running build from the HUD, filed under "recycled".
+    """
+
+    import gateway.status
+
+    monkeypatch.setattr(gateway.status, "get_process_start_time", lambda _pid: None)
+    _write_checkpoint(
+        home,
+        [
+            {
+                "session_id": "sess-unreadable",
+                "command": "npm run build",
+                "pid": os.getpid(),
+                "pid_scope": "host",
+                "host_start_time": 12345,
+                "started_at": 1_700_000_000.0,
+            }
+        ],
+    )
+    accountant = ProjectionAccountant("running_work")
+
+    rows = _rows_of_kind(build_running_work(accountant), KIND_TERMINAL)
+
+    assert [row["work_id"] for row in rows] == ["terminal:sess-unreadable"]
+    assert rows[0]["status"] == STATUS_UNKNOWN
+    assert rows[0]["pid_verified"] is False
+    assert accountant.summary()["reasons"] == {}
+
+
+def test_a_raising_start_time_probe_is_also_unknown_not_recycled(home, monkeypatch):
+    import gateway.status
+
+    def _boom(_pid):
+        raise PermissionError("access denied")
+
+    monkeypatch.setattr(gateway.status, "get_process_start_time", _boom)
+    _write_checkpoint(
+        home,
+        [
+            {
+                "session_id": "sess-denied",
+                "command": "npm run build",
+                "pid": os.getpid(),
+                "pid_scope": "host",
+                "host_start_time": 12345,
+                "started_at": 1_700_000_000.0,
+            }
+        ],
+    )
+
+    rows = _rows_of_kind(build_running_work(), KIND_TERMINAL)
+
+    assert [row["status"] for row in rows] == [STATUS_UNKNOWN]
+
+
+@pytest.mark.parametrize(
+    "observed, baseline, expected",
+    [
+        (999, 999, running_work.PID_VERIFIED),
+        (1000, 999, running_work.PID_RECYCLED),
+        (None, 999, running_work.PID_START_TIME_UNREADABLE),
+        (999, None, running_work.PID_NO_BASELINE),
+    ],
+)
+def test_pid_identity_reports_a_distinct_verdict_per_case(
+    monkeypatch, observed, baseline, expected
+):
+    import gateway.status
+
+    monkeypatch.setattr(gateway.status, "_pid_exists", lambda _pid: True)
+    monkeypatch.setattr(gateway.status, "get_process_start_time", lambda _pid: observed)
+
+    alive, verified, verdict = running_work._pid_identity(4242, baseline)
+
+    assert alive is True
+    assert verdict == expected
+    assert verified is (expected == running_work.PID_VERIFIED)
+
+
+def test_a_dead_pid_reports_the_dead_verdict(monkeypatch):
+    import gateway.status
+
+    monkeypatch.setattr(gateway.status, "_pid_exists", lambda _pid: False)
+
+    assert running_work._pid_identity(4242, 999) == (False, False, running_work.PID_DEAD)
 
 
 def test_a_delegation_whose_owner_is_gone_is_not_reported_running(home):
@@ -497,22 +745,39 @@ def test_cron_ownership_requires_more_than_module_residency():
     """``mission_chat_turns`` imports the scheduler transitively — residency lies."""
 
     class _Bare:
-        def get_running_job_ids(self):
-            return frozenset()
+        pass
 
     class _Owner:
         _parallel_pool = object()
 
-        def get_running_job_ids(self):
-            return frozenset()
+    assert running_work._cron_owned_here(_Bare(), set()) is False
+    assert running_work._cron_owned_here(_Owner(), set()) is True
+    # A live running id proves ownership even before any pool is inspected.
+    assert running_work._cron_owned_here(_Bare(), {"job-1"}) is True
 
-    class _Busy:
-        def get_running_job_ids(self):
-            return frozenset({"job-1"})
 
-    assert running_work._cron_owned_here(_Bare()) is False
-    assert running_work._cron_owned_here(_Owner()) is True
-    assert running_work._cron_owned_here(_Busy()) is True
+def test_a_broken_scheduler_is_unreadable_not_someone_elses_process(home, monkeypatch):
+    """"The scheduler broke" and "I am not the scheduler" are different facts.
+
+    Only the first is actionable, and swallowing the exception into the
+    ownership predicate reported it as the second.
+    """
+
+    class _Broken:
+        def get_running_job_ids(self):
+            raise RuntimeError("scheduler exploded")
+
+    monkeypatch.setattr(
+        running_work,
+        "_module",
+        lambda name: _Broken() if name == "cron.scheduler" else None,
+    )
+
+    source = build_running_work()["sources"][KIND_CRON_JOB]
+
+    assert source["status"] == SOURCE_UNAVAILABLE
+    assert source["reason"] == "scheduler_unreadable"
+    assert source["detail"] == "RuntimeError"
 
 
 def test_mcp_ownership_requires_connection_state():
@@ -621,6 +886,62 @@ def test_every_row_carries_the_full_wire_shape(home):
     assert set(row["owner"]) == {"persona_id", "persona_instance_id", "session_id"}
     assert row["started_at"].startswith("2027-")
     assert row["elapsed_seconds"] >= 0
+
+
+def test_every_started_at_on_the_wire_carries_a_utc_offset(home, monkeypatch):
+    """The live registry emits naive LOCAL stamps; the wire must not.
+
+    Two rows built on different lanes would otherwise carry stamps in different
+    frames of reference with nothing marking which is which.
+    """
+
+    class _Registry:
+        def list_sessions(self):
+            return [
+                {
+                    "session_id": "sess-live",
+                    "command": "npm run dev",
+                    "pid": 4242,
+                    # Exactly what `time.strftime(..., time.localtime(...))`
+                    # produces: no offset, local clock.
+                    "started_at": "2026-08-03T10:00:00",
+                    "uptime_seconds": 30,
+                    "status": "running",
+                    "output_preview": "",
+                }
+            ]
+
+    class _Module:
+        process_registry = _Registry()
+
+    real_module = running_work._module
+    monkeypatch.setattr(
+        running_work,
+        "_module",
+        lambda name: _Module() if name == "tools.process_registry" else real_module(name),
+    )
+
+    row = _rows_of_kind(build_running_work(), KIND_TERMINAL)[0]
+
+    parsed = datetime.fromisoformat(row["started_at"])
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() == timedelta(0)
+    # ...and it is the SAME instant the registry meant, not a relabelled one.
+    assert parsed == datetime(2026, 8, 3, 10, 0, 0).astimezone(timezone.utc)
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("", ""),
+        ("not a stamp", ""),
+        # Already anchored: passed through, not re-interpreted.
+        ("2026-08-03T10:00:00+00:00", "2026-08-03T10:00:00+00:00"),
+        ("2026-08-03T10:00:00Z", "2026-08-03T10:00:00+00:00"),
+    ],
+)
+def test_anchored_and_unusable_stamps_are_left_alone(raw, expected):
+    assert running_work._iso_from_naive_local(raw) == expected
 
 
 @pytest.mark.parametrize(
@@ -782,6 +1103,9 @@ def test_cancel_routes_terminal_work_through_the_registry_kill_seam(home, monkey
     seen = {}
 
     class _Registry:
+        def get(self, session_id):
+            return object() if session_id == "sess-kill" else None
+
         def kill_process(self, session_id, *, source, consume_output):
             seen.update(
                 session_id=session_id, source=source, consume_output=consume_output
@@ -805,3 +1129,89 @@ def test_cancel_routes_terminal_work_through_the_registry_kill_seam(home, monkey
     # A cancel is not the agent reading its output: consuming here would
     # suppress the completion notification the agent is waiting on.
     assert seen["consume_output"] is False
+
+
+def test_cancelling_work_owned_by_another_process_says_so(home, monkeypatch):
+    """A durable-visible row this process cannot kill is `cancel_unavailable`.
+
+    Falling through to `kill_process` on a registry that never spawned it
+    returns `not_found`, which would tell an operator "no such work" about work
+    their own HUD is listing as running.
+    """
+
+    _write_checkpoint(
+        home,
+        [
+            {
+                "session_id": "sess-elsewhere",
+                "command": "long build",
+                "pid": os.getpid(),
+                "pid_scope": "host",
+                "host_start_time": _self_start_time(),
+                "started_at": 1_700_000_000.0,
+            }
+        ],
+    )
+
+    class _EmptyRegistry:
+        def get(self, session_id):
+            return None
+
+        def kill_process(self, *_args, **_kwargs):
+            raise AssertionError("must not reach the kill seam for foreign work")
+
+    class _Module:
+        process_registry = _EmptyRegistry()
+
+    real_module = running_work._module
+    monkeypatch.setattr(
+        running_work,
+        "_module",
+        lambda name: _Module() if name == "tools.process_registry" else real_module(name),
+    )
+
+    result = cancel_work("terminal:sess-elsewhere")
+
+    assert result["status"] == "error"
+    assert result["code"] == "cancel_unavailable"
+    assert result["detail"] == "not_in_process"
+    assert result["owning_lane"] == "serve"
+
+
+def test_cancelling_a_delegation_this_process_does_not_hold_says_so(home, monkeypatch):
+    _seed_delegation_db(
+        home,
+        [
+            (
+                "del-elsewhere",
+                "origin",
+                "parent",
+                "running",
+                1_700_000_000.0,
+                os.getpid(),
+                _self_start_time(),
+                "{}",
+            )
+        ],
+    )
+
+    class _Module:
+        @staticmethod
+        def list_async_delegations():
+            return []
+
+        @staticmethod
+        def interrupt_for_session(**_kwargs):
+            raise AssertionError("must not reach the interrupt seam")
+
+    real_module = running_work._module
+    monkeypatch.setattr(
+        running_work,
+        "_module",
+        lambda name: _Module if name == "tools.async_delegation" else real_module(name),
+    )
+
+    result = cancel_work("delegation:del-elsewhere")
+
+    assert result["code"] == "cancel_unavailable"
+    assert result["detail"] == "not_in_process"

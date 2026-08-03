@@ -266,6 +266,40 @@ def _parse_iso(text: Any) -> float | None:
     return parsed.timestamp()
 
 
+def _iso_from_naive_local(text: Any) -> str:
+    """UTC ISO-8601 for the naive LOCAL stamp the process registry emits.
+
+    ``process_registry.list_sessions`` formats ``started_at`` with
+    ``time.localtime`` and no offset, so the string is unanchored: two rows on
+    one wire would carry stamps in different frames of reference depending on
+    which lane produced them, and any consumer parsing them (the launcher's
+    elapsed clock, this module's own ``--issued-at`` replay guard) would be off
+    by the machine's UTC offset without anything looking wrong.
+
+    Normalizing HERE rather than in ``process_registry`` is deliberate: that
+    function has other consumers (the ``process`` tool's ``list`` action, the
+    goal-loop judge) whose displayed output would change under them. The
+    projection is the boundary that publishes a wire contract, so the
+    projection is where the stamp gets anchored.
+
+    Already-anchored input is passed through, and anything unparseable is
+    returned empty rather than guessed at.
+    """
+
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return ""
+    if parsed.tzinfo is None:
+        # `astimezone()` on a naive datetime interprets it as local time, which
+        # is exactly what `time.localtime` produced.
+        parsed = parsed.astimezone()
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
 def _elapsed(started_epoch: float | None, *, now: float) -> int:
     if started_epoch is None:
         return 0
@@ -290,27 +324,41 @@ def _module(name: str):
 def _head_home() -> tuple[Path | None, str]:
     """The durable home the background stores live under, plus its provenance.
 
-    Resolved through the chat head-home scope rather than ambient
-    ``get_hermes_home()`` because ``persona_profile_context`` flips that env var
-    process-globally during persona turns, and persona turns share a process
-    with snapshot builds.
+    This MUST resolve to the directory the WRITERS use, and now it does: this
+    function, ``process_registry.checkpoint_path`` and
+    ``async_delegation._db_path`` all call the same
+    ``get_hermes_background_work_home`` authority.
+
+    The first version resolved the CHAT head-home scope instead. That scope
+    consults a durable ``chat_head_home.json`` pointer the writers know nothing
+    about, so wherever the pointer disagreed with the writers' ambient home the
+    projection watched one directory while the work was recorded in another —
+    and reported "nothing running", with every source ``ok``, for the entire
+    life of a build. A confident empty answer is the worst failure this
+    projection can produce, and it was reachable on the launcher's own layout
+    (``HERMES_HOME=profiles/<profile>`` beside ``HERMES_HEAD_HOME=profiles/base``).
+
+    Ambient ``get_hermes_home()`` is not an option either: it is flipped
+    process-globally for the duration of a persona turn, and persona turns share
+    a process with snapshot builds. The head authority is correct in both
+    situations precisely because ``persona_profile_context`` records the
+    operator home BEFORE it diverts the ambient one.
     """
 
     try:
-        from .chat_session_scope import resolve_chat_session_scope
+        from hermes_constants import (
+            get_hermes_background_work_home,
+            hermes_head_home_is_authoritative,
+        )
 
-        scope = resolve_chat_session_scope()
-        head = getattr(scope, "head_home", None)
-        if head:
-            return Path(head), "head_home"
-    except Exception:
-        pass
-    try:
-        from hermes_constants import get_hermes_home
-
-        return Path(get_hermes_home()), "ambient_home"
+        home = Path(get_hermes_background_work_home())
     except Exception:
         return None, "unresolved"
+    try:
+        explicit = bool(hermes_head_home_is_authoritative())
+    except Exception:  # pragma: no cover - defensive
+        explicit = False
+    return home, "head_home" if explicit else "ambient_home"
 
 
 def running_work_store_paths() -> tuple[Path, ...]:
@@ -334,38 +382,66 @@ def running_work_store_paths() -> tuple[Path, ...]:
     return (head / _CHECKPOINT_FILENAME, head / _STATE_DB_FILENAME)
 
 
-def _pid_identity(pid: Any, expected_start: Any) -> tuple[bool, bool]:
-    """``(alive, verified)`` for a host PID against its spawn-time start ticks.
+#: ``_pid_identity`` verdicts. The split between the last two matters more than
+#: it looks: "a different process holds this number" and "I could not read this
+#: number's start time" lead to OPPOSITE actions. The first is proof the work is
+#: gone (drop the row); the second is an absence of proof (keep the row, admit
+#: it is unverified). Collapsing them — which the first implementation did —
+#: means a psutil hiccup or an access-denied probe silently deletes a running
+#: build from the operator's HUD and files it under "recycled PID".
+PID_VERIFIED = "verified"
+PID_DEAD = "dead"
+PID_RECYCLED = "recycled"
+PID_NO_BASELINE = "no_baseline"
+PID_START_TIME_UNREADABLE = "start_time_unreadable"
+
+
+def _pid_identity(pid: Any, expected_start: Any) -> tuple[bool, bool, str]:
+    """``(alive, verified, verdict)`` for a host PID against its spawn ticks.
 
     ``alive`` is a bare existence probe; ``verified`` additionally proves the
-    number was not recycled onto an unrelated process. When no baseline was
-    captured (legacy checkpoint rows, or a platform that cannot report start
-    times) the pair is ``(alive, False)`` — the caller must then report
-    ``unknown``, never ``running``.
+    number was not recycled onto an unrelated process. ``verdict`` is one of the
+    ``PID_*`` constants and is what the caller must branch on — only
+    :data:`PID_DEAD` and :data:`PID_RECYCLED` are DISPROOF that the work is
+    running. :data:`PID_NO_BASELINE` and :data:`PID_START_TIME_UNREADABLE` are
+    both merely unproven, and must surface as an ``unknown`` row.
     """
 
     try:
         pid_int = int(pid)
     except (TypeError, ValueError):
-        return False, False
+        return False, False, PID_DEAD
     if pid_int <= 0:
-        return False, False
+        return False, False, PID_DEAD
     try:
         from gateway.status import _pid_exists, get_process_start_time
     except Exception:
-        return False, False
+        # Without the probe we cannot even test liveness. Refusing to claim
+        # anything is the honest answer, and the row keeps its unknown status
+        # rather than being reported dead.
+        return True, False, PID_START_TIME_UNREADABLE
     try:
         alive = bool(_pid_exists(pid_int))
     except Exception:
-        return False, False
+        return True, False, PID_START_TIME_UNREADABLE
     if not alive:
-        return False, False
+        return False, False, PID_DEAD
     if expected_start is None:
-        return True, False
+        return True, False, PID_NO_BASELINE
     try:
-        return True, get_process_start_time(pid_int) == int(expected_start)
+        observed = get_process_start_time(pid_int)
     except Exception:
-        return True, False
+        return True, False, PID_START_TIME_UNREADABLE
+    if observed is None:
+        # The platform/permissions could not answer. NOT a mismatch: comparing
+        # None against a real baseline yields False, which is how an unreadable
+        # probe used to masquerade as a recycled PID.
+        return True, False, PID_START_TIME_UNREADABLE
+    try:
+        matches = int(observed) == int(expected_start)
+    except (TypeError, ValueError):
+        return True, False, PID_START_TIME_UNREADABLE
+    return True, matches, PID_VERIFIED if matches else PID_RECYCLED
 
 
 def _stale_thresholds() -> tuple[float, float]:
@@ -583,8 +659,8 @@ def _collect_terminal(
         if accountant is not None:
             accountant.consider()
         pid = entry.get("pid")
-        alive, verified = _pid_identity(pid, entry.get("host_start_time"))
-        if not alive:
+        _alive, verified, verdict = _pid_identity(pid, entry.get("host_start_time"))
+        if verdict == PID_DEAD:
             # The checkpoint says running; the kernel says the PID is gone.
             # A process that exited is not running work, and reporting it would
             # be exactly the liveness lie this projection exists to prevent.
@@ -598,9 +674,11 @@ def _collect_terminal(
                     by_design=True,
                 )
             continue
-        if entry.get("host_start_time") is not None and not verified:
+        if verdict == PID_RECYCLED:
             # Alive, but a DIFFERENT process now holds the number. Our work is
             # gone and the live process is a stranger we must never signal.
+            # Reached ONLY on a real start-time mismatch — an unreadable probe
+            # falls through below as unverified instead of being deleted here.
             if accountant is not None:
                 accountant.drop(
                     "pid_recycled",
@@ -678,7 +756,9 @@ def _collect_terminal(
                         # registry holds the handle it spawned, so no
                         # start-time comparison is needed or possible.
                         pid_verified=True,
-                        started_at=_safe_text(item.get("started_at"), limit=80),
+                        # The registry formats this with `time.localtime` and no
+                        # offset; every `started_at` on this wire is UTC.
+                        started_at=_iso_from_naive_local(item.get("started_at")),
                         elapsed_seconds=int(item.get("uptime_seconds") or 0),
                         cancellable=True,
                     )
@@ -694,11 +774,14 @@ def _collect_terminal(
             live_detail = f"live enrichment failed: {type(exc).__name__}"
 
     ordered = sorted(rows.values(), key=lambda item: (item.get("started_at") or "", item["work_id"]))
+    capped = _cap(ordered, source=KIND_TERMINAL, accountant=accountant)
     if accountant is not None:
-        accountant.include(len(ordered))
+        # Count what actually ships. Including pre-cap would report rows the
+        # frame does not carry, and `considered - dropped` would stop reconciling.
+        accountant.include(len(capped))
     detail = durable_detail if not live_detail else f"{durable_detail}; {live_detail}"
     return (
-        _cap(ordered, source=KIND_TERMINAL, accountant=accountant),
+        capped,
         _source(SOURCE_OK, lane=lane, detail=detail),
     )
 
@@ -793,7 +876,7 @@ def _collect_delegations(
                     detail=type(exc).__name__,
                 )
             fetched = []
-            durable_detail = f"{provenance}; no async_delegations table"
+            durable_detail = f"{durable_detail}; no async_delegations table"
         except Exception as exc:
             conn.close()
             return [], _source(
@@ -824,8 +907,8 @@ def _collect_delegations(
                 continue
             if accountant is not None:
                 accountant.consider()
-            alive, verified = _pid_identity(owner_pid, owner_started_at)
-            if not alive:
+            _alive, verified, verdict = _pid_identity(owner_pid, owner_started_at)
+            if verdict == PID_DEAD:
                 # The owning process is gone. ``recover_abandoned_delegations``
                 # is the authority that reclassifies these; reporting them as
                 # running here would contradict it.
@@ -837,7 +920,7 @@ def _collect_delegations(
                         by_design=True,
                     )
                 continue
-            if owner_started_at is not None and not verified:
+            if verdict == PID_RECYCLED:
                 if accountant is not None:
                     accountant.drop(
                         "pid_recycled",
@@ -952,11 +1035,12 @@ def _collect_delegations(
             live_detail = f"live enrichment failed: {type(exc).__name__}"
 
     ordered = sorted(rows.values(), key=lambda item: (item.get("started_at") or "", item["work_id"]))
+    capped = _cap(ordered, source=KIND_DELEGATION, accountant=accountant)
     if accountant is not None:
-        accountant.include(len(ordered))
+        accountant.include(len(capped))
     detail = durable_detail if not live_detail else f"{durable_detail}; {live_detail}"
     return (
-        _cap(ordered, source=KIND_DELEGATION, accountant=accountant),
+        capped,
         _source(SOURCE_OK, lane=lane, detail=detail),
     )
 
@@ -1035,12 +1119,10 @@ def _collect_chat_turns(
         )
 
     rows.sort(key=lambda item: (item.get("started_at") or "", item["work_id"]))
+    capped = _cap(rows, source=KIND_CHAT_TURN, accountant=accountant)
     if accountant is not None:
-        accountant.include(len(rows))
-    return (
-        _cap(rows, source=KIND_CHAT_TURN, accountant=accountant),
-        _source(SOURCE_OK, lane=LANE_DURABLE),
-    )
+        accountant.include(len(capped))
+    return capped, _source(SOURCE_OK, lane=LANE_DURABLE)
 
 
 # --------------------------------------------------------------------------
@@ -1133,12 +1215,10 @@ def _collect_mcp(
         )
 
     rows.sort(key=lambda item: item["work_id"])
+    capped = _cap(rows, source=KIND_MCP_SERVER, accountant=accountant)
     if accountant is not None:
-        accountant.include(len(rows))
-    return (
-        _cap(rows, source=KIND_MCP_SERVER, accountant=accountant),
-        _source(SOURCE_OK, lane=LANE_LIVE),
-    )
+        accountant.include(len(capped))
+    return capped, _source(SOURCE_OK, lane=LANE_LIVE)
 
 
 # --------------------------------------------------------------------------
@@ -1146,8 +1226,14 @@ def _collect_mcp(
 # --------------------------------------------------------------------------
 
 
-def _cron_owned_here(scheduler: Any) -> bool:
+def _cron_owned_here(scheduler: Any, running_ids: set) -> bool:
     """True when the cron scheduler's dispatch machinery lives in THIS process.
+
+    Takes the already-read running ids rather than re-reading them, so a failure
+    to read the scheduler is reported by the CALLER as ``scheduler_unreadable``
+    instead of being swallowed here and rendered as ``not_in_process`` — those
+    are different facts ("the scheduler broke" vs "I am not the scheduler") and
+    only the first is actionable.
 
     The pools are created lazily by ``_submit_with_guard`` on the first tick and
     then persist, so their existence is durable proof of ownership for the life
@@ -1155,11 +1241,8 @@ def _cron_owned_here(scheduler: Any) -> bool:
     between jobs and would make the lane flicker to ``unavailable`` in the gaps.
     """
 
-    try:
-        if scheduler.get_running_job_ids():
-            return True
-    except Exception:
-        return False
+    if running_ids:
+        return True
     return any(
         getattr(scheduler, attr, None) is not None
         for attr in ("_parallel_pool", "_sequential_pool")
@@ -1181,7 +1264,7 @@ def _collect_cron(
     """
 
     scheduler = _module("cron.scheduler")
-    if scheduler is None or not _cron_owned_here(scheduler):
+    if scheduler is None:
         return [], _source(
             SOURCE_UNAVAILABLE, lane=LANE_LIVE, reason=REASON_NOT_IN_PROCESS
         )
@@ -1193,6 +1276,10 @@ def _collect_cron(
             lane=LANE_LIVE,
             reason="scheduler_unreadable",
             detail=type(exc).__name__,
+        )
+    if not _cron_owned_here(scheduler, running_ids):
+        return [], _source(
+            SOURCE_UNAVAILABLE, lane=LANE_LIVE, reason=REASON_NOT_IN_PROCESS
         )
 
     labels: dict[str, str] = {}
@@ -1227,12 +1314,10 @@ def _collect_cron(
             )
         )
 
+    capped = _cap(rows, source=KIND_CRON_JOB, accountant=accountant)
     if accountant is not None:
-        accountant.include(len(rows))
-    return (
-        _cap(rows, source=KIND_CRON_JOB, accountant=accountant),
-        _source(SOURCE_OK, lane=LANE_LIVE),
-    )
+        accountant.include(len(capped))
+    return capped, _source(SOURCE_OK, lane=LANE_LIVE)
 
 
 # --------------------------------------------------------------------------
@@ -1386,6 +1471,23 @@ def peek_work(work_id: str) -> dict[str, Any]:
     return payload
 
 
+def _delegation_owned_here(mod: Any, delegation_id: str) -> bool:
+    """True when THIS process holds the live record for ``delegation_id``.
+
+    Ownership is per-record, not per-module: a process can hold some
+    delegations and know nothing about others, and only the holder has the
+    ``interrupt_fn`` that can actually stop the child.
+    """
+
+    try:
+        return any(
+            str((record or {}).get("delegation_id") or "") == delegation_id
+            for record in mod.list_async_delegations()
+        )
+    except Exception:
+        return False
+
+
 def cancel_work(work_id: str, *, reason: str = "operator_cancel") -> dict[str, Any]:
     """Route a cancel to the owning subsystem's interrupt seam.
 
@@ -1407,12 +1509,24 @@ def cancel_work(work_id: str, *, reason: str = "operator_cancel") -> dict[str, A
 
     if kind == KIND_TERMINAL:
         registry = _module("tools.process_registry")
-        if registry is None:
+        session = None
+        if registry is not None:
+            try:
+                session = registry.process_registry.get(stable)
+            except Exception:
+                session = None
+        if session is None:
+            # The row exists — it came from the durable checkpoint — but the
+            # handle lives in another process, so there is nothing here to kill.
+            # The same positive-ownership rule the read lanes apply: falling
+            # through to `kill_process` would return `not_found` and report
+            # "no such work" about work that is demonstrably running.
             return {
                 "status": "error",
                 "code": "cancel_unavailable",
                 "work_id": work_id,
                 "detail": REASON_NOT_IN_PROCESS,
+                "owning_lane": "serve",
             }
         try:
             # consume_output=False: a cancel is not the agent reading its
@@ -1438,12 +1552,17 @@ def cancel_work(work_id: str, *, reason: str = "operator_cancel") -> dict[str, A
 
     if kind == KIND_DELEGATION:
         mod = _module("tools.async_delegation")
-        if mod is None:
+        if mod is None or not _delegation_owned_here(mod, stable):
+            # The interrupt callable lives in the record map of the process that
+            # dispatched the child. From anywhere else `interrupt_for_session`
+            # matches nothing and returns 0, which the caller would otherwise
+            # read as "the cancel failed" rather than "ask the owning lane".
             return {
                 "status": "error",
                 "code": "cancel_unavailable",
                 "work_id": work_id,
                 "detail": REASON_NOT_IN_PROCESS,
+                "owning_lane": "serve",
             }
         session_id = (row.get("owner") or {}).get("session_id") or ""
         if not session_id:

@@ -169,7 +169,7 @@ _USAGE_LANE_PROVIDERS: tuple[str, ...] = (
 )
 
 
-def _add_stage42_global_args(parser, *, mutation: bool = False) -> None:
+def _add_stage42_global_args(parser, *, mutation: bool = False, omit: frozenset = frozenset()) -> None:
     """The flags EVERY stage42 verb accepts.
 
     A flag registered here is a PROMISE made on every one of ~60 verbs at
@@ -201,9 +201,20 @@ def _add_stage42_global_args(parser, *, mutation: bool = False) -> None:
     `tests/hermes_cli/test_harness_cli.py::test_every_stage42_global_flag_is_honored`
     pins this — a new flag here must be read somewhere on the lane, or be
     declared satisfied-by-construction like ``--no-color``.
+
+    ``omit`` names flags a verb genuinely does not implement, so they are never
+    advertised on it. This is the SAME ruling that removed ``--filter`` and
+    ``--watch`` from the whole surface, applied per-verb instead of globally:
+    an accepted-but-ignored flag is a wrong answer believed. It defaults empty,
+    so every existing call site is unchanged; a call site that passes it owes a
+    comment saying what the verb cannot do. Use it sparingly — the point of this
+    helper is a uniform surface, and a verb that omits half the contract should
+    prompt the question of whether it belongs on this lane at all.
     """
 
     def add(*flags, **kwargs):
+        if any(flag in omit for flag in flags):
+            return
         if any(flag in parser._option_string_actions for flag in flags):  # noqa: SLF001 - argparse has no public query
             return
         parser.add_argument(*flags, **kwargs)
@@ -1223,17 +1234,32 @@ def build_parser(parent_subparsers) -> None:
     work_subs = work.add_subparsers(dest="work_command", required=True)
     work_list = work_subs.add_parser("list", help="Every piece of running background work, with per-source health")
     work_list.add_argument("--kind", default=None, help="Only rows of this kind (terminal, delegation, chat_turn, mcp_server, cron_job, dispatch)")
-    _add_stage42_global_args(work_list)
+    # No `--cursor`/`--since`: this projection is a point-in-time census of what
+    # is running NOW, built fresh on every call. There is no page to resume from
+    # and no history to filter by, so advertising either would accept a flag and
+    # silently return the whole unfiltered set.
+    _add_stage42_global_args(work_list, omit=frozenset({"--cursor", "--since"}))
     work_list.set_defaults(func=_cmd_work_list)
     work_peek = work_subs.add_parser("peek", help="Bounded read-only look at one item's recent output/progress")
     work_peek.add_argument("work_id", help="Work id from `harness work list`, e.g. terminal:sess-1")
-    _add_stage42_global_args(work_peek)
+    # Peek answers about ONE row, so nothing to sort, page or bound.
+    _add_stage42_global_args(
+        work_peek, omit=frozenset({"--sort", "--limit", "--cursor", "--since"})
+    )
     work_peek.set_defaults(func=_cmd_work_peek)
     work_cancel = work_subs.add_parser("cancel", help="Interrupt one piece of running work through its owning subsystem")
     work_cancel.add_argument("work_id", help="Work id from `harness work list`")
     work_cancel.add_argument("--reason", default="operator_cancel", help="Recorded interrupt reason")
     work_cancel.add_argument("--issued-at", dest="issued_at", default=None, help="ISO-8601 issue timestamp; a cancel issued before the work started is superseded instead of applied")
-    _add_stage42_global_args(work_cancel, mutation=True)
+    # Same single-row reasoning, plus `--idempotency-key`: replay protection on
+    # this verb is `--issued-at` (a cancel aimed at a previous incarnation is
+    # superseded), and a second, unread key would imply a guarantee nothing here
+    # provides.
+    _add_stage42_global_args(
+        work_cancel,
+        mutation=True,
+        omit=frozenset({"--sort", "--limit", "--cursor", "--since", "--idempotency-key"}),
+    )
     work_cancel.set_defaults(func=_cmd_work_cancel)
 
     pets = subs.add_parser("pets", help="Mission Control Petdex bridge")

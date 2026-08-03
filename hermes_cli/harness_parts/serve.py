@@ -201,14 +201,23 @@ def _runtime_state_fingerprint() -> tuple | None:
     for name in _FINGERPRINT_STORE_DIRS:
         _stat(root / name)
     # Background-work stores hang off the HERMES home, not the store root, and
-    # are resolved through the head-home scope for the same reason the chat
-    # SessionDB below is: ``persona_profile_context`` flips ambient HERMES_HOME
-    # process-globally while a persona turn runs in THIS process, so an ambient
-    # read here would fingerprint whichever profile happened to be mid-turn.
+    # resolve through the same head authority their WRITERS use
+    # (``get_hermes_background_work_home``): ``persona_profile_context`` flips
+    # ambient HERMES_HOME process-globally while a persona turn runs in THIS
+    # process, so an ambient read here would fingerprint whichever profile
+    # happened to be mid-turn.
+    #
+    # An EMPTY tuple means the authority could not resolve a home — "I cannot
+    # fingerprint these", not "there is nothing to watch". Both that case and a
+    # raised exception get the same sentinel, because caching against a silently
+    # missing signal is exactly how a stale HUD gets served.
     try:
         from agent_runtime.running_work import running_work_store_paths
 
-        for path in running_work_store_paths():
+        store_paths = running_work_store_paths()
+        if not store_paths:
+            parts.append(("running_work_stores", -1, -1))
+        for path in store_paths:
             _stat(path)
     except Exception:
         parts.append(("running_work_stores", -1, -1))

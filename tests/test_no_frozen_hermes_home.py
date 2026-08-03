@@ -176,10 +176,13 @@ FROZEN_LEDGER: dict[str, tuple[frozenset[str], str]] = {
         frozenset({"_SNAPSHOT_STORE"}),
         "upstream tool: singularity snapshot store",
     ),
-    "tools/process_registry.py": (
-        frozenset({"CHECKPOINT_PATH"}),
-        "upstream tool: process registry checkpoint",
-    ),
+    # ``tools/process_registry.py`` used to sit here for ``CHECKPOINT_PATH``.
+    # The Activity projection made the freeze load-bearing rather than merely
+    # untidy — a second process reading the checkpoint has to agree with the
+    # writer about WHERE it is, and an import-time bind made that depend on when
+    # the module first got imported relative to a persona-profile home flip. The
+    # constant is now the lazy ``checkpoint_path()``, so the ledger row is gone
+    # rather than re-worded.
     "tools/skill_manager_tool.py": (
         frozenset({"HERMES_HOME", "SKILLS_DIR", "_SKILLS_DIR_AT_IMPORT"}),
         "upstream tool: skills root; _SKILLS_DIR_AT_IMPORT is a deliberate "

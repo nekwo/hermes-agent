@@ -46,13 +46,32 @@ from hermes_cli._subprocess_compat import windows_hide_flags
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-from hermes_cli.config import get_hermes_home
-
 logger = logging.getLogger(__name__)
 
 
-# Checkpoint file for crash recovery (gateway only)
-CHECKPOINT_PATH = get_hermes_home() / "processes.json"
+# Checkpoint file for crash recovery, and — since the Activity projection —
+# the DURABLE view of this registry that other processes read.
+#
+# Resolved per call rather than bound at import, which was wrong twice over
+# once anything read it from a second process. ``persona_profile_context``
+# flips ``HERMES_HOME`` process-globally for the duration of a persona turn, so
+# a frozen value depended on WHEN this module first happened to be imported;
+# and on the launcher's layout (``HERMES_HOME=profiles/<profile>`` alongside
+# ``HERMES_HEAD_HOME=profiles/base``) the ambient home is not the home the
+# operator's projection watches, so a running build was checkpointed into a
+# directory nothing would ever look in — the HUD reported "nothing running"
+# for its whole duration.
+#
+# ``get_hermes_background_work_home`` is the ONE authority this writer, the
+# ``async_delegations`` store, the ``running_work`` projection and the serve
+# read-model fingerprint all resolve through. With no explicit head declared it
+# returns the ambient home, so gateway/TUI/plain-CLI behaviour is unchanged.
+def checkpoint_path():
+    """Path to the crash-recovery checkpoint, resolved at call time."""
+
+    from hermes_constants import get_hermes_background_work_home
+
+    return get_hermes_background_work_home() / "processes.json"
 
 # Limits
 MAX_OUTPUT_CHARS = 200_000      # 200KB rolling output buffer
@@ -1981,7 +2000,7 @@ class ProcessRegistry:
             
             # Atomic write to avoid corruption on crash
             from utils import atomic_json_write
-            atomic_json_write(CHECKPOINT_PATH, entries)
+            atomic_json_write(checkpoint_path(), entries)
         except Exception as e:
             logger.debug("Failed to write checkpoint file: %s", e, exc_info=True)
 
@@ -1991,11 +2010,12 @@ class ProcessRegistry:
 
         Returns the number of processes recovered as detached.
         """
-        if not CHECKPOINT_PATH.exists():
+        path = checkpoint_path()
+        if not path.exists():
             return 0
 
         try:
-            entries = json.loads(CHECKPOINT_PATH.read_text(encoding="utf-8"))
+            entries = json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             return 0
 

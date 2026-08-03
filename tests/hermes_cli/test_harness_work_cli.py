@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -109,11 +110,61 @@ def test_work_list_refuses_an_unknown_kind_instead_of_returning_everything(one_r
     assert "terminal" in payload["error"]["safe_details"]["supported"]
 
 
-def test_work_list_honors_the_stage42_limit_and_declares_truncation(one_row, capsys):
-    code, payload = _run(["harness", "work", "list", "--json", "--limit", "0"], capsys)
+def test_work_list_honors_the_stage42_limit_and_declares_truncation(
+    monkeypatch, one_row, capsys
+):
+    """Actually exercise truncation.
+
+    The first version of this test passed ``--limit 0`` and asserted nothing was
+    truncated — which a completely broken ``--limit`` also satisfies. A test that
+    cannot fail is worse than no test: it reads as coverage.
+    """
+
+    monkeypatch.setattr(
+        running_work,
+        "build_running_work",
+        lambda *a, **k: {
+            "rows": [
+                {**one_row, "work_id": f"terminal:sess-{index}"} for index in range(5)
+            ],
+            "sources": {},
+            "counts": {"total": 5},
+        },
+    )
+
+    code, payload = _run(["harness", "work", "list", "--json", "--limit", "2"], capsys)
 
     assert code == 0
+    assert len(payload["items"]) == 2
+    assert payload["truncated"] is True
+
+
+def test_work_list_below_the_limit_is_not_declared_truncated(one_row, capsys):
+    code, payload = _run(["harness", "work", "list", "--json", "--limit", "10"], capsys)
+
+    assert code == 0
+    assert len(payload["items"]) == 1
     assert payload["truncated"] is False
+
+
+def test_work_list_reports_its_own_completeness(monkeypatch, capsys):
+    """The CLI lane accounts its drops too, or it sheds rows in silence."""
+
+    def _build(accountant=None):
+        assert accountant is not None, "the CLI lane must pass an accountant"
+        accountant.consider(3)
+        accountant.include(1)
+        accountant.drop("process_exited", count=2, by_design=True)
+        return {"rows": [], "sources": {}, "counts": {"total": 0}}
+
+    monkeypatch.setattr(running_work, "build_running_work", _build)
+
+    code, payload = _run(["harness", "work", "list", "--json"], capsys)
+
+    assert code == 0
+    assert payload["completeness"]["considered"] == 3
+    assert payload["completeness"]["reasons"] == {"process_exited": 2}
+    assert "process_exited" in payload["completeness"]["by_design"]
 
 
 # --- peek -------------------------------------------------------------------
@@ -264,6 +315,47 @@ def test_cancel_reports_unknown_work_as_not_found(one_row, capsys):
     assert payload["error"]["code"] == "not_found"
 
 
+def test_the_replay_guard_does_not_refuse_a_legitimate_cancel_across_timezones(
+    monkeypatch, one_row, capsys
+):
+    """Regression: naive-local `started_at` compared against a UTC `--issued-at`.
+
+    The projection now anchors every `started_at` to UTC, so this comparison is
+    between two stamps in the same frame. Before it was not: a naive local stamp
+    read as UTC landed hours in the FUTURE in any UTC-plus timezone, and a
+    cancel issued *right now* compared as "issued before the work started" and
+    was refused `stale_revision`. The row below carries the real wire shape — an
+    offset-bearing stamp — and a plainly-later `--issued-at` must go through.
+    """
+
+    started = datetime(2026, 8, 3, 10, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(
+        running_work,
+        "build_running_work",
+        lambda *a, **k: {
+            "rows": [{**one_row, "started_at": started.isoformat()}],
+            "sources": {},
+            "counts": {"total": 1},
+        },
+    )
+    monkeypatch.setattr(
+        running_work,
+        "cancel_work",
+        lambda work_id, *, reason: {"status": "cancelled", "code": ""},
+    )
+
+    code, payload = _run(
+        [
+            "harness", "work", "cancel", "terminal:sess-1", "--json", "--yes",
+            "--issued-at", (started + timedelta(minutes=5)).isoformat(),
+        ],
+        capsys,
+    )
+
+    assert code == 0
+    assert payload["cancelled"] is True
+
+
 @pytest.mark.parametrize(
     "code_in, exit_code",
     [
@@ -304,3 +396,55 @@ def test_only_cancel_carries_the_mutation_flags():
     assert cancelled.yes is False
     assert cancelled.dry_run is False
     assert cancelled.issued_at is None
+
+
+@pytest.mark.parametrize(
+    "argv, flag",
+    [
+        # `work list` is a point-in-time census: no page to resume, no history
+        # to filter.
+        (["harness", "work", "list"], "--cursor"),
+        (["harness", "work", "list"], "--since"),
+        # peek/cancel answer about ONE row.
+        (["harness", "work", "peek", "terminal:x"], "--sort"),
+        (["harness", "work", "peek", "terminal:x"], "--limit"),
+        (["harness", "work", "peek", "terminal:x"], "--cursor"),
+        (["harness", "work", "peek", "terminal:x"], "--since"),
+        (["harness", "work", "cancel", "terminal:x"], "--sort"),
+        (["harness", "work", "cancel", "terminal:x"], "--limit"),
+        (["harness", "work", "cancel", "terminal:x"], "--cursor"),
+        (["harness", "work", "cancel", "terminal:x"], "--since"),
+        # Replay protection on cancel is `--issued-at`; a second unread key
+        # would imply a guarantee nothing here provides.
+        (["harness", "work", "cancel", "terminal:x"], "--idempotency-key"),
+    ],
+)
+def test_a_flag_these_verbs_cannot_honor_is_refused_not_swallowed(argv, flag):
+    """An accepted-but-ignored flag is a wrong answer believed, not an error seen."""
+
+    with pytest.raises(SystemExit):
+        parser().parse_args([*argv, flag, "x"])
+
+
+def test_the_flags_these_verbs_do_honor_are_still_accepted():
+    listed = parser().parse_args(
+        ["harness", "work", "list", "--json", "--sort", "label", "--limit", "3"]
+    )
+    assert listed.sort == "label"
+    assert listed.limit == 3
+
+    peeked = parser().parse_args(
+        ["harness", "work", "peek", "terminal:x", "--fields", "work_id", "--quiet"]
+    )
+    assert peeked.fields == "work_id"
+    assert peeked.quiet is True
+
+
+def test_omitting_a_flag_is_scoped_to_the_verb_that_asked():
+    """`omit` must not leak: other verbs keep the full shared contract."""
+
+    listed = parser().parse_args(
+        ["harness", "workspace", "list", "--json", "--cursor", "abc", "--since", "x"]
+    )
+    assert listed.cursor == "abc"
+    assert listed.since == "x"

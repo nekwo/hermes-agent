@@ -130,6 +130,37 @@ def hermes_head_home_is_authoritative() -> bool:
     return bool(os.environ.get("HERMES_HEAD_HOME", "").strip())
 
 
+def get_hermes_background_work_home() -> Path:
+    """The home the OPERATOR-VISIBLE background-work stores live under.
+
+    ``processes.json`` (the terminal checkpoint) and ``state.db``'s
+    ``async_delegations`` table are written by one process and READ by another:
+    an agent spawns a build inside a serve-hosted persona turn, and the
+    operator's Activity HUD reads it from a snapshot built on a different lane.
+    Writer and reader therefore have to agree on the directory, and until this
+    function existed they did not — the writers resolved ambient
+    ``get_hermes_home()`` while the projection resolved the head-home scope. On
+    the launcher's own layout (``HERMES_HOME=profiles/<profile>`` with
+    ``HERMES_HEAD_HOME=profiles/base``) those are DIFFERENT directories, so the
+    writers wrote to the profile home while the reader watched base and reported
+    "nothing running" through an entire build.
+
+    The precedence is deliberately the one :func:`get_hermes_head_home` already
+    implements, and this function is a NAME for that decision rather than a
+    second resolver:
+
+    * An explicit head — the ``HERMES_HEAD_HOME`` env value, or the outermost
+      home recorded in the contextvar by ``persona_profile_context`` — wins.
+      That is what makes a turn running under a profile-home override still
+      register its background work where the operator can see it.
+    * With neither present the answer is the ambient home, byte-identical to
+      the historical behaviour. The gateway, the TUI and plain CLI runs set
+      neither, so nothing on those lanes moves.
+    """
+
+    return get_hermes_head_home()
+
+
 def _get_platform_default_hermes_home() -> Path:
     """Return the platform-native default Hermes home path."""
     if sys.platform == "win32":

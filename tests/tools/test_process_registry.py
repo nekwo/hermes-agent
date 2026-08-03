@@ -714,7 +714,7 @@ class TestCheckpoint:
             "pid": 999999999,  # almost certainly not running
             "task_id": "t1",
         }]))
-        with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint):
+        with patch("tools.process_registry.checkpoint_path", lambda: checkpoint):
             recovered = registry.recover_from_checkpoint()
             assert recovered == 0
 
@@ -730,7 +730,7 @@ class TestCheckpoint:
         }]
         checkpoint.write_text(json.dumps(original))
 
-        with patch("tools.process_registry.CHECKPOINT_PATH", checkpoint):
+        with patch("tools.process_registry.checkpoint_path", lambda: checkpoint):
             recovered = registry.recover_from_checkpoint()
             assert recovered == 0
             assert registry.get("proc_remote") is None

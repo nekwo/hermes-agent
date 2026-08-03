@@ -460,6 +460,7 @@ def _work_target_details(row: dict) -> dict:
 
 
 def _cmd_work_list(args) -> int:
+    from agent_runtime.parity import ProjectionAccountant
     from agent_runtime.running_work import RUNNING_WORK_KINDS, build_running_work
 
     kind = str(getattr(args, "kind", None) or "").strip()
@@ -475,7 +476,12 @@ def _cmd_work_list(args) -> int:
         )
         return ERROR_EXIT_CODES["invalid_request"]
 
-    projection = build_running_work()
+    # The snapshot lane accounts its drops through the parity envelope; without
+    # an accountant here the CLI lane silently shed the same rows (exited PIDs,
+    # recycled PIDs, capped lanes) with nothing to say so. Same projection, same
+    # accounting.
+    accountant = ProjectionAccountant("running_work")
+    projection = build_running_work(accountant)
     rows = [row for row in projection["rows"] if not kind or row.get("kind") == kind]
     rows = _sort_rows(rows, getattr(args, "sort", None))
 
@@ -492,6 +498,7 @@ def _cmd_work_list(args) -> int:
     # projection exists to make impossible.
     envelope["sources"] = projection["sources"]
     envelope["counts"] = projection["counts"]
+    envelope["completeness"] = accountant.summary()
     _print_stage42(envelope, args=args, default_output="json")
     return 0
 
@@ -547,6 +554,19 @@ def _cmd_work_cancel(args) -> int:
     started_at = str(row.get("started_at") or "")
     if issued_at and started_at:
         def _epoch(text: str):
+            """Epoch seconds for an ISO stamp; naive input is read as UTC.
+
+            Every `started_at` on this wire carries an offset — the projection
+            anchors the process registry's naive LOCAL stamps at its boundary
+            precisely so this comparison cannot be made against two different
+            frames of reference. Before that, a naive local stamp read as UTC
+            landed hours in the FUTURE in any UTC-plus timezone, so a
+            legitimate cancel issued seconds ago compared as "earlier than the
+            work started" and was refused `stale_revision`. The naive branch
+            stays as a defensive fallback for a caller-supplied `--issued-at`
+            written without an offset, where UTC is the documented reading.
+            """
+
             raw = text[:-1] + "+00:00" if text.endswith("Z") else text
             try:
                 parsed = datetime.fromisoformat(raw)
