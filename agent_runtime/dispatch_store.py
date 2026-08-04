@@ -88,6 +88,7 @@ __all__ = [
     "release_delivery_claim",
     "restore_undelivered_dispatches",
     "running_dispatches",
+    "set_dispatch_owner",
 ]
 
 _TABLE = "mission_chat_dispatches"
@@ -514,20 +515,70 @@ def claim_delivery(dispatch_id: str, claim_id: str) -> bool:
     return claimed
 
 
-def release_delivery_claim(dispatch_id: str) -> None:
+def release_delivery_claim(dispatch_id: str, *, refund_attempt: bool = False) -> None:
     """Hand a claimed-but-undelivered row back for a later attempt.
 
     Used when the sender is BUSY: the completion is fine, the moment is wrong,
     and holding the claim would block the next drain pass for the whole expiry
     window.
+
+    ``refund_attempt`` un-counts the attempt the claim burned, and exists for one
+    specific and entirely real class: the sender took its chat-root lease between
+    the drain's idle probe and the forge, so the handler answered ``chat_busy``.
+    NOTHING failed there — racing a live operator is the system working — but the
+    attempt counter cannot tell, and eight unlucky races would have marched a
+    perfectly deliverable completion to a terminal ``dropped`` with no failure
+    anywhere in its history. Attempts count real failures only; the cap exists to
+    converge genuinely undeliverable rows, not to time out busy ones.
     """
 
     with _DB_LOCK, _transaction() as conn:
-        conn.execute(
-            f"""UPDATE {_TABLE} SET delivery_claim=NULL, delivery_claimed_at=NULL, updated_at=?
-                WHERE dispatch_id=? AND delivery_state=?""",
-            (time.time(), str(dispatch_id), DELIVERY_PENDING),
+        if refund_attempt:
+            conn.execute(
+                f"""UPDATE {_TABLE}
+                    SET delivery_claim=NULL, delivery_claimed_at=NULL, updated_at=?,
+                        delivery_attempts=MAX(delivery_attempts-1, 0)
+                    WHERE dispatch_id=? AND delivery_state=?""",
+                (time.time(), str(dispatch_id), DELIVERY_PENDING),
+            )
+        else:
+            conn.execute(
+                f"""UPDATE {_TABLE} SET delivery_claim=NULL, delivery_claimed_at=NULL, updated_at=?
+                    WHERE dispatch_id=? AND delivery_state=?""",
+                (time.time(), str(dispatch_id), DELIVERY_PENDING),
+            )
+
+
+def set_dispatch_owner(
+    dispatch_id: str, *, owner_pid: int | None, owner_started_at: int | None
+) -> bool:
+    """Re-point a running row's owner identity at the process actually doing the work.
+
+    A dispatch is RECORDED by the tool (in the sender's process) and then
+    EXECUTED by a child process. The row's owner has to become the child, because
+    "is this dispatch still running?" is a question about the process running the
+    turn — not about the supervisor thread waiting on it, and not about the
+    sender that asked. Stamping the child here is what keeps the orphan sweep
+    coherent when the supervisor itself dies: the row settles when the CHILD is
+    gone, which is exactly when the work is gone.
+
+    Only ``running`` rows move. A completion that arrived first wins — this is
+    bookkeeping, and it must never resurrect a settled row.
+    """
+
+    with _DB_LOCK, _transaction() as conn:
+        cur = conn.execute(
+            f"""UPDATE {_TABLE} SET owner_pid=?, owner_started_at=?, updated_at=?
+                WHERE dispatch_id=? AND state=?""",
+            (
+                int(owner_pid) if owner_pid else None,
+                int(owner_started_at) if owner_started_at else None,
+                time.time(),
+                str(dispatch_id),
+                STATE_RUNNING,
+            ),
         )
+        return cur.rowcount == 1
 
 
 def mark_delivered(dispatch_id: str) -> bool:

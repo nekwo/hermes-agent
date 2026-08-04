@@ -296,6 +296,44 @@ def agent_chat_send(
             target_persona=persona_id,
         )
 
+    if detached and not _async_delivery_available():
+        # The SAME question the capability contract already answers, asked by the
+        # lane that most needs it. `async_delivery_supported()` is False here for
+        # a concrete reason — this turn's process ends when the turn does, and
+        # nothing in it will be alive to notice a background result — and a
+        # dispatch accepted on such a lane would leave an orphaned child process
+        # writing into a chat thread with no recorder left to settle its row.
+        #
+        # This is exactly the reasoning `delegate_task` follows when the same
+        # flag is False: fall back to the synchronous path and return the result
+        # INSIDE the turn that asked for it, rather than promise a delivery the
+        # channel cannot make. Refusing here is the same ruling, applied to the
+        # tool that made the promise.
+        return _refusal(
+            "agent_chat_send(wait=false) is not available on this lane: it ends when this turn "
+            "ends, so nothing would be left to receive their answer or to record what happened "
+            "to the work. Send it with wait=true (the default) and use the reply inline — same "
+            "fallback delegate_task takes when a channel cannot take a late completion.",
+            error_kind="async_delivery_unavailable",
+            target_persona=persona_id,
+        )
+
+    sender_persona = _persona_of_chat_root(sender_session) if detached else ""
+    if detached and not sender_persona:
+        # Admission check, run BEFORE any work starts. The delivery drain
+        # addresses its forged turn by resolving this root to a persona; a root
+        # it cannot resolve gets a typed ``sender_session_unresolvable`` drop —
+        # AFTER the target has already done the work. Running real work whose
+        # answer is guaranteed to be discarded is the exact run-and-drop this
+        # lane must never have, so the same resolver decides admission here.
+        return _refusal(
+            "agent_chat_send(wait=false) can only deliver back into a persona chat thread, and "
+            "this session does not resolve to one. Send it with wait=true (the default) and use "
+            "the reply inline.",
+            error_kind="async_delivery_unavailable",
+            target_persona=persona_id,
+        )
+
     if detached:
         # RELAY RULING (operator-approved 2026-08-03): a detached dispatch is a
         # NEW CHAIN ROOT with its own deadline, and the chain is still forwarded.
@@ -323,7 +361,12 @@ def agent_chat_send(
         except (TypeError, ValueError):
             stated = None
         wall_budget = float(resolve_mission_chat_dispatch_max_seconds(stated))
-        effective_deadline = time.time() + wall_budget
+        # NO deadline is minted here. The child mints it when the turn actually
+        # starts (``agent_chat_dispatch.build_dispatch_argv``), because a
+        # dispatch queued behind the concurrency cap would otherwise burn its
+        # wall budget sitting in a queue — the budget the sender was told about
+        # and the budget the turn got would drift apart with nothing reporting it.
+        effective_deadline = None
     else:
         try:
             wall_budget = max(10.0, min(float(max_seconds or 240), 600.0))
@@ -397,11 +440,28 @@ def agent_chat_send(
     )
 
     if detached:
+        # The child is a separate PROCESS, so it takes argv and an environment,
+        # not an args object. The spec below is that invocation's whole input;
+        # nothing about the turn is smuggled through ambient state.
         return _dispatch_detached(
-            args,
+            spec={
+                "persona_id": persona_id,
+                "persona_instance_id": target_instance_id,
+                "session_id": resolved_session_id,
+                "clarify_token": resolved_clarify_token,
+                "new_session": new_session,
+                "title": resolved_title,
+                "message": message,
+                "intent_hint": "chat",
+                "requested_by": requested_by,
+                "requested_by_session": source_token or None,
+                "relay_chain": list(chain),
+                "max_seconds": wall_budget,
+            },
             persona_id=persona_id,
             target_instance_id=target_instance_id,
             sender_session=sender_session,
+            sender_persona=sender_persona,
             message=message,
             title=resolved_title,
             notify_operator=notify,
@@ -485,22 +545,77 @@ def agent_chat_send(
     return json.dumps(result, indent=2, default=str)
 
 
+def _async_delivery_available() -> bool:
+    """Whether THIS lane can receive a background completion after the turn ends.
+
+    The one capability contract, consulted rather than re-derived. It is bound
+    per request by the mission-chat handler and answers True only for a
+    serve-hosted turn whose delivery drain is actually running.
+    """
+
+    try:
+        from gateway.session_context import async_delivery_supported
+
+        return bool(async_delivery_supported())
+    except Exception:  # pragma: no cover - defensive
+        # Cannot read the capability ⇒ cannot promise delivery. Fail toward the
+        # inline lane, which always works.
+        return False
+
+
+def _persona_of_chat_root(root_session_id) -> str:
+    """The persona that owns a chat root, or ``""`` when it owns none.
+
+    Deliberately THE SAME resolver the delivery drain routes on
+    (``dispatch_delivery._sender_persona``), not a second one. That is what makes
+    the admission check below sound: if this cannot name the sender, the drain
+    will not be able to either, and accepting the dispatch would mean running
+    real work whose answer is guaranteed to be dropped.
+    """
+
+    try:
+        from agent_runtime.dispatch_delivery import _sender_persona
+
+        owner = _sender_persona(str(root_session_id or ""))
+    except Exception:  # pragma: no cover - defensive
+        return ""
+    return owner[0] if owner else ""
+
+
+def _dispatch_homes() -> tuple[str, str]:
+    """``(ambient_home, background_work_home)`` for the child process.
+
+    Both come from the existing authorities. ``get_hermes_home`` is read HERE,
+    in the sender's turn, because that is where the operator's ambient home is
+    still the right answer; by the time the supervisor thread spawns, another
+    persona turn may have flipped the process-global. ``get_hermes_background_work_home``
+    is the one resolver for where background work is recorded, so the child's
+    writers land exactly where this parent, the drain and the Activity
+    projection read.
+    """
+
+    from hermes_constants import get_hermes_background_work_home, get_hermes_home
+
+    return str(get_hermes_home()), str(get_hermes_background_work_home())
+
+
 def _dispatch_detached(
-    args,
     *,
+    spec,
     persona_id,
     target_instance_id,
     sender_session,
+    sender_persona,
     message,
     title,
     notify_operator,
     chain,
     wall_budget,
 ):
-    """Record a detached dispatch durably, queue its turn, and return the handle.
+    """Record a detached dispatch durably, queue its child turn, return the handle.
 
-    ORDER IS THE CONTRACT. The durable row is written BEFORE the executor is
-    handed the work and before the caller is told anything, so there is no
+    ORDER IS THE CONTRACT. The durable row is written BEFORE the work is handed
+    to the supervisor and before the caller is told anything, so there is no
     window in which the target's turn is running (or has already finished)
     against a dispatch nothing remembers. Written after, a process that died
     early would leave work whose result had nowhere to go and no record that it
@@ -516,12 +631,20 @@ def _dispatch_detached(
     dispatch_id = mint_dispatch_id()
     # The delivery turn is deduped on this id (see dispatch_delivery), so it is
     # minted HERE, once, and travels with the row.
-    args.client_message_id = f"agent-dispatch-{dispatch_id}"
+    spec["client_message_id"] = f"agent-dispatch-{dispatch_id}"
+    ambient_home, background_home = _dispatch_homes()
+    spec["hermes_home"] = ambient_home
+    spec["head_home"] = background_home
     started_at = time.time()
     try:
         record_dispatch(
             dispatch_id=dispatch_id,
             sender_session_id=sender_session,
+            # The sender's own persona, already resolved by the admission check
+            # above through the SAME resolver the drain routes on. Recorded
+            # rather than left blank so a store row answers "who asked for this"
+            # without a second lookup.
+            sender_persona_id=sender_persona,
             target_persona=persona_id,
             target_instance_id=target_instance_id or "",
             title=title or "",
@@ -542,7 +665,7 @@ def _dispatch_detached(
     try:
         dispatch_detached_turn(
             dispatch_id=dispatch_id,
-            args=args,
+            spec=spec,
             max_concurrent=mission_chat_dispatch_max_concurrent(),
         )
     except Exception as exc:

@@ -1176,15 +1176,23 @@ def _collect_dispatches(
             accountant.consider()
         pid = record.get("owner_pid")
         _alive, verified, verdict = _pid_identity(pid, record.get("owner_started_at"))
-        if verdict in {PID_DEAD, PID_RECYCLED}:
-            if accountant is not None:
-                accountant.drop(
-                    "owner_exited" if verdict == PID_DEAD else "pid_recycled",
-                    entity_id=dispatch_id,
-                    detail="dispatch owner process is gone; the boot sweep settles it as unknown",
-                    by_design=True,
-                )
-            continue
+        # A dead or recycled owner is REPORTED here, not dropped — the one place
+        # this lane deliberately differs from the terminal and delegation lanes,
+        # and the difference is a property of the store rather than a relaxation
+        # of the rule.
+        #
+        # There, a dead PID means the work is over and nobody is owed anything;
+        # dropping the row is the honest end of it. Here, a dead PID means the
+        # CHILD PROCESS running a dispatch died while a SENDER IS STILL WAITING
+        # for its answer. Hiding it would make the one dispatch most worth
+        # looking at — the one that just died — the only invisible one, and to an
+        # operator its disappearance reads as "it finished". So it surfaces as
+        # ``unknown`` with ``pid_verified: false``: something was dispatched, its
+        # process is gone, and nothing has settled it yet. The periodic orphan
+        # sweep converts it into a deliverable ``unknown`` completion within its
+        # cadence, and the row then leaves this projection because it is no
+        # longer running work.
+        orphaned = verdict in {PID_DEAD, PID_RECYCLED}
         started = record.get("dispatched_at")
         target = _safe_text(record.get("target_persona"), limit=120)
         label = _safe_text(record.get("title"), limit=160) or (
@@ -1195,10 +1203,10 @@ def _collect_dispatches(
                 kind=KIND_DISPATCH,
                 stable_id=dispatch_id,
                 label=label,
-                status=STATUS_RUNNING if verified else STATUS_UNKNOWN,
+                status=STATUS_RUNNING if (verified and not orphaned) else STATUS_UNKNOWN,
                 source_lane=LANE_DURABLE,
                 pid=pid,
-                pid_verified=verified,
+                pid_verified=verified and not orphaned,
                 persona_id=target,
                 persona_instance_id=_safe_text(record.get("target_instance_id"), limit=200),
                 # The SENDER's chat root: the thread the answer is owed to, and
@@ -1212,9 +1220,11 @@ def _collect_dispatches(
                 # survives to this store, so say so rather than emit zeros.
                 progress=_progress(available=False),
                 tail_preview=_preview(record.get("ask"), accountant),
-                # No interrupt seam in v1: the turn runs on a shared executor
-                # thread with no cancellation token. Claiming cancellable here
-                # would put a button on the HUD that cannot do anything.
+                # No interrupt seam in v1. The turn runs in a child process this
+                # projection could signal, but a cancel has to unwind the store
+                # row and the sender's pending delivery too, and half a cancel is
+                # worse than none. Claiming cancellable here would put a button
+                # on the HUD that cannot keep its promise.
                 cancellable=False,
             )
         )

@@ -297,3 +297,53 @@ def test_a_real_completion_event_stays_inside_the_payload_cap(store_home):
 
     encoded = json.dumps(captured["dispatch.completed"]).encode("utf-8")
     assert len(encoded) < EVENT_PAYLOAD_LIMIT_BYTES
+
+
+def test_the_owner_moves_to_the_process_actually_doing_the_work(store_home):
+    """The row is recorded by the sender, then EXECUTED by a child process.
+
+    "Is this dispatch still running?" is a question about the process running the
+    turn — not the supervisor thread waiting on it, and not the sender that
+    asked. Stamping the child is what keeps the orphan sweep coherent when the
+    supervisor itself dies.
+    """
+
+    from agent_runtime.dispatch_store import set_dispatch_owner
+
+    dispatch_id = _dispatch()
+    assert set_dispatch_owner(dispatch_id, owner_pid=98765, owner_started_at=4242) is True
+
+    row = get_dispatch(dispatch_id)
+    assert row["owner_pid"] == 98765
+    assert row["owner_started_at"] == 4242
+
+
+def test_a_settled_row_is_never_re_owned(store_home):
+    """Bookkeeping must not resurrect a dispatch that already finished."""
+
+    from agent_runtime.dispatch_store import set_dispatch_owner
+
+    dispatch_id = _dispatch()
+    record_completion(dispatch_id, state=STATE_COMPLETED, reply="done")
+
+    assert set_dispatch_owner(dispatch_id, owner_pid=1, owner_started_at=2) is False
+    assert get_dispatch(dispatch_id)["state"] == STATE_COMPLETED
+
+
+def test_a_refunded_release_does_not_walk_a_busy_row_toward_dropped(store_home):
+    """Racing a live operator is not a failure, so it must not spend the budget.
+
+    Without the refund, eight `chat_busy` races would march a perfectly
+    deliverable completion to a terminal `dropped` having never once failed.
+    """
+
+    dispatch_id = _dispatch()
+    record_completion(dispatch_id, state=STATE_COMPLETED, reply="done")
+
+    for _ in range(MAX_DELIVERY_ATTEMPTS + 3):
+        assert claim_delivery(dispatch_id, "claim")
+        release_delivery_claim(dispatch_id, refund_attempt=True)
+
+    row = get_dispatch(dispatch_id)
+    assert row["delivery_state"] == DELIVERY_PENDING
+    assert row["delivery_attempts"] == 0

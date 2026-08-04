@@ -55,12 +55,17 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "DELIVERY_REQUESTED_BY",
+    "MAX_BACKGROUND_DELIVERY_ATTEMPTS",
+    "ORPHAN_SWEEP_INTERVAL_SECONDS",
     "delivery_client_message_id",
+    "delivery_drain_is_live",
     "delivery_requested_by",
+    "drain_background_completions",
     "drain_once",
     "format_dispatch_delivery",
     "parse_delivery_requested_by",
     "start_delivery_drain",
+    "sweep_orphaned_dispatches",
 ]
 
 #: Provenance stamped on every forged delivery turn. The launcher renders turns
@@ -83,6 +88,38 @@ DEFAULT_DRAIN_INTERVAL_SECONDS = 5.0
 #: Per-pass delivery cap. Ten completions landing at once must not turn into ten
 #: back-to-back forged turns that monopolise the sender's thread.
 MAX_DELIVERIES_PER_PASS = 3
+
+#: How often the orphan sweep runs. Its own cadence, deliberately: it walks every
+#: running row and probes PIDs, which is too expensive for the 5s delivery loop —
+#: and boot-only, which is what it was, meant a dispatch whose process died could
+#: sit ``running`` in the HUD for as long as serve stayed up.
+ORPHAN_SWEEP_INTERVAL_SECONDS = 60.0
+
+#: Attempt cap for queue-backed background completions. Unlike a dispatch these
+#: have no durable row to count on, so a persistently-failing event would requeue
+#: every drain pass forever.
+MAX_BACKGROUND_DELIVERY_ATTEMPTS = 8
+
+#: Per-event failure counts for the queue lane, keyed by the event's own
+#: identity. Process-local by nature — the queue it guards is process-local too.
+_background_attempts: dict[str, int] = {}
+
+#: The live drain thread, or None. Read by the capability binding: "serve is
+#: running" was only ever a PROXY for "a consumer exists", and the drain starts
+#: best-effort, so a serve whose drain failed used to go on promising deliveries
+#: nothing would perform.
+_drain_thread: threading.Thread | None = None
+
+
+def delivery_drain_is_live() -> bool:
+    """Whether a delivery drain is actually running in THIS process.
+
+    The honest answer to "can a background completion reach this session later",
+    and the reason the mission-chat capability binding is not just a serve check.
+    """
+
+    thread = _drain_thread
+    return bool(thread is not None and thread.is_alive())
 
 
 def delivery_client_message_id(dispatch_id: str) -> str:
@@ -433,8 +470,9 @@ def drain_once(*, forge: Callable | None = None, limit: int | None = None) -> di
             continue
 
         persona_id, instance_id = owner
+        payload: dict[str, Any] | None = None
         try:
-            ok, _payload = forge(
+            ok, payload = forge(
                 root_session_id=root,
                 persona_id=persona_id,
                 persona_instance_id=instance_id,
@@ -449,12 +487,41 @@ def drain_once(*, forge: Callable | None = None, limit: int | None = None) -> di
         if ok:
             dispatch_store.mark_delivered(dispatch_id)
             tally["delivered"] += 1
+            continue
+        # The sender took its lease between the idle probe and the forge. That
+        # is a RACE WITH A LIVE OPERATOR, not a failure — the completion is
+        # perfectly deliverable and will be, moments later. Refund the attempt
+        # the claim burned: without this, eight unlucky races walk a good
+        # completion to a terminal `dropped` having never once failed.
+        busy = str((payload or {}).get("error_kind") or "") == "chat_busy"
+        dispatch_store.release_delivery_claim(dispatch_id, refund_attempt=busy)
+        if busy:
+            tally["busy"] += 1
         else:
-            # The attempt was already counted at claim time; hand the row back
-            # so a later pass (or a later boot) can retry until the cap.
-            dispatch_store.release_delivery_claim(dispatch_id)
             tally["failed"] += 1
     return tally
+
+
+def sweep_orphaned_dispatches() -> int:
+    """Settle dispatches whose executing process is provably gone. Returns the count.
+
+    Runs on the drain's own cadence, not only at boot. Boot-only was a real gap:
+    a serve process can stay up for days, so a dispatch whose child died at 09:00
+    stayed ``running`` — in the operator's HUD and in the sender's mental model —
+    until the next restart. The sender was owed "the outcome is unknown" within a
+    minute of it becoming true, not within a week.
+
+    Identity-verified through the store's own sweep, which treats an unreadable
+    start-time probe as absence of proof rather than as death.
+    """
+
+    from . import dispatch_store
+
+    try:
+        return int((dispatch_store.restore_undelivered_dispatches() or {}).get("restored") or 0)
+    except Exception:  # pragma: no cover - a sweep must never kill the drain
+        logger.debug("dispatch orphan sweep failed", exc_info=True)
+        return 0
 
 
 # --------------------------------------------------------------------------
@@ -493,9 +560,17 @@ def drain_background_completions(*, forge: Callable | None = None) -> dict[str, 
 
     Ownership is proven per event, not assumed per process: an event that does
     not name a resolvable persona chat root is re-queued untouched.
+
+    Unlike a dispatch, a queue event has no durable row to count attempts on, so
+    the counter lives here, keyed by the event's own identity. Without it a
+    persistently-failing event re-queues every five seconds forever — an
+    invisible hot loop that also blocks the queue behind it. Past
+    :data:`MAX_BACKGROUND_DELIVERY_ATTEMPTS` the event is dropped with a WARNING
+    naming it, because an event that can never be delivered should end loudly
+    rather than spin quietly.
     """
 
-    tally = {"considered": 0, "delivered": 0, "requeued": 0, "failed": 0}
+    tally = {"considered": 0, "delivered": 0, "requeued": 0, "failed": 0, "abandoned": 0}
     forge = forge or forge_delivery_turn
     try:
         from tools.process_registry import process_registry
@@ -532,21 +607,43 @@ def drain_background_completions(*, forge: Callable | None = None) -> dict[str, 
         marker = str(
             evt.get("delegation_id") or evt.get("session_id") or uuid.uuid4().hex
         )[:40]
+        key = f"{evt.get('type', 'completion')}:{marker}"
+        if _background_attempts.get(key, 0) >= MAX_BACKGROUND_DELIVERY_ATTEMPTS:
+            # Terminal, and LOUD. A silently-abandoned completion is the failure
+            # class this whole lane exists to retire, so it leaves a named log
+            # line rather than disappearing off the queue.
+            logger.warning(
+                "abandoning background completion %s after %d failed deliveries into %s",
+                key,
+                MAX_BACKGROUND_DELIVERY_ATTEMPTS,
+                root,
+            )
+            _background_attempts.pop(key, None)
+            tally["abandoned"] += 1
+            continue
         try:
-            ok, _payload = forge(
+            ok, payload = forge(
                 root_session_id=root,
                 persona_id=persona_id,
                 persona_instance_id=instance_id,
                 message=text,
-                client_message_id=f"bg-completion-{evt.get('type', 'completion')}-{marker}",
+                client_message_id=f"bg-completion-{key}",
             )
         except Exception:
             logger.warning("background completion delivery failed", exc_info=True)
-            ok = False
+            ok, payload = False, None
         if ok:
+            _background_attempts.pop(key, None)
             tally["delivered"] += 1
+            continue
+        process_registry.completion_queue.put(evt)
+        # Same rule the dispatch lane follows: losing a race with a live
+        # operator is not a failure, so a `chat_busy` refusal does not count
+        # against the cap.
+        if str((payload or {}).get("error_kind") or "") == "chat_busy":
+            tally["requeued"] += 1
         else:
-            process_registry.completion_queue.put(evt)
+            _background_attempts[key] = _background_attempts.get(key, 0) + 1
             tally["failed"] += 1
     return tally
 
@@ -564,18 +661,35 @@ def start_delivery_drain(
     """
 
     def _loop() -> None:
-        while not stop_event.wait(interval_seconds):
-            try:
-                drain_once()
-            except Exception:  # pragma: no cover - a drain must never die
-                logger.debug("dispatch delivery pass failed", exc_info=True)
-            try:
-                drain_background_completions()
-            except Exception:  # pragma: no cover
-                logger.debug("background completion pass failed", exc_info=True)
+        global _drain_thread
+        next_sweep = 0.0
+        try:
+            while not stop_event.wait(interval_seconds):
+                try:
+                    drain_once()
+                except Exception:  # pragma: no cover - a drain must never die
+                    logger.debug("dispatch delivery pass failed", exc_info=True)
+                try:
+                    drain_background_completions()
+                except Exception:  # pragma: no cover
+                    logger.debug("background completion pass failed", exc_info=True)
+                # The orphan sweep runs on its own, slower cadence: it walks
+                # every running row and probes PIDs, which is far too expensive
+                # for the 5s delivery loop and far too rare for boot-only.
+                now = time.monotonic()
+                if now >= next_sweep:
+                    next_sweep = now + ORPHAN_SWEEP_INTERVAL_SECONDS
+                    sweep_orphaned_dispatches()
+        finally:
+            # The capability binding reads this. A drain that died must stop the
+            # runtime promising deliveries it can no longer make — the same
+            # honesty rule that made the binding conditional in the first place.
+            _drain_thread = None
 
     thread = threading.Thread(
         target=_loop, name="harness-serve-dispatch-delivery", daemon=True
     )
+    global _drain_thread
+    _drain_thread = thread
     thread.start()
     return thread

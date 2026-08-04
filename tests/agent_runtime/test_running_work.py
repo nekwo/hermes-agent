@@ -1294,19 +1294,31 @@ def test_a_settled_dispatch_stops_being_running_work(dispatch_home):
     assert [row for row in build_running_work()["rows"] if row["kind"] == "dispatch"] == []
 
 
-def test_a_dispatch_whose_owner_died_is_dropped_through_the_accountant(
+def test_a_dispatch_whose_owner_died_is_SHOWN_as_unknown_not_hidden(
     dispatch_home, monkeypatch
 ):
-    """Dropped, never silently: the boot sweep turns it into a delivered 'unknown'."""
+    """The one lane that reports a dead owner instead of dropping it.
+
+    A dead PID on a terminal or delegation row means the work is over and nobody
+    is owed anything. A dead PID on a DISPATCH row means the child process died
+    while a sender is still waiting for its answer — so hiding it would make the
+    single dispatch most worth looking at the only invisible one, and to an
+    operator the disappearance would read as "it finished". It surfaces as
+    unknown/unverified until the periodic sweep settles it into a deliverable
+    ``unknown`` completion, at which point it leaves the projection because it
+    genuinely is not running work any more.
+    """
 
     _record_dispatch()
     monkeypatch.setattr("gateway.status._pid_exists", lambda pid: False)
     accountant = ProjectionAccountant("running_work")
 
-    frame = build_running_work(accountant)
+    rows = [row for row in build_running_work(accountant)["rows"] if row["kind"] == "dispatch"]
 
-    assert [row for row in frame["rows"] if row["kind"] == "dispatch"] == []
-    assert accountant.summary()["reasons"]["owner_exited"] == 1
+    assert len(rows) == 1
+    assert rows[0]["status"] == STATUS_UNKNOWN
+    assert rows[0]["pid_verified"] is False
+    assert accountant.summary()["reasons"] == {}
 
 
 def test_the_dispatch_lane_reports_unavailable_when_the_store_cannot_be_read(

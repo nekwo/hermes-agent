@@ -1003,6 +1003,22 @@ def build_parser(parent_subparsers) -> None:
     mission_chat_message.add_argument("--compression-protect-last-n", type=int, default=None, help="One-turn native-compression proof seam; override protected tail messages")
     mission_chat_message.add_argument("--relay-chain", default=None, help="Comma-separated canonical persona ids already on the agent-relay chain (envelope provenance for chained agent_chat_send hops)")
     mission_chat_message.add_argument("--relay-deadline-epoch", type=float, default=None, help="Absolute unix-epoch deadline shared by every hop on the relay chain")
+    # Sender provenance, not guard logic: the sender's chat-root session id
+    # scopes bare-persona target resolution to the SENDER's workspace. The
+    # in-process relay always carried it on the args object; a DETACHED dispatch
+    # runs its target turn in a CHILD PROCESS, so without an argv spelling the
+    # child would silently resolve bare personas against the wrong scope.
+    mission_chat_message.add_argument("--requested-by-session", dest="requested_by_session", default=None, help="Chat-root session id of the sender (envelope provenance; scopes bare-persona target resolution to the sender's workspace)")
+    # The tri-state ``new_session`` has no argparse spelling: absent is False
+    # ("continue the target's current default thread"), present is True, and
+    # there is no way to say UNSET ("no opinion — let
+    # agent_runtime.mission_chat.dispatch_session_policy decide"), which is
+    # exactly what the dispatch lane forwards in-process. Changing
+    # ``--new-session``'s default to None would express it, but would also
+    # silently start minting a fresh thread for every bare CLI send that omits
+    # the flag. This states the unset case explicitly instead, so the child
+    # process reproduces the in-process lane's threading exactly.
+    mission_chat_message.add_argument("--defer-thread-policy", dest="defer_thread_policy", action="store_true", help="State NO opinion about the thread: let agent_runtime.mission_chat.dispatch_session_policy decide (the tri-state 'unset' the in-process dispatch lane forwards). Overrides --new-session")
     mission_chat_message.add_argument("--json", action="store_true")
     mission_chat_message.set_defaults(func=_cmd_mission_chat_message)
     mission_chat_queue_skill = mission_chat_subs.add_parser("queue-skill", help="Load a skill on the next Mission Control chat turn")

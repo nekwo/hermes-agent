@@ -279,3 +279,242 @@ def test_a_completion_naming_no_chat_root_is_not_adopted():
 
     assert dispatch_delivery._chat_root_of_completion({"session_key": "gateway-42"}) is None
     assert dispatch_delivery._chat_root_of_completion({}) is None
+
+
+# --------------------------------------------------------------------------
+# attempts must count real failures only
+# --------------------------------------------------------------------------
+
+
+def test_losing_a_race_with_a_live_operator_does_not_burn_an_attempt(
+    store_home, resolvable_sender, idle_sender
+):
+    """`chat_busy` at forge time is the system working, not a delivery failing.
+
+    The sender took its chat-root lease between the drain's idle probe and the
+    forge. Nothing failed — the completion is perfectly deliverable and will be,
+    moments later. Counting it would let eight unlucky races march a good
+    completion to a terminal `dropped` with no failure anywhere in its history.
+    """
+
+    dispatch_id = _completed()
+
+    class _Busy:
+        def __call__(self, **kwargs):
+            return False, {"ok": False, "error_kind": "chat_busy"}
+
+    tally = drain_once(forge=_Busy())
+
+    assert tally["busy"] == 1 and tally["failed"] == 0
+    row = get_dispatch(dispatch_id)
+    assert row["delivery_state"] == DELIVERY_PENDING
+    assert row["delivery_attempts"] == 0
+
+
+def test_a_genuine_failure_still_burns_its_attempt(store_home, resolvable_sender, idle_sender):
+    """The cap has to keep converging for the failures it exists for."""
+
+    dispatch_id = _completed()
+
+    tally = drain_once(forge=_Forge(ok=False))
+
+    assert tally["failed"] == 1
+    assert get_dispatch(dispatch_id)["delivery_attempts"] == 1
+
+
+# --------------------------------------------------------------------------
+# the periodic orphan sweep
+# --------------------------------------------------------------------------
+
+
+def test_the_sweep_settles_orphans_without_waiting_for_a_reboot(store_home, monkeypatch):
+    """Boot-only was a real gap: serve can stay up for days.
+
+    A dispatch whose child died at 09:00 stayed `running` — in the HUD and in
+    the sender's mental model — until the next restart. The sender is owed "the
+    outcome is unknown" within a minute of it becoming true.
+    """
+
+    from agent_runtime.dispatch_store import STATE_UNKNOWN, mint_dispatch_id, record_dispatch
+
+    dispatch_id = mint_dispatch_id()
+    record_dispatch(
+        dispatch_id=dispatch_id,
+        sender_session_id=SENDER_ROOT,
+        target_persona="dev",
+        ask="run the suite",
+    )
+    monkeypatch.setattr("gateway.status._pid_exists", lambda pid: False)
+
+    assert dispatch_delivery.sweep_orphaned_dispatches() == 1
+    row = get_dispatch(dispatch_id)
+    assert row["state"] == STATE_UNKNOWN
+    # And it is now DELIVERABLE, not merely reclassified.
+    assert row["delivery_state"] == DELIVERY_PENDING
+
+
+def test_the_sweep_never_takes_the_drain_down(store_home, monkeypatch):
+    monkeypatch.setattr(
+        "agent_runtime.dispatch_store.restore_undelivered_dispatches",
+        lambda: (_ for _ in ()).throw(RuntimeError("store gone")),
+    )
+
+    assert dispatch_delivery.sweep_orphaned_dispatches() == 0
+
+
+# --------------------------------------------------------------------------
+# drain liveness backs the capability promise
+# --------------------------------------------------------------------------
+
+
+def test_the_drain_reports_its_own_liveness(monkeypatch):
+    """"serve is running" was only ever a PROXY for "a consumer exists".
+
+    The drain starts best-effort, so a serve whose drain failed used to go on
+    promising deliveries nothing would perform. The capability binding reads
+    this instead.
+    """
+
+    import threading
+
+    assert dispatch_delivery.delivery_drain_is_live() is False
+    stop = threading.Event()
+    thread = dispatch_delivery.start_delivery_drain(stop_event=stop, interval_seconds=0.05)
+    try:
+        assert dispatch_delivery.delivery_drain_is_live() is True
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+    assert dispatch_delivery.delivery_drain_is_live() is False
+
+
+# --------------------------------------------------------------------------
+# the queue lane converges too
+# --------------------------------------------------------------------------
+
+
+def test_a_background_completion_that_cannot_be_delivered_stops_retrying(
+    store_home, resolvable_sender, idle_sender, monkeypatch
+):
+    """No durable row means no attempt column, so the counter lives in the drain.
+
+    Without it a persistently-failing event re-queues every five seconds
+    forever — an invisible hot loop that also blocks the queue behind it. It
+    ends LOUDLY instead, because a silently-abandoned completion is the exact
+    failure class this lane exists to retire.
+    """
+
+    from tools.process_registry import process_registry
+
+    evt = {"type": "completion", "session_id": SENDER_ROOT, "session_key": SENDER_ROOT}
+    monkeypatch.setattr(
+        process_registry,
+        "drain_notifications",
+        lambda **kw: [(evt, "the build finished")]
+        if not process_registry.completion_queue.empty()
+        else [],
+    )
+    dispatch_delivery._background_attempts.clear()
+
+    seen = []
+    for _ in range(dispatch_delivery.MAX_BACKGROUND_DELIVERY_ATTEMPTS + 1):
+        process_registry.completion_queue.put(evt)
+        seen.append(dispatch_delivery.drain_background_completions(forge=_Forge(ok=False)))
+
+    # Every pass but the last retried; the last abandoned it, once.
+    assert sum(pass_["failed"] for pass_ in seen) == dispatch_delivery.MAX_BACKGROUND_DELIVERY_ATTEMPTS
+    assert seen[-1]["abandoned"] == 1
+    dispatch_delivery._background_attempts.clear()
+
+
+# --------------------------------------------------------------------------
+# the forge, driven through the REAL mission-chat handler
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.usefixtures("persisted_persona_samples")
+def test_forge_delivery_turn_lands_a_real_turn_and_dedupes_a_retry(
+    monkeypatch, capsys, isolate_agent_runtime_root, tmp_path
+):
+    """Everything above stubs the forge; this drives the real one.
+
+    Real handler, real transcript persistence, real turn journal, real chat-root
+    lease — only the provider is stubbed. That matters because the two claims
+    this lane rests on are claims about the HANDLER, not about the drain: that a
+    delivery becomes an ordinary turn in the sender's own thread, and that a
+    retried delivery converges on ONE turn because its client_message_id is
+    derived from the dispatch rather than minted per attempt. A stubbed forge
+    cannot show either.
+    """
+
+    from types import SimpleNamespace
+
+    from hermes_cli import harness
+    from tests.agent_runtime.test_persona_assignments import _assignment_config, _TranscriptDB
+
+    monkeypatch.setenv("HERMES_HEAD_HOME", str(tmp_path))
+    db = _TranscriptDB()
+    calls = []
+
+    class _ProviderSpy:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def mission_chat_reply(self, persona, message, **kwargs):
+            calls.append(message)
+            return SimpleNamespace(
+                final_response="told the operator",
+                input_tokens=1,
+                output_tokens=2,
+                total_tokens=3,
+                raw={},
+            )
+
+    monkeypatch.setattr(harness, "load_agent_runtime_config", _assignment_config)
+    monkeypatch.setattr(harness, "_default_persona_session_db", lambda: db)
+    monkeypatch.setattr(harness, "GPTPersonaRuntime", _ProviderSpy)
+
+    dispatch_id = "dispatch-realforge01"
+    message = format_dispatch_delivery(
+        {
+            "dispatch_id": dispatch_id,
+            "target_persona": "qa",
+            "ask": "run the suite",
+            "state": "completed",
+            "result": {"reply": "3 failures"},
+            "dispatched_at": 1_700_000_000.0,
+            "completed_at": 1_700_000_060.0,
+            "notify_operator": True,
+        }
+    )
+
+    ok, payload = dispatch_delivery.forge_delivery_turn(
+        root_session_id="persona_chat_personainst_dev",
+        persona_id="dev",
+        persona_instance_id="personainst_dev",
+        message=message,
+        client_message_id=delivery_client_message_id(dispatch_id),
+    )
+    capsys.readouterr()
+
+    assert ok is True, payload
+    # It is a REAL turn: the model saw the delivery block, and the reply was
+    # persisted into the sender's own thread.
+    assert "BACKGROUND DISPATCH COMPLETE" in calls[0]
+    assert "OPERATOR IS WAITING ON THIS" in calls[0]
+
+    # The retry. Same derived id ⇒ the chat lane's own replay dedup absorbs it,
+    # so the sender never sees the same result twice.
+    ok_again, replay = dispatch_delivery.forge_delivery_turn(
+        root_session_id="persona_chat_personainst_dev",
+        persona_id="dev",
+        persona_instance_id="personainst_dev",
+        message=message,
+        client_message_id=delivery_client_message_id(dispatch_id),
+    )
+    capsys.readouterr()
+
+    assert ok_again is True
+    assert replay.get("idempotent_replay") is True
+    # And the provider was NOT asked a second time: one delivery, one turn.
+    assert len(calls) == 1

@@ -117,15 +117,40 @@ def unbound_capability():
     _SESSION_ASYNC_DELIVERY.reset(token)
 
 
-def test_a_serve_hosted_turn_can_take_a_late_completion(monkeypatch, unbound_capability):
-    """True because the drain runs HERE — not because nothing bound the var."""
+def test_a_serve_hosted_turn_with_a_live_drain_can_take_a_late_completion(
+    monkeypatch, unbound_capability
+):
+    """True because a consumer is RUNNING — not because nothing bound the var."""
 
     from gateway.session_context import async_delivery_supported
 
     monkeypatch.setattr(harness, "persona_chat_runtime_registry", lambda: object())
+    monkeypatch.setattr(
+        "agent_runtime.dispatch_delivery.delivery_drain_is_live", lambda: True
+    )
 
     assert harness._bind_mission_chat_delivery_capability() is True
     assert async_delivery_supported() is True
+
+
+def test_a_serve_whose_drain_never_started_promises_nothing(monkeypatch, unbound_capability):
+    """"This is serve" was only ever a PROXY for "a consumer exists".
+
+    The drain starts best-effort — a runtime that cannot start it still serves —
+    so a serve whose drain failed would otherwise go on granting
+    `notify_on_complete` promises with nothing left to perform them. The same
+    class of dishonesty the binding was introduced to retire, one level down.
+    """
+
+    from gateway.session_context import async_delivery_supported
+
+    monkeypatch.setattr(harness, "persona_chat_runtime_registry", lambda: object())
+    monkeypatch.setattr(
+        "agent_runtime.dispatch_delivery.delivery_drain_is_live", lambda: False
+    )
+
+    assert harness._bind_mission_chat_delivery_capability() is False
+    assert async_delivery_supported() is False
 
 
 def test_a_cold_cli_turn_refuses_the_promise(monkeypatch, unbound_capability):
@@ -142,3 +167,22 @@ def test_a_cold_cli_turn_refuses_the_promise(monkeypatch, unbound_capability):
 
     assert harness._bind_mission_chat_delivery_capability() is False
     assert async_delivery_supported() is False
+
+
+def test_the_deferred_thread_policy_flag_restores_the_unset_tri_state(monkeypatch):
+    """argparse cannot say UNSET, and UNSET is what a dispatch forwards.
+
+    A detached dispatch runs in a child process, so ``new_session`` has to cross
+    an argv boundary where absent means False ("continue the current default
+    thread") rather than "let the policy decide". Without this flag every
+    dispatch would silently stop opening its own task thread.
+    """
+
+    args = SimpleNamespace(defer_thread_policy=True, new_session=False)
+    harness._normalize_deferred_thread_policy(args)
+    assert args.new_session is None
+
+    # Absent flag ⇒ untouched: the bare CLI keeps its historical threading.
+    untouched = SimpleNamespace(defer_thread_policy=False, new_session=False)
+    harness._normalize_deferred_thread_policy(untouched)
+    assert untouched.new_session is False

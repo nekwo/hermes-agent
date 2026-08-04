@@ -1484,11 +1484,13 @@ def _bind_mission_chat_delivery_capability() -> bool:
 
     Now the answer is bound to a fact:
 
-    * **serve-hosted turn ⇒ True.** The dispatch-delivery drain runs in this
-      process and forges completions back into the sender's thread when it is
-      idle. The registry that ``persona_chat_root_lease`` already uses to tell
-      serve from CLI is the ONE seam for that distinction; this reads it rather
-      than inventing a second serve detector.
+    * **serve-hosted turn WITH A LIVE DRAIN ⇒ True.** Both halves are required
+      and the second is the one that was missing: the drain is started
+      best-effort (a runtime that cannot start it still serves), so "this is
+      serve" was a PROXY for "a consumer exists", and a serve whose drain failed
+      to start went on promising delivery no one could perform. The registry
+      that ``persona_chat_root_lease`` already uses tells serve from CLI; the
+      drain's own liveness answers the rest. Neither is a new detector.
     * **cold one-shot CLI turn ⇒ False.** The process exits when the turn does.
       ``terminal``'s notifications live only in this process's in-memory queue
       and die with it, so that promise is simply false. ``delegate_task``'s
@@ -1499,17 +1501,42 @@ def _bind_mission_chat_delivery_capability() -> bool:
       is the honest and the more useful answer.
     """
 
+    from agent_runtime.dispatch_delivery import delivery_drain_is_live
     from gateway.session_context import (
         declare_async_delivery_channel,
         declare_stateless_channel,
     )
 
-    serve_hosted = persona_chat_runtime_registry() is not None
-    if serve_hosted:
+    can_deliver = persona_chat_runtime_registry() is not None and delivery_drain_is_live()
+    if can_deliver:
         declare_async_delivery_channel()
     else:
         declare_stateless_channel()
-    return serve_hosted
+    return can_deliver
+
+
+def _normalize_deferred_thread_policy(args) -> None:
+    """Restore the tri-state ``new_session`` argparse cannot express.
+
+    ``--new-session`` is ``store_true``: present is True, absent is False
+    ("continue the target's current default thread"). There is no spelling for
+    UNSET — "no opinion, let ``agent_runtime.mission_chat.dispatch_session_policy``
+    decide" — which is exactly what the in-process dispatch lane forwards, and
+    what a DETACHED dispatch has to reproduce across an argv boundary now that
+    its turn runs in a child process. Without it every dispatch would silently
+    stop opening its own task thread and pile back into one sticky per-pair
+    thread.
+
+    Changing ``--new-session``'s own default to ``None`` would express it too,
+    and would also start minting a fresh thread for every bare CLI send that
+    omits the flag. So the unset case gets its own explicit flag, normalized
+    HERE — once, at the boundary where args are first consumed — leaving the
+    policy resolver downstream to see exactly the three states it was written
+    for, with no second spelling anywhere behind it.
+    """
+
+    if getattr(args, "defer_thread_policy", False):
+        args.new_session = None
 
 
 def _cmd_mission_chat_message(args) -> int:
@@ -1525,6 +1552,7 @@ def _cmd_mission_chat_message(args) -> int:
     # Per-request capability binding, at the very top so every path below —
     # including the refusals — runs with the truthful answer bound.
     _bind_mission_chat_delivery_capability()
+    _normalize_deferred_thread_policy(args)
     cfg = load_agent_runtime_config()
     try:
         normalized_persona = _resolve_mission_chat_persona_id(
