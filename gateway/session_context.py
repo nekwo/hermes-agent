@@ -425,6 +425,22 @@ def declare_async_delivery_channel() -> None:
     _SESSION_ASYNC_DELIVERY.set(True)
 
 
+def async_delivery_declared() -> bool:
+    """Whether this session EXPLICITLY declared its delivery capability.
+
+    :func:`async_delivery_supported` answers ``True`` for an unbound session,
+    which is the right default for the long-lived interactive lanes it was
+    written for — but it means "nobody said" and "yes, a consumer exists" come
+    back as the same answer.
+
+    A caller about to make a DURABLE promise on a lane it does not control has
+    to tell those apart, and must read the silence as a no. This is not a second
+    capability: it is the same contextvar, read for whether it was bound at all
+    rather than for its value.
+    """
+    return _SESSION_ASYNC_DELIVERY.get() is not _UNSET
+
+
 def async_delivery_supported() -> bool:
     """Whether the current session can deliver a background completion later.
 

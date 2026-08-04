@@ -221,6 +221,24 @@ def _text(value: Any, limit: int) -> str:
     return text[:limit]
 
 
+def _supervised_here() -> set[str]:
+    """Dispatch ids a live supervisor in THIS process is still answering for.
+
+    Read through the tools lane's own registry rather than duplicated here, so
+    "who owns this row right now" has exactly one answer. Imported lazily and
+    fails open to an empty set: a store that cannot see the registry sweeps
+    exactly as it did before, which is the previous behaviour rather than a new
+    hazard.
+    """
+
+    try:
+        from tools.agent_chat_dispatch import supervised_dispatch_ids
+
+        return supervised_dispatch_ids()
+    except Exception:  # pragma: no cover - defensive
+        return set()
+
+
 def _owner_identity() -> tuple[int, int | None]:
     """``(pid, start_ticks)`` for THIS process.
 
@@ -405,11 +423,22 @@ def record_completion(
     error: str = "",
     target_session_id: str = "",
     total_tokens: Any = None,
+    only_if_running: bool = False,
 ) -> bool:
     """Record the target turn's outcome and arm the row for delivery.
 
     ``delivery_state`` is (re)set to ``pending`` here rather than at dispatch
-    time so a row only becomes deliverable once there is something to deliver.
+    time so a row only becomes deliverable once there is something to deliver —
+    EXCEPT on a row already marked ``delivered``, which is never re-armed. The
+    sender has been told; re-arming would queue a second delivery of the same
+    dispatch, and the only thing standing between that and a duplicate message
+    is a replay cache that can rotate or be compressed away.
+
+    ``only_if_running`` scopes the write to a row still in flight. The GUESSING
+    writer — the orphan sweep, which infers ``unknown`` from a dead PID — passes
+    it; the supervisor that actually watched the turn does not. That ordering is
+    the point: the supervisor's observed outcome must always beat the sweep's
+    inference, never the other way round.
     """
 
     settled = str(state or STATE_UNKNOWN)
@@ -423,21 +452,29 @@ def record_completion(
         "target_session_id": _text(target_session_id, 240),
         "total_tokens": total_tokens,
     }
+    guard = " AND state=?" if only_if_running else ""
+    params: list[Any] = [
+        settled,
+        now_epoch,
+        now_epoch,
+        json.dumps(result),
+        result["target_session_id"],
+        # CASE WHEN delivery_state=<delivered> THEN <delivered> ELSE <pending>
+        DELIVERY_DELIVERED,
+        DELIVERY_DELIVERED,
+        DELIVERY_PENDING,
+        str(dispatch_id),
+    ]
+    if only_if_running:
+        params.append(STATE_RUNNING)
     with _DB_LOCK, _transaction() as conn:
         cur = conn.execute(
             f"""UPDATE {_TABLE} SET state=?, completed_at=?, updated_at=?, result_json=?,
-                   target_session_id=?, delivery_state=?, delivery_claim=NULL,
-                   delivery_claimed_at=NULL
-                WHERE dispatch_id=?""",
-            (
-                settled,
-                now_epoch,
-                now_epoch,
-                json.dumps(result),
-                result["target_session_id"],
-                DELIVERY_PENDING,
-                str(dispatch_id),
-            ),
+                   target_session_id=?,
+                   delivery_state=CASE WHEN delivery_state=? THEN ? ELSE ? END,
+                   delivery_claim=NULL, delivery_claimed_at=NULL
+                WHERE dispatch_id=?{guard}""",
+            tuple(params),
         )
         updated = cur.rowcount == 1
     if updated:
@@ -752,9 +789,20 @@ def restore_undelivered_dispatches() -> dict[str, int]:
     except Exception:  # pragma: no cover - defensive
         return {"restored": 0, "checked": 0}
 
+    supervised = _supervised_here()
     rows = _query("WHERE state=?", (STATE_RUNNING,))
     restored = 0
     for row in rows:
+        # NEVER answer for a dispatch this process is still supervising. Since
+        # the sweep became periodic it runs beside live supervisors, and there
+        # is a real window — from the child exiting to the supervisor's
+        # `record_completion`, across `proc.wait()` and two pump joins — where a
+        # dead PID on a running row means "about to be recorded", not "orphan".
+        # Guessing there delivers "the outcome is unknown" for a dispatch that
+        # COMPLETED, and the real answer landing moments later is then swallowed
+        # by the delivery-turn replay dedup.
+        if row.get("dispatch_id") in supervised:
+            continue
         pid = row.get("owner_pid")
         if not pid:
             continue
@@ -774,14 +822,32 @@ def restore_undelivered_dispatches() -> dict[str, int]:
             if observed is None or int(observed) == int(baseline):
                 # Unreadable probe, or a genuine match — either way not disproof.
                 continue
-        record_completion(
+        # The dominant case after the subprocess move is a serve recycled while
+        # a HEALTHY child ran to completion: the reply exists, it is in the
+        # target's own thread, and only this bookkeeping row was orphaned. So
+        # the copy points at that thread rather than inviting the sender to
+        # duplicate work that has very likely already been done.
+        thread = row.get("target_session_id") or ""
+        where = (
+            f" Their reply, if they finished, is in thread {thread} "
+            "(agent_chat_open with that session_id)."
+            if thread
+            else (
+                " Check your thread with them (agent_chat_open / agent_chat_log_path)"
+                " before re-sending — they may well have finished."
+            )
+        )
+        if record_completion(
             row["dispatch_id"],
             state=STATE_UNKNOWN,
             error=(
-                "The process running this dispatch exited before recording a result; "
-                "the outcome is unknown. Re-send if you still need it."
+                "The process running this dispatch exited before recording a result, so "
+                "the outcome is unknown." + where
             ),
-            target_session_id=row.get("target_session_id", ""),
-        )
-        restored += 1
+            target_session_id=thread,
+            # The sweep INFERS; it must never overwrite an outcome a supervisor
+            # actually observed and recorded between the read above and here.
+            only_if_running=True,
+        ):
+            restored += 1
     return {"restored": restored, "checked": len(rows)}

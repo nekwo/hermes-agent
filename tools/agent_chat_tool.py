@@ -554,9 +554,19 @@ def _async_delivery_available() -> bool:
     """
 
     try:
-        from gateway.session_context import async_delivery_supported
+        from gateway.session_context import (
+            async_delivery_declared,
+            async_delivery_supported,
+        )
 
-        return bool(async_delivery_supported())
+        # A POSITIVE declaration is required, not merely a non-False answer.
+        # `async_delivery_supported()` returns True for an unbound session, and
+        # the mission-chat binding has exactly one call site — so any lane that
+        # reaches this tool without going through `_cmd_mission_chat_message`
+        # inherits an unexamined True and would be granted a durable promise on
+        # the strength of nobody having said otherwise. Both real lanes bind it;
+        # this makes the silence a refusal rather than trusting the default.
+        return bool(async_delivery_declared() and async_delivery_supported())
     except Exception:  # pragma: no cover - defensive
         # Cannot read the capability ⇒ cannot promise delivery. Fail toward the
         # inline lane, which always works.
@@ -585,13 +595,27 @@ def _persona_of_chat_root(root_session_id) -> str:
 def _dispatch_homes() -> tuple[str, str]:
     """``(ambient_home, background_work_home)`` for the child process.
 
-    Both come from the existing authorities. ``get_hermes_home`` is read HERE,
-    in the sender's turn, because that is where the operator's ambient home is
-    still the right answer; by the time the supervisor thread spawns, another
-    persona turn may have flipped the process-global. ``get_hermes_background_work_home``
-    is the one resolver for where background work is recorded, so the child's
-    writers land exactly where this parent, the drain and the Activity
-    projection read.
+    Both come from the existing authorities, and it is worth being precise about
+    what the first one actually is, because the name invites a wrong reading.
+
+    ``get_hermes_home()`` is read HERE, inside the sender's turn — which means
+    inside that persona's ``persona_profile_context``. So the value is the
+    SENDER PERSONA's profile home, not the operator's. That is deliberate and it
+    matches the synchronous relay lane, where the target's turn has always run
+    nested inside the sender's flipped environment: a dispatched turn resolves
+    the same profile-scoped state whether it was awaited or detached. It is
+    still a behaviour change worth naming against the ORIGINAL in-process
+    dispatch lane, which inherited whatever the process-global happened to be at
+    the moment the worker thread ran — a value that depended on which unrelated
+    persona turn was in flight, and was therefore not reliably anything.
+
+    Reading it here rather than in the supervisor is what makes it deterministic
+    at all: by the time the supervisor thread spawns, another persona turn may
+    have flipped the process-global out from under it.
+
+    ``get_hermes_background_work_home()`` is the one resolver for where
+    background work is recorded, so the child's own background writers land
+    exactly where this parent, the drain and the Activity projection read.
     """
 
     from hermes_constants import get_hermes_background_work_home, get_hermes_home

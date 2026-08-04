@@ -35,8 +35,16 @@ A child process has its own ``_WORKDIR_LOCK``, its own ``HERMES_HOME`` override,
 and its own cwd. The executor thread here spawns and WAITS — holding NO lock
 while it waits, which is the entire point — so the parent stays free to run
 operator turns and deliveries throughout. ``dispatch_max_concurrent`` now means
-three genuinely concurrent turns, and a nested dispatch simply spawns another
-process.
+three genuinely concurrent turns.
+
+The nested-dispatch deadlock is gone too, but NOT because a child spawns a
+grandchild — an earlier version of this note claimed that and it was wrong. The
+child is a cold one-shot CLI, so its delivery capability is False and a nested
+``wait: false`` is REFUSED (``async_delivery_unavailable``) before anything
+runs. That is the honest outcome rather than a limitation: the child's process
+ends with its turn, so a grandchild would outlive the only thing that could
+record what happened to it. A dispatched agent that needs a teammate uses
+``wait: true`` and gets the reply inline.
 
 The cost is a cold start per dispatch. That is the right trade for work whose
 budget is measured in minutes, and it buys a second property worth as much: a
@@ -71,6 +79,8 @@ __all__ = [
     "build_dispatch_argv",
     "child_environment",
     "dispatch_detached_turn",
+    "is_supervised_here",
+    "supervised_dispatch_ids",
     "parse_child_payload",
     "shutdown_dispatch_executor",
     "summarize_for_caller",
@@ -87,14 +97,74 @@ KILL_GRACE_SECONDS = 120.0
 #: Bound on the child's captured streams. Stdout only has to carry one JSON
 #: payload; stderr is diagnostics. Neither may grow without limit inside a
 #: long-lived parent.
+#:
+#: The bound keeps the TAIL and drops the head — see :class:`_BoundedTail`. The
+#: first implementation did the opposite and it was a data-loss bug, not a
+#: tuning choice: the payload is the LAST thing the child prints, so a chatty
+#: turn that crossed the cap had its own answer discarded and every successful
+#: 30-minute dispatch was reported ``unknown``.
 _MAX_STREAM_CHARS = 512_000
 #: How much stderr rides into a failure record. Enough to name the failure,
 #: nowhere near the 8KB reply bound.
 _STDERR_EXCERPT = 800
 
+#: The key every mission-chat payload carries, on every exit path — success,
+#: refusal, blocker, replay. It is what tells the handler's payload apart from
+#: any other JSON object a child happens to print.
+_PAYLOAD_MARKER = "capability_id"
+
 _executor = None
 _executor_lock = threading.Lock()
 _executor_max_workers = 0
+
+#: Dispatch ids this process is actively supervising — and the guard that keeps
+#: the orphan sweep from answering for them.
+#:
+#: The sweep became PERIODIC in the previous commit, which turned a theoretical
+#: second writer into a real one: from the instant a child exits until this
+#: supervisor's ``record_completion`` lands — across ``proc.wait()`` and two
+#: pump joins — the sweep sees a dead PID on a ``running`` row and settles it
+#: ``unknown``. The 5s drain then delivers "the outcome is unknown" for a
+#: dispatch that COMPLETED, and the supervisor's real answer, written moments
+#: later, is absorbed by the delivery-turn replay dedup — so the sender is told
+#: nothing is known and never receives the answer sitting in the row.
+#:
+#: A row still supervised HERE is not an orphan by definition, so the sweep
+#: skips it. Process-local on purpose, and sufficient: the race is between two
+#: threads of one serve process, and a row whose supervisor died is exactly the
+#: row the sweep SHOULD settle.
+_supervised: set[str] = set()
+_supervised_lock = threading.Lock()
+
+
+def _mark_supervised(dispatch_id: str) -> None:
+    with _supervised_lock:
+        _supervised.add(str(dispatch_id))
+
+
+def _forget_supervised(dispatch_id: str) -> None:
+    with _supervised_lock:
+        _supervised.discard(str(dispatch_id))
+
+
+def is_supervised_here(dispatch_id: str) -> bool:
+    """True while THIS process has a live supervisor for ``dispatch_id``."""
+
+    with _supervised_lock:
+        return str(dispatch_id) in _supervised
+
+
+def supervised_dispatch_ids() -> set[str]:
+    """A snapshot of every dispatch this process is actively supervising.
+
+    The orphan sweep reads this to know which ``running`` rows are not orphans
+    at all. Returns a COPY: the sweep iterates while supervisors come and go,
+    and handing out the live set would make that a mutation-during-iteration
+    bug on a background thread.
+    """
+
+    with _supervised_lock:
+        return set(_supervised)
 
 
 def _get_executor(max_workers: int):
@@ -251,7 +321,8 @@ def parse_child_payload(text: str) -> dict[str, Any] | None:
     if not text:
         return None
     decoder = json.JSONDecoder()
-    found: dict[str, Any] | None = None
+    marked: dict[str, Any] | None = None
+    fallback: dict[str, Any] | None = None
     index = text.find("{")
     while index != -1:
         try:
@@ -260,9 +331,22 @@ def parse_child_payload(text: str) -> dict[str, Any] | None:
             index = text.find("{", index + 1)
             continue
         if isinstance(value, dict):
-            found = value
+            # PREFER the handler's own payload. "last object wins" was wrong in
+            # both directions and neither was theoretical: a shutdown notice
+            # (``{"event":"mcp_shutdown","ok":false}``) printed after a
+            # successful turn made it an error, and a trailing ``{}`` made it a
+            # success with an EMPTY reply — which reads as "they had nothing to
+            # report". Every mission-chat payload carries ``capability_id`` on
+            # every exit path, so the discriminator is the producer's own, not a
+            # guess about ordering.
+            if _PAYLOAD_MARKER in value:
+                marked = value
+            elif marked is None:
+                fallback = value
         index = text.find("{", max(end, index + 1))
-    return found
+    # The fallback keeps a pre-marker or hand-stubbed payload readable rather
+    # than reporting a turn that did answer as having produced nothing.
+    return marked if marked is not None else fallback
 
 
 # --------------------------------------------------------------------------
@@ -270,7 +354,47 @@ def parse_child_payload(text: str) -> dict[str, Any] | None:
 # --------------------------------------------------------------------------
 
 
-def _drain(stream, sink: list[str]) -> threading.Thread:
+class _BoundedTail:
+    """A capture that keeps the LAST ``limit`` characters and drops the head.
+
+    WHICH END IS KEPT IS THE WHOLE POINT. The child prints its JSON payload
+    LAST, after everything else it has to say, so a head-keeping bound throws
+    away exactly the thing the parent came for: a chatty turn that crossed the
+    cap had its own answer discarded, ``parse_child_payload`` returned None, and
+    a successful thirty-minute dispatch was recorded ``unknown`` — with an empty
+    stderr excerpt, because the noise was all on stdout. Reproduced at 583,070
+    characters in, 512,033 captured, payload gone.
+
+    The running total is not a micro-optimisation either. Re-summing the sink on
+    every line is O(n²), so a child that printed past the cap pinned a pump
+    thread to a core for the rest of a half-hour run, inside a long-lived serve.
+    """
+
+    __slots__ = ("_chunks", "_limit", "_total", "dropped_chars")
+
+    def __init__(self, limit: int):
+        from collections import deque
+
+        self._chunks: Any = deque()
+        self._limit = int(limit)
+        self._total = 0
+        self.dropped_chars = 0
+
+    def append(self, text: str) -> None:
+        if not text:
+            return
+        self._chunks.append(text)
+        self._total += len(text)
+        while self._total > self._limit and len(self._chunks) > 1:
+            oldest = self._chunks.popleft()
+            self._total -= len(oldest)
+            self.dropped_chars += len(oldest)
+
+    def text(self) -> str:
+        return "".join(self._chunks)
+
+
+def _drain(stream, sink: _BoundedTail) -> threading.Thread:
     """Consume a child pipe for its WHOLE lifetime on a daemon thread.
 
     Both pipes get one of these, always. A stderr pipe nobody reads fills its OS
@@ -284,8 +408,7 @@ def _drain(stream, sink: list[str]) -> threading.Thread:
             for line in iter(stream.readline, ""):
                 if not line:
                     break
-                if sum(len(item) for item in sink) < _MAX_STREAM_CHARS:
-                    sink.append(line)
+                sink.append(line)
         except Exception:  # pragma: no cover - pipe torn down under us
             pass
         finally:
@@ -297,6 +420,35 @@ def _drain(stream, sink: list[str]) -> threading.Thread:
     thread = threading.Thread(target=_pump, daemon=True)
     thread.start()
     return thread
+
+
+def _release_pumps(proc, threads) -> None:
+    """Join the pumps, then force them loose if a survivor still holds the pipe.
+
+    ``readline`` blocks until EOF, and EOF only arrives when every writer has
+    closed. A grandchild that inherited the pipe — which is exactly what "go run
+    the suite" spawns — or a tree member that survived the kill keeps it open,
+    so a plain join leaks two daemon threads PER DISPATCH, permanently, inside a
+    process that is meant to run for days.
+
+    Closing the parent's handle unblocks the reader (it raises, and the pump
+    swallows it), which bounds the thread even when the pipe does not close on
+    its own. Best effort by contract: a thread that still will not budge is one
+    leak, not a growing one, and never a failed dispatch.
+    """
+
+    for thread in threads:
+        thread.join(timeout=10)
+    if not any(thread.is_alive() for thread in threads):
+        return
+    for stream in (getattr(proc, "stdout", None), getattr(proc, "stderr", None)):
+        try:
+            if stream is not None and not stream.closed:
+                stream.close()
+        except Exception:
+            pass
+    for thread in threads:
+        thread.join(timeout=2)
 
 
 def _child_identity(pid: int) -> int | None:
@@ -359,24 +511,59 @@ def _detached_error_text(payload: dict[str, Any]) -> str:
 def _run_dispatch(dispatch_id: str, spec: dict[str, Any]) -> None:
     """Spawn one child turn, wait for it, and record its outcome.
 
-    Never raises: this runs on a detached supervisor with nobody to catch
-    anything, and an unrecorded exception would leave the row ``running``
-    forever — the sender waiting on an answer that can never arrive. Every exit
-    path writes a terminal state, which is what makes the completion
-    deliverable.
+    Never raises, and that is now STRUCTURAL rather than a claim this docstring
+    makes about the code below it. The body used to run unguarded, so a raise
+    before the spawn — ``build_dispatch_argv`` subscripting a malformed spec,
+    ``child_environment`` failing — left the row ``running`` and owned by the
+    sender's still-live serve PID, which the orphan sweep can therefore never
+    settle: running forever, with nobody waiting on a Future to notice, because
+    ``executor.submit`` discards it. The wrapper below turns every such raise
+    into a recorded terminal state.
     """
+
+    try:
+        _run_dispatch_guarded(dispatch_id, spec)
+    except BaseException as exc:  # noqa: BLE001 - a detached turn must never vanish
+        logger.exception("detached dispatch %s failed unrecoverably", dispatch_id)
+        try:
+            from agent_runtime import dispatch_store
+
+            dispatch_store.record_completion(
+                dispatch_id,
+                state=dispatch_store.STATE_ERROR,
+                error=(
+                    "the dispatch supervisor failed before it could record a result: "
+                    f"{type(exc).__name__}: {exc}"
+                ),
+            )
+        except Exception:  # pragma: no cover - the store is the last resort
+            logger.exception(
+                "dispatch %s could not be settled after a supervisor failure", dispatch_id
+            )
+        finally:
+            _forget_supervised(dispatch_id)
+        return
+    finally:
+        _forget_supervised(dispatch_id)
+
+
+def _run_dispatch_guarded(dispatch_id: str, spec: dict[str, Any]) -> None:
+    """The supervisor body. See :func:`_run_dispatch` for the failure contract."""
 
     from agent_runtime import dispatch_store
 
-    budget = float(spec.get("max_seconds") or 1800.0)
+    # ``spec["max_seconds"]`` everywhere: the tool always sets it, and reading
+    # the same key two ways (subscript here, ``.get(...) or 1800`` there) is how
+    # a spec-shape bug hides behind a default that looks deliberate.
+    budget = float(spec["max_seconds"])
     # Minted HERE: the turn's clock starts when the turn starts, not when the
     # dispatch was enqueued behind the concurrency cap.
     deadline_epoch = time.time() + budget
     argv = build_dispatch_argv(spec, deadline_epoch=deadline_epoch)
     env = child_environment(spec)
 
-    stdout_lines: list[str] = []
-    stderr_lines: list[str] = []
+    stdout_tail = _BoundedTail(_MAX_STREAM_CHARS)
+    stderr_tail = _BoundedTail(_MAX_STREAM_CHARS)
     try:
         popen_kwargs: dict[str, Any] = {
             "stdout": subprocess.PIPE,
@@ -420,8 +607,8 @@ def _run_dispatch(dispatch_id: str, spec: dict[str, Any]) -> None:
     except Exception:  # pragma: no cover - bookkeeping must not abort the run
         logger.debug("dispatch %s owner stamp failed", dispatch_id, exc_info=True)
 
-    out_thread = _drain(proc.stdout, stdout_lines)
-    err_thread = _drain(proc.stderr, stderr_lines)
+    out_thread = _drain(proc.stdout, stdout_tail)
+    err_thread = _drain(proc.stderr, stderr_tail)
 
     exit_reason = ""
     try:
@@ -440,13 +627,12 @@ def _run_dispatch(dispatch_id: str, spec: dict[str, Any]) -> None:
         exit_reason = f"wait_failed:{type(exc).__name__}"
         returncode = -1
 
-    # Join the pumps so nothing the child wrote is missed, but never wait
-    # forever on a pipe a killed child left open.
-    out_thread.join(timeout=10)
-    err_thread.join(timeout=10)
+    # Join the pumps so nothing the child wrote is missed, then force them loose
+    # rather than leaking a thread per dispatch on a pipe a survivor holds open.
+    _release_pumps(proc, (out_thread, err_thread))
 
-    stdout_text = "".join(stdout_lines)
-    stderr_text = "".join(stderr_lines)
+    stdout_text = stdout_tail.text()
+    stderr_text = stderr_tail.text()
     payload = parse_child_payload(stdout_text)
 
     if exit_reason:
@@ -504,7 +690,15 @@ def dispatch_detached_turn(
     """
 
     executor = _get_executor(max_concurrent)
-    executor.submit(_run_dispatch, dispatch_id, spec)
+    # Marked BEFORE submit, not inside the worker: a dispatch queued behind the
+    # concurrency cap has not started yet, but its row is already `running` and
+    # the sweep must not answer for it either.
+    _mark_supervised(dispatch_id)
+    try:
+        executor.submit(_run_dispatch, dispatch_id, spec)
+    except Exception:
+        _forget_supervised(dispatch_id)
+        raise
 
 
 def summarize_for_caller(row: dict[str, Any]) -> dict[str, Any]:

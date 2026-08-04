@@ -109,6 +109,9 @@ _background_attempts: dict[str, int] = {}
 #: best-effort, so a serve whose drain failed used to go on promising deliveries
 #: nothing would perform.
 _drain_thread: threading.Thread | None = None
+#: Guards the registration/teardown pair above, so a restart and an old loop's
+#: teardown cannot interleave into "registered, then immediately cleared".
+_drain_lock = threading.Lock()
 
 
 def delivery_drain_is_live() -> bool:
@@ -684,12 +687,21 @@ def start_delivery_drain(
             # The capability binding reads this. A drain that died must stop the
             # runtime promising deliveries it can no longer make — the same
             # honesty rule that made the binding conditional in the first place.
-            _drain_thread = None
+            #
+            # Cleared ONLY when this loop is still the registered drain. An
+            # unconditional clear let an old loop's teardown null a drain that
+            # had already been restarted, after which `delivery_drain_is_live()`
+            # answered False forever and every dispatch was refused by a runtime
+            # perfectly able to deliver.
+            with _drain_lock:
+                if _drain_thread is threading.current_thread():
+                    _drain_thread = None
 
     thread = threading.Thread(
         target=_loop, name="harness-serve-dispatch-delivery", daemon=True
     )
     global _drain_thread
-    _drain_thread = thread
+    with _drain_lock:
+        _drain_thread = thread
     thread.start()
     return thread

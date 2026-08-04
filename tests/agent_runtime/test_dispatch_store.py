@@ -347,3 +347,82 @@ def test_a_refunded_release_does_not_walk_a_busy_row_toward_dropped(store_home):
     row = get_dispatch(dispatch_id)
     assert row["delivery_state"] == DELIVERY_PENDING
     assert row["delivery_attempts"] == 0
+
+
+def test_a_delivered_row_is_never_re_armed(store_home):
+    """Once the sender has been told, a later write must not queue it again.
+
+    The only thing standing between a re-armed `delivered` row and the sender
+    receiving the same result twice is a replay cache that can rotate or be
+    compressed away. So the invariant lives in the store, not in a cache.
+    """
+
+    dispatch_id = _dispatch()
+    record_completion(dispatch_id, state=STATE_COMPLETED, reply="done")
+    assert claim_delivery(dispatch_id, "claim")
+    assert mark_delivered(dispatch_id)
+
+    # A late write still corrects the OUTCOME, but does not re-queue delivery.
+    assert record_completion(dispatch_id, state=STATE_COMPLETED, reply="corrected")
+    row = get_dispatch(dispatch_id)
+    assert row["result"]["reply"] == "corrected"
+    assert row["delivery_state"] == DELIVERY_DELIVERED
+    assert pending_deliveries() == []
+
+
+def test_only_if_running_refuses_to_overwrite_a_settled_row(store_home):
+    """The guessing writer must never outrank the observing one.
+
+    The sweep INFERS `unknown` from a dead PID. The supervisor WATCHED the turn.
+    When both write, the observation has to win, so the sweep's write is scoped
+    to rows still in flight.
+    """
+
+    dispatch_id = _dispatch()
+    record_completion(dispatch_id, state=STATE_COMPLETED, reply="the real answer")
+
+    assert (
+        record_completion(
+            dispatch_id, state=STATE_UNKNOWN, error="guessed", only_if_running=True
+        )
+        is False
+    )
+    row = get_dispatch(dispatch_id)
+    assert row["state"] == STATE_COMPLETED
+    assert row["result"]["reply"] == "the real answer"
+
+    # Unguarded, the supervisor's own correction still lands.
+    assert record_completion(dispatch_id, state=STATE_COMPLETED, reply="corrected")
+    assert get_dispatch(dispatch_id)["result"]["reply"] == "corrected"
+
+
+def test_the_orphan_copy_points_at_the_thread_instead_of_inviting_rework(
+    store_home, monkeypatch
+):
+    """After the subprocess move the dominant orphan is a recycled serve.
+
+    The child very likely finished and wrote its reply into the target's own
+    thread; only the bookkeeping row was orphaned. "Re-send if you still need
+    it" invites duplicated work in exactly that case.
+    """
+
+    dispatch_id = _dispatch()
+    record_completion(
+        dispatch_id, state=STATE_COMPLETED, reply="x", target_session_id="persona_chat_dev_9"
+    )
+    # Re-open it as running with a dead owner, the shape a recycled serve leaves.
+    import sqlite3
+
+    with sqlite3.connect(dispatch_db_path()) as conn:
+        conn.execute(
+            "UPDATE mission_chat_dispatches SET state='running', delivery_state='pending' "
+            "WHERE dispatch_id=?",
+            (dispatch_id,),
+        )
+    monkeypatch.setattr("gateway.status._pid_exists", lambda pid: False)
+
+    assert restore_undelivered_dispatches()["restored"] == 1
+    error = get_dispatch(dispatch_id)["result"]["error"]
+    assert "persona_chat_dev_9" in error
+    assert "agent_chat_open" in error
+    assert "Re-send if you still need it" not in error

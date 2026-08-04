@@ -60,12 +60,20 @@ def deliverable_lane(monkeypatch):
     forge a turn back into.
     """
 
-    monkeypatch.setattr("gateway.session_context.async_delivery_supported", lambda: True)
+    from gateway.session_context import _SESSION_ASYNC_DELIVERY, declare_async_delivery_channel
+
+    # The REAL contextvar, not a stub of the getter: the lane now requires a
+    # POSITIVE declaration, so a test that stubbed only the value would pass
+    # while the mechanism it is about went unexercised.
+    token = _SESSION_ASYNC_DELIVERY.set(_SESSION_ASYNC_DELIVERY.get())
+    declare_async_delivery_channel()
     monkeypatch.setattr(
         dispatch_delivery,
         "_sender_persona",
         lambda root: ("neko_supervisor", "personainst_neko") if root == SENDER_ROOT else None,
     )
+    yield
+    _SESSION_ASYNC_DELIVERY.reset(token)
 
 
 @pytest.fixture
@@ -178,12 +186,17 @@ def test_a_cold_cli_lane_refuses_instead_of_orphaning_the_work(store_home, monke
     exactly as ``delegate_task`` falls back to its inline path on the same signal.
     """
 
-    monkeypatch.setattr("gateway.session_context.async_delivery_supported", lambda: False)
+    from gateway.session_context import _SESSION_ASYNC_DELIVERY, declare_stateless_channel
+
+    token = _SESSION_ASYNC_DELIVERY.set(_SESSION_ASYNC_DELIVERY.get())
+    declare_stateless_channel()
     monkeypatch.setattr(
         dispatch_delivery, "_sender_persona", lambda root: ("neko_supervisor", "personainst_neko")
     )
-
-    result = _send()
+    try:
+        result = _send()
+    finally:
+        _SESSION_ASYNC_DELIVERY.reset(token)
 
     assert result["ok"] is False
     assert result["error_kind"] == "async_delivery_unavailable"
@@ -203,7 +216,9 @@ def test_a_sender_root_the_drain_cannot_resolve_is_refused_before_running(
     could not deliver never runs.
     """
 
-    monkeypatch.setattr("gateway.session_context.async_delivery_supported", lambda: True)
+    from gateway.session_context import declare_async_delivery_channel
+
+    declare_async_delivery_channel()
     monkeypatch.setattr(dispatch_delivery, "_sender_persona", lambda root: None)
 
     result = _send()
@@ -744,4 +759,169 @@ def test_a_dispatch_runs_while_another_thread_holds_the_workdir_lock(store_home)
     # process-wide turn lock was held by someone else.
     row = get_dispatch(dispatch_id)
     assert row["state"] == STATE_ERROR
+    assert row["delivery_state"] == DELIVERY_PENDING
+
+
+# --------------------------------------------------------------------------
+# payload integrity: a silent wrong answer is the failure class here
+# --------------------------------------------------------------------------
+
+
+def test_an_over_cap_chatty_child_still_yields_its_payload(store_home, monkeypatch):
+    """The bound keeps the TAIL, because the payload is printed LAST.
+
+    Head-keeping was a data-loss bug, not a tuning choice: reproduced at 583,070
+    characters in and 512,033 captured, with the payload past the cap and gone —
+    so a SUCCESSFUL thirty-minute dispatch was recorded `unknown`, and the stderr
+    excerpt was empty because all the noise was on stdout.
+    """
+
+    dispatch_id = _armed_dispatch()
+    noise = "x" * 200 + "\n"
+    payload = json.dumps(
+        {"ok": True, "capability_id": "mission.chat.message", "reply": "3 failures", "session_id": "s-dev"}
+    )
+    stdout = noise * 3000 + payload  # ~600KB, well past the 512KB cap
+    assert len(stdout) > agent_chat_dispatch._MAX_STREAM_CHARS
+    proc = _FakeProc(stdout=stdout)
+    monkeypatch.setattr(agent_chat_dispatch.subprocess, "Popen", lambda *a, **k: proc)
+
+    agent_chat_dispatch._run_dispatch(dispatch_id, _spec())
+
+    row = get_dispatch(dispatch_id)
+    assert row["state"] == "completed"
+    assert row["result"]["reply"] == "3 failures"
+
+
+def test_the_tail_buffer_drops_the_head_and_bounds_itself():
+    tail = agent_chat_dispatch._BoundedTail(100)
+    for _ in range(50):
+        tail.append("y" * 10)
+
+    text = tail.text()
+    assert len(text) <= 110  # bounded (one chunk of slack by construction)
+    assert tail.dropped_chars > 0
+    # The END survived, which is the only property that matters here.
+    tail.append("PAYLOAD")
+    assert tail.text().endswith("PAYLOAD")
+
+
+def test_trailing_json_after_the_payload_does_not_become_the_result(store_home, monkeypatch):
+    """"Last object wins" was wrong in BOTH directions, and both were live.
+
+    A shutdown notice printed after a successful turn turned it into an error; a
+    trailing `{}` turned it into a success with an EMPTY reply, which reads to an
+    agent as "they had nothing to report". The handler's own `capability_id` is
+    the discriminator, so ordering stops deciding.
+    """
+
+    dispatch_id = _armed_dispatch()
+    payload = json.dumps(
+        {"ok": True, "capability_id": "mission.chat.message", "reply": "3 failures"}
+    )
+    stdout = payload + '\n{"event":"mcp_shutdown","ok":false}\n'
+    proc = _FakeProc(stdout=stdout)
+    monkeypatch.setattr(agent_chat_dispatch.subprocess, "Popen", lambda *a, **k: proc)
+
+    agent_chat_dispatch._run_dispatch(dispatch_id, _spec())
+
+    row = get_dispatch(dispatch_id)
+    assert row["state"] == "completed"
+    assert row["result"]["reply"] == "3 failures"
+
+
+def test_a_trailing_empty_object_does_not_become_an_empty_success():
+    payload = {"ok": True, "capability_id": "mission.chat.message", "reply": "done"}
+    assert agent_chat_dispatch.parse_child_payload(json.dumps(payload) + "\n{}\n") == payload
+    assert (
+        agent_chat_dispatch.parse_child_payload(json.dumps(payload) + '\n{"ok": true}\n')
+        == payload
+    )
+    # A payload with no marker at all is still better than reporting nothing.
+    assert agent_chat_dispatch.parse_child_payload('{"ok": true, "reply": "hi"}') == {
+        "ok": True,
+        "reply": "hi",
+    }
+
+
+def test_a_prespawn_failure_still_settles_the_row(store_home, monkeypatch):
+    """"Never raises" is now structural, not a docstring promise.
+
+    A raise before the spawn used to escape entirely — `executor.submit` never
+    retrieves the Future, so nothing observed it — leaving the row `running` and
+    owned by the sender's still-live serve PID, which the orphan sweep can
+    therefore never settle. Running forever, silently.
+    """
+
+    dispatch_id = _armed_dispatch()
+    monkeypatch.setattr(
+        agent_chat_dispatch,
+        "build_dispatch_argv",
+        lambda spec, deadline_epoch: (_ for _ in ()).throw(KeyError("persona_id")),
+    )
+
+    agent_chat_dispatch._run_dispatch(dispatch_id, _spec())  # must not raise
+
+    row = get_dispatch(dispatch_id)
+    assert row["state"] == STATE_ERROR
+    assert "supervisor failed" in row["result"]["error"]
+    assert row["delivery_state"] == DELIVERY_PENDING
+
+
+def test_a_supervised_dispatch_is_not_an_orphan(store_home, monkeypatch):
+    """THE race the periodic sweep introduced.
+
+    Between the child exiting and the supervisor's `record_completion` — across
+    `proc.wait()` and two pump joins — the sweep sees a dead PID on a running
+    row. If it answers there, the sender is told "the outcome is unknown" for a
+    dispatch that COMPLETED, and the real answer arriving moments later is
+    swallowed by the delivery-turn replay dedup: told nothing, never corrected.
+    """
+
+    from agent_runtime.dispatch_store import restore_undelivered_dispatches
+
+    dispatch_id = _armed_dispatch()
+    monkeypatch.setattr("gateway.status._pid_exists", lambda pid: False)
+
+    agent_chat_dispatch._mark_supervised(dispatch_id)
+    try:
+        assert restore_undelivered_dispatches()["restored"] == 0
+        assert get_dispatch(dispatch_id)["state"] == STATE_RUNNING
+    finally:
+        agent_chat_dispatch._forget_supervised(dispatch_id)
+
+    # Once nobody is supervising it, it IS an orphan and settles normally.
+    assert restore_undelivered_dispatches()["restored"] == 1
+    assert get_dispatch(dispatch_id)["state"] == "unknown"
+
+
+def test_the_supervisors_observed_outcome_beats_the_sweeps_guess(store_home, monkeypatch):
+    """End-to-end of the race: the sender must receive the REAL answer.
+
+    Even with the sweep having already settled the row `unknown`, the
+    supervisor's observed completion has to win — and re-arm delivery so the
+    answer actually goes out.
+    """
+
+    from agent_runtime.dispatch_store import restore_undelivered_dispatches
+
+    dispatch_id = _armed_dispatch()
+    monkeypatch.setattr("gateway.status._pid_exists", lambda pid: False)
+
+    # The sweep gets there first (nothing supervising, e.g. after a restart).
+    assert restore_undelivered_dispatches()["restored"] == 1
+    assert get_dispatch(dispatch_id)["state"] == "unknown"
+
+    # The supervisor then reports what it actually observed.
+    proc = _FakeProc(
+        stdout=json.dumps(
+            {"ok": True, "capability_id": "mission.chat.message", "reply": "3 failures"}
+        )
+    )
+    monkeypatch.setattr(agent_chat_dispatch.subprocess, "Popen", lambda *a, **k: proc)
+    agent_chat_dispatch._run_dispatch(dispatch_id, _spec())
+
+    row = get_dispatch(dispatch_id)
+    assert row["state"] == "completed"
+    assert row["result"]["reply"] == "3 failures"
     assert row["delivery_state"] == DELIVERY_PENDING

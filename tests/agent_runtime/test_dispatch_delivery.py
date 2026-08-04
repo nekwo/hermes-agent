@@ -518,3 +518,30 @@ def test_forge_delivery_turn_lands_a_real_turn_and_dedupes_a_retry(
     assert replay.get("idempotent_replay") is True
     # And the provider was NOT asked a second time: one delivery, one turn.
     assert len(calls) == 1
+
+
+def test_a_restarted_drain_is_not_nulled_by_the_old_loops_teardown(store_home):
+    """`delivery_drain_is_live()` gates EVERY dispatch, so a false negative
+    refuses them all.
+
+    The teardown used to clear the registration unconditionally, so an old
+    loop's `finally` could null a drain that had already been restarted — after
+    which the runtime reported no consumer forever and refused work it was
+    perfectly able to deliver.
+    """
+
+    import threading
+
+    first_stop = threading.Event()
+    first = dispatch_delivery.start_delivery_drain(stop_event=first_stop, interval_seconds=0.05)
+    second_stop = threading.Event()
+    second = dispatch_delivery.start_delivery_drain(stop_event=second_stop, interval_seconds=0.05)
+    try:
+        # Retire the FIRST loop while the second is the registered drain.
+        first_stop.set()
+        first.join(timeout=5)
+        assert dispatch_delivery.delivery_drain_is_live() is True
+    finally:
+        second_stop.set()
+        second.join(timeout=5)
+    assert dispatch_delivery.delivery_drain_is_live() is False
