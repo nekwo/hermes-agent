@@ -68,22 +68,6 @@ def _async_event(delegation_id="deleg_duplicate"):
     }
 
 
-def _completion_event(*, started_at, session_id="proc_reused"):
-    return {
-        "type": "completion",
-        "session_id": session_id,
-        "session_key": "agent:main:telegram:dm:123",
-        "platform": "telegram",
-        "chat_type": "dm",
-        "chat_id": "123",
-        "started_at": started_at,
-        "command": "echo done",
-        "exit_code": 0,
-        "completion_reason": "exited",
-        "output": "done\n",
-    }
-
-
 def _stop_after_sleeps(monkeypatch, runner, count):
     sleep_calls = 0
 
@@ -184,22 +168,6 @@ def test_failed_async_injection_is_retried_and_only_success_is_acked(
 
     assert adapter.handle_message.await_count == 2
     assert acknowledgements == ["deleg_duplicate"]
-
-
-def _persist_pending_completion(event):
-    from tools import async_delegation
-
-    async_delegation._persist_dispatch({
-        "delegation_id": event["delegation_id"],
-        "session_key": event["session_key"],
-        "origin_ui_session_id": "",
-        "parent_session_id": event.get("parent_session_id"),
-        "dispatched_at": event["dispatched_at"],
-    })
-    async_delegation._persist_completion(event, {
-        "status": "completed",
-        "summary": event["summary"],
-    })
 
 
 def test_explicit_kill_returns_output_before_consuming_notification(monkeypatch):
