@@ -17,6 +17,56 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  mutation-claims:
+    name: Changed-line mutation claims
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code and base history
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Select changed claims before installing dependencies
+        id: select
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE=$(git merge-base "origin/${{ github.base_ref }}" HEAD)
+          else
+            BASE=$(git rev-parse HEAD~1 2>/dev/null || git rev-parse HEAD)
+          fi
+          OUTPUT=$(python scripts/changed_line_mutation_check.py --base "$BASE" --list)
+          printf '%s\n' "$OUTPUT"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          if printf '%s\n' "$OUTPUT" | grep -q '^mutation candidates: 0 '; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install uv
+        if: steps.select.outputs.run == 'true'
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          version: "0.9.28"
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install focused-test environment
+        if: steps.select.outputs.run == 'true'
+        uses: ./.github/actions/retry
+        with:
+          command: uv sync --locked --python 3.11 --extra dev
+
+      - name: Require every selected mutant to turn its claimed test red
+        if: steps.select.outputs.run == 'true'
+        run: >-
+          uv run python scripts/changed_line_mutation_check.py
+          --base "${{ steps.select.outputs.base }}"
+
   generate:
     name: "Generate slices"
     runs-on: ubuntu-latest

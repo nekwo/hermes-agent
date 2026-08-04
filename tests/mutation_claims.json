@@ -1,0 +1,19 @@
+{
+  "claims": [
+    {
+      "id": "stage42-work-list-refuses-cursor",
+      "path": "hermes_cli/harness.py",
+      "symbol": "build_parser/work_list",
+      "operator": "advertise-unread-control",
+      "find": "work_list, controls=frozenset({\"limit\", \"sort\"})",
+      "replace": "work_list, controls=frozenset({\"cursor\", \"limit\", \"sort\"})",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_harness_cli.py::test_every_stage42_global_flag_is_honored"
+      ]
+    }
+  ]
+}
