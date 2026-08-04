@@ -169,7 +169,12 @@ _USAGE_LANE_PROVIDERS: tuple[str, ...] = (
 )
 
 
-def _add_stage42_global_args(parser, *, mutation: bool = False, omit: frozenset = frozenset()) -> None:
+def _add_stage42_global_args(
+    parser,
+    *,
+    controls: frozenset[str] = frozenset(),
+    omit: frozenset[str] = frozenset(),
+) -> None:
     """The flags EVERY stage42 verb accepts.
 
     A flag registered here is a PROMISE made on every one of ~60 verbs at
@@ -224,13 +229,19 @@ def _add_stage42_global_args(parser, *, mutation: bool = False, omit: frozenset 
     add("-q", "--quiet", action="store_true")
     add("--no-color", action="store_true")
     add("--fields", default=None)
-    add("--sort", default=None)
-    add("--limit", type=int, default=None)
-    add("--cursor", default=None)
-    add("--since", default=None)
-    if mutation:
+    if "sort" in controls:
+        add("--sort", default=None)
+    if "limit" in controls:
+        add("--limit", type=int, default=None)
+    if "cursor" in controls:
+        add("--cursor", default=None)
+    if "since" in controls:
+        add("--since", default=None)
+    if "dry_run" in controls:
         add("--dry-run", action="store_true")
+    if "yes" in controls:
         add("--yes", "-y", action="store_true")
+    if "idempotency_key" in controls:
         add("--idempotency-key", default=None)
 
 
@@ -265,11 +276,11 @@ def build_parser(parent_subparsers) -> None:
     roots_set.add_argument("name", help="Logical root name, e.g. eternia_launcher")
     roots_set.add_argument("path", help="Absolute path to the checkout on THIS machine")
     roots_set.add_argument("--allow-missing", action="store_true", help="Bind even when the path does not exist yet")
-    _add_stage42_global_args(roots_set, mutation=True)
+    _add_stage42_global_args(roots_set, controls=frozenset({"dry_run"}))
     roots_set.set_defaults(func=_cmd_roots_set)
     roots_unset = roots_subs.add_parser("unset", help="Remove a logical-root binding")
     roots_unset.add_argument("name")
-    _add_stage42_global_args(roots_unset, mutation=True)
+    _add_stage42_global_args(roots_unset, controls=frozenset({"dry_run"}))
     roots_unset.set_defaults(func=_cmd_roots_unset)
     roots_migrate = roots_subs.add_parser(
         "migrate",
@@ -278,13 +289,15 @@ def build_parser(parent_subparsers) -> None:
     roots_migrate.add_argument("configs", nargs="*", help="config.yaml paths to migrate (default: every Hermes profile config)")
     roots_migrate.add_argument("--root", action="append", default=[], metavar="NAME=PATH", help="Explicit root binding; repeatable. Omit to auto-derive from .git ancestors.")
     roots_migrate.add_argument("--no-platform-gates", action="store_true", help="Do not add platforms:[windows] to PowerShell/.ps1-only MCP entries")
-    _add_stage42_global_args(roots_migrate, mutation=True)
+    _add_stage42_global_args(
+        roots_migrate, controls=frozenset({"dry_run", "yes"})
+    )
     roots_migrate.set_defaults(func=_cmd_roots_migrate)
 
     workspace = subs.add_parser("workspace", help="Manage Harness workspaces")
     workspace_subs = workspace.add_subparsers(dest="workspace_command", required=True)
     workspace_list = workspace_subs.add_parser("list", help="List workspaces")
-    _add_stage42_global_args(workspace_list)
+    _add_stage42_global_args(workspace_list, controls=frozenset({"sort"}))
     workspace_list.set_defaults(func=_cmd_workspace_list)
     workspace_show = workspace_subs.add_parser("show", help="Show one workspace")
     workspace_show.add_argument("workspace_id")
@@ -312,7 +325,7 @@ def build_parser(parent_subparsers) -> None:
         default=None,
         help="Template scope to copy (repeatable). Default with --from-workspace: every scope. Requires --from-workspace.",
     )
-    _add_stage42_global_args(workspace_create, mutation=True)
+    _add_stage42_global_args(workspace_create, controls=frozenset({"dry_run"}))
     workspace_create.set_defaults(func=_cmd_workspace_create)
     workspace_use = workspace_subs.add_parser("use", help="Set active workspace")
     workspace_use.add_argument("workspace_id")
@@ -322,7 +335,7 @@ def build_parser(parent_subparsers) -> None:
         default=None,
         help="ISO-8601 UTC instant the operator issued this switch; a pointer already owned by a strictly newer intent rejects this one as superseded (transport replay guard)",
     )
-    _add_stage42_global_args(workspace_use, mutation=True)
+    _add_stage42_global_args(workspace_use)
     workspace_use.set_defaults(func=_cmd_workspace_use)
     workspace_actors = workspace_subs.add_parser("actors", help="List typed actors in a workspace")
     workspace_actors.add_argument("workspace_id")
@@ -332,33 +345,41 @@ def build_parser(parent_subparsers) -> None:
     workspace_add_agent = workspace_subs.add_parser("add-agent", help="Add a persona to a workspace roster")
     workspace_add_agent.add_argument("workspace_id")
     workspace_add_agent.add_argument("persona_id")
-    _add_stage42_global_args(workspace_add_agent, mutation=True)
+    _add_stage42_global_args(
+        workspace_add_agent, controls=frozenset({"dry_run"})
+    )
     workspace_add_agent.set_defaults(func=_cmd_workspace_add_agent)
     workspace_remove_agent = workspace_subs.add_parser("remove-agent", help="Remove a persona from a workspace roster")
     workspace_remove_agent.add_argument("workspace_id")
     workspace_remove_agent.add_argument("persona_id")
-    _add_stage42_global_args(workspace_remove_agent, mutation=True)
+    _add_stage42_global_args(
+        workspace_remove_agent, controls=frozenset({"dry_run", "yes"})
+    )
     workspace_remove_agent.set_defaults(func=_cmd_workspace_remove_agent)
     workspace_rename = workspace_subs.add_parser("rename", help="Rename a workspace")
     workspace_rename.add_argument("workspace_id")
     workspace_rename.add_argument("name")
-    _add_stage42_global_args(workspace_rename, mutation=True)
+    _add_stage42_global_args(workspace_rename, controls=frozenset({"dry_run"}))
     workspace_rename.set_defaults(func=_cmd_workspace_rename)
     workspace_archive = workspace_subs.add_parser("archive", help="Archive a workspace")
     workspace_archive.add_argument("workspace_id")
-    _add_stage42_global_args(workspace_archive, mutation=True)
+    _add_stage42_global_args(
+        workspace_archive, controls=frozenset({"dry_run", "yes"})
+    )
     workspace_archive.set_defaults(func=_cmd_workspace_archive)
     workspace_delete = workspace_subs.add_parser(
         "delete", help="Permanently delete a workspace and its office/board content (archive is the reversible path)"
     )
     workspace_delete.add_argument("workspace_id")
-    _add_stage42_global_args(workspace_delete, mutation=True)
+    _add_stage42_global_args(
+        workspace_delete, controls=frozenset({"dry_run", "yes"})
+    )
     workspace_delete.set_defaults(func=_cmd_workspace_delete)
 
     realm = subs.add_parser("realm", help="Manage Harness realms")
     realm_subs = realm.add_subparsers(dest="realm_command", required=True)
     realm_list = realm_subs.add_parser("list", help="List realms")
-    _add_stage42_global_args(realm_list)
+    _add_stage42_global_args(realm_list, controls=frozenset({"sort"}))
     realm_list.set_defaults(func=_cmd_realm_list)
     realm_show = realm_subs.add_parser("show", help="Show one realm")
     realm_show.add_argument("realm_id")
@@ -367,17 +388,19 @@ def build_parser(parent_subparsers) -> None:
     realm_create = realm_subs.add_parser("create", help="Create a realm")
     realm_create.add_argument("--name", required=True)
     realm_create.add_argument("--server", default=None)
-    _add_stage42_global_args(realm_create, mutation=True)
+    _add_stage42_global_args(realm_create, controls=frozenset({"dry_run"}))
     realm_create.set_defaults(func=_cmd_realm_create)
     realm_adopt = realm_subs.add_parser("adopt", help="Adopt server-granted realms from the Eternia backend")
     realm_adopt.add_argument("--server", default=None, help="Only adopt realms bound to this Eternia server id")
     realm_adopt.add_argument("--credential-file", default=None, help="Launcher-brokered realm sync credential JSON (fallback: HERMES_REALM_SYNC_CREDENTIAL)")
-    _add_stage42_global_args(realm_adopt, mutation=True)
+    _add_stage42_global_args(
+        realm_adopt, controls=frozenset({"dry_run", "sort"})
+    )
     realm_adopt.set_defaults(func=_cmd_realm_adopt)
     realm_bind = realm_subs.add_parser("bind-server", help="Bind a realm to an Eternia server id")
     realm_bind.add_argument("realm_id")
     realm_bind.add_argument("server_id")
-    _add_stage42_global_args(realm_bind, mutation=True)
+    _add_stage42_global_args(realm_bind, controls=frozenset({"dry_run"}))
     realm_bind.set_defaults(func=_cmd_realm_bind_server)
     realm_use = realm_subs.add_parser("use", help="Set active realm")
     realm_use.add_argument("realm_id")
@@ -387,7 +410,7 @@ def build_parser(parent_subparsers) -> None:
         default=None,
         help="ISO-8601 UTC instant the operator issued this switch; a pointer already owned by a strictly newer intent rejects this one as superseded (transport replay guard)",
     )
-    _add_stage42_global_args(realm_use, mutation=True)
+    _add_stage42_global_args(realm_use)
     realm_use.set_defaults(func=_cmd_realm_use)
     realm_default_scope = realm_subs.add_parser(
         "default-scope",
@@ -418,12 +441,14 @@ def build_parser(parent_subparsers) -> None:
     realm_sync_pull = realm_sync_subs.add_parser("pull", help="Pull and materialize realm sync artifacts")
     realm_sync_pull.add_argument("realm_id")
     realm_sync_pull.add_argument("--credential-file", default=None, help="Launcher-brokered realm sync credential JSON (fallback: HERMES_REALM_SYNC_CREDENTIAL)")
-    _add_stage42_global_args(realm_sync_pull, mutation=True)
+    _add_stage42_global_args(realm_sync_pull, controls=frozenset({"dry_run"}))
     realm_sync_pull.set_defaults(func=_cmd_realm_sync_pull)
     realm_sync_publish = realm_sync_subs.add_parser("publish", help="Publish allowlisted realm sync artifacts")
     realm_sync_publish.add_argument("realm_id")
     realm_sync_publish.add_argument("--credential-file", default=None, help="Launcher-brokered realm sync credential JSON (fallback: HERMES_REALM_SYNC_CREDENTIAL)")
-    _add_stage42_global_args(realm_sync_publish, mutation=True)
+    _add_stage42_global_args(
+        realm_sync_publish, controls=frozenset({"dry_run", "yes"})
+    )
     realm_sync_publish.set_defaults(func=_cmd_realm_sync_publish)
     realm_sync_held = realm_sync_subs.add_parser(
         "held",
@@ -439,7 +464,9 @@ def build_parser(parent_subparsers) -> None:
     realm_sync_resolve.add_argument("realm_id")
     realm_sync_resolve.add_argument("--key", required=True, help="Entity key from `realm sync held` (e.g. alice:memories/MEMORY.md)")
     realm_sync_resolve.add_argument("--take", required=True, choices=["local", "remote"])
-    _add_stage42_global_args(realm_sync_resolve, mutation=True)
+    _add_stage42_global_args(
+        realm_sync_resolve, controls=frozenset({"dry_run", "yes"})
+    )
     realm_sync_resolve.set_defaults(func=_cmd_realm_sync_resolve)
 
     realm_skills = realm_subs.add_parser("skills", help="Per-realm selection of which shared skills publish to a realm")
@@ -456,7 +483,7 @@ def build_parser(parent_subparsers) -> None:
     realm_skills_set.add_argument("--all", dest="publish_all", action="store_true", help="Publish all shared skills (mode=all; the stored selection list is preserved)")
     realm_skills_set.add_argument("--skills", dest="skills", default=None, help="Comma-separated skill slugs to publish (mode=selected)")
     realm_skills_set.add_argument("--none", dest="publish_none", action="store_true", help="Publish no skills (mode=selected, empty selection)")
-    _add_stage42_global_args(realm_skills_set, mutation=True)
+    _add_stage42_global_args(realm_skills_set, controls=frozenset({"dry_run"}))
     realm_skills_set.set_defaults(func=_cmd_realm_skills_set)
 
     realm_agents = realm_subs.add_parser(
@@ -494,7 +521,7 @@ def build_parser(parent_subparsers) -> None:
         action="store_true",
         help="Clear the explicit selection; required references remain pinned",
     )
-    _add_stage42_global_args(realm_agents_set, mutation=True)
+    _add_stage42_global_args(realm_agents_set, controls=frozenset({"dry_run"}))
     realm_agents_set.set_defaults(func=_cmd_realm_agents_set)
 
     flow = subs.add_parser("flow", help="Operator flow-graph documents: ingest the Launcher's authored agent map whole and set the referenced instances' steering relations")
@@ -596,7 +623,9 @@ def build_parser(parent_subparsers) -> None:
     skills_promote_cmd.add_argument("--from-path", dest="from_path", default=None, help="Promote from an explicit package directory")
     skills_promote_cmd.add_argument("--adopt-divergent", dest="adopt_divergent", action="store_true", help="Adopt over a divergent canonical (archives the previous copy)")
     skills_promote_cmd.add_argument("--move-source", dest="move_source", action="store_true", help="Archive the source package after a successful promotion (retire the duplicate)")
-    _add_stage42_global_args(skills_promote_cmd, mutation=True)
+    _add_stage42_global_args(
+        skills_promote_cmd, controls=frozenset({"dry_run"})
+    )
     skills_promote_cmd.set_defaults(func=_cmd_skills_promote)
 
     prompt_context = subs.add_parser(
@@ -616,7 +645,7 @@ def build_parser(parent_subparsers) -> None:
     board_subs = board.add_subparsers(dest="board_command", required=True)
     board_list = board_subs.add_parser("list", help="List boards")
     board_list.add_argument("--workspace", default=None)
-    _add_stage42_global_args(board_list)
+    _add_stage42_global_args(board_list, controls=frozenset({"sort"}))
     board_list.set_defaults(func=_cmd_board_list)
     board_show = board_subs.add_parser("show", help="Show one board")
     board_show.add_argument("board_id")
@@ -626,14 +655,14 @@ def build_parser(parent_subparsers) -> None:
     board_create = board_subs.add_parser("create", help="Create a board")
     board_create.add_argument("--workspace", required=True)
     board_create.add_argument("--title", default=None)
-    _add_stage42_global_args(board_create, mutation=True)
+    _add_stage42_global_args(board_create, controls=frozenset({"dry_run"}))
     board_create.set_defaults(func=_cmd_board_create)
     board_update = board_subs.add_parser("update", help="Update a board title/columns")
     board_update.add_argument("board_id")
     board_update.add_argument("--title", default=None)
     board_update.add_argument("--columns-json", dest="columns_json", default=None, help="JSON array of {column_id,title,kind,wip_limit}")
     board_update.add_argument("--expect-revision", dest="expect_revision", type=int, default=None)
-    _add_stage42_global_args(board_update, mutation=True)
+    _add_stage42_global_args(board_update)
     board_update.set_defaults(func=_cmd_board_update)
 
     board_card = board_subs.add_parser("card", help="Manage board cards")
@@ -648,7 +677,9 @@ def build_parser(parent_subparsers) -> None:
     card_add.add_argument("--labels", default=None, help="Comma-separated labels")
     card_add.add_argument("--assignee", default=None)
     card_add.add_argument("--created-by", dest="created_by", default=None, help="operator (default) or a persona id")
-    _add_stage42_global_args(card_add, mutation=True)
+    _add_stage42_global_args(
+        card_add, controls=frozenset({"dry_run", "idempotency_key"})
+    )
     card_add.set_defaults(func=_cmd_board_card_add)
     card_edit = board_card_subs.add_parser("edit", help="Edit a card")
     card_edit.add_argument("card_id")
@@ -659,7 +690,9 @@ def build_parser(parent_subparsers) -> None:
     card_edit.add_argument("--assignee", default=None)
     card_edit.add_argument("--clear-assignee", dest="clear_assignee", action="store_true")
     card_edit.add_argument("--expect-revision", dest="expect_revision", type=int, default=None)
-    _add_stage42_global_args(card_edit, mutation=True)
+    _add_stage42_global_args(
+        card_edit, controls=frozenset({"idempotency_key"})
+    )
     card_edit.set_defaults(func=_cmd_board_card_edit)
     card_move = board_card_subs.add_parser("move", help="Move a card to a column / position")
     card_move.add_argument("card_id")
@@ -667,21 +700,23 @@ def build_parser(parent_subparsers) -> None:
     card_move.add_argument("--before", default=None, help="Place before this card id")
     card_move.add_argument("--after", default=None, help="Place after this card id")
     card_move.add_argument("--expect-revision", dest="expect_revision", type=int, default=None)
-    _add_stage42_global_args(card_move, mutation=True)
+    _add_stage42_global_args(
+        card_move, controls=frozenset({"idempotency_key"})
+    )
     card_move.set_defaults(func=_cmd_board_card_move)
     card_archive = board_card_subs.add_parser("archive", help="Archive a card (archive-never-delete)")
     card_archive.add_argument("card_id")
-    _add_stage42_global_args(card_archive, mutation=True)
+    _add_stage42_global_args(card_archive)
     card_archive.set_defaults(func=_cmd_board_card_archive)
     card_restore = board_card_subs.add_parser("restore", help="Restore an archived card")
     card_restore.add_argument("card_id")
-    _add_stage42_global_args(card_restore, mutation=True)
+    _add_stage42_global_args(card_restore)
     card_restore.set_defaults(func=_cmd_board_card_restore)
 
     board_resolve = board_subs.add_parser("resolve-conflict", help="Resolve a realm-sync conflict on a card")
     board_resolve.add_argument("card_id")
     board_resolve.add_argument("--take", required=True, choices=["local", "remote"])
-    _add_stage42_global_args(board_resolve, mutation=True)
+    _add_stage42_global_args(board_resolve)
     board_resolve.set_defaults(func=_cmd_board_resolve_conflict)
 
     office = subs.add_parser("office", help="Manage the Mission Office layout (one file per actor placement; realm-synced like boards)")
@@ -696,31 +731,41 @@ def build_parser(parent_subparsers) -> None:
     office_actor_upsert.add_argument("--actor-json", dest="actor_json", required=True, help="Actor object (path or inline JSON): {persona_id, persona_instance_id?, backing_profile?, items:[...]}")
     office_actor_upsert.add_argument("--expect-revision", dest="expect_revision", type=int, default=None)
     office_actor_upsert.add_argument("--updated-by", dest="updated_by", default=None)
-    _add_stage42_global_args(office_actor_upsert, mutation=True)
+    _add_stage42_global_args(
+        office_actor_upsert, controls=frozenset({"dry_run"})
+    )
     office_actor_upsert.set_defaults(func=_cmd_office_actor_upsert)
     office_actor_remove = office_subs.add_parser("actor-remove", help="Archive an actor placement (archive-never-delete)")
     office_actor_remove.add_argument("--workspace", default=None)
     office_actor_remove.add_argument("--actor", required=True, help="Actor key")
     office_actor_remove.add_argument("--reason", default=None)
     office_actor_remove.add_argument("--expect-revision", dest="expect_revision", type=int, default=None)
-    _add_stage42_global_args(office_actor_remove, mutation=True)
+    _add_stage42_global_args(
+        office_actor_remove, controls=frozenset({"dry_run"})
+    )
     office_actor_remove.set_defaults(func=_cmd_office_actor_remove)
     office_actor_restore = office_subs.add_parser("actor-restore", help="Restore an archived actor placement")
     office_actor_restore.add_argument("--workspace", default=None)
     office_actor_restore.add_argument("--actor", required=True, help="Actor key")
-    _add_stage42_global_args(office_actor_restore, mutation=True)
+    _add_stage42_global_args(
+        office_actor_restore, controls=frozenset({"dry_run"})
+    )
     office_actor_restore.set_defaults(func=_cmd_office_actor_restore)
     office_set_folders = office_subs.add_parser("set-folders", help="Replace the surface's shared folder taxonomy")
     office_set_folders.add_argument("--workspace", default=None)
     office_set_folders.add_argument("--folders", required=True, help="Comma-separated folder names (structural defaults always kept)")
     office_set_folders.add_argument("--expect-revision", dest="expect_revision", type=int, default=None)
-    _add_stage42_global_args(office_set_folders, mutation=True)
+    _add_stage42_global_args(
+        office_set_folders, controls=frozenset({"dry_run"})
+    )
     office_set_folders.set_defaults(func=_cmd_office_set_folders)
     office_resolve = office_subs.add_parser("resolve-conflict", help="Resolve a realm-sync conflict on an actor placement")
     office_resolve.add_argument("--workspace", default=None)
     office_resolve.add_argument("--actor", required=True, help="Actor key")
     office_resolve.add_argument("--take", required=True, choices=["local", "remote"])
-    _add_stage42_global_args(office_resolve, mutation=True)
+    _add_stage42_global_args(
+        office_resolve, controls=frozenset({"dry_run"})
+    )
     office_resolve.set_defaults(func=_cmd_office_resolve_conflict)
 
     persona = subs.add_parser("persona", help="Run bounded live-token diagnostics for one persona")
@@ -914,7 +959,11 @@ def build_parser(parent_subparsers) -> None:
     )
     persona_instance_repair.add_argument("persona_instance_id", nargs="?", default=None, help="Target one row; omit and pass --all to scan every row")
     persona_instance_repair.add_argument("--all", action="store_true", help="Scan and repair every persona-instance row")
-    _add_stage42_global_args(persona_instance_repair, mutation=True)
+    _add_stage42_global_args(
+        persona_instance_repair,
+        controls=frozenset({"dry_run"}),
+        omit=frozenset({"--output", "--quiet", "--fields"}),
+    )
     persona_instance_repair.set_defaults(func=_cmd_persona_instance_repair_steering)
     persona_instance_return = persona_instance_subs.add_parser("return-summary", help="Post a bounded child summary back into a parent chat session")
     persona_instance_return.add_argument("persona_instance_id")
@@ -1056,7 +1105,9 @@ def build_parser(parent_subparsers) -> None:
         "clarify-tickets",
         help="Clarify-token adoption readout: live tickets with state/age/session binding, and the bound_via histogram",
     )
-    _add_stage42_global_args(mission_chat_clarify_tickets)
+    _add_stage42_global_args(
+        mission_chat_clarify_tickets, controls=frozenset({"limit", "sort"})
+    )
     mission_chat_clarify_tickets.add_argument("--session-id", default=None, help="Only list tickets bound to this chat root (counts still cover the whole store)")
     mission_chat_clarify_tickets.add_argument("--state", default=None, choices=["open", "answered", "rebound"], help="Only list tickets in this lifecycle state (counts still cover the whole store)")
     mission_chat_clarify_tickets.set_defaults(func=_cmd_mission_chat_clarify_tickets)
@@ -1191,7 +1242,7 @@ def build_parser(parent_subparsers) -> None:
     agent_subs = agent.add_subparsers(dest="agent_command", required=True)
     agent_list = agent_subs.add_parser("list", help="List persisted/configured agent definitions")
     agent_list.add_argument("--all-profiles", action="store_true")
-    _add_stage42_global_args(agent_list)
+    _add_stage42_global_args(agent_list, controls=frozenset({"sort"}))
     agent_list.set_defaults(func=_cmd_agent_list)
 
     agent_set_profile = agent_subs.add_parser(
@@ -1201,7 +1252,7 @@ def build_parser(parent_subparsers) -> None:
     agent_set_profile.add_argument("persona_id", help="Store-persisted agent id")
     agent_set_profile.add_argument("--profile", required=True, help="Target Hermes profile name; must exist and resolve ready")
     agent_set_profile.add_argument("--requested-by", default="operator")
-    _add_stage42_global_args(agent_set_profile, mutation=True)
+    _add_stage42_global_args(agent_set_profile, controls=frozenset({"dry_run"}))
     agent_set_profile.set_defaults(func=_cmd_agent_set_profile)
 
     skills = subs.add_parser("install-harness-skills", help="Install versioned Harness skills into configured persona profiles")
@@ -1254,14 +1305,14 @@ def build_parser(parent_subparsers) -> None:
     # is running NOW, built fresh on every call. There is no page to resume from
     # and no history to filter by, so advertising either would accept a flag and
     # silently return the whole unfiltered set.
-    _add_stage42_global_args(work_list, omit=frozenset({"--cursor", "--since"}))
+    _add_stage42_global_args(
+        work_list, controls=frozenset({"limit", "sort"})
+    )
     work_list.set_defaults(func=_cmd_work_list)
     work_peek = work_subs.add_parser("peek", help="Bounded read-only look at one item's recent output/progress")
     work_peek.add_argument("work_id", help="Work id from `harness work list`, e.g. terminal:sess-1")
     # Peek answers about ONE row, so nothing to sort, page or bound.
-    _add_stage42_global_args(
-        work_peek, omit=frozenset({"--sort", "--limit", "--cursor", "--since"})
-    )
+    _add_stage42_global_args(work_peek)
     work_peek.set_defaults(func=_cmd_work_peek)
     work_cancel = work_subs.add_parser("cancel", help="Interrupt one piece of running work through its owning subsystem")
     work_cancel.add_argument("work_id", help="Work id from `harness work list`")
@@ -1272,9 +1323,7 @@ def build_parser(parent_subparsers) -> None:
     # superseded), and a second, unread key would imply a guarantee nothing here
     # provides.
     _add_stage42_global_args(
-        work_cancel,
-        mutation=True,
-        omit=frozenset({"--sort", "--limit", "--cursor", "--since", "--idempotency-key"}),
+        work_cancel, controls=frozenset({"dry_run", "yes"})
     )
     work_cancel.set_defaults(func=_cmd_work_cancel)
 
@@ -2518,8 +2567,8 @@ def _agent_definition_row(persona: AgentPersona, *, source_profile: str | None, 
 def _cmd_agent_set_profile(args) -> int:
     """`harness agent set-profile` — the ONE persona⇄profile rebind door.
 
-    ``_add_stage42_global_args(mutation=True)`` auto-registers ``--dry-run``;
-    it is READ here and threaded into the store chokepoint, which validates
+    The parser opts this verb into the ``dry_run`` control explicitly; it is
+    READ here and threaded into the store chokepoint, which validates
     fully, writes nothing and emits nothing on a preview. A mutation verb that
     ignores the flag silently mutates on a preview — this repo has shipped that
     bug twice (the 2026-07-17 office verb family).
