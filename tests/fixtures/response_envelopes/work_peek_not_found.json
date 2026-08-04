@@ -1,0 +1,25 @@
+{
+  "argv": [
+    "harness",
+    "work",
+    "peek",
+    "terminal:fixture-missing",
+    "--json"
+  ],
+  "exit_code": 3,
+  "stdout": {
+    "error": {
+      "code": "not_found",
+      "correlation_id": null,
+      "error_id": "err_fixture",
+      "hint": "Check the id with the matching list command.",
+      "message": "no running work with that id",
+      "retryable": false,
+      "safe_details": {
+        "work_id": "terminal:fixture-missing"
+      }
+    },
+    "kind": "error",
+    "schema_version": 1
+  }
+}

@@ -1,0 +1,60 @@
+{
+  "argv": [
+    "harness",
+    "work",
+    "list",
+    "--json"
+  ],
+  "exit_code": 0,
+  "stdout": {
+    "completeness": {
+      "by_design": [],
+      "considered": 0,
+      "dropped": 0,
+      "included": 0,
+      "reasons": {},
+      "truncated": false
+    },
+    "count": 0,
+    "counts": {
+      "total": 0,
+      "unavailable_sources": 2
+    },
+    "cursor": null,
+    "item_kind": "running_work",
+    "items": [],
+    "kind": "list",
+    "schema_version": 1,
+    "sources": {
+      "chat_turn": {
+        "lane": "durable",
+        "status": "ok"
+      },
+      "cron_job": {
+        "lane": "live",
+        "reason": "not_in_process",
+        "status": "unavailable"
+      },
+      "delegation": {
+        "detail": "head_home=hermes",
+        "lane": "durable",
+        "status": "ok"
+      },
+      "dispatch": {
+        "lane": "durable",
+        "status": "ok"
+      },
+      "mcp_server": {
+        "lane": "live",
+        "reason": "not_in_process",
+        "status": "unavailable"
+      },
+      "terminal": {
+        "detail": "head_home=hermes; no checkpoint file",
+        "lane": "durable",
+        "status": "ok"
+      }
+    },
+    "truncated": false
+  }
+}
