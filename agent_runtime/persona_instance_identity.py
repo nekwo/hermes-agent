@@ -45,7 +45,7 @@ from .flow_graph import (
     reconcile_departed_agents,
 )
 from .models import Event, PersonaInstance
-from .personas import MOTHBALLED_PERSONA_IDS, MOTHBALLED_ROLE_TOKENS
+from .persona_lifecycle import is_runtime_persona
 from .persona_assignments import (
     PersonaInstanceStore,
     canonical_persona_instance_id,
@@ -72,7 +72,6 @@ HELD_REASON_ACTIVE = "active-binding"
 HELD_REASON_TASK_BOUND = "task-bound"
 HELD_REASON_HEARTBEAT = "fresh-heartbeat"
 HELD_REASON_RECENT = "recently-updated"
-HELD_REASON_LEGACY_SEEDED = "legacy-role-still-seeded"
 
 # Liveness grace windows. A genuine orphan tombstone is weeks stale; these only protect
 # rows that are actively being written (races) from being reaped mid-flight.
@@ -278,8 +277,9 @@ def classify_orphan_persona_instances(
     backed universe (``orphan-no-profile``) OR its role/persona is mothballed
     (``legacy-role``). A real product agent (backed and not mothballed) is skipped
     entirely. A candidate is HELD (never pruned) when it shows any live activity, is
-    task-bound (owned by the task-bound sweep), has a fresh heartbeat, was updated inside
-    the min-age grace, or is a still-seeded mothballed persona; otherwise it is prunable.
+    task-bound (owned by the task-bound sweep), or has a fresh heartbeat. The
+    min-age grace protects ordinary orphans, but not a retired definition: the
+    shared lifecycle predicate prevents that row from being rematerialized.
 
     ``profile_catalog_authoritative`` guards the ``profile:<name>`` lane: when the profile
     template catalog could not be positively enumerated (empty/failed read), a missing
@@ -310,8 +310,8 @@ def classify_orphan_persona_instances(
         if not is_backed and persona_id.startswith("profile:") and not profile_catalog_authoritative:
             # Blind catalog: can't confirm the template is truly gone — never reap it.
             is_backed = True
-        is_mothballed = role in MOTHBALLED_ROLE_TOKENS or persona_id in MOTHBALLED_PERSONA_IDS
-        if is_backed and not is_mothballed:
+        is_retired = not is_runtime_persona({"persona_id": persona_id, "role": role})
+        if is_backed and not is_retired:
             continue  # real product agent — not an orphan, not even held
 
         entry = {
@@ -338,17 +338,19 @@ def classify_orphan_persona_instances(
             held_reason = HELD_REASON_TASK_BOUND
         elif _within(current, _as_datetime(_row_get(row, "last_heartbeat_at")), heartbeat_fresh_seconds):
             held_reason = HELD_REASON_HEARTBEAT
-        elif _within(current, _as_datetime(_row_get(row, "updated_at")), updated_min_age_seconds):
+        elif not is_retired and _within(
+            current,
+            _as_datetime(_row_get(row, "updated_at")),
+            updated_min_age_seconds,
+        ):
             held_reason = HELD_REASON_RECENT
-        elif is_mothballed and persona_id in backed_ids:
-            held_reason = HELD_REASON_LEGACY_SEEDED
         else:
             held_reason = None
 
         if held_reason is not None:
             held.append({**entry, "reason": held_reason})
         else:
-            entry["reason"] = PRUNE_REASON_LEGACY_ROLE if is_mothballed else PRUNE_REASON_NO_PROFILE
+            entry["reason"] = PRUNE_REASON_LEGACY_ROLE if is_retired else PRUNE_REASON_NO_PROFILE
             prunable.append(entry)
 
     return {"prunable": prunable, "held": held}

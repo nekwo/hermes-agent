@@ -484,6 +484,72 @@ def test_resolve_skills_batched_matches_per_name_resolve_skill(tmp_path):
     assert batched["missing-one"].status == "missing"
 
 
+def test_skill_root_registry_reuses_unchanged_roots_and_invalidates_only_changed_root(
+    tmp_path,
+):
+    import os
+
+    from agent.skill_utils import (
+        _skill_root_registry,
+        _skill_root_registry_cache_clear,
+    )
+
+    root_a = tmp_path / "a"
+    root_b = tmp_path / "b"
+    root_a.mkdir()
+    root_b.mkdir()
+    _write_skill(root_a, "alpha")
+    _write_skill(root_b, "beta")
+    _skill_root_registry_cache_clear()
+
+    first_a = _skill_root_registry(root_a)
+    first_b = _skill_root_registry(root_b)
+    assert _skill_root_registry(root_a) is first_a
+    assert _skill_root_registry(root_b) is first_b
+
+    changed = root_a / "alpha" / "SKILL.md"
+    changed.write_text("---\nname: renamed-alpha\n---\nchanged\n", encoding="utf-8")
+    os.utime(changed, ns=(1, 6_000_000_000))
+
+    assert _skill_root_registry(root_a) is not first_a
+    assert _skill_root_registry(root_b) is first_b
+
+
+def test_cached_skill_registry_preserves_root_precedence_and_profile_classification(
+    tmp_path, monkeypatch
+):
+    from agent import skill_utils
+
+    local = tmp_path / "local"
+    shared = tmp_path / "shared"
+    local.mkdir()
+    shared.mkdir()
+    _write_skill(local, "same")
+    _write_skill(shared, "same")
+    skill_utils._skill_root_registry_cache_clear()
+
+    monkeypatch.setattr(skill_utils, "get_skills_dir", lambda: local)
+    monkeypatch.setattr(skill_utils, "get_shared_skills_dir", lambda: shared)
+    first = skill_utils.resolve_skills(["same"], roots=[local, shared])["same"]
+    assert first.status == "collision"
+    assert [candidate.root for candidate in first.candidates] == [local, shared]
+    assert [candidate.source_kind for candidate in first.candidates] == [
+        "profile_local",
+        "shared_core",
+    ]
+
+    # Reuse the same physical registries under another profile classification;
+    # source metadata is projected per call, never cached into the root entry.
+    other_profile = tmp_path / "other-profile"
+    monkeypatch.setattr(skill_utils, "get_skills_dir", lambda: other_profile)
+    second = skill_utils.resolve_skills(["same"], roots=[shared, local])["same"]
+    assert [candidate.root for candidate in second.candidates] == [shared, local]
+    assert [candidate.source_kind for candidate in second.candidates] == [
+        "shared_core",
+        "external",
+    ]
+
+
 # ── parse_frontmatter: UTF-8 BOM tolerance ─────────────────────────────────
 
 

@@ -111,10 +111,10 @@ def test_skill_observability_resolver_is_linear_across_production_shaped_roster(
     resolve_calls = 0
     hash_calls = 0
 
-    def counting_resolve(identifiers, *, roots=None):
+    def counting_resolve(identifiers, *, roots=None, **kwargs):
         nonlocal resolve_calls
         resolve_calls += 1
-        return real_resolve_skills(identifiers, roots=roots)
+        return real_resolve_skills(identifiers, roots=roots, **kwargs)
 
     def counting_hash(skill_dir, skill_md):
         nonlocal hash_calls

@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import threading
 from collections import Counter
 from collections.abc import Collection, Iterator
 from datetime import datetime
@@ -29,6 +30,24 @@ _INDEXED_EVENT_ID_TOKEN_RE = re.compile(
 # does not re-parse config on every event.
 _ROTATION_CAP_ENV = "HERMES_EVENT_LOG_ROTATION_CAP_BYTES"
 _ROTATION_CAP_CACHE: dict[str, int] = {}
+
+# Process-local immutable event views keyed by the exact ordered rotation-slice
+# fingerprint. Snapshot/status builders intentionally create a fresh
+# CachedEventLog, but unchanged serve recomputations can safely reuse the same
+# raw lines and id index. Any append/rotation changes one source stamp and
+# creates a new point-in-time view.
+_EVENT_VIEW_CACHE: dict[
+    tuple[tuple[str, int, int], ...], tuple[list[str], dict[str, list[str]]]
+] = {}
+_EVENT_VIEW_CACHE_LOCK = threading.Lock()
+_EVENT_VIEW_CACHE_MAX = 8
+
+
+def _event_view_cache_clear() -> None:
+    """Test hook — clear reusable immutable event-log views."""
+
+    with _EVENT_VIEW_CACHE_LOCK:
+        _EVENT_VIEW_CACHE.clear()
 
 
 def _rotation_cap_bytes() -> int:
@@ -310,8 +329,10 @@ class CachedEventLog(EventLog):
     call (the dominant repeated cost). This caches the split lines once and keeps
     the base's *selective* parse (substring pre-filter → ``json.loads`` only on
     matching lines), so it dedupes the file I/O without paying to parse every
-    event. It is a point-in-time view — created per build and discarded, so appends
-    made elsewhere during the build are intentionally not reflected.
+    event. It is a point-in-time view: each builder gets its own object, while
+    identical source fingerprints reuse an immutable process-local view. Appends
+    made elsewhere during a build are intentionally not reflected; the next
+    builder observes the changed size/mtime and loads a fresh view.
 
     Rotation (C6a): the cache concatenates every slice oldest-first (rotated
     archive slices + live). Slices are contiguous in logical-offset space and the
@@ -328,8 +349,23 @@ class CachedEventLog(EventLog):
 
     def _cached_lines(self) -> list[str]:
         if self._lines is None:
+            sources = list(event_rotation.ordered_line_sources())
+            fingerprint: list[tuple[str, int, int]] = []
+            for source in sources:
+                try:
+                    stat = source.stat()
+                    fingerprint.append((str(source), stat.st_mtime_ns, stat.st_size))
+                except OSError:
+                    fingerprint.append((str(source), -1, -1))
+            cache_key = tuple(fingerprint)
+            with _EVENT_VIEW_CACHE_LOCK:
+                cached = _EVENT_VIEW_CACHE.get(cache_key)
+            if cached is not None:
+                self._lines, self._lines_by_id_token = cached
+                return self._lines
+
             lines: list[str] = []
-            for source in event_rotation.ordered_line_sources():
+            for source in sources:
                 if source.exists():
                     lines.extend(source.read_text(encoding="utf-8").splitlines())
             self._lines = lines
@@ -342,6 +378,10 @@ class CachedEventLog(EventLog):
                 for token in {match.group(0) for match in _INDEXED_EVENT_ID_TOKEN_RE.finditer(line)}:
                     indexed.setdefault(token, []).append(line)
             self._lines_by_id_token = indexed
+            with _EVENT_VIEW_CACHE_LOCK:
+                if len(_EVENT_VIEW_CACHE) >= _EVENT_VIEW_CACHE_MAX:
+                    _EVENT_VIEW_CACHE.clear()
+                _EVENT_VIEW_CACHE[cache_key] = (lines, indexed)
         return self._lines
 
     def _scan(

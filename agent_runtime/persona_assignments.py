@@ -24,6 +24,7 @@ from .models import (
     PersonaInstance,
     looks_like_persona_instance_id,
 )
+from .persona_lifecycle import is_runtime_persona
 from .personas import profile_chat_toolsets
 from .serde import from_jsonable, to_jsonable
 from .state_patches import emit_persona_instance_patch, emit_persona_instance_remove
@@ -1648,6 +1649,7 @@ class PersonaInstanceStore:
         ``chat`` / ``free_floating`` instances are still skipped: an operator
         chat binding is not stale execution state.
         """
+        personas = [persona for persona in personas if is_runtime_persona(persona)]
         for persona in personas:
             self.ensure_for_persona(persona)
         for persona in personas:

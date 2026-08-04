@@ -17,6 +17,7 @@ from .persona_assignments import (
     persona_instance_summary,
 )
 from .persona_chat_history import DEFAULT_PERSONA_CHAT_MESSAGE_TAIL, persona_chat_history_summary, persona_chat_trace_summary
+from .persona_lifecycle import is_runtime_persona
 from .profile_readiness import profile_readiness_for_persona
 from .provider_health import provider_health_for_personas
 from .migrations import effective_config_summary
@@ -24,9 +25,20 @@ from .runtime_instances import GoalRuntimeInstanceStore, runtime_instances_summa
 from .states import RunState
 from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, RunStore
 from .snapshot import _default_persona_session_db, _parity_envelope
+from .resolution import runtime_resolution_scope
 
 
 def build_status(run_store: RunStore | None = None, incident_store: IncidentStore | None = None, agent_store: AgentStore | None = None, event_log: EventLog | None = None) -> dict:
+    with runtime_resolution_scope():
+        return _build_status_in_runtime_scope(
+            run_store=run_store,
+            incident_store=incident_store,
+            agent_store=agent_store,
+            event_log=event_log,
+        )
+
+
+def _build_status_in_runtime_scope(run_store: RunStore | None = None, incident_store: IncidentStore | None = None, agent_store: AgentStore | None = None, event_log: EventLog | None = None) -> dict:
     _build_started = time.perf_counter()
     run_store = run_store or RunStore()
     incident_store = incident_store or IncidentStore()
@@ -41,7 +53,8 @@ def build_status(run_store: RunStore | None = None, incident_store: IncidentStor
     # The background Mission Daemon was retired; execution is always operator/
     # goal-runner driven ("manual").
     execution_mode = "manual"
-    agents = agent_store.list_all() or ensure_persisted_personas(cfg)
+    catalog_agents = agent_store.list_all() or ensure_persisted_personas(cfg)
+    agents = [agent for agent in catalog_agents if is_runtime_persona(agent)]
     runtime_instances = GoalRuntimeInstanceStore(event_log=event_log).list_all()
     active_runs = [r for r in runs if r.state in ACTIVE_RUN_STATES]
     queued_runs = [r for r in active_runs if r.state == RunState.QUEUED]

@@ -2009,7 +2009,7 @@ class _SkillObservabilityResolver:
     isolated registry entry; package hashes are memoized only for this build.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, root_registries: dict[str, Any] | None = None) -> None:
         self._resolutions_by_roots: dict[tuple[str, ...], dict[str, Any]] = {}
         self._hashes: dict[tuple[str, str], str | None] = {}
         self._skill_contexts: dict[
@@ -2018,6 +2018,7 @@ class _SkillObservabilityResolver:
         ] = {}
         self._shared_catalog: dict[str, dict[str, Any]] | None = None
         self._realm_rows: list[dict[str, Any]] | None = None
+        self._root_registries = root_registries if root_registries is not None else {}
 
     def skill_context(
         self, key: tuple[Any, ...]
@@ -2099,7 +2100,11 @@ class _SkillObservabilityResolver:
             # filesystem walk and keeps collision results deterministic if a
             # later persona introduces a name absent from the first subset.
             requested = list(dict.fromkeys([*cached.keys(), *missing]))
-            cached = resolve_skills(requested, roots=roots)
+            cached = resolve_skills(
+                requested,
+                roots=roots,
+                _root_registries=self._root_registries,
+            )
             self._resolutions_by_roots[root_key] = cached
         return {name: cached[name] for name in names if name in cached}
 

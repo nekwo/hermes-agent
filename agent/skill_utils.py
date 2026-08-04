@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import sys
+import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -660,6 +661,99 @@ class SkillResolution:
         return self.candidates[0] if self.status == "resolved" else None
 
 
+@dataclass(frozen=True, slots=True)
+class _SkillRootRegistry:
+    fingerprint: tuple[tuple[str, int | None, int | None], ...]
+    manifests: tuple[tuple[Path | None, Path], ...]
+    legacy: tuple[tuple[Path | None, Path], ...]
+    manifests_by_alias: dict[str, tuple[tuple[Path | None, Path], ...]]
+    legacy_by_alias: dict[str, tuple[tuple[Path | None, Path], ...]]
+
+
+_SKILL_ROOT_REGISTRY_CACHE: dict[str, _SkillRootRegistry] = {}
+_SKILL_ROOT_REGISTRY_LOCK = threading.Lock()
+
+
+def _skill_root_registry_cache_clear() -> None:
+    """Test hook — drop reusable physical-root candidate registries."""
+
+    with _SKILL_ROOT_REGISTRY_LOCK:
+        _SKILL_ROOT_REGISTRY_CACHE.clear()
+
+
+def _skill_root_registry(root: Path) -> _SkillRootRegistry:
+    """Return the candidate registry for one physical skill root.
+
+    The fingerprint covers every resolver-visible markdown candidate plus the
+    active-org marker. A changed root rebuilds only its own registry; unchanged
+    roots reuse parsed frontmatter across profiles and snapshot builds.
+    """
+
+    root_key = str(_resolved_path(root))
+    if not root.is_dir():
+        fingerprint: tuple[tuple[str, int | None, int | None], ...] = ()
+        with _SKILL_ROOT_REGISTRY_LOCK:
+            cached = _SKILL_ROOT_REGISTRY_CACHE.get(root_key)
+            if cached is not None and cached.fingerprint == fingerprint:
+                return cached
+            registry = _SkillRootRegistry(fingerprint, (), (), {}, {})
+            _SKILL_ROOT_REGISTRY_CACHE[root_key] = registry
+            return registry
+
+    manifests = list(iter_skill_index_files(root, "SKILL.md"))
+    legacy = [
+        path
+        for path in root.rglob("*.md")
+        if path.name != "SKILL.md" and not is_skill_support_path(path)
+    ]
+    marker = root / ORG_MIRROR_DIR_NAME / ORG_ACTIVE_MARKER
+    fingerprint_paths = [*manifests, *legacy, marker]
+    stamps: list[tuple[str, int | None, int | None]] = []
+    for path in fingerprint_paths:
+        try:
+            relative = "/".join(path.relative_to(root).parts)
+        except ValueError:
+            relative = str(path)
+        try:
+            stat = path.stat()
+            stamps.append((relative, stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            stamps.append((relative, None, None))
+    fingerprint = tuple(stamps)
+    with _SKILL_ROOT_REGISTRY_LOCK:
+        cached = _SKILL_ROOT_REGISTRY_CACHE.get(root_key)
+        if cached is not None and cached.fingerprint == fingerprint:
+            return cached
+
+    manifest_aliases: dict[str, list[tuple[Path | None, Path]]] = {}
+    for manifest in manifests:
+        aliases = {manifest.parent.name}
+        try:
+            frontmatter, _ = parse_frontmatter(manifest.read_text(encoding="utf-8"))
+        except Exception:
+            frontmatter = {}
+        declared = str(frontmatter.get("name") or "").strip()
+        if declared:
+            aliases.add(declared)
+        for alias in aliases:
+            manifest_aliases.setdefault(alias, []).append((manifest.parent, manifest))
+
+    legacy_aliases: dict[str, list[tuple[Path | None, Path]]] = {}
+    for path in legacy:
+        legacy_aliases.setdefault(path.stem, []).append((None, path))
+
+    registry = _SkillRootRegistry(
+        fingerprint,
+        tuple((manifest.parent, manifest) for manifest in manifests),
+        tuple((None, path) for path in legacy),
+        {key: tuple(value) for key, value in manifest_aliases.items()},
+        {key: tuple(value) for key, value in legacy_aliases.items()},
+    )
+    with _SKILL_ROOT_REGISTRY_LOCK:
+        _SKILL_ROOT_REGISTRY_CACHE[root_key] = registry
+    return registry
+
+
 def _resolved_path(path: Path) -> Path:
     try:
         return path.expanduser().resolve()
@@ -717,38 +811,30 @@ def resolve_skill(
         lookup_names.append(categorized)
 
     for root in search_roots:
-        if not root.is_dir():
-            continue
+        registry = _skill_root_registry(root)
         for lookup in lookup_names:
-            direct = root / lookup
-            manifest = direct / "SKILL.md"
-            if direct.is_dir() and manifest.is_file() and not is_skill_support_path(direct):
-                record(root, direct, manifest)
-            legacy_direct = direct.with_suffix(".md")
-            if legacy_direct.is_file() and not is_skill_support_path(legacy_direct):
-                record(root, None, legacy_direct)
-
-        for manifest in iter_skill_index_files(root, "SKILL.md"):
-            if manifest.parent.name == name:
-                record(root, manifest.parent, manifest)
-                continue
-            try:
-                frontmatter, _ = parse_frontmatter(manifest.read_text(encoding="utf-8"))
-            except Exception:
-                frontmatter = {}
-            if str(frontmatter.get("name") or "").strip() == name:
-                record(root, manifest.parent, manifest)
-
-        for legacy in root.rglob(f"{name}.md"):
-            if legacy.name != "SKILL.md" and not is_skill_support_path(legacy):
-                record(root, None, legacy)
+            direct_manifest = root / lookup / "SKILL.md"
+            for skill_dir, manifest in registry.manifests:
+                if manifest == direct_manifest:
+                    record(root, skill_dir, manifest)
+            direct_legacy = (root / lookup).with_suffix(".md")
+            for skill_dir, legacy in registry.legacy:
+                if legacy == direct_legacy:
+                    record(root, skill_dir, legacy)
+        for skill_dir, manifest in registry.manifests_by_alias.get(name, ()):
+            record(root, skill_dir, manifest)
+        for skill_dir, legacy in registry.legacy_by_alias.get(name, ()):
+            record(root, skill_dir, legacy)
 
     status = _skill_resolution_status(name, candidates)
     return SkillResolution(name, status, tuple(candidates))
 
 
 def resolve_skills(
-    identifiers: List[str], *, roots: List[Path] | None = None
+    identifiers: List[str],
+    *,
+    roots: List[Path] | None = None,
+    _root_registries: Dict[str, _SkillRootRegistry] | None = None,
 ) -> Dict[str, SkillResolution]:
     """Resolve many bare/path identifiers with one registry walk."""
 
@@ -757,6 +843,7 @@ def resolve_skills(
     search_roots = list(roots) if roots is not None else get_all_skills_dirs()
     found: Dict[str, list[SkillResolutionCandidate]] = {name: [] for name in names}
     seen: Dict[str, set[Path]] = {name: set() for name in names}
+    root_registries = _root_registries if _root_registries is not None else {}
 
     def record(name: str, root: Path, skill_dir: Path | None, skill_md: Path) -> None:
         key = _resolved_path(skill_md)
@@ -772,39 +859,25 @@ def resolve_skills(
             )
         )
 
-    names_set = set(names)
     for root in search_roots:
-        if not root.is_dir():
-            continue
+        root_key = str(_resolved_path(root))
+        registry = root_registries.get(root_key)
+        if registry is None:
+            registry = _skill_root_registry(root)
+            root_registries[root_key] = registry
         for name in names:
-            direct = root / name
-            manifest = direct / "SKILL.md"
-            if direct.is_dir() and manifest.is_file() and not is_skill_support_path(direct):
-                record(name, root, direct, manifest)
-            legacy = direct.with_suffix(".md")
-            if legacy.is_file() and not is_skill_support_path(legacy):
-                record(name, root, None, legacy)
-        for manifest in iter_skill_index_files(root, "SKILL.md"):
-            matched = manifest.parent.name if manifest.parent.name in names_set else None
-            if matched is None:
-                try:
-                    frontmatter, _ = parse_frontmatter(
-                        manifest.read_text(encoding="utf-8")
-                    )
-                except Exception:
-                    frontmatter = {}
-                declared = str(frontmatter.get("name") or "").strip()
-                matched = declared if declared in names_set else None
-            if matched:
-                record(matched, root, manifest.parent, manifest)
-        for legacy in root.rglob("*.md"):
-            matched = legacy.stem
-            if (
-                legacy.name != "SKILL.md"
-                and matched in names_set
-                and not is_skill_support_path(legacy)
-            ):
-                record(matched, root, None, legacy)
+            direct_manifest = root / name / "SKILL.md"
+            for skill_dir, manifest in registry.manifests:
+                if manifest == direct_manifest:
+                    record(name, root, skill_dir, manifest)
+            direct_legacy = (root / name).with_suffix(".md")
+            for skill_dir, legacy in registry.legacy:
+                if legacy == direct_legacy:
+                    record(name, root, skill_dir, legacy)
+            for skill_dir, manifest in registry.manifests_by_alias.get(name, ()):
+                record(name, root, skill_dir, manifest)
+            for skill_dir, legacy in registry.legacy_by_alias.get(name, ()):
+                record(name, root, skill_dir, legacy)
 
     result: Dict[str, SkillResolution] = {}
     for name, candidates in found.items():

@@ -10,7 +10,7 @@ runtime HUD as phantom "on level" agents. Two classes:
   QA probes `codex_{create,display,no_display}_probe` created against the LIVE
   store instead of an isolated temp home).
 - **`legacy-role`** — an instance under a mothballed role (the retired `pm`
-  slot; see `MOTHBALLED_ROLES` in `personas.py`).
+  slot; see the shared predicate in `persona_lifecycle.py`).
 
 The snapshot builds the instance list from `PersonaInstanceStore.list_all()`
 (a fresh glob), and the only cleanup lanes were duplicate-id fold
@@ -34,12 +34,15 @@ these rows lingered forever with no prune and no accounting.
   `orphan-no-profile` (a missing template is indistinguishable from an
   unreadable catalog — a blind catalog must not reap real profile channels).
 - **Protection (held, never pruned)**: active worker/run/assignment/task binding,
-  `mode == "task_bound"`, fresh heartbeat (<24h), recent `updated_at` (<48h), or
-  a still-seeded mothballed persona. The reconcile prune re-verifies with the
-  cross-store `_has_live_binding` as a belt.
-- **Mothballed set** single-sourced in `personas.py`: `MOTHBALLED_ROLES` /
-  `MOTHBALLED_ROLE_TOKENS` / `MOTHBALLED_PERSONA_IDS` (start = `pm`). Consumed
-  only by the classifier — no hand-rolled `role == "pm"` checks. (Scattered
+  `mode == "task_bound"`, or a fresh heartbeat (<24h). Recent `updated_at`
+  (<48h) also protects ordinary orphans, but not retired definitions because
+  the lifecycle predicate prevents their rematerialization. The reconcile
+  prune re-verifies with the cross-store `_has_live_binding` as a belt.
+- **Runtime lifecycle** single-sourced in `persona_lifecycle.py`: definitions
+  with `role: disabled` or a mothballed role/persona id (start = `pm`) remain
+  administratively visible but never materialize runtime instances. Consumed
+  by materialization, readiness/status projections, and the classifier — no
+  hand-rolled `role == "pm"` checks. (Scattered
   `"pm"` **routing aliases** in `blueprints/resolve.py`, `mission_goal.py`, etc.
   are alias maps, not liveness checks — left as debt.)
 - **Prune lane** appended to `reconcile_persona_instances` (phase 2 after the

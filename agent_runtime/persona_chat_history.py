@@ -238,7 +238,11 @@ def persona_chat_history_summary(
     except Exception:
         sessions = list(broad_sessions)
 
-    rows: list[dict[str, Any]] = []
+    # Candidate discovery/accounting stays lightweight. Message tails, lineage,
+    # and runtime observations are hydrated only after the creation-order bound
+    # is applied; on a busy runtime this avoids reading every historical chat to
+    # render the newest 50.
+    candidates: list[tuple[dict[str, Any], PersonaInstance, str, str, str | None]] = []
     seen: set[str] = set()
     for raw in sessions or []:
         if not isinstance(raw, dict):
@@ -279,8 +283,7 @@ def persona_chat_history_summary(
             # mark it seen so a drop is only accounted once.
             seen.add(session_id)
             continue
-        row = _history_row(raw, instance, session_id=session_id, session_db=db, message_tail=message_tail)
-        rows.append(row)
+        candidates.append((raw, instance, session_id, "chat", None))
         seen.add(session_id)
 
     # Create/open paths now persist persona chat sessions before exposing them.
@@ -303,7 +306,7 @@ def persona_chat_history_summary(
                 accountant.consider(1)
                 accountant.drop("session_not_in_db", entity_id=session_id)
             continue
-        rows.append(_history_row(raw, instance, session_id=session_id, session_db=db, message_tail=message_tail))
+        candidates.append((raw, instance, session_id, "chat", None))
         seen.add(session_id)
         if accountant is not None:
             accountant.consider(1)
@@ -346,16 +349,7 @@ def persona_chat_history_summary(
             "started_at": assigned,
             "last_active": assigned,
         }
-        row = _history_row(
-            synthetic,
-            instance,
-            session_id=session_id,
-            session_db=db,
-            message_tail=message_tail,
-            kind="mission",
-        )
-        row["task_id"] = task_id
-        rows.append(row)
+        candidates.append((synthetic, instance, session_id, "mission", task_id))
         seen.add(session_id)
         if accountant is not None:
             accountant.consider(1)
@@ -365,18 +359,33 @@ def persona_chat_history_summary(
     # above a conversation created later. Resolve every eligible row first, then
     # sort and truncate so an active old chat cannot crowd a newer chat out of
     # the bounded projection. Session id is the deterministic tie-breaker for
-    # legacy rows whose creation timestamp is missing.
-    rows.sort(key=_persona_chat_creation_sort_key, reverse=True)
-    visible = rows[: max(0, limit)]
+    # legacy rows whose creation timestamp is missing. Candidate fields are the
+    # same fields ``_history_row`` projects into the final row, so selection is
+    # byte-equivalent while hydration is bounded to the visible slice.
+    candidates.sort(key=_persona_chat_candidate_sort_key, reverse=True)
+    visible_candidates = candidates[: max(0, limit)]
     if omitted_session_ids is not None:
         omitted_session_ids.update(
             session_id
-            for row in rows[len(visible):]
-            if (session_id := safe_assignment_text(row.get("session_id"), limit=200))
+            for _raw, _instance, session_id, _kind, _task_id in candidates[len(visible_candidates):]
+            if session_id
         )
+    visible: list[dict[str, Any]] = []
+    for raw, instance, session_id, kind, task_id in visible_candidates:
+        row = _history_row(
+            raw,
+            instance,
+            session_id=session_id,
+            session_db=db,
+            message_tail=message_tail,
+            kind=kind,
+        )
+        if task_id is not None:
+            row["task_id"] = task_id
+        visible.append(row)
     if accountant is not None:
         accountant.include(len(visible))
-        omitted = len(rows) - len(visible)
+        omitted = len(candidates) - len(visible)
         if omitted > 0:
             # Deliberate bound: the directory keeps the newest ``limit`` rows by
             # creation order and every omitted row stays fetchable per-session.
@@ -1052,6 +1061,14 @@ def _persona_chat_creation_sort_key(row: dict[str, Any]) -> tuple[bool, str, str
         created_at or "",
         safe_assignment_text(row.get("session_id"), limit=200),
     )
+
+
+def _persona_chat_candidate_sort_key(
+    candidate: tuple[dict[str, Any], PersonaInstance, str, str, str | None]
+) -> tuple[bool, str, str]:
+    raw, _instance, session_id, _kind, _task_id = candidate
+    created_at = _iso_timestamp(raw.get("started_at"))
+    return (created_at is not None, created_at or "", session_id)
 
 
 def _token_usage_fields(raw: dict[str, Any]) -> dict[str, int]:

@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from agent_runtime.resolution import (
     resolution_table,
     resolve_runtime,
+    runtime_resolution_scope,
     suspect_default_root,
 )
 from agent_runtime.snapshot import build_snapshot
@@ -101,3 +104,33 @@ def test_resolution_table_marks_winner_without_mission_columns(tmp_path):
     assert "tasks" not in env_row
     assert set(env_row) == {"layer", "value", "exists", "winner"}
     assert [row["layer"] for row in rows] == ["env", "config", "default"]
+
+
+def test_runtime_resolution_scope_is_nested_and_environment_sensitive(monkeypatch, tmp_path):
+    first = tmp_path / "runtime-a"
+    second = tmp_path / "runtime-b"
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(first))
+
+    with runtime_resolution_scope() as outer:
+        monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(second))
+        assert resolve_runtime() is outer
+        assert resolve_runtime({"HERMES_AGENT_RUNTIME_ROOT": str(second)}).store_root == second
+        with runtime_resolution_scope() as inner:
+            assert inner is outer
+            assert resolve_runtime() is outer
+
+    assert resolve_runtime().store_root == second
+
+
+def test_runtime_resolution_scope_is_thread_local(tmp_path):
+    roots = [tmp_path / "thread-a", tmp_path / "thread-b"]
+
+    def resolve_in_scope(root):
+        explicit = resolve_runtime({"HERMES_AGENT_RUNTIME_ROOT": str(root)})
+        with runtime_resolution_scope(explicit):
+            return resolve_runtime().store_root
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        resolved = list(pool.map(resolve_in_scope, roots))
+
+    assert resolved == roots

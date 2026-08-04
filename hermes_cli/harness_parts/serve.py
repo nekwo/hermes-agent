@@ -523,6 +523,9 @@ def serve_loop(
     stdout_proxy = _LineFrameProxy(frames, "line")
     stderr_proxy = _LineFrameProxy(frames, "stderr")
     read_cache = _ReadModelCache(read_cache_max_age)
+    from agent_runtime.snapshot import SnapshotBuildContext
+
+    read_build_context = SnapshotBuildContext()
 
     inflight: dict[str, _ArgvRequest] = {}
     # Futures by request id so ``{"op":"cancel"}`` can drop work that is
@@ -569,7 +572,13 @@ def serve_loop(
                 capturing = True
             try:
                 with request_cancel_scope(request.cancel_event):
-                    code = dispatch(list(request.argv))
+                    if cache_key is not None:
+                        from agent_runtime.snapshot import snapshot_build_context_scope
+
+                        with snapshot_build_context_scope(read_build_context):
+                            code = dispatch(list(request.argv))
+                    else:
+                        code = dispatch(list(request.argv))
             except SystemExit as exc:  # argparse usage errors land here
                 raw = exc.code
                 code = raw if isinstance(raw, int) else (0 if raw is None else 2)

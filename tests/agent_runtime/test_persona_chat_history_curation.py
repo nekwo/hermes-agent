@@ -15,6 +15,7 @@ from hermes_time import now
 
 from agent_runtime.events import EventLog
 from agent_runtime.models import Event, PersonaAssignment, PersonaInstance
+from agent_runtime.parity import ProjectionAccountant
 from agent_runtime.mission_chat_turns import (
     mark_stale_inflight_turns_interrupted,
     mission_chat_turn_elements,
@@ -58,6 +59,16 @@ class FakeHistorySessionDB(FakeSessionDB):
             if row.get("id") == session_id:
                 return dict(row)
         return None
+
+
+class CountingHistorySessionDB(FakeHistorySessionDB):
+    def __init__(self, sessions, messages=None):
+        super().__init__(sessions, messages=messages)
+        self.message_hydrations = 0
+
+    def get_messages(self, session_id, include_inactive=False):
+        self.message_hydrations += 1
+        return super().get_messages(session_id, include_inactive=include_inactive)
 
 
 _DECISION = json.dumps(
@@ -441,6 +452,44 @@ def test_history_uses_persisted_instance_binding_and_creation_order():
     assert rows[0]["persona_id"] == "neko_supervisor"
     assert rows[0]["persona_instance_id"] == instance_id
     assert rows[0]["created_at"] == "2026-07-22T05:49:48.000000Z"
+
+
+def test_history_hydrates_only_visible_newest_fifty_with_equivalent_accounting():
+    instance_id = "personainst_neko_supervisor"
+    sessions = [
+        {
+            "id": f"chat_{index:03d}",
+            "source": "agent_runtime_persona_chat",
+            "title": f"Chat {index:03d}",
+            "started_at": f"2026-07-{1 + index // 24:02d}T{index % 24:02d}:00:00Z",
+            "last_active": f"2026-07-{1 + index // 24:02d}T{index % 24:02d}:30:00Z",
+            "model_config": json.dumps({"persona_instance_id": instance_id}),
+        }
+        for index in range(120)
+    ]
+    instance = _chat_persona_instance(instance_id, "neko_supervisor", "chat_000")
+    full_db = CountingHistorySessionDB(sessions, messages=[])
+    expected = persona_chat_history_summary(
+        persona_instances=[instance], session_db=full_db, limit=120
+    )[:50]
+
+    bounded_db = CountingHistorySessionDB(sessions, messages=[])
+    accountant = ProjectionAccountant("persona_chat_history")
+    omitted: set[str] = set()
+    actual = persona_chat_history_summary(
+        persona_instances=[instance],
+        session_db=bounded_db,
+        limit=50,
+        accountant=accountant,
+        omitted_session_ids=omitted,
+    )
+
+    assert actual == expected
+    assert bounded_db.message_hydrations <= 50
+    assert len(omitted) == 70
+    assert accountant.summary()["considered"] == 120
+    assert accountant.summary()["included"] == 50
+    assert accountant.summary()["dropped"] == 70
 
 
 def test_persona_chat_history_rows_always_emit_kind():

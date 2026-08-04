@@ -468,9 +468,9 @@ def test_classify_orphan_truth_table():
     }
 
 
-def test_classify_legacy_role_still_seeded_is_held():
-    # If the mothballed persona is still present in the backed universe, pruning would
-    # flap (it gets re-ensured), so it is held, not pruned.
+def test_classify_legacy_role_still_seeded_is_prunable():
+    # The lifecycle predicate prevents runtime rematerialization, so an
+    # administratively visible retired definition no longer needs a hold.
     backed_ids, backed_profiles = _backed_universe()
     backed_ids = set(backed_ids) | {"pm"}
     res = classify_orphan_persona_instances(
@@ -479,17 +479,17 @@ def test_classify_legacy_role_still_seeded_is_held():
         backed_profile_names=backed_profiles,
         now=_FIXED_NOW,
     )
-    assert res["prunable"] == []
-    assert res["held"] == [
+    assert res["prunable"] == [
         {
             "persona_instance_id": "pm",
             "persona_id": "pm",
             "role": "pm",
             "profile_id": "pm",
             "updated_at": _STALE.isoformat(),
-            "reason": "legacy-role-still-seeded",
+            "reason": "legacy-role",
         }
     ]
+    assert res["held"] == []
 
 
 def test_reconcile_prunes_orphans_holds_and_is_idempotent(monkeypatch):

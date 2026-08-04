@@ -35,6 +35,7 @@ from agent_runtime.persona_assignments import (
     persona_instance_id_for_placement,
 )
 from agent_runtime.persona_chat_history import persona_chat_history_summary
+from agent_runtime.persona_instance_identity import reconcile_persona_instances
 from agent_runtime.snapshot import build_snapshot
 from agent_runtime.serde import to_jsonable
 from agent_runtime.states import RunState, TaskState, WorkerSessionState
@@ -75,11 +76,11 @@ def _seed_run(
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _persona(persona_id: str = "dev") -> AgentPersona:
+def _persona(persona_id: str = "dev", *, role: str = "dev") -> AgentPersona:
     return AgentPersona(
         id=persona_id,
         display_name=f"{persona_id} worker",
-        role="dev",
+        role=role,
         model="gpt-test",
         provider="openai-codex",
         api_mode="codex_responses",
@@ -149,6 +150,45 @@ def test_persona_instance_store_ensures_a_singleton_per_persona(isolate_agent_ru
     by_id = {item.persona_id: item for item in instances}
     assert by_id["dev"].id == "personainst_dev"
     assert by_id["qa"].id == "personainst_qa"
+
+
+def test_disabled_and_mothballed_definitions_never_materialize_runtime_instances(
+    isolate_agent_runtime_root,
+):
+    store = PersonaInstanceStore()
+
+    instances = store.ensure_for_personas(
+        [
+            _persona("dev"),
+            _persona("custom_reviewer", role="reviewer"),
+            _persona("retired_coordinator", role="disabled"),
+            _persona("pm", role="disabled"),
+        ]
+    )
+
+    assert {item.persona_id for item in instances} == {"dev", "custom_reviewer"}
+
+
+def test_reconciled_disabled_pm_is_not_recreated_by_read_builds(
+    isolate_agent_runtime_root,
+):
+    store = PersonaInstanceStore()
+    pm = _persona("pm", role="disabled")
+    store.ensure_for_persona(pm)
+
+    report = reconcile_persona_instances(event_log=EventLog())
+    assert report["pruned_count"] == 1
+    assert store.list_all() == []
+
+    # These are the central paths used by snapshot/status/persona-list/chat
+    # initialization. Repeating them after reconciliation must remain a no-op.
+    assert store.ensure_for_personas([pm]) == []
+    build_snapshot()
+    build_status()
+    assert not [item for item in store.list_all() if item.persona_id == "pm"]
+
+    again = reconcile_persona_instances(event_log=EventLog())
+    assert again["pruned_count"] == 0
 
 
 def test_persona_instance_ensure_clears_a_stale_execution_binding(isolate_agent_runtime_root):

@@ -15,6 +15,7 @@ from agent_runtime.resolution import (
     assert_probe_isolation,
     probe_isolation_required,
     resolve_runtime,
+    runtime_resolution_scope,
 )
 
 
@@ -86,3 +87,15 @@ def test_store_root_enforces_isolation(tmp_path, monkeypatch):
     # Repoint at a probe root and it proceeds.
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "agent-runtime-probe-xyz"))
     assert isinstance(paths.store_root(), Path)
+
+
+def test_probe_isolation_validates_the_scoped_resolution(tmp_path, monkeypatch):
+    live = resolve_runtime(
+        {"HERMES_AGENT_RUNTIME_ROOT": str(tmp_path / "agent-runtime")}
+    )
+    monkeypatch.setenv(PROBE_ISOLATION_ENV, "1")
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "agent-runtime-probe-safe"))
+
+    with runtime_resolution_scope(live):
+        with pytest.raises(ProbeIsolationViolation):
+            paths.store_root()

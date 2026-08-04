@@ -135,7 +135,7 @@ def test_event_log_for_session_decodes_legacy_rows_without_session_field(isolate
 
 
 def test_cached_event_log_matches_base_and_reads_once(isolate_agent_runtime_root, monkeypatch):
-    from agent_runtime.events import CachedEventLog
+    from agent_runtime.events import CachedEventLog, _event_view_cache_clear
 
     base = EventLog()
     for index in range(4):
@@ -169,11 +169,32 @@ def test_cached_event_log_matches_base_and_reads_once(isolate_agent_runtime_root
         return real_read_text(self, *a, **k)
 
     monkeypatch.setattr(type(paths.events_path()), "read_text", counting_read_text)
+    _event_view_cache_clear()
     fresh = CachedEventLog()
     fresh.for_task("task_a")
     fresh.for_session("chat_z")
     fresh.tail(1)
     assert reads["n"] == 1
+
+    # A new build-scoped object reuses the immutable process view while the
+    # source fingerprint is unchanged.
+    CachedEventLog().tail(1)
+    assert reads["n"] == 1
+
+    # An append changes the source size/mtime and forces the next build to read
+    # a fresh point-in-time view.
+    base.append(
+        Event(
+            ts=now(),
+            type="run.tool.started",
+            task_id="task_b",
+            run_id="r-new",
+            persona_id="dev",
+            payload={"tool_name": "x"},
+        )
+    )
+    assert CachedEventLog().tail(1)[0].run_id == "r-new"
+    assert reads["n"] == 2
 
 
 def test_event_log_for_task_type_filter_counts_matches_not_raw_rows(isolate_agent_runtime_root):

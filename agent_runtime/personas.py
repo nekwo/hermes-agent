@@ -5,6 +5,7 @@ from dataclasses import replace
 from enum import StrEnum
 
 from .models import AgentPersona
+from .persona_lifecycle import MOTHBALLED_PERSONA_IDS, MOTHBALLED_ROLE_TOKENS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -25,8 +26,6 @@ class AutonomyLevel(StrEnum):
 # rows (archive, never delete). Single-sourced here so liveness/roster checks resolve a
 # mothballed role through this set instead of hand-rolling ``role == "pm"`` string tests.
 MOTHBALLED_ROLES: frozenset[AgentRole] = frozenset({AgentRole.PM})
-MOTHBALLED_ROLE_TOKENS: frozenset[str] = frozenset(role.value for role in MOTHBALLED_ROLES)
-MOTHBALLED_PERSONA_IDS: frozenset[str] = frozenset({AgentRole.PM.value})
 
 
 # Synthetic operator-channel personas built from a raw Hermes profile carry the

@@ -7,7 +7,8 @@ import threading
 import time
 import hashlib
 from contextlib import contextmanager
-from dataclasses import dataclass
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 # The snapshot roster does not render per-profile model/provider settings. Use
@@ -43,8 +44,9 @@ from .persona_instance_identity import (
     duplicate_persona_instance_groups,
     identity_aliases_for_rows,
 )
+from .persona_lifecycle import is_runtime_persona
 from .parity import PARITY_ENVELOPE_VERSION, ProjectionAccountant, events_watermark
-from .resolution import resolution_payload, resolve_runtime, suspect_default_root
+from .resolution import resolution_payload, resolve_runtime, runtime_resolution_scope, suspect_default_root
 from .personas import effective_toolsets
 from .prompt_observability import _SkillObservabilityResolver, snapshot_prompt_observability
 from .realm_sync import read_realm_sync_sidecar
@@ -77,6 +79,27 @@ class SnapshotSummary:
 
     def as_dict(self) -> dict[str, int]:
         return {"persona_instances": int(self.persona_instances)}
+
+
+@dataclass(slots=True)
+class SnapshotBuildContext:
+    """Reusable, non-wire caches owned by one long-lived serve process."""
+
+    skill_root_registries: dict[str, object] = field(default_factory=dict)
+
+
+_SNAPSHOT_BUILD_CONTEXT: ContextVar[SnapshotBuildContext | None] = ContextVar(
+    "snapshot_build_context", default=None
+)
+
+
+@contextmanager
+def snapshot_build_context_scope(context: SnapshotBuildContext):
+    token = _SNAPSHOT_BUILD_CONTEXT.set(context)
+    try:
+        yield context
+    finally:
+        _SNAPSHOT_BUILD_CONTEXT.reset(token)
 
 
 # S2 read-model — history out of the live frame (operator move 6).
@@ -323,6 +346,25 @@ def _build_snapshot_uncoalesced(
     event_log=None,
     prompt_skills_catalogs=None,
 ) -> dict:
+    with runtime_resolution_scope():
+        return _build_snapshot_in_runtime_scope(
+            task_store=task_store,
+            run_store=run_store,
+            agent_store=agent_store,
+            incident_store=incident_store,
+            event_log=event_log,
+            prompt_skills_catalogs=prompt_skills_catalogs,
+        )
+
+
+def _build_snapshot_in_runtime_scope(
+    task_store=None,
+    run_store=None,
+    agent_store=None,
+    incident_store=None,
+    event_log=None,
+    prompt_skills_catalogs=None,
+) -> dict:
     _build_started = time.perf_counter()
     _sections_ms: dict[str, int] = {}
     agent_store = agent_store or AgentStore()
@@ -353,7 +395,7 @@ def _build_snapshot_uncoalesced(
     # cold store, fall back to the base seed itself — NOT ensure_persisted_personas, which
     # also returns the dormant typed catalog for resolution and would surface mothballed
     # pipeline personas that are not meant to be shown.
-    agents = agent_store.list_all()
+    agents = [agent for agent in agent_store.list_all() if is_runtime_persona(agent)]
     workspace_store = WorkspaceStore()
     realm_store = RealmStore()
     workspaces = workspace_store.list_all(include_archived=True)
@@ -368,7 +410,12 @@ def _build_snapshot_uncoalesced(
         (getattr(r, "name", None) for r in realms if getattr(r, "id", None) == realm_store.active_id()),
         None,
     )
-    skill_resolver = _SkillObservabilityResolver()
+    build_context = _SNAPSHOT_BUILD_CONTEXT.get()
+    skill_resolver = _SkillObservabilityResolver(
+        root_registries=(
+            build_context.skill_root_registries if build_context is not None else None
+        )
+    )
     with _timed_section(_sections_ms, "agents_readiness"):
         from .profile_readiness import profile_readiness_for_persona
 
