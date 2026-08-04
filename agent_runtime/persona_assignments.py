@@ -708,7 +708,13 @@ class PersonaInstanceStore:
                 safe_assignment_text(instance.default_chat_session_id, limit=200),
                 safe_assignment_text(instance.session_id, limit=200),
             }
-            pointers.discard(None)
+            # Legacy rows may persist either pointer as an empty string. That is
+            # already the absence of a binding, not a session id to probe. Keep
+            # dry-run and apply on the same candidate set: before this filter a
+            # dry-run reported a repair for ``""`` while apply delegated to
+            # ``clear_chat_session_binding``, which correctly rejected the empty
+            # target and wrote nothing.
+            pointers = {pointer for pointer in pointers if pointer}
             if not pointers:
                 continue
             if (instance.mode or "").lower() == "task_bound" or safe_optional_token(

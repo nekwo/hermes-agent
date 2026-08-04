@@ -701,6 +701,29 @@ def test_repair_missing_chat_session_bindings_dry_run_writes_nothing():
     assert _binding_cleared_events() == []
 
 
+def test_repair_missing_chat_session_bindings_ignores_blank_legacy_pointers():
+    instance = _bind("personainst_blank", persona_id="dev", session_id="")
+    store = PersonaInstanceStore()
+
+    dry = store.repair_missing_chat_session_bindings(
+        apply=False,
+        session_db=_FakeSessionDB(["persona_chat_live"]),
+    )
+    applied = store.repair_missing_chat_session_bindings(
+        session_db=_FakeSessionDB(["persona_chat_live"]),
+    )
+
+    assert dry["repaired"] == []
+    assert dry["repaired_count"] == 0
+    assert applied["repaired"] == []
+    assert applied["repaired_count"] == 0
+    unchanged = store.get(instance.id)
+    assert unchanged.default_chat_session_id == ""
+    assert unchanged.session_id == ""
+    assert unchanged.mode == "chat"
+    assert _binding_cleared_events() == []
+
+
 def test_repair_missing_chat_session_bindings_skips_task_bound_mission_sessions():
     instance = _bind(
         "personainst_worker",
