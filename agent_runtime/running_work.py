@@ -142,6 +142,12 @@ KIND_CRON_JOB = "cron_job"
 #: first landing and no consumer had to re-derive it when the lane arrived.
 KIND_DISPATCH = "dispatch"
 
+#: How far back an UNDELIVERABLE dispatch keeps surfacing on the Activity
+#: projection. A day, because "your agent's answer was thrown away" is worth
+#: seeing on the next session start, and not forever, because the HUD reports
+#: what the machine is doing now rather than serving as an incident archive.
+_UNDELIVERABLE_WINDOW_SECONDS = 24 * 60 * 60
+
 RUNNING_WORK_KINDS = (
     KIND_TERMINAL,
     KIND_DELEGATION,
@@ -1225,6 +1231,68 @@ def _collect_dispatches(
                 # row and the sender's pending delivery too, and half a cancel is
                 # worse than none. Claiming cancellable here would put a button
                 # on the HUD that cannot keep its promise.
+                cancellable=False,
+            )
+        )
+
+    # UNDELIVERABLE completions ride this lane too, and they are the reason it
+    # is not purely "running" work.
+    #
+    # Three paths abandon a finished dispatch without ever forging a delivery
+    # turn — no sender session, an unresolvable sender, and the attempt cap —
+    # and all three used to leave nothing behind but an EventLog row that no
+    # consumer reads. So an agent asked for work, the work RAN, an answer came
+    # back, and then the answer was discarded in silence: no delivery, no
+    # notification, and a HUD that says everything is fine. Surfacing them here
+    # is the cheapest honest fix, because this is already the surface an
+    # operator looks at to ask "what is my machine doing about that request".
+    #
+    # They are `error`, not `unknown`: nothing here is uncertain. We know the
+    # dispatch settled, and we know its answer will never be delivered.
+    try:
+        dropped = dispatch_store.undeliverable_dispatches(
+            limit=_MAX_ROWS_PER_SOURCE,
+            since=now - _UNDELIVERABLE_WINDOW_SECONDS,
+        )
+    except Exception:
+        # A read that fails here must not take the whole lane down with it — the
+        # running rows above are already collected and are still true.
+        dropped = []
+    for record in dropped:
+        if not isinstance(record, dict):
+            continue
+        dispatch_id = _safe_text(record.get("dispatch_id"), limit=200)
+        if not dispatch_id:
+            continue
+        if accountant is not None:
+            accountant.consider()
+        target = _safe_text(record.get("target_persona"), limit=120)
+        reason = _safe_text(record.get("delivery_error"), limit=160) or "undelivered"
+        settled = record.get("completed_at") or record.get("updated_at")
+        collected.append(
+            _row(
+                kind=KIND_DISPATCH,
+                stable_id=dispatch_id,
+                label=(
+                    f"undelivered reply from {target}"
+                    if target
+                    else f"undelivered reply ({dispatch_id})"
+                ),
+                status=STATUS_ERROR,
+                source_lane=LANE_DURABLE,
+                persona_id=target,
+                persona_instance_id=_safe_text(
+                    record.get("target_instance_id"), limit=200
+                ),
+                session_id=_safe_text(record.get("sender_session_id"), limit=240),
+                started_at=_iso(settled),
+                elapsed_seconds=0,
+                progress=_progress(available=False),
+                # The drop REASON is the whole value of the row: "your answer
+                # could not be delivered" is useless without "because".
+                tail_preview=_preview(
+                    f"delivery abandoned: {reason}", accountant
+                ),
                 cancellable=False,
             )
         )

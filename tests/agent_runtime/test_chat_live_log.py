@@ -444,6 +444,36 @@ def test_relay_attribution_rides_the_mirror_line(tmp_path, monkeypatch):
     assert "relay_sender_persona_id" not in plain
 
 
+def test_a_delivered_result_is_typed_in_the_mirror(tmp_path, monkeypatch):
+    """A forged delivery must not read as the operator either.
+
+    The mirror exists for MACHINE consumption — a head agent greps a teammate's
+    thread — so an untyped delivery line is worse here than in the UI: there is
+    no layout, no sender name and no bubble alignment to disambiguate it. The
+    line would simply claim the human wrote the runtime's own delivery.
+    """
+
+    monkeypatch.setenv("HERMES_HEAD_HOME", str(tmp_path))
+    record_chat_message(
+        session_id="persona_chat_s1",
+        role="user",
+        text="[BACKGROUND DISPATCH COMPLETE - dispatch-abc123]",
+        client_message_id="dispatch-delivery-dispatch-abc123",
+        relay_marker="harness_delivery:dispatch-abc123:1:error",
+    )
+
+    row = _messages(chat_live_log_path("persona_chat_s1"))[0]
+    assert row["origin"] == "harness_delivery"
+    assert row["dispatch_id"] == "dispatch-abc123"
+    # The outcome travels too: a failed dispatch delivers exactly like a
+    # successful one, and a grepping agent must be able to tell them apart
+    # without reading the prose.
+    assert row["dispatch_state"] == "error"
+    assert row["notify_operator"] == "1"
+    # And it is NOT a relay: no agent sent it, so no sender may be named.
+    assert "relay_sender_persona_id" not in row
+
+
 def test_dedupe_survives_rotation_across_a_generation_boundary(tmp_path, monkeypatch):
     """FOLLOW-UP 6. A rotation empties the live file's tail; a fresh process
     must not re-append a resend whose line now lives in the ``.1`` sibling."""

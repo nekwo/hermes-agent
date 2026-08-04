@@ -88,6 +88,7 @@ __all__ = [
     "release_delivery_claim",
     "restore_undelivered_dispatches",
     "running_dispatches",
+    "undeliverable_dispatches",
     "set_dispatch_owner",
 ]
 
@@ -187,9 +188,31 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
             delivery_claimed_at REAL,
             owner_pid INTEGER,
             owner_started_at INTEGER,
-            relay_chain_json TEXT
+            relay_chain_json TEXT,
+            delivery_error TEXT
         )"""
     )
+    # CREATE TABLE IF NOT EXISTS does nothing to a store that already exists, so
+    # a column added after the first release needs an explicit migration — or it
+    # is absent on every machine that ever ran the older build, and the reads
+    # below raise there while a fresh install stays green. That is the worst
+    # possible place to discover a schema change.
+    _add_missing_column(conn, "delivery_error", "TEXT")
+
+
+def _add_missing_column(conn: sqlite3.Connection, name: str, decl: str) -> None:
+    try:
+        existing = {
+            str(row[1]) for row in conn.execute(f"PRAGMA table_info({_TABLE})")
+        }
+    except Exception:  # pragma: no cover - defensive
+        return
+    if name in existing:
+        return
+    try:
+        conn.execute(f"ALTER TABLE {_TABLE} ADD COLUMN {name} {decl}")
+    except sqlite3.OperationalError:  # pragma: no cover - lost a concurrent race
+        pass
 
 
 class _transaction:
@@ -298,6 +321,7 @@ def _row_to_dict(row: tuple) -> dict[str, Any]:
         owner_pid,
         owner_started_at,
         relay_chain_json,
+        delivery_error,
     ) = row
     try:
         result = json.loads(result_json) if result_json else None
@@ -328,6 +352,7 @@ def _row_to_dict(row: tuple) -> dict[str, Any]:
         "owner_pid": int(owner_pid) if owner_pid else None,
         "owner_started_at": int(owner_started_at) if owner_started_at else None,
         "relay_chain": relay_chain if isinstance(relay_chain, list) else [],
+        "delivery_error": delivery_error or "",
     }
 
 
@@ -335,7 +360,7 @@ _SELECT = f"""SELECT dispatch_id, sender_session_id, sender_persona_id, target_p
                      target_instance_id, target_session_id, title, ask, state,
                      notify_operator, dispatched_at, completed_at, updated_at,
                      result_json, delivery_state, delivery_attempts, delivered_at,
-                     owner_pid, owner_started_at, relay_chain_json
+                     owner_pid, owner_started_at, relay_chain_json, delivery_error
               FROM {_TABLE}"""
 
 
@@ -648,9 +673,15 @@ def drop_delivery(dispatch_id: str, *, reason: str) -> bool:
     with _DB_LOCK, _transaction() as conn:
         cur = conn.execute(
             f"""UPDATE {_TABLE} SET delivery_state=?, updated_at=?, delivery_claim=NULL,
-                   delivery_claimed_at=NULL
+                   delivery_claimed_at=NULL, delivery_error=?
                 WHERE dispatch_id=? AND delivery_state=?""",
-            (DELIVERY_DROPPED, now_epoch, str(dispatch_id), DELIVERY_PENDING),
+            (
+                DELIVERY_DROPPED,
+                now_epoch,
+                _text(reason, 200),
+                str(dispatch_id),
+                DELIVERY_PENDING,
+            ),
         )
         dropped = cur.rowcount == 1
     if dropped:
@@ -659,7 +690,22 @@ def drop_delivery(dispatch_id: str, *, reason: str) -> bool:
 
 
 def _prune() -> None:
-    """Bound terminal history, preferring delivered rows for deletion."""
+    """Bound terminal history — but NEVER at the cost of an undelivered answer.
+
+    Housekeeping deletes only rows whose DELIVERY has settled (``delivered`` or
+    ``dropped``). A ``pending`` row is an answer the sender has not been told
+    about, and the previous ordering-only preference ("delivered first, then
+    whatever is oldest") fell straight through to those rows once the terminal
+    count passed the cap: a permanently-busy sender never drains — the idle
+    probe requeues without burning an attempt, so the row never converges to
+    ``dropped`` either — and the reply it was holding got deleted with no event,
+    no log line, and nothing left to notice it by. That is precisely the silence
+    this lane exists to retire, manufactured by the lane's own collector.
+
+    An undeliverable row is not thereby immortal: the attempt cap converges it
+    to ``dropped``, which is deletable and evented. Pruning is simply not the
+    mechanism that decides an answer was worthless.
+    """
 
     cutoff = time.time() - _RETENTION_SECONDS
     try:
@@ -668,19 +714,43 @@ def _prune() -> None:
                 f"DELETE FROM {_TABLE} WHERE delivery_state=? AND updated_at < ?",
                 (DELIVERY_DELIVERED, cutoff),
             )
-            terminal = conn.execute(
-                f"SELECT COUNT(*) FROM {_TABLE} WHERE state != ?", (STATE_RUNNING,)
+            settled = conn.execute(
+                f"""SELECT COUNT(*) FROM {_TABLE}
+                    WHERE state != ? AND delivery_state != ?""",
+                (STATE_RUNNING, DELIVERY_PENDING),
             ).fetchone()[0]
-            excess = max(0, int(terminal) - _MAX_RETAINED_TERMINAL)
+            excess = max(0, int(settled) - _MAX_RETAINED_TERMINAL)
             if excess:
                 conn.execute(
                     f"""DELETE FROM {_TABLE} WHERE dispatch_id IN (
-                          SELECT dispatch_id FROM {_TABLE} WHERE state != ?
+                          SELECT dispatch_id FROM {_TABLE}
+                          WHERE state != ? AND delivery_state != ?
                           ORDER BY CASE delivery_state WHEN ? THEN 0 ELSE 1 END,
                                    updated_at ASC LIMIT ?
                         )""",
-                    (STATE_RUNNING, DELIVERY_DELIVERED, excess),
+                    (STATE_RUNNING, DELIVERY_PENDING, DELIVERY_DELIVERED, excess),
                 )
+            # Exempting pending rows above would trade one silent failure for
+            # another if nobody ever looked: a store growing without bound while
+            # senders quietly fail to drain. So count them and SAY SO — loudly,
+            # and in the event log — but never delete.
+            stranded = conn.execute(
+                f"""SELECT COUNT(*) FROM {_TABLE}
+                    WHERE state != ? AND delivery_state = ?""",
+                (STATE_RUNNING, DELIVERY_PENDING),
+            ).fetchone()[0]
+        if int(stranded) > _MAX_RETAINED_TERMINAL:
+            logger.warning(
+                "dispatch store holds %s undelivered completions (cap %s) — "
+                "senders are not draining; nothing was deleted",
+                stranded,
+                _MAX_RETAINED_TERMINAL,
+            )
+            _emit(
+                "dispatch.delivery_backlog",
+                pending=int(stranded),
+                cap=_MAX_RETAINED_TERMINAL,
+            )
     except Exception:  # pragma: no cover - housekeeping must never fail a write
         logger.debug("dispatch store prune failed", exc_info=True)
 
@@ -721,6 +791,29 @@ def running_dispatches(limit: int = 200) -> list[dict[str, Any]]:
 
     return _query(
         "WHERE state=? ORDER BY dispatched_at LIMIT ?", (STATE_RUNNING, int(limit))
+    )
+
+
+def undeliverable_dispatches(
+    limit: int = 50, *, since: float | None = None
+) -> list[dict[str, Any]]:
+    """Completions the sender will NEVER be told about, newest first.
+
+    Three paths reach here and none of them forges a delivery turn: no sender
+    session, an unresolvable sender, and the attempt cap. Each is an answer that
+    was produced and then abandoned — the single worst outcome this lane can
+    have, and until now its only trace was an EventLog row nothing reads.
+
+    Surfaced so the Activity projection can show it. ``since`` bounds the window
+    (the operator cares that work died, not that it died last week); the drop
+    reason travels on the row rather than only in the event, so what is rendered
+    can say WHY.
+    """
+
+    cutoff = float(since) if since is not None else 0.0
+    return _query(
+        "WHERE delivery_state = ? AND updated_at >= ? ORDER BY updated_at DESC LIMIT ?",
+        (DELIVERY_DROPPED, cutoff, int(limit)),
     )
 
 

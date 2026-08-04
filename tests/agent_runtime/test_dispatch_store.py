@@ -426,3 +426,166 @@ def test_the_orphan_copy_points_at_the_thread_instead_of_inviting_rework(
     assert "persona_chat_dev_9" in error
     assert "agent_chat_open" in error
     assert "Re-send if you still need it" not in error
+
+# ---------------------------------------------------------------------------
+# housekeeping must never be the thing that loses an answer
+# ---------------------------------------------------------------------------
+
+
+def test_pruning_never_deletes_an_undelivered_answer(store_home, monkeypatch):
+    """The silent-deletion path, reproduced at a survivable scale.
+
+    A sender that is permanently busy never drains: the idle probe requeues
+    without burning an attempt, so its row never converges to `dropped` either.
+    Meanwhile other completions keep pushing the terminal count past the
+    retention cap. The old prune ordered "delivered first, then oldest" but
+    counted and deleted across ALL terminal rows, so once the excess exceeded
+    the number of delivered rows it fell straight through to the pending ones —
+    deleting replies nobody had ever been told about, with no event, no log
+    line, and nothing left to notice them by.
+
+    Shaped so the fall-through is REACHED: three stranded rows, two delivered,
+    a cap of one. Excess is four; only two delivered rows exist to absorb it.
+    """
+
+    monkeypatch.setattr(dispatch_store, "_MAX_RETAINED_TERMINAL", 1)
+    stranded = []
+    for index in range(3):
+        held = _dispatch(dispatch_id=f"dispatch-stranded-{index}")
+        record_completion(held, state=STATE_COMPLETED, reply=f"answer {index}")
+        stranded.append(held)
+    for index in range(2):
+        settled = _dispatch(dispatch_id=f"dispatch-settled-{index}")
+        record_completion(settled, state=STATE_COMPLETED, reply="ok")
+        mark_delivered(settled)
+
+    # One more completion, purely to run the pruner after the store is loaded.
+    trigger = _dispatch(dispatch_id="dispatch-trigger")
+    record_completion(trigger, state=STATE_COMPLETED, reply="ok")
+
+    for index, held in enumerate(stranded):
+        row = get_dispatch(held)
+        assert row is not None, f"{held}: an undelivered answer was silently deleted"
+        assert row["delivery_state"] == DELIVERY_PENDING
+        assert row["result"]["reply"] == f"answer {index}"
+
+
+def test_pruning_still_bounds_settled_history(store_home, monkeypatch):
+    """Exempting pending rows must not turn the store into an append-only log."""
+
+    monkeypatch.setattr(dispatch_store, "_MAX_RETAINED_TERMINAL", 3)
+    for index in range(12):
+        settled = _dispatch(dispatch_id=f"dispatch-old-{index}")
+        record_completion(settled, state=STATE_COMPLETED, reply="ok")
+        mark_delivered(settled)
+        record_completion(settled, state=STATE_COMPLETED, reply="ok")
+
+    survivors = dispatch_store._query("WHERE delivery_state != ?", (DELIVERY_PENDING,))
+    assert len(survivors) <= 4
+
+
+def test_an_undeliverable_backlog_is_reported_rather_than_trimmed(
+    store_home, monkeypatch
+):
+    """Growth that cannot be deleted must at least be loud."""
+
+    monkeypatch.setattr(dispatch_store, "_MAX_RETAINED_TERMINAL", 1)
+    events = []
+    monkeypatch.setattr(
+        dispatch_store, "_emit", lambda event_type, **payload: events.append(event_type)
+    )
+    for index in range(3):
+        stuck = _dispatch(dispatch_id=f"dispatch-stuck-{index}")
+        record_completion(stuck, state=STATE_COMPLETED, reply="held")
+
+    assert "dispatch.delivery_backlog" in events
+
+
+def test_a_dropped_row_keeps_its_reason_for_the_operator(store_home):
+    """The drop reason is the whole value of surfacing a drop at all."""
+
+    dispatch_id = _dispatch()
+    record_completion(dispatch_id, state=STATE_COMPLETED, reply="done")
+    drop_delivery(dispatch_id, reason="sender_session_unresolvable")
+
+    assert get_dispatch(dispatch_id)["delivery_error"] == "sender_session_unresolvable"
+
+
+def test_undeliverable_dispatches_are_readable_as_their_own_lane(store_home):
+    dropped = _dispatch(dispatch_id="dispatch-dropped")
+    record_completion(dropped, state=STATE_COMPLETED, reply="done")
+    drop_delivery(dropped, reason="no_sender_session")
+
+    delivered = _dispatch(dispatch_id="dispatch-fine")
+    record_completion(delivered, state=STATE_COMPLETED, reply="done")
+    mark_delivered(delivered)
+
+    rows = dispatch_store.undeliverable_dispatches()
+
+    assert [row["dispatch_id"] for row in rows] == ["dispatch-dropped"]
+    assert rows[0]["delivery_error"] == "no_sender_session"
+
+
+def test_a_store_written_before_the_reason_column_still_opens(store_home):
+    """CREATE TABLE IF NOT EXISTS does nothing to an existing store."""
+
+    path = dispatch_store.dispatch_db_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    legacy = sqlite3.connect(path)
+    legacy.execute(
+        f"""CREATE TABLE {dispatch_store._TABLE} (
+            dispatch_id TEXT PRIMARY KEY, sender_session_id TEXT NOT NULL DEFAULT '',
+            sender_persona_id TEXT NOT NULL DEFAULT '', target_persona TEXT NOT NULL DEFAULT '',
+            target_instance_id TEXT NOT NULL DEFAULT '', target_session_id TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL DEFAULT '', ask TEXT NOT NULL DEFAULT '', state TEXT NOT NULL,
+            notify_operator INTEGER NOT NULL DEFAULT 0, dispatched_at REAL NOT NULL,
+            completed_at REAL, updated_at REAL NOT NULL, result_json TEXT,
+            delivery_state TEXT NOT NULL DEFAULT 'pending', delivery_attempts INTEGER NOT NULL DEFAULT 0,
+            delivered_at REAL, delivery_claim TEXT, delivery_claimed_at REAL,
+            owner_pid INTEGER, owner_started_at INTEGER, relay_chain_json TEXT
+        )"""
+    )
+    legacy.commit()
+    legacy.close()
+
+    dispatch_id = _dispatch(dispatch_id="dispatch-legacy")
+    record_completion(dispatch_id, state=STATE_COMPLETED, reply="done")
+    drop_delivery(dispatch_id, reason="no_sender_session")
+
+    assert get_dispatch(dispatch_id)["delivery_error"] == "no_sender_session"
+
+
+def test_the_prune_exemption_and_the_re_arm_guard_compose(store_home, monkeypatch):
+    """The two halves of "never lose an answer", landed a commit apart.
+
+    `record_completion` guarantees a DELIVERED row is never re-armed to
+    `pending`; `_prune` guarantees a PENDING row is never deleted. Together they
+    make `delivery_state` mean something a collector can safely act on:
+    `pending` is exactly "an answer someone is still owed", and it is the only
+    state that is never collected.
+
+    Landed separately, so pin the composition rather than each half alone —
+    before the re-arm guard, a row the pruner had just classified as safely
+    delivered could become pending again a moment later.
+    """
+
+    monkeypatch.setattr(dispatch_store, "_MAX_RETAINED_TERMINAL", 1)
+    told = _dispatch(dispatch_id="dispatch-told")
+    record_completion(told, state=STATE_COMPLETED, reply="first")
+    mark_delivered(told)
+
+    # A late write on an already-delivered row must not re-arm it...
+    record_completion(told, state=STATE_COMPLETED, reply="second")
+    assert get_dispatch(told)["delivery_state"] == DELIVERY_DELIVERED
+
+    # ...and an undelivered one must survive the collector that follows.
+    owed = _dispatch(dispatch_id="dispatch-owed")
+    record_completion(owed, state=STATE_COMPLETED, reply="never seen")
+    for index in range(4):
+        filler = _dispatch(dispatch_id=f"dispatch-filler-{index}")
+        record_completion(filler, state=STATE_COMPLETED, reply="ok")
+        mark_delivered(filler)
+    record_completion(_dispatch(dispatch_id="dispatch-last"), state=STATE_COMPLETED)
+
+    assert get_dispatch(owed) is not None
+    assert get_dispatch(owed)["result"]["reply"] == "never seen"

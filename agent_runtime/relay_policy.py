@@ -220,14 +220,26 @@ def parse_relay_sender_marker(value) -> "RelaySender | None":
 # a relay: no agent sent it, there is no sending persona to name, and a consumer
 # that grouped it with relayed messages would attribute a machine delivery to
 # whichever persona happened to be encoded. What a delivery carries instead is
-# the identity of the DISPATCH it settles, plus whether the dispatching agent
-# flagged the operator to be told — the two facts a consumer needs to render it
-# and to decide whether it is notification-worthy.
+# the identity of the DISPATCH it settles, whether the dispatching agent flagged
+# the operator to be told, and HOW THE DISPATCH ENDED — the facts a consumer
+# needs to render it and to decide whether, and how, it is worth surfacing.
+#
+# The outcome is not decoration. ``pending_deliveries`` selects ``state !=
+# running``, so an ``error`` and an ``unknown`` dispatch are delivered exactly
+# like a completed one; without it on the wire the only trace of "this failed"
+# is the prose body, and a consumer that read the prose to decide what to say
+# would be doing the sentence-matching this whole marker exists to retire.
 #
 # Same column, same precedent, same single-authority rule: this module builds
 # and parses; nothing else pattern-matches the string.
 
 HARNESS_DELIVERY_FINISH_REASON_PREFIX = "harness_delivery:"
+
+#: The outcome a delivery reports when the segment is absent or unreadable.
+#: ``unknown`` rather than ``completed``: a marker written by a build that
+#: predates the segment genuinely does not say how the work ended, and claiming
+#: success on its behalf is the one wrong answer.
+HARNESS_DELIVERY_UNKNOWN_STATE = "unknown"
 
 
 @dataclass(frozen=True)
@@ -241,20 +253,31 @@ class HarnessDeliveryOrigin:
 
     dispatch_id: str | None = None
     notify_operator: bool = False
+    #: How the dispatch ended: ``completed`` | ``error`` | ``unknown`` (the
+    #: ``dispatch_store.TERMINAL_STATES`` vocabulary). Never ``running`` — a
+    #: delivery only exists once the work settled.
+    state: str = HARNESS_DELIVERY_UNKNOWN_STATE
 
 
 def build_harness_delivery_marker(
-    dispatch_id: str | None, notify_operator: bool = False
+    dispatch_id: str | None,
+    notify_operator: bool = False,
+    state: str | None = None,
 ) -> str:
     """Encode a forged delivery turn's origin into a ``finish_reason`` marker.
 
-    Shape: ``harness_delivery:<dispatch_id>:<0|1>``. The id segment is emitted
-    empty when unknown; the flag is always one explicit character so a consumer
-    never has to infer "not flagged" from a missing field."""
+    Shape: ``harness_delivery:<dispatch_id>:<0|1>:<state>``. The id segment is
+    emitted empty when unknown; the flag is always one explicit character so a
+    consumer never has to infer "not flagged" from a missing field; the state is
+    the settled outcome, defaulting to the honest ``unknown``.
+
+    The state segment is emitted LAST so a parser written against the earlier
+    three-segment shape keeps reading the first two correctly."""
     dispatch = (dispatch_id or "").strip()
+    settled = (state or "").strip() or HARNESS_DELIVERY_UNKNOWN_STATE
     return (
         f"{HARNESS_DELIVERY_FINISH_REASON_PREFIX}{dispatch}:"
-        f"{'1' if notify_operator else '0'}"
+        f"{'1' if notify_operator else '0'}:{settled}"
     )
 
 
@@ -265,15 +288,20 @@ def parse_harness_delivery_marker(value) -> "HarnessDeliveryOrigin | None":
     relayed message all keep their existing projection untouched. Only ``"1"``
     means flagged: an absent, empty or unparseable flag segment is read as NOT
     flagged, because notifying on an unreadable marker would manufacture
-    operator interrupts out of corruption."""
+    operator interrupts out of corruption. An absent state segment — every row a
+    pre-outcome build wrote — decodes to
+    :data:`HARNESS_DELIVERY_UNKNOWN_STATE`, never to success."""
     if not isinstance(value, str) or not value.startswith(
         HARNESS_DELIVERY_FINISH_REASON_PREFIX
     ):
         return None
     remainder = value[len(HARNESS_DELIVERY_FINISH_REASON_PREFIX):]
-    parts = remainder.split(":", 2)
+    parts = remainder.split(":", 3)
     dispatch_id = parts[0].strip() if parts else ""
     flag = parts[1].strip() if len(parts) > 1 else ""
+    state = parts[2].strip() if len(parts) > 2 else ""
     return HarnessDeliveryOrigin(
-        dispatch_id=dispatch_id or None, notify_operator=flag == "1"
+        dispatch_id=dispatch_id or None,
+        notify_operator=flag == "1",
+        state=state or HARNESS_DELIVERY_UNKNOWN_STATE,
     )

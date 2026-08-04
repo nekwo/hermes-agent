@@ -138,27 +138,35 @@ def delivery_client_message_id(dispatch_id: str) -> str:
     return f"dispatch-delivery-{dispatch_id}"
 
 
-def delivery_requested_by(dispatch_id: str, *, notify_operator: bool = False) -> str:
+def delivery_requested_by(
+    dispatch_id: str, *, notify_operator: bool = False, state: str | None = None
+) -> str:
     """The ``requested_by`` provenance a forged delivery turn is sent under.
 
-    Shape: ``harness-delivery:<dispatch_id>:<0|1>``. Structured provenance in
-    this field is the ESTABLISHED convention on this lane, not a new one — an
-    ``agent_chat_send`` relay already travels as ``agent:<caller session id>``
-    and the mission-chat handler already decodes that into the marker its user
-    row is typed with. A delivery follows the same road.
+    Shape: ``harness-delivery:<dispatch_id>:<0|1>:<state>``. Structured
+    provenance in this field is the ESTABLISHED convention on this lane, not a
+    new one — an ``agent_chat_send`` relay already travels as
+    ``agent:<caller session id>`` and the mission-chat handler already decodes
+    that into the marker its user row is typed with. A delivery follows the same
+    road.
 
-    Two facts ride along because the handler is the last place that has them and
-    the persisted row is the last place they can be recovered from: WHICH
-    dispatch this settles, and whether the dispatching agent flagged the
-    operator to be told. Without the second, the launcher would have to join a
-    delivery against a ``running_work`` row that no longer exists by then (a
-    dispatch leaves that projection the moment it stops running) to answer a
-    question the producer already knew the answer to.
+    Three facts ride along because the handler is the last place that has them
+    and the persisted row is the last place they can be recovered from: WHICH
+    dispatch this settles, whether the dispatching agent flagged the operator to
+    be told, and HOW IT ENDED. Without the first two, a consumer would have to
+    join against a ``running_work`` row that no longer exists by then (a
+    dispatch leaves that projection the moment it stops running). Without the
+    third, an ``error`` delivery is indistinguishable from a successful one
+    except in prose — and ``pending_deliveries`` selects ``state != running``,
+    so failures genuinely travel this lane.
     """
 
+    from .relay_policy import HARNESS_DELIVERY_UNKNOWN_STATE
+
+    settled = (state or "").strip() or HARNESS_DELIVERY_UNKNOWN_STATE
     return (
         f"{DELIVERY_REQUESTED_BY}:{str(dispatch_id or '').strip()}:"
-        f"{'1' if notify_operator else '0'}"
+        f"{'1' if notify_operator else '0'}:{settled}"
     )
 
 
@@ -167,12 +175,12 @@ def parse_delivery_requested_by(value):
 
     Tolerates the bare ``harness-delivery`` (no suffix) that a pre-attribution
     build stamped: those rows are still deliveries and must still render as
-    deliveries; they simply carry no dispatch id and no flag. Returns ``None``
-    for every other value, so operator, CLI, coordinator and relay sends are
-    untouched.
+    deliveries; they simply carry no dispatch id, no flag, and an ``unknown``
+    outcome. Returns ``None`` for every other value, so operator, CLI,
+    coordinator and relay sends are untouched.
     """
 
-    from .relay_policy import HarnessDeliveryOrigin
+    from .relay_policy import HARNESS_DELIVERY_UNKNOWN_STATE, HarnessDeliveryOrigin
 
     if not isinstance(value, str):
         return None
@@ -182,11 +190,14 @@ def parse_delivery_requested_by(value):
     prefix = f"{DELIVERY_REQUESTED_BY}:"
     if not token.startswith(prefix):
         return None
-    parts = token[len(prefix):].split(":", 2)
+    parts = token[len(prefix):].split(":", 3)
     dispatch_id = parts[0].strip() if parts else ""
     flag = parts[1].strip() if len(parts) > 1 else ""
+    state = parts[2].strip() if len(parts) > 2 else ""
     return HarnessDeliveryOrigin(
-        dispatch_id=dispatch_id or None, notify_operator=flag == "1"
+        dispatch_id=dispatch_id or None,
+        notify_operator=flag == "1",
+        state=state or HARNESS_DELIVERY_UNKNOWN_STATE,
     )
 
 
@@ -358,6 +369,7 @@ def forge_delivery_turn(
     client_message_id: str,
     dispatch_id: str = "",
     notify_operator: bool = False,
+    state: str | None = None,
     max_seconds: float | None = None,
 ) -> tuple[bool, dict[str, Any] | None]:
     """Run one delivery as a real mission-chat turn. Returns ``(ok, payload)``.
@@ -390,7 +402,7 @@ def forge_delivery_turn(
         # the persisted user row carries, which is the ONLY reason a consumer
         # can tell a delivered result from something the operator typed.
         requested_by=delivery_requested_by(
-            dispatch_id, notify_operator=notify_operator
+            dispatch_id, notify_operator=notify_operator, state=state
         ),
         client_message_id=client_message_id,
         stream=False,
@@ -483,6 +495,7 @@ def drain_once(*, forge: Callable | None = None, limit: int | None = None) -> di
                 client_message_id=delivery_client_message_id(dispatch_id),
                 dispatch_id=dispatch_id,
                 notify_operator=bool(row.get("notify_operator")),
+                state=str(row.get("state") or ""),
             )
         except Exception:
             logger.warning("dispatch %s delivery turn failed", dispatch_id, exc_info=True)

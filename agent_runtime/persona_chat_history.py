@@ -1274,6 +1274,7 @@ def _safe_curated_messages(
                 row["kind"] = PERSONA_HARNESS_DELIVERY_KIND
                 row["delivery_dispatch_id"] = delivery.dispatch_id
                 row["delivery_notify_operator"] = delivery.notify_operator
+                row["delivery_state"] = delivery.state
             elif relay_sender is not None:
                 row["kind"] = PERSONA_RELAYED_MESSAGE_KIND
                 row["relay_sender_persona_id"] = relay_sender.persona_id

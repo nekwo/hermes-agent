@@ -203,7 +203,15 @@ REMOVED_EVENT_TYPES = frozenset(
 # direction. This is the first ADDITION this counter has recorded, and it
 # behaved exactly as designed: it went red on a legitimate new lane and had to
 # be moved deliberately, rather than letting a contract slip in unnoticed.
-SURVIVING_EVENT_COUNT = 55
+#
+# Then +1 at the WP-L2 review fixes (2026-08-03): dispatch.delivery_backlog.
+# The dispatch store stopped pruning UNDELIVERED completions — that path was
+# deleting answers nobody had ever received — which means the only remaining
+# bound on them is that senders eventually drain. When they do not, the backlog
+# has to be sayable rather than merely observable in a table nobody opens, so
+# the exemption ships with an event that reports it. Registered in the same
+# commit as its emitter, per S55.
+SURVIVING_EVENT_COUNT = 56
 
 
 def test_the_unemittable_event_types_are_no_longer_registered():

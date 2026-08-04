@@ -18,6 +18,7 @@ from .persona_chat_history import (
     PERSONA_TURN_BUDGET_EXHAUSTED_KIND,
     PERSONA_TURN_INTERRUPTED_KIND,
 )
+from .relay_policy import HARNESS_DELIVERY_UNKNOWN_STATE
 from .transcript_order import TURN_SEQ_CONTENT, order_transcript_rows
 
 OPERATOR_CHANNELS_SCHEMA_VERSION = 1
@@ -868,10 +869,17 @@ def _conversation_history_message(
             if (value := safe_assignment_text(runtime_context.get(key), limit=200))
         }
     # The delivery's own facts, as a typed sub-block rather than loose keys: a
-    # consumer needs BOTH to act, and a flag that can go missing independently
-    # of the id it belongs to is a flag that eventually gets read against the
-    # wrong dispatch. `notify_operator` is always present and always a bool —
-    # "the agent did not flag this" is an answer, not an absence.
+    # consumer needs ALL THREE to act, and a field that can go missing
+    # independently of the id it belongs to eventually gets read against the
+    # wrong dispatch. `notify_operator` and `state` are always present — "the
+    # agent did not flag this" and "nobody knows how it ended" are answers, not
+    # absences.
+    #
+    # `state` is why this block is not just an id: ``pending_deliveries``
+    # selects ``state != running``, so a FAILED dispatch is delivered exactly
+    # like a successful one and only the prose body says which. A consumer
+    # without this would have to read that prose to phrase its own notification,
+    # which is the sentence-matching the typed marker exists to retire.
     if is_harness_delivery:
         message["delivery"] = {
             "dispatch_id": safe_assignment_text(
@@ -879,6 +887,8 @@ def _conversation_history_message(
             )
             or "",
             "notify_operator": bool(row.get("delivery_notify_operator")),
+            "state": safe_assignment_token(row.get("delivery_state"))
+            or HARNESS_DELIVERY_UNKNOWN_STATE,
         }
     # Name the sending agent ONLY when its instance id resolves in the roster —
     # never fabricate a name for an instance we cannot see.

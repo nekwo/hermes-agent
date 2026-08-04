@@ -31,14 +31,41 @@ from agent_runtime.relay_policy import (
 # ---------------------------------------------------------------------------
 
 
-def test_a_delivery_marker_round_trips_both_facts():
-    marker = build_harness_delivery_marker("dispatch-abc123", True)
+def test_a_delivery_marker_round_trips_every_fact():
+    marker = build_harness_delivery_marker("dispatch-abc123", True, "error")
 
     origin = parse_harness_delivery_marker(marker)
 
     assert origin is not None
     assert origin.dispatch_id == "dispatch-abc123"
     assert origin.notify_operator is True
+    assert origin.state == "error"
+
+
+def test_a_marker_with_no_state_segment_never_claims_success():
+    """Every row a pre-outcome build wrote. `unknown` is the only honest read."""
+
+    origin = parse_harness_delivery_marker("harness_delivery:dispatch-abc123:1")
+
+    assert origin.state == "unknown"
+
+
+def test_requested_by_carries_the_outcome_too():
+    origin = dispatch_delivery.parse_delivery_requested_by(
+        dispatch_delivery.delivery_requested_by(
+            "dispatch-abc123", notify_operator=False, state="error"
+        )
+    )
+
+    assert origin.state == "error"
+    assert origin.notify_operator is False
+
+
+def test_a_bare_provenance_reports_an_unknown_outcome():
+    assert (
+        dispatch_delivery.parse_delivery_requested_by("harness-delivery").state
+        == "unknown"
+    )
 
 
 def test_an_unflagged_delivery_is_still_a_delivery():
@@ -245,6 +272,7 @@ def test_a_delivery_projects_as_a_delivery_not_as_the_operator():
     assert message["delivery"] == {
         "dispatch_id": "dispatch-abc123",
         "notify_operator": True,
+        "state": "unknown",
     }
 
 
@@ -284,3 +312,37 @@ def test_a_relayed_message_keeps_its_own_attribution():
     assert message["kind"] == PERSONA_RELAYED_MESSAGE_KIND
     assert message["actor_persona_id"] == "dev"
     assert "delivery" not in message
+
+
+def test_the_handler_carries_the_outcome_into_the_typed_marker():
+    """The seam the whole outcome fix rides: forge -> requested_by -> marker."""
+
+    marker = _marker_for(
+        dispatch_delivery.delivery_requested_by(
+            "dispatch-abc123", notify_operator=True, state="error"
+        )
+    )
+
+    origin = parse_harness_delivery_marker(marker)
+    assert origin.state == "error"
+    assert origin.notify_operator is True
+
+
+def test_a_failed_delivery_projects_its_failure(monkeypatch):
+    """`pending_deliveries` selects `state != running`, so failures DO deliver.
+
+    Without the outcome on the wire, the only difference between this row and a
+    successful one is prose — and a consumer that reads prose to decide what to
+    tell the operator is doing the sentence-matching the marker retires.
+    """
+
+    message = _project(
+        _history_row(
+            kind=PERSONA_HARNESS_DELIVERY_KIND,
+            delivery_dispatch_id="dispatch-abc123",
+            delivery_notify_operator=True,
+            delivery_state="error",
+        )
+    )
+
+    assert message["delivery"]["state"] == "error"

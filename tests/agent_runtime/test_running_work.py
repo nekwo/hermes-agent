@@ -1294,6 +1294,58 @@ def test_a_settled_dispatch_stops_being_running_work(dispatch_home):
     assert [row for row in build_running_work()["rows"] if row["kind"] == "dispatch"] == []
 
 
+def test_an_ABANDONED_delivery_stays_visible_with_its_reason(dispatch_home):
+    """The worst outcome this lane has must not also be the quietest one.
+
+    Three paths give up on a finished dispatch without ever forging a delivery
+    turn — no sender session, an unresolvable sender, and the attempt cap. Each
+    means an agent asked for work, the work ran, an answer came back, and the
+    answer was then discarded. Before this the only trace was an EventLog row no
+    consumer reads: no delivery, no notification, and a HUD that said everything
+    was fine.
+    """
+
+    from agent_runtime.dispatch_store import (
+        STATE_COMPLETED,
+        drop_delivery,
+        record_completion,
+    )
+
+    dispatch_id = _record_dispatch()
+    record_completion(dispatch_id, state=STATE_COMPLETED, reply="the answer nobody got")
+    drop_delivery(dispatch_id, reason="sender_session_unresolvable")
+
+    rows = [row for row in build_running_work()["rows"] if row["kind"] == "dispatch"]
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["work_id"] == f"dispatch:{dispatch_id}"
+    # `error`, not `unknown`: nothing here is uncertain. The dispatch settled,
+    # and its answer will never be delivered.
+    assert row["status"] == running_work.STATUS_ERROR
+    assert "undelivered" in row["label"]
+    # The reason is the whole point — "could not be delivered" is useless
+    # without "because".
+    assert "sender_session_unresolvable" in row["tail_preview"]
+    assert row["cancellable"] is False
+
+
+def test_a_DELIVERED_dispatch_does_not_linger_on_the_hud(dispatch_home):
+    """Only the abandoned ones stay. A delivered answer is not an incident."""
+
+    from agent_runtime.dispatch_store import (
+        STATE_COMPLETED,
+        mark_delivered,
+        record_completion,
+    )
+
+    dispatch_id = _record_dispatch()
+    record_completion(dispatch_id, state=STATE_COMPLETED, reply="done")
+    mark_delivered(dispatch_id)
+
+    assert [row for row in build_running_work()["rows"] if row["kind"] == "dispatch"] == []
+
+
 def test_a_dispatch_whose_owner_died_is_SHOWN_as_unknown_not_hidden(
     dispatch_home, monkeypatch
 ):

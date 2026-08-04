@@ -663,6 +663,14 @@ def _backfill_rows(
                 value = _safe_token(message.get(key), limit=160)
                 if value:
                     payload[key] = value
+            # A backfilled delivery must be indistinguishable from a live one to
+            # a consumer — that is the only thing that makes mixing the two
+            # safe. The read projection names these facts `delivery_*` (it is
+            # feeding the conversation contract); the mirror names them
+            # `origin`/`dispatch_*`. TRANSLATE rather than copy: a blind
+            # key-for-key copy would silently write nothing, because the two
+            # vocabularies do not share a single key name.
+            payload.update(_backfilled_delivery_fields(message))
             rows.append(payload)
     return rows, truncated
 
@@ -867,25 +875,71 @@ def _logical_client_key(value: Any) -> str:
         return token
 
 
-def _relay_sender_fields(relay_marker: Any) -> dict[str, str]:
-    """Attribution for a relayed incoming row, from its finish_reason marker.
+def _backfilled_delivery_fields(message: dict[str, Any]) -> dict[str, str]:
+    """Mirror-vocabulary origin fields for a row read back from the projection.
 
-    Without this a teammate's relayed message reads as the operator in the grep
-    file — the same attribution defect the conversation projection carries
-    ``relay_sender_*`` to avoid.
+    The live path decodes the finish_reason marker directly
+    (:func:`_relay_sender_fields`); backfill only ever sees the already-typed
+    projection row, so this is the second and last place the two vocabularies
+    meet. Keyed on the typed kind, never on prose.
+    """
+
+    from .persona_chat_history import PERSONA_HARNESS_DELIVERY_KIND
+
+    if _safe_token(message.get("kind"), limit=64) != PERSONA_HARNESS_DELIVERY_KIND:
+        return {}
+    fields: dict[str, str] = {"origin": "harness_delivery"}
+    dispatch_id = _safe_token(message.get("delivery_dispatch_id"), limit=200)
+    if dispatch_id:
+        fields["dispatch_id"] = dispatch_id
+    fields["dispatch_state"] = (
+        _safe_token(message.get("delivery_state"), limit=40) or "unknown"
+    )
+    if message.get("delivery_notify_operator"):
+        fields["notify_operator"] = "1"
+    return fields
+
+
+def _relay_sender_fields(relay_marker: Any) -> dict[str, str]:
+    """Origin fields for an incoming row, decoded from its finish_reason marker.
+
+    Two non-operator origins ride that one column, and BOTH are invisible in the
+    mirror without this. A relayed teammate message reads as the operator — the
+    attribution defect the conversation projection carries ``relay_sender_*`` to
+    avoid — and a forged dispatch DELIVERY reads as the operator too, which is
+    worse here than in the UI: the mirror's whole purpose is machine
+    consumption, and a head agent grepping a teammate's thread would attribute
+    the runtime's own delivery to the human, with nothing in the line to say
+    otherwise.
+
+    Kept as ONE helper over one column rather than two: the marker vocabularies
+    are mutually exclusive by construction (``relay_policy`` owns both), so a
+    second call site would only create a chance for them to disagree.
     """
 
     if not relay_marker:
         return {}
     try:
-        from .relay_policy import parse_relay_sender_marker
+        from .relay_policy import (
+            parse_harness_delivery_marker,
+            parse_relay_sender_marker,
+        )
 
-        sender = parse_relay_sender_marker(relay_marker)
+        delivery = parse_harness_delivery_marker(relay_marker)
+        sender = None if delivery is not None else parse_relay_sender_marker(relay_marker)
     except Exception:  # pragma: no cover - defensive
         return {}
+    if delivery is not None:
+        fields: dict[str, str] = {"origin": "harness_delivery"}
+        if delivery.dispatch_id:
+            fields["dispatch_id"] = _safe_token(delivery.dispatch_id, limit=200)
+        fields["dispatch_state"] = _safe_token(delivery.state, limit=40)
+        if delivery.notify_operator:
+            fields["notify_operator"] = "1"
+        return fields
     if sender is None:
         return {}
-    fields: dict[str, str] = {}
+    fields = {}
     if sender.persona_id:
         fields["relay_sender_persona_id"] = _safe_token(sender.persona_id, limit=160)
     if sender.instance_id:

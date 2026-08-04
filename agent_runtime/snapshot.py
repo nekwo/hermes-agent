@@ -760,6 +760,20 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         # consumer is the same one the dispatch lane put there: conversation
         # ``kind`` stays an OPEN string. An exhaustive switch over it would turn
         # this ruling into a fail-closed frame and would have needed the bump.
+        #
+        # 52 KEPT, THIRD TIME (WP-L2 review fixes, 2026-08-03) — the
+        # ``delivery`` sub-block gained ``state`` (the settled dispatch outcome)
+        # and the ``running_work`` dispatch lane gained terminal ``error`` rows
+        # for completions whose delivery was ABANDONED. Both are additions to
+        # blocks a consumer already parses, on a ``kind`` it already knows, and
+        # both are consumed by the Launcher in the same wave. The reason
+        # ``state`` had to be added at all is worth recording: without it an
+        # ``error`` dispatch — which ``pending_deliveries`` selects and delivers
+        # exactly like a successful one — was distinguishable from success only
+        # in the prose body, so a consumer would have had to sentence-match to
+        # phrase an honest notification. That is precisely what the typed marker
+        # exists to prevent, so the fix belongs on the wire rather than in the
+        # reader.
         "contract_version": 52,
         "generated_at": data.get("generated_at"),
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),

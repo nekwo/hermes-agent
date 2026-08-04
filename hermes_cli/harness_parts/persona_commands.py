@@ -5628,7 +5628,7 @@ def _resolve_relay_sender_marker(
     delivery = _dispatch_delivery.parse_delivery_requested_by(requested_by)
     if delivery is not None:
         return _relay_policy.build_harness_delivery_marker(
-            delivery.dispatch_id, delivery.notify_operator
+            delivery.dispatch_id, delivery.notify_operator, delivery.state
         )
     if not isinstance(requested_by, str) or not requested_by.startswith("agent:"):
         return None
