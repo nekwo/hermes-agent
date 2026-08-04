@@ -146,6 +146,14 @@ KIND_DISPATCH = "dispatch"
 #: projection. A day, because "your agent's answer was thrown away" is worth
 #: seeing on the next session start, and not forever, because the HUD reports
 #: what the machine is doing now rather than serving as an incident archive.
+#:
+#: BOUND, STATED: past this window the row goes silent here with no "N older"
+#: affordance. That is a deliberate limit of THIS surface, not a claim that
+#: nothing older happened — the drop is still in the EventLog
+#: (``dispatch.dropped``), still on the store row, and still reported to the
+#: dispatching agent through ``agent_chat_dispatches``. A counted-older
+#: affordance belongs here eventually; until it exists, a reader must not treat
+#: an empty dispatch lane as "nothing was ever abandoned".
 _UNDELIVERABLE_WINDOW_SECONDS = 24 * 60 * 60
 
 RUNNING_WORK_KINDS = (

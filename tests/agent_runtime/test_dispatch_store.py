@@ -16,6 +16,7 @@ import pytest
 
 from agent_runtime import dispatch_store
 from agent_runtime.dispatch_store import (
+    MAX_DELIVERY_ATTEMPTS,
     CLAIM_EXPIRY_SECONDS,
     DELIVERY_DELIVERED,
     DELIVERY_DROPPED,
@@ -49,6 +50,21 @@ def store_home(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.setenv("HERMES_HEAD_HOME", str(home))
     return home
+
+
+@pytest.fixture(autouse=True)
+def _reset_backlog_throttle():
+    """The backlog report's throttle is PROCESS-global, deliberately.
+
+    That is right in production — a serve process should not re-report the same
+    backlog every completion — and wrong in a test process, where one test's
+    high-water mark silently suppresses the next test's report. Reset per test
+    so each one drives the guard from a known state instead of inheriting one.
+    """
+
+    dispatch_store._backlog_report_state["at"] = 0.0
+    dispatch_store._backlog_report_state["high"] = 0
+    yield
 
 
 def _dispatch(**overrides):
@@ -511,6 +527,142 @@ def test_a_dropped_row_keeps_its_reason_for_the_operator(store_home):
     assert get_dispatch(dispatch_id)["delivery_error"] == "sender_session_unresolvable"
 
 
+def test_the_ATTEMPT_CAP_drop_records_its_reason_too(store_home):
+    """The cap is the path where "because" matters most, and it had none.
+
+    `drop_delivery` persisted a reason; the cap-drop inside `claim_delivery`
+    wrote every other delivery column and skipped that one. So the row the
+    Activity panel renders said `delivery abandoned: undelivered` — the exact
+    uselessness surfacing drops at all was meant to retire — for the one drop an
+    operator is most likely to be looking at, since it is the one that follows
+    eight visible failures.
+    """
+
+    dispatch_id = _dispatch()
+    record_completion(dispatch_id, state=STATE_COMPLETED, reply="done")
+    for index in range(MAX_DELIVERY_ATTEMPTS + 1):
+        claim_delivery(dispatch_id, f"claim-{index}")
+        release_delivery_claim(dispatch_id)
+
+    row = get_dispatch(dispatch_id)
+    assert row["delivery_state"] == DELIVERY_DROPPED
+    assert row["delivery_error"] == dispatch_store.DROP_REASON_ATTEMPT_CAP
+    # Row and event agree because they read the same constant.
+    assert row["delivery_error"] == "attempt_cap"
+
+
+def test_re_arming_a_capped_row_clears_the_stale_give_up(store_home):
+    """Otherwise the next claim re-drops instantly, against a stale reason.
+
+    A row dropped by the cap keeps an exhausted counter. Re-arming it without
+    resetting that means the very first claim on the fresh answer trips the cap
+    again — and the operator reads `attempt_cap` against a delivery that never
+    got a single attempt.
+    """
+
+    dispatch_id = _dispatch()
+    record_completion(dispatch_id, state=STATE_COMPLETED, reply="first")
+    for index in range(MAX_DELIVERY_ATTEMPTS + 1):
+        claim_delivery(dispatch_id, f"claim-{index}")
+        release_delivery_claim(dispatch_id)
+    assert get_dispatch(dispatch_id)["delivery_state"] == DELIVERY_DROPPED
+
+    record_completion(dispatch_id, state=STATE_COMPLETED, reply="second")
+
+    row = get_dispatch(dispatch_id)
+    assert row["delivery_state"] == DELIVERY_PENDING
+    assert row["delivery_attempts"] == 0
+    assert not row["delivery_error"]
+    # And it is genuinely deliverable again, not cap-tripped on the first try.
+    assert claim_delivery(dispatch_id, "claim-fresh") is True
+
+
+def test_re_arming_never_touches_a_DELIVERED_row(store_home):
+    """The reset above is scoped; it must not undo the re-arm guard."""
+
+    dispatch_id = _dispatch()
+    record_completion(dispatch_id, state=STATE_COMPLETED, reply="first")
+    claim_delivery(dispatch_id, "claim-1")
+    mark_delivered(dispatch_id)
+
+    record_completion(dispatch_id, state=STATE_COMPLETED, reply="second")
+
+    row = get_dispatch(dispatch_id)
+    assert row["delivery_state"] == DELIVERY_DELIVERED
+    assert row["delivery_attempts"] == 1
+
+
+def test_a_superseding_outcome_on_a_delivered_row_is_named(store_home, monkeypatch):
+    """Harmless to the sender, and therefore otherwise invisible.
+
+    The re-arm guard means a second writer landing a different outcome cannot
+    produce a duplicate delivery — which is exactly why it would leave no trace.
+    It is the observable symptom of the supervised-id registry being
+    process-local, so it gets an event rather than being absorbed in silence.
+    """
+
+    events = []
+    dispatch_id = _dispatch()
+    record_completion(dispatch_id, state=STATE_COMPLETED, reply="done")
+    mark_delivered(dispatch_id)
+    monkeypatch.setattr(
+        dispatch_store, "_emit", lambda event_type, **payload: events.append(event_type)
+    )
+
+    record_completion(dispatch_id, state=dispatch_store.STATE_UNKNOWN, error="sweep")
+
+    assert "dispatch.outcome_superseded" in events
+
+
+def test_the_same_outcome_re_landing_is_not_reported(store_home, monkeypatch):
+    """A retry that agrees with the record is not news."""
+
+    events = []
+    dispatch_id = _dispatch()
+    record_completion(dispatch_id, state=STATE_COMPLETED, reply="done")
+    mark_delivered(dispatch_id)
+    monkeypatch.setattr(
+        dispatch_store, "_emit", lambda event_type, **payload: events.append(event_type)
+    )
+
+    record_completion(dispatch_id, state=STATE_COMPLETED, reply="done")
+
+    assert "dispatch.outcome_superseded" not in events
+
+
+def test_the_backlog_report_does_not_storm(store_home, monkeypatch):
+    """The alarm must not become the noise it exists to describe.
+
+    `_prune` runs on EVERY completion, so an unthrottled report emits one
+    EventLog row and one warning per completion for as long as the backlog
+    lasts — in exactly the pathological state where the log is most needed for
+    something else.
+    """
+
+    monkeypatch.setattr(dispatch_store, "_MAX_RETAINED_TERMINAL", 1)
+    events = []
+    monkeypatch.setattr(
+        dispatch_store, "_emit", lambda event_type, **payload: events.append(event_type)
+    )
+    for index in range(3):
+        stuck = _dispatch(dispatch_id=f"dispatch-stuck-{index}")
+        record_completion(stuck, state=STATE_COMPLETED, reply="held")
+
+    backlog = [event for event in events if event == "dispatch.delivery_backlog"]
+    assert backlog, "a real backlog must still be reported at least once"
+
+    # Now hold the count steady and keep the collector running: no new reports.
+    before = len(backlog)
+    for index in range(5):
+        settled = _dispatch(dispatch_id=f"dispatch-settled-{index}")
+        record_completion(settled, state=STATE_COMPLETED, reply="ok")
+        mark_delivered(settled)
+        record_completion(settled, state=STATE_COMPLETED, reply="ok")
+    after = len([event for event in events if event == "dispatch.delivery_backlog"])
+
+    assert after - before <= 2, "the backlog report is storming"
+
+
 def test_undeliverable_dispatches_are_readable_as_their_own_lane(store_home):
     dropped = _dispatch(dispatch_id="dispatch-dropped")
     record_completion(dropped, state=STATE_COMPLETED, reply="done")
@@ -589,3 +741,58 @@ def test_the_prune_exemption_and_the_re_arm_guard_compose(store_home, monkeypatc
 
     assert get_dispatch(owed) is not None
     assert get_dispatch(owed)["result"]["reply"] == "never seen"
+
+
+def test_the_two_guards_hold_while_INTERLEAVED(store_home, monkeypatch):
+    """The composition, actually interleaved rather than run in sequence.
+
+    The sequential test above proves each guard in isolation. The interesting
+    case is a delivery lane and a collector operating on the SAME rows in
+    alternation, which is the real serve process: completions keep arriving (so
+    the collector keeps running) while the drain marks some rows delivered and
+    leaves others pending because their senders are busy.
+
+    Two invariants must survive every ordering: an answer nobody received is
+    still there at the end, and a row the sender WAS told about is never queued
+    for a second delivery.
+    """
+
+    monkeypatch.setattr(dispatch_store, "_MAX_RETAINED_TERMINAL", 2)
+    owed = []
+    told = []
+
+    for round_index in range(6):
+        # A completion whose sender is busy: stays pending, forever owed.
+        held = _dispatch(dispatch_id=f"dispatch-held-{round_index}")
+        record_completion(held, state=STATE_COMPLETED, reply=f"owed {round_index}")
+        owed.append(held)
+
+        # A completion that drains immediately.
+        drained = _dispatch(dispatch_id=f"dispatch-drained-{round_index}")
+        record_completion(drained, state=STATE_COMPLETED, reply="ok")
+        claim_delivery(drained, f"claim-{round_index}")
+        mark_delivered(drained)
+        told.append(drained)
+
+        # A late writer lands on an already-delivered row, INTERLEAVED with the
+        # collector rather than after it.
+        record_completion(drained, state=STATE_COMPLETED, reply="late")
+
+        # And an unrelated completion, purely to keep the collector running.
+        noise = _dispatch(dispatch_id=f"dispatch-noise-{round_index}")
+        record_completion(noise, state=STATE_COMPLETED, reply="ok")
+        mark_delivered(noise)
+
+    for index, held in enumerate(owed):
+        row = get_dispatch(held)
+        assert row is not None, f"{held}: an owed answer was collected"
+        assert row["delivery_state"] == DELIVERY_PENDING
+        assert row["result"]["reply"] == f"owed {index}"
+
+    for drained in told:
+        row = get_dispatch(drained)
+        if row is None:
+            continue  # legitimately collected: the sender was already told
+        assert row["delivery_state"] == DELIVERY_DELIVERED, (
+            f"{drained}: a delivered row was re-armed for a second delivery"
+        )

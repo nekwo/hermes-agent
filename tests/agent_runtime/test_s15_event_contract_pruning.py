@@ -211,7 +211,13 @@ REMOVED_EVENT_TYPES = frozenset(
 # has to be sayable rather than merely observable in a table nobody opens, so
 # the exemption ships with an event that reports it. Registered in the same
 # commit as its emitter, per S55.
-SURVIVING_EVENT_COUNT = 56
+#
+# Then +1 again (final review wave, 2026-08-03): dispatch.outcome_superseded.
+# The re-arm guard makes a second writer landing a different outcome on an
+# already-delivered row harmless to the sender — which is precisely why it would
+# otherwise be invisible. It is the observable symptom of the supervised-id
+# registry being process-local, so it gets a name instead of being absorbed.
+SURVIVING_EVENT_COUNT = 57
 
 
 def test_the_unemittable_event_types_are_no_longer_registered():

@@ -933,7 +933,12 @@ def _relay_sender_fields(relay_marker: Any) -> dict[str, str]:
         fields: dict[str, str] = {"origin": "harness_delivery"}
         if delivery.dispatch_id:
             fields["dispatch_id"] = _safe_token(delivery.dispatch_id, limit=200)
-        fields["dispatch_state"] = _safe_token(delivery.state, limit=40)
+        # `or "unknown"` to match the backfill path exactly. The two
+        # vocabularies are deliberately identical — that is what makes a
+        # backfilled line and a live one indistinguishable to a consumer — so a
+        # fallback on one side and not the other is a real divergence, however
+        # unreachable it looks today.
+        fields["dispatch_state"] = _safe_token(delivery.state, limit=40) or "unknown"
         if delivery.notify_operator:
             fields["notify_operator"] = "1"
         return fields

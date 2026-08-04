@@ -72,6 +72,7 @@ __all__ = [
     "DELIVERY_DELIVERED",
     "DELIVERY_DROPPED",
     "DELIVERY_PENDING",
+    "DROP_REASON_ATTEMPT_CAP",
     "MAX_DELIVERY_ATTEMPTS",
     "STATE_ERROR",
     "STATE_RUNNING",
@@ -118,6 +119,12 @@ CLAIM_EXPIRY_SECONDS = 300.0
 #: Terminal after this many failed delivery attempts. An unroutable row (its
 #: chat root deleted, say) must converge instead of replaying forever.
 MAX_DELIVERY_ATTEMPTS = 8
+
+#: Why the attempt cap gave up, recorded on the ROW and not only on the event.
+#: One constant because the two must never drift: the Activity projection reads
+#: the row and the operator reads the projection, so a reason that lives only in
+#: the event log renders as the useless "undelivered".
+DROP_REASON_ATTEMPT_CAP = "attempt_cap"
 
 #: Bound on the stored ask/reply text. The reply bound matches the relay tool's
 #: own ``_REPLY_LIMIT``; nothing downstream ever needs more, and the store is not
@@ -488,20 +495,52 @@ def record_completion(
         DELIVERY_DELIVERED,
         DELIVERY_DELIVERED,
         DELIVERY_PENDING,
+        # …and the two CASE guards that leave a delivered row's bookkeeping
+        # untouched while resetting a re-armed one's.
+        DELIVERY_DELIVERED,
+        DELIVERY_DELIVERED,
         str(dispatch_id),
     ]
     if only_if_running:
         params.append(STATE_RUNNING)
     with _DB_LOCK, _transaction() as conn:
+        # Read the row's PRIOR verdict inside the same transaction, purely to
+        # notice a specific silence: a second writer landing a DIFFERENT outcome
+        # on a row the sender was already told about. The re-arm guard makes
+        # that harmless to the sender (no second delivery), which is exactly why
+        # it would otherwise leave no trace at all — and it is the observable
+        # symptom of the supervised-id registry being process-local, so it wants
+        # a name rather than to be silently absorbed.
+        prior = conn.execute(
+            f"SELECT state, delivery_state FROM {_TABLE} WHERE dispatch_id=?",
+            (str(dispatch_id),),
+        ).fetchone()
         cur = conn.execute(
             f"""UPDATE {_TABLE} SET state=?, completed_at=?, updated_at=?, result_json=?,
                    target_session_id=?,
                    delivery_state=CASE WHEN delivery_state=? THEN ? ELSE ? END,
-                   delivery_claim=NULL, delivery_claimed_at=NULL
+                   delivery_claim=NULL, delivery_claimed_at=NULL,
+                   -- Re-arming clears the PREVIOUS give-up. A row dropped by the
+                   -- attempt cap keeps its exhausted counter and its drop reason
+                   -- otherwise, so the very next claim re-drops it instantly —
+                   -- and the operator reads a stale "attempt_cap" against a
+                   -- delivery that never got an attempt. Scoped to rows actually
+                   -- being re-armed: a delivered row is left exactly as it is.
+                   delivery_attempts=CASE WHEN delivery_state=? THEN delivery_attempts ELSE 0 END,
+                   delivery_error=CASE WHEN delivery_state=? THEN delivery_error ELSE NULL END
                 WHERE dispatch_id=?{guard}""",
             tuple(params),
         )
         updated = cur.rowcount == 1
+    if updated and prior is not None:
+        prior_state, prior_delivery = prior
+        if prior_delivery == DELIVERY_DELIVERED and str(prior_state or "") != settled:
+            _emit(
+                "dispatch.outcome_superseded",
+                dispatch_id=str(dispatch_id),
+                previous=str(prior_state or ""),
+                settled=settled,
+            )
     if updated:
         _emit(
             "dispatch.completed",
@@ -545,9 +584,9 @@ def claim_delivery(dispatch_id: str, claim_id: str) -> bool:
         if int(attempts or 0) >= MAX_DELIVERY_ATTEMPTS:
             conn.execute(
                 f"""UPDATE {_TABLE} SET delivery_state=?, updated_at=?, delivery_claim=NULL,
-                       delivery_claimed_at=NULL
+                       delivery_claimed_at=NULL, delivery_error=?
                     WHERE dispatch_id=?""",
-                (DELIVERY_DROPPED, now_epoch, str(dispatch_id)),
+                (DELIVERY_DROPPED, now_epoch, DROP_REASON_ATTEMPT_CAP, str(dispatch_id)),
             )
             dropped = True
         else:
@@ -570,7 +609,7 @@ def claim_delivery(dispatch_id: str, claim_id: str) -> bool:
         _emit(
             "dispatch.dropped",
             dispatch_id=str(dispatch_id),
-            reason="attempt_cap",
+            reason=DROP_REASON_ATTEMPT_CAP,
             attempts=int(attempts or 0),
         )
         return False
@@ -689,6 +728,45 @@ def drop_delivery(dispatch_id: str, *, reason: str) -> bool:
     return dropped
 
 
+#: How often the backlog report may repeat while the condition persists.
+_BACKLOG_REPORT_INTERVAL_SECONDS = 300.0
+
+_backlog_report_state: dict[str, float | int] = {"at": 0.0, "high": 0}
+
+
+def _backlog_report_due(pending: int, *, now: float | None = None) -> bool:
+    """True when the backlog is worth reporting AGAIN.
+
+    ``_prune`` runs on every ``record_completion``, so an unthrottled report
+    would emit an EventLog row and a warning per completion for as long as the
+    backlog lasts — a storm produced by the very alarm meant to describe a quiet
+    failure, in exactly the pathological state where the log is most needed for
+    something else.
+
+    Reported when the backlog reaches a NEW HIGH (that is new information) or
+    when the interval has elapsed (so a stuck backlog never goes permanently
+    silent) — and never merely because another completion happened to run the
+    collector.
+
+    A high-water mark rather than "the number changed": the two lanes interleave,
+    so the pending count oscillates as rows drain and new completions land.
+    Reporting on any change turns 3 -> 4 -> 3 -> 4 back into the storm this
+    exists to prevent, which is exactly what the first version of this guard did
+    and what its test caught.
+    """
+
+    moment = time.time() if now is None else now
+    elapsed = moment - float(_backlog_report_state["at"])
+    if (
+        pending <= int(_backlog_report_state["high"])
+        and elapsed < _BACKLOG_REPORT_INTERVAL_SECONDS
+    ):
+        return False
+    _backlog_report_state["high"] = max(pending, int(_backlog_report_state["high"]))
+    _backlog_report_state["at"] = moment
+    return True
+
+
 def _prune() -> None:
     """Bound terminal history — but NEVER at the cost of an undelivered answer.
 
@@ -739,7 +817,7 @@ def _prune() -> None:
                     WHERE state != ? AND delivery_state = ?""",
                 (STATE_RUNNING, DELIVERY_PENDING),
             ).fetchone()[0]
-        if int(stranded) > _MAX_RETAINED_TERMINAL:
+        if int(stranded) > _MAX_RETAINED_TERMINAL and _backlog_report_due(int(stranded)):
             logger.warning(
                 "dispatch store holds %s undelivered completions (cap %s) — "
                 "senders are not draining; nothing was deleted",

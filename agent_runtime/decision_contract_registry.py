@@ -330,4 +330,5 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "dispatch.delivered": EventContract("dispatch.delivered", "Detached dispatch delivered to its sender", ("dispatch_id",), ()),
     "dispatch.dropped": EventContract("dispatch.dropped", "Detached dispatch delivery abandoned", ("dispatch_id", "reason"), ("attempts",)),
     "dispatch.delivery_backlog": EventContract("dispatch.delivery_backlog", "Undelivered dispatch completions exceed the retention cap", ("pending", "cap"), ()),
+    "dispatch.outcome_superseded": EventContract("dispatch.outcome_superseded", "A different outcome landed on an already-delivered dispatch", ("dispatch_id", "settled"), ("previous",)),
 }

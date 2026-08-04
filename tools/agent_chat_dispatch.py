@@ -346,6 +346,14 @@ def parse_child_payload(text: str) -> dict[str, Any] | None:
         index = text.find("{", max(end, index + 1))
     # The fallback keeps a pre-marker or hand-stubbed payload readable rather
     # than reporting a turn that did answer as having produced nothing.
+    #
+    # It is NOT an inversion of the old "last object wins", though it reads like
+    # one: `fallback` is overwritten by every unmarked object while `marked` is
+    # still None, so when NO marked payload exists at all — the only case where
+    # `fallback` is ever returned — it holds the last object, exactly as before.
+    # The `elif` only stops it tracking objects printed AFTER a marked payload,
+    # and in that case `marked` wins regardless. Stated here because the shape
+    # invites the wrong reading twice over.
     return marked if marked is not None else fallback
 
 
@@ -368,6 +376,17 @@ class _BoundedTail:
     The running total is not a micro-optimisation either. Re-summing the sink on
     every line is O(n²), so a child that printed past the cap pinned a pump
     thread to a core for the rest of a half-hour run, inside a long-lived serve.
+
+    WHAT ``limit`` ACTUALLY BOUNDS, stated because it is not quite what it
+    looks like: the eviction loop stops at one remaining chunk, so a SINGLE
+    chunk larger than the limit is kept whole. That is deliberate — a chunk is
+    one line, the payload is a single line of JSON, and truncating it produces
+    something ``parse_child_payload`` cannot read, which is precisely the
+    data-loss this class exists to prevent. The effective ceiling is therefore
+    ``max(limit, longest single line)``, not ``limit``, and this runs inside a
+    long-lived serve process. Bounding it for real would have to happen at the
+    producer (a child that bounds its own payload line), never here, where the
+    only available tool is the truncation that breaks it.
     """
 
     __slots__ = ("_chunks", "_limit", "_total", "dropped_chars")
@@ -540,10 +559,12 @@ def _run_dispatch(dispatch_id: str, spec: dict[str, Any]) -> None:
             logger.exception(
                 "dispatch %s could not be settled after a supervisor failure", dispatch_id
             )
-        finally:
-            _forget_supervised(dispatch_id)
         return
     finally:
+        # ONE release site. The inner handler used to release too, which was
+        # harmless (the operation is idempotent) but read as though the outer
+        # `finally` did not cover the early return — it does, and a second call
+        # invites the next reader to assume one of them is load-bearing.
         _forget_supervised(dispatch_id)
 
 
@@ -708,6 +729,13 @@ def summarize_for_caller(row: dict[str, Any]) -> dict[str, Any]:
     thing I asked for come back yet?", never the whole reply (that arrives as
     its own delivered turn, and duplicating it here would double the context
     cost of every status check).
+
+    ``delivery_error`` is here because ``delivery_state`` alone leaves the one
+    party actually owed the answer — the agent that dispatched the work — able
+    to see THAT delivery was abandoned but never why, at any point. Its whole
+    recourse is to decide whether to re-dispatch, and "dropped" without a reason
+    does not support that decision: a vanished chat root means re-sending is
+    pointless, while an exhausted attempt cap means it is exactly right.
     """
 
     result = row.get("result") or {}
@@ -720,6 +748,9 @@ def summarize_for_caller(row: dict[str, Any]) -> dict[str, Any]:
         "ask_excerpt": str(row.get("ask") or "")[:200],
         "state": row.get("state"),
         "delivery_state": row.get("delivery_state"),
+        # Bounded like every other field here; the reason is a short token
+        # (`attempt_cap`, `no_sender_session`, …), never prose.
+        "delivery_error": str(row.get("delivery_error") or "")[:200] or None,
         "notify_operator": bool(row.get("notify_operator")),
         "dispatched_at": row.get("dispatched_at"),
         "completed_at": row.get("completed_at"),
