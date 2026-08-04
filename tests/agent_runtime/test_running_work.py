@@ -22,7 +22,6 @@ from agent_runtime.running_work import (
     KIND_CHAT_TURN,
     KIND_CRON_JOB,
     KIND_DELEGATION,
-    KIND_MCP_SERVER,
     KIND_TERMINAL,
     RUNNING_WORK_SOURCES,
     SOURCE_OK,
@@ -725,20 +724,49 @@ def test_chat_turn_rows_never_carry_message_content(home, isolate_agent_runtime_
 # --- live-only lanes --------------------------------------------------------
 
 
-def test_live_only_lanes_report_unavailable_rather_than_no_work(home):
+def test_live_only_cron_lane_reports_unavailable_rather_than_no_work(home):
     """Absence proves nothing: an empty registry in a non-owning process is blind.
 
-    Reporting ``ok`` with zero rows here would tell an operator "no MCP servers
-    and no cron jobs are running" on the sole evidence that THIS process is not
-    the one that would know.
+    Reporting ``ok`` with zero rows here would tell an operator "no cron jobs
+    are running" on the sole evidence that THIS process is not the one that
+    would know.
     """
 
     payload = build_running_work()
 
-    for name in (KIND_MCP_SERVER, KIND_CRON_JOB):
-        entry = payload["sources"][name]
-        assert entry["status"] == SOURCE_UNAVAILABLE
-        assert entry["reason"] == "not_in_process"
+    entry = payload["sources"][KIND_CRON_JOB]
+    assert entry["status"] == SOURCE_UNAVAILABLE
+    assert entry["reason"] == "not_in_process"
+
+
+def test_connected_mcp_transports_are_capabilities_not_running_work(home, monkeypatch):
+    """A warm shared transport must not make an idle agent look busy."""
+
+    class _ConnectedMcp:
+        _servers = {"launcher_qa": object()}
+
+        @staticmethod
+        def get_mcp_status():
+            return [
+                {
+                    "name": "launcher_qa",
+                    "transport": "stdio",
+                    "connected": True,
+                    "status": "connected",
+                }
+            ]
+
+    original_module = running_work._module
+    monkeypatch.setattr(
+        running_work,
+        "_module",
+        lambda name: _ConnectedMcp() if name == "tools.mcp_tool" else original_module(name),
+    )
+
+    payload = build_running_work()
+
+    assert "mcp_server" not in payload["sources"]
+    assert all(row["kind"] != "mcp_server" for row in payload["rows"])
 
 
 def test_cron_ownership_requires_more_than_module_residency():
@@ -778,19 +806,6 @@ def test_a_broken_scheduler_is_unreadable_not_someone_elses_process(home, monkey
     assert source["status"] == SOURCE_UNAVAILABLE
     assert source["reason"] == "scheduler_unreadable"
     assert source["detail"] == "RuntimeError"
-
-
-def test_mcp_ownership_requires_connection_state():
-    class _Bare:
-        _servers = {}
-        _server_connecting = set()
-        _server_connect_errors = {}
-
-    class _Owner(_Bare):
-        _servers = {"docs": object()}
-
-    assert running_work._mcp_owned_here(_Bare()) is False
-    assert running_work._mcp_owned_here(_Owner()) is True
 
 
 # --- bounded previews -------------------------------------------------------

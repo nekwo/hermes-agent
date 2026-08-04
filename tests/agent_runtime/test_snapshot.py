@@ -26,7 +26,7 @@ def _task() -> Task:
 
 def test_snapshot_builds_without_stage_graph(isolate_agent_runtime_root) -> None:
     snapshot = build_snapshot()
-    assert snapshot["parity"]["contract_version"] == 52
+    assert snapshot["parity"]["contract_version"] == 53
     assert "goals" not in snapshot
     assert "boards" in snapshot
 
@@ -40,12 +40,15 @@ def test_snapshot_stage_projections_are_empty_after_graph_removal(isolate_agent_
 def test_write_snapshot_remains_importable_and_persists(isolate_agent_runtime_root) -> None:
     result = write_snapshot(build_snapshot())
 
-    assert result["parity"]["contract_version"] == 52
+    assert result["parity"]["contract_version"] == 53
     assert paths.snapshot_path().exists()
 
 
 def test_snapshot_carries_the_running_work_section(isolate_agent_runtime_root) -> None:
     """Contract 52's addition: rows + per-source health, on every frame.
+
+    Contract 53 retires the MCP transport source because connected capability
+    infrastructure is not background work.
 
     ``sources`` is asserted alongside ``rows`` on purpose — a consumer handed
     rows without the health block reads an unreadable lane as "nothing running",
@@ -72,7 +75,6 @@ def test_snapshot_carries_the_running_work_section(isolate_agent_runtime_root) -
         "delegation",
         "chat_turn",
         "dispatch",
-        "mcp_server",
         "cron_job",
     }
     for name, entry in section["sources"].items():

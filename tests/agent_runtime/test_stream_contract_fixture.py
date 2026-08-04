@@ -113,7 +113,9 @@ def test_hydrate_frame_matches_golden_shape(isolate_agent_runtime_root):
 # `running_work` section joins the core, so this is a key-set change and not a
 # value edit — the shape assertions below would catch a hand-bumped version that
 # left the goldens without the section.
-CONTRACT_VERSION = 52
+# The Activity ownership correction (2026-08-04) moved it 52 -> 53 and
+# regenerated every frame after retiring connected MCP transports as work.
+CONTRACT_VERSION = 53
 
 
 def test_every_frame_bearing_golden_pins_contract_version(isolate_agent_runtime_root):

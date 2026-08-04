@@ -68,10 +68,9 @@ def one_row(monkeypatch):
             "terminal": {"status": "ok", "lane": "live"},
             "delegation": {"status": "ok", "lane": "durable"},
             "chat_turn": {"status": "ok", "lane": "durable"},
-            "mcp_server": {"status": "unavailable", "lane": "live", "reason": "not_in_process"},
             "cron_job": {"status": "unavailable", "lane": "live", "reason": "not_in_process"},
         },
-        "counts": {"total": 1, "running": 1, "unavailable_sources": 2},
+        "counts": {"total": 1, "running": 1, "unavailable_sources": 1},
     }
     monkeypatch.setattr(running_work, "build_running_work", lambda *a, **k: payload)
     return row
@@ -89,8 +88,8 @@ def test_work_list_emits_rows_with_per_source_health(one_row, capsys):
     assert [item["work_id"] for item in payload["items"]] == ["terminal:sess-1"]
     # The health block rides the SAME envelope as the rows: a consumer that got
     # rows without it would read an unreadable lane as "nothing running".
-    assert payload["sources"]["mcp_server"]["status"] == "unavailable"
-    assert payload["counts"]["unavailable_sources"] == 2
+    assert payload["sources"]["cron_job"]["status"] == "unavailable"
+    assert payload["counts"]["unavailable_sources"] == 1
 
 
 def test_work_list_filters_by_kind(one_row, capsys):

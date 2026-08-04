@@ -1,16 +1,22 @@
 """Unified ``running_work`` projection — what background work is running RIGHT NOW.
 
-One aggregator, six lanes (terminal background processes, background subagent
+One aggregator, five lanes (terminal background processes, background subagent
 delegations, in-flight mission-chat turns, detached agent-to-agent dispatches,
-MCP servers, and cron jobs), producing ONE row vocabulary so an operator surface
-never has to know which subsystem spawned a piece of work.
+and cron jobs), producing ONE row vocabulary so an operator surface never has
+to know which subsystem spawned a piece of work.
+
+Connected MCP transports are deliberately NOT a lane. A warm connection is
+capability infrastructure, not work: it can outlive the agent turn that admitted
+it, can be reused by several persona instances, and has no single truthful
+owner. Active MCP calls already travel with the owning chat turn's tool trace;
+counting the connection itself made an idle runtime claim background motion.
 
 Durable-first, and that is the whole architecture
 -------------------------------------------------
 The CLI snapshot lane, the serve process, and the stream are SEPARATE
 PROCESSES. Every in-memory registry in this runtime (``process_registry``,
-``async_delegation._records``, ``mcp_tool._servers``, the cron scheduler's
-running-id set) lives only inside the process that spawned the work. A
+``async_delegation._records``, the cron scheduler's running-id set) lives only
+inside the process that spawned the work. A
 projection built from those registries alone would report an empty HUD from any
 other lane and call it "nothing running" — the exact silent-lie class this
 module exists to retire.
@@ -31,10 +37,10 @@ registry can honestly report is therefore split in two:
   registry HAS any. A registry in a non-owning process returns an empty list,
   which enriches nothing and drops nothing, and the lane keeps reporting
   ``durable`` — it only claims ``live`` once live rows were actually observed.
-* **Live-only lanes** (MCP servers, cron jobs) have no durable record at all, so
-  they apply the rule *presence proves, absence proves nothing*: this process is
-  the owner only if it holds MCP connection objects, or cron pool/running-id
-  state. Without that proof the lane reports ``unavailable``, because an empty
+* **Live-only lanes** (cron jobs) have no durable record at all, so they apply
+  the rule *presence proves, absence proves nothing*: this process is the owner
+  only if it holds cron pool/running-id state. Without that proof the lane
+  reports ``unavailable``, because an empty
   ``get_running_job_ids()`` in a non-scheduler process is indistinguishable from
   "no cron jobs are running anywhere" and rendering it as the latter is exactly
   the silent lie this projection exists to retire.
@@ -106,7 +112,6 @@ __all__ = [
     "KIND_CRON_JOB",
     "KIND_DELEGATION",
     "KIND_DISPATCH",
-    "KIND_MCP_SERVER",
     "KIND_TERMINAL",
     "PEEK_TAIL_LIMIT",
     "PROJECTION",
@@ -134,7 +139,6 @@ PEEK_TAIL_LIMIT = 2048
 KIND_TERMINAL = "terminal"
 KIND_DELEGATION = "delegation"
 KIND_CHAT_TURN = "chat_turn"
-KIND_MCP_SERVER = "mcp_server"
 KIND_CRON_JOB = "cron_job"
 #: Detached agent-to-agent dispatches (``agent_chat_send(wait=false)``), backed
 #: by :mod:`agent_runtime.dispatch_store`. Declared in this tuple one wave
@@ -160,7 +164,6 @@ RUNNING_WORK_KINDS = (
     KIND_TERMINAL,
     KIND_DELEGATION,
     KIND_CHAT_TURN,
-    KIND_MCP_SERVER,
     KIND_CRON_JOB,
     KIND_DISPATCH,
 )
@@ -173,7 +176,6 @@ RUNNING_WORK_SOURCES = (
     KIND_TERMINAL,
     KIND_DELEGATION,
     KIND_CHAT_TURN,
-    KIND_MCP_SERVER,
     KIND_CRON_JOB,
     KIND_DISPATCH,
 )
@@ -1313,102 +1315,6 @@ def _collect_dispatches(
 
 
 # --------------------------------------------------------------------------
-# lane: MCP servers
-# --------------------------------------------------------------------------
-
-
-def _mcp_owned_here(mod: Any) -> bool:
-    """True when THIS process manages MCP connections.
-
-    Any of the three connection registries being non-empty proves it: a
-    connected server, an attempt in flight, or a recorded connect failure all
-    mean this process ran the connect path. All three empty means it did not,
-    and the lane must say so rather than reporting the config file's contents
-    as runtime truth.
-    """
-
-    for attr in ("_servers", "_server_connecting", "_server_connect_errors"):
-        try:
-            if getattr(mod, attr, None):
-                return True
-        except Exception:
-            continue
-    return False
-
-
-def _collect_mcp(
-    *, accountant: ProjectionAccountant | None
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Connected MCP servers — live-only, and unavailable everywhere else.
-
-    MCP connections are process-local sockets/subprocesses with no durable
-    record, so from any other lane the truthful answer is "I cannot see this",
-    not an empty list.
-
-    Ownership is proven by the module holding connection STATE (a connected
-    server, an in-flight attempt, or a recorded failure) — not by the module
-    being imported, which happens transitively almost everywhere. Without that
-    proof ``get_mcp_status()`` would report every configured server as
-    ``connected: false`` and this lane would render "no MCP servers running",
-    which is a claim about the config file, not about this process.
-    """
-
-    mod = _module("tools.mcp_tool")
-    if mod is None or not _mcp_owned_here(mod):
-        return [], _source(
-            SOURCE_UNAVAILABLE, lane=LANE_LIVE, reason=REASON_NOT_IN_PROCESS
-        )
-    try:
-        statuses = mod.get_mcp_status()
-    except Exception as exc:
-        return [], _source(
-            SOURCE_UNAVAILABLE,
-            lane=LANE_LIVE,
-            reason="status_failed",
-            detail=type(exc).__name__,
-        )
-
-    rows: list[dict[str, Any]] = []
-    for entry in statuses or []:
-        if not isinstance(entry, dict):
-            continue
-        if accountant is not None:
-            accountant.consider()
-        if not entry.get("connected"):
-            # disabled / connecting / failed servers are configuration state,
-            # not running work.
-            if accountant is not None:
-                accountant.drop(
-                    "not_connected",
-                    entity_id=entry.get("name"),
-                    detail=str(entry.get("status") or ""),
-                    by_design=True,
-                )
-            continue
-        name = _safe_text(entry.get("name"), limit=120)
-        if not name:
-            continue
-        rows.append(
-            _row(
-                kind=KIND_MCP_SERVER,
-                stable_id=name,
-                label=name,
-                status=STATUS_RUNNING,
-                source_lane=LANE_LIVE,
-                command=_safe_text(entry.get("transport"), limit=40),
-                progress=_progress(available=False),
-                cancellable=False,
-            )
-        )
-
-    rows.sort(key=lambda item: item["work_id"])
-    capped = _cap(rows, source=KIND_MCP_SERVER, accountant=accountant)
-    if accountant is not None:
-        accountant.include(len(capped))
-    return capped, _source(SOURCE_OK, lane=LANE_LIVE)
-
-
-# --------------------------------------------------------------------------
 # lane: cron jobs
 # --------------------------------------------------------------------------
 
@@ -1516,7 +1422,6 @@ _COLLECTORS = (
     (KIND_DELEGATION, _collect_delegations, True),
     (KIND_CHAT_TURN, _collect_chat_turns, True),
     (KIND_DISPATCH, _collect_dispatches, True),
-    (KIND_MCP_SERVER, _collect_mcp, False),
     (KIND_CRON_JOB, _collect_cron, False),
 )
 

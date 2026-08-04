@@ -774,7 +774,17 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         # phrase an honest notification. That is precisely what the typed marker
         # exists to prevent, so the fix belongs on the wire rather than in the
         # reader.
-        "contract_version": 52,
+        #
+        # 53 (Activity ownership correction, 2026-08-04) REMOVES the
+        # ``mcp_server`` running-work source and its rows. A connected MCP
+        # transport is reusable capability infrastructure, not a background
+        # task: it can stay warm after the admitting turn settles and several
+        # persona instances can share the same profile/server. It therefore has
+        # no single truthful owner and must not make an idle runtime say
+        # "1 running". Active calls remain visible on their owning chat turn's
+        # tool trace. This is a wire removal, so the contract and Launcher pin
+        # move together under the removal rule recorded at 46.
+        "contract_version": 53,
         "generated_at": data.get("generated_at"),
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
         "redaction_observed": _redaction_observed(data),
