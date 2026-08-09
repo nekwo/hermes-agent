@@ -2272,3 +2272,41 @@ A structural gate that walks the repo is only as hermetic as its prune list, and
 a prune list keyed on DIRECTORY NAMES rots the first time an operator names an
 environment something else. Prefer a marker/typed test over a name list for
 anything whose whole purpose is "this is not our code".
+
+## Unbounded-by-default rollout — the debts it un-defers (2026-08-09)
+
+The unbounded-by-default implementation
+([`UNBOUNDED_DEFAULT_PLAN_2026-08-09.md`](UNBOUNDED_DEFAULT_PLAN_2026-08-09.md),
+§8) names two items that this ledger now owns. Neither is a defect in the
+landing; both are consequences the ruling accepted, recorded here so they are
+never silent.
+
+1. **`memory` parallel authority is no longer deferred by a block.** The upstream
+   `memory` tool sat in `PERSONA_BLOCKED_TOOLS` partly on a real ruling: upstream
+   memory writes and profile memory (`MEMORY.md` / `USER.md`, the
+   `include_profile_memory` opt-in) are two authorities over the same question,
+   and blocking the tool deferred the reconciliation. With `unbounded` as the
+   runtime default the tool is on the schema of every chat lane, so the conflict
+   is now REACHABLE rather than resolved. **Owed:** decide which store is
+   authoritative for a persona's durable memory, and either route the upstream
+   tool at the profile-memory store or keep them separate with an explicit,
+   documented split. Until then an agent can write to a memory surface the
+   profile-memory lane does not read.
+2. **Per-turn schema cost.** `chat_lane_toolsets`' cost cuts (browser / vision /
+   code_execution / debugging / file / terminal + `skill_manage`) do not apply
+   under `unbounded`, so every conversational turn now ships the full registry
+   schema and each session pays one prompt-cache invalidation as the mode flips.
+   The plan's §4.3 ruling stands: if bills spike, the fix is a narrow knob (e.g.
+   `unbounded_keep_chat_lane_cost_cuts`), **not** quietly re-blocking tools — and
+   it is not built speculatively.
+
+Also recorded, unchanged by this landing: the still-owed one-line delegation of
+`tools/terminal_tool.py::_log_harness_blocked_attempt` to
+`terminal_envelope.record_legacy_block` (the legacy writer keeps its silent-drop
+branch on lanes that bind no scope; see that function's docstring).
+
+The safety tradeoff itself — `network_egress` was the last exfiltration brake
+after ruling R-2 removed the secret-read floor, and the replacement is detective
+(receipts) rather than preventive — is recorded in the plan's §4 and was accepted
+by the operator before implementation. Any preventive replacement (egress
+allowlists, secret-scoped env) remains a separate ruling; nothing here builds one.

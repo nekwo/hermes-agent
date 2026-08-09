@@ -64,8 +64,9 @@ envelope-gated commands on a governed lane (today: `mission_chat` only):
 
 | Situation | Result |
 |---|---|
-| gated class + explicit grant | **runs**, grant provenance recorded |
-| gated class + no grant | **typed refusal** `envelope_command_requires_grant` — carries the class, the exact ROOT-config key, the lane and the role |
+| gated class + explicit config grant | **runs**, provenance recorded (`grant_source=config_grant`, `granted_by=<config key>`) |
+| gated class + `unbounded` permission mode | **runs**, provenance recorded (`grant_source=permission_mode`, `granted_by=permission_mode=unbounded`) — see §2.1 |
+| gated class + neither | **typed refusal** `envelope_command_requires_grant` — carries the class, the exact ROOT-config key, the lane and the role |
 | gated class outside the grantable set | reserved typed refusal `envelope_command_not_grantable`; ruling R-2 leaves no current class in this category |
 | not a gated class | allowed, exactly as before |
 | **no scope bound** (every other lane) | `envelope_decision()` returns `None` ⇒ the legacy pattern table decides, byte-for-byte |
@@ -77,6 +78,35 @@ mission-chat turn is governed whether or not its persona binds a profile.
 Fail-closed is preserved at every degradation: a config load fault, a malformed
 stanza, an unknown class, or an unimportable policy module all resolve to
 "refuse", never "allow".
+
+### 2.1 Permission-mode grants (amendment, 2026-08-09)
+
+The 2026-08-09 operator ruling
+([`UNBOUNDED_DEFAULT_PLAN_2026-08-09.md`](UNBOUNDED_DEFAULT_PLAN_2026-08-09.md))
+made `unbounded` the runtime-wide **default** permission mode. Schema-plane "full
+tool access" was hollow while the execution plane still refused `git push`, so
+`envelope_decision` now reads the mode the run resolved
+(`TerminalEnvelopeScope.permission_mode`, stamped by
+`persona_runtime.mission_chat_reply` from the same
+`permission_options_for_chat` resolve the toolset plane uses):
+
+* **`unbounded` + a class in `GRANTABLE_COMMAND_CLASSES` ⇒ granted**, with no
+  config stanza required.
+* **The hard floor is untouched.** `GRANTABLE_COMMAND_CLASSES` is the bound; the
+  `envelope_command_not_grantable` branch is unchanged, so a future re-instated
+  floor is not liftable by any mode.
+* **Ungoverned lanes are untouched.** No scope ⇒ `None` ⇒ legacy behavior,
+  byte-for-byte, exactly as before.
+* **Every mode-granted command still writes a receipt** naming the mode (§5).
+  This is not incidental: the ruling explicitly trades a *preventive* control
+  for a *detective* one, so the receipt IS the compensating control. A change
+  that lets a mode-granted command run without `record_envelope_decision` seeing
+  it removes the ruling's safety argument outright.
+
+The per-role `grants.<role>.<lane>` table in §3 keeps its job: it is what allows
+a class for a session an operator has **restricted** (`--mode bounded` /
+`read_only`), or for a deployment that configured
+`agent_runtime.tool_permissions.default_mode: profile_default`.
 
 ### Command classes
 
@@ -186,7 +216,7 @@ relay an envelope refusal rather than retry it.
 
 | File (under the runtime root) | Written when | Contents |
 |---|---|---|
-| `terminal_envelope_decisions.jsonl` | every governed refusal **and** every granted execution | `decision`, `lane`, `role`, `persona_id`, `session_id`, `command_class`, `reason`, `failure_class`, `granted_by` (the config key, for grants), `command_preview`, `grant_issues` |
+| `terminal_envelope_decisions.jsonl` | every governed refusal **and** every granted execution | `decision`, `lane`, `role`, `persona_id`, `session_id`, `command_class`, `reason`, `failure_class`, `granted_by` (the config key for a config grant, `permission_mode=<mode>` for a mode grant), `grant_source`, `permission_mode`, `command_preview`, `grant_issues` |
 | `blocked_tool_attempts.jsonl` | refusals only | the pre-existing shape (`reason`, `command_preview`) plus the typed fields — operators watching this file lose nothing |
 
 Allowed (ungated) commands write **nothing**: the log records decisions that
@@ -209,7 +239,9 @@ now produces them.
   `test_chat_lane_keeps_no_envelope_at_all`.
 * **No weakening for non-granted classes.** The envelope is not relaxed
   anywhere. The only new "allow" is an explicit operator grant, bounded by the
-  stage floor.
+  stage floor. *(Amended 2026-08-09: a second "allow" exists — the `unbounded`
+  permission mode, §2.1. It is an operator ruling made at the runtime-default
+  level rather than per role, and it is receipted identically.)*
 * **`tools/approval.py`'s general fail-open default is untouched.** It is
   upstream, and it is out of scope here. What changed is that envelope-gated
   commands on mission-chat no longer *reach* it undecided — the fail-open

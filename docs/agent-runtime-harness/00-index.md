@@ -25,7 +25,14 @@
      admission (profile-declares-the-server rule; records the R-1 role-floor
      removal).
    - [mission-chat-terminal-envelope-grants.md](mission-chat-terminal-envelope-grants.md) —
-     terminal envelope grants (records the R-2 floor removal).
+     terminal envelope grants (records the R-2 floor removal; §2.1 records the
+     2026-08-09 permission-mode grants).
+   - [UNBOUNDED_DEFAULT_PLAN_2026-08-09.md](UNBOUNDED_DEFAULT_PLAN_2026-08-09.md) —
+     **the standing tool-access posture (implemented).** `unbounded` is the
+     runtime-wide default (`agent_runtime.tool_permissions.default_mode`); the
+     session permission store is the RESTRICTION lane; registry hygiene and MCP
+     cross-persona scoping never yield to it; every formerly-refused terminal
+     command is receipted with the mode that allowed it.
    - [mission-chat-lane-gap-audit.md](mission-chat-lane-gap-audit.md) — the lane
      gap audit.
    - [chat-session-presence-authority.md](chat-session-presence-authority.md),

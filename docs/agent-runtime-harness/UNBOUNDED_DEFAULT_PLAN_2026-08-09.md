@@ -1,6 +1,27 @@
 # Unbounded-by-Default Tool Access — Implementation Plan (2026-08-09)
 
-> **Status: decision-ready plan, not yet implemented.** Operator (Tony) ruling:
+> **IMPLEMENTED 2026-08-09.** The plan below is retained verbatim as the ruling
+> record and the design rationale. What shipped, section by section:
+>
+> | Plan section | Landed as |
+> |---|---|
+> | §3.1 default at the chokepoint | `agent_runtime/permission_modes.py` (new leaf owning the mode vocabulary, so `config` / `runtime_config` / `terminal_envelope` can read it without closing an import cycle through `tool_permissions` → `tool_visibility`); `runtime_config.ToolPermissionConfig` + `config._tool_permission_config` (unknown value ⇒ typed issue + `profile_default`); `tool_permissions.default_permission_mode()` — the ONE config reader — consumed by `permission_options_for_chat` (`permission_source="runtime_default"`) and by `ToolVisibilityOptions`' default factory, so the no-options snapshot previews describe the same posture a turn gets. |
+> | §3.1 stored `profile_default` = "no opinion" | `tool_permissions._record_expresses_opinion`. A corrupted/unknown stored mode clamps to `bounded`, never to the sentinel — a damaged record must not widen a session. |
+> | §3.2 envelope under the new posture | `TerminalEnvelopeScope.permission_mode`, stamped by `persona_runtime.mission_chat_reply` from the SAME resolve the schema plane uses; `envelope_decision` grants `GRANTABLE_COMMAND_CLASSES` under `unbounded`; `GRANT_SOURCE_CONFIG` / `GRANT_SOURCE_PERMISSION_MODE`; every receipt carries `granted_by` / `grant_source` / `permission_mode`. The hard-floor branch is untouched. |
+> | §3.3 MCP | no code change. `agent_runtime.mcp_admission.enabled: true` was ALREADY set in the live ROOT config (operator ruling 2026-07-26), so the rollout flip was a verified no-op rather than an assumed one. `scope_toolsets_to_admission` untouched. |
+> | §3.4 what is NOT unbounded | registry hygiene now reports honestly under `unbounded`: `blocked_tools_count` 22 → **17**, not 0. The previous empty answer was a preview lie against what `profile_runner` strips at agent construction on every lane. |
+> | §3.5 store → restriction lane | `PERMISSION_MODE_BOUNDED` added (option (a), pinned); `consume_turn` decrements for ANY opinionated mode — the turns-bounded `read_only` never-expired bug; expiry writes `operator:restriction_expired` vs `operator:elevation_expired`; CLI `--mode` gains `bounded` and its help is reworded around restriction. |
+> | §5 honest surfaces | `runtime_hud.resolve_capability_block` gains an explicit `posture` block and rendered line for `unbounded`; `explain_terminal_envelope` is mode-aware (`granted_by_config` / `granted_by_permission_mode`); `persona tool-diff --permission-mode` defaults to the RUNTIME default (an explicit `profile_default` still previews the bounded shape); the mission-chat operative rules no longer tell the model a per-role grant is required for every gated class. |
+> | §6.4 docs | this header, `mission-chat-terminal-envelope-grants.md` §2.1 + §5, `00-index.md`, and the doc-19 debt entry (`memory` parallel authority + per-turn schema cost, both un-deferred by this change). |
+> | §7 tests | `tests/agent_runtime/test_unbounded_default_posture.py`, each test proven red by reverting the exact line it pins. |
+>
+> Contract note: `runtime_config.tool_permissions` is an ADDITION to a frame
+> section consumers parse key-by-key — "merely unread", not "invisible" — so the
+> snapshot `contract_version` does not move, per the ledger's own 52-KEPT rule.
+>
+> ---
+>
+> **Original status: decision-ready plan, not yet implemented.** Operator (Tony) ruling:
 > every agent/persona in this runtime gets full tool access by default — no
 > per-tool blocking as the standing posture, no per-session escalation ritual.
 > This document maps every gating layer that exists today, states exactly where
