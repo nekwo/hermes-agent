@@ -68,6 +68,24 @@ def bundled_persona_profiles():
 
 
 @pytest.fixture(autouse=True)
+def reset_profile_runner_runtime_resolve_cache():
+    """Keep the T6 runtime-resolve memo from crossing test boundaries.
+
+    The memo keys on (profile home, provider, model, config stamps) — none of
+    which distinguish one test's monkeypatched ``resolve_runtime_provider`` from
+    the next test's. Without this, a suite that patches two different resolvers
+    for the same provider/model silently reads the first one's answer in the
+    second test. Process-global state gets a process-global reset.
+    """
+
+    from agent_runtime.profile_runner import reset_runtime_resolve_cache
+
+    reset_runtime_resolve_cache()
+    yield
+    reset_runtime_resolve_cache()
+
+
+@pytest.fixture(autouse=True)
 def isolate_agent_runtime_root(tmp_path, monkeypatch):
     root = tmp_path / "agent-runtime"
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(root))
