@@ -25,7 +25,7 @@ import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
-from hermes_constants import get_hermes_home, _get_platform_default_hermes_home
+from hermes_constants import get_hermes_home, get_process_hermes_home
 from typing import Any, Callable, NamedTuple, Optional
 from utils import atomic_json_write
 
@@ -136,12 +136,12 @@ def _get_process_hermes_home() -> Path:
     ``get_hermes_home()`` honors ``_HERMES_HOME_OVERRIDE`` contextvar used for
     per-session profile dispatch, which would route these files into the wrong
     profile directory when a profile-context task happens to be active at write
-    time.  See issue #56986.
+    time.  See issue #56986.  Delegates to the canonical
+    :func:`hermes_constants.get_process_hermes_home` (identical semantics:
+    env var → platform default, never the override) so the process-scope
+    resolution has a single owner.
     """
-    val = os.environ.get("HERMES_HOME", "").strip()
-    if val:
-        return Path(val)
-    return _get_platform_default_hermes_home()
+    return get_process_hermes_home()
 
 
 def _canonical_hermes_home(path: Path | str) -> Path:

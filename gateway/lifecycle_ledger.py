@@ -59,13 +59,19 @@ _LOW_MEM_AVAILABLE_FRACTION = 0.05  # < 5% of MemTotal available
 
 
 def _process_hermes_home() -> Path:
-    """HERMES_HOME for process-level identity files (ignore task overrides)."""
-    val = os.environ.get("HERMES_HOME", "").strip()
-    if val:
-        return Path(val)
-    from hermes_constants import get_hermes_home
+    """HERMES_HOME for process-level identity files (ignore task overrides).
 
-    return get_hermes_home()
+    Delegates to the canonical :func:`hermes_constants.get_process_hermes_home`
+    (env var → platform default), which never follows the context-local
+    profile override. The previous local copy fell back to
+    ``get_hermes_home()`` when the env var was unset — that resolver DOES
+    honor the override, so a lifecycle write landing mid persona-turn could
+    route the sentinel into the wrong profile directory (same class as
+    gateway/status.py issue #56986).
+    """
+    from hermes_constants import get_process_hermes_home
+
+    return get_process_hermes_home()
 
 
 def get_lifecycle_sentinel_path(home: Optional[Path] = None) -> Path:

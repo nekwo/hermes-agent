@@ -269,6 +269,30 @@ def persona_profile_context(binding: PersonaProfileBinding, *, runtime_root: Pat
     head_home_token = record_hermes_head_home_if_unset(get_hermes_head_home())
     token = set_hermes_home_override(binding.profile_home)
     rows_token = _PROFILE_CONTEXT_ROWS.set(tuple(rows))
+    # ── Why the os.environ writes below still exist (audited 2026-08-09) ──
+    # The ContextVar override above already wins for every reader that goes
+    # through ``get_hermes_home()``, so the ``HERMES_HOME`` env write looks
+    # redundant. It is NOT removable yet; each write is pinned by live readers
+    # that consume the ACTUAL env var:
+    #   * HERMES_HOME — in-process plugins read it raw (e.g.
+    #     plugins/memory/openviking), and any spawn site that inherits ambient
+    #     os.environ instead of building env through
+    #     tools/environments/local.py's factories (which DO bridge the
+    #     override) would otherwise hand a child the head home. ContextVars
+    #     never cross a subprocess boundary.
+    #   * HERMES_AUTH_HOME — hermes_cli/auth.py::_global_auth_file_path reads
+    #     the env var directly on the credential-resolution path of every turn.
+    #   * HOME — POSIX ``os.path.expanduser``/``Path.home()`` consult it; there
+    #     is no context-scoped hook for those.
+    #   * HERMES_AGENT_RUNTIME_ROOT — the legacy terminal envelope layer
+    #     (agent_runtime/terminal_envelope.py, tools/terminal_tool.py) still
+    #     keys on the exported env var.
+    # INVARIANT: this save/mutate/restore of process-global env is only sound
+    # while runs are serialized by profile_runner._WORKDIR_LOCK. Under
+    # concurrent entry the restore is a lost-update race (B saves A's value,
+    # then restores it after A already restored the original) and mid-turn
+    # env readers see the wrong scope. Do not shrink that lock until every
+    # reader above is context-scoped and these writes are deleted.
     try:
         head_auth_home = previous_env.get("HERMES_AUTH_HOME") or previous_env.get("HERMES_HOME")
         if head_auth_home:

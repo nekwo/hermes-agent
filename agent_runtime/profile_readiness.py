@@ -204,12 +204,16 @@ def _dominant_issue(issues: list[tuple[str, str]]) -> tuple[str, str]:
 #
 # The key MUST carry the active profile/auth scope, not just (provider, model):
 # ``_provider_issue`` runs inside ``persona_profile_context``, which diverts the
-# process-global HERMES_HOME/HERMES_AUTH_HOME so ``resolve_runtime_provider``
-# reads PER-PROFILE config and secrets. Keyed on (provider, model) alone, the
-# first profile's verdict leaks to every other profile requesting the same pair
-# within the TTL — one build could show agent B "ready" on agent A's credentials
-# (or falsely flag A with B's auth_attention). Reading the env INSIDE this call
-# reflects the caller's active profile context.
+# Hermes home (ContextVar override + process-global HERMES_HOME/HERMES_AUTH_HOME
+# mirror) so ``resolve_runtime_provider`` reads PER-PROFILE config and secrets.
+# Keyed on (provider, model) alone, the first profile's verdict leaks to every
+# other profile requesting the same pair within the TTL — one build could show
+# agent B "ready" on agent A's credentials (or falsely flag A with B's
+# auth_attention). The home component resolves through ``get_hermes_home()``
+# (ContextVar-first) INSIDE this call, so the key reflects the caller's active
+# profile context even when the process-global env mirror belongs to another
+# concurrently-running scope (env writes are process-wide; the ContextVar is
+# per-task — see agent_runtime/profile_context.py).
 _PROVIDER_ISSUE_TTL_SECONDS = 60.0
 _provider_issue_memo: dict[tuple[str, str, str, str], dict[str, Any]] = {}
 
@@ -227,8 +231,17 @@ def _provider_issue(persona) -> tuple[str, str] | None:
     import os
     import time
 
+    from hermes_constants import get_hermes_home
+
+    # Home component: ContextVar-aware resolver, NOT a raw env read. Under
+    # ``persona_profile_context`` both agree today (the context mirrors the
+    # override into env), but only the resolver stays correct for this task if
+    # another scope's env mutation is in flight. HERMES_AUTH_HOME stays a raw
+    # env read on purpose: that env value is exactly what the auth fallback
+    # (``hermes_cli/auth.py::_global_auth_file_path``) itself consumes, so the
+    # key must mirror the resolver's actual input.
     key = (
-        os.environ.get("HERMES_HOME") or "",
+        str(get_hermes_home()),
         os.environ.get("HERMES_AUTH_HOME") or "",
         str(provider or ""),
         str(model or ""),

@@ -1325,6 +1325,23 @@ def _agent_workdir(workdir: Path | None):
                 os.environ.pop("TERMINAL_CWD", None)
 
 
+# Serializes every ``_execute_agent_run`` body, on purpose — NOT only the
+# ``os.chdir`` swap in ``_agent_workdir``. Two process-global mutations make the
+# wide scope load-bearing (audited 2026-08-09):
+#   1. ``persona_profile_context`` saves/mutates/restores HERMES_HOME / HOME /
+#      HERMES_AUTH_HOME / HERMES_AGENT_RUNTIME_ROOT in ``os.environ``. The
+#      restore is only correct while runs are serialized; concurrent entry is a
+#      lost-update race that leaves the process env pointing at a finished
+#      turn's profile (see the pin comment in profile_context.py for the env
+#      readers that keep those writes alive).
+#   2. ``_agent_workdir`` chdirs the process and holds this lock across its
+#      whole body (including the yield) whenever a workdir is set, so
+#      workdir-bearing runs would still serialize even if the outer
+#      acquisition were removed — removing it would only let workdir-less runs
+#      race the env mutation in (1).
+# Shrinking this lock to just the chdir swap is the desired end state, but it
+# requires first context-scoping every reader listed in profile_context.py and
+# deleting the env writes. Do not shrink it before that.
 _WORKDIR_LOCK = RLock()
 
 

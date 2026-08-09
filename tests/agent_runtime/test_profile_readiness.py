@@ -300,3 +300,59 @@ def test_provider_issue_memo_is_scoped_per_profile_home(monkeypatch):
     assert profile_readiness._provider_issue(persona)[0] == "auth_attention"
     assert len(calls) == 2
     profile_readiness._provider_issue_cache_clear()
+
+
+def test_provider_issue_memo_is_scoped_per_contextvar_override(monkeypatch):
+    # ``persona_profile_context`` installs the profile home as a ContextVar
+    # override FIRST and only mirrors it into os.environ second. The memo key
+    # must follow the ContextVar (via ``get_hermes_home()``), not the raw env
+    # mirror: the env var is process-global, so with the env held constant a
+    # key built from os.environ would collapse two different persona scopes
+    # onto one entry and leak the first profile's verdict to the second.
+    from agent_runtime import profile_readiness
+    from hermes_constants import (
+        get_hermes_home,
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+
+    profile_readiness._provider_issue_cache_clear()
+    calls: list[str] = []
+
+    def _resolver(requested=None, target_model=None):
+        home = str(get_hermes_home())
+        calls.append(home)
+        if home.endswith("bob"):
+            raise profile_readiness.AuthError("no credential for bob")
+
+    monkeypatch.setattr(profile_readiness, "resolve_runtime_provider", _resolver)
+    persona = AgentPersona(
+        id="dev",
+        display_name="Dev",
+        role="dev",
+        model="gpt-5",
+        provider="openai",
+        api_mode=None,
+        toolsets=[],
+        system_prompt_path="personas/dev/system.md",
+        hermes_profile=None,
+        skills=[],
+    )
+
+    # The process env NEVER changes across the two scopes.
+    monkeypatch.setenv("HERMES_HOME", r"X:\fake\head")
+
+    token = set_hermes_home_override(r"X:\fake\profiles\alice")
+    try:
+        assert profile_readiness._provider_issue(persona) is None
+    finally:
+        reset_hermes_home_override(token)
+
+    token = set_hermes_home_override(r"X:\fake\profiles\bob")
+    try:
+        issue = profile_readiness._provider_issue(persona)
+    finally:
+        reset_hermes_home_override(token)
+    assert issue is not None and issue[0] == "auth_attention"
+    assert len(calls) == 2, "bob's scope must re-resolve, not reuse alice's memo entry"
+    profile_readiness._provider_issue_cache_clear()
