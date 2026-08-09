@@ -897,15 +897,15 @@ class ProfileAgentRunner:
             # warm serve lane where it was immediately discarded on reuse.
             turn_state = {
                 "status_callback": _profile_status_callback(request, timing),
-                "tool_progress_callback": _progress_adapter(
-                    request.progress_callback, "run.progress", guard=budget_guard
-                ),
-                "tool_start_callback": _progress_adapter(
-                    request.progress_callback, "run.tool.started", guard=budget_guard
-                ),
-                "tool_complete_callback": _progress_adapter(
-                    request.progress_callback, "run.tool.finished", guard=budget_guard
-                ),
+                # Kept on ONE line each, exactly as in the construction call this
+                # was lifted out of: ``test_s55_registered_events_have_emitters``
+                # witnesses that these two event labels are supplied by the RUNNER
+                # rather than written at the sink, and it witnesses that by
+                # matching the call's SOURCE TEXT — so a purely cosmetic wrap here
+                # reads to that gate as "the runner stopped naming the label".
+                "tool_progress_callback": _progress_adapter(request.progress_callback, "run.progress", guard=budget_guard),
+                "tool_start_callback": _progress_adapter(request.progress_callback, "run.tool.started", guard=budget_guard),
+                "tool_complete_callback": _progress_adapter(request.progress_callback, "run.tool.finished", guard=budget_guard),
                 "clarify_callback": request.clarify_callback,
                 # Header-only codex cache-scope hint; the default factory applies
                 # it to the constructed agent (never to session/transcript load).
