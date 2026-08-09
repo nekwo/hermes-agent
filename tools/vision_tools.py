@@ -1391,19 +1391,33 @@ def check_vision_requirements() -> bool:
     Without the auto-fallback step the tool would disappear from the model's
     tool list whenever the explicit provider name was unresolvable, even
     when the auto chain would have served the request (issue #31179).
+
+    This is a ``check_fn``: the tool registry runs it once per gated toolset
+    per persona — ~1,050 times in a single Mission Control snapshot build — so
+    it resolves inside ``capability_probe_scope()``. Same resolver, same
+    fallback chain, same answer; the terminal client construction (lazy SDK
+    import + keepalive HTTP client + TLS context + OAuth token handshake,
+    ~1.5s of a cold read-only projection) is skipped, because building a
+    network client is not part of answering whether one is configured.
     """
     try:
-        from agent.auxiliary_client import resolve_vision_provider_client
+        from agent.auxiliary_client import (
+            capability_probe_scope,
+            resolve_vision_provider_client,
+        )
     except ImportError:
         return False
     try:
-        _provider, client, _model = resolve_vision_provider_client()
-        if client is not None:
-            return True
-        # Same fallback to "auto" that call_llm performs when the configured
-        # provider can't be resolved.
-        _provider, client, _model = resolve_vision_provider_client(provider="auto")
-        return client is not None
+        with capability_probe_scope():
+            _provider, client, _model = resolve_vision_provider_client()
+            if client is not None:
+                return True
+            # Same fallback to "auto" that call_llm performs when the configured
+            # provider can't be resolved.
+            _provider, client, _model = resolve_vision_provider_client(
+                provider="auto"
+            )
+            return client is not None
     except Exception:
         return False
 

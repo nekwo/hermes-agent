@@ -85,6 +85,124 @@ def _load_openai_cls() -> type:
     return _OPENAI_CLS_CACHE
 
 
+# ── Capability probes: an availability check must not BUILD a client ────────
+#
+# "Is a vision backend available?" is asked ~1,050 times per Mission Control
+# snapshot build (once per gated toolset per persona) and it used to answer by
+# resolving a REAL provider client: lazy openai SDK import, keepalive httpx
+# client, TLS context, Codex OAuth token read — 1.5s of it inside a read-only
+# projection (measured 2026-08-09, §3 of PERF_STARTUP_ANALYSIS). That is the
+# same disease the 2026-07-08 chat-lane fix retired: expensive construction
+# hiding inside an availability check.
+#
+# The fix keeps ONE resolution authority. A probe runs the real resolver — the
+# whole fallback chain, including the auto step issue #31179 added — inside
+# this scope, and only the terminal client CONSTRUCTION is replaced by an inert
+# stand-in. The resolver's answer ("did a client resolve?") is unchanged; what
+# disappears is the SDK import, the socket-capable client, and the credential
+# handshake. Nothing outside a probe can observe the stand-in: the scope is
+# entered only by capability checks, and the client cache refuses to store one.
+_capability_probe_active: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "aux_capability_probe_active", default=False
+)
+_client_construction_count = 0
+_client_construction_lock = threading.Lock()
+
+
+def _note_client_construction() -> None:
+    """Count one real provider-client construction (test/pin seam).
+
+    Covers the auxiliary-client construction seams: every module-level
+    ``OpenAI(...)`` (they all resolve through the proxy below), the async
+    client, and the Anthropic adapter client.
+    """
+
+    global _client_construction_count
+    with _client_construction_lock:
+        _client_construction_count += 1
+
+
+def client_construction_count() -> int:
+    """How many provider clients this process has constructed so far.
+
+    The invariant worth pinning is a DELTA of zero across a capability check —
+    a wall-clock assertion would rot on the first slow CI box.
+    """
+
+    with _client_construction_lock:
+        return _client_construction_count
+
+
+class _CapabilityProbeClient:
+    """Inert stand-in for a provider client, returned only inside a probe.
+
+    Attribute access yields the stand-in again, because thin wrappers read
+    identity fields while they construct (``CodexAuxiliaryClient`` reads
+    ``.api_key`` / ``.base_url``) and a probe that raised there would answer
+    "unavailable" for a backend that IS available — the exact false negative
+    issue #31179 fixed. Calling anything raises: a probe must never reach a
+    wire, and if one of these ever escapes into a real request path we want a
+    loud RuntimeError naming the seam, not a silent hang.
+    """
+
+    __slots__ = ()
+
+    def __getattr__(self, name: str) -> Any:
+        if name.startswith("__") and name.endswith("__"):
+            raise AttributeError(name)
+        return self
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError(
+            "capability-probe placeholder client was used to make a request; "
+            "resolve a real client outside capability_probe_scope()"
+        )
+
+    def __bool__(self) -> bool:
+        return True
+
+    def __repr__(self) -> str:
+        return "<capability-probe placeholder client>"
+
+
+_CAPABILITY_PROBE_CLIENT = _CapabilityProbeClient()
+
+
+def capability_probe_active() -> bool:
+    return _capability_probe_active.get()
+
+
+def is_capability_probe_client(candidate: Any) -> bool:
+    """True for the stand-in AND for a thin wrapper built around one.
+
+    The resolver wraps what it builds (``CodexAuxiliaryClient`` /
+    ``AnthropicAuxiliaryClient`` keep the client they were handed on
+    ``_real_client``), so a probe's result is usually a real wrapper object
+    holding an unusable core. Treating only the bare stand-in as "probe
+    output" let such a wrapper reach the shared client cache, where the next
+    REAL caller would have been handed it.
+    """
+
+    if isinstance(candidate, _CapabilityProbeClient):
+        return True
+    return isinstance(getattr(candidate, "_real_client", None), _CapabilityProbeClient)
+
+
+@contextlib.contextmanager
+def capability_probe_scope():
+    """Resolve "is a client available?" without constructing one.
+
+    Scope is per-context (contextvars), so a probe on one thread never turns
+    another thread's real resolution into a stand-in.
+    """
+
+    token = _capability_probe_active.set(True)
+    try:
+        yield
+    finally:
+        _capability_probe_active.reset(token)
+
+
 class _OpenAIProxy:
     """Module-level proxy that looks like the ``openai.OpenAI`` class.
 
@@ -95,6 +213,9 @@ class _OpenAIProxy:
     __slots__ = ()
 
     def __call__(self, *args, **kwargs):
+        if _capability_probe_active.get():
+            return _CAPABILITY_PROBE_CLIENT
+        _note_client_construction()
         return _load_openai_cls()(*args, **kwargs)
 
     def __instancecheck__(self, obj):
@@ -203,6 +324,11 @@ def _openai_http_client_kwargs(
     return {"http_client": client}
 
 def _create_openai_client(*, api_key: str, base_url: str, **kwargs: Any) -> Any:
+    if _capability_probe_active.get():
+        # Short-circuit ABOVE the http-client kwargs: the keepalive httpx
+        # client and its TLS verification resolution are most of the cost a
+        # capability check must not pay.
+        return _CAPABILITY_PROBE_CLIENT
     kwargs = {**_openai_http_client_kwargs(base_url), **kwargs}
     # Hermes owns auxiliary retry + provider/model fallback policy (the
     # same-provider transient retry in call_llm plus the except-chain
@@ -3185,7 +3311,12 @@ def _try_anthropic(explicit_api_key: str = None) -> Tuple[Optional[Any], Optiona
     is_oauth = _is_oauth_token(token)
     model = _get_aux_model_for_provider("anthropic") or "claude-haiku-4-5-20251001"
     logger.debug("Auxiliary client: Anthropic native (%s) at %s (oauth=%s)", model, base_url, is_oauth)
+    if _capability_probe_active.get():
+        # A credential resolved, so the answer is "available"; building the
+        # Anthropic SDK client is exactly the work a probe must skip.
+        return _CAPABILITY_PROBE_CLIENT, model
     try:
+        _note_client_construction()
         real_client = build_anthropic_client(token, base_url)
     except ImportError:
         # The anthropic_adapter module imports fine but the SDK itself is
@@ -5062,6 +5193,10 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
     header so the request is routed to Copilot's vision-capable
     infrastructure (otherwise vision payloads silently time out).
     """
+    if _capability_probe_active.get() or is_capability_probe_client(sync_client):
+        # An async capability probe answers from the sync resolution; there is
+        # no async client to build because there is no request to make.
+        return _CAPABILITY_PROBE_CLIENT, model
     from openai import AsyncOpenAI
 
     if isinstance(sync_client, CodexAuxiliaryClient):
@@ -5129,6 +5264,7 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
     # See _create_openai_client: disable SDK-internal retries so Hermes owns
     # the auxiliary retry/timeout budget (issue #54465).
     async_kwargs.setdefault("max_retries", 0)
+    _note_client_construction()
     return AsyncOpenAI(**async_kwargs), model
 
 
@@ -5855,7 +5991,11 @@ def resolve_provider_client(
         default_model = "google/gemini-3-flash-preview"
         final_model = _normalize_resolved_model(model or default_model, provider)
         try:
-            from openai import OpenAI
+            # Module-level proxy (not a local ``from openai import OpenAI``):
+            # it is the construction seam every other site in this module goes
+            # through, so the probe short-circuit and the construction counter
+            # cover this branch too. It still imports the SDK lazily and still
+            # raises ImportError into the same handler when it is missing.
             client = OpenAI(api_key=token, base_url=base_url)
         except Exception as exc:
             logger.warning("resolve_provider_client: cannot create Vertex "
@@ -6738,7 +6878,16 @@ def _get_cached_client(
         is_vision=is_vision,
         task=task,
     )
-    if client is not None:
+    if (
+        client is not None
+        and not _capability_probe_active.get()
+        and not is_capability_probe_client(client)
+    ):
+        # Nothing resolved during a probe may enter the shared cache: the next
+        # REAL caller would be handed something that cannot make a request.
+        # Two guards on purpose — the scope check covers whatever the resolver
+        # wrapped the stand-in in, the identity check covers a stand-in that
+        # somehow outlived its scope.
         # For async clients, remember which loop they were created on so we
         # can detect stale entries later.
         bound_loop = current_loop
