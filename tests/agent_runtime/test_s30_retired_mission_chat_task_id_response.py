@@ -18,13 +18,10 @@ field — so old-client tolerance costs nothing.
 
 What this contract deliberately does NOT touch:
 
-* ``persona instance message`` / ``persona instance create --message`` — the
-  free-floating lane's ``_run_free_floating_assignment_once`` emits its own
-  constant-``None`` ``task_id``, and ``_queue_free_floating_assignment`` emits
-  ``assignment.task_id`` (always ``None`` there, since the spec is created with
-  ``task_id=None``). Same smell, DIFFERENT verbs, and no reader was audited for
-  them — reaping those belongs to a contract that audits that lane. Left alone
-  rather than swept in silently.
+* The free-floating verbs S31 later audited. (Historical: S31 reaped their
+  copy of the key; S70 then removed the whole free-floating assignment lane —
+  verbs, queue and runner — so those emitters no longer exist at all. See the
+  tombstone registry, wave s70.)
 * ``persona tool-diff --task/--goal``, ``persona instance steer --goal``,
   ``update-profile --goal`` — untouched by S26 and untouched here.
 """

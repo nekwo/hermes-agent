@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import shutil
 import uuid
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -269,30 +268,10 @@ def _normalize_reasoning_effort_override(value: str) -> str | None:
     )
 
 
-@dataclass(slots=True)
-class PersonaAssignmentSpec:
-    persona_id: str
-    kind: str
-    title: str
-    message: str
-    created_by: str = "harness"
-    persona_instance_id: str | None = None
-    state: str = "queued"
-    goal_id: str | None = None
-    stage_id: str | None = None
-    operation_id: str | None = None
-    repo_bundle_id: str | None = None
-    repo: str | None = None
-    affected_paths: list[str] = field(default_factory=list)
-    proof_targets: list[str] = field(default_factory=list)
-    acceptance: list[str] = field(default_factory=list)
-    non_goals: list[str] = field(default_factory=list)
-    allowed_decisions: list[str] = field(default_factory=list)
-    allowed_tools: list[str] = field(default_factory=list)
-    evidence_kind: str | None = None
-    production_proof_eligible: bool | None = None
-    archive_scope: str | None = None
-    client_message_id: str | None = None
+# S70 removed ``PersonaAssignmentSpec`` with the assignment MINT side (see the
+# note above ``PersonaAssignmentStore``). The spec's one production consumer was
+# ``create_or_resume``, whose one caller was the retired free-floating queue
+# verb chain.
 
 
 class PersonaInstanceStore:
@@ -1744,90 +1723,26 @@ class PersonaInstanceStore:
 
 
 class PersonaAssignmentStore:
+    """READ/CLOSE side of the persona-assignment store.
+
+    S70 removed the MINT side (``create`` / ``create_or_resume`` / the
+    ``PersonaAssignmentSpec`` request shape and the ``assignment_evidence_kind``
+    / ``assignment_archive_scope`` / ``assignment_signal_hash`` /
+    ``assignment_signal_hash_from_parts`` derivations). The only production
+    minter was the free-floating queue verb chain (``persona instance create``'s
+    display-name-less branch and ``persona instance message``), whose queued
+    rows had no consumer since the 2026-07-30 chat-only purge removed ticking.
+
+    What remains is deliberately kept: residual rows exist on live runtime
+    roots, the Launcher parses the snapshot/status ``persona_assignments`` wire
+    block (``_personaAssignmentsFromJson`` feeds the roster fold), the retire
+    guard refuses to archive an instance with an active assignment, and the
+    ``persona instance close``/``archive`` maintenance verbs settle residual
+    rows through :meth:`complete`. Full store retirement is a parked contract
+    decision (deferred-debt ledger, S70)."""
+
     def __init__(self, event_log: EventLog | None = None):
         self.event_log = event_log or EventLog()
-
-    def create(self, assignment: PersonaAssignment) -> PersonaAssignment:
-        path = paths.persona_assignment_path(assignment.id)
-        if path.exists():
-            raise ValueError(f"persona assignment already exists: {assignment.id}")
-        assignment.signal_hash = assignment.signal_hash or assignment_signal_hash(assignment)
-        self._write(assignment)
-        self._event("persona_assignment.created", assignment, {"state": assignment.state})
-        return self.get(assignment.id)
-
-    def create_or_resume(self, spec: PersonaAssignmentSpec) -> PersonaAssignment:
-        persona_id = safe_assignment_token(spec.persona_id)
-        goal_id = safe_optional_token(spec.goal_id)
-        instance_id = canonical_persona_instance_id(spec.persona_instance_id, persona_id=persona_id) or (
-            persona_instance_id_for_placement(f"{goal_id}:{persona_id}") if goal_id else persona_instance_id_for(persona_id)
-        )
-        signal_hash = assignment_signal_hash_from_parts(
-            persona_id=persona_id,
-            goal_id=goal_id,
-            stage_id=spec.stage_id,
-            kind=spec.kind,
-            repo_bundle_id=spec.repo_bundle_id,
-            repo=spec.repo,
-            affected_paths=spec.affected_paths,
-            proof_targets=spec.proof_targets,
-            message=spec.message,
-        )
-        client_message_id = safe_assignment_text(spec.client_message_id, limit=200)
-        if client_message_id:
-            for existing in self.list_all():
-                if (
-                    existing.persona_instance_id == instance_id
-                    and existing.kind == (safe_assignment_token(spec.kind) or "task_stage")
-                    and getattr(existing, "client_message_id", None) == client_message_id
-                ):
-                    return existing
-        for existing in self.find_active(
-            persona_id=persona_id,
-            goal_id=goal_id,
-            stage_id=spec.stage_id,
-            kind=spec.kind,
-        ):
-            if existing.signal_hash == signal_hash:
-                return existing
-        ts = now()
-        evidence_kind = assignment_evidence_kind(spec.kind)
-        archive_scope = assignment_archive_scope(spec.kind)
-        production_proof_eligible = (
-            bool(spec.production_proof_eligible)
-            if spec.production_proof_eligible is not None
-            else evidence_kind == "task_bound"
-        )
-        return self.create(
-            PersonaAssignment(
-                id=f"assign_{uuid.uuid4().hex[:12]}",
-                persona_instance_id=instance_id,
-                persona_id=persona_id,
-                kind=safe_assignment_token(spec.kind) or "task_stage",
-                state=safe_assignment_state(spec.state),
-                title=safe_assignment_text(spec.title, limit=200),
-                message=safe_assignment_text(spec.message, limit=4000),
-                created_by=safe_assignment_token(spec.created_by) or "harness",
-                created_at=ts,
-                updated_at=ts,
-                goal_id=goal_id,
-                stage_id=safe_optional_token(spec.stage_id),
-                operation_id=safe_optional_token(spec.operation_id),
-                repo_bundle_id=safe_optional_token(spec.repo_bundle_id),
-                repo=safe_assignment_text(spec.repo or "", limit=160) or None,
-                affected_paths=[safe_assignment_text(item, limit=240) for item in spec.affected_paths if safe_assignment_text(item, limit=240)],
-                proof_targets=[safe_assignment_text(item, limit=240) for item in spec.proof_targets if safe_assignment_text(item, limit=240)],
-                acceptance=[safe_assignment_text(item, limit=500) for item in spec.acceptance if safe_assignment_text(item, limit=500)],
-                non_goals=[safe_assignment_text(item, limit=500) for item in spec.non_goals if safe_assignment_text(item, limit=500)],
-                allowed_decisions=[safe_assignment_token(item) for item in spec.allowed_decisions if safe_assignment_token(item)],
-                allowed_tools=[safe_assignment_token(item) for item in spec.allowed_tools if safe_assignment_token(item)],
-                evidence_kind=safe_assignment_token(spec.evidence_kind or evidence_kind) or evidence_kind,
-                production_proof_eligible=production_proof_eligible,
-                archive_scope=safe_assignment_token(spec.archive_scope or archive_scope) or archive_scope,
-                client_message_id=client_message_id or None,
-                signal_hash=signal_hash,
-            )
-        )
 
     def get(self, assignment_id: str) -> PersonaAssignment:
         raw = json.loads(paths.persona_assignment_path(assignment_id).read_text(encoding="utf-8"))
@@ -2575,50 +2490,11 @@ def persona_assignment_summary(assignment: PersonaAssignment) -> dict[str, Any]:
 
 
 
-def assignment_evidence_kind(kind: str | None) -> str:
-    normalized = safe_assignment_token(kind)
-    if normalized == "diagnostic":
-        return "diagnostic"
-    if normalized.startswith("free_floating"):
-        return "free_floating"
-    return "task_bound"
-
-
-def assignment_archive_scope(kind: str | None) -> str:
-    evidence_kind = assignment_evidence_kind(kind)
-    if evidence_kind == "free_floating":
-        return "assignment"
-    return "task"
-
-
-def assignment_signal_hash(assignment: PersonaAssignment) -> str:
-    return assignment_signal_hash_from_parts(
-        persona_id=assignment.persona_id,
-        goal_id=assignment.goal_id,
-        stage_id=assignment.stage_id,
-        kind=assignment.kind,
-        repo_bundle_id=assignment.repo_bundle_id,
-        repo=assignment.repo,
-        affected_paths=assignment.affected_paths,
-        proof_targets=assignment.proof_targets,
-        message=assignment.message,
-    )
-
-
-def assignment_signal_hash_from_parts(*, persona_id: str | None, goal_id: str | None, stage_id: str | None, kind: str | None, repo: str | None, affected_paths: list[str] | None, proof_targets: list[str] | None, message: str | None, repo_bundle_id: str | None = None) -> str:
-    payload = {
-        "persona_id": safe_assignment_token(persona_id),
-        "goal_id": safe_optional_token(goal_id),
-        "stage_id": safe_optional_token(stage_id),
-        "kind": safe_assignment_token(kind),
-        "repo_bundle_id": safe_optional_token(repo_bundle_id),
-        "repo": safe_assignment_text(repo or "", limit=160),
-        "affected_paths": sorted(safe_assignment_text(item, limit=240) for item in (affected_paths or []) if safe_assignment_text(item, limit=240)),
-        "proof_targets": sorted(safe_assignment_text(item, limit=240) for item in (proof_targets or []) if safe_assignment_text(item, limit=240)),
-        "message": safe_assignment_text(message or "", limit=4000),
-    }
-    raw = json.dumps(payload, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
+# S70 removed ``assignment_evidence_kind`` / ``assignment_archive_scope`` /
+# ``assignment_signal_hash`` / ``assignment_signal_hash_from_parts`` with the
+# assignment mint side. They were derivation inputs to ``create_or_resume``
+# only; the ``evidence_kind`` / ``archive_scope`` / ``signal_hash`` FIELDS stay
+# on the model and the wire summary because residual rows still carry them.
 
 
 def safe_assignment_token(value: Any) -> str:

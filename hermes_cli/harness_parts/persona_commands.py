@@ -18,7 +18,6 @@ import re
 import sys
 import time
 import uuid
-from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 
@@ -76,7 +75,6 @@ from agent_runtime.models import AgentPersona, Event, apply_instance_model_overr
 from agent_runtime.persona_assignments import (
     CHAT_BINDING_CLEARED_REASON_DELETED,
     PERSONA_INSTANCE_ID_PREFIX,
-    PersonaAssignmentSpec,
     PersonaAssignmentStore,
     PersonaInstanceRetireError,
     PersonaInstanceStore,
@@ -486,24 +484,28 @@ def _cmd_persona_instance_create(args) -> int:
         }
         print(emit_json(data) if args.json else f"created {instance.id} on chat {instance.default_chat_session_id}")
         return 0
-    return _queue_free_floating_assignment(
-        persona_id=args.persona_id,
-        title=args.title,
-        message=args.message,
-        requested_by=args.requested_by,
-        json_output=args.json,
-        auto_run=getattr(args, "auto_run", False),
-        max_actions=getattr(args, "max_actions", 1),
-        max_seconds=getattr(args, "max_seconds", 240.0),
-        client_message_id=getattr(args, "client_message_id", None),
-        session_id=getattr(args, "session_id", None),
-        stream=getattr(args, "stream", False),
-        kill_active=kill_active,
-        add_instance=add_instance,
-        placement_id=placement_id,
-        spawned_by=coordinator_id if coordinator_id else ("operator" if add_instance else None),
-        coordinator_permission_scope=coordinator_scope,
-    )
+    # S70: the display-name-less branch used to queue a "free-floating persona
+    # assignment" (and optionally auto-run one bounded turn beside the canonical
+    # chat lane). The queue's only durable consumer was the tick loop the
+    # 2026-07-30 chat-only purge removed — a queued row dead-ended forever, the
+    # advertised `persona instance run-once` follow-up verb never existed, and
+    # the auto-run turn was a second, parallel turn authority beside
+    # `mission-chat message`. The lane is retired; refuse loudly instead of
+    # silently minting work nothing will ever pick up.
+    data = {
+        "ok": False,
+        "error": (
+            "persona instance create requires --display-name (an Agent Profile "
+            "or placement mint); the free-floating assignment lane is retired"
+        ),
+        "persona_id": persona_id,
+        "next_expected": (
+            "pass --display-name to create the agent profile/placement, then "
+            "send messages with `harness mission-chat message`"
+        ),
+    }
+    print(emit_json(data) if args.json else data["error"])
+    return 2
 
 
 def _cmd_persona_instance_open_chat(args) -> int:
@@ -1278,21 +1280,12 @@ def _maybe_stamp_spawned_by(instance, *, coordinator_id: str | None, operator_so
     return PersonaInstanceStore().update(instance)
 
 
-def _cmd_persona_instance_message(args) -> int:
-    return _queue_free_floating_assignment(
-        persona_id=_persona_id_from_instance_id(args.persona_instance_id),
-        title=args.title,
-        message=args.message,
-        requested_by=args.requested_by,
-        json_output=args.json,
-        persona_instance_id=args.persona_instance_id,
-        auto_run=getattr(args, "auto_run", False),
-        max_actions=getattr(args, "max_actions", 1),
-        max_seconds=getattr(args, "max_seconds", 240.0),
-        client_message_id=getattr(args, "client_message_id", None),
-        session_id=getattr(args, "session_id", None),
-        stream=getattr(args, "stream", False),
-    )
+# S70 removed `_cmd_persona_instance_message` and its `persona instance
+# message` subparser. The verb queued a "free-floating persona assignment" —
+# a row whose only durable consumer was the tick loop the 2026-07-30 chat-only
+# purge removed — and its `--auto-run` variant ran a second, parallel chat-turn
+# authority beside `mission-chat message`. Messaging an instance is
+# `harness mission-chat message`.
 
 
 def _cmd_mission_chat_steer(args) -> int:
@@ -4198,201 +4191,6 @@ def _cmd_persona_set_model(args) -> int:
     return 0
 
 
-def _queue_free_floating_assignment(
-    *,
-    persona_id: str,
-    title: str,
-    message: str,
-    requested_by: str,
-    json_output: bool,
-    persona_instance_id: str | None = None,
-    auto_run: bool = False,
-    max_actions: int = 1,
-    max_seconds: float = 240.0,
-    client_message_id: str | None = None,
-    session_id: str | None = None,
-    stream: bool = False,
-    kill_active: bool = False,
-    add_instance: bool = False,
-    placement_id: str | None = None,
-    spawned_by: str | None = None,
-    coordinator_permission_scope: CoordinatorPermissionScope | None = None,
-) -> int:
-    # Function-local: this file is exec'd into harness.py's globals, so a
-    # module-level import here would need a matching harness.py import or it
-    # is a NameError on a LIVE turn. The turn-outcome vocabulary is owned by
-    # agent_runtime.mission_chat_outcome; nothing re-spells its values.
-    from agent_runtime.mission_chat_outcome import (
-        ChatErrorKind,
-        ExecutionState,
-    )
-    cfg = load_agent_runtime_config()
-    normalized_persona = _normalize_cli_persona_or_template_id(persona_id)
-    instance_store = PersonaInstanceStore()
-    instance_store.ensure_for_personas(ensure_persisted_personas(cfg))
-    if persona_instance_id is None:
-        if add_instance:
-            if not placement_id:
-                data = {"ok": False, "error": "placement_id is required when add_instance is true"}
-                if stream:
-                    _emit_chat_final(data)
-                else:
-                    print(emit_json(data) if json_output else data["error"])
-                return 2
-            try:
-                instance = instance_store.add_instance(
-                    persona_id=normalized_persona,
-                    placement_id=placement_id,
-                    display_name=safe_assignment_text(title, limit=120) or None,
-                )
-            except RetiredPersonaInstanceError as exc:
-                data = _retired_persona_instance_payload(exc)
-                if stream:
-                    _emit_chat_final(data)
-                else:
-                    print(emit_json(data) if json_output else data["error"])
-                return 2
-            instance = _maybe_stamp_spawned_by(instance, coordinator_id=spawned_by, operator_source="operator")
-            persona_instance_id = instance.id
-        else:
-            persona_instance_id = instance_store.create_free_floating(normalized_persona).id
-    assignment_store = PersonaAssignmentStore()
-    assignment = assignment_store.create_or_resume(
-        PersonaAssignmentSpec(
-            persona_id=normalized_persona,
-            persona_instance_id=persona_instance_id,
-            kind="free_floating_message",
-            title=title,
-            message=message,
-            created_by=requested_by,
-            evidence_kind="free_floating",
-            production_proof_eligible=False,
-            archive_scope="assignment",
-            client_message_id=client_message_id,
-        )
-    )
-    try:
-        session_db = _default_persona_session_db()
-        session_id = _bind_free_floating_chat_session(
-            instance_store=instance_store,
-            session_db=session_db,
-            persona_id=normalized_persona,
-            persona_instance_id=assignment.persona_instance_id,
-            assignment_id=assignment.id,
-            session_id=session_id,
-            kill_active=kill_active,
-            transcript_required=True,
-        )
-    except RetiredPersonaInstanceError as exc:
-        try:
-            assignment_store.complete(
-                assignment.id,
-                state="blocked",
-                error=exc.code,
-            )
-        except Exception:
-            pass
-        data = _retired_persona_instance_payload(exc)
-        if stream:
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if json_output else data["error"])
-        return 2
-    except PersonaChatPersistenceError as exc:
-        try:
-            assignment_store.complete(
-                assignment.id,
-                state="blocked",
-                error=str(exc),
-            )
-        except Exception:
-            pass
-        data = {
-            "ok": False,
-            "execution_state": ExecutionState.BLOCKED,
-            "error_kind": ChatErrorKind.CHAT_TRANSCRIPT_PERSIST_FAILED,
-            "persistence_operation": exc.operation,
-            "error": str(exc),
-            "assignment_id": assignment.id,
-            "persona_instance_id": assignment.persona_instance_id,
-            "persona_id": normalized_persona,
-            "session_id": safe_assignment_text(session_id, limit=200) or None,
-            "client_message_id": assignment.client_message_id,
-            "next_expected": "restore canonical persona chat transcript storage and retry the message",
-        }
-        if stream:
-            _emit_chat_final(data)
-        else:
-            print(emit_json(data) if json_output else data["error"])
-        return 2
-    data = {
-        "ok": True,
-        "agent_profile_id": assignment.persona_instance_id,
-        "assignment_id": assignment.id,
-        "persona_instance_id": assignment.persona_instance_id,
-        "persona_id": normalized_persona,
-        # S31 removed the constant task_id response key from both envelopes;
-        # S35 then retired the spec field after archiving legacy bound rows.
-        "state": assignment.state,
-        "kind": assignment.kind,
-        "evidence_kind": assignment.evidence_kind,
-        "production_proof_eligible": assignment.production_proof_eligible,
-        "archive_scope": assignment.archive_scope,
-        "client_message_id": assignment.client_message_id,
-        "execution_state": ExecutionState.QUEUED,
-        "lifecycle_mode": "free_floating",
-        "auto_run": bool(auto_run),
-        "chat_session_id": session_id,
-        "session_id": session_id,
-        "chat_busy": False,
-        "killed_previous": bool(kill_active),
-        "add_instance": bool(add_instance),
-        "placement_id": placement_id or None,
-        "coordinator_permission_scope": asdict(coordinator_permission_scope) if coordinator_permission_scope is not None else None,
-        "turn_id": None,
-        "run_ids": [],
-        "next_expected": "agent turn queued; run harness persona instance run-once if auto_run is false",
-    }
-    exit_code = 0
-    deferred_title: Callable[[], None] | None = None
-    if auto_run:
-        run_exit, run_payload, deferred_title = _run_free_floating_assignment_once(
-            cfg=cfg,
-            assignment_id=assignment.id,
-            persona_instance_id=assignment.persona_instance_id,
-            persona_id=normalized_persona,
-            title=title,
-            message=message,
-            requested_by=requested_by,
-            max_actions=max_actions,
-            max_seconds=max_seconds,
-            client_message_id=assignment.client_message_id,
-            stream=stream,
-        )
-        data.update(run_payload)
-        try:
-            updated_assignment = assignment_store.get(assignment.id)
-            data["state"] = updated_assignment.state
-            data["run_ids"] = list(updated_assignment.run_ids or data.get("run_ids") or [])
-        except Exception:
-            pass
-        exit_code = run_exit
-    if stream:
-        _emit_chat_final(data)
-    else:
-        print(emit_json(data) if json_output else f"queued free-floating {assignment.id} for {assignment.persona_id}")
-    # Auto-title runs AFTER the terminal frame is emitted above (this is the
-    # emit site for the free-floating lane; the runner never writes stdout). It
-    # is a SessionDB-only side effect nothing in the frame depends on and costs
-    # a synchronous auxiliary-LLM RTT — running it post-emit keeps that RTT off
-    # the turn's critical path. Wrapped so a title failure can never add to
-    # stdout or change the exit code.
-    if deferred_title is not None:
-        try:
-            deferred_title()
-        except Exception:
-            pass
-    return exit_code
 
 
 def _emit_chat_final(payload: dict[str, object]) -> None:
@@ -5456,67 +5254,8 @@ def _ensure_persona_chat_session(
     return True
 
 
-def _persona_chat_session_id(persona_instance_id: str) -> str:
-    return persona_chat_session_id_for(persona_instance_id)
 
 
-def _bind_free_floating_chat_session(
-    *,
-    instance_store: PersonaInstanceStore,
-    session_db,
-    persona_id: str,
-    persona_instance_id: str,
-    assignment_id: str | None = None,
-    session_id: str | None = None,
-    kill_active: bool = False,
-    transcript_required: bool = False,
-) -> str:
-    requested_persona = _normalize_cli_persona_or_template_id(persona_id)
-    normalized_persona = requested_persona
-    normalized_instance = safe_assignment_token(persona_instance_id) or persona_instance_id_for(requested_persona)
-    requested_session_id = safe_assignment_text(session_id, limit=200)
-    session_id = requested_session_id or ""
-    previous_mode = None
-    try:
-        instance = instance_store.get(normalized_instance)
-        normalized_persona = instance.persona_id
-        previous_mode = safe_assignment_token(getattr(instance, "mode", None))
-        existing_session_id = safe_assignment_text(
-            getattr(instance, "default_chat_session_id", None), limit=200
-        )
-        existing_assignment_id = safe_assignment_token(getattr(instance, "current_assignment_id", None))
-        if not session_id and existing_session_id and (not existing_assignment_id or existing_assignment_id == safe_assignment_token(assignment_id)):
-            session_id = existing_session_id
-    except Exception:
-        instance = None
-    if not session_id:
-        session_id = _persona_chat_session_id(normalized_instance)
-    instance = instance_store.open_chat(
-        persona_id=normalized_persona,
-        persona_instance_id=normalized_instance,
-        session_id=session_id,
-        kill_active=kill_active,
-    )
-    instance.mode = "chat" if previous_mode == "chat" else "free_floating"
-    instance.current_task_id = None
-    instance.active_run_id = None
-    instance.current_assignment_id = assignment_id
-    instance_store.update(instance)
-    if session_db is not None:
-        _ensure_persona_chat_session(
-            session_db=session_db,
-            session_id=session_id,
-            persona_id=normalized_persona,
-            required=transcript_required,
-        )
-    return session_id
-
-
-# Redaction-on-write boundary (audit doc Stage 2B). Persona chat turns are now
-# persisted to the shared SessionDB and recall is enabled for them, so any
-# secret must be stripped *before* it is written — otherwise it becomes
-# cross-session reachable. The read projection sanitizes too, but the write
-# boundary is the authoritative one.
 _PERSONA_CHAT_SECRET_RE = re.compile(
     r"(?i)(api[_-]?key|token|secret|password|passwd|authorization|bearer)\s*[:=]\s*\S+"
 )
@@ -6000,322 +5739,6 @@ def _maybe_auto_title_persona_chat(*, session_db, session_id: str, user_message:
         return
 
 
-def _run_free_floating_assignment_once(
-    *,
-    cfg,
-    assignment_id: str,
-    persona_instance_id: str,
-    persona_id: str,
-    title: str,
-    message: str,
-    requested_by: str,
-    max_actions: int,
-    max_seconds: float,
-    client_message_id: str | None = None,
-    stream: bool = False,
-) -> tuple[int, dict[str, object], Callable[[], None] | None]:
-    """Run one bounded sandbox turn for an already-queued persona chat message.
-
-    Returns ``(exit_code, payload, deferred_title)``. The caller emits the
-    terminal ``chat.final`` frame from ``payload``; ``deferred_title`` (when not
-    None) is a zero-arg thunk the caller runs AFTER that emit so the synchronous
-    auxiliary-LLM title call stays off the turn's critical path. This runner
-    never writes stdout, so the title cannot be run post-emit from in here.
-    """
-    # Function-local: this file is exec'd into harness.py's globals, so a
-    # module-level import here would need a matching harness.py import or it
-    # is a NameError on a LIVE turn. The turn-outcome vocabulary is owned by
-    # agent_runtime.mission_chat_outcome; nothing re-spells its values.
-    from agent_runtime.mission_chat_outcome import (
-        ChatErrorKind,
-        ExecutionState,
-        FinalizationWarning,
-        FinalizationWarningKind,
-    )
-
-    # See the mission-chat lane: post-reply bookkeeping that fails is reported
-    # on the envelope, never swallowed. Absent when nothing went wrong.
-    finalization_warnings: list[FinalizationWarning] = []
-    session_id: str | None = None
-    try:
-        session_db = _default_persona_session_db()
-        session_id = _bind_free_floating_chat_session(
-            instance_store=PersonaInstanceStore(),
-            session_db=session_db,
-            persona_id=persona_id,
-            persona_instance_id=persona_instance_id,
-            assignment_id=assignment_id,
-            transcript_required=True,
-        )
-        _append_persona_operator_turn(
-            session_db=session_db,
-            session_id=session_id,
-            message=message,
-            client_message_id=client_message_id,
-            required=True,
-        )
-    except PersonaChatPersistenceError as exc:
-        try:
-            PersonaAssignmentStore().complete(
-                assignment_id,
-                state="blocked",
-                error=str(exc),
-            )
-        except Exception:
-            pass
-        return 2, {
-            "ok": False,
-            "execution_state": ExecutionState.BLOCKED,
-            "error_kind": ChatErrorKind.CHAT_TRANSCRIPT_PERSIST_FAILED,
-            "persistence_operation": exc.operation,
-            "session_id": session_id,
-            "client_message_id": client_message_id,
-            "blocker": str(exc),
-            "next_expected": "restore canonical persona chat transcript storage and retry the message",
-        }, None
-    persona = _persona_by_id(cfg, persona_id)
-    if persona is None:
-        PersonaAssignmentStore().complete(assignment_id, state="blocked", error="unknown persona")
-        return 2, {
-            "ok": False,
-            "execution_state": ExecutionState.BLOCKED,
-            "session_id": session_id,
-            "blocker": f"unknown persona {safe_assignment_token(persona_id)}",
-            "next_expected": "configure the persona before chatting",
-        }, None
-
-    # Compatibility commands share the same native structured continuation
-    # authority as Mission Control.  The current operator row is already in the
-    # native history, so reuse it rather than prepending a lossy text recap.
-    active_session_id = _persona_chat_native_tip(session_db, session_id)
-    native_history = safe_native_history(
-        _persona_chat_native_history(session_db, active_session_id)
-    )
-    stream_emitter = _ChatProtocolV2Emitter(
-        turn_id=safe_assignment_token(client_message_id) or safe_assignment_token(assignment_id),
-        client_message_id=client_message_id,
-        emit_frames=stream,
-        on_update=lambda emitter: persist_mission_chat_turn(
-            session_id=session_id,
-            client_message_id=client_message_id,
-            turn_id=emitter.turn_id,
-            elements=emitter.elements,
-            state=TURN_STATE_RUNNING,
-        ),
-    )
-
-    # C8: legacy `chat.delta` lane retired — v2 `segment.delta` is the one wire
-    # shape per token (the emitter already carries the serve request context).
-    _stream_delta = stream_emitter.delta
-
-    def _stream_progress(payload: dict[str, object] | None) -> None:
-        stream_emitter.progress(payload)
-
-    try:
-        mark_stale_inflight_turns_interrupted(
-            session_id=session_id,
-            active_client_message_id=client_message_id,
-        )
-        write_ahead_outcome = persist_mission_chat_turn(
-            session_id=session_id,
-            client_message_id=client_message_id,
-            turn_id=stream_emitter.turn_id,
-            elements=stream_emitter.elements,
-            state=TURN_STATE_RUNNING,
-            write_ahead=True,
-        )
-        # Keep the model run out of SessionDB. The canonical operator transcript
-        # is written below; persisting the internal run as a second hidden
-        # session creates orphaned final answers when copy-back is interrupted.
-        chat_result = GPTPersonaRuntime(
-            default_provider=cfg.default_provider,
-            default_model=cfg.default_model,
-            session_db=session_db,
-            persist_agent_session=False,
-        ).mission_chat_reply(
-            persona,
-            message,
-            session_id=None,
-            permission_session_id=session_id,
-            root_chat_session_id=session_id,
-            conversation_history=native_history,
-            reuse_current_user_message=True,
-            turn_id=safe_assignment_token(client_message_id) or safe_assignment_token(assignment_id),
-            max_wall_seconds=max_seconds,
-            stream_callback=_stream_delta if stream else None,
-            trace_callback=_stream_progress,
-        )
-    except Exception as exc:
-        stream_emitter.finish(state="failed")
-        failed_outcome = persist_mission_chat_turn(
-            session_id=session_id,
-            client_message_id=client_message_id,
-            turn_id=stream_emitter.turn_id,
-            elements=stream_emitter.elements,
-            state=TURN_STATE_FAILED,
-        )
-        PersonaAssignmentStore().complete(assignment_id, state="blocked", error=safe_assignment_text(str(exc), limit=240))
-        data = {
-            "ok": False,
-            "execution_state": ExecutionState.BLOCKED,
-            "session_id": session_id,
-            "blocker": safe_assignment_text(str(exc), limit=240),
-            "next_expected": "fix the runtime blocker and retry the persona chat turn",
-        }
-        if failed_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
-            data["turn_persist_outcome"] = failed_outcome.value
-        return 2, data, None
-
-    reply_text = _redact_persona_chat_text(getattr(chat_result, "final_response", "") or "", limit=PERSONA_CHAT_REPLY_LIMIT)
-    # Provider replied: every exit below must settle the turn record. The
-    # caller prints the returned payload, so this block never writes stdout.
-    terminal_outcome: MissionChatTurnPersistOutcome | None = None
-    assignment_completed = False
-    try:
-        _append_persona_assistant_text(
-            session_db=session_db,
-            session_id=session_id,
-            text=reply_text,
-            client_message_id=client_message_id,
-            required=True,
-        )
-        _update_persona_chat_token_counts(
-            session_db=session_db,
-            session_id=session_id,
-            result=chat_result,
-        )
-
-        PersonaAssignmentStore().complete(assignment_id, state="completed")
-        assignment_completed = True
-        try:
-            instance_store = PersonaInstanceStore()
-            instance = instance_store.get(persona_instance_id)
-            instance.active_run_id = None
-            instance.current_assignment_id = None
-            instance.state = WorkerSessionState.IDLE
-            if instance.mode != "chat":
-                instance.mode = "free_floating"
-            instance.default_chat_session_id = session_id
-            instance_store.update(instance)
-        except Exception as instance_commit_exc:
-            # The mission-chat lane's swallow, duplicated here. Same fix: the
-            # reply is durable so this cannot fail the turn, but an agent left
-            # rendering ``busy`` must not be a mystery.
-            finalization_warnings.append(
-                FinalizationWarning(
-                    kind=FinalizationWarningKind.INSTANCE_STATE_COMMIT_FAILED,
-                    detail=type(instance_commit_exc).__name__,
-                    step="return_instance_to_idle",
-                )
-            )
-
-        # Auto-title is a SessionDB-only side effect nothing in the emitted
-        # frame depends on, and it costs a synchronous auxiliary-LLM RTT on a
-        # session's first turn. This runner never writes stdout — the caller
-        # emits the terminal chat.final — so it cannot run the title post-emit
-        # itself. Package it as a deferred thunk the caller runs AFTER the emit,
-        # keeping that RTT off the turn's critical path. The captured session_db
-        # handle stays open (this runner never closes it).
-        def _deferred_auto_title() -> None:
-            _maybe_auto_title_persona_chat(
-                session_db=session_db,
-                session_id=session_id,
-                user_message=message,
-                assistant_response=reply_text,
-            )
-
-        data = {
-            "ok": True,
-            "execution_state": ExecutionState.COMPLETED,
-            "session_id": session_id,
-            "reply": reply_text,
-            "turn_id": stream_emitter.turn_id,
-            "client_message_id": client_message_id,
-            "run_ids": [],
-            # S31: no task binding key -- the free-floating half of S30's reap.
-            # It emitted a constant None into the SAME Launcher terminal parser
-            # the mission-chat lane uses, whose typed field for it was retired
-            # first (launcher 23bd05c6). Audited both repos: no reader remains.
-            "input_tokens": getattr(chat_result, "input_tokens", None),
-            "output_tokens": getattr(chat_result, "output_tokens", None),
-            "total_tokens": getattr(chat_result, "total_tokens", None),
-            "latency_ms": getattr(chat_result, "latency_ms", None),
-            "profile_timing": dict(getattr(chat_result, "profile_timing", None) or {}) or None,
-            "next_expected": "agent replied conversationally; refresh Harness snapshot for the chat transcript",
-            **(
-                {
-                    "finalization_warnings": [
-                        warning.as_dict() for warning in finalization_warnings
-                    ]
-                }
-                if finalization_warnings
-                else {}
-            ),
-        }
-        stream_emitter.finish(
-            state="completed",
-            input_tokens=data.get("input_tokens"),
-            output_tokens=data.get("output_tokens"),
-            total_tokens=data.get("total_tokens"),
-        )
-        terminal_outcome = persist_mission_chat_turn(
-            session_id=session_id,
-            client_message_id=client_message_id,
-            turn_id=stream_emitter.turn_id,
-            elements=stream_emitter.elements,
-            state=TURN_STATE_COMPLETED,
-        )
-        if terminal_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
-            data["turn_persist_outcome"] = terminal_outcome.value
-        if write_ahead_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
-            data["turn_write_ahead_outcome"] = write_ahead_outcome.value
-        if stream:
-            data["protocol_version"] = 2
-            # C3: `turn_elements` DROPPED here too — this free-floating lane
-            # never carried an observability row, and the turn store is the
-            # element/replay authority. The wire keeps only the v2 protocol tag.
-        return 0, data, _deferred_auto_title
-    except Exception as exc:
-        if terminal_outcome is not None:
-            raise
-        stream_emitter.finish(state="failed")
-        failed_outcome = persist_mission_chat_turn(
-            session_id=session_id,
-            client_message_id=client_message_id,
-            turn_id=stream_emitter.turn_id,
-            elements=stream_emitter.elements,
-            state=TURN_STATE_FAILED,
-        )
-        if not assignment_completed:
-            try:
-                PersonaAssignmentStore().complete(assignment_id, state="blocked", error=safe_assignment_text(str(exc), limit=240))
-            except Exception:
-                pass
-        data = {
-            "ok": False,
-            "execution_state": ExecutionState.BLOCKED,
-            "error_kind": ChatErrorKind.POST_TURN_PERSIST_FAILED,
-            "persistence_operation": (
-                exc.operation if isinstance(exc, PersonaChatPersistenceError) else None
-            ),
-            "session_id": session_id,
-            "client_message_id": client_message_id,
-            "reply": reply_text,
-            "blocker": safe_assignment_text(str(exc), limit=240),
-            "next_expected": "the agent replied but recording the turn failed; inspect the blocker and retry the message",
-            **(
-                {
-                    "finalization_warnings": [
-                        warning.as_dict() for warning in finalization_warnings
-                    ]
-                }
-                if finalization_warnings
-                else {}
-            ),
-        }
-        if failed_outcome is not MissionChatTurnPersistOutcome.PERSISTED:
-            data["turn_persist_outcome"] = failed_outcome.value
-        return 2, data, None
 
 
 def _close_free_floating_assignments(persona_instance_id: str, *, reason: str, json_output: bool, terminal_state: str) -> int:

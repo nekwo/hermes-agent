@@ -2310,3 +2310,86 @@ after ruling R-2 removed the secret-read floor, and the replacement is detective
 (receipts) rather than preventive — is recorded in the plan's §4 and was accepted
 by the operator before implementation. Any preventive replacement (egress
 allowlists, secret-scoped env) remains a separate ruling; nothing here builds one.
+
+## S70 — free-floating assignment lane strip (2026-08-09)
+
+Trigger (verified live 2026-08-09): `harness persona instance create
+--add-instance --display-name … --message … --auto-run` created the placement
+but landed NO turn anywhere — the display-name branch silently discarded the
+*required* `--message`/`--auto-run` flags. The display-name-less branch queued
+a "free-floating persona assignment" instead: a row whose only durable
+consumer was the tick loop the 2026-07-30 chat-only purge removed. A queued
+row therefore dead-ended forever (its envelope's `next_expected` advertised a
+`persona instance run-once` verb that never existed), and the `--auto-run`
+in-process runner was a second, parallel turn authority beside
+`mission-chat message`.
+
+### Cut (tombstone registry, wave s70)
+
+`persona instance message` (verb + handler), `create`'s queue branch and its
+`--auto-run/--stream/--max-actions/--max-seconds` flags (argparse now REJECTS
+them — a removed lane must not degrade to a silent ignore),
+`_queue_free_floating_assignment`, `_run_free_floating_assignment_once`,
+`_bind_free_floating_chat_session`, the assignment mint side
+(`PersonaAssignmentStore.create`/`create_or_resume`, `PersonaAssignmentSpec`,
+`assignment_evidence_kind`/`assignment_archive_scope`/`assignment_signal_hash*`),
+`ExecutionState.QUEUED`, and `ChatErrorKind.CHAT_TRANSCRIPT_PERSIST_FAILED` /
+`POST_TURN_PERSIST_FAILED` — the last three had ONLY free-floating emitters;
+the outcome module's "every owned member has a producer" gate went red on them
+the moment the lane died, which is exactly that gate doing its job.
+
+### Alive-that-looked-dead (why the cut stops where it does)
+
+- **`persona.instance.create` is gateway-exposed launcher-side** — the
+  capability registry publishes it to the Agent Gateway with `message` /
+  `auto_run` in `allowedArgs`, so the queue branch was string-reachable from a
+  remote grant, not just the CLI. Post-cut a remote `auto_run: true` call gets
+  a clean argparse rejection through the capability envelope.
+- **The `persona_assignments` wire block is CONSUMED**: the Launcher parses it
+  (`mission_control_snapshot.dart` `_personaAssignmentsFromJson`) and folds
+  assignments into the agent roster (`mission_agent_roster_policy.dart`).
+- The instance-mode value `free_floating` is still live conversational-mode
+  vocabulary (`operator_channels` / `persona_chat_history` /
+  `persona_instance_identity` mode sets) — it is a MODE, not the lane.
+
+### Parked — decision-ready (do NOT cut without the named coordination)
+
+1. **`--title`/`--message` on `persona instance create`** — accepted for wire
+   compat and IGNORED (title only feeds the display-name fallback). The
+   Launcher emits both on every `persona.instance.create` /
+   `persona.profile.instantiate` call (`mission_control_bridge.dart`).
+   Removal = lockstep launcher change (bridge argv + registry
+   required/default args + both call sites in `mission_control_page.dart`).
+2. **Full `PersonaAssignmentStore` retirement** (read/close side, the
+   snapshot/status `persona_assignments` wire block, `persona assignments`
+   list verb, `persona instance close`/`archive` maintenance verbs, the
+   `persona_assignment.closed` event, the retire guard's `assignment_active`
+   refusal, `migrate_retired_persona_assignment_task_ids`). Blocked on: the
+   Launcher consumers above (wire-block drop = snapshot contract bump per
+   `agent_runtime/snapshot.py` ledger rules) and on residual rows on live
+   runtime roots (close/archive are the only settle path; retire would
+   deadlock on an active residual row without them).
+3. **Launcher-side handoff** (not this repo's tree): registry
+   `persona.instance.create` `allowedArgs` still advertises
+   `auto_run`/`max_actions`/`max_seconds`/`message`; the bridge still emits
+   the `--auto-run` block when `auto_run: true`; the
+   `persona.instance.close`/`archive` bridge lanes have NO dispatcher
+   (registry rows + argv builders only). All three should be pruned
+   launcher-side; until then a remote `auto_run: true` gets the argparse
+   refusal.
+4. **`PersonaInstanceStore.create_free_floating`** — production-callerless
+   after the cut (its one production caller was the queue), but ~10 test
+   files across flow-graph/checkpoint/state-patch suites use it as their
+   instance-mint fixture. Fold it into a shared test fixture (or rename to a
+   test-support mint) in a mechanical follow-up; not cut here because the
+   blast radius is unrelated suites in a live runtime.
+5. **Dead-but-contract-relevant persona-instance wire fields** (all writers
+   gone since the worker/mission lanes died; `ensure_for_personas` only ever
+   resets them): `token_budget_used`, `last_heartbeat_at`,
+   `context_receipt_id`, `compression_receipt_id` are PARSED by the Launcher
+   (`mission_control_snapshot.dart:4106-4109`) — carried for contract;
+   `tool_budget_used`, `watchdog_warning_count`, `current_work_assignment_id`,
+   `attached_task_id` have NO launcher reader but dropping any snapshot key
+   requires the contract bump — decision-ready as one batch with (2).
+   `current_assignment_id` is launcher-parsed and now permanently null going
+   forward (only residual rows carry values); it belongs to batch (2) too.

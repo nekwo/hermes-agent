@@ -30,8 +30,8 @@ Mirrored **as they happen**:
 * text steered into a turn that is already running
   (``mission_chat_steer``, stamped ``steered: true``),
 * the recorded final reply of each mission-chat turn (native commit),
-* every row the explicit persona-chat append seam writes — the relay /
-  free-floating lanes and the child return-summary lane,
+* every row the explicit persona-chat append seam writes — the relay lane
+  and the child return-summary lane,
 * tool start/finish lines from :class:`~agent_runtime.progress.ChatProgressSink`.
 
 NOT mirrored as they happen: the runtime's NON-FINAL rows — the intermediate

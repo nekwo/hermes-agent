@@ -2,37 +2,26 @@
 
 ``0b67024af`` kept ``PersonaAssignmentSpec.task_id`` only because historical
 mission-lane assignment rows could still carry a real value.  The 2026-07-30
-follow-up ruling resolves that blocker explicitly: archive every live row whose
+follow-up ruling resolved that blocker explicitly: archive every live row whose
 raw ``task_id`` is non-null, then make ``evidence_kind`` the sole authority for
 free-floating discrimination and assignment archive scope.
+
+S70 then removed the assignment MINT side wholesale (``PersonaAssignmentSpec``,
+``create_or_resume``, the derivation helpers and the free-floating queue verbs
+that fed them — tombstone registry, wave s70), so the spec-shape and
+mint-source assertions this file used to carry are subsumed by the registry.
+What survives here is the MIGRATION behaviour (still a live maintenance verb
+over residual on-disk rows) and the discriminator pin on the surviving
+close/delete maintenance paths.
 """
 
 from __future__ import annotations
 
-import dataclasses
 import inspect
 import json
 
 from agent_runtime import paths, persona_assignments
 from utils import atomic_json_write
-
-
-def test_persona_assignment_spec_no_longer_declares_task_id():
-    fields = {
-        field.name
-        for field in dataclasses.fields(persona_assignments.PersonaAssignmentSpec)
-    }
-    assert "task_id" not in fields
-
-
-def test_create_or_resume_and_archive_scope_use_evidence_kind_not_spec_task_id():
-    source = inspect.getsource(persona_assignments.PersonaAssignmentStore.create_or_resume)
-    assert "spec.task_id" not in source
-
-    signature = inspect.signature(persona_assignments.assignment_archive_scope)
-    assert list(signature.parameters) == ["kind"]
-    assert persona_assignments.assignment_archive_scope("free_floating_message") == "assignment"
-    assert persona_assignments.assignment_archive_scope("diagnostic") == "task"
 
 
 def test_retired_task_id_migration_is_dry_run_safe_archival_and_idempotent(
@@ -84,8 +73,6 @@ def test_free_floating_cli_discriminators_use_evidence_kind_alone():
 
     delete_source = inspect.getsource(harness._cmd_persona_chat_delete)
     close_source = inspect.getsource(harness._close_free_floating_assignments)
-    queue_source = inspect.getsource(harness._queue_free_floating_assignment)
 
     assert ".task_id is None" not in delete_source
     assert ".task_id is None" not in close_source
-    assert "task_id=None" not in queue_source

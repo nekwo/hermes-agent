@@ -49,7 +49,8 @@ EXECUTION_STATE_WIRE = {
     "BLOCKED": "blocked",
     "BUDGET_EXHAUSTED": "budget_exhausted",
     "COMPLETED": "completed",
-    "QUEUED": "queued",
+    # S70 removed QUEUED: its only emitter was the retired free-floating
+    # assignment queue envelope (tombstone registry, wave s70).
 }
 CHAT_ERROR_KIND_WIRE = {
     "INVALID_REQUEST": "invalid_request",
@@ -63,10 +64,10 @@ CHAT_ERROR_KIND_WIRE = {
     "CHAT_BUSY": "chat_busy",
     "CHAT_SESSION_DB_UNAVAILABLE": "chat_session_db_unavailable",
     "CHAT_SESSION_PERSIST_FAILED": "chat_session_persist_failed",
-    "CHAT_TRANSCRIPT_PERSIST_FAILED": "chat_transcript_persist_failed",
     "CHAT_MODEL_OVERRIDE_PERSIST_FAILED": "chat_model_override_persist_failed",
     "CHAT_PROJECTION_INCOMPLETE": "chat_projection_incomplete",
-    "POST_TURN_PERSIST_FAILED": "post_turn_persist_failed",
+    # S70 removed CHAT_TRANSCRIPT_PERSIST_FAILED / POST_TURN_PERSIST_FAILED
+    # with the free-floating lane, their only producer (registry wave s70).
     "CHAT_TURN_BUDGET_EXHAUSTED": "chat_turn_budget_exhausted",
     "CHAT_TURN_OUTCOME_UNKNOWN": "chat_turn_outcome_unknown",
     "CHAT_TURN_NOT_SUBMITTED": "chat_turn_not_submitted",
@@ -237,9 +238,10 @@ def test_the_import_time_guard_runs_and_passes():
 def test_an_unclassified_execution_state_is_rejected(monkeypatch):
     from agent_runtime import mission_chat_outcome as module
 
-    monkeypatch.setattr(
-        module, "OK_EXECUTION_STATES", frozenset({ExecutionState.QUEUED})
-    )
+    # Empty the OK bucket so COMPLETED is left in no bucket at all — the guard
+    # must reject the unclassified state. (S70 removed QUEUED, the member this
+    # test originally used as the sole-OK example.)
+    monkeypatch.setattr(module, "OK_EXECUTION_STATES", frozenset())
     with pytest.raises(RuntimeError, match="no verdict bucket"):
         module._guard_turn_outcome_vocabulary()
 

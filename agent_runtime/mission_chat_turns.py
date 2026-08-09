@@ -615,8 +615,8 @@ def mark_stale_inflight_turns_interrupted(
     Callers MUST guarantee no live executor on the session: hold its root
     lease (``persona_chat_root_lease`` — held for a native turn's entire
     execution and released by the kernel when the executor dies), or run from
-    a lane that already serializes sends per session (the free-floating
-    assignment queue). Under that guarantee every OTHER in-flight record —
+    a lane that already serializes sends per session. Under that guarantee
+    every OTHER in-flight record —
     journal ``pending``/``executing``/``outcome_unknown`` as much as legacy
     ``running`` — is a corpse that can no longer settle itself (live incident
     2026-07-25: a reaped Launcher took its serve child down mid-turn and the

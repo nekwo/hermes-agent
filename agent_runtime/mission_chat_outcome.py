@@ -87,8 +87,9 @@ class ExecutionState(StrEnum):
     BUDGET_EXHAUSTED = "budget_exhausted"
     #: The turn ran and settled.
     COMPLETED = "completed"
-    #: Accepted onto the free-floating assignment lane, not yet run.
-    QUEUED = "queued"
+    # S70 removed ``QUEUED``: its only emitter was the free-floating assignment
+    # queue envelope, retired with that lane (a queued row had no consumer
+    # since the 2026-07-30 chat-only purge removed ticking).
 
 
 #: Exactly one of these two buckets holds every state. The partition is the
@@ -98,7 +99,6 @@ class ExecutionState(StrEnum):
 OK_EXECUTION_STATES = frozenset(
     {
         ExecutionState.COMPLETED,
-        ExecutionState.QUEUED,
     }
 )
 FAILURE_EXECUTION_STATES = frozenset(
@@ -148,10 +148,13 @@ class ChatErrorKind(StrEnum):
     # -- persistence ---------------------------------------------------------
     CHAT_SESSION_DB_UNAVAILABLE = "chat_session_db_unavailable"
     CHAT_SESSION_PERSIST_FAILED = "chat_session_persist_failed"
-    CHAT_TRANSCRIPT_PERSIST_FAILED = "chat_transcript_persist_failed"
     CHAT_MODEL_OVERRIDE_PERSIST_FAILED = "chat_model_override_persist_failed"
     CHAT_PROJECTION_INCOMPLETE = "chat_projection_incomplete"
-    POST_TURN_PERSIST_FAILED = "post_turn_persist_failed"
+    # S70 removed CHAT_TRANSCRIPT_PERSIST_FAILED and POST_TURN_PERSIST_FAILED:
+    # both were emitted ONLY by the retired free-floating queue/runner (the
+    # mission-chat lane has its own persist kinds), and the "every owned member
+    # has a producer" gate is exactly the rule that retires them with it. No
+    # launcher reader existed for either string.
 
     # -- turn lifecycle ------------------------------------------------------
     CHAT_TURN_BUDGET_EXHAUSTED = "chat_turn_budget_exhausted"
@@ -181,10 +184,8 @@ PERSISTENCE_ERROR_KINDS = frozenset(
     {
         ChatErrorKind.CHAT_SESSION_DB_UNAVAILABLE,
         ChatErrorKind.CHAT_SESSION_PERSIST_FAILED,
-        ChatErrorKind.CHAT_TRANSCRIPT_PERSIST_FAILED,
         ChatErrorKind.CHAT_MODEL_OVERRIDE_PERSIST_FAILED,
         ChatErrorKind.CHAT_PROJECTION_INCOMPLETE,
-        ChatErrorKind.POST_TURN_PERSIST_FAILED,
     }
 )
 TURN_LIFECYCLE_ERROR_KINDS = frozenset(

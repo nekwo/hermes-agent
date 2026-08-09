@@ -13,13 +13,15 @@ post-emit placement relies on — a title failure can never propagate and corrup
 the one-JSON-object stdout / flip the exit code — is pinned behaviorally through
 the importable `_maybe_auto_title_persona_chat` seam.
 
-Two handler variants carry the chat lane; both are guarded:
-  * `_cmd_mission_chat_message` — emits inline (`_emit_chat_final` / `print`);
-    the title now runs after that emit, wrapped so it cannot raise into the
-    crash-tail guard.
-  * `_run_free_floating_assignment_once` — never writes stdout; its caller
-    `_queue_free_floating_assignment` emits. The runner packages the title as a
-    deferred thunk (3rd return element) the caller runs AFTER its own emit.
+One handler carries the chat lane and is guarded here:
+  * `_cmd_mission_chat_message` / `_mission_chat_commit_turn` — emits inline
+    (`_mission_chat_emit`); the title runs after that emit, wrapped so it
+    cannot raise into the crash-tail guard.
+
+(The free-floating runner variant this file also guarded —
+`_run_free_floating_assignment_once` + `_queue_free_floating_assignment` — was
+removed with the free-floating assignment lane at S70; see the tombstone
+registry.)
 """
 
 from __future__ import annotations
@@ -28,7 +30,6 @@ import ast
 from pathlib import Path
 
 TITLE = "_maybe_auto_title_persona_chat"
-EMIT = "_emit_chat_final"
 # WP-H2 routed every mission-chat terminal payload through ONE seam
 # (``_mission_chat_emit``), which owns the stream/print branch this guard used
 # to read directly. The main handler is pinned on the seam; the free-floating
@@ -119,78 +120,6 @@ def test_main_handler_titles_exactly_once():
     assert len(_calls_named(func, TITLE)) == 1, (
         "the moved title call must not be duplicated across paths"
     )
-
-
-# --------------------------------------------------------------------------- #
-# Free-floating runner + its caller                                           #
-# --------------------------------------------------------------------------- #
-
-
-def test_runner_titles_only_inside_the_deferred_thunk():
-    runner = _func(_persona_commands_tree(), "_run_free_floating_assignment_once")
-    thunk = next(
-        (
-            n
-            for n in ast.walk(runner)
-            if isinstance(n, ast.FunctionDef) and n.name == "_deferred_auto_title"
-        ),
-        None,
-    )
-    assert thunk is not None, "runner must package the title as a deferred thunk"
-    all_title_calls = _calls_named(runner, TITLE)
-    thunk_title_calls = _calls_named(thunk, TITLE)
-    assert all_title_calls, "the deferred thunk must still title the session"
-    # Every title call lives INSIDE the thunk — the runner never titles inline
-    # before returning, which would keep the auxiliary-LLM RTT on the critical
-    # path (the whole point of F4).
-    assert len(all_title_calls) == len(thunk_title_calls), (
-        "the runner titles inline before returning — that keeps the title RTT "
-        "on the critical path; it must only run via the caller-invoked thunk"
-    )
-
-
-def test_runner_returns_thunk_as_third_tuple_element():
-    runner = _func(_persona_commands_tree(), "_run_free_floating_assignment_once")
-    returns_thunk = any(
-        isinstance(node, ast.Return)
-        and isinstance(node.value, ast.Tuple)
-        and isinstance(node.value.elts[-1], ast.Name)
-        and node.value.elts[-1].id == "_deferred_auto_title"
-        for node in ast.walk(runner)
-    )
-    assert returns_thunk, (
-        "the success return must hand the deferred title thunk to the caller as "
-        "the 3rd tuple element (exit_code, payload, deferred_title)"
-    )
-
-
-def test_caller_runs_deferred_title_after_emit_and_wrapped():
-    caller = _func(_persona_commands_tree(), "_queue_free_floating_assignment")
-    # The 3-tuple unpack pins the runner's return contract at the call site.
-    unpacks_three = any(
-        isinstance(node, ast.Assign)
-        and _calls_named(node, "_run_free_floating_assignment_once")
-        and isinstance(node.targets[0], ast.Tuple)
-        and len(node.targets[0].elts) == 3
-        and "deferred_title"
-        in [e.id for e in node.targets[0].elts if isinstance(e, ast.Name)]
-        for node in ast.walk(caller)
-    )
-    assert unpacks_three, "caller must unpack (exit_code, payload, deferred_title)"
-
-    deferred_calls = _calls_named(caller, "deferred_title")
-    assert deferred_calls, "caller must run the deferred title thunk"
-    latest_emit = max(c.lineno for c in _calls_named(caller, EMIT))
-    latest_print = max((c.lineno for c in _calls_named(caller, "print")), default=0)
-    for call in deferred_calls:
-        assert call.lineno > latest_emit and call.lineno > latest_print, (
-            "the deferred title must run AFTER the terminal frame is emitted "
-            "(both the stream `_emit_chat_final` and the non-stream `print` paths)"
-        )
-    # Wrapped so a title failure can never change stdout / the exit code.
-    assert any(
-        _calls_named(t, "deferred_title") for t in ast.walk(caller) if isinstance(t, ast.Try)
-    ), "the deferred title call must be wrapped in try/except"
 
 
 # --------------------------------------------------------------------------- #

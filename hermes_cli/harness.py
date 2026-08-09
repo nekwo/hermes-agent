@@ -52,7 +52,6 @@ from agent_runtime import paths
 from agent_runtime.persona_assignments import (
     CHAT_BINDING_CLEARED_REASON_DELETED,
     PERSONA_INSTANCE_ID_PREFIX,
-    PersonaAssignmentSpec,
     PersonaInstanceRetireError,
     RetiredPersonaInstanceError,
     StaleModelOverrideWrite,
@@ -896,12 +895,17 @@ def build_parser(parent_subparsers) -> None:
     persona_set_model.add_argument("--requested-by", default="operator")
     persona_set_model.add_argument("--json", action="store_true")
     persona_set_model.set_defaults(func=_cmd_persona_set_model)
-    persona_instance = persona_subs.add_parser("instance", help="Create, message, run, close, and archive free-floating persona instances")
+    persona_instance = persona_subs.add_parser("instance", help="Create, open, steer, retire, and maintain persona instances (chat is the only messaging lane)")
     persona_instance_subs = persona_instance.add_subparsers(dest="persona_instance_command")
-    persona_instance_create = persona_instance_subs.add_parser("create", help="Create an Agent Profile or queue a free-floating persona assignment")
+    persona_instance_create = persona_instance_subs.add_parser("create", help="Create an Agent Profile (operator chat channel) or an additional placement-backed instance (--add-instance); requires --display-name")
     persona_instance_create.add_argument("--persona", dest="persona_id", required=True)
-    persona_instance_create.add_argument("--title", required=True)
-    persona_instance_create.add_argument("--message", required=True)
+    persona_instance_create.add_argument("--title", required=True, help="Fallback display name when --display-name is empty (launcher wire-compat)")
+    # S70: `--message` is accepted for launcher wire-compat only and is NOT
+    # acted on — the free-floating assignment queue it used to feed is retired
+    # (messaging is `harness mission-chat message`). Removing the flag needs a
+    # lockstep launcher change: mission_control_bridge.dart emits it on every
+    # persona.instance.create / persona.profile.instantiate call.
+    persona_instance_create.add_argument("--message", required=True, help="DEPRECATED: accepted for launcher wire-compat and ignored; send messages with `harness mission-chat message`")
     persona_instance_create.add_argument("--requested-by", default="cli")
     _add_coordinator_permission_args(persona_instance_create)
     persona_instance_create.add_argument("--client-message-id", default=None)
@@ -912,10 +916,9 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_create.add_argument("--placement-id", default=None, help="Scene itemId for an additional placement-backed instance")
     persona_instance_create.add_argument("--workspace-id", dest="workspace_id", default=None, help="Mission Control workspace the placement belongs to (scope-provenance pointer; only meaningful with --add-instance)")
     persona_instance_create.add_argument("--realm-id", dest="realm_id", default=None, help="Mission Control realm the placement belongs to (scope-provenance pointer; only meaningful with --add-instance)")
-    persona_instance_create.add_argument("--auto-run", action="store_true", help="Immediately run one bounded chat turn after queuing the message")
-    persona_instance_create.add_argument("--stream", action="store_true", help="Emit operator-chat deltas and the final payload as NDJSON")
-    persona_instance_create.add_argument("--max-actions", type=int, default=1)
-    persona_instance_create.add_argument("--max-seconds", type=float, default=240.0)
+    # S70 removed `--auto-run` / `--stream` / `--max-actions` / `--max-seconds`:
+    # they belonged to the retired free-floating assignment queue (argparse now
+    # rejects them cleanly instead of silently ignoring them).
     persona_instance_create.add_argument("--json", action="store_true")
     persona_instance_create.set_defaults(func=_cmd_persona_instance_create)
     persona_instance_open = persona_instance_subs.add_parser("open-chat", help="Bind a persona instance to a durable chat session without ticking")
@@ -944,29 +947,22 @@ def build_parser(parent_subparsers) -> None:
     persona_instance_resolve_turn.add_argument("--action", choices=["abandon"], required=True)
     persona_instance_resolve_turn.add_argument("--json", action="store_true")
     persona_instance_resolve_turn.set_defaults(func=_cmd_mission_chat_turn_resolve)
-    persona_instance_message = persona_instance_subs.add_parser("message", help="Queue a message to a free-floating persona instance without ticking")
-    persona_instance_message.add_argument("persona_instance_id")
-    persona_instance_message.add_argument("--message", required=True)
-    persona_instance_message.add_argument("--title", default="Free-floating operator message")
-    persona_instance_message.add_argument("--requested-by", default="cli")
-    persona_instance_message.add_argument("--client-message-id", default=None)
-    persona_instance_message.add_argument("--session-id", default=None)
-    persona_instance_message.add_argument("--auto-run", action="store_true", help="Immediately run one bounded chat turn after queuing the message")
-    persona_instance_message.add_argument("--stream", action="store_true", help="Emit operator-chat deltas and the final payload as NDJSON")
-    persona_instance_message.add_argument("--max-actions", type=int, default=1)
-    persona_instance_message.add_argument("--max-seconds", type=float, default=240.0)
-    persona_instance_message.add_argument("--json", action="store_true")
-    persona_instance_message.set_defaults(func=_cmd_persona_instance_message)
-    persona_instance_close = persona_instance_subs.add_parser("close", help="Close active free-floating assignments for one persona instance")
+    # S70 removed `persona instance message`. It queued a "free-floating
+    # persona assignment" — a lane whose only durable consumer was the tick
+    # loop removed by the 2026-07-30 chat-only purge (a queued row dead-ended
+    # forever; the advertised `run-once` follow-up verb never existed), and its
+    # `--auto-run` variant was a second, parallel turn authority. Messaging an
+    # instance is `harness mission-chat message`.
+    persona_instance_close = persona_instance_subs.add_parser("close", help="Cancel residual free-floating assignment rows for one persona instance (maintenance; the lane that minted them is retired)")
     persona_instance_close.add_argument("persona_instance_id")
     persona_instance_close.add_argument("--reason", required=True)
     persona_instance_close.add_argument("--requested-by", default="cli")
     _add_coordinator_permission_args(persona_instance_close)
     persona_instance_close.add_argument("--json", action="store_true")
     persona_instance_close.set_defaults(func=_cmd_persona_instance_close)
-    persona_instance_archive = persona_instance_subs.add_parser("archive", help="Archive active free-floating assignments for one persona instance")
+    persona_instance_archive = persona_instance_subs.add_parser("archive", help="Complete residual free-floating assignment rows for one persona instance (maintenance; the lane that minted them is retired)")
     persona_instance_archive.add_argument("persona_instance_id")
-    persona_instance_archive.add_argument("--reason", default="archived free-floating persona assignment")
+    persona_instance_archive.add_argument("--reason", default="archived residual free-floating assignment row")
     persona_instance_archive.add_argument("--requested-by", default="cli")
     persona_instance_archive.add_argument("--json", action="store_true")
     persona_instance_archive.set_defaults(func=_cmd_persona_instance_archive)

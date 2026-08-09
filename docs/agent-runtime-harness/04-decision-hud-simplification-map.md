@@ -264,9 +264,12 @@ visible; S4/S6 make it safe; S7 certifies it.
 
 The policy — "hit something too big → spawn a helper, hand it this chat's context, wait,
 resume where you left off" — is a **skill** composing two runtime primitives:
-1. **spawn/delegate** a sub-agent — `harness swarm` / `persona instance create` exist.
-2. **post the result back into the shared session** — `persona instance message` +
-   SessionDB/messaging exist.
+1. **spawn/delegate** a sub-agent — `harness swarm` / `persona instance create`
+   (display-name/placement mint) exist.
+2. **post the result back into the shared session** — `harness mission-chat message`
+   / `persona instance return-summary` + SessionDB/messaging exist. (S70 note:
+   `persona instance message` was the retired free-floating assignment queue and
+   no longer exists; the chat lane is the only messaging lane.)
 
 The only thing to confirm is that a spawned agent can write into the **parent's**
 `session_id` (true shared chat, not a fork). If yes, continuity is 100% a skill; if not,

@@ -2749,6 +2749,67 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "verify_registry",
         scope=("agent_runtime.decision_contract_registry",),
     ),
+    # -- S70 — the free-floating assignment lane (2026-08-09) ------------
+    # `persona instance create --message/--auto-run` and `persona instance
+    # message` fed a "free-floating persona assignment" queue whose only
+    # durable consumer was the tick loop the 2026-07-30 chat-only purge
+    # removed: a queued row dead-ended forever (the `run-once` verb the
+    # envelope advertised as next step never existed), the `--auto-run`
+    # in-process runner was a second, parallel turn authority beside
+    # `mission-chat message`, and the display-name branch of `create`
+    # silently DISCARDED the required `--message` (verified live 2026-08-09:
+    # create --add-instance --message --auto-run landed no turn anywhere).
+    # The READ/CLOSE store side, the `persona_assignments` wire block and the
+    # close/archive maintenance verbs survive for residual rows (ledger S70).
+    *rows(
+        "s70",
+        "HEAD",
+        Form.CODE,
+        "free-floating queue verb chain: the CLI verb string, its handler, "
+        "the queue producer and the auto-run runner — verb string and handler "
+        "rowed together (the sweep-orphans lesson)",
+        "_cmd_persona_instance_message",
+        "_queue_free_floating_assignment",
+        "_run_free_floating_assignment_once",
+        "_bind_free_floating_chat_session",
+    ),
+    *rows(
+        "s70",
+        "HEAD",
+        Form.ATTR,
+        "assignment MINT side removed with the queue lane; the read/close "
+        "side and the model fields stay for residual on-disk rows",
+        "PersonaAssignmentSpec",
+        "assignment_evidence_kind",
+        "assignment_archive_scope",
+        "assignment_signal_hash",
+        "assignment_signal_hash_from_parts",
+        scope=("agent_runtime.persona_assignments",),
+    ),
+    *rows(
+        "s70",
+        "HEAD",
+        Form.CLASS_ATTR,
+        "the store's row-mint entry points went with the spec; residual rows "
+        "are settled through complete(), never re-minted",
+        "persona_assignments.PersonaAssignmentStore.create",
+        "persona_assignments.PersonaAssignmentStore.create_or_resume",
+        scope=_AR,
+    ),
+    *rows(
+        "s70",
+        "HEAD",
+        Form.CODE,
+        "the queue's assignment kind and its wire vocabulary are retired: "
+        "nothing may mint the kind or emit the states/kinds again "
+        "(ExecutionState.QUEUED and both error kinds had ONLY free-floating "
+        "emitters — the 'every owned member has a producer' gate is the rule "
+        "that took them with the lane; no launcher reader existed)",
+        "free_floating_message",
+        "ExecutionState.QUEUED",
+        "CHAT_TRANSCRIPT_PERSIST_FAILED",
+        "POST_TURN_PERSIST_FAILED",
+    ),
 )
 
 
