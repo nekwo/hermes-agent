@@ -55,7 +55,14 @@ def hydrate_frame(
     the key-set, Ruling 0).
     """
 
-    snap = snapshot if snapshot is not None else build_snapshot()
+    # ``accept_inflight``: this hydrate may ride the build that is ALREADY
+    # running (serve prewarms one right after ``ready``). It loses no event —
+    # the frame's ``watermark.event_offset`` is read back out of the snapshot
+    # below and ``stream_frames`` tails from exactly that offset, so anything
+    # appended after the shared build arrives as the first delta instead.
+    # Requiring a newer build would make the launcher's boot hydrate wait for
+    # the prewarm AND then pay a second build — strictly worse than no prewarm.
+    snap = snapshot if snapshot is not None else build_snapshot(accept_inflight=True)
     parity = snap.get("parity") if isinstance(snap.get("parity"), dict) else {}
     watermark = parity.get("watermark") if isinstance(parity.get("watermark"), dict) else {}
     frame: dict[str, Any] = {

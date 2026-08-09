@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import threading
+import time
 
 from hermes_cli.harness_parts.serve import dispatch_argv, serve_loop
 
@@ -591,3 +593,172 @@ def test_boot_reports_the_dispatches_it_settled(monkeypatch):
 
     assert frames[1]["event"] == "ready"
     assert frames[1]["dispatches_restored"] == 2
+
+
+# ── Boot instrumentation (T5/T9) ────────────────────────────────────────────
+#
+# A cold boot is the one worth attributing and the one nobody is watching a
+# console for, so the boot stamps itself into the frames a supervisor already
+# reads.
+
+
+def test_booting_frame_carries_the_interpreter_stamp():
+    """``booting`` is emitted before any heavy work, so its stamp is exactly
+    the interpreter + CLI import tax — the cold-boot term a supervisor can see
+    no other way."""
+
+    from agent_runtime.boot_timeline import BootTimeline
+
+    timeline = BootTimeline(process_start_monotonic=time.monotonic() - 4.0)
+    frames = _run([SHUTDOWN], dispatch=lambda argv: 0, boot_timeline=timeline)
+
+    booting = frames[0]
+    assert booting["event"] == "booting"
+    assert 3900 <= booting["boot"]["interpreter_ms"] <= 4300
+
+
+def test_ready_frame_attributes_every_boot_phase():
+    from agent_runtime.boot_timeline import BootTimeline
+
+    timeline = BootTimeline(process_start_monotonic=time.monotonic() - 1.0)
+    frames = _run([SHUTDOWN], dispatch=lambda argv: 0, boot_timeline=timeline)
+
+    ready = frames[1]
+    assert ready["event"] == "ready"
+    stamps = ready["boot_timeline"]
+    # Every phase between ``booting`` and ``ready`` is named, so a slow boot
+    # says WHICH step was slow instead of only that it was slow.
+    for phase in (
+        "chat_registry_ms",
+        "head_publish_ms",
+        "store_root_ms",
+        "orphaned_turn_sweep_ms",
+        "dispatch_restore_ms",
+    ):
+        assert phase in stamps, phase
+        assert stamps[phase] >= 0
+    assert stamps["interpreter_ms"] >= 900
+    assert stamps["total_ms"] >= stamps["elapsed_ms"]
+
+
+def test_a_slow_boot_phase_shows_up_in_its_own_stamp(monkeypatch):
+    """The stamps measure the phase they name — pinned by making one phase
+    genuinely slow and reading it back off the frame."""
+
+    from agent_runtime import dispatch_store
+
+    def slow_restore():
+        time.sleep(0.25)
+        return {"restored": 0}
+
+    monkeypatch.setattr(
+        dispatch_store, "restore_undelivered_dispatches", slow_restore
+    )
+
+    frames = _run([SHUTDOWN], dispatch=lambda argv: 0)
+
+    stamps = frames[1]["boot_timeline"]
+    assert stamps["dispatch_restore_ms"] >= 200
+    assert stamps["orphaned_turn_sweep_ms"] < 200
+
+
+# ── Read-model prewarm (T2) ─────────────────────────────────────────────────
+
+
+def test_the_snapshot_prewarm_starts_before_ready_is_announced():
+    """Only the build that STARTED FIRST can be shared. The launcher's first
+    request lands within milliseconds of ``ready``, so a prewarm started after
+    that frame loses the race and queues a redundant second build behind the
+    request it was supposed to spare."""
+
+    started = threading.Event()
+    ready_seen = threading.Event()
+    order: list[str] = []
+
+    def prewarm():
+        order.append("prewarm")
+        started.set()
+
+    def dispatch(argv):
+        return 0
+
+    out = io.StringIO()
+
+    class _WatchingWriter:
+        def write(self, payload):
+            if '"ready"' in payload:
+                # The prewarm must already have been handed its thread.
+                assert started.wait(5)
+                order.append("ready")
+                ready_seen.set()
+            return out.write(payload)
+
+        def flush(self):
+            return out.flush()
+
+    assert (
+        serve_loop(
+            iter([SHUTDOWN]),
+            _WatchingWriter(),
+            dispatch=dispatch,
+            snapshot_prewarm=prewarm,
+        )
+        == 0
+    )
+    assert ready_seen.wait(5)
+    assert order == ["prewarm", "ready"]
+
+
+def test_no_prewarm_is_started_when_none_is_injected():
+    """The loop is mechanism; the warmup is policy the entry point supplies.
+    A unit-test loop must never fire a multi-second projection build."""
+
+    frames = _run([SHUTDOWN], dispatch=lambda argv: 0)
+
+    assert [f["event"] for f in frames[:2]] == ["booting", "ready"]
+    thread_names = {thread.name for thread in threading.enumerate()}
+    assert "harness-serve-snapshot-prewarm" not in thread_names
+
+
+def test_the_serve_entry_point_wires_the_real_prewarm_and_timeline(monkeypatch):
+    """The default is OFF in the loop, so the production wiring is what makes
+    the prewarm real — pin it, or the whole item ships dead."""
+
+    from hermes_cli.harness_parts import serve as serve_mod
+
+    read_fd, write_fd = os.pipe()
+    monkeypatch.setattr(serve_mod, "_claim_protocol_pipes", lambda: (read_fd, write_fd))
+
+    captured: dict = {}
+
+    def fake_serve_loop(reader, writer, **kwargs):
+        captured.update(kwargs)
+        return 0
+
+    monkeypatch.setattr(serve_mod, "serve_loop", fake_serve_loop)
+
+    class _Args:
+        ndjson = True
+        pool_size = 4
+
+    assert serve_mod._cmd_serve(_Args()) == 0
+    assert captured["snapshot_prewarm"] is serve_mod._prewarm_read_model_snapshot
+    assert captured["boot_timeline"] is not None
+    # Started at the command's first instruction: everything before it is
+    # interpreter + import tax, which is what the term is supposed to mean.
+    assert captured["boot_timeline"].interpreter_ms is None or (
+        captured["boot_timeline"].interpreter_ms >= 0
+    )
+
+
+def test_a_failing_prewarm_never_takes_the_runtime_down(monkeypatch):
+    from hermes_cli.harness_parts import serve as serve_mod
+    from agent_runtime import snapshot as snapshot_mod
+
+    def boom(**_kwargs):
+        raise RuntimeError("store torn mid-read")
+
+    monkeypatch.setattr(snapshot_mod, "build_snapshot", boom)
+
+    # Best effort by contract: it swallows, logs, and the serve keeps serving.
+    serve_mod._prewarm_read_model_snapshot()

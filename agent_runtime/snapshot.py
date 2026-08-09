@@ -272,7 +272,25 @@ def build_snapshot(
     incident_store=None,
     event_log=None,
     prompt_skills_catalogs=None,
+    *,
+    accept_inflight: bool = False,
 ) -> dict:
+    """Build the read-model core, coalescing concurrent builds (see above).
+
+    ``accept_inflight`` opts a caller into sharing the build that is ALREADY
+    running rather than waiting for the next one. It is not a freshness
+    shortcut and must only be used where the payload carries its own
+    watermark and the consumer replays everything after it — the stream
+    hydrate is the one such caller (``agent_runtime.stream.hydrate_frame``):
+    its ``watermark.event_offset`` comes from the snapshot itself and the
+    stream loop tails events from exactly that offset, so a core built one
+    build-duration earlier loses no event, it only delays it to the first
+    delta frame. Without this opt-in, a background prewarm build and the
+    hydrate that arrives moments later would cost TWO sequential builds
+    (strict coalescing makes the second caller wait for the first AND then
+    lead its own) — worse than no prewarm at all.
+    """
+
     custom_stores = any(
         value is not None
         for value in (
@@ -301,8 +319,12 @@ def build_snapshot(
     with _BUILD_COALESCE:
         # The first build STARTED at/after arrival is the one that satisfies
         # this caller; an in-flight build began earlier and may miss writes
-        # this caller has already observed.
-        target = state["started"] + 1
+        # this caller has already observed. ``accept_inflight`` callers opt out
+        # of that guarantee (see the docstring) and join the running build —
+        # only the RUNNING one: while ``running`` is true ``done`` is strictly
+        # behind ``started``, so this can never hand back a finished build's
+        # leftover result.
+        target = state["started"] + (0 if accept_inflight and state["running"] else 1)
         while True:
             if state["done"] >= target and state["result"] is not None:
                 payload = copy.deepcopy(state["result"])

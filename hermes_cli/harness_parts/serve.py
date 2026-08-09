@@ -441,6 +441,35 @@ def dispatch_argv(argv: list[str]) -> int:
     return code if isinstance(code, int) else 0
 
 
+def _prewarm_read_model_snapshot() -> None:
+    """Build ONE read-model core in the background right after ``ready``.
+
+    A fresh serve child's first snapshot build costs ~7.5s against ~2.2s warm
+    (measured 2026-08-09, B4/B11): ~5s of that is per-process cache fill —
+    YAML parse cache, tool-visibility memos, skill resolution, the event tail.
+    Serve is long-lived, so paying it on a daemon thread the moment the child
+    is ready takes it off whichever request would otherwise have been first.
+
+    Read-only by construction: ``build_snapshot`` projects, it does not write
+    (``write_snapshot`` is the writer, and is not called here). Concurrency is
+    handled by the builder's own coalescing — a real request arriving mid-build
+    joins it (hydrate) or waits and shares the next one; it never double-builds.
+    Best effort by contract: a failure here surfaces on the first real request
+    exactly as it would have without the prewarm.
+    """
+
+    try:
+        from agent_runtime.snapshot import build_snapshot
+
+        build_snapshot()
+    except Exception:
+        import logging as _logging
+
+        _logging.getLogger(__name__).debug(
+            "serve snapshot prewarm did not complete", exc_info=True
+        )
+
+
 def _prewarm_provider_runtime() -> None:
     """Best-effort warmup of the per-process one-time costs a chat turn pays.
 
@@ -481,9 +510,23 @@ def serve_loop(
     fingerprint: Callable[[], tuple | None] = _runtime_state_fingerprint,
     read_cache_max_age: float = _READ_CACHE_MAX_AGE_SECONDS,
     liveness_pump_interval_seconds: float = 5.0,
+    boot_timeline: Any = None,
+    snapshot_prewarm: Callable[[], None] | None = None,
 ) -> int:
     """Core dispatch loop over explicit streams. stdio is transport #1; a
-    future remote lane feeds the same loop (design doc §Future)."""
+    future remote lane feeds the same loop (design doc §Future).
+
+    ``boot_timeline`` is the caller's already-running :class:`BootTimeline`
+    (``_cmd_serve`` starts one at the process's first hermes instruction, so
+    ``interpreter_ms`` covers the import tax); the loop starts its own when a
+    caller supplies none. ``snapshot_prewarm`` is the post-``ready`` warmup
+    policy — injected, and OFF unless the real entry point turns it on, so the
+    loop's own unit tests never fire a multi-second projection build.
+    """
+
+    from agent_runtime.boot_timeline import BootTimeline
+
+    timeline = boot_timeline if boot_timeline is not None else BootTimeline()
     frames = _FrameWriter(writer)
     # Emitted before ANY heavy boot work (the agent_runtime import, root
     # config load, registry init, and the pre-ready orphan sweep below): a
@@ -492,11 +535,19 @@ def serve_loop(
     # before ``ready``; killing it mid-boot respawns into another cold boot
     # forever (2026-07-26 launcher kill-loop incident). Consumers that
     # predate this frame ignore unknown events, so it is purely additive.
+    #
+    # ``boot``: the self-attributing cold-boot stamp (T9). A >25s cold boot has
+    # been recorded and is not reproducible on demand (the OS file cache is
+    # warm on any machine that just ran the launcher), so the boot measures
+    # itself instead: ``interpreter_ms`` here is the interpreter + hermes CLI
+    # import tax the supervisor can see NO other way, and the ``ready`` frame
+    # below carries the per-phase breakdown of everything after it.
     frames.emit(
         {
             "event": "booting",
             "pid": os.getpid(),
             "schema_version": SERVE_SCHEMA_VERSION,
+            "boot": timeline.stamps(),
         }
     )
     from agent_runtime.persona_chat_continuity import (
@@ -510,6 +561,7 @@ def serve_loop(
         max_entries=persona_chat_cfg.max_hot_sessions,
         ttl_seconds=persona_chat_cfg.idle_ttl_seconds,
     )
+    timeline.mark("chat_registry_ms")
     # Publish this process's EXPLICIT chat head home into the shared runtime
     # store root — the ONE writer of that pointer. The Launcher always starts
     # serve with HERMES_HEAD_HOME; a plain CLI turn started later names no head
@@ -520,6 +572,7 @@ def serve_loop(
     from agent_runtime.chat_session_scope import publish_chat_head_home
 
     publish_chat_head_home()
+    timeline.mark("head_publish_ms")
     stdout_proxy = _LineFrameProxy(frames, "line")
     stderr_proxy = _LineFrameProxy(frames, "stderr")
     read_cache = _ReadModelCache(read_cache_max_age)
@@ -634,6 +687,7 @@ def serve_loop(
             runtime_root = str(_paths.store_root())
         except Exception:
             runtime_root = None
+        timeline.mark("store_root_ms")
         # Orphaned-turn sweep BEFORE the ready frame: serve boot is the moment
         # a launcher restart replaces a dead runtime, and the first hydrate is
         # only requested after ready — so records a dead executor left frozen
@@ -647,6 +701,7 @@ def serve_loop(
             orphaned_repaired = repair_orphaned_chat_turns()
         except Exception:
             orphaned_repaired = []
+        timeline.mark("orphaned_turn_sweep_ms")
         # Same moment, same reason, for detached dispatches: a row still marked
         # ``running`` whose owning process is provably gone can never finish, and
         # the sender is owed that answer too. Reclassifying it here — BEFORE the
@@ -662,6 +717,7 @@ def serve_loop(
             )
         except Exception:
             dispatches_restored = 0
+        timeline.mark("dispatch_restore_ms")
         ready_frame: dict[str, Any] = {
             "event": "ready",
             "pid": os.getpid(),
@@ -672,7 +728,36 @@ def serve_loop(
             ready_frame["orphaned_turns_repaired"] = len(orphaned_repaired)
         if dispatches_restored:
             ready_frame["dispatches_restored"] = dispatches_restored
+        # Every phase this boot actually paid, on the frame the supervisor
+        # already waits for — and the same line in agent.log, because the boot
+        # worth attributing (the cold one) is the boot nobody is watching a
+        # console for. Emission is defensive: a broken instrument must never be
+        # the reason a runtime fails to come up.
+        try:
+            ready_frame["boot_timeline"] = timeline.stamps()
+        except Exception:
+            pass
+        # Read-model warmup starts BEFORE ``ready`` is announced, unlike the
+        # provider warmup below. The launcher's first request lands within
+        # milliseconds of this frame, and only the build that STARTED FIRST can
+        # be shared: if the request wins the race it leads its own build and
+        # the warmup then queues a second, redundant one behind it. Starting a
+        # daemon thread costs microseconds, so ``ready`` is not delayed.
+        if snapshot_prewarm is not None:
+            threading.Thread(
+                target=snapshot_prewarm,
+                name="harness-serve-snapshot-prewarm",
+                daemon=True,
+            ).start()
         frames.emit(ready_frame)
+        try:
+            import logging as _logging
+
+            _logging.getLogger(__name__).info(
+                timeline.log_line("harness serve boot timeline:")
+            )
+        except Exception:
+            pass
         # Prewarm the first chat turn's one-time costs in the background:
         # lazy OpenAI SDK import (~1.7s), shared SSL context / CA-guard
         # verification (~0.7s), and the tool-definition module imports +
@@ -686,6 +771,9 @@ def serve_loop(
             name="harness-serve-prewarm",
             daemon=True,
         ).start()
+        # (The read-model warmup runs on its own thread, started just before
+        # the ready frame above — it must not queue behind this one's ~3s SDK
+        # import, and it must start its build before the first request does.)
         # A busy serve must never look dead. The launcher's stream watchdog
         # keys on "no frames for N seconds", and when pool workers are deep in
         # chat-turn work the infinite `stream` request's generator can starve
@@ -942,6 +1030,12 @@ def _claim_protocol_pipes() -> tuple[int, int]:
 
 
 def _cmd_serve(args) -> int:
+    # Started before anything else this command does: everything from process
+    # creation up to here is the interpreter + hermes import tax, and it is the
+    # single largest term in a cold boot.
+    from agent_runtime.boot_timeline import BootTimeline
+
+    timeline = BootTimeline()
     if not getattr(args, "ndjson", False):
         print(
             json.dumps(
@@ -961,6 +1055,8 @@ def _cmd_serve(args) -> int:
             writer,
             pool_size=getattr(args, "pool_size", DEFAULT_POOL_SIZE)
             or DEFAULT_POOL_SIZE,
+            boot_timeline=timeline,
+            snapshot_prewarm=_prewarm_read_model_snapshot,
         )
     finally:
         try:

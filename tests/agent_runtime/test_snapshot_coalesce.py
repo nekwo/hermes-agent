@@ -211,3 +211,117 @@ def test_builder_exception_propagates_and_releases_the_gate(monkeypatch):
     # The gate must not stay held after a failed build.
     assert snapshot_mod.build_snapshot() == {"ok": True}
     assert len(attempts) == 2
+
+
+def test_accept_inflight_shares_the_running_build(monkeypatch):
+    """``accept_inflight`` callers ride the build that is already running.
+
+    Serve prewarms a core right after ``ready`` (T2) and the launcher's boot
+    hydrate lands milliseconds later. Under the strict rule above that hydrate
+    would wait for the prewarm to finish AND then pay a second build — worse
+    than no prewarm at all. The hydrate is allowed to share because it carries
+    the built core's own watermark and the stream replays every event after it.
+    """
+
+    calls: list[int] = []
+    build_started = threading.Event()
+    release_build = threading.Event()
+
+    def fake_build(**_kwargs):
+        generation = len(calls) + 1
+        calls.append(generation)
+        build_started.set()
+        assert release_build.wait(5)
+        return {"generation": generation}
+
+    monkeypatch.setattr(snapshot_mod, "_build_snapshot_uncoalesced", fake_build)
+
+    results: dict[str, dict] = {}
+    leader = threading.Thread(
+        target=lambda: results.__setitem__("prewarm", snapshot_mod.build_snapshot())
+    )
+    leader.start()
+    assert build_started.wait(5)
+
+    joiner = threading.Thread(
+        target=lambda: results.__setitem__(
+            "hydrate", snapshot_mod.build_snapshot(accept_inflight=True)
+        )
+    )
+    joiner.start()
+    assert _wait_for(lambda: snapshot_mod._build_coalesce_state["waiters"] >= 1)
+    release_build.set()
+
+    leader.join(5)
+    joiner.join(5)
+
+    assert results["prewarm"] == {"generation": 1}
+    assert results["hydrate"] == {"generation": 1}
+    assert calls == [1]  # ONE build served both
+
+
+def test_accept_inflight_leads_its_own_build_when_nothing_is_running(monkeypatch):
+    """Sharing is only ever with a build that is RUNNING. With no build in
+    flight the caller builds — it never picks up a finished build's leftover
+    result, which could be arbitrarily older than its arrival."""
+
+    calls: list[int] = []
+
+    def fake_build(**_kwargs):
+        calls.append(1)
+        return {"generation": len(calls)}
+
+    monkeypatch.setattr(snapshot_mod, "_build_snapshot_uncoalesced", fake_build)
+
+    first = snapshot_mod.build_snapshot(accept_inflight=True)
+    second = snapshot_mod.build_snapshot(accept_inflight=True)
+
+    assert first == {"generation": 1}
+    assert second == {"generation": 2}
+    assert len(calls) == 2
+
+
+def test_the_stream_hydrate_joins_the_running_build(monkeypatch):
+    """The wiring that makes the prewarm worth having: the hydrate frame is
+    the caller that opts into sharing (behavioural pin, not a call-arg pin)."""
+
+    from agent_runtime import stream as stream_mod
+
+    calls: list[int] = []
+    build_started = threading.Event()
+    release_build = threading.Event()
+
+    def fake_build(**_kwargs):
+        generation = len(calls) + 1
+        calls.append(generation)
+        build_started.set()
+        assert release_build.wait(5)
+        return {
+            "generation": generation,
+            "parity": {"watermark": {"event_offset": 7}},
+            "generated_at": "2026-08-09T00:00:00Z",
+        }
+
+    monkeypatch.setattr(snapshot_mod, "_build_snapshot_uncoalesced", fake_build)
+    monkeypatch.setattr(stream_mod, "_identity_map", lambda _snap: {})
+
+    leader = threading.Thread(target=snapshot_mod.build_snapshot)
+    leader.start()
+    assert build_started.wait(5)
+
+    frames: dict[str, dict] = {}
+    hydrate = threading.Thread(
+        target=lambda: frames.__setitem__("hydrate", stream_mod.hydrate_frame())
+    )
+    hydrate.start()
+    assert _wait_for(lambda: snapshot_mod._build_coalesce_state["waiters"] >= 1)
+    release_build.set()
+
+    leader.join(5)
+    hydrate.join(5)
+
+    assert calls == [1]
+    assert frames["hydrate"]["core"]["generation"] == 1
+    # The shared core's own watermark rides out with it, so the stream tails
+    # from exactly where that core ended — nothing is skipped.
+    assert frames["hydrate"]["watermark"] == {"event_offset": 7}
