@@ -858,7 +858,17 @@ def audit_root_source(scope: TerminalEnvelopeScope | None) -> str:
     return AUDIT_ROOT_SOURCE_RESOLVER
 
 
-def _append_jsonl(root: Path, name: str, event: Mapping[str, Any]) -> None:
+def _append_jsonl(root: Path, name: str, event: Mapping[str, Any]) -> bool:
+    """Append one receipt row. Returns whether the row actually landed.
+
+    The boolean is not decoration. Since the 2026-08-09 ruling the receipt IS
+    the compensating control, so "a receipt was written" is a claim the runtime
+    now makes to the agent (:func:`envelope_provenance`). A writer that swallows
+    its IO error and still reports success would turn the one honest record of a
+    detective control into an unfalsifiable assertion — the failure had to become
+    a VALUE, not just a log line nobody reads.
+    """
+
     try:
         path = root / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -866,6 +876,8 @@ def _append_jsonl(root: Path, name: str, event: Mapping[str, Any]) -> None:
             handle.write(json.dumps(dict(event), ensure_ascii=False, sort_keys=True) + "\n")
     except Exception:
         logger.warning("Failed to write terminal-envelope audit row", exc_info=True)
+        return False
+    return True
 
 
 def record_envelope_decision(
@@ -873,21 +885,27 @@ def record_envelope_decision(
     command: str,
     *,
     scope: TerminalEnvelopeScope | None = None,
-) -> None:
+) -> bool:
     """Write the receipt. Never raises — auditability must not gate the answer.
 
     A granted command is recorded with its GRANT PROVENANCE (which config key
     allowed it, for which role and lane), because "it ran because the operator
     said so" is the only honest record of a command the envelope would
     otherwise have blocked.
+
+    Returns whether a row landed in :data:`ENVELOPE_DECISION_LOG` — the lane
+    that carries the ruling's compensating control. ``False`` for an ungoverned
+    or ungated command (nothing to receipt), for an unresolvable audit root, and
+    for a failed write. Callers surface it to the agent rather than asserting a
+    receipt exists; see :func:`envelope_provenance`.
     """
 
     if decision.outcome == OUTCOME_ALLOW:
-        return
+        return False
     resolved = scope if scope is not None else current_terminal_envelope_scope()
     root = _audit_root(resolved)
     if root is None:
-        return
+        return False
     preview = str(command or "")[:500]
     event: dict[str, Any] = {
         "ts": time.time(),
@@ -916,7 +934,7 @@ def record_envelope_decision(
     }
     if decision.grant_issues:
         event["grant_issues"] = [issue.row() for issue in decision.grant_issues]
-    _append_jsonl(root, ENVELOPE_DECISION_LOG, event)
+    written = _append_jsonl(root, ENVELOPE_DECISION_LOG, event)
     if decision.refused:
         _append_jsonl(
             root,
@@ -933,6 +951,7 @@ def record_envelope_decision(
                 "config_key": decision.config_key,
             },
         )
+    return written
 
 
 def record_legacy_block(
@@ -995,6 +1014,70 @@ def record_legacy_block(
         },
     )
     return True
+
+
+#: Top-level key the terminal tool's JSON result carries provenance under. Named
+#: here, next to the shape, so the producer and the merge site cannot drift.
+ENVELOPE_RESULT_KEY = "envelope"
+
+
+def envelope_provenance(
+    decision: TerminalEnvelopeDecision | None,
+    *,
+    receipted: bool,
+) -> dict[str, Any] | None:
+    """The provenance fragment merged into a GRANTED command's tool result.
+
+    Why this exists
+    ---------------
+    The 2026-08-09 unbounded-default ruling removed the preventive refusal for
+    every grantable command class and substituted a detective control: the
+    receipt in :data:`ENVELOPE_DECISION_LOG`. That trade only holds if the fact
+    is *checkable*, and the one party who could never check it was the party the
+    receipt is about. Live 2026-08-09 a QA agent ran a formerly-refused
+    ``network_egress`` command, was asked to confirm the mechanism, and reported
+    the audit proof MISSING — returning an honest BLOCKED verdict on facts that
+    were all fine — because the granted path returned the ordinary result and
+    said nothing. The runtime knew; its subject did not.
+
+    So this is not new authority and not a new decision. Everything here was
+    already resolved by :func:`envelope_decision` and already written by
+    :func:`record_envelope_decision`; this makes an existing fact visible to the
+    one reader who was structurally blind to it.
+
+    Shape and cost
+    --------------
+    Returns ``None`` for anything that is not a grant — an ungoverned lane
+    (``decision is None``), and, importantly, :data:`OUTCOME_ALLOW`, which is
+    almost every command an agent ever runs. The fragment rides ONLY the gated
+    classes, so the common path pays exactly zero tokens. A refusal pays nothing
+    here either: :func:`blocked_result` already carries the class, the config key
+    and the typed failure row.
+
+    ``receipt_log`` is the BARE FILENAME, never the resolved runtime root. The
+    agent needs to know which lane the row landed in, not where the operator's
+    store lives, and the same constant is already agent-visible in the HUD's
+    capability posture line. ``receipted`` is the write's real answer, not an
+    assumption — a receipt that silently failed to land is precisely the case an
+    agent must not report as proof.
+    """
+
+    if decision is None or not decision.granted:
+        return None
+    row: dict[str, Any] = {
+        "command_class": decision.command_class or "",
+        "decision": decision.outcome,
+        # Names the ROOT-config key for a config grant and the MODE for a
+        # permission-mode grant — the same string the receipt records, so the
+        # agent's account and the operator's log cannot disagree.
+        "granted_by": decision.granted_by or "",
+        "grant_source": decision.grant_source or "",
+        "receipt_log": ENVELOPE_DECISION_LOG,
+        "receipted": bool(receipted),
+    }
+    if decision.permission_mode:
+        row["permission_mode"] = decision.permission_mode
+    return {ENVELOPE_RESULT_KEY: row}
 
 
 def blocked_result(decision: TerminalEnvelopeDecision) -> dict[str, Any]:
@@ -1110,6 +1193,7 @@ __all__ = [
     "ENVELOPE_COMMAND_NOT_GRANTABLE",
     "ENVELOPE_COMMAND_REQUIRES_GRANT",
     "ENVELOPE_DECISION_LOG",
+    "ENVELOPE_RESULT_KEY",
     "GIT_PUSH",
     "GOVERNED_LANES",
     "GRANTABLE_COMMAND_CLASSES",
@@ -1136,6 +1220,7 @@ __all__ = [
     "current_terminal_envelope_scope",
     "envelope_config",
     "envelope_decision",
+    "envelope_provenance",
     "explain_terminal_envelope",
     "grant_config_key",
     "hard_floor_command_classes",

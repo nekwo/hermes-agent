@@ -45,7 +45,7 @@ import atexit
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, Any, List, Tuple
 
 from utils import env_var_enabled
 
@@ -2248,8 +2248,23 @@ def _harness_network_block_reason(command: str) -> str | None:
     return None
 
 
-def _harness_envelope_block(command: str) -> Optional[Dict[str, Any]]:
-    """The single envelope decision for this command, or ``None`` to proceed.
+def _harness_envelope_gate(
+    command: str,
+) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    """The single envelope decision for this command, as ``(block, provenance)``.
+
+    ``block`` is the refusal payload, or ``None`` to proceed — the historical
+    contract, preserved verbatim under :func:`_harness_envelope_block`.
+
+    ``provenance`` is the second half, added 2026-08-09. It is non-``None`` only
+    when the command was GRANTED (a formerly-refused gated class that ran
+    because a config grant or the run's permission mode allowed it), and it
+    carries the account of WHY into the tool result the agent actually reads.
+    Without it the granted path was silent: the runtime recorded the receipt and
+    the agent — the receipt's own subject — had no way to know it existed, so an
+    agent asked to confirm the mechanism could only report it missing. Every
+    other command (ungoverned lane, ungated class) gets ``None`` and pays
+    nothing; see ``agent_runtime.terminal_envelope.envelope_provenance``.
 
     Two layers, in order:
 
@@ -2271,10 +2286,18 @@ def _harness_envelope_block(command: str) -> Optional[Dict[str, Any]]:
        to the hard block: fail CLOSED, never open.
     """
 
+    if not isinstance(command, str):
+        # A non-string command has no class to classify and no envelope opinion.
+        # It falls through to ``_terminal_tool_run``'s typed invalid-command
+        # error, which is where it was answered before this gate moved ahead of
+        # that check — the ordering is preserved deliberately, not incidentally.
+        return None, None
+
     try:
         from agent_runtime.terminal_envelope import (
             blocked_result,
             envelope_decision,
+            envelope_provenance,
             record_envelope_decision,
         )
 
@@ -2286,17 +2309,19 @@ def _harness_envelope_block(command: str) -> Optional[Dict[str, Any]]:
         decision = None
     else:
         if decision is not None:
-            record_envelope_decision(decision, command)
+            receipted = bool(record_envelope_decision(decision, command))
             if decision.refused:
-                return blocked_result(decision)
+                return blocked_result(decision), None
             # Granted, or not an envelope-gated command at all. Either way the
             # governed lane has spoken and the legacy pattern table must not
-            # re-block what an operator grant just allowed.
-            return None
+            # re-block what an operator grant just allowed. A GRANT also reports
+            # its provenance upward; an ungated command resolves to ``None`` and
+            # the result is byte-identical to before.
+            return None, envelope_provenance(decision, receipted=receipted)
 
     reason = _harness_safety_block(command)
     if reason is None:
-        return None
+        return None, None
     _log_harness_blocked_attempt(command, reason)
     return {
         "output": "",
@@ -2305,7 +2330,44 @@ def _harness_envelope_block(command: str) -> Optional[Dict[str, Any]]:
         "status": "blocked",
         "blocked_by": "harness_execution_safety",
         "block_reason": reason,
-    }
+    }, None
+
+
+def _harness_envelope_block(command: str) -> Optional[Dict[str, Any]]:
+    """The refusal half of :func:`_harness_envelope_gate`, unchanged.
+
+    Kept as the narrow "may this run?" question for callers that do not compose
+    a tool result — the decision and its receipt are identical either way.
+    """
+
+    return _harness_envelope_gate(command)[0]
+
+
+def _with_envelope_provenance(
+    result: str,
+    provenance: Optional[Dict[str, Any]],
+) -> str:
+    """Merge a grant's provenance into the tool's JSON result string.
+
+    Best-effort by construction and in that order of priority: observability
+    must never damage the answer. Anything unexpected — a non-dict payload, a
+    result that is not JSON at all — returns the ORIGINAL string untouched
+    rather than raising or substituting a synthesized one. The agent losing a
+    provenance block is a degraded turn; the agent losing its command output is
+    a broken one.
+    """
+
+    if not provenance:
+        return result
+    try:
+        payload = json.loads(result)
+        if not isinstance(payload, dict):
+            return result
+        payload.update(provenance)
+        return json.dumps(payload, ensure_ascii=False)
+    except Exception:
+        logger.debug("Could not attach envelope provenance to terminal result", exc_info=True)
+        return result
 
 
 def _log_harness_blocked_attempt(command: str, reason: str) -> None:
@@ -2318,6 +2380,69 @@ def _log_harness_blocked_attempt(command: str, reason: str) -> None:
 
 
 def terminal_tool(
+    command: str,
+    background: bool = False,
+    timeout: Optional[int] = None,
+    task_id: Optional[str] = None,
+    session_id: Optional[str] = None,
+    force: bool = False,
+    workdir: Optional[str] = None,
+    pty: bool = False,
+    notify_on_complete: bool = False,
+    watch_patterns: Optional[List[str]] = None,
+) -> str:
+    """Execute a command, gated by the envelope and accounted for in the result.
+
+    Thin by design. The envelope decision happens ONCE, here, and the grant's
+    provenance is merged ONCE, here — which is the whole reason this wrapper
+    exists rather than the gate living inside :func:`_terminal_tool_run`. That
+    body has well over a dozen ``return json.dumps(...)`` exits (timeouts,
+    backend failures, background handoffs, PTY paths); attaching provenance at
+    each of them would be a hand-maintained list that a new exit silently falls
+    out of, and a granted command whose result quietly lost its audit account is
+    exactly the invisible-fact class this change was made to retire. One
+    chokepoint means a new exit inherits the behaviour for free.
+
+    Argument and return contract: see :func:`_terminal_tool_run`. The model-facing
+    schema is ``TERMINAL_SCHEMA``/``TERMINAL_TOOL_DESCRIPTION``, not this
+    docstring, so the tool the model sees is unchanged.
+    """
+
+    try:
+        block, provenance = _harness_envelope_gate(command)
+    except Exception as exc:  # pragma: no cover - the gate is defensive throughout
+        # Fail CLOSED, in the same shape the body's own handler returns. Moving
+        # the gate out of ``_terminal_tool_run`` moved it out of that
+        # ``except Exception`` too; without this, a gate fault would stop being
+        # a typed tool error and start propagating into the tool executor — and
+        # a command whose safety decision crashed must not run on the way there.
+        logger.error("Terminal envelope gate failed; refusing command", exc_info=True)
+        return json.dumps({
+            "output": "",
+            "exit_code": -1,
+            "error": f"Failed to execute command: {exc}",
+            "status": "error",
+        }, ensure_ascii=False)
+    if block is not None:
+        return json.dumps(block, ensure_ascii=False)
+    return _with_envelope_provenance(
+        _terminal_tool_run(
+            command,
+            background=background,
+            timeout=timeout,
+            task_id=task_id,
+            session_id=session_id,
+            force=force,
+            workdir=workdir,
+            pty=pty,
+            notify_on_complete=notify_on_complete,
+            watch_patterns=watch_patterns,
+        ),
+        provenance,
+    )
+
+
+def _terminal_tool_run(
     command: str,
     background: bool = False,
     timeout: Optional[int] = None,
@@ -2372,9 +2497,9 @@ def terminal_tool(
                 "error": f"Invalid command: expected string, got {type(command).__name__}",
                 "status": "error",
             }, ensure_ascii=False)
-        harness_block = _harness_envelope_block(command)
-        if harness_block is not None:
-            return json.dumps(harness_block, ensure_ascii=False)
+        # The envelope decision and its provenance are the WRAPPER's job
+        # (:func:`terminal_tool`) — one gate, one merge, ahead of every exit
+        # below.
 
         # Get configuration
         config = _get_env_config()
