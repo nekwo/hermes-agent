@@ -170,15 +170,39 @@ def test_underscored_private_extension_counts_as_the_distributions_own(tmp_path)
 
 
 def test_namespace_package_without_a_trapped_extension_is_clean(tmp_path):
+    # The filenames here deliberately share the module's NAME prefix and differ
+    # only in suffix — a type stub and a source shim are both legitimate
+    # contents of a namespace directory. A detector that dropped the
+    # compiled-extension suffix check would call this corruption.
     empty = tmp_path / "jiter"
     empty.mkdir()
-    (empty / "notes.txt").write_text("x", encoding="utf-8")
+    (empty / "jiter.pyi").write_text("def from_json(...): ...\n", encoding="utf-8")
+    (empty / "jiter.py").write_text("from_json = None\n", encoding="utf-8")
 
     assert shadowed_extension_issue("jiter", find_spec=lambda name: _namespace_spec(empty)) is None
 
 
-def test_regular_module_is_clean(tmp_path):
-    spec = SimpleNamespace(origin=str(tmp_path / "jiter.pyd"), submodule_search_locations=None)
+def test_real_package_holding_its_own_extension_is_clean(tmp_path):
+    # A HEALTHY installed package: it has __init__.py (so ``origin`` is set)
+    # and legitimately ships its compiled extension inside its own directory.
+    # Only the missing __init__.py made the live jiter/ corrupt — a detector
+    # that looked at directory contents alone would condemn this layout.
+    package = tmp_path / "jiter"
+    package.mkdir()
+    (package / "__init__.py").write_text("from .jiter import from_json\n", encoding="utf-8")
+    (package / "jiter.cp311-win_amd64.pyd").write_bytes(b"MZ")
+    spec = SimpleNamespace(
+        origin=str(package / "__init__.py"), submodule_search_locations=[str(package)]
+    )
+
+    assert shadowed_extension_issue("jiter", find_spec=lambda name: spec) is None
+
+
+def test_plain_single_file_extension_at_site_packages_root_is_clean(tmp_path):
+    # The correct layout the live venv had lost: the .pyd at the root, no dir.
+    spec = SimpleNamespace(
+        origin=str(tmp_path / "jiter.cp311-win_amd64.pyd"), submodule_search_locations=None
+    )
 
     assert shadowed_extension_issue("jiter", find_spec=lambda name: spec) is None
 
