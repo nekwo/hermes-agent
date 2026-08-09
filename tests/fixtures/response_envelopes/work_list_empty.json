@@ -18,7 +18,7 @@
     "count": 0,
     "counts": {
       "total": 0,
-      "unavailable_sources": 2
+      "unavailable_sources": 1
     },
     "cursor": null,
     "item_kind": "running_work",
@@ -43,11 +43,6 @@
       "dispatch": {
         "lane": "durable",
         "status": "ok"
-      },
-      "mcp_server": {
-        "lane": "live",
-        "reason": "not_in_process",
-        "status": "unavailable"
       },
       "terminal": {
         "detail": "head_home=hermes; no checkpoint file",

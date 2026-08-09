@@ -322,14 +322,19 @@ def classify_orphan_persona_instances(
             "updated_at": _isoformat(_row_get(row, "updated_at")),
         }
 
+        # S70 (contract 54) dropped the ``current_work_assignment_id`` /
+        # ``attached_task_id`` wire aliases, so those two slots could no longer be
+        # reached from either caller: ``reconcile_persona_instances`` passes
+        # ``to_jsonable`` STORE rows (canonical names only) and ``snapshot.py``
+        # passes wire rows that no longer carry the aliases. Both aliases always
+        # held the same value as the canonical key beside them, so the held/prunable
+        # verdict is unchanged — this drops unreachable keys, not a safety belt.
         active = any(
             str(_row_get(row, key) or "").strip()
             for key in (
                 "active_run_id",
                 "current_assignment_id",
-                "current_work_assignment_id",
                 "current_task_id",
-                "attached_task_id",
             )
         )
         if active:

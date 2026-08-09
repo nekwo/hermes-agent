@@ -92,7 +92,12 @@ _PERSONA_INSTANCE_STORE_TO_WIRE: dict[str, tuple[str, ...]] = {
     "spawned_by": ("spawned_by",),
     "goal_id": ("goal_id",),
     "mode": ("mode", "lifecycle_mode"),
-    "current_task_id": ("current_task_id", "attached_task_id"),
+    # S70 (contract 54) dropped the ``attached_task_id`` alias from the full
+    # snapshot row; it leaves the patch lane in the same wave. A patch that kept
+    # projecting it would ADD a key the full rebuild no longer has — the launcher
+    # folds whatever wire fields arrive with no allowlist, so the two lanes would
+    # disagree about the row's shape after the first incremental update.
+    "current_task_id": ("current_task_id",),
     "display_name": ("display_name", "agent_profile_display_name"),
     "current_chat_goal": ("current_chat_goal",),
     "skill_overrides": ("skill_overrides", "skills"),
@@ -278,7 +283,6 @@ def _persona_instance_wire_row(instance: Any, persona: Any) -> dict[str, Any]:
         "mode": instance.mode,
         "lifecycle_mode": instance.mode,
         "current_task_id": instance.current_task_id,
-        "attached_task_id": instance.current_task_id,
         "display_name": instance.display_name,
         "agent_profile_display_name": instance.display_name,
         "current_chat_goal": instance.current_chat_goal,

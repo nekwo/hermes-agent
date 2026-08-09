@@ -364,12 +364,18 @@ class PersonaInstance:
     # Legacy dual-purpose pointer.  Read only for v1 migration; new writers do
     # not use it for either chat or worker ownership.
     session_id: str | None = None
-    context_receipt_id: str | None = None
-    compression_receipt_id: str | None = None
+    # S70 (contract 54) removed ``context_receipt_id`` / ``compression_receipt_id``
+    # / ``tool_budget_used`` / ``watchdog_warning_count`` from this record. Their
+    # only writers died with the worker/goal lanes; ``ensure_for_personas`` was
+    # left resetting values nothing could set. ``token_budget_used`` and
+    # ``last_heartbeat_at`` are equally writer-less but STAY: both still have live
+    # readers (the Launcher's token-total fallback and its roster-recency /
+    # gateway-frame lanes; the orphan classifier's heartbeat hold), so retiring
+    # them is a reader-side decision, not a wire cleanup. Dropping a field here is
+    # safe against persisted rows: ``serde._coerce`` builds kwargs from the
+    # dataclass fields and silently ignores unknown keys already on disk.
     skill_manifest_hash: str | None = None
     token_budget_used: int = 0
-    tool_budget_used: int = 0
-    watchdog_warning_count: int = 0
     child_events_offset: int = 0
     last_heartbeat_at: datetime | None = None
     updated_at: datetime | None = None

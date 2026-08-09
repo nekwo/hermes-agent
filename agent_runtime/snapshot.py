@@ -831,7 +831,32 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         # "1 running". Active calls remain visible on their owning chat turn's
         # tool trace. This is a wire removal, so the contract and Launcher pin
         # move together under the removal rule recorded at 46.
-        "contract_version": 53,
+        #
+        # 54 (S70 persona-instance wire prune, 2026-08-09) REMOVES six keys from
+        # every ``persona_instances`` row. Two were duplicate ALIASES that
+        # projected byte-identical values to the canonical key beside them —
+        # ``current_work_assignment_id`` (= ``current_assignment_id``) and
+        # ``attached_task_id`` (= ``current_task_id``); ``attached_task_id`` also
+        # leaves the ``state_patches`` projection in this wave, because a patch
+        # lane that kept emitting a key the full rebuild dropped would make the
+        # two lanes disagree about the row's shape. Four were writer-less since
+        # the worker/goal lanes died, with no consumer past a Launcher model copy:
+        # ``context_receipt_id``, ``compression_receipt_id``, ``tool_budget_used``,
+        # ``watchdog_warning_count`` (these four also leave ``PersonaInstance``
+        # itself; ``serde._coerce`` ignores the stale keys still on disk).
+        #
+        # Two fields the deferred-debt ledger grouped with them deliberately DID
+        # NOT move, and the distinction is the point of this entry: writer-less is
+        # not the same as reader-less. ``token_budget_used`` feeds the Launcher's
+        # token-total fallback (``totalTokens ?? tokenBudgetUsed``) and
+        # ``last_heartbeat_at`` is read by the Launcher's roster-recency tiebreak
+        # AND re-emitted on the Agent Gateway state frame AND read here by
+        # ``classify_orphan_persona_instances`` as the heartbeat HOLD. Dropping
+        # either would silently retire a live consumer, so retiring them is a
+        # reader-side decision that needs its own ruling — not a wire cleanup.
+        # This is a wire removal, so the contract and Launcher pin move together
+        # under the removal rule recorded at 46.
+        "contract_version": 54,
         "generated_at": data.get("generated_at"),
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
         "redaction_observed": _redaction_observed(data),

@@ -250,7 +250,7 @@ def test_snapshot_offices_section_and_conflict_parity_warning():
     assert row["orphaned"] is False
     codes = {w.get("code") for w in snap["parity"]["warnings"]}
     assert "office_actor_conflict" in codes
-    assert snap["parity"]["contract_version"] == 52
+    assert snap["parity"]["contract_version"] == 54
 
 
 # ── dry-run: full validation, zero writes, zero events (mutation-arg trap) ──

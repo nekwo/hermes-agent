@@ -1635,13 +1635,15 @@ class PersonaInstanceStore:
             instance = self.ensure_for_persona(persona)
             if instance.mode in {"chat", "free_floating"}:
                 continue
+            # S70 (contract 54): the two receipt-id disjuncts that used to widen
+            # this predicate are gone with the fields. They were always falsy —
+            # nothing had written either since the worker/goal lanes died — so
+            # the set of instances this resets is unchanged.
             if (
                 instance.state != WorkerSessionState.IDLE
                 or instance.current_assignment_id
                 or instance.current_task_id
                 or instance.active_run_id
-                or instance.context_receipt_id
-                or instance.compression_receipt_id
             ):
                 instance.state = WorkerSessionState.IDLE
                 instance.mode = "configured"
@@ -1651,11 +1653,7 @@ class PersonaInstanceStore:
                 instance.spawned_by = None
                 instance.steered_by = []
                 instance.active_run_id = None
-                instance.context_receipt_id = None
-                instance.compression_receipt_id = None
                 instance.token_budget_used = 0
-                instance.tool_budget_used = 0
-                instance.watchdog_warning_count = 0
                 instance.last_heartbeat_at = None
                 self.update(instance)
         return self.list_all()
@@ -2234,9 +2232,15 @@ def persona_instance_summary(
         "steered_by": list(instance.steered_by),
         "returned_to": instance.returned_to,
         "current_chat_goal": instance.current_chat_goal,
-        "current_work_assignment_id": instance.current_assignment_id,
+        # S70 removed the two duplicate ALIASES this row used to carry
+        # (contract 54): ``current_work_assignment_id`` and ``attached_task_id``
+        # projected byte-identical values to the canonical keys below them, so a
+        # reader could never distinguish them. No Launcher code read either name;
+        # the only reader was the orphan classifier's own alias slot, which reads
+        # the canonical key in the same predicate. Note the asymmetry the ledger
+        # missed: ``attached_task_id`` was NOT writer-less — ``current_task_id``
+        # is written live by the steer/goal-id lane — it was merely redundant.
         "current_assignment_id": instance.current_assignment_id,
-        "attached_task_id": instance.current_task_id,
         "current_task_id": instance.current_task_id,
         # S56 removed ``active_worker_session_id`` from this row (contract 47).
         # Its only writer was ``update_from_worker``, which went with the worker
@@ -2245,12 +2249,16 @@ def persona_instance_summary(
         "default_chat_session_id": instance.default_chat_session_id,
         "chat_session_id": instance.default_chat_session_id,
         "session_id": instance.default_chat_session_id,
-        "context_receipt_id": instance.context_receipt_id,
-        "compression_receipt_id": instance.compression_receipt_id,
+        # S70 (contract 54) also dropped ``context_receipt_id`` /
+        # ``compression_receipt_id`` / ``tool_budget_used`` /
+        # ``watchdog_warning_count`` from this row: writer-less since the
+        # worker/goal lanes died AND with no consumer past the Launcher's model
+        # copy. ``token_budget_used`` / ``last_heartbeat_at`` are just as
+        # writer-less but STAY — both are read live downstream (token-total
+        # fallback; roster recency, gateway state frame, orphan heartbeat hold),
+        # so they are a reader-side retirement, not a wire cleanup.
         "skill_manifest_hash": instance.skill_manifest_hash,
         "token_budget_used": instance.token_budget_used,
-        "tool_budget_used": instance.tool_budget_used,
-        "watchdog_warning_count": instance.watchdog_warning_count,
         "last_heartbeat_at": instance.last_heartbeat_at,
         "updated_at": instance.updated_at,
     }

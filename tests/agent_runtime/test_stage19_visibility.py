@@ -29,4 +29,4 @@ def test_snapshot_exposes_goal_timeline_proof_summaries_and_why_not_done():
     snap = build_snapshot()
     for key in ("goals", "runs", "proofs", "incidents", "stage_verification"):
         assert key not in snap
-    assert snap["parity"]["contract_version"] == 52
+    assert snap["parity"]["contract_version"] == 54

@@ -2383,13 +2383,54 @@ the moment the lane died, which is exactly that gate doing its job.
    instance-mint fixture. Fold it into a shared test fixture (or rename to a
    test-support mint) in a mechanical follow-up; not cut here because the
    blast radius is unrelated suites in a live runtime.
-5. **Dead-but-contract-relevant persona-instance wire fields** (all writers
-   gone since the worker/mission lanes died; `ensure_for_personas` only ever
-   resets them): `token_budget_used`, `last_heartbeat_at`,
-   `context_receipt_id`, `compression_receipt_id` are PARSED by the Launcher
-   (`mission_control_snapshot.dart:4106-4109`) — carried for contract;
-   `tool_budget_used`, `watchdog_warning_count`, `current_work_assignment_id`,
-   `attached_task_id` have NO launcher reader but dropping any snapshot key
-   requires the contract bump — decision-ready as one batch with (2).
-   `current_assignment_id` is launcher-parsed and now permanently null going
-   forward (only residual rows carry values); it belongs to batch (2) too.
+5. ~~**Dead-but-contract-relevant persona-instance wire fields**~~ — **LANDED
+   2026-08-09 at contract 54.** See "S70 wire prune" below for what actually
+   moved and for the three claims in the original entry that did not survive
+   verification.
+
+### S70 wire prune — landed at contract 54 (2026-08-09)
+
+Six keys left every `persona_instances` row; the Launcher pin moved to 54 in
+the same wave. **Cut:** `context_receipt_id`, `compression_receipt_id`,
+`tool_budget_used`, `watchdog_warning_count` (writer-less, and no consumer past
+a Launcher model copy — these four also leave `PersonaInstance` itself, which is
+safe because `serde._coerce` builds kwargs from the dataclass fields and ignores
+stale keys on persisted rows) plus the two duplicate ALIASES
+`current_work_assignment_id` and `attached_task_id`.
+
+**Three corrections to item 5 as written.** They are the reason "writer-less"
+must never be used as a synonym for "dead":
+
+- **`attached_task_id` was NOT writer-less.** It is a wire alias of
+  `current_task_id`, which is written live by the steer/`goal_id` lane
+  (`persona_assignments.py`). It was cut as *redundant* — the same value still
+  ships under the canonical key — not as dead. Same shape for
+  `current_work_assignment_id` (alias of `current_assignment_id`).
+- **The item missed the incremental lane entirely.** `attached_task_id` was also
+  projected by `state_patches._persona_instance_wire_row` and mapped in
+  `_PERSONA_INSTANCE_STORE_TO_WIRE`. The Launcher folds whatever wire fields a
+  patch carries with no allowlist, so cutting only the full-snapshot copy would
+  have let the first incremental update re-add a key the rebuild had dropped —
+  the two lanes must move together.
+- **`token_budget_used` and `last_heartbeat_at` are writer-less but NOT
+  reader-less, so they STAY.** `token_budget_used` feeds the Launcher's
+  token-total fallback (`totalTokens ?? tokenBudgetUsed` in
+  `mission_agent_instance.dart`), not just a parse.  `last_heartbeat_at` has
+  three live readers: the Launcher's roster-recency tiebreak
+  (`mission_agent_roster_policy.dart`), its Agent Gateway state frame
+  (`gateway_state_frame.dart`, which re-emits the value), and — in THIS repo —
+  `classify_orphan_persona_instances`, where a fresh heartbeat is the
+  `held-heartbeat` reason that protects a row from being archived. Retiring
+  either is a reader-side ruling with its own blast radius, not a wire cleanup.
+
+`current_assignment_id` also stays: the Launcher folds it into the agent roster
+against the `persona_assignments` block, and residual rows still carry values.
+It remains part of batch (2).
+
+**Also found, unrelated to the prune but fixed in the same wave:** the emitted
+contract version is asserted by SIX literals across five test files with no
+shared authority, and the 53 landing moved only two of them — `test_s47`
+(which calls itself "the only live pin"), `test_office_store`,
+`test_s57_unruled_config_debt_removal` and `test_stage19_visibility` were all
+RED on `main` at 52-vs-53 before this wave. All six now read 54. The structural
+fix — import one constant from the producer — is filed, not done.

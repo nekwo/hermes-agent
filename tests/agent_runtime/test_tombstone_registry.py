@@ -2810,6 +2810,49 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "CHAT_TRANSCRIPT_PERSIST_FAILED",
         "POST_TURN_PERSIST_FAILED",
     ),
+    # -- S70 (second half) — the persona-instance wire prune, contract 54 -
+    # The ledger's parked batch (5), landed with the snapshot contract bump the
+    # wire removal requires. Four fields were writer-less since the worker/goal
+    # lanes died — `ensure_for_personas` only ever RESET them — and had no
+    # consumer past a Launcher model copy, so they leave both the wire row and
+    # `PersonaInstance` itself. Two more were duplicate wire ALIASES carrying
+    # byte-identical values to the canonical key beside them.
+    #
+    # `token_budget_used` and `last_heartbeat_at` are just as writer-less and are
+    # deliberately NOT rowed: both still have live readers (the Launcher's
+    # token-total fallback; its roster-recency tiebreak and gateway state frame;
+    # this repo's orphan heartbeat HOLD). Writer-less is not reader-less, and a
+    # tombstone on a name something still reads would be a false contract.
+    *rows(
+        "s70",
+        "HEAD",
+        Form.CLASS_ATTR,
+        "writer-less persona-instance record fields whose only assignment was "
+        "the configured/idle RESET; dropped from the record as well as the "
+        "wire, since serde._coerce builds kwargs from the dataclass fields and "
+        "ignores the stale keys still on persisted rows",
+        "models.PersonaInstance.context_receipt_id",
+        "models.PersonaInstance.compression_receipt_id",
+        "models.PersonaInstance.tool_budget_used",
+        "models.PersonaInstance.watchdog_warning_count",
+        scope=_AR,
+    ),
+    *rows(
+        "s70",
+        "HEAD",
+        Form.CODE,
+        "duplicate persona-instance wire ALIASES: each projected the exact "
+        "value of the canonical key beside it (current_assignment_id / "
+        "current_task_id), so no reader could tell them apart. Rowed as CODE "
+        "because they are wire-key STRINGS, and scoped repo-wide so neither "
+        "the snapshot row, the state_patches projection, nor the orphan "
+        "classifier's alias slot can re-grow one. NOTE the ledger called "
+        "attached_task_id writer-less: it was not — current_task_id is written "
+        "live by the steer/goal-id lane — it was merely redundant, which is "
+        "why cutting it loses no value from the frame",
+        "current_work_assignment_id",
+        "attached_task_id",
+    ),
 )
 
 

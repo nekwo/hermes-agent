@@ -113,7 +113,17 @@ S47_CONTRACT_VERSION = 46
 #: ``MissionSnapshotEnvelope.health()`` requires EXACT contract equality, so an
 #: additive section under an unbumped version would be invisible rather than
 #: merely unread.
-CURRENT_CONTRACT_VERSION = 52
+#:
+#: S70 (-> 54) found this pin STALE at 52 while the frame emitted 53: this test
+#: had been RED on main since the 53 landing, and so had the three other files
+#: that hardcode the emitted value (``test_office_store``,
+#: ``test_s57_unruled_config_debt_removal``, ``test_stage19_visibility``). The
+#: sentence above calls this "the only live pin" -- it is not, and that is the
+#: defect. SIX literals across five files assert the emitted version with no
+#: shared authority, so a bump moves whichever ones its author happened to grep
+#: and the rest go quietly red. The fix is one constant imported from the
+#: producer; filed rather than done here so the contract wave stays reviewable.
+CURRENT_CONTRACT_VERSION = 54
 
 
 def _function(module, name: str) -> ast.FunctionDef:
