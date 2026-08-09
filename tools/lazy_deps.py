@@ -67,6 +67,7 @@ Adding a new backend:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import re
@@ -75,9 +76,10 @@ import site
 import subprocess
 import sys
 import sysconfig
+import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterator, Optional
 
 from hermes_cli._subprocess_compat import windows_hide_flags
 
@@ -338,11 +340,118 @@ class FeatureUnavailable(RuntimeError):
         )
 
 
+class RuntimeInstallDenied(FeatureUnavailable):
+    """A lazy install was refused because the caller is inside a scope that
+    must not mutate the venv it is running in — see :func:`deny_venv_installs`.
+
+    Subclasses :class:`FeatureUnavailable` on purpose: every existing call site
+    already handles that exception by reporting the feature unavailable, so the
+    refusal degrades exactly like "the package was never installed" instead of
+    introducing a new failure mode at ~40 call sites. Callers that want to tell
+    "refused here" from "genuinely absent" can catch this subclass.
+    """
+
+
 @dataclass(frozen=True)
 class _InstallResult:
     success: bool
     stdout: str
     stderr: str
+
+
+# =============================================================================
+# Venv-mutation barrier
+#
+# WHY THIS EXISTS (2026-08-09 incident). Tony's Mission Control refused to
+# open behind a destructive-repair gate because the runtime venv had a corrupt
+# ``jiter``: a compiled single-file extension trapped inside a ``jiter/``
+# directory with no ``__init__.py``, plus THREE conflicting ``*.dist-info``
+# dirs (0.12.0 / 0.13.0 / 0.15.0) whose invalid metadata made pip silently
+# no-op every ``--force-reinstall``. That is the signature of concurrent or
+# interrupted installs racing into one venv — and this runtime generated
+# exactly that traffic: a lazy ``provider.anthropic`` install ran MID-TURN,
+# during a live operator conversation, inside the chat-root lease.
+#
+# THE RULE: a live turn must never mutate the venv it is running in.
+#
+# Enforcement lives HERE, at the one chokepoint every lazy install already
+# funnels through (``ensure`` / ``install_specs`` / ``_venv_pip_install``),
+# rather than at each of the ~40 call sites — a per-call-site rule would be
+# re-broken by the next backend that adds an ``ensure()`` line.
+#
+# WHAT IS DENIED is precisely venv mutation, not "installs". A durable-target
+# install (``HERMES_LAZY_INSTALL_TARGET``, used by the immutable Docker image)
+# writes to a separate directory that is APPENDED to ``sys.path`` and can only
+# add new importable modules — it structurally cannot shadow, downgrade, or
+# corrupt the running venv. Those stay allowed, so sealed deployments behave
+# exactly as before. The same principle exempts ``pip install --target`` in
+# ``hermes_cli.tools_config._pip_install`` (the LSP server installer).
+# =============================================================================
+
+
+_barrier_lock = threading.RLock()
+# Stack of active denial reasons. A stack (not a bool) so nested scopes — a
+# subagent turn inside an operator turn — restore correctly, and so the reason
+# reported is the innermost, most specific one.
+_barrier_reasons: list[str] = []
+
+
+@contextlib.contextmanager
+def deny_venv_installs(reason: str) -> Iterator[None]:
+    """Refuse venv-scoped lazy installs for the duration of this scope.
+
+    ``reason`` is operator-facing prose naming the scope (e.g.
+    ``"an agent turn (profile='base')"``); it is quoted verbatim in the
+    :class:`RuntimeInstallDenied` message, which also carries the exact
+    ``uv pip install`` / ``pip install`` command to run instead.
+
+    PROCESS-WIDE, not context-local, and deliberately so: an agent turn runs
+    its tools on worker threads, and a ``ContextVar`` would not follow them —
+    the tool call is exactly where a mid-turn install fires. The cost is that a
+    concurrent operator-initiated install in the SAME process is also refused
+    while a turn is live, which is the safe direction: that concurrency is the
+    incident's root cause.
+    """
+    text = str(reason).strip() or "a scope that must not mutate the venv"
+    with _barrier_lock:
+        _barrier_reasons.append(text)
+    try:
+        yield
+    finally:
+        with _barrier_lock:
+            try:
+                _barrier_reasons.remove(text)
+            except ValueError:  # pragma: no cover - defensive
+                pass
+
+
+def venv_install_denial() -> Optional[str]:
+    """Return the innermost active denial reason, or ``None`` if unbarriered.
+
+    Reports the barrier state only; it does NOT account for the durable-target
+    exemption. Use :func:`venv_mutation_denial` for the enforcement answer.
+    """
+    with _barrier_lock:
+        return _barrier_reasons[-1] if _barrier_reasons else None
+
+
+def venv_mutation_denial() -> Optional[str]:
+    """Return why an install must be refused right now, or ``None`` to proceed.
+
+    ``None`` when no barrier is armed, or when a durable install target is
+    configured (that install cannot touch the running venv — see the module
+    header and :func:`_lazy_install_target`).
+    """
+    reason = venv_install_denial()
+    if reason is None:
+        return None
+    if _lazy_install_target() is not None:
+        return None
+    return (
+        f"refusing to install into the running venv from inside {reason}: a live "
+        f"turn must never mutate the environment it is executing in "
+        f"(2026-08-09 venv-corruption incident). Install it up front instead"
+    )
 
 
 # =============================================================================
@@ -699,6 +808,13 @@ def _venv_pip_install(specs: tuple[str, ...], *, timeout: int = 300) -> _Install
     if not specs:
         return _InstallResult(True, "", "")
 
+    # Last line of defence for the venv-mutation barrier. ``ensure`` and
+    # ``install_specs`` both refuse earlier with a typed result; this catches
+    # any future caller that reaches the pip ladder directly.
+    denial = venv_mutation_denial()
+    if denial:
+        return _InstallResult(False, "", denial)
+
     target = _lazy_install_target()
     constraints: Optional[Path] = None
 
@@ -826,6 +942,13 @@ def ensure(feature: str, *, prompt: bool = True) -> None:
     unsupported = _unsupported_feature_reason(feature)
     if unsupported:
         raise FeatureUnavailable(feature, missing, unsupported)
+
+    # Venv-mutation barrier — checked BEFORE the config gate and before the
+    # interactive confirmation, because a live turn must neither install nor
+    # block on an operator prompt it has no terminal for.
+    denial = venv_mutation_denial()
+    if denial:
+        raise RuntimeInstallDenied(feature, missing, denial)
 
     # Validate every spec against the allowlist + safety regex. Belt and
     # braces — the keys-in-LAZY_DEPS check above already constrains this.
@@ -974,6 +1097,10 @@ def install_specs(specs: list[str] | tuple[str, ...], *, timeout: int = 300) -> 
                 ok=False, blocked=True,
                 reason=f"refusing to install unsafe spec {spec!r}",
             )
+
+    denial = venv_mutation_denial()
+    if denial:
+        return InstallSpecsResult(ok=False, blocked=True, reason=denial)
 
     if not _allow_lazy_installs():
         target = _lazy_install_target()

@@ -35,21 +35,51 @@ _anthropic_sdk: Any = ...  # sentinel — None means "tried and missing"
 
 
 def _get_anthropic_sdk():
-    """Return the ``anthropic`` SDK module, importing lazily. None if not installed."""
+    """Return the ``anthropic`` SDK module, importing lazily. None if not installed.
+
+    The lazy install here is best-effort and is REFUSED outright while an agent
+    turn is live (``tools.lazy_deps.deny_venv_installs``): on 2026-08-09 this
+    exact call ran a mid-conversation ``pip install`` inside the chat-root lease
+    and left the runtime venv with three conflicting ``jiter`` dist-info dirs.
+    The turn-safe path is that ``hermes_cli.runtime_environment`` declares
+    ``anthropic`` for provider/api-mode ``anthropic``, so a missing SDK is
+    reported by preflight before token spend.
+
+    Two consequences here are deliberate:
+
+    * A refusal is LOGGED at warning level carrying the exact install command.
+      The auxiliary client can route to Anthropic even when the persona's
+      provider is something else, which preflight cannot predict — without this
+      line that path degrades to "no auxiliary client configured" with nothing
+      naming the cause.
+    * A refusal does NOT latch the ``None`` sentinel, so the SDK becomes usable
+      as soon as it is installed rather than staying dead for the life of the
+      process. A genuine ImportError with no refusal still latches, exactly as
+      before, so the happy path pays no repeated import cost.
+    """
     global _anthropic_sdk
     if _anthropic_sdk is ...:
+        refusal = ""
         try:
             from tools.lazy_deps import ensure as _lazy_ensure
             _lazy_ensure("provider.anthropic", prompt=False)
         except ImportError:
             pass
-        except Exception:
-            # FeatureUnavailable — fall through to ImportError handling below
-            pass
+        except Exception as exc:
+            # FeatureUnavailable (incl. RuntimeInstallDenied) — fall through to
+            # the import below, which still succeeds whenever the SDK is present
+            # and only its version pin was unsatisfied.
+            refusal = str(exc)
         try:
             import anthropic as _sdk
             _anthropic_sdk = _sdk
         except ImportError:
+            if refusal:
+                logger.warning(
+                    "Anthropic SDK unavailable and was not installed on demand: %s",
+                    refusal,
+                )
+                return None
             _anthropic_sdk = None
     return _anthropic_sdk
 

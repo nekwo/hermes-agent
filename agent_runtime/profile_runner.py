@@ -549,6 +549,26 @@ class ProfileAgentRunner:
         self._session_db = session_db
 
     def run(self, request: AgentRunRequest) -> AgentRunResult:
+        """Execute one turn with venv mutation barred for its whole duration.
+
+        Every harness lane — operator mission chat, mission-run workers, and
+        dispatch — reaches the agent through this method, which makes it the
+        one place that can promise the 2026-08-09 rule: a live turn never
+        mutates the venv it is running in. Arming it here (rather than at the
+        ~40 ``lazy_deps.ensure`` call sites) covers the installs a turn triggers
+        indirectly and unpredictably — the auxiliary client resolving to
+        Anthropic for a summarisation side-call, a model-invoked tool reaching
+        a backend the operator never configured, a memory provider recalling
+        mid-turn. Declaring provider packages up front (see
+        ``hermes_cli.runtime_environment``) closes the predictable half; this
+        closes the rest.
+        """
+        from tools.lazy_deps import deny_venv_installs
+
+        with deny_venv_installs(f"an agent turn (profile={request.profile!r})"):
+            return self._run(request)
+
+    def _run(self, request: AgentRunRequest) -> AgentRunResult:
         _validate_workdir(request.workdir)
         binding = _binding_for_profile(request.profile)
         if binding.readiness != "ready":

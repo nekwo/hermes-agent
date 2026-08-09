@@ -786,7 +786,28 @@ def _pip_install(
 
     Returns the ``subprocess.CompletedProcess`` from whichever tier succeeded
     (or the last failure for the caller to inspect).
+
+    Honours the venv-mutation barrier (``tools.lazy_deps.deny_venv_installs``):
+    while an agent turn is live, a venv-scoped install is refused with a
+    synthesized non-zero result naming the reason. ``pip install --target``
+    installs are exempt — they write to a caller-owned directory (e.g. the LSP
+    server store) and cannot corrupt the running venv, which is the only thing
+    the barrier protects.
     """
+    if "--target" not in args:
+        try:
+            from tools.lazy_deps import venv_mutation_denial
+            denial = venv_mutation_denial()
+        except Exception:  # pragma: no cover - lazy_deps is always importable in-tree
+            denial = None
+        if denial:
+            return subprocess.CompletedProcess(
+                [sys.executable, "-m", "pip", "install", *args],
+                returncode=1,
+                stdout="",
+                stderr=denial,
+            )
+
     venv_root = Path(sys.executable).parent.parent
     uv_env = {**os.environ, "VIRTUAL_ENV": str(venv_root)}
 
