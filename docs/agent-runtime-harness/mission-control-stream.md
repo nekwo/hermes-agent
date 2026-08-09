@@ -253,3 +253,27 @@ records `projection_event_emitted`, so normal idempotent replays do not append a
 second notification, while an older or interrupted projected turn repairs a
 missing notification on replay. `agent_chat_send` invokes the same command
 handler, so agent-to-agent and direct CLI messages share this path.
+
+Two properties of that lane changed on 2026-08-09 and consumers should know both.
+
+**The auto-title runs after the chat-root lease releases, not before.** The lease
+serialises writes to one chat root; the title is a SessionDB-only decoration that
+costs a synchronous auxiliary-LLM round trip (provider resolution, and possibly a
+lazy provider install, on the way). It used to run post-emit but pre-release, so
+the root kept refusing sends for as long as the title took — 46 seconds in the
+incident that found this, all of it after the reply was already on the operator's
+screen. Consequence for consumers: `persona_chat.projected` and
+`persona_chat.metadata_updated` for the same turn are now separated by the whole
+title round trip, and the root accepts a new send in between. A client that
+treated "title arrived" as "turn fully settled" was reading a coincidence; the
+projected event is and always was the settle signal.
+
+**A refused send now leaves a durable row.** `persona_chat.send_refused` records
+a send the lane rejected before it acquired the lease — today only the transient
+`chat_busy` refusal. It carries `root_chat_session_id`, `client_message_id`,
+`error_kind`, the refusing lease's pid/kind/acquired_at, and the envelope's `ts`
+and `session_id`. It deliberately does NOT carry the message text: the sanitising
+chokepoints for operator prose are inside the lease the refusal never took. This
+event exists so a message lost to a busy root is diagnosable after the fact —
+before it, the refusal wrote nothing anywhere and the only copy of the operator's
+message died with the client-side banner.

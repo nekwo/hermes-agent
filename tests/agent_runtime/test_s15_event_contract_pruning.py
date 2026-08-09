@@ -217,7 +217,16 @@ REMOVED_EVENT_TYPES = frozenset(
 # already-delivered row harmless to the sender — which is precisely why it would
 # otherwise be invisible. It is the observable symptom of the supervised-id
 # registry being process-local, so it gets a name instead of being absorbed.
-SURVIVING_EVENT_COUNT = 57
+#
+# Then +1 (R0, 2026-08-09): persona_chat.send_refused. A mission-chat send
+# refused before the chat-root lease was acquired wrote NOTHING — every durable
+# write the lane performs lives inside that lease — so the 2026-08-09 incident
+# investigation could not find an operator message that had definitely been
+# sent in any persistence surface. The refusal now leaves a fact about itself
+# (root, client_message_id, error_kind, ts) with the text deliberately excluded.
+# Registered in the same commit as its emitter, per S55; this counter went red
+# on it and was moved deliberately, which is the counter working.
+SURVIVING_EVENT_COUNT = 58
 
 
 def test_the_unemittable_event_types_are_no_longer_registered():

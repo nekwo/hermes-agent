@@ -162,6 +162,17 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     "persona_instance.chat_opened": EventContract("persona_instance.chat_opened", "Persona instance chat opened", ("persona_instance_id", "session_id"), ("persona_id",)),
     "persona_chat.projected": EventContract("persona_chat.projected", "Persona chat turn projection committed", ("persona_instance_id", "root_chat_session_id", "client_message_id", "turn_id", "change_kind"), ("active_session_id", "native_revision")),
     "persona_chat.metadata_updated": EventContract("persona_chat.metadata_updated", "Persona chat session metadata updated", ("persona_instance_id", "root_chat_session_id", "change_kind"), ()),
+    # The refusal counter-record (2026-08-09). Every durable write a mission-chat
+    # turn performs lives inside the chat-root lease, so a send REFUSED on the
+    # way to that lease wrote nothing at all — the investigation went looking for
+    # a message the operator had definitely sent and found it in zero persistence
+    # surfaces (history, live log, turn journal). Summary fields are the three
+    # the emitter always passes and the three a loss is diagnosed from. The
+    # message TEXT is deliberately absent and must stay absent: its sanitising
+    # chokepoints are inside the lease this branch never took, and events.jsonl
+    # feeds the snapshot/read-model pipeline. Emitter:
+    # ``_publish_persona_chat_send_refused_event`` in persona_commands.py.
+    "persona_chat.send_refused": EventContract("persona_chat.send_refused", "Persona chat send refused", ("root_chat_session_id", "client_message_id", "error_kind"), ("persona_instance_id", "lease_owner_pid", "lease_owner_kind", "lease_acquired_at")),
     # The operator chat-delete CLI verb (_cmd_persona_chat_delete). It was
     # emitted but never registered, so the append raised inside its own
     # try/except and the delete left no durable record while the per-instance

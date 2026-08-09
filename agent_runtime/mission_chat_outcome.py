@@ -55,6 +55,7 @@ __all__ = [
     "FinalizationWarningKind",
     "MISSION_CHAT_EXIT_FAILURE",
     "MISSION_CHAT_EXIT_OK",
+    "MissionChatDeferredFinalization",
     "MissionChatTurnPlan",
     "OK_EXECUTION_STATES",
     "TurnOutcome",
@@ -335,6 +336,67 @@ class MissionChatTurnPlan:
     turn_relay_chain: object
     relay_chain_in: object
     relay_deadline: object
+
+
+@dataclass(slots=True)
+class MissionChatDeferredFinalization:
+    """Best-effort turn bookkeeping that runs AFTER the chat-root lease releases.
+
+    The lease exists to serialise WRITES to one chat root. It was, however, held
+    for the entire command — including a tail that writes nothing to that root.
+    Live incident 2026-08-09: the reply was durable, mirrored, projected and
+    emitted at 06:58:02, and the lease did not release until 06:58:48, because
+    the session auto-title in between resolved the auxiliary-provider chain
+    (marking two providers unhealthy), lazily pip-installed
+    ``provider.anthropic``, and then retried a 401 on a revoked OAuth token. The
+    operator's next message landed in that window and was refused ``chat_busy``
+    — 46 seconds after the answer he was replying to was already on his screen.
+
+    Nothing in that tail writes turn or transcript state. The rule this object
+    encodes: **once the terminal frame is emitted, what is left is decoration,
+    and decoration does not get to hold the root.** The commit phase PACKAGES it
+    here; ``_cmd_mission_chat_message`` RUNS it once the ``with`` block exits.
+
+    Why a mutable holder rather than a wider return type:
+    ``_mission_chat_commit_turn`` returns an exit code from ~15 sites, and
+    widening that to a tuple would make any missed site a ``TypeError`` on a LIVE
+    turn. Why not a field on ``MissionChatTurnPlan``: that object is frozen on
+    purpose (see its docstring) — a plan mutable after the lease was taken is
+    exactly the ambiguity the plan/commit split retired. This is a separate,
+    deliberately mutable carrier for the one value that flows the other way.
+
+    Failure semantics, stated because the move CHANGES them: a thunk that raises
+    can no longer reach the commit phase's crash-tail guard, so it can neither
+    corrupt the one-JSON-object stdout contract nor flip the exit code — it is
+    swallowed by ``run_once`` instead. In exchange, a deferred failure now
+    happens strictly after the turn's exit code is decided, so it can never mark
+    the turn. That is the intended direction: the turn was complete, durable and
+    reported before the deferred work was ever attempted.
+    """
+
+    #: Zero-arg thunk packaged under the lease, invoked after it releases.
+    thunk: object | None = None
+
+    def defer(self, thunk: object) -> None:
+        """Package the post-lease work. Refuses a second thunk rather than
+        silently dropping one — two deferrals would mean the tail grew a second
+        author, which is the shape this holder exists to prevent."""
+
+        if self.thunk is not None:
+            raise ValueError("mission-chat deferred finalization is already set")
+        self.thunk = thunk
+
+    def run_once(self) -> bool:
+        """Run the deferred thunk exactly once. Never raises; True if it ran clean."""
+
+        thunk, self.thunk = self.thunk, None
+        if thunk is None:
+            return False
+        try:
+            thunk()
+            return True
+        except Exception:
+            return False
 
 
 class FinalizationWarningKind(StrEnum):

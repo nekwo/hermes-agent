@@ -1433,6 +1433,89 @@ def _publish_persona_chat_metadata_event(
         return False
 
 
+def _publish_persona_chat_send_refused_event(
+    *,
+    session_id: str,
+    client_message_id: str | None,
+    persona_id: str | None,
+    persona_instance_id: str | None,
+    error_kind: str,
+    lease_owner: dict | None = None,
+) -> bool:
+    """Record that an operator send was REFUSED before any turn write happened.
+
+    The refusal lanes are the one turn outcome with no durable trace by
+    construction: every durable write a mission-chat turn performs lives inside
+    ``_mission_chat_commit_turn``, under the chat-root lease, so a send refused
+    on the way to that lease writes no operator row, no turn record, and no
+    event. The 2026-08-09 investigation went looking for a message the operator
+    had definitely sent and found it in exactly zero persistence surfaces —
+    history, live log, and turn journal all showed only the turn that was
+    holding the lease. A lost operator message was, by design, undiagnosable.
+
+    This is the counter-record. It is deliberately a FACT ABOUT a send, not a
+    copy of one:
+
+    * ``client_message_id`` is the idempotency key the operator's client already
+      owns, so a refused send can be correlated with the retry that eventually
+      landed (or the absence of one) without the text ever leaving the client.
+    * the message TEXT is not here and must never be added. Operator text has
+      exactly two sanitising chokepoints — the chat persistence path and the
+      live-log mirror — and both sit inside the lease this branch never took.
+      Writing raw text here would put unsanitised operator prose into
+      ``events.jsonl``, which is read by the snapshot/read-model pipeline and
+      shipped to every consumer of it. ``error_kind`` plus the identity keys is
+      what makes a loss diagnosable; the prose is what makes it a leak.
+    * ``lease_owner`` is reduced to pid/kind/acquired_at. The sidecar is
+      operator-written JSON read off disk best-effort; only the three scalar
+      fields are copied so an oversized or attacker-shaped sidecar cannot ride
+      into the payload (events are byte-capped, and a rejected append here would
+      lose the very record this exists to keep).
+
+    Returns True when the row landed. Never raises: a refusal that additionally
+    failed to record is still a refusal, and the caller's typed envelope must
+    reach the client unchanged.
+
+    Registered as ``persona_chat.send_refused``. Today the sole caller is the
+    ``chat_busy`` branch — the refusal the incident produced and the only one
+    that is genuinely transient. The other pre-lease refusals
+    (``unknown_chat_session``, ``foreign_chat_session``,
+    ``retired_persona_instance``) are terminal and operator-visible by other
+    means; routing them through here is a deliberate extension, not an
+    oversight, and ``error_kind`` is on the payload so it costs one call site.
+    """
+
+    owner = lease_owner if isinstance(lease_owner, dict) else {}
+    payload = {
+        "root_chat_session_id": session_id,
+        "client_message_id": safe_assignment_token(client_message_id) or None,
+        "error_kind": str(error_kind),
+        "persona_instance_id": safe_assignment_token(persona_instance_id) or None,
+        "lease_owner_pid": owner.get("pid") if isinstance(owner.get("pid"), int) else None,
+        "lease_owner_kind": safe_assignment_token(owner.get("observer_kind")) or None,
+        "lease_acquired_at": (
+            owner.get("acquired_at") if isinstance(owner.get("acquired_at"), (int, float)) else None
+        ),
+    }
+    try:
+        EventLog().append(
+            Event(
+                type="persona_chat.send_refused",
+                # See the projection event above: chat turns carry no task
+                # binding under contract 45.
+                task_id=None,
+                run_id=None,
+                persona_id=safe_assignment_token(persona_id) or None,
+                ts=now(),
+                payload=payload,
+                session_id=session_id,
+            )
+        )
+        return True
+    except Exception:
+        return False
+
+
 def _mission_chat_emit(args, data, plain=None, *, stream=None) -> None:
     """THE one place a mission-chat turn payload leaves this handler.
 
@@ -1549,6 +1632,7 @@ def _cmd_mission_chat_message(args) -> int:
     from agent_runtime.mission_chat_outcome import (
         ChatErrorKind,
         ExecutionState,
+        MissionChatDeferredFinalization,
         MissionChatTurnPlan,
     )
     # Per-request capability binding, at the very top so every path below —
@@ -2023,13 +2107,21 @@ def _cmd_mission_chat_message(args) -> int:
         relay_chain_in=relay_chain_in,
         relay_deadline=relay_deadline,
     )
+    # The lease covers the WRITES and nothing else. Post-emit decoration — the
+    # auxiliary-LLM auto-title and the metadata event that reports it — is
+    # packaged into ``deferred`` under the lease and run below, after the
+    # ``with`` has exited. See MissionChatDeferredFinalization for the 2026-08-09
+    # incident that made the distinction load-bearing: a 46-second title tail
+    # inside the lease refused the operator's next message ``chat_busy`` long
+    # after the reply it answered was on screen.
+    deferred = MissionChatDeferredFinalization()
     try:
         with persona_chat_root_lease(
             session_id,
             owner_id=safe_assignment_token(getattr(args, "serve_request_id", None)),
             observer_kind="serve" if persona_chat_runtime_registry() is not None else "cli",
         ):
-            return _mission_chat_commit_turn(plan)
+            exit_code = _mission_chat_commit_turn(plan, deferred)
     except PersonaChatBusyError as exc:
         data = {
             "ok": False,
@@ -2043,11 +2135,33 @@ def _cmd_mission_chat_message(args) -> int:
             "client_message_id": client_message_id,
             "error": str(exc),
         }
+        # Durable FIRST, then the wire. A refused send is the one turn outcome
+        # that writes nothing by construction — every durable write lives inside
+        # the lease this branch never acquired — so before 2026-08-09 an
+        # operator message lost to a busy root left no trace anywhere: not in
+        # the transcript, not in the turn journal, not in the EventLog. The
+        # refusal envelope on stdout was the only evidence, and it died with the
+        # banner that rendered it.
+        _publish_persona_chat_send_refused_event(
+            session_id=session_id,
+            client_message_id=client_message_id,
+            persona_id=normalized_persona,
+            persona_instance_id=persona_instance_id,
+            error_kind=ChatErrorKind.CHAT_BUSY,
+            lease_owner=exc.owner,
+        )
         _mission_chat_emit(args, data)
         return 2
+    # ── lease RELEASED ─────────────────────────────────────────────────────
+    # Everything the turn owed the root is committed and reported. The root is
+    # free from here, so a slow or failing deferred step delays nobody's next
+    # send. ``run_once`` never raises: this is past the point where the exit
+    # code is decided, and a decoration failure may not change it.
+    deferred.run_once()
+    return exit_code
 
 
-def _mission_chat_commit_turn(plan) -> int:
+def _mission_chat_commit_turn(plan, deferred) -> int:
     """The SOLE writer for a mission-chat turn. Runs under the chat-root lease.
 
     Every durable write from ``open_chat`` onward lives here, so the lease that
@@ -2059,6 +2173,12 @@ def _mission_chat_commit_turn(plan) -> int:
     unchanged by the extraction. A renaming pass through 1,000 lines of the
     most-live code in the harness is a separate risk from moving the lease, and
     they do not have to be taken together.
+
+    ``deferred`` is the one value that flows back OUT: a
+    ``MissionChatDeferredFinalization`` the caller runs after the ``with`` block
+    exits. Nothing that writes the root's turn or transcript state may go in it;
+    it exists for post-emit decoration whose only cost is time — today, the
+    auxiliary-LLM auto-title and the metadata event that reports a title change.
     """
 
     # Function-local: this file is exec'd into harness.py's globals (see the
@@ -3215,17 +3335,28 @@ def _mission_chat_commit_turn(plan) -> int:
             f"mission chat reply for {normalized_persona}",
             stream=stream,
         )
-        # Auto-title is a SessionDB-only side effect that NOTHING in the
-        # emitted frame depends on, and it costs a synchronous auxiliary-LLM
-        # RTT on a session's first turn. Run it AFTER the terminal frame so
-        # that RTT stays off the turn's critical path (last delta ->
-        # chat.final) while remaining in this command's lifetime. It MUST NOT
-        # raise here: the terminal record is already settled, so the crash-tail
-        # guard below (`terminal_outcome is not None -> raise`) would turn any
-        # exception into a duplicate-emit / non-zero exit. The helper swallows
-        # internally; this wrap is defense-in-depth so a title failure can
-        # never add to stdout or change the return code.
-        try:
+        # Auto-title is a SessionDB-only side effect that NOTHING in the emitted
+        # frame depends on, and it costs a synchronous auxiliary-LLM RTT on a
+        # session's first turn — an RTT that walks the whole provider-resolution
+        # chain and can lazily pip-install a provider on the way (2026-08-09:
+        # 46 seconds of it, ending in a 401 on a revoked OAuth token).
+        #
+        # It was already placed AFTER the terminal frame so that RTT stayed off
+        # the last-delta -> chat.final critical path. That was necessary and not
+        # sufficient: it still ran inside the chat-root lease, so for those 46
+        # seconds the root REFUSED the operator's next send with ``chat_busy``
+        # while his answer sat on screen. Post-emit is not the same boundary as
+        # post-lease, and the operator experiences the second one.
+        #
+        # So it is packaged, not run. The caller invokes this thunk once the
+        # ``with persona_chat_root_lease(...)`` block has exited; nothing inside
+        # it touches turn or transcript state, so the root does not need to be
+        # serialised for any of it. The internal try/except stays: the helper
+        # already swallows, and ``run_once`` swallows too, but a raise from here
+        # while the thunk is being BUILT (not run) would still reach the
+        # crash-tail guard below and corrupt the one-JSON-object stdout
+        # contract.
+        def _deferred_auto_title() -> None:
             title_before = session_db.get_session_title(session_id)
             _maybe_auto_title_persona_chat(
                 session_db=session_db,
@@ -3239,6 +3370,9 @@ def _mission_chat_commit_turn(plan) -> int:
                     persona_id=normalized_persona,
                     persona_instance_id=instance.id,
                 )
+
+        try:
+            deferred.defer(_deferred_auto_title)
         except Exception:
             pass
         return 0
