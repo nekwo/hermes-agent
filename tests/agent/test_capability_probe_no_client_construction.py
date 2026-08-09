@@ -138,6 +138,24 @@ def test_wrappers_can_still_be_constructed_around_the_stand_in(codex_vision_rout
     assert client.api_key is not None
 
 
+def test_a_probe_builds_no_http_client_either(codex_vision_route, monkeypatch):
+    """The construction seam is short-circuited ABOVE the HTTP-client kwargs.
+
+    Returning the stand-in only at the SDK call would still pay the keepalive
+    httpx client and its TLS-verification resolution — most of what a cold
+    check_fn sweep was charging for. Separate mechanism, separate pin.
+    """
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("a capability probe built an HTTP client")
+
+    monkeypatch.setattr(ac, "_openai_http_client_kwargs", forbidden)
+
+    from tools.vision_tools import check_vision_requirements
+
+    assert check_vision_requirements() is True
+
+
 def test_using_the_stand_in_raises_instead_of_reaching_a_wire():
     probe = ac._CAPABILITY_PROBE_CLIENT
 
