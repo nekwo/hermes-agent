@@ -55,6 +55,8 @@ from typing import Any, Iterable
 
 from .chat_lane_toolsets import DROP_KIND_TOOL, DROP_KIND_TOOLSET
 from .models import looks_like_persona_instance_id
+from .permission_modes import permission_mode_is_unbounded
+from .terminal_envelope import ENVELOPE_DECISION_LOG
 
 # Bound the roster so a large level cannot bloat every chat turn. The operator's
 # widget wraps chips; the fed block lists names and notes the overflow count.
@@ -792,6 +794,8 @@ def resolve_capability_block(
     *,
     drops: Iterable[Any] = (),
     envelope: dict[str, Any] | None = None,
+    permission_mode: str | None = None,
+    permission_source: str | None = None,
 ) -> dict[str, Any]:
     """Assemble this lane's capability account: what was DROPPED, what is REFUSED.
 
@@ -810,12 +814,24 @@ def resolve_capability_block(
       (the same reasoning that made ``envelope_command_not_grantable`` a
       distinct refusal code).
 
-    Returns ``{}`` when there is genuinely nothing to account for — an
-    ``unbounded`` turn drops nothing, and an ungoverned lane refuses nothing, so
-    neither pays a line. Honest silence, not a noise block.
+    * ``permission_mode`` / ``permission_source`` — the posture this turn
+      resolved. Since the 2026-08-09 ruling made ``unbounded`` the runtime
+      DEFAULT, silence is no longer honest for it: an empty block used to mean
+      "nothing was taken away", which a reader could only interpret against an
+      assumed bounded baseline. The posture is stated explicitly instead.
+
+    Returns ``{}`` when there is genuinely nothing to account for — a bounded
+    lane with no drops and an ungoverned lane refuse nothing, so neither pays a
+    line. Honest silence, not a noise block.
     """
 
     block: dict[str, Any] = {}
+
+    if permission_mode_is_unbounded(permission_mode):
+        block["posture"] = {
+            "permission_mode": str(permission_mode or "").strip(),
+            "permission_source": str(permission_source or "").strip(),
+        }
 
     toolsets: list[str] = []
     tools: list[str] = []
@@ -894,6 +910,24 @@ def render_capability_block(capability: dict[str, Any] | None) -> str:
         return ""
 
     lines: list[str] = []
+
+    posture = capability.get("posture") if isinstance(capability.get("posture"), dict) else {}
+    if posture:
+        mode = str(posture.get("permission_mode") or "").strip()
+        source = str(posture.get("permission_source") or "").strip()
+        origin = (
+            "runtime default"
+            if source in ("", "runtime_default")
+            else f"source: {source}"
+        )
+        lines.append(
+            f"- No lane restrictions: permission mode '{mode}' ({origin}). Every tool this "
+            "runtime registers is on your schema, and the terminal envelope's gated command "
+            "classes are granted by this mode rather than by a per-role config grant. Every "
+            "such command is RECEIPTED with the mode that allowed it "
+            f"({ENVELOPE_DECISION_LOG}) — you are trusted and audited, so act, and keep the "
+            "confirmation pause for destructive or irreversible steps."
+        )
 
     toolsets = capability.get("toolsets_dropped") or []
     tools = capability.get("tools_dropped") or []
@@ -982,6 +1016,24 @@ def capability_block_for_persona(
     if persona is None:
         return {}
 
+    # The posture this turn runs under. Resolved through the ONE chokepoint (a
+    # caller-supplied ``permission_mode`` still wins, for the hypothetical
+    # ``persona tool-diff --permission-mode`` preview) and threaded into BOTH
+    # halves: the envelope view is mode-aware since 2026-08-09, so reading it
+    # without the mode would tell the agent classes are refused that its very
+    # next command would run.
+    mode = str(permission_mode or "").strip()
+    source = ""
+    if not mode:
+        try:
+            from .tool_permissions import permission_options_for_chat
+
+            resolved = permission_options_for_chat(persona, session_id=session_id)
+            mode = str(resolved.permission_mode or "")
+            source = str(resolved.permission_source or "")
+        except Exception:
+            mode = ""
+
     drops: tuple[Any, ...] = ()
     try:
         # Deferred: ``persona_runtime`` pulls the runtime graph (and imports this
@@ -1004,12 +1056,19 @@ def capability_block_for_persona(
         except Exception:
             role = str(getattr(persona, "role", "") or "")
         envelope = explain_terminal_envelope(
-            role=role, lane=str(lane or "").strip() or LANE_MISSION_CHAT
+            role=role,
+            lane=str(lane or "").strip() or LANE_MISSION_CHAT,
+            permission_mode=mode,
         )
     except Exception:
         envelope = None
 
-    return resolve_capability_block(drops=drops, envelope=envelope)
+    return resolve_capability_block(
+        drops=drops,
+        envelope=envelope,
+        permission_mode=mode,
+        permission_source=source,
+    )
 
 
 def _board_digest_for_workspace(workspace_id: str | None) -> dict[str, Any] | None:

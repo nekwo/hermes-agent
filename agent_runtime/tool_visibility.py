@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import lru_cache
 import hashlib
@@ -21,6 +21,7 @@ from .mcp_admission import (
 from .mcp_lane import current_entry_point_lane, mcp_lane_requirement_failures
 from .mission_chat_workdir import MissionChatWorkdir
 from .models import AgentPersona
+from .permission_modes import permission_mode_is_unbounded
 from .personas import (
     PERSONA_BLOCKED_TOOLS,
     REGISTRY_HYGIENE_BLOCKED_TOOLS,
@@ -34,23 +35,52 @@ from .tool_turn_history import load_tool_turn_history
 
 TOOL_VISIBILITY_SCHEMA_VERSION = 2
 
-_MUTATING_TOOLS = frozenset(
-    {
-        "apply_patch",
-        "edit_file",
-        "file.edit",
-        "file.write",
-        "patch",
-        "terminal",
-        "write_file",
-    }
-)
+
+@lru_cache(maxsize=1)
+def _mutating_tools() -> frozenset[str]:
+    """The tools that cross the mutation boundary.
+
+    ONE definition, in ``tool_permissions.READ_ONLY_BLOCKS`` — the same 7 names
+    used to be maintained here as ``_MUTATING_TOOLS`` and there as the
+    ``read_only`` block set, two copies of one fact in two files that could only
+    drift. The import is deferred because ``tool_permissions`` imports THIS
+    module at load time; the constant is a frozenset of literals, so caching the
+    lookup costs one import and no staleness.
+    """
+
+    from .tool_permissions import READ_ONLY_BLOCKS
+
+    return READ_ONLY_BLOCKS
+
+
+def _default_permission_mode_for_options() -> str:
+    """The runtime default, for an options object nobody threaded a mode into.
+
+    Deferred + never-raising for the same reason as :func:`_mutating_tools`.
+    ``snapshot._agent_summary`` / ``_agent_tool_detail`` call
+    ``resolve_tool_visibility(agent)`` with no options at all, so without this
+    the agents drawer would keep rendering the pre-2026-08-09 bounded posture
+    while every actual turn ran unbounded.
+    """
+
+    try:
+        from .tool_permissions import default_permission_mode
+
+        return default_permission_mode()
+    except Exception:  # pragma: no cover - defensive; never fail a preview
+        from .permission_modes import FALLBACK_DEFAULT_PERMISSION_MODE
+
+        return FALLBACK_DEFAULT_PERMISSION_MODE
 
 
 @dataclass(slots=True)
 class ToolVisibilityOptions:
-    permission_mode: str = "profile_default"
-    permission_source: str = "persona_role_policy"
+    #: Defaults to the CONFIGURED runtime default (``agent_runtime.
+    #: tool_permissions.default_mode``), not a literal: an options object built
+    #: without going through ``permission_options_for_chat`` must describe the
+    #: same posture a real turn gets, or every no-options preview lies.
+    permission_mode: str = field(default_factory=_default_permission_mode_for_options)
+    permission_source: str = "runtime_default"
     permission_expired: bool = False
     repo_scope: str | None = None
     workdir: str | Path | None = None
@@ -111,7 +141,13 @@ def resolve_tool_visibility(
     configured_toolsets = list(opts.configured_toolsets or resolved_toolsets)
     role_allowed_toolsets = list(resolved_toolsets)
     persona_toolsets = list(getattr(persona, "toolsets", []) or [])
-    persona_blocked = frozenset() if unbounded else blocked_tool_names()
+    # Registry hygiene NEVER yields to a permission mode: ``profile_runner``
+    # unions ``REGISTRY_HYGIENE_BLOCKED_TOOLS`` at agent construction on EVERY
+    # lane, unbounded included, because deregistering upstream kanban/feishu junk
+    # is not a permission tier. Before 2026-08-09 this line returned an empty set
+    # for unbounded, so an unbounded preview claimed 17 tools the runtime would
+    # strip — the count the plan corrects from 22 to 17 rather than to 0.
+    persona_blocked = REGISTRY_HYGIENE_BLOCKED_TOOLS if unbounded else blocked_tool_names()
     requested_blocked = frozenset(_clean_names(opts.blocked_tool_names or []))
     if opts.chat_lane_blocked_tool_names is not None:
         # T9b chat-lane preview parity: use the chat-lane chokepoint's already
@@ -308,8 +344,8 @@ def permission_state_for_persona(
         "schema_version": TOOL_VISIBILITY_SCHEMA_VERSION,
         "persona_id": visibility["persona_id"],
         "session_id": visibility.get("session_id"),
-        "mode": visibility.get("permission_mode") or "profile_default",
-        "source": visibility.get("permission_source") or "persona_role_policy",
+        "mode": visibility.get("permission_mode") or _default_permission_mode_for_options(),
+        "source": visibility.get("permission_source") or "runtime_default",
         "expired": bool(visibility.get("permission_expired")),
         "repo_scope": visibility.get("repo_scope"),
         "workdir": visibility.get("workdir"),
@@ -453,7 +489,7 @@ def _blocked_tool_entries(
                 "name": name,
                 "toolset": get_toolset_for_tool(name),
                 "reason": reason,
-                "mutating": name in _MUTATING_TOOLS,
+                "mutating": name in _mutating_tools(),
             }
         )
     return entries
@@ -463,7 +499,7 @@ def _tool_entry(name: str) -> dict[str, Any]:
     return {
         "name": name,
         "toolset": get_toolset_for_tool(name),
-        "mutating": name in _MUTATING_TOOLS,
+        "mutating": name in _mutating_tools(),
     }
 
 
@@ -493,7 +529,7 @@ def _tool_resolution_id(
 
 def _mutation_boundary(tool_names: list[str]) -> dict[str, Any]:
     names = set(tool_names)
-    mutating = sorted(names & _MUTATING_TOOLS)
+    mutating = sorted(names & _mutating_tools())
     return {
         "can_mutate_files": bool(names & {"apply_patch", "edit_file", "file.edit", "file.write", "patch", "write_file"}),
         "can_run_terminal": "terminal" in names,
@@ -519,4 +555,4 @@ def _resolved_toolsets(persona: AgentPersona, options: ToolVisibilityOptions, *,
 
 
 def _is_unbounded(options: ToolVisibilityOptions) -> bool:
-    return str(getattr(options, "permission_mode", "") or "").strip().lower() == "unbounded"
+    return permission_mode_is_unbounded(getattr(options, "permission_mode", ""))

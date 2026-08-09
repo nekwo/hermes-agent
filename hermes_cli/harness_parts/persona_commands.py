@@ -117,7 +117,11 @@ from agent_runtime.prompt_observability import (
 )
 from agent_runtime.states import WorkerSessionState
 from agent_runtime.store import AgentStore
-from agent_runtime.tool_permissions import ChatToolPermissionStore, permission_state_for_chat
+from agent_runtime.tool_permissions import (
+    ChatToolPermissionStore,
+    default_permission_mode,
+    permission_state_for_chat,
+)
 from agent_runtime.tool_turn_history import persist_tool_turn_actual
 from agent_runtime.tool_visibility import ToolVisibilityOptions, resolve_tool_visibility
 from hermes_cli.harness_support import (
@@ -198,7 +202,10 @@ def _cmd_persona_tool_diff(args) -> int:
         data = {"ok": False, "error": f"persona not found: {args.persona_id}"}
         print(emit_json(data) if args.json else data["error"])
         return 2
-    permission_mode = str(args.permission_mode or "profile_default")
+    # No flag ⇒ the RUNTIME DEFAULT, so the preview describes what a real turn
+    # gets. Hardcoding ``profile_default`` here would have made every preview
+    # report the bounded shape while every turn ran under the configured default.
+    permission_mode = str(args.permission_mode or "").strip() or default_permission_mode()
     visibility = resolve_tool_visibility(
         persona,
         ToolVisibilityOptions(
@@ -250,7 +257,9 @@ def _cmd_persona_tool_diff(args) -> int:
             explain_persona_terminal_envelope,
         )
 
-        data["terminal_envelope"] = explain_persona_terminal_envelope(persona)
+        data["terminal_envelope"] = explain_persona_terminal_envelope(
+            persona, session_id=args.session_id, permission_mode=permission_mode
+        )
     if args.json:
         print(emit_json(data))
     else:

@@ -164,12 +164,16 @@ class GPTPersonaRuntime:
         # registers can never disagree. Disabled by default: with the flag off
         # this resolves to "nothing admitted" and the request is byte-identical
         # to what it was before admission existed.
+        # ONE permission resolve for this turn, reused by both planes below.
+        # Resolving it twice was harmless while only the schema plane read it;
+        # since the terminal envelope became mode-aware (2026-08-09) the two
+        # planes MUST agree, and the cheapest way to guarantee that is to read
+        # the answer once.
+        turn_permission = permission_options_for_chat(persona, session_id=perm_session_id)
         admission = resolve_mcp_admission(
             persona,
             lane=LANE_MISSION_CHAT,
-            permission_mode=permission_options_for_chat(
-                persona, session_id=perm_session_id
-            ).permission_mode,
+            permission_mode=turn_permission.permission_mode,
         )
         # Repo grounding for this turn (G6). Resolved ONCE, here, and handed to
         # the EXISTING ``AgentRunRequest.workdir`` seam the worker lane already
@@ -194,11 +198,19 @@ class GPTPersonaRuntime:
         # in front of the terminal tool, which is exactly what makes the envelope
         # gate load-bearing rather than theoretical — a grounded turn can now
         # actually reach a git remote.
+        #
+        # The scope also carries this turn's PERMISSION MODE (operator ruling
+        # 2026-08-09): an unbounded run is granted the grantable command classes
+        # by mode rather than by a per-role config stanza, and every such command
+        # still writes a receipt naming the mode. Stamped from the same resolve
+        # the schema plane used, so "what tools the turn has" and "what commands
+        # it may run" cannot come from two different answers.
         envelope_scope = terminal_envelope_scope_for_persona(
             persona,
             lane=LANE_MISSION_CHAT,
             session_id=perm_session_id,
             runtime_root=paths.store_root(),
+            permission_mode=turn_permission.permission_mode,
         )
         result = self._runner.run(
             AgentRunRequest(
@@ -346,12 +358,15 @@ def _mission_chat_operative_rules() -> str:
         "- You are talking directly to your operator — a trusted teammate, not an end user.\n"
         "- You have real tools. When the operator asks you to do something — run a command, read or edit a file, check or "
         "change state — actually use your tools and report the real result; there is no separate 'hand it off first' step.\n"
-        "- Exactly TWO things gate what you can do, and both name themselves when they refuse: (1) the operator's current "
-        "permission grant, and (2) the terminal safety envelope, which requires a per-role operator grant in the ROOT "
-        "config.yaml for a small set of command classes (git push, destructive git, recursive delete, network egress) and "
-        "hard-blocks a few others outright. An envelope refusal tells you the class, the exact config key that would grant "
-        "it, and whether a grant is even possible. Relay that to the operator — do not retry, reword, or split the command, "
-        "and never claim a capability gap you have not actually hit.\n"
+        "- By default you have FULL tool access: the runtime's standing permission mode is `unbounded`, and the terminal "
+        "safety envelope grants its gated command classes (git push, destructive git, recursive delete, network egress) by "
+        "that mode. Every one of those commands is RECORDED with the reason it was allowed — you are trusted and audited, "
+        "not gated. Two things can still narrow you, and both name themselves when they refuse: (1) an operator restriction "
+        "on this session (a `read_only` / `bounded` permission mode), and (2) a per-class hard floor, if one is ever "
+        "reinstated. A refusal tells you the class, the exact ROOT-config key that would grant it, and whether a grant is "
+        "even possible. Relay that to the operator — do not retry, reword, or split the command, and never claim a "
+        "capability gap you have not actually hit. Full access is not licence: destructive and irreversible actions still "
+        "get the confirmation pause described above.\n"
         "- Never fabricate. Do not claim to have run a command, read a file, opened a path, or produced output unless you "
         "actually invoked the tool and are reporting its real result. If a capability isn't available, or your permission "
         "grant blocks it, say so plainly instead of inventing output.\n"

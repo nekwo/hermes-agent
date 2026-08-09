@@ -12,7 +12,13 @@ from hermes_constants import get_config_path
 from .dispatch_session_policy import normalize_dispatch_session_policy
 from .personas import PROFILE_ROLE_SENTINEL, validate_toolsets
 from .redaction_mode import normalize_redaction_mode
-from .runtime_config import CoordinatorPermissionConfig, EventLogConfig, McpAdmissionConfig, MissionChatConfig, PersonaChatConfig, ReadModelConfig, RuntimeConfig, SupervisionConfig, TerminalEnvelopeConfig
+from .permission_modes import (
+    FALLBACK_DEFAULT_PERMISSION_MODE,
+    SHIPPED_DEFAULT_PERMISSION_MODE,
+    SUPPORTED_PERMISSION_MODES,
+    normalize_permission_mode,
+)
+from .runtime_config import CoordinatorPermissionConfig, EventLogConfig, McpAdmissionConfig, MissionChatConfig, PersonaChatConfig, ReadModelConfig, RuntimeConfig, SupervisionConfig, TerminalEnvelopeConfig, ToolPermissionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -118,6 +124,7 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
     mission_chat = _mission_chat_config(raw.get("mission_chat") or {})
     mcp_admission = _mcp_admission_config(raw.get("mcp_admission") or {})
     terminal_envelope = _terminal_envelope_config(raw.get("terminal_envelope") or {})
+    tool_permissions = _tool_permission_config(raw.get("tool_permissions") or {})
     cfg = AgentRuntimeConfig(
         schema_version=int(raw.get("schema_version", 1)),
         store_root=raw.get("store_root"),
@@ -146,6 +153,7 @@ def load_agent_runtime_config(config_path: Path | None = None) -> AgentRuntimeCo
         mission_chat=mission_chat,
         mcp_admission=mcp_admission,
         terminal_envelope=terminal_envelope,
+        tool_permissions=tool_permissions,
         personas=raw.get("personas", {}) or {},
         default_model_source=default_model_source,
         default_provider_source=default_provider_source,
@@ -787,6 +795,49 @@ def _mcp_admission_config(raw: dict[str, Any]) -> McpAdmissionConfig:
             maximum=MCP_ADMISSION_MAX_TOOL_CALLS_CEILING,
         ),
     )
+
+
+#: Typed issue code for a ``tool_permissions.default_mode`` the runtime cannot
+#: honor. Same ``{code, subject, summary, fix_hint}`` row shape the envelope
+#: grant issues and the MCP admission denials already emit.
+TOOL_PERMISSION_DEFAULT_MODE_UNKNOWN = "tool_permission_default_mode_unknown"
+
+
+def _tool_permission_config(raw: dict[str, Any]) -> ToolPermissionConfig:
+    """Parse ``agent_runtime.tool_permissions`` — a fault can only NARROW.
+
+    Absent / blank ⇒ the shipped default (``unbounded``, operator ruling
+    2026-08-09). A value the runtime does not recognize is NOT silently ignored
+    and is NOT read as the shipped default: it produces a typed issue row and
+    falls back to ``profile_default``, because a config the runtime could not
+    parse must never resolve to more capability than the operator wrote. That
+    asymmetry (wide shipped default, narrow fault fallback) is deliberate and is
+    the one place this block behaves like the deny-by-default policies beside it.
+    """
+
+    raw = raw if isinstance(raw, dict) else {}
+    if "default_mode" not in raw:
+        return ToolPermissionConfig()
+    text = normalize_permission_mode(raw.get("default_mode"))
+    if not text:
+        return ToolPermissionConfig()
+    if text not in SUPPORTED_PERMISSION_MODES:
+        issue = {
+            "code": TOOL_PERMISSION_DEFAULT_MODE_UNKNOWN,
+            "subject": "agent_runtime.tool_permissions.default_mode",
+            "summary": (
+                f"'{raw.get('default_mode')}' is not a permission mode; the runtime default "
+                f"falls back to '{FALLBACK_DEFAULT_PERMISSION_MODE}' (never to "
+                f"'{SHIPPED_DEFAULT_PERMISSION_MODE}') so a config fault cannot widen access."
+            ),
+            "fix_hint": (
+                "Valid modes: " + ", ".join(sorted(SUPPORTED_PERMISSION_MODES)) + "."
+            ),
+        }
+        return ToolPermissionConfig(
+            default_mode=FALLBACK_DEFAULT_PERMISSION_MODE, issues=(issue,)
+        )
+    return ToolPermissionConfig(default_mode=text)
 
 
 def _terminal_envelope_config(raw: dict[str, Any]) -> TerminalEnvelopeConfig:

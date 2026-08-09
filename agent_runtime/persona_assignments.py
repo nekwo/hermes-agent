@@ -34,7 +34,7 @@ from .tool_visibility import (
     resolve_tool_visibility,
     turn_tool_context_for_persona,
 )
-from .tool_permissions import permission_options_for_chat
+from .tool_permissions import default_permission_mode, permission_options_for_chat
 
 TERMINAL_ASSIGNMENT_STATES = frozenset({"completed", "blocked", "cancelled"})
 
@@ -2354,7 +2354,8 @@ def persona_instance_summary(
             tool_options,
             profile_readiness=profile_readiness,
         )
-        summary["permission_mode"] = tool_resolution.get("permission_mode") or "profile_default"
+        # Fallback follows the RUNTIME DEFAULT (see snapshot._agent_summary).
+        summary["permission_mode"] = tool_resolution.get("permission_mode") or default_permission_mode()
         summary["mutation_boundary"] = tool_resolution["mutation_boundary"]
         summary["tool_count"] = tool_resolution["final_tool_count"]
         summary["blocked_tools_count"] = len(tool_resolution["blocked_tools"])

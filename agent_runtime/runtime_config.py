@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from agent_runtime.dispatch_session_policy import DEFAULT_DISPATCH_SESSION_POLICY
+from agent_runtime.permission_modes import SHIPPED_DEFAULT_PERMISSION_MODE
 
 
 # S56 (2026-08-01) removed FIVE whole config blocks and pruned a sixth. Every
@@ -236,6 +237,43 @@ class McpAdmissionConfig:
 
 
 @dataclass(slots=True)
+class ToolPermissionConfig:
+    """The runtime-wide DEFAULT chat tool-permission mode.
+
+    Operator ruling 2026-08-09 (``docs/agent-runtime-harness/
+    UNBOUNDED_DEFAULT_PLAN_2026-08-09.md``): every persona/agent in this runtime
+    gets full tool access by default. Before it, the default was hardcoded twice
+    in ``tool_permissions.py`` and liftable only by a per-session operator
+    ritual; this block is the ONE knob that answers it, resolved at the ONE
+    chokepoint (``tool_permissions.permission_options_for_chat``), which is why
+    no persona or profile file needs migrating.
+
+    ``default_mode`` ships as ``unbounded``. A deployment that wants the former
+    posture writes ``profile_default`` (or ``read_only``); an unknown value is a
+    typed :attr:`issues` row and falls back to ``profile_default`` — a config
+    fault must never resolve to MORE capability than the operator wrote, even
+    though the shipped default is the wider mode.
+
+    Root ``config.yaml`` shape::
+
+        agent_runtime:
+          tool_permissions:
+            default_mode: unbounded   # or profile_default / read_only
+
+    Wire note: this block rides the ``runtime_config`` frame section via
+    ``asdict(cfg)``. It is an ADDITION to a map a consumer already parses
+    key-by-key, so it is "merely unread" rather than "invisible" by the contract
+    ledger's own rule (snapshot.py, the 52-KEPT entries) — no contract bump.
+    """
+
+    default_mode: str = SHIPPED_DEFAULT_PERMISSION_MODE
+    #: Typed config faults, in the ``{code, subject, summary, fix_hint}`` row
+    #: shape every other harness policy surface emits. Populated by the parser;
+    #: a fault NARROWS (see ``default_mode``) and is never silent.
+    issues: tuple[dict[str, str], ...] = ()
+
+
+@dataclass(slots=True)
 class TerminalEnvelopeConfig:
     """Which envelope-gated command classes a role may run on a governed lane.
 
@@ -323,3 +361,4 @@ class RuntimeConfig:
     mission_chat: MissionChatConfig = field(default_factory=MissionChatConfig)
     mcp_admission: McpAdmissionConfig = field(default_factory=McpAdmissionConfig)
     terminal_envelope: TerminalEnvelopeConfig = field(default_factory=TerminalEnvelopeConfig)
+    tool_permissions: ToolPermissionConfig = field(default_factory=ToolPermissionConfig)

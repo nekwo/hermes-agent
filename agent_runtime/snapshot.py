@@ -1821,6 +1821,11 @@ def _agent_summary(agent, *, include_tool_details: bool = False, readiness=None)
         "repo_scope_label": _safe_text(getattr(agent, "repo_scope_label", None)) or _safe_repo_scope_label(getattr(agent, "repo_scope", None)),
     }
     if include_tool_details:
+        # Deferred: ``tool_permissions`` imports ``tool_visibility``, which this
+        # module already imports at load time; keeping the reader local avoids
+        # widening the module-load graph for one scalar fallback.
+        from .tool_permissions import default_permission_mode
+
         # Residue-slim R2: same tool-detail eviction as persona_instance_summary.
         # The heavy payloads (tool_resolution / turn_tool_context /
         # permission_state / blocked_tools) leave the row behind a typed
@@ -1831,7 +1836,12 @@ def _agent_summary(agent, *, include_tool_details: bool = False, readiness=None)
         # tool-visibility resolution.
         summary.update(
             {
-                "permission_mode": tool_resolution.get("permission_mode") or "profile_default",
+                # Fallback follows the RUNTIME DEFAULT, not a bounded literal: the
+                # agents drawer must not render a posture no turn actually runs
+                # under (2026-08-09 ruling). ``blocked_tools_count`` moves 22 → 17
+                # under the unbounded default — the registry-hygiene names, which
+                # never yield to a mode.
+                "permission_mode": tool_resolution.get("permission_mode") or default_permission_mode(),
                 "mutation_boundary": tool_resolution["mutation_boundary"],
                 "tool_count": tool_resolution["final_tool_count"],
                 "blocked_tools_count": len(tool_resolution["blocked_tools"]),

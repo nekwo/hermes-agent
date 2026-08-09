@@ -55,6 +55,20 @@ def validate_runtime_config(cfg: AgentRuntimeConfig | None = None) -> dict[str, 
     # duplicates the top-level ``model.default`` authority. Warnings never flip
     # ``ok`` — a deliberate harness-wide override is valid, just worth surfacing.
     warnings = _runtime_default_warnings()
+    # A ``tool_permissions.default_mode`` the runtime could not honor already
+    # narrowed itself (config.py: fault ⇒ profile_default). Surfacing it here is
+    # what keeps the narrowing from being SILENT: an operator who typed a mode
+    # the runtime ignored must learn it from the doctor, not from agents that
+    # quietly have fewer tools than the config appears to grant.
+    for issue in getattr(getattr(cfg, "tool_permissions", None), "issues", ()) or ():
+        if not isinstance(issue, dict):
+            continue
+        warnings.append(
+            {
+                "field": str(issue.get("subject") or "agent_runtime.tool_permissions.default_mode"),
+                "reason": str(issue.get("summary") or ""),
+            }
+        )
 
     return {"ok": not errors, "errors": errors, "warnings": warnings, "schema_version": CURRENT_RUNTIME_SCHEMA_VERSION}
 

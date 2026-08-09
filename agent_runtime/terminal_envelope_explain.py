@@ -59,8 +59,33 @@ _DISPOSITION_SUMMARY = {
 }
 
 
+def _resolved_permission_mode(persona: Any, *, session_id: str | None = None) -> str:
+    """This persona's effective chat permission mode, or ``""`` if unresolvable.
+
+    Read through the ONE chokepoint. An operator preview that skipped it would
+    describe the config grants table alone, which since the 2026-08-09 ruling is
+    only half the answer: an unbounded run is granted the grantable classes by
+    MODE, and a preview that showed them refused would send the operator writing
+    a grant stanza for something already allowed.
+    """
+
+    try:
+        from .tool_permissions import permission_options_for_chat
+
+        return str(
+            permission_options_for_chat(persona, session_id=session_id).permission_mode or ""
+        )
+    except Exception:  # pragma: no cover - a preview must never fail on policy
+        return ""
+
+
 def explain_persona_terminal_envelope(
-    persona: Any, *, lane: str = LANE_MISSION_CHAT, cfg: Any | None = None
+    persona: Any,
+    *,
+    lane: str = LANE_MISSION_CHAT,
+    cfg: Any | None = None,
+    session_id: str | None = None,
+    permission_mode: str | None = None,
 ) -> dict[str, Any]:
     """The terminal-envelope posture of one persona's lane, as a JSON payload.
 
@@ -74,8 +99,13 @@ def explain_persona_terminal_envelope(
     side empty today.
     """
 
-    scope = scope_for_persona(persona, lane=lane)
-    explained = explain_terminal_envelope(role=scope.role, lane=scope.lane, cfg=cfg)
+    mode = str(permission_mode or "").strip() or _resolved_permission_mode(
+        persona, session_id=session_id
+    )
+    scope = scope_for_persona(persona, lane=lane, session_id=session_id, permission_mode=mode)
+    explained = explain_terminal_envelope(
+        role=scope.role, lane=scope.lane, cfg=cfg, permission_mode=mode
+    )
 
     hard_floor = hard_floor_command_classes()
     refused = [str(name) for name in explained.get("refused") or ()]
@@ -98,7 +128,10 @@ def explain_persona_terminal_envelope(
         "command_classes": explained.get("command_classes"),
         "grantable_command_classes": explained.get("grantable_command_classes"),
         "hard_floor_command_classes": sorted(hard_floor),
+        "permission_mode": explained.get("permission_mode"),
         "granted": explained.get("granted"),
+        "granted_by_config": explained.get("granted_by_config"),
+        "granted_by_permission_mode": explained.get("granted_by_permission_mode"),
         "refused": refused,
         "refused_grantable": [name for name in refused if name not in hard_floor],
         "refused_hard_floor": [name for name in refused if name in hard_floor],
@@ -123,7 +156,16 @@ def render_terminal_envelope_explanation(explained: dict[str, Any]) -> list[str]
     lines.append(f"  disposition: {explained.get('disposition_summary')}")
     if explained.get("config_key"):
         lines.append(f"  grant config key: {explained['config_key']}")
+    if explained.get("permission_mode"):
+        lines.append(f"  permission mode: {explained['permission_mode']}")
     lines.append(f"  granted:  {_names(explained.get('granted'))}")
+    if explained.get("granted_by_permission_mode"):
+        lines.append(
+            "    by permission mode: "
+            f"{_names(explained.get('granted_by_permission_mode'))} (receipted per command)"
+        )
+    if explained.get("granted_by_config"):
+        lines.append(f"    by config grant:    {_names(explained.get('granted_by_config'))}")
     lines.append(
         f"  refused (operator-grantable): {_names(explained.get('refused_grantable'))}"
     )

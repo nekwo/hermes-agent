@@ -195,10 +195,15 @@ class ChatLaneDrop:
             ),
             "fix_hint": (
                 "By design, not a permission problem: this is a per-turn schema-cost "
-                "cut applied AFTER role and permission resolution, so no permission "
-                "mode short of an operator-granted `unbounded` grant restores it and "
-                "chasing blocked-tool counts will not find it. Restore it for this "
-                f"persona with `{self.restorable_via}: [{self.subject}]` in the ROOT "
+                "cut applied AFTER role and permission resolution, so chasing "
+                "blocked-tool counts will not find it. Seeing this row at all means "
+                "the session is running BELOW the runtime default — since the "
+                "2026-08-09 ruling that default is `unbounded`, which bypasses this "
+                "policy entirely — so an operator either restricted this session "
+                "(`harness persona permission set --mode bounded|read_only`) or "
+                "configured `agent_runtime.tool_permissions.default_mode` narrower. "
+                "Lift that, restore it for this persona with "
+                f"`{self.restorable_via}: [{self.subject}]` in the ROOT "
                 "config.yaml (un-exclusion — the role must already allow it), or run "
                 "the work on a worker lane, which never passes through this policy."
             ),

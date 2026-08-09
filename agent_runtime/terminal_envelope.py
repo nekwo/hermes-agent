@@ -96,6 +96,8 @@ import re
 import time
 from typing import Any, Iterator, Mapping
 
+from .permission_modes import permission_mode_is_unbounded
+
 logger = logging.getLogger(__name__)
 
 
@@ -253,10 +255,21 @@ class TerminalEnvelopeScope:
     persona_id: str = ""
     session_id: str = ""
     runtime_root: str = ""
+    #: The chat permission mode this run resolved (``tool_permissions.
+    #: permission_options_for_chat``). Stamped by ``persona_runtime`` from the
+    #: SAME resolve the turn already performs, so the schema plane and the
+    #: execution plane cannot disagree about which mode the turn is running
+    #: under. Empty on any caller that does not model a permission mode, which
+    #: reads exactly as the pre-2026-08-09 behaviour (grants table only).
+    permission_mode: str = ""
 
     @property
     def governed(self) -> bool:
         return self.lane in GOVERNED_LANES
+
+    @property
+    def unbounded(self) -> bool:
+        return permission_mode_is_unbounded(self.permission_mode)
 
 
 _ENVELOPE_SCOPE: ContextVar[TerminalEnvelopeScope | None] = ContextVar(
@@ -288,6 +301,15 @@ ENVELOPE_COMMAND_REQUIRES_GRANT = "envelope_command_requires_grant"
 #: Reserved for any future gated class kept outside
 #: :data:`GRANTABLE_COMMAND_CLASSES`. Ruling R-2 leaves no current hard floors.
 ENVELOPE_COMMAND_NOT_GRANTABLE = "envelope_command_not_grantable"
+#: Why a granted command was allowed to run. Recorded on the receipt so an
+#: operator reading ``terminal_envelope_decisions.jsonl`` can tell an explicit
+#: per-role config grant from the standing permission-mode posture.
+GRANT_SOURCE_CONFIG = "config_grant"
+#: The run's permission mode granted it (``unbounded``). This is the detective
+#: half of the 2026-08-09 ruling: the class is no longer refused by default, so
+#: the receipt naming the MODE is the only record of why it ran.
+GRANT_SOURCE_PERMISSION_MODE = "permission_mode"
+
 #: ``grants`` config issue codes (never widen; always reported).
 GRANT_UNKNOWN_COMMAND_CLASS = "envelope_grant_unknown_command_class"
 GRANT_CLASS_NOT_GRANTABLE = "envelope_grant_class_not_grantable"
@@ -347,6 +369,11 @@ class TerminalEnvelopeDecision:
     persona_id: str = ""
     session_id: str = ""
     grant_issues: tuple[TerminalEnvelopeGrantIssue, ...] = ()
+    #: The permission mode the run resolved, carried onto every receipt.
+    permission_mode: str = ""
+    #: :data:`GRANT_SOURCE_CONFIG` or :data:`GRANT_SOURCE_PERMISSION_MODE` on a
+    #: grant; empty otherwise.
+    grant_source: str = ""
 
     @property
     def refused(self) -> bool:
@@ -369,6 +396,22 @@ class TerminalEnvelopeDecision:
             "fix_hint": self.fix_hint,
         }
 
+    @property
+    def granted_by(self) -> str | None:
+        """The provenance string a receipt records for a GRANT.
+
+        A config grant names its ROOT-config key (unchanged). A permission-mode
+        grant has no config key by construction — naming the mode is the whole
+        point of the receipt, so it says ``permission_mode=unbounded`` rather
+        than leaving the field null and losing why the command ran.
+        """
+
+        if not self.granted:
+            return None
+        if self.grant_source == GRANT_SOURCE_PERMISSION_MODE:
+            return f"permission_mode={self.permission_mode}"
+        return self.config_key
+
     def explain(self) -> dict[str, Any]:
         return {
             "outcome": self.outcome,
@@ -380,6 +423,9 @@ class TerminalEnvelopeDecision:
             "reason": self.reason,
             "failure_class": self.failure_class,
             "config_key": self.config_key,
+            "permission_mode": self.permission_mode,
+            "grant_source": self.grant_source,
+            "granted_by": self.granted_by,
             "summary": self.summary,
             "fix_hint": self.fix_hint,
             "grant_issues": [issue.row() for issue in self.grant_issues],
@@ -565,6 +611,7 @@ def envelope_decision(
     if resolved is None or not resolved.governed:
         return None
 
+    permission_mode = str(resolved.permission_mode or "")
     command_class = classify_command(command)
     if command_class is None:
         return TerminalEnvelopeDecision(
@@ -573,6 +620,7 @@ def envelope_decision(
             role=resolved.role,
             persona_id=resolved.persona_id,
             session_id=resolved.session_id,
+            permission_mode=permission_mode,
         )
 
     reason = legacy_reason_for_class(command_class)
@@ -594,6 +642,45 @@ def envelope_decision(
             persona_id=resolved.persona_id,
             session_id=resolved.session_id,
             grant_issues=grants.issues,
+            permission_mode=permission_mode,
+            grant_source=GRANT_SOURCE_CONFIG,
+        )
+
+    # Permission-mode grant (operator ruling 2026-08-09). An ``unbounded`` run
+    # gets every GRANTABLE class without a per-role config stanza — schema-plane
+    # "full tool access" was hollow while the execution plane still refused
+    # ``git push``. Three properties are load-bearing and must not be softened:
+    #
+    # * it never touches the hard floor (``GRANTABLE_COMMAND_CLASSES`` is the
+    #   bound, and the not-grantable branch below is unchanged),
+    # * it never applies to an ungoverned lane (we returned ``None`` above), and
+    # * it is RECEIPTED exactly like a config grant. This is the compensating
+    #   control the ruling trades the refusal for: preventive → detective. If a
+    #   future change makes a mode-granted command run without
+    #   ``record_envelope_decision`` seeing it, the ruling's safety argument is
+    #   gone, not merely weakened.
+    if resolved.unbounded and command_class in GRANTABLE_COMMAND_CLASSES:
+        return TerminalEnvelopeDecision(
+            outcome=OUTCOME_GRANTED,
+            lane=resolved.lane,
+            role=resolved.role,
+            command_class=command_class,
+            reason=reason,
+            # No config key: this grant did not come from the grants table, and
+            # naming one would send an operator to a stanza that is not why the
+            # command ran.
+            config_key=None,
+            summary=(
+                f"'{command_class}' is granted by permission_mode="
+                f"'{permission_mode}' (runtime default) for role '{grants.role}' on "
+                f"the '{resolved.lane}' lane; the command is recorded in "
+                f"{ENVELOPE_DECISION_LOG}."
+            ),
+            persona_id=resolved.persona_id,
+            session_id=resolved.session_id,
+            grant_issues=grants.issues,
+            permission_mode=permission_mode,
+            grant_source=GRANT_SOURCE_PERMISSION_MODE,
         )
 
     if command_class not in GRANTABLE_COMMAND_CLASSES:
@@ -618,6 +705,7 @@ def envelope_decision(
             persona_id=resolved.persona_id,
             session_id=resolved.session_id,
             grant_issues=grants.issues,
+            permission_mode=permission_mode,
         )
 
     return TerminalEnvelopeDecision(
@@ -639,6 +727,7 @@ def envelope_decision(
         persona_id=resolved.persona_id,
         session_id=resolved.session_id,
         grant_issues=grants.issues,
+        permission_mode=permission_mode,
     )
 
 
@@ -655,8 +744,14 @@ def _grant_fix_hint(
     """
 
     lines = [
-        f"An OPERATOR can allow it by adding this to the ROOT config.yaml "
-        f"(not a profile config — a profile cannot grant itself this):",
+        "This session is running under a RESTRICTED permission mode — the runtime "
+        "default grants every operator-grantable envelope class, so a refusal here "
+        "means an operator narrowed this session (`hermes harness persona permission "
+        "set --mode bounded|read_only`) or the runtime default was configured "
+        "narrower. Ask the operator to lift the restriction, or:",
+        "",
+        "An OPERATOR can allow just this class by adding this to the ROOT config.yaml "
+        "(not a profile config — a profile cannot grant itself this):",
         "",
         "  agent_runtime:",
         "    terminal_envelope:",
@@ -809,7 +904,14 @@ def record_envelope_decision(
         "command_class": decision.command_class,
         "reason": decision.reason,
         "failure_class": decision.failure_class,
-        "granted_by": decision.config_key if decision.granted else None,
+        # WHY it ran (or was refused under which posture). ``granted_by`` keeps
+        # naming the ROOT-config key for a config grant and names the MODE for a
+        # permission-mode grant, so no granted command lands in this log without
+        # its provenance — the compensating control the 2026-08-09 ruling
+        # substitutes for the refusal it removed.
+        "granted_by": decision.granted_by,
+        "grant_source": decision.grant_source or None,
+        "permission_mode": decision.permission_mode or None,
         "command_preview": preview,
     }
     if decision.grant_issues:
@@ -925,6 +1027,7 @@ def scope_for_persona(
     lane: str = LANE_MISSION_CHAT,
     session_id: str | None = None,
     runtime_root: Any = None,
+    permission_mode: str | None = None,
 ) -> TerminalEnvelopeScope:
     """Build the run scope from a persona. Never raises on a odd role value."""
 
@@ -940,15 +1043,32 @@ def scope_for_persona(
         persona_id=str(getattr(persona, "id", "") or ""),
         session_id=str(session_id or ""),
         runtime_root=str(runtime_root or ""),
+        permission_mode=str(permission_mode or ""),
     )
 
 
 def explain_terminal_envelope(
-    *, role: str, lane: str = LANE_MISSION_CHAT, cfg: Any | None = None
+    *,
+    role: str,
+    lane: str = LANE_MISSION_CHAT,
+    cfg: Any | None = None,
+    permission_mode: str | None = None,
 ) -> dict[str, Any]:
-    """Operator view: what this role may do on this lane, and why. No side effects."""
+    """Operator view: what this role may do on this lane, and why. No side effects.
+
+    ``permission_mode`` makes the view match :func:`envelope_decision`: an
+    ``unbounded`` run is granted every grantable class by MODE, so a view that
+    only read the grants table would show classes as refused that the very next
+    command would run. Left unset the answer is the config-grants-only view,
+    byte-identical to the pre-2026-08-09 shape.
+    """
 
     grants = resolve_terminal_envelope_grants(role=role, lane=lane, cfg=cfg)
+    mode = str(permission_mode or "")
+    granted_by_mode: frozenset[str] = frozenset()
+    if lane in GOVERNED_LANES and permission_mode_is_unbounded(mode):
+        granted_by_mode = GRANTABLE_COMMAND_CLASSES - grants.classes
+    granted = grants.classes | granted_by_mode
     return {
         "lane": lane,
         "role": grants.role,
@@ -956,8 +1076,11 @@ def explain_terminal_envelope(
         "config_key": grants.config_key,
         "command_classes": sorted(COMMAND_CLASSES),
         "grantable_command_classes": sorted(GRANTABLE_COMMAND_CLASSES),
-        "granted": sorted(grants.classes),
-        "refused": sorted(COMMAND_CLASSES - grants.classes),
+        "granted": sorted(granted),
+        "granted_by_config": sorted(grants.classes),
+        "granted_by_permission_mode": sorted(granted_by_mode),
+        "permission_mode": mode,
+        "refused": sorted(COMMAND_CLASSES - granted),
         "grant_issues": grants.issue_rows(),
     }
 
@@ -992,6 +1115,8 @@ __all__ = [
     "GRANTABLE_COMMAND_CLASSES",
     "GRANT_CLASS_NOT_GRANTABLE",
     "GRANT_MALFORMED",
+    "GRANT_SOURCE_CONFIG",
+    "GRANT_SOURCE_PERMISSION_MODE",
     "GRANT_UNKNOWN_COMMAND_CLASS",
     "LANE_MISSION_CHAT",
     "LEGACY_REASON_BY_CLASS",

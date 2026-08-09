@@ -780,7 +780,18 @@ def build_parser(parent_subparsers) -> None:
     persona_tool_diff = persona_subs.add_parser("tool-diff", help="Show resolved model tools and blocked tools for one persona")
     persona_tool_diff.add_argument("persona_id", help="Persona id")
     persona_tool_diff.add_argument("--session-id", default=None)
-    persona_tool_diff.add_argument("--permission-mode", default="profile_default")
+    # Unset ⇒ preview the persona under the RUNTIME DEFAULT
+    # (``agent_runtime.tool_permissions.default_mode``, shipped ``unbounded``),
+    # which is what a real turn gets. Pass a mode to preview a hypothetical one:
+    # ``--permission-mode profile_default`` still renders the bounded shape.
+    persona_tool_diff.add_argument(
+        "--permission-mode",
+        default=None,
+        help=(
+            "Preview under this permission mode (profile_default | bounded | "
+            "read_only | unbounded). Default: the runtime default from the ROOT config."
+        ),
+    )
     persona_tool_diff.add_argument("--repo-scope", default=None)
     persona_tool_diff.add_argument("--workdir", default=None)
     persona_tool_diff.add_argument(
@@ -805,14 +816,44 @@ def build_parser(parent_subparsers) -> None:
     )
     persona_tool_diff.add_argument("--json", action="store_true")
     persona_tool_diff.set_defaults(func=_cmd_persona_tool_diff)
-    persona_permission = persona_subs.add_parser("permission", help="Preview or set chat-scoped persona tool permissions")
+    persona_permission = persona_subs.add_parser(
+        "permission",
+        help=(
+            "Restrict (or clear a restriction on) one chat session's tool permissions. "
+            "The runtime default is the standing posture — this is the temporary "
+            "narrowing lane, not an escalation ritual."
+        ),
+    )
     persona_permission_subs = persona_permission.add_subparsers(dest="persona_permission_command")
-    persona_permission_set = persona_permission_subs.add_parser("set", help="Set chat-scoped permission mode")
+    persona_permission_set = persona_permission_subs.add_parser(
+        "set",
+        help=(
+            "Set this session's permission mode. 'bounded' / 'read_only' RESTRICT it "
+            "below the runtime default; 'profile_default' CLEARS the restriction "
+            "(the session falls back to the runtime default); 'unbounded' is normally "
+            "redundant with the default and only needed when the default is narrower."
+        ),
+    )
     persona_permission_set.add_argument("persona_id", help="Persona id")
     persona_permission_set.add_argument("--session-id", required=True)
-    persona_permission_set.add_argument("--mode", choices=["profile_default", "read_only", "unbounded"], required=True)
+    persona_permission_set.add_argument(
+        "--mode",
+        choices=["profile_default", "bounded", "read_only", "unbounded"],
+        required=True,
+        help=(
+            "bounded = the historical bounded tier (persona-safety blocks + chat-lane "
+            "cost cuts + envelope grants table only); read_only = bounded plus the "
+            "mutating-tool block and the reviewer-shaped MCP subset; profile_default = "
+            "no opinion, defer to the runtime default; unbounded = full access."
+        ),
+    )
     persona_permission_set.add_argument("--reason", required=True)
-    persona_permission_set.add_argument("--turns", type=int, default=None)
+    persona_permission_set.add_argument(
+        "--turns",
+        type=int,
+        default=None,
+        help="Expire the restriction after this many turns (any restricting mode decrements).",
+    )
     persona_permission_set.add_argument("--ttl-seconds", type=int, default=None)
     persona_permission_set.add_argument("--expires-at", default=None)
     persona_permission_set.add_argument("--json", action="store_true")
