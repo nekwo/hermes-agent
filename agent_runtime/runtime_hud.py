@@ -422,6 +422,100 @@ def extract_skill_preload_envelope(
     return text[: match.start()].rstrip(), metadata
 
 
+@dataclass(frozen=True, slots=True)
+class ComposedUserRow:
+    """One composed operator user row, split into the parts it was joined from.
+
+    Composition order is ``message · skill_preload · runtime_context``
+    (``persona_runtime._mission_chat_user_message``) and the two envelopes are
+    end-anchored, so the split is exact and lossless:
+    ``message + skill_preload + runtime_context`` reproduces the input byte for
+    byte, separators included. Absent envelopes are ``""``.
+
+    This exists because the parts have DIFFERENT contracts and therefore
+    different bounds — operator text must never be cut silently, the preload
+    owns its own dedupe/revision machinery, the HUD is small and load-bearing —
+    and a bound applied to the joined row cannot tell them apart. It mutilated
+    all three (2026-08-09 F1).
+    """
+
+    message: str
+    skill_preload: str
+    runtime_context: str
+
+    @property
+    def joined(self) -> str:
+        return f"{self.message}{self.skill_preload}{self.runtime_context}"
+
+    @property
+    def has_envelope(self) -> bool:
+        return bool(self.skill_preload or self.runtime_context)
+
+
+def split_composed_user_row(content: Any) -> ComposedUserRow:
+    """Split a composed operator user row into its three parts.
+
+    Each envelope is the RAW matched text — opening tag, body, closing tag, and
+    the leading blank-line separator the composition joined it with — so a
+    caller can rebound one part and rejoin without re-deriving any separator.
+
+    The HUD envelope is stripped FIRST for the same reason
+    :func:`skill_preload_delivery` strips it first: the skill envelope is
+    end-anchored only once the runtime-context envelope is out of the way.
+    """
+
+    text = content if isinstance(content, str) else str(content or "")
+    hud_match = _RUNTIME_CONTEXT_ENVELOPE_RE.search(text)
+    if hud_match is None:
+        head, runtime_context = text, ""
+    else:
+        head, runtime_context = text[: hud_match.start()], text[hud_match.start() :]
+    skill_match = _SKILL_PRELOAD_ENVELOPE_RE.search(head)
+    if skill_match is None:
+        message, skill_preload = head, ""
+    else:
+        message, skill_preload = head[: skill_match.start()], head[skill_match.start() :]
+    return ComposedUserRow(
+        message=message, skill_preload=skill_preload, runtime_context=runtime_context
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class EnvelopeCodec:
+    """Read and rewrite ONE envelope's body without respelling its grammar.
+
+    Both operations go through the same compiled pattern, so "where the body
+    is" and "where a replacement body goes" cannot drift apart. Callers that
+    need to bound an envelope get its body, shrink it, and put it back —
+    the opening tag and its attributes stay byte-exact, which is what keeps
+    :func:`skill_preload_delivery`'s ``unchanged`` dedupe (which matches on
+    ``revision``/``delivery``) working across a bound. Amputating the closing
+    tag instead defeats that dedupe outright and re-ships the whole preload on
+    every turn (2026-08-09 F1).
+    """
+
+    name: str
+    pattern: Any
+
+    def body(self, envelope: str) -> str | None:
+        """The envelope's body, or ``None`` when *envelope* is not this grammar."""
+
+        match = self.pattern.search(envelope)
+        return None if match is None else match.group("body")
+
+    def with_body(self, envelope: str, body: str) -> str | None:
+        """*envelope* with its body replaced; everything else byte-exact."""
+
+        match = self.pattern.search(envelope)
+        if match is None:
+            return None
+        return envelope[: match.start("body")] + body + envelope[match.end("body") :]
+
+
+SKILL_PRELOAD_CODEC = EnvelopeCodec("skill_preload", _SKILL_PRELOAD_ENVELOPE_RE)
+RUNTIME_CONTEXT_CODEC = EnvelopeCodec("runtime_context", _RUNTIME_CONTEXT_ENVELOPE_RE)
+
+
 def _clean(value: Any) -> bool:
     """True when a value carries information worth emitting."""
 

@@ -427,15 +427,19 @@ class _ToolBudgetGuard:
         return 3
 
 
-def _prepare_resident_persona_chat_agent(agent: Any, candidate: Any) -> None:
-    """Refresh turn-scoped state without erasing native compressor memory."""
+def _prepare_resident_persona_chat_agent(agent: Any, turn_state: dict[str, Any]) -> None:
+    """Refresh turn-scoped state without erasing native compressor memory.
 
-    for name in (
-        "status_callback", "tool_progress_callback", "tool_start_callback",
-        "tool_complete_callback", "clarify_callback", "cache_scope_id", "max_iterations",
-    ):
-        if hasattr(candidate, name):
-            setattr(agent, name, getattr(candidate, name))
+    ``turn_state`` is the per-turn values resolved from the REQUEST (see
+    ``_execute_agent_run``), not read back off a freshly constructed agent. That
+    distinction is the whole of T3: the seven values below are the only thing a
+    resident actor ever wanted from the candidate, and building a ~1.5 s agent to
+    carry them across — then discarding it — was the cost of the warm lane.
+    """
+
+    for name, value in turn_state.items():
+        if hasattr(agent, name):
+            setattr(agent, name, value)
     for name in (
         "session_prompt_tokens", "session_completion_tokens", "session_total_tokens",
         "session_api_calls", "session_input_tokens", "session_output_tokens",
@@ -797,7 +801,7 @@ class ProfileAgentRunner:
         ):
             try:
                 runtime_started = time.perf_counter()
-                runtime = _resolve_request_runtime(request)
+                runtime = _resolve_request_runtime(request, timing)
                 timing["runtime_resolve_ms"] = _emit_request_timing(request, "runtime_resolve", runtime_started)
             except Exception:
                 if self._uses_default_agent_factory:
@@ -873,8 +877,6 @@ class ProfileAgentRunner:
                     timing,
                     budget=call_budget,
                 )
-            status_callback = _profile_status_callback(request, timing)
-            construct_started = time.perf_counter()
             # Per-run reasoning override → agent reasoning_config. Only passed
             # when explicitly requested so an unset run keeps the current
             # behavior (transport reads the global agent.reasoning_effort). The
@@ -886,48 +888,81 @@ class ProfileAgentRunner:
                 reasoning_config = parse_reasoning_effort(request.reasoning_effort)
                 if reasoning_config is not None:
                     reasoning_kwargs["reasoning_config"] = reasoning_config
-            agent = self._agent_factory(
-                provider=runtime.get("provider") or request.provider,
-                model=runtime.get("model") or request.model or "",
-                api_mode=request.api_mode or runtime.get("api_mode"),
-                base_url=runtime.get("base_url"),
-                api_key=runtime.get("api_key"),
-                **reasoning_kwargs,
-                enabled_toolsets=_enabled_toolsets_for_run(request, admitted_servers),
-                disabled_toolsets=request.disabled_toolsets,
-                blocked_tool_names=_blocked_tool_names_for_run(request),
-                quiet_mode=request.quiet_mode,
-                skip_context_files=request.skip_context_files,
-                skip_memory=request.skip_memory,
-                platform=request.platform,
-                session_id=request.session_id,
+            # T3 (2026-08-09): the turn-scoped state a RESIDENT actor needs
+            # refreshed, resolved from the REQUEST rather than read back off a
+            # throwaway agent. This is what makes the construction below lazy:
+            # `_prepare_resident_persona_chat_agent` used to consume exactly
+            # these seven values from a freshly built agent, which is why one had
+            # to be constructed (~1.4-1.8 s, tool setup dominated) even on the
+            # warm serve lane where it was immediately discarded on reuse.
+            turn_state = {
+                "status_callback": _profile_status_callback(request, timing),
+                "tool_progress_callback": _progress_adapter(
+                    request.progress_callback, "run.progress", guard=budget_guard
+                ),
+                "tool_start_callback": _progress_adapter(
+                    request.progress_callback, "run.tool.started", guard=budget_guard
+                ),
+                "tool_complete_callback": _progress_adapter(
+                    request.progress_callback, "run.tool.finished", guard=budget_guard
+                ),
+                "clarify_callback": request.clarify_callback,
                 # Header-only codex cache-scope hint; the default factory applies
                 # it to the constructed agent (never to session/transcript load).
-                cache_scope_id=request.cache_scope_id,
-                credential_pool=self._credential_pool,
-                session_db=self._session_db,
-                status_callback=status_callback,
-                max_iterations=request.max_iterations,
-                tool_progress_callback=_progress_adapter(request.progress_callback, "run.progress", guard=budget_guard),
-                tool_start_callback=_progress_adapter(request.progress_callback, "run.tool.started", guard=budget_guard),
-                tool_complete_callback=_progress_adapter(request.progress_callback, "run.tool.finished", guard=budget_guard),
-                clarify_callback=request.clarify_callback,
-            )
+                "cache_scope_id": request.cache_scope_id,
+                "max_iterations": request.max_iterations,
+            }
+
+            def _construct_agent():
+                """Build this run's agent and time it. Called at most once."""
+
+                construct_started = time.perf_counter()
+                built = self._agent_factory(
+                    provider=runtime.get("provider") or request.provider,
+                    model=runtime.get("model") or request.model or "",
+                    api_mode=request.api_mode or runtime.get("api_mode"),
+                    base_url=runtime.get("base_url"),
+                    api_key=runtime.get("api_key"),
+                    **reasoning_kwargs,
+                    enabled_toolsets=_enabled_toolsets_for_run(request, admitted_servers),
+                    disabled_toolsets=request.disabled_toolsets,
+                    blocked_tool_names=_blocked_tool_names_for_run(request),
+                    quiet_mode=request.quiet_mode,
+                    skip_context_files=request.skip_context_files,
+                    skip_memory=request.skip_memory,
+                    platform=request.platform,
+                    session_id=request.session_id,
+                    credential_pool=self._credential_pool,
+                    session_db=self._session_db,
+                    **turn_state,
+                )
+                timing["agent_construct_ms"] = _emit_request_timing(
+                    request, "agent_construct", construct_started
+                )
+                return built
+
             if request.persona_chat_runtime_registry is not None and request.root_chat_session_id:
                 active_id = request.session_id or request.root_chat_session_id
+                # The factory is now genuinely lazy: the registry calls it only
+                # on a miss or a rebuild. On reuse nothing is constructed at all,
+                # so `agent_construct_ms` is ABSENT rather than reporting the
+                # cost of work that was thrown away — `resident_actor_reused`
+                # says why, so the absence is typed, never silent.
                 entry, reused, rebuild_reason = request.persona_chat_runtime_registry.acquire(
                     root_session_id=request.root_chat_session_id,
                     active_session_id=active_id,
                     signature=request.persona_chat_runtime_signature or "default",
                     revision=request.persona_chat_native_revision or "unknown",
-                    factory=lambda: agent,
+                    factory=_construct_agent,
                 )
                 if reused:
-                    _prepare_resident_persona_chat_agent(entry.agent, agent)
-                    agent = entry.agent
+                    _prepare_resident_persona_chat_agent(entry.agent, turn_state)
+                agent = entry.agent
                 timing["resident_actor_reused"] = 1 if reused else 0
                 if rebuild_reason:
                     timing[f"resident_rebuild_{rebuild_reason}"] = 1
+            else:
+                agent = _construct_agent()
             if request.root_chat_session_id:
                 agent._persona_chat_root_session_id = request.root_chat_session_id
                 agent._persona_chat_client_message_id = request.client_message_id
@@ -959,7 +994,6 @@ class ProfileAgentRunner:
                         compressor.protect_last_n = max(
                             0, int(request.compression_protect_last_n_override)
                         )
-            timing["agent_construct_ms"] = _emit_request_timing(request, "agent_construct", construct_started)
             _steer_mcp_admission_notice(agent, request, admission_outcome)
             agent_ready_cleanup = _notify_agent_ready(request, agent)
             max_wall_seconds = _positive_float(request.max_wall_seconds)
@@ -1478,15 +1512,98 @@ def _binding_for_profile(profile: str | None) -> PersonaProfileBinding:
     )
 
 
-def _resolve_request_runtime(request: AgentRunRequest) -> dict[str, Any]:
+#: T6 (2026-08-09): how long a resolved runtime may be reused for an unchanged
+#: (profile, provider, model, config) tuple. 0.28-0.44 s of every send was spent
+#: re-resolving an identical answer.
+#:
+#: THE TTL IS A SAFETY BOUND, NOT A TUNING KNOB, and it is why it is 30 s rather
+#: than something generous. ``resolve_runtime_provider`` returns live OAuth
+#: credentials and refreshes any token within
+#: ``hermes_cli.auth.ACCESS_TOKEN_REFRESH_SKEW_SECONDS`` (120 s) of expiry. A
+#: memo handed out T seconds after resolution therefore carries a token with at
+#: least ``skew - T`` seconds of validity left: at 30 s that floor is 90 s,
+#: comfortably longer than the turn that is about to use it. Raising this past
+#: the skew would hand out expired credentials, so it must stay well under it —
+#: the invariant is pinned by
+#: ``tests/agent_runtime/test_runtime_resolve_cache.py``.
+RUNTIME_RESOLVE_CACHE_TTL_SECONDS = 30.0
+
+#: Files whose content can change what ``resolve_runtime_provider`` returns for
+#: an otherwise identical request (default provider/model, base_url, a provider
+#: flipped to ``enabled: false``, a rotated key). Their (mtime_ns, size) join the
+#: cache key, so an operator edit invalidates the memo immediately instead of
+#: waiting out the TTL.
+_RUNTIME_RESOLVE_STAMPED_FILES = ("config.yaml", ".env")
+
+_RUNTIME_RESOLVE_CACHE: dict[tuple, tuple[float, dict[str, Any]]] = {}
+_RUNTIME_RESOLVE_CACHE_LOCK = RLock()
+
+
+def reset_runtime_resolve_cache() -> None:
+    """Drop every memoized runtime resolution (tests; profile teardown)."""
+
+    with _RUNTIME_RESOLVE_CACHE_LOCK:
+        _RUNTIME_RESOLVE_CACHE.clear()
+
+
+def _runtime_resolve_cache_key(request: AgentRunRequest) -> tuple:
+    """Everything that can change the answer, and nothing that cannot.
+
+    ``HERMES_HOME`` is in the key because this resolves INSIDE
+    ``persona_profile_context`` — two personas bound to different profiles must
+    never share a memo (the same reason profile-context memos key on it).
+    """
+
+    from hermes_constants import get_hermes_home
+
+    home = Path(get_hermes_home())
+    stamps = []
+    for name in _RUNTIME_RESOLVE_STAMPED_FILES:
+        try:
+            stat = (home / name).stat()
+            stamps.append((name, stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            # An absent file is a stable fact about the config too; it becomes a
+            # different key the moment one is created.
+            stamps.append((name, None, None))
+    return (
+        str(home),
+        str(request.provider or ""),
+        str(request.model or ""),
+        tuple(stamps),
+    )
+
+
+def _resolve_request_runtime(
+    request: AgentRunRequest, timing: dict[str, Any] | None = None
+) -> dict[str, Any]:
     if not request.provider:
         return {}
+    key = _runtime_resolve_cache_key(request)
+    now = time.monotonic()
+    with _RUNTIME_RESOLVE_CACHE_LOCK:
+        cached = _RUNTIME_RESOLVE_CACHE.get(key)
+        if cached is not None and now - cached[0] <= RUNTIME_RESOLVE_CACHE_TTL_SECONDS:
+            if timing is not None:
+                timing["runtime_resolve_cached"] = 1
+            return dict(cached[1])
     runtime = resolve_runtime_provider(requested=request.provider, target_model=request.model)
-    return {
-        key: value
-        for key, value in runtime.items()
-        if key in {"provider", "model", "api_mode", "base_url", "api_key"} and value
+    resolved = {
+        key_name: value
+        for key_name, value in runtime.items()
+        if key_name in {"provider", "model", "api_mode", "base_url", "api_key"} and value
     }
+    with _RUNTIME_RESOLVE_CACHE_LOCK:
+        # Bounded: one entry per live (profile, provider, model, config) tuple,
+        # and the set of those is small. Evict the oldest wholesale rather than
+        # keep an LRU — a cold re-resolve costs one turn 0.3 s, a leak costs the
+        # process.
+        if len(_RUNTIME_RESOLVE_CACHE) >= 64:
+            _RUNTIME_RESOLVE_CACHE.clear()
+        _RUNTIME_RESOLVE_CACHE[key] = (now, dict(resolved))
+    if timing is not None:
+        timing["runtime_resolve_cached"] = 0
+    return resolved
 
 
 def _progress_adapter(
@@ -2459,9 +2576,25 @@ def _model_input_observability(*, agent, request: AgentRunRequest) -> dict[str, 
             system_prompt=str(system_prompt),
             captured_content=system_preview["content"],
         )
-    messages.append(_message_preview("user", request.user_message, source="mission_chat_user_message"))
+    # T4 (2026-08-09): record the WIRE, not the composition. ``request.user_message``
+    # is what the turn COMPOSED; the persona-chat persistence boundary
+    # (``persona_chat_continuity.safe_native_message``) may bound it in place on
+    # the live actor BEFORE the first provider call, so the composed text is not
+    # what the model received. Recording the composition is what let the 20k-char
+    # amputation (F1) run live and invisibly for weeks — the record showed a
+    # 56 KB user turn the provider metered at 4.2 k tokens.
+    wire_user_message, wire_receipt = _wire_user_message(agent=agent, request=request)
+    messages.append(
+        _message_preview("user", wire_user_message, source="mission_chat_user_message")
+    )
     cache_routing = _agent_cache_routing_observability(agent)
     return {
+        # Typed provenance for the row above: which copy it is, how the composed
+        # and wire sizes compare, and — when they differ — that the boundary
+        # bounded this turn. Never a silent fallback: an unavailable wire row
+        # says so instead of quietly recording the composition as if it were the
+        # wire.
+        "user_message_wire": wire_receipt,
         "schema_version": 1,
         "kind": "redaction_safe_final_model_input",
         "platform": request.platform,
@@ -2506,6 +2639,81 @@ def _model_input_observability(*, agent, request: AgentRunRequest) -> dict[str, 
             else {}
         ),
     }
+
+
+#: Typed reasons the wire copy of this turn's user row could not be read. Each
+#: one degrades the record to the COMPOSED text and says so — the record must
+#: never present a composition as a wire capture (that blind spot is F1).
+WIRE_USER_MESSAGE_UNAVAILABLE_REASONS: tuple[str, ...] = (
+    "no_message_list",
+    "no_turn_index",
+    "index_out_of_range",
+    "row_not_a_user_row",
+    "content_not_text",
+)
+
+
+def _current_turn_user_row(agent: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """This turn's user row as the agent actually holds it, or a typed reason.
+
+    ``_persist_user_message_idx`` is the agent's OWN pointer at the current
+    turn's user message (``agent/turn_context.py``, re-anchored after preflight
+    compression), so it names the exact dict every provider call for this turn
+    reads — including after an in-place boundary rewrite. It is used rather than
+    "the last user row" because a todo-snapshot or injected row appended after
+    the turn's message would otherwise steal the capture.
+    """
+
+    messages = getattr(agent, "messages", None)
+    if not isinstance(messages, list):
+        return None, "no_message_list"
+    index = getattr(agent, "_persist_user_message_idx", None)
+    if not isinstance(index, int):
+        return None, "no_turn_index"
+    if index < 0 or index >= len(messages):
+        return None, "index_out_of_range"
+    row = messages[index]
+    if not isinstance(row, dict) or str(row.get("role") or "").lower() != "user":
+        return None, "row_not_a_user_row"
+    return row, None
+
+
+def _wire_user_message(*, agent: Any, request: AgentRunRequest) -> tuple[str, dict[str, Any]]:
+    """The user text this turn actually SUBMITTED, plus a typed receipt.
+
+    Returns ``(text, receipt)``. ``receipt["source"]`` is ``agent_wire`` when the
+    text was read off the agent's own current-turn row and ``request_composed``
+    when it could not be (with ``receipt["unavailable_reason"]`` naming which of
+    :data:`WIRE_USER_MESSAGE_UNAVAILABLE_REASONS` applied).
+
+    ``bounded`` is the alarm this exists to raise: the composed and wire sizes
+    differ, so something between composition and the wire rewrote the turn. On
+    the persona-chat lane that is the per-envelope bound in
+    ``persona_chat_continuity``; anywhere else it is a finding.
+    """
+
+    composed = request.user_message if isinstance(request.user_message, str) else str(
+        request.user_message or ""
+    )
+    receipt: dict[str, Any] = {
+        "schema_version": 1,
+        "source": "request_composed",
+        "composed_chars": len(composed),
+        "wire_chars": len(composed),
+        "bounded": False,
+    }
+    row, reason = _current_turn_user_row(agent)
+    if row is None:
+        receipt["unavailable_reason"] = reason
+        return composed, receipt
+    content = row.get("content")
+    if not isinstance(content, str):
+        receipt["unavailable_reason"] = "content_not_text"
+        return composed, receipt
+    receipt["source"] = "agent_wire"
+    receipt["wire_chars"] = len(content)
+    receipt["bounded"] = len(content) != len(composed)
+    return content, receipt
 
 
 def _system_prompt_section_receipts(

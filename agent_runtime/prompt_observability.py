@@ -816,6 +816,13 @@ def _final_model_input_stub(final_model_input: dict[str, Any], context_id: Any) 
         # only one-way fingerprints. Keep it in the frame stub so operators can
         # compare a cold turn with adjacent warm turns without a disk fetch.
         stub["cache_routing"] = cache_routing
+    wire = _safe_user_message_wire(final_model_input.get("user_message_wire"))
+    if wire is not None:
+        # T4: a handful of ints. Whether the captured user row is the WIRE copy
+        # is exactly the fact an evicted payload must not take with it — the
+        # operator opening a peek needs to know the record is trustworthy before
+        # deciding whether the fetch is worth it.
+        stub["user_message_wire"] = wire
     sections = _safe_system_prompt_sections(
         final_model_input.get("system_prompt_sections")
     )
@@ -1849,6 +1856,14 @@ def _compaction_ratio(model: str, provider: str | None) -> float:
 # (or when a turn failed before any call) and must be labeled as such — an
 # unlabeled estimate reads as truth and silently under-reports (it cannot see
 # tool schemas, which are ~12K tokens on a typical mission-chat turn).
+#: Bounds outside which recorded-vs-metered token drift is reported as a typed
+#: alarm row on ``context_budget``. Deliberately wide: the recorded estimate is
+#: a bytes//4 heuristic and healthy turns on this lane measured 0.62–1.0, so a
+#: narrow band would cry wolf every turn and be ignored — which is exactly how
+#: the 5.48 reading on the 2026-08-09 200 k turn went unread while F1 ran live.
+CONTEXT_BUDGET_DRIFT_ALARM_HIGH = 2.0
+CONTEXT_BUDGET_DRIFT_ALARM_LOW = 0.25
+
 BUDGET_BASIS_METERED_FIRST_CALL = "metered_first_call"
 BUDGET_BASIS_ESTIMATE_WITH_TOOLS = "estimate_messages_plus_tools"
 BUDGET_BASIS_ESTIMATE_MESSAGES_ONLY = "estimate_messages_only"
@@ -1962,8 +1977,74 @@ def _context_budget(
     # meter both exist and disagree badly, the estimator has lost an input class
     # (as it did with tool schemas) and says so instead of failing silently.
     if metered is not None and estimate is not None and estimate > 0:
-        budget["estimate_drift_ratio"] = round(metered / estimate, 2)
+        ratio = round(metered / estimate, 2)
+        budget["estimate_drift_ratio"] = ratio
+        # T4: the ratio existed and NOTHING READ IT — 5.48 sat in the record on
+        # the 200 k turn while the wire-vs-record bug (F1) ran live. A number
+        # only alarms when something decides it is out of band, so the decision
+        # is made here, once, and rides the SAME block the launcher already
+        # decodes off the `chat.final` frame.
+        alarm_direction = _drift_alarm_direction(ratio)
+        if alarm_direction is not None:
+            budget["estimate_drift_alarm"] = {
+                "schema_version": 1,
+                "direction": alarm_direction,
+                "ratio": ratio,
+                "low": CONTEXT_BUDGET_DRIFT_ALARM_LOW,
+                "high": CONTEXT_BUDGET_DRIFT_ALARM_HIGH,
+                "summary": (
+                    "Provider metered far MORE than the recorded prompt accounts for; "
+                    "the record is missing an input class."
+                    if alarm_direction == "metered_exceeds_record"
+                    else
+                    "Provider metered far LESS than the recorded prompt accounts for; "
+                    "something between composition and the wire dropped content."
+                ),
+            }
+    # T4: the exact, non-statistical companion to the ratio above. The recorded
+    # user row now carries whether the WIRE copy differed from the COMPOSED one
+    # (profile_runner._wire_user_message); when it did, say so on the frame
+    # rather than leaving it buried in the evicted final_model_input payload.
+    wire_drift = _wire_drift_row(final_model_input)
+    if wire_drift is not None:
+        budget["wire_drift"] = wire_drift
     return budget
+
+
+def _drift_alarm_direction(ratio: float) -> str | None:
+    """Which way the drift broke band, or ``None`` while it is in band."""
+
+    if ratio >= CONTEXT_BUDGET_DRIFT_ALARM_HIGH:
+        return "metered_exceeds_record"
+    if ratio <= CONTEXT_BUDGET_DRIFT_ALARM_LOW:
+        return "record_exceeds_metered"
+    return None
+
+
+def _wire_drift_row(final_model_input: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Typed frame row for a turn whose wire user text differed from composed.
+
+    ``None`` when nothing is recorded, when the wire copy was unreadable, or
+    when the two matched — the frame stays quiet on a healthy turn and speaks
+    only when the composition did not survive to the wire.
+    """
+
+    if not isinstance(final_model_input, dict):
+        return None
+    receipt = final_model_input.get("user_message_wire")
+    if not isinstance(receipt, dict) or not receipt.get("bounded"):
+        return None
+    composed = receipt.get("composed_chars")
+    wire = receipt.get("wire_chars")
+    if not isinstance(composed, int) or not isinstance(wire, int):
+        return None
+    return {
+        "schema_version": 1,
+        "kind": "user_message_bounded_before_wire",
+        "composed_chars": composed,
+        "wire_chars": wire,
+        "dropped_chars": max(0, composed - wire),
+    }
 
 
 def _profile_snapshot_skill_names(profile: str) -> list[str]:
@@ -3031,7 +3112,34 @@ def _safe_final_model_input(value: dict[str, Any] | None) -> dict[str, Any] | No
         # estimate) them at all.
         "tool_schema": _safe_tool_schema(value.get("tool_schema")),
         "cache_routing": _safe_cache_routing(value.get("cache_routing")),
+        # T4: the wire-vs-composed receipt for this turn's user row. Tiny, typed,
+        # and load-bearing — without it a reader cannot tell whether the captured
+        # user message is what the model received or only what the turn composed.
+        "user_message_wire": _safe_user_message_wire(value.get("user_message_wire")),
     }
+
+
+def _safe_user_message_wire(value: Any) -> dict[str, Any] | None:
+    """Bounded projection of the T4 wire receipt. ``None`` for an absent one.
+
+    Absent means the producer did not record it (an older row, a non-runner
+    lane) — an honest absence the reader renders as "unknown", never a
+    fabricated ``bounded: False`` that would read as proof the wire matched.
+    """
+
+    if not isinstance(value, dict):
+        return None
+    receipt: dict[str, Any] = {
+        "schema_version": _safe_int(value.get("schema_version")) or 1,
+        "source": safe_assignment_token(value.get("source")) or "unknown",
+        "composed_chars": _safe_int(value.get("composed_chars")),
+        "wire_chars": _safe_int(value.get("wire_chars")),
+        "bounded": bool(value.get("bounded")),
+    }
+    reason = safe_assignment_token(value.get("unavailable_reason"))
+    if reason:
+        receipt["unavailable_reason"] = reason
+    return receipt
 
 
 # The assignment rule is single-homed in ``agent_runtime.redaction`` (see the

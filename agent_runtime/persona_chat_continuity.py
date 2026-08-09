@@ -13,6 +13,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -32,6 +33,8 @@ from .persona_assignments import (
 from .redaction import TEXT_SECRET_ASSIGNMENT_RE
 
 
+logger = logging.getLogger(__name__)
+
 PERSONA_CHAT_SESSION_SOURCE = "agent_runtime_persona_chat"
 _TOOL_EXECUTION_SCOPE: ContextVar[str | None] = ContextVar(
     "persona_chat_tool_execution_scope", default=None
@@ -44,18 +47,229 @@ _SECRET_RE = TEXT_SECRET_ASSIGNMENT_RE
 _MAX_CONTENT = 20_000
 _MAX_ARGUMENTS = 4_000
 
+#: Total ceiling for ONE composed operator user row (message · skill_preload ·
+#: runtime_context). Deliberately much larger than :data:`_MAX_CONTENT`, and
+#: deliberately the ONLY ceiling on that row — the per-part limits below are
+#: priority slices of this one number, not independent budgets that could
+#: silently disagree with it.
+#:
+#: 256 KiB is ~4.6x the largest real preload measured on this lane (qa's
+#: ``launcher-stagec-mcp-screenshot``, 54 KB) and it is paid at most ONCE per
+#: thread: turn 2+ delivers the compact ``unchanged`` stub, so steady-state rows
+#: are a few hundred bytes.
+_MAX_USER_ROW_CONTENT = 262_144
 
-def _safe_text(value: Any, *, limit: int = _MAX_CONTENT) -> str:
+#: Priority slice for the runtime-context (HUD) envelope. Served FIRST, because
+#: it is the smallest load-bearing part: the wall-budget countdown, roster,
+#: scope, and steering lines. Under the previous single flat cap it composed
+#: LAST and was therefore the first thing amputated — on exactly the personas
+#: whose turns run long enough for a budget warning to matter.
+_MAX_RUNTIME_CONTEXT_CONTENT = 32_000
+
+#: Names of the three parts, for the typed bound notes below.
+BOUND_PART_MESSAGE = "message"
+BOUND_PART_SKILL_PRELOAD = "skill_preload"
+BOUND_PART_RUNTIME_CONTEXT = "runtime_context"
+
+BOUND_ACTION_TRUNCATED = "truncated"
+BOUND_ACTION_DROPPED = "dropped"
+
+#: In-band marker for bounded free text. Unchanged spelling — a persisted row
+#: carrying it must keep reading the same way it always has.
+_TRUNCATION_MARKER = " … [truncated]"
+
+
+@dataclass(frozen=True, slots=True)
+class ContentBoundNote:
+    """One part of a composed row that did not survive its bound intact."""
+
+    part: str
+    action: str
+    original_chars: int
+    bounded_chars: int
+    limit: int
+
+
+@dataclass(frozen=True, slots=True)
+class BoundedUserContent:
+    """A bounded composed user row, plus what the bound did to it.
+
+    ``notes`` is the whole point. A bound that silently amputates structured
+    content mid-token is worse than one that cuts a part and says so, and the
+    2026-08-09 F1 finding is what that costs: 37% of a required skill delivered
+    mid-sentence, the HUD gone entirely, and — because the amputation took the
+    ``</skill_preload>`` closing tag with it — the ``unchanged`` dedupe made
+    structurally unreachable, re-shipping ~3.7 k tokens every turn forever.
+    """
+
+    text: str
+    notes: tuple[ContentBoundNote, ...] = ()
+
+    @property
+    def bounded(self) -> bool:
+        return bool(self.notes)
+
+
+def _redacted(value: Any) -> str:
     text = str(value or "").replace("\x00", " ")
     try:
         from agent.redact import redact_sensitive_text
 
-        text = redact_sensitive_text(text, force=True)
+        return redact_sensitive_text(text, force=True)
     except Exception:
-        text = _SECRET_RE.sub(r"\1: [redacted]", text)
-    if len(text) > limit:
-        return text[:limit].rstrip() + " … [truncated]"
-    return text
+        return _SECRET_RE.sub(r"\1: [redacted]", text)
+
+
+def _truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    keep = max(0, limit - len(_TRUNCATION_MARKER))
+    return text[:keep].rstrip() + _TRUNCATION_MARKER
+
+
+def _safe_text(value: Any, *, limit: int = _MAX_CONTENT) -> str:
+    return _truncate(_redacted(value), limit)
+
+
+def _bound_envelope(
+    envelope: str, *, limit: int, part: str, codec: Any
+) -> tuple[str, ContentBoundNote | None]:
+    """Bound one envelope by shrinking its BODY, never its tags.
+
+    The opening tag and its attributes are what every downstream consumer reads:
+    the transcript projection strips on them, and the skill preload's
+    ``unchanged`` dedupe matches on ``revision``/``delivery``. Cutting through
+    them is what turned a size problem into a correctness one.
+
+    The whole part is dropped only when the budget cannot hold the tags at all —
+    at that size there is no well-formed envelope to emit, and an honest absence
+    beats a broken one.
+    """
+
+    original = len(envelope)
+    if original <= limit:
+        return envelope, None
+    body = codec.body(envelope)
+    if body is None:
+        # Not this grammar (a legacy row, a hand-edited one): treat it as opaque
+        # free text rather than hand-editing tags we did not parse.
+        bounded = _truncate(envelope, limit)
+        return bounded, ContentBoundNote(
+            part=part,
+            action=BOUND_ACTION_TRUNCATED,
+            original_chars=original,
+            bounded_chars=len(bounded),
+            limit=limit,
+        )
+    body_limit = limit - (original - len(body))
+    if body_limit <= len(_TRUNCATION_MARKER):
+        return "", ContentBoundNote(
+            part=part,
+            action=BOUND_ACTION_DROPPED,
+            original_chars=original,
+            bounded_chars=0,
+            limit=limit,
+        )
+    bounded = codec.with_body(envelope, _truncate(body, body_limit)) or ""
+    return bounded, ContentBoundNote(
+        part=part,
+        action=BOUND_ACTION_TRUNCATED,
+        original_chars=original,
+        bounded_chars=len(bounded),
+        limit=limit,
+    )
+
+
+def bound_composed_user_content(value: Any) -> BoundedUserContent:
+    """Bound one operator user row PER PART, in priority order.
+
+    Order of service is the contract, not an implementation detail:
+
+    1. the runtime-context (HUD) envelope — smallest, load-bearing, must always
+       arrive;
+    2. the operator's own text — never cut without the explicit in-band marker;
+    3. the skill preload — largest and the only part with its own re-delivery
+       machinery, so it absorbs whatever room is left.
+
+    A row carrying neither envelope is bounded exactly as before (:data:`_MAX_CONTENT`
+    on the whole thing), so nothing outside the mission-chat composition changes.
+    """
+
+    # Function-local by the same precedent ``prompt_observability`` documents:
+    # ``runtime_hud`` pulls a sizeable dependency graph and this module is
+    # imported very early. It is guaranteed importable on any lane that composes
+    # an envelope (``mission_chat_turn_context`` imports it at module scope), so
+    # no defensive swallow — a silent degrade here would restore F1.
+    from .runtime_hud import (
+        RUNTIME_CONTEXT_CODEC,
+        SKILL_PRELOAD_CODEC,
+        split_composed_user_row,
+    )
+
+    text = _redacted(value)
+    parts = split_composed_user_row(text)
+    if not parts.has_envelope:
+        bounded = _truncate(text, _MAX_CONTENT)
+        if bounded == text:
+            return BoundedUserContent(text=text)
+        return BoundedUserContent(
+            text=bounded,
+            notes=(
+                ContentBoundNote(
+                    part=BOUND_PART_MESSAGE,
+                    action=BOUND_ACTION_TRUNCATED,
+                    original_chars=len(text),
+                    bounded_chars=len(bounded),
+                    limit=_MAX_CONTENT,
+                ),
+            ),
+        )
+
+    notes: list[ContentBoundNote] = []
+    remaining = _MAX_USER_ROW_CONTENT
+
+    hud, note = _bound_envelope(
+        parts.runtime_context,
+        limit=min(_MAX_RUNTIME_CONTEXT_CONTENT, remaining),
+        part=BOUND_PART_RUNTIME_CONTEXT,
+        codec=RUNTIME_CONTEXT_CODEC,
+    )
+    if note is not None:
+        notes.append(note)
+    remaining -= len(hud)
+
+    message = _truncate(parts.message, min(_MAX_CONTENT, remaining))
+    if len(message) != len(parts.message):
+        notes.append(
+            ContentBoundNote(
+                part=BOUND_PART_MESSAGE,
+                action=BOUND_ACTION_TRUNCATED,
+                original_chars=len(parts.message),
+                bounded_chars=len(message),
+                limit=min(_MAX_CONTENT, remaining),
+            )
+        )
+    remaining -= len(message)
+
+    preload, note = _bound_envelope(
+        parts.skill_preload,
+        limit=max(0, remaining),
+        part=BOUND_PART_SKILL_PRELOAD,
+        codec=SKILL_PRELOAD_CODEC,
+    )
+    if note is not None:
+        notes.append(note)
+
+    if notes:
+        logger.warning(
+            "persona chat user row bounded before the wire: %s",
+            ", ".join(
+                f"{item.part}={item.action}({item.original_chars}->{item.bounded_chars}"
+                f"/{item.limit})"
+                for item in notes
+            ),
+        )
+    return BoundedUserContent(text=f"{message}{preload}{hud}", notes=tuple(notes))
 
 
 def safe_native_message(message: dict[str, Any]) -> dict[str, Any]:
@@ -70,7 +284,16 @@ def safe_native_message(message: dict[str, Any]) -> dict[str, Any]:
     role = str(message.get("role") or "").strip().lower()
     if role not in {"system", "user", "assistant", "tool"}:
         role = "assistant"
-    result: dict[str, Any] = {"role": role, "content": _safe_text(message.get("content"))}
+    # The operator user row is the ONE composed row on this lane — a join of
+    # three parts with three different contracts — so it is bounded per part
+    # (see :func:`bound_composed_user_content`). Every other role is opaque free
+    # text and keeps the flat bound it always had.
+    content = (
+        bound_composed_user_content(message.get("content")).text
+        if role == "user"
+        else _safe_text(message.get("content"))
+    )
+    result: dict[str, Any] = {"role": role, "content": content}
     for key in (
         "tool_call_id",
         "tool_name",
