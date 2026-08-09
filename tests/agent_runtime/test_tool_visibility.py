@@ -6,6 +6,11 @@ from agent_runtime.tool_visibility import (
     resolve_tool_visibility,
     turn_tool_context_for_persona,
 )
+from agent_runtime.permission_modes import (
+    PERMISSION_MODE_PROFILE_DEFAULT,
+    PERMISSION_MODE_UNBOUNDED,
+)
+from agent_runtime.personas import REGISTRY_HYGIENE_BLOCKED_TOOLS
 from agent_runtime.tool_permissions import ChatToolPermissionStore, permission_options_for_chat
 from agent_runtime.tool_turn_history import persist_tool_turn_actual
 
@@ -18,7 +23,12 @@ def test_neko_supervisor_visibility_has_dev_parity_by_default():
     # The mission-lead role was brought to dev-grade tool parity (operator
     # decision 2026-06-25): terminal + file mutation are available by default,
     # while the global persona blocks (delegate_task/kanban/send_message) stay.
-    visibility = resolve_tool_visibility(_persona("neko_supervisor"))
+    # Bounded tier explicitly: since the 2026-08-09 ruling the runtime DEFAULT
+    # is ``unbounded``, and this test's subject is what the bounded tier blocks.
+    visibility = resolve_tool_visibility(
+        _persona("neko_supervisor"),
+        ToolVisibilityOptions(permission_mode=PERMISSION_MODE_PROFILE_DEFAULT),
+    )
 
     final_tools = set(visibility["final_model_tools"])
 
@@ -33,7 +43,10 @@ def test_neko_supervisor_visibility_has_dev_parity_by_default():
 
 
 def test_dev_visibility_can_mutate_but_keeps_default_persona_blocks():
-    visibility = resolve_tool_visibility(_persona("dev"))
+    visibility = resolve_tool_visibility(
+        _persona("dev"),
+        ToolVisibilityOptions(permission_mode=PERMISSION_MODE_PROFILE_DEFAULT),
+    )
 
     final_tools = set(visibility["final_model_tools"])
 
@@ -54,7 +67,10 @@ def test_qa_visibility_is_unbounded_and_can_mutate():
     assert "terminal" in final_tools
     assert "write_file" in final_tools
     assert "patch" in final_tools
-    assert visibility["blocked_tool_names"] == []
+    # Registry hygiene (kanban/feishu) is junk deregistration, not a permission
+    # tier — ``profile_runner`` unions it on every lane — so an unbounded resolve
+    # honestly reports those 17 and nothing else (plan §3.4).
+    assert visibility["blocked_tool_names"] == sorted(REGISTRY_HYGIENE_BLOCKED_TOOLS)
     assert visibility["mutation_boundary"]["can_mutate_files"] is True
     assert visibility["mutation_boundary"]["can_run_terminal"] is True
 
@@ -70,7 +86,7 @@ def test_unbounded_permission_mode_expands_neko_visibility():
     assert "write_file" in final_tools
     assert "patch" in final_tools
     assert "terminal" in final_tools
-    assert visibility["blocked_tool_names"] == []
+    assert visibility["blocked_tool_names"] == sorted(REGISTRY_HYGIENE_BLOCKED_TOOLS)
     assert visibility["permission_mode"] == "unbounded"
 
 
@@ -150,7 +166,7 @@ def test_chat_permission_store_can_expand_chat_to_unbounded(tmp_path):
     visibility = resolve_tool_visibility(persona, options)
 
     assert visibility["permission_mode"] == "unbounded"
-    assert visibility["blocked_tool_names"] == []
+    assert visibility["blocked_tool_names"] == sorted(REGISTRY_HYGIENE_BLOCKED_TOOLS)
     assert "write_file" in visibility["final_model_tools"]
     assert "patch" in visibility["final_model_tools"]
     assert "terminal" in visibility["final_model_tools"]
@@ -168,7 +184,9 @@ def test_profile_chat_keeps_persona_safety_blocks():
         system_prompt_path="",
     )
 
-    visibility = resolve_tool_visibility(persona)
+    visibility = resolve_tool_visibility(
+        persona, ToolVisibilityOptions(permission_mode=PERMISSION_MODE_PROFILE_DEFAULT)
+    )
 
     assert "delegate_task" in visibility["blocked_tool_names"]
     assert "send_message" in visibility["blocked_tool_names"]
@@ -177,14 +195,29 @@ def test_profile_chat_keeps_persona_safety_blocks():
     assert "send_message" not in visibility["final_model_tools"]
 
 
-def test_expired_unbounded_permission_falls_back_to_profile_default(tmp_path):
+def test_expired_permission_record_falls_back_to_the_runtime_default(tmp_path):
+    """An expired record stops applying — it does not PIN the session.
+
+    Before the 2026-08-09 ruling an expired grant resolved to ``profile_default``,
+    which was both "the fallback" and "the bounded tier", so the two were
+    indistinguishable. Now ``profile_default`` on a record is the no-opinion
+    sentinel and the session falls back to the configured runtime default. That
+    distinction is the migration trap the plan names: the live store is full of
+    these expiry writebacks, and reading them as an operator restriction would
+    have frozen every session that ever held a temporary grant out of the new
+    default, permanently.
+
+    The expiry PROVENANCE is not lost — it lives on the store record, which is
+    what an operator reads.
+    """
+
     persona = _persona("neko_supervisor")
     store = ChatToolPermissionStore(path=tmp_path / "tool_permissions.json")
 
     store.set(
         persona_id=persona.id,
         session_id="session_expired",
-        mode="unbounded",
+        mode=PERMISSION_MODE_UNBOUNDED,
         reason="operator enabled full tools briefly",
         expires_at="2000-01-01T00:00:00Z",
     )
@@ -196,8 +229,15 @@ def test_expired_unbounded_permission_falls_back_to_profile_default(tmp_path):
     )
     state = permission_state_for_persona(persona, options)
 
-    assert state["mode"] == "profile_default"
-    assert state["expired"] is True
+    assert state["mode"] == PERMISSION_MODE_UNBOUNDED  # the runtime default
+    assert options.permission_source == "runtime_default"
+    assert options.expires_at is None
+    assert state["expired"] is False
+
+    # The record still knows it lapsed.
+    record = store.get(persona_id=persona.id, session_id="session_expired")
+    assert record.expired is True
+    assert record.source.endswith(":expired")
 
 
 def test_turn_tool_context_loads_last_actual_tool_schema(tmp_path, monkeypatch):
@@ -341,8 +381,9 @@ def test_scoped_context_partitions_session_withheld_policy_and_excluded_toolsets
     assert preview["resolved_at"].endswith("Z")
 
 
-def test_registry_hygiene_is_not_mislabeled_as_persona_safety_policy():
-    preview = _scoped_preview(_persona("neko_supervisor"))
+def test_registry_hygiene_is_not_mislabeled_as_persona_safety_policy(bounded_chat_session):
+    persona = _persona("neko_supervisor")
+    preview = _scoped_preview(persona, bounded_chat_session(persona.id))
     blocked = {item["name"]: item["reason"] for item in preview["blocked_tools"]}
 
     assert blocked["kanban_create"] == "registry_hygiene"
@@ -359,7 +400,7 @@ def test_registry_hygiene_is_not_mislabeled_as_persona_safety_policy():
 # chat lane actually ships. These tests pin preview == actual lane.
 
 
-def _actual_chat_lane(persona):
+def _actual_chat_lane(persona, session_id=None):
     """The tools + toolsets the operator chat lane actually ships for ``persona``,
     computed straight from the chat-lane chokepoint (the authority the preview
     must mirror)."""
@@ -370,26 +411,29 @@ def _actual_chat_lane(persona):
     from agent_runtime.profile_runner import _blocked_tool_names_with_registry_hygiene
     from agent_runtime.tool_visibility import _tool_names_for_toolsets
 
-    enabled = _enabled_toolsets_for_chat(persona, session_id=None)
+    enabled = _enabled_toolsets_for_chat(persona, session_id=session_id)
     blocked = _blocked_tool_names_with_registry_hygiene(
-        _blocked_tool_names_for_chat(persona, session_id=None)
+        _blocked_tool_names_for_chat(persona, session_id=session_id)
     )
     tools = set(_tool_names_for_toolsets(enabled, blocked_tool_names=sorted(set(blocked))))
     return sorted(enabled), tools
 
 
-def _scoped_preview(persona):
+def _scoped_preview(persona, session_id=None):
     from agent_runtime.persona_runtime import apply_chat_lane_tool_scope
 
-    options = permission_options_for_chat(persona, session_id=None)
-    apply_chat_lane_tool_scope(persona, options, session_id=None)
+    options = permission_options_for_chat(persona, session_id=session_id)
+    apply_chat_lane_tool_scope(persona, options, session_id=session_id)
     return resolve_tool_visibility(persona, options)
 
 
-def test_chat_lane_preview_matches_actual_lane_default_scoped():
+def test_chat_lane_preview_matches_actual_lane_default_scoped(bounded_chat_session):
+    # BOUNDED session on purpose: the cost cuts asserted below are the bounded
+    # lane's, and since 2026-08-09 the runtime default bypasses them entirely.
     persona = _persona("neko_supervisor")
-    enabled, actual_tools = _actual_chat_lane(persona)
-    preview = _scoped_preview(persona)
+    session_id = bounded_chat_session(persona.id)
+    enabled, actual_tools = _actual_chat_lane(persona, session_id)
+    preview = _scoped_preview(persona, session_id)
 
     # Toolsets + the resolved model-tool schema are byte-identical to the lane.
     assert sorted(preview["effective_toolsets"]) == enabled
@@ -416,7 +460,9 @@ def test_chat_lane_preview_matches_actual_lane_default_scoped():
     assert "skill_view" in final
 
 
-def test_chat_lane_preview_matches_actual_lane_with_restore_config(monkeypatch):
+def test_chat_lane_preview_matches_actual_lane_with_restore_config(
+    monkeypatch, bounded_chat_session
+):
     # neko with the live config shape `chat_lane_restore_toolsets: [file]`
     # (constructed in-test — never read the operator's real config.yaml). The
     # restore un-excludes the `file` toolset on the bounded chat lane; the
@@ -436,8 +482,9 @@ def test_chat_lane_preview_matches_actual_lane_with_restore_config(monkeypatch):
     monkeypatch.setattr(cfgmod, "load_agent_runtime_config", lambda *a, **k: fake)
 
     persona = _persona("neko_supervisor")
-    enabled, actual_tools = _actual_chat_lane(persona)
-    preview = _scoped_preview(persona)
+    session_id = bounded_chat_session(persona.id)
+    enabled, actual_tools = _actual_chat_lane(persona, session_id)
+    preview = _scoped_preview(persona, session_id)
 
     assert "file" in enabled
     assert sorted(preview["effective_toolsets"]) == enabled

@@ -13,6 +13,7 @@ from hermes_time import now
 
 from agent_runtime.config import AgentRuntimeConfig
 from agent_runtime import paths
+from agent_runtime.tool_permissions import default_permission_mode
 from agent_runtime.events import EventLog
 from agent_runtime.models import AgentPersona, AgentRun, PersonaInstance
 
@@ -4609,7 +4610,10 @@ def test_profile_persona_instance_summary_includes_tool_visibility(isolate_agent
     assert "permission_state" not in summary
     assert "agent_hud_state" not in summary
     assert "blocked_tools" not in summary
-    assert summary["permission_mode"] == "profile_default"
+    # The runtime DEFAULT posture since the 2026-08-09 ruling — the drawer must
+    # render what a turn actually gets, not a bounded literal.
+    assert summary["permission_mode"] == default_permission_mode()
+    assert summary["permission_mode"] == "unbounded"
     assert isinstance(summary["mutation_boundary"], dict)
     assert isinstance(summary["tool_count"], int)
     assert summary["blocked_tools_count"] >= 0
@@ -4623,23 +4627,61 @@ def test_profile_persona_instance_summary_includes_tool_visibility(isolate_agent
     detail = persona_instance_tool_detail(instance)
     assert detail["tool_resolution"]["persona_id"] == "profile:alice"
     assert detail["turn_tool_context"]["persona_id"] == "profile:alice"
-    # T9b: this preview is the persona instance's operator CHAT lane, so it now
-    # reflects the chat-lane scoping (augmentation + T3/T6a cost cuts) instead of
-    # the raw effective_toolsets. The dev-toolkit toolsets (file / terminal /
-    # code_execution) are cut from the conversational lane...
+    # T9b: this preview is the persona instance's operator CHAT lane, so it
+    # reflects whatever that lane actually ships. Under the 2026-08-09 runtime
+    # default (`unbounded`) the T3/T6a cost cuts do not apply, so the dev toolkit
+    # is present — the preview would be LYING if it still hid it (the bounded
+    # shape is pinned by the companion test below).
     final_tools = detail["tool_resolution"]["final_model_tools"]
+    assert "read_file" in final_tools
+    assert "terminal" in final_tools
+    assert "agent_chat_send" in final_tools
+    assert "clarify" in final_tools
+    # The persona-safety blocks yield to the mode; registry hygiene never does.
+    assert "send_message" not in detail["tool_resolution"]["blocked_tool_names"]
+    assert "kanban_create" in detail["tool_resolution"]["blocked_tool_names"]
+    assert detail["permission_state"]["mode"] == "unbounded"
+    assert "agent_hud_state" not in detail
+    assert summary["tool_count"] == len(detail["tool_resolution"]["final_model_tools"])
+
+
+def test_profile_persona_instance_preview_reflects_an_operator_restriction(
+    isolate_agent_runtime_root, bounded_chat_session
+):
+    """The same preview, for a session an operator narrowed.
+
+    The chat-lane cost policy (T3/T6a) is alive and unchanged — it just no longer
+    applies to the DEFAULT posture. This is the tier it does apply to, and the
+    preview must track it rather than reporting one fixed shape.
+    """
+
+    session_id = "persona_chat_personainst_profile_alice_e898c1dc3794"
+    bounded_chat_session("profile:alice", session_id)
+    instance = PersonaInstance(
+        id="personainst_profile_alice",
+        persona_id="profile:alice",
+        role="profile",
+        display_name="Alice Agent",
+        profile_id="alice",
+        runtime_root=str(REPO_ROOT),
+        state=WorkerSessionState.IDLE,
+        mode="chat",
+        session_id=session_id,
+    )
+
+    summary = persona_instance_summary(instance)
+    detail = persona_instance_tool_detail(instance)
+    final_tools = detail["tool_resolution"]["final_model_tools"]
+
+    assert summary["permission_mode"] == "profile_default"
     assert "read_file" not in final_tools
     assert "terminal" not in final_tools
     assert "execute_code" not in final_tools
-    # ...while ordinary chat keeps the heavy mission route absent globally and
-    # retains the non-task chat capabilities.
     assert "mission_goal_create" not in final_tools
     assert "agent_chat_send" in final_tools
     assert "clarify" in final_tools
     assert "send_message" in detail["tool_resolution"]["blocked_tool_names"]
     assert detail["permission_state"]["mode"] == "profile_default"
-    assert "agent_hud_state" not in detail
-    assert summary["tool_count"] == len(detail["tool_resolution"]["final_model_tools"])
 
 
 def test_profile_visibility_preserves_custom_instance_role_without_config(monkeypatch):

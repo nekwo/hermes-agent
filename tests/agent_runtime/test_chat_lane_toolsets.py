@@ -196,9 +196,14 @@ def _persona_with_dev_toolkit():
     )
 
 
-def test_default_neko_chat_lane_excludes_dev_toolkit():
+def test_default_neko_chat_lane_excludes_dev_toolkit(bounded_chat_session):
+    # The cost policy only applies on the BOUNDED lane, and since the 2026-08-09
+    # ruling the runtime default is `unbounded` — so this test states the tier it
+    # is about instead of inheriting it.
     neko = next(p for p in sample_personas() if p.id == "neko_supervisor")
-    enabled = PR._enabled_toolsets_for_chat(neko, session_id=None)
+    enabled = PR._enabled_toolsets_for_chat(
+        neko, session_id=bounded_chat_session(neko.id)
+    )
     # browser/vision/code_execution (T3) + file/terminal (T6a) all drop.
     assert not {"browser", "vision", "code_execution", "file", "terminal"} & set(enabled)
     # The supervision capabilities the lane legitimately keeps are still present.
@@ -206,18 +211,24 @@ def test_default_neko_chat_lane_excludes_dev_toolkit():
     assert "mission_goal" not in enabled
 
 
-def test_chat_lane_scopes_dev_toolkit_when_persona_carries_it():
-    enabled = PR._enabled_toolsets_for_chat(_persona_with_dev_toolkit(), session_id=None)
+def test_chat_lane_scopes_dev_toolkit_when_persona_carries_it(bounded_chat_session):
+    persona = _persona_with_dev_toolkit()
+    enabled = PR._enabled_toolsets_for_chat(
+        persona, session_id=bounded_chat_session(persona.id)
+    )
     assert not {"browser", "vision", "code_execution", "file", "terminal"} & set(enabled)
     # skills survives as a toolset (skill_manage is cut at the tool level, below).
     assert "skills" in enabled
 
 
-def test_chat_lane_restore_keeps_named_toolsets(monkeypatch):
+def test_chat_lane_restore_keeps_named_toolsets(monkeypatch, bounded_chat_session):
     # Per-persona config restore flows through the chokepoint: file + terminal
     # survive; a non-restored excluded toolset (browser) still drops.
     monkeypatch.setattr(PR, "chat_lane_restore_toolsets", lambda persona_id: ["file", "terminal"])
-    enabled = PR._enabled_toolsets_for_chat(_persona_with_dev_toolkit(), session_id=None)
+    persona = _persona_with_dev_toolkit()
+    enabled = PR._enabled_toolsets_for_chat(
+        persona, session_id=bounded_chat_session(persona.id)
+    )
     assert "file" in enabled and "terminal" in enabled
     assert "browser" not in enabled and "vision" not in enabled
 
@@ -240,9 +251,13 @@ def test_unbounded_permission_mode_is_not_scoped(monkeypatch):
 # --------------------------------------------------------------------------- #
 # Single-tool (skill_manage) cut at the blocked-tool-names chokepoint.
 # --------------------------------------------------------------------------- #
-def test_default_neko_chat_lane_blocks_skill_manage_but_keeps_read_only_skill_tools():
+def test_default_neko_chat_lane_blocks_skill_manage_but_keeps_read_only_skill_tools(
+    bounded_chat_session,
+):
     neko = next(p for p in sample_personas() if p.id == "neko_supervisor")
-    blocked = PR._blocked_tool_names_for_chat(neko, session_id=None)
+    blocked = PR._blocked_tool_names_for_chat(
+        neko, session_id=bounded_chat_session(neko.id)
+    )
     assert "skill_manage" in blocked
     # Read-only skill recall stays available (never in the block list).
     assert "skill_search" not in blocked
@@ -250,10 +265,15 @@ def test_default_neko_chat_lane_blocks_skill_manage_but_keeps_read_only_skill_to
     assert "skills_list" not in blocked
 
 
-def test_chat_lane_restore_unblocks_skill_manage(monkeypatch):
+def test_chat_lane_restore_unblocks_skill_manage(monkeypatch, bounded_chat_session):
+    # BOUNDED on purpose: with the unbounded runtime default the block list is
+    # empty for every reason at once, so this would assert nothing about the
+    # restore knob it exists to pin.
     neko = next(p for p in sample_personas() if p.id == "neko_supervisor")
+    session_id = bounded_chat_session(neko.id)
+    assert "skill_manage" in PR._blocked_tool_names_for_chat(neko, session_id=session_id)
     monkeypatch.setattr(PR, "chat_lane_restore_toolsets", lambda persona_id: ["skill_manage"])
-    blocked = PR._blocked_tool_names_for_chat(neko, session_id=None)
+    blocked = PR._blocked_tool_names_for_chat(neko, session_id=session_id)
     assert "skill_manage" not in blocked
 
 

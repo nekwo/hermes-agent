@@ -22,6 +22,38 @@ def persisted_persona_samples():
 
 
 @pytest.fixture
+def bounded_chat_session():
+    """Pin one chat session to the pre-2026-08-09 BOUNDED tier.
+
+    The runtime default is ``unbounded`` (operator ruling 2026-08-09 — see
+    ``docs/agent-runtime-harness/UNBOUNDED_DEFAULT_PLAN_2026-08-09.md``), so a
+    test whose SUBJECT is the bounded tier — the chat-lane cost policy, the
+    persona-safety block set, the envelope grants table — has to say so instead
+    of leaning on a default that no longer means what it used to. Leaning on it
+    would not just fail; it would silently re-pin the old posture the moment
+    someone "fixed" the assertion.
+
+    This writes the real store record through the real store, so the test still
+    resolves through the ONE chokepoint (``permission_options_for_chat``) rather
+    than monkeypatching a mode into place.
+    """
+
+    from agent_runtime.permission_modes import PERMISSION_MODE_BOUNDED
+    from agent_runtime.tool_permissions import ChatToolPermissionStore
+
+    def _pin(persona_id: str, session_id: str = "bounded-session") -> str:
+        ChatToolPermissionStore().set(
+            persona_id=str(persona_id),
+            session_id=session_id,
+            mode=PERMISSION_MODE_BOUNDED,
+            reason="test pins the historical bounded tier",
+        )
+        return session_id
+
+    return _pin
+
+
+@pytest.fixture
 def bundled_persona_profiles():
     """Provision the explicit profile homes used by legacy runtime test data."""
 

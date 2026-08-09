@@ -199,10 +199,14 @@ def test_drop_rows_renders_every_drop():
 # ── the lane-level accounting twin ──────────────────────────────────────────
 
 
-def test_capability_drops_match_what_the_chat_lane_actually_ships():
+def test_capability_drops_match_what_the_chat_lane_actually_ships(bounded_chat_session):
+    # BOUNDED session: the cost policy this accounts for is bypassed by the
+    # runtime default since the 2026-08-09 ruling (pinned just below by
+    # ``test_unbounded_mode_claims_no_drops``), so the tier is named explicitly.
     qa = _persona("qa")
-    enabled = set(PR._enabled_toolsets_for_chat(qa, session_id=None))
-    drops = PR.chat_lane_capability_drops(qa, session_id=None)
+    session_id = bounded_chat_session(qa.id)
+    enabled = set(PR._enabled_toolsets_for_chat(qa, session_id=session_id))
+    drops = PR.chat_lane_capability_drops(qa, session_id=session_id)
     toolsets = {drop.subject for drop in drops if drop.kind == DROP_KIND_TOOLSET}
 
     # Everything reported as dropped is genuinely absent from the shipped lane…
@@ -226,11 +230,12 @@ def test_unbounded_mode_claims_no_drops():
     )
 
 
-def test_restore_config_suppresses_the_lane_rows(monkeypatch):
+def test_restore_config_suppresses_the_lane_rows(monkeypatch, bounded_chat_session):
     monkeypatch.setattr(
         PR, "chat_lane_restore_toolsets", lambda persona_id: ["file", "terminal"]
     )
-    drops = PR.chat_lane_capability_drops(_persona("qa"), session_id=None)
+    qa = _persona("qa")
+    drops = PR.chat_lane_capability_drops(qa, session_id=bounded_chat_session(qa.id))
     subjects = {drop.subject for drop in drops}
 
     assert not {"file", "terminal"} & subjects
@@ -240,13 +245,16 @@ def test_restore_config_suppresses_the_lane_rows(monkeypatch):
 # ── resolver integration ────────────────────────────────────────────────────
 
 
-def test_rows_ride_the_same_requirement_failures_list():
+def test_rows_ride_the_same_requirement_failures_list(bounded_chat_session):
     qa = _persona("qa")
+    session_id = bounded_chat_session(qa.id)
     visibility = resolve_tool_visibility(
         qa,
         ToolVisibilityOptions(
             entry_point_lane=HARNESS_LANE,
-            chat_lane_capability_drops=PR.chat_lane_capability_drops(qa, session_id=None),
+            chat_lane_capability_drops=PR.chat_lane_capability_drops(
+                qa, session_id=session_id
+            ),
         ),
     )
 
@@ -257,13 +265,16 @@ def test_rows_ride_the_same_requirement_failures_list():
     assert _rows(visibility, TOOL_DROPPED_BY_CHAT_LANE_POLICY)
 
 
-def test_rows_compose_with_the_mcp_rows_without_displacing_them():
+def test_rows_compose_with_the_mcp_rows_without_displacing_them(bounded_chat_session):
     qa = dataclasses.replace(_persona("qa"), required_mcp_servers=["launcher_qa"])
+    session_id = bounded_chat_session(qa.id)
     visibility = resolve_tool_visibility(
         qa,
         ToolVisibilityOptions(
             entry_point_lane=HARNESS_LANE,
-            chat_lane_capability_drops=PR.chat_lane_capability_drops(qa, session_id=None),
+            chat_lane_capability_drops=PR.chat_lane_capability_drops(
+                qa, session_id=session_id
+            ),
         ),
     )
     codes = [row["code"] for row in visibility["requirement_failures"]]
@@ -304,12 +315,14 @@ def test_accounting_changes_no_tool():
     assert accounted["effective_toolsets"] == plain["effective_toolsets"]
 
 
-def test_chat_lane_preview_carries_the_rows_end_to_end():
+def test_chat_lane_preview_carries_the_rows_end_to_end(bounded_chat_session):
     # apply_chat_lane_tool_scope is what Mission Control's persona-instance
     # preview uses; the drops must ride it without any caller opting in.
     qa = _persona("qa")
     options = PR.apply_chat_lane_tool_scope(
-        qa, ToolVisibilityOptions(entry_point_lane=HARNESS_LANE), session_id=None
+        qa,
+        ToolVisibilityOptions(entry_point_lane=HARNESS_LANE),
+        session_id=bounded_chat_session(qa.id),
     )
     visibility = resolve_tool_visibility(qa, options)
 
@@ -330,7 +343,20 @@ def test_tool_diff_reports_the_drops(capsys):
 
     parser = argparse.ArgumentParser()
     build_parser(parser.add_subparsers(dest="command"))
-    args = parser.parse_args(["harness", "persona", "tool-diff", "qa", "--json"])
+    # ``--permission-mode profile_default`` is the documented way to preview the
+    # BOUNDED shape now that the CLI's default follows the runtime default
+    # (unbounded). Without it this asserts drops that no longer happen.
+    args = parser.parse_args(
+        [
+            "harness",
+            "persona",
+            "tool-diff",
+            "qa",
+            "--permission-mode",
+            "profile_default",
+            "--json",
+        ]
+    )
 
     assert args.func(args) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -351,7 +377,9 @@ def test_tool_diff_human_output_prints_the_fix(capsys):
 
     parser = argparse.ArgumentParser()
     build_parser(parser.add_subparsers(dest="command"))
-    args = parser.parse_args(["harness", "persona", "tool-diff", "qa"])
+    args = parser.parse_args(
+        ["harness", "persona", "tool-diff", "qa", "--permission-mode", "profile_default"]
+    )
 
     assert args.func(args) == 0
     out = capsys.readouterr().out

@@ -1,5 +1,6 @@
 from agent_runtime.models import AgentPersona
 from agent_runtime.personas import (
+    REGISTRY_HYGIENE_BLOCKED_TOOLS,
     AgentRole,
     blocked_tool_names,
     effective_toolsets,
@@ -98,5 +99,8 @@ def test_unbounded_permission_mode_exposes_available_unbounded_tools(monkeypatch
             persona,
             ToolVisibilityOptions(permission_mode="unbounded", permission_source="test"),
         )
-        assert visibility["blocked_tool_names"] == []
+        # Registry hygiene never yields to a permission mode (plan §3.4): the 17
+        # kanban/feishu names stay blocked on every lane, unbounded included,
+        # because deregistering upstream junk is not a permission tier.
+        assert visibility["blocked_tool_names"] == sorted(REGISTRY_HYGIENE_BLOCKED_TOOLS)
         assert required_model_tools.issubset(set(visibility["final_model_tools"]))

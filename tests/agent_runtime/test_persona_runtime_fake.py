@@ -885,16 +885,19 @@ def test_mission_chat_reply_runs_for_profile_persona(tmp_path, monkeypatch):
 
     assert result.final_response == "hi from alice"
     request = captured["request"]
-    # Toolsets resolve through the supervisor ceiling, but ordinary profile chat
-    # is globally chat-only and cannot create a durable mission by default.
-    assert "mission_goal" not in request.enabled_toolsets
-    # The chat lane keeps the supervision toolsets; the T6a cost policy drops the
-    # `file` dev toolkit (patch/read/write/search_files) from the conversational
-    # lane, so it is no longer present even though the persona configured it.
-    assert set(["search", "session_search", "todo", "skills"]).issubset(
+    # Under the 2026-08-09 runtime default (`unbounded`) the turn resolves the
+    # FULL registry — the T6a cost policy that used to drop the `file` dev
+    # toolkit applies only to a restricted session now.
+    # (``search`` is service-gated and simply not registered without a web API
+    # key, which is a capability fact rather than a permission one.)
+    assert set(["session_search", "todo", "skills", "file", "terminal"]).issubset(
         set(request.enabled_toolsets)
     )
-    assert "file" not in request.enabled_toolsets
+    # The mode reaches the EXECUTION plane too: the envelope scope this turn
+    # binds carries it, which is what makes the gated command classes grantable
+    # by mode (with a receipt) instead of needing a per-role config stanza.
+    assert request.terminal_envelope_scope.permission_mode == "unbounded"
+    assert request.blocked_tool_names == []
 
     assert len(captured["requests"]) == 1
 

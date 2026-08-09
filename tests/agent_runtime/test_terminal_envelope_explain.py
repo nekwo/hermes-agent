@@ -21,6 +21,7 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures("persisted_persona_samples")
 
+from agent_runtime.permission_modes import PERMISSION_MODE_PROFILE_DEFAULT
 from agent_runtime.runtime_config import TerminalEnvelopeConfig
 from agent_runtime.terminal_envelope import (
     COMMAND_CLASSES,
@@ -52,6 +53,15 @@ def _persona(persona_id: str = "dev", role: str = "dev"):
     return types.SimpleNamespace(id=persona_id, role=role)
 
 
+#: This file's subject is the ROOT-config GRANTS TABLE — the lever that governs a
+#: session an operator RESTRICTED. Since the 2026-08-09 ruling the runtime
+#: default is ``unbounded``, which grants every grantable class by mode, so these
+#: cases name the bounded tier explicitly rather than inheriting a default that
+#: would make every one of them vacuous. The mode-granted view has its own
+#: coverage in ``test_unbounded_default_posture.py`` and below.
+BOUNDED = PERMISSION_MODE_PROFILE_DEFAULT
+
+
 # ── the accessor this verb reads from ───────────────────────────────────────
 
 
@@ -69,7 +79,7 @@ def test_an_ungranted_governed_lane_names_the_floor_and_the_key():
     """Deny by default. Every gated class is refused, and the split says which
     of them an operator could actually grant."""
 
-    explained = explain_persona_terminal_envelope(_persona(), cfg=_cfg())
+    explained = explain_persona_terminal_envelope(_persona(), cfg=_cfg(), permission_mode=BOUNDED)
 
     assert explained["lane"] == LANE_MISSION_CHAT
     assert explained["role"] == "dev"
@@ -88,7 +98,7 @@ def test_an_ungranted_governed_lane_names_the_floor_and_the_key():
 
 def test_an_active_grant_moves_the_class_out_of_refused():
     explained = explain_persona_terminal_envelope(
-        _persona(), cfg=_cfg(dev={LANE_MISSION_CHAT: [GIT_PUSH]})
+        _persona(), permission_mode=BOUNDED, cfg=_cfg(dev={LANE_MISSION_CHAT: [GIT_PUSH]})
     )
     assert explained["granted"] == [GIT_PUSH]
     assert GIT_PUSH not in explained["refused"]
@@ -100,12 +110,38 @@ def test_an_active_grant_moves_the_class_out_of_refused():
     }
 
 
+def test_the_runtime_default_posture_shows_the_classes_as_granted_by_mode():
+    """The operator view must not send someone writing a grant stanza for a
+    class the runtime already allows.
+
+    Under the 2026-08-09 default an unbounded run is granted every grantable
+    class by MODE, with no config stanza. A view that read only the grants table
+    would render all four as refused-but-grantable — the exact "surface tells a
+    different story than the runtime" failure this module was written against.
+    """
+
+    explained = explain_persona_terminal_envelope(
+        _persona(), permission_mode="unbounded", cfg=_cfg()
+    )
+
+    assert explained["permission_mode"] == "unbounded"
+    assert set(explained["granted"]) == set(GRANTABLE_COMMAND_CLASSES)
+    assert set(explained["granted_by_permission_mode"]) == set(GRANTABLE_COMMAND_CLASSES)
+    assert explained["granted_by_config"] == []
+    assert explained["refused"] == []
+
+    text = "\n".join(render_terminal_envelope_explanation(explained))
+    assert "permission mode: unbounded" in text
+    assert "by permission mode:" in text
+    assert "receipted" in text
+
+
 def test_a_removed_floor_name_is_reported_as_unknown():
     """Old config does not resurrect a retired command class."""
 
     retired = "credential_" + "read"
     explained = explain_persona_terminal_envelope(
-        _persona(), cfg=_cfg(dev={LANE_MISSION_CHAT: [retired, GIT_PUSH]})
+        _persona(), permission_mode=BOUNDED, cfg=_cfg(dev={LANE_MISSION_CHAT: [retired, GIT_PUSH]})
     )
     assert retired not in explained["granted"]
     assert explained["refused_hard_floor"] == []
@@ -115,7 +151,7 @@ def test_a_removed_floor_name_is_reported_as_unknown():
 
 def test_a_malformed_stanza_grants_nothing_and_says_so():
     explained = explain_persona_terminal_envelope(
-        _persona(), cfg=_cfg(dev={LANE_MISSION_CHAT: "git_push"})
+        _persona(), permission_mode=BOUNDED, cfg=_cfg(dev={LANE_MISSION_CHAT: "git_push"})
     )
     assert explained["granted"] == []
     assert [issue["code"] for issue in explained["grant_issues"]] == [
@@ -130,7 +166,7 @@ def test_an_ungoverned_lane_reports_the_legacy_ambient_disposition():
     ``HERMES_AGENT_RUNTIME_ROOT`` happens to be exported."""
 
     explained = explain_persona_terminal_envelope(
-        _persona(), lane="worker_tick", cfg=_cfg()
+        _persona(), permission_mode=BOUNDED, lane="worker_tick", cfg=_cfg()
     )
     assert explained["governed"] is False
     assert explained["disposition"] == DISPOSITION_LEGACY_AMBIENT
@@ -145,6 +181,7 @@ def test_the_supervisor_role_alias_resolves_to_the_canonical_grant_key():
 
     explained = explain_persona_terminal_envelope(
         _persona("neko_supervisor", "neko_supervisor"),
+        permission_mode=BOUNDED,
         cfg=_cfg(alice_supervisor={LANE_MISSION_CHAT: [NETWORK_EGRESS]}),
     )
     assert explained["role"] == "alice_supervisor"
@@ -156,7 +193,7 @@ def test_the_payload_reads_the_taxonomy_from_the_authority():
     """No parallel class list here. If the taxonomy ever grows, this payload
     grows with it automatically."""
 
-    explained = explain_persona_terminal_envelope(_persona(), cfg=_cfg())
+    explained = explain_persona_terminal_envelope(_persona(), cfg=_cfg(), permission_mode=BOUNDED)
     assert explained["command_classes"] == sorted(COMMAND_CLASSES)
     assert explained["grantable_command_classes"] == sorted(GRANTABLE_COMMAND_CLASSES)
     assert explained["hard_floor_command_classes"] == sorted(hard_floor_command_classes())
@@ -169,8 +206,8 @@ def test_explaining_is_side_effect_free():
     """Inspection only, exactly like ``--explain-mcp``: an operator can read what
     a persona WOULD get without running a turn, a command, or a tool."""
 
-    first = explain_persona_terminal_envelope(_persona(), cfg=_cfg())
-    second = explain_persona_terminal_envelope(_persona(), cfg=_cfg())
+    first = explain_persona_terminal_envelope(_persona(), cfg=_cfg(), permission_mode=BOUNDED)
+    second = explain_persona_terminal_envelope(_persona(), cfg=_cfg(), permission_mode=BOUNDED)
     assert first == second
 
 
@@ -179,7 +216,7 @@ def test_explaining_is_side_effect_free():
 
 def test_the_text_rendering_states_every_decision_relevant_fact():
     explained = explain_persona_terminal_envelope(
-        _persona(), cfg=_cfg(dev={LANE_MISSION_CHAT: [GIT_PUSH, "git-push"]})
+        _persona(), permission_mode=BOUNDED, cfg=_cfg(dev={LANE_MISSION_CHAT: [GIT_PUSH, "git-push"]})
     )
     text = "\n".join(render_terminal_envelope_explanation(explained))
 
@@ -192,7 +229,7 @@ def test_the_text_rendering_states_every_decision_relevant_fact():
 
 
 def test_the_text_rendering_uses_a_dash_for_an_empty_set_never_a_blank():
-    explained = explain_persona_terminal_envelope(_persona(), cfg=_cfg())
+    explained = explain_persona_terminal_envelope(_persona(), cfg=_cfg(), permission_mode=BOUNDED)
     text = "\n".join(render_terminal_envelope_explanation(explained))
     assert "granted:  -" in text
 
