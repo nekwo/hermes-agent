@@ -71,13 +71,18 @@ def snapshot_watermark(snapshot: Any, *, override: dict | None = None) -> dict:
     keys back in from the frame. One helper, one fallback: the frame's own
     watermark when it has one, a freshly measured ``events_watermark()`` when it
     does not.
+
+    The one fallback that is NOT allowed is ``0``. An absent ``event_offset``
+    means the position is unknown, and 0 is a real position meaning "the head of
+    the log" — the difference is a full log replay rendered as fresh activity.
+    Unknown stays ``None`` and every reader below branches on it.
     """
 
     frame_watermark = ((snapshot or {}).get("parity") or {}).get("watermark") or {}
     resolved = dict(override) if override else dict(frame_watermark)
     if not resolved:
         resolved = events_watermark(last_event_ts=frame_watermark.get("last_event_ts"))
-    resolved.setdefault("event_offset", frame_watermark.get("event_offset", 0))
+    resolved.setdefault("event_offset", frame_watermark.get("event_offset"))
     resolved.setdefault("last_event_ts", frame_watermark.get("last_event_ts"))
     resolved.setdefault("captured_at", now())
     return resolved
@@ -154,19 +159,31 @@ class ReadModel:
                     "INSERT OR REPLACE INTO meta(key, value) VALUES(?, ?)",
                     ("resolved_root", str(resolve_runtime().store_root)),
                 )
-                conn.execute(
-                    """
-                    INSERT OR REPLACE INTO projection_watermarks(
-                        projection, event_offset, last_event_ts, applied_at
-                    ) VALUES(?, ?, ?, ?)
-                    """,
-                    (
-                        SNAPSHOT_PROJECTION,
-                        int(normalized_watermark.get("event_offset") or 0),
-                        _optional_text(normalized_watermark.get("last_event_ts")),
-                        str(applied_at),
-                    ),
-                )
+                if normalized_watermark.get("event_offset") is None:
+                    # No position to record. The ABSENT row is this table's
+                    # existing typed unknown (``projection_watermark`` answers
+                    # ``None``, and ``read_projection`` then refuses to claim
+                    # "caught up"); the column is NOT NULL, so writing 0 was the
+                    # only alternative — and 0 is the lie that makes every
+                    # cursor believe it is at the head of the log.
+                    conn.execute(
+                        "DELETE FROM projection_watermarks WHERE projection = ?",
+                        (SNAPSHOT_PROJECTION,),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO projection_watermarks(
+                            projection, event_offset, last_event_ts, applied_at
+                        ) VALUES(?, ?, ?, ?)
+                        """,
+                        (
+                            SNAPSHOT_PROJECTION,
+                            int(normalized_watermark["event_offset"]),
+                            _optional_text(normalized_watermark.get("last_event_ts")),
+                            str(applied_at),
+                        ),
+                    )
                 # ONE write of the frame. The per-section ``projections_misc``
                 # rows this loop used to emit alongside the blob were a verbatim
                 # second copy of the same bytes, read by nothing that could not
@@ -212,7 +229,16 @@ class ReadModel:
 
     def read_projection(self, projection: str, *, since_offset: int | None = None) -> dict:
         watermark = self.projection_watermark(SNAPSHOT_PROJECTION)
-        if since_offset is not None and watermark and int(watermark.get("event_offset") or 0) <= since_offset:
+        stored_offset = (watermark or {}).get("event_offset")
+        # ``<= since_offset`` is a claim that the caller is CAUGHT UP, so it may
+        # only be made from a position actually recorded. ``or 0`` folded an
+        # absent/NULL offset into byte 0, which is <= every cursor — so an
+        # unknown watermark silently answered "no new rows" to every reader.
+        if (
+            since_offset is not None
+            and stored_offset is not None
+            and int(stored_offset) <= since_offset
+        ):
             return {"projection": projection, "watermark": watermark, "rows": []}
         if projection in ROW_TABLES:
             with closing(self.connect()) as conn:

@@ -224,3 +224,63 @@ def test_build_snapshot_carries_redaction_mode_from_env(isolate_agent_runtime_ro
 # ``open_incident_warning_threshold`` knob it read, and this test went together.
 # Reachability of every remaining warning code is now gated executably by
 # tests/agent_runtime/test_parity_warning_catalog.py.
+
+
+# ── an unreadable log has no position, and 0 is a position ──────────────────
+#
+# ``except OSError: offset = 0`` made an unreadable event log indistinguishable
+# from an empty one. Every downstream reader acts on 0 as a real cursor at the
+# head of the log.
+
+
+def test_events_watermark_reports_unknown_when_the_log_cannot_be_read(monkeypatch):
+    import agent_runtime.parity as parity_mod
+
+    def _boom():
+        raise OSError(32, "The process cannot access the file")
+
+    monkeypatch.setattr(parity_mod.event_rotation, "log_end_offset", _boom)
+
+    wm = events_watermark(last_event_ts="2026-08-09T00:00:00Z")
+
+    # NOT 0 — 0 is "the head of the log", which is a full replay, not an unknown.
+    assert wm["event_offset"] is None
+    assert "cannot access the file" in wm["event_offset_error"]
+    # The rest of the marker still resolves; only the position is unknown.
+    assert wm["last_event_ts"] == "2026-08-09T00:00:00Z"
+    assert wm["captured_at"] is not None
+
+
+def test_readable_log_carries_no_error_key(isolate_agent_runtime_root):
+    from hermes_time import now
+
+    from agent_runtime.events import EventLog
+    from agent_runtime.models import Event
+
+    log = EventLog()
+    log.append(Event(ts=now(), type="persona_instance.created", task_id="t1", run_id=None, persona_id=None))
+
+    wm = events_watermark()
+
+    assert wm["event_offset"] > 0
+    assert "event_offset_error" not in wm
+
+
+def test_parity_envelope_warns_when_the_frame_has_no_source_position(
+    isolate_agent_runtime_root, monkeypatch
+):
+    import agent_runtime.parity as parity_mod
+
+    def _boom():
+        raise OSError(32, "share violation")
+
+    monkeypatch.setattr(parity_mod.event_rotation, "log_end_offset", _boom)
+
+    snapshot = build_snapshot()
+
+    warnings = snapshot["parity"]["warnings"]
+    codes = [w["code"] for w in warnings]
+    assert "event_offset_unknown" in codes
+    assert snapshot["parity"]["watermark"]["event_offset"] is None
+    detail = next(w["detail"] for w in warnings if w["code"] == "event_offset_unknown")
+    assert "resync" in detail

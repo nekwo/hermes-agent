@@ -730,6 +730,19 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
     cfg = load_agent_runtime_config()
     warnings = _parity_warnings(data)
     warnings.extend(_event_summary_warnings(recent_events or []))
+    if watermark.get("event_offset") is None:
+        # The frame cannot date itself against the log. Riders must resync
+        # rather than read the absent position as byte 0 (= "caught up").
+        warnings.append(
+            {
+                "code": "event_offset_unknown",
+                "detail": (
+                    "the event log's end offset could not be read, so this frame carries no "
+                    "source position; watermark-gated consumers must resync instead of resuming "
+                    f"({watermark.get('event_offset_error') or 'unreadable'})"
+                ),
+            }
+        )
     if suspect_default_root(resolution):
         warnings.append(
             {

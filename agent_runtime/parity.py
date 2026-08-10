@@ -185,12 +185,32 @@ def events_watermark(*, last_event_ts: Any = None) -> dict[str, Any]:
     resolves to "nothing past the tail". Equals ``getsize(events.jsonl)`` in the
     pristine (pre-rotation) state. ``last_event_ts`` is passed in by the caller
     (which has already tailed the log for the snapshot) so this stays O(1).
+
+    **An unreadable log yields ``None``, never ``0``.** The stat can fail — on
+    this runtime's platform routinely, under AV scanning or a share violation —
+    and it used to be swallowed into ``offset = 0``, indistinguishable from a
+    genuinely empty log. Zero is the single most damaging value this field can
+    carry, because every reader treats it as a real position: the projector
+    reads "caught up, no new rows", the read model persists 0 as its stored
+    projection watermark, and the stream resumes a tailer from byte 0 —
+    replaying the ENTIRE log as fresh activity at the root of every Mission
+    Control surface. ``read_model.snapshot_watermark`` documents this exact
+    trap in its own docstring while this producer was still minting one.
+
+    ``None`` + ``event_offset_error`` is the typed unknown (the ``cron``
+    orphan-sweep shape): a reader that cannot act without a position has to say
+    so and resync, rather than guess a plausible one.
     """
 
     try:
         offset = event_rotation.log_end_offset()
-    except OSError:
-        offset = 0
+    except OSError as exc:
+        return {
+            "event_offset": None,
+            "event_offset_error": _safe_text(f"{type(exc).__name__}: {exc}"),
+            "last_event_ts": last_event_ts,
+            "captured_at": now(),
+        }
     return {"event_offset": offset, "last_event_ts": last_event_ts, "captured_at": now()}
 
 

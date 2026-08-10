@@ -95,3 +95,122 @@ def test_harness_stream_command_outputs_ndjson(isolate_agent_runtime_root, capsy
     payload = json.loads(lines[0])
     assert payload["type"] == "hydrate"
     assert payload["schema_version"] == 1
+
+
+# ── an unknown resume position must not tail from the head of the log ──────
+#
+# ``offset = int(watermark.get("event_offset") or 0)`` folded both a missing and
+# an explicitly-unknown watermark into 0, then tailed from there — replaying the
+# whole event log as fresh activity at the root of every Mission Control
+# surface.
+
+
+def _seed(count: int) -> None:
+    log = EventLog()
+    for index in range(count):
+        log.append(
+            Event(
+                ts=now(),
+                type="persona_assignment.created",
+                task_id=f"task_pre_{index}",
+                run_id=None,
+                persona_id="neko_supervisor",
+                payload={"summary": "pre-existing", "assignment_id": f"pa_{index}"},
+            )
+        )
+
+
+def test_unknown_watermark_does_not_replay_the_log_as_fresh_activity(
+    isolate_agent_runtime_root, monkeypatch
+):
+    _seed(3)
+
+    import agent_runtime.parity as parity_mod
+
+    def _boom():
+        raise OSError(32, "share violation")
+
+    monkeypatch.setattr(parity_mod.event_rotation, "log_end_offset", _boom)
+
+    frames = stream_frames(
+        poll_interval_seconds=0.01, heartbeat_interval_seconds=0.01, max_frames=3
+    )
+    first = next(frames)
+    assert first["type"] == "hydrate"
+    assert first["watermark"]["event_offset"] is None
+
+    # No delta may carry the pre-existing rows: the position is unknown, so the
+    # tailer has nothing to resume FROM and must not start at byte 0.
+    for _ in range(2):
+        frame = next(frames)
+        assert frame["type"] == "heartbeat", frame["type"]
+        # Liveness without a position — not a cursor at the head of the log.
+        assert frame["watermark"]["event_offset"] is None
+
+
+def test_recovered_watermark_re_baselines_instead_of_replaying_or_gapping(
+    isolate_agent_runtime_root, monkeypatch
+):
+    """Learning the tail again must re-baseline, not resume into a gap.
+
+    Resuming from the freshly measured tail would silently drop whatever landed
+    while the log was unreadable; resuming from 0 would re-render the whole log
+    as new. The honest answer is the explicit resync this lane already has.
+    """
+
+    _seed(3)
+
+    import agent_runtime.parity as parity_mod
+
+    real = parity_mod.event_rotation.log_end_offset
+    calls = {"n": 0}
+
+    def _flaky():
+        calls["n"] += 1
+        # Unreadable for the hydrate's measurement, readable afterwards.
+        if calls["n"] <= 1:
+            raise OSError(32, "share violation")
+        return real()
+
+    monkeypatch.setattr(parity_mod.event_rotation, "log_end_offset", _flaky)
+
+    frames = stream_frames(
+        poll_interval_seconds=0.01, heartbeat_interval_seconds=60, max_frames=3
+    )
+    first = next(frames)
+    assert first["type"] == "hydrate"
+    assert first["watermark"]["event_offset"] is None
+
+    EventLog().append(
+        Event(
+            ts=now(),
+            type="persona_assignment.created",
+            task_id="task_during_outage",
+            run_id=None,
+            persona_id="neko_supervisor",
+            payload={"summary": "landed while unreadable", "assignment_id": "pa_outage"},
+        )
+    )
+
+    second = next(frames)
+    # A full re-baseline carrying a REAL position, not a delta replayed from 0.
+    assert second["type"] == "hydrate"
+    assert isinstance(second["watermark"]["event_offset"], int)
+    assert second["watermark"]["event_offset"] > 0
+
+    EventLog().append(
+        Event(
+            ts=now(),
+            type="persona_assignment.created",
+            task_id="task_after_recovery",
+            run_id=None,
+            persona_id="neko_supervisor",
+            payload={"summary": "after recovery", "assignment_id": "pa_after"},
+        )
+    )
+
+    third = next(frames)
+    # Tailed from the re-baseline's own offset: only the newest event, and none
+    # of the four rows the re-baseline's core already covers.
+    assert third["type"] == "delta"
+    assert third["entity"]["event"]["task_id"] == "task_after_recovery"

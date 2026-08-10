@@ -12,6 +12,7 @@ from hermes_time import now
 from . import paths
 from .events import EventLog
 from .models import Event
+from .parity import events_watermark
 from .patch_coverage import batch_is_patch_coverable
 from .redaction import ENV_SECRET_ASSIGNMENT_RE
 from .request_control import request_cancelled
@@ -81,21 +82,52 @@ def hydrate_frame(
     return frame
 
 
+def _resume_offset(frame: dict[str, Any]) -> int | None:
+    """The tail position a frame says to resume from, or ``None`` if unknown.
+
+    Two distinct absences used to collapse into ``0`` at the call site: a frame
+    carrying no watermark key at all, and one carrying an explicit ``None``
+    because ``events_watermark`` could not stat the log. Both mean "no position";
+    neither means "the head of the log".
+    """
+
+    value = (frame.get("watermark") or {}).get("event_offset")
+    return None if value is None else int(value)
+
+
+def _bounded_sleep(poll_interval_seconds: float) -> None:
+    """Sleep the poll interval in cancellation-latency-bounded slices."""
+
+    remaining = max(0.01, float(poll_interval_seconds))
+    while remaining > 0 and not request_cancelled():
+        interval = min(_SNAPSHOT_CANCEL_POLL_SECONDS, remaining)
+        time.sleep(interval)
+        remaining -= interval
+
+
 def heartbeat_frame(
-    *, offset: int, activity: dict[str, Any] | None = None
+    *, offset: int | None, activity: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Liveness frame that advances the stream watermark without a core delta.
 
     Pure liveness telemetry: consumers merge it fire-and-forget and a dropped
     frame only ages the HUD, never runtime state. (This frame previously also
     carried the Mission Daemon status block; the background daemon was retired.)
+
+    ``offset=None`` is the honest heartbeat of a stream that has not been able
+    to read the log's tail: liveness without a position. It must not be stamped
+    ``0``, which every watermark-gated reader would take as a real cursor at the
+    head of the log.
     """
 
     frame = {
         "type": "heartbeat",
         "schema_version": STREAM_SCHEMA_VERSION,
         "generated_at": now(),
-        "watermark": {"event_offset": int(offset or 0), "captured_at": now()},
+        "watermark": {
+            "event_offset": None if offset is None else int(offset),
+            "captured_at": now(),
+        },
     }
     if activity:
         frame["activity"] = activity
@@ -334,6 +366,14 @@ def stream_frames(
     detect a gap. ``resync=True`` forces the FIRST post-hydrate batch to a full
     core — the "explicit resync request" a reconnecting client makes to re-baseline
     before folding. Flag off → every batch is the byte-identical full-core frame.
+
+    **An unknown resume position is not byte 0.** ``or 0`` folded BOTH a missing
+    watermark key and an explicitly unknown one (``events_watermark`` returns
+    ``None`` when the log's end offset could not be stat'ed) into 0, and then
+    tailed from there — replaying the entire event log as fresh activity at the
+    root of every Mission Control surface. Unknown now takes the resync lane
+    this function already has: the first batch ships as a full core, and the
+    tailer waits to learn a real tail instead of inventing one.
     """
 
     log = event_log or EventLog()
@@ -341,7 +381,11 @@ def stream_frames(
     resync_pending = bool(resync)
     emitted = 0
     hydrate = hydrate_frame(delta_patches=delta_patches)
-    offset = int(((hydrate.get("watermark") or {}).get("event_offset")) or 0)
+    offset = _resume_offset(hydrate)
+    if offset is None:
+        # Cannot resume from an unknown position. Re-baseline the client on the
+        # first batch and re-measure the tail below until the log is readable.
+        resync_pending = True
     # Memoize BEFORE the first yield: a generator body pauses at yield, so a
     # memo taken after it would absorb any write racing the consumer's first
     # pull — exactly the writes the watchdog exists to catch.
@@ -355,6 +399,38 @@ def stream_frames(
     while True:
         if request_cancelled():
             return
+        if offset is None:
+            # Still no readable tail. Emit liveness (with an honestly null
+            # position) and retry the measurement — never fall back to 0, which
+            # would tail the whole log from its head as if it were new.
+            if events_watermark().get("event_offset") is None:
+                if time.monotonic() - last_heartbeat >= heartbeat_interval_seconds:
+                    yield heartbeat_frame(offset=None)
+                    emitted += 1
+                    last_heartbeat = time.monotonic()
+                    if max_frames is not None and emitted >= max_frames:
+                        return
+                _bounded_sleep(poll_interval_seconds)
+                continue
+            # The tail is readable again, but the client's baseline predates
+            # whatever landed while it was not — and there is no cursor to
+            # replay that span from. Re-baseline explicitly (the "explicit
+            # resync" this lane exists for): a fresh full core, tailed from ITS
+            # OWN measured offset, so the recovery leaves neither a gap nor a
+            # replay. Resuming from the newly measured tail alone would silently
+            # drop the span; resuming from 0 would re-render the whole log.
+            rebaseline = hydrate_frame(delta_patches=delta_patches)
+            offset = _resume_offset(rebaseline)
+            if offset is None:
+                continue
+            batch_base = offset
+            resync_pending = True
+            known_fingerprint = _scope_fingerprint()
+            yield rebaseline
+            emitted += 1
+            last_heartbeat = time.monotonic()
+            if max_frames is not None and emitted >= max_frames:
+                return
         # Fingerprint BEFORE reading events. A delta batch rebuilds one full
         # snapshot per BATCH (W1 coalescing — it was per event, ~9MB a time);
         # a memo taken AFTER the batch would absorb any event-less write that
@@ -455,11 +531,7 @@ def stream_frames(
 
         # Cancellation latency is bounded even when a caller chooses a long
         # poll interval; the production default remains 250ms.
-        sleep_remaining = max(0.01, float(poll_interval_seconds))
-        while sleep_remaining > 0 and not request_cancelled():
-            interval = min(_SNAPSHOT_CANCEL_POLL_SECONDS, sleep_remaining)
-            time.sleep(interval)
-            sleep_remaining -= interval
+        _bounded_sleep(poll_interval_seconds)
 
 
 def _scope_fingerprint() -> str:
