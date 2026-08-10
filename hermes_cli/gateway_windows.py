@@ -1325,7 +1325,7 @@ def task_action_is_console_less() -> bool | None:
     there is no task, its definition can't be read, or its action is
     unrecognised.
     """
-    if not is_windows():
+    if sys.platform != "win32":
         return None
     code, out, _err = _exec_schtasks(["/Query", "/TN", get_task_name(), "/V", "/FO", "LIST"])
     if code != 0:

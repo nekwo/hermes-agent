@@ -108,6 +108,29 @@ def test_task_action_classifier_reads_localized_output():
     assert gateway_windows._task_action_is_console_less(localized, _SCRIPT) is False
 
 
+def _probe(schtasks_result):
+    with mock.patch.object(gateway_windows.sys, "platform", "win32"), mock.patch.object(
+        gateway_windows, "_exec_schtasks", return_value=schtasks_result
+    ), mock.patch.object(
+        gateway_windows, "get_task_name", return_value="Hermes_Gateway_alice"
+    ), mock.patch.object(gateway_windows, "get_task_script_path", return_value=_SCRIPT):
+        return gateway_windows.task_action_is_console_less()
+
+
+def test_probe_runs_end_to_end_against_a_schtasks_dump():
+    """Exercise the probe BODY, not just its return value. Every other test —
+    and every caller — mocks this function out, so nothing else executes these
+    lines; a name that fails to resolve here reaches the operator as a
+    traceback on the one command they run when the gateway is missing."""
+    legacy = r"Task To Run: C:\hermes\gateway-service\Hermes_Gateway_alice.cmd"
+
+    assert _probe((0, legacy, "")) is False
+
+
+def test_probe_returns_unknown_when_schtasks_fails():
+    assert _probe((1, "", "ERROR: The system cannot find the file specified.")) is None
+
+
 def _run_refresh(*, console_less: bool | None, capsys):
     with mock.patch.object(cli_main, "_is_windows", return_value=True), mock.patch.object(
         gateway_windows, "is_installed", return_value=True
