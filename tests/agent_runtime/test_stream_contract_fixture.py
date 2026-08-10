@@ -3,9 +3,16 @@
 The launcher commits byte-identical copies of ``tests/fixtures/stream_frames/``
 under ``test/fixtures/harness_stream/`` and parses them through its real
 decode + read-model pipeline. These tests hold the hermes side of that
-contract: the frames the producer builds TODAY must keep the golden key-set
-shape, and the fixture bytes must match the manifest so either repo drifting
-alone turns a CI red instead of a silently-null field.
+contract: the frames the producer builds TODAY must have the golden's shape all
+the way down, and the fixture bytes must match the manifest so either repo
+drifting alone turns a CI red instead of a silently-null field.
+
+The shape comparison is by nested KEY PATH (``_key_paths``), not by top-level
+key set. The top-level version was green while
+``core.runtime_config.mission_chat.compaction_threshold_tokens`` sat missing
+from every golden, and the launcher mirrored those stale bytes cross-repo: a
+key added one level below a key set that already matched changed nothing the
+old assertions looked at.
 
 Update rule (both fixture dirs' README): fixtures change only in a
 cross-stack change that lands both repos together.
@@ -14,16 +21,29 @@ cross-stack change that lands both repos together.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
+
+import pytest
 
 from agent_runtime.events import EventLog
 from agent_runtime.models import Event
+from agent_runtime.serde import to_jsonable
 from agent_runtime.snapshot import SNAPSHOT_CONTRACT_VERSION
-from agent_runtime.stream import delta_frame, heartbeat_frame, hydrate_frame
+from agent_runtime.stream import (
+    delta_batch_frame,
+    delta_frame,
+    heartbeat_frame,
+    hydrate_frame,
+)
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "stream_frames"
+GENERATOR = REPO_ROOT / "scripts" / "generate_agent_runtime_stream_fixtures.py"
+REGENERATE = f"python {GENERATOR.relative_to(REPO_ROOT).as_posix()}"
 
 # The launcher consumes exactly these; they may never leave a frame.
 LAUNCHER_LOAD_BEARING_KEYS = {"type", "watermark"}
@@ -44,6 +64,97 @@ def _seed_event(log: EventLog, *, task: str, fingerprint: str) -> Event:
     )
     log.append(evt)
     return evt
+
+
+# --------------------------------------------------------------------------- #
+# Shape: every nested key path, not just the top-level neighbourhood
+# --------------------------------------------------------------------------- #
+def _key_paths(value: Any, prefix: str = "") -> set[str]:
+    """Every nested key path in a JSON-shaped value, dotted.
+
+    ``{"core": {"runtime_config": {"mission_chat": {"x": 1}}}}`` yields
+    ``core``, ``core.runtime_config``, ``core.runtime_config.mission_chat`` and
+    ``core.runtime_config.mission_chat.x`` — so an addition BELOW a key set that
+    already matched is visible, which a top-level ``set(...) == set(...)`` is
+    blind to by construction.
+
+    List elements collapse onto a single ``[]`` segment. That is the deliberate
+    line between contract and data: a golden holding two entries where the
+    producer holds three is not drift and must not churn, but an entry gaining
+    or losing a KEY is drift and must fail.
+    """
+
+    found: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            found.add(path)
+            found |= _key_paths(item, path)
+    elif isinstance(value, list):
+        for item in value:
+            found |= _key_paths(item, f"{prefix}[]")
+    return found
+
+
+def _shape_drift(live: Any, golden: Any) -> tuple[list[str], list[str]]:
+    """``(producer_only, golden_only)`` key paths. Empty pair == agreement.
+
+    Extracted so the anti-vacuity tests below can drive the comparator on
+    planted data instead of trusting that it still discriminates.
+    """
+
+    live_paths, golden_paths = _key_paths(live), _key_paths(golden)
+    return sorted(live_paths - golden_paths), sorted(golden_paths - live_paths)
+
+
+def _live_generated_frames() -> dict[str, dict]:
+    """The four goldens ``scripts/generate_agent_runtime_stream_fixtures.py``
+    writes, rebuilt HERE by the same production builders it calls, with the same
+    seeded two-event log.
+
+    Values still differ from the committed bytes (the generator normalizes
+    timestamps, timings, the root spelling and ``repo_scopes[*].resolved``);
+    only the SHAPE is compared, which is why this needs no normalization of its
+    own and cannot rot into a second normalizer disagreeing with the first.
+    """
+
+    hydrate = hydrate_frame()
+    core = hydrate["core"]
+    log = EventLog()
+    first = Event(
+        ts=datetime(2026, 7, 16, 12, 0, 0, tzinfo=timezone.utc),
+        type="state.reconciled",
+        task_id="task_shape",
+        run_id=None,
+        persona_id="custom_agent",
+        payload={"fingerprint": "shape-fp"},
+    )
+    second = Event(
+        ts=first.ts + timedelta(seconds=1),
+        type="state.reconciled",
+        task_id="task_shape",
+        run_id=None,
+        persona_id="custom_agent",
+        payload={"fingerprint": "shape-fp-2"},
+    )
+    log.append(first)
+    log.append(second)
+    batch = list(log.iter_from_offset(0))
+    return {
+        "hydrate.json": hydrate,
+        "delta.json": delta_frame(first, offset=batch[0][0], snapshot=core),
+        "heartbeat.json": heartbeat_frame(offset=7),
+        "delta_batch.json": delta_batch_frame(batch, snapshot=core),
+    }
+
+
+def _generator_module():
+    spec = importlib.util.spec_from_file_location(
+        "_stream_fixture_generator_for_tests", GENERATOR
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_manifest_pins_fixture_bytes():
@@ -69,15 +180,13 @@ def test_manifest_pins_fixture_bytes():
         )
 
 
-def test_hydrate_frame_matches_golden_shape(isolate_agent_runtime_root):
+def test_hydrate_frame_is_the_frame_the_launcher_decodes(isolate_agent_runtime_root):
+    """The hydrate frame's own contract. Its SHAPE agreement with the golden is
+    owned once, by ``test_every_generated_golden_has_the_producer_shape`` — a
+    second key-set assertion here would be a second mechanism satisfying the
+    same pin, which is how a sabotaged gate stays green."""
+
     live = hydrate_frame()
-    golden = _fixture("hydrate.json")
-    assert set(live) == set(golden)
-    assert set(live["watermark"]) == set(golden["watermark"])
-    assert set(live["core"]) == set(golden["core"])
-    assert set(live["core"]["runtime_config"]) == set(
-        golden["core"]["runtime_config"]
-    )
     assert LAUNCHER_LOAD_BEARING_KEYS <= set(live)
     assert live["type"] == "hydrate"
     assert isinstance(live["core"], dict)
@@ -143,14 +252,61 @@ def test_every_frame_bearing_golden_pins_contract_version(isolate_agent_runtime_
         )
 
 
-def test_every_frame_bearing_golden_matches_live_core_shape(
+# --------------------------------------------------------------------------- #
+# THE GATE
+# --------------------------------------------------------------------------- #
+def test_every_generated_golden_has_the_producer_shape(isolate_agent_runtime_root):
+    """Rebuild each generated frame from the production builders; the committed
+    golden must have the SAME nested key paths.
+
+    This is the check whose absence let
+    ``core.runtime_config.mission_chat.compaction_threshold_tokens`` (added by
+    `3d6f9ae81`, which never regenerated) sit in a stale golden with the gate
+    green — and then be mirrored, stale, into the Launcher. The old assertions
+    compared the TOP-LEVEL key sets of ``core`` and ``runtime_config``, so a key
+    appearing one level down changed nothing they looked at. They pinned the
+    neighbourhood; this pins the guarantee.
+
+    Paths, not values, on purpose. Values are what churns — timings, counts, the
+    generator's normalized stamps — and a gate that reddens on churn is a gate
+    people regenerate without reading, which is how goldens rot in the first
+    place. A nested addition or removal is never churn: it is a cross-repo
+    contract change, and it fails here naming the exact path.
+    """
+
+    for name, live in _live_generated_frames().items():
+        producer_only, golden_only = _shape_drift(to_jsonable(live), _fixture(name))
+        assert not producer_only and not golden_only, (
+            f"{name} no longer has the shape the producer builds.\n"
+            f"  producer only (the golden is stale): {producer_only}\n"
+            f"  golden only (the producer dropped these): {golden_only}\n"
+            f"Regenerate with `{REGENERATE}`, mirror the bytes into the "
+            "Launcher's test/fixtures/harness_stream/, and update BOTH "
+            "manifests — stream goldens change only in a cross-stack landing."
+        )
+
+
+def test_the_gate_covers_every_frame_the_generator_writes():
+    """A frame the generator writes but this gate never rebuilds would be
+    unpinned by construction — the S59 failure (a partial fixture bump the gate
+    could not see) one level up."""
+
+    generated = _generator_module().GENERATED_FRAME_FILES
+    assert set(_live_generated_frames()) == set(generated), (
+        f"gate rebuilds {sorted(_live_generated_frames())} but the generator "
+        f"writes {sorted(generated)}"
+    )
+
+
+def test_every_frame_bearing_golden_carries_the_generated_core(
     isolate_agent_runtime_root,
 ):
-    """A contract-version match is insufficient when nested keys drift.
+    """The value-level agreements shape cannot express.
 
-    Hydrate is the live full-core producer authority. Delta and delta_batch
-    carry that same full core, so all three committed frame goldens must agree
-    with its core and runtime_config key sets.
+    Delta and delta_batch ship the SAME core object hydrate does, so their
+    goldens must be byte-equal to hydrate's core — and the parity capabilities
+    the launcher branches on must equal the live ones, not merely have the same
+    keys.
     """
 
     live_core = hydrate_frame()["core"]
@@ -161,34 +317,105 @@ def test_every_frame_bearing_golden_matches_live_core_shape(
         assert golden_core == hydrate_golden_core, (
             f"{name} does not carry the exact generated hydrate core"
         )
-        assert set(golden_core) == set(live_core), f"{name} core keys drifted"
-        assert set(golden_core["runtime_config"]) == set(
-            live_core["runtime_config"]
-        ), f"{name} core.runtime_config keys drifted"
         assert golden_core["parity"]["capabilities"] == live_core["parity"][
             "capabilities"
         ], f"{name} core.parity.capabilities drifted"
-        assert set(golden_core["parity"]["completeness"]) == set(
-            live_core["parity"]["completeness"]
-        ), f"{name} core.parity.completeness keys drifted"
-        for section, live_completeness in live_core["parity"][
-            "completeness"
-        ].items():
-            assert set(golden_core["parity"]["completeness"][section]) == set(
-                live_completeness
-            ), f"{name} completeness.{section} keys drifted"
-        assert "default_flow" not in golden_core["prompt_observability"]
 
 
-def test_delta_frame_matches_golden_shape(isolate_agent_runtime_root):
+# --------------------------------------------------------------------------- #
+# Anti-vacuity: drive the comparator on planted drift
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "plant, expected_path",
+    [
+        pytest.param(
+            lambda core: core["runtime_config"]["mission_chat"].pop(
+                "compaction_threshold_tokens"
+            ),
+            "core.runtime_config.mission_chat.compaction_threshold_tokens",
+            id="the-real-2026-08-nested-addition-the-old-gate-missed",
+        ),
+        pytest.param(
+            lambda core: core["runtime_config"]["read_model"].__setitem__(
+                "invented_switch", True
+            ),
+            "core.runtime_config.read_model.invented_switch",
+            id="a-nested-key-invented-in-the-golden",
+        ),
+        pytest.param(
+            lambda core: core["repo_scopes"]["frontend"].pop("label"),
+            "core.repo_scopes.frontend.label",
+            id="a-contractual-leaf-dropped-two-levels-down",
+        ),
+        pytest.param(
+            lambda core: core["parity"]["completeness"].pop("running_work"),
+            "core.parity.completeness.running_work",
+            id="a-whole-completeness-section-dropped",
+        ),
+    ],
+)
+def test_the_shape_comparison_notices_drift_below_the_top_level(plant, expected_path):
+    """Each drift class planted into a copy of the real golden.
+
+    The old gate is the cautionary tale: none of these change
+    ``set(core)`` or ``set(core["runtime_config"])``, so none of them could have
+    failed it. Driving the comparator on planted data is what stops this rewrite
+    from decaying the same way — if it ever stops discriminating, this fails
+    while the tree is clean.
+    """
+
+    golden = _fixture("hydrate.json")
+    drifted = json.loads(json.dumps(golden))
+    plant(drifted["core"])
+
+    # Precondition: the RETIRED comparison is blind to every one of these.
+    assert set(drifted["core"]) == set(golden["core"])
+    assert set(drifted["core"]["runtime_config"]) == set(
+        golden["core"]["runtime_config"]
+    )
+
+    producer_only, golden_only = _shape_drift(golden, drifted)
+    assert expected_path in producer_only or expected_path in golden_only, (
+        f"the comparator accepted drift at {expected_path}: "
+        f"producer_only={producer_only} golden_only={golden_only}"
+    )
+
+
+def test_the_shape_comparison_does_not_redden_on_values_or_list_length():
+    """The other half of the balance: churn must NOT fail.
+
+    A gate that reddens on a changed timestamp or a differently-sized list gets
+    regenerated reflexively, unread — the habit that lets a real nested change
+    ride along unnoticed.
+    """
+
+    golden = _fixture("hydrate.json")
+    churned = json.loads(json.dumps(golden))
+    churned["core"]["generated_at"] = "2099-01-01T00:00:00.000000Z"
+    churned["core"]["runtime_config"]["store_root"] = "D:/somewhere/else"
+    churned["core"]["runtime_config"]["lock_acquire_timeout_seconds"] = 999
+    churned["core"]["runtime_config"]["mission_chat"][
+        "compaction_threshold_tokens"
+    ] = 1
+    # Same element shape, different length — data, not contract. (The parity
+    # capabilities' VALUES are pinned separately against the live producer, so
+    # tolerating length here opens no hole.)
+    churned["core"]["parity"]["capabilities"] = [
+        *golden["core"]["parity"]["capabilities"],
+        "another_capability",
+    ]
+
+    assert _shape_drift(golden, churned) == ([], []), (
+        "value churn registered as shape drift — this gate would teach people "
+        "to regenerate without reading"
+    )
+
+
+def test_delta_frame_is_never_shipped_without_a_core(isolate_agent_runtime_root):
     log = EventLog()
     _seed_event(log, task="task_shape", fingerprint="shape-fp")
     ((offset, event),) = list(log.iter_from_offset(0))
     live = delta_frame(event, offset=offset)
-    golden = _fixture("delta.json")
-    assert set(live) == set(golden)
-    assert set(live["watermark"]) == set(golden["watermark"])
-    assert set(live["entity"]) == set(golden["entity"])
     assert live["type"] == "delta"
     assert isinstance(live["core"], dict), (
         "a delta without a core is a launcher drop (delta_without_core) — "
@@ -196,11 +423,8 @@ def test_delta_frame_matches_golden_shape(isolate_agent_runtime_root):
     )
 
 
-def test_heartbeat_frame_matches_golden_shape(isolate_agent_runtime_root):
+def test_heartbeat_frame_stays_core_free(isolate_agent_runtime_root):
     live = heartbeat_frame(offset=7)
-    golden = _fixture("heartbeat.json")
-    assert set(live) == set(golden)
-    assert set(live["watermark"]) == set(golden["watermark"])
     assert live["type"] == "heartbeat"
     assert "core" not in live
 
