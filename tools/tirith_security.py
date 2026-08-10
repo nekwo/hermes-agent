@@ -727,6 +727,47 @@ _MAX_FINDINGS = 50
 _MAX_SUMMARY_LEN = 500
 
 
+def _unsupported_platform_result(fail_open: bool) -> dict:
+    """Allow the command, but say so when fail-closed was asked for.
+
+    tirith publishes release binaries for linux/macOS on x86_64/aarch64 only
+    (see :func:`_detect_target`), so on any other host there is no scanner to
+    fail closed *against*. Blocking every command there would take the machine
+    offline rather than make it safer, so ``security.tirith_fail_open: false``
+    deliberately does NOT start blocking here — the platform arm still allows.
+
+    What it must not do is vanish. Until this helper existed the short-circuit
+    returned "allow" *before* the flag was ever read, so an operator who had
+    explicitly opted into fail-closed got a silent fail-open with nothing
+    anywhere saying their setting was inert. The override is now visible in
+    two places: logged once per process (through the same ``_warn_once``
+    dedupe the spawn warnings use, because this sits on the per-command hot
+    path and would otherwise repeat for every tool call), and named in the
+    returned ``summary`` so callers that surface it get it too.
+    """
+    if fail_open:
+        return {"action": "allow", "findings": [], "summary": ""}
+    _warn_once(
+        "tirith_fail_closed_on_unsupported_platform",
+        "security.tirith_fail_open is false, but tirith publishes no build "
+        "for %s/%s, so there is no scanner to fail closed against: commands "
+        "are being ALLOWED UNSCANNED by tirith on this host and the setting "
+        "is not binding. Pattern-matching approval guards still run. To make "
+        "this explicit set security.tirith_enabled: false; to get scanning, "
+        "run on linux or macOS (x86_64 or aarch64).",
+        platform.system() or "unknown",
+        platform.machine() or "unknown",
+    )
+    return {
+        "action": "allow",
+        "findings": [],
+        "summary": (
+            "tirith unsupported on this platform; security.tirith_fail_open="
+            "false could not be honoured (allowed unscanned)"
+        ),
+    }
+
+
 def check_command_security(command: str) -> dict:
     """Run tirith security scan on a command.
 
@@ -755,8 +796,12 @@ def check_command_security(command: str) -> dict:
     # Unsupported platform (Windows etc.) — tirith has no binary here and
     # never will. Skip the resolver entirely so we don't even try to spawn.
     # Pattern-matching guards still run via the rest of approval.py.
+    # This arm reads tirith_fail_open rather than ignoring it: it still
+    # allows either way, but an operator who asked for fail-closed is told
+    # once that their setting cannot bind here. See
+    # :func:`_unsupported_platform_result`.
     if not is_platform_supported():
-        return {"action": "allow", "findings": [], "summary": ""}
+        return _unsupported_platform_result(cfg["tirith_fail_open"])
 
     tirith_path = _resolve_tirith_path(cfg["tirith_path"])
     timeout = cfg["tirith_timeout"]
