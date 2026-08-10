@@ -1124,6 +1124,68 @@ def run_conversation(
     moa_config: Optional[dict[str, Any]] = None,
     reuse_current_user_message: bool = False,
 ) -> Dict[str, Any]:
+    """Run one turn with venv mutation barred — see :func:`_run_conversation`.
+
+    THE arming site for the no-install-inside-a-turn rule (2026-08-09
+    venv-corruption incident: a mid-turn lazy ``pip install`` of a provider SDK
+    rewrote the interpreter the turn was executing in and took Mission Control
+    down). ``ProfileAgentRunner.run`` already armed it for every HARNESS lane,
+    but the CLI-interactive lane (``HermesCLI.chat`` →
+    ``AIAgent.run_conversation``) never routes through that runner, so it ran
+    unbarriered. This is the turn loop itself: every lane — harness, CLI REPL,
+    gateway, ACP, one-shot, delegation, background review — reaches a model turn
+    through here, so arming here is arming everywhere.
+
+    Nesting is safe by construction (:func:`tools.lazy_deps.deny_venv_installs`
+    keeps a stack), and the reason string is INHERITED when an outer scope
+    already named one: the harness lane's more specific
+    ``"an agent turn (profile='base')"`` keeps appearing in the refusal instead
+    of being masked by this generic inner scope, since the barrier reports the
+    innermost reason. Re-using the outer string rather than SKIPPING the inner
+    scope is deliberate — skipping would leave a turn running on another thread
+    unprotected the moment the outer scope exited.
+
+    What this does NOT block: operator-initiated installs (``hermes tools``,
+    ``hermes setup``, ``hermes doctor --fix``, ``hermes postinstall``). Those
+    are top-level commands with no turn on the stack, so the barrier is
+    disarmed while they run. Durable-target installs
+    (``HERMES_LAZY_INSTALL_TARGET`` / ``pip install --target``) stay allowed
+    even under the barrier — they cannot corrupt the running venv.
+    """
+    from tools.lazy_deps import deny_venv_installs, venv_install_denial
+
+    reason = venv_install_denial() or "an agent turn (conversation loop)"
+    with deny_venv_installs(reason):
+        return _run_conversation(
+            agent,
+            user_message,
+            system_message=system_message,
+            conversation_history=conversation_history,
+            task_id=task_id,
+            stream_callback=stream_callback,
+            persist_user_message=persist_user_message,
+            persist_user_timestamp=persist_user_timestamp,
+            persist_user_display_kind=persist_user_display_kind,
+            persist_user_display_metadata=persist_user_display_metadata,
+            moa_config=moa_config,
+            reuse_current_user_message=reuse_current_user_message,
+        )
+
+
+def _run_conversation(
+    agent,
+    user_message: Any,
+    system_message: str = None,
+    conversation_history: List[Dict[str, Any]] = None,
+    task_id: str = None,
+    stream_callback: Optional[callable] = None,
+    persist_user_message: Optional[Any] = None,
+    persist_user_timestamp: Optional[float] = None,
+    persist_user_display_kind: Optional[str] = None,
+    persist_user_display_metadata: Optional[Dict[str, Any]] = None,
+    moa_config: Optional[dict[str, Any]] = None,
+    reuse_current_user_message: bool = False,
+) -> Dict[str, Any]:
     """
     Run a complete conversation with tool calling until completion.
 
