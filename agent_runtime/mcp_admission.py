@@ -155,6 +155,31 @@ LANE_MISSION_CHAT = "mission_chat"
 #: Toolset-name prefix ``tools/mcp_tool.py`` registers every MCP server under.
 _MCP_TOOLSET_PREFIX = "mcp-"
 
+#: How an admitted server's tools reached the registry on THIS run.
+#:
+#: ``warm`` — the transport was already connected with a live session, so
+#: registration re-ran over tools this process had already listed. Measured
+#: 2026-08-09 against a real 60-tool stdio MCP server: **6–8 ms** for the whole
+#: admission, 0.2–0.3 ms for teardown.
+#:
+#: ``cold`` — no live session, so ``register_mcp_servers`` spawned the server
+#: process and completed the MCP handshake before anything could be listed.
+#: Measured on the same server: **3,197 ms** — ~400x the warm path.
+#:
+#: These exist as a RECORDED fact because the difference was being inferred.
+#: ``PERF_SEND_ANALYSIS_2026-08-09`` (F2/T2) attributed a flat 2.35–3.4 s per
+#: turn to "re-registration of an unchanged server set" and proposed caching the
+#: registration. The measurement says registration is the 6 ms half and the spawn
+#: is the whole cost — and a spawn is not cacheable, because a tool call needs a
+#: live session, not a remembered schema. Its three probe turns each ran in a
+#: FRESH CLI process, so all three were cold: turn-1 numbers reported as steady
+#: state. The serve lane keeps transports warm across turns by design
+#: (``tools/mcp_tool._servers`` outlives the run; only the registry scope is
+#: per-run), so a warm serve turn should read ``warm``. Nothing persisted that,
+#: so nobody could check which one the live 3.4 s was. Now the turn says.
+TRANSPORT_WARM = "warm"
+TRANSPORT_COLD = "cold"
+
 #: The launcher-allowlist PROFILE ROW a ``read_only`` admission compiles from.
 #: ``read_only`` is "inspect what others captured", which is exactly what that
 #: row was written to express — see the parity fixture below.
@@ -399,6 +424,12 @@ class McpAdmissionOutcome:
     #: module-global) because the budget IS per-run: a new admission mints a new
     #: meter, and the old one dies with the run's registry scope.
     call_budget: "McpCallBudget | None" = None
+    #: ``{server: "warm" | "cold"}`` as observed BEFORE this run registered
+    #: anything — the one attribution that turns ``mcp_admission_ms`` from a
+    #: number into an explanation. Empty when a caller supplied its own
+    #: ``register`` (tests, previews): classification reads the live transport
+    #: map, and a custom registrar means there is no live transport to read.
+    transport_paths: Mapping[str, str] = field(default_factory=dict)
 
     def denial_rows(self) -> list[dict[str, Any]]:
         return [denial.row() for denial in self.denied]
@@ -1148,6 +1179,15 @@ def admit_mcp_servers(
             execution_denied=busy,
         )
 
+    # Classified HERE — after the mutex, before the registrar — because both
+    # facts have to be true at once: nothing else can be registering (so the
+    # reading is not racing another admission's spawn), and this run has not yet
+    # registered anything (so a cold server still reads cold). Only on the
+    # production path: a caller-supplied ``register`` means the live transport
+    # map is not what will be consulted, and classifying against it would be a
+    # confident label for a path that was never taken.
+    transport_paths = classify_admission_transport(admission.server_names) if register is None else {}
+
     done = threading.Event()
     box: dict[str, Any] = {}
     # One meter per admission ⇒ the budget resets per run by construction, with
@@ -1213,6 +1253,10 @@ def admit_mcp_servers(
             # registration lands late, so the run stays bounded even on the path
             # where the caller gave up on it.
             call_budget=call_budget,
+            # A timeout is almost always a COLD spawn that outran the budget, and
+            # saying so is the difference between "MCP is slow" and "that server
+            # takes longer to start than the turn allows".
+            transport_paths=transport_paths,
         )
 
     from .mcp_lane import registered_mcp_server_names
@@ -1244,6 +1288,7 @@ def admit_mcp_servers(
         denied=tuple(admission.denied) + unregistered,
         execution_denied=unregistered,
         call_budget=call_budget,
+        transport_paths=transport_paths,
     )
 
 
@@ -1449,6 +1494,28 @@ def _default_registrar(servers: Mapping[str, Mapping[str, Any]]) -> list[str]:
 
         names.extend(register_mcp_servers({name: dict(cfg) for name, cfg in cold.items()}) or [])
     return names
+
+
+def classify_admission_transport(servers: Iterable[str] | None) -> dict[str, str]:
+    """``{server: warm|cold}`` for an admitted set, read before registration.
+
+    Pure observation over ``tools/mcp_tool._servers``: it decides nothing and
+    changes nothing. It exists so a turn can SAY which of the two costs it paid
+    instead of leaving a reader to infer it from a millisecond count — see
+    :data:`TRANSPORT_WARM` for the measurements that make the distinction worth
+    recording, and the analysis it corrects.
+
+    Uses the same liveness predicate :func:`_default_registrar` routes on
+    (``_live_mcp_sessions``), so the label can never disagree with the path
+    actually taken: a session-less cached entry is COLD to both, because
+    ``register_mcp_servers`` is what handles the wake.
+    """
+
+    names = [str(name).strip() for name in servers or () if str(name or "").strip()]
+    if not names:
+        return {}
+    live = _live_mcp_sessions()
+    return {name: (TRANSPORT_WARM if name in live else TRANSPORT_COLD) for name in names}
 
 
 def _live_mcp_sessions() -> frozenset[str]:

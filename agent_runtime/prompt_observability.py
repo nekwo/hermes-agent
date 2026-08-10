@@ -1868,6 +1868,14 @@ BUDGET_BASIS_METERED_FIRST_CALL = "metered_first_call"
 BUDGET_BASIS_ESTIMATE_WITH_TOOLS = "estimate_messages_plus_tools"
 BUDGET_BASIS_ESTIMATE_MESSAGES_ONLY = "estimate_messages_only"
 
+#: Where ``context_budget.compaction_tokens`` came from. ``live_compressor`` is
+#: a READING off the object that will do the compacting; ``model_ratio`` is the
+#: ``window x compaction_ratio`` DERIVATION, which is all that was available
+#: before the turn started recording the compressor and is still the answer for
+#: any lane that does not (batch, gateway, CLI).
+COMPACTION_BASIS_LIVE_COMPRESSOR = "live_compressor"
+COMPACTION_BASIS_MODEL_RATIO = "model_ratio"
+
 
 def _tool_schema_json_bytes(final_model_input: dict[str, Any] | None) -> int | None:
     if not isinstance(final_model_input, dict):
@@ -1926,6 +1934,25 @@ def _metered_assembled_tokens(turn_usage: dict[str, Any] | None) -> int | None:
     return None
 
 
+def _live_compaction_threshold(final_model_input: dict[str, Any] | None) -> int | None:
+    """The compaction threshold the live compressor holds, or None.
+
+    Reads the row `profile_runner._chat_compaction_observability` records.
+    Returns None — never a guess — when the turn did not record one, so the
+    caller falls back to the model-ratio derivation and LABELS it as such.
+    """
+
+    if not isinstance(final_model_input, dict):
+        return None
+    row = final_model_input.get("context_compaction")
+    if not isinstance(row, dict):
+        return None
+    value = row.get("effective_threshold_tokens")
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        return None
+    return value
+
+
 def _context_budget(
     model_selection: dict[str, Any] | None,
     final_model_input: dict[str, Any] | None,
@@ -1960,12 +1987,28 @@ def _context_budget(
             if _tool_schema_json_bytes(final_model_input) is not None
             else BUDGET_BASIS_ESTIMATE_MESSAGES_ONLY
         )
+    # T5 (2026-08-09): `window x compaction_ratio` is a DERIVATION, not a
+    # reading — it cannot see the mission-chat lane's compaction cap, so it
+    # reported 892,500 on a root the compressor would compact at 150,000. When
+    # the turn recorded what the live compressor actually holds, that is the
+    # answer, and `compaction_basis` says which of the two this is so the UI
+    # never renders a derivation as a measurement.
+    derived_compaction = int(window * ratio)
+    effective_compaction = _live_compaction_threshold(final_model_input)
     budget = {
         "model": safe_assignment_text(str(model), limit=120),
         "provider": safe_assignment_token(provider) if provider else None,
         "window_tokens": int(window),
         "compaction_ratio": round(float(ratio), 4),
-        "compaction_tokens": int(window * ratio),
+        "compaction_tokens": (
+            effective_compaction if effective_compaction is not None else derived_compaction
+        ),
+        "compaction_basis": (
+            COMPACTION_BASIS_LIVE_COMPRESSOR
+            if effective_compaction is not None
+            else COMPACTION_BASIS_MODEL_RATIO
+        ),
+        "compaction_tokens_model_ratio": derived_compaction,
         "used_tokens": used,
         "used_basis": basis,
         # Back-compat for launcher builds that predate `used_basis`; they render
@@ -3116,7 +3159,34 @@ def _safe_final_model_input(value: dict[str, Any] | None) -> dict[str, Any] | No
         # and load-bearing — without it a reader cannot tell whether the captured
         # user message is what the model received or only what the turn composed.
         "user_message_wire": _safe_user_message_wire(value.get("user_message_wire")),
+        # T5: the live compaction threshold. Whitelisted (not merely passed
+        # through) because the deferred-refresh path at
+        # `_context_budget_needs_refresh` re-derives the budget from the SAFE
+        # row — dropping it here would make a refreshed budget silently fall
+        # back to the static window x ratio number the lane cap overrides.
+        "context_compaction": _safe_context_compaction(value.get("context_compaction")),
     }
+
+
+def _safe_context_compaction(value: Any) -> dict[str, Any] | None:
+    """Redaction-safe copy of the live-compressor compaction row. Ints only."""
+
+    if not isinstance(value, dict):
+        return None
+    effective = _safe_int(value.get("effective_threshold_tokens"))
+    if not effective or effective <= 0:
+        return None
+    row: dict[str, Any] = {
+        "schema_version": _safe_int(value.get("schema_version")) or 1,
+        "effective_threshold_tokens": effective,
+    }
+    for key in ("threshold_tokens_cap", "context_length"):
+        number = _safe_int(value.get(key))
+        if number:
+            row[key] = number
+    if "compression_in_place" in value:
+        row["compression_in_place"] = bool(value.get("compression_in_place"))
+    return row
 
 
 def _safe_user_message_wire(value: Any) -> dict[str, Any] | None:

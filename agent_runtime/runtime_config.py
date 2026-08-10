@@ -164,6 +164,10 @@ class MissionChatConfig:
             dispatch_max_seconds: 1800
             # How many detached dispatches execute at once. Overflow queues.
             dispatch_max_concurrent: 3
+            # Compact a chat root once its assembled context passes this many
+            # tokens. A CAP, never a floor: a model whose own ratio-based
+            # threshold is already lower keeps it. 0 disables the lane cap.
+            compaction_threshold_tokens: 150000
     """
 
     default_max_seconds: float = 240.0
@@ -198,6 +202,33 @@ class MissionChatConfig:
     #: refused, because a dispatch is already asynchronous and a caller told
     #: "dispatched" must not silently lose the work.
     dispatch_max_concurrent: int = 3
+    #: Token threshold at which a mission-chat ROOT compacts, expressed as an
+    #: absolute CAP on the compressor's own ratio-based threshold.
+    #:
+    #: Why the lane needs its own number at all: Hermes derives the threshold
+    #: from ``compaction_ratio × window``, which on this lane's 1,050,000-token
+    #: model is 892,500 — a bound a chat root reaches roughly never. Measured
+    #: 2026-08-09: the longest live root reached ~200 k in 19 turns, and one
+    #: tool-heavy turn on it metered ~826 k prompt tokens across 4 provider
+    #: calls where the same turn on a fresh thread meters ~50 k. The cost is
+    #: subscription **limit burn**, not dollars (that lane bills at $0), and a
+    #: threshold nothing can reach is not a bound.
+    #:
+    #: Why **150,000**: it is ~7× a measured fresh-thread turn-1 prefix
+    #: (22.7 k), so a thread keeps 15–30 real turns of headroom and only a
+    #: thread that outlived its task ever reaches it; it sits BELOW the 200 k
+    #: root that produced the measured 16× burn, so it engages on exactly the
+    #: state that motivated it; and it is 14% of the window, far enough away
+    #: that one tool-heavy multi-call turn cannot cross the window mid-turn.
+    #:
+    #: It is applied through ``ContextCompressor.threshold_tokens_cap``, which
+    #: takes the LOWER of the ratio-based threshold and the cap. So it can only
+    #: make compaction fire EARLIER, never later: a 32 k-window model whose own
+    #: threshold is ~27 k is untouched. ``0`` (or a negative / unparseable
+    #: value) disables the lane cap and restores the model-derived threshold —
+    #: that spelling IS the rollback. An explicit per-turn
+    #: ``--compression-threshold-tokens`` always wins over it.
+    compaction_threshold_tokens: int = 150_000
 
 
 @dataclass(slots=True)

@@ -32,6 +32,18 @@ logger = logging.getLogger(__name__)
 MISSION_CHAT_MIN_MAX_SECONDS = 30.0
 MISSION_CHAT_MAX_MAX_SECONDS = 86_400.0
 
+#: Bounds for ``agent_runtime.mission_chat.compaction_threshold_tokens`` when it
+#: is enabled. The floor exists because a cap under ~16 k would compact a chat
+#: root before its own turn-1 prefix fits (measured: 22.7 k for a qa turn on
+#: 2026-08-09, of which ~9.3 k is tool schema that no compaction can remove), so
+#: the lane would summarize on every turn and never converge. The ceiling is the
+#: largest window this lane has seen; a cap above it can only be a no-op anyway,
+#: because ``_apply_threshold_tokens_cap`` already clamps the cap to the model's
+#: context length. Zero is NOT clamped into this window — it is the documented
+#: "no lane cap" spelling and is honoured verbatim.
+MISSION_CHAT_MIN_COMPACTION_TOKENS = 16_000
+MISSION_CHAT_MAX_COMPACTION_TOKENS = 2_000_000
+
 #: Hard ceiling for ``agent_runtime.mcp_admission.max_tool_calls_per_run``.
 #: A per-run MCP call budget only bounds a looping agent while it is actually
 #: reachable, so "effectively unlimited" must not be spellable in config — a
@@ -536,7 +548,61 @@ def _mission_chat_config(raw: dict[str, Any]) -> MissionChatConfig:
             minimum=1,
             maximum=32,
         ),
+        compaction_threshold_tokens=_compaction_threshold_tokens(
+            raw.get("compaction_threshold_tokens"), defaults.compaction_threshold_tokens
+        ),
     )
+
+
+def _compaction_threshold_tokens(value: Any, default: int) -> int:
+    """Coerce the chat-lane compaction cap. ``0`` means "no lane cap".
+
+    Deliberately NOT ``_clamped_positive_int``: that helper maps every
+    non-positive value onto the default, which would make the documented
+    rollback spelling (``compaction_threshold_tokens: 0``) silently re-enable
+    the very cap it asks to remove. An operator who writes a disable must get a
+    disable. Absent / unparseable still falls back to the shipped default —
+    that is a missing opinion, not a stated one.
+    """
+
+    if value is None or isinstance(value, bool):
+        return int(default)
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return int(default)
+    if number <= 0:
+        return 0
+    return max(
+        MISSION_CHAT_MIN_COMPACTION_TOKENS,
+        min(MISSION_CHAT_MAX_COMPACTION_TOKENS, number),
+    )
+
+
+def mission_chat_compaction_threshold_tokens(cfg: AgentRuntimeConfig | None = None) -> int:
+    """The chat-lane compaction cap in tokens; ``0`` ⇒ no lane cap.
+
+    Harness-wide operator policy, so it loads through
+    :func:`load_root_runtime_config` for exactly the reason
+    :func:`mission_chat_default_max_seconds` documents — one sticky-active
+    profile's own ``config.yaml`` must not decide when every OTHER profile's
+    threads compact. A config fault degrades to the shipped default rather than
+    failing the turn.
+    """
+
+    if cfg is not None:
+        return _compaction_threshold_tokens(
+            getattr(cfg.mission_chat, "compaction_threshold_tokens", None),
+            MissionChatConfig().compaction_threshold_tokens,
+        )
+    try:
+        return int(load_root_runtime_config().mission_chat.compaction_threshold_tokens)
+    except Exception:  # pragma: no cover - defensive; a config fault must not kill a turn
+        logger.debug(
+            "mission_chat compaction threshold load failed; using the built-in default",
+            exc_info=True,
+        )
+        return MissionChatConfig().compaction_threshold_tokens
 
 
 def mission_chat_clarify_token_binding(cfg: AgentRuntimeConfig | None = None) -> bool:

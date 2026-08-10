@@ -669,6 +669,19 @@ class ProfileAgentRunner:
             return None
         timing["mcp_admission_ms"] = _emit_request_timing(request, "mcp_admission", started)
         timing["mcp_admitted_servers"] = len(outcome.admitted)
+        # T2 (2026-08-09): WHY this turn's admission cost what it did. Measured
+        # warm re-registration is 6-8 ms and a cold spawn is ~3,200 ms, so the
+        # millisecond count alone cannot distinguish "MCP admission is expensive"
+        # from "one server had to be started". Recorded per server, and as a
+        # count so a reader does not have to parse the map to see the answer.
+        transport_paths = dict(getattr(outcome, "transport_paths", None) or {})
+        if transport_paths:
+            from .mcp_admission import TRANSPORT_COLD
+
+            timing["mcp_admission_transport"] = transport_paths
+            timing["mcp_admission_cold_servers"] = sum(
+                1 for path in transport_paths.values() if path == TRANSPORT_COLD
+            )
         timing["mcp_call_budget"] = int(getattr(admission, "max_tool_calls_per_run", 0) or 0)
         if request.progress_callback is not None and (outcome.admitted or outcome.denied):
             try:
@@ -687,6 +700,7 @@ class ProfileAgentRunner:
                             "admitted": list(outcome.admitted),
                             "denied": outcome.denial_rows(),
                             "duration_ms": outcome.duration_ms,
+                            "transport": transport_paths,
                         },
                     }
                 )
@@ -978,14 +992,26 @@ class ProfileAgentRunner:
                 agent.compression_in_place = False
                 compressor = getattr(agent, "context_compressor", None)
                 if compressor is not None:
+                    # T5 (2026-08-09). ONE write path for "when does this chat
+                    # root compact", whether the number came from a per-turn
+                    # override or the lane default — see
+                    # `_apply_chat_compaction_threshold` for why the two must
+                    # not be separate assignments.
                     if request.compression_threshold_tokens_override is not None:
                         threshold_tokens = int(request.compression_threshold_tokens_override)
                         if threshold_tokens <= 0:
                             raise ValueError("compression threshold tokens must be positive")
-                        compressor.threshold_tokens = threshold_tokens
-                        context_length = int(getattr(compressor, "context_length", 0) or 0)
-                        if context_length > 0:
-                            compressor.threshold_percent = threshold_tokens / context_length
+                        timing["chat_compaction"] = _apply_chat_compaction_threshold(
+                            compressor, threshold_tokens, source="turn_override"
+                        )
+                    else:
+                        from .config import mission_chat_compaction_threshold_tokens
+
+                        timing["chat_compaction"] = _apply_chat_compaction_threshold(
+                            compressor,
+                            mission_chat_compaction_threshold_tokens(),
+                            source="lane_default",
+                        )
                     if request.compression_protect_first_n_override is not None:
                         compressor.protect_first_n = max(
                             0, int(request.compression_protect_first_n_override)
@@ -2550,6 +2576,124 @@ def _looks_sensitive_or_pathish(value: str) -> bool:
     return False
 
 
+#: Receipt kind stamped on every chat-lane compaction decision, so a reader can
+#: tell an intentional threshold from a default it happened to inherit.
+CHAT_COMPACTION_RECEIPT_KIND = "chat_compaction_threshold"
+
+
+def _apply_chat_compaction_threshold(
+    compressor: Any, threshold_tokens: int, *, source: str
+) -> dict[str, Any]:
+    """Decide — once — when THIS chat root compacts, and return the receipt.
+
+    Two callers, two different contracts, one function so they cannot drift:
+
+    * ``turn_override`` — an explicit ``--compression-threshold-tokens`` on the
+      turn. It is an operator instruction and wins in BOTH directions, so it is
+      written the way it always was: the live threshold plus the equivalent
+      ``threshold_percent``, which is what carries the intent through a model
+      switch (``update_model`` recomputes from the percent).
+    * ``lane_default`` — the harness-wide
+      ``agent_runtime.mission_chat.compaction_threshold_tokens``. It is a CAP,
+      never a floor, so it goes through ``threshold_tokens_cap``: the compressor
+      takes the LOWER of its ratio-based threshold and the cap, re-applies it on
+      every ``update_model``, and clamps a cap larger than the window to a no-op.
+      A small-window model therefore keeps its own (already earlier) threshold —
+      the lane can only make compaction fire sooner, never later.
+
+    ``threshold_tokens <= 0`` on the lane path is the documented "no lane cap"
+    spelling: the model-derived threshold stands and the receipt says so. It is
+    never an error, because the rollback for this whole feature is writing a 0.
+
+    Never raises: a compressor that does not expose these attributes (a stub, a
+    future refactor) yields an ``unavailable`` receipt rather than failing a turn
+    over an accounting knob.
+    """
+
+    receipt: dict[str, Any] = {
+        "kind": CHAT_COMPACTION_RECEIPT_KIND,
+        "schema_version": 1,
+        "source": source,
+        "requested_tokens": int(threshold_tokens) if threshold_tokens else 0,
+    }
+    try:
+        model_threshold = int(getattr(compressor, "threshold_tokens", 0) or 0)
+        context_length = int(getattr(compressor, "context_length", 0) or 0)
+    except Exception:  # pragma: no cover - defensive; accounting must not fail a turn
+        receipt["applied"] = False
+        receipt["reason"] = "unavailable"
+        return receipt
+    receipt["model_threshold_tokens"] = model_threshold
+    receipt["context_length"] = context_length
+
+    if source == "turn_override":
+        compressor.threshold_tokens = int(threshold_tokens)
+        if context_length > 0:
+            compressor.threshold_percent = int(threshold_tokens) / context_length
+    elif int(threshold_tokens or 0) <= 0:
+        receipt["applied"] = False
+        receipt["reason"] = "lane_cap_disabled"
+        receipt["effective_threshold_tokens"] = model_threshold
+        return receipt
+    else:
+        # The cap is a first-class field on the compressor, not a one-time
+        # patch — writing it is what makes the bound survive a model switch.
+        compressor.threshold_tokens_cap = int(threshold_tokens)
+        effective_cap = int(threshold_tokens)
+        if context_length > 0:
+            effective_cap = min(effective_cap, context_length)
+        if model_threshold > 0 and effective_cap < model_threshold:
+            compressor.threshold_tokens = effective_cap
+
+    try:
+        effective = int(getattr(compressor, "threshold_tokens", 0) or 0)
+    except Exception:  # pragma: no cover - defensive
+        effective = model_threshold
+    receipt["effective_threshold_tokens"] = effective
+    receipt["applied"] = effective != model_threshold
+    if not receipt["applied"] and source == "lane_default":
+        # A cap that did not move the threshold is the healthy small-window
+        # case, not a silent failure. Name it so a reader is not left inferring.
+        receipt["reason"] = "model_threshold_already_lower"
+    return receipt
+
+
+def _chat_compaction_observability(agent: Any) -> dict[str, Any] | None:
+    """What the LIVE compressor will actually compact at, read at send time.
+
+    Separate from the decision receipt on purpose: the receipt says what this
+    turn asked for, this says what the object holds when the prompt goes out.
+    They are the same number on a healthy turn — and a launcher rendering
+    "compaction at 892,500" while the compressor holds 150,000 is exactly the
+    kind of divergence the T4 wire-vs-record work exists to make impossible.
+    """
+
+    compressor = getattr(agent, "context_compressor", None)
+    if compressor is None:
+        return None
+    try:
+        effective = int(getattr(compressor, "threshold_tokens", 0) or 0)
+    except Exception:  # pragma: no cover - defensive
+        return None
+    if effective <= 0:
+        return None
+    row: dict[str, Any] = {
+        "schema_version": 1,
+        "effective_threshold_tokens": effective,
+    }
+    try:
+        cap = getattr(compressor, "threshold_tokens_cap", None)
+        if cap:
+            row["threshold_tokens_cap"] = int(cap)
+        context_length = int(getattr(compressor, "context_length", 0) or 0)
+        if context_length > 0:
+            row["context_length"] = context_length
+        row["compression_in_place"] = bool(getattr(agent, "compression_in_place", True))
+    except Exception:  # pragma: no cover - defensive
+        pass
+    return row
+
+
 def _attach_model_input_observability(raw_result: Any, *, agent, request: AgentRunRequest) -> None:
     if not isinstance(raw_result, dict):
         return
@@ -2595,6 +2739,12 @@ def _model_input_observability(*, agent, request: AgentRunRequest) -> dict[str, 
         # says so instead of quietly recording the composition as if it were the
         # wire.
         "user_message_wire": wire_receipt,
+        # T5 (2026-08-09): the threshold this root will actually compact at,
+        # read off the live compressor. `prompt_observability._context_budget`
+        # prefers it over the static `window x compaction_ratio` derivation,
+        # which does not know the lane cap exists and reported 892,500 while the
+        # compressor held 150,000.
+        "context_compaction": _chat_compaction_observability(agent),
         "schema_version": 1,
         "kind": "redaction_safe_final_model_input",
         "platform": request.platform,
