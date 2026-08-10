@@ -386,6 +386,15 @@ async def test_profile_command_reports_source_stamped_profile(monkeypatch, tmp_p
     source (source.profile — URL prefix / per-credential adapter / room map),
     not the multiplexer's active profile, which is always the default and
     made /profile answer "default" in every persona chat."""
+    # Keep the profile home OUTSIDE the running user's home. The footer
+    # collapses a home-prefixed path to "~/...", and on Windows pytest's
+    # tmp_path lives under %LOCALAPPDATA%\Temp — i.e. under the profile — so
+    # the collapse rewrote the very path this test asserts literally. On Linux
+    # /tmp happens to sit outside $HOME and nothing collapsed, which is the
+    # only reason this ever looked platform-specific.
+    from tests._home_env import point_home_at
+
+    point_home_at(monkeypatch, tmp_path / "elsewhere")
     hermes_home = tmp_path / ".hermes"
     profile_home = hermes_home / "profiles" / "milo"
     profile_home.mkdir(parents=True)

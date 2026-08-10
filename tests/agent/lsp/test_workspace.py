@@ -69,7 +69,13 @@ def test_resolve_workspace_for_file_uses_cwd_first(tmp_path: Path, monkeypatch):
 
 
 
-def test_normalize_path_expands_tilde(monkeypatch):
-    monkeypatch.setenv("HOME", "/home/user")
+def test_normalize_path_expands_tilde(monkeypatch, tmp_path):
+    # point_home_at, not a bare HOME setenv: ntpath.expanduser prefers
+    # USERPROFILE, so a HOME-only patch expanded "~" to the real profile. The
+    # home comes from tmp_path rather than a "/home/user" literal, which
+    # os.path.abspath drive-qualifies on Windows.
+    from tests._home_env import point_home_at
+
+    home = point_home_at(monkeypatch, tmp_path)
     p = normalize_path("~/x.py")
-    assert p == os.path.abspath("/home/user/x.py")
+    assert p == os.path.abspath(str(home / "x.py"))

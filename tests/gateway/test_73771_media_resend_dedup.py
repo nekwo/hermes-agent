@@ -25,6 +25,7 @@ import asyncio
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from urllib.parse import unquote
 
 import pytest
 
@@ -267,7 +268,12 @@ async def test_streamed_explicit_media_resend_is_delivered(tmp_path, monkeypatch
 
     adapter.send_multiple_images.assert_awaited_once()
     sent_paths = [p for p, _cap in adapter.send_multiple_images.await_args.kwargs["images"]]
-    assert str(img) in sent_paths[0]
+    # The delivery form is a percent-quoted ``file://`` envelope that
+    # BasePlatformAdapter.send_multiple_images unquotes back into a path.
+    # Assert that round trip rather than a raw substring: a POSIX path quotes
+    # to itself, so the substring check silently pinned the spelling instead
+    # of the contract, and any path with a space or a drive colon broke it.
+    assert unquote(sent_paths[0].removeprefix("file://")) == str(img)
 
 
 def test_stream_rescan_accepts_no_history_dedup_input():

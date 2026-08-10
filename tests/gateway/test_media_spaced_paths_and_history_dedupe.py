@@ -14,6 +14,7 @@ Covers the follow-up wave after PR #72170:
 """
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -86,7 +87,12 @@ class TestHistoryMediaDedupe:
         tmp_path,
         monkeypatch,
     ):
-        monkeypatch.setenv("HOME", str(tmp_path))
+        # point_home_at, not a bare HOME setenv: ntpath.expanduser prefers
+        # USERPROFILE, so a HOME-only patch expanded ~ to the developer's real
+        # profile and this stopped exercising the collapse it exists to pin.
+        from tests._home_env import point_home_at
+
+        point_home_at(monkeypatch, tmp_path)
         history = [
             {
                 "role": "assistant",
@@ -96,7 +102,10 @@ class TestHistoryMediaDedupe:
 
         paths = _collect_history_media_paths(history)
 
-        assert str(tmp_path / "audio cache" / "old.ogg") in paths
+        # Compare as paths: os.path.expanduser substitutes the home for "~" and
+        # leaves the remainder verbatim, so the collected string mixes
+        # separators on Windows. The guarantee is WHICH FILE was collected.
+        assert (tmp_path / "audio cache" / "old.ogg") in {Path(p) for p in paths}
 
     def test_empty_history_empty_set(self):
         assert _collect_history_media_paths([]) == set()

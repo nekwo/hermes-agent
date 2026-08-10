@@ -158,6 +158,12 @@ def test_codex_turn_persists_each_message_exactly_once():
     finally:
         import shutil
 
+        # Close before removing the tree. SessionDB.close() drains the token
+        # writer thread and unregisters its atexit hook, so leaking it leaked a
+        # thread and a strong reference into the rest of the run on EVERY
+        # platform. Windows merely made the leak visible by refusing to unlink
+        # the still-open state.db (WinError 32) where POSIX unlinks silently.
+        db.close()
         shutil.rmtree(tmp)
 
 

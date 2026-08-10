@@ -63,10 +63,20 @@ _IMAGE_EXTS = (
 _IMAGE_EXT_PATTERN = "|".join(e.lstrip(".") for e in _IMAGE_EXTS)
 
 # Absolute / home-relative local image path. Matches the same shape gateway's
-# extract_local_files() uses: anchors to ``~/`` or ``/``, ignores matches inside
-# URLs (the ``(?<![/:\w.])`` lookbehind), and case-insensitive on the extension.
+# extract_local_files() uses (``gateway/platforms/base.py``): anchors to ``~/``,
+# ``/`` or a Windows drive letter, ignores matches inside URLs (the
+# ``(?<![/:\w.])`` lookbehind), and case-insensitive on the extension.
+#
+# The drive-letter anchor and the ``[/\\]`` separator class are not decoration.
+# gateway's copy grew them in #34632; this one did not, and the two drifted for
+# as long as the failure was fenced as an environment gap. While they were out
+# of sync a Windows operator who pasted ``C:\Users\me\shot.png`` had it silently
+# dropped here, though the identical path delivered fine through the gateway.
+# Keep the two anchors identical.
 _LOCAL_IMAGE_PATH_RE = re.compile(
-    r"(?<![/:\w.])(?:~/|/)(?:[\w.\-]+/)*[\w.\-]+\.(?:" + _IMAGE_EXT_PATTERN + r")\b",
+    r"(?<![/:\w.])(?:~/|/|[A-Za-z]:[/\\])(?:[\w.\-]+[/\\])*[\w.\-]+\.(?:"
+    + _IMAGE_EXT_PATTERN
+    + r")\b",
     re.IGNORECASE,
 )
 

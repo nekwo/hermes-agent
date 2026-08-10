@@ -299,12 +299,17 @@ class TestExtractImageRefs:
         assert urls == []
 
     def test_finds_home_relative_path(self, tmp_path: Path, monkeypatch):
-        # Simulate ~/foo.png by pointing HOME at tmp_path and creating the file
-        monkeypatch.setenv("HOME", str(tmp_path))
+        # Simulate ~/foo.png by pointing HOME at tmp_path and creating the file.
+        # point_home_at, not a bare HOME setenv: ntpath.expanduser prefers
+        # USERPROFILE, so a HOME-only patch expands ~ to the real profile and
+        # the test silently stops testing anything.
+        from tests._home_env import point_home_at
+
+        point_home_at(monkeypatch, tmp_path)
         img = tmp_path / "foo.png"
         img.write_bytes(_png_bytes())
         paths, urls = extract_image_refs("see ~/foo.png please")
-        assert paths == [str(img)]
+        assert [Path(p) for p in paths] == [img]
         assert urls == []
 
 

@@ -1613,16 +1613,60 @@ class TestWebhookSecurity(unittest.TestCase):
 class TestDedupTTL(unittest.TestCase):
     """Tests for TTL-aware deduplication."""
 
-    @patch.dict(os.environ, {}, clear=True)
     def test_duplicate_within_ttl_is_rejected(self):
         from gateway.config import PlatformConfig
         from plugins.platforms.feishu.adapter import FeishuAdapter
 
-        adapter = FeishuAdapter(PlatformConfig())
-        with patch.object(adapter, "_persist_seen_message_ids"):
-            adapter._seen_message_ids = {"om_dup": time.time()}
-            adapter._seen_message_order = ["om_dup"]
-            self.assertTrue(adapter._is_duplicate("om_dup"))
+        # The scrub keeps ambient FEISHU_* settings out, but still hands the
+        # adapter a real (throwaway) HERMES_HOME: ``_is_duplicate`` hydrates
+        # the persisted dedup cache on first use, so a home has to resolve. A
+        # bare ``clear=True`` only looked hermetic on POSIX, where
+        # ``Path.home()`` falls back to ``pwd.getpwuid()`` — which silently
+        # pointed the cache at the developer's real home.
+        with tempfile.TemporaryDirectory() as temp_home:
+            with patch.dict(os.environ, {"HERMES_HOME": temp_home}, clear=True):
+                adapter = FeishuAdapter(PlatformConfig())
+                with patch.object(adapter, "_persist_seen_message_ids"):
+                    adapter._seen_message_ids = {"om_dup": time.time()}
+                    adapter._seen_message_order = ["om_dup"]
+                    self.assertTrue(adapter._is_duplicate("om_dup"))
+
+    def test_dedup_state_path_follows_a_home_that_moves_after_construction(self):
+        """The dedup-state path is resolved live, and __init__ reads nothing.
+
+        Both halves used to be wrong in one line: ``__init__`` did
+        ``self._dedup_state_path = get_hermes_home() / ...`` and then called
+        ``_load_seen_message_ids()``. That froze the path against whatever
+        ``HERMES_HOME`` was set at construction and made construction itself
+        depend on the home being resolvable and readable — so an adapter built
+        before a profile switch kept writing dedup state into the previous
+        profile's home, and an adapter built under a scrubbed environment blew
+        up in the constructor rather than on the persistence path that
+        actually wants a home.
+        """
+        from gateway.config import PlatformConfig
+        from plugins.platforms.feishu.adapter import FeishuAdapter
+
+        with tempfile.TemporaryDirectory() as home_a, \
+                tempfile.TemporaryDirectory() as home_b:
+            seeded = Path(home_b) / "feishu_seen_message_ids.json"
+            seeded.write_text(
+                json.dumps({"message_ids": {"om_seeded": time.time()}}),
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {"HERMES_HOME": home_a}, clear=True):
+                adapter = FeishuAdapter(PlatformConfig())
+                # Constructor did no I/O: nothing hydrated yet.
+                self.assertEqual(adapter._seen_message_ids, {})
+
+            # The home moves AFTER construction.
+            with patch.dict(os.environ, {"HERMES_HOME": home_b}, clear=True):
+                self.assertEqual(adapter._dedup_state_path, seeded)
+                # First dedup decision hydrates from the home in force NOW,
+                # not the one that happened to be set at construction.
+                with patch.object(adapter, "_persist_seen_message_ids"):
+                    self.assertTrue(adapter._is_duplicate("om_seeded"))
 
 
     @patch.dict(os.environ, {}, clear=True)

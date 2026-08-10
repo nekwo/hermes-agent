@@ -722,7 +722,14 @@ class TestMediaDeliveryDefaultMode:
         workdir.mkdir(parents=True)
         doc = workdir / "proposal.docx"
         doc.write_bytes(b"PK\x03\x04")
-        monkeypatch.setenv("HOME", str(fake_home))
+        # point_home_at, not a bare HOME setenv: the carve-out under test lives
+        # in _path_under_denied_prefix, which resolves home with
+        # os.path.expanduser("~") — and ntpath.expanduser prefers USERPROFILE,
+        # so a HOME-only patch never moved the home the carve-out compares
+        # against, and the exemption simply never fired.
+        from tests._home_env import point_home_at
+
+        point_home_at(monkeypatch, fake_home)
         # $HOME is itself on the denied-prefix list, mirroring /root.
         monkeypatch.setattr(
             "gateway.platforms.base._MEDIA_DELIVERY_DENIED_PREFIXES",
