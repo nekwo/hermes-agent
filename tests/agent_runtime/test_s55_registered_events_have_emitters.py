@@ -132,6 +132,42 @@ DYNAMIC_DISPATCH_ALLOWLIST = {
     "run.tool.finished": "profile_runner passes the label into _progress_adapter",
 }
 
+#: Types whose PRODUCER was deliberately retired while a LIVE CONSUMER still
+#: reads them off historical rows. A SEPARATE allowlist from the one above on
+#: purpose: that one claims "the type arrives as data at the sink", which is a
+#: different factual claim with a different witness. Folding these in would make
+#: three entries assert something untrue about themselves.
+#:
+#: This is not the "registration outlived the emitter" debt the gate was built
+#: for. That debt is a shape the contract advertises and NO reader will ever
+#: see. These are the inverse: nothing writes them any more, and something still
+#: reads them — off rows written before the producer was retired. De-registering
+#: would delete the reader's ability to render real historical data, and would
+#: move ``contract_hash()``, which is stamped on every live persona instance.
+#:
+#: Each entry is witnessed on its CONSUMER below, not on its registration.
+RETIRED_PRODUCER_LIVE_CONSUMER_ALLOWLIST = {
+    "persona_assignment.created": (
+        "S70 (`6b9a27a74`, retire the free-floating assignment lane) removed the "
+        "emitter deliberately. The registration survives for READ-BACK "
+        "compatibility: `persona_chat_history` still resolves the type in two "
+        "places — the `_TRACE_EVENT_TYPES` fetch filter (used at :563, :582 and "
+        ":626) and the `_trace_entry` mapping (:1551), which renders it as an "
+        "`assignment_created` harness-trace row. Both feed `persona_chat_trace_summary`, "
+        "which is on the live snapshot AND status wire (`data['persona_chat_trace']`) "
+        "and therefore reaches the Launcher. Its sibling `persona_assignment.closed` "
+        "is STILL emitted (`persona_assignments.py:1795`) through the very same "
+        "reader, so the consumer path is exercised in production today — the two "
+        "types are read as a pair."
+    ),
+}
+
+#: Everything the gate excuses, for the subtraction below.
+ALL_ALLOWLISTS = {
+    **DYNAMIC_DISPATCH_ALLOWLIST,
+    **RETIRED_PRODUCER_LIVE_CONSUMER_ALLOWLIST,
+}
+
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parents[2]
@@ -267,12 +303,15 @@ def test_every_registered_event_type_has_a_production_emitter():
     advertises and no reader will ever see."""
 
     emitted = emitted_event_types()
-    missing = sorted(set(event_catalog()) - set(emitted) - set(DYNAMIC_DISPATCH_ALLOWLIST))
+    missing = sorted(set(event_catalog()) - set(emitted) - set(ALL_ALLOWLISTS))
     assert missing == [], (
         "registered event types with no production emitter: "
         f"{missing}. Either de-register them in the same commit that removed "
         "the emitter (the S24->S25 / S43->S44 lesson), or add a reasoned "
-        "allowlist entry WITH a witness assertion."
+        "allowlist entry WITH a witness assertion. If the producer was retired "
+        "deliberately AND a live consumer still reads the type off historical "
+        "rows, it belongs in RETIRED_PRODUCER_LIVE_CONSUMER_ALLOWLIST, witnessed "
+        "on the CONSUMER."
     )
 
 
@@ -282,8 +321,96 @@ def test_the_allowlist_is_not_a_dumping_ground():
     a gate quietly stops gating."""
 
     catalog = set(event_catalog())
-    stale = sorted(name for name in DYNAMIC_DISPATCH_ALLOWLIST if name not in catalog)
+    stale = sorted(name for name in ALL_ALLOWLISTS if name not in catalog)
     assert stale == [], f"allowlist names types that are no longer registered: {stale}"
+
+
+def test_the_two_allowlists_make_different_claims_and_do_not_overlap():
+    """They excuse the same symptom for opposite reasons, so an entry in the
+    wrong one is a false statement about the code.
+
+    Dynamic dispatch says "there IS a writer, the resolver just cannot see the
+    literal". Retired-producer says "there is genuinely NO writer, and that is
+    intended". A type in both would be asserting both."""
+
+    overlap = sorted(set(DYNAMIC_DISPATCH_ALLOWLIST) & set(RETIRED_PRODUCER_LIVE_CONSUMER_ALLOWLIST))
+    assert overlap == [], f"a type cannot be excused by both allowlists: {overlap}"
+
+
+def test_a_retired_producer_entry_is_dropped_once_an_emitter_returns():
+    """The exemption's own precondition, asserted.
+
+    ``RETIRED_PRODUCER_LIVE_CONSUMER_ALLOWLIST`` claims these types have NO
+    writer. If one comes back, the entry stops being true and becomes a hole:
+    the type would be excused from a gate it no longer needs excusing from, and
+    the next genuine retirement of that same type would pass silently."""
+
+    emitted = emitted_event_types()
+    resurrected = sorted(
+        name for name in RETIRED_PRODUCER_LIVE_CONSUMER_ALLOWLIST if name in emitted
+    )
+    assert resurrected == [], (
+        f"{resurrected} now HAVE production emitters again. Remove them from "
+        "RETIRED_PRODUCER_LIVE_CONSUMER_ALLOWLIST — the entry claims there is no "
+        "writer, and an exemption that has stopped being true is how this gate "
+        "quietly stops gating."
+    )
+
+
+def test_the_retired_producer_entries_are_witnessed_on_their_live_consumer():
+    """THE WITNESS, and it deliberately proves the CONSUMER, not the registration.
+
+    An entry here says: nothing writes this type any more, and something still
+    READS it off rows written before the producer was retired. Registration is
+    the thing being excused, so registration cannot also be the evidence — that
+    would be circular. What has to be true is that a historical row still
+    resolves, so that is what is driven.
+
+    ``persona_assignment.created`` last had a writer before S70 (`6b9a27a74`).
+    Rows carrying it are still in real session history, and
+    ``persona_chat_history._trace_entry`` still renders them into the
+    ``persona_chat_trace`` block that ships on the snapshot and status wire. If
+    that stopped being true the honest outcome flips: de-register the type and
+    state the ``contract_hash`` migration, rather than keep an exemption for a
+    reader that no longer exists."""
+
+    from agent_runtime import persona_chat_history
+
+    class _HistoricalEvent:
+        """A row as it sits in a session log written before the producer left."""
+
+        type = "persona_assignment.created"
+        turn_id = "turn_historical"
+        payload = {"status": "open", "assignment_id": "asg_1"}
+
+    for event_type in RETIRED_PRODUCER_LIVE_CONSUMER_ALLOWLIST:
+        # 1. The fetch filter still admits the type, or the row is never read.
+        assert event_type in persona_chat_history._TRACE_EVENT_TYPES, (
+            f"{event_type} is no longer in _TRACE_EVENT_TYPES, so no historical "
+            "row carrying it can reach a reader. The registration is now excusing "
+            "nothing — de-register it and state the contract_hash migration."
+        )
+
+    # 2. And the mapping still RESOLVES a historical row into a rendered entry.
+    entry = persona_chat_history._trace_entry(_HistoricalEvent())
+    assert entry is not None, (
+        "persona_chat_history._trace_entry no longer resolves a historical "
+        "persona_assignment.created row. The live-consumer claim is false; flip "
+        "to de-registration."
+    )
+    assert entry["kind"] == "harness_trace"
+    assert entry["event"] == "assignment_created"
+
+    # 3. The sibling that proves the reader is exercised in production TODAY.
+    #    `.closed` still has an emitter and travels the identical path, so this
+    #    is not a lane kept alive only by the row above.
+    sibling = "persona_assignment.closed"
+    assert sibling in persona_chat_history._TRACE_EVENT_TYPES
+    assert sibling in emitted_event_types(), (
+        f"{sibling} lost its emitter too. The whole assignment-trace lane may now "
+        "be dead, which would retire the read-back argument for its sibling — "
+        "re-derive rather than leaving the exemption standing."
+    )
 
 
 def _module_tree(module) -> ast.Module:
@@ -523,7 +650,11 @@ def test_the_worker_session_family_needed_no_temporary_exemption():
 
     worker_types = sorted(name for name in event_catalog() if name.startswith("worker_session."))
     assert worker_types == []
-    assert [name for name in DYNAMIC_DISPATCH_ALLOWLIST if name.startswith("worker_session.")] == []
+    # Checked against EVERY allowlist, not just the dynamic-dispatch one: a
+    # re-registration excused by the newer retired-producer list would evade a
+    # check scoped to the older one, which is exactly the hole this assertion
+    # was inverted to prevent.
+    assert [name for name in ALL_ALLOWLISTS if name.startswith("worker_session.")] == []
 
 
 def test_no_test_only_append_can_satisfy_the_gate():

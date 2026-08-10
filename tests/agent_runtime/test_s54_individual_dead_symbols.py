@@ -194,12 +194,29 @@ def test_the_repo_context_worktree_lane_was_NOT_cut():
         assert hasattr(repo_context, name), name
 
 
-def test_the_delivery_directive_janitor_still_builds_real_worktrees():
+def test_the_delivery_directive_janitor_still_builds_real_worktrees(
+    isolate_agent_runtime_root,
+):
     """The wire, not just the symbol: the janitor suite must still reach the
     kept constructor. If this import ever dies, the two live-incident
-    regressions died with it."""
+    regressions died with it.
 
-    import inspect
+    REPLACED 2026-08-09. The assertion here used to be::
+
+        assert "worktree" in inspect.getsource(reap_orphan_worktrees)
+
+    which is **permanently green by construction** — the substring ``worktree``
+    is in the function's own ``def`` line, so no edit to its body, however
+    destructive, could ever fail it. That is not a weak test; it is a
+    zero-information assertion sitting where the real one goes, and it read as
+    coverage to every audit that walked past it.
+
+    What the janitor actually has to do is REACH the kept ``repo_context``
+    worktree API. So it is now RUN — ``dry_run=True``, against an isolated root,
+    which inspects and reports without removing anything — and its typed result
+    asserted. A gutted body returns the wrong shape or raises; neither survives
+    this."""
+
     from pathlib import Path
 
     source = Path(__file__).resolve().parent.joinpath("test_delivery_directive.py").read_text(encoding="utf-8")
@@ -207,7 +224,25 @@ def test_the_delivery_directive_janitor_still_builds_real_worktrees():
     from agent_runtime import delivery_directive
 
     assert callable(delivery_directive.reap_orphan_worktrees)
-    assert "worktree" in inspect.getsource(delivery_directive.reap_orphan_worktrees)
+
+    result = delivery_directive.reap_orphan_worktrees(dry_run=True)
+
+    # The typed contract of the janitor — only a body that still walks the
+    # worktree inventory can produce it.
+    assert set(result) == {
+        "reaped",
+        "kept",
+        "capture_dir",
+        "dry_run",
+        "include_legacy_temp",
+    }, result
+    assert result["dry_run"] is True, "dry_run must never be silently downgraded"
+    assert isinstance(result["reaped"], list)
+    assert isinstance(result["kept"], list)
+    # The capture directory is where the "nothing is ever deleted with an
+    # uncaptured diff" guarantee lands. A janitor that no longer knows where to
+    # put a patch has lost the protection the two live incidents bought.
+    assert result["capture_dir"].endswith("wt_reaped_patches")
 
 
 def test_the_kept_incident_constant_is_addressed_by_value_somewhere_live():
