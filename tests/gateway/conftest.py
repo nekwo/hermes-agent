@@ -611,7 +611,7 @@ def _posix_only_update_spawn() -> bool:
 
 
 def _no_posix_fhs_absolute_dir() -> bool:
-    """True where "/etc" cannot name an existing filesystem-absolute directory.
+    r"""True where "/etc" cannot name an existing filesystem-absolute directory.
 
     On Windows a leading slash is drive-relative, so "/etc" resolves to
     <current drive>:\etc, and there is no drive-independent absolute directory
