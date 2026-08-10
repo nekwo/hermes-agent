@@ -238,20 +238,47 @@ def test_the_two_cross_module_projections_dropped_the_dead_parameter():
     assert "tasks_by_id" not in bound
 
 
-def test_status_no_longer_forwards_a_task_list_to_the_channel_projection():
+def test_status_no_longer_forwards_a_task_list_to_the_channel_projection(
+    isolate_agent_runtime_root,
+):
     """Scoped to the channel projection: ``build_dirty_state`` keeps its own
-    ``tasks=`` argument — a different lane, not this wave's."""
+    ``tasks=`` argument — a different lane, not this wave's.
 
+    RE-AIMED 2026-08-09. This walked ``_function(status, "build_status")`` and
+    required an ``operator_channel_summary`` call inside THAT function. A later
+    refactor moved the call one function over, into
+    ``_build_status_in_runtime_scope``; the projection was untouched and still
+    passed no ``tasks=``, and the gate went red anyway, on pristine ``main``,
+    for days. It was asserting a call's NEIGHBOURHOOD, not the wave's guarantee.
+
+    The same defect hit ``test_s56_config_block_removal`` in the same window and
+    for the same reason. Both are fixed the same way: assert the guarantee where
+    the guarantee lives.
+
+    Here that is two things, neither of which cares which function holds the
+    call: the projection still HAPPENS (asserted on a built status), and NO call
+    anywhere in the module forwards ``tasks=`` to it (asserted on the module's
+    AST, which is strictly stronger than the old single-function scan — a
+    forwarding call added to a sibling function would previously have been
+    invisible)."""
+
+    assert "operator_channels" in status.build_status(), (
+        "build_status must still project operator channels"
+    )
+
+    module = ast.parse(inspect.getsource(status))
     calls = [
         node
-        for node in ast.walk(_function(status, "build_status"))
+        for node in ast.walk(module)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Name)
         and node.func.id == "operator_channel_summary"
     ]
-    assert calls, "build_status must still project operator channels"
+    assert calls, "the operator-channel projection call has left agent_runtime.status entirely"
     for call in calls:
-        assert "tasks" not in {kw.arg for kw in call.keywords}
+        assert "tasks" not in {kw.arg for kw in call.keywords}, (
+            f"status.py:{call.lineno} forwards a task list to the channel projection again"
+        )
 
 
 def test_the_live_frame_drops_both_fields_at_the_new_contract(isolate_agent_runtime_root):

@@ -110,6 +110,7 @@ WHY THE SURVIVORS STAYED:
 
 from __future__ import annotations
 
+import ast
 import importlib
 import inspect
 
@@ -221,17 +222,46 @@ def test_the_snapshot_contract_version_moved():
     """S57 moved the frame again (47 -> 48) for its own removals, so this pin is
     a FLOOR, not a second copy of the current number. The property this file owns
     is that S56's move happened and can never regress; the current value has one
-    authority (``test_s47_wire_constant_field_removal.CURRENT_CONTRACT_VERSION``)
-    and this is deliberately not a second one."""
-    src = inspect.getsource(snapshot._parity_envelope)
-    assert '"contract_version": 46,' not in src
-    literals = [
-        int(line.strip().split(":", 1)[1].strip().rstrip(","))
-        for line in src.splitlines()
-        if line.strip().startswith('"contract_version":')
+    authority (``agent_runtime.snapshot.SNAPSHOT_CONTRACT_VERSION``) and this is
+    deliberately not a second one.
+
+    RE-AIMED 2026-08-09. This used to read ``_parity_envelope``'s SOURCE, take
+    every line starting ``"contract_version":`` and ``int()`` the text after the
+    colon — which worked only while the value was written there as a literal.
+    The authority change made the envelope read a named constant, and the parse
+    blew up on ``SNAPSHOT_CONTRACT_VERSION``: a false red against a frame whose
+    version had not moved at all.
+
+    Both halves of the guarantee survive, each expressed against what it is
+    actually about:
+
+    * the FLOOR is a property of the emitted NUMBER, so it is asserted on the
+      number (and on a really-built frame, not on prose about one);
+    * "not a second copy" is a property of the envelope's STRUCTURE — that it
+      sources the version from the single authority instead of restating it — so
+      it is asserted on the AST, where a reformat cannot break it and a
+      re-introduced literal cannot hide from it."""
+
+    assert snapshot.SNAPSHOT_CONTRACT_VERSION >= 47
+    assert snapshot.build_snapshot()["parity"]["contract_version"] >= 47
+
+    envelope = next(
+        node
+        for node in ast.walk(ast.parse(inspect.getsource(snapshot._parity_envelope)))
+        if isinstance(node, ast.Dict)
+        and any(isinstance(k, ast.Constant) and k.value == "contract_version" for k in node.keys)
+    )
+    values = [
+        value
+        for key, value in zip(envelope.keys, envelope.values)
+        if isinstance(key, ast.Constant) and key.value == "contract_version"
     ]
-    assert len(literals) == 1, literals
-    assert literals[0] >= 47
+    assert len(values) == 1, values
+    assert isinstance(values[0], ast.Name), (
+        "the parity envelope states the contract version as a literal again. It "
+        "must read the single authority (snapshot.SNAPSHOT_CONTRACT_VERSION) — a "
+        "second copy is how six restatements rotted out of step in the first place."
+    )
 
 
 def test_build_snapshot_no_longer_accepts_a_worker_store():

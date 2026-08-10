@@ -183,7 +183,9 @@ def test_an_operator_yaml_that_still_sets_a_removed_block_loads_and_is_ignored(t
 # --------------------------------------------------------------------------
 
 
-def test_the_roster_section_is_emitted_unconditionally():
+def test_the_roster_section_is_emitted_unconditionally(
+    tmp_path, monkeypatch, isolate_agent_runtime_root
+):
     """COUNTERFACTUAL PROOF. Under the old gate, a config whose
     ``enterprise_worker_sessions`` block was absent (the DEFAULT: ``enabled``
     and ``persona_instance_runtime`` both default ``False``) produced
@@ -191,19 +193,59 @@ def test_the_roster_section_is_emitted_unconditionally():
     section at all. Six live profiles — qa, launcher-dev, backend-dev,
     launcher-qa, gpt-launcher, aliceimagecron — carry exactly that shape, so the
     change is not vacuous: they gain the roster. The four that set the block
-    (alice, neko, base, unbounded) are unaffected, because they set it true."""
-    src = inspect.getsource(snapshot._build_snapshot_uncoalesced)
-    code = "\n".join(line for line in src.splitlines() if not line.strip().startswith("#"))
-    assert "persona_instance_runtime_enabled" not in code
-    assert '"persona_instance_runtime"] = {' in code or '"persona_instance_runtime"]' in code
-    assert '{"enabled": False}' not in code
+    (alice, neko, base, unbounded) are unaffected, because they set it true.
 
-    status_src = inspect.getsource(status.build_status)
-    status_code = "\n".join(
-        line for line in status_src.splitlines() if not line.strip().startswith("#")
+    RE-AIMED 2026-08-09, AND THE REASON IS THIS FILE'S OWN THESIS. It used to
+    prove the counterfactual by reading the SOURCE of
+    ``snapshot._build_snapshot_uncoalesced`` and asserting on text in it. A later
+    refactor moved the emission one function over, into
+    ``_build_snapshot_in_runtime_scope`` — the behaviour was intact, the section
+    still emitted unconditionally — and this gate went red anyway. It had stopped
+    proving anything about the roster and started proving where a line of text
+    happens to sit.
+
+    Worse in the other direction: it would have stayed GREEN if the emission had
+    been DELETED from the runtime-scope function while a matching string survived
+    in the inspected one. A gate that can be both falsely red and falsely green
+    is not measuring its guarantee.
+
+    So the counterfactual is now RUN rather than READ. A config with no
+    ``enterprise_worker_sessions`` block at all — the exact shape those six
+    profiles carry — must still produce both sections. That survives any future
+    function split, and it fails if the emission is removed no matter where it
+    lives."""
+
+    home = tmp_path / "no-block"
+    home.mkdir()
+    # Deliberately not an empty file: a config that OMITS the block is the shape
+    # the six live profiles have, and it is the input the old text gate could
+    # only reason about indirectly.
+    (home / "config.yaml").write_text(
+        yaml.safe_dump({"agent_runtime": {"supervision": {"child_events_enabled": True}}}),
+        encoding="utf-8",
     )
-    assert "persona_instance_runtime_enabled" not in status_code
-    assert '{"enabled": False}' not in status_code
+    monkeypatch.setenv("HERMES_HOME", str(home))
+
+    cfg = load_agent_runtime_config()
+    assert not hasattr(cfg, "enterprise_worker_sessions"), (
+        "precondition: the retired block must be absent from the loaded config"
+    )
+
+    frame = snapshot.build_snapshot()
+    assert "persona_instances" in frame, (
+        "the roster section is gone for a config with no enterprise_worker_sessions "
+        "block — the pre-S56 behaviour the removal existed to end, and what the six "
+        "live profiles would hit"
+    )
+    assert frame["persona_instance_runtime"] != {"enabled": False}, (
+        "the runtime block is echoing the retired flag again rather than reporting "
+        "what is actually true"
+    )
+    assert frame["persona_instance_runtime"]["enabled"] is True
+
+    data = status.build_status()
+    assert "persona_instances" in data
+    assert data["persona_instance_runtime"]["enabled"] is True
 
 
 def test_the_wire_block_survives_and_reports_the_truth():

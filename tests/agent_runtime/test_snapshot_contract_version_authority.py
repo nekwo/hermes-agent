@@ -172,13 +172,26 @@ def restatements(tree: ast.Module, *, filename: str) -> list[tuple[int, str]]:
                         continue
                     found.append((node.lineno, f"{target.id} = {value.value}"))
 
-        # 2. <version expr> <cmp> <int>   (either side)
+        # 2. <version expr> ==/!= <int>   (either side)
+        #
+        # EQUALITY ONLY, and the distinction is the whole point rather than a
+        # convenience. An equality pin states "the contract is exactly N", which
+        # stops being true at the next bump — that is the literal that rots, and
+        # the class this gate exists to prevent. An ORDERING comparison
+        # (`>= 47`) states "the contract has never gone back below the version
+        # this wave moved it to", which is a permanent historical fact that
+        # stays true across every future bump. Flagging floors would force the
+        # removal-contract tests to give up a guarantee they legitimately own,
+        # and would push their authors toward an allowlist entry — an exemption
+        # that then has to be policed, for a literal that was never a hazard.
         if isinstance(node, ast.Compare):
             operands = [node.left, *node.comparators]
-            for left, right in zip(operands, operands[1:]):
+            for op, (left, right) in zip(node.ops, zip(operands, operands[1:])):
+                if not isinstance(op, (ast.Eq, ast.NotEq)):
+                    continue
                 for a, b in ((left, right), (right, left)):
                     if _mentions_version(a) and _is_int_literal(b):
-                        found.append((node.lineno, f"contract version compared to literal {b.value}"))
+                        found.append((node.lineno, f"contract version pinned to literal {b.value}"))
 
         # 3. {"contract_version": <int>}
         if isinstance(node, ast.Dict):
@@ -334,6 +347,11 @@ def test_the_gate_scanned_a_real_tree():
         ('assert frame["parity"]["contract_version"] == SNAPSHOT_CONTRACT_VERSION', False),
         ('assert frame["parity"]["contract_version"] == SNAPSHOT_CONTRACT_VERSION - 1', False),
         ('CURRENT_CONTRACT_VERSION = SNAPSHOT_CONTRACT_VERSION', False),
+        # A FLOOR is a permanent historical fact ("this wave's move can never
+        # regress"), not a pin — it stays true across every future bump, so it
+        # is not the rotting class and must not be flagged.
+        ('assert frame["parity"]["contract_version"] >= 47', False),
+        ('assert snap["parity"]["contract_version"] > 40', False),
         # Prose and string assertions are why this is AST-based, not substring.
         ('SRC = \'"contract_version": 46,\'\nassert SRC not in src', False),
     ],
