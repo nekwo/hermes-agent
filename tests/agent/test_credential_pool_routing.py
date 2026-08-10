@@ -370,15 +370,34 @@ class TestFailureAttribution:
     """
 
     def _make_pool(self, tmp_path, monkeypatch, entries):
+        # HERMES_HOME does NOT sandbox external credential discovery:
+        # _seed_from_singletons() auto-discovers ~/.claude/.credentials.json
+        # whenever anthropic is explicitly configured, so on a developer box
+        # with Claude Code installed the pool silently gained an entry this
+        # fixture never wrote — and a test whose whole premise is "this is the
+        # ONLY pool entry" was exercising the opposite. Close the discovery
+        # gate so the pool is exactly what the caller declares.
+        import hermes_cli.auth as _hermes_auth
+
+        monkeypatch.setattr(
+            _hermes_auth,
+            "is_provider_explicitly_configured",
+            lambda _provider: False,
+        )
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir(parents=True, exist_ok=True)
         (hermes_home / "auth.json").write_text(
-            json.dumps({"version": 1, "credential_pool": {"anthropic": entries}})
+            json.dumps({"version": 1, "credential_pool": {"anthropic": entries}}),
+            encoding="utf-8",
         )
         from agent.credential_pool import load_pool
 
-        return load_pool("anthropic")
+        pool = load_pool("anthropic")
+        # Precondition, stated rather than assumed: nothing was seeded in.
+        loaded = list(pool.entries())
+        assert len(loaded) == len(entries), [e.id for e in loaded]
+        return pool
 
     def _entry(self, idx, key, **overrides):
         entry = {

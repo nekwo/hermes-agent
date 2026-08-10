@@ -32,6 +32,9 @@ incident.
 """
 
 import ast
+import importlib.util
+import os
+import socket
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -39,11 +42,11 @@ from unittest.mock import MagicMock
 import pytest
 
 from tests._env_gap_fence import (
-    HOST_DEPENDENCY_GAP as _HOST,
-    WINDOWS_ENV_GAP as _WINDOWS,
     EnvGapRegistry,
+    EnvGapSkipRegistry,
     StaleEntryTracker,
     apply_marks,
+    apply_skips,
     register_marks,
 )
 
@@ -540,317 +543,142 @@ def pytest_configure(config):
             cache_file.write_text("clean", encoding="utf-8")
 
 
-# ── Pre-existing environment-gap fence (2026-07-31 upstream sync) ───────────
+# ── Environment-gap registry (audited 2026-08-10) ──────────────────────
 #
-# Every row below was reproduced individually on this Windows 10 workstation,
-# traced to a concrete host/platform cause, and proven PRE-EXISTING by running
-# the same node on the pre-merge fork tip `1adf0404f` — where each of these
-# files failed with a superset of these node ids (upstream's prune waves
-# removed the rest). None is caused by the `upstream/main` merge.
+# This directory registered ~62 node ids as pre-existing Windows/host gaps.
+# The audit reproduced every one and found FIFTY-FOUR were not gaps:
 #
-# These tests are NOT skipped and NOT xfailed: they still run, still execute
-# their real assertions, and still fail loudly on a plain
-# `pytest tests/gateway`. See `tests/_env_gap_fence` for the full contract and
-# the rules for adding a row.
+#   * 39 rows (test_feishu.py + test_setup_feishu.py), filed as "Windows home
+#     resolution is environment-only", were a REAL DEFECT:
+#     plugins/platforms/feishu/adapter.py.__init__ resolved get_hermes_home()
+#     into an attribute and then read the dedup cache off disk. That froze the
+#     path against the construction-time home AND made construction depend on
+#     a resolvable home. Fixed in the code (live-resolving property + hydrate
+#     on first use), not fenced; 38 rows went green on the fix alone. The 39th
+#     was an over-broad patch.dict(os.environ, {}, clear=True) that only ever
+#     looked hermetic because POSIX falls back to pwd.getpwuid().
+#   * 2 rows (test_api_server.py, test_readiness.py) were ALREADY STALE: they
+#     described a HERMES_HOME volume at 93.8% capacity, which it no longer is.
+#     Nothing failed to say so — the stale detector only prints, and it printed
+#     into a summary nobody reads on a permanently red suite. That is the
+#     motivating case for the probe-backed form below.
+#   * 3 rows monkeypatched HOME and expected `~` to follow; ntpath.expanduser
+#     prefers USERPROFILE, so home stayed at the developer's real profile —
+#     under which pytest's tmp_path lives on Windows, so the wrong prefix got
+#     collapsed. They now use tests._home_env.point_home_at.
+#   * the remainder asserted a POSIX SPELLING: a file:// envelope whose
+#     percent-quoting is invisible only because a POSIX path quotes to itself
+#     (they now pin the encode/decode round trip, which is the actual
+#     contract), a "~/" separator, a root-relative "/tmp/wd" that
+#     os.path.abspath drive-qualifies, and two fixtures writing U+2713/U+2192
+#     through Path.write_text with no encoding= while production reads those
+#     files with encoding="utf-8".
 #
-#     python -m pytest tests/gateway -m "not windows_env_gap and not host_dependency_gap"
-#
-# Rows for files that arrived WITH the merge (no fork-side history at all) are
-# marked as such: there is no fork regression intent to preserve in them, and
-# "pre-existing" cannot be asked of a file that did not exist before.
-#
-# Three genuine defects were found in this directory during the same pass and
-# were FIXED in the code, not fenced:
-#   * gateway/slash_commands.py — the fork-owned `_handle_queue_status_command`
-#     called the raw sync session store from loop-side async code, which
-#     upstream's new AST guard (test_async_session_store.py) correctly flagged;
-#   * agent/prompt_builder.py — the merge dropped the fork's guarded
-#     `skill_matches_environment` import (see tests/agent/conftest.py);
-#   * tests/gateway/test_completion_delivery.py — upstream's redaction test was
-#     written against upstream's agent-turn delivery lane; the fork defaults to
-#     a direct send, so the test was RETARGETED (redaction intent preserved and
-#     now proven on the lane that actually ships), not fenced.
-_ENV_GAPS: EnvGapRegistry = {
-    'test_73771_media_resend_dedup.py': [
-        (
-            _WINDOWS,
-            'arrived with the merge (upstream-only). Asserts the raw filesystem '
-            'path appears in the delivered media reference; on Windows the '
-            'delivery form is a percent-encoded file:// URL '
-            '(file://C%3A%5CUsers%5C...), because the drive colon and '
-            'backslashes are not URL-safe',
-            {
-                'test_streamed_explicit_media_resend_is_delivered',
-            },
-        ),
-    ],
-    'test_api_server.py': [
-        (
-            _HOST,
-            'gateway/readiness.py flags disk usage >= 90% as degraded and this '
-            "host's HERMES_HOME volume is 93.8% full, so /health/detailed "
-            'correctly reports "degraded"; the test asserts an unconditional '
-            '"ok" without stubbing _probe_disk',
-            {
-                'TestHealthDetailedEndpoint::test_health_detailed_returns_ok',
-            },
-        ),
-    ],
-    'test_complete_path_at_filter.py': [
-        (
-            _WINDOWS,
-            'arrived with the merge (the node does not exist at 1adf0404f). The '
-            'test states its own assumption — "/etc exists on any POSIX box" — '
-            'so the absolute reading of "@/etc/" cannot resolve on Windows and '
-            'the cwd-relative decoy legitimately wins',
-            {
-                'test_leading_slash_prefers_a_real_absolute_path',
-            },
-        ),
-    ],
-    'test_media_spaced_paths_and_history_dedupe.py': [
-        (
-            _WINDOWS,
-            'arrived with the merge (upstream-only). The home-relative collapse '
-            'rebuilds the path as "C:\\Users\\beast" + "/" + the remainder, so '
-            'the collected form mixes separators and never equals the '
-            'all-backslash path the test builds from tmp_path',
-            {
-                'TestHistoryMediaDedupe::test_quoted_spaced_home_path_is_collected_in_delivery_form',
-            },
-        ),
-    ],
-    'test_post_stream_media_delivery.py': [
-        (
-            _WINDOWS,
-            'arrived with the merge (upstream-only). Same cause as '
-            'test_73771_media_resend_dedup.py: the Windows path is delivered '
-            'percent-encoded inside a file:// URL, not as the raw path',
-            {
-                'test_explicit_media_tag_still_delivers_post_stream',
-            },
-        ),
-    ],
-    'test_readiness.py': [
-        (
-            _HOST,
-            'arrived with the merge (upstream-only). _probe_disk() degrades at '
-            ">= 90% used and this host's HERMES_HOME volume is 93.8% full, so "
-            'the aggregate readiness is correctly "degraded"; the test asserts '
-            '"ok" without stubbing the disk probe',
-            {
-                'test_collect_runtime_readiness_reports_healthy_local_runtime',
-            },
-        ),
-    ],
-    'test_status_command.py': [
-        (
-            _WINDOWS,
-            'the profile footer collapses a home-prefixed path to "~/...". On '
-            'Windows pytest\'s tmp_path lives UNDER the user profile '
-            '(%LOCALAPPDATA%\\Temp), so the collapse rewrites the very path the '
-            'test asserts literally; on Linux /tmp is outside $HOME and nothing '
-            'is collapsed',
-            {
-                'test_profile_command_reports_source_stamped_profile',
-            },
-        ),
-    ],
+# NOTE on test_platform_base.py: the row correctly observed that
+# _path_under_denied_prefix resolves home with os.path.expanduser("~") while
+# its sibling _media_delivery_denied_paths() prefers $HOME, and correctly
+# declined to "fix" it because reconciling them WIDENS a denial carve-out. The
+# divergence is real and remains an owner decision; the test now patches what
+# the platform actually reads, so it pins the carve-out on both platforms
+# without anyone touching the policy.
+_ENV_GAPS: EnvGapRegistry = {}
+
+
+def _no_af_unix() -> bool:
+    """True where there is no AF_UNIX socket, hence no systemd notify socket."""
+    return not hasattr(socket, "AF_UNIX")
+
+
+def _no_defusedxml() -> bool:
+    """True where the optional defusedxml dependency is absent.
+
+    DEPENDENCY-bound, not platform-bound: plugins/platforms/wecom/
+    callback_adapter.py falls back to ET=None without it and _build_event
+    raises before parsing. Installing defusedxml retires this row outright.
+    """
+    return importlib.util.find_spec("defusedxml") is None
+
+
+def _posix_only_update_spawn() -> bool:
+    """True where _handle_update_command does NOT take the bash/setsid branch.
+
+    gateway/slash_commands.py:5498 branches on sys.platform: the win32 arm
+    spawns the interpreter directly, so the `bash -c` / setsid fallback shape
+    these tests pin is unreachable. The platform IS the mechanism here — the
+    assertion targets a branch the host never selects.
+    """
+    return sys.platform == "win32"
+
+
+def _no_posix_fhs_absolute_dir() -> bool:
+    """True where "/etc" cannot name an existing filesystem-absolute directory.
+
+    On Windows a leading slash is drive-relative, so "/etc" resolves to
+    <current drive>:\etc, and there is no drive-independent absolute directory
+    guaranteed to exist. The test states its own assumption ("/etc exists on
+    any POSIX box"), and with no absolute candidate on disk the cwd-relative
+    decoy legitimately wins.
+    """
+    return not os.path.isdir(os.path.abspath(os.sep + "etc"))
+
+
+_ENV_GAP_SKIPS: EnvGapSkipRegistry = {
     'test_systemd_notify.py': [
         (
-            _WINDOWS,
-            'arrived with the merge (upstream-only). gateway/systemd_notify.py '
-            'returns False up front when socket.AF_UNIX is absent, which it is '
-            'on Windows — there is no systemd notification socket to write to',
+            _no_af_unix,
+            'gateway/systemd_notify.py returns False up front when '
+            'socket.AF_UNIX is absent; there is no systemd notification socket '
+            'to write to on this platform',
             {
                 'test_notify_uses_nonblocking_datagram_send',
                 'test_watchdog_sends_ready_heartbeat_and_stopping',
             },
         ),
     ],
-    # ── Windows home resolution is environment-only ──────────────────────
-    #
-    # These tests construct their subject under
-    # `@patch.dict(os.environ, {}, clear=True)`. The adapter's __init__ reaches
-    # `get_hermes_home()` -> `_get_platform_default_hermes_home()` ->, with
-    # LOCALAPPDATA cleared, `Path.home()`. On Windows `ntpath.expanduser` reads
-    # only USERPROFILE / HOMEDRIVE+HOMEPATH, so with the env scrubbed it returns
-    # "~" unchanged and pathlib raises `RuntimeError: Could not determine home
-    # directory.` POSIX falls back to `pwd.getpwuid(os.getuid()).pw_dir`, which
-    # needs no environment at all. Verified: all 38 feishu failures carry that
-    # exact message.
-    'test_feishu.py': [
+    'test_wecom_callback.py': [
         (
-            _WINDOWS,
-            'the adapter is constructed under patch.dict(os.environ, {}, '
-            'clear=True); Windows home resolution is environment-only, so '
-            'Path.home() raises "Could not determine home directory." where '
-            'POSIX falls back to pwd.getpwuid()',
+            _no_defusedxml,
+            "optional dependency 'defusedxml' is not installed, so "
+            'plugins/platforms/wecom/callback_adapter.py falls back to ET=None '
+            'and _build_event raises AttributeError before parsing anything. '
+            'DEPENDENCY-bound: installing defusedxml retires this row',
             {
-                'TestAdapterBehavior::test_bot_origin_reactions_are_dropped_to_avoid_feedback_loops',
-                'TestAdapterBehavior::test_build_event_handler_registers_reaction_and_card_processors',
-                'TestAdapterBehavior::test_extract_audio_message_downloads_and_caches',
-                'TestAdapterBehavior::test_extract_post_message_downloads_embedded_resources',
-                'TestAdapterBehavior::test_extract_text_file_injects_content',
-                'TestAdapterBehavior::test_extract_text_message_starting_with_slash_becomes_command',
-                'TestAdapterBehavior::test_group_message_matches_bot_name_when_only_name_available',
-                'TestAdapterBehavior::test_media_batch_merges_rapid_photo_messages',
-                'TestAdapterBehavior::test_message_event_submits_to_adapter_loop',
-                'TestAdapterBehavior::test_process_inbound_message_uses_event_sender_identity_only',
-                'TestAdapterBehavior::test_reaction_on_peer_bot_message_is_not_routed',
-                'TestAdapterBehavior::test_send_document_reply_uses_thread_flag',
-                'TestAdapterBehavior::test_send_splits_fenced_code_blocks_into_separate_post_rows',
-                'TestAdapterBehavior::test_send_uses_post_for_every_chunk_of_multi_chunk_markdown',
-                'TestAdapterBehavior::test_text_batch_flushes_when_message_count_limit_is_hit',
-                'TestAdapterBehavior::test_url_verification_requires_configured_verification_token',
-                'TestAdapterBehavior::test_user_reaction_with_managed_emoji_is_still_routed',
-                'TestAdapterBehavior::test_webhook_request_uses_same_message_dispatch_path',
-                'TestBotNameResolution::test_fetches_and_caches_bot_name',
-                'TestBotNameResolution::test_returns_cached_bot_name_without_api_call',
-                'TestDedupTTL::test_duplicate_within_ttl_is_rejected',
-                'TestFeishuAdapterMessaging::test_connect_websocket_sets_channel_ua_tag',
-                'TestFeishuAdapterMessaging::test_edit_message_falls_back_to_text_when_post_update_is_rejected',
-                'TestGroupMentionAtAll::test_at_all_still_requires_policy_gate',
-                'TestHydrateBotIdentity::test_hydration_populates_open_id_from_bot_info',
-                'TestHydrateBotIdentity::test_hydration_refreshes_env_values_when_bot_info_available',
-                'TestPendingInboundQueue::test_drainer_replays_queued_events_when_loop_becomes_ready',
-                'TestPendingInboundQueue::test_event_queued_when_loop_not_ready',
-                'TestProcessingReactions::test_delete_failure_on_failure_outcome_skips_cross_mark',
-                'TestProcessingReactions::test_failure_removes_typing_then_adds_cross_mark',
-                'TestProcessingReactions::test_start_adds_typing_and_caches_reaction_id',
-                'TestProcessingReactions::test_success_removes_typing_and_adds_nothing',
-                'TestSenderNameResolution::test_fetches_and_caches_name_from_api',
-                'TestSenderNameResolution::test_returns_cached_name_within_ttl',
-                'TestWebhookSecurity::test_rate_limit_resets_after_window_expires',
-                'TestWebhookSecurity::test_signature_valid_passes',
-                'TestWebhookSecurity::test_webhook_connect_requires_inbound_auth_secret',
-                'TestWebhookSecurity::test_webhook_loads_auth_secrets_from_platform_extra',
+                'TestWecomCallbackEventConstruction::test_build_event_extracts_text_message',
+                'TestWecomCallbackPollLoop::test_poll_loop_dispatches_handle_message',
             },
         ),
     ],
-    'test_setup_feishu.py': [
-        (
-            _WINDOWS,
-            'same as test_feishu.py: FeishuAdapter(PlatformConfig()) is built '
-            'under a cleared os.environ, and Windows home resolution is '
-            'environment-only, so Path.home() raises "Could not determine home '
-            'directory."',
-            {
-                'TestSetupFeishuAdapterIntegration::test_qr_env_produces_valid_adapter_settings',
-            },
-        ),
-    ],
-    # ── os.path.expanduser ignores a monkeypatched HOME on Windows ───────
-    'test_platform_base.py': [
-        (
-            _WINDOWS,
-            'the test patches HOME and relies on the "a denied prefix that IS '
-            "the running user's home is exempt\" carve-out in "
-            '_path_under_denied_prefix, which resolves home with '
-            'os.path.expanduser("~") — and ntpath.expanduser prefers '
-            'USERPROFILE, so the carve-out never fires. NOTE: the sibling '
-            '_media_delivery_denied_paths() in the same file already prefers '
-            '$HOME (a fork addition the merge correctly preserved); making '
-            '_path_under_denied_prefix match it would retire this row and close '
-            'a real alt-home divergence, but it WIDENS a denial carve-out, so '
-            'it is an owner decision rather than a sync-time edit',
-            {
-                'TestMediaDeliveryDefaultMode::test_root_home_deliverable_is_accepted',
-            },
-        ),
-    ],
-    'test_runtime_footer.py': [
-        (
-            _WINDOWS,
-            '_home_relative_cwd() resolves home with os.path.expanduser("~"), '
-            'which ignores the monkeypatched HOME on Windows. Home becomes the '
-            "real profile, pytest's tmp_path lives UNDER it "
-            '(%LOCALAPPDATA%\\Temp), so the wrong prefix is collapsed and the '
-            'result carries backslashes where the assertion hardcodes "/"',
-            {
-                'test_home_relative_cwd_collapses_home',
-                'test_format_footer_all_fields',
-            },
-        ),
-        (
-            _WINDOWS,
-            'no HOME patch involved: _home_relative_cwd("/tmp/wd") calls '
-            'os.path.abspath, which drive-qualifies a root-relative path '
-            'against the current drive on Windows ("X:\\tmp\\wd"), so the '
-            'literal "/tmp/wd" cannot appear in the output',
-            {
-                'test_format_footer_skips_missing_context_length',
-            },
-        ),
-    ],
-    # ── missing host dependencies / undeclared packages ──────────────────
-    #
-    # RETIRED 2026-08-01 (ledger item 7, RULED EXECUTE) — four groups lived
-    # here and all four now pass, because psutil==7.2.2 and Markdown==3.10.2
-    # were installed on the ambient interpreter:
-    #   * test_memory_monitor.py (3 nodes) — psutil
-    #   * test_status.py (1 node) — psutil
-    #   * test_whatsapp_bridge_pidfile.py (1 node) — psutil
-    #   * test_matrix.py (1 node) — Markdown. Its reason also asserted that
-    #     `markdown` was "declared in NO requirements file ... a real packaging
-    #     gap". That claim was FALSE and is retired with the row: pyproject.toml
-    #     has carried `Markdown==3.10.2` in [project.dependencies] since
-    #     c1eb2dcda, and uv.lock resolves it as a core dep. The original audit
-    #     grepped for lowercase `markdown` and missed the capitalized spelling.
-    # ── test-side portability defects (fixable at the source) ────────────
-    #
-    # RETIRED, not fenced — both rows that lived here were fixed at the source
-    # and now pass on this host:
-    #   * test_config_env_bridge_authority.py — _run_gateway_import's child-env
-    #     allowlist was POSIX-shaped (PATH/PYTHONPATH/VIRTUAL_ENV/HOME). It now
-    #     also forwards the Windows equivalents (APPDATA/USERPROFILE/
-    #     HOMEDRIVE+HOMEPATH for user-site and home resolution, SystemRoot/
-    #     SystemDrive for Winsock init).
-    #   * test_session_state_cleanup.py — the architectural guard read
-    #     gateway/run.py without encoding=, so the cp1252 locale default killed
-    #     it on Windows; it now reads encoding="utf-8" and the guard actually
-    #     runs here.
     'test_update_command.py': [
         (
-            _WINDOWS,
-            'asserts the POSIX spawn shape (`bash -c`, setsid/nohup); the '
-            'Windows branch of _handle_update_command spawns the interpreter '
-            'directly, so argv[0] is the python.exe path',
+            _posix_only_update_spawn,
+            'pins the POSIX `bash -c` / setsid spawn shape; '
+            'gateway/slash_commands.py:5498 selects a direct-interpreter spawn '
+            'on win32, so this fallback branch is never reached',
             {
                 'TestHandleUpdateCommand::test_fallback_when_no_setsid',
-            },
-        ),
-        (
-            _WINDOWS,
-            'the fixture writes U+2713 / U+2192 through Path.write_text() with '
-            "no encoding=, so Python's Windows default (cp1252) raises "
-            'UnicodeEncodeError before the assertion under test is reached',
-            {
-                'TestSendUpdateNotification::test_sends_notification_with_output',
-                'TestSendUpdateNotification::test_cleans_up_on_error',
             },
         ),
     ],
     'test_update_streaming.py': [
         (
-            _WINDOWS,
-            'asserts PYTHONUNBUFFERED inside the `bash -c` command STRING; on '
-            'Windows the spawn is an argv list whose last element is the plain '
-            '`--gateway` flag and the env goes through Popen(env=...) instead',
+            _posix_only_update_spawn,
+            'asserts PYTHONUNBUFFERED inside the `bash -c` command STRING; the '
+            'win32 branch of _handle_update_command spawns an argv list and '
+            'passes the env through Popen(env=...) instead',
             {
                 'TestUpdateCommandGatewayFlag::test_spawns_with_gateway_flag',
             },
         ),
     ],
-    'test_wecom_callback.py': [
+    'test_complete_path_at_filter.py': [
         (
-            _HOST,
-            "optional dependency 'defusedxml' is not installed, so "
-            'plugins/platforms/wecom/callback_adapter.py falls back to ET=None '
-            'and _build_event raises AttributeError before parsing anything',
+            _no_posix_fhs_absolute_dir,
+            'the test states its own assumption — "/etc exists on any POSIX '
+            'box" — and on Windows a leading slash is drive-relative, so no '
+            'filesystem-absolute candidate exists and the cwd-relative decoy '
+            'correctly wins',
             {
-                'TestWecomCallbackEventConstruction::test_build_event_extracts_text_message',
-                'TestWecomCallbackPollLoop::test_poll_loop_dispatches_handle_message',
+                'test_leading_slash_prefers_a_real_absolute_path',
             },
         ),
     ],
@@ -862,6 +690,7 @@ _STALE = StaleEntryTracker(_ENV_GAPS, "tests/gateway/conftest.py")
 def pytest_collection_modifyitems(items):  # noqa: D401 — pytest hook
     """Attach the environment-gap mark to every registered node id."""
     apply_marks(items, _ENV_GAPS)
+    apply_skips(items, _ENV_GAP_SKIPS)
 
 
 def pytest_runtest_logreport(report):  # noqa: D401 — pytest hook

@@ -21,23 +21,30 @@ Two independent mechanisms live here. Neither weakens an assertion.
    that. Unlike a skip, this needs no host probe to stay honest — on a fast
    host the tests finish in under a second and never reach the raised ceiling.
 
-2. ``_ENV_GAPS`` — the shared environment-gap registry (see
-   ``tests/_env_gap_fence`` for the full contract). Registered tests still run
-   and still fail loudly; the mark only lets a run deselect them:
+2. ``_ENV_GAP_SKIPS`` — the shared environment-gap registry, in its
+   probe-backed form (see ``tests/_env_gap_fence`` for the full contract). A
+   row names a mechanism and carries a live probe; when the probe says the gap
+   is present on this host the test is really SKIPPED, with the mechanism as
+   the reason. When the probe says otherwise the test runs, and
+   ``tests/test_env_gap_registry.py`` fails on the stale row.
 
-       python -m pytest tests/agent -m "not windows_env_gap and not host_dependency_gap"
+   ``_ENV_GAPS`` (the older mark-only form, which left the tests failing) is
+   now empty here: the 2026-08-10 audit found twenty of its twenty-four rows
+   were stale tests or a real defect. See the block comment above it.
 """
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from tests._env_gap_fence import (
-    HOST_DEPENDENCY_GAP as _HOST,
-    WINDOWS_ENV_GAP as _WINDOWS,
     EnvGapRegistry,
+    EnvGapSkipRegistry,
     StaleEntryTracker,
     apply_marks,
+    apply_skips,
     register_marks,
 )
 
@@ -59,179 +66,67 @@ _SLOW_LOOPBACK_TIMEOUT_NODE_IDS: dict[str, frozenset[str]] = {
     }),
 }
 
-# Every row below was reproduced individually on this Windows 10 workstation,
-# traced to a concrete host/platform cause, and proven PRE-EXISTING by running
-# the same node on the pre-merge fork tip `1adf0404f` — where each of these
-# files failed with a superset of these node ids (upstream's prune waves
-# removed the rest). The one exception is `test_credential_pool_routing.py`,
-# whose node arrived WITH the merge (upstream-only test, upstream-identical
-# production code) and is a property of this host, not of the merge.
+# ── Environment-gap registry (audited 2026-08-10) ───────────────────────────
 #
-# The one genuine merge-resolution defect found in this directory
-# (`agent/prompt_builder.py` lost the fork's guarded
-# `skill_matches_environment` import when the merge took upstream's
-# consolidated import block, breaking the fork-owned regression test
-# `test_skill_environment_fallback.py`) was FIXED in the code, not fenced.
-_ENV_GAPS: EnvGapRegistry = {
-    'test_codex_app_server_persist.py': [
-        (
-            _WINDOWS,
-            'the temp-dir teardown unlinks state.db while the SQLite handle is '
-            'still open; Windows refuses with WinError 32 where POSIX allows '
-            'unlinking an open file',
-            {
-                'test_codex_turn_persists_each_message_exactly_once',
-            },
-        ),
-    ],
-    'test_coding_context.py': [
-        (
-            _WINDOWS,
-            'Path.write_text() emits CRLF on Windows, and _git_init runs git '
-            'with HOME=<tmp_path> so only the system gitconfig applies '
-            '(core.autocrlf=true, the Git-for-Windows installer default) and '
-            'the index is normalized to LF. build_coding_workspace_block() then '
-            'runs git with the ambient env where the user global sets '
-            'core.autocrlf=false, so the CRLF worktree file differs from the LF '
-            'index and the workspace reports "1 modified" instead of "clean". '
-            'Same mechanism as tests/tools/test_working_diff.py',
-            {
-                'TestWorkspaceBlock::test_reports_branch_and_clean_status',
-            },
-        ),
-    ],
-    'test_credential_pool_routing.py': [
-        (
-            _HOST,
-            'this host has a Claude Code OAuth credential on disk and anthropic '
-            'explicitly configured, so credential_pool._seed_from_singletons() '
-            'auto-discovers it into every anthropic pool — HERMES_HOME does not '
-            'sandbox that source. The test needs the seeded entry to be the '
-            'ONLY pool entry; with a second one present the recovery correctly '
-            'rotates and returns True',
-            {
-                'TestFailureAttribution::test_unmatched_key_does_not_retry_only_pool_entry',
-            },
-        ),
-    ],
-    'test_curator_classification.py': [
-        (
-            _WINDOWS,
-            'report.md is written UTF-8 and read back with the Windows default '
-            'cp1252, so the em dash in "Pruned — archived for staleness" '
-            'arrives mojibaked and the section assertion cannot match',
-            {
-                'test_report_md_splits_consolidated_and_pruned_sections',
-            },
-        ),
-    ],
-    'test_file_safety_sandbox_mirror.py': [
-        (
-            _WINDOWS,
-            'asserts sandbox-mirror paths in their POSIX spelling '
-            '("profiles/default/cron/jobs.json", '
-            '"sandboxes/docker/default/home/.hermes"); the classifier builds '
-            'them with os.sep, so on Windows they carry backslashes',
-            {
-                'TestClassifySandboxMirrorTarget::test_docker_mirror_soul_md_classified',
-                'TestClassifySandboxMirrorTarget::test_other_backends_and_inner_files_match[docker-profiles/coder/memories/MEMORY.md]',
-                'TestClassifySandboxMirrorTarget::test_other_backends_and_inner_files_match[daytona-profiles/default/cron/jobs.json]',
-                'TestGetSandboxMirrorWarning::test_mirror_warning_names_mirror_root_and_inner_path',
-            },
-        ),
-    ],
-    'test_image_routing.py': [
-        (
-            _WINDOWS,
-            "extract_image_refs()'s path pattern is POSIX-shaped, so a Windows "
-            'absolute path (drive letter + backslashes) is never recognised as '
-            'an image reference and the expected list comes back empty',
-            {
-                'TestExtractImageRefs::test_finds_absolute_path',
-                'TestExtractImageRefs::test_finds_home_relative_path',
-            },
-        ),
-    ],
-    'test_proxy_and_url_validation.py': [
-        (
-            _WINDOWS,
-            'asserts the lowercase env-var name in the error message; Windows '
-            'environment variables are case-insensitive and os.environ '
-            'upper-cases them, so the message names HTTP_PROXY / HTTPS_PROXY / '
-            'ALL_PROXY and the regex cannot match',
-            {
-                'test_proxy_env_rejects_malformed_port[http_proxy]',
-                'test_proxy_env_rejects_malformed_port[https_proxy]',
-                'test_proxy_env_rejects_malformed_port[all_proxy]',
-            },
-        ),
-    ],
-    'test_save_url_image.py': [
-        (
-            _WINDOWS,
-            'asserts the POSIX substring "cache/images" in a path the code '
-            'builds with os.sep, so on Windows it reads "cache\\images"',
-            {
-                'TestSaveUrlImage::test_writes_real_bytes_to_hermes_home_cache',
-            },
-        ),
-    ],
+# This directory registered 24 node ids across 12 files, all as pre-existing
+# Windows/host gaps. The audit reproduced every one of them and found TWENTY
+# were not gaps at all:
+#
+#   * agent/image_routing.py's _LOCAL_IMAGE_PATH_RE anchored only on `~/` and
+#     `/`, though its own comment claims parity with gateway's
+#     extract_local_files() — whose copy grew a Windows drive-letter anchor in
+#     #34632. A REAL DEFECT: a Windows operator's pasted C:\...\shot.png was
+#     silently dropped here while the identical path delivered via the gateway.
+#     Fixed in the code, not fenced.
+#   * ten rows asserted a POSIX path SPELLING (a "/" separator, a
+#     "cache/images" substring, a lowercase env-var name that Windows
+#     upper-cases, a UTF-8 file read back with the cp1252 default). Windows
+#     reproduces every one of those behaviours; only the string differed.
+#   * three rows monkeypatched HOME and expected `~` to follow. It does not on
+#     Windows — ntpath.expanduser prefers USERPROFILE — so the test quietly
+#     expanded ~ to the developer's REAL profile and stopped testing anything.
+#     They now use tests._home_env.point_home_at.
+#   * one leaked an open SessionDB into shutil.rmtree. Not a Windows quirk: a
+#     thread and an atexit registration leaked on EVERY platform, and POSIX
+#     merely unlinked the open file without complaining.
+#   * one was non-hermetic — credential_pool._seed_from_singletons()
+#     auto-discovers ~/.claude/.credentials.json, which HERMES_HOME does not
+#     sandbox, so a test whose premise was "the ONLY pool entry" ran with two.
+#   * one blamed cmd.exe for an inline `!`pwd`` snippet that run_inline_shell
+#     executes under bash on every platform (it prefers Git Bash on Windows).
+#     The stated reason was simply wrong; the real mechanism is that Git Bash
+#     answers in MSYS form, which `pwd -W` fixes.
+#
+# Nothing is left in _ENV_GAPS. What remains is one genuine, probe-backed gap.
+_ENV_GAPS: EnvGapRegistry = {}
+
+
+def _shell_hook_scripts_are_not_directly_executable() -> bool:
+    """True where a `#!`-line script cannot be handed to CreateProcess/execve.
+
+    agent/shell_hooks.py runs a hook with ``subprocess.run(argv, shell=False)``
+    where argv[0] is the script path. POSIX honours the shebang in execve;
+    Windows has no shebang handling at all, so a `.sh` hook raises
+    FileNotFoundError before any payload is produced. This is a real product
+    gap (shell hooks do not function on Windows), not a test defect — see the
+    audit note filed with this change.
+    """
+    return os.name == "nt"
+
+
+_ENV_GAP_SKIPS: EnvGapSkipRegistry = {
     'test_shell_hooks.py': [
         (
-            _WINDOWS,
-            'the fixtures write POSIX shell scripts and rely on the shebang / '
-            'executable bit to run them; Windows has neither, so every callback '
-            'subprocess fails with "command not found" before the hook payload '
-            'is produced',
+            _shell_hook_scripts_are_not_directly_executable,
+            'agent/shell_hooks.py spawns the hook via subprocess.run(argv, '
+            'shell=False) with the script path as argv[0]; Windows CreateProcess '
+            'has no shebang handling, so a POSIX hook script is not directly '
+            'executable and the callback fails before the payload is produced',
             {
                 'TestCallbackSubprocess::test_block_translation_end_to_end',
                 'TestCallbackSubprocess::test_block_aggregation_through_plugin_manager',
                 'TestCallbackSubprocess::test_matcher_regex_filters_callback',
                 'TestCallbackSubprocess::test_payload_schema_delivered',
-            },
-        ),
-    ],
-    'test_shell_hooks_consent.py': [
-        (
-            _WINDOWS,
-            'monkeypatches HOME and expects "~" to expand to it; '
-            'os.path.expanduser prefers USERPROFILE on Windows, so the '
-            'approved tilde path resolves elsewhere and no mtime is recorded',
-            {
-                'TestAllowlistOps::test_tilde_path_approval_records_resolvable_mtime',
-            },
-        ),
-    ],
-    # tests/agent/lsp/ — this conftest governs the whole tests/agent subtree,
-    # and the registry keys on the file BASENAME, so nested files register here.
-    'test_workspace.py': [
-        (
-            _WINDOWS,
-            'monkeypatches HOME=/home/user and expects normalize_path("~/x.py") '
-            'to expand to it; os.path.expanduser prefers USERPROFILE on '
-            'Windows, so it expands to the real user profile instead',
-            {
-                'test_normalize_path_expands_tilde',
-            },
-        ),
-    ],
-    'test_skill_commands.py': [
-        (
-            _WINDOWS,
-            'the supporting-files block emits str(Path.relative_to(...)), which '
-            'is "scripts\\run.js" on Windows; the test asserts the POSIX '
-            'spelling "scripts/run.js"',
-            {
-                'TestSkillDirectoryHeader::test_supporting_files_shown_with_absolute_paths',
-            },
-        ),
-        (
-            _WINDOWS,
-            "the inline-shell snippet is !`pwd`, which has no cmd.exe builtin, "
-            'so the expansion never yields the Windows skill directory the test '
-            'asserts',
-            {
-                'TestInlineShellExpansion::test_inline_shell_runs_in_skill_directory',
             },
         ),
     ],
@@ -255,6 +150,7 @@ def pytest_collection_modifyitems(items):  # noqa: D401 — pytest hook
         if within_file in node_ids:
             item.add_marker(pytest.mark.timeout(_SLOW_LOOPBACK_TIMEOUT_SECONDS))
     apply_marks(items, _ENV_GAPS)
+    apply_skips(items, _ENV_GAP_SKIPS)
 
 
 def pytest_runtest_logreport(report):  # noqa: D401 — pytest hook

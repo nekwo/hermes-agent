@@ -26,13 +26,24 @@ def _git_init(path):
     # Commit a source file so the fixture is a real *code* workspace: a bare git
     # repo with no code no longer flips into the coding posture (see
     # _detect_profile_name / _has_code_files), so "a code repo" needs code.
-    (Path(path) / "main.py").write_text("print('hi')\n")
+    # newline="\n" and the explicit core.autocrlf=false pin: without them the
+    # fixture's cleanliness depends on the HOST's git config. Path.write_text
+    # emits CRLF on Windows, and this runs git under HOME=<tmp> so only the
+    # SYSTEM gitconfig applies — where the Git-for-Windows installer default
+    # core.autocrlf=true normalises the index to LF. The code under test then
+    # runs git under the ambient env, so the CRLF worktree file no longer
+    # matched the LF index and a pristine checkout reported "1 modified".
+    (Path(path) / "main.py").write_text("print('hi')\n", newline="\n")
     for args in (
         ["init", "-q", "-b", "main"],
         ["add", "-A"],
         ["commit", "-q", "-m", "init commit"],
     ):
-        subprocess.run([shutil.which("git"), "-C", str(path), *args], check=True, env=env)
+        subprocess.run(
+            [shutil.which("git"), "-c", "core.autocrlf=false", "-C", str(path), *args],
+            check=True,
+            env=env,
+        )
 
 
 # ── resolver ──────────────────────────────────────────────────────────────

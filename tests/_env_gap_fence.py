@@ -27,17 +27,59 @@ Two marks, by cause:
                          platform property — an uninstalled dependency, an
                          unreachable service, a missing toolchain version.
 
+PROBE-BACKED SKIPS — prefer these (2026-08-10)
+----------------------------------------------
+The no-skip design above was built so gaps would stay visible instead of being
+quietly skipped. In practice it made ``main`` permanently red, which trained
+every reader to treat reds as scenery — and a standing red is the best possible
+camouflage. The 2026-08-09 audit of ``tests/tools`` found nine of ten rows were
+stale TESTS rather than gaps, and that the red was hiding a real frozen-home
+defect. The 2026-08-10 audit of the other three registries found the same shape
+again: a 39-row block filed as "Windows home resolution" was a constructor-I/O
+defect in ``plugins/platforms/feishu/adapter.py``, a two-row block was a regex
+that had drifted out of sync with its own declared sibling, and two host rows
+had silently gone stale (the disk they described was no longer full) with
+nothing failing to say so.
+
+So a genuine gap now registers in ``_ENV_GAP_SKIPS`` with a **live probe**
+instead of ``_ENV_GAPS`` with a mark:
+
+    ('test_foo.py', [(lambda: not hasattr(os, "chown"), "os.chown does not "
+                      "exist on Windows", {'test_bar'})])
+
+The probe is the honesty mechanism. It is evaluated at collection:
+
+  * probe TRUE  -> the test is really skipped, with the mechanism as the reason,
+    so a plain run is GREEN and the gap is visible as a named skip;
+  * probe FALSE -> the row does not apply on this host, the test RUNS, and if
+    it now passes ``tests/test_env_gap_registry.py`` fails the run and tells
+    you to delete the row.
+
+That inverts the failure mode. Under the mark-only design a row went stale
+silently and a stale row fences nothing while still reading like a fence. Under
+a probe, staleness is a failing test.
+
+A probe must interrogate the MECHANISM, never the platform name.
+``not hasattr(os, "chown")`` and ``importlib.util.find_spec("croniter") is
+None`` are probes. ``sys.platform == "win32"`` is a probe only when the code
+under test itself branches on ``sys.platform`` — i.e. when the platform IS the
+mechanism, because the assertion pins a branch the host never selects.
+
 Keeping it honest
 -----------------
 Any registered node id that PASSES is printed in a
 "stale environment-gap registry entries" section at the end of the run, so a
 fixed environment — or a fixed test — forces the row to be deleted rather than
-quietly masking a future regression.
+quietly masking a future regression. Note this only catches rows that still
+RUN; it is the weaker half of the contract, which is why probe-backed skips
+above are preferred for anything new.
 
 Rules for adding a row
 ----------------------
 1. Reproduce the failure individually first, and read the traceback to a
-   concrete host/platform cause. "It fails on Windows" is not a cause.
+   concrete host/platform cause. "It fails on Windows" is not a cause. Do not
+   trust an existing row's stated reason either: the 2026-08-10 audit found one
+   that blamed cmd.exe for a snippet the code runs under bash on every platform.
 2. Prove it is not a regression — run the same node on the pre-merge / pre-change
    ref before registering it.
 3. Never register a failure whose cause is a defect in our own code. Fix the
@@ -46,9 +88,18 @@ Rules for adding a row
    run still executes the test and the hang kills the whole pytest process,
    taking every other result with it. Hangs need a real prerequisite probe or a
    real fix.
+5. A test that asserts a POSIX path SPELLING is not a gap. Windows reproduces
+   the behaviour; only the separator, the drive letter or the default codec
+   differs. Fix the assertion to pin the guarantee instead of the string.
+6. ``monkeypatch.setenv("HOME", ...)`` is not a gap either. ``ntpath.expanduser``
+   prefers ``USERPROFILE``, so the reflex silently expands ``~`` to the real
+   profile and the test stops testing anything. Use
+   ``tests._home_env.point_home_at``.
 """
 
 from __future__ import annotations
+
+from typing import Callable
 
 import pytest
 
@@ -78,6 +129,49 @@ def register_marks(config) -> None:
         "package, service or toolchain version. Not a regression; deselect with "
         f"-m 'not {HOST_DEPENDENCY_GAP}'.",
     )
+
+
+# file basename -> [(probe, reason, {node ids within the file}), ...].
+#
+# ``probe`` is a zero-argument callable returning True when the gap is present
+# on THIS host. See the "PROBE-BACKED SKIPS" section of the module docstring:
+# the probe is what keeps the row honest, because a row whose probe has gone
+# False lets its test run again and ``tests/test_env_gap_registry.py`` fails on
+# it.
+EnvGapSkipRegistry = dict[str, list[tuple["Callable[[], bool]", str, set[str]]]]
+
+
+def apply_skips(items, registry: EnvGapSkipRegistry) -> None:
+    """Skip every registered node whose probe reports the gap is present.
+
+    A row whose probe is False is deliberately left alone: the test runs, and
+    a stale row becomes a failing assertion in the registry ledger rather than
+    a silent non-fence.
+    """
+    for item in items:
+        groups = registry.get(item.path.name)
+        if groups is None:
+            continue
+        _, _, within_file = item.nodeid.partition("::")
+        for probe, reason, node_ids in groups:
+            if within_file in node_ids and probe():
+                item.add_marker(pytest.mark.skip(reason=reason))
+
+
+def stale_skip_rows(registry: EnvGapSkipRegistry) -> list[str]:
+    """Return ``file::node`` ids whose probe no longer reports a gap.
+
+    Used by ``tests/test_env_gap_registry.py`` to fail the run on a row that
+    has stopped describing anything — the enforcement the print-only stale
+    tracker never had.
+    """
+    stale: list[str] = []
+    for file_name, groups in registry.items():
+        for probe, _reason, node_ids in groups:
+            if probe():
+                continue
+            stale.extend(f"{file_name}::{node_id}" for node_id in sorted(node_ids))
+    return stale
 
 
 def apply_marks(items, registry: EnvGapRegistry) -> None:
