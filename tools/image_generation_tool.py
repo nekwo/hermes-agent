@@ -535,8 +535,12 @@ def _resolve_fal_model() -> tuple:
     """
     model_id = ""
     try:
-        from hermes_cli.config import load_config
-        cfg = load_config()
+        # readonly: runs at module import (module-scope resolution below), and
+        # tool modules are imported by discovery from read-only processes —
+        # load_config() would scaffold the home as an import side effect
+        # (eager-tool-discovery audit). Pure read: a string is copied out.
+        from hermes_cli.config import load_config_readonly
+        cfg = load_config_readonly()
         img_cfg = cfg.get("image_gen") if isinstance(cfg, dict) else None
         if isinstance(img_cfg, dict):
             raw = img_cfg.get("model")

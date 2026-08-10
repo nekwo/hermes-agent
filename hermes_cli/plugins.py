@@ -232,8 +232,12 @@ def _get_disabled_plugins() -> set:
     ``plugins.enabled``.
     """
     try:
-        from hermes_cli.config import load_config
-        config = load_config()
+        # readonly: discover_plugins() runs at model_tools import, which
+        # read-only processes reach through the tool tree — load_config()
+        # would scaffold the home as an import side effect
+        # (eager-tool-discovery audit). Pure read: names copied into a set.
+        from hermes_cli.config import load_config_readonly
+        config = load_config_readonly()
         disabled = cfg_get(config, "plugins", "disabled", default=[])
         return set(disabled) if isinstance(disabled, list) else set()
     except Exception:
@@ -255,8 +259,9 @@ def _get_enabled_plugins() -> Optional[set]:
     * ``set(...)`` — the concrete allow-list.
     """
     try:
-        from hermes_cli.config import load_config
-        config = load_config()
+        # readonly: same import-time contract as _get_disabled_plugins above.
+        from hermes_cli.config import load_config_readonly
+        config = load_config_readonly()
         plugins_cfg = config.get("plugins")
         if not isinstance(plugins_cfg, dict):
             return None

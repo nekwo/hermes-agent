@@ -440,6 +440,20 @@ def main():
     # import cost entirely off the path for users with no mcp_servers.
     ensure_mcp_discovery_started()
 
+    # Rehydrate durable delegation completions for this process's drain
+    # (server.py's process_registry.drain_notifications watcher) — explicit
+    # at startup, never as an import side effect (same #16856 class as MCP
+    # discovery above; see
+    # docs/agent-runtime-harness/eager-tool-discovery-audit-2026-08-09.md).
+    try:
+        from tools.process_registry import process_registry
+
+        process_registry.restore_durable_completions()
+    except Exception:
+        logger.debug(
+            "Delegation completion restore failed at TUI startup", exc_info=True
+        )
+
     if not write_json({
         "jsonrpc": "2.0",
         "method": "event",

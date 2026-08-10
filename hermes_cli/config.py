@@ -3138,8 +3138,16 @@ def load_config_readonly() -> Dict[str, Any]:
     Note: this returns a plain ``dict`` (not ``MappingProxyType``) so
     existing ``isinstance(x, dict)`` guards downstream keep working. The
     safety guarantee is purely documented, not enforced — be careful.
+
+    This path also does NOT scaffold the home: a reader that materializes
+    ``~/.hermes`` (11 directories plus ``SOUL.md``) is a reader in name only,
+    and it was reachable from import side effects — pytest COLLECTION with an
+    exported ``HERMES_HOME`` scaffolded that home before any fixture ran (see
+    docs/agent-runtime-harness/eager-tool-discovery-audit-2026-08-09.md).
+    ``load_config()`` — the mutate-then-``save_config`` path — still ensures
+    the home, as do all write paths.
     """
-    return _load_config_impl(want_deepcopy=False)
+    return _load_config_impl(want_deepcopy=False, ensure_home=False)
 
 
 def write_platform_config_field(
@@ -3260,9 +3268,14 @@ def apply_terminal_config_to_env(
     return target
 
 
-def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
+def _load_config_impl(*, want_deepcopy: bool, ensure_home: bool = True) -> Dict[str, Any]:
     with _CONFIG_LOCK:
-        ensure_hermes_home()
+        # ``ensure_home=False`` is the read-only contract: loading config to
+        # LOOK at it must not scaffold the home directory tree (mkdirs +
+        # SOUL.md). Everything below already tolerates an absent home — the
+        # config stat handles FileNotFoundError and the cache is in-memory.
+        if ensure_home:
+            ensure_hermes_home()
         config_path = get_config_path()
         path_key = str(config_path)
 

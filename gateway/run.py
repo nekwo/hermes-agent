@@ -25582,6 +25582,19 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
     except Exception as e:
         logger.debug("MCP tool discovery failed: %s", e)
 
+    # Rehydrate durable delegation completions for this gateway's drain —
+    # explicit at startup, never as an import side effect (same #16856 class
+    # as the MCP discovery above; see
+    # docs/agent-runtime-harness/eager-tool-discovery-audit-2026-08-09.md).
+    # In an executor because the restore runs the delegation-recovery sweep,
+    # which probes owner PIDs and opens state.db.
+    try:
+        from tools.process_registry import process_registry as _pr_restore
+        _loop = asyncio.get_running_loop()
+        await _loop.run_in_executor(None, _pr_restore.restore_durable_completions)
+    except Exception as e:
+        logger.debug("Delegation completion restore failed: %s", e)
+
     # Start the gateway
     try:
         success = await runner.start()

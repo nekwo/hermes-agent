@@ -82,8 +82,12 @@ def _resolve_download_timeout() -> float:
         except ValueError:
             pass
     try:
-        from hermes_cli.config import cfg_get, load_config
-        cfg = load_config()
+        # readonly: runs at module import (module-scope constant below), and
+        # tool modules are imported by discovery from read-only processes —
+        # load_config() would scaffold the home as an import side effect
+        # (eager-tool-discovery audit). Pure read: value copied out.
+        from hermes_cli.config import cfg_get, load_config_readonly
+        cfg = load_config_readonly()
         val = cfg_get(cfg, "auxiliary", "vision", "download_timeout")
         if val is not None:
             return float(val)
@@ -166,8 +170,9 @@ def _resolve_vision_cpu_workers() -> int:
         except ValueError:
             pass
     try:
-        from hermes_cli.config import cfg_get, load_config
-        cfg = load_config()
+        # readonly: same import-time contract as _resolve_download_timeout.
+        from hermes_cli.config import cfg_get, load_config_readonly
+        cfg = load_config_readonly()
         val = cfg_get(cfg, "auxiliary", "vision", "max_concurrency")
         if val is not None:
             parsed = int(val)

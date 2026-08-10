@@ -473,9 +473,18 @@ def _load_tts_config() -> Dict[str, Any]:
     for any missing fields.
     """
     try:
-        from hermes_cli.config import load_config
-        config = load_config()
-        return config.get("tts") or {}
+        # readonly + deepcopy: this runs at module import (tool modules are
+        # imported by discovery from read-only processes), and load_config()
+        # would scaffold the home as an import side effect
+        # (eager-tool-discovery audit). The deepcopy preserves the old
+        # contract for callers: load_config() handed out a private copy, and
+        # returning the readonly cache's own "tts" subdict would let any
+        # caller mutation corrupt the shared config cache.
+        import copy as _copy
+
+        from hermes_cli.config import load_config_readonly
+        config = load_config_readonly()
+        return _copy.deepcopy(config.get("tts") or {})
     except ImportError:
         logger.debug("hermes_cli.config not available, using default TTS config")
         return {}

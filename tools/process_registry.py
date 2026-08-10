@@ -190,13 +190,16 @@ class ProcessRegistry:
         # gateway drain this after each agent turn to auto-trigger new turns.
         import queue as _queue_mod
         self.completion_queue: _queue_mod.Queue = _queue_mod.Queue()
-        # Rehydrate durable delegation completions only at registry startup.
-        # Consumers still inject them as fresh turns through this existing rail.
-        try:
-            from tools.async_delegation import restore_undelivered_completions
-            restore_undelivered_completions(self.completion_queue)
-        except Exception as exc:
-            logger.warning("Could not restore async delegation completions: %s", exc)
+        # Durable delegation completions are rehydrated by
+        # restore_durable_completions(), called EXPLICITLY by the entry points
+        # that own a completion drain — never here. This constructor runs as a
+        # module-import side effect (the module-scope singleton below), and
+        # the restore opens/creates state.db and runs delegation RECOVERY, a
+        # mutation no read-only importer may reach (see
+        # docs/agent-runtime-harness/eager-tool-discovery-audit-2026-08-09.md;
+        # same class as the #16856 module-scope MCP discovery).
+        self._durable_restore_lock = threading.Lock()
+        self._durable_completions_restored = False
 
         # Track sessions whose completion was already consumed by the agent
         # via wait/log.  Drain loops AND gateway/tui watchers skip notifications
@@ -231,6 +234,40 @@ class ProcessRegistry:
         # terminal tab. Distinct from kill — the process keeps running; only the
         # UI view is dropped (the user can reopen it from the status stack).
         self.on_close = None
+
+    def restore_durable_completions(self) -> int:
+        """Rehydrate durable pending delegation completions into the queue.
+
+        Called explicitly, once, by the entry points that OWN a completion
+        drain (the gateway, the interactive CLI, the TUI gateway, harness
+        serve) — the same explicit-at-startup contract MCP discovery moved to
+        for #16856. It used to run inside ``__init__``, which made it an
+        IMPORT side effect of the module-scope singleton: any module that
+        touched the tool tree — including read-only projections — opened (and
+        created) ``state.db`` and ran ``recover_abandoned_delegations()``, a
+        real mutation, before a single verb executed. See
+        ``docs/agent-runtime-harness/eager-tool-discovery-audit-2026-08-09.md``.
+
+        Idempotent per process: a second call returns 0 without touching the
+        store, because re-running the restore would re-enqueue every pending
+        completion (delivery attempts are only deduped at claim time). The
+        guard is set before the restore runs, so a failed restore is warned
+        about and NOT retried — the same once-at-startup semantics the
+        constructor provided.
+
+        Returns the number of completions enqueued (0 on the guarded or
+        failed path).
+        """
+        with self._durable_restore_lock:
+            if self._durable_completions_restored:
+                return 0
+            self._durable_completions_restored = True
+        try:
+            from tools.async_delegation import restore_undelivered_completions
+            return restore_undelivered_completions(self.completion_queue)
+        except Exception as exc:
+            logger.warning("Could not restore async delegation completions: %s", exc)
+            return 0
 
     @staticmethod
     def _clean_shell_noise(text: str) -> str:

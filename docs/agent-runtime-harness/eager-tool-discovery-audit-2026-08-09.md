@@ -30,6 +30,19 @@ work tonight: no wire consumer depends on the side effect (da656b7e6), no live
 data has been corrupted, and the blast radius of a hasty lazy-discovery change
 is the whole tool registry.
 
+> **Status update, same night (2026-08-09, follow-up wave):** Fix B and Fix C
+> are **SHIPPED** — see §6. `ProcessRegistry.__init__` no longer performs any
+> I/O (restore moved to `restore_durable_completions()`, called explicitly at
+> the drain-owning entry points), `load_config_readonly()` no longer
+> scaffolds the home, and the nine import-time `load_config()` reader call
+> sites the smoke test then exposed (tools + plugin lane) were converted to
+> the readonly loader. A cold `import hermes_cli.harness` + one projection
+> build against an empty home now leaves exactly one artifact: the discovery
+> verdict cache. The strict-xfail pin was promoted to an always-on invariant
+> (no `state.db`, and created entries ⊆ `{cache}`), and a second behavioural
+> pin proves recovery does not execute during a read. Fix A (lazy discovery)
+> remains open — the decision brief the operator needs is §7.
+
 ---
 
 ## 1. The chain, confirmed by execution
@@ -299,3 +312,146 @@ carries the whole-process claim.
   `%LOCALAPPDATA%\hermes\cache\tool_discovery_cache.json` mtime
   2026-08-09 22:27:57 (unattributed HERMES_HOME-less process tonight);
   `%LOCALAPPDATA%\hermes\state.db` mtime 2026-08-02 10:17.
+
+## 6. Shipped, same night: Fix B and Fix C
+
+**Fix B — `ProcessRegistry.__init__` is now pure in-memory.** The restore
+moved to `ProcessRegistry.restore_durable_completions()` (idempotent per
+process, guard set before the store is touched, same warn-don't-raise
+semantics the constructor had), called explicitly by the entry points that own
+a completion drain — the #16856 MCP-discovery pattern, at the same seams:
+
+- `gateway/run.py` — after MCP discovery, before `runner.start()`, in an
+  executor (recovery probes owner PIDs and opens state.db).
+- `hermes_cli/main.py` `_prepare_agent_startup()` — after the MCP-discovery
+  branches; scoped by that function's existing gate to agent-turn-capable
+  commands, so plain CLI verbs never reach it.
+- `tui_gateway/entry.py` `main()` — beside `ensure_mcp_discovery_started()`
+  (the TUI server's `drain_notifications` watcher is this process's drain).
+- `hermes_cli/harness_parts/serve.py` — immediately before
+  `start_delivery_drain()`, so completions are rehydrated before the drain
+  that delivers them exists.
+
+Non-drain processes (cron job runner, ACP as currently wired — it consumes no
+`completion_queue`) deliberately do NOT restore: pending completions are
+durable rows with `delivery_state='pending'`; nothing is lost by leaving them
+for the next drain-owning boot, which is the pre-existing crash-recovery
+contract.
+
+**Fix C — `load_config_readonly()` no longer scaffolds the home.**
+`_load_config_impl(..., ensure_home=False)` on the readonly path only;
+`load_config()` (the mutate-then-`save_config` path) and every explicit write
+path keep calling `ensure_hermes_home()` (`save_config` ensures independently,
+so the load→mutate→save flow never depended on the load's ensure). The impl
+body was verified to tolerate an absent home (the config stat already handles
+`FileNotFoundError`; the cache is in-memory; the only `open()` is read-mode
+behind an existence signature).
+
+**Fix C's second half — the import-time `load_config()` callers.** The split
+alone did NOT close the scaffold: smoke-testing a cold
+`import hermes_cli.harness` still produced `SOUL.md` plus the 11 directories,
+because tool and plugin modules executed by the discovery chain call
+`load_config()` (the ensuring variant) at module import. Enumerated
+exhaustively in one pass (ensure is memoized per home, so stack-tracing the
+`SOUL.md` write reveals only the FIRST caller per process — the enumeration
+stubbed `ensure_hermes_home` with a stack-recording spy instead): nine
+import-time reader call sites, all converted to `load_config_readonly()`
+after a per-site mutation-safety review:
+
+- `tools/approval.py` `load_permanent_allowlist()` (module-scope call at
+  import; copies a list into a set),
+- `tools/vision_tools.py` `_resolve_download_timeout` /
+  `_resolve_vision_cpu_workers` (module-scope constants; scalar reads),
+- `tools/image_generation_tool.py` `_resolve_fal_model` (string read),
+- `tools/tts_tool.py` `_load_tts_config` (returns a config SUBDICT, so it
+  now deep-copies it — handing out the readonly cache's own dict would let a
+  caller mutation corrupt every later config read),
+- `hermes_cli/plugins.py` `_get_disabled_plugins` / `_get_enabled_plugins`
+  (sets copied out),
+- `plugins/dashboard_auth/{basic,nous,self_hosted}` `_load_config_*_section`
+  (return subdicts → deep-copied, same reasoning as tts).
+
+After the sweep, a cold `import hermes_cli.harness` +
+`build_running_work()` against an empty home leaves exactly ONE artifact:
+`cache/tool_discovery_cache.json` — the declared Fix A residual (eager
+discovery still runs; it just no longer drags any writer). This also closes
+the pytest-collection exposure: with `HERMES_HOME` exported, collection no
+longer materializes the home.
+
+**Pins (behavioural, subprocess — no source greps):**
+
+- `test_a_cold_process_asked_a_read_only_question_creates_no_state_db` —
+  PROMOTED from strict-xfail to always-on: fresh interpreter, empty home, one
+  `build_running_work()`, no `state.db` afterward.
+- `test_a_read_only_question_does_not_run_delegation_recovery` — the teeth
+  pin: a `state.db` seeded through the store's own `_initialize_schema` with
+  an ownerless `running` row (exactly what recovery reclassifies, and a
+  schema on which the recovery UPDATE would genuinely succeed — a partial
+  schema would let recovery crash and the pin pass for the wrong reason). The
+  row must be untouched after a cold-process build.
+- The promoted pin also carries the whole-home claim: the entries a cold
+  read-only build may create are asserted as a SUBSET of `{cache}` — the
+  discovery-cache residual — so retiring Fix A's write later tightens the pin
+  for free instead of breaking it, and any new scaffold-class regression is
+  named in the failure message.
+- `tests/hermes_cli/test_config_readonly_no_scaffold.py` — readonly load
+  leaves a nonexistent home nonexistent; `load_config()` still ensures it
+  (the split must not overshoot).
+
+All pins were sabotage-verified, and each sabotage was confirmed to have
+actually applied before trusting its red (a sibling agent tonight had a
+sabotage silently fail to apply and produce a meaningless green): with the
+`__init__` restore temporarily reinstated, both projection pins go red with
+the expected messages (the seeded row observed reclassified to
+`state='unknown'` with a real `completed_at`); with `ensure_home` forced back
+to `True`, the config pin goes red naming the scaffold and the whole-home
+subset assertion goes red listing the 10 materialized entries. Fixes
+restored, all green.
+
+## 7. Fix A — the decision brief (NOT started, by instruction)
+
+**What it would win.** `discover_builtin_tools()` measures **0.889 s warm**
+(cold cache 1.5–2.4 s total for `import model_tools`, of which discovery is
+the dominant share — ~75 tool-module imports plus their dependency trees).
+Every cold process that touches agent_runtime/harness pays it at import:
+every `hermes harness *` CLI invocation (the launcher's CLI snapshot lane),
+serve boot, run_agent, batch_runner. Lazy discovery takes ~0.9 s off every
+such process that doesn't execute a tool — read-only harness verbs would pay
+only `model_tools`' own remaining dependency tree (~0.6 s, itself then worth
+shrinking). Against tonight's Mission Control startup numbers (~1.55 s gate),
+this is the largest single unclaimed number in that workstream.
+
+**What it would cost.** The mechanical change is contained: an idempotent,
+lock-guarded `ensure_builtin_tools()` gate at the top of every
+registry-consuming API in `model_tools` AND inside `ToolRegistry`'s own query
+methods (closing the "someone queries `registry` directly" hole), plus PEP 562
+module `__getattr__` for the two import-time snapshot constants
+(`TOOL_TO_TOOLSET_MAP`, `TOOLSET_REQUIREMENTS`; non-test consumers:
+`batch_runner.py:55/65`, `hermes_cli/banner.py:584-613`), plus explicit
+eager calls at the entry points that want warm tools (gateway, cli, tui, acp —
+the same seams Fix B just used). Same treatment for `discover_plugins()`.
+Estimate: a focused day including the test sweep, most of it verification.
+
+**The specific risk — why it cannot be done casually.** The failure mode lazy
+discovery introduces is code that works today only because *someone else's*
+import populated the registry first. Import-order dependence is invisible to
+static analysis and to any single test file run in isolation (the fixture
+calls `discover_builtin_tools()` explicitly); it surfaces only in process
+shapes nobody tests — a fresh embedder importing one module and calling one
+function. Every call path that reads the registry without going through a
+gated API is a latent empty-registry bug, and the audit's own finding is that
+this repo's import graph is too entangled to enumerate those paths by grep
+("zero callers" is FALSE until dynamic dispatch is checked). The mitigation
+is structural, not enumerative: the gate must live inside `ToolRegistry`
+itself so there IS no ungated read, and the regression pin must be
+behavioural (fresh interpreter, one API call, correct answer with no prior
+imports). Second-order risks: thread-safety of first-call discovery under the
+gateway's executor fan-out (the gate needs a lock, and tool modules must
+tolerate concurrent first-import), and the discovery-cache write moving from
+import time to first-use time (harmless, but it changes when the
+`cache/tool_discovery_cache.json` mtime moves — anything fingerprinting it
+learns a new rhythm).
+
+**Recommendation unchanged:** schedule it as a startup-perf slice with the
+gate-inside-the-registry shape, never as a drive-by. The ~0.9 s is real and
+recurring; the risk is bounded exactly as far as the gate is structural.

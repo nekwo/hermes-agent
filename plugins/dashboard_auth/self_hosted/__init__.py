@@ -754,9 +754,16 @@ def _load_config_oauth_section() -> dict:
     to ``{}`` so callers can rely on ``.get(...)``.
     """
     try:
-        from hermes_cli.config import cfg_get, load_config
+        # readonly + deepcopy: plugin modules load during discover_plugins(),
+        # which read-only processes reach at import — load_config() would
+        # scaffold the home as an import side effect (eager-tool-discovery
+        # audit). The deepcopy preserves the previous ownership contract
+        # (load_config() handed out a private copy of the section).
+        import copy as _copy
 
-        cfg = load_config()
+        from hermes_cli.config import cfg_get, load_config_readonly
+
+        cfg = load_config_readonly()
     except Exception as exc:  # noqa: BLE001 — broad catch is intentional
         logger.debug(
             "dashboard-auth-self-hosted: load_config() raised %s; "
@@ -765,7 +772,7 @@ def _load_config_oauth_section() -> dict:
         )
         return {}
     section = cfg_get(cfg, "dashboard", "oauth", default=None)
-    return section if isinstance(section, dict) else {}
+    return _copy.deepcopy(section) if isinstance(section, dict) else {}
 
 
 def _oidc_subsection(oauth_section: dict) -> dict:

@@ -103,9 +103,10 @@ it made the producer NON-DETERMINISTIC. Concretely, ``_collect_delegations``
 runs before ``_collect_chat_turns`` and reported whether ``state.db`` existed;
 the chat-turn lane's lazy ``from . import mission_chat_turns`` drags
 ``model_tools`` → ``tools.registry.discover_builtin_tools()`` →
-``tools.process_registry``'s module-scope singleton →
-``async_delegation.restore_undelivered_completions()``, which CREATES that very
-``state.db``. So the FIRST build in a process said ``"; no state.db"`` and every
+``tools.process_registry``'s module-scope singleton — whose constructor, at
+the time, ran ``async_delegation.restore_undelivered_completions()`` and
+CREATED that very ``state.db`` (retired since; see the end of this
+docstring). So the FIRST build in a process said ``"; no state.db"`` and every
 later build did not, for identical work and an identical contract — and under
 pytest which answer you got was decided by whether some other test module had
 already dragged that import chain in. A producer whose output depends on hidden
@@ -137,15 +138,20 @@ The split this module now keeps:
 
 This module is READ-ONLY with respect to every store it touches: it opens no
 database it would have to create, marks no output consumed, and takes no lock a
-writer could be waiting on. That invariant holds for every store this file reads
-DIRECTLY. It does NOT survive ``_collect_chat_turns``'s import chain, which
-reaches a tool singleton whose constructor runs delegation recovery — a
-structural weakness in ``model_tools``' module-scope
-``discover_builtin_tools()`` call, filed rather than fixed here — the full
-execution-verified audit and retirement plan live in
+writer could be waiting on. That invariant used to hold only for the stores
+this file reads DIRECTLY: ``_collect_chat_turns``'s import chain reached a
+tool singleton whose CONSTRUCTOR ran delegation recovery — creating
+``state.db`` and reclassifying owner-dead delegations as an import side
+effect. That constructor I/O is retired: the restore now runs only through
+``process_registry.restore_durable_completions()``, called explicitly by the
+entry points that own a completion drain, so the invariant holds for the
+whole build in a cold process. It is pinned behaviourally (fresh-interpreter
+subprocess: no ``state.db`` appears, and a seeded ownerless ``running``
+delegation is not reclassified) in ``tests/agent_runtime/test_running_work.py``.
+``model_tools``' module-scope ``discover_builtin_tools()`` call itself remains
+eager — still an import-cost weakness, filed with measurements and a lazy-
+discovery plan in
 ``docs/agent-runtime-harness/eager-tool-discovery-audit-2026-08-09.md``.
-Nothing this projection PUBLISHES depends on that side effect any more, which
-is what makes the wire deterministic in spite of it.
 """
 
 from __future__ import annotations
@@ -969,10 +975,12 @@ def _collect_delegations(
     db_path = head / _STATE_DB_FILENAME
     # Whether `state.db` exists yet is deliberately NOT reported. It is a
     # filesystem observation rather than a fact about work, and — uniquely
-    # corrosive — it is one this very projection perturbs: the chat-turn lane
-    # that runs after this one imports a chain that CREATES the file, so build 1
-    # and build 2 of the same process would disagree about it. See the module
-    # docstring.
+    # corrosive — it was one this very projection used to perturb: the
+    # chat-turn lane's import chain CREATED the file through the tool
+    # singleton's constructor (retired — see the module docstring), so build 1
+    # and build 2 of the same process would disagree about it. Keeping the
+    # fact off the wire remains correct regardless: storage layout is not
+    # lane health.
     if db_path.exists():
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)

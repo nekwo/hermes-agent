@@ -255,14 +255,15 @@ def test_a_recorded_head_survives_a_persona_profile_flip(tmp_path, monkeypatch):
 # The projection used to concatenate CONTRACT (a lane's health) with AMBIENT
 # machine-local state (which home it resolved, what files sit under it) into one
 # `detail` prose string. That is not a tidiness complaint: one half of the
-# ambient state — whether `state.db` exists — is CREATED by this projection's own
-# lazy `from . import mission_chat_turns`, which reaches
-# `tools.process_registry`'s module-scope singleton and through it
-# `async_delegation.restore_undelivered_completions()`. The chat-turn lane runs
-# AFTER the delegation lane, so the first build in a process said
-# "; no state.db" and every later build did not, for identical work. Under
-# pytest, which answer you got depended on whether some other test module had
-# already dragged that chain in.
+# ambient state — whether `state.db` exists — was CREATED by this projection's
+# own lazy `from . import mission_chat_turns`, which reaches
+# `tools.process_registry`'s module-scope singleton — whose constructor, at the
+# time, ran `async_delegation.restore_undelivered_completions()` (constructor
+# I/O retired; restore now runs only via restore_durable_completions() at
+# drain-owning entry points). The chat-turn lane runs AFTER the delegation
+# lane, so the first build in a process said "; no state.db" and every later
+# build did not, for identical work. Under pytest, which answer you got
+# depended on whether some other test module had already dragged that chain in.
 #
 # So these are not shape tests. They pin that the producer's output is a
 # function of the WORK, and of nothing else.
@@ -839,34 +840,18 @@ def test_the_projection_never_creates_the_state_db_it_reads(home):
     assert not (home / "state.db").exists()
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Filed defect (docs/agent-runtime-harness/"
-        "eager-tool-discovery-audit-2026-08-09.md): model_tools' module-scope "
-        "discover_builtin_tools() constructs the process_registry singleton, "
-        "whose __init__ runs delegation recovery and CREATES state.db. A "
-        "read-only projection in a cold process therefore writes. When the "
-        "eager chain is retired this XPASSes strictly — promote it to a plain "
-        "always-on invariant instead of deleting it."
-    ),
-)
-def test_a_cold_process_asked_a_read_only_question_creates_no_state_db(tmp_path):
-    """Behavioural whole-process pin: a read-only verb against an empty home.
+def _cold_build_subprocess(cold_home):
+    """One ``build_running_work()`` in a FRESH interpreter against *cold_home*.
 
-    A fresh interpreter (the only place the once-per-process import side effect
-    is observable), an empty ``HERMES_HOME``, no ``HERMES_HEAD_HOME``, one
-    ``build_running_work()``. A projection that is read-only with respect to
-    the stores it reads must leave no ``state.db`` behind. Asserted as
-    behaviour in a subprocess — never as a source grep — per the
-    no-source-grep-assertions gate.
+    A fresh interpreter is the only place the once-per-process import side
+    effect this pin guards against is observable: the module-scope
+    ``process_registry`` singleton is constructed exactly once, so any
+    in-process assertion runs after some earlier test already spent it.
     """
 
     import subprocess
     import sys
 
-    cold_home = tmp_path / "cold_home"
-    cold_home.mkdir()
     repo_root = Path(running_work.__file__).resolve().parent.parent
 
     env = dict(os.environ)
@@ -874,7 +859,7 @@ def test_a_cold_process_asked_a_read_only_question_creates_no_state_db(tmp_path)
     env.pop("HERMES_HEAD_HOME", None)
     env["PYTHONPATH"] = str(repo_root)
 
-    proc = subprocess.run(
+    return subprocess.run(
         [
             sys.executable,
             "-c",
@@ -887,8 +872,103 @@ def test_a_cold_process_asked_a_read_only_question_creates_no_state_db(tmp_path)
         cwd=str(repo_root),
     )
 
+
+def test_a_cold_process_asked_a_read_only_question_creates_no_state_db(tmp_path):
+    """Behavioural whole-process pin: a read-only verb against an empty home.
+
+    An empty ``HERMES_HOME``, no ``HERMES_HEAD_HOME``, one
+    ``build_running_work()`` in a fresh interpreter. A projection that is
+    read-only with respect to the stores it reads must leave no ``state.db``
+    behind. Asserted as behaviour in a subprocess — never as a source grep —
+    per the no-source-grep-assertions gate.
+
+    History: landed as ``xfail(strict=True)`` against the filed defect
+    (docs/agent-runtime-harness/eager-tool-discovery-audit-2026-08-09.md —
+    ``ProcessRegistry.__init__`` ran delegation recovery, creating ``state.db``
+    as an import side effect of the ``model_tools`` discovery chain), and
+    promoted to an always-on invariant in the same wave that moved the restore
+    to the drain-owning entry points. It must stay green from here.
+    """
+
+    cold_home = tmp_path / "cold_home"
+    cold_home.mkdir()
+
+    proc = _cold_build_subprocess(cold_home)
+
     assert proc.returncode == 0, proc.stderr[-2000:]
     assert not (cold_home / "state.db").exists()
+    # The whole-home claim, achievable since the read paths stopped calling
+    # ensure_hermes_home(): no scaffold (11 dirs), no SOUL.md. The one
+    # declared residual is the tool-discovery verdict cache — eager discovery
+    # itself is the audit's open Fix A. Asserted as a subset so retiring that
+    # write later tightens the pin for free instead of breaking it.
+    created = {p.name for p in cold_home.iterdir()}
+    assert created <= {"cache"}, (
+        "a read-only question materialized home entries beyond the declared "
+        f"discovery-cache residual: {sorted(created - {'cache'})}"
+    )
+
+
+def test_a_read_only_question_does_not_run_delegation_recovery(tmp_path):
+    """The projection must not RECLASSIFY delegations — recovery has teeth.
+
+    ``recover_abandoned_delegations()`` UPDATEs any ``running`` row whose
+    owner PID cannot be proven alive to ``state='unknown',
+    delivery_state='pending'`` — which re-queues an "outcome unknown" delivery
+    into the owning chat. That is a mutation only a process that OWNS a
+    completion drain may perform (gateway, interactive CLI, TUI, harness
+    serve — via ``process_registry.restore_durable_completions()``). A
+    read-only verb reaching it was the projection-with-teeth half of the
+    eager-tool-discovery audit.
+
+    Seeded through the store's OWN schema initializer (so if recovery does
+    run, its UPDATE genuinely succeeds — a hand-rolled partial schema would
+    make recovery crash and this pin pass for the wrong reason), with an
+    ownerless ``running`` row: exactly the shape recovery exists to
+    reclassify. After a cold-process ``build_running_work()``, the row must
+    be byte-identically untouched.
+    """
+
+    cold_home = tmp_path / "cold_home"
+    cold_home.mkdir()
+
+    # Production schema, produced by the production initializer, on an
+    # explicit path (no home resolution involved — a recorded head-home
+    # contextvar in this long-lived test process must not be able to divert
+    # the seed away from the home the subprocess will resolve).
+    from tools import async_delegation as ad
+
+    conn = sqlite3.connect(cold_home / "state.db")
+    try:
+        ad._initialize_schema(conn)
+        with conn:
+            conn.execute(
+                """INSERT INTO async_delegations
+                   (delegation_id, origin_session, state, dispatched_at,
+                    updated_at, owner_pid, task_json)
+                   VALUES ('del-ownerless', 'sess', 'running',
+                           1800000000.0, 1800000000.0, NULL, '{}')"""
+            )
+    finally:
+        conn.close()
+
+    proc = _cold_build_subprocess(cold_home)
+    assert proc.returncode == 0, proc.stderr[-2000:]
+
+    verify = sqlite3.connect(f"file:{cold_home / 'state.db'}?mode=ro", uri=True)
+    try:
+        state, delivery_state, completed_at = verify.execute(
+            """SELECT state, delivery_state, completed_at
+               FROM async_delegations WHERE delegation_id='del-ownerless'"""
+        ).fetchone()
+    finally:
+        verify.close()
+
+    assert (state, delivery_state, completed_at) == ("running", "pending", None), (
+        "delegation recovery executed during a read-only projection: the "
+        f"ownerless row was reclassified to state={state!r}, "
+        f"delivery_state={delivery_state!r}, completed_at={completed_at!r}"
+    )
 
 
 @pytest.mark.parametrize(

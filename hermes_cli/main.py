@@ -10769,6 +10769,19 @@ def _prepare_agent_startup(args) -> None:
                 "MCP tool discovery failed at CLI startup",
                 exc_info=True,
             )
+    # Rehydrate durable delegation completions for the CLI process loop's
+    # drain — explicit at agent-capable startup, never as an import side
+    # effect (same #16856 class as the MCP discovery above; see
+    # docs/agent-runtime-harness/eager-tool-discovery-audit-2026-08-09.md).
+    try:
+        from tools.process_registry import process_registry
+
+        process_registry.restore_durable_completions()
+    except Exception:
+        logger.debug(
+            "Delegation completion restore failed at CLI startup",
+            exc_info=True,
+        )
     try:
         from hermes_cli.config import load_config
         from agent.shell_hooks import register_from_config

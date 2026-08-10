@@ -2392,8 +2392,14 @@ def load_permanent_allowlist() -> set:
     patterns added via 'always' in a previous session.
     """
     try:
-        from hermes_cli.config import load_config
-        config = load_config()
+        # readonly, deliberately: this runs at MODULE IMPORT (the call at the
+        # bottom of this file), and tool modules are imported by
+        # discover_builtin_tools() from read-only processes. load_config()
+        # would ensure_hermes_home() — scaffolding the home as an import side
+        # effect (the eager-tool-discovery audit's defect class). Nothing
+        # here mutates the returned dict: the list is copied into a fresh set.
+        from hermes_cli.config import load_config_readonly
+        config = load_config_readonly()
         patterns = set(config.get("command_allowlist", []) or [])
         if patterns:
             load_permanent(patterns)
