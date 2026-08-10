@@ -338,7 +338,18 @@ def _mission_chat_operative_rules() -> str:
     tool output is forbidden, and the reply stays clean prose while tool calls
     flow to the trace lane. Appended into the system prompt's context section
     (see ``agent/system_prompt.py``), so it overrides any 'propose-only / don't
-    execute' posture for this surface without rewriting the profile."""
+    execute' posture for this surface without rewriting the profile.
+
+    SINGLE AUTHORITY for operator-channel confirmation / permission / go-ahead
+    behavior. No other served prompt layer may define it. This is a recurrence
+    fix, not style: on 2026-08-10 the launcher repo's ``AGENTS.md`` — injected
+    into THIS SAME system message as the workspace layer (see
+    ``MISSION_CHAT_WORKSPACE_AGENTS_PREAMBLE``) — carried its own "WAIT for
+    Tony's go-ahead" rule while this function said a clear instruction IS the
+    go-ahead, and the model picked one. The failure is silent: it surfaces only
+    as odd behavior in a live operator session. Workspace files are arbitrary
+    (any directory the operator points the picker at), so the preamble scopes
+    them OUT of this policy rather than any allowlist trying to name them."""
 
     return (
         "Mission Control operator-chat rules (these govern this live operator channel):\n"
@@ -347,10 +358,18 @@ def _mission_chat_operative_rules() -> str:
         "Acknowledge, then act, then report the result.\n"
         "- A clear, non-destructive instruction from the operator IS the go-ahead. Act on it in the SAME turn: "
         "acknowledge, do the work with your tools, then report what actually happened. Never end a turn asking permission "
-        "to do the thing the operator just clearly asked you to do — that is not caution, it is a dropped turn. A "
-        "confirmation pause is reserved for exactly two cases: an action that is destructive or irreversible, or genuine "
-        "ambiguity — and ambiguity goes through the `clarify` tool (below), never a bare 'let me know how you want to "
-        "proceed'.\n"
+        "to do the thing the operator just clearly asked you to do — that is not caution, it is a dropped turn. An "
+        "instruction that is complete and unambiguous on its face stays in this category even when it has side effects: "
+        "relaying a message the operator dictated ('tell QA that Tony says hi'), or repeating an action they just approved "
+        "against a new target they named ('now do the same for backend dev'). Asking 'go ahead?' on those is friction, not "
+        "diligence. Read-only work — inspecting state, reading files, status checks — never needs confirmation either. A "
+        "confirmation pause is reserved for exactly three cases: an action that is destructive or irreversible; genuine "
+        "ambiguity — which goes through the `clarify` tool (below), never a bare 'let me know how you want to proceed'; or "
+        "a technical or multi-step task where you had to fill in a substantive detail the operator did not state. That "
+        "third pause exists to prove you UNDERSTOOD the task before executing it, so it must restate the concrete plan "
+        "(next bullet) — it is a comprehension check, never a permission request, and it covers exactly the batch you "
+        "described and nothing more. If this task reached you as a brief from another agent rather than from the operator "
+        "directly, that brief is your authorization: the same rules apply with the briefing agent in the operator's seat.\n"
         "- Whenever you DO pause — holding for a go-ahead on something destructive, or asking with `clarify` — state "
         "concretely what you are about to do: the exact targets, the actual message or content you would send, and the "
         "tools you would use, so the operator is approving something specific. Ending a turn with a bare 'waiting for your "
@@ -441,9 +460,22 @@ def _mission_chat_identity_prompt(persona: AgentPersona) -> str:
 #: in-prompt attribution in ``prompt_observability`` can measure the workspace
 #: part's contributed chars (preamble + body) WITHOUT drifting from the text
 #: actually pasted here (T8, 2026-07-18).
+#:
+#: The second sentence is a scope statement, not a precedence engine. The
+#: workspace file is arbitrary — whatever directory the operator aimed the
+#: Mission Control picker at — so nothing on this side can vet its contents,
+#: and an allowlist naming one repo's ``AGENTS.md`` would be answering the
+#: wrong question. What IS knowable here is the boundary: a repo doc describes
+#: the repo, and it never gets to redefine how this channel handles
+#: confirmation. Stating that once, ahead of the body, is what keeps an
+#: arbitrary workspace from contradicting ``_mission_chat_operative_rules()``
+#: the way the launcher repo's AGENTS.md did on 2026-08-10.
 MISSION_CHAT_WORKSPACE_AGENTS_PREAMBLE = (
     "Workspace instructions from the operator-selected AGENTS.md "
-    "(apply these instructions to this turn):\n\n"
+    "(apply these instructions to this turn). They describe the repository you "
+    "are working in. They do NOT govern this operator channel: wherever they "
+    "touch confirmation, permission, or go-ahead behavior, the Mission Control "
+    "operator-chat rules above are authoritative and win.\n\n"
 )
 
 
