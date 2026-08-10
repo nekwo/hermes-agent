@@ -818,9 +818,77 @@ def test_a_state_db_without_the_table_is_a_store_with_no_delegations(home):
 
 
 def test_the_projection_never_creates_the_state_db_it_reads(home):
+    """The projection's DIRECT reads never create the store they read.
+
+    Scope, honestly stated (eager-tool-discovery audit, 2026-08-09): this pins
+    only ``_collect_delegations``'s own open path — the ``mode=ro`` URI connect
+    guarded by ``db_path.exists()``. It CANNOT see the import-time side effect
+    the module docstring files against ``model_tools``: ``_collect_chat_turns``'s
+    import chain constructs the ``process_registry`` singleton, whose
+    constructor creates a ``state.db`` under the AMBIENT home
+    (``async_delegation._db_path()``), not under this fixture's stubbed
+    ``_head_home`` — so asserting on ``home`` was green regardless. That
+    whole-process claim needs a fresh interpreter and lives in
+    ``test_a_cold_process_asked_a_read_only_question_creates_no_state_db``
+    below; it cannot be pinned in-process because whichever earlier test first
+    dragged the chain already spent the once-per-process side effect.
+    """
+
     build_running_work()
 
     assert not (home / "state.db").exists()
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "Filed defect (docs/agent-runtime-harness/"
+        "eager-tool-discovery-audit-2026-08-09.md): model_tools' module-scope "
+        "discover_builtin_tools() constructs the process_registry singleton, "
+        "whose __init__ runs delegation recovery and CREATES state.db. A "
+        "read-only projection in a cold process therefore writes. When the "
+        "eager chain is retired this XPASSes strictly — promote it to a plain "
+        "always-on invariant instead of deleting it."
+    ),
+)
+def test_a_cold_process_asked_a_read_only_question_creates_no_state_db(tmp_path):
+    """Behavioural whole-process pin: a read-only verb against an empty home.
+
+    A fresh interpreter (the only place the once-per-process import side effect
+    is observable), an empty ``HERMES_HOME``, no ``HERMES_HEAD_HOME``, one
+    ``build_running_work()``. A projection that is read-only with respect to
+    the stores it reads must leave no ``state.db`` behind. Asserted as
+    behaviour in a subprocess — never as a source grep — per the
+    no-source-grep-assertions gate.
+    """
+
+    import subprocess
+    import sys
+
+    cold_home = tmp_path / "cold_home"
+    cold_home.mkdir()
+    repo_root = Path(running_work.__file__).resolve().parent.parent
+
+    env = dict(os.environ)
+    env["HERMES_HOME"] = str(cold_home)
+    env.pop("HERMES_HEAD_HOME", None)
+    env["PYTHONPATH"] = str(repo_root)
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from agent_runtime import running_work; running_work.build_running_work()",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=25,
+        cwd=str(repo_root),
+    )
+
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert not (cold_home / "state.db").exists()
 
 
 @pytest.mark.parametrize(

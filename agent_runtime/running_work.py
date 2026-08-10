@@ -141,9 +141,11 @@ writer could be waiting on. That invariant holds for every store this file reads
 DIRECTLY. It does NOT survive ``_collect_chat_turns``'s import chain, which
 reaches a tool singleton whose constructor runs delegation recovery — a
 structural weakness in ``model_tools``' module-scope
-``discover_builtin_tools()`` call, filed rather than fixed here. Nothing this
-projection PUBLISHES depends on that side effect any more, which is what makes
-the wire deterministic in spite of it.
+``discover_builtin_tools()`` call, filed rather than fixed here — the full
+execution-verified audit and retirement plan live in
+``docs/agent-runtime-harness/eager-tool-discovery-audit-2026-08-09.md``.
+Nothing this projection PUBLISHES depends on that side effect any more, which
+is what makes the wire deterministic in spite of it.
 """
 
 from __future__ import annotations
