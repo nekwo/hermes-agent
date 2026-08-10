@@ -873,6 +873,45 @@ def test_stage42_controls_remain_available_on_their_real_owners():
     ).yes is True
 
 
+def test_omit_is_scoped_to_the_verb_that_asked():
+    """`omit=` drops a flag from ONE verb, never from the shared helper.
+
+    `controls=` is opt-in; `omit=` is the opposite direction — it takes away a
+    flag every verb otherwise gets by default. `persona instance
+    repair-steering` is its only live call site (it writes a fixed human report,
+    so `--output/--quiet/--fields` would be accepted and ignored), and until now
+    nothing drove it: `test_harness_cli.py` only models `omit` inside its own
+    AST ownership extractor, which is bookkeeping, not behaviour.
+
+    Both halves are the pin. Refusal alone would still pass if the flags had
+    been deleted from `_add_stage42_global_args` outright; the sibling half is
+    what makes this about SCOPING.
+    """
+
+    omitted = ["--output", "--fields"]
+    for flag in omitted:
+        with pytest.raises(SystemExit) as excinfo:
+            parser().parse_args(
+                ["harness", "persona", "instance", "repair-steering", "pi_1", flag, "json"]
+            )
+        assert excinfo.value.code == 2
+    with pytest.raises(SystemExit) as excinfo:
+        parser().parse_args(
+            ["harness", "persona", "instance", "repair-steering", "pi_1", "--quiet"]
+        )
+    assert excinfo.value.code == 2
+
+    # The verb keeps what it did NOT omit...
+    assert parser().parse_args(
+        ["harness", "persona", "instance", "repair-steering", "pi_1", "--dry-run"]
+    ).dry_run is True
+    # ...and a sibling on the same shared helper keeps all three.
+    sibling = parser().parse_args(
+        ["harness", "workspace", "list", "--output", "json", "--fields", "id", "--quiet"]
+    )
+    assert (sibling.output, sibling.fields, sibling.quiet) == ("json", "id", True)
+
+
 def test_stage42_honored_gate_rejects_a_per_verb_destination_collision():
     module = "fixture.cli"
     reads = {

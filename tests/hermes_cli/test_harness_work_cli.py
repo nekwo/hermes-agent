@@ -449,11 +449,26 @@ def test_the_flags_these_verbs_do_honor_are_still_accepted():
     assert peeked.quiet is True
 
 
-def test_omitting_a_flag_is_scoped_to_the_verb_that_asked():
-    """`omit` must not leak: other verbs keep the full shared contract."""
-
-    listed = parser().parse_args(
-        ["harness", "workspace", "list", "--json", "--cursor", "abc", "--since", "x"]
-    )
-    assert listed.cursor == "abc"
-    assert listed.since == "x"
+# RETIRED: `test_omitting_a_flag_is_scoped_to_the_verb_that_asked` lived here and
+# drove `harness workspace list --cursor abc --since x`. It was written
+# (fddf800af, 2026-08-03) when the work verbs narrowed the shared contract by
+# opting OUT (`omit={"--cursor","--since"}`) while every other stage42 verb was
+# handed those two flags globally — so a sibling accepting them was a real
+# witness that the narrowing was per-verb.
+#
+# `3a09a4b69`, the same day, inverted the mechanism to opt-IN `controls=` and
+# gave `--cursor`/`--since` to NO verb at all. It rewrote
+# `tests/hermes_cli/test_harness_cli.py` to match and never touched this file,
+# so the witness stopped existing and `main` has been red here ever since.
+#
+# The guarantee is not unpinned; it moved to where the mechanism now lives.
+# `test_harness_cli.py::test_stage42_controls_remain_available_on_their_real_owners`
+# pins that a control absent from one verb survives on its owners, and
+# `::test_omit_is_scoped_to_the_verb_that_asked` there pins the one surviving
+# `omit=` call site behaviourally for the first time. The work-lane half of the
+# scoping is pinned directly above by
+# `test_the_flags_these_verbs_do_honor_are_still_accepted` and by
+# `test_a_flag_these_verbs_cannot_honor_is_refused_not_swallowed`.
+#
+# Restating it here as well would be a SECOND mechanism satisfying one pin —
+# the shape that lets a sabotaged gate stay green.
