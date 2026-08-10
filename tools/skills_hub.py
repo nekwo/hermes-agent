@@ -3135,7 +3135,12 @@ class OptionalSkillSource(SkillSource):
                 and "__pycache__" not in f.parts
                 and f.suffix != ".pyc"
             ):
-                rel_path = str(f.relative_to(skill_dir))
+                # POSIX separators: bundle keys are a wire format. Every other
+                # SkillSource derives them from GitHub tree paths or URLs, and
+                # quarantine_bundle / bundle_content_hash / _content_digest all
+                # assume "a/b". str(relative_to(...)) yields "a\\b" on Windows,
+                # which produced a bundle no other component could match.
+                rel_path = f.relative_to(skill_dir).as_posix()
                 try:
                     files[rel_path] = f.read_bytes()
                 except OSError:
@@ -3476,7 +3481,14 @@ def quarantine_bundle(bundle: SkillBundle) -> Path:
         if isinstance(file_content, bytes):
             file_dest.write_bytes(file_content)
         else:
-            file_dest.write_text(file_content, encoding="utf-8")
+            # newline="": write the bundle's characters verbatim. Without it
+            # Path.write_text applies os.linesep translation, so on Windows
+            # every "\n" landed on disk as "\r\n" and the installed tree no
+            # longer hashed to bundle_content_hash(bundle) — check_for_skill_
+            # updates then reported every freshly installed skill as drifted,
+            # and the scan attestation was bound to a digest the installed
+            # bytes never had.
+            file_dest.write_text(file_content, encoding="utf-8", newline="")
 
     return dest
 

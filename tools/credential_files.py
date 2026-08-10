@@ -357,7 +357,13 @@ def iter_skills_files(
             rel = item.relative_to(skills_dir)
             result.append({
                 "host_path": str(item),
-                "container_path": f"{container_root}/{rel}",
+                # ``as_posix()``: this is the path INSIDE the Linux sandbox.
+                # ``str(rel)`` emits the HOST separator, so a Windows host
+                # uploaded every nested skill file under a single flat name
+                # (``skills/cat\myskill\SKILL.md``). A backslash is a legal
+                # Linux filename character, so nothing errored — the files
+                # simply never appeared at the paths the agent reads.
+                "container_path": f"{container_root}/{rel.as_posix()}",
             })
 
     # Include external skill dirs
@@ -373,7 +379,7 @@ def iter_skills_files(
                 rel = item.relative_to(ext_dir)
                 result.append({
                     "host_path": str(item),
-                    "container_path": f"{container_root}/{rel}",
+                    "container_path": f"{container_root}/{rel.as_posix()}",
                 })
     except ImportError:
         pass
@@ -513,7 +519,8 @@ def iter_cache_files(
             rel = item.relative_to(host_dir)
             result.append({
                 "host_path": str(item),
-                "container_path": f"{container_root}/{rel}",
+                # Sandbox-side path — see iter_skills_files for why as_posix().
+                "container_path": f"{container_root}/{rel.as_posix()}",
             })
     return result
 

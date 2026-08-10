@@ -31,7 +31,18 @@ def repo(tmp_path):
     d = tmp_path / "repo"
     d.mkdir()
     _git(d, "init", "-q")
-    (d / "tracked.py").write_text("print('hello')\n")
+    # The fixture drives git with HOME=<repo> (above) while the code under
+    # test runs git with the AMBIENT environment. Any line-ending setting
+    # that differs between those two views makes a freshly committed file
+    # look modified: on this workstation the SYSTEM gitconfig ships
+    # core.autocrlf=true (the Git-for-Windows installer default, seen by the
+    # fixture) and the user's global sets false (seen by collect_working_diff),
+    # so the index was normalized to LF while the worktree kept CRLF.
+    # Repo-local config outranks both and is visible to every git invocation
+    # regardless of HOME, so pin it here; and write the file's bytes
+    # explicitly rather than letting write_text apply os.linesep.
+    _git(d, "config", "core.autocrlf", "false")
+    (d / "tracked.py").write_bytes(b"print('hello')\n")
     _git(d, "add", "-A")
     _git(d, "commit", "-q", "-m", "init")
     return d

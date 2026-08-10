@@ -199,12 +199,23 @@ class TestDetectAudioEnvironment:
         assert any("SSH" in n for n in result.get("notices", []))
 
     def test_wsl_without_pulse_blocks_voice(self, monkeypatch, tmp_path):
-        """WSL without PULSE_SERVER should block voice mode."""
+        """WSL without PULSE_SERVER *and* without the PowerShell TTS fallback
+        should block voice mode.
+
+        The PowerShell fallback arm is pinned explicitly: ``shutil.which`` is
+        forced to find nothing, so ``_wsl_powershell_tts_available()`` is False
+        because ``powershell.exe`` is absent — the exact condition this test
+        means to describe. Left to the host it is not a condition at all: on a
+        Windows workstation ``which("powershell.exe")`` finds a real one and
+        this becomes an assertion about the developer's PATH. The sibling
+        ``TestWSLAudioEnvironmentGate`` owns the available arm.
+        """
         monkeypatch.delenv("SSH_CLIENT", raising=False)
         monkeypatch.delenv("SSH_TTY", raising=False)
         monkeypatch.delenv("SSH_CONNECTION", raising=False)
         monkeypatch.delenv("PULSE_SERVER", raising=False)
         monkeypatch.setattr("tools.voice_mode._pulse_socket_reachable", lambda: False)
+        monkeypatch.setattr("tools.voice_mode.shutil.which", lambda _name: None)
         monkeypatch.setattr("tools.voice_mode._import_audio",
                             lambda: (MagicMock(), MagicMock()))
 
@@ -1407,7 +1418,8 @@ class TestWSL2PowerShellFallback:
             m.wait = MagicMock(return_value=m.returncode)
             return m
 
-        with patch("tools.voice_mode._is_wsl2_env", return_value=True), \
+        with patch("tools.voice_mode.platform.system", return_value="Linux"), \
+             patch("tools.voice_mode._is_wsl2_env", return_value=True), \
              patch("tools.voice_mode._import_audio", side_effect=ImportError), \
              patch("tools.voice_mode.shutil.which",
                    side_effect=lambda x: f"/bin/{x}" if x in ("powershell.exe", "ffmpeg", "ffplay", "sh") else (x if x.startswith("/") else None)), \
@@ -1460,6 +1472,8 @@ class TestWSL2PowerShellFallback:
             return open(path, *args, **kwargs)
 
         with patch("builtins.open", side_effect=_fake_open), \
+             patch("tools.voice_mode.platform.system", return_value="Linux"), \
+             patch("tools.voice_mode._import_audio", side_effect=ImportError), \
              patch("shutil.which", side_effect=lambda x: f"/bin/{x}" if x in ("powershell.exe", "ffmpeg", "ffplay") else None), \
              patch("subprocess.check_output", side_effect=_capture_check_output), \
              patch("subprocess.Popen", return_value=MagicMock(returncode=0, wait=lambda **k: 0)), \
@@ -1500,6 +1514,7 @@ class TestWSL2PowerShellFallback:
             return open(path, *args, **kwargs)
 
         with patch("builtins.open", side_effect=_fake_open), \
+             patch("tools.voice_mode.platform.system", return_value="Linux"), \
              patch("tools.voice_mode._import_audio", side_effect=ImportError), \
              patch("shutil.which", side_effect=lambda x: f"/bin/{x}" if x in ("ffplay", "aplay") else None), \
              patch("subprocess.Popen", side_effect=_capture_popen), \

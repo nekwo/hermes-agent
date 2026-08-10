@@ -6,7 +6,6 @@ gateway deployments.
 """
 
 import os
-import signal
 import subprocess
 import sys
 import threading
@@ -37,10 +36,17 @@ class TestZombieReproduction:
         them — this models the gap that causes zombie accumulation when
         the gateway drops agent references without calling close()."""
         pids = []
+        # Handles are retained for TEARDOWN only (see the finally block).
+        # This does not weaken the "reference dropped" premise below:
+        # Popen.__del__ never kills a child — at most it emits a
+        # ResourceWarning — so whether a handle is alive or garbage makes no
+        # difference to the child, which is precisely what this test asserts.
+        procs = []
 
         try:
             for _ in range(3):
                 proc = _spawn_sleep(60)
+                procs.append(proc)
                 pids.append(proc.pid)
 
             for pid in pids:
@@ -56,10 +62,24 @@ class TestZombieReproduction:
                     f"expected it to survive (demonstrating the bug)"
                 )
         finally:
-            for pid in pids:
+            # Kill through the Popen handles rather than os.kill(pid, SIG*).
+            # Two reasons, both real on this host:
+            #   * signal.SIGKILL does not exist on Windows, so the original
+            #     teardown raised AttributeError AFTER the assertions passed
+            #     and leaked three sleepers on every run;
+            #   * the live-system guard in tests/conftest.py refuses any
+            #     NONZERO os.kill whose PID it cannot prove is inside this
+            #     process's subtree, and on Windows psutil's parent walk for a
+            #     freshly spawned child is unreliable — it failed on roughly
+            #     half of the runs measured here, making the test flaky.
+            # Popen.kill()/wait() needs no signal spelling, is not routed
+            # through os.kill on Windows, and REAPS the child rather than
+            # leaving the OS to.
+            for p in procs:
                 try:
-                    os.kill(pid, signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
+                    p.kill()
+                    p.wait(timeout=5)
+                except Exception:
                     pass
 
     def test_explicit_terminate_reaps_processes(self):

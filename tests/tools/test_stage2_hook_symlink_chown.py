@@ -16,7 +16,7 @@ STAGE2_HOOK = REPO_ROOT / "docker" / "stage2-hook.sh"
 def stage2_text() -> str:
     if not STAGE2_HOOK.exists():
         pytest.skip("docker/stage2-hook.sh not present in this checkout")
-    return STAGE2_HOOK.read_text()
+    return STAGE2_HOOK.read_text(encoding="utf-8")
 
 
 def _chown_hermes_tree_function(text: str) -> str:
@@ -43,7 +43,18 @@ def _run_helper(
         f'chown() {{ printf "%s\\n" "$*" >> "{log_path}"; }}\n'
         f'chown_hermes_tree "{target}"\n'
     )
-    return subprocess.run([shell, "-c", script], capture_output=True, text=True)
+    # The hook's refusal message is UTF-8; ``text=True`` alone decodes with the
+    # locale codec, which on a cp1252 host raises inside subprocess's reader
+    # THREAD. That does not fail the call — it leaves ``stdout`` as None, so the
+    # security assertion below degrades to a TypeError instead of a verdict.
+    # Pin the encoding the hook actually emits.
+    return subprocess.run(
+        [shell, "-c", script],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
 
 
 def test_chown_helper_repairs_real_directories(stage2_text: str, tmp_path: Path) -> None:

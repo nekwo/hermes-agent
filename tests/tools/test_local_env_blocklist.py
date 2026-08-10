@@ -471,6 +471,39 @@ class TestBlocklistCoverage:
         assert extras.issubset(_HERMES_PROVIDER_ENV_BLOCKLIST)
 
 
+@pytest.fixture
+def posix_path_arm(monkeypatch):
+    """Pin the POSIX arm of the PATH builders, on any host.
+
+    ``_make_run_env`` composes its PATH from four helpers that do NOT agree on
+    a separator: ``_append_missing_sane_path_entries`` early-returns on Windows
+    and otherwise joins with a literal ``":"``, while
+    ``_prepend_git_bash_dirs`` / ``_augment_windows_system_path`` /
+    ``_prepend_hermes_bin_dir`` use ``os.pathsep``. On a real POSIX host those
+    coincide, which is what made these tests look platform-neutral — they are
+    not. Faking only ``_IS_WINDOWS`` leaves the helpers disagreeing, so fake
+    the separator too, and clear the Git-Bash bin-dir cache the module memoised
+    from the REAL host (it is a process-lifetime global, so an earlier test in
+    this file leaks it into this one).
+    """
+    from tools.environments import local as local_mod
+
+    monkeypatch.setattr(local_mod, "_IS_WINDOWS", False)
+    monkeypatch.setattr(local_mod, "_git_bash_bin_dirs_cache", None)
+    monkeypatch.setattr(local_mod.os, "pathsep", ":")
+
+
+@pytest.fixture
+def windows_path_arm(monkeypatch):
+    """Pin the WINDOWS arm of the PATH builders, on any host — see
+    ``posix_path_arm`` for why the separator has to move with the flag."""
+    from tools.environments import local as local_mod
+
+    monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
+    monkeypatch.setattr(local_mod, "_git_bash_bin_dirs_cache", None)
+    monkeypatch.setattr(local_mod.os, "pathsep", ";")
+
+
 class TestSanePathIncludesHomebrew:
     """Verify _SANE_PATH includes macOS Homebrew directories."""
 
@@ -491,7 +524,7 @@ class TestSanePathIncludesHomebrew:
         assert "/opt/homebrew/bin" in _SANE_PATH
 
 
-    def test_make_run_env_appends_homebrew_on_minimal_path(self):
+    def test_make_run_env_appends_homebrew_on_minimal_path(self, posix_path_arm):
         """When PATH is minimal, _make_run_env appends missing sane entries."""
         from tools.environments.local import _SANE_PATH, _make_run_env
         minimal_env = {"PATH": "/some/custom/bin"}
@@ -503,7 +536,7 @@ class TestSanePathIncludesHomebrew:
             assert entry in path_entries
 
 
-    def test_make_run_env_real_launchd_path_gains_homebrew(self):
+    def test_make_run_env_real_launchd_path_gains_homebrew(self, posix_path_arm):
         """The literal macOS launchd PATH is the production trigger for #35613."""
         from tools.environments.local import _make_run_env
         launchd_env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin"}
@@ -516,15 +549,24 @@ class TestSanePathIncludesHomebrew:
         assert path_entries[:4] == ["/usr/bin", "/bin", "/usr/sbin", "/sbin"]
 
 
-    def test_make_run_env_preserves_windows_mixed_case_path_key(self, monkeypatch):
+    def test_make_run_env_preserves_windows_mixed_case_path_key(self, windows_path_arm):
         from tools.environments import local as local_mod
         from tools.environments.local import _make_run_env
         windows_env = {"Path": r"C:\Windows\System32;C:\Program Files\Git\bin"}
-        monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
         with patch.object(local_mod.os, "environ", windows_env):
             result = _make_run_env({})
-        assert result["Path"] == windows_env["Path"]
+        # The guarantee is about the KEY: completion writes back to the
+        # caller's own casing and never invents a second, differently-cased
+        # PATH. The VALUE is deliberately NOT preserved verbatim — on a real
+        # Windows host the Git-Bash coreutils dirs are prepended and the
+        # system-tooling dirs appended (both no-ops on a POSIX host, which is
+        # the only reason an equality assertion here ever looked
+        # platform-neutral). What holds everywhere is that the caller's own
+        # entries survive, in their original relative order.
         assert "PATH" not in result
+        entries = result["Path"].split(";")
+        original = windows_env["Path"].split(";")
+        assert [e for e in entries if e in original] == original
 
 
 class TestHermesBinDirOnPath:
@@ -555,16 +597,15 @@ class TestHermesBinDirOnPath:
         local_mod._HERMES_BIN_DIR = None
         assert local_mod._prepend_hermes_bin_dir("/usr/bin:/bin") == "/usr/bin:/bin"
 
-    def test_make_run_env_injects_hermes_bin_dir(self, monkeypatch):
+    def test_make_run_env_injects_hermes_bin_dir(self, posix_path_arm):
         """A gateway env missing the hermes dir gets it back in the subshell PATH."""
         from tools.environments import local as local_mod
         from tools.environments.local import _make_run_env
         self._reset_cache()
         local_mod._HERMES_BIN_DIR = "/opt/hermes/bin"
-        monkeypatch.setattr(local_mod, "_IS_WINDOWS", False)
         with patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=True):
             result = _make_run_env({})
-        entries = result["PATH"].split(os.pathsep)
+        entries = result["PATH"].split(":")
         assert entries[0] == "/opt/hermes/bin"
         assert "/usr/bin" in entries
 

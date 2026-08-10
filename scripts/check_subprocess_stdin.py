@@ -84,6 +84,28 @@ SKIP_DIRS = {
 }
 
 
+def _unpacked_kwargs_set_stdin(
+    lines: list[str], call_index: int, names: list[str], lookback: int = 60
+) -> bool:
+    """True when a dict unpacked into the call assigns stdin.
+
+    ``subprocess.Popen(argv, **popen_kwargs)`` carries its ``stdin`` in the
+    dict, not in the call text, so a purely line-local scan reported a
+    false violation for a call that IS muzzled (``tools/agent_chat_dispatch``
+    builds ``popen_kwargs`` with ``"stdin": subprocess.DEVNULL``). Search the
+    region between the dict's assignment and the call for a stdin key.
+    """
+    start = max(0, call_index - lookback)
+    for name in names:
+        for k in range(start, call_index):
+            if not re.match(rf"\s*{re.escape(name)}\b[^=]*=", lines[k]):
+                continue
+            block = "\n".join(lines[k:call_index])
+            if re.search(r"""["']stdin["']\s*:""", block) or "stdin=" in block:
+                return True
+    return False
+
+
 def find_subprocess_calls(content: str, filepath: str) -> list[dict]:
     """Find all subprocess/os/asyncio calls missing stdin= in content."""
     violations = []
@@ -139,6 +161,14 @@ def find_subprocess_calls(content: str, filepath: str) -> list[dict]:
                         if EXEMPT_MARKER in call_text or EXEMPT_MARKER in preceding:
                             break
 
+                        # ``**kwargs`` unpacking → the stdin= may live in the
+                        # dict being unpacked rather than in the call text.
+                        unpacked = re.findall(r"\*\*(\w+)", call_text)
+                        if unpacked and _unpacked_kwargs_set_stdin(
+                            lines, i, unpacked
+                        ):
+                            break
+
                         violations.append({
                             "file": filepath,
                             "line": i + 1,
@@ -170,7 +200,11 @@ def main() -> int:
             continue
 
         for py_file in dirpath.rglob("*.py"):
-            rel = str(py_file.relative_to(repo_root))
+            # POSIX spelling: KNOWN_SAFE (and every other path constant here)
+            # is written with "/", while ``relative_to`` yields the platform
+            # separator. On Windows the allowlist therefore matched NOTHING
+            # and the guard reported known-safe files as violations.
+            rel = py_file.relative_to(repo_root).as_posix()
 
             # Skip known-safe files.
             if rel in KNOWN_SAFE:
@@ -201,7 +235,8 @@ def main() -> int:
 
         for py_file in resolved.rglob("*.py"):
             rel = str(py_file)
-            if py_file.name in ("conftest.py",) or "/tests/" in rel:
+            # Same POSIX-spelling reason as above for the "/tests/" probe.
+            if py_file.name in ("conftest.py",) or "/tests/" in py_file.as_posix():
                 continue
 
             try:

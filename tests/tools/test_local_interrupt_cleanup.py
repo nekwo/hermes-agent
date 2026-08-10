@@ -66,11 +66,23 @@ def _wait_for_pgid_exit(pgid: int, timeout: float = 60.0) -> bool:
 
 
 def test_kill_process_uses_cached_pgid_if_wrapper_already_exited(monkeypatch):
-    """If the shell wrapper exits before cleanup, still kill its process group.
+    """If the shell wrapper exits before cleanup, still kill the whole tree.
 
-    Without the cached pgid fallback, ``os.getpgid(proc.pid)`` raises for the
-    dead wrapper and cleanup falls back to ``proc.kill()``, which cannot reach
-    orphaned grandchildren still running in the original process group.
+    ``_kill_process`` has two arms behind ``if _IS_WINDOWS``. Each is pinned
+    here on the platform that actually executes it, rather than patching
+    ``os.getpgid`` unconditionally — that patch dies with AttributeError on
+    Windows before the body runs, so the test was unfalsifiable there while
+    still looking like coverage.
+
+    POSIX — ``os.getpgid(proc.pid)`` raises for the dead wrapper, so cleanup
+    must fall back to the pgid cached on the Popen at spawn time and SIGTERM
+    the GROUP. Without that fallback it degrades to ``proc.kill()``, which
+    cannot reach orphaned grandchildren still running in the original group.
+
+    Windows — there are no POSIX process groups; the equivalent tree-kill is
+    ``gateway.status.terminate_pid(pid, force=True)`` (``taskkill /PID <pid>
+    /T /F``). The guarantee is the same one: cleanup must reach the children,
+    not just the wrapper handle.
     """
     env = object.__new__(LocalEnvironment)
     proc = SimpleNamespace(
@@ -78,7 +90,25 @@ def test_kill_process_uses_cached_pgid_if_wrapper_already_exited(monkeypatch):
         _hermes_pgid=67890,
         poll=lambda: 0,
         kill=lambda: None,
+        wait=lambda timeout=None: 0,
     )
+
+    if local_mod._IS_WINDOWS:
+        terminated = []
+
+        def fake_terminate_pid(pid, *, force=False):
+            terminated.append((pid, force))
+
+        monkeypatch.setattr("gateway.status.terminate_pid", fake_terminate_pid)
+
+        env._kill_process(proc)
+
+        assert terminated == [(12345, True)], (
+            "Windows cleanup must force-terminate the wrapper PID's whole "
+            f"tree via terminate_pid; got {terminated!r}"
+        )
+        return
+
     killpg_calls = []
 
     def fake_getpgid(_pid):

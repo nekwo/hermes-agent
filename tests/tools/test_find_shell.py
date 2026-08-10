@@ -24,7 +24,13 @@ class TestFindShellPrefersUserShell:
         fake_zsh = tmp_path / "zsh"
         fake_zsh.touch()
         fake_zsh.chmod(0o755)
-        with patch.dict(os.environ, {"SHELL": str(fake_zsh)}):
+        # ``_find_shell`` consults $SHELL only on its ``not _IS_WINDOWS`` arm,
+        # so pin that arm explicitly — the mirror image of
+        # TestFindShellWindowsBehavior below, which pins the Windows arm from a
+        # POSIX host. Without the patch this asserted nothing on Windows beyond
+        # "the other branch was taken".
+        with patch("tools.environments.local._IS_WINDOWS", False), \
+                patch.dict(os.environ, {"SHELL": str(fake_zsh)}):
             assert _find_shell() == str(fake_zsh)
 
     def test_falls_back_when_shell_not_executable(self, tmp_path):
@@ -53,7 +59,10 @@ class TestFindShellPrefersUserShell:
             fake = tmp_path / name
             fake.touch()
             fake.chmod(0o755)
-            with patch.dict(os.environ, {"SHELL": str(fake)}):
+            # See test_returns_shell_env_when_set_and_exists: the allowlist
+            # lives on the ``not _IS_WINDOWS`` arm, so pin that arm.
+            with patch("tools.environments.local._IS_WINDOWS", False), \
+                    patch.dict(os.environ, {"SHELL": str(fake)}):
                 assert _find_shell() == str(fake), name
 
 

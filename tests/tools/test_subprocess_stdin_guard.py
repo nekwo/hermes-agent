@@ -28,6 +28,12 @@ def test_all_tui_subprocess_calls_have_stdin():
         [sys.executable, str(SCRIPT)],
         capture_output=True,
         text=True,
+        # The script prints ✅/❌. Decoding its output with this host's locale
+        # codec (cp1252 on Windows) raised UnicodeDecodeError inside the reader
+        # thread, so ``result.stdout`` arrived as None and the failure message
+        # below said "None" instead of naming the offending calls.
+        encoding="utf-8",
+        errors="replace",
         timeout=30,
     )
     assert result.returncode == 0, (

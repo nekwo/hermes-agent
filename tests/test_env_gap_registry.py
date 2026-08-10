@@ -76,6 +76,46 @@ def test_every_skip_row_still_describes_a_real_gap(directory: str) -> None:
     )
 
 
+@pytest.mark.parametrize("directory", _FENCED_DIRS)
+def test_no_directory_still_uses_the_mark_only_registry(directory: str) -> None:
+    """Both checks above are blind to ``_ENV_GAPS``, so it must stay empty.
+
+    ``_load_registry`` returns None when a conftest carries no
+    ``_ENV_GAP_SKIPS``, and both preceding tests then SKIP. That is exactly
+    what happened to ``tests/tools`` while it still held 109 mark-only rows:
+    this gate reported green while auditing that directory not at all, and two
+    of its rows had already gone orphaned — ``test_extract_relevant_content_
+    guarded`` and ``test_browser_vision_guarded``, both deleted when their file
+    was rewritten — with nothing failing to say so.
+
+    A mark-only row is unguarded by construction: the only thing watching it is
+    a terminal-summary print, which cannot fail a run. So the gate has to
+    assert the mark-only lane is EMPTY rather than merely preferring probes.
+    """
+    conftest = TESTS_ROOT / directory / "conftest.py"
+    if not conftest.is_file():
+        pytest.skip(f"tests/{directory} has no conftest")
+    spec = importlib.util.spec_from_file_location(
+        f"_env_gap_marks_{directory}", conftest
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    rows = {
+        f"{file_name}::{node_id}"
+        for file_name, groups in (getattr(module, "_ENV_GAPS", None) or {}).items()
+        for _mark, _reason, node_ids in groups
+        for node_id in node_ids
+    }
+    assert not rows, (
+        f"tests/{directory}/conftest.py still registers rows in the mark-only "
+        "_ENV_GAPS registry, which neither the staleness nor the orphan check "
+        "above can see. Move them to _ENV_GAP_SKIPS with a live probe, or "
+        "delete them:\n  " + "\n  ".join(sorted(rows))
+    )
+
+
 def _defined_node_ids(path: Path) -> set[str]:
     """Return ``test_x`` and ``TestC::test_x`` ids defined in ``path``.
 

@@ -439,21 +439,48 @@ def _path_resolution_warning(filepath: str, resolved: Path, task_id: str = "defa
         return None
 
 
+def _posix_match_forms(path: str) -> tuple[str, ...]:
+    """Return every spelling a POSIX-rooted blocklist must be matched against.
+
+    ``os.path.normpath`` rewrites "/dev/zero" to "\\dev\\zero" and "/etc/hosts"
+    to "\\etc\\hosts" wherever ``os.sep`` is a backslash, so a guard that
+    compares only the normalized form matches NONE of the POSIX literals it is
+    built from. It does not fail loudly — it silently answers "not blocked" for
+    exactly the paths it exists to refuse.
+
+    The host platform is not the question. Reads and writes execute through Git
+    Bash / WSL and through the container backends (docker, modal, daytona,
+    singularity, vercel_sandbox), where /dev, /proc and /etc are real and a
+    POSIX path is the normal case rather than the exotic one.
+
+    Adding the POSIX spelling cannot create a false positive against a
+    root-anchored prefix: a native Windows path is always drive- or
+    UNC-anchored ("C:/…", "//host/…") and so can never match an "/etc/"-style
+    root.
+
+    This is deliberately ONE helper. The reconciliation was worked out once for
+    ``_BLOCKED_DEVICE_PATHS`` and left open-coded there, and three hundred lines
+    later ``_check_sensitive_path`` still had the original bug. Duplicating the
+    fix per guard is what let the second instance survive the first fix, so new
+    guards must call this instead of repeating it.
+    """
+    normalized = os.path.normpath(_expand_tilde(path))
+    if os.sep == "/":
+        return (normalized,)
+    posix_form = normalized.replace(os.sep, "/")
+    if posix_form == normalized:
+        return (normalized,)
+    return (normalized, posix_form)
+
+
 def _is_blocked_device_path(path: str) -> bool:
     """Return True for concrete device/fd paths that can hang reads."""
-    normalized = os.path.normpath(_expand_tilde(path))
-    # os.path.normpath() rewrites "/" to "\" on Windows, so "/dev/zero" arrives
-    # here as "\dev\zero" and matches NONE of the POSIX literals below — the
-    # guard silently stopped guarding on Windows. It still MUST guard there:
-    # reads execute through Git Bash / WSL, where /dev/zero and /proc/<pid>/*
-    # are real and `wc -c < /dev/zero` never terminates (an unbounded hang, not
-    # a slow read). Compare the POSIX spelling as well; it can only ever match
-    # a path that is root-anchored at "/dev" or "/proc", so no native Windows
-    # path (always drive- or UNC-anchored) can be caught by it.
-    posix_form = normalized.replace(os.sep, "/") if os.sep != "/" else normalized
-    if normalized in _BLOCKED_DEVICE_PATHS or posix_form in _BLOCKED_DEVICE_PATHS:
+    forms = _posix_match_forms(path)
+    if any(form in _BLOCKED_DEVICE_PATHS for form in forms):
         return True
-    normalized = posix_form
+    # The prefix/suffix tests below are all written against POSIX roots, so
+    # they run on the POSIX spelling (identical to the normalized one on POSIX).
+    normalized = forms[-1]
     # /proc/self/fd/0-2 and /proc/<pid>/fd/0-2 are Linux aliases for stdio
     if normalized.startswith("/proc/") and normalized.endswith(
         ("/fd/0", "/fd/1", "/fd/2")
@@ -609,15 +636,23 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
         resolved = str(_resolve_path_for_task(filepath, task_id))
     except (OSError, ValueError):
         resolved = filepath
-    normalized = os.path.normpath(_expand_tilde(filepath))
+    # Both spellings — see _posix_match_forms. Comparing only the normalized
+    # form let this guard return None for every POSIX path on a Windows host,
+    # including the Linux paths the container backends hand it.
+    forms = _posix_match_forms(filepath)
+    normalized = forms[0]
     _err = (
         f"Refusing to write to sensitive system path: {filepath}\n"
         "Use the terminal tool with sudo if you need to modify system files."
     )
     for prefix in _SENSITIVE_PATH_PREFIXES:
-        if resolved.startswith(prefix) or normalized.startswith(prefix):
+        if resolved.startswith(prefix) or any(
+            form.startswith(prefix) for form in forms
+        ):
             return _err
-    if resolved in _SENSITIVE_EXACT_PATHS or normalized in _SENSITIVE_EXACT_PATHS:
+    if resolved in _SENSITIVE_EXACT_PATHS or any(
+        form in _SENSITIVE_EXACT_PATHS for form in forms
+    ):
         return _err
     # Prevent agents from modifying the Hermes config file directly.
     # approvals.mode and other security settings live here; a malicious or

@@ -1113,9 +1113,18 @@ class TestCuaDriverSessionReconnect:
         class FakeProc:
             returncode = 0
             stderr = ""
-            # Daemon returns a path, not inline base64.
-            stdout = ('{"element_count": 7, "tree_markdown": "- [0] AXButton",'
-                      ' "screenshot_file_path": "%s"}' % str(shot))
+            # Daemon returns a path, not inline base64. Serialize with
+            # json.dumps rather than interpolating the path into a JSON
+            # string literal: a Windows tmp_path such as
+            # C:\Users\...\shot.png carries "\U" and "\b", which are invalid
+            # JSON escapes, so the fixture — not the code under test —
+            # produced unparseable stdout and the CLI fallback failed after
+            # its four retries.
+            stdout = json.dumps({
+                "element_count": 7,
+                "tree_markdown": "- [0] AXButton",
+                "screenshot_file_path": str(shot),
+            })
 
         import subprocess as _sp
         orig_run = _sp.run
@@ -1221,7 +1230,16 @@ class TestCaptureAppFilterNoMatch:
         assert backend._active_pid is None
         assert backend._active_window_id is None
 
-    def test_linux_default_capture_skips_gnome_shell_helper(self):
+    def test_linux_default_capture_skips_gnome_shell_helper(self, monkeypatch):
+        # `_select_capture_window` gates the desktop/shell-helper skip on
+        # `sys.platform == "linux"` (cua_backend.py), so off Linux this test
+        # asserted an arm the host never takes and could not fail for the
+        # right reason. The skip itself is pure list-of-dicts filtering, so
+        # pin the platform the branch describes rather than inheriting the
+        # host's. `_linux_x11_active_window_id` additionally requires
+        # $DISPLAY, so no xprop is spawned here.
+        monkeypatch.setattr(sys, "platform", "linux")
+        monkeypatch.delenv("DISPLAY", raising=False)
         windows = [
             {"app_name": "", "pid": 100, "window_id": 1,
              "is_on_screen": None, "title": "@!1921,0;BDHF", "z_index": 0},

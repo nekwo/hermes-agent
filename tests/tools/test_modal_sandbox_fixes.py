@@ -27,6 +27,27 @@ except ImportError:
     pytest.skip("hermes-agent tools not importable (missing deps)", allow_module_level=True)
 
 
+def _native_host_cwd(*candidates: str) -> str:
+    """Pick the host-cwd spelling this platform treats as already absolute.
+
+    ``_get_env_config`` runs the candidate cwd through ``os.path.abspath``
+    before matching it against ``_HOST_CWD_PREFIXES`` — and that tuple carries
+    BOTH POSIX ("/Users/", "/home/") and Windows ("C:\\\\", "C:/") forms, on
+    purpose, because both hosts are supported. ``abspath`` is platform-
+    flavoured though: on Windows a POSIX-spelled "/Users/x" is rewritten to
+    "<current drive>:\\\\Users\\\\x", so a hardcoded POSIX fixture matched the
+    "C:\\\\" prefix only when the checkout happened to sit on the C: drive. The
+    assertion then turned on a drive letter rather than on any guarantee.
+
+    Select by the MECHANISM — does ``abspath`` leave this spelling alone
+    here? — rather than by platform name.
+    """
+    for candidate in candidates:
+        if os.path.abspath(candidate) == candidate:
+            return candidate
+    raise AssertionError(f"no already-absolute host-cwd spelling among {candidates!r}")
+
+
 # =========================================================================
 # Test 1: Tool resolution includes terminal + file tools
 # =========================================================================
@@ -99,12 +120,14 @@ class TestCwdHandling:
 
     def test_users_path_maps_to_workspace_for_docker_when_enabled(self, monkeypatch):
         """Docker should map the host cwd into /workspace only when explicitly enabled."""
+        host_cwd = _native_host_cwd("/Users/someone/projects",
+                                    r"C:\Users\someone\projects")
         monkeypatch.setenv("TERMINAL_ENV", "docker")
-        monkeypatch.setenv("TERMINAL_CWD", "/Users/someone/projects")
+        monkeypatch.setenv("TERMINAL_CWD", host_cwd)
         monkeypatch.setenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "true")
         config = _tt_mod._get_env_config()
         assert config["cwd"] == "/workspace"
-        assert config["host_cwd"] == "/Users/someone/projects"
+        assert config["host_cwd"] == host_cwd
         assert config["docker_mount_cwd_to_workspace"] is True
 
     def test_windows_path_replaced_for_modal(self, monkeypatch):
@@ -147,13 +170,14 @@ class TestCwdHandling:
 
     def test_docker_default_cwd_maps_current_directory_when_enabled(self, monkeypatch):
         """Docker should use /workspace when cwd mounting is explicitly enabled."""
-        monkeypatch.setattr("tools.terminal_tool.os.getcwd", lambda: "/home/user/project")
+        host_cwd = _native_host_cwd("/home/user/project", r"C:\Users\user\project")
+        monkeypatch.setattr("tools.terminal_tool.os.getcwd", lambda: host_cwd)
         monkeypatch.setenv("TERMINAL_ENV", "docker")
         monkeypatch.setenv("TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE", "true")
         monkeypatch.delenv("TERMINAL_CWD", raising=False)
         config = _tt_mod._get_env_config()
         assert config["cwd"] == "/workspace"
-        assert config["host_cwd"] == "/home/user/project"
+        assert config["host_cwd"] == host_cwd
 
     def test_local_backend_uses_getcwd(self, monkeypatch):
         """Local backend should use os.getcwd(), not /root."""

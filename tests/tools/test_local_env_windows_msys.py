@@ -310,19 +310,31 @@ class TestGitBashCoreutilsOnPath:
         return lambda p: p.replace("\\", "/") in existing
 
     def test_derives_dirs_from_portablegit_layout(self, monkeypatch):
+        # Build every path with os.path.join, because that is how
+        # ``_git_bash_bin_dirs`` derives them: hardcoding the POSIX spelling
+        # pins the SEPARATOR rather than the layout rule this test is named
+        # for, and the function is byte-identical to upstream.
+        root = os.path.join(os.sep, "pg")
+        bash = os.path.join(root, "bin", "bash.exe")
+        mingw64 = os.path.join(root, "mingw64", "bin")
+        usr_bin = os.path.join(root, "usr", "bin")
+        bin_dir = os.path.join(root, "bin")
+        mingw32 = os.path.join(root, "mingw32", "bin")
         monkeypatch.setattr(local_mod, "_IS_WINDOWS", True)
         monkeypatch.setattr(local_mod, "_git_bash_bin_dirs_cache", None)
-        monkeypatch.setattr(local_mod, "_find_bash", lambda: "/pg/bin/bash.exe")
-        existing = {"/pg/mingw64/bin", "/pg/usr/bin", "/pg/bin"}
-        monkeypatch.setattr(local_mod.os.path, "isdir", self._fake_isdir(existing))
+        monkeypatch.setattr(local_mod, "_find_bash", lambda: bash)
+        monkeypatch.setattr(
+            local_mod.os.path, "isdir",
+            self._fake_isdir({mingw64, usr_bin, bin_dir}),
+        )
 
         dirs = _git_bash_bin_dirs()
 
         # usr/bin is the load-bearing coreutils dir; mingw64 precedes it.
-        assert "/pg/usr/bin" in dirs
-        assert dirs.index("/pg/mingw64/bin") < dirs.index("/pg/usr/bin")
+        assert usr_bin in dirs
+        assert dirs.index(mingw64) < dirs.index(usr_bin)
         # Non-existent dirs (mingw32, usr/local/bin) are excluded.
-        assert "/pg/mingw32/bin" not in dirs
+        assert mingw32 not in dirs
 
 
     def test_empty_off_windows(self, monkeypatch):

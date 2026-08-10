@@ -1138,14 +1138,23 @@ class TestBuildSafeEnv:
         with patch.dict("os.environ", fake_env, clear=True):
             result = _build_safe_env(None)
 
-        assert result["ProgramFiles"] == r"C:\Program Files"
-        assert result["ProgramData"] == r"C:\ProgramData"
-        assert result["ProgramW6432"] == r"C:\Program Files"
-        assert result["LOCALAPPDATA"].endswith("Local")
-        assert result["APPDATA"].endswith("Roaming")
-        assert result["USERPROFILE"] == r"C:\Users\alice"
-        assert "GITHUB_TOKEN" not in result
-        assert "OPENAI_API_KEY" not in result
+        # Environment variable NAMES are case-insensitive on Windows, and
+        # ``os.environ`` upper-cases every key it stores there — so the same
+        # ``ProgramFiles`` this test writes comes back out of ``_build_safe_env``
+        # spelled ``PROGRAMFILES``. That is the platform being itself, not the
+        # allowlist failing (``_build_safe_env`` matches on ``key.upper()``
+        # precisely for this reason). Pin the guarantee — the variable is passed
+        # through with its value, the secrets are not — instead of the casing.
+        passed = {k.upper(): v for k, v in result.items()}
+
+        assert passed["PROGRAMFILES"] == r"C:\Program Files"
+        assert passed["PROGRAMDATA"] == r"C:\ProgramData"
+        assert passed["PROGRAMW6432"] == r"C:\Program Files"
+        assert passed["LOCALAPPDATA"].endswith("Local")
+        assert passed["APPDATA"].endswith("Roaming")
+        assert passed["USERPROFILE"] == r"C:\Users\alice"
+        assert "GITHUB_TOKEN" not in passed
+        assert "OPENAI_API_KEY" not in passed
 
 
 # ---------------------------------------------------------------------------

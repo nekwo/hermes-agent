@@ -33,8 +33,17 @@ class TestResolveSafeCwd:
         itself is still a valid recovery target — don't skip it just because
         ``os.path.dirname('/') == '/'`` is the loop's exit condition."""
         sep = os.path.sep
+        # Spell the missing path with the HOST separator. The walk up is
+        # ``os.path.dirname``, which preserves whatever separator it was handed,
+        # so a hardcoded POSIX spelling never reaches the ``sep`` root the
+        # stubbed ``isdir`` recognises — the assertion would then only be
+        # measuring the tempdir fallback.
+        missing = os.path.join(sep, "no", "such", "deep", "dir")
         monkeypatch.setattr(os.path, "isdir", lambda p: p == sep)
-        assert _resolve_safe_cwd("/no/such/deep/dir") == sep
+        # ``_cwd_usable`` is isdir AND access(X_OK); stub both so the test does
+        # not depend on the host's permissions for "/".
+        monkeypatch.setattr(os, "access", lambda p, mode: p == sep)
+        assert _resolve_safe_cwd(missing) == sep
 
 
 def _fake_interrupt():

@@ -8,6 +8,7 @@ and resumed on next creation, preserving the filesystem across sessions.
 import logging
 import math
 import os
+import posixpath
 import shlex
 import threading
 from pathlib import Path
@@ -153,7 +154,13 @@ class DaytonaEnvironment(BaseEnvironment):
 
     def _daytona_upload(self, host_path: str, remote_path: str) -> None:
         """Upload a single file via Daytona SDK."""
-        parent = str(Path(remote_path).parent)
+        # ``remote_path`` names a file inside the Linux sandbox, so its parent
+        # must be taken with posixpath — ``Path`` uses the HOST flavour, and on
+        # Windows that rewrote the whole remote path to backslashes, so the
+        # mkdir created a single literal directory named
+        # ``\root\.hermes\skills`` and the upload landed nowhere the sandbox
+        # reads. ``unique_parent_dirs`` (the bulk lane) already does this.
+        parent = posixpath.dirname(remote_path)
         self._sandbox.process.exec(quoted_mkdir_command([parent]))
         self._sandbox.fs.upload_file(host_path, remote_path)
 

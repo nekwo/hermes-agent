@@ -4,9 +4,24 @@ Tests _wrap_command(), _extract_cwd_from_output(), _embed_stdin_heredoc(),
 init_session() failure handling, and the CWD marker contract.
 """
 
+import shutil
+
 from unittest.mock import MagicMock
 
 from tools.environments.base import BaseEnvironment, _BoundedOutputCollector
+
+
+def _bash_exe() -> str | None:
+    """Resolve the host's bash, or ``None`` when there is none.
+
+    The literal ``/bin/bash`` is only a valid *argv[0]* inside a POSIX (or
+    MSYS) mount namespace. A native Windows ``CreateProcess`` cannot see it and
+    fails with ``WinError 2`` even though a perfectly good bash is installed and
+    on PATH — so a test that probes ``shutil.which("bash")`` and then spawns
+    ``/bin/bash`` anyway tests nothing about the guarantee it claims. Spawn what
+    the probe actually found.
+    """
+    return shutil.which("bash")
 
 
 class _TestableEnv(BaseEnvironment):
@@ -184,11 +199,12 @@ class TestAtomicSnapshotConcurrencyBehavioral:
 
     def _run(self, script):
         import subprocess
-        return subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True)
+        bash = _bash_exe()
+        assert bash is not None, "bash prerequisite not checked before _run"
+        return subprocess.run([bash, "-c", script], capture_output=True, text=True)
 
     def test_concurrent_writes_never_tear_the_snapshot(self, tmp_path):
-        import shutil
-        if not shutil.which("bash"):
+        if not _bash_exe():
             import pytest
             pytest.skip("bash required")
         import shlex
@@ -225,8 +241,7 @@ class TestAtomicSnapshotConcurrencyBehavioral:
     def test_failed_export_does_not_destroy_good_snapshot(self, tmp_path):
         """If ``export -p`` fails, the ``&&``-chained mv must NOT clobber the
         existing good snapshot."""
-        import shutil
-        if not shutil.which("bash"):
+        if not _bash_exe():
             import pytest
             pytest.skip("bash required")
         import shlex
@@ -251,10 +266,10 @@ class TestSnapshotFileModes:
     def test_snapshot_and_cwd_files_are_0600(self, tmp_path):
         import os
         from pathlib import Path
-        import shutil
         import stat
         import subprocess
-        if not shutil.which("bash"):
+        bash = _bash_exe()
+        if not bash:
             import pytest
             pytest.skip("bash required")
 
@@ -268,7 +283,7 @@ class TestSnapshotFileModes:
 
             def _run_bash(self, cmd_string, *, login=False, timeout=120, stdin_data=None):
                 proc = subprocess.Popen(
-                    ["/bin/bash", "-lc", cmd_string],
+                    [bash, "-lc", cmd_string],
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     stdin=subprocess.DEVNULL,
@@ -287,7 +302,10 @@ class TestSnapshotFileModes:
             env.init_session()
 
             user_file = tmp_path / "user-created.txt"
-            env.execute(f"touch {user_file}")
+            # ``as_posix()`` is a no-op on POSIX and keeps the operand
+            # readable by the bash we spawn on Windows, where ``str(Path)``
+            # would hand it backslashes that the shell eats.
+            env.execute(f"touch {user_file.as_posix()}")
 
             assert stat.S_IMODE(user_file.stat().st_mode) == 0o644
             assert stat.S_IMODE(Path(env._snapshot_path).stat().st_mode) == 0o600

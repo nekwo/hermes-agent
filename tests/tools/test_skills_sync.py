@@ -127,7 +127,9 @@ class TestComputeRelativeDest:
     def test_preserves_category_structure(self):
         bundled = Path("/repo/skills")
         dest = _compute_relative_dest(Path("/repo/skills/mlops/axolotl"), bundled)
-        assert str(dest).endswith("mlops/axolotl")
+        # Pin the STRUCTURE — the category dir survives under the skills dir —
+        # not the separator ``str(Path)`` happens to use on this host.
+        assert dest.parts[-2:] == ("mlops", "axolotl")
         # Flat (uncategorized) skills keep their own name.
         assert _compute_relative_dest(Path("/repo/skills/simple"), bundled).name == "simple"
 

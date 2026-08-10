@@ -262,7 +262,16 @@ class TestMemoryStorePersistence:
         monkeypatch.setattr("tools.memory_tool.get_memory_dir", lambda: tmp_path)
         # Write file with duplicates
         mem_file = tmp_path / "MEMORY.md"
-        mem_file.write_text("duplicate entry\n§\nduplicate entry\n§\nunique entry")
+        # encoding="utf-8" is load-bearing: the entry delimiter is "§", and
+        # ``_read_raw_checked`` reads memory files as UTF-8 *by contract*
+        # (invalid UTF-8 counts as unreadable, so nothing is ever rewritten
+        # from a lossy view). Writing with the host locale default — cp1252 on
+        # Windows — puts a lone 0xA7 on disk, the read fails, and the store
+        # loads EMPTY, which is a green-looking way to test nothing.
+        mem_file.write_text(
+            "duplicate entry\n§\nduplicate entry\n§\nunique entry",
+            encoding="utf-8",
+        )
 
         store = MemoryStore()
         store.load_from_disk()

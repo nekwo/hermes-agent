@@ -6,6 +6,7 @@ and Daytona.  Docker and Singularity use bind mounts (live host FS
 view) and don't need this.
 """
 
+import contextlib
 import hashlib
 import logging
 import os
@@ -339,6 +340,29 @@ class FileSyncManager:
                 pass
             lock_fd.close()
 
+    @staticmethod
+    @contextlib.contextmanager
+    def _download_target(suffix: str):
+        """Yield a temp-file PATH that no open handle is holding.
+
+        ``tempfile.NamedTemporaryFile`` keeps its own handle open for the
+        whole ``with`` block. Handing ``tf.name`` to a downloader that opens
+        the path itself works on POSIX but is refused on Windows, where a
+        second ``open()`` of an already-open file raises ``PermissionError``
+        (Errno 13) — which made EVERY ``sync_back`` attempt fail there, three
+        times over, and then be swallowed by the retry loop's ``logger.warning``.
+        Close the handle first and hand out only the path.
+        """
+        fd, name = tempfile.mkstemp(suffix=suffix)
+        os.close(fd)
+        try:
+            yield name
+        finally:
+            try:
+                os.unlink(name)
+            except OSError:
+                pass
+
     def _sync_back_impl(self) -> None:
         """Download, diff, and apply remote changes to host."""
         if self._bulk_download_fn is None:
@@ -350,13 +374,13 @@ class FileSyncManager:
         except Exception:
             file_mapping = []
 
-        with tempfile.NamedTemporaryFile(suffix=".tar") as tf:
-            self._bulk_download_fn(Path(tf.name))
+        with self._download_target(".tar") as tar_path:
+            self._bulk_download_fn(Path(tar_path))
 
             # Defensive size cap: a misbehaving sandbox could produce an
             # arbitrarily large tar. Refuse to extract if it exceeds the cap.
             try:
-                tar_size = os.path.getsize(tf.name)
+                tar_size = os.path.getsize(tar_path)
             except OSError:
                 tar_size = 0
             if tar_size > _SYNC_BACK_MAX_BYTES:
@@ -367,7 +391,7 @@ class FileSyncManager:
                 return
 
             with tempfile.TemporaryDirectory(prefix="hermes-sync-back-") as staging:
-                with tarfile.open(tf.name) as tar:
+                with tarfile.open(tar_path) as tar:
                     tar.extractall(staging, filter="data")
 
                 applied = 0
@@ -378,7 +402,15 @@ class FileSyncManager:
                     for fname in filenames:
                         staged_file = os.path.join(dirpath, fname)
                         rel = os.path.relpath(staged_file, staging)
-                        remote_path = "/" + rel
+                        # The remote is always POSIX, and every key we match
+                        # ``remote_path`` against (``_pushed_hashes``, the
+                        # container_path side of the file mapping) is a POSIX
+                        # path. ``os.path.relpath`` yields native separators,
+                        # so on Windows this built "/root\.hermes\..." and
+                        # NOTHING ever matched: every staged file was dropped
+                        # as "no host mapping" and sync_back applied nothing
+                        # at all, silently.
+                        remote_path = "/" + rel.replace(os.sep, "/")
 
                         pushed_hash = self._pushed_hashes.get(remote_path)
 

@@ -33,6 +33,32 @@ def _reset_resolved_path():
     _tirith_mod._circuit_open = False
 
 
+@pytest.fixture
+def supported_platform():
+    """Pin the platform-support gate to its SUPPORTED arm.
+
+    ``_detect_target()`` returns None on any host tirith ships no release
+    build for (Windows, riscv64, ...), and EVERY entry point short-circuits
+    on that before the behaviour below is reached: ``check_command_security``
+    returns allow, ``ensure_installed`` and ``_resolve_tirith_path`` cache
+    ``_INSTALL_FAILED``/"unsupported_platform", and ``_install_tirith``
+    returns ("unsupported_platform") before it even calls ``mkdtemp``.
+
+    The guarantees these classes pin — exit-code→verdict mapping, fail-open
+    vs fail-closed, findings/summary caps, install-failure caching, warn-once
+    dedupe, .app suppression — are all platform-neutral. So the tests pin the
+    arm they mean to exercise instead of inheriting whichever arm the host
+    happens to select; otherwise they are unfalsifiable where tirith has no
+    build, and the "allow"-expecting ones pass VACUOUSLY.
+
+    ``TestUnsupportedPlatform`` deliberately does NOT use this fixture — it
+    owns the other arm.
+    """
+    with patch("tools.tirith_security._detect_target",
+               return_value="x86_64-unknown-linux-gnu"):
+        yield
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -54,6 +80,7 @@ def _json_stdout(findings=None, summary=""):
 # Exit code → action mapping
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("supported_platform")
 class TestExitCodeMapping:
     @patch("tools.tirith_security.subprocess.run")
     @patch("tools.tirith_security._load_security_config")
@@ -94,6 +121,7 @@ class TestExitCodeMapping:
 # JSON parse failure (exit code still wins)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("supported_platform")
 class TestJsonParseFailure:
     @patch("tools.tirith_security.subprocess.run")
     @patch("tools.tirith_security._load_security_config")
@@ -119,6 +147,7 @@ class TestJsonParseFailure:
 # Operational failures + fail_open
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("supported_platform")
 class TestOSErrorFailOpen:
     @patch("tools.tirith_security.subprocess.run")
     @patch("tools.tirith_security._load_security_config")
@@ -141,6 +170,7 @@ class TestOSErrorFailOpen:
         assert "fail-closed" in result["summary"]
 
 
+@pytest.mark.usefixtures("supported_platform")
 class TestTimeoutFailOpen:
     @patch("tools.tirith_security.subprocess.run")
     @patch("tools.tirith_security._load_security_config")
@@ -153,6 +183,7 @@ class TestTimeoutFailOpen:
         assert "fail-closed" in result["summary"]
 
 
+@pytest.mark.usefixtures("supported_platform")
 class TestUnknownExitCode:
     @patch("tools.tirith_security.subprocess.run")
     @patch("tools.tirith_security._load_security_config")
@@ -169,6 +200,7 @@ class TestUnknownExitCode:
 # Disabled
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("supported_platform")
 class TestDisabled:
     @patch("tools.tirith_security._load_security_config")
     def test_disabled_returns_allow(self, mock_cfg):
@@ -182,6 +214,7 @@ class TestDisabled:
 # Findings cap + summary cap
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("supported_platform")
 class TestCaps:
     @patch("tools.tirith_security.subprocess.run")
     @patch("tools.tirith_security._load_security_config")
@@ -199,6 +232,7 @@ class TestCaps:
 # Programming errors propagate
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("supported_platform")
 class TestProgrammingErrors:
     @patch("tools.tirith_security.subprocess.run")
     @patch("tools.tirith_security._load_security_config")
@@ -214,6 +248,7 @@ class TestProgrammingErrors:
 # ensure_installed
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("supported_platform")
 class TestEnsureInstalled:
     @patch("tools.tirith_security._load_security_config")
     def test_disabled_returns_none(self, mock_cfg):
@@ -292,6 +327,7 @@ class TestUnsupportedPlatform:
 # Failed download caches the miss (Finding #1)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("supported_platform")
 class TestFailedDownloadCaching:
     @patch("tools.tirith_security._mark_install_failed")
     @patch("tools.tirith_security._is_install_failed_on_disk", return_value=False)
@@ -320,6 +356,7 @@ class TestFailedDownloadCaching:
 # Explicit path must not auto-download (Finding #2)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("supported_platform")
 class TestExplicitPathNoAutoDownload:
     @patch("tools.tirith_security._install_tirith")
     @patch("tools.tirith_security.shutil.which", return_value=None)
@@ -483,6 +520,7 @@ class TestInstallArchiveMemberValidation:
 # Background install / non-blocking startup (P2)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("supported_platform")
 class TestBackgroundInstall:
     def test_ensure_installed_non_blocking(self):
         """ensure_installed must return immediately when download needed."""
@@ -527,6 +565,7 @@ class TestBackgroundInstall:
 # Disk failure marker persistence (P2)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("supported_platform")
 class TestDiskFailureMarker:
     def test_expired_marker_ignored(self):
         """Marker older than TTL should be ignored."""
@@ -580,6 +619,7 @@ class TestHermesHomeIsolation:
 # Warn-once dedupe (issue: tirith spawn failed spamming on Windows)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("supported_platform")
 class TestSpawnWarningDedup:
     """When tirith isn't installed yet (background install in flight, or
     install marked failed), every terminal command spammed an identical
@@ -630,6 +670,7 @@ _CFG = {"tirith_enabled": True, "tirith_path": "tirith",
         "tirith_timeout": 5, "tirith_fail_open": True}
 
 
+@pytest.mark.usefixtures("supported_platform")
 class TestAppTldSuppression:
     """warn verdicts whose only finding is lookalike_tld/.app are downgraded to allow."""
 
@@ -688,6 +729,7 @@ class TestIsAppTldFinding:
 # mkdtemp OSError → no_space (disk-full leak prevention)
 # ---------------------------------------------------------------------------
 
+@pytest.mark.usefixtures("supported_platform")
 class TestMkdtempOSErrorNoSpace:
     """When tempfile.mkdtemp raises OSError (e.g. disk full), _install_tirith
     must return (None, "no_space") instead of propagating the exception.
@@ -706,11 +748,16 @@ class TestMkdtempOSErrorNoSpace:
     def test_mkdtemp_oserror_does_not_leak_tempdir(self):
         """No temp directory should remain after a mkdtemp failure."""
         import glob
+        import tempfile
         from tools.tirith_security import _install_tirith
 
-        before = set(glob.glob("/tmp/tirith-install-*"))
+        # The platform's own temp dir, not a hardcoded "/tmp": mkdtemp puts the
+        # dir wherever tempfile.gettempdir() points, so globbing a POSIX
+        # spelling would make this assertion vacuously true off Linux/macOS.
+        pattern = os.path.join(tempfile.gettempdir(), "tirith-install-*")
+        before = set(glob.glob(pattern))
         with patch("tools.tirith_security.tempfile.mkdtemp",
                    side_effect=OSError(28, "No space left on device")):
             _install_tirith(log_failures=False)
-        after = set(glob.glob("/tmp/tirith-install-*"))
+        after = set(glob.glob(pattern))
         assert after - before == set()

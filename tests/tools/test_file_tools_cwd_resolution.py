@@ -89,6 +89,21 @@ def test_absolute_terminal_cwd_used_verbatim(_isolated_cwd, monkeypatch):
     assert resolved == (workspace / "target.py")
 
 
+def _container_spelling(path: Path) -> str:
+    """Spell *path* the way a CONTAINER path is spelled: POSIX-absolute.
+
+    ``tmp_path`` is already POSIX-absolute on Linux/macOS, but on Windows it is
+    drive-anchored (``C:\\Users\\...``) and ``posixpath.isabs`` rejects that —
+    so a raw ``str(tmp_path/...)`` is not a container path at all, and the
+    resolver's container branch treats it as RELATIVE. Dropping the drive
+    anchor gives a spelling that is POSIX-absolute on every platform and, when
+    the process cwd is on the same drive, still names the real directory on
+    this host — so the symlink these tests plant stays live bait for an
+    accidental ``resolve()`` instead of becoming decoration.
+    """
+    return "/" + path.relative_to(path.anchor).as_posix()
+
+
 def test_container_absolute_input_path_does_not_follow_host_symlink(tmp_path, monkeypatch):
     """Docker paths are sandbox-local and must not be host-dereferenced.
 
@@ -103,12 +118,17 @@ def test_container_absolute_input_path_does_not_follow_host_symlink(tmp_path, mo
     container_mount.symlink_to(host_project, target_is_directory=True)
     monkeypatch.setattr(terminal_tool, "_get_env_config", lambda: {"env_type": "docker"})
     monkeypatch.setattr(terminal_tool, "_active_environments", {})
+    # Keeps the drive-anchor-stripped spelling pointing at the real symlink on
+    # Windows (a root-anchored path resolves against the CURRENT drive).
+    monkeypatch.chdir(tmp_path)
 
-    container_path = container_mount / "oilsands-sim" / "README.md"
-    resolved = ft._resolve_path_for_task(str(container_path), task_id="default")
+    container_path = _container_spelling(container_mount / "oilsands-sim" / "README.md")
+    resolved = ft._resolve_path_for_task(container_path, task_id="default")
 
-    assert resolved == container_path
-    assert resolved != (host_project / "oilsands-sim" / "README.md")
+    assert resolved == PurePosixPath(container_path)
+    assert resolved != PurePosixPath(
+        _container_spelling(host_project / "oilsands-sim" / "README.md")
+    )
 
 
 def test_container_path_normalization_uses_posix_path_syntax():
@@ -126,12 +146,18 @@ def test_container_relative_path_keeps_container_cwd_symlink(tmp_path, monkeypat
     container_mount.symlink_to(host_project, target_is_directory=True)
     monkeypatch.setattr(terminal_tool, "_get_env_config", lambda: {"env_type": "docker"})
     monkeypatch.setattr(terminal_tool, "_active_environments", {})
-    terminal_tool.record_session_cwd("default", str(container_mount))
+    monkeypatch.chdir(tmp_path)
+    # A container cwd is POSIX-absolute — see _container_spelling.
+    terminal_tool.record_session_cwd("default", _container_spelling(container_mount))
 
     resolved = ft._resolve_path_for_task("oilsands-sim/README.md", task_id="default")
 
-    assert resolved == container_mount / "oilsands-sim" / "README.md"
-    assert resolved != host_project / "oilsands-sim" / "README.md"
+    assert resolved == PurePosixPath(
+        _container_spelling(container_mount / "oilsands-sim" / "README.md")
+    )
+    assert resolved != PurePosixPath(
+        _container_spelling(host_project / "oilsands-sim" / "README.md")
+    )
 
 
 class _DummyDockerEnvironment:
@@ -153,6 +179,17 @@ def test_resolution_base_always_absolute_no_terminal_cwd(_isolated_cwd, monkeypa
 # ── B-(ii): workspace-divergence warning ────────────────────────────────────
 
 
+def _paths_named_in(warn: str) -> str:
+    """Return *warn* with the ``!r`` path escaping undone.
+
+    ``_path_resolution_warning`` interpolates both paths with ``{...!r}``, and
+    ``repr`` of a Windows path doubles every backslash. Undoing that one
+    transform lets the assertions pin the path the message NAMES rather than
+    the repr spelling of it. No-op on POSIX.
+    """
+    return warn.replace("\\\\", "\\")
+
+
 def test_warning_fires_when_relative_path_escapes_workspace(_isolated_cwd, monkeypatch):
     """Relative path resolving outside the live workspace must warn."""
     workspace, decoy = _isolated_cwd
@@ -166,8 +203,8 @@ def test_warning_fires_when_relative_path_escapes_workspace(_isolated_cwd, monke
 
     assert warn is not None
     assert "OUTSIDE the active workspace" in warn
-    assert str(decoy) in warn
-    assert str(workspace) in warn
+    assert str(decoy) in _paths_named_in(warn)
+    assert str(workspace) in _paths_named_in(warn)
 
 
 # ── Fix C: sentinel TERMINAL_CWD + empty-registry worktree anchoring ─────────
@@ -199,7 +236,7 @@ def test_warning_fires_from_terminal_cwd_when_registry_empty(_isolated_cwd, monk
 
     assert warn is not None
     assert "OUTSIDE the active workspace" in warn
-    assert str(workspace) in warn
+    assert str(workspace) in _paths_named_in(warn)
 
 
 # ── Fix A: write_file / patch report the resolved ABSOLUTE path ──────────────

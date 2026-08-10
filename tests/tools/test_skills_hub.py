@@ -413,6 +413,17 @@ class TestUrlSource:
 
 class TestCheckForSkillUpdates:
     def test_bundle_content_hash_matches_installed_content_hash(self, tmp_path):
+        """A clean install must not be reported as drifted.
+
+        The tree is materialized by the PRODUCTION writer (quarantine_bundle)
+        instead of being hand-written with Path.write_text. Hand-writing made
+        the fixture the author of the on-disk bytes, so it could agree with the
+        bundle by construction while the real install path disagreed: on
+        Windows Path.write_text translates "\\n" to "\\r\\n" and content_hash
+        hashes exact bytes. This version pins the seam that actually decides
+        whether check_for_skill_updates flags a fresh install.
+        """
+        import tools.skills_hub as hub
         from tools.skills_guard import content_hash
 
         bundle = SkillBundle(
@@ -425,11 +436,16 @@ class TestCheckForSkillUpdates:
             identifier="owner/repo/demo-skill",
             trust_level="community",
         )
-        skill_dir = tmp_path / "demo-skill"
-        skill_dir.mkdir()
-        (skill_dir / "SKILL.md").write_text("same content")
-        (skill_dir / "references").mkdir()
-        (skill_dir / "references" / "checklist.md").write_text("- [ ] security\n")
+
+        hub_dir = tmp_path / "skills" / ".hub"
+        with patch.object(hub, "SKILLS_DIR", tmp_path / "skills"), \
+             patch.object(hub, "HUB_DIR", hub_dir), \
+             patch.object(hub, "LOCK_FILE", hub_dir / "lock.json"), \
+             patch.object(hub, "QUARANTINE_DIR", hub_dir / "quarantine"), \
+             patch.object(hub, "AUDIT_LOG", hub_dir / "audit.log"), \
+             patch.object(hub, "TAPS_FILE", hub_dir / "taps.json"), \
+             patch.object(hub, "INDEX_CACHE_DIR", hub_dir / "index-cache"):
+            skill_dir = quarantine_bundle(bundle)
 
         assert bundle_content_hash(bundle) == content_hash(skill_dir)
 
@@ -762,8 +778,12 @@ class TestOptionalSkillSourceBinaryAssets:
         (skill_dir / "assets" / "neutts-cli" / "samples" / "jo.wav").write_bytes(
             wav_bytes
         )
-        (skill_dir / "assets" / "neutts-cli" / "samples" / "jo.txt").write_text(
-            "hello\n", encoding="utf-8"
+        # write_bytes, not write_text: fetch() is a byte-fidelity contract
+        # (it read_bytes() every file), and Path.write_text would translate
+        # the "\n" to os.linesep, so on Windows the fixture asserted bytes it
+        # had not actually written.
+        (skill_dir / "assets" / "neutts-cli" / "samples" / "jo.txt").write_bytes(
+            b"hello\n"
         )
         pycache_dir = skill_dir / "assets" / "neutts-cli" / "src" / "neutts_cli" / "__pycache__"
         pycache_dir.mkdir(parents=True)

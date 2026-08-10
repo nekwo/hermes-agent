@@ -689,14 +689,29 @@ def scan_skill(skill_path: Path, source: str = "community") -> ScanResult:
 
 
 def _content_digest(skill_path: Path) -> str:
-    """Canonical SHA-256 over relative paths and exact file bytes."""
+    """Canonical SHA-256 over relative paths and exact file bytes.
+
+    Files are ordered by their RELATIVE POSIX path — the same key
+    ``tools.skills_hub.bundle_content_hash`` sorts its bundle by. Sorting the
+    ``Path`` objects instead ordered by ``str(path)``, i.e. by the platform's
+    separator and, on Windows, by the case-folded name (``PurePath``
+    comparison is case-insensitive there). ``"SKILL.md"`` sorts BEFORE
+    ``"scripts/run.sh"`` as a string but AFTER ``"scripts\\run.sh"`` as a
+    Windows Path, so the on-disk digest and the in-bundle digest disagreed on
+    Windows for any skill with a subdirectory — making ``content_hash`` and
+    ``bundle_content_hash`` asymmetric on exactly the contract the docstring
+    below promises, and reporting every clean install as drifted.
+    """
     h = hashlib.sha256()
     if skill_path.is_dir():
-        for file_path in sorted(skill_path.rglob("*")):
-            if file_path.is_file():
-                rel = file_path.relative_to(skill_path).as_posix()
-                h.update(rel.encode("utf-8") + b"\x00")
-                h.update(file_path.read_bytes())
+        entries = [
+            (file_path.relative_to(skill_path).as_posix(), file_path)
+            for file_path in skill_path.rglob("*")
+            if file_path.is_file()
+        ]
+        for rel, file_path in sorted(entries, key=lambda entry: entry[0]):
+            h.update(rel.encode("utf-8") + b"\x00")
+            h.update(file_path.read_bytes())
     else:
         h.update(skill_path.read_bytes())
     return h.hexdigest()
