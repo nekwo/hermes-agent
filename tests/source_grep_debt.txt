@@ -1,0 +1,113 @@
+# Source-grep debt register
+# =========================
+#
+# Every POSITIVE `in`-assertion over `inspect.getsource` output that existed
+# when tests/test_no_source_grep_assertions.py landed (2026-08-09). Each line
+# is one assertion that proves characters exist and nothing else — it goes
+# false-GREEN when a symbol is deleted but a mention of it survives, and
+# false-RED when a refactor moves the line to a neighbouring function.
+#
+# grandfathered violations: 83
+#
+# THIS REGISTER IS CLOSED TO ADDITIONS. The gate does not offer a way to
+# ledger a new violation: a new positive source grep is a red build, not a
+# new line here. The number above only ever goes down.
+#
+# Paying one off:
+#   1. Re-aim the assertion at the guarantee — execute the path and assert on
+#      what it returns/emits/raises, or parse the source and assert against a
+#      resolved AST node.
+#   2. Delete its line below and lower the count above.
+# Nothing in the gate needs editing, and a line left behind after the
+# assertion is gone FAILS test_source_grep_ledger_has_no_stale_entries — a
+# register that silently keeps paid-off rows rots exactly like the grep pins
+# it exists to retire.
+#
+# Key: <path>::<enclosing qualname>::<the assertion, as ast.unparse renders it>
+# Line numbers are deliberately absent: they would churn this file on every
+# unrelated edit above a violation, and the churn is what makes a baseline
+# stop being read.
+#
+tests/agent/test_anthropic_oauth_ua_prefix.py::TestOAuthUserAgentPrefix.test_token_refresh_ua_not_throttled::'_OAUTH_TOKEN_USER_AGENT' in source
+tests/agent/test_micro_compaction.py::TestMicroCompaction.test_persist_disabled_agent_never_micro_compacts::'_persist_disabled' in micro_block
+tests/agent/test_nous_oauth_401_guidance.py::test_nous_401_guidance_strings_present::'Nous Portal OAuth token was rejected' in source
+tests/agent/test_nous_oauth_401_guidance.py::test_nous_401_guidance_strings_present::'hermes portal' in source
+tests/agent/test_nous_oauth_401_guidance.py::test_nous_401_guidance_strings_present::'portal.nousresearch.com' in source
+tests/agent/test_nous_oauth_401_guidance.py::test_nous_provider_is_in_oauth_401_set::'"nous"' in source
+tests/agent/test_nous_oauth_401_guidance.py::test_nous_provider_is_in_oauth_401_set::'"openai-codex"' in source
+tests/agent/test_nous_oauth_401_guidance.py::test_nous_provider_is_in_oauth_401_set::'"xai-oauth"' in source
+tests/agent/test_nous_oauth_401_guidance.py::test_nous_provider_is_in_oauth_401_set::needle in source
+tests/agent_runtime/test_mcp_admission_budget.py::test_the_dispatch_seam_the_budget_intercepts_still_exists::'entry.handler(args, **kwargs)' in source
+tests/agent_runtime/test_mcp_admission_budget.py::test_upstream_registers_mcp_tools_synchronously::'is_async=False' in source
+tests/agent_runtime/test_mcp_admission_r2.py::test_the_upstream_warm_registration_seam_exists::'if not new_servers:' in source
+tests/agent_runtime/test_mcp_admission_r2.py::test_the_upstream_warm_registration_seam_exists::'return _existing_tool_names()' in source
+tests/agent_runtime/test_mcp_lane_agent_context_line.py::test_the_role_policy_is_imported_never_re_implemented::'_effective_required_mcp_servers' in source
+tests/agent_runtime/test_persona_chat_wire_boundary.py::test_the_wire_bound_is_documented_as_a_wire_bound::'WIRE BOUND, NOT A PERSISTENCE BOUND' in header
+tests/agent_runtime/test_s24_delivery_directive_residue_removal.py::test_the_live_janitor_still_emits_its_registered_event_type::'worktree.orphans_reaped' in source
+tests/agent_runtime/test_s27_tool_diff_task_goal_flags.py::test_the_live_task_goal_threading_is_kept::'"goal_id": visibility.get("goal_id")' in wire
+tests/agent_runtime/test_s27_tool_diff_task_goal_flags.py::test_the_live_task_goal_threading_is_kept::'"task_id": visibility.get("task_id")' in wire
+tests/agent_runtime/test_s27_tool_diff_task_goal_flags.py::test_the_live_task_goal_threading_is_kept::'goal_id=instance.goal_id' in source
+tests/agent_runtime/test_s27_tool_diff_task_goal_flags.py::test_the_live_task_goal_threading_is_kept::'task_id=instance.current_task_id' in source
+tests/agent_runtime/test_s29_agent_context_shape_retirement.py::test_the_contract_45_situational_hud_observability_field_survives_s39::'"situational_hud"' in source
+tests/agent_runtime/test_s29_persona_runtime_context_lane_removal.py::test_the_profile_runner_namesake_is_untouched::'_blocked_tool_names_for_run(request)' in inspect.getsource(profile_runner)
+tests/agent_runtime/test_s30_retired_mission_chat_task_id_response.py::test_mission_chat_message_still_emits_every_key_the_launcher_reads::kept in source
+tests/agent_runtime/test_s32_persona_runtime_run_lane_residue.py::test_the_shared_progress_import_line_keeps_its_live_sibling::'ChatProgressSink(' in inspect.getsource(persona_runtime)
+tests/agent_runtime/test_s33_repo_baseline_retirement.py::test_the_worktree_creator_trio_stays_live_as_regression_infrastructure::'_ensure_isolated_worktree(' in source
+tests/agent_runtime/test_s33_repo_baseline_retirement.py::test_the_worktree_creator_trio_stays_live_as_regression_infrastructure::'isolated_repo_context_for_run(' in source
+tests/agent_runtime/test_s48_cli_entity_row_consolidation.py::test_the_cli_only_count_is_deliberately_kept::'done' in source
+tests/agent_runtime/test_s48_cli_entity_row_consolidation.py::test_the_new_snapshot_seams_are_extractions_not_a_second_lane::'board_summary_row' in boards
+tests/agent_runtime/test_s48_cli_entity_row_consolidation.py::test_the_new_snapshot_seams_are_extractions_not_a_second_lane::'office_summary_row' in offices
+tests/agent_runtime/test_s48_cli_entity_row_consolidation.py::test_the_projection_bounds_live_in_exactly_one_place::'MAX_BOARD_CARDS_PROJECTED' in board_row
+tests/agent_runtime/test_s48_cli_entity_row_consolidation.py::test_the_projection_bounds_live_in_exactly_one_place::'MAX_OFFICE_ACTORS_PROJECTED' in office_row
+tests/agent_runtime/test_s48_cli_entity_row_consolidation.py::test_the_projection_bounds_live_in_exactly_one_place::'actors_truncated' in office_row
+tests/agent_runtime/test_s48_cli_entity_row_consolidation.py::test_the_projection_bounds_live_in_exactly_one_place::'cards_truncated' in board_row
+tests/agent_runtime/test_s48_cli_entity_row_consolidation.py::test_the_row_delegates_to_its_builder::builder in _row_source(name)
+tests/agent_runtime/test_s54_individual_dead_symbols.py::test_the_delivery_directive_janitor_still_builds_real_worktrees::'worktree' in inspect.getsource(delivery_directive.reap_orphan_worktrees)
+tests/agent_runtime/test_s54_individual_dead_symbols.py::test_the_kept_incident_constant_is_addressed_by_value_somewhere_live::'model_invalid_output' in inspect.getsource(observability)
+tests/agent_runtime/test_s57_unruled_config_debt_removal.py::test_the_surviving_scalar_is_still_there_and_still_read::SURVIVING_SCALAR in inspect.getsource(locks)
+tests/agent_runtime/test_s57_unruled_config_debt_removal.py::test_validation_still_has_a_real_arm_left::'schema_version' in src
+tests/agent_runtime/test_s57_unruled_config_debt_removal.py::test_validation_still_has_a_real_arm_left::SURVIVING_SCALAR in src
+tests/cli/test_cli_active_agent_ref_wiring.py::test_mixin_does_not_use_bare_global_for_active_agent_ref::'_active_agent_ref = self.agent' in src
+tests/cli/test_cli_active_agent_ref_wiring.py::test_mixin_does_not_use_bare_global_for_active_agent_ref::'_cli._active_agent_ref = self.agent' in src
+tests/cli/test_cli_goal_interrupt.py::TestInterruptFlagLifecycle.test_chat_resets_flag_at_entry::'self._last_turn_interrupted = False' in head
+tests/gateway/test_aiohttp_body_caps.py::test_bluebubbles_app_sets_client_max_size::'client_max_size=_WEBHOOK_MAX_BODY_BYTES' in src
+tests/gateway/test_async_delegation_session_binding.py::TestResetHandlerInterruptsDelegations.test_reset_command_calls_interrupt_for_session::'interrupt_for_session' in src
+tests/gateway/test_async_delegation_session_binding.py::TestResetHandlerInterruptsDelegations.test_reset_command_calls_interrupt_for_session::'session_reset' in src
+tests/gateway/test_discord_opus.py::TestOpusFindLibrary.test_uses_find_library_first::'find_library' in source
+tests/gateway/test_platform_http_client_limits.py::TestWhatsappTypingLeakFix.test_bare_await_removed::'async with self._http_session.post(' in src
+tests/gateway/test_slack_mention.py::test_reaction_guard_pinned_to_production_expression::'(is_one_to_one_dm or is_mentioned)' in src
+tests/gateway/test_telegram_prune_stale_topic_binding_31501.py::TestThreadNotFoundFallbackSitesPruneBinding.test_control_message_helper_calls_prune::'_prune_stale_dm_topic_binding' in src
+tests/gateway/test_telegram_prune_stale_topic_binding_31501.py::TestThreadNotFoundFallbackSitesPruneBinding.test_streaming_send_fallback_calls_prune::'_prune_stale_dm_topic_binding' in window
+tests/gateway/test_update_command.py::TestUpdateInHelp.test_update_is_known_command::'"update"' in source
+tests/gateway/test_voice_command.py::TestPlayInVoiceChannelUsesRunningLoop.test_source_uses_get_running_loop::'get_running_loop' in source
+tests/gateway/test_voice_command.py::TestPlaybackTimeout.test_source_has_wait_for_timeout::'_playback_timeout_for_audio' in source
+tests/gateway/test_voice_command.py::TestPlaybackTimeout.test_source_has_wait_for_timeout::'wait_for' in source
+tests/gateway/test_voice_command.py::TestSendVoiceReplyFilename.test_filename_uses_uuid::'build_auto_tts_output_path' in runner_source
+tests/gateway/test_voice_command.py::TestSendVoiceReplyFilename.test_filename_uses_uuid::'uuid' in source
+tests/hermes_cli/test_web_server_pty_import.py::test_pty_bridge_import_block_is_platform_branched::"sys.platform.startswith('win')" in src
+tests/hermes_cli/test_web_server_pty_import.py::test_pty_bridge_import_block_is_platform_branched::'from hermes_cli.pty_bridge import' in src
+tests/hermes_cli/test_web_server_pty_import.py::test_pty_bridge_import_block_is_platform_branched::'from hermes_cli.win_pty_bridge import' in src
+tests/hermes_cli/test_web_server_pty_import.py::test_pty_bridge_import_block_is_platform_branched::'sys.platform.startswith("win")' in src
+tests/plugins/platforms/photon/test_fatal_notify_self_cancel.py::TestBothCallSitesDetached.test_no_inline_notify_awaits_remain::'_dispatch_fatal_notification()' in src
+tests/tools/test_browser_hardening.py::TestCamofoxEvalFix.test_uses_correct_ensure_tab_signature::'body=' in src
+tests/tools/test_browser_hardening.py::TestEmptyStdoutFailure.test_empty_stdout_returns_failure::'returned no output' in src
+tests/tools/test_browser_hardening.py::TestRecordingSessionsThreadSafety.test_start_recording_uses_lock::'_cleanup_lock' in src
+tests/tools/test_browser_hardening.py::TestRecordingSessionsThreadSafety.test_stop_recording_uses_lock::'_cleanup_lock' in src
+tests/tools/test_browser_hardening.py::TestScrollOptimization.test_agent_browser_path_uses_pixel_scroll::'_SCROLL_PIXELS' in src
+tests/tools/test_execute_code_approval_cluster.py::test_both_rpc_threads_use_propagation_helper::'propagate_context_to_thread(_rpc_poll_loop)' in src
+tests/tools/test_execute_code_approval_cluster.py::test_both_rpc_threads_use_propagation_helper::'propagate_context_to_thread(_rpc_server_loop)' in src
+tests/tools/test_mcp_stability.py::TestMCPReloadTimeout.test_reload_timeout_does_not_block_forever::'Thread' in source
+tests/tools/test_mcp_stability.py::TestMCPReloadTimeout.test_reload_timeout_does_not_block_forever::'thread' in source.lower()
+tests/tools/test_modal_sandbox_fixes.py::TestEnsurepipFix.test_modal_environment_creates_image_with_setup_commands::'ensurepip' in source
+tests/tools/test_modal_sandbox_fixes.py::TestEnsurepipFix.test_modal_environment_creates_image_with_setup_commands::'setup_dockerfile_commands' in source
+tests/tools/test_modal_sandbox_fixes.py::TestEnsurepipFix.test_modal_environment_uses_native_sdk::'Sandbox.create.aio' in source
+tests/tools/test_modal_sandbox_fixes.py::TestEnsurepipFix.test_modal_environment_uses_native_sdk::'exec.aio' in source
+tests/tools/test_terminal_config_env_sync.py::test_docker_env_is_bridged_everywhere::'TERMINAL_DOCKER_ENV' in _terminal_tool_env_var_names()
+tests/tools/test_terminal_config_env_sync.py::test_docker_extra_args_is_bridged_everywhere::'TERMINAL_DOCKER_EXTRA_ARGS' in _terminal_tool_env_var_names()
+tests/tools/test_terminal_config_env_sync.py::test_docker_forward_env_is_bridged_everywhere::'TERMINAL_DOCKER_FORWARD_ENV' in _terminal_tool_env_var_names()
+tests/tools/test_terminal_config_env_sync.py::test_docker_mount_cwd_to_workspace_is_bridged_everywhere::'TERMINAL_DOCKER_MOUNT_CWD_TO_WORKSPACE' in _terminal_tool_env_var_names()
+tests/tools/test_terminal_config_env_sync.py::test_docker_orphan_reaper_is_bridged_everywhere::'TERMINAL_DOCKER_ORPHAN_REAPER' in _terminal_tool_env_var_names()
+tests/tools/test_terminal_config_env_sync.py::test_docker_persist_across_processes_is_bridged_everywhere::'TERMINAL_DOCKER_PERSIST_ACROSS_PROCESSES' in _terminal_tool_env_var_names()
+tests/tools/test_terminal_config_env_sync.py::test_docker_run_as_host_user_is_bridged_everywhere::'TERMINAL_DOCKER_RUN_AS_HOST_USER' in _terminal_tool_env_var_names()
+tests/tools/test_terminal_config_env_sync.py::test_docker_volumes_is_bridged_everywhere::'TERMINAL_DOCKER_VOLUMES' in _terminal_tool_env_var_names()
+tests/tools/test_tts_output_timestamp.py::TestDefaultOutputTimestampResolution.test_default_output_path_uses_microsecond_timestamp::'%Y%m%d_%H%M%S_%f' in src
