@@ -772,14 +772,26 @@ _STALE_ENV_GAP_ENTRIES: list[str] = []
 # _ENV_GAP_SKIPS above with a live probe.
 _KNOWN_DEFECTS: dict[str, str] = {
     "test_commands.py": (
-        "KNOWN DEFECT — NOT an environment gap. slack_native_slashes() drops\n"
-        "  entries at _SLACK_MAX_SLASH_COMMANDS (hermes_cli/commands.py:1335) in\n"
-        "  registration order with NO accounting, so which commands survive is a\n"
-        "  function of how many plugins happen to be installed. The retired\n"
-        "  registry row also named the wrong casualty ('version', which lives in\n"
-        "  _SLACK_VIA_HERMES_ONLY); the command actually clamped off is\n"
-        "  'platform'. Which commands get pinned is product curation, so it is an\n"
-        "  owner decision. Do NOT re-file this as host_dependency_gap."
+        "KNOWN DEFECT — NOT an environment gap. Slack allows an app only 50\n"
+        "  slash commands, and the registry no longer fits: 'platform' is a\n"
+        "  gateway command on Telegram/Discord/CLI with NO native Slack slash,\n"
+        "  so test_telegram_parity fails. It is the only CANONICAL casualty:\n"
+        "  every other name the cap drops is an alias whose canonical spelling\n"
+        "  either still holds a native slot or is already a deliberate\n"
+        "  _SLACK_VIA_HERMES_ONLY entry. (The exact casualty set depends on\n"
+        "  which plugins are installed — the WARNING below names them.)\n"
+        "  The silence half of this finding is FIXED: the clamp is accounted\n"
+        "  for at the one branch that performs it, slack_native_slashes() logs\n"
+        "  every dropped name at WARNING, `hermes slack manifest` prints them\n"
+        "  to stderr, and slack_clamped_slashes() returns the same list\n"
+        "  (hermes_cli/commands.py). Visibility is not parity, though — naming\n"
+        "  the casualty does not give /platform a slot, so this red STAYS.\n"
+        "  Closing it means either pinning 'platform' a native slot (something\n"
+        "  else then loses one) or declaring it Slack-via-/hermes in\n"
+        "  _SLACK_VIA_HERMES_ONLY. Which commands get a native slot is product\n"
+        "  curation, so it is an owner decision. The 50 is SLACK'S limit, not\n"
+        "  ours — do not 'fix' this by raising it. Do NOT re-file this as\n"
+        "  host_dependency_gap."
     ),
 }
 

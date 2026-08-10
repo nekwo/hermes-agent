@@ -1294,30 +1294,23 @@ def _sanitize_slack_name(raw: str) -> str:
     return name[:_SLACK_NAME_LIMIT]
 
 
-def slack_native_slashes() -> list[tuple[str, str, str]]:
-    """Return (slash_name, description, usage_hint) triples for Slack.
+def _slack_native_slashes_and_clamped() -> tuple[list[tuple[str, str, str]], list[str]]:
+    """Build the Slack slash list and the accounting of what the cap cost.
 
-    Every gateway-available command in ``COMMAND_REGISTRY`` is surfaced as
-    a standalone Slack slash command (e.g. ``/btw``, ``/stop``, ``/model``),
-    matching Discord's and Telegram's model where every command is a
-    first-class slash and not a ``/hermes <verb>`` subcommand.
+    Returns ``(entries, clamped)``. ``clamped`` names every command that
+    WOULD have been registered but hit ``_SLACK_MAX_SLASH_COMMANDS`` — in the
+    order it was offered, deduplicated. It excludes the deliberate skips
+    (Slack built-ins, ``_SLACK_VIA_HERMES_ONLY``, duplicate names), which are
+    curated decisions rather than coverage silently lost to a cap.
 
-    Both canonical names and aliases are included so users can type any
-    documented form (e.g. ``/background``, ``/bg``, and ``/btw`` all work).
-    Plugin-registered slash commands are included too.
-
-    Commands whose sanitized name collides with a Slack built-in
-    (e.g. ``/status``, ``/me``, ``/join``) are silently skipped.  Users
-    can still reach them via ``/hermes <command>``.
-
-    Results are clamped to Slack's 50-command limit with duplicate-name
-    avoidance. ``/hermes`` is always reserved as the first entry so the
-    legacy ``/hermes <subcommand>`` form keeps working for anything that
-    gets dropped by the clamp or for free-form questions.
+    Single authority for both the list and its accounting: the clamp is
+    recorded at the one branch that performs it, so the two can never
+    disagree about what was dropped.
     """
     overrides = _resolve_config_gates()
     entries: list[tuple[str, str, str]] = []
     seen: set[str] = set()
+    clamped: list[str] = []
 
     # Reserve /hermes as the catch-all top-level command.
     entries.append(("hermes", "Talk to Hermes or run a subcommand", "[subcommand] [args]"))
@@ -1333,6 +1326,11 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
             # Intentionally Slack-via-/hermes only (see _SLACK_VIA_HERMES_ONLY).
             return
         if len(entries) >= _SLACK_MAX_SLASH_COMMANDS:
+            # No silent caps. Record every name the cap costs us so callers
+            # (and `hermes slack manifest`) can say WHICH commands lost their
+            # native slot instead of leaving it to registration order.
+            if slack_name not in clamped:
+                clamped.append(slack_name)
             return
         # Slack description cap is 2000 chars; keep it short.
         entries.append((slack_name, desc[:140], hint[:100]))
@@ -1372,6 +1370,59 @@ def slack_native_slashes() -> list[tuple[str, str, str]]:
     for name, description, args_hint in _iter_plugin_command_entries():
         _add(name, description, args_hint or "")
 
+    return entries, clamped
+
+
+def slack_clamped_slashes() -> list[str]:
+    """Return the command names Slack's 50-slash app cap costs us.
+
+    Empty when everything fits. Non-empty means those commands have NO native
+    Slack slash and are reachable only as ``/hermes <command>`` — which is a
+    real parity gap against Telegram/Discord/CLI, not a formatting detail.
+    Pure query: it does not log, so callers can report the clamp themselves.
+    """
+    return _slack_native_slashes_and_clamped()[1]
+
+
+def slack_native_slashes() -> list[tuple[str, str, str]]:
+    """Return (slash_name, description, usage_hint) triples for Slack.
+
+    Every gateway-available command in ``COMMAND_REGISTRY`` is surfaced as
+    a standalone Slack slash command (e.g. ``/btw``, ``/stop``, ``/model``),
+    matching Discord's and Telegram's model where every command is a
+    first-class slash and not a ``/hermes <verb>`` subcommand.
+
+    Both canonical names and aliases are included so users can type any
+    documented form (e.g. ``/background``, ``/bg``, and ``/btw`` all work).
+    Plugin-registered slash commands are included too.
+
+    Commands whose sanitized name collides with a Slack built-in
+    (e.g. ``/status``, ``/me``, ``/join``) are silently skipped.  Users
+    can still reach them via ``/hermes <command>``.
+
+    Results are clamped to Slack's 50-command limit with duplicate-name
+    avoidance. ``/hermes`` is always reserved as the first entry so the
+    legacy ``/hermes <subcommand>`` form keeps working for anything that
+    gets dropped by the clamp or for free-form questions.
+
+    The clamp is NOT silent: whatever it drops is logged by name at WARNING,
+    because which commands survive would otherwise be a function of how many
+    plugins happen to be installed, discoverable only by diffing manifests.
+    ``slack_clamped_slashes()`` returns the same accounting without logging.
+    """
+    entries, clamped = _slack_native_slashes_and_clamped()
+    if clamped:
+        logger.warning(
+            "Slack's %d-slash-command app cap dropped %d command(s) from the "
+            "native slash list: %s. They stay reachable as `/hermes <command>` "
+            "but have no native slash, so Slack is missing commands other "
+            "surfaces have. To choose the casualties instead of leaving it to "
+            "registration order, curate _SLACK_VIA_HERMES_ONLY / "
+            "_SLACK_PRIORITY_ALIASES in hermes_cli/commands.py.",
+            _SLACK_MAX_SLASH_COMMANDS,
+            len(clamped),
+            ", ".join(f"/{name}" for name in clamped),
+        )
     return entries
 
 

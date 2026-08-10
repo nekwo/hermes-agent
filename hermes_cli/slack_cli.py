@@ -252,6 +252,23 @@ def slack_manifest_command(args) -> int:
 
     payload = json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
 
+    # No silent caps: the manifest just generated may be missing commands
+    # because Slack allows an app only 50 slash commands. The person about to
+    # paste it into Slack is exactly who needs to know which ones lost their
+    # native slot, so say it here as well as in the log.
+    from hermes_cli.commands import _SLACK_MAX_SLASH_COMMANDS, slack_clamped_slashes
+
+    clamped = slack_clamped_slashes()
+    if clamped:
+        print(
+            f"\nNote: Slack allows an app {_SLACK_MAX_SLASH_COMMANDS} slash "
+            f"commands; {len(clamped)} did not fit and are NOT in this "
+            "manifest:\n"
+            f"  {', '.join('/' + name for name in clamped)}\n"
+            "They remain reachable as `/hermes <command>`.",
+            file=sys.stderr,
+        )
+
     write_target = getattr(args, "write", None)
     if write_target is not None:
         if isinstance(write_target, bool) and write_target:
