@@ -137,6 +137,28 @@ def test_a_turn_override_still_wins_in_both_directions():
     assert receipt["source"] == "turn_override"
 
 
+def test_the_receipt_still_says_applied_on_a_reused_actors_second_turn():
+    """``applied`` describes the STATE, not whether this call moved a number.
+
+    The warm serve lane reuses a resident actor across turns, so from turn 2
+    onward the compressor already holds the capped value and nothing is written.
+    A did-it-change reading would report ``applied: False`` with
+    ``model_threshold_already_lower`` on every turn but the first — telling an
+    operator the cap was inactive, and blaming the model, on the exact lane the
+    cap exists for. This is the second call against ONE compressor, which is the
+    only fixture where the two readings disagree.
+    """
+
+    compressor = _luna_compressor()
+    _apply_chat_compaction_threshold(compressor, 150_000, source="lane_default")
+
+    second = _apply_chat_compaction_threshold(compressor, 150_000, source="lane_default")
+
+    assert compressor.threshold_tokens == 150_000
+    assert second["applied"] is True
+    assert "reason" not in second
+
+
 def test_zero_is_the_documented_rollback_and_leaves_the_model_threshold_alone():
     compressor = _luna_compressor()
 

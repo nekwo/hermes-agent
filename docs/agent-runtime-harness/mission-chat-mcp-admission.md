@@ -571,6 +571,50 @@ Measured facts, not estimates (sources in §Established facts):
 | CLI/TUI join bound | 1.5s default | `hermes_cli/config.py:1302` |
 | Repeat registration, same process | near-free (`_servers` short-circuit) | `mcp_tool.py:3041`, `:4818` |
 | Cross-process schema cache | **none exists** | — |
+| WARM admission, 60 tools (register + meter + toolset alias) | **6–8 ms** | measured 2026-08-09, real stdio MCP server |
+| WARM teardown, 60 tools | **0.2–0.3 ms** | same |
+| COLD admission, 60 tools (spawn + handshake + `tools/list`) | **3,197 ms** | same |
+
+### The T2 admission-cache question, answered by measurement (2026-08-09)
+
+`PERF_SEND_ANALYSIS_2026-08-09` (launcher, F2/T2) read `mcp_admission_ms` of
+2,347–2,654 ms on three probe turns, plus an operator-reported ~3.4 s on the
+live serve, and concluded that admission "re-pays registration/listing for an
+unchanged server set + tool manifest every time". It proposed an admission
+cache keyed on (persona, admitted server set, config revision, tool-manifest
+hash) — flagged as needing operator approval, because this is the cross-persona
+isolation chokepoint.
+
+**The premise does not hold, and the three rows above are why.** Registration is
+the 6 ms half; the spawn is the whole cost. The probe turns each ran in a FRESH
+CLI process (`hermes harness mission-chat message --json`), so all three were
+cold — turn-1 numbers reported as steady state. Consequence 2 below already
+stated the property that predicts this, and the live evidence agrees: the
+`launcher_qa` "does not implement the optional 'ping'" line is logged once per
+fresh transport connection, and `profiles/launcher-qa/logs/agent.log` carries
+six of them across two weeks of turns.
+
+A cache of registered tool definitions cannot remove a spawn — a tool call needs
+a live session, not a remembered schema — so it would buy ~6 ms in exchange for
+a way to replay one persona's admission for another. **Not built.**
+
+What was built instead is the attribution, because the thing genuinely missing
+was any way to check this in production: nothing persists `mcp_admission_ms` at
+all (a grep over the whole runtime root returns nothing), so the live 3.4 s
+could only ever be inferred. `McpAdmissionOutcome.transport_paths` now records
+`warm`/`cold` per server — observed under the admission mutex, before this run
+registers anything, using the same liveness predicate `_default_registrar`
+routes on — and the turn's `profile_timing` carries `mcp_admission_transport`
+and `mcp_admission_cold_servers`. A future 3.4 s reading then names the server
+that had to be started instead of indicting the mechanism.
+
+The isolation property the cache would have needed is pinned anyway, aimed at
+the reuse path that actually exists: a warm transport must be re-registered
+under **this** run's `tools.include` filter, never the one it was first
+registered under —
+`tests/agent_runtime/test_send_policy_admission_and_compaction.py::test_a_warm_transport_re_registers_under_THIS_runs_tool_filter`.
+That is the fixture a cache keyed on the server set or the manifest hash would
+fail, since both keys are identical across the two runs it drives.
 
 Design consequences:
 

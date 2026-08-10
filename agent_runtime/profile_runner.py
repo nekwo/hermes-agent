@@ -2650,10 +2650,21 @@ def _apply_chat_compaction_threshold(
     except Exception:  # pragma: no cover - defensive
         effective = model_threshold
     receipt["effective_threshold_tokens"] = effective
-    receipt["applied"] = effective != model_threshold
-    if not receipt["applied"] and source == "lane_default":
-        # A cap that did not move the threshold is the healthy small-window
-        # case, not a silent failure. Name it so a reader is not left inferring.
+    if source == "turn_override":
+        receipt["applied"] = effective != model_threshold
+        return receipt
+    # ``applied`` answers "does the lane cap govern this root", NOT "did this
+    # call change a number". The distinction is load-bearing on the warm serve
+    # lane: a RESIDENT actor is reused across turns (T3), so from turn 2 onward
+    # the compressor already holds the capped value — and a did-it-change reading
+    # would report the cap as inactive, and blame the model for it, on every turn
+    # after the first. The state is the fact; the write is an implementation
+    # detail of the first turn that saw this actor.
+    governing = min(int(threshold_tokens), context_length or int(threshold_tokens))
+    receipt["applied"] = effective == governing
+    if not receipt["applied"]:
+        # A cap that does not govern is the healthy small-window case, not a
+        # silent failure. Name it so a reader is not left inferring.
         receipt["reason"] = "model_threshold_already_lower"
     return receipt
 
