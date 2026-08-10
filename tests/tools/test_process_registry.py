@@ -3,6 +3,7 @@
 import contextlib
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -351,8 +352,13 @@ class TestStdinHelpers:
                 "pipe mode, whose stdin is DEVNULL."
             ),
         )
+        # sys.executable, not a bare "python3": Windows ships the interpreter as
+        # "python" and Git Bash has no "python3" on PATH, so the child exited
+        # 127 and the assertions below measured a command-not-found rather than
+        # PTY stdin. Every other spawn in this file already uses sys.executable.
         session = registry.spawn_local(
-            'python3 -c "import sys; print(sys.stdin.read().strip())"',
+            f'{shlex.quote(sys.executable)} '
+            '-c "import sys; print(sys.stdin.read().strip())"',
             cwd=str(tmp_path),
             use_pty=True,
         )

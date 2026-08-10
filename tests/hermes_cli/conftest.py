@@ -314,11 +314,33 @@ _LOCAL_MODEL_PROBE_REASON = _local_model_probe_failure()
 #     `import shutil`. Deleting the module-level import left it GREEN, which is
 #     precisely the NameError it exists to prevent. It now walks tree.body.
 #
-# What is left below is genuine and probe-backed. Note how much of it is
-# DEPENDENCY-bound rather than platform-bound: croniter, pathspec, pywinpty and
-# windows-curses are all installable, and three of the four are already
-# declared project dependencies. Installing them retires 17 of these rows
-# outright — they are an install gap on this box, not a property of Windows.
+# What is left below is genuine and probe-backed.
+#
+# ── 2026-08-10: the dependency rows were never environment gaps ────────────
+#
+# 17 of the surviving rows were DEPENDENCY-bound rather than platform-bound.
+# croniter==6.0.0, pathspec==1.1.1 and pywinpty>=2.0.0 are all DECLARED in
+# pyproject.toml, and all three were already present in the managed runtime
+# venv (X:\Eternia\.hermes\venvs\hermes-agent) — they were missing only from
+# the ambient C:\Python312 the tests run under. That is a BROKEN LOCAL INSTALL,
+# not a property of this host, and the fence should never have described it as
+# one. Installing them on the ambient interpreter retired 12 rows outright
+# (croniter 2, pathspec 3, pywinpty 7), matching the fire/psutil precedent.
+#
+# The 13th pywinpty row did NOT pass, and what it was hiding is the reason this
+# distinction matters. test_win_pty_bridge's test_cwd_is_respected matched the
+# PTY's RAW bytes for a tmp_path longer than the terminal's 80-column width, so
+# the ConPTY's hard line wrap split the path mid-token and the test pinned
+# terminal geometry rather than the cwd. Fixed with a wrap-aware unwrap.
+#
+# Under that row, in tests/tools, sat a REAL DEFECT — see the commit message.
+# tools/process_registry.py's Windows PTY stdin path was entirely non-functional
+# while reporting {"status": "ok"}, and the ONLY test that would have caught it
+# was gated on the pywinpty that was never installed.
+#
+# windows-curses is the one that stays: it is deliberately NOT declared, and
+# curses_ui.py falls back to a numbered text menu, so it is a real optional
+# extra rather than a broken install.
 #
 # NOT registered, deliberately, and therefore still RED — these are defects,
 # and rule 3 says a defect gets fixed, not fenced:
@@ -563,56 +585,24 @@ _ENV_GAP_SKIPS: EnvGapSkipRegistry = {
             },
         ),
     ],
-    # ── absent modules: DEPENDENCY-bound, retire by installing ─────────────
-    'test_cron.py': [
-        (
-            _no_module("croniter"),
-            "declared dependency 'croniter' (pyproject.toml) is not installed, "
-            'so every cron expression is rejected. DEPENDENCY-bound: installing '
-            'it retires this row',
-            {
-                'TestGatewayNotRunningWarning::test_list_warns_when_gateway_absent',
-            },
-        ),
-    ],
-    'test_gateway_restart_loop.py': [
-        (
-            _no_module("croniter"),
-            "declared dependency 'croniter' is not installed, so the lifecycle "
-            'block message never reaches the assertion. DEPENDENCY-bound',
-            {
-                'TestCreateJobBlocksLifecycleCommands::test_cronjob_tool_surfaces_block_as_error',
-            },
-        ),
-    ],
+    # ── absent modules ─────────────────────────────────────────────────────
+    #
+    # The croniter / pathspec / pywinpty rows that stood here were retired on
+    # 2026-08-10 by INSTALLING those packages on this interpreter — see the
+    # "broken install, not an environment gap" note in the audit block above.
+    # Only the two genuinely-absent modules are left.
     'test_session_browse.py': [
         (
             _no_module("curses"),
-            "the '_curses' extension is unavailable. DEPENDENCY-bound rather "
-            'than platform-bound: the windows-curses wheel provides it and is '
-            'simply not declared in pyproject.toml',
+            "the '_curses' extension is unavailable. Genuinely OPTIONAL, unlike "
+            'the three retired dependency rows: windows-curses is deliberately '
+            'not declared in pyproject.toml, and curses_ui.py:623-624 catches '
+            'the ImportError and returns the numbered text fallback, so the '
+            'pickers degrade by design rather than break. These two tests pin '
+            'the curses branch specifically, which this host cannot select',
             {
                 'TestCursesBrowse::test_escape_cancels',
                 'TestCursesBrowse::test_type_to_filter_then_enter',
-            },
-        ),
-    ],
-    'test_win_pty_bridge.py': [
-        (
-            _no_module("winpty"),
-            "declared dependency 'pywinpty' (pyproject.toml:113, "
-            "sys_platform == 'win32') is not installed on this interpreter. "
-            'DEPENDENCY-bound — these Windows pty tests are the least '
-            'platform-bound rows in the registry',
-            {
-                'TestWinPtyBridgeClose::test_close_terminates_long_running_child',
-                'TestWinPtyBridgeEnv::test_cwd_is_respected',
-                'TestWinPtyBridgeEnv::test_env_is_forwarded',
-                'TestWinPtyBridgeIO::test_read_returns_none_after_child_exits',
-                'TestWinPtyBridgeIO::test_write_sends_to_child_stdin',
-                'TestWinPtyBridgeResize::test_resize_after_close_is_silent',
-                'TestWinPtyBridgeResize::test_resize_does_not_raise_on_live_child',
-                'TestWinPtyBridgeSpawn::test_spawn_returns_bridge_with_pid',
             },
         ),
     ],
@@ -624,20 +614,6 @@ _ENV_GAP_SKIPS: EnvGapSkipRegistry = {
             'test is unreachable here',
             {
                 'TestBuildWebUIFlock::test_contended_lock_without_dist_waits_then_skips_fresh_build',
-            },
-        ),
-        (
-            _no_module("pathspec"),
-            "declared dependency 'pathspec' (pyproject.toml:104) is not "
-            'installed, so _compute_web_ui_content_hash() raises '
-            'ModuleNotFoundError. DEPENDENCY-bound. The SWALLOW that hid this '
-            'was a real defect and is fixed; both halves are now pinned by '
-            'TestWebUIHashFailureIsAccounted, which mocks the import failure '
-            'and therefore runs with or without the package',
-            {
-                'TestWebUIBuildNeeded::test_content_hash_is_deterministic',
-                'TestWebUIBuildNeeded::test_mtime_only_change_is_not_stale',
-                'TestWebUIBuildNeeded::test_write_stamp_creates_file_with_hash',
             },
         ),
     ],

@@ -1756,8 +1756,19 @@ class ProcessRegistry:
             return {"status": "error", "error": str(e)}
 
     def submit_stdin(self, session_id: str, data: str = "") -> dict:
-        """Send data + newline to a running process's stdin (like pressing Enter)."""
-        return self.write_stdin(session_id, data + "\n")
+        """Send data + newline to a running process's stdin (like pressing Enter).
+
+        On a Windows ConPTY the Enter key is a CARRIAGE RETURN. A bare "\\n"
+        does not commit the line, so the child's read()/readline() never
+        returns it — while write_stdin still reports {"status": "ok"} because
+        the bytes did reach the pty. Pipe-mode sessions and POSIX ptys take
+        "\\n" as they always have.
+        """
+        session = self.get(session_id)
+        is_windows_pty = bool(
+            _IS_WINDOWS and session is not None and getattr(session, "_pty", None)
+        )
+        return self.write_stdin(session_id, data + ("\r\n" if is_windows_pty else "\n"))
 
     def request_close_terminal(self, session_id: str) -> dict:
         """Ask the desktop GUI to close the read-only terminal tab mirroring this
@@ -1800,7 +1811,24 @@ class ProcessRegistry:
 
         if hasattr(session, '_pty') and session._pty:
             try:
-                session._pty.sendeof()
+                if _IS_WINDOWS:
+                    # pywinpty's sendeof() writes Ctrl-D (\x04) — the POSIX EOF
+                    # character, inherited from the ptyprocess API it mirrors.
+                    # A Windows console line discipline does not treat Ctrl-D as
+                    # end-of-file; it arrives as an ordinary byte, the child's
+                    # read() never returns 0, and an EOF-driven process blocks
+                    # forever. We nonetheless returned {"status": "ok",
+                    # "message": "EOF sent"} — a false success that left the
+                    # caller (the agent, and the dashboard /chat tab via
+                    # /api/pty) waiting on a child that could never finish.
+                    #
+                    # Ctrl-Z is the Windows EOF. It is honoured only at the
+                    # start of a line and must be committed with a newline, so
+                    # write the whole sequence; submit_stdin already terminates
+                    # its data with "\n", which satisfies the first condition.
+                    session._pty.write("\x1a\r\n")
+                else:
+                    session._pty.sendeof()
                 return {"status": "ok", "message": "EOF sent"}
             except Exception as e:
                 return {"status": "error", "error": str(e)}
