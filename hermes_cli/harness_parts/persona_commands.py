@@ -1567,23 +1567,34 @@ def _bind_mission_chat_delivery_capability() -> bool:
     unkeepable — the tool registered a watcher, the turn ended, and the result
     went nowhere.
 
-    Now the answer is bound to a fact:
+    Now the answer is bound to ONE fact: ``delivery_drain_is_live()``.
 
-    * **serve-hosted turn WITH A LIVE DRAIN ⇒ True.** Both halves are required
-      and the second is the one that was missing: the drain is started
-      best-effort (a runtime that cannot start it still serves), so "this is
-      serve" was a PROXY for "a consumer exists", and a serve whose drain failed
-      to start went on promising delivery no one could perform. The registry
-      that ``persona_chat_root_lease`` already uses tells serve from CLI; the
-      drain's own liveness answers the rest. Neither is a new detector.
-    * **cold one-shot CLI turn ⇒ False.** The process exits when the turn does.
-      ``terminal``'s notifications live only in this process's in-memory queue
-      and die with it, so that promise is simply false. ``delegate_task``'s
-      completions ARE durable and a later serve boot could deliver them — but
-      "your subagent result may reappear in some future session" is a worse
-      outcome than the inline/synchronous fallback ``False`` selects, which
-      returns the result inside the turn that asked for it. Refusing the promise
-      is the honest and the more useful answer.
+    * **a turn in a process with a LIVE DRAIN ⇒ True.** The drain is the
+      consumer the promise names — it walks the durable dispatch store and
+      forges completions back into the sender's thread — and it runs in exactly
+      one place, the serve loop. So its liveness already distinguishes a
+      serve-hosted turn from everything else; no second serve detector needed.
+    * **cold one-shot CLI turn ⇒ False.** No drain was ever started there. The
+      process exits when the turn does: ``terminal``'s notifications live only
+      in this process's in-memory queue and die with it, so that promise is
+      simply false. ``delegate_task``'s completions ARE durable and a later
+      serve boot could deliver them — but "your subagent result may reappear in
+      some future session" is a worse outcome than the inline/synchronous
+      fallback ``False`` selects, which returns the result inside the turn that
+      asked for it. Refusing the promise is the honest and the more useful
+      answer.
+
+    This used to ALSO require ``persona_chat_runtime_registry() is not None``,
+    believing the registry "tells serve from CLI". It does not: the registry
+    exists only when ``agent_runtime.persona_chat.hot_sessions_enabled`` is set,
+    and that flag is an unrelated resident-agent CACHE policy which defaults to
+    False and is off in production. The conjunct therefore answered False on
+    every default-config serve — with the drain alive and perfectly able to
+    deliver — and ``agent_chat_send(wait=false)`` refused on the exact lane it
+    was built for, from the day it shipped (2026-08-09 live incident; see
+    ``test_a_serve_with_hot_sessions_disabled_still_delivers``). A capability
+    must gate on the consumer's own liveness, never on a proxy owned by a
+    different feature.
     """
 
     from agent_runtime.dispatch_delivery import delivery_drain_is_live
@@ -1592,7 +1603,7 @@ def _bind_mission_chat_delivery_capability() -> bool:
         declare_stateless_channel,
     )
 
-    can_deliver = persona_chat_runtime_registry() is not None and delivery_drain_is_live()
+    can_deliver = delivery_drain_is_live()
     if can_deliver:
         declare_async_delivery_channel()
     else:

@@ -124,7 +124,32 @@ def test_a_serve_hosted_turn_with_a_live_drain_can_take_a_late_completion(
 
     from gateway.session_context import async_delivery_supported
 
-    monkeypatch.setattr(harness, "persona_chat_runtime_registry", lambda: object())
+    monkeypatch.setattr(
+        "agent_runtime.dispatch_delivery.delivery_drain_is_live", lambda: True
+    )
+
+    assert harness._bind_mission_chat_delivery_capability() is True
+    assert async_delivery_supported() is True
+
+
+def test_a_serve_with_hot_sessions_disabled_still_delivers(
+    monkeypatch, unbound_capability
+):
+    """The 2026-08-09 incident, pinned: the drain decides, the cache does not.
+
+    ``persona_chat_runtime_registry()`` is None whenever
+    ``persona_chat.hot_sessions_enabled`` is off — which is the DEFAULT and the
+    production state. The binding used to conjoin registry presence with drain
+    liveness believing the registry "tells serve from CLI", so every
+    default-config serve answered False and ``agent_chat_send(wait=false)`` was
+    refused on the exact lane built to host it, from the day it shipped. The
+    capability gates on the consumer's own liveness — a resident-agent cache
+    flag has no vote.
+    """
+
+    from gateway.session_context import async_delivery_supported
+
+    monkeypatch.setattr(harness, "persona_chat_runtime_registry", lambda: None)
     monkeypatch.setattr(
         "agent_runtime.dispatch_delivery.delivery_drain_is_live", lambda: True
     )
@@ -144,7 +169,6 @@ def test_a_serve_whose_drain_never_started_promises_nothing(monkeypatch, unbound
 
     from gateway.session_context import async_delivery_supported
 
-    monkeypatch.setattr(harness, "persona_chat_runtime_registry", lambda: object())
     monkeypatch.setattr(
         "agent_runtime.dispatch_delivery.delivery_drain_is_live", lambda: False
     )
@@ -156,14 +180,18 @@ def test_a_serve_whose_drain_never_started_promises_nothing(monkeypatch, unbound
 def test_a_cold_cli_turn_refuses_the_promise(monkeypatch, unbound_capability):
     """The process exits with the turn, so `terminal` notifications die with it.
 
-    ``delegate_task`` then falls back to its inline path and returns the result
-    INSIDE the turn that asked for it, which is strictly better than a promise
-    that would be kept, if ever, in some future session.
+    No drain is ever started in a one-shot CLI process, so the same liveness
+    fact that admits serve refuses here. ``delegate_task`` then falls back to
+    its inline path and returns the result INSIDE the turn that asked for it,
+    which is strictly better than a promise that would be kept, if ever, in
+    some future session.
     """
 
     from gateway.session_context import async_delivery_supported
 
-    monkeypatch.setattr(harness, "persona_chat_runtime_registry", lambda: None)
+    monkeypatch.setattr(
+        "agent_runtime.dispatch_delivery.delivery_drain_is_live", lambda: False
+    )
 
     assert harness._bind_mission_chat_delivery_capability() is False
     assert async_delivery_supported() is False

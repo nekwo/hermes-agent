@@ -822,10 +822,19 @@ def serve_loop(
         except Exception:
             # Function-local: parts files are exec'd into harness.py's globals,
             # which carry no module logger.
+            #
+            # WARNING, not debug: a drain that fails to start disables the
+            # entire `agent_chat_send(wait=false)` lane for the life of this
+            # serve — every dispatch is refused with
+            # `async_delivery_unavailable` — and at debug level that
+            # feature-killing fact was invisible in every live log
+            # (2026-08-09 dispatch-lane investigation).
             import logging as _logging
 
-            _logging.getLogger(__name__).debug(
-                "dispatch delivery drain did not start", exc_info=True
+            _logging.getLogger(__name__).warning(
+                "dispatch delivery drain did not start; "
+                "agent_chat_send(wait=false) will be refused for this serve",
+                exc_info=True,
             )
         with ThreadPoolExecutor(
             max_workers=max(1, pool_size), thread_name_prefix="harness-serve"
