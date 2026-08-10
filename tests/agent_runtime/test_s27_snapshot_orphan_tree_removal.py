@@ -37,6 +37,8 @@ from __future__ import annotations
 
 import ast
 import inspect
+import pathlib
+import textwrap
 
 from agent_runtime import snapshot
 
@@ -137,34 +139,147 @@ REMOVED_SNAPSHOT_IMPORTS = (
     "simplified_contract",
 )
 
+#: The five names this file verified as external at S27. They are a FLOOR
+#: (asserted on its own below), never the root set itself — see
+#: ``_external_surface_of_snapshot``.
+VERIFIED_EXTERNAL_SURFACE = (
+    "build_snapshot",
+    "write_snapshot",
+    "_parity_envelope",
+    "_default_persona_session_db",
+    "persona_instance_detail_for_id",
+)
+
+#: Production packages a consumer of ``snapshot.py`` can live in, plus the
+#: repo-root modules. ``tests/`` is excluded ON PURPOSE and that exclusion is
+#: this whole family's thesis: a test pin is not a caller (S29 removed two
+#: helpers S27 had rooted on exactly that mistake).
+_PRODUCTION_PACKAGES = (
+    "agent_runtime",
+    "hermes_cli",
+    "gateway",
+    "agent",
+    "tools",
+    "cron",
+    "providers",
+    "scripts",
+    "apps",
+)
+
+_SKIPPED_DIRECTORIES = frozenset(
+    {"tests", "node_modules", ".venv", "venv", "site-packages", "__pycache__", "build", "dist"}
+)
 
 
+def _repo_root() -> pathlib.Path:
+    return pathlib.Path(snapshot.__file__).resolve().parents[1]
 
 
+def _production_sources(root: pathlib.Path):
+    for package in _PRODUCTION_PACKAGES:
+        directory = root / package
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.rglob("*.py")):
+            if _SKIPPED_DIRECTORIES & set(path.relative_to(root).parts):
+                continue
+            yield path
+    yield from sorted(root.glob("*.py"))
 
-def test_no_module_level_name_is_unreachable_from_the_external_surface():
-    """The defect class this stage retires: an island that survives a cut because
-    every reference into it comes from inside itself.
 
-    The roots are the module's verified external surface. Anything not reachable
-    from them (or from module-level executable code) is unreachable by
-    construction, regardless of what a text grep says.
-    """
+def _imported_module(node: ast.ImportFrom, path: pathlib.Path, root: pathlib.Path) -> str:
+    """The absolute dotted module an ``ImportFrom`` reads, relative forms resolved.
 
-    roots = {
-        "build_snapshot",
-        "write_snapshot",
-        "_parity_envelope",
-        "_default_persona_session_db",
-        "persona_instance_detail_for_id",
-        # S27 seeded two more roots here — ``_open_incidents_frame`` and
-        # ``snapshot_section_bytes`` — on the grounds that S18 and
-        # test_snapshot_history_eviction pinned them. A test pin is not a caller:
-        # S29 established both were production-caller-free and removed them, so
-        # the roots are back to the module's five real external names. See
-        # tests/agent_runtime/test_s29_snapshot_dead_local_removal.py.
-    }
-    tree = ast.parse(inspect.getsource(snapshot))
+    ``from .snapshot import X`` inside ``agent_runtime/`` names the same module as
+    ``from agent_runtime.snapshot import X``; a scan that only understood the
+    absolute form would miss half the package's own consumers."""
+
+    if node.level == 0:
+        return node.module or ""
+    package = list(path.relative_to(root).with_suffix("").parts[:-1])
+    if node.level > 1:
+        package = package[: len(package) - (node.level - 1)]
+    return ".".join(package + ([node.module] if node.module else []))
+
+
+def _external_surface_of_snapshot() -> dict[str, set[str]]:
+    """Every production name reached INTO ``agent_runtime.snapshot``, with sites.
+
+    DERIVED, not restated. S27 and S29 both hardcoded a five-name ``roots`` set
+    and walked reachability from it. A hardcoded root set answers "is this name
+    reachable from the surface I wrote down in 2026-07", which stops being the
+    question the moment someone adds a consumer: ``serve.py`` grew a
+    function-local ``from agent_runtime.snapshot import
+    snapshot_build_context_scope`` and both gates reported that live, called
+    helper as an unreachable orphan — a false accusation aimed at production
+    code, for days.
+
+    So the roots are read off the tree instead:
+
+    * ``from agent_runtime.snapshot import X`` / ``from .snapshot import X`` —
+      at ANY depth, function bodies included, which is precisely the form that
+      was being missed.
+    * ``snapshot.X`` attribute loads in a file that binds this module to that
+      name (``from agent_runtime import snapshot``, ``import
+      agent_runtime.snapshot as snapshot``).
+
+    Known over-approximation, bounded and deliberate: a file that both binds the
+    module AND shadows the binding with a local of the same name would
+    contribute that local's attributes too. Over-approximating roots can only
+    HIDE an orphan, never invent one, so it is paired with the anti-vacuity
+    assertions below — the derived set must be non-empty, must contain
+    ``build_snapshot``, must cover the verified five, and the walk itself must
+    demonstrably name a planted orphan."""
+
+    root = _repo_root()
+    this_module = pathlib.Path(snapshot.__file__).resolve()
+    surface: dict[str, set[str]] = {}
+    for path in _production_sources(root):
+        if path.resolve() == this_module:
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+        where = path.relative_to(root).as_posix()
+        module_aliases: set[str] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                imported = _imported_module(node, path, root)
+                if imported == "agent_runtime.snapshot":
+                    for alias in node.names:
+                        if alias.name != "*":
+                            surface.setdefault(alias.name, set()).add(f"{where}:{node.lineno}")
+                elif imported == "agent_runtime":
+                    module_aliases.update(
+                        alias.asname or alias.name
+                        for alias in node.names
+                        if alias.name == "snapshot"
+                    )
+            elif isinstance(node, ast.Import):
+                for alias in node.names:
+                    if alias.name == "agent_runtime.snapshot" and alias.asname:
+                        module_aliases.add(alias.asname)
+        if not module_aliases:
+            continue
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.ctx, ast.Load)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in module_aliases
+            ):
+                surface.setdefault(node.attr, set()).add(f"{where}:{node.lineno}")
+    return surface
+
+
+def _unreachable_module_level_names(source: str, roots) -> list[str]:
+    """Module-level names in ``source`` reachable from neither ``roots`` nor
+    module-level executable code. Pure over text so it can be exercised against
+    a synthetic module — a gate whose walk silently resolves nothing passes
+    forever, which is the failure mode this whole wave is about."""
+
+    tree = ast.parse(source)
     defs: dict[str, ast.AST] = {}
     for node in tree.body:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
@@ -182,22 +297,132 @@ def test_no_module_level_name_is_unreachable_from_the_external_surface():
                 module_level.add(inner.id)
 
     def referenced(node) -> set[str]:
-        names = set()
-        for inner in ast.walk(node):
-            if isinstance(inner, ast.Name) and isinstance(inner.ctx, ast.Load) and inner.id in defs:
-                names.add(inner.id)
-        return names
+        return {
+            inner.id
+            for inner in ast.walk(node)
+            if isinstance(inner, ast.Name) and isinstance(inner.ctx, ast.Load) and inner.id in defs
+        }
 
     seen: set[str] = set()
-    stack = list((roots | module_level) & set(defs))
+    stack = list((set(roots) | module_level) & set(defs))
     while stack:
         current = stack.pop()
         if current in seen:
             continue
         seen.add(current)
         stack.extend(referenced(defs[current]) - seen)
+    return sorted(set(defs) - seen)
 
-    assert sorted(set(defs) - seen) == []
+
+
+
+def test_no_module_level_name_is_unreachable_from_the_external_surface():
+    """The defect class this stage retires: an island that survives a cut because
+    every reference into it comes from inside itself.
+
+    The roots are the module's external surface. Anything not reachable from
+    them (or from module-level executable code) is unreachable by construction,
+    regardless of what a text grep says.
+
+    RE-AIMED 2026-08-09. The roots used to be a hardcoded list of five names —
+    the surface as verified once, at S27 — so the gate could only ever answer
+    "reachable from the 2026-07 surface", and any consumer added afterwards was
+    invisible to it. ``hermes_cli/harness_parts/serve.py`` added a
+    function-local ``from agent_runtime.snapshot import
+    snapshot_build_context_scope`` and this gate began naming that live, called
+    context manager as an unreachable orphan. A cut driven by that verdict would
+    have deleted production code that has a caller.
+
+    The surface is now DERIVED from the production tree (see
+    ``_external_surface_of_snapshot``), so a new external consumer roots itself.
+    The five originally-verified names survive as a separately-asserted FLOOR —
+    ``test_the_verified_external_surface_is_still_external`` — because a
+    derivation that silently resolved nothing would make this assertion pass
+    vacuously forever."""
+
+    surface = _external_surface_of_snapshot()
+    assert surface, (
+        "the external-surface derivation resolved NO consumer of "
+        "agent_runtime.snapshot anywhere in the production tree — the roots are "
+        "empty and this gate would pass vacuously"
+    )
+    assert "build_snapshot" in surface, (
+        "the derivation cannot see build_snapshot, the module's most-imported "
+        f"name; it is not resolving imports. Derived: {sorted(surface)}"
+    )
+
+    unreachable = _unreachable_module_level_names(inspect.getsource(snapshot), surface)
+    assert unreachable == [], (
+        "unreachable from every production consumer of agent_runtime.snapshot: "
+        f"{unreachable}"
+    )
+
+
+def test_the_verified_external_surface_is_still_external():
+    """FLOOR under the derivation above. These five were hand-verified as
+    external at S27; the derived set must still contain every one of them.
+
+    Kept as a floor rather than as the root set: as the root set they were a
+    ceiling that falsely accused ``snapshot_build_context_scope``. As a floor
+    they catch the opposite failure — a derivation that quietly stops resolving
+    imports would produce a small or empty root set, every gate above it would
+    still pass, and the "no orphans" claim would mean nothing."""
+
+    surface = _external_surface_of_snapshot()
+    missing = [name for name in VERIFIED_EXTERNAL_SURFACE if name not in surface]
+    assert missing == [], (
+        f"{missing} were verified external at S27 but the derivation no longer "
+        "finds a production consumer for them — either the consumer left (say "
+        "so in this file) or the scan is broken"
+    )
+    # ``snapshot_build_context_scope`` is the name that exposed the hardcoded
+    # root set. Pinned by its call site so a regression names the file to look at.
+    assert any(
+        site.startswith("hermes_cli/harness_parts/serve.py")
+        for site in surface.get("snapshot_build_context_scope", set())
+    ), (
+        "serve.py no longer imports snapshot_build_context_scope; it was the "
+        "function-local import the old hardcoded roots could not see"
+    )
+
+
+def test_the_reachability_walk_names_a_planted_orphan():
+    """ANTI-VACUITY, run against a synthetic module. The walk above asserts an
+    EMPTY result, which is exactly the shape that keeps passing after the
+    machinery underneath it stops working. Here it is handed a module with a
+    known-good root, a helper that root reaches, module-level executable code
+    that reaches a second helper, and one genuine island — and it must name the
+    island and nothing else."""
+
+    synthetic = textwrap.dedent(
+        '''
+        CAP = 5
+
+        def build_snapshot():
+            return _reached_from_the_root(CAP)
+
+        def _reached_from_the_root(limit):
+            return limit
+
+        def _reached_from_module_level():
+            return 1
+
+        _reached_from_module_level()
+
+        def _orphan_head():
+            return _orphan_tail()
+
+        def _orphan_tail():
+            return _orphan_head()
+        '''
+    )
+
+    assert _unreachable_module_level_names(synthetic, {"build_snapshot"}) == [
+        "_orphan_head",
+        "_orphan_tail",
+    ]
+    # And it does not report an island once the surface reaches it.
+    assert _unreachable_module_level_names(synthetic, {"build_snapshot", "_orphan_head"}) == []
 
 
 def test_the_lookalike_keep_set_survives():
