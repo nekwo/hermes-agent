@@ -7,7 +7,7 @@
 # false-GREEN when a symbol is deleted but a mention of it survives, and
 # false-RED when a refactor moves the line to a neighbouring function.
 #
-# grandfathered violations: 83
+# grandfathered violations: 79
 #
 # THIS REGISTER IS CLOSED TO ADDITIONS. The gate does not offer a way to
 # ledger a new violation: a new positive source grep is a red build, not a
@@ -62,7 +62,6 @@ tests/agent_runtime/test_s48_cli_entity_row_consolidation.py::test_the_projectio
 tests/agent_runtime/test_s48_cli_entity_row_consolidation.py::test_the_projection_bounds_live_in_exactly_one_place::'actors_truncated' in office_row
 tests/agent_runtime/test_s48_cli_entity_row_consolidation.py::test_the_projection_bounds_live_in_exactly_one_place::'cards_truncated' in board_row
 tests/agent_runtime/test_s48_cli_entity_row_consolidation.py::test_the_row_delegates_to_its_builder::builder in _row_source(name)
-tests/agent_runtime/test_s54_individual_dead_symbols.py::test_the_delivery_directive_janitor_still_builds_real_worktrees::'worktree' in inspect.getsource(delivery_directive.reap_orphan_worktrees)
 tests/agent_runtime/test_s54_individual_dead_symbols.py::test_the_kept_incident_constant_is_addressed_by_value_somewhere_live::'model_invalid_output' in inspect.getsource(observability)
 tests/agent_runtime/test_s57_unruled_config_debt_removal.py::test_the_surviving_scalar_is_still_there_and_still_read::SURVIVING_SCALAR in inspect.getsource(locks)
 tests/agent_runtime/test_s57_unruled_config_debt_removal.py::test_validation_still_has_a_real_arm_left::'schema_version' in src
@@ -78,7 +77,6 @@ tests/gateway/test_platform_http_client_limits.py::TestWhatsappTypingLeakFix.tes
 tests/gateway/test_slack_mention.py::test_reaction_guard_pinned_to_production_expression::'(is_one_to_one_dm or is_mentioned)' in src
 tests/gateway/test_telegram_prune_stale_topic_binding_31501.py::TestThreadNotFoundFallbackSitesPruneBinding.test_control_message_helper_calls_prune::'_prune_stale_dm_topic_binding' in src
 tests/gateway/test_telegram_prune_stale_topic_binding_31501.py::TestThreadNotFoundFallbackSitesPruneBinding.test_streaming_send_fallback_calls_prune::'_prune_stale_dm_topic_binding' in window
-tests/gateway/test_update_command.py::TestUpdateInHelp.test_update_is_known_command::'"update"' in source
 tests/gateway/test_voice_command.py::TestPlayInVoiceChannelUsesRunningLoop.test_source_uses_get_running_loop::'get_running_loop' in source
 tests/gateway/test_voice_command.py::TestPlaybackTimeout.test_source_has_wait_for_timeout::'_playback_timeout_for_audio' in source
 tests/gateway/test_voice_command.py::TestPlaybackTimeout.test_source_has_wait_for_timeout::'wait_for' in source
@@ -94,8 +92,6 @@ tests/tools/test_browser_hardening.py::TestEmptyStdoutFailure.test_empty_stdout_
 tests/tools/test_browser_hardening.py::TestRecordingSessionsThreadSafety.test_start_recording_uses_lock::'_cleanup_lock' in src
 tests/tools/test_browser_hardening.py::TestRecordingSessionsThreadSafety.test_stop_recording_uses_lock::'_cleanup_lock' in src
 tests/tools/test_browser_hardening.py::TestScrollOptimization.test_agent_browser_path_uses_pixel_scroll::'_SCROLL_PIXELS' in src
-tests/tools/test_execute_code_approval_cluster.py::test_both_rpc_threads_use_propagation_helper::'propagate_context_to_thread(_rpc_poll_loop)' in src
-tests/tools/test_execute_code_approval_cluster.py::test_both_rpc_threads_use_propagation_helper::'propagate_context_to_thread(_rpc_server_loop)' in src
 tests/tools/test_mcp_stability.py::TestMCPReloadTimeout.test_reload_timeout_does_not_block_forever::'Thread' in source
 tests/tools/test_mcp_stability.py::TestMCPReloadTimeout.test_reload_timeout_does_not_block_forever::'thread' in source.lower()
 tests/tools/test_modal_sandbox_fixes.py::TestEnsurepipFix.test_modal_environment_creates_image_with_setup_commands::'ensurepip' in source
