@@ -3500,7 +3500,13 @@ def _cmd_doctor(args) -> int:
         ),
     )
     data = {
+        # Command status ("the doctor ran to completion"), NOT the runtime's
+        # health — the refusal branch above spends the same key on a rejected
+        # invocation. ``healthy`` is the verdict a triage reader wants, mirrored
+        # up from ``hygiene.ok`` so `--json | jq .healthy` cannot read the
+        # command's exit as an all-clear over an unexamined body.
         "ok": True,
+        "healthy": bool(hygiene.get("ok", False)),
         "runtime_resolution": {
             "store_root": str(resolution.store_root),
             "layer": resolution.layer,
@@ -3522,19 +3528,66 @@ def _cmd_doctor(args) -> int:
                 f"{marker} {row['layer']:<7} value={row['value'] or '<unset>'} "
                 f"exists={row['exists']}"
             )
-        counts = hygiene["summary"]["finding_counts"]
-        event_log = hygiene["findings"]["event_log"]
+        summary = hygiene.get("summary") or {}
+        counts = summary.get("finding_counts") or {}
+        event_log = hygiene.get("findings", {}).get("event_log") or {}
         print("Harness doctor")
+        # THE verdict line, first. Text mode printed two counts and an event-log
+        # size — three of the five examined sections never reached the operator
+        # at all, so a diverged binding or an unreadable model-authority config
+        # was invisible on the default path. Every section reports here now, and
+        # ``unknown`` is stated as unknown rather than folded into a clean run.
+        verdict = (
+            "ok"
+            if hygiene.get("ok")
+            else "NEEDS FIX"
+            if summary.get("needs_fix")
+            else "UNKNOWN"
+        )
+        print(f"verdict: {verdict}")
         # Render exactly the findings the report emits. The mission-era counts
         # (runs/workers/open tasks/incidents/compactable rows) went away with
         # the lane; reading them here is what made the default path crash.
-        print("findings: " + " ".join(f"{name}={count}" for name, count in counts.items()))
+        # ``None`` means the class was not observed — say so, never print 0.
         print(
-            "event log: "
-            f"size={event_log['size_bytes']} bytes lines={event_log['line_count']} "
-            f"archive_slices={event_log['archived_event_slices']} "
-            f"index={event_log['index_health']}"
+            "findings: "
+            + " ".join(
+                f"{name}={'unknown' if count is None else count}"
+                for name, count in counts.items()
+            )
         )
+        # Where each section keeps its own error text. ``snapshot_null_id_rows``
+        # is a bare list of rows, so its build outcome lives one key over.
+        detail_sources = {
+            "orphan_worktrees": hygiene.get("findings", {}).get("orphan_worktrees"),
+            "snapshot_null_id_rows": hygiene.get("findings", {}).get("snapshot_build"),
+            "event_log": hygiene.get("findings", {}).get("event_log"),
+            "model_authority": hygiene.get("model_authority"),
+            "persona_binding": hygiene.get("persona_binding"),
+        }
+        for name, health in sorted((summary.get("section_health") or {}).items()):
+            if health in (None, "ok"):
+                continue
+            source = detail_sources.get(name)
+            detail = source.get("error") if isinstance(source, dict) else None
+            print(f"  {name}: {health}" + (f" ({detail})" if detail else ""))
+        if event_log.get("health") == "unknown":
+            print(f"event log: unknown ({event_log.get('error') or 'unreadable'})")
+        else:
+            print(
+                "event log: "
+                f"size={event_log.get('size_bytes')} bytes lines={event_log.get('line_count')} "
+                f"archive_slices={event_log.get('archived_event_slices')} "
+                f"index={event_log.get('index_health')}"
+            )
+        binding = hygiene.get("persona_binding") or {}
+        if binding.get("diverged_count"):
+            print(
+                f"persona binding: {binding['diverged_count']} diverged — "
+                f"{binding.get('remediation', '')}"
+            )
+        for notice in (hygiene.get("model_authority") or {}).get("notices") or []:
+            print(f"model authority: {notice}")
         if getattr(args, "fix", False):
             mode = "dry run" if getattr(args, "dry_run", False) else "applied"
             print(f"repairs: {mode}")
