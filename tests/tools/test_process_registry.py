@@ -1,5 +1,6 @@
 """Tests for tools/process_registry.py — ProcessRegistry query methods, pruning, checkpoint."""
 
+import contextlib
 import json
 import os
 import signal
@@ -334,6 +335,22 @@ class TestStdinHelpers:
         lockout (#17959). For interactive stdin → PTY mode is now the only
         supported path.
         """
+        # spawn_local's PTY branch imports a pty backend per platform:
+        # ``ptyprocess`` on POSIX, ``pywinpty`` on Windows (both declared in
+        # pyproject.toml). When neither is importable it catches the
+        # ImportError and falls back to pipe mode, where non-PTY stdin is
+        # DEVNULL by design (#17959) — so submit_stdin correctly returns
+        # "error" and this test would be asserting against the fallback, not
+        # against PTY stdin. Gate on the backend rather than on the platform:
+        # Windows CAN run this once pywinpty is installed.
+        pytest.importorskip(
+            "winpty" if sys.platform == "win32" else "ptyprocess",
+            reason=(
+                "PTY stdin needs a pty backend: pywinpty (ConPTY) on Windows, "
+                "ptyprocess on POSIX. Without one spawn_local falls back to "
+                "pipe mode, whose stdin is DEVNULL."
+            ),
+        )
         session = registry.spawn_local(
             'python3 -c "import sys; print(sys.stdin.read().strip())"',
             cwd=str(tmp_path),
@@ -597,10 +614,22 @@ class TestPopenLeakOnSetupFailure:
         # and a real risk of SIGKILLing an innocent process group. Force the
         # ProcessLookupError fallback so the test deterministically exercises
         # proc.kill() and never issues a real killpg.
+        #
+        # os.getpgid is POSIX-only — patching it unconditionally raises
+        # AttributeError on Windows before the body ever runs. There is
+        # nothing to force there anyway: spawn_local's cleanup is guarded by
+        # `if not _IS_WINDOWS`, so Windows goes straight to proc.kill(). Gate
+        # the patch on the attribute and BOTH branches of that guard stay
+        # pinned, each on the platform that actually executes it.
+        force_killpg_fallback = (
+            patch("os.getpgid", side_effect=ProcessLookupError)
+            if hasattr(os, "getpgid")
+            else contextlib.nullcontext()
+        )
         with patch("tools.process_registry._find_shell", return_value="/bin/bash"), \
              patch("subprocess.Popen", return_value=proc), \
              patch("threading.Thread", side_effect=boom), \
-             patch("os.getpgid", side_effect=ProcessLookupError), \
+             force_killpg_fallback, \
              patch.object(registry, "_write_checkpoint"):
             with pytest.raises(RuntimeError, match="Thread creation failed"):
                 registry.spawn_local("echo hello", cwd="/tmp")
@@ -756,7 +785,13 @@ class TestKillProcess:
         s.detached = True
         registry._running[s.id] = s
 
-        terminate_calls = []
+        # PIDs the platform's kill primitive was actually aimed at. The
+        # guarantee — a detached session is killed by its HOST pid — is
+        # platform-neutral; only the primitive differs, so mock whichever one
+        # ``_terminate_host_pid`` really reaches rather than asserting the
+        # POSIX seam everywhere (that seam is never constructed on Windows,
+        # which made this assertion unfalsifiable there).
+        killed_pids = []
 
         class FakeProcess:
             def __init__(self, pid):
@@ -764,9 +799,23 @@ class TestKillProcess:
             def children(self, recursive=False):
                 return []
             def terminate(self):
-                terminate_calls.append(("terminate", self.pid))
+                killed_pids.append(self.pid)
+
+        def _fake_taskkill(argv, **_kwargs):
+            # ["taskkill", "/PID", "<pid>", "/T", "/F"]
+            killed_pids.append(int(argv[argv.index("/PID") + 1]))
+            return subprocess.CompletedProcess(argv, 0, "", "")
 
         import psutil as _psutil
+
+        if sys.platform == "win32":
+            # Windows tree-kill shells out to ``taskkill /PID <pid> /T /F``
+            # and returns before psutil is imported (_terminate_host_pid).
+            kill_seam = patch("tools.process_registry.subprocess.run", _fake_taskkill)
+        else:
+            kill_seam = patch.object(
+                _psutil, "Process", side_effect=lambda pid: FakeProcess(pid)
+            )
 
         try:
             # Post-#21561: liveness probe routes through
@@ -779,11 +828,11 @@ class TestKillProcess:
             with patch("gateway.status._pid_exists", return_value=True), \
                  patch.object(ProcessRegistry, "_daemon_term_grace_seconds",
                               staticmethod(lambda: 0.0)), \
-                 patch.object(_psutil, "Process", side_effect=lambda pid: FakeProcess(pid)):
+                 kill_seam:
                 result = registry.kill_process(s.id)
 
             assert result["status"] == "killed"
-            assert ("terminate", 424242) in terminate_calls
+            assert killed_pids == [424242]
         finally:
             registry._running.pop(s.id, None)
 

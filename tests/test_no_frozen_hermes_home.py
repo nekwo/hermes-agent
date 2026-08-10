@@ -168,14 +168,21 @@ FROZEN_LEDGER: dict[str, tuple[frozenset[str], str]] = {
         frozenset({"CHECKPOINT_BASE"}),
         "upstream tool: checkpoint store root",
     ),
-    "tools/environments/modal.py": (
-        frozenset({"_SNAPSHOT_STORE"}),
-        "upstream tool: modal snapshot store",
-    ),
-    "tools/environments/singularity.py": (
-        frozenset({"_SNAPSHOT_STORE"}),
-        "upstream tool: singularity snapshot store",
-    ),
+    # ``tools/environments/modal.py`` used to sit here for ``_SNAPSHOT_STORE``,
+    # for exactly the reason recorded for ``singularity.py`` below and on the
+    # same import chain — ``tools/terminal_tool.py`` imports both, so
+    # ``spawn_local`` resolved BOTH homes at first-call import time. Retiring
+    # only one just moved the traceback down a frame. Now the lazy
+    # ``_snapshot_store_path()``.
+    # ``tools/environments/singularity.py`` used to sit here for
+    # ``_SNAPSHOT_STORE``. The freeze was not merely untidy: this module is
+    # imported at the top of ``tools/terminal_tool.py``, which
+    # ``ProcessRegistry.spawn_local`` imports on its first call, so the
+    # import-time ``get_hermes_home()`` ran inside whatever environment the
+    # first spawn happened to have. A caller that legitimately scrubs the
+    # environment took a ``RuntimeError: Could not determine home directory``
+    # out of a *snapshot-store path* it never touches. Now the lazy
+    # ``_snapshot_store_path()``, matching ``vercel_sandbox.py``.
     # ``tools/process_registry.py`` used to sit here for ``CHECKPOINT_PATH``.
     # The Activity projection made the freeze load-bearing rather than merely
     # untidy — a second process reading the checkpoint has to agree with the

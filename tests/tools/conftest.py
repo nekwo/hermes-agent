@@ -210,27 +210,32 @@ _ENV_GAPS: EnvGapRegistry = {
         # 'TestPidReuseGuard::test_terminate_refuses_when_start_time_mismatches'
         # was retired 2026-08-01 (ledger item 7): the start-time comparison it
         # guards is a psutil read, so psutil==7.2.2 made it pass.
-        (_WINDOWS, _POSIX_PROC, {
-            'TestStdinHelpers::test_close_stdin_allows_eof_driven_process_to_finish',
-            # Re-diagnosed 2026-08-01 (ledger item 7): was registered as
-            # "psutil not installed". With psutil==7.2.2 now installed on the
-            # ambient interpreter the real cause is visible, and it is a
-            # platform property, not a host gap — patching `os.getpgid` raises
-            # AttributeError because Windows `os` has no such attribute.
-            'TestPopenLeakOnSetupFailure::test_popen_killed_when_thread_creation_fails',
-        }),
-        # Re-diagnosed 2026-08-01 (ledger item 7): also previously registered
-        # as "psutil not installed". psutil is installed now and the assertion
-        # still cannot hold, because the seam it mocks is POSIX-only.
-        (_WINDOWS, 'the test mocks `psutil.Process(pid).terminate()` and '
-         'asserts it was called, but that is the POSIX kill path only: '
-         '`ProcessRegistry._terminate_host_pid` shells out to '
-         '`taskkill /PID <pid> /T /F` on Windows (process_registry.py:565,601) '
-         'and never constructs a psutil.Process, so the mocked terminate '
-         'records nothing. The kill itself succeeds (status == "killed"); only '
-         'the POSIX-specific call assertion fails', {
-            'TestKillProcess::test_kill_detached_session_uses_host_pid',
-        }),
+        # All three of this file's rows were retired 2026-08-09. None of them
+        # described a guarantee Windows cannot hold — only fixtures that were
+        # written in POSIX and never ported:
+        #
+        #   'TestStdinHelpers::test_close_stdin_allows_eof_driven_process_to_
+        #   finish' was registered as a POSIX process-primitive gap. It is not:
+        #   spawn_local's PTY branch imports `pywinpty` on Windows and
+        #   `ptyprocess` on POSIX (both declared in pyproject), so the test is
+        #   gated on the backend it actually needs and now SKIPS with that
+        #   reason where none is installed, instead of failing.
+        #
+        #   'TestPopenLeakOnSetupFailure::test_popen_killed_when_thread_
+        #   creation_fails' died in `patch("os.getpgid")` — before its body
+        #   ran. The behaviour under test is guarded by `if not _IS_WINDOWS`
+        #   and reaches `proc.kill()` directly on Windows, so the patch is now
+        #   applied only where the attribute exists and BOTH branches are
+        #   pinned, each on the platform that runs it.
+        #
+        #   'TestKillProcess::test_kill_detached_session_uses_host_pid' mocked
+        #   `psutil.Process(pid).terminate()`, which `_terminate_host_pid`
+        #   never constructs on Windows (it shells out to
+        #   `taskkill /PID <pid> /T /F`). The guarantee — a detached session is
+        #   killed by its HOST pid — is platform-neutral, so the test now mocks
+        #   whichever primitive the platform actually reaches. It had been
+        #   unfalsifiable on Windows, not inapplicable.
+        #
         # 'TestSpawnEnvSanitization::test_spawn_local_strips_blocked_vars_from_
         # _background_env' was retired 2026-08-01 (ledger item 7). Unlike every
         # other retirement in that pass this one is NOT attributable to the
@@ -245,6 +250,15 @@ _ENV_GAPS: EnvGapRegistry = {
         # passing row hides a future regression — and recorded here rather than
         # silently dropped. The underlying fragility is unchanged and still
         # worth retiring at the source (resolve the snapshot store lazily).
+        #
+        # 2026-08-09: retired at the source, as that note asked. The "something
+        # warms it" was the PTY test above — it FAILED, but only after
+        # spawn_local had imported tools.terminal_tool (and through it
+        # tools.environments.singularity) under an unscrubbed environment.
+        # Gating that test on its pty backend stopped the warming and the node
+        # went red again, in isolation as well as in file order. The frozen
+        # `_SNAPSHOT_STORE` is now the lazy `_snapshot_store_path()`, so no
+        # import order can decide whether spawn_local works.
     ],
     'test_terminal_output_transform_hook.py': [
         (_HOST, 'arrived with the merge. The test drives a `python3` child, and '
@@ -456,13 +470,15 @@ _ENV_GAPS: EnvGapRegistry = {
         }),
     ],
     # ── mixed / file-specific ────────────────────────────────────────────
-    'test_approval.py': [
-        (_WINDOWS, 'arrived with the merge. Depends on POSIX temp-dir and '
-         'symlink canonicalization semantics that Windows does not reproduce', {
-            'TestDetectDangerousRm::test_nonrecursive_verification_artifact_cleanup_is_not_dangerous',
-            'TestDetectDangerousRm::test_symlinked_temp_dir_only_exempts_canonical_target',
-        }),
-    ],
+    # 'test_approval.py' held two rows until 2026-08-09, recorded as depending
+    # on "POSIX temp-dir and symlink canonicalization semantics that Windows
+    # does not reproduce". That diagnosis was wrong, and it was fencing off
+    # destructive-command safety logic. Windows reproduces both semantics
+    # fine; the fixtures simply hardcoded POSIX path SPELLING — a literal
+    # "/tmp" that `os.path.realpath` resolves against the current drive on
+    # Windows, and unquoted separators that `shlex.split(posix=True)` eats.
+    # Both tests now build their operand from the platform's own temp dir and
+    # pass everywhere. See the rule above: "It fails on Windows" is not a cause.
     'test_computer_use.py': [
         (_WINDOWS, 'the CLI-fallback test interpolates a Windows path into a '
          'JSON literal, where "\\U" and "\\b" are invalid escapes so json.loads '

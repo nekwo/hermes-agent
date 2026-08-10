@@ -1,6 +1,8 @@
 """Tests for the dangerous command approval module."""
 
 import os
+import shlex
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -13,6 +15,7 @@ import tools.approval as approval_module
 from hermes_constants import get_hermes_home
 from tools.approval import (
     _get_approval_mode,
+    _is_verification_artifact_cleanup,
     _normalize_approval_mode,
     _smart_approve,
     approve_session,
@@ -83,6 +86,17 @@ class TestSmartApproval:
         assert is_approved(session_key, pattern_key) is False
 
 
+def _rm_f(path) -> str:
+    """Spell ``rm -f <path>`` the way a shell argument is actually spelled.
+
+    The exemption tokenizes with ``shlex.split(posix=True)``, which eats a
+    bare Windows separator (``C:\\Temp\\x`` -> ``C:Tempx``). Quoting is how a
+    caller passes such a path through a POSIX-tokenized command line, and it
+    keeps this fixture identical on POSIX (no metacharacters -> unquoted).
+    """
+    return f"rm -f {shlex.quote(str(path))}"
+
+
 class TestDetectDangerousRm:
     def test_rm_flags_after_operands_detected(self):
         # GNU rm permutes options: `rm build/ -rf` == `rm -rf build/`.
@@ -100,13 +114,23 @@ class TestDetectDangerousRm:
 
 
     def test_nonrecursive_verification_artifact_cleanup_is_not_dangerous(self):
-        with mock_patch("tempfile.gettempdir", return_value="/tmp"):
+        # Drive the fixture off the platform's own temp dir rather than a
+        # hardcoded POSIX "/tmp". The exemption compares the operand against
+        # ``os.path.join(os.path.realpath(gettempdir()), basename)``, and on
+        # Windows ``os.path.realpath("/tmp")`` resolves a rooted POSIX path
+        # against the current drive (-> "X:\\tmp"), so a "/tmp" literal can
+        # never match there and the guarantee would go unpinned.
+        temp_dir = os.path.realpath(tempfile.gettempdir())
+        with mock_patch("tempfile.gettempdir", return_value=temp_dir):
             for prefix in ("hermes-verify-", "hermes-ad-hoc-"):
-                assert detect_dangerous_command(f"rm -f /tmp/{prefix}example.py") == (
-                    False,
-                    None,
-                    None,
-                )
+                command = _rm_f(os.path.join(temp_dir, f"{prefix}example.py"))
+                # Assert the exemption FIRED, not merely that the verdict is
+                # "not dangerous". A Windows-native path matches none of the
+                # DANGEROUS_PATTERNS anyway (they anchor on a leading POSIX
+                # "/"), so the end-to-end verdict alone is vacuous there —
+                # it stays green even if the exemption is deleted outright.
+                assert _is_verification_artifact_cleanup(command) is True
+                assert detect_dangerous_command(command) == (False, None, None)
 
     def test_symlinked_temp_dir_only_exempts_canonical_target(self, tmp_path):
         real_temp = tmp_path / "real-temp"
@@ -116,12 +140,43 @@ class TestDetectDangerousRm:
         basename = "hermes-verify-example.py"
 
         with mock_patch("tempfile.gettempdir", return_value=str(linked_temp)):
-            assert detect_dangerous_command(f"rm -f {linked_temp / basename}")[0] is True
-            assert detect_dangerous_command(f"rm -f {real_temp / basename}") == (
-                False,
-                None,
-                None,
-            )
+            # The exemption keys on the CANONICAL temp dir (gettempdir() is
+            # realpath'd), so a symlinked spelling of the very same file is
+            # NOT exempt -- exemptions apply to one exact path spelling only.
+            # Asserted on the decision seam itself rather than on
+            # detect_dangerous_command: whether a *non-exempt* single-file
+            # ``rm -f`` is then flagged depends on the unrelated POSIX
+            # "delete in root path" rule, which no Windows-native path can
+            # match, so the end-to-end spelling only pins this on POSIX.
+            assert _is_verification_artifact_cleanup(_rm_f(linked_temp / basename)) is False
+            # ...while the canonical spelling is exempt, on every platform.
+            canonical = _rm_f(real_temp / basename)
+            assert _is_verification_artifact_cleanup(canonical) is True
+            assert detect_dangerous_command(canonical) == (False, None, None)
+
+    def test_exemption_rejects_in_temp_symlink_pointing_outside_temp(self, tmp_path):
+        """A correctly-spelled temp artifact that RESOLVES outside temp is not exempt.
+
+        ``_is_verification_artifact_cleanup`` has two independent guards: the
+        literal-spelling equality above, and a realpath check that the operand
+        still lands in the temp dir after symlink resolution. Only the first
+        had a test — deleting the realpath guard entirely left the whole
+        TestDetectDangerousRm class green, so this pins the second one.
+        """
+        temp_dir = tmp_path / "temp"
+        temp_dir.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        secret = outside / "secret.txt"
+        secret.write_text("do not touch", encoding="utf-8")
+
+        # Correctly named, correctly located, correctly spelled -- but a
+        # symlink whose target is outside the temp dir.
+        planted = temp_dir / "hermes-verify-example.py"
+        planted.symlink_to(secret)
+
+        with mock_patch("tempfile.gettempdir", return_value=str(temp_dir)):
+            assert _is_verification_artifact_cleanup(_rm_f(planted)) is False
 
     def test_verification_cleanup_exemption_rejects_broader_deletions(self):
         commands = (

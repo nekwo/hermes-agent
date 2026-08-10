@@ -4251,6 +4251,12 @@ def test_notification_poller_live_loop_requeues_foreign_completion_for_owner(
         session["running"] = False
 
     monkeypatch.setattr(server, "_run_prompt_submit", _deliver)
+    # The completion -> agent-turn hand-off is opt-in
+    # (_tui_background_agent_turns_enabled); with it off the poller emits the
+    # status.update and consumes the event without ever scheduling a turn, so
+    # _run_prompt_submit is the wrong probe. Turn it on to keep pinning WHICH
+    # session the owned event is handed to.
+    monkeypatch.setenv("HERMES_BACKGROUND_AGENT_TURNS", "true")
     server._sessions.update(
         {
             "sid-a-live-handoff": session_a,
@@ -4465,6 +4471,12 @@ def test_notification_poller_delivers_owned_events(
         lambda _rid, _sid, _session, text: delivered.append(text),
     )
     monkeypatch.setattr(server, "_get_db", lambda: _CompressionDB())
+    # The completion -> agent-turn hand-off is opt-in
+    # (_tui_background_agent_turns_enabled). Visibility (status.update) is
+    # unconditional, but delivery through _run_prompt_submit is not, so the
+    # ownership routing this test exists to pin is only observable on the
+    # delivery path with the opt-in on.
+    monkeypatch.setenv("HERMES_BACKGROUND_AGENT_TURNS", "true")
 
     isolated_queue: _queue_mod.Queue = _queue_mod.Queue()
     monkeypatch.setattr(process_registry, "completion_queue", isolated_queue)
@@ -13039,7 +13051,9 @@ def test_notification_poller_legacy_agent_turn_env_opt_in(monkeypatch):
     emitted = []
 
     class _Agent:
-        def run_conversation(self, prompt, conversation_history=None, stream_callback=None):
+        def run_conversation(
+            self, prompt, conversation_history=None, stream_callback=None, **_kwargs
+        ):
             turns.append(prompt)
             return {
                 "final_response": "ok",
