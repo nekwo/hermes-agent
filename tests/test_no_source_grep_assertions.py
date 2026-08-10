@@ -437,10 +437,18 @@ def _entry(relpath: str, qualname: str, text: str) -> str:
     return f"{relpath}::{qualname}::{text}"
 
 
-def _scan() -> tuple[list[str], int]:
-    """Every positive source-grep assertion under ``tests/``, as ledger keys."""
+def _scan() -> tuple[list[str], int, dict[str, list[int]]]:
+    """Every positive source-grep assertion under ``tests/``.
+
+    Returns the ledger keys, the number of files walked, and — separately — the
+    line each key was found on. Line numbers are for the failure message only,
+    so an author can jump straight to the assertion; they never enter the key,
+    because a key that moves on every unrelated edit above it turns the
+    register into churn nobody reads.
+    """
 
     entries: list[str] = []
+    locations: dict[str, list[int]] = {}
     scanned = 0
     for path in sorted(TESTS_ROOT.rglob("*.py")):
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -457,9 +465,11 @@ def _scan() -> tuple[list[str], int]:
         relpath = path.relative_to(REPO_ROOT).as_posix()
         qualnames = _qualname_index(tree)
         for lineno, rendered in _SourceTextAnalyzer(tree).violations():
-            entries.append(_entry(relpath, qualnames.get(lineno, "<module>"), rendered))
+            key = _entry(relpath, qualnames.get(lineno, "<module>"), rendered)
+            entries.append(key)
+            locations.setdefault(key, []).append(lineno)
     entries.sort()
-    return entries, scanned
+    return entries, scanned, locations
 
 
 def _read_ledger() -> tuple[list[str], int | None]:
@@ -496,22 +506,28 @@ _REMEDY = (
 
 
 @pytest.fixture(scope="module")
-def scan() -> tuple[list[str], int]:
+def scan() -> tuple[list[str], int, dict[str, list[int]]]:
     return _scan()
 
 
 @pytest.mark.timeout(300)
 def test_no_new_positive_source_grep_assertion(scan) -> None:
-    found, scanned = scan
+    found, scanned, locations = scan
     assert scanned >= _MIN_SCANNED_FILES, (
         f"the walker only saw {scanned} files under {TESTS_ROOT} — it drifted off "
         "the tree, so a green here would mean nothing"
     )
     ledgered, _declared = _read_ledger()
     new = sorted((Counter(found) - Counter(ledgered)).elements())
+
+    def located(key: str) -> str:
+        path, _, rest = key.partition("::")
+        lines = ", ".join(str(line) for line in locations.get(key, []))
+        return f"{path}:{lines}\n      {rest.replace('::', '  ->  ')}"
+
     assert not new, (
         "New positive source-grep assertion(s) in tests/:\n"
-        + "\n".join(f"  {item}" for item in new)
+        + "\n".join(f"  {located(item)}" for item in new)
         + _REMEDY
         + f"\n\nThis gate does not accept new debt, so there is no ledger line to "
         f"add: fix the assertion. ({LEDGER_PATH.name} is closed to additions.)"
@@ -523,7 +539,7 @@ def test_source_grep_ledger_has_no_stale_entries(scan) -> None:
     """A debt register that silently keeps paid-off rows rots exactly like the
     grep pins it exists to retire."""
 
-    found, _scanned = scan
+    found, _scanned, _locations = scan
     ledgered, _declared = _read_ledger()
     stale = sorted((Counter(ledgered) - Counter(found)).elements())
     assert not stale, (
