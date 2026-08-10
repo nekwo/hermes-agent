@@ -1513,11 +1513,19 @@ class TestTirithImportErrorFailOpenPolicy:
 
         assert result.get("approved") is True
 
-    def test_fail_open_false_escalates_to_approval_on_import_error(self):
+    def test_fail_open_false_escalates_to_approval_on_import_error(self, monkeypatch):
         """Fail-closed: ImportError must NOT silently allow when tirith_fail_open=false."""
         import builtins
         from unittest.mock import patch as _patch
         from tools.approval import check_all_command_guards
+
+        # This case pins the CONFIG value. The flag is now resolved through
+        # hermes_cli.tirith_config, so the suite-wide TIRITH_ENABLED=false that
+        # tests/conftest.py sets (to keep tirith's auto-install off the network)
+        # would otherwise win here and force fail-open. The env-var lane has its
+        # own coverage in tests/tools/test_tirith_config_call_sites.py.
+        monkeypatch.delenv("TIRITH_ENABLED", raising=False)
+        monkeypatch.delenv("TIRITH_FAIL_OPEN", raising=False)
 
         cfg = {
             "approvals": {"mode": "manual"},

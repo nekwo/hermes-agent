@@ -252,6 +252,13 @@ class TestCronDenyModeAllGuards:
         monkeypatch.delenv("HERMES_GATEWAY_SESSION", raising=False)
         monkeypatch.delenv("HERMES_EXEC_ASK", raising=False)
         monkeypatch.delenv("HERMES_YOLO_MODE", raising=False)
+        # This case pins the CONFIG value. The flag is now resolved through
+        # hermes_cli.tirith_config, so the suite-wide TIRITH_ENABLED=false that
+        # tests/conftest.py sets (to keep tirith's auto-install off the network)
+        # would otherwise win here and force fail-open. The env-var lane has its
+        # own coverage in tests/tools/test_tirith_config_call_sites.py.
+        monkeypatch.delenv("TIRITH_ENABLED", raising=False)
+        monkeypatch.delenv("TIRITH_FAIL_OPEN", raising=False)
 
         from unittest.mock import patch as mock_patch
         import builtins

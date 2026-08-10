@@ -7009,12 +7009,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         self._tirith_security_checked = True
         try:
             from tools.tirith_security import ensure_installed, is_platform_supported
+            # Single authority for the flag's default and its TIRITH_ENABLED
+            # override (hermes_cli.tirith_config). Reading self.config
+            # directly, as this did, meant the notice claimed "enabled" even
+            # when the operator had switched scanning off with the env var.
+            # self.config is passed through so this stays a single config load.
+            from hermes_cli.tirith_config import tirith_enabled
 
             tirith_path = ensure_installed(log_failures=False)
             if tirith_path is None and is_platform_supported():
-                security_cfg = self.config.get("security", {}) or {}
-                tirith_enabled = security_cfg.get("tirith_enabled", True)
-                if tirith_enabled:
+                if tirith_enabled(self.config):
                     _cprint(
                         f"  {_DIM}⚠ tirith security scanner enabled but not available "
                         f"— command scanning will use pattern matching only{_RST}"

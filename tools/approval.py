@@ -23,6 +23,7 @@ import time
 import unicodedata
 from typing import Optional
 from hermes_cli.config import cfg_get
+from hermes_cli.tirith_config import fail_open_when_scanner_unavailable
 
 from tools import path_identity
 from tools.interrupt import is_interrupted
@@ -3512,14 +3513,12 @@ def check_all_command_guards(command: str, env_type: str,
                     # be silently allowed — and a cron session has no user to
                     # approve it, so fail-closed means block (mirrors the
                     # fail-closed synthesis in the main flow below; see #20733).
-                    _cron_fail_open = True  # safe default if config is unreadable
-                    try:
-                        from hermes_cli.config import load_config as _load_cfg
-                        _sec = (_load_cfg() or {}).get("security", {}) or {}
-                        if _sec.get("tirith_enabled", True):
-                            _cron_fail_open = _sec.get("tirith_fail_open", True)
-                    except Exception:
-                        pass
+                    # The flag, its default, its tirith_enabled interaction and
+                    # its TIRITH_FAIL_OPEN override are resolved in one place:
+                    # hermes_cli.tirith_config. This branch used to read
+                    # hermes_cli.config directly and so could not see the env
+                    # override that tips.py advertises.
+                    _cron_fail_open = fail_open_when_scanner_unavailable()
                     if not _cron_fail_open:
                         return {
                             "approved": False,
@@ -3550,15 +3549,10 @@ def check_all_command_guards(command: str, env_type: str,
         # fail-closed; an import failure must not silently grant access, so we
         # synthesize a warn result that will be surfaced to the user through the
         # normal approval flow.  Fixes #20733.
-        _tirith_fail_open = True  # safe default if config is unreadable
-        try:
-            from hermes_cli.config import load_config as _load_cfg
-            _sec = (_load_cfg() or {}).get("security", {}) or {}
-            _tirith_enabled = _sec.get("tirith_enabled", True)
-            if _tirith_enabled:
-                _tirith_fail_open = _sec.get("tirith_fail_open", True)
-        except Exception:
-            pass
+        # Same single authority as the cron lane above — see
+        # hermes_cli.tirith_config for the default, the tirith_enabled
+        # interaction and the TIRITH_FAIL_OPEN override.
+        _tirith_fail_open = fail_open_when_scanner_unavailable()
         if not _tirith_fail_open:
             tirith_result = {
                 "action": "warn",

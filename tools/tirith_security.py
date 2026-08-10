@@ -48,13 +48,6 @@ _COSIGN_ISSUER = "https://token.actions.githubusercontent.com"
 # Config helpers
 # ---------------------------------------------------------------------------
 
-def _env_bool(key: str, default: bool) -> bool:
-    val = os.getenv(key)
-    if val is None:
-        return default
-    return val.lower() in {"1", "true", "yes"}
-
-
 def _env_int(key: str, default: int) -> int:
     val = os.getenv(key)
     if val is None:
@@ -66,24 +59,26 @@ def _env_int(key: str, default: int) -> int:
 
 
 def _load_security_config() -> dict:
-    """Load security settings from config.yaml, with env var overrides."""
-    defaults = {
-        "tirith_enabled": True,
-        "tirith_path": "tirith",
-        "tirith_timeout": 5,
-        "tirith_fail_open": True,
-    }
-    try:
-        from hermes_cli.config import load_config
-        cfg = load_config().get("security", {}) or {}
-    except Exception:
-        cfg = {}
+    """Load security settings from config.yaml, with env var overrides.
+
+    The two boolean flags are resolved by ``hermes_cli.tirith_config``, which
+    is the single authority for their default and their env override — this
+    module used to be the *only* reader that honoured ``TIRITH_ENABLED`` /
+    ``TIRITH_FAIL_OPEN``, and the four readers that did not are now on the
+    same accessor. ``tirith_path`` / ``tirith_timeout`` stay here: they have
+    exactly one reader (this function) and so have no seam to share.
+    """
+    from hermes_cli import tirith_config
+
+    full = tirith_config.load_config_or_empty()
+    cfg = tirith_config.security_section(full)
+    defaults = tirith_config.SECURITY_DEFAULTS
 
     return {
-        "tirith_enabled": _env_bool("TIRITH_ENABLED", cfg.get("tirith_enabled", defaults["tirith_enabled"])),
+        "tirith_enabled": tirith_config.tirith_enabled(full),
         "tirith_path": os.getenv("TIRITH_BIN", cfg.get("tirith_path", defaults["tirith_path"])),
         "tirith_timeout": _env_int("TIRITH_TIMEOUT", cfg.get("tirith_timeout", defaults["tirith_timeout"])),
-        "tirith_fail_open": _env_bool("TIRITH_FAIL_OPEN", cfg.get("tirith_fail_open", defaults["tirith_fail_open"])),
+        "tirith_fail_open": tirith_config.tirith_fail_open(full),
     }
 
 
