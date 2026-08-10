@@ -718,11 +718,55 @@ def pytest_collection_modifyitems(items):  # noqa: D401 — pytest hook
 _STALE_ENV_GAP_ENTRIES: list[str] = []
 
 
+# ── Known defects that are deliberately NOT fenced ─────────────────────────
+#
+# The 2026-08-10 registry audit left these RED on purpose. Rule 3 of the fence
+# contract says a failure caused by a defect in our own code gets FIXED, not
+# registered — and both of these need an owner decision, so neither could be
+# fixed inside that audit. Without this banner the next person to run the suite
+# sees a red on Windows and files it back into the registry as an environment
+# gap, which is precisely how the tamper-check hole below stayed invisible.
+_KNOWN_DEFECTS: dict[str, str] = {
+    "test_hooks_cli.py": (
+        "SECURITY FINDING — NOT an environment gap. agent/shell_hooks.py parses\n"
+        "  the hook command with shlex.split() in POSIX mode (:452, :817, :904),\n"
+        "  which eats every backslash in a Windows hook path. Downstream:\n"
+        "    * the hook never executes ('command not found');\n"
+        "    * `hermes hooks doctor` reports every hook non-executable;\n"
+        "    * script_mtime_iso() returns None, so the 'script modified since\n"
+        "      approval' TAMPER CHECK at hermes_cli/hooks.py:369-376 CANNOT FIRE.\n"
+        "      An approved hook can be rewritten with arbitrary content and\n"
+        "      doctor still reports OK.\n"
+        "  The fix is an argv-parsing policy change on a security path, so it is\n"
+        "  an owner decision. Do NOT re-file this as windows_env_gap."
+    ),
+    "test_commands.py": (
+        "KNOWN DEFECT — NOT an environment gap. slack_native_slashes() drops\n"
+        "  entries at _SLACK_MAX_SLASH_COMMANDS (hermes_cli/commands.py:1335) in\n"
+        "  registration order with NO accounting, so which commands survive is a\n"
+        "  function of how many plugins happen to be installed. The retired\n"
+        "  registry row also named the wrong casualty ('version', which lives in\n"
+        "  _SLACK_VIA_HERMES_ONLY); the command actually clamped off is\n"
+        "  'platform'. Which commands get pinned is product curation, so it is an\n"
+        "  owner decision. Do NOT re-file this as host_dependency_gap."
+    ),
+}
+
+_KNOWN_DEFECT_FAILURES: list[str] = []
+
+
 def pytest_runtest_logreport(report):  # noqa: D401 — pytest hook
-    """Record registered environment-gap node ids that actually passed."""
-    if report.when != "call" or report.outcome != "passed":
+    """Record stale env-gap passes, and failures of the known-defect tests."""
+    if report.when != "call":
         return
     file_name = report.nodeid.split("::", 1)[0].rsplit("/", 1)[-1]
+
+    if report.outcome == "failed" and file_name in _KNOWN_DEFECTS:
+        _KNOWN_DEFECT_FAILURES.append(report.nodeid)
+        return
+
+    if report.outcome != "passed":
+        return
     groups = _ENV_GAPS.get(file_name)
     if groups is None:
         return
@@ -732,7 +776,18 @@ def pytest_runtest_logreport(report):  # noqa: D401 — pytest hook
 
 
 def pytest_terminal_summary(terminalreporter):  # noqa: D401 — pytest hook
-    """Surface registry rows that no longer describe a real failure."""
+    """Surface stale registry rows, and explain the deliberate reds."""
+    if _KNOWN_DEFECT_FAILURES:
+        terminalreporter.write_sep("=", "KNOWN DEFECTS — deliberately not fenced")
+        seen: set[str] = set()
+        for nodeid in sorted(set(_KNOWN_DEFECT_FAILURES)):
+            file_name = nodeid.split("::", 1)[0].rsplit("/", 1)[-1]
+            terminalreporter.write_line(f"  {nodeid}")
+            if file_name not in seen:
+                seen.add(file_name)
+                terminalreporter.write_line(f"  {_KNOWN_DEFECTS[file_name]}")
+                terminalreporter.write_line("")
+
     if not _STALE_ENV_GAP_ENTRIES:
         return
     terminalreporter.write_sep("=", "stale environment-gap registry entries")
