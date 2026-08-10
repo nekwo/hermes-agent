@@ -582,6 +582,58 @@ def _check_gateway_service_linger(issues: list[str]) -> None:
         check_warn("Could not verify systemd linger", f"({linger_detail})")
 
 
+def _check_gateway_launcher_interpreter(issues: list[str]) -> None:
+    """Fail when the autostart launcher names an interpreter updates don't sync.
+
+    The Windows launcher is written once at install time and then outlives
+    every process that could notice it is wrong. When it names an interpreter
+    outside the Hermes environment, the gateway boots against a package set no
+    update maintains — and the only symptom is a missing-module traceback at
+    some later boot, which reads as a code bug rather than an install one.
+    Two separate incidents on one install traced back to exactly this: a fatal
+    ``concurrent_log_handler`` import death, and a ``nemo_relay`` traceback
+    that made a fully healthy boot look like a crash.
+    """
+    try:
+        from hermes_cli import gateway_windows
+        from hermes_cli.gateway import (
+            ManagedPythonUnavailable,
+            is_windows,
+            resolve_managed_python,
+        )
+    except Exception as e:
+        check_warn("Gateway launcher interpreter", f"(could not import gateway helpers: {e})")
+        return
+
+    if not is_windows():
+        return
+
+    rendered = gateway_windows.installed_launcher_interpreter()
+    if rendered is None:
+        return
+
+    _section("Gateway Launcher")
+    try:
+        managed = resolve_managed_python()
+    except ManagedPythonUnavailable as exc:
+        check_warn("Could not verify gateway launcher interpreter", f"({exc})")
+        return
+
+    if Path(rendered) == Path(managed):
+        check_ok("Gateway launcher uses the Hermes interpreter", f"({rendered})")
+        return
+
+    check_fail("Gateway launcher uses an unmanaged interpreter", f"(launcher: {rendered})")
+    check_info(f"Hermes is installed into: {managed}")
+    check_info("Dependencies sync into the Hermes environment, not that one, so the")
+    check_info("gateway can die at boot on a missing module. Re-render the launcher:")
+    check_info("  hermes gateway install")
+    issues.append(
+        f"Gateway launcher points at {rendered}, not the Hermes interpreter "
+        f"{managed} — run 'hermes gateway install' from the Hermes environment"
+    )
+
+
 _APIKEY_PROVIDERS_CACHE: list | None = None
 
 
@@ -1622,6 +1674,7 @@ def run_doctor(args):
 
     _check_gateway_service_linger(issues)
     _check_s6_supervision(issues)
+    _check_gateway_launcher_interpreter(issues)
 
     if sys.platform != "win32":
         _section("Command Installation")

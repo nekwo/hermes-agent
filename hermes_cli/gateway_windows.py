@@ -546,10 +546,14 @@ def _write_task_script() -> Path:
     from hermes_cli.gateway import (
         PROJECT_ROOT,
         _profile_arg,
-        get_python_path,
+        resolve_managed_python,
     )
 
-    python_path = _preserve_hermes_home_path(get_python_path())
+    # The launcher is a PERSISTENCE artifact: the interpreter it names outlives
+    # this process and every future gateway boot runs on it. Resolve the
+    # managed one and let ManagedPythonUnavailable propagate — refusing to
+    # write beats pinning whatever ran the install and letting it rot silently.
+    python_path = _preserve_hermes_home_path(resolve_managed_python())
     working_dir = _stable_gateway_working_dir(PROJECT_ROOT)
     hermes_home = str(Path(get_hermes_home()))
     profile_arg = _profile_arg(hermes_home)
@@ -1286,6 +1290,40 @@ def query_task_status() -> dict[str, str]:
             else:
                 info[key] = value
     return info
+
+
+def launcher_interpreter(script_text: str) -> str | None:
+    """Extract the interpreter a rendered ``gateway.cmd`` launcher invokes.
+
+    The launcher's whole job is to name an interpreter, so that name is the
+    one thing worth reading back out of it: an install whose launcher points
+    at an unmanaged Python boots the gateway against a package set no update
+    ever syncs, and nothing says so until an import fails at some later boot.
+
+    Returns None when no ``hermes_cli.main`` invocation is present.
+    """
+    for raw in script_text.splitlines():
+        line = raw.strip()
+        if "-m hermes_cli.main" not in line:
+            continue
+        if line.startswith('"'):
+            end = line.find('"', 1)
+            if end == -1:
+                return None
+            return line[1:end]
+        return line.split(" ", 1)[0]
+    return None
+
+
+def installed_launcher_interpreter() -> str | None:
+    """The interpreter named by the launcher on disk, or None if unreadable."""
+    try:
+        script_path = get_task_script_path()
+        if not script_path.exists():
+            return None
+        return launcher_interpreter(script_path.read_text(encoding="utf-8"))
+    except OSError:
+        return None
 
 
 def _task_action_is_console_less(query_output: str, script_path: Path) -> bool | None:

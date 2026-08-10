@@ -2561,16 +2561,61 @@ def _detect_venv_dir() -> Path | None:
     return None
 
 
+def _venv_interpreter(venv: Path) -> Path:
+    """The interpreter path inside ``venv`` for this platform."""
+    if is_windows():
+        return venv / "Scripts" / "python.exe"
+    return venv / "bin" / "python"
+
+
 def get_python_path() -> str:
     venv = _detect_venv_dir()
     if venv is not None:
-        if is_windows():
-            venv_python = venv / "Scripts" / "python.exe"
-        else:
-            venv_python = venv / "bin" / "python"
+        venv_python = _venv_interpreter(venv)
         if venv_python.exists():
             return str(venv_python)
     return sys.executable
+
+
+class ManagedPythonUnavailable(RuntimeError):
+    """No interpreter could be resolved as the one Hermes is installed into."""
+
+
+def resolve_managed_python() -> str:
+    """Return the interpreter Hermes is INSTALLED INTO — the one updates sync.
+
+    Same layout knowledge as :func:`_detect_venv_dir` (this process's venv via
+    ``sys.prefix``, then ``$VIRTUAL_ENV``, then the ``.venv``/``venv``
+    checkout layouts that ``_venv_core_imports_healthy`` and
+    ``managed_uv._default_live_venv`` already treat as the install). It
+    deliberately does NOT introduce a second notion of "the managed
+    environment" — there was no accessor for it at all, which is why the
+    launcher renderer had nothing better to ask.
+
+    The difference from :func:`get_python_path` is the fallback, and it is the
+    whole point: ``get_python_path`` ends in ``sys.executable``, which is
+    right for ephemeral work in a dev checkout and wrong for anything
+    persisted. Stamped into a launcher artifact, that fallback silently pins
+    whichever interpreter happened to run the install — the gateway then boots
+    for months against a package set nobody maintains, and the failure only
+    surfaces as a missing-module traceback at some later boot.
+
+    Raises :class:`ManagedPythonUnavailable` with a single-line reason naming
+    what was looked for. Callers persisting an artifact must let it propagate
+    rather than degrade to a guess.
+    """
+    venv = _detect_venv_dir()
+    if venv is None:
+        raise ManagedPythonUnavailable(
+            "no Hermes virtualenv found (looked at sys.prefix, $VIRTUAL_ENV, "
+            f"{PROJECT_ROOT / '.venv'}, {PROJECT_ROOT / 'venv'})"
+        )
+    interpreter = _venv_interpreter(venv)
+    if not interpreter.exists():
+        raise ManagedPythonUnavailable(
+            f"virtualenv {venv} has no interpreter at {interpreter}"
+        )
+    return str(interpreter)
 
 
 # =============================================================================

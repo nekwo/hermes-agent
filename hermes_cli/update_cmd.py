@@ -2935,10 +2935,21 @@ def _refresh_windows_gateway_launchers() -> None:
         return
     try:
         from hermes_cli import gateway_windows
+        from hermes_cli.gateway import ManagedPythonUnavailable
 
         if not gateway_windows.is_installed():
             return
-        gateway_windows._write_task_script()
+        try:
+            gateway_windows._write_task_script()
+        except ManagedPythonUnavailable as exc:
+            # Never swallow this one into a debug log. Leaving the old launcher
+            # in place is the safe action, but the operator has to know the
+            # gateway is still pinned to whatever interpreter it was pinned to.
+            print(f"  ⚠ Left the Windows gateway launcher unchanged: {exc}")
+            print("    It still names the interpreter it was installed with, which")
+            print("    updates do not sync. Re-run from the Hermes environment:")
+            print("      hermes gateway install")
+            return
         print("  ✓ Refreshed Windows gateway launcher scripts")
         _m()._warn_legacy_console_gateway_task()
     except Exception as exc:
