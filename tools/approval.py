@@ -2014,6 +2014,63 @@ def _command_detection_variants(command: str):
         yield variant
 
 
+# A Git-Bash/MSYS absolute path: a single-letter drive component at the root,
+# then the rest of the path. `/c/Users/...` is MSYS's spelling of `C:\Users\...`.
+_MSYS_DRIVE_PATH = re.compile(r"/([A-Za-z])/(.+)", re.DOTALL)
+_IS_WINDOWS = os.name == "nt"
+
+
+def _windows_spelling_of_msys_path(operand: str) -> Optional[str]:
+    """Translate a Git-Bash/MSYS drive path to its Windows spelling, or None.
+
+    ``_find_shell()`` returns Git Bash on Windows, so the cleanup command an
+    agent actually writes spells its temp artifact the MSYS way
+    (``/c/Users/.../Temp/hermes-verify-x.py``) rather than the native way
+    (``C:\\Users\\...\\Temp\\hermes-verify-x.py``). The two spellings name the
+    same real file, but only the native one could ever satisfy the exemption
+    below, so routine cleanup was refused on Windows — and refused loudly,
+    because a leading ``/`` also trips the "delete in root path" rule.
+
+    This is a pure SPELLING translation and nothing else. The translated path
+    is handed to exactly the same checks the native spelling goes through, so
+    it cannot exempt anything a native path would not be exempted for. It is
+    deliberately narrow:
+
+      * Windows only — on POSIX ``/c/...`` is a real path of its own and
+        reinterpreting it as a drive would be a lie about the filesystem.
+      * A path already containing a backslash is not a clean MSYS spelling;
+        leave it alone rather than guess at a mixed one.
+    """
+    if not _IS_WINDOWS:
+        return None
+    match = _MSYS_DRIVE_PATH.fullmatch(operand)
+    if match is None:
+        return None
+    drive, rest = match.groups()
+    if "\\" in rest:
+        return None
+    return f"{drive.upper()}:\\" + rest.replace("/", "\\")
+
+
+def _is_exempt_verification_artifact_path(operand: str) -> bool:
+    """Whether *operand* names exactly one Hermes ad-hoc script in temp.
+
+    Two independent guards, both required: the operand must be spelled as the
+    canonical temp dir joined with a bare basename (no traversal, no other
+    directory, no alternate spelling of temp), and it must still resolve into
+    that same temp dir after symlink resolution.
+    """
+    temp_dir = os.path.realpath(tempfile.gettempdir())
+    basename = os.path.basename(operand)
+    if operand != os.path.join(temp_dir, basename):
+        return False
+
+    target = os.path.realpath(operand)
+    if os.path.dirname(target) != temp_dir:
+        return False
+    return re.fullmatch(r"hermes-(?:verify|ad-hoc)-[A-Za-z0-9_.-]+", basename) is not None
+
+
 def _is_verification_artifact_cleanup(command: str) -> bool:
     """Return whether *command* only removes one Hermes ad-hoc temp script."""
     try:
@@ -2024,15 +2081,15 @@ def _is_verification_artifact_cleanup(command: str) -> bool:
         return False
 
     operand = argv[2]
-    temp_dir = os.path.realpath(tempfile.gettempdir())
-    basename = os.path.basename(operand)
-    if operand != os.path.join(temp_dir, basename):
+    if _is_exempt_verification_artifact_path(operand):
+        return True
+    # Same file, MSYS spelling (see _windows_spelling_of_msys_path). Re-run the
+    # IDENTICAL checks on the translated path — the exemption widens to one
+    # extra SPELLING of an already-permitted target, never to an extra target.
+    windows_spelling = _windows_spelling_of_msys_path(operand)
+    if windows_spelling is None:
         return False
-
-    target = os.path.realpath(operand)
-    if os.path.dirname(target) != temp_dir:
-        return False
-    return re.fullmatch(r"hermes-(?:verify|ad-hoc)-[A-Za-z0-9_.-]+", basename) is not None
+    return _is_exempt_verification_artifact_path(windows_spelling)
 
 
 def detect_dangerous_command(command: str) -> tuple:
