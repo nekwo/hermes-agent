@@ -7,6 +7,10 @@
   ],
   "exit_code": 0,
   "stdout": {
+    "ambient": {
+      "home_name": "hermes",
+      "home_provenance": "head_home"
+    },
     "completeness": {
       "by_design": [],
       "considered": 0,
@@ -36,7 +40,6 @@
         "status": "unavailable"
       },
       "delegation": {
-        "detail": "head_home=hermes",
         "lane": "durable",
         "status": "ok"
       },
@@ -45,7 +48,6 @@
         "status": "ok"
       },
       "terminal": {
-        "detail": "head_home=hermes; no checkpoint file",
         "lane": "durable",
         "status": "ok"
       }

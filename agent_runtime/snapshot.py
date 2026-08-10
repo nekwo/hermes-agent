@@ -906,6 +906,42 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         # This is a wire removal, so the contract and Launcher pin move together
         # under the removal rule recorded at 46.
         #
+        # 54 KEPT (running_work contract/ambient split, 2026-08-09) — the
+        # ``running_work`` section stops folding MACHINE-LOCAL state into its
+        # per-source ``detail`` prose, gains a typed ``live_enrichment_error`` on
+        # a source entry, and gains a sibling ``ambient`` block naming the
+        # resolved background-work home. The two-part rule recorded at "52 KEPT"
+        # answers it, and the FIRST part needs stating carefully, because a key
+        # does stop appearing on some entries:
+        #
+        # (a) Nothing LEAVES the wire. ``detail`` is not removed — it keeps its
+        # key, its type and its documented meaning ("bounded operator detail,
+        # WHEN hermes attached one"), and on the entries a consumer actually
+        # renders it from (``unavailable`` lanes, where it has always been a bare
+        # exception class name) it is byte-identical. Its presence was ALREADY
+        # conditional on both sides: three of the five lanes ship ``ok`` entries
+        # with no ``detail`` today, and the Launcher models it as
+        # ``_string(json['detail'], fallback: '')``. What changes is which values
+        # an optional diagnostic takes on the ``ok`` entries of two lanes — not
+        # the schema. That is categorically different from 46/49/53/54, each of
+        # which deleted a key or a section a consumer modelled and could no
+        # longer find.
+        #
+        # (b) The additions are "merely unread", not "invisible". ``sources`` is
+        # parsed as a MAP with named-key reads — the constraint the WP-H2 ruling
+        # put on the consumer, for exactly this reason — so an unknown
+        # ``live_enrichment_error`` is ignored; ``ambient`` is a new sibling key
+        # on a section the Launcher already parses field-by-field, so a
+        # pinned-54 reader ignores it rather than fail-closing.
+        #
+        # Why it had to move at all: the old ``detail`` concatenated contract
+        # with ambient filesystem state, and the filesystem half was perturbed by
+        # the projection's OWN lazy import (``_collect_chat_turns`` reaches a
+        # tool singleton whose constructor creates ``state.db``), so the same
+        # producer emitted two different strings for identical work depending on
+        # import order. A wire field no consumer can rely on and no test can pin
+        # honestly is worse than no field.
+        #
         # The number itself lives at module scope as
         # :data:`SNAPSHOT_CONTRACT_VERSION` so that consumers derive it instead
         # of restating it; the history above stays here, where the rulings are.

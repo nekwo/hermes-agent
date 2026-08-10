@@ -89,9 +89,61 @@ head-home scope (:func:`agent_runtime.chat_session_scope.resolve_chat_session_sc
 the same durable pointer the chat lane uses, with ambient home as a declared
 fallback only when that resolver itself fails.
 
-This module is READ-ONLY with respect to every store it touches. It opens no
-database it would have to create, marks no output consumed, and takes no lock
-that a writer could be waiting on.
+Contract is wire; ambient is context — and they never share a string
+--------------------------------------------------------------------
+A source entry's ``status`` / ``lane`` / ``reason`` are CONTRACT: a consumer
+branches on them, and this module owes them a stable vocabulary. Everything
+else a lane could say about itself is AMBIENT — which directory the projection
+resolved, what the filesystem under it happens to contain — machine-local
+context, not a fact about work.
+
+The first implementation concatenated the two into one ``detail`` prose string
+(``"head_home=base; no state.db"``), and that mixing did not merely read badly:
+it made the producer NON-DETERMINISTIC. Concretely, ``_collect_delegations``
+runs before ``_collect_chat_turns`` and reported whether ``state.db`` existed;
+the chat-turn lane's lazy ``from . import mission_chat_turns`` drags
+``model_tools`` → ``tools.registry.discover_builtin_tools()`` →
+``tools.process_registry``'s module-scope singleton →
+``async_delegation.restore_undelivered_completions()``, which CREATES that very
+``state.db``. So the FIRST build in a process said ``"; no state.db"`` and every
+later build did not, for identical work and an identical contract — and under
+pytest which answer you got was decided by whether some other test module had
+already dragged that import chain in. A producer whose output depends on hidden
+import state cannot be pinned honestly by anyone, which is why the mixing is the
+bug rather than the prose.
+
+The split this module now keeps:
+
+* **Contract, on each source entry.** ``status``, ``lane``, ``reason``, the
+  bounded ``detail`` an UNAVAILABLE lane attaches (already a bare machine token
+  — an exception class name — never prose), and ``live_enrichment_error``: the
+  typed exception class name recorded when a live enrichment raised while the
+  durable answer survived. Absence of the last is unambiguous — the enrichment
+  did not raise — which is why it is a bare token rather than a nullable block.
+* **Ambient, in ONE clearly-named block.** :func:`_ambient_context`, published
+  as ``ambient`` beside ``rows`` / ``sources`` / ``counts``. It names the
+  resolved background-work home — provenance plus BASENAME only, because the
+  error contract forbids absolute paths in operator messages — so "0 processes"
+  can still be told apart from "0 processes *in the home I happened to
+  resolve*", the diagnostic the writer/reader divergence above cost an entire
+  build to learn. **No consumer is expected to depend on it, and nothing in
+  this module branches on it.**
+* **Off the wire entirely: store PRESENCE.** ``"no checkpoint file"``,
+  ``"no state.db"`` and ``"no async_delegations table"`` were observations about
+  storage LAYOUT, not about work — a durable lane answering ``ok`` with zero
+  rows out of a named home is already the complete honest answer — and two of
+  the three were perturbed by the import chain above, so they could never have
+  been reported honestly at all.
+
+This module is READ-ONLY with respect to every store it touches: it opens no
+database it would have to create, marks no output consumed, and takes no lock a
+writer could be waiting on. That invariant holds for every store this file reads
+DIRECTLY. It does NOT survive ``_collect_chat_turns``'s import chain, which
+reaches a tool singleton whose constructor runs delegation recovery — a
+structural weakness in ``model_tools``' module-scope
+``discover_builtin_tools()`` call, filed rather than fixed here. Nothing this
+projection PUBLISHES depends on that side effect any more, which is what makes
+the wire deterministic in spite of it.
 """
 
 from __future__ import annotations
@@ -592,7 +644,28 @@ def _strip_ansi(text: str) -> str:
         return text
 
 
-def _source(status: str, *, lane: str = "", reason: str = "", detail: str = "") -> dict[str, Any]:
+def _source(
+    status: str,
+    *,
+    lane: str = "",
+    reason: str = "",
+    detail: str = "",
+    live_enrichment_error: str = "",
+) -> dict[str, Any]:
+    """One lane's CONTRACT health entry. Ambient facts do not belong here.
+
+    ``detail`` is reserved for the bounded machine token an UNAVAILABLE lane
+    attaches (an exception class name) — never prose, and never anything the
+    filesystem or the environment decides. Machine-local context rides
+    :func:`_ambient_context` instead, where no consumer is asked to parse it
+    back out of a sentence.
+
+    ``live_enrichment_error`` is the typed counterpart of the old
+    ``"; live enrichment failed: TypeError"`` suffix: a lane whose durable
+    answer stands but whose live enrichment raised is still ``ok``, and the
+    reader must be able to see the difference without sentence-matching.
+    """
+
     entry: dict[str, Any] = {"status": status}
     if lane:
         entry["lane"] = lane
@@ -600,7 +673,36 @@ def _source(status: str, *, lane: str = "", reason: str = "", detail: str = "") 
         entry["reason"] = reason
     if detail:
         entry["detail"] = _safe_text(detail, limit=240)
+    if live_enrichment_error:
+        entry["live_enrichment_error"] = _safe_text(live_enrichment_error, limit=80)
     return entry
+
+
+def _ambient_context() -> dict[str, str]:
+    """Machine-local context for this build. **NOT contract — do not branch on it.**
+
+    Names the background-work home the projection resolved, so an operator can
+    tell "nothing is running" apart from "nothing is running *in the directory I
+    happened to resolve*" — the exact silent-empty failure
+    ``get_hermes_background_work_home`` was introduced to retire.
+
+    Deliberately a BASENAME plus a provenance token, not a path: the error
+    contract forbids absolute paths in operator-visible messages, and the
+    question this answers ("which home did you mean?") is answered by the name.
+
+    Deliberately ONE block rather than a per-lane field, because it is ONE
+    fact: both durable lanes resolve the same home through the same authority,
+    and duplicating it into two lanes' prose is how it got concatenated onto a
+    contract field in the first place.
+
+    Nothing in this module reads this back. It is published, never consulted.
+    """
+
+    head, provenance = _head_home()
+    return {
+        "home_provenance": provenance,
+        "home_name": head.name if head is not None else "",
+    }
 
 
 def _cap(
@@ -639,23 +741,25 @@ def _collect_terminal(
     """
 
     rows: dict[str, dict[str, Any]] = {}
-    head, provenance = _head_home()
+    head, _provenance = _head_home()
     if head is None:
         return [], _source(
             SOURCE_UNAVAILABLE, lane=LANE_DURABLE, reason="home_unresolved"
         )
-    # Name the home (basename only — the error contract forbids absolute paths
-    # in operator messages) so "0 processes" can be told apart from "0 processes
-    # *in the home I happened to resolve*".
-    durable_detail = f"{provenance}={head.name}"
+    # Which home this resolved to rides `_ambient_context()`, once, for the whole
+    # projection — it is machine-local context, not this lane's health.
 
     path = head / _CHECKPOINT_FILENAME
     try:
         if path.exists():
             entries = json.loads(path.read_text(encoding="utf-8"))
         else:
+            # An absent checkpoint and a checkpoint listing nothing are the SAME
+            # runtime fact — zero background processes, proven — so the lane says
+            # `ok` with zero rows either way. Which of the two it was is storage
+            # layout, and reporting it here is what used to put a filesystem
+            # observation on a contract field.
             entries = []
-            durable_detail = f"{durable_detail}; no checkpoint file"
     except Exception as exc:
         return [], _source(
             SOURCE_UNAVAILABLE,
@@ -729,7 +833,7 @@ def _collect_terminal(
 
     registry = _module("tools.process_registry")
     lane = LANE_DURABLE
-    live_detail = ""
+    live_error = ""
     if registry is not None:
         try:
             sessions = registry.process_registry.list_sessions()
@@ -790,7 +894,7 @@ def _collect_terminal(
                         existing["elapsed_seconds"] = int(item["uptime_seconds"])
                 existing["tail_preview"] = _preview(item.get("output_preview"), accountant)
         except Exception as exc:
-            live_detail = f"live enrichment failed: {type(exc).__name__}"
+            live_error = type(exc).__name__
 
     ordered = sorted(rows.values(), key=lambda item: (item.get("started_at") or "", item["work_id"]))
     capped = _cap(ordered, source=KIND_TERMINAL, accountant=accountant)
@@ -798,10 +902,9 @@ def _collect_terminal(
         # Count what actually ships. Including pre-cap would report rows the
         # frame does not carry, and `considered - dropped` would stop reconciling.
         accountant.include(len(capped))
-    detail = durable_detail if not live_detail else f"{durable_detail}; {live_detail}"
     return (
         capped,
-        _source(SOURCE_OK, lane=lane, detail=detail),
+        _source(SOURCE_OK, lane=lane, live_enrichment_error=live_error),
     )
 
 
@@ -857,15 +960,18 @@ def _collect_delegations(
 
     rows: dict[str, dict[str, Any]] = {}
     idle_stale, in_tool_stale = _stale_thresholds()
-    head, provenance = _head_home()
+    head, _provenance = _head_home()
     if head is None:
         return [], _source(SOURCE_UNAVAILABLE, lane=LANE_DURABLE, reason="home_unresolved")
 
     db_path = head / _STATE_DB_FILENAME
-    durable_detail = f"{provenance}={head.name}"
-    if not db_path.exists():
-        durable_detail = f"{durable_detail}; no state.db"
-    else:
+    # Whether `state.db` exists yet is deliberately NOT reported. It is a
+    # filesystem observation rather than a fact about work, and — uniquely
+    # corrosive — it is one this very projection perturbs: the chat-turn lane
+    # that runs after this one imports a chain that CREATES the file, so build 1
+    # and build 2 of the same process would disagree about it. See the module
+    # docstring.
+    if db_path.exists():
         try:
             conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
         except Exception as exc:
@@ -894,8 +1000,10 @@ def _collect_delegations(
                     reason="store_unreadable",
                     detail=type(exc).__name__,
                 )
+            # A store that predates the table holds zero delegations, which is
+            # the same answer as a table with no rows. Same ruling as the absent
+            # checkpoint above: schema layout is not lane health.
             fetched = []
-            durable_detail = f"{durable_detail}; no async_delegations table"
         except Exception as exc:
             conn.close()
             return [], _source(
@@ -980,7 +1088,7 @@ def _collect_delegations(
             rows[work_row["work_id"]] = work_row
 
     lane = LANE_DURABLE
-    live_detail = ""
+    live_error = ""
     mod = _module("tools.async_delegation")
     if mod is not None:
         try:
@@ -1051,16 +1159,15 @@ def _collect_delegations(
                     available=True,
                 )
         except Exception as exc:
-            live_detail = f"live enrichment failed: {type(exc).__name__}"
+            live_error = type(exc).__name__
 
     ordered = sorted(rows.values(), key=lambda item: (item.get("started_at") or "", item["work_id"]))
     capped = _cap(ordered, source=KIND_DELEGATION, accountant=accountant)
     if accountant is not None:
         accountant.include(len(capped))
-    detail = durable_detail if not live_detail else f"{durable_detail}; {live_detail}"
     return (
         capped,
-        _source(SOURCE_OK, lane=lane, detail=detail),
+        _source(SOURCE_OK, lane=lane, live_enrichment_error=live_error),
     )
 
 
@@ -1429,11 +1536,16 @@ _COLLECTORS = (
 def build_running_work(
     accountant: ProjectionAccountant | None = None,
 ) -> dict[str, Any]:
-    """The ``running_work`` projection: rows + per-source health + counts.
+    """The ``running_work`` projection: rows + per-source health + counts + ambient.
 
     Never raises. A lane that blows up in an unforeseen way still yields an
     ``unavailable`` source entry, because a projection that can crash the
     snapshot build is worse than one that admits a blind spot.
+
+    ``rows`` / ``sources`` / ``counts`` are CONTRACT. ``ambient`` is not: it is
+    machine-local context (see :func:`_ambient_context`), carried in its own
+    named block precisely so it can never again be concatenated into a field a
+    consumer branches on.
     """
 
     now = time.time()
@@ -1464,7 +1576,12 @@ def build_running_work(
         1 for entry in sources.values() if entry.get("status") != SOURCE_OK
     )
 
-    return {"rows": rows, "sources": sources, "counts": counts}
+    return {
+        "rows": rows,
+        "sources": sources,
+        "counts": counts,
+        "ambient": _ambient_context(),
+    }
 
 
 def find_work_row(work_id: str) -> dict[str, Any] | None:

@@ -13,6 +13,7 @@ import json
 import os
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -184,8 +185,9 @@ def test_with_no_explicit_head_both_sides_fall_back_to_the_ambient_home(
     assert _head_home_provenance() == "ambient_home"
 
 
-def test_an_explicit_head_is_reported_as_such_in_the_source_detail(real_home):
+def test_an_explicit_head_is_reported_as_such_in_the_ambient_context(real_home):
     assert _head_home_provenance() == "head_home"
+    assert build_running_work()["ambient"]["home_provenance"] == "head_home"
 
 
 def _head_home_provenance() -> str:
@@ -248,6 +250,211 @@ def test_a_recorded_head_survives_a_persona_profile_flip(tmp_path, monkeypatch):
         reset_hermes_head_home(token)
 
 
+# --- contract vs ambient ----------------------------------------------------
+#
+# The projection used to concatenate CONTRACT (a lane's health) with AMBIENT
+# machine-local state (which home it resolved, what files sit under it) into one
+# `detail` prose string. That is not a tidiness complaint: one half of the
+# ambient state — whether `state.db` exists — is CREATED by this projection's own
+# lazy `from . import mission_chat_turns`, which reaches
+# `tools.process_registry`'s module-scope singleton and through it
+# `async_delegation.restore_undelivered_completions()`. The chat-turn lane runs
+# AFTER the delegation lane, so the first build in a process said
+# "; no state.db" and every later build did not, for identical work. Under
+# pytest, which answer you got depended on whether some other test module had
+# already dragged that chain in.
+#
+# So these are not shape tests. They pin that the producer's output is a
+# function of the WORK, and of nothing else.
+
+_DETERMINISM_PROBE = """
+import json, os, sys
+
+home = sys.argv[1]
+os.environ["HERMES_HOME"] = home
+os.environ["HERMES_HEAD_HOME"] = home
+if "--preimport" in sys.argv:
+    # The exact chain the chat-turn lane imports lazily, forced to fire BEFORE
+    # the first build instead of during it. This is the import-order axis.
+    import tools.process_registry  # noqa: F401
+
+from agent_runtime.running_work import build_running_work
+
+frames = [build_running_work() for _ in range(2)]
+print(
+    "@@" + json.dumps(
+        [
+            {"sources": f["sources"], "counts": f["counts"], "ambient": f["ambient"]}
+            for f in frames
+        ],
+        sort_keys=True,
+    )
+)
+"""
+
+
+def _probe_frames(tmp_path, *, preimport: bool) -> list[dict]:
+    """Two consecutive builds from a FRESH interpreter and a fresh home.
+
+    A subprocess is not ceremony here, it is the whole test. Inside this pytest
+    process `agent_runtime.mission_chat_turns` is imported before the first
+    assertion runs, so the divergence being pinned — build 1 vs build 2 of a cold
+    process — is unreachable in-process. Reproducing it requires a cold
+    interpreter, which is precisely why the defect survived to be found on a
+    fixture instead of by a unit test.
+    """
+
+    import subprocess
+    import sys
+
+    root = str(Path(__file__).resolve().parents[2])
+    home = tmp_path / ("pre" if preimport else "cold")
+    home.mkdir()
+    env = dict(os.environ)
+    env["PYTHONPATH"] = root
+    env.pop("HERMES_HOME", None)
+    env.pop("HERMES_HEAD_HOME", None)
+    argv = [sys.executable, "-c", _DETERMINISM_PROBE, str(home)]
+    if preimport:
+        argv.append("--preimport")
+    result = subprocess.run(
+        argv, cwd=root, env=env, capture_output=True, text=True, timeout=600
+    )
+    assert result.returncode == 0, result.stderr[-4000:]
+    payload = [line for line in result.stdout.splitlines() if line.startswith("@@")]
+    assert len(payload) == 1, result.stdout[-4000:]
+    return json.loads(payload[0][2:])
+
+
+@pytest.mark.timeout(180)
+def test_two_builds_in_one_cold_process_emit_the_same_frame(tmp_path):
+    """THE headline pin: the producer is not perturbed by its own side effects.
+
+    Build 1 and build 2 differ in exactly one respect — build 1 ran the import
+    that creates `state.db`. If any ambient observation of that file reaches the
+    wire, these two frames stop being equal.
+    """
+
+    first, second = _probe_frames(tmp_path, preimport=False)
+
+    assert first == second
+
+
+@pytest.mark.timeout(300)
+def test_import_order_cannot_change_what_the_producer_says(tmp_path):
+    """The finding, stated directly: same work, same contract, same bytes.
+
+    One interpreter forces the chat-turn lane's import chain BEFORE the first
+    build; the other lets the lane fire it mid-build. Historically that decided
+    whether `detail` carried "; no state.db". Nothing on the wire may depend on
+    it now.
+    """
+
+    cold = _probe_frames(tmp_path, preimport=False)
+    preimported = _probe_frames(tmp_path, preimport=True)
+
+    # `ambient.home_name` differs by construction (each run gets its own home),
+    # so compare it separately and require only that BOTH name their own home.
+    assert cold[0]["ambient"]["home_provenance"] == "head_home"
+    assert preimported[0]["ambient"]["home_provenance"] == "head_home"
+    assert cold[0]["ambient"]["home_name"] == "cold"
+    assert preimported[0]["ambient"]["home_name"] == "pre"
+
+    assert [frame["sources"] for frame in cold] == [
+        frame["sources"] for frame in preimported
+    ]
+    assert [frame["counts"] for frame in cold] == [
+        frame["counts"] for frame in preimported
+    ]
+
+
+def test_no_source_health_entry_carries_machine_local_state(home):
+    """Health entries are contract-only, and the home is what must not be in them.
+
+    Keyed on the resolved home's NAME rather than on a fixed phrase: a producer
+    that reintroduced the mixing under different wording ("home: X", "read from
+    X") would still fail, which a substring pin on "head_home=" would not.
+    """
+
+    payload = build_running_work()
+    home_name = payload["ambient"]["home_name"]
+
+    assert home_name == home.name
+    for name, entry in payload["sources"].items():
+        assert set(entry) <= {
+            "status",
+            "lane",
+            "reason",
+            "detail",
+            "live_enrichment_error",
+        }, name
+        assert home_name not in entry.get("detail", ""), name
+
+
+def test_the_resolved_home_is_published_as_ambient_context_not_lost(home):
+    """The diagnostic survives the split — it moves, it is not deleted.
+
+    "Nothing is running" and "nothing is running *in the directory I resolved*"
+    are different answers, and the writer/reader divergence that
+    `get_hermes_background_work_home` exists to retire is invisible without this.
+    """
+
+    ambient = build_running_work()["ambient"]
+
+    assert ambient == {"home_provenance": "test_home", "home_name": home.name}
+    # A basename, never a path: the error contract forbids absolute paths in
+    # operator-visible messages, and these bytes are mirrored into the Launcher.
+    assert os.sep not in ambient["home_name"]
+
+
+def test_the_ambient_block_names_an_unresolvable_home_rather_than_lying(monkeypatch):
+    monkeypatch.setattr(running_work, "_head_home", lambda: (None, "unresolved"))
+
+    assert build_running_work()["ambient"] == {
+        "home_provenance": "unresolved",
+        "home_name": "",
+    }
+
+
+def test_a_failed_live_enrichment_is_a_typed_field_not_prose(home, monkeypatch):
+    """The durable answer stands, and the reader can SEE that live failed.
+
+    This used to be `"; live enrichment failed: TypeError"` appended to the same
+    string as the home — a fact a consumer could only recover by sentence
+    matching, which is exactly what the typed key exists to prevent.
+    """
+
+    class _BrokenRegistry:
+        class process_registry:  # noqa: N801 - mirrors the real module attribute
+            @staticmethod
+            def list_sessions():
+                raise TypeError("registry exploded")
+
+    monkeypatch.setattr(
+        running_work,
+        "_module",
+        lambda name: _BrokenRegistry if name == "tools.process_registry" else None,
+    )
+
+    terminal = build_running_work()["sources"][KIND_TERMINAL]
+
+    # `ok`, because the durable checkpoint answered — the live lane is enrichment.
+    assert terminal["status"] == SOURCE_OK
+    assert terminal["live_enrichment_error"] == "TypeError"
+    assert "detail" not in terminal
+
+
+def test_a_healthy_lane_says_nothing_about_live_enrichment(home):
+    """Absence is the honest encoding here: it did not raise.
+
+    Emitting `live_enrichment_error: ""` would put an always-present empty
+    string on the wire for four of five lanes to mean "fine".
+    """
+
+    for entry in build_running_work()["sources"].values():
+        assert "live_enrichment_error" not in entry
+
+
 # --- per-source fail-closed -------------------------------------------------
 
 
@@ -289,13 +496,37 @@ def test_an_unresolvable_home_is_reported_not_treated_as_no_work(monkeypatch):
         assert payload["sources"][name]["reason"] == "home_unresolved"
 
 
-def test_an_absent_checkpoint_is_ok_with_a_reason_not_unavailable(home):
-    """A home with no checkpoint PROVES zero processes; that is readable, not blind."""
+def test_an_absent_checkpoint_is_ok_not_unavailable(home):
+    """A home with no checkpoint PROVES zero processes; that is readable, not blind.
 
-    terminal = build_running_work()["sources"][KIND_TERMINAL]
+    And it says so with health alone. "The file is missing" and "the file lists
+    nothing" are the same runtime fact — zero background processes, proven — so
+    the lane must not spend a contract field distinguishing storage layouts.
+    """
+
+    payload = build_running_work()
+    terminal = payload["sources"][KIND_TERMINAL]
 
     assert terminal["status"] == SOURCE_OK
-    assert "no checkpoint file" in terminal["detail"]
+    assert terminal["lane"] == running_work.LANE_DURABLE
+    assert _rows_of_kind(payload, KIND_TERMINAL) == []
+    assert "detail" not in terminal
+
+
+def test_an_absent_checkpoint_and_an_empty_one_are_indistinguishable(home):
+    """Same fact, same bytes — the pin that keeps layout off the wire.
+
+    This is the shape of the original defect: a filesystem observation on a
+    contract field. It is stated as an EQUALITY between two homes rather than as
+    "no such substring", so a producer that reintroduced the distinction under
+    any wording at all fails here.
+    """
+
+    absent = build_running_work()["sources"][KIND_TERMINAL]
+    _write_checkpoint(home, [])
+    empty = build_running_work()["sources"][KIND_TERMINAL]
+
+    assert absent == empty
 
 
 def test_a_lane_that_explodes_cannot_break_the_frame(home, monkeypatch):
@@ -565,6 +796,15 @@ def test_durable_delegation_rows_declare_progress_unavailable(home):
 
 
 def test_a_state_db_without_the_table_is_a_store_with_no_delegations(home):
+    """A store predating the table holds zero delegations — `ok`, not blind.
+
+    Pinned as an EQUALITY against the no-store case for the same reason as the
+    checkpoint above: both are zero delegations, and which schema the file
+    happens to carry is layout, not lane health.
+    """
+
+    no_store = build_running_work()["sources"][KIND_DELEGATION]
+
     conn = sqlite3.connect(home / "state.db")
     conn.execute("CREATE TABLE unrelated (id TEXT)")
     conn.commit()
@@ -573,7 +813,8 @@ def test_a_state_db_without_the_table_is_a_store_with_no_delegations(home):
     source = build_running_work()["sources"][KIND_DELEGATION]
 
     assert source["status"] == SOURCE_OK
-    assert "no async_delegations table" in source["detail"]
+    assert _rows_of_kind(build_running_work(), KIND_DELEGATION) == []
+    assert source == no_store
 
 
 def test_the_projection_never_creates_the_state_db_it_reads(home):

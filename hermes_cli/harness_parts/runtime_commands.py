@@ -498,6 +498,21 @@ def _cmd_work_list(args) -> int:
     # projection exists to make impossible.
     envelope["sources"] = projection["sources"]
     envelope["counts"] = projection["counts"]
+    # Machine-local context, carried in its OWN block rather than folded into a
+    # lane's health prose. It is what tells an operator staring at an empty list
+    # WHICH home the projection read — the difference between "nothing is
+    # running" and "nothing is running over there". Not contract: a consumer
+    # renders it, never branches on it.
+    #
+    # Attached only when the projection published it, and never defaulted. This
+    # block is a DIAGNOSTIC, so it must not be able to take the verb down (a
+    # required-key read here would turn a missing diagnostic into a dead
+    # `work list`), and it must not be fabricated either — a producer that
+    # stopped publishing it should be visible by its absence, not papered over
+    # with an invented home.
+    ambient = projection.get("ambient")
+    if isinstance(ambient, dict):
+        envelope["ambient"] = ambient
     envelope["completeness"] = accountant.summary()
     _print_stage42(envelope, args=args, default_output="json")
     return 0

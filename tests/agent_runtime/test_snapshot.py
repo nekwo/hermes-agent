@@ -72,7 +72,13 @@ def test_snapshot_carries_the_running_work_section(isolate_agent_runtime_root) -
 
     section = build_snapshot()["running_work"]
 
-    assert set(section) == {"rows", "sources", "counts"}
+    # ``ambient`` is the fourth key and deliberately NOT one of the other three.
+    # ``rows`` / ``sources`` / ``counts`` are contract; ``ambient`` is
+    # machine-local context, given its own block so it can never again be
+    # concatenated into a lane's ``detail`` — which is how the producer came to
+    # emit different bytes for identical work depending on import order.
+    assert set(section) == {"rows", "sources", "counts", "ambient"}
+    assert set(section["ambient"]) == {"home_provenance", "home_name"}
     assert isinstance(section["rows"], list)
     assert set(section["sources"]) == {
         "terminal",

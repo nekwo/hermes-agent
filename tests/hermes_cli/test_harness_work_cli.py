@@ -71,6 +71,10 @@ def one_row(monkeypatch):
             "cron_job": {"status": "unavailable", "lane": "live", "reason": "not_in_process"},
         },
         "counts": {"total": 1, "running": 1, "unavailable_sources": 1},
+        # Machine-local context. Modelled here because the stub stands in for
+        # the real producer's SHAPE — a stub that omitted it would let the CLI
+        # drop the block without any test noticing.
+        "ambient": {"home_provenance": "head_home", "home_name": "base"},
     }
     monkeypatch.setattr(running_work, "build_running_work", lambda *a, **k: payload)
     return row
@@ -90,6 +94,12 @@ def test_work_list_emits_rows_with_per_source_health(one_row, capsys):
     # rows without it would read an unreadable lane as "nothing running".
     assert payload["sources"]["cron_job"]["status"] == "unavailable"
     assert payload["counts"]["unavailable_sources"] == 1
+    # Machine-local context rides its OWN block, never a lane's health string.
+    # An empty list is ambiguous without it: "nothing is running" and "nothing
+    # is running in the home I resolved" are different answers.
+    assert payload["ambient"] == {"home_provenance": "head_home", "home_name": "base"}
+    for name, source in payload["sources"].items():
+        assert "base" not in source.get("detail", ""), name
 
 
 def test_work_list_filters_by_kind(one_row, capsys):

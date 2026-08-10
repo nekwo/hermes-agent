@@ -40,10 +40,22 @@ The whole nondeterminism surface of these two envelopes is:
   ``_normalize`` rewrites it to ``err_fixture`` and so does ``_run``, which is
   why the comparison can be exact;
 * the isolated ``HERMES_HOME`` / ``HERMES_HEAD_HOME`` path, which reaches the
-  bytes ONLY as ``detail: "head_home=hermes"`` — ``running_work`` emits the
+  bytes ONLY as ``ambient.home_name: "hermes"`` — ``running_work`` emits the
   basename, never the path. The temp home is therefore named literally
   ``hermes``, exactly as the generator names it. **This coupling is load-bearing
   and easy to break by "tidying" the fixture name below.**
+
+The comparison used to need a NORMALISER here, and its removal is the point of
+this paragraph. ``running_work`` folded machine-local filesystem state into the
+same ``detail`` prose that carried its contract, and one half of that state —
+"does ``state.db`` exist yet" — was perturbed by the projection's own lazy
+import, so the producer emitted ``"head_home=hermes"`` or
+``"head_home=hermes; no state.db"`` for identical work depending on test import
+order. This file worked around it by pinning the suffix vocabulary and comparing
+only the stable prefix. The producer now separates the two — contract on the
+source entry, machine-local context in a sibling ``ambient`` block, store
+presence off the wire entirely — so the envelopes are byte-stable as emitted and
+the comparison is raw.
 
 No timestamps, elapsed times, pids, or machine-root probes reach either
 envelope: the empty list has no rows to carry per-row time fields, and neither
@@ -90,57 +102,9 @@ FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "response_envelope
 #: this file exists to prevent, one level up.
 _GENERATOR = "scripts.generate_agent_runtime_response_fixtures"
 
-#: Environment-state suffixes that ``running_work`` appends to a source's
-#: ``detail`` prose (``running_work.py`` builds ``f"{provenance}={head.name}"``
-#: and then appends these).
-#:
-#: THEY ARE NOT CONTRACT, AND THEY ARE NOT DETERMINISTIC. Whether the isolated
-#: home has a ``state.db`` yet depends on whether any module that opens one was
-#: imported BEFORE the home was isolated — so the same producer emits
-#: ``"head_home=hermes"`` or ``"head_home=hermes; no state.db"`` for the same
-#: contract, decided by test import order. The committed fixture happens to
-#: encode the first.
-#:
-#: So the comparison below normalises the suffix away and compares the stable
-#: ``provenance=basename`` prefix exactly. The vocabulary is pinned rather than
-#: pattern-stripped: an UNKNOWN suffix is a real change in what the producer
-#: says and fails, instead of being silently swallowed by a permissive regex.
-#: (That this field mixes contract with ambient filesystem state at all is a
-#: weakness in ``running_work``, not in the fixture — filed, not fixed here.)
-_ENVIRONMENT_DETAIL_SUFFIXES = (
-    "no state.db",
-    "no checkpoint file",
-    "no async_delegations table",
-)
-
 
 def _read(name: str) -> dict:
     return json.loads((FIXTURES / name).read_text(encoding="utf-8"))
-
-
-def _normalise_detail(envelope: dict) -> dict:
-    """Strip the ambient-state suffixes from every source ``detail``.
-
-    Returns a copy; the caller's envelope is untouched.
-    """
-
-    clone = json.loads(json.dumps(envelope))
-    for source in (clone.get("stdout", {}).get("sources") or {}).values():
-        detail = source.get("detail")
-        if not isinstance(detail, str):
-            continue
-        head, _, tail = detail.partition("; ")
-        while tail:
-            piece, _, rest = tail.partition("; ")
-            assert piece in _ENVIRONMENT_DETAIL_SUFFIXES, (
-                f"unrecognised `detail` suffix {piece!r}. If the producer now "
-                "says something new here, decide whether it is contract (assert "
-                "it) or ambient state (add it to _ENVIRONMENT_DETAIL_SUFFIXES) — "
-                "do not let it pass unread."
-            )
-            tail = rest
-        source["detail"] = head
-    return clone
 
 
 @pytest.fixture
@@ -148,8 +112,8 @@ def producer(tmp_path, monkeypatch):
     """The real CLI producer, against an isolated home.
 
     Mirrors the generator's ``main()`` env setup exactly. The home directory is
-    named ``hermes`` on purpose: ``running_work`` renders provenance as
-    ``head_home=<basename>``, so the name reaches the fixture bytes.
+    named ``hermes`` on purpose: ``running_work`` publishes the resolved home
+    as ``ambient.home_name = <basename>``, so the name reaches the fixture bytes.
     """
 
     home = tmp_path / "hermes"
@@ -181,8 +145,8 @@ def test_every_fixture_is_re_derivable_from_the_producer(producer):
     """
 
     for name, argv in producer.cases.items():
-        live = _normalise_detail(producer(argv))
-        committed = _normalise_detail(_read(name))
+        live = producer(argv)
+        committed = _read(name)
 
         # Report the structural difference first — a raw dict inequality on a
         # 1 KB envelope is unreadable, and the drift that actually happens is a
@@ -296,8 +260,8 @@ def test_the_comparison_would_notice_a_drifted_fixture(producer, drift):
     way — if it ever stops discriminating, this fails while the tree is clean.
     """
 
-    live = _normalise_detail(producer(["harness", "work", "list", "--json"]))
-    committed = _normalise_detail(_read("work_list_empty.json"))
+    live = producer(["harness", "work", "list", "--json"])
+    committed = _read("work_list_empty.json")
     assert not _rejects(live, committed), "precondition: the clean fixture must be accepted"
 
     drifted = json.loads(json.dumps(committed))
@@ -305,20 +269,53 @@ def test_the_comparison_would_notice_a_drifted_fixture(producer, drift):
     assert _rejects(live, drifted), "the comparator accepted a drifted fixture"
 
 
-def test_the_detail_prose_carries_a_basename_never_a_path(producer):
-    """``detail`` is provenance prose, and the ONE thing about it that IS
-    contract is that it never leaks an absolute path into bytes the Launcher
-    mirrors. ``running_work`` emits ``head.name``; this pins that it stays a
-    basename."""
+def test_the_ambient_home_is_a_basename_never_a_path(producer):
+    """The machine-local block names the home; it must never leak the PATH.
+
+    These bytes are mirrored verbatim into the Launcher repo, and the error
+    contract forbids absolute paths in operator-visible messages, so the one
+    thing that IS guaranteed about this diagnostic is that it stays a basename.
+    The guarantee used to sit on ``detail``; it moved here with the fact.
+    """
 
     live = producer(["harness", "work", "list", "--json"])
-    for source_name, source in (live["stdout"].get("sources") or {}).items():
-        detail = source.get("detail")
-        if not isinstance(detail, str):
-            continue
-        assert detail.startswith("head_home=hermes"), (source_name, detail)
-        for leak in ("C:\\", "X:\\", "/mnt/", "AppData"):
-            assert leak not in detail, f"{source_name} leaks a path: {detail!r}"
+    ambient = live["stdout"]["ambient"]
+
+    assert ambient == {"home_provenance": "head_home", "home_name": "hermes"}
+    for leak in ("C:\\", "X:\\", "/mnt/", "AppData", "Temp", "/"):
+        assert leak not in ambient["home_name"], f"leaks a path: {ambient!r}"
+
+
+def test_no_source_health_entry_carries_machine_local_prose(producer):
+    """The split itself, pinned on the bytes a consumer repo mirrors.
+
+    A source entry is CONTRACT. Before this split it also carried the resolved
+    home and the presence of files under it, concatenated into one ``detail``
+    string — which is how a wire field became a function of test import order.
+    An ``ok`` lane now attaches nothing but typed keys, and ``detail`` survives
+    only as the bare machine token an ``unavailable`` lane reports.
+    """
+
+    live = producer(["harness", "work", "list", "--json"])
+    home_name = live["stdout"]["ambient"]["home_name"]
+
+    for source_name, source in (live["stdout"]["sources"]).items():
+        assert set(source) <= {
+            "status",
+            "lane",
+            "reason",
+            "detail",
+            "live_enrichment_error",
+        }, (source_name, source)
+        detail = source.get("detail", "")
+        assert home_name not in detail, (
+            f"{source_name}: the resolved home is back on a contract field "
+            f"({detail!r}). It belongs in `ambient`."
+        )
+        assert "; " not in detail, (
+            f"{source_name}: `detail` is concatenating facts again ({detail!r}). "
+            "Model them as separate typed keys."
+        )
 
 
 # --------------------------------------------------------------------------- #
