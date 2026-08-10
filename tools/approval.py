@@ -24,6 +24,7 @@ import unicodedata
 from typing import Optional
 from hermes_cli.config import cfg_get
 
+from tools import path_identity
 from tools.interrupt import is_interrupted
 from utils import env_var_enabled, is_truthy_value
 
@@ -2014,51 +2015,31 @@ def _command_detection_variants(command: str):
         yield variant
 
 
-# A Git-Bash/MSYS absolute path: a single-letter drive component at the root,
-# then the rest of the path. `/c/Users/...` is MSYS's spelling of `C:\Users\...`.
-_MSYS_DRIVE_PATH = re.compile(r"/([A-Za-z])/(.+)", re.DOTALL)
-_IS_WINDOWS = os.name == "nt"
-
-
-def _windows_spelling_of_msys_path(operand: str) -> Optional[str]:
-    """Translate a Git-Bash/MSYS drive path to its Windows spelling, or None.
-
-    ``_find_shell()`` returns Git Bash on Windows, so the cleanup command an
-    agent actually writes spells its temp artifact the MSYS way
-    (``/c/Users/.../Temp/hermes-verify-x.py``) rather than the native way
-    (``C:\\Users\\...\\Temp\\hermes-verify-x.py``). The two spellings name the
-    same real file, but only the native one could ever satisfy the exemption
-    below, so routine cleanup was refused on Windows — and refused loudly,
-    because a leading ``/`` also trips the "delete in root path" rule.
-
-    This is a pure SPELLING translation and nothing else. The translated path
-    is handed to exactly the same checks the native spelling goes through, so
-    it cannot exempt anything a native path would not be exempted for. It is
-    deliberately narrow:
-
-      * Windows only — on POSIX ``/c/...`` is a real path of its own and
-        reinterpreting it as a drive would be a lie about the filesystem.
-      * A path already containing a backslash is not a clean MSYS spelling;
-        leave it alone rather than guess at a mixed one.
-    """
-    if not _IS_WINDOWS:
-        return None
-    match = _MSYS_DRIVE_PATH.fullmatch(operand)
-    if match is None:
-        return None
-    drive, rest = match.groups()
-    if "\\" in rest:
-        return None
-    return f"{drive.upper()}:\\" + rest.replace("/", "\\")
+# The MSYS spelling translation lives in the path-identity authority now; this
+# module was the second place to re-derive it (tools/environments/local.py was
+# the first) and re-deriving it per guard is the defect being retired. Re-export
+# under the private name so the call site and its pins keep reading naturally.
+_windows_spelling_of_msys_path = path_identity.windows_spelling_of_msys_path
 
 
 def _is_exempt_verification_artifact_path(operand: str) -> bool:
     """Whether *operand* names exactly one Hermes ad-hoc script in temp.
 
-    Two independent guards, both required: the operand must be spelled as the
-    canonical temp dir joined with a bare basename (no traversal, no other
-    directory, no alternate spelling of temp), and it must still resolve into
-    that same temp dir after symlink resolution.
+    Two independent guards, both required, and they ask deliberately DIFFERENT
+    questions:
+
+    * **Spelling.** The operand must be written as the canonical temp dir joined
+      with a bare basename. This is a literal string comparison on purpose — it
+      is what refuses ``/tmp/nested/../x``, ``/var/tmp/x`` and every alternate
+      spelling of temp. Relaxing it into an identity test would delete the
+      traversal rejection outright, so it must NOT become
+      ``denotes_same_file``.
+    * **Identity.** The operand must still land in that same temp dir after
+      symlink resolution. This one IS an identity question, and it is asked
+      through the authority: a realpath'd dir and the realpath'd temp dir can
+      differ in case on Windows, and a string ``!=`` there refuses a legitimate
+      cleanup rather than permitting an illegitimate one — but the exemption is
+      security-relevant either way, so it gets the resolution-based answer.
     """
     temp_dir = os.path.realpath(tempfile.gettempdir())
     basename = os.path.basename(operand)
@@ -2066,7 +2047,7 @@ def _is_exempt_verification_artifact_path(operand: str) -> bool:
         return False
 
     target = os.path.realpath(operand)
-    if os.path.dirname(target) != temp_dir:
+    if not path_identity.denotes_same_file(os.path.dirname(target), temp_dir):
         return False
     return re.fullmatch(r"hermes-(?:verify|ad-hoc)-[A-Za-z0-9_.-]+", basename) is not None
 

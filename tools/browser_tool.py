@@ -173,6 +173,7 @@ from plugins.browser.browser_use.provider import (  # noqa: F401
 from plugins.browser.firecrawl.provider import (  # noqa: F401
     FirecrawlBrowserProvider as FirecrawlProvider,
 )
+from tools import path_identity
 from tools.tool_backend_helpers import normalize_browser_cloud_provider
 # Camofox local anti-detection browser backend (optional).
 # When CAMOFOX_URL is set, all browser operations route through the
@@ -1734,8 +1735,15 @@ def _verify_reapable_browser_daemon(daemon_pid: int, socket_dir: str,
         try:
             env_dir = (proc.environ() or {}).get(
                 "AGENT_BROWSER_SOCKET_DIR", "")
-            bound = bool(env_dir) and os.path.normpath(env_dir) == \
-                os.path.normpath(socket_dir)
+            # Identity, not spelling. The two sides have different producers --
+            # one read out of a live process's environ, one built here -- so
+            # they can name one directory two ways: a case flip on Windows, a
+            # symlinked temp root anywhere. normpath answers False for both,
+            # and the reaper then refuses to clean up its own daemon. Still
+            # fails closed: an unrelated directory resolves elsewhere and the
+            # reap is refused exactly as before. Empty env_dir denotes no file
+            # and so is never a match (see denotes_same_file).
+            bound = path_identity.denotes_same_file(env_dir, socket_dir)
         except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
             # environ() can be denied even same-user on some platforms.
             # cmdline already failed to bind — fail closed.

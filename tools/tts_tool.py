@@ -89,6 +89,7 @@ def _resolve_provider_key(env_var: str, provider_id: str) -> str:
         return str(get_env_value(env_var) or "").strip()
     return resolve_provider_secret(env_var, provider_id, env_getter=get_env_value)
 
+from tools import path_identity
 from tools.managed_tool_gateway import resolve_managed_tool_gateway
 from tools.tool_backend_helpers import (
     managed_nous_tools_enabled,
@@ -1275,7 +1276,12 @@ def _ffmpeg_transcode_to_opus(input_path: str, ogg_path: str) -> Optional[str]:
     if not _has_ffmpeg():
         return None
 
-    in_place = os.path.abspath(input_path) == os.path.abspath(ogg_path)
+    # Identity, not spelling: getting this wrong in the False direction hands
+    # ffmpeg the same file as both input and output and corrupts it mid-read.
+    # ``abspath`` compares byte-for-byte, so ``C:\a\x.ogg`` vs ``c:/a/x.ogg``
+    # -- one path built by a caller, one by a temp helper -- answered "not the
+    # same file" for a file that is.
+    in_place = path_identity.denotes_same_file(input_path, ogg_path)
     work_path = ogg_path + ".tmp.ogg" if in_place else ogg_path
     try:
         result = subprocess.run(

@@ -18,6 +18,7 @@ from tools.file_operations import (
     normalize_search_pagination,
 )
 from tools import file_state
+from tools import path_identity
 from agent.redact import redact_sensitive_text
 
 logger = logging.getLogger(__name__)
@@ -440,37 +441,22 @@ def _path_resolution_warning(filepath: str, resolved: Path, task_id: str = "defa
 
 
 def _posix_match_forms(path: str) -> tuple[str, ...]:
-    """Return every spelling a POSIX-rooted blocklist must be matched against.
+    """Tilde-expand *path*, then hand it to the path-identity authority.
 
-    ``os.path.normpath`` rewrites "/dev/zero" to "\\dev\\zero" and "/etc/hosts"
-    to "\\etc\\hosts" wherever ``os.sep`` is a backslash, so a guard that
-    compares only the normalized form matches NONE of the POSIX literals it is
-    built from. It does not fail loudly — it silently answers "not blocked" for
-    exactly the paths it exists to refuse.
+    The spelling reconciliation itself lives in ``tools.path_identity`` — see
+    :func:`tools.path_identity.posix_match_forms` for what ``os.path.normpath``
+    does to a POSIX root on Windows and why every guard here has to know.
 
-    The host platform is not the question. Reads and writes execute through Git
-    Bash / WSL and through the container backends (docker, modal, daytona,
-    singularity, vercel_sandbox), where /dev, /proc and /etc are real and a
-    POSIX path is the normal case rather than the exotic one.
+    This shim exists for the one thing the authority deliberately refuses to
+    own: ``~`` resolves against the *effective profile home* (:func:`_expand_tilde`,
+    which consults ``hermes_constants.get_subprocess_home``), and that is Hermes
+    policy with a config dependency, not a pure spelling fact. Keeping the
+    expansion here is what lets ``path_identity`` stay import-light enough for
+    ``tools/approval.py`` to depend on it.
 
-    Adding the POSIX spelling cannot create a false positive against a
-    root-anchored prefix: a native Windows path is always drive- or
-    UNC-anchored ("C:/…", "//host/…") and so can never match an "/etc/"-style
-    root.
-
-    This is deliberately ONE helper. The reconciliation was worked out once for
-    ``_BLOCKED_DEVICE_PATHS`` and left open-coded there, and three hundred lines
-    later ``_check_sensitive_path`` still had the original bug. Duplicating the
-    fix per guard is what let the second instance survive the first fix, so new
-    guards must call this instead of repeating it.
+    Guards in this module call THIS, so no caller can forget the expansion.
     """
-    normalized = os.path.normpath(_expand_tilde(path))
-    if os.sep == "/":
-        return (normalized,)
-    posix_form = normalized.replace(os.sep, "/")
-    if posix_form == normalized:
-        return (normalized,)
-    return (normalized, posix_form)
+    return path_identity.posix_match_forms(_expand_tilde(path))
 
 
 def _is_blocked_device_path(path: str) -> bool:
@@ -659,7 +645,18 @@ def _check_sensitive_path(filepath: str, task_id: str = "default") -> str | None
     # prompt-injected agent could silently disable exec approval by writing to
     # this file.
     hermes_config = _get_hermes_config_resolved()
-    if hermes_config and (resolved == hermes_config or normalized == hermes_config):
+    # Identity, not string equality. The two operands are produced by different
+    # machinery -- ``resolved`` by _resolve_path_for_task (and by the raw
+    # filepath when that raises), ``normalized`` by normpath, the config path by
+    # Path.resolve() -- so they can name one file in two spellings. On Windows
+    # that difference is a bare case flip, and this is the guard that stops an
+    # agent rewriting approvals.mode in config.yaml, so a missed match is an
+    # approval bypass. denotes_same_file only ever matches MORE than the string
+    # compares it replaces; the refusal set below cannot shrink.
+    if hermes_config and (
+        path_identity.denotes_same_file(resolved, hermes_config)
+        or path_identity.denotes_same_file(normalized, hermes_config)
+    ):
         return (
             f"Refusing to write to Hermes config file: {filepath}\n"
             "Agent cannot modify security-sensitive configuration. "

@@ -12,6 +12,7 @@ from unittest.mock import patch as mock_patch
 import pytest
 
 import tools.approval as approval_module
+from tools import path_identity
 from hermes_constants import get_hermes_home
 from tools.approval import (
     _get_approval_mode,
@@ -197,6 +198,41 @@ class TestDetectDangerousRm:
         with mock_patch("tempfile.gettempdir", return_value=str(temp_dir)):
             assert _is_verification_artifact_cleanup(_rm_f(planted)) is False
 
+    def test_exemption_identity_half_is_not_a_prefix_test(self, tmp_path):
+        """A neighbour whose name EXTENDS temp's must not read as inside temp.
+
+        The identity half of the exemption ("does the operand still resolve into
+        the temp dir") now goes through ``path_identity.denotes_same_file``
+        instead of a string ``!=``. Migrating an identity question is exactly
+        where a prefix-shaped answer can be smuggled in, so pin the shape that
+        would expose one: ``<temp>-evil`` shares every character of ``<temp>``
+        and must still be refused.
+
+        The control above it is what makes the refusal meaningful — an
+        identically shaped artifact in the same directory IS exempt, so the
+        rejection is the identity guard firing rather than the whole lane being
+        inert.
+        """
+        temp_dir = tmp_path / "temp"
+        temp_dir.mkdir()
+        neighbour = tmp_path / "temp-evil"
+        neighbour.mkdir()
+        secret = neighbour / "hermes-verify-example.py"
+        secret.write_text("do not touch", encoding="utf-8")
+
+        real_temp = os.path.realpath(temp_dir)
+        planted = os.path.join(real_temp, "hermes-verify-example.py")
+        try:
+            Path(planted).symlink_to(secret)
+        except (OSError, NotImplementedError):
+            pytest.skip("symlink creation unavailable for this user")
+        plain = os.path.join(real_temp, "hermes-verify-plain.py")
+        Path(plain).write_text("", encoding="utf-8")
+
+        with mock_patch("tempfile.gettempdir", return_value=real_temp):
+            assert _is_verification_artifact_cleanup(_rm_f(plain)) is True
+            assert _is_verification_artifact_cleanup(_rm_f(planted)) is False
+
     @_WINDOWS_ONLY
     def test_msys_spelled_temp_artifact_cleanup_is_exempt(self):
         """Git Bash spells the very same temp file ``/c/Users/.../Temp/x``.
@@ -290,8 +326,15 @@ class TestDetectDangerousRm:
             ) is False
 
     def test_msys_translation_is_windows_only_and_narrow(self):
-        """``/c/...`` is a real POSIX path; only Windows may reinterpret it."""
-        with mock_patch.object(approval_module, "_IS_WINDOWS", True):
+        """``/c/...`` is a real POSIX path; only Windows may reinterpret it.
+
+        The platform gate moved with the function into ``tools.path_identity``
+        (approval re-exports it), so the patch target is the authority's global.
+        The imported ``_windows_spelling_of_msys_path`` name below is the same
+        object — pinning it here keeps the guarantee attached to the guard that
+        depends on it, not only to the module that implements it.
+        """
+        with mock_patch.object(path_identity, "_IS_WINDOWS", True):
             assert _windows_spelling_of_msys_path("/c/Users/x/hermes-verify-a.py") == (
                 r"C:\Users\x\hermes-verify-a.py"
             )
@@ -302,7 +345,7 @@ class TestDetectDangerousRm:
             assert _windows_spelling_of_msys_path("/c/") is None
             # Already carries a native separator -- not a clean MSYS spelling.
             assert _windows_spelling_of_msys_path("/c/Users\\x") is None
-        with mock_patch.object(approval_module, "_IS_WINDOWS", False):
+        with mock_patch.object(path_identity, "_IS_WINDOWS", False):
             assert _windows_spelling_of_msys_path("/c/Users/x/hermes-verify-a.py") is None
 
     def test_verification_cleanup_exemption_rejects_broader_deletions(self):
