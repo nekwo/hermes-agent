@@ -1288,6 +1288,51 @@ def query_task_status() -> dict[str, str]:
     return info
 
 
+def _task_action_is_console_less(query_output: str, script_path: Path) -> bool | None:
+    """Classify a ``schtasks /Query`` dump by which launcher the action names.
+
+    Locale-independent on purpose: Windows translates the *field labels*
+    (``Task To Run``) but never the *path* inside them, so we look for the
+    launcher path itself rather than parsing key/value pairs.
+
+    Returns True for the console-less ``.vbs`` (run through ``wscript.exe``),
+    False for the legacy ``.cmd`` (run through ``cmd.exe``, which owns a
+    visible console window), and None when neither path appears — an action
+    we don't recognise, which we must not report as either.
+    """
+    text = query_output.lower()
+    if str(script_path.with_suffix(".vbs")).lower() in text:
+        return True
+    if str(script_path.with_suffix(".cmd")).lower() in text:
+        return False
+    return None
+
+
+def task_action_is_console_less() -> bool | None:
+    """Whether the REGISTERED Scheduled Task launches the console-less ``.vbs``.
+
+    ``_write_task_script`` regenerates the launcher *files*, but a task
+    registered before #45610 has its action bound to the ``.cmd``. Rewriting
+    the files cannot retarget that: cmd.exe owns a **visible console window**,
+    so the live gateway dies with ``STATUS_CONTROL_C_EXIT`` (0xC000013A) the
+    moment that window is closed or receives a stray console-control
+    broadcast — and, since the only trigger is ONLOGON, it stays down until
+    the next login. Re-registering the action needs ``schtasks /Create``
+    (elevation), which ``hermes update`` deliberately does not do, so the only
+    way a pre-#45610 install ever escapes this is if someone is *told*.
+
+    Returns True (console-less), False (legacy visible console), or None when
+    there is no task, its definition can't be read, or its action is
+    unrecognised.
+    """
+    if not is_windows():
+        return None
+    code, out, _err = _exec_schtasks(["/Query", "/TN", get_task_name(), "/V", "/FO", "LIST"])
+    if code != 0:
+        return None
+    return _task_action_is_console_less(out, get_task_script_path())
+
+
 def _gateway_pids() -> list[int]:
     """Reuse the cross-platform PID scanner in gateway.py."""
     from hermes_cli.gateway import find_gateway_pids
@@ -1443,6 +1488,15 @@ def status(deep: bool = False) -> None:
             for key in ("status", "last run time", "last run result"):
                 if key in info:
                     print(f"  {key.title()}: {info[key]}")
+        if task_action_is_console_less() is False:
+            # A pre-#45610 registration runs the .cmd through cmd.exe, which
+            # owns a visible console window. Closing it kills the gateway with
+            # STATUS_CONTROL_C_EXIT (0xC000013A) and the ONLOGON-only trigger
+            # leaves it down until the next login — so say it here, on the
+            # surface an operator actually reads when the gateway is missing.
+            print("  ⚠ Task launches a VISIBLE console window (legacy .cmd action).")
+            print("    Closing that window kills the gateway; nothing restarts it")
+            print("    until the next login. Re-register with: hermes gateway install")
     elif startup_installed:
         entry = get_startup_entry_path()
         if not entry.exists():

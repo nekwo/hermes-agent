@@ -83,6 +83,94 @@ def test_restart_spec_normalizes_legacy_pythonw_argv(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+_SCRIPT = Path(r"C:\hermes\gateway-service\Hermes_Gateway_alice.cmd")
+
+
+def test_task_action_classifier_separates_legacy_cmd_from_console_less_vbs():
+    """Rewriting the launcher FILES only retargets a task whose action already
+    names the ``.vbs``. A pre-#45610 action names the ``.cmd`` and keeps a
+    visible console window no matter how often the files are regenerated, so
+    the two must not collapse into one answer — and an action naming neither
+    must stay unknown rather than being guessed either way."""
+    legacy = r"Task To Run: C:\hermes\gateway-service\Hermes_Gateway_alice.cmd"
+    modern = r'Task To Run: wscript.exe //B //Nologo "C:\hermes\gateway-service\Hermes_Gateway_alice.vbs"'
+
+    assert gateway_windows._task_action_is_console_less(legacy, _SCRIPT) is False
+    assert gateway_windows._task_action_is_console_less(modern, _SCRIPT) is True
+    assert gateway_windows._task_action_is_console_less("Task To Run: other.exe", _SCRIPT) is None
+
+
+def test_task_action_classifier_reads_localized_output():
+    """Windows translates the field LABELS but never the path inside them, so a
+    localized ``schtasks`` dump must still classify."""
+    localized = r"Aufgabe wird ausgeführt: C:\hermes\gateway-service\Hermes_Gateway_alice.cmd"
+
+    assert gateway_windows._task_action_is_console_less(localized, _SCRIPT) is False
+
+
+def _run_refresh(*, console_less: bool | None, capsys):
+    with mock.patch.object(cli_main, "_is_windows", return_value=True), mock.patch.object(
+        gateway_windows, "is_installed", return_value=True
+    ), mock.patch.object(gateway_windows, "_write_task_script", return_value=_SCRIPT), mock.patch.object(
+        gateway_windows, "task_action_is_console_less", return_value=console_less
+    ), mock.patch.object(gateway_windows, "get_task_name", return_value="Hermes_Gateway_alice"):
+        cli_main._refresh_windows_gateway_launchers()
+    return capsys.readouterr().out
+
+
+def test_refresh_reports_a_task_that_still_launches_a_visible_console(capsys):
+    """The update path cannot re-register the action (that needs elevation), so
+    the one thing it must not do is stay silent: a ``.cmd`` task means the live
+    gateway dies whenever its console window closes, with no restart until the
+    next login."""
+    out = _run_refresh(console_less=False, capsys=capsys)
+
+    assert "Hermes_Gateway_alice" in out
+    assert "VISIBLE console window" in out
+    assert "hermes gateway install" in out
+
+
+def test_refresh_stays_quiet_for_a_console_less_task(capsys):
+    """A modern registration is already correct — no scary warning on it."""
+    out = _run_refresh(console_less=True, capsys=capsys)
+
+    assert "VISIBLE console window" not in out
+
+
+def test_refresh_stays_quiet_when_the_action_cannot_be_read(capsys):
+    """Unknown must not be reported as broken."""
+    out = _run_refresh(console_less=None, capsys=capsys)
+
+    assert "VISIBLE console window" not in out
+
+
+def _run_status(*, console_less: bool | None, capsys):
+    with mock.patch.object(gateway_windows, "_assert_windows"), mock.patch.object(
+        gateway_windows, "get_task_name", return_value="Hermes_Gateway_alice"
+    ), mock.patch.object(gateway_windows, "is_task_registered", return_value=True), mock.patch.object(
+        gateway_windows, "is_startup_entry_installed", return_value=False
+    ), mock.patch.object(gateway_windows, "_gateway_pids", return_value=[]), mock.patch.object(
+        gateway_windows, "query_task_status", return_value={"last run result": "-1073741510"}
+    ), mock.patch.object(gateway_windows, "task_action_is_console_less", return_value=console_less):
+        gateway_windows.status()
+    return capsys.readouterr().out
+
+
+def test_status_explains_a_dead_gateway_left_by_a_visible_console_task(capsys):
+    """``hermes gateway status`` is what an operator reads when the gateway is
+    missing. On a legacy ``.cmd`` registration it used to print a bare
+    ``Last Run Result: -1073741510`` — the numeric form of
+    STATUS_CONTROL_C_EXIT — and leave the cause unnamed."""
+    out = _run_status(console_less=False, capsys=capsys)
+
+    assert "VISIBLE console window" in out
+    assert "hermes gateway install" in out
+
+
+def test_status_stays_quiet_for_a_console_less_task(capsys):
+    out = _run_status(console_less=True, capsys=capsys)
+
+    assert "VISIBLE console window" not in out
 
 
 

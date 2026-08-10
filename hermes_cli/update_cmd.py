@@ -2924,6 +2924,12 @@ def _refresh_windows_gateway_launchers() -> None:
     ``_write_task_script`` is idempotent and renders from current code, so
     this is a no-op for modern installs. Best-effort: a failed refresh must
     never fail the update.
+
+    Rewriting the files only retargets the task when its action already names
+    the console-less ``.vbs``. Tasks registered before #45610 name the
+    ``.cmd`` — a cmd.exe launch that owns a visible console window — and no
+    amount of file rewriting changes that, so we report it instead of leaving
+    the operator on a gateway that any window close silently kills.
     """
     if not _m()._is_windows():
         return
@@ -2934,8 +2940,30 @@ def _refresh_windows_gateway_launchers() -> None:
             return
         gateway_windows._write_task_script()
         print("  ✓ Refreshed Windows gateway launcher scripts")
+        _m()._warn_legacy_console_gateway_task()
     except Exception as exc:
         logger.debug("Could not refresh Windows gateway launchers after update: %s", exc)
+
+def _warn_legacy_console_gateway_task() -> None:
+    """Tell the operator when the registered task still runs a visible console.
+
+    Re-registering the action requires ``schtasks /Create`` (elevation), which
+    the update path deliberately avoids — so a pre-#45610 install cannot heal
+    itself here. What it *can* do is stop being silent: a gateway launched
+    through the ``.cmd`` dies with ``STATUS_CONTROL_C_EXIT`` (0xC000013A) the
+    moment its console window is closed, and the ONLOGON-only trigger means it
+    stays down until the next login.
+    """
+    from hermes_cli import gateway_windows
+
+    if gateway_windows.task_action_is_console_less() is not False:
+        return
+    task_name = gateway_windows.get_task_name()
+    print(f"  ⚠ Scheduled Task {task_name!r} still launches the gateway in a VISIBLE console window.")
+    print("    Closing that window (or a stray console-control broadcast) kills the")
+    print("    gateway outright, and nothing restarts it until the next login.")
+    print("    Re-register it on the console-less launcher — approve the UAC prompt:")
+    print("      hermes gateway install")
 
 def _resume_windows_gateways_after_update(token: dict | None) -> None:
     """Restart Windows profile gateways previously paused for update."""
