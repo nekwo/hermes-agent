@@ -345,14 +345,15 @@ _LOCAL_MODEL_PROBE_REASON = _local_model_probe_failure()
 # NOT registered, deliberately, and therefore still RED — these are defects,
 # and rule 3 says a defect gets fixed, not fenced:
 #
-#   * test_hooks_cli.py (3 nodes) — agent/shell_hooks.py runs
-#     shlex.split(spec.command) in POSIX mode at :452/:817/:904, which eats
-#     every backslash in a Windows hook path. Consequence: hooks report
-#     "command not found", doctor calls every hook non-executable, and
-#     script_mtime_iso returns None — so the "script modified since approval"
-#     TAMPER CHECK at hermes_cli/hooks.py:369-376 can never fire. An approved
-#     hook can be rewritten with anything and doctor still prints OK. The fix
-#     is an argv-parsing policy decision on a security path: owner call.
+#   * test_hooks_cli.py (3 nodes) — FIXED 2026-08-10, owner ruled. The cause
+#     was agent/shell_hooks.py running shlex.split(spec.command) in POSIX mode
+#     at :452/:817/:904, which ate every backslash in a Windows hook path, so
+#     script_mtime_iso returned None and the "script modified since approval"
+#     TAMPER CHECK at hermes_cli/hooks.py:369-376 could never fire. All three
+#     sites now route through shell_hooks._split_command; the tamper-check node
+#     is green. The other two nodes had a SECOND cause underneath, unrelated to
+#     tokenization — a bare shebang script cannot be exec'd by this loader —
+#     and are now probe-registered in _ENV_GAP_SKIPS below.
 #   * test_commands.py::TestSlackNativeSlashes::test_telegram_parity —
 #     slack_native_slashes() drops entries at _SLACK_MAX_SLASH_COMMANDS
 #     (commands.py:1335) in registration order with NO accounting, so which
@@ -472,7 +473,65 @@ def _git_name_only_ignores_cr_at_eol() -> bool:
     return _GIT_EOL_PROBE
 
 
+_SHEBANG_EXEC_PROBE = None
+
+
+def _no_shebang_script_execution() -> bool:
+    """True where the OS cannot spawn a ``#!``-prefixed script directly.
+
+    The shebang is honoured by the kernel's exec, not by the file: Windows'
+    CreateProcess has no equivalent, so ``subprocess.run([r"C:\\...\\hook.sh"])``
+    raises ``OSError: [WinError 193] %1 is not a valid Win32 application`` no
+    matter how the path is spelled. Interpreter-prefixed hook commands
+    (``python C:\\...\\hook.py``) are unaffected and still run here — it is the
+    bare-script spawn shape alone that is unavailable.
+
+    Probed by performing the spawn, because there is no attribute to test for:
+    the answer is a property of the loader, not of the standard library.
+    """
+    global _SHEBANG_EXEC_PROBE
+    if _SHEBANG_EXEC_PROBE is None:
+        import subprocess as _sp
+        import tempfile as _tempfile
+
+        with _tempfile.TemporaryDirectory() as _tmp:
+            _script = os.path.join(_tmp, "shebang_probe.sh")
+            with open(_script, "w", encoding="utf-8", newline="\n") as _fh:
+                _fh.write("#!/bin/sh\nexit 0\n")
+            os.chmod(_script, 0o755)
+            try:
+                _sp.run([_script], capture_output=True, timeout=15)
+            except OSError:
+                _SHEBANG_EXEC_PROBE = True
+            else:
+                _SHEBANG_EXEC_PROBE = False
+    return _SHEBANG_EXEC_PROBE
+
+
 _ENV_GAP_SKIPS: EnvGapSkipRegistry = {
+    # ── Spawn shapes the loader does not support ──────────────────────────
+    #
+    # Registered 2026-08-10, when the shlex path-spelling defect that used to
+    # be the FIRST cause of these two failures was fixed (agent/shell_hooks.py
+    # now tokenizes through _split_command). Underneath it sat this second,
+    # independent cause, which the fix does not touch: both tests write a bare
+    # `#!/usr/bin/env bash` script and require `hermes hooks test` to actually
+    # execute it. Their sibling TestHooksDoctor::test_flags_mtime_drift — the
+    # node that pinned the tamper check — is NOT registered and now passes.
+    'test_hooks_cli.py': [
+        (
+            _no_shebang_script_execution,
+            'these two spawn a bare `#!/usr/bin/env bash` hook script through '
+            'shell_hooks._spawn (shell=False, argv[0] = the .sh itself), and '
+            'this loader cannot exec a shebang script — WinError 193. The hook '
+            'machinery itself is platform-neutral: an interpreter-prefixed '
+            'command (`python <path>.py`) runs here',
+            {
+                'TestHooksTest::test_fires_real_subprocess_and_parses_block',
+                'TestHooksTest::test_synthetic_payload_matches_production_shape',
+            },
+        ),
+    ],
     # ── POSIX-only syscalls: the mechanism is a missing attribute ──────────
     'test_container_boot.py': [
         (
@@ -702,20 +761,16 @@ _STALE_ENV_GAP_ENTRIES: list[str] = []
 # fixed inside that audit. Without this banner the next person to run the suite
 # sees a red on Windows and files it back into the registry as an environment
 # gap, which is precisely how the tamper-check hole below stayed invisible.
+# The test_hooks_cli.py entry was REMOVED on 2026-08-10: the defect it named is
+# fixed. agent/shell_hooks.py no longer parses hook commands with POSIX-mode
+# shlex — _split_command keeps the backslashes, script_mtime_iso resolves, and
+# the "script modified since approval" tamper check fires again (pinned by
+# TestHooksDoctor::test_flags_mtime_drift, which is green). A banner announcing
+# a defect that no longer exists is the same stale claim in the other
+# direction, so it does not outlive the fix. The two remaining reds in that
+# file have a different, independent cause and are registered in
+# _ENV_GAP_SKIPS above with a live probe.
 _KNOWN_DEFECTS: dict[str, str] = {
-    "test_hooks_cli.py": (
-        "SECURITY FINDING — NOT an environment gap. agent/shell_hooks.py parses\n"
-        "  the hook command with shlex.split() in POSIX mode (:452, :817, :904),\n"
-        "  which eats every backslash in a Windows hook path. Downstream:\n"
-        "    * the hook never executes ('command not found');\n"
-        "    * `hermes hooks doctor` reports every hook non-executable;\n"
-        "    * script_mtime_iso() returns None, so the 'script modified since\n"
-        "      approval' TAMPER CHECK at hermes_cli/hooks.py:369-376 CANNOT FIRE.\n"
-        "      An approved hook can be rewritten with arbitrary content and\n"
-        "      doctor still reports OK.\n"
-        "  The fix is an argv-parsing policy change on a security path, so it is\n"
-        "  an owner decision. Do NOT re-file this as windows_env_gap."
-    ),
     "test_commands.py": (
         "KNOWN DEFECT — NOT an environment gap. slack_native_slashes() drops\n"
         "  entries at _SLACK_MAX_SLASH_COMMANDS (hermes_cli/commands.py:1335) in\n"

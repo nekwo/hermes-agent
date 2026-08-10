@@ -13,9 +13,10 @@ Design notes
   :func:`hermes_cli.plugins.invoke_hook` and its aggregators.  Python
   plugins are registered first (via ``discover_and_load()``) so their
   block decisions win ties over shell-hook blocks.
-* Subprocess execution uses ``shlex.split(os.path.expanduser(command))``
-  with ``shell=False`` — no shell injection footguns.  Users that need
-  pipes/redirection wrap their logic in a script.
+* Subprocess execution uses :func:`_split_command` with ``shell=False``
+  — no shell injection footguns.  Users that need pipes/redirection wrap
+  their logic in a script.  That helper is the single tokenizer for hook
+  commands; see its docstring for why POSIX-mode ``shlex`` is wrong here.
 * First-use consent is gated by the allowlist under
   ``~/.hermes/shell-hooks-allowlist.json``.  Non-TTY callers must pass
   ``accept_hooks=True`` (resolved from ``--accept-hooks``,
@@ -424,6 +425,49 @@ def _parse_single_entry(
 
 
 # ---------------------------------------------------------------------------
+# Command tokenization
+# ---------------------------------------------------------------------------
+
+def _strip_outer_quotes(token: str) -> str:
+    """Drop one matched pair of surrounding quotes from ``token``."""
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in ("'", '"'):
+        return token[1:-1]
+    return token
+
+
+def _split_command(command: str) -> List[str]:
+    """Tokenize a configured hook command into argv.
+
+    THE single tokenizer for hook commands: spawning, script-path
+    resolution and the executability check all route through here, so the
+    argv the doctor reasons about is the argv that actually gets run.
+
+    Why not plain ``shlex.split``: its POSIX mode treats ``\\`` as an escape
+    character, but on Windows it is the path separator, so
+    ``shlex.split(r"C:\\tools\\hook.py")`` returns ``["C:toolshook.py"]``.
+    Every downstream consumer then works on a path that does not exist —
+    the hook fails to spawn as "command not found", ``hermes hooks doctor``
+    calls it non-executable, and :func:`script_mtime_iso` returns ``None``,
+    which silently disables the "script modified since approval" TAMPER
+    CHECK in ``hermes_cli/hooks.py``: an approved hook could be rewritten
+    with arbitrary content and doctor still reported OK.
+
+    The mangling is entirely in-process — the command string is read from
+    ``cli-config.yaml`` and never passes through a shell — so the fix is
+    the tokenizer mode, not quoting at some outer layer. Non-POSIX mode
+    preserves backslashes but leaves the quote characters inside the
+    tokens, so they are stripped here to produce the same argv shape POSIX
+    mode yields for a quoted path containing spaces.
+
+    ``posix=(os.name != "nt")`` matches the existing convention in
+    ``hermes_cli/mcp_security.py`` and ``hermes_cli/main.py``.
+    """
+    if os.name != "nt":
+        return shlex.split(command)
+    return [_strip_outer_quotes(tok) for tok in shlex.split(command, posix=False)]
+
+
+# ---------------------------------------------------------------------------
 # Subprocess callback
 # ---------------------------------------------------------------------------
 
@@ -449,7 +493,7 @@ def _spawn(spec: ShellHookSpec, stdin_json: str) -> Dict[str, Any]:
         "error": None,
     }
     try:
-        argv = shlex.split(os.path.expanduser(spec.command))
+        argv = _split_command(os.path.expanduser(spec.command))
     except ValueError as exc:
         result["error"] = f"command {spec.command!r} cannot be parsed: {exc}"
         return result
@@ -808,13 +852,18 @@ _SCRIPT_EXTENSIONS: Tuple[str, ...] = (
 def _command_script_path(command: str) -> str:
     """Return the script path from ``command`` for doctor / drift checks.
 
-    Prefers a token ending in a known script extension, then a token
-    containing ``/`` or leading ``~``, then the first token.  Handles
-    ``python3 /path/hook.py``, ``/usr/bin/env bash hook.sh``, and the
-    common bare-path form.
+    Prefers a token ending in a known script extension, then a token that
+    looks like a path (contains a separator for THIS platform, or leads
+    with ``~``), then the first token.  Handles ``python3 /path/hook.py``,
+    ``/usr/bin/env bash hook.sh``, and the common bare-path form.
+
+    The separator set includes ``os.sep`` so an extension-less Windows
+    path (``python C:\\tools\\myhook``) resolves to the script rather than
+    to the interpreter — the same POSIX-path assumption that
+    :func:`_split_command` documents, one layer up.
     """
     try:
-        parts = shlex.split(command)
+        parts = _split_command(command)
     except ValueError:
         return command
     if not parts:
@@ -823,7 +872,7 @@ def _command_script_path(command: str) -> str:
         if part.lower().endswith(_SCRIPT_EXTENSIONS):
             return part
     for part in parts:
-        if "/" in part or part.startswith("~"):
+        if "/" in part or os.sep in part or part.startswith("~"):
             return part
     return parts[0]
 
@@ -901,7 +950,7 @@ def script_is_executable(command: str) -> bool:
     if not os.path.isfile(expanded):
         return False
     try:
-        argv = shlex.split(command)
+        argv = _split_command(command)
     except ValueError:
         return False
     is_bare_invocation = bool(argv) and argv[0] == path
