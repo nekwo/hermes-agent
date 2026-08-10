@@ -88,6 +88,60 @@ def _restore_file_mode(path: Path, mode: "int | None") -> None:
         pass
 
 
+# Windows rename-over contention. POSIX ``rename(2)`` is specified to replace
+# the destination atomically and never fails because a concurrent rename is
+# touching the same target. The Win32 primitive behind ``os.replace``
+# (``MoveFileExW`` with ``MOVEFILE_REPLACE_EXISTING``) has no such guarantee:
+# while another thread/process is mid-replace on that destination — or any
+# handle to it is open without ``FILE_SHARE_DELETE`` — the call fails
+# immediately with ERROR_ACCESS_DENIED (winerror 5, surfaced as errno EACCES)
+# or ERROR_SHARING_VIOLATION (winerror 32).
+#
+# That is a transient collision, not a real permission problem: the target
+# file is never left partially written, and an immediate retry succeeds. Every
+# caller of ``atomic_replace``/``atomic_json_write`` — auth stores, config
+# saves, session writers — otherwise has to hand a spurious PermissionError
+# back to the user on Windows the first time two writers land together.
+_WINDOWS_REPLACE_RETRY_ERRNOS = frozenset({errno.EACCES})
+_WINDOWS_REPLACE_RETRY_WINERRORS = frozenset({5, 32})
+_WINDOWS_REPLACE_ATTEMPTS = 20
+_WINDOWS_REPLACE_BACKOFF_SECONDS = 0.01
+
+
+def _is_windows_replace_contention(exc: OSError) -> bool:
+    """True for the transient Win32 rename-over collisions worth retrying."""
+    if os.name != "nt":
+        return False
+    winerror = getattr(exc, "winerror", None)
+    if winerror is not None:
+        return winerror in _WINDOWS_REPLACE_RETRY_WINERRORS
+    return exc.errno in _WINDOWS_REPLACE_RETRY_ERRNOS
+
+
+def _replace_with_windows_contention_retry(src: str, dst: str) -> None:
+    """``os.replace`` plus a bounded retry for Windows rename contention.
+
+    A no-op wrapper on POSIX (the first attempt either succeeds or raises a
+    real error). On Windows a transient ERROR_ACCESS_DENIED /
+    ERROR_SHARING_VIOLATION is retried for up to ~200ms before the original
+    exception is re-raised unchanged, so a genuinely unwritable destination
+    still fails, and fails with its real error.
+    """
+    import time
+
+    for attempt in range(_WINDOWS_REPLACE_ATTEMPTS):
+        try:
+            os.replace(src, dst)
+            return
+        except OSError as exc:
+            if (
+                attempt == _WINDOWS_REPLACE_ATTEMPTS - 1
+                or not _is_windows_replace_contention(exc)
+            ):
+                raise
+            time.sleep(_WINDOWS_REPLACE_BACKOFF_SECONDS)
+
+
 def atomic_replace(tmp_path: Union[str, Path], target: Union[str, Path]) -> str:
     """Atomically move *tmp_path* onto *target*, preserving symlinks.
 
@@ -112,7 +166,7 @@ def atomic_replace(tmp_path: Union[str, Path], target: Union[str, Path]) -> str:
     real_path = os.path.realpath(target_str) if os.path.islink(target_str) else target_str
     tmp_str = str(tmp_path)
     try:
-        os.replace(tmp_str, real_path)
+        _replace_with_windows_contention_retry(tmp_str, real_path)
     except OSError as exc:
         if exc.errno not in (errno.EXDEV, errno.EBUSY):
             raise

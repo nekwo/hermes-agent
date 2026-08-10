@@ -114,6 +114,59 @@ class TestWebUIBuildNeeded:
         assert data["contentHash"] == _compute_web_ui_content_hash(self._root(web_dir), web_dir)
 
 
+class TestWebUIHashFailureIsAccounted:
+    """An un-hashable web tree must degrade loudly, never silently.
+
+    ``_compute_web_ui_content_hash`` imports ``pathspec`` (a declared
+    dependency) lazily. When that import fails the two stamp entry points used
+    to disagree in the worst possible way: the WRITER swallowed the error at
+    DEBUG and produced no stamp, and the READER called the hash unguarded and
+    raised ``ModuleNotFoundError`` straight out of ``hermes web``. The
+    swallowed write was the only thing keeping the reader off its own crash,
+    and the visible symptom was a full npm install + Vite build on every boot
+    with nothing in the log to explain it.
+
+    These pin the contract in both directions without depending on whether
+    ``pathspec`` happens to be installed on the host.
+    """
+
+    @staticmethod
+    def _root(web_dir: Path) -> Path:
+        return web_dir.parent.parent if web_dir.parent.name == "apps" else web_dir.parent
+
+    def test_unwritable_stamp_is_reported_at_warning(self, tmp_path, caplog):
+        web_dir, _ = _make_web_dir(tmp_path)
+        boom = ModuleNotFoundError("No module named 'pathspec'")
+        with caplog.at_level("WARNING", logger="hermes_cli.main"), \
+             patch("hermes_cli.main._compute_web_ui_content_hash", side_effect=boom):
+            _write_web_ui_build_stamp(self._root(web_dir), web_dir)
+
+        # Still never fails the build...
+        assert not _web_ui_stamp_path().is_file()
+        # ...but the permanent-rebuild state is now on the record.
+        assert any(
+            "rebuilt on every start" in r.getMessage() for r in caplog.records
+        ), f"expected a WARNING about the missing stamp, got: {caplog.records}"
+
+    def test_unhashable_tree_reports_stale_instead_of_raising(self, tmp_path, caplog):
+        web_dir, dist_dir = _make_web_dir(tmp_path)
+        (dist_dir / ".vite").mkdir(parents=True, exist_ok=True)
+        (dist_dir / ".vite" / "manifest.json").write_text("{}", encoding="utf-8")
+        # A stamp exists — this is the state that used to reach the crash.
+        stamp = _web_ui_stamp_path()
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text('{"contentHash": "deadbeef"}', encoding="utf-8")
+
+        boom = ModuleNotFoundError("No module named 'pathspec'")
+        with caplog.at_level("WARNING", logger="hermes_cli.main"), \
+             patch("hermes_cli.main._compute_web_ui_content_hash", side_effect=boom):
+            needed = _web_ui_build_needed(web_dir)
+
+        assert needed is True
+        assert any(
+            "staleness check degraded" in r.getMessage() for r in caplog.records
+        ), f"expected a WARNING about the degraded check, got: {caplog.records}"
+
 
 class TestBuildWebUISkipsWhenFresh:
 
@@ -142,7 +195,12 @@ class TestBuildWebUISkipsWhenFresh:
 
         install_cp = __import__("subprocess").CompletedProcess([], 0, stdout="", stderr="")
         build_cp = __import__("subprocess").CompletedProcess([], 0, stdout="", stderr="")
-        with patch("hermes_cli.main.shutil.which", return_value="/usr/bin/npm"), \
+        # Patch the npm RESOLVER, not shutil.which: _build_web_ui calls
+        # _resolve_node_runtime_npm(), which delegates to
+        # hermes_constants.find_node_executable and returns the platform npm
+        # directly on Windows — so a shutil.which stub never reaches the
+        # value under test and the real npm path leaks into the argv.
+        with patch("hermes_cli.main._resolve_node_runtime_npm", return_value="/usr/bin/npm"), \
              patch("hermes_cli.main.subprocess.run", return_value=install_cp) as mock_run, \
              patch("hermes_cli.main._run_with_idle_timeout", return_value=build_cp):
             result = _build_web_ui(web_dir)
@@ -164,7 +222,9 @@ class TestBuildWebUISkipsWhenFresh:
 
         install_cp = __import__("subprocess").CompletedProcess([], 0, stdout="", stderr="")
         build_cp = __import__("subprocess").CompletedProcess([], 0, stdout="", stderr="")
-        with patch("hermes_cli.main.shutil.which", return_value="/usr/bin/npm"), \
+        # See the sibling test: the npm path comes from
+        # _resolve_node_runtime_npm(), not from shutil.which.
+        with patch("hermes_cli.main._resolve_node_runtime_npm", return_value="/usr/bin/npm"), \
              patch("hermes_cli.main.subprocess.run", return_value=install_cp), \
              patch("hermes_cli.main._run_with_idle_timeout", return_value=build_cp) as mock_idle:
             result = _build_web_ui(web_dir)

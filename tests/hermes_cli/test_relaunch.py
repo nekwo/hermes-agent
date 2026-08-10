@@ -123,6 +123,13 @@ class TestRelaunch:
             calls.append((path, argv))
             raise SystemExit(0)
 
+        # relaunch() branches on sys.platform: only the POSIX side reaches
+        # os.execvp (the win32 side spawns a subprocess — see
+        # test_windows_uses_subprocess_not_execvp, which pins the mirror
+        # image of this by forcing "win32"). Pin the POSIX branch so this
+        # test exercises execvp on every host instead of silently testing
+        # the Windows path when run from Windows.
+        monkeypatch.setattr(relaunch_mod.sys, "platform", "linux")
         monkeypatch.setattr(relaunch_mod.os, "execvp", fake_execvp)
         monkeypatch.setattr(relaunch_mod, "resolve_hermes_bin", lambda: "/usr/bin/hermes")
 

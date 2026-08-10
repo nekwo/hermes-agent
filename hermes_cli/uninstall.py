@@ -133,6 +133,28 @@ def _node_symlink_candidate_dirs() -> "list[Path]":
     return dirs
 
 
+_WIN_EXTENDED_PREFIX = "\\\\?\\"
+_WIN_EXTENDED_UNC_PREFIX = "\\\\?\\UNC\\"
+
+
+def _comparable_path(path: Path) -> Path:
+    """Return *path* fully resolved and spelled so it compares against peers.
+
+    ``os.readlink()`` on Windows hands back the extended-length spelling
+    (``\\\\?\\C:\\...``), and ``Path.resolve()`` preserves that prefix — so a
+    resolved link target and a resolved ordinary path have different anchors
+    and never compare equal, even when they name the same file. Strip the
+    prefix before resolving so both sides of a containment test are spelled
+    the same way. A no-op on POSIX.
+    """
+    raw = str(path)
+    if raw.startswith(_WIN_EXTENDED_UNC_PREFIX):
+        raw = "\\\\" + raw[len(_WIN_EXTENDED_UNC_PREFIX):]
+    elif raw.startswith(_WIN_EXTENDED_PREFIX):
+        raw = raw[len(_WIN_EXTENDED_PREFIX):]
+    return Path(raw).resolve()
+
+
 def remove_node_symlinks(hermes_home: Path) -> list:
     """Remove the node/npm/npx symlinks the installer placed on PATH.
 
@@ -150,7 +172,7 @@ def remove_node_symlinks(hermes_home: Path) -> list:
     directory are removed — links the user has repointed elsewhere (nvm, fnm,
     etc.) are left untouched.
     """
-    node_dir = (hermes_home / "node").resolve()
+    node_dir = _comparable_path(hermes_home / "node")
     removed = []
 
     for name in ("node", "npm", "npx"):
@@ -167,7 +189,7 @@ def remove_node_symlinks(hermes_home: Path) -> list:
                 target = Path(os.readlink(link))
                 if not target.is_absolute():
                     target = (link.parent / target)
-                target = target.resolve()
+                target = _comparable_path(target)
 
                 if target == node_dir or node_dir in target.parents:
                     link.unlink()

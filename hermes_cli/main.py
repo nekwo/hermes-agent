@@ -5254,7 +5254,24 @@ def _web_ui_build_needed(web_dir: Path) -> bool:
     saved_hash = stamp_data.get("contentHash")
     if not saved_hash:
         return True
-    return _compute_web_ui_content_hash(project_root, web_dir) != saved_hash
+    try:
+        current = _compute_web_ui_content_hash(project_root, web_dir)
+    except Exception as exc:
+        # Every other unreadable-stamp path above answers "stale" rather than
+        # raising, and this one must too. The hash needs `pathspec` (a declared
+        # dependency), so a broken install turned an un-hashable tree into an
+        # unhandled ModuleNotFoundError out of `hermes web` / `hermes update`
+        # instead of a rebuild — and only ever reached that crash when a stamp
+        # existed, which the silently-swallowing writer below made impossible.
+        # Account for it at WARNING: a permanently un-hashable tree means an
+        # unconditional rebuild on every boot, the exact cost the stamp exists
+        # to avoid.
+        logger.warning(
+            "Web UI staleness check degraded — cannot hash the web source "
+            "tree (%s); assuming stale and rebuilding.", exc,
+        )
+        return True
+    return current != saved_hash
 
 
 def _compute_web_ui_content_hash(project_root: Path, web_dir: Path) -> str:
@@ -5332,8 +5349,15 @@ def _write_web_ui_build_stamp(project_root: Path, web_dir: Path) -> None:
         }
         stamp_file.write_text(json.dumps(stamp_data, indent=2) + "\n", encoding="utf-8")
     except Exception as exc:
-        # Never let stamp-writing block or fail a build.
-        logger.debug("Failed to write web UI build stamp: %s", exc)
+        # Never let stamp-writing block or fail a build — but never let it be
+        # SILENT either. No stamp means `_web_ui_build_needed()` reports stale
+        # unconditionally, so the whole npm install + Vite build reruns on
+        # every single boot with nothing above DEBUG to say why. Account for
+        # it at WARNING so the permanent-rebuild state is diagnosable.
+        logger.warning(
+            "Failed to write web UI build stamp (%s) — the web UI will be "
+            "rebuilt on every start until this succeeds.", exc,
+        )
 
 
 def _run_with_idle_timeout(

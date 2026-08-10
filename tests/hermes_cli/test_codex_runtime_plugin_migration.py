@@ -351,7 +351,8 @@ class TestStripUnmanagedPluginTables:
             'command = "x"\n'
             "\n"
             '[plugins."tasks@openai-curated"]\n'
-            "enabled = true\n"
+            "enabled = true\n",
+            encoding="utf-8",
         )
 
         # Simulate codex's plugin/list reporting the same plugin tasks@openai-curated.
@@ -366,7 +367,11 @@ class TestStripUnmanagedPluginTables:
             fake_query,
         )
         migrate({}, codex_home=tmp_path, discover_plugins=True, expose_hermes_tools=False)
-        new_text = target.read_text()
+        # encoding="utf-8" explicitly: production writes config.toml as UTF-8
+        # and MIGRATION_MARKER contains an em dash.  A bare read_text() picks
+        # up the locale codec (cp1252 on Windows), which turns the marker into
+        # mojibake and makes the managed-section bounds unfindable.
+        new_text = target.read_text(encoding="utf-8")
         # Only ONE [plugins."tasks@openai-curated"] header should remain — inside
         # the managed block — not the original outside-the-block copy.
         assert new_text.count('[plugins."tasks@openai-curated"]') == 1

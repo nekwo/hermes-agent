@@ -72,7 +72,16 @@ def repo(tmp_path, monkeypatch):
     d = tmp_path / "repo"
     d.mkdir()
     _git(d, "init", "-q")
-    (d / "main.py").write_text("print('hello')\n")
+    # Pin line-ending handling in the fixture repo instead of inheriting the
+    # host's. Git-for-Windows ships core.autocrlf=true in its SYSTEM config,
+    # which normalises the worktree's CRLF to LF in the index at `git add`;
+    # the in-process /diff under test then runs against the developer's real
+    # config (autocrlf=false), sees the CRLF worktree copy disagree with the
+    # LF index copy, and reports a freshly-committed repo as dirty. Writing
+    # LF explicitly AND disabling the conversion makes index and worktree
+    # byte-identical on every host.
+    _git(d, "config", "core.autocrlf", "false")
+    (d / "main.py").write_text("print('hello')\n", encoding="utf-8", newline="")
     _git(d, "add", "-A")
     _git(d, "commit", "-q", "-m", "init")
     monkeypatch.setenv("TERMINAL_CWD", str(d))

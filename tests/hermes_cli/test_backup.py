@@ -599,9 +599,15 @@ class TestProfileRestoration:
         from hermes_cli.backup import run_import
         run_import(args)
 
-        # Only valid profile should get a wrapper
-        assert (wrapper_dir / "valid").exists()
+        # Only valid profile should get a wrapper.  The wrapper is a POSIX
+        # shell script named after the profile on POSIX and a ".bat" of the
+        # same stem on Windows (hermes_cli.profiles.create_alias) — assert the
+        # native spelling, and assert the OTHER profile got no wrapper under
+        # EITHER spelling so the negative half can never pass vacuously.
+        suffix = ".bat" if os.name == "nt" else ""
+        assert (wrapper_dir / f"valid{suffix}").exists()
         assert not (wrapper_dir / "empty").exists()
+        assert not (wrapper_dir / "empty.bat").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -906,7 +912,12 @@ class TestQuickSnapshotProjectsKanban:
         monkeypatch.setattr(bk, "_safe_copy_db", _spy)
         snap_id = create_quick_snapshot(hermes_home=hermes_home)
         # The board db was copied via _safe_copy_db (not raw copy).
-        assert any(s.endswith("boards/work/kanban.db") for s in called["db"]), called["db"]
+        # Compare with normalised separators: the copy source is a real
+        # filesystem path, which spells the separator "\" on Windows and "/"
+        # on POSIX.  The guarantee being pinned is WHICH file went through
+        # _safe_copy_db, not how the OS spells its separator.
+        copied = [s.replace(os.sep, "/") for s in called["db"]]
+        assert any(s.endswith("boards/work/kanban.db") for s in copied), called["db"]
         copy = hermes_home / "state-snapshots" / snap_id / "kanban" / "boards" / "work" / "kanban.db"
         rows = sqlite3.connect(str(copy)).execute("SELECT * FROM tasks").fetchall()
         assert rows == [("w1", "ship")]
@@ -1232,14 +1243,29 @@ class TestMemoryProviderExternalPaths:
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.setattr(Path, "home", lambda: dst_home)
 
+        # Record the chmod tightening.  Asserting the resulting st_mode only
+        # pins the guarantee on POSIX — on NTFS os.chmod merely toggles the
+        # read-only bit and stat() reports 0o666 — so pin the CALL on every
+        # platform and keep the on-disk check where the bits are meaningful.
+        import hermes_cli.backup as _backup_mod
+        chmods: list[tuple[str, int]] = []
+        real_chmod = _backup_mod.os.chmod
+
+        def _spy_chmod(p, m, *a, **k):
+            chmods.append((str(p), m))
+            return real_chmod(p, m, *a, **k)
+
         from hermes_cli.backup import run_import
-        run_import(Namespace(zipfile=str(zip_path), force=True))
+        with patch.object(_backup_mod.os, "chmod", _spy_chmod):
+            run_import(Namespace(zipfile=str(zip_path), force=True))
 
         restored = dst_home / ".honcho" / "config.json"
         assert restored.exists()
-        assert restored.read_text() == '{"peer":"bob"}'
-        # Credential-shaped file tightened.
-        assert (restored.stat().st_mode & 0o777) == 0o600
+        assert restored.read_text(encoding="utf-8") == '{"peer":"bob"}'
+        # Credential-shaped file tightened to owner-only.
+        assert (str(restored), 0o600) in chmods, chmods
+        if os.name != "nt":
+            assert (restored.stat().st_mode & 0o777) == 0o600
         # External state did NOT leak into HERMES_HOME.
         assert not (hermes_home / "_external").exists()
 

@@ -153,7 +153,16 @@ class TestBoardCRUD:
         # downstream readers hit `no such table: task_events`.
         kb.create_board("recycle")
         # First connect populates _INITIALIZED_PATHS for this DB.
-        with kb.connect(board="recycle") as conn:
+        #
+        # connect_closing, NOT `with kb.connect(...)`: sqlite3's own
+        # connection context manager commits/rolls back the transaction but
+        # never CLOSES the handle — which is precisely why connect_closing
+        # exists. Leaking the handle here holds kanban.db open across the
+        # remove_board() call below. That is invisible on POSIX (unlinking an
+        # open file succeeds) and makes the rename/rmtree fail outright on
+        # Windows, so the cache-invalidation guarantee under test is never
+        # reached.
+        with kb.connect_closing(board="recycle") as conn:
             kb.create_task(conn, title="t1", assignee="dev")
         db_path = kb.board_dir("recycle") / "kanban.db"
         assert str(db_path.resolve()) in kb._INITIALIZED_PATHS
@@ -165,7 +174,7 @@ class TestBoardCRUD:
 
         # Simulate the event-stream poll: re-open the same slug. connect()
         # recreates the directory + empty .db; the schema must be re-applied.
-        with kb.connect(board="recycle") as conn:
+        with kb.connect_closing(board="recycle") as conn:
             tables = {
                 row[0]
                 for row in conn.execute(

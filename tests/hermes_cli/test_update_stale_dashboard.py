@@ -91,7 +91,13 @@ class TestFindStaleDashboardPids:
 
 
 
-    def test_self_pid_excluded(self):
+    def test_self_pid_excluded(self, monkeypatch):
+        # _scan_dashboard_processes branches on sys.platform: `ps` on POSIX,
+        # `wmic` on win32, with different output parsers. This test feeds `ps`
+        # output, so pin the POSIX branch — otherwise on Windows the wmic
+        # parser reads it as zero processes and both assertions pass/fail for
+        # reasons unrelated to self-PID exclusion.
+        monkeypatch.setattr(sys, "platform", "linux")
         with patch("subprocess.run") as mock_run:
             mock_run.return_value = MagicMock(
                 returncode=0,
@@ -288,13 +294,23 @@ class TestSupervisedBackendRestart:
     def _live(self):
         return sys.modules["hermes_cli.main"]
 
-    def test_supervised_pid_restarts_owning_unit(self, capsys):
+    def test_supervised_pid_restarts_owning_unit(self, capsys, monkeypatch):
         """A killed PID whose cgroup names a custom unit → systemctl restart."""
         live = self._live()
+        # Pin the POSIX kill branch: on win32 the whole path is taskkill and
+        # the cgroup/systemd snapshot is skipped outright (`restart_managed
+        # and sys.platform != "win32"`), so the behaviour under test is never
+        # reached.
+        monkeypatch.setattr(sys, "platform", "linux")
 
         def fake_kill(pid, sig):
-            if sig == 0:
-                raise ProcessLookupError
+            # Already gone: the SIGTERM raise is what puts the pid straight
+            # into `killed`, which is the state this test is about. The old
+            # `if sig == 0` shape modelled a liveness poll production no
+            # longer does (it routes through gateway.status._pid_exists now),
+            # so it left the pid pending and the poll asking the real OS
+            # about PID 4321.
+            raise ProcessLookupError
 
         with patch.object(live, "_restart_managed_dashboard_service", return_value=False), \
              patch.object(live, "_find_stale_dashboard_pids", return_value=[4321]), \
@@ -324,12 +340,15 @@ class TestManualBackendRespawn:
         return sys.modules["hermes_cli.main"]
 
 
-    def test_argv_capture_failure_falls_back_to_hint(self, capsys):
+    def test_argv_capture_failure_falls_back_to_hint(self, capsys, monkeypatch):
         live = self._live()
+        # See TestSupervisedBackendRestart: the argv-capture branch only runs
+        # under `sys.platform != "win32"`, and "already gone" on SIGTERM is
+        # what lands the pid in `killed`.
+        monkeypatch.setattr(sys, "platform", "linux")
 
         def fake_kill(pid, sig):
-            if sig == 0:
-                raise ProcessLookupError
+            raise ProcessLookupError
 
         with patch.object(live, "_restart_managed_dashboard_service", return_value=False), \
              patch.object(live, "_find_stale_dashboard_pids", return_value=[5555]), \
@@ -385,6 +404,11 @@ class TestCmdlineCapture:
 
     def test_reads_proc_cmdline_when_available(self, tmp_path, monkeypatch):
         live = self._live()
+        # _dashboard_cmdline_for_pid returns None on win32 before it reads
+        # anything (see test_returns_none_on_windows, which pins the mirror
+        # image by forcing "win32"). Pin the POSIX branch so the /proc reader
+        # is what actually runs, on every host.
+        monkeypatch.setattr(live.sys, "platform", "linux")
         proc_file = tmp_path / "cmdline"
         proc_file.write_bytes(b"/usr/bin/python3\x00-m\x00hermes_cli.main\x00serve\x00")
 
@@ -410,6 +434,9 @@ class TestCmdlineCapture:
 
     def test_falls_back_to_ps_without_proc(self, monkeypatch):
         live = self._live()
+        # See the sibling test: the ps fallback sits behind the same
+        # `sys.platform == "win32" -> None` early return.
+        monkeypatch.setattr(live.sys, "platform", "linux")
 
         def fake_run(args, *a, **kw):
             assert args == ["ps", "-p", "888", "-o", "command="]

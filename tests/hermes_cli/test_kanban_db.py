@@ -558,7 +558,15 @@ def test_worktree_workspace_explicit_target_materializes_linked_worktree(kanban_
         capture_output=True,
         text=True,
     ).stdout
-    assert f"worktree {target}" in listed
+    # `git worktree list --porcelain` always spells paths with forward
+    # slashes, including on Windows where `target` is a native backslash
+    # path. Normalise the separator on both sides: the guarantee being
+    # pinned is that git registered THIS directory as a linked worktree,
+    # not how the OS spells its separator.
+    assert (
+        f"worktree {str(target).replace(os.sep, '/')}"
+        in listed.replace("\\", "/")
+    )
     assert f"branch refs/heads/{branch}" in listed
 
 

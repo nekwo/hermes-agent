@@ -60,8 +60,13 @@ class TestBlankSlateMinimalToolsets:
         names = sorted(
             {(d.get("function") or {}).get("name") or d.get("name") for d in defs}
         )
+        # ``tool_describe`` is injected into every toolset by
+        # ``model_tools`` (T6b details-on-demand — see
+        # ``ensure_tool_describe_present``), so it is part of the minimal
+        # surface too. It is NOT a posture toolset and must survive
+        # ``disabled_toolsets`` like the rest of this list.
         assert names == ["patch", "process", "read_file", "search_files",
-                         "terminal", "write_file"]
+                         "terminal", "tool_describe", "write_file"]
 
 
 class TestBlankSlateMinimizeConfig:

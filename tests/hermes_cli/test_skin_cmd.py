@@ -28,7 +28,7 @@ def test_set_edits_active_user_skin_in_place_preserving_everything_else():
 
     assert skin_cmd._skin_set("ui_tool", "#00FFFF", None) == 0
 
-    data = yaml.safe_load((_skins() / "oasis.yaml").read_text())
+    data = yaml.safe_load((_skins() / "oasis.yaml").read_text(encoding="utf-8"))
     assert data["colors"]["ui_tool"] == "#00FFFF"
     assert data["colors"]["background"] == "#08201f"  # untouched — the whole point
     assert data["colors"]["banner_title"] == "#f2dfb3"
@@ -43,13 +43,15 @@ def test_set_forks_a_builtin_without_inventing_a_background():
 
     fork = _skins() / "default-custom.yaml"
     assert fork.exists()
-    data = yaml.safe_load(fork.read_text())
+    data = yaml.safe_load(fork.read_text(encoding="utf-8"))
     assert data["colors"]["ui_tool"] == "#00FFFF"
     # default has no background, so the fork must not invent one (terminal stays put).
     assert "background" not in data["colors"]
     # full palette carried over, and it became active.
     assert data["colors"].get("banner_title")
-    assert (get_hermes_home() / "config.yaml").read_text().find("default-custom") != -1
+    assert (get_hermes_home() / "config.yaml").read_text(
+        encoding="utf-8"
+    ).find("default-custom") != -1
 
 
 def test_set_rejects_non_hex():

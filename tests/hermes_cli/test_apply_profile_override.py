@@ -17,6 +17,26 @@ from pathlib import Path
 from types import SimpleNamespace
 
 
+def _pin_hermes_root(monkeypatch, root: Path) -> None:
+    """Point the platform-native Hermes root at ``root`` on every OS.
+
+    ``get_default_hermes_root()`` (and therefore ``resolve_profile_env`` /
+    ``get_profile_dir``) resolves the root through
+    ``hermes_constants._get_platform_default_hermes_home()``, which is
+    ``~/.hermes`` on POSIX but ``%LOCALAPPDATA%\\hermes`` on Windows.
+    Patching ``Path.home`` alone therefore only redirects the root on POSIX
+    and leaves these tests reading the developer's REAL profile store on
+    Windows.  Pinning the single platform seam keeps the assertions — and
+    the whole production resolution chain underneath it — identical on both
+    platforms.
+    """
+    import hermes_constants
+
+    monkeypatch.setattr(
+        hermes_constants, "_get_platform_default_hermes_home", lambda: root
+    )
+
+
 def _run_apply_profile_override(
     tmp_path, monkeypatch, *, hermes_home: str | None, active_profile: str | None,
     argv: list[str] | None = None,
@@ -30,12 +50,13 @@ def _run_apply_profile_override(
     hermes_root.mkdir(parents=True, exist_ok=True)
 
     if active_profile is not None:
-        (hermes_root / "active_profile").write_text(active_profile)
+        (hermes_root / "active_profile").write_text(active_profile, encoding="utf-8")
 
     if active_profile and active_profile != "default":
         (hermes_root / "profiles" / active_profile).mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    _pin_hermes_root(monkeypatch, hermes_root)
     if hermes_home is not None:
         monkeypatch.setenv("HERMES_HOME", hermes_home)
     else:
@@ -134,6 +155,7 @@ class TestApplyProfileOverrideHermesHomeGuard:
         ]
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        _pin_hermes_root(monkeypatch, hermes_root)
         monkeypatch.delenv("HERMES_HOME", raising=False)
         monkeypatch.setattr(sys, "argv", list(argv))
 
@@ -225,11 +247,12 @@ class TestSupervisedChildIgnoresStickyProfile:
         active_profile fallback, never an explicit flag)."""
         hermes_root = tmp_path / ".hermes"
         hermes_root.mkdir(parents=True, exist_ok=True)
-        (hermes_root / "active_profile").write_text("briefer")
+        (hermes_root / "active_profile").write_text("briefer", encoding="utf-8")
         (hermes_root / "profiles" / "briefer").mkdir(parents=True, exist_ok=True)
         (hermes_root / "profiles" / "coder").mkdir(parents=True, exist_ok=True)
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        _pin_hermes_root(monkeypatch, hermes_root)
         monkeypatch.delenv("HERMES_HOME", raising=False)
         monkeypatch.setenv("HERMES_S6_SUPERVISED_CHILD", "1")
         monkeypatch.setattr(sys, "argv", ["hermes", "-p", "coder", "gateway", "run"])

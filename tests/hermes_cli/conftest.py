@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
+import importlib
+import importlib.util
+import os
+import sys
+
 import pytest
+
+from tests._env_gap_fence import EnvGapSkipRegistry, apply_skips
 
 
 @pytest.fixture
@@ -67,13 +74,14 @@ def _suppress_concurrent_hermes_gate(request, monkeypatch):
 # green (`test_harness_cli.py`, `test_web_server_blueprints.py`, the
 # `test_mission_chat_*` set, `test_flow_commands.py`, `test_persona_chat_session.py`).
 #
-# The failures are pre-existing gaps between this host and the Linux CI the
-# upstream suite is written for. They are NOT skipped and NOT xfailed: they
-# still run, still execute their real assertions, and still fail loudly on a
-# plain `pytest tests/hermes_cli`. What the registry below adds is a *name*,
-# so a run that deliberately wants the fork-owned signal can deselect them:
-#
-#     python -m pytest tests/hermes_cli -m "not windows_env_gap and not host_dependency_gap"
+# SUPERSEDED 2026-08-10 — read the audited block further down before this one.
+# The claim above ("234 failures ... pre-existing gaps between this host and
+# the Linux CI") did not survive being checked: of the 82 rows that reached
+# this audit, fifty were stale tests or defects in our own code. The no-skip
+# design that left them failing is retired; genuine rows now carry a live probe
+# and become real skips (`_ENV_GAP_SKIPS`), and `tests/test_env_gap_registry.py`
+# fails when a probe stops describing anything. The paragraphs below are kept
+# because their toolchain/hang notes are still accurate and still load-bearing.
 #
 # Two marks, by cause:
 #
@@ -268,117 +276,187 @@ def _local_model_probe_failure() -> str | None:
 
 _LOCAL_MODEL_PROBE_REASON = _local_model_probe_failure()
 
-# file basename -> [(mark, reason, {node ids within the file}), ...].
+# ── Environment-gap registry (audited 2026-08-10) ──────────────────────────
 #
-# A file can carry MORE THAN ONE group when its failures have more than one
-# cause (e.g. test_web_ui_build.py fails partly on POSIX npm/fcntl assumptions
-# and partly because `pathspec` is not installed). Every group is applied
-# independently, so each node id keeps the mark and the reason that actually
-# explains it — a single-mark-per-file registry would have forced one of the
-# two causes to be recorded as a lie.
-_ENV_GAPS: dict[str, list[tuple[str, str, set[str]]]] = {
-    'test_apply_profile_override.py': [
-        (
-            _WINDOWS,
-            'profile lookup resolves get_default_hermes_root(), which is '
-            '%LOCALAPPDATA%\\hermes on Windows while the fixtures seed ~/.hermes',
-            {
-                'TestApplyProfileOverrideHermesHomeGuard::test_sudo_explicit_profile_resolves_invoking_users_profile',
-                'TestSupervisedChildIgnoresStickyProfile::test_non_supervised_run_still_follows_active_profile',
-                'TestSupervisedChildIgnoresStickyProfile::test_supervised_named_profile_flag_still_wins',
-            },
-        ),
-    ],
-    'test_atomic_json_write.py': [
-        (
-            _WINDOWS,
-            'concurrent os.replace() onto an open file raises PermissionError on '
-            'Windows; POSIX rename is atomic',
-            {
-                'TestAtomicJsonWrite::test_concurrent_writes_dont_corrupt',
-            },
-        ),
-    ],
-    'test_auth_nous_provider.py': [
-        (
-            _WINDOWS,
-            'asserts a 0o600 file mode; NTFS reports 0o666 because os.chmod only '
-            'toggles the read-only bit',
-            {
-                'test_shared_store_write_and_read_roundtrip',
-            },
-        ),
-    ],
-    'test_backup.py': [
-        (
-            _WINDOWS,
-            'asserts 0o600 modes and POSIX profile-wrapper symlinks; NTFS reports '
-            '0o666',
-            {
-                'TestMemoryProviderExternalPaths::test_import_restores_external_to_home_relative_location',
-                'TestProfileRestoration::test_import_skips_profile_dirs_without_config',
-                'TestQuickSnapshotProjectsKanban::test_board_db_copied_wal_safely',
-            },
-        ),
-    ],
-    'test_cmd_update.py': [
-        (
-            _WINDOWS,
-            'cmd_update prepends `git -c windows.appendAtomically=false` on win32 and '
-            'resolves npm as npm.CMD; the mocks assert the POSIX argv. WARNING: this '
-            'file only stubs subprocess.run, so `_build_web_ui` still runs a REAL npm '
-            'install + vite build against the checkout',
-            {
-                'TestCmdUpdateBranchFallback::test_update_on_fork_checks_upstream_when_origin_up_to_date',
-            },
-        ),
-    ],
-    'test_codex_runtime_plugin_migration.py': [
-        (
-            _WINDOWS,
-            'the em dash in MIGRATION_MARKER is written as UTF-8 and read back with '
-            'the Windows default cp1252 codec, so the marker comes back as mojibake '
-            "('â€”') and is never found",
-            {
-                'TestStripUnmanagedPluginTables::test_migrate_dedups_codex_owned_plugin_tables',
-            },
-        ),
-    ],
-    'test_commands.py': [
-        (
-            _HOST,
-            "Slack native-slash parity against the installed plugin set ('version' "
-            'present on Telegram only)',
-            {
-                'TestSlackNativeSlashes::test_telegram_parity',
-            },
-        ),
-    ],
-    'test_completion.py': [
-        (
-            _WINDOWS,
-            'shells out to `bash -n <windows path>`; Git-bash cannot resolve a C:\\... '
-            'argument',
-            {
-                'TestGenerateBash::test_valid_bash_syntax',
-            },
-        ),
-    ],
-    'test_config.py': [
-        (
-            _WINDOWS,
-            'asserts the POSIX default root ~/.hermes; get_hermes_home() returns '
-            '%LOCALAPPDATA%\\hermes on Windows',
-            {
-                'TestGetHermesHome::test_default_path',
-            },
-        ),
-    ],
+# 82 node ids across 44 files were registered here as pre-existing Windows/host
+# gaps. Every one was reproduced individually. FIFTY were not gaps:
+#
+#   * three were REAL DEFECTS in our own code, which rule 3 of the fence
+#     contract forbids registering at all:
+#       - utils.atomic_replace only retried EXDEV/EBUSY, so concurrent
+#         os.replace onto one target lost ~3 writes in 10 on Windows. It now
+#         retries Win32 rename contention (fixed).
+#       - hermes_cli/uninstall.py compared os.readlink()'s extended-length
+#         (\\?\) target against an unprefixed root, so uninstall silently left
+#         its own node/npm/npx symlinks behind — via a bare `continue`, with no
+#         log. The candidate dirs include ~/.local/bin on EVERY platform
+#         (fixed).
+#       - hermes_cli/main.py swallowed the web-UI stamp failure at DEBUG, so a
+#         missing pathspec meant a full npm install + Vite build on every boot
+#         with nothing above DEBUG to say why; and the READER called the same
+#         hash unguarded, so `hermes web` would have died on an unhandled
+#         ModuleNotFoundError the moment a stamp existed. It never crashed only
+#         because the swallowing writer guaranteed no stamp ever existed. Both
+#         halves fixed, and pinned by portable tests that mock the import
+#         failure so they run with or without pathspec.
+#   * the rest were stale TESTS: a dozen read a UTF-8 file with no encoding=;
+#     several asserted a POSIX path SPELLING that os.path.abspath
+#     drive-qualifies; several pinned a sys.platform-selected POSIX branch
+#     without pinning the branch, where a sibling test in the SAME FILE already
+#     showed the convention; two leaked an open sqlite handle (test_kanban_boards
+#     used `with kb.connect(...)`, which commits but never closes, though
+#     kb.connect_closing exists for exactly this); one asserted a hardcoded
+#     toolset list that upstream had since extended.
+#
+#   * THREE VACUOUS GREENS were caught in passing — tests that passed while
+#     proving nothing. The worst: test_setup_matrix_e2ee's guard used
+#     ast.walk(), which descends into function bodies, so it matched a DEFERRED
+#     `import shutil`. Deleting the module-level import left it GREEN, which is
+#     precisely the NameError it exists to prevent. It now walks tree.body.
+#
+# What is left below is genuine and probe-backed. Note how much of it is
+# DEPENDENCY-bound rather than platform-bound: croniter, pathspec, pywinpty and
+# windows-curses are all installable, and three of the four are already
+# declared project dependencies. Installing them retires 17 of these rows
+# outright — they are an install gap on this box, not a property of Windows.
+#
+# NOT registered, deliberately, and therefore still RED — these are defects,
+# and rule 3 says a defect gets fixed, not fenced:
+#
+#   * test_hooks_cli.py (3 nodes) — agent/shell_hooks.py runs
+#     shlex.split(spec.command) in POSIX mode at :452/:817/:904, which eats
+#     every backslash in a Windows hook path. Consequence: hooks report
+#     "command not found", doctor calls every hook non-executable, and
+#     script_mtime_iso returns None — so the "script modified since approval"
+#     TAMPER CHECK at hermes_cli/hooks.py:369-376 can never fire. An approved
+#     hook can be rewritten with anything and doctor still prints OK. The fix
+#     is an argv-parsing policy decision on a security path: owner call.
+#   * test_commands.py::TestSlackNativeSlashes::test_telegram_parity —
+#     slack_native_slashes() drops entries at _SLACK_MAX_SLASH_COMMANDS
+#     (commands.py:1335) in registration order with NO accounting, so which
+#     commands survive is a function of how many plugins are installed. The old
+#     row also named the wrong casualty ('version', which is in
+#     _SLACK_VIA_HERMES_ONLY); the command actually clamped off is 'platform'.
+#     Which commands get pinned is product curation: owner call.
+_ENV_GAPS: dict[str, list[tuple[str, str, set[str]]]] = {}
+
+_POSIX_MODE_BITS_PROBE = None
+_GIT_EOL_PROBE = None
+
+
+def _no_module(name: str):
+    """Return a probe that is True while ``name`` cannot be imported.
+
+    It really imports rather than asking ``find_spec``. ``find_spec("curses")``
+    answers yes on Windows — the pure-Python package ships with CPython, and it
+    is the ``_curses`` extension underneath that is missing, which only
+    executing the module body discovers. The registry ledger caught exactly
+    that mistake in this file on its first run, which is the point of having a
+    ledger rather than a printed warning.
+    """
+    cached: list[bool] = []
+
+    def _probe() -> bool:
+        if not cached:
+            try:
+                importlib.import_module(name)
+            except Exception:
+                cached.append(True)
+            else:
+                cached.append(False)
+        return cached[0]
+
+    return _probe
+
+
+def _no_posix_mode_bits() -> bool:
+    """True where os.chmod cannot express an owner-only file mode.
+
+    Measured, not assumed: NTFS records only FILE_ATTRIBUTE_READONLY, so
+    chmod(0o600) reads back as 0o666. The probe performs the actual round trip
+    rather than testing the platform name.
+    """
+    global _POSIX_MODE_BITS_PROBE
+    if _POSIX_MODE_BITS_PROBE is None:
+        import stat as _stat
+        import tempfile as _tempfile
+
+        with _tempfile.TemporaryDirectory() as _tmp:
+            _probe_file = os.path.join(_tmp, "mode_probe")
+            with open(_probe_file, "w", encoding="utf-8"):
+                pass
+            os.chmod(_probe_file, 0o600)
+            _POSIX_MODE_BITS_PROBE = (
+                _stat.S_IMODE(os.stat(_probe_file).st_mode) != 0o600
+            )
+    return _POSIX_MODE_BITS_PROBE
+
+
+def _no_os_chown() -> bool:
+    """True where os.chown is absent — the POSIX service-manager seam."""
+    return not hasattr(os, "chown")
+
+
+def _no_posix_wait_status() -> bool:
+    """True where a raw wait status cannot be decoded.
+
+    kanban_db._classify_worker_exit uses os.WIFEXITED / WEXITSTATUS /
+    WIFSIGNALED, and the exit registry it reads is populated only by
+    reap_worker_zombies, itself gated ``os.name != "nt"``.
+    """
+    return not hasattr(os, "WIFEXITED")
+
+
+def _no_posix_privilege_api() -> bool:
+    """True where os.geteuid is absent, so root/sudo branches are unreachable."""
+    return not hasattr(os, "geteuid")
+
+
+def _posix_only_branch() -> bool:
+    """True where the code under test selects its non-POSIX arm.
+
+    Used ONLY where the production code itself branches on ``sys.platform`` and
+    the assertion pins the arm this host never takes — i.e. where the platform
+    genuinely is the mechanism rather than a stand-in for one.
+    """
+    return sys.platform == "win32"
+
+
+def _git_name_only_ignores_cr_at_eol() -> bool:
+    """True where `git diff --name-only --ignore-cr-at-eol` is not honoured.
+
+    _normalize_managed_eol() derives its EOL-only set as
+    ``dirty - dirty(--ignore-cr-at-eol)``. Below git 2.32 the --name-only
+    output is decided before the content-level ignore rules run, so that set is
+    always empty and the function pins core.autocrlf without restoring
+    anything. A toolchain version, not a platform.
+    """
+    global _GIT_EOL_PROBE
+    if _GIT_EOL_PROBE is None:
+        import re as _re
+        import subprocess as _sp
+
+        try:
+            raw = _sp.run(
+                ["git", "--version"], capture_output=True, text=True, timeout=15
+            ).stdout
+            match = _re.search(r"(\d+)\.(\d+)", raw or "")
+            _GIT_EOL_PROBE = (
+                True if match is None
+                else (int(match.group(1)), int(match.group(2))) < (2, 32)
+            )
+        except Exception:
+            _GIT_EOL_PROBE = True
+    return _GIT_EOL_PROBE
+
+
+_ENV_GAP_SKIPS: EnvGapSkipRegistry = {
+    # ── POSIX-only syscalls: the mechanism is a missing attribute ──────────
     'test_container_boot.py': [
         (
-            _WINDOWS,
-            's6/container supervision layout is Linux-only; service_manager calls '
-            'os.chown, which does not exist on Windows',
+            _no_os_chown,
+            's6 container supervision is Linux-only; service_manager._mkdir_owned '
+            'calls os.chown, which does not exist on this platform',
             {
                 'test_profiles_default_subdir_is_skipped_with_warning',
                 'test_register_service_overwrites_existing_slot',
@@ -387,68 +465,13 @@ _ENV_GAPS: dict[str, list[tuple[str, str, set[str]]]] = {
             },
         ),
     ],
-    'test_cron.py': [
-        (
-            _HOST,
-            "optional dependency 'croniter' is not installed, so every cron "
-            'expression is rejected',
-            {
-                'TestGatewayNotRunningWarning::test_list_warns_when_gateway_absent',
-            },
-        ),
-    ],
-    'test_debug.py': [
-        (
-            _WINDOWS,
-            'log-snapshot truncation budget differs because the captured log is '
-            'CRLF-terminated on Windows',
-            {
-                'TestCaptureLogSnapshot::test_keeps_first_line_when_truncation_on_boundary',
-            },
-        ),
-    ],
-    'test_diff_command.py': [
-        (
-            _WINDOWS,
-            'the fixture writes main.py with Path.write_text (Windows text mode emits '
-            'CRLF) and commits it with HOME pointed at the tmp repo, where '
-            "Git-for-Windows' SYSTEM config core.autocrlf=true still applies and "
-            'normalises it to LF in the index; the in-process /diff then runs under '
-            'the real HOME (core.autocrlf=false), so the clean repo reads as one '
-            'modified file',
-            {
-                'test_diff_clean_repo_reports_no_changes',
-            },
-        ),
-    ],
-    'test_early_recovery.py': [
-        (
-            _HOST,
-            "the test's builtins.__import__ guard keys on name.split('.')[0], so it "
-            'rejects every RELATIVE import executed under it (`from . import '
-            "_compiler` arrives as name ''). That only stays invisible on a host "
-            'whose startup/site path already imported re, locale, subprocess and '
-            'importlib. This interpreter (CPython 3.12.5, no preloading .pth files) '
-            'has none of them in sys.modules at startup, so their module bodies '
-            'execute under the guard and trip it',
-            {
-                'test_early_recovery_module_is_stdlib_only',
-            },
-        ),
-    ],
-    'test_ensure_acp_launcher.py': [
-        (
-            _WINDOWS,
-            'os.geteuid does not exist on Windows',
-            {
-                'test_unwritable_bin_dir_is_skipped',
-            },
-        ),
-    ],
     'test_ensure_hermes_home_uid_34107.py': [
         (
-            _WINDOWS,
-            'os.chown does not exist on Windows',
+            _no_os_chown,
+            'os.chown does not exist on this platform, and config.py:713 returns '
+            '(None, None) from _resolve_hermes_uid_gid on win32 by design — the '
+            'same guard the sibling TestSecureDirChown in this file already '
+            'carries',
             {
                 'TestChownToHermesUid::test_attributeerror_swallowed_for_windows_compat',
                 'TestChownToHermesUid::test_calls_os_chown_when_both_set',
@@ -457,49 +480,46 @@ _ENV_GAPS: dict[str, list[tuple[str, str, set[str]]]] = {
             },
         ),
     ],
-    'test_gateway_restart_loop.py': [
+    'test_service_manager.py': [
         (
-            _HOST,
-            "optional dependency 'croniter' is not installed, so the lifecycle block "
-            'message never reaches the assertion',
+            _no_os_chown,
+            'os.chown does not exist on this platform and systemd units cannot '
+            'be written; service_manager._mkdir_owned is the POSIX seam',
             {
-                'TestCreateJobBlocksLifecycleCommands::test_cronjob_tool_surfaces_block_as_error',
+                'test_s6_log_run_creates_leaf_as_hermes_without_chown',
+                'test_seed_supervise_skeleton_creates_expected_layout',
             },
         ),
     ],
-    'test_hooks_cli.py': [
+    'test_ensure_acp_launcher.py': [
         (
-            _WINDOWS,
-            'shell-hook doctor executes POSIX scripts and compares POSIX '
-            'mtime/approval state',
+            _no_posix_privilege_api,
+            'os.geteuid does not exist on this platform; _ensure_acp_launcher '
+            'also returns early on win32 (update_cmd.py:2198), and chmod(0o555) '
+            'cannot make an NTFS directory unwritable',
             {
-                'TestHooksDoctor::test_flags_mtime_drift',
-                'TestHooksTest::test_fires_real_subprocess_and_parses_block',
-                'TestHooksTest::test_synthetic_payload_matches_production_shape',
+                'test_unwritable_bin_dir_is_skipped',
             },
         ),
     ],
-    'test_kanban_boards.py': [
+    'test_apply_profile_override.py': [
         (
-            _WINDOWS,
-            'board-DB teardown asserts a cache invalidation that Windows file locking '
-            'defers',
+            _no_module("pwd"),
+            'sudo profile resolution reads the POSIX account database '
+            '(main.py:546 _resolve_sudo_user_profile_env imports pwd behind an '
+            'os.geteuid()==0 gate); the pwd module does not exist here',
             {
-                'TestBoardCRUD::test_remove_clears_init_cache_for_recreated_db[False]',
-                'TestBoardCRUD::test_remove_clears_init_cache_for_recreated_db[True]',
+                'TestApplyProfileOverrideHermesHomeGuard::test_sudo_explicit_profile_resolves_invoking_users_profile',
             },
         ),
     ],
     'test_kanban_core_functionality.py': [
         (
-            _WINDOWS,
-            'os.WIFEXITED / os.WEXITSTATUS / os.WIFSIGNALED do not exist on Windows, '
-            'so _classify_worker_exit() falls into its except branch and returns '
-            '("unknown", None) for every reaped worker. A clean-exit protocol '
-            'violation is then counted as a plain crash against the unified failure '
-            'budget instead of the violation-only streak, and the task blocks one '
-            "attempt early. Also: tests/conftest.py's live-system guard refuses "
-            'os.kill() of a synthetic PID',
+            _no_posix_wait_status,
+            '_classify_worker_exit decodes a raw POSIX wait status '
+            '(os.WIFEXITED / WEXITSTATUS / WIFSIGNALED); the exit registry it '
+            'reads is populated only by reap_worker_zombies, gated '
+            'os.name != "nt"',
             {
                 'test_protocol_violation_budget_not_consumed_by_other_failures',
             },
@@ -507,263 +527,83 @@ _ENV_GAPS: dict[str, list[tuple[str, str, set[str]]]] = {
     ],
     'test_kanban_db.py': [
         (
-            _WINDOWS,
-            'worker-PID reaping asserts POSIX signal delivery to synthetic PIDs',
+            _no_posix_wait_status,
+            'same _classify_worker_exit POSIX wait-status decode. NB the old '
+            'row claimed this asserts "POSIX signal delivery to synthetic PIDs" '
+            '— it does not; _pid_alive is stubbed and no signal is ever sent',
             {
                 'test_rate_limit_exit_requeues_without_counting_failure',
-                'test_worktree_workspace_explicit_target_materializes_linked_worktree',
             },
         ),
     ],
-    'test_kanban_worker_image_extraction.py': [
-        (
-            _WINDOWS,
-            'image paths in a task body are matched with a POSIX path regex; Windows '
-            'paths carry a drive letter',
-            {
-                'TestBuildPartsFromTaskBody::test_code_block_example_is_not_attached',
-                'TestBuildPartsFromTaskBody::test_local_path_becomes_native_image_part',
-                'TestExtractFromTaskBody::test_local_path_in_body_round_trips',
-            },
-        ),
-    ],
-    'test_managed_uv.py': [
-        (
-            _WINDOWS,
-            'POSIX uv/venv layout: the fixture "binary" is a `#!/bin/sh` text file at '
-            'bin/uv (no .exe, so Windows resolution misses it and executing it raises '
-            'WinError 216) and _default_live_venv probes Scripts/python.exe rather '
-            'than bin/python; the install-branch tests additionally assert '
-            '_install_uv_posix, while Windows takes _install_uv_windows',
-            {
-                'TestDefaultLiveVenv::test_dot_venv_only_is_targeted',
-                'TestEnsureUv::test_install_reports_runtime_repair_to_observer',
-                'TestEnsureUv::test_installs_if_missing',
-                'TestInstallUvInternals::test_posix_sets_uv_unmanaged_install',
-                'TestResolveUv::test_existing_executable',
-                'TestUpdateManagedUv::test_fresh_stamp_skips_network_self_update_but_not_repair',
-                'TestUpdateManagedUv::test_stale_stamp_runs_self_update_and_refreshes_stamp',
-            },
-        ),
-    ],
-    'test_plugins_cmd.py': [
-        (
-            _WINDOWS,
-            'reads a plugin file without an explicit encoding; the Windows default '
-            'cp1252 codec raises UnicodeDecodeError',
-            {
-                'TestNoAutoActivation::test_compressor_default_ignores_plugin',
-            },
-        ),
-    ],
+    # ── NTFS cannot express a POSIX file mode ──────────────────────────────
     'test_profiles.py': [
         (
-            _WINDOWS,
-            'asserts a 0o600 .env mode; NTFS reports 0o666 because os.chmod only '
-            'toggles the read-only bit',
+            _no_posix_mode_bits,
+            'asserts a 0o600 .env mode; this filesystem records only a '
+            'read-only bit, so os.chmod(0o600) reads back as 0o666. SEE THE '
+            'ESCALATION FILED WITH THIS CHANGE: profile .env files hold API '
+            'keys and are genuinely NOT owner-restricted on Windows, which '
+            'wants an ACL path rather than a skipped test',
             {
                 'TestBackfillProfileEnvs::test_copies_default_env_into_envless_profiles',
                 'TestCreateProfile::test_seeds_placeholder_env_file',
             },
         ),
     ],
-    'test_projects_db.py': [
+    'test_web_server_oauth_write.py': [
         (
-            _WINDOWS,
-            "asserts POSIX absolute-path literals ('/a/c'); Path normalisation yields "
-            "'X:\\a\\c'",
+            _no_posix_mode_bits,
+            'asserts a 0o600 file mode; this filesystem records only a '
+            'read-only bit. The guarantee is not lost — the sibling '
+            'test_dashboard_oauth_write_uses_atomic_json_write_with_owner_only_mode '
+            'pins atomic_json_write(mode=0o600) portably and runs here',
             {
-                'test_create_get_list',
-                'test_per_profile_isolation',
+                'test_dashboard_oauth_write_uses_owner_only_permissions',
             },
         ),
     ],
-    'test_prompt_compose_command.py': [
+    # ── absent modules: DEPENDENCY-bound, retire by installing ─────────────
+    'test_cron.py': [
         (
-            _WINDOWS,
-            'the fake $EDITOR is a POSIX shell script and does not execute on Windows',
+            _no_module("croniter"),
+            "declared dependency 'croniter' (pyproject.toml) is not installed, "
+            'so every cron expression is rejected. DEPENDENCY-bound: installing '
+            'it retires this row',
             {
-                'test_compose_reads_and_strips_header',
+                'TestGatewayNotRunningWarning::test_list_warns_when_gateway_absent',
             },
         ),
     ],
-    'test_relaunch.py': [
+    'test_gateway_restart_loop.py': [
         (
-            _WINDOWS,
-            "asserts os.execvp against '/usr/bin/hermes'",
+            _no_module("croniter"),
+            "declared dependency 'croniter' is not installed, so the lifecycle "
+            'block message never reaches the assertion. DEPENDENCY-bound',
             {
-                'TestRelaunch::test_calls_execvp',
-            },
-        ),
-    ],
-    'test_service_manager.py': [
-        (
-            _WINDOWS,
-            'os.chown does not exist on Windows and systemd units cannot be written',
-            {
-                'test_s6_log_run_creates_leaf_as_hermes_without_chown',
-                'test_seed_supervise_skeleton_creates_expected_layout',
+                'TestCreateJobBlocksLifecycleCommands::test_cronjob_tool_surfaces_block_as_error',
             },
         ),
     ],
     'test_session_browse.py': [
         (
-            _WINDOWS,
-            "the '_curses' module is not available on Windows",
+            _no_module("curses"),
+            "the '_curses' extension is unavailable. DEPENDENCY-bound rather "
+            'than platform-bound: the windows-curses wheel provides it and is '
+            'simply not declared in pyproject.toml',
             {
                 'TestCursesBrowse::test_escape_cancels',
                 'TestCursesBrowse::test_type_to_filter_then_enter',
             },
         ),
     ],
-    'test_setup_blank_slate.py': [
-        (
-            _HOST,
-            "minimal toolset now also carries upstream's standalone 'tool_describe' "
-            'bridge tool',
-            {
-                'TestBlankSlateMinimalToolsets::test_tool_schema_survives_disabled_toolsets_from_config',
-            },
-        ),
-    ],
-    'test_setup_hermes_script.py': [
-        (
-            _WINDOWS,
-            'shells out to `bash -n <windows path>`; Git-bash cannot resolve an '
-            'X:\\... argument',
-            {
-                'test_setup_hermes_script_is_valid_shell',
-            },
-        ),
-    ],
-    'test_setup_matrix_e2ee.py': [
-        (
-            _WINDOWS,
-            'reads a source file without an explicit encoding; the Windows default '
-            'cp1252 codec raises UnicodeDecodeError',
-            {
-                'TestSetupShutilImport::test_shutil_imported_at_module_level',
-            },
-        ),
-    ],
-    'test_skin_cmd.py': [
-        (
-            _WINDOWS,
-            'reads the generated skin YAML with Path.read_text() and no encoding; the '
-            'Windows default cp1252 codec cannot decode its UTF-8 bytes',
-            {
-                'test_set_forks_a_builtin_without_inventing_a_background',
-            },
-        ),
-    ],
-    'test_subprocess_timeouts.py': [
-        (
-            _WINDOWS,
-            'reads source files without an explicit encoding; the Windows default '
-            'cp1252 codec raises UnicodeDecodeError',
-            {
-                'test_all_subprocess_run_calls_have_timeout[hermes_cli/banner.py]',
-                'test_all_subprocess_run_calls_have_timeout[hermes_cli/doctor.py]',
-                'test_all_subprocess_run_calls_have_timeout[hermes_cli/status.py]',
-            },
-        ),
-    ],
-    'test_tui_resume_flow.py': [
-        (
-            _WINDOWS,
-            'asserts a child process wrote exactly b"ok\\n"; Windows text-mode newline '
-            'translation makes it b"ok\\r\\n"',
-            {
-                'test_oneshot_subprocess_exits_without_teardown_abort',
-            },
-        ),
-    ],
-    'test_uninstall_node_symlinks.py': [
-        (
-            _WINDOWS,
-            'asserts POSIX symlinks for node/npm/npx',
-            {
-                'test_removes_fhs_symlinks_in_usr_local_bin',
-            },
-        ),
-    ],
-    'test_update_eol_churn.py': [
-        (
-            _HOST,
-            'git toolchain floor: this host runs git 2.31.1.windows.1, where `git '
-            'diff --name-only --ignore-cr-at-eol` still lists a file whose full '
-            '--ignore-cr-at-eol diff is empty (the name-only output is decided before '
-            'the content-level ignore rules run). _normalize_managed_eol() derives '
-            'its EOL-only set as `dirty - dirty(--ignore-cr-at-eol)`, which is '
-            'therefore always empty here, so it pins core.autocrlf=false without '
-            'restoring anything. test_churn_across_more_files_than_fit_in_one_argv '
-            "additionally depends on git's 1-second racy-index window: its 1200-file "
-            'checkout straddles a second boundary on this filesystem, so only the '
-            "last few hundred index entries are re-read and the fixture's own "
-            '`len(_dirty(repo)) == 1200` precondition cannot hold',
-            {
-                'test_churn_across_more_files_than_fit_in_one_argv',
-                'test_churn_invisible_under_autocrlf_true_is_still_found',
-                'test_churn_is_cleared_and_the_pin_is_persisted',
-                'test_real_edits_survive_even_when_line_endings_also_flipped',
-            },
-        ),
-    ],
-    'test_update_stale_dashboard.py': [
-        (
-            _WINDOWS,
-            'POSIX process plumbing: synthetic-PID signal delivery, '
-            '/proc/<pid>/cmdline, the `ps` fallback, and systemd/cgroup unit restart. '
-            'On Windows the stale-dashboard kill path shells out to taskkill and '
-            '_dashboard_cmdline_for_pid returns None by design, so the '
-            'systemd-restart and argv-capture branches are never reached',
-            {
-                'TestCmdlineCapture::test_falls_back_to_ps_without_proc',
-                'TestCmdlineCapture::test_reads_proc_cmdline_when_available',
-                'TestFindStaleDashboardPids::test_self_pid_excluded',
-                'TestManualBackendRespawn::test_argv_capture_failure_falls_back_to_hint',
-                'TestSupervisedBackendRestart::test_supervised_pid_restarts_owning_unit',
-            },
-        ),
-    ],
-    'test_web_server_oauth_write.py': [
-        (
-            _WINDOWS,
-            'asserts a 0o600 file mode; NTFS reports 0o666',
-            {
-                'test_dashboard_oauth_write_uses_owner_only_permissions',
-            },
-        ),
-    ],
-    'test_web_ui_build.py': [
-        (
-            _WINDOWS,
-            "asserts npm at '/usr/bin/npm' (Windows resolves 'C:\\Program "
-            "Files\\nodejs\\npm.CMD'), and the flock test imports fcntl, which does not "
-            'exist on Windows',
-            {
-                'TestBuildWebUIFlock::test_contended_lock_without_dist_waits_then_skips_fresh_build',
-                'TestBuildWebUISkipsWhenFresh::test_web_build_uses_idle_timeout_helper',
-                'TestBuildWebUISkipsWhenFresh::test_web_install_omits_workspace_when_web_has_own_lockfile',
-            },
-        ),
-        (
-            _HOST,
-            "declared dependency 'pathspec' (pathspec==1.1.1 in pyproject) is not "
-            'installed on this host, so _compute_web_ui_content_hash() raises '
-            'ModuleNotFoundError; _write_web_ui_build_stamp() swallows it and writes '
-            'no stamp, and _web_ui_build_needed() then reports stale unconditionally',
-            {
-                'TestWebUIBuildNeeded::test_content_hash_is_deterministic',
-                'TestWebUIBuildNeeded::test_mtime_only_change_is_not_stale',
-                'TestWebUIBuildNeeded::test_write_stamp_creates_file_with_hash',
-            },
-        ),
-    ],
     'test_win_pty_bridge.py': [
         (
-            _HOST,
-            "optional dependency 'pywinpty' is not installed",
+            _no_module("winpty"),
+            "declared dependency 'pywinpty' (pyproject.toml:113, "
+            "sys_platform == 'win32') is not installed on this interpreter. "
+            'DEPENDENCY-bound — these Windows pty tests are the least '
+            'platform-bound rows in the registry',
             {
                 'TestWinPtyBridgeClose::test_close_terminates_long_running_child',
                 'TestWinPtyBridgeEnv::test_cwd_is_respected',
@@ -776,8 +616,63 @@ _ENV_GAPS: dict[str, list[tuple[str, str, set[str]]]] = {
             },
         ),
     ],
+    'test_web_ui_build.py': [
+        (
+            _no_module("fcntl"),
+            'the flock test imports fcntl; main.py:5602-5605 explicitly falls '
+            'through on ImportError ("Windows: no flock"), so the branch under '
+            'test is unreachable here',
+            {
+                'TestBuildWebUIFlock::test_contended_lock_without_dist_waits_then_skips_fresh_build',
+            },
+        ),
+        (
+            _no_module("pathspec"),
+            "declared dependency 'pathspec' (pyproject.toml:104) is not "
+            'installed, so _compute_web_ui_content_hash() raises '
+            'ModuleNotFoundError. DEPENDENCY-bound. The SWALLOW that hid this '
+            'was a real defect and is fixed; both halves are now pinned by '
+            'TestWebUIHashFailureIsAccounted, which mocks the import failure '
+            'and therefore runs with or without the package',
+            {
+                'TestWebUIBuildNeeded::test_content_hash_is_deterministic',
+                'TestWebUIBuildNeeded::test_mtime_only_change_is_not_stale',
+                'TestWebUIBuildNeeded::test_write_stamp_creates_file_with_hash',
+            },
+        ),
+    ],
+    # ── toolchain version ──────────────────────────────────────────────────
+    'test_update_eol_churn.py': [
+        (
+            _git_name_only_ignores_cr_at_eol,
+            'git toolchain floor: below 2.32 `git diff --name-only '
+            '--ignore-cr-at-eol` still lists a file whose full '
+            '--ignore-cr-at-eol diff is empty, so _normalize_managed_eol() '
+            'derives an always-empty EOL-only set and pins core.autocrlf '
+            'without restoring anything',
+            {
+                'test_churn_across_more_files_than_fit_in_one_argv',
+                'test_churn_invisible_under_autocrlf_true_is_still_found',
+                'test_churn_is_cleared_and_the_pin_is_persisted',
+                'test_real_edits_survive_even_when_line_endings_also_flipped',
+            },
+        ),
+    ],
+    # ── the production code itself branches on sys.platform ────────────────
+    'test_cmd_update.py': [
+        (
+            _posix_only_branch,
+            'cmd_update prepends `git -c windows.appendAtomically=false` on '
+            'win32 and resolves npm as npm.CMD; the mocks assert the POSIX '
+            'argv. WARNING: this file only stubs subprocess.run, so '
+            '_build_web_ui still runs a REAL npm install + vite build against '
+            'the checkout — treat it as side-effecting',
+            {
+                'TestCmdUpdateBranchFallback::test_update_on_fork_checks_upstream_when_origin_up_to_date',
+            },
+        ),
+    ],
 }
-
 
 def pytest_configure(config):  # noqa: D401 — pytest hook
     """Register the environment-gap marks (see the block comment above)."""
@@ -817,6 +712,7 @@ def pytest_collection_modifyitems(items):  # noqa: D401 — pytest hook
         for mark, reason, node_ids in groups:
             if within_file in node_ids:
                 item.add_marker(getattr(pytest.mark, mark)(reason=reason))
+    apply_skips(items, _ENV_GAP_SKIPS)
 
 
 _STALE_ENV_GAP_ENTRIES: list[str] = []
