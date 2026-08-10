@@ -5,7 +5,7 @@ from agent_runtime.models import Event, Incident
 from types import SimpleNamespace
 
 Task = SimpleNamespace
-from agent_runtime.snapshot import build_snapshot
+from agent_runtime.snapshot import SNAPSHOT_CONTRACT_VERSION, build_snapshot
 from agent_runtime.states import TaskState
 from agent_runtime.store import IncidentStore, TaskStore
 
@@ -29,4 +29,4 @@ def test_snapshot_exposes_goal_timeline_proof_summaries_and_why_not_done():
     snap = build_snapshot()
     for key in ("goals", "runs", "proofs", "incidents", "stage_verification"):
         assert key not in snap
-    assert snap["parity"]["contract_version"] == 54
+    assert snap["parity"]["contract_version"] == SNAPSHOT_CONTRACT_VERSION

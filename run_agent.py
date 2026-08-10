@@ -2158,9 +2158,21 @@ class AIAgent:
                     tool_calls_data = msg["tool_calls"]
                 platform_message_id = None
                 if getattr(self, "_persona_chat_root_session_id", None):
-                    from agent_runtime.persona_chat_continuity import safe_native_message
+                    from agent_runtime.persona_chat_continuity import (
+                        native_wire_row,
+                        record_wire_boundary_drift,
+                    )
 
-                    native = safe_native_message(
+                    # THE WIRE BOUNDARY. This block reads like persistence — it
+                    # sits in the crash-resilience flush — but the write-back
+                    # below puts the result into the LIVE actor's message list,
+                    # and it runs BEFORE the first provider call of the turn. So
+                    # whatever `native_wire_row` decides here is what the model
+                    # receives, and a change to a bound in that module is a
+                    # change to the prompt. The typed form is used (rather than
+                    # `safe_native_message`) precisely because this is the site
+                    # where the distinction matters.
+                    bound = native_wire_row(
                         {
                             **msg,
                             "content": content,
@@ -2170,6 +2182,16 @@ class AIAgent:
                             "turn_id": self._persona_chat_turn_id,
                         }
                     )
+                    # Fail LOUD, not fatal. The boundary is supposed to shorten
+                    # content; the invariant is that every character it removes
+                    # is named by a note. An unaccounted residue means the model
+                    # is being sent something no receipt describes. Raising here
+                    # would lose a live turn over an accounting bug, so the
+                    # residue is reported and the turn proceeds — the hard
+                    # equality assertion lives in the unit tests over the pure
+                    # boundary, where it costs nothing.
+                    record_wire_boundary_drift(bound)
+                    native = bound.row
                     # The safe representation is retained in the live actor too;
                     # the next provider call therefore sees exactly what cold
                     # resume will read, never raw tool residue.

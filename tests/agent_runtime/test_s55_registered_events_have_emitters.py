@@ -286,23 +286,210 @@ def test_the_allowlist_is_not_a_dumping_ground():
     assert stale == [], f"allowlist names types that are no longer registered: {stale}"
 
 
+def _module_tree(module) -> ast.Module:
+    return ast.parse(inspect.getsource(module))
+
+
+def _callee_name(node: ast.expr) -> str | None:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return node.attr
+    return None
+
+
+def _calls_to(tree: ast.AST, name: str) -> list[ast.Call]:
+    """Every call in ``tree`` whose callee spells ``name`` (bare or attribute)."""
+
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call) and _callee_name(node.func) == name
+    ]
+
+
+def _is_call(node: ast.expr, name: str) -> bool:
+    return isinstance(node, ast.Call) and _callee_name(node.func) == name
+
+
+def _const_args(call: ast.Call) -> list[object]:
+    """Positional args, with non-literals rendered as ``None``."""
+
+    return [a.value if isinstance(a, ast.Constant) else None for a in call.args]
+
+
 def test_each_allowlisted_type_is_witnessed_on_the_dynamic_dispatch_path():
     """The allowlist claims these three arrive as DATA rather than as a literal
-    at the Event construction. Asserted, not trusted."""
+    at the Event construction. Asserted structurally, not trusted.
+
+    WHY AST AND NOT SUBSTRING (converted 2026-08-09). This witness used to match
+    raw source text, and it did what every text-matching gate eventually does: a
+    purely cosmetic reformat of the ``_progress_adapter`` call sites broke it,
+    and the author had to keep three calls on one line to appease a test that
+    has no opinion about line breaks. That is a change-detector wearing a
+    witness's clothes. The GUARANTEE is real and worth pinning — the runner
+    supplies the label, the sink never writes it, which is exactly why the
+    static resolver above cannot see these three types — but line layout was
+    never part of it, and a witness that fails on formatting trains readers to
+    edit the code to suit the test.
+
+    Comments, string continuations, and reflowing all defeat substring matching,
+    which is why structural gates in this repo are AST- or token-based. The
+    resolver above always was; this witness now matches it.
+    """
 
     from agent_runtime import profile_runner, progress
 
-    progress_source = inspect.getsource(progress)
-    # The payload-driven dispatch that defeats static resolution, plus the
-    # default literal it falls back to.
-    assert 'self.emit(str(payload.get("type", "run.progress")), payload)' in progress_source
-    assert '_CHAT_TRACE_EVENT_TYPES = {"run.tool.started", "run.tool.finished", "run.progress"}' in progress_source
+    # --- 1. The sink dispatches on payload DATA, not on a literal. -----------
+    # Was: the exact text `self.emit(str(payload.get("type", "run.progress")),
+    # payload)`. Now: an `emit` call whose type argument is a `payload.get(
+    # "type", <default>)` (optionally wrapped in `str(...)`). Any spelling of
+    # that shape survives; replacing it with a literal — which is the change
+    # that would make this allowlist entry FALSE, because the resolver could
+    # then see the type — fails.
+    progress_tree = _module_tree(progress)
+    dispatch_defaults: list[object] = []
+    for call in _calls_to(progress_tree, "emit"):
+        if not call.args:
+            continue
+        first = call.args[0]
+        inner = first.args[0] if _is_call(first, "str") and first.args else first
+        if not _is_call(inner, "get"):
+            continue
+        args = _const_args(inner)
+        if args and args[0] == "type":
+            dispatch_defaults.append(args[1] if len(args) > 1 else None)
 
-    # The two tool labels are handed in by the runner, not written at the sink.
-    runner_source = inspect.getsource(profile_runner)
+    assert dispatch_defaults, (
+        "ProgressEmitter no longer dispatches on payload['type']. If the event "
+        "type became a literal at the sink, the static resolver can now see it "
+        "and these three types must LEAVE the allowlist rather than keep an "
+        "exemption that is no longer true."
+    )
+    assert "run.progress" in dispatch_defaults, (
+        "the payload-driven dispatch no longer defaults to 'run.progress'; "
+        f"defaults found: {dispatch_defaults}"
+    )
+
+    # --- 2. The trace gate is a VALUE, so compare the value. -----------------
+    # Was: the exact text of the set literal, which made the SAME set written in
+    # a different order a failure. Importing it compares what actually gates.
+    assert progress._CHAT_TRACE_EVENT_TYPES == {
+        "run.tool.started",
+        "run.tool.finished",
+        "run.progress",
+    }
+
+    # --- 3. The runner hands the two tool labels in at the CALL SITE. --------
+    # This is the entire claim of the allowlist for these two: the label is an
+    # ARGUMENT, so no literal is in scope where the Event is constructed. The
+    # old form additionally required the first argument to be spelled
+    # `request.progress_callback` on the same line — neither of which the
+    # guarantee cares about.
+    runner_tree = _module_tree(profile_runner)
+    adapter_labels = {
+        args[1]
+        for args in (_const_args(c) for c in _calls_to(runner_tree, "_progress_adapter"))
+        if len(args) > 1 and isinstance(args[1], str)
+    }
     for label in ("run.tool.started", "run.tool.finished"):
-        assert f'_progress_adapter(request.progress_callback, "{label}"' in runner_source, label
-    assert '"type": "run.progress"' in runner_source
+        assert label in adapter_labels, (
+            f"{label} is no longer passed into _progress_adapter by the runner. "
+            f"Labels at the call sites: {sorted(adapter_labels)}"
+        )
+
+    # ...and `_progress_adapter` FORWARDS that parameter rather than writing its
+    # own type. If it ever hardcoded one, the resolver would find it and the
+    # exemption would be stale decoration.
+    adapter_def = next(
+        node
+        for node in ast.walk(runner_tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "_progress_adapter"
+    )
+    assert [
+        call
+        for call in _calls_to(adapter_def, "_progress_payload_from_callback")
+        if any(isinstance(a, ast.Name) and a.id == "event_type" for a in call.args)
+    ], (
+        "_progress_adapter no longer forwards its `event_type` parameter into "
+        "the payload builder — the label may now be written at the sink, which "
+        "would make the allowlist entries for the two tool types wrong."
+    )
+
+    # --- 4. The runner builds the bare progress type as payload DATA. -------
+    # Was: the substring `"type": "run.progress"`, which a docstring or a
+    # comment mentioning it would have satisfied.
+    assert [
+        node
+        for node in ast.walk(runner_tree)
+        if isinstance(node, ast.Dict)
+        and any(
+            isinstance(k, ast.Constant)
+            and k.value == "type"
+            and isinstance(v, ast.Constant)
+            and v.value == "run.progress"
+            for k, v in zip(node.keys, node.values)
+        )
+    ], (
+        "no `{'type': 'run.progress', ...}` payload is built in profile_runner; "
+        "run.progress reaches the sink some other way now and its allowlist "
+        "entry needs re-deriving."
+    )
+
+
+def test_the_witness_is_structural_and_survives_reformatting():
+    """RED-PROOF for the conversion above, run permanently.
+
+    The defect being retired is specific: a cosmetic reflow broke the witness.
+    So the proof is equally specific — feed the four idioms to the same helpers
+    the witness uses, in a REFORMATTED spelling of each, and require them to
+    resolve. A witness that had quietly gone back to matching text would fail
+    here while the code it guards was untouched.
+    """
+
+    reflowed = ast.parse(
+        "\n".join(
+            (
+                "def sink(self, payload):",
+                "    self.emit(",
+                "        # the type arrives as data, on its own line now",
+                "        str(",
+                '            payload.get("type", "run.progress")',
+                "        ),",
+                "        payload,",
+                "    )",
+                "",
+                "def runner(request, budget_guard):",
+                "    return {",
+                '        "tool_start_callback": _progress_adapter(',
+                "            request.progress_callback,",
+                '            "run.tool.started",',
+                "            guard=budget_guard,",
+                "        ),",
+                '        "payload": {"type": "run.progress"},',
+                "    }",
+            )
+        )
+    )
+
+    dispatch = [
+        _const_args(c.args[0].args[0])
+        for c in _calls_to(reflowed, "emit")
+        if c.args and _is_call(c.args[0], "str") and _is_call(c.args[0].args[0], "get")
+    ]
+    assert dispatch == [["type", "run.progress"]], dispatch
+
+    labels = {
+        args[1]
+        for args in (_const_args(c) for c in _calls_to(reflowed, "_progress_adapter"))
+        if len(args) > 1
+    }
+    assert labels == {"run.tool.started"}, labels
+
+    # And the negative direction: prose mentioning the label must NOT satisfy
+    # the label witness. This is the substring gate's original hole.
+    prose = ast.parse('"""calls _progress_adapter(cb, \\"run.tool.finished\\")."""')
+    assert _calls_to(prose, "_progress_adapter") == []
 
 
 def test_the_resolver_actually_resolves_each_emission_idiom():

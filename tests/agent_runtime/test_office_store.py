@@ -13,7 +13,7 @@ from agent_runtime import office_models, paths
 from agent_runtime.errors import NotFound, StaleRevision, SyncConflict
 from agent_runtime.events import EventLog
 from agent_runtime.office_store import OfficeStore
-from agent_runtime.snapshot import build_snapshot
+from agent_runtime.snapshot import SNAPSHOT_CONTRACT_VERSION, build_snapshot
 from agent_runtime.store import WorkspaceStore
 
 
@@ -250,7 +250,7 @@ def test_snapshot_offices_section_and_conflict_parity_warning():
     assert row["orphaned"] is False
     codes = {w.get("code") for w in snap["parity"]["warnings"]}
     assert "office_actor_conflict" in codes
-    assert snap["parity"]["contract_version"] == 54
+    assert snap["parity"]["contract_version"] == SNAPSHOT_CONTRACT_VERSION
 
 
 # ── dry-run: full validation, zero writes, zero events (mutation-arg trap) ──

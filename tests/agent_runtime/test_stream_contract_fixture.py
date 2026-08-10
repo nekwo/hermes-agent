@@ -20,6 +20,7 @@ from pathlib import Path
 
 from agent_runtime.events import EventLog
 from agent_runtime.models import Event
+from agent_runtime.snapshot import SNAPSHOT_CONTRACT_VERSION
 from agent_runtime.stream import delta_frame, heartbeat_frame, hydrate_frame
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "stream_frames"
@@ -115,7 +116,15 @@ def test_hydrate_frame_matches_golden_shape(isolate_agent_runtime_root):
 # left the goldens without the section.
 # The Activity ownership correction (2026-08-04) moved it 52 -> 53 and
 # regenerated every frame after retiring connected MCP transports as work.
-CONTRACT_VERSION = 54
+#
+# 2026-08-09: DERIVED from the producer instead of restated. This is not a
+# weakening. The assertion below compares the GOLDEN BYTES against it, so
+# deriving means the moment the producer moves, every stale golden goes red —
+# exactly the drift this gate exists to catch. Restating it had the opposite
+# effect: a bump that forgot this file left the goldens stale AND the gate
+# green. The one deliberate literal now lives in
+# `test_snapshot_contract_version_authority.py`.
+CONTRACT_VERSION = SNAPSHOT_CONTRACT_VERSION
 
 
 def test_every_frame_bearing_golden_pins_contract_version(isolate_agent_runtime_root):

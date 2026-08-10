@@ -44,6 +44,27 @@ _TOOL_EXECUTION_SCOPE: ContextVar[str | None] = ContextVar(
 # the ``\1: [redacted]`` rebuild below is unchanged; the value shape widens
 # from ``[^\s,;]+`` to ``\S+``, which only removes MORE of the offending run.
 _SECRET_RE = TEXT_SECRET_ASSIGNMENT_RE
+
+#: Flat ceiling for one opaque free-text row.
+#:
+#: **THIS IS A WIRE BOUND, NOT A PERSISTENCE BOUND.** It reads like the latter —
+#: it lives in the continuity module, beside the session-DB flush, and it was
+#: introduced to keep persisted rows small. But the flush hands its result back
+#: into the LIVE actor's message list (``msg.clear(); msg.update(native)`` in
+#: ``run_agent``) BEFORE the first provider call of the turn, so whatever this
+#: number cuts, the model never sees.
+#:
+#: That is not a hypothetical. On 2026-08-09 this single flat 20,000 applied to
+#: a COMPOSED operator row and delivered 37% of a required skill, cut
+#: mid-sentence, with the runtime HUD amputated entirely — and because the cut
+#: took the ``</skill_preload>`` closing tag with it, the ``unchanged`` dedupe
+#: became structurally unreachable and re-shipped ~3.7 k tokens every turn. The
+#: composed row now has its own per-part ceilings (below); this one still
+#: governs every other role, and it still governs the wire.
+#:
+#: Anyone changing it is changing the prompt. :func:`native_wire_row` is the
+#: named boundary that says so, and it accounts for every character this number
+#: removes so the loss can never again be silent.
 _MAX_CONTENT = 20_000
 _MAX_ARGUMENTS = 4_000
 
@@ -70,6 +91,26 @@ _MAX_RUNTIME_CONTEXT_CONTENT = 32_000
 BOUND_PART_MESSAGE = "message"
 BOUND_PART_SKILL_PRELOAD = "skill_preload"
 BOUND_PART_RUNTIME_CONTEXT = "runtime_context"
+#: The whole content of a row that is opaque free text (every role but ``user``:
+#: assistant replies, tool results, system notes). Not composed, so not split —
+#: but bounded, and therefore accounted, by the same boundary.
+BOUND_PART_CONTENT = "content"
+#: One tool call's serialized arguments, bounded at :data:`_MAX_ARGUMENTS`. The
+#: same silent-loss class as the free-text rows and on the same wire: these ride
+#: back into the live actor with the rest of the row, so a truncated argument
+#: blob is what the model sees its own previous call as having made.
+BOUND_PART_TOOL_ARGUMENTS = "tool_arguments"
+
+#: The parts that make up a row's ``content``, and therefore the only ones whose
+#: losses belong in the content arithmetic.
+CONTENT_BOUND_PARTS = frozenset(
+    {
+        BOUND_PART_MESSAGE,
+        BOUND_PART_SKILL_PRELOAD,
+        BOUND_PART_RUNTIME_CONTEXT,
+        BOUND_PART_CONTENT,
+    }
+)
 
 BOUND_ACTION_TRUNCATED = "truncated"
 BOUND_ACTION_DROPPED = "dropped"
@@ -104,10 +145,22 @@ class BoundedUserContent:
 
     text: str
     notes: tuple[ContentBoundNote, ...] = ()
+    #: Length of the content this bound was applied TO, measured after redaction
+    #: and before any part was cut. Carried so the caller can prove the arithmetic
+    #: closes — ``source_chars - len(text)`` must equal the loss the notes
+    #: account for. A residue means content left through a path with no note on
+    #: it, which is the exact class of defect the notes exist to retire.
+    source_chars: int = 0
 
     @property
     def bounded(self) -> bool:
         return bool(self.notes)
+
+    @property
+    def accounted_loss(self) -> int:
+        """Characters the notes explain."""
+
+        return sum(max(0, note.original_chars - note.bounded_chars) for note in self.notes)
 
 
 def _redacted(value: Any) -> str:
@@ -211,7 +264,7 @@ def bound_composed_user_content(value: Any) -> BoundedUserContent:
     if not parts.has_envelope:
         bounded = _truncate(text, _MAX_CONTENT)
         if bounded == text:
-            return BoundedUserContent(text=text)
+            return BoundedUserContent(text=text, source_chars=len(text))
         return BoundedUserContent(
             text=bounded,
             notes=(
@@ -223,6 +276,7 @@ def bound_composed_user_content(value: Any) -> BoundedUserContent:
                     limit=_MAX_CONTENT,
                 ),
             ),
+            source_chars=len(text),
         )
 
     notes: list[ContentBoundNote] = []
@@ -269,30 +323,217 @@ def bound_composed_user_content(value: Any) -> BoundedUserContent:
                 for item in notes
             ),
         )
-    return BoundedUserContent(text=f"{message}{preload}{hud}", notes=tuple(notes))
+    return BoundedUserContent(
+        text=f"{message}{preload}{hud}",
+        notes=tuple(notes),
+        source_chars=len(text),
+    )
 
 
-def safe_native_message(message: dict[str, Any]) -> dict[str, Any]:
-    """Return the one retained-and-persisted persona-chat message shape.
+def _bounded_free_text(
+    value: Any, *, limit: int = _MAX_CONTENT, part: str = BOUND_PART_CONTENT
+) -> BoundedUserContent:
+    """Bound one opaque free-text row, and SAY SO when it cuts.
+
+    ``_safe_text`` does the same truncation and returns a bare string, which is
+    how the assistant/tool/system rows have been losing content silently: the
+    per-part accounting added for the composed operator row covered ``user``
+    only, while the other three roles kept a flat cap with no note, no log and
+    no receipt. A 25 KB tool result was cut to 20 K on the way to the model and
+    nothing anywhere recorded that it had been.
+    """
+
+    text = _redacted(value)
+    bounded = _truncate(text, limit)
+    if bounded == text:
+        return BoundedUserContent(text=text, source_chars=len(text))
+    return BoundedUserContent(
+        text=bounded,
+        notes=(
+            ContentBoundNote(
+                part=part,
+                action=BOUND_ACTION_TRUNCATED,
+                original_chars=len(text),
+                bounded_chars=len(bounded),
+                limit=limit,
+            ),
+        ),
+        source_chars=len(text),
+    )
+
+
+#: Name of the boundary, for logs and typed drift rows. One spelling, so a
+#: search for "who decided what the model sees on this lane" lands in one place.
+WIRE_BOUNDARY = "persona_chat.native_wire_row"
+
+
+@dataclass(frozen=True, slots=True)
+class WireBoundaryRow:
+    """What the persona-chat boundary put ON THE WIRE, and what it cost.
+
+    ``row`` is the value the flush writes back into the LIVE actor's message
+    list, so it is what the next provider call submits — not merely what gets
+    persisted. The remaining fields exist so that claim is checkable rather than
+    asserted in a comment.
+    """
+
+    row: dict[str, Any]
+    notes: tuple[ContentBoundNote, ...] = ()
+    #: Length of the content handed to the boundary, before redaction.
+    submitted_chars: int = 0
+    #: Length after redaction — the input the BOUND was actually applied to.
+    #: Redaction is a separate, intended transform; separating the two keeps a
+    #: redacted secret from masquerading as an unaccounted bound loss.
+    redacted_chars: int = 0
+    #: Length of what goes to the model.
+    wire_chars: int = 0
+
+    @property
+    def bounded(self) -> bool:
+        return bool(self.notes)
+
+    @property
+    def accounted_loss(self) -> int:
+        """Characters the notes explain, counting only the CONTENT parts.
+
+        Tool-call arguments are bounded and noted too, but they live in a
+        different field of the row and are NOT part of the content arithmetic.
+        Summing them here would let an argument truncation cancel out a real
+        content residue and drive :attr:`unaccounted_loss` to zero — a check
+        that hides the thing it exists to find.
+        """
+
+        return sum(
+            max(0, note.original_chars - note.bounded_chars)
+            for note in self.notes
+            if note.part in CONTENT_BOUND_PARTS
+        )
+
+    @property
+    def argument_loss(self) -> int:
+        """Characters removed from tool-call argument blobs. Reported, not netted."""
+
+        return sum(
+            max(0, note.original_chars - note.bounded_chars)
+            for note in self.notes
+            if note.part == BOUND_PART_TOOL_ARGUMENTS
+        )
+
+    @property
+    def unaccounted_loss(self) -> int:
+        """Characters that left between submission and the wire with NOTHING naming them.
+
+        THE INVARIANT. Every character the boundary removes must be explained by
+        a typed note or by redaction. A non-zero residue means content is
+        reaching the model in a shape no receipt describes — the 2026-08-09
+        class, where a bound that read as persistence-only silently governed the
+        prompt and the receipt could only report it after the fact.
+        """
+
+        return max(0, self.redacted_chars - self.wire_chars - self.accounted_loss)
+
+    @property
+    def holds(self) -> bool:
+        return self.unaccounted_loss == 0
+
+    def drift_row(self) -> dict[str, Any] | None:
+        """The fail-loud typed row, or ``None`` when the invariant holds.
+
+        A ROW rather than a raised assertion, deliberately — see
+        :func:`record_wire_boundary_drift`.
+        """
+
+        if self.holds:
+            return None
+        return {
+            "boundary": WIRE_BOUNDARY,
+            "role": str(self.row.get("role") or ""),
+            "submitted_chars": self.submitted_chars,
+            "redacted_chars": self.redacted_chars,
+            "wire_chars": self.wire_chars,
+            "accounted_loss": self.accounted_loss,
+            "argument_loss": self.argument_loss,
+            "unaccounted_loss": self.unaccounted_loss,
+            "notes": [
+                {
+                    "part": note.part,
+                    "action": note.action,
+                    "original_chars": note.original_chars,
+                    "bounded_chars": note.bounded_chars,
+                    "limit": note.limit,
+                }
+                for note in self.notes
+            ],
+        }
+
+
+def record_wire_boundary_drift(bound: WireBoundaryRow) -> dict[str, Any] | None:
+    """Report an unaccounted wire loss loudly, and keep the turn alive.
+
+    WHY A TYPED ROW AND NOT AN ASSERTION. This runs inside the crash-resilience
+    persist, on the live agent turn loop, BEFORE the first provider call of the
+    turn. Raising here would convert an accounting bug into a lost turn on a
+    conversation that is otherwise fine — strictly worse than the drift being
+    reported, and it would do so in the one place a user cannot retry cheaply.
+    The hard equality assertion lives where it is free: the unit tests over the
+    pure boundary, which is the seam the invariant actually belongs to.
+
+    The row is also the honest shape for the check. The boundary is SUPPOSED to
+    shorten content; the invariant is not "wire == submitted" but "every
+    character of the difference is named". A bare assert could only express the
+    former, which is why the previous receipt could report drift and never
+    prevent it.
+    """
+
+    row = bound.drift_row()
+    if row is None:
+        return None
+    logger.error(
+        "persona chat wire boundary lost %d unaccounted chars on a %s row "
+        "(submitted=%d redacted=%d wire=%d accounted=%d) — the model is being "
+        "sent content no receipt describes",
+        row["unaccounted_loss"],
+        row["role"] or "?",
+        row["submitted_chars"],
+        row["redacted_chars"],
+        row["wire_chars"],
+        row["accounted_loss"],
+    )
+    return row
+
+
+def native_wire_row(message: dict[str, Any]) -> WireBoundaryRow:
+    """THE persona-chat wire boundary.
+
+    Named for what it decides rather than where it is called from. The flush in
+    ``run_agent`` writes this result back into the live actor's message list, so
+    this function — not the provider call, not the composition step — is what
+    settles the bytes the model receives on this lane. That coupling is the
+    reason the module's bounds are wire bounds (see :data:`_MAX_CONTENT`), and
+    it used to be recorded only in a comment at the call site.
 
     Tool structure and ordering identifiers survive, while raw/unbounded
-    payloads and provider-specific residue do not.  Applying this function more
-    than once is stable, which lets warm memory and cold persistence share the
-    same boundary without representation drift.
+    payloads and provider-specific residue do not. Applying this more than once
+    is stable, which lets warm memory and cold persistence share the same
+    boundary without representation drift.
     """
 
     role = str(message.get("role") or "").strip().lower()
     if role not in {"system", "user", "assistant", "tool"}:
         role = "assistant"
+    # Named `submitted`, not `raw`: the loop over `tool_calls` below rebinds
+    # `raw` per call, and the two must not be the same name.
+    submitted = message.get("content")
     # The operator user row is the ONE composed row on this lane — a join of
     # three parts with three different contracts — so it is bounded per part
     # (see :func:`bound_composed_user_content`). Every other role is opaque free
-    # text and keeps the flat bound it always had.
-    content = (
-        bound_composed_user_content(message.get("content")).text
+    # text and keeps the flat bound it always had — but now reports it.
+    bounded = (
+        bound_composed_user_content(submitted)
         if role == "user"
-        else _safe_text(message.get("content"))
+        else _bounded_free_text(submitted)
     )
+    content = bounded.text
     result: dict[str, Any] = {"role": role, "content": content}
     for key in (
         "tool_call_id",
@@ -309,6 +550,7 @@ def safe_native_message(message: dict[str, Any]) -> dict[str, Any]:
         value = safe_assignment_text(raw_value, limit=240)
         if value:
             result[key] = value
+    notes: list[ContentBoundNote] = list(bounded.notes)
     calls = message.get("tool_calls")
     if isinstance(calls, list):
         safe_calls: list[dict[str, Any]] = []
@@ -320,19 +562,42 @@ def safe_native_message(message: dict[str, Any]) -> dict[str, Any]:
             name = safe_assignment_text(function.get("name") or raw.get("name"), limit=240)
             if not call_id or not name:
                 continue
+            # Accounted for the same reason the row content is: this rides back
+            # into the live actor and reaches the model.
+            arguments = _bounded_free_text(
+                function.get("arguments"),
+                limit=_MAX_ARGUMENTS,
+                part=BOUND_PART_TOOL_ARGUMENTS,
+            )
+            notes += arguments.notes
             safe_calls.append(
                 {
                     "id": call_id,
                     "type": "function",
-                    "function": {
-                        "name": name,
-                        "arguments": _safe_text(function.get("arguments"), limit=_MAX_ARGUMENTS),
-                    },
+                    "function": {"name": name, "arguments": arguments.text},
                 }
             )
         if safe_calls:
             result["tool_calls"] = safe_calls
-    return result
+    return WireBoundaryRow(
+        row=result,
+        notes=tuple(notes),
+        submitted_chars=len(submitted) if isinstance(submitted, str) else 0,
+        redacted_chars=bounded.source_chars,
+        wire_chars=len(content),
+    )
+
+
+def safe_native_message(message: dict[str, Any]) -> dict[str, Any]:
+    """The boundary's row, for callers that do not need the accounting.
+
+    Kept as the name every existing call site already uses; the accounting lives
+    on :func:`native_wire_row`. Callers that write this result back into a LIVE
+    message list — which makes it the wire, not merely the record — should use
+    the typed form and report drift.
+    """
+
+    return native_wire_row(message).row
 
 
 def safe_native_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:

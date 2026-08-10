@@ -95,6 +95,7 @@ import pytest
 
 from agent_runtime import config as config_module
 from agent_runtime import migrations, operator_channels, prompt_observability, runtime_config, snapshot, status
+from agent_runtime.snapshot import SNAPSHOT_CONTRACT_VERSION
 
 
 #: The contract this wave moved to. Two emitted fields left the frame.
@@ -123,7 +124,16 @@ S47_CONTRACT_VERSION = 46
 #: shared authority, so a bump moves whichever ones its author happened to grep
 #: and the rest go quietly red. The fix is one constant imported from the
 #: producer; filed rather than done here so the contract wave stays reviewable.
-CURRENT_CONTRACT_VERSION = 54
+#:
+#: DONE (2026-08-09). The filed fix landed: the emitted value is now
+#: :data:`agent_runtime.snapshot.SNAPSHOT_CONTRACT_VERSION`, this name is an
+#: alias of it rather than a restatement, and the literal survives in exactly
+#: ONE place — ``test_snapshot_contract_version_authority.py``, which also
+#: carries the AST gate that fails if any other test states it again. This file
+#: is therefore no longer "the only live pin"; it is a consumer like the rest,
+#: and the assertion below is kept for its POSITION (it proves the parity
+#: envelope is actually reached by this wave's frame) rather than for the number.
+CURRENT_CONTRACT_VERSION = SNAPSHOT_CONTRACT_VERSION
 
 
 def _function(module, name: str) -> ast.FunctionDef:

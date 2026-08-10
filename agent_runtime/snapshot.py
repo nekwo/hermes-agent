@@ -61,6 +61,33 @@ from .tool_visibility import (
 from .workspace_scope import exact_scoped_instance_ids
 
 
+#: THE snapshot wire contract version — the single producer-side authority.
+#:
+#: Every consumer of this number, in this repo and in the Launcher, derives it
+#: from here rather than restating it. That rule exists because restating it is
+#: what kept breaking: the contract-53 landing moved two of six hermes test
+#: literals and left four red on ``main`` for five days, and the 53 -> 54 sweep
+#: then found eleven more still pinned at 52. Each of those was a *negative*
+#: gate — "this cut did NOT move the contract" — expressed as an absolute
+#: number, so every unrelated bump made a true statement go red and taught
+#: readers that a contract failure is routine noise.
+#:
+#: Consequently:
+#:
+#: * production reads :data:`SNAPSHOT_CONTRACT_VERSION` (see the parity envelope
+#:   in :func:`_parity_envelope`, whose comment block carries the full
+#:   version-by-version history and the bump/keep rulings behind it);
+#: * tests import it and assert RELATIVE to it (``== SNAPSHOT_CONTRACT_VERSION``,
+#:   ``- 1``, ``+ 1``) so a bump moves them for free;
+#: * exactly ONE test states the literal —
+#:   ``test_snapshot_contract_version_authority.py`` — because the number is a
+#:   cross-repo lockstep with the Launcher's ``kSupportedMissionContractVersion``
+#:   and moving it must be a deliberate, reviewed edit rather than a silent
+#:   consequence of a refactor;
+#: * a structural (AST) gate in that same file fails if any other test states it.
+SNAPSHOT_CONTRACT_VERSION = 54
+
+
 @dataclass(frozen=True, slots=True)
 class SnapshotSummary:
     """The frame's ``summary`` block, as a CLOSED set of fields.
@@ -878,7 +905,11 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         # reader-side decision that needs its own ruling — not a wire cleanup.
         # This is a wire removal, so the contract and Launcher pin move together
         # under the removal rule recorded at 46.
-        "contract_version": 54,
+        #
+        # The number itself lives at module scope as
+        # :data:`SNAPSHOT_CONTRACT_VERSION` so that consumers derive it instead
+        # of restating it; the history above stays here, where the rulings are.
+        "contract_version": SNAPSHOT_CONTRACT_VERSION,
         "generated_at": data.get("generated_at"),
         "redaction_mode": getattr(cfg, "redaction_mode", "strict"),
         "redaction_observed": _redaction_observed(data),

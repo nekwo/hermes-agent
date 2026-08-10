@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 
 from agent_runtime.read_model import READ_MODEL_SCHEMA_VERSION, ROW_TABLES, ReadModel
-from agent_runtime.snapshot import build_snapshot
+from agent_runtime.snapshot import SNAPSHOT_CONTRACT_VERSION, build_snapshot
 
 
 def test_s9_snapshot_contract_removes_mission_rows_and_bumps_versions(tmp_path):
@@ -14,7 +14,7 @@ def test_s9_snapshot_contract_removes_mission_rows_and_bumps_versions(tmp_path):
     assert ROW_TABLES == ("agent_instances", "operator_channels")
 
     snapshot = build_snapshot()
-    assert snapshot["parity"]["contract_version"] == 52
+    assert snapshot["parity"]["contract_version"] == SNAPSHOT_CONTRACT_VERSION
     for key in ("goals", "stage_verification", "runs", "proofs", "incidents"):
         assert key not in snapshot
 

@@ -20,7 +20,11 @@ from __future__ import annotations
 
 from agent_runtime import prompt_observability as po
 from agent_runtime import snapshot as snapshot_module
-from agent_runtime.snapshot import build_snapshot, persona_instance_detail_for_id
+from agent_runtime.snapshot import (
+    SNAPSHOT_CONTRACT_VERSION,
+    build_snapshot,
+    persona_instance_detail_for_id,
+)
 from tests.agent_runtime.snapshot_bytes import snapshot_size_budget
 
 
@@ -32,7 +36,7 @@ from tests.agent_runtime.snapshot_bytes import snapshot_size_budget
 def test_goal_section_is_absent_from_the_frame(isolate_agent_runtime_root):
     snap = build_snapshot()
     assert "goals" not in snap
-    assert snap["parity"]["contract_version"] == 52
+    assert snap["parity"]["contract_version"] == SNAPSHOT_CONTRACT_VERSION
 
 
 def test_goal_detail_lane_is_removed_not_merely_empty(isolate_agent_runtime_root):
