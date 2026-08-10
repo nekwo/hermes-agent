@@ -220,7 +220,7 @@ def test_history_rows_carry_turn_anchor_and_intra_turn_seq():
             },
         ]
     )
-    rows, _status = _safe_recent_messages(db, session_id="s1")
+    rows, _status, _unread = _safe_recent_messages(db, session_id="s1")
     assert [r["role"] for r in rows] == ["operator", "agent"]
     assert rows[0]["client_message_id"] == "turn-a"
     assert rows[0]["turn_seq"] == TURN_SEQ_OPERATOR
@@ -238,7 +238,7 @@ def test_pre_c8_ack_rows_stay_unkeyed_residue():
             },
         ]
     )
-    rows, _status = _safe_recent_messages(db, session_id="s1")
+    rows, _status, _unread = _safe_recent_messages(db, session_id="s1")
     assert rows[0]["kind"] == "pre_trace_ack"
     assert "turn_seq" not in rows[0]
     assert "client_message_id" not in rows[0]
@@ -263,7 +263,7 @@ def test_history_projection_orders_reply_after_late_stamped_operator_row():
             },
         ]
     )
-    rows, _status = _safe_recent_messages(db, session_id="s1")
+    rows, _status, _unread = _safe_recent_messages(db, session_id="s1")
     assert [r["role"] for r in rows] == ["operator", "agent"]
     assert [r["turn_id"] for r in rows] == ["turn-a", "turn-a"]
     assert rows[1]["client_message_id"] == "turn-a:assistant:1"
@@ -299,7 +299,7 @@ def test_history_projection_joins_turn_elements_through_assistant_persistence_id
         ]
     )
 
-    rows, _status = _safe_recent_messages(db, session_id="s-assistant-id")
+    rows, _status, _unread = _safe_recent_messages(db, session_id="s-assistant-id")
 
     assert rows[0]["turn_id"] == turn_id
     assert rows[0]["turn_elements"][0]["turn_id"] == turn_id

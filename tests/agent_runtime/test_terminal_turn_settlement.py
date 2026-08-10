@@ -205,7 +205,7 @@ def test_budget_exhausted_turn_with_a_recorded_reply_synthesizes_nothing(
         ]
     )
 
-    rows, _status = _safe_recent_messages(db, session_id="s-budget-ok")
+    rows, _status, _unread = _safe_recent_messages(db, session_id="s-budget-ok")
 
     assert [row["role"] for row in rows] == ["agent"]
     assert all("turn-budget-exhausted" not in row["id"] for row in rows)

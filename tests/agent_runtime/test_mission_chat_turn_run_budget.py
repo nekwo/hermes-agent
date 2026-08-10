@@ -379,7 +379,7 @@ def test_the_reply_row_carries_the_block(isolate_agent_runtime_root):
         metadata={"native_committed": True, "stored_reply": "ok", **metadata},
     )
 
-    rows, _status = _safe_recent_messages(
+    rows, _status, _unread = _safe_recent_messages(
         _FakeSessionDB(
             [
                 {

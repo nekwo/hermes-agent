@@ -84,7 +84,7 @@ _DECISION = json.dumps(
 
 def test_decision_dict_collapses_to_summary_and_rationale():
     db = FakeSessionDB([{"role": "assistant", "content": _DECISION}])
-    rows, status = _safe_recent_messages(db, session_id="s1")
+    rows, status, _unread = _safe_recent_messages(db, session_id="s1")
     assert status == "safe"
     assert len(rows) == 1
     assert rows[0]["role"] == "agent"
@@ -119,7 +119,7 @@ def test_compression_lineage_projection_hides_summary_and_deduplicates_turn():
         ]
     )
 
-    rows, status = _safe_recent_messages(db, session_id="s1")
+    rows, status, _unread = _safe_recent_messages(db, session_id="s1")
 
     assert status == "safe"
     assert [(row["role"], row["text"]) for row in rows] == [
@@ -135,14 +135,14 @@ def test_internal_scaffolding_operator_rows_are_dropped():
             {"role": "assistant", "content": _DECISION},
         ]
     )
-    rows, _ = _safe_recent_messages(db, session_id="s1")
+    rows, _, _unread = _safe_recent_messages(db, session_id="s1")
     # Only the curated agent reply survives; the tick-context prompt is dropped.
     assert [r["role"] for r in rows] == ["agent"]
 
 
 def test_clean_operator_message_is_kept():
     db = FakeSessionDB([{"role": "user", "content": "hi neko"}])
-    rows, _ = _safe_recent_messages(db, session_id="s1")
+    rows, _, _unread = _safe_recent_messages(db, session_id="s1")
     assert len(rows) == 1
     assert rows[0]["role"] == "operator"
     assert rows[0]["text"] == "hi neko"
@@ -176,7 +176,7 @@ def test_operator_row_strips_skill_preload_and_runtime_context_envelopes():
     composed = "\n\n".join(["message launcher dev say hi", skill_envelope, hud_envelope])
     db = FakeSessionDB([{"role": "user", "content": composed}])
 
-    rows, status = _safe_recent_messages(db, session_id="s1")
+    rows, status, _unread = _safe_recent_messages(db, session_id="s1")
 
     assert status == "safe"
     assert len(rows) == 1
@@ -196,7 +196,7 @@ def test_operator_row_strips_skill_preload_envelope_without_hud():
     )
     db = FakeSessionDB([{"role": "user", "content": f"run the audit\n\n{skill_envelope}"}])
 
-    rows, _ = _safe_recent_messages(db, session_id="s1")
+    rows, _, _unread = _safe_recent_messages(db, session_id="s1")
 
     assert rows[0]["text"] == "run the audit"
     assert rows[0]["skill_preload"]["skills"] == ["deep-audit"]
@@ -219,7 +219,7 @@ def test_operator_row_strips_unchanged_skill_preload_stub():
     )
     db = FakeSessionDB([{"role": "user", "content": f"and the next step?\n\n{stub}"}])
 
-    rows, _ = _safe_recent_messages(db, session_id="s1")
+    rows, _, _unread = _safe_recent_messages(db, session_id="s1")
 
     assert rows[0]["text"] == "and the next step?"
     assert rows[0]["skill_preload"]["delivery"] == "unchanged"
@@ -241,7 +241,7 @@ def test_long_markdown_agent_message_is_not_preview_truncated():
     )
     db = FakeSessionDB([{"role": "assistant", "content": body}])
 
-    rows, status = _safe_recent_messages(db, session_id="s1")
+    rows, status, _unread = _safe_recent_messages(db, session_id="s1")
 
     assert status == "safe"
     assert rows[0]["text"] == body
@@ -258,7 +258,7 @@ def test_tool_system_and_empty_rows_are_dropped():
             {"role": "assistant", "content": _DECISION},
         ]
     )
-    rows, _ = _safe_recent_messages(db, session_id="s1")
+    rows, _, _unread = _safe_recent_messages(db, session_id="s1")
     assert [r["role"] for r in rows] == ["agent"]
 
 
@@ -275,7 +275,7 @@ def test_pre_trace_ack_marker_projects_typed_kind():
             {"role": "assistant", "content": "Currently one skill is loaded: hermes-agent."},
         ]
     )
-    rows, _ = _safe_recent_messages(db, session_id="s1")
+    rows, _, _unread = _safe_recent_messages(db, session_id="s1")
     ack_rows = [r for r in rows if r.get("kind") == "pre_trace_ack"]
     assert len(ack_rows) == 1
     assert ack_rows[0]["role"] == "agent"
@@ -292,7 +292,7 @@ def test_pre_trace_ack_without_marker_has_no_typed_kind():
     # guesses a kind from prose (the Launcher text fallback handles those).
     ack = "I'll check that now and report back with what I find."
     db = FakeSessionDB([{"role": "assistant", "content": ack}])
-    rows, _ = _safe_recent_messages(db, session_id="s1")
+    rows, _, _unread = _safe_recent_messages(db, session_id="s1")
     assert len(rows) == 1
     assert "kind" not in rows[0]
 
@@ -300,7 +300,7 @@ def test_pre_trace_ack_without_marker_has_no_typed_kind():
 def test_unparseable_raw_dict_is_not_shown():
     # A serialized dict we can't parse must not dump as raw JSON to the operator.
     db = FakeSessionDB([{"role": "assistant", "content": '{"type": broken json'}])
-    rows, _ = _safe_recent_messages(db, session_id="s1")
+    rows, _, _unread = _safe_recent_messages(db, session_id="s1")
     assert rows == []
 
 
@@ -312,7 +312,7 @@ def test_message_timestamps_are_iso_so_they_merge_with_trace_by_ts():
         [{"id": "m1", "role": "assistant", "content": "Agent update", "timestamp": 1782162002.5}]
     )
 
-    rows, _ = _safe_recent_messages(db, session_id="s1")
+    rows, _, _unread = _safe_recent_messages(db, session_id="s1")
 
     assert rows[0]["timestamp"] == "2026-06-22T21:00:02.500000Z"
     # Same shape the trace channel emits, so DateTime.tryParse orders them together.
@@ -663,7 +663,7 @@ def test_safe_recent_messages_returns_deeper_bounded_tail():
         ]
     )
 
-    rows, status = _safe_recent_messages(db, session_id="s1")
+    rows, status, _unread = _safe_recent_messages(db, session_id="s1")
 
     assert status == "safe"
     assert len(rows) == 12
@@ -724,7 +724,7 @@ def test_safe_recent_messages_projects_persisted_turn_elements(isolate_agent_run
         ]
     )
 
-    rows, status = _safe_recent_messages(db, session_id="s1")
+    rows, status, _unread = _safe_recent_messages(db, session_id="s1")
 
     assert status == "safe"
     assert rows[0]["client_message_id"] == "client_1"
@@ -992,7 +992,7 @@ def test_interrupted_turn_without_assistant_row_synthesizes_system_message(isola
         ]
     )
 
-    rows, status = _safe_recent_messages(db, session_id="s1")
+    rows, status, _unread = _safe_recent_messages(db, session_id="s1")
 
     assert status == "safe"
     marker = rows[-1]
@@ -1037,7 +1037,7 @@ def test_interrupted_turn_synthesis_skips_completed_running_and_answered(isolate
         ]
     )
 
-    rows, _ = _safe_recent_messages(db, session_id="s1")
+    rows, _, _unread = _safe_recent_messages(db, session_id="s1")
 
     assert [row["role"] for row in rows] == ["agent"]
     assert all("turn-interrupted" not in row["id"] for row in rows)
@@ -1074,7 +1074,7 @@ def test_untimestamped_row_holds_position_when_interrupted_marker_is_merged(isol
         ]
     )
 
-    rows, _ = _safe_recent_messages(db, session_id="s1")
+    rows, _, _unread = _safe_recent_messages(db, session_id="s1")
 
     # The untimestamped agent row inherits its predecessor's timestamp and
     # keeps its transcript position; the synthesized marker (updated_at = now)
@@ -1129,7 +1129,7 @@ def test_recent_interrupted_marker_survives_retention_churn_and_synthesizes(
         ]
     )
 
-    rows, _ = _safe_recent_messages(db, session_id="s1")
+    rows, _, _unread = _safe_recent_messages(db, session_id="s1")
 
     marker = rows[-1]
     assert marker["id"] == "s1:turn-interrupted:client_interrupted"
@@ -1781,7 +1781,7 @@ def test_safe_recent_messages_tags_relay_marker_on_operator_row():
             },
         ]
     )
-    rows, status = _safe_recent_messages(
+    rows, status, _unread = _safe_recent_messages(
         db, session_id="persona_chat_personainst_qa_abc123def456"
     )
     assert status == "safe"
@@ -1798,3 +1798,139 @@ def test_safe_recent_messages_tags_relay_marker_on_operator_row():
     assert "relay_sender_persona_id" not in plain[0]
     # Both are turn openers on the operator lane — turn_seq stamping unchanged.
     assert relayed[0]["turn_seq"] == plain[0]["turn_seq"]
+
+
+# ── an unread transcript is not an empty chat ───────────────────────────────
+#
+# ``_safe_curated_messages`` answered a missing SessionDB and a raised read with
+# the same ``[], "safe"`` a genuinely empty conversation produces — including a
+# redaction verdict over content nobody loaded. Reachable against live SQLite
+# under a running serve: lock contention, corruption, schema drift.
+
+
+class ExplodingSessionDB:
+    """A SessionDB whose read raises, the way a locked/corrupt file does."""
+
+    def get_messages(self, session_id, include_inactive=False):
+        raise RuntimeError("database is locked")
+
+    def resolve_resume_session_id(self, session_id):
+        return session_id
+
+
+def test_failed_transcript_read_is_typed_unknown_not_a_safe_empty_list():
+    from agent_runtime.persona_chat_history import _safe_curated_messages
+
+    rows, status, unread = _safe_curated_messages(
+        ExplodingSessionDB(), session_id="s1"
+    )
+
+    assert rows == []
+    # NOT "safe": nothing was read, so there is no redaction verdict to give.
+    assert status == "unknown"
+    assert unread is not None
+    assert unread["error_kind"] == "session_db_read_failed"
+    assert "database is locked" in unread["detail"]
+
+
+def test_absent_session_db_is_unavailable_not_an_empty_transcript():
+    from agent_runtime.persona_chat_history import _safe_curated_messages
+
+    rows, status, unread = _safe_curated_messages(None, session_id="s1")
+
+    assert rows == []
+    assert status == "unknown"
+    # Same vocabulary persona_assignments.py already uses for this condition.
+    assert unread["error_kind"] == "session_db_unavailable"
+
+
+def test_successful_read_still_reports_safe_with_no_unread_block():
+    """The healthy path must stay byte-identical — no pessimism regression."""
+
+    db = FakeSessionDB(
+        [{"id": "m1", "role": "user", "content": "hello", "created_at": "2026-08-09T00:00:00Z"}]
+    )
+
+    rows, status, unread = _safe_recent_messages(db, session_id="s1")
+
+    assert [row["text"] for row in rows] == ["hello"]
+    assert status == "safe"
+    assert unread is None
+
+
+def test_history_fetch_reports_a_failed_read_as_not_ok():
+    """The on-demand page must not package a failed read as a successful empty.
+
+    An operator sees an empty chat and concludes messages were lost; an agent
+    hunting a missing turn is told authoritatively there are none.
+    """
+
+    from agent_runtime.persona_chat_history import persona_chat_session_messages
+
+    data = persona_chat_session_messages(
+        session_id="persona_chat_x", limit=40, session_db=ExplodingSessionDB()
+    )
+
+    assert data["ok"] is False
+    assert data["error_kind"] == "session_db_read_failed"
+    assert "database is locked" in data["error"]
+    # None of the success vocabulary may appear on a read that did not happen.
+    assert "count" not in data
+    assert "total_count" not in data
+    assert "has_more" not in data
+    assert "messages" not in data
+    assert "redaction_status" not in data
+
+
+def test_snapshot_chat_row_marks_an_unread_tail_instead_of_certifying_it_safe():
+    from agent_runtime.persona_chat_history import _history_row
+
+    instance = PersonaInstance(
+        id="personainst_dev",
+        persona_id="dev",
+        role="dev",
+        display_name="Dev",
+        profile_id=None,
+        runtime_root="",
+        state=WorkerSessionState.IDLE,
+        mode="chat",
+    )
+    row = _history_row(
+        {"title": "Dev chat", "preview": "hi"},
+        instance,
+        session_id="persona_chat_dev",
+        session_db=ExplodingSessionDB(),
+    )
+
+    assert row["messages"] == []
+    assert row["messages_unavailable"]["error_kind"] == "session_db_read_failed"
+    # The fold used to certify the whole row "safe" off an unread tail.
+    assert row["redaction_status"] == "unknown"
+
+
+def test_snapshot_chat_row_omits_the_marker_when_the_tail_was_read():
+    from agent_runtime.persona_chat_history import _history_row
+
+    instance = PersonaInstance(
+        id="personainst_dev",
+        persona_id="dev",
+        role="dev",
+        display_name="Dev",
+        profile_id=None,
+        runtime_root="",
+        state=WorkerSessionState.IDLE,
+        mode="chat",
+    )
+    db = FakeSessionDB(
+        [{"id": "m1", "role": "user", "content": "hello", "created_at": "2026-08-09T00:00:00Z"}]
+    )
+
+    row = _history_row(
+        {"title": "Dev chat", "preview": "hi"},
+        instance,
+        session_id="persona_chat_dev",
+        session_db=db,
+    )
+
+    assert "messages_unavailable" not in row
+    assert row["redaction_status"] == "safe"

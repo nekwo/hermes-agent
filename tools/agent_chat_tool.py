@@ -1193,6 +1193,21 @@ def agent_chat_open(*, persona_id, session_id=None, limit=20, requested_by_sessi
         )
 
     data = persona_chat_session_messages(session_id=target_session, limit=bounded)
+    if data.get("ok") is False:
+        # Propagate the read failure. Flattening it into the success envelope
+        # below would hand the calling agent ``count: 0`` over an unread
+        # transcript — the single most misleading answer available here, because
+        # an agent checking whether a teammate replied would conclude they did
+        # not and act on that.
+        return _refusal(
+            f"could not read {resolved_persona}'s thread {target_session}: "
+            f"{data.get('error') or data.get('error_kind') or 'unknown error'}. "
+            "This is NOT an empty thread — the transcript was not read.",
+            error_kind=data.get("error_kind") or "session_db_unavailable",
+            target_persona=resolved_persona,
+            handle=handle,
+            session_id=target_session,
+        )
     messages = [
         {
             "role": message.get("role"),

@@ -203,7 +203,7 @@ def test_the_read_side_types_a_delivery_row_and_leaves_the_others_alone():
         ]
     )
 
-    rows, status = _safe_recent_messages(
+    rows, status, _unread = _safe_recent_messages(
         db, session_id="persona_chat_personainst_qa_abc123def456"
     )
 

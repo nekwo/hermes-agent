@@ -345,9 +345,17 @@ def _cmd_persona_chat_history(args) -> int:
     )
     if getattr(args, "json", False):
         print(emit_json(data))
+    elif data.get("ok") is False:
+        # A read that FAILED must never render as "no messages" — that is the
+        # exact sentence that makes an operator conclude the transcript is gone.
+        detail = str(data.get("error") or "").strip()
+        print(
+            f"could not read {args.session_id}: {data.get('error_kind') or 'error'}"
+            + (f" — {detail}" if detail else "")
+        )
     else:
         lines = []
-        for message in data["messages"]:
+        for message in data.get("messages") or []:
             text = str(message.get("text") or "").splitlines()
             head = text[0][:120] if text else ""
             lines.append(f"{message.get('timestamp') or '-'} {message.get('role')}: {head}")

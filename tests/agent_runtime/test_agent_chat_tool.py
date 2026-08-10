@@ -695,6 +695,36 @@ def test_open_returns_the_bounded_tail_and_canonicalizes_handle_input(isolate_ag
     assert set(data["messages"][0]) >= {"role", "text", "timestamp"}
 
 
+def test_open_propagates_an_unreadable_transcript_instead_of_count_zero(
+    isolate_agent_runtime_root, monkeypatch
+):
+    """A failed SessionDB read must not reach the calling agent as an empty thread.
+
+    ``agent_chat_open`` hardcoded ``ok: True`` and read ``data["messages"] or
+    []``, so an unreadable transcript arrived as ``count: 0`` — and an agent
+    checking whether a teammate had replied would conclude they had not.
+    """
+
+    _seed_persona_chat("qa", [("hi", "ack")])
+    monkeypatch.setattr(
+        "agent_runtime.persona_chat_history.persona_chat_session_messages",
+        lambda **_kwargs: {
+            "ok": False,
+            "error_kind": "session_db_read_failed",
+            "error": "RuntimeError: database is locked",
+        },
+    )
+
+    data = json.loads(agent_chat_open(persona_id="qa"))
+
+    assert data["ok"] is False
+    assert data["error_kind"] == "session_db_read_failed"
+    assert "database is locked" in data["error"]
+    assert "NOT an empty thread" in data["error"]
+    assert data["target_persona"] == "qa"
+    assert "count" not in data
+
+
 def test_open_refuses_a_foreign_session(isolate_agent_runtime_root):
     _seed_persona_chat("qa", [("hi", "ack")])
     # A session belonging to a different teammate's chat lane is refused — this is

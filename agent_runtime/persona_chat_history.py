@@ -122,6 +122,25 @@ if _UNKNOWN_MARKER_STATES:  # pragma: no cover - import-time contract guard
     )
 
 _CHAT_INSTANCE_MODES = {"chat", "free_floating"}
+
+# ── "we did not read the transcript" is its own answer ──────────────────────
+#
+# A failed SessionDB read used to return ``[], "safe"`` — byte-identical to a
+# genuinely empty conversation, right down to a ``redaction_status`` asserting
+# the content had been verified when none of it was ever loaded. An operator
+# reads that as "my messages are gone"; an agent hunting a missing turn is told
+# authoritatively there are none.
+#
+# The vocabulary is the one ``persona_assignments.py`` already uses for exactly
+# this condition (``None, "session_db_unavailable"``), and the shape follows the
+# orphan sweep in ``cron/executions.py``: a typed unknown, never a plausible
+# default.
+CHAT_READ_UNAVAILABLE = "session_db_unavailable"  # no SessionDB to read from
+CHAT_READ_FAILED = "session_db_read_failed"  # the read itself raised
+# The ``redaction_status`` an unread body reports. Not a redaction verdict —
+# the absence of one. "safe" here is a claim about content nobody loaded.
+CHAT_REDACTION_UNKNOWN = "unknown"
+
 DEFAULT_PERSONA_CHAT_MESSAGE_TAIL = 40
 MAX_PERSONA_CHAT_MESSAGE_TAIL = 40
 PERSONA_CHAT_MESSAGE_TEXT_LIMIT = 20000
@@ -415,20 +434,20 @@ def persona_chat_session_messages(
 
     bounded = _bounded_message_tail(limit)
     db = session_db or _default_session_db()
-    if db is None:
+    messages, status, unread = _safe_curated_messages(db, session_id=session_id)
+    if unread is not None:
+        # A read that did not happen is NOT an empty conversation. This used to
+        # return the full success envelope — ``ok: True``, ``count: 0``,
+        # ``redaction_status: "safe"`` — byte-identical to a genuinely empty
+        # chat, so an operator concluded their messages were lost and an agent
+        # hunting a missing turn was told authoritatively there were none.
         return {
-            "ok": True,
+            "ok": False,
+            "error_kind": unread["error_kind"],
+            "error": unread["detail"],
             "session_id": session_id,
             "limit": bounded,
-            "count": 0,
-            "total_count": 0,
-            "has_more": False,
-            "next_before": None,
-            "history_revision": _history_revision(session_id, []),
-            "redaction_status": "safe",
-            "messages": [],
         }
-    messages, status = _safe_curated_messages(db, session_id=session_id)
     end = len(messages)
     if before:
         cursor = _decode_history_cursor(before)
@@ -821,7 +840,9 @@ def _history_row(
         redacted_fallback="Preview hidden by redaction boundary",
         limit=180,
     )
-    messages, messages_status = _safe_recent_messages(session_db, session_id=session_id, limit=message_tail)
+    messages, messages_status, messages_unread = _safe_recent_messages(
+        session_db, session_id=session_id, limit=message_tail
+    )
     active_session_id = session_id
     try:
         active_session_id = session_db.resolve_resume_session_id(session_id)
@@ -854,11 +875,19 @@ def _history_row(
         root_session_id=session_id,
         active_session_id=lineage["active_session_id"],
     )
+    _statuses = {title_status, preview_status, messages_status}
     redaction_status = (
         "would_redact"
-        if "would_redact" in {title_status, preview_status, messages_status}
+        if "would_redact" in _statuses
         else "redacted"
-        if "redacted" in {title_status, preview_status, messages_status}
+        if "redacted" in _statuses
+        # An unread transcript cannot be certified safe. Without this branch the
+        # fold fell through to "safe" — a redaction verdict over content that
+        # was never loaded. Launcher readers test for exactly 'redacted' /
+        # 'unsafe' with a safe fallback, so this value degrades to "render
+        # normally" (over an empty body) rather than misrendering anything.
+        else CHAT_REDACTION_UNKNOWN
+        if CHAT_REDACTION_UNKNOWN in _statuses
         else "safe"
     )
     would_redact = {
@@ -894,6 +923,10 @@ def _history_row(
         "state": "archived" if bool(raw.get("archived")) else "open",
         "redaction_status": redaction_status,
         **({"would_redact": would_redact} if would_redact else {}),
+        # Additive, and present ONLY when the tail could not be read. Its
+        # absence is the healthy path, byte-for-byte as before; its presence is
+        # what stops an empty ``messages`` list reading as an empty chat.
+        **({"messages_unavailable": messages_unread} if messages_unread else {}),
         **_token_usage_fields({**raw, **lineage_aggregate}),
         **_chat_model_fields(raw),
         **_cache_policy_fields(raw),
@@ -1148,25 +1181,38 @@ def _safe_recent_messages(
     *,
     session_id: str,
     limit: int = DEFAULT_PERSONA_CHAT_MESSAGE_TAIL,
-) -> tuple[list[dict[str, Any]], str]:
-    rows, status = _safe_curated_messages(session_db, session_id=session_id)
-    return rows[-_bounded_message_tail(limit):], status
+) -> tuple[list[dict[str, Any]], str, dict[str, Any] | None]:
+    rows, status, unread = _safe_curated_messages(session_db, session_id=session_id)
+    return rows[-_bounded_message_tail(limit):], status, unread
 
 
 def _safe_curated_messages(
     session_db: Any | None,
     *,
     session_id: str,
-) -> tuple[list[dict[str, Any]], str]:
+) -> tuple[list[dict[str, Any]], str, dict[str, Any] | None]:
     """Return every redaction-safe operator-facing row for one logical chat.
 
     Snapshot callers continue to take a bounded tail through
     :func:`_safe_recent_messages`; the on-demand authority pages this complete
     ordered list with opaque cursors.
+
+    Third element: ``None`` when the transcript was READ, otherwise a typed
+    ``{"error_kind", "detail"}`` block naming why it was not. It is the only
+    thing separating "this chat is empty" from "this chat could not be opened" —
+    both used to arrive as ``[], "safe"``. Reachable against a live SQLite file
+    under a running serve: lock contention, corruption, schema drift.
     """
 
     if session_db is None:
-        return [], "safe"
+        return (
+            [],
+            CHAT_REDACTION_UNKNOWN,
+            {
+                "error_kind": CHAT_READ_UNAVAILABLE,
+                "detail": "no SessionDB is bound for this runtime, so this chat's transcript was never read",
+            },
+        )
     try:
         lineage_loader = getattr(session_db, "get_messages_as_conversation", None)
         try:
@@ -1178,8 +1224,18 @@ def _safe_curated_messages(
             if callable(lineage_loader)
             else session_db.get_messages(session_id)
         )
-    except Exception:
-        return [], "safe"
+    except Exception as exc:
+        return (
+            [],
+            CHAT_REDACTION_UNKNOWN,
+            {
+                "error_kind": CHAT_READ_FAILED,
+                "detail": safe_assignment_text(
+                    f"{type(exc).__name__}: {exc}", limit=240
+                )
+                or type(exc).__name__,
+            },
+        )
     rows: list[dict[str, Any]] = []
     redacted = False
     assistant_client_message_ids: set[str] = set()
@@ -1338,7 +1394,9 @@ def _safe_curated_messages(
         )
     )
     rows = _ordered_message_rows(rows)
-    return rows, "redacted" if redacted else "safe"
+    # Third element ``None``: the transcript WAS read, so "safe" here is an
+    # observation about content that actually passed through the redactor.
+    return rows, "redacted" if redacted else "safe", None
 
 
 def _history_revision(
