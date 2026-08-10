@@ -50,7 +50,7 @@ registry can honestly report is therefore split in two:
 costs nothing to skip, and so a read-only projection never constructs a tool
 singleton as a side effect of being asked a question.
 
-Four honesty rules, all prior operator rulings — do not relax
+Five honesty rules, all prior operator rulings — do not relax
 ------------------------------------------------------------
 1. **Fail-closed per source.** Every lane contributes a ``sources`` entry
    (``ok`` / ``unavailable`` + reason). A lane that cannot be read is REPORTED
@@ -76,6 +76,17 @@ Four honesty rules, all prior operator rulings — do not relax
    :data:`TAIL_PREVIEW_LIMIT` characters and the truncation is declared
    ``by_design`` in the parity accounting, so a deliberate bound never trips the
    amber "lost data" pill.
+5. **Owner honesty.** Every lane that can name a session resolves its owner
+   through :func:`_owner_of` — one authority, shared with the dispatch-delivery
+   lane — and NEVER derives one itself. A session that resolves to no persona
+   instance ships an EMPTY owner block; it is never filled in with the parent's
+   persona, the active instance, or any other plausible-looking stand-in.
+   Consumers group by owner, so this rule cuts both ways and both halves are
+   load-bearing: omitting a resolvable owner makes real work invisible (which is
+   what a background ``delegate_task`` did on Mission Control's Activity
+   surface — never appearing, not appearing late), and inventing an
+   unresolvable one attributes work to an agent that is not doing it. A blank is
+   renderable as "no owning agent"; a wrong name is not un-believable.
 
 Path resolution and the HERMES_HOME flip
 ----------------------------------------
@@ -523,6 +534,57 @@ def _pid_identity(pid: Any, expected_start: Any) -> tuple[bool, bool, str]:
     return True, matches, PID_VERIFIED if matches else PID_RECYCLED
 
 
+def _owner_of(
+    session_id: Any, *, memo: dict[str, tuple[str, str]] | None = None
+) -> tuple[str, str]:
+    """``(persona_id, persona_instance_id)`` owning a session, or ``("", "")``.
+
+    Every lane that knows only a session id gets its owner from HERE, and here
+    defers to :func:`agent_runtime.persona_assignments.chat_session_owner_persona`
+    — the runtime's single answer to "whose work is this", already relied on by
+    the dispatch-delivery lane. No lane derives ownership for itself: this
+    projection's whole reason to exist is that five subsystems must not answer
+    the same operator question five different ways.
+
+    Why this function exists at all: the delegation and terminal lanes used to
+    pass only ``session_id``, so every row on them shipped
+    ``owner: {persona_id: null, persona_instance_id: null}`` — and Mission
+    Control's Activity surface groups BY owner, so a background
+    ``delegate_task`` could never appear there. Not late: never.
+
+    An unresolvable session answers ``("", "")`` and the row ships an honestly
+    EMPTY owner. Fabricating one — the parent's persona, the active instance,
+    anything plausible — would put a confident falsehood on an operator console,
+    which is strictly worse than a blank: a consumer can render "no owning
+    agent", but it cannot un-believe a name.
+
+    ``memo`` is a caller-owned, BUILD-SCOPED dict. Sibling delegations spawned
+    from one conversation all name the same chat root, so without it a lane pays
+    one instance-store read per row for an answer it already has. It is passed in
+    rather than cached module-side on purpose: a process-lifetime cache would
+    keep serving a renamed or retired instance long after the store moved on, and
+    a projection that exists to stop stale claims must not manufacture one.
+    """
+
+    token = _safe_text(session_id, limit=240)
+    if not token:
+        return "", ""
+    if memo is not None and token in memo:
+        return memo[token]
+    try:
+        from .persona_assignments import chat_session_owner_persona
+
+        resolved = chat_session_owner_persona(token)
+    except Exception:
+        # The projection answers with what it has rather than failing a lane:
+        # an unresolved owner is already a modelled, visible state.
+        resolved = None
+    owner = resolved if resolved else ("", "")
+    if memo is not None:
+        memo[token] = owner
+    return owner
+
+
 def _stale_thresholds() -> tuple[float, float]:
     """``(idle, in_tool)`` stale seconds, read from the ONE authority that owns them.
 
@@ -749,6 +811,7 @@ def _collect_terminal(
     """
 
     rows: dict[str, dict[str, Any]] = {}
+    owners: dict[str, tuple[str, str]] = {}
     head, _provenance = _head_home()
     if head is None:
         return [], _source(
@@ -820,6 +883,12 @@ def _collect_terminal(
             continue
         started = entry.get("started_at")
         command = _safe_text(entry.get("command"), limit=400)
+        owning_session = _safe_text(entry.get("session_key"), limit=200)
+        # Same resolver, same rule as the delegation lane. A terminal spawned
+        # outside a persona turn carries a gateway session key that no chat root
+        # owns; it resolves to nothing and ships an empty owner, which is the
+        # truthful answer rather than a lane-specific guess.
+        owner_persona, owner_instance = _owner_of(owning_session, memo=owners)
         row = _row(
             kind=KIND_TERMINAL,
             stable_id=session_id,
@@ -829,7 +898,9 @@ def _collect_terminal(
             source_lane=LANE_DURABLE,
             pid=pid,
             pid_verified=verified,
-            session_id=_safe_text(entry.get("session_key"), limit=200),
+            persona_id=owner_persona,
+            persona_instance_id=owner_instance,
+            session_id=owning_session,
             started_at=_iso(started),
             elapsed_seconds=_elapsed(
                 float(started) if isinstance(started, (int, float)) else None, now=now
@@ -967,6 +1038,7 @@ def _collect_delegations(
     """
 
     rows: dict[str, dict[str, Any]] = {}
+    owners: dict[str, tuple[str, str]] = {}
     idle_stale, in_tool_stale = _stale_thresholds()
     head, _provenance = _head_home()
     if head is None:
@@ -1076,6 +1148,8 @@ def _collect_delegations(
                 if str(state or "") == "finalizing"
                 else (STATUS_RUNNING if verified else STATUS_UNKNOWN)
             )
+            session_id = _safe_text(parent_session_id or origin_session, limit=200)
+            owner_persona, owner_instance = _owner_of(session_id, memo=owners)
             work_row = _row(
                 kind=KIND_DELEGATION,
                 stable_id=delegation_id,
@@ -1084,7 +1158,9 @@ def _collect_delegations(
                 source_lane=LANE_DURABLE,
                 pid=owner_pid,
                 pid_verified=verified,
-                session_id=_safe_text(parent_session_id or origin_session, limit=200),
+                persona_id=owner_persona,
+                persona_instance_id=owner_instance,
+                session_id=session_id,
                 started_at=_iso(dispatched_at),
                 elapsed_seconds=_elapsed(
                     float(dispatched_at) if isinstance(dispatched_at, (int, float)) else None,
@@ -1137,16 +1213,20 @@ def _collect_delegations(
                 if existing is None:
                     if accountant is not None:
                         accountant.consider()
+                    session_id = _safe_text(
+                        record.get("parent_session_id") or record.get("session_key"),
+                        limit=200,
+                    )
+                    owner_persona, owner_instance = _owner_of(session_id, memo=owners)
                     existing = _row(
                         kind=KIND_DELEGATION,
                         stable_id=delegation_id,
                         label=_safe_text(record.get("goal"), limit=160) or delegation_id,
                         status=status,
                         source_lane=LANE_LIVE,
-                        session_id=_safe_text(
-                            record.get("parent_session_id") or record.get("session_key"),
-                            limit=200,
-                        ),
+                        persona_id=owner_persona,
+                        persona_instance_id=owner_instance,
+                        session_id=session_id,
                         started_at=_iso(dispatched),
                         elapsed_seconds=_elapsed(
                             float(dispatched) if isinstance(dispatched, (int, float)) else None,

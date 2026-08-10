@@ -6,7 +6,7 @@ after construction, so the fixture bytes stay reviewable.
 
 Reproducibility, stated precisely
 ---------------------------------
-Rerunning this script on ANY machine reproduces the committed bytes of the four
+Rerunning this script on ANY machine reproduces the committed bytes of the
 frames :func:`main` writes. That claim did **not** hold before the
 ``_MACHINE_PROBED_FLAGS`` normalization below, and the correction is recorded
 here so a future reader does not have to re-derive it.
@@ -33,10 +33,16 @@ later is a cross-stack change under the fixture README's update rule. The
 
 What this script writes, and what it only pins
 ----------------------------------------------
-:func:`main` regenerates the four frames in :data:`GENERATED_FRAME_FILES`. The
-four files in :data:`PINNED_ONLY_FILES` are hand-authored and are only HASHED
-into ``MANIFEST.sha256``; see that tuple's comment for why they cannot be
-generated from the current production builders.
+:func:`main` regenerates the frames in :data:`GENERATED_FRAME_FILES`. The four
+files in :data:`PINNED_ONLY_FILES` are hand-authored and are only HASHED into
+``MANIFEST.sha256``; see that tuple's comment for why they cannot be generated
+from the current production builders.
+
+``hydrate_running_work_owner.json`` is the odd one out among the generated
+frames: it is a SECOND hydrate taken after the isolated root is seeded with a
+persona instance and two background delegations, and it is the only golden that
+carries ``running_work`` rows. It exists to pin the producer/consumer JOIN on
+``running_work.rows[].owner`` — see :func:`_seed_running_work_owner`.
 """
 
 from __future__ import annotations
@@ -61,7 +67,26 @@ GENERATED_FRAME_FILES = (
     "delta.json",
     "heartbeat.json",
     "delta_batch.json",
+    "hydrate_running_work_owner.json",
 )
+
+#: Identities the running-work owner fixture seeds. They are FIXTURE constants,
+#: not runtime constants — nothing in either repo resolves them at run time — but
+#: their SHAPE is contractual: ``OWNED_CHAT_SESSION`` must satisfy
+#: ``persona_assignments.chat_session_owner_instance_id`` (``persona_chat_`` +
+#: instance id + ``_`` + 12 hex), because the whole point of the fixture is that
+#: the producer resolves it to :data:`FIXTURE_INSTANCE_ID` and stamps the row's
+#: ``owner`` block with it.
+FIXTURE_PERSONA_ID = "fixture_agent"
+FIXTURE_INSTANCE_ID = "personainst_fixture_agent_0f0f0f0f"
+OWNED_CHAT_SESSION = f"persona_chat_{FIXTURE_INSTANCE_ID}_0123456789ab"
+#: A session no chat root owns — a CLI/gateway key, the ordinary case for work
+#: spawned outside a persona turn. Its row must ship an EMPTY owner rather than a
+#: guessed one, and must still ship.
+UNOWNED_SESSION = "cli_fixture_session"
+#: Fixed spawn stamp so ``started_at`` is stable before normalization even reads
+#: it (``elapsed_seconds`` is derived from wall time and is normalized instead).
+FIXTURE_DISPATCHED_AT = 1_760_000_000.0
 
 #: Hand-authored goldens this script only PINS: it hashes them into the manifest
 #: and never rewrites them. They are not regenerable from the current production
@@ -109,6 +134,16 @@ _VOLATILE_METRICS = {
     "snapshot_bytes",
     "event_log_bytes",
     "projection_age_ms",
+    # running_work row fields that answer questions about THIS run rather than
+    # about the contract: the generator's own OS process id, and seconds counted
+    # from a fixed spawn stamp to whenever the script happened to execute. Both
+    # would otherwise change the committed bytes on every regeneration. The
+    # honesty fields beside them — `pid_verified`, `status` — are deliberately
+    # NOT normalized: the seed pins them by construction (a NULL spawn baseline
+    # is unprovable identity, so the row is `unknown`/`pid_verified: false` on
+    # every platform), which is what makes those two bytes reviewable.
+    "pid",
+    "elapsed_seconds",
 }
 _VOLATILE_METRIC_MAPS = {
     # Each section is timed independently while the parity snapshot is built.
@@ -158,6 +193,68 @@ def _normalize(value: Any, *, isolated_root: Path, key: str = "") -> Any:
         root = str(isolated_root)
         return value.replace(root, "<isolated-root>").replace(root.replace("\\", "/"), "<isolated-root>")
     return value
+
+
+def _seed_running_work_owner() -> None:
+    """Seed one OWNED and one UNOWNED background delegation into the isolated root.
+
+    This is the cross-repo pin for the defect the ``owner`` block exists to
+    prevent: ``running_work``'s delegation lane used to emit
+    ``owner: {persona_id: null, persona_instance_id: null}`` on every row, and
+    Mission Control's Activity surface groups BY owner — so a background
+    ``delegate_task`` could never appear there at all. Producer-side and
+    consumer-side tests both passed the whole time; only the JOIN was broken,
+    which is exactly what this fixture family is for.
+
+    Real writers throughout: the persona instance goes through
+    ``PersonaInstanceStore``, the delegations through
+    ``async_delegation._persist_dispatch``. The single seeded deviation is the
+    NULL ``owner_started_at`` — see below.
+    """
+
+    from agent_runtime import paths
+    from agent_runtime.models import PersonaInstance, WorkerSessionState
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+    from tools import async_delegation
+
+    store = PersonaInstanceStore()
+    store._write(
+        PersonaInstance(
+            id=FIXTURE_INSTANCE_ID,
+            persona_id=FIXTURE_PERSONA_ID,
+            role="specialist",
+            display_name="Fixture Agent",
+            profile_id=None,
+            runtime_root=str(paths.store_root()),
+            state=WorkerSessionState.IDLE,
+        )
+    )
+
+    for delegation_id, session in (
+        ("deleg_fixture_owned", OWNED_CHAT_SESSION),
+        ("deleg_fixture_unowned", UNOWNED_SESSION),
+    ):
+        async_delegation._persist_dispatch(
+            {
+                "delegation_id": delegation_id,
+                "session_key": session,
+                "parent_session_id": session,
+                "dispatched_at": FIXTURE_DISPATCHED_AT,
+                "goal": f"fixture goal for {delegation_id}",
+            }
+        )
+
+    # ``_persist_dispatch`` stamps the writer's real kernel start ticks, which
+    # makes PID identity PROVABLE on some platforms and unreadable on others —
+    # i.e. the emitted `status`/`pid_verified` bytes would depend on who ran the
+    # script. Clearing the baseline pins the ONE deterministic verdict every
+    # platform agrees on (`no_baseline` -> unproven identity -> `unknown`), so
+    # the fixture stays byte-reproducible without normalizing away the two
+    # honesty fields a reviewer most needs to see. The row is still carried, and
+    # carrying it is the point: owner attribution is independent of whether the
+    # runtime could prove the process is alive.
+    with async_delegation._transaction() as conn:
+        conn.execute("UPDATE async_delegations SET owner_started_at=NULL")
 
 
 def _write_json(name: str, value: Any) -> None:
@@ -227,11 +324,32 @@ def main() -> int:
         log.append(second)
         batch = list(log.iter_from_offset(0))
 
+        # LAST, and after `batch` is closed: seeding writes a
+        # `persona_instance.created` event, which would otherwise land in the
+        # delta/delta_batch goldens and churn their bytes for an unrelated reason.
+        _seed_running_work_owner()
+        owner_hydrate = hydrate_frame()
+        owner_rows = owner_hydrate["core"]["running_work"]["rows"]
+        # Assert the PRODUCER fact this fixture exists to carry, at generation
+        # time. A silently-empty or silently-ownerless section would otherwise be
+        # committed as a golden and pin the bug instead of the fix.
+        assert len(owner_rows) == 2, owner_rows
+        by_id = {row["work_id"]: row for row in owner_rows}
+        assert by_id["delegation:deleg_fixture_owned"]["owner"] == {
+            "persona_id": FIXTURE_PERSONA_ID,
+            "persona_instance_id": FIXTURE_INSTANCE_ID,
+            "session_id": OWNED_CHAT_SESSION,
+        }, by_id["delegation:deleg_fixture_owned"]
+        unowned_owner = by_id["delegation:deleg_fixture_unowned"]["owner"]
+        assert unowned_owner["persona_id"] is None, unowned_owner
+        assert unowned_owner["persona_instance_id"] is None, unowned_owner
+
         frames = {
             "hydrate.json": hydrate,
             "delta.json": delta_frame(first, offset=batch[0][0], snapshot=core),
             "heartbeat.json": heartbeat_frame(offset=7),
             "delta_batch.json": delta_batch_frame(batch, snapshot=core),
+            "hydrate_running_work_owner.json": owner_hydrate,
         }
         # A frame that silently drops out of the built set while staying in
         # MANIFEST_FILES would become hand-maintained without anyone saying so —

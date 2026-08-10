@@ -340,27 +340,18 @@ def _sender_persona(root_session_id: str) -> tuple[str, str] | None:
     a row recovered from a previous process names a chat root, and delivery only
     proceeds if that root still resolves to a real persona instance in THIS
     runtime. Absence of the instance is not "deliver anyway", it is "do not".
+
+    The derivation itself lives in
+    :func:`agent_runtime.persona_assignments.chat_session_owner_persona`, the
+    runtime's ONE answer to "whose work is this" — shared with the running-work
+    projection, which used to ship a null owner on every delegation row rather
+    than reach for it. This name stays as the delivery lane's local vocabulary
+    and must never grow a second derivation.
     """
 
-    from .persona_assignments import (
-        PersonaInstanceStore,
-        chat_session_owner_instance_id,
-    )
+    from .persona_assignments import chat_session_owner_persona
 
-    try:
-        instance_id = chat_session_owner_instance_id(root_session_id)
-    except Exception:
-        return None
-    if not instance_id:
-        return None
-    try:
-        instance = PersonaInstanceStore().get(instance_id)
-    except Exception:
-        return None
-    persona_id = str(getattr(instance, "persona_id", "") or "")
-    if not persona_id:
-        return None
-    return persona_id, instance_id
+    return chat_session_owner_persona(root_session_id)
 
 
 # --------------------------------------------------------------------------

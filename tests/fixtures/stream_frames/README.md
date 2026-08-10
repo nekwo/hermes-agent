@@ -7,14 +7,15 @@ and parses them through its real decode + read-model pipeline
 
 ## Which files are generated, and which are hand-maintained
 
-`MANIFEST.sha256` pins **eight** files, but
-`scripts/generate_agent_runtime_stream_fixtures.py` writes only **four**. The
+`MANIFEST.sha256` pins **nine** files, but
+`scripts/generate_agent_runtime_stream_fixtures.py` writes only **five**. The
 split is structural, not an oversight, and the script names both halves
 (`GENERATED_FRAME_FILES` / `PINNED_ONLY_FILES`).
 
 | File | Origin |
 | --- | --- |
 | `hydrate.json`, `delta.json`, `heartbeat.json`, `delta_batch.json` | **Generated.** Built from a **seeded isolated runtime root** (empty store + two `state.reconciled` events) by the current production frame builders — never from a live store. |
+| `hydrate_running_work_owner.json` | **Generated.** A second hydrate frame, taken after the same isolated root is seeded with one persona instance and two background delegations — one spawned from that instance's chat root, one from a plain CLI session. It is the cross-repo pin for `running_work.rows[].owner`, and it exists because the launcher's Activity surface **groups by owner**: a null owner does not make work late, it makes it invisible. Both halves are golden — the owned row names its agent, the unowned row ships an **empty** owner rather than a guess. `pid` / `elapsed_seconds` are normalized (this run's process and wall clock); `status` / `pid_verified` deliberately are **not** — the seed clears the spawn baseline so every platform agrees on `unknown` / `false`. |
 | `patch.json`, `patch_upsert_profile.json`, `patch_remove.json` | **Hand-maintained.** S6 v2 field-patch frames carrying real wall-clock stamps (`2026-07-17T04:22:55.149761Z`, not the generator's `FIXED_TIME`) and hand-chosen `base_offset`/`seq` pairs demonstrating specific fold semantics over entities the seeded root does not contain. `patch_remove.json` is additionally **un-emittable today**: it is the `incident.closed` remove fold, and S65 de-registered that event with its last writer (`agent_runtime/patch_coverage.py` keeps it in `HISTORICAL_COVERED_DOMAIN_EVENT_TYPES` so an old replayed batch still classifies the way the launcher folded it). Regenerating it would mean resurrecting a retired lane. |
 | `patch_coverage_manifest.json` | **Hand-maintained.** Not a frame at all — the S7-A coverage table. |
 
@@ -22,7 +23,7 @@ The hand-maintained four are validated by **shape + live-classifier agreement**
 (`test_stream_patch.py`), not by byte-regeneration. Editing one is a hand edit
 under the update rule below; the generator only hashes them.
 
-- Regenerate the four with
+- Regenerate the five with
   `python scripts/generate_agent_runtime_stream_fixtures.py`; it calls the
   current production builders and normalizes only volatile timestamps, timings,
   the temporary root spelling, and `core.repo_scopes[*].resolved`.

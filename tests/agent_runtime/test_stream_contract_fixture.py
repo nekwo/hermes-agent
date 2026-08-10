@@ -108,9 +108,9 @@ def _shape_drift(live: Any, golden: Any) -> tuple[list[str], list[str]]:
 
 
 def _live_generated_frames() -> dict[str, dict]:
-    """The four goldens ``scripts/generate_agent_runtime_stream_fixtures.py``
-    writes, rebuilt HERE by the same production builders it calls, with the same
-    seeded two-event log.
+    """The goldens ``scripts/generate_agent_runtime_stream_fixtures.py`` writes,
+    rebuilt HERE by the same production builders it calls, with the same seeded
+    two-event log.
 
     Values still differ from the committed bytes (the generator normalizes
     timestamps, timings, the root spelling and ``repo_scopes[*].resolved``);
@@ -140,11 +140,18 @@ def _live_generated_frames() -> dict[str, dict]:
     log.append(first)
     log.append(second)
     batch = list(log.iter_from_offset(0))
+    # Seeded LAST, through the generator's own function rather than a copy of it:
+    # a second seeder here could drift from the one that wrote the bytes, and the
+    # gate would then compare a frame nobody ships against a golden nobody
+    # rebuilds. Order matches the generator — everything above is built before
+    # the seed lands, so only the last frame carries running work.
+    _generator_module()._seed_running_work_owner()
     return {
         "hydrate.json": hydrate,
         "delta.json": delta_frame(first, offset=batch[0][0], snapshot=core),
         "heartbeat.json": heartbeat_frame(offset=7),
         "delta_batch.json": delta_batch_frame(batch, snapshot=core),
+        "hydrate_running_work_owner.json": hydrate_frame(),
     }
 
 
@@ -167,6 +174,7 @@ def test_manifest_pins_fixture_bytes():
         "delta.json",
         "heartbeat.json",
         "delta_batch.json",
+        "hydrate_running_work_owner.json",
         "patch.json",
         "patch_upsert_profile.json",
         "patch_remove.json",
@@ -241,7 +249,12 @@ def test_every_frame_bearing_golden_pins_contract_version(isolate_agent_runtime_
     frames = [(live, "live hydrate")]
     frames.extend(
         (_fixture(name), f"golden {name}")
-        for name in ("hydrate.json", "delta.json", "delta_batch.json")
+        for name in (
+            "hydrate.json",
+            "delta.json",
+            "delta_batch.json",
+            "hydrate_running_work_owner.json",
+        )
     )
     for frame, origin in frames:
         parity = (frame.get("core") or {}).get("parity") or {}

@@ -1985,6 +1985,46 @@ def chat_session_owner_instance_id(session_id: str | None) -> str | None:
     return None
 
 
+def chat_session_owner_persona(session_id: str | None) -> tuple[str, str] | None:
+    """``(persona_id, persona_instance_id)`` that owns a chat root, or ``None``.
+
+    THE answer to "whose work is this" for anything that knows only a chat
+    session id. One authority on purpose: the composition below —
+    session → owning instance id → that instance's ``persona_id`` — used to be
+    open-coded inside ``dispatch_delivery._sender_persona``, and the running-work
+    projection then shipped ``owner: {persona_id: null, ...}`` on every
+    delegation row rather than reach for it, which made an entire kind of work
+    invisible on the operator's Activity surface. Both call sites now resolve
+    here, so a delegation and a delivered dispatch can never disagree about who
+    owns a thread.
+
+    Absence is a real answer and is never softened: a session with no derivable
+    owner, or an owner the instance store does not have, returns ``None``. The
+    positive-ownership rule the delivery lane depends on (#64484) is exactly this
+    — "no instance" means "do not deliver", never "deliver anyway" — and the
+    projection's rule is its twin: an unresolved owner must be REPORTED unowned,
+    never invented.
+
+    Pure read: it opens no store it would have to create and writes nothing, so
+    a read-only projection may call it.
+    """
+
+    try:
+        instance_id = chat_session_owner_instance_id(session_id)
+    except Exception:
+        return None
+    if not instance_id:
+        return None
+    try:
+        instance = PersonaInstanceStore().get(instance_id)
+    except Exception:
+        return None
+    persona_id = str(getattr(instance, "persona_id", "") or "")
+    if not persona_id:
+        return None
+    return persona_id, instance_id
+
+
 def sender_scope_workspace_id(
     session_id: str | None,
     *,

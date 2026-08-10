@@ -1797,3 +1797,182 @@ def test_cancelling_a_dispatch_is_a_typed_refusal_not_a_pretend_success(dispatch
     result = cancel_work(f"dispatch:{dispatch_id}")
 
     assert result["code"] == "cancel_unsupported"
+
+
+# --- owner attribution ------------------------------------------------------
+#
+# Mission Control's Activity surface GROUPS BY owner. A lane that ships
+# `owner: {persona_id: null, persona_instance_id: null}` therefore does not make
+# its work late — it makes it permanently invisible, which is what a background
+# `delegate_task` was for as long as this projection has existed. The tests
+# below pin both halves of the correction: a resolvable owner is named, and an
+# unresolvable one is left EMPTY on a row that still ships.
+
+
+_FIXTURE_INSTANCE = "personainst_owner_test_a1b2c3d4"
+_FIXTURE_PERSONA = "owner_test_persona"
+_OWNED_ROOT = f"persona_chat_{_FIXTURE_INSTANCE}_0123456789ab"
+
+
+def _seed_persona_instance(instance_id=_FIXTURE_INSTANCE, persona_id=_FIXTURE_PERSONA):
+    """Write one persona instance through the real store."""
+
+    from agent_runtime import paths
+    from agent_runtime.models import PersonaInstance, WorkerSessionState
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    PersonaInstanceStore()._write(
+        PersonaInstance(
+            id=instance_id,
+            persona_id=persona_id,
+            role="specialist",
+            display_name="Owner Test",
+            profile_id=None,
+            runtime_root=str(paths.store_root()),
+            state=WorkerSessionState.IDLE,
+        )
+    )
+
+
+def _delegation_row(delegation_id, session):
+    return (
+        delegation_id,
+        session,
+        session,
+        "running",
+        1_800_000_000.0,
+        os.getpid(),
+        _self_start_time(),
+        json.dumps({"goal": f"goal for {delegation_id}"}),
+    )
+
+
+def test_a_delegation_spawned_in_a_persona_chat_names_its_owning_agent(home):
+    """The defect, stated as a contract.
+
+    Without this the row shipped a null owner and Activity — which buckets rows
+    by owner — dropped it before rendering. Not late: never.
+    """
+
+    _seed_persona_instance()
+    _seed_delegation_db(home, [_delegation_row("del-owned", _OWNED_ROOT)])
+
+    (row,) = _rows_of_kind(build_running_work(), KIND_DELEGATION)
+
+    assert row["owner"] == {
+        "persona_id": _FIXTURE_PERSONA,
+        "persona_instance_id": _FIXTURE_INSTANCE,
+        "session_id": _OWNED_ROOT,
+    }
+
+
+def test_an_unresolvable_owner_stays_empty_and_the_row_still_ships(home):
+    """Two ways to be ownerless, one answer: blank, and never dropped here.
+
+    Fabricating an owner would be strictly worse than the original bug — an
+    operator can read "no owning agent", but cannot un-believe a name — and
+    dropping the row producer-side would just move the disappearance upstream of
+    the consumer that was told to stop disappearing rows.
+    """
+
+    # Deliberately NO persona instance for the second row's chat root: a
+    # well-formed session id whose instance the store does not have must not
+    # resolve to a half-answer (instance id but no persona).
+    _seed_delegation_db(
+        home,
+        [
+            _delegation_row("del-cli", "cli-session-key"),
+            _delegation_row(
+                "del-orphan", "persona_chat_personainst_absent_ffffffff_0123456789ab"
+            ),
+        ],
+    )
+
+    rows = {row["work_id"]: row for row in _rows_of_kind(build_running_work(), KIND_DELEGATION)}
+
+    assert set(rows) == {"delegation:del-cli", "delegation:del-orphan"}
+    for row in rows.values():
+        assert row["owner"]["persona_id"] is None
+        assert row["owner"]["persona_instance_id"] is None
+        assert row["owner"]["session_id"]
+
+
+def test_a_terminal_process_started_in_a_persona_chat_names_the_same_owner(home):
+    """The terminal lane had the identical omission and takes the identical fix."""
+
+    _seed_persona_instance()
+    _write_checkpoint(
+        home,
+        [
+            {
+                "session_id": "proc-owned",
+                "session_key": _OWNED_ROOT,
+                "command": "npm run build",
+                "pid": os.getpid(),
+                "host_start_time": _self_start_time(),
+                "started_at": 1_800_000_000.0,
+            }
+        ],
+    )
+
+    (row,) = _rows_of_kind(build_running_work(), KIND_TERMINAL)
+
+    assert row["owner"]["persona_id"] == _FIXTURE_PERSONA
+    assert row["owner"]["persona_instance_id"] == _FIXTURE_INSTANCE
+
+
+def test_the_projection_and_the_delivery_lane_share_one_owner_resolver(monkeypatch):
+    """No second answer to "whose work is this".
+
+    Driven by REDIRECTING the shared authority rather than by comparing two
+    outputs: if either caller ever grows its own derivation, it keeps answering
+    the real value here and this fails. Two independent implementations that
+    merely agree today would pass a comparison test forever.
+    """
+
+    from agent_runtime import dispatch_delivery, persona_assignments
+
+    monkeypatch.setattr(
+        persona_assignments,
+        "chat_session_owner_persona",
+        lambda session_id: ("redirected_persona", "redirected_instance"),
+    )
+
+    assert dispatch_delivery._sender_persona(_OWNED_ROOT) == (
+        "redirected_persona",
+        "redirected_instance",
+    )
+    assert running_work._owner_of(_OWNED_ROOT) == (
+        "redirected_persona",
+        "redirected_instance",
+    )
+
+
+def test_the_owner_lookup_is_memoized_per_build_not_per_process(home, monkeypatch):
+    """Siblings from one conversation cost one store read, and none is cached
+    across builds — a process-lifetime cache would keep naming a retired
+    instance, which is the stale claim this projection exists to prevent."""
+
+    calls: list[str] = []
+
+    def _counted(session_id):
+        calls.append(session_id)
+        return _FIXTURE_PERSONA, _FIXTURE_INSTANCE
+
+    from agent_runtime import persona_assignments
+
+    monkeypatch.setattr(persona_assignments, "chat_session_owner_persona", _counted)
+    _seed_delegation_db(
+        home,
+        [
+            _delegation_row("del-a", _OWNED_ROOT),
+            _delegation_row("del-b", _OWNED_ROOT),
+        ],
+    )
+
+    assert len(_rows_of_kind(build_running_work(), KIND_DELEGATION)) == 2
+    assert calls == [_OWNED_ROOT]
+
+    build_running_work()
+
+    assert calls == [_OWNED_ROOT, _OWNED_ROOT]
