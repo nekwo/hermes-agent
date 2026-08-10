@@ -95,13 +95,21 @@ MAX_DELIVERIES_PER_PASS = 3
 #: sit ``running`` in the HUD for as long as serve stayed up.
 ORPHAN_SWEEP_INTERVAL_SECONDS = 60.0
 
-#: Attempt cap for queue-backed background completions. Unlike a dispatch these
-#: have no durable row to count on, so a persistently-failing event would requeue
+#: Attempt cap for queue-backed background completions that have NO durable row
+#: to count on — ``terminal`` notifications, and any completion whose producer
+#: never persisted it. Without a cap a persistently-failing event would requeue
 #: every drain pass forever.
+#:
+#: ``delegate_task`` completions are deliberately NOT counted here: they DO have
+#: a durable row, ``async_delegations``, whose ``delivery_attempts`` column is
+#: the authority the gateway, the interactive CLI and the TUI gateway have all
+#: counted against since the lane shipped. Two counters for one completion is a
+#: second ledger, which is the whole defect this cap must not reintroduce.
 MAX_BACKGROUND_DELIVERY_ATTEMPTS = 8
 
-#: Per-event failure counts for the queue lane, keyed by the event's own
-#: identity. Process-local by nature — the queue it guards is process-local too.
+#: Per-event failure counts for the LEDGERLESS half of the queue lane, keyed by
+#: the event's own identity. Process-local by nature — the queue it guards is
+#: process-local too, and so is the class of event it covers.
 _background_attempts: dict[str, int] = {}
 
 #: The live drain thread, or None. Read by the capability binding: "serve is
@@ -564,6 +572,81 @@ def _chat_root_of_completion(evt: dict[str, Any]) -> str | None:
     return None
 
 
+def _claim_durable_completion(evt: dict[str, Any]) -> str | None:
+    """Claim a queued completion's durable row. ``""`` when it has none.
+
+    Three outcomes, and the middle one is why this is not a bool:
+
+    * ``""`` — LEDGERLESS. The event is not a ``delegate_task`` completion (a
+      ``terminal`` notification, say), or its producer never persisted a row, or
+      the store could not be reached. Delivery proceeds and the process-local
+      attempt counter governs it.
+    * a claim id — the row was ``async_delegations``-backed and is now ours for
+      this pass. The claim itself counted the attempt.
+    * ``None`` — the row exists and is NOT claimable: another consumer holds it,
+      or it already settled. The caller must not deliver.
+
+    A store this process cannot reach fails OPEN, deliberately: the ledger is
+    accounting, the forge is the operator's answer, and refusing to deliver a
+    finished result because a bookkeeping table was unreadable would trade the
+    defect above for a strictly worse one. The cost is a possible duplicate
+    delivery, which the chat lane's ``client_message_id`` replay already
+    converges, and it is logged rather than silent.
+    """
+
+    if str(evt.get("type") or "") != "async_delegation":
+        return ""
+    try:
+        from tools.async_delegation import claim_event_delivery
+    except Exception:
+        logger.debug("durable completion claim unavailable", exc_info=True)
+        return ""
+    try:
+        return claim_event_delivery(evt, "harness-serve")
+    except Exception:
+        logger.warning(
+            "could not claim durable completion %s; delivering unclaimed",
+            evt.get("delegation_id"),
+            exc_info=True,
+        )
+        return ""
+
+
+def _settle_durable_completion(
+    evt: dict[str, Any], claim: str, *, delivered: bool
+) -> None:
+    """Write a delivery outcome back to the row that owns it. Never raises.
+
+    ``delivered`` acknowledges; anything else releases the claim so another
+    consumer — or this drain on a later pass — may retry, with the row's own
+    attempt budget deciding when retrying stops. A ledgerless event (empty
+    *claim*) has nothing to settle.
+    """
+
+    if not claim:
+        return
+    try:
+        from tools.async_delegation import (
+            complete_event_delivery,
+            release_event_delivery,
+        )
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("durable completion settle unavailable", exc_info=True)
+        return
+    try:
+        if delivered:
+            complete_event_delivery(evt, claim)
+        else:
+            release_event_delivery(evt, claim)
+    except Exception:
+        logger.warning(
+            "could not settle durable completion %s (delivered=%s)",
+            evt.get("delegation_id"),
+            delivered,
+            exc_info=True,
+        )
+
+
 def drain_background_completions(*, forge: Callable | None = None) -> dict[str, int]:
     """Deliver ``delegate_task(background)`` / ``terminal`` completions.
 
@@ -577,16 +660,62 @@ def drain_background_completions(*, forge: Callable | None = None) -> dict[str, 
     Ownership is proven per event, not assumed per process: an event that does
     not name a resolvable persona chat root is re-queued untouched.
 
-    Unlike a dispatch, a queue event has no durable row to count attempts on, so
-    the counter lives here, keyed by the event's own identity. Without it a
-    persistently-failing event re-queues every five seconds forever — an
-    invisible hot loop that also blocks the queue behind it. Past
-    :data:`MAX_BACKGROUND_DELIVERY_ATTEMPTS` the event is dropped with a WARNING
-    naming it, because an event that can never be delivered should end loudly
-    rather than spin quietly.
+    The durable row is settled through ITS OWN authority, not a second ledger
+    ------------------------------------------------------------------------
+    ``delegate_task`` completions are persisted to ``async_delegations`` before
+    they are ever queued, and that row carries the whole delivery protocol:
+    ``delivery_state``, ``delivery_attempts``, ``delivery_claim``,
+    ``delivered_at``. The gateway, the interactive CLI and the TUI gateway have
+    always driven it through ``claim_event_delivery`` /
+    ``complete_event_delivery`` / ``release_event_delivery``. Serve was the one
+    consumer that did not: it drained the in-memory queue, forged a real turn,
+    and left the row ``pending`` with ``delivery_attempts: 0`` forever.
+
+    That was not cosmetic. Three things followed from it, and a live 2026-08-10
+    delegation (``deleg_1f53b4be``) exhibited all three at once — a completion
+    that HAD been delivered into the operator's thread while every durable field
+    said no attempt was ever made:
+
+    * **The forensics lied in the worst direction.** ``delivery_attempts: 0`` on
+      a delivered row reads as "the drain never picked it up", which is the one
+      conclusion the evidence cannot support and the first one an investigator
+      draws.
+    * **Every serve delivery was re-armed for replay.** ``restore_undelivered_
+      completions`` selects exactly ``state != 'running' AND delivery_state =
+      'pending'``, so serve's own successful deliveries were re-queued at the
+      next boot. The chat lane's ``client_message_id`` replay dedup is what has
+      been absorbing them — an idempotency guard silently doing a ledger's job,
+      and only for as long as the turn journal retains the record.
+    * **Retention could not do its job.** ``_prune_durable_records`` deletes
+      ``delivery_state='delivered'`` rows first and falls back to evicting the
+      OLDEST pending ones; with nothing ever marked delivered, the fallback is
+      the only path, so undelivered work is what gets dropped.
+
+    So the claim is taken here, after the idle probe (never before — a burnt
+    attempt for losing a race with a live operator is the failure class the
+    dispatch lane already had to fix) and before the forge, and the outcome is
+    written back to the row that owns it. A claim this process cannot take means
+    another consumer holds it or the row already settled: the event leaves the
+    queue rather than spinning, because the durable row — not this queue — is
+    the authority on whether the completion is still owed.
+
+    A LEDGERLESS event (a ``terminal`` notification; a completion whose producer
+    never persisted a row) claims nothing, and only those fall back to the
+    process-local :data:`MAX_BACKGROUND_DELIVERY_ATTEMPTS` counter. Without it
+    such an event re-queues every five seconds forever — an invisible hot loop
+    that also blocks the queue behind it — so past the cap it is dropped with a
+    WARNING naming it, because an event that can never be delivered should end
+    loudly rather than spin quietly.
     """
 
-    tally = {"considered": 0, "delivered": 0, "requeued": 0, "failed": 0, "abandoned": 0}
+    tally = {
+        "considered": 0,
+        "delivered": 0,
+        "requeued": 0,
+        "failed": 0,
+        "abandoned": 0,
+        "unclaimed": 0,
+    }
     forge = forge or forge_delivery_turn
     try:
         from tools.process_registry import process_registry
@@ -624,10 +753,30 @@ def drain_background_completions(*, forge: Callable | None = None) -> dict[str, 
             evt.get("delegation_id") or evt.get("session_id") or uuid.uuid4().hex
         )[:40]
         key = f"{evt.get('type', 'completion')}:{marker}"
-        if _background_attempts.get(key, 0) >= MAX_BACKGROUND_DELIVERY_ATTEMPTS:
+        # Taken AFTER the idle probe: a claim burnt on a busy sender would spend
+        # a durable attempt on a race with a live operator, which is the exact
+        # over-counting the dispatch lane's `refund_attempt` had to undo.
+        claim = _claim_durable_completion(evt)
+        if claim is None:
+            # The row is not ours to deliver: another consumer holds the claim,
+            # or it already settled. Not re-queued — spinning on a completion
+            # somebody else owns is how a queue silently starves the events
+            # behind it.
+            tally["unclaimed"] += 1
+            continue
+        durable = bool(claim)
+        if (
+            not durable
+            and _background_attempts.get(key, 0) >= MAX_BACKGROUND_DELIVERY_ATTEMPTS
+        ):
             # Terminal, and LOUD. A silently-abandoned completion is the failure
             # class this whole lane exists to retire, so it leaves a named log
             # line rather than disappearing off the queue.
+            #
+            # Only ledgerless events reach here. A durable one converges through
+            # its own row instead: the release below drops it to a terminal
+            # state once its attempts are spent, and the claim above then
+            # refuses it for good.
             logger.warning(
                 "abandoning background completion %s after %d failed deliveries into %s",
                 key,
@@ -649,15 +798,25 @@ def drain_background_completions(*, forge: Callable | None = None) -> dict[str, 
             logger.warning("background completion delivery failed", exc_info=True)
             ok, payload = False, None
         if ok:
+            # Acknowledge on the row that owns the question. Without this the
+            # next boot's restore sweep re-queues a completion this process
+            # already delivered.
+            _settle_durable_completion(evt, claim, delivered=True)
             _background_attempts.pop(key, None)
             tally["delivered"] += 1
             continue
+        _settle_durable_completion(evt, claim, delivered=False)
         process_registry.completion_queue.put(evt)
         # Same rule the dispatch lane follows: losing a race with a live
         # operator is not a failure, so a `chat_busy` refusal does not count
         # against the cap.
         if str((payload or {}).get("error_kind") or "") == "chat_busy":
             tally["requeued"] += 1
+        elif durable:
+            # The durable row counted this attempt at claim time; counting it
+            # here as well is the second ledger, so the tally records the
+            # failure and nothing else does.
+            tally["failed"] += 1
         else:
             _background_attempts[key] = _background_attempts.get(key, 0) + 1
             tally["failed"] += 1

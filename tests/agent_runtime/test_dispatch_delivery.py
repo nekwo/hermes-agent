@@ -545,3 +545,182 @@ def test_a_restarted_drain_is_not_nulled_by_the_old_loops_teardown(store_home):
         second_stop.set()
         second.join(timeout=5)
     assert dispatch_delivery.delivery_drain_is_live() is False
+
+
+# --------------------------------------------------------------------------
+# the delegation lane settles its OWN durable row
+#
+# `delegate_task` completions are persisted to `async_delegations` before they
+# are ever queued, and that row carries the whole delivery protocol. The
+# gateway, the interactive CLI and the TUI gateway have always driven it. Serve
+# did not: it drained the in-memory queue, forged a real turn, and left the row
+# `pending / 0 / None` forever.
+#
+# Live specimen, 2026-08-10: delegation `deleg_1f53b4be` was delivered into the
+# operator's own thread 8 seconds after it completed — the journal record, the
+# `messages` rows and a `persona_chat.projected` event all prove it — while its
+# durable row reported `delivery_attempts: 0`. An entire incident investigation
+# was routed by that row into concluding the drain had never run.
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def durable_delegation(store_home):
+    """A COMPLETED `delegate_task` row plus the event that was queued for it."""
+
+    import time
+
+    from tools import async_delegation
+
+    delegation_id = "deleg_testspecimen"
+    async_delegation._persist_dispatch(
+        {
+            "delegation_id": delegation_id,
+            "session_key": SENDER_ROOT,
+            "origin_ui_session_id": "",
+            "parent_session_id": SENDER_ROOT,
+            "dispatched_at": time.time(),
+            "goal": "run a harmless background UI test",
+            "role": "leaf",
+        }
+    )
+    event = {
+        "type": "async_delegation",
+        "delegation_id": delegation_id,
+        "session_key": SENDER_ROOT,
+        "origin_ui_session_id": "",
+        "parent_session_id": SENDER_ROOT,
+        "goal": "run a harmless background UI test",
+        "status": "completed",
+        "summary": "Background UI test completed successfully.",
+        "completed_at": time.time(),
+    }
+    async_delegation._persist_completion(
+        event, {"status": "completed", "summary": event["summary"]}
+    )
+    return event
+
+
+def _queue_once(monkeypatch, event, text="the delegation finished"):
+    """Hand the drain exactly one queued completion."""
+
+    from tools.process_registry import process_registry
+
+    # `completion_queue` is a process-global singleton that other tests in this
+    # file deliberately leave loaded, so take ownership of it before asserting
+    # on what this drain did or did not put back.
+    while not process_registry.completion_queue.empty():
+        process_registry.completion_queue.get_nowait()
+
+    served: list[bool] = []
+
+    def _drain(**_kwargs):
+        if served:
+            return []
+        served.append(True)
+        return [(event, text)]
+
+    monkeypatch.setattr(process_registry, "drain_notifications", _drain)
+    return process_registry
+
+
+def test_a_delivered_delegation_is_acknowledged_on_its_own_durable_row(
+    durable_delegation, resolvable_sender, idle_sender, monkeypatch
+):
+    """The row is the ledger, and a successful delivery has to reach it.
+
+    Without this the durable record permanently misreports a delivery that
+    demonstrably happened as one that was never attempted — the false negative
+    that derailed the 2026-08-10 investigation.
+    """
+
+    from tools import async_delegation
+
+    _queue_once(monkeypatch, durable_delegation)
+    dispatch_delivery._background_attempts.clear()
+
+    tally = dispatch_delivery.drain_background_completions(forge=_Forge(ok=True))
+
+    assert tally["delivered"] == 1
+    row = async_delegation.get_durable_delegation("deleg_testspecimen")
+    assert row["delivery_state"] == "delivered"
+    assert row["delivery_attempts"] == 1
+
+
+def test_a_delivered_delegation_is_not_re_enqueued_by_the_next_boot_restore(
+    durable_delegation, resolvable_sender, idle_sender, monkeypatch
+):
+    """Serve re-arms every completion it delivers, until the row is acked.
+
+    ``restore_undelivered_completions`` selects exactly ``state != 'running'
+    AND delivery_state = 'pending'``, so an unacked row is re-queued at every
+    boot and re-forged — suppressed only by the chat lane's
+    ``client_message_id`` replay dedup, and only for as long as the turn
+    journal still holds that record.
+    """
+
+    import queue as _queue
+
+    from tools.async_delegation import restore_undelivered_completions
+
+    _queue_once(monkeypatch, durable_delegation)
+    dispatch_delivery._background_attempts.clear()
+
+    assert dispatch_delivery.drain_background_completions(forge=_Forge(ok=True))["delivered"] == 1
+
+    next_boot: _queue.Queue = _queue.Queue()
+    assert restore_undelivered_completions(next_boot) == 0
+    assert next_boot.empty()
+
+
+def test_a_completion_another_consumer_holds_is_never_double_delivered(
+    durable_delegation, resolvable_sender, idle_sender, monkeypatch
+):
+    """The durable row, not this queue, decides whether a result is still owed.
+
+    A queued event whose row is already claimed belongs to the consumer holding
+    it. Delivering anyway would double the message in the sender's thread; and
+    re-queueing it would spin on work somebody else owns, starving the events
+    behind it.
+    """
+
+    from tools.async_delegation import claim_completion_delivery
+
+    registry = _queue_once(monkeypatch, durable_delegation)
+    dispatch_delivery._background_attempts.clear()
+    assert claim_completion_delivery("deleg_testspecimen", "someone-else") is True
+
+    forge = _Forge(ok=True)
+    tally = dispatch_delivery.drain_background_completions(forge=forge)
+
+    assert tally["unclaimed"] == 1
+    assert tally["delivered"] == 0
+    assert forge.calls == []
+    assert registry.completion_queue.empty()
+
+
+def test_a_failed_delegation_delivery_releases_its_claim_for_the_next_pass(
+    durable_delegation, resolvable_sender, idle_sender, monkeypatch
+):
+    """A failure returns the row to the pool with its attempt honestly counted.
+
+    Holding the claim would strand the completion behind a dead consumer; not
+    counting the attempt is how an undeliverable row spins forever.
+    """
+
+    from tools import async_delegation
+
+    registry = _queue_once(monkeypatch, durable_delegation)
+    dispatch_delivery._background_attempts.clear()
+
+    tally = dispatch_delivery.drain_background_completions(forge=_Forge(ok=False))
+
+    assert tally["failed"] == 1
+    row = async_delegation.get_durable_delegation("deleg_testspecimen")
+    assert row["delivery_state"] == "pending"
+    assert row["delivery_attempts"] == 1
+    assert not registry.completion_queue.empty()
+    # The process-local counter covers LEDGERLESS events only. A second counter
+    # for a row that already counts its own attempts is the duplicate ledger
+    # this change exists to retire.
+    assert dispatch_delivery._background_attempts == {}
