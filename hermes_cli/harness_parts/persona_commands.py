@@ -1611,6 +1611,37 @@ def _bind_mission_chat_delivery_capability() -> bool:
     return can_deliver
 
 
+def _mission_chat_lease_provenance() -> tuple[str | None, str]:
+    """``(owner_id, observer_kind)`` for the message-turn root lease.
+
+    ONE fact answers both fields: the serve frame-protocol request id, read from
+    the context serve's ``_run`` bound it in. Non-None means this turn arrived
+    as a serve request — so the request id itself becomes the lease
+    ``owner_id`` (correlating the lease owner file, and the ``lease_owner``
+    block a ``chat_busy`` refusal surfaces, with the exact serve frame that
+    holds the root) and the observer is labelled ``serve``. None means a
+    one-shot CLI turn: no request to correlate (the lease falls back to its
+    ``pid-<n>`` owner), labelled ``cli``.
+
+    History, because this line has now lied twice (2026-08-09 investigation):
+    ``observer_kind`` was derived from ``persona_chat_runtime_registry() is not
+    None`` — the hot-sessions CACHE flag, default off, so every live serve turn
+    was labelled ``cli`` in exactly the forensics a ``chat_busy`` incident
+    reaches for — and ``owner_id`` read ``args.serve_request_id``, an attribute
+    nothing in the tree has ever set, so every owner file carried the
+    ``pid-<n>`` fallback instead of the request id the name promised. Both
+    fields now read the one authority: :func:`current_serve_request_id`.
+    """
+
+    # serve is a real module (not an exec'd part) — see harness._cmd_serve —
+    # so this import is safe from part-module code, and lazy to keep the CLI
+    # path from paying serve's import weight before it needs it.
+    from hermes_cli.harness_parts.serve import current_serve_request_id
+
+    serve_request_id = current_serve_request_id()
+    return serve_request_id, ("serve" if serve_request_id is not None else "cli")
+
+
 def _normalize_deferred_thread_policy(args) -> None:
     """Restore the tri-state ``new_session`` argparse cannot express.
 
@@ -2127,10 +2158,14 @@ def _cmd_mission_chat_message(args) -> int:
     # after the reply it answered was on screen.
     deferred = MissionChatDeferredFinalization()
     try:
+        # Provenance decided in ONE place (owner id + observer kind from the
+        # same serve-request fact) — see _mission_chat_lease_provenance for the
+        # two diagnostic lies this line used to tell.
+        lease_owner_id, lease_observer_kind = _mission_chat_lease_provenance()
         with persona_chat_root_lease(
             session_id,
-            owner_id=safe_assignment_token(getattr(args, "serve_request_id", None)),
-            observer_kind="serve" if persona_chat_runtime_registry() is not None else "cli",
+            owner_id=safe_assignment_token(lease_owner_id),
+            observer_kind=lease_observer_kind,
         ):
             exit_code = _mission_chat_commit_turn(plan, deferred)
     except PersonaChatBusyError as exc:

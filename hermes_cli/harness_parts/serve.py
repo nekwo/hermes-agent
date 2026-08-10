@@ -321,6 +321,27 @@ _request_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 
 
+def current_serve_request_id() -> str | None:
+    """The serve frame-protocol request id bound to THIS context, or None.
+
+    ``_run`` binds it for exactly the span of one serve-dispatched request, in
+    the pool-worker context that dispatches to the command handler — so a
+    non-None answer is DIRECT provenance that the current work arrived as a
+    serve frame request. Every other lane reads None: a one-shot CLI turn, the
+    delivery drain's forged turns, background threads.
+
+    This is the honest "did this turn arrive via serve" fact, and the only one.
+    Two proxies have already been retired for impersonating it (both live
+    2026-08-09 findings): ``persona_chat_runtime_registry() is not None`` is
+    really "the hot-sessions CACHE is enabled" (default off, so every live
+    serve read False), and ``delivery_drain_is_live()`` is really "a delivery
+    consumer exists" — a serve whose drain died is still a serve. Provenance
+    questions read THIS; capability questions read the drain.
+    """
+
+    return _request_id.get()
+
+
 class _FrameWriter:
     """Sole owner of the real stdout; one lock keeps frames atomic."""
 

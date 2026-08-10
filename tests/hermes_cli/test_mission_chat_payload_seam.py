@@ -197,6 +197,47 @@ def test_a_cold_cli_turn_refuses_the_promise(monkeypatch, unbound_capability):
     assert async_delivery_supported() is False
 
 
+# --------------------------------------------------------------------------
+# lease provenance honesty
+# --------------------------------------------------------------------------
+
+
+def test_a_serve_hosted_turn_is_observed_as_serve_with_hot_sessions_disabled(
+    monkeypatch,
+):
+    """The 2026-08-09 mislabel, pinned: provenance reads the request id, not a cache.
+
+    ``observer_kind`` used to derive from ``persona_chat_runtime_registry() is
+    not None`` — the hot-sessions cache flag, default off and off in production
+    — so every live serve turn wrote ``cli`` into the lease owner file, the
+    exact forensics a ``chat_busy`` incident reads. The registry must have no
+    vote: a serve turn is a turn that arrived as a serve frame request, and the
+    request id serve's ``_run`` binds is the direct fact. It also BECOMES the
+    lease owner id, correlating the owner file with the frame that holds the
+    root (the old ``args.serve_request_id`` read was never set by anything and
+    always degraded to the ``pid-<n>`` fallback).
+    """
+
+    from hermes_cli.harness_parts import serve as serve_module
+
+    monkeypatch.setattr(harness, "persona_chat_runtime_registry", lambda: None)
+    token = serve_module._request_id.set("req-42")
+    try:
+        assert harness._mission_chat_lease_provenance() == ("req-42", "serve")
+    finally:
+        serve_module._request_id.reset(token)
+
+
+def test_a_cli_turn_is_observed_as_cli_even_with_the_cache_enabled(monkeypatch):
+    """The inverse mislabel: enabling the cache must not dress a CLI turn as serve."""
+
+    from hermes_cli.harness_parts import serve as serve_module
+
+    monkeypatch.setattr(harness, "persona_chat_runtime_registry", lambda: object())
+    assert serve_module._request_id.get() is None
+    assert harness._mission_chat_lease_provenance() == (None, "cli")
+
+
 def test_the_deferred_thread_policy_flag_restores_the_unset_tri_state(monkeypatch):
     """argparse cannot say UNSET, and UNSET is what a dispatch forwards.
 
