@@ -1182,6 +1182,24 @@ _JOURNAL_TEXT_FIELDS = {
 #: them apart.
 _JOURNAL_RUN_BUDGET_FIELD = RUN_BUDGET_ACCOUNTING_KEY
 
+#: Text fields whose EMPTY value is a recorded fact rather than an absence.
+#:
+#: Everything else above is dropped when empty, which is right for an id or a
+#: fingerprint — there is no such thing as "the fingerprint was, meaningfully,
+#: nothing". ``stored_reply`` is the exception: "the turn replied with nothing"
+#: and "nobody recorded a reply here" are different facts about the turn, and
+#: collapsing them had a live consequence. The replay branch admits a settled
+#: turn on ``stored_reply is not None``, so a SILENT turn — model produced no
+#: content, `ok` true, empty reply — failed that guard, fell through to the
+#: live provider path and died there as ``chat_turn_not_submitted /
+#: rejected_stale_transition``. The delivery drain derives its
+#: ``client_message_id`` from the dispatch id precisely so a retry converges on
+#: one turn; for silent turns that convergence was broken.
+#:
+#: Same principle the run-budget block states directly above: absent stays
+#: absent, and recorded-empty stays recorded.
+_JOURNAL_EMPTY_PRESERVING_FIELDS = frozenset({"stored_reply"})
+
 
 def _safe_journal_metadata(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
@@ -1191,6 +1209,10 @@ def _safe_journal_metadata(value: Any) -> dict[str, Any]:
         text = safe_assignment_text(value.get(key), limit=limit)
         if text:
             result[key] = text
+        elif key in _JOURNAL_EMPTY_PRESERVING_FIELDS and value.get(key) is not None:
+            # An empty value that was WRITTEN is a fact, not an absence — the
+            # same distinction the run-budget block above is careful about.
+            result[key] = ""
     run_budget = safe_run_budget_accounting(value.get(_JOURNAL_RUN_BUDGET_FIELD))
     if run_budget is not None:
         result[_JOURNAL_RUN_BUDGET_FIELD] = run_budget

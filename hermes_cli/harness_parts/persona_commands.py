@@ -1666,6 +1666,43 @@ def _normalize_deferred_thread_policy(args) -> None:
         args.new_session = None
 
 
+def _stamp_turn_visibility(data: dict, reply_text, *, chat_result=None) -> dict:
+    """Stamp the typed "did this turn produce visible content" block, in place.
+
+    Every payload on this lane that carries a `reply` carries this beside it —
+    the live turn, both idempotent-replay branches, and the projection-failure
+    branch — so a consumer never has to know which internal path produced its
+    payload in order to know whether anyone saw an answer. `ok` alone cannot
+    tell it: this handler returns `ok: True` with an empty `reply` when the
+    model produces no content, and on 2026-08-11 it did exactly that on a
+    background-completion delivery, which every surface downstream then
+    reported as a clean delivery.
+
+    Total by construction (`classify_turn_visibility` never raises) because one
+    of the four call sites is inside an exception handler, where a raise would
+    replace a real failure with this one and corrupt the one-JSON-object stdout
+    contract on the way.
+
+    Function-local import for the reason given in `_cmd_mission_chat_message`:
+    this file is exec'd into harness.py's globals.
+    """
+
+    from agent_runtime.turn_visibility import (
+        TURN_VISIBILITY_KEY,
+        classify_turn_visibility,
+    )
+
+    data[TURN_VISIBILITY_KEY] = classify_turn_visibility(
+        reply_text=reply_text,
+        # Absent on the replay branches, which answer from a stored reply and
+        # have no turn result in hand. That is honestly less evidence, not
+        # missing evidence: the stored text is exactly what the operator saw.
+        messages=getattr(chat_result, "messages", None),
+        raw=getattr(chat_result, "raw", None),
+    ).as_dict()
+    return data
+
+
 def _cmd_mission_chat_message(args) -> int:
     # Function-local: this file is exec'd into harness.py's globals, so a
     # module-level import here would need a matching harness.py import or it
@@ -2559,6 +2596,7 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
             "idempotent_replay": True,
             "journal_state": TURN_STATE_PROJECTED,
         }
+        _stamp_turn_visibility(data, reply_text)
         _stamp_finalization(data)
         _mission_chat_emit(args, data, f"mission chat reply for {normalized_persona}")
         return 0
@@ -2639,6 +2677,7 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
             "idempotent_replay": True,
             "next_expected": "duplicate client message id replayed from the canonical Mission Control chat transcript",
         }
+        _stamp_turn_visibility(data, reply_text)
         _stamp_finalization(data)
         _mission_chat_emit(args, data, f"mission chat reply for {normalized_persona}")
         return 0
@@ -3337,6 +3376,7 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
                 else "agent replied through the canonical Mission Control chat path; refresh Harness snapshot for transcript and Initial Chat Context"
             ),
         }
+        _stamp_turn_visibility(data, reply_text, chat_result=chat_result)
         _stamp_finalization(data)
         stream_emitter.finish(
             state="completed",
@@ -3453,6 +3493,13 @@ def _mission_chat_commit_turn(plan, deferred) -> int:
             "model_selection": model_selection,
             "next_expected": "retry this client_message_id to repair projection from the native committed reply",
         }
+        # The guarded block starts AFTER the run returns and after `reply_text`
+        # is derived from it, so both names are bound on every path that
+        # reaches this handler: a projection failure gets the same evidence the
+        # success payload would have had. What failed here is persistence, not
+        # the turn — the reply may well be real and visible, and saying so is
+        # what lets a repair retry be told apart from a silent turn.
+        _stamp_turn_visibility(data, reply_text, chat_result=chat_result)
         _stamp_finalization(data)
         _mission_chat_emit(args, data, data["blocker"])
         return 2

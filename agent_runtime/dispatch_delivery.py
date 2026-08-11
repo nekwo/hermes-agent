@@ -39,10 +39,10 @@ an answer: the handler returns ``ok: True`` with an empty ``reply`` when the
 model produces no content, and on 2026-08-11 it did exactly that, three retries
 deep, on a real completion notice. So the drain classifies every successful
 forge (:func:`_delivery_outcome`) and records ``delivered_silent`` when the
-reply is empty. Known weakness underneath it: the mission-chat payload exposes
-no typed "this turn produced visible content" field, so that classification is
-re-derived from ``reply`` text here — and would have to be re-derived again by
-the next consumer that cares.
+turn produced nothing visible. The classification itself is NOT made here: it
+is read off the typed block the handler stamps, whose one authority is
+``agent_runtime.turn_visibility`` — the drain consumes it exactly like any
+other consumer, and a silence it cannot prove stays a plain delivery.
 
 Where the chat database comes from
 ----------------------------------
@@ -475,23 +475,24 @@ def _delivery_outcome(payload: dict[str, Any] | None) -> tuple[str, str]:
     with a duplicate notice per lap — and the completion notice IS in the
     thread either way. The turn happened. It just answered with nothing.
 
-    ``reply`` is the only evidence available. The mission-chat success payload
-    exposes no typed "did this turn produce visible content" signal, so every
-    consumer that needs the answer re-derives it exactly here (see the weakness
-    note in the module docstring). Absence of the key is NOT silence: a
-    caller-supplied forge — tests, and any other lane that borrows this drain —
-    may return no payload at all, and manufacturing silence out of missing
-    evidence is the same lie pointed the other way.
+    The drain does not decide this — it READS it. ``TurnVisibility`` is the one
+    authority (``agent_runtime.turn_visibility``); the handler stamps a typed
+    block on every payload carrying a reply, and ``from_payload`` falls back to
+    the reply text only for a payload that predates the block, which a
+    long-running serve process will keep producing until it restarts.
+
+    Only PROVEN silence is reported as silence. An unknown verdict — no payload,
+    no reply key, a stub forge from another lane — stays ``delivered``:
+    manufacturing silence out of missing evidence is the same lie pointed the
+    other way.
     """
 
-    if not isinstance(payload, dict) or "reply" not in payload:
+    from .turn_visibility import TurnVisibility
+
+    visibility = TurnVisibility.from_payload(payload)
+    if not visibility.is_silent:
         return DELIVERED_REASON, ""
-    if str(payload.get("reply") or "").strip():
-        return DELIVERED_REASON, ""
-    return (
-        DELIVERED_SILENT_REASON,
-        "forged turn produced an empty reply — the operator was shown nothing",
-    )
+    return DELIVERED_SILENT_REASON, visibility.describe()
 
 
 def _owns_event_with_accounting(evt: dict[str, Any]) -> bool:

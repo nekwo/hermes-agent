@@ -818,3 +818,109 @@ def test_a_silent_background_completion_keeps_its_producer_detail(
     # Acknowledged on its durable row exactly as a visible delivery would be:
     # the turn ran, so the next boot must not re-queue it.
     assert get_durable_delegation("deleg_testspecimen")["delivery_state"] == "delivered"
+
+
+# ---------------------------------------------------------------------------
+# 11. the drain READS the verdict, it does not make one
+#
+# `TurnVisibility` is the single authority (agent_runtime.turn_visibility). The
+# drain's job is to record what the handler already determined — a second
+# derivation here would be the very thing the authority was extracted to end,
+# and it would drift the moment the two disagreed about, say, whether a
+# truncated turn that still produced words counts as visible.
+# ---------------------------------------------------------------------------
+
+
+def _payload(reply: str, block: dict | None = None) -> dict:
+    from agent_runtime.turn_visibility import TURN_VISIBILITY_KEY
+
+    payload = {"ok": True, "reply": reply}
+    if block is not None:
+        payload[TURN_VISIBILITY_KEY] = block
+    return payload
+
+
+def test_the_typed_block_decides_over_the_reply_text(
+    store_home, resolvable_sender, idle_sender
+):
+    """Non-empty reply text, block says silent -> silent.
+
+    A contrived payload on purpose: it is the only way to prove the drain reads
+    the verdict rather than quietly re-deriving one that usually agrees.
+    """
+
+    _completed()
+
+    dispatch_delivery.drain_once(
+        forge=_Forge(
+            ok=True,
+            payload=_payload(
+                "text the drain must not judge for itself",
+                {
+                    "state": "silent",
+                    "reason": "filtered",
+                    "finish_reason": "content_filter",
+                    "reply_chars": 0,
+                },
+            ),
+        )
+    )
+
+    assert _reasons() == [dispatch_delivery.DELIVERED_SILENT_REASON]
+    assert "content_filter" in _row(dispatch_delivery.DELIVERED_SILENT_REASON)["detail"]
+
+
+def test_a_visible_verdict_wins_even_over_an_empty_reply_field(
+    store_home, resolvable_sender, idle_sender
+):
+    """The same authority, pointed the other way."""
+
+    _completed()
+
+    dispatch_delivery.drain_once(
+        forge=_Forge(
+            ok=True,
+            payload=_payload(
+                "",
+                {
+                    "state": "visible",
+                    "reason": "content",
+                    "finish_reason": "stop",
+                    "reply_chars": 12,
+                },
+            ),
+        )
+    )
+
+    assert _reasons() == [dispatch_delivery.DELIVERED_REASON]
+
+
+def test_an_unreadable_verdict_is_not_treated_as_silence(
+    store_home, resolvable_sender, idle_sender
+):
+    """A block this drain cannot parse is unknown, and unknown is not silent."""
+
+    _completed()
+
+    dispatch_delivery.drain_once(
+        forge=_Forge(ok=True, payload=_payload("", {"state": "sideways"}))
+    )
+
+    assert _reasons() == [dispatch_delivery.DELIVERED_REASON]
+
+
+def test_a_payload_from_an_older_serve_still_classifies(
+    store_home, resolvable_sender, idle_sender
+):
+    """A landed fix is not a running one.
+
+    Serve is long-lived: it keeps emitting block-less payloads until it
+    restarts, and those are exactly the passes an operator is watching after a
+    deploy. The reply-text fallback is what covers that window.
+    """
+
+    _completed()
+
+    dispatch_delivery.drain_once(forge=_Forge(ok=True, payload=_payload("")))
+
+    assert _reasons() == [dispatch_delivery.DELIVERED_SILENT_REASON]

@@ -532,3 +532,112 @@ def test_chat_emitter_carries_explicit_empty_todo_state_on_both_lanes():
     element, frame = _drive({"tool_name": "terminal", "status": "ok"})
     assert "todo_state" not in element
     assert "todo_state" not in frame
+
+
+# ---------------------------------------------------------------------------
+# W4 — a turn that replied with NOTHING is a fact the record can hold
+# ---------------------------------------------------------------------------
+
+
+def test_an_empty_stored_reply_survives_the_metadata_filter():
+    """"Replied with nothing" and "no reply recorded" are different facts.
+
+    The filter drops empty text for every other field, which is right for an id
+    or a fingerprint. For `stored_reply` it collapsed a SILENT turn into an
+    unrecorded one — and the replay branch admits a settled turn on
+    `stored_reply is not None`, so a resent silent turn missed its own record,
+    fell through to the live provider path and died there as
+    `chat_turn_not_submitted / rejected_stale_transition`. The delivery drain
+    derives its client_message_id from the dispatch id precisely so a retry
+    converges on one turn; for silent turns it could not.
+    """
+
+    from agent_runtime.mission_chat_turns import transition_mission_chat_turn
+
+    transition_mission_chat_turn(
+        session_id="root_silent",
+        client_message_id="m1",
+        turn_id="t1",
+        state="pending",
+        metadata={"root_chat_session_id": "root_silent"},
+    )
+    for state in ("executing", "native_committed"):
+        transition_mission_chat_turn(
+            session_id="root_silent",
+            client_message_id="m1",
+            turn_id="t1",
+            state=state,
+            metadata={"stored_reply": ""},
+        )
+
+    record = mission_chat_turn_record(session_id="root_silent", client_message_id="m1")
+    assert record["stored_reply"] == ""
+    assert record["stored_reply"] is not None
+
+
+def test_an_unwritten_reply_stays_absent():
+    """The other half: absent must stay absent, or the fix is just a new lie.
+
+    A record that never carried a reply must not grow an empty one — that would
+    tell a reader the turn was answered with silence when nobody ever said so.
+    """
+
+    from agent_runtime.mission_chat_turns import transition_mission_chat_turn
+
+    transition_mission_chat_turn(
+        session_id="root_unwritten",
+        client_message_id="m1",
+        turn_id="t1",
+        state="pending",
+        metadata={"root_chat_session_id": "root_unwritten"},
+    )
+
+    record = mission_chat_turn_record(
+        session_id="root_unwritten", client_message_id="m1"
+    )
+    assert "stored_reply" not in record
+
+
+def test_an_explicit_none_reply_is_still_an_absence():
+    """`None` is how a caller says "I have no reply", not "the reply is empty"."""
+
+    from agent_runtime.mission_chat_turns import transition_mission_chat_turn
+
+    transition_mission_chat_turn(
+        session_id="root_none",
+        client_message_id="m1",
+        turn_id="t1",
+        state="pending",
+        metadata={"root_chat_session_id": "root_none", "stored_reply": None},
+    )
+
+    record = mission_chat_turn_record(session_id="root_none", client_message_id="m1")
+    assert "stored_reply" not in record
+
+
+def test_no_other_text_field_grew_an_empty_value():
+    """The exemption is ONE field, by name — not a loosened filter.
+
+    An id or a fingerprint has no meaningful empty value, and an empty one
+    reaching a reader that treats presence as proof is a different bug in the
+    same family.
+    """
+
+    from agent_runtime.mission_chat_turns import transition_mission_chat_turn
+
+    transition_mission_chat_turn(
+        session_id="root_blanks",
+        client_message_id="m1",
+        turn_id="t1",
+        state="pending",
+        metadata={
+            "root_chat_session_id": "root_blanks",
+            "provider_request_id": "",
+            "native_revision": "",
+            "resolution": "",
+        },
+    )
+
+    record = mission_chat_turn_record(session_id="root_blanks", client_message_id="m1")
+    for field in ("provider_request_id", "native_revision", "resolution"):
+        assert field not in record, field
