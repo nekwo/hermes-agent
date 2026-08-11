@@ -44,6 +44,37 @@ def fresh_telemetry():
     dispatch_delivery._telemetry.reset()
 
 
+@pytest.fixture
+def registry_left_as_found():
+    """Hand the PROCESS-GLOBAL registry back exactly as it was found.
+
+    ``process_registry`` is a module singleton whose ``_running``/``_finished``
+    maps outlive any tmp home, so a real spawn left behind here becomes a row in
+    every later projection this process builds — which is how a spawn in THIS
+    module silently reddened ``test_response_contract_fixture`` seven tests
+    later. Session state does not get to leak across a test boundary just
+    because the object is a singleton.
+    """
+
+    from tools.process_registry import process_registry
+
+    with process_registry._lock:
+        before_running = set(process_registry._running)
+        before_finished = set(process_registry._finished)
+    try:
+        yield process_registry
+    finally:
+        with process_registry._lock:
+            for session_id in set(process_registry._running) - before_running:
+                process_registry._running.pop(session_id, None)
+            for session_id in set(process_registry._finished) - before_finished:
+                process_registry._finished.pop(session_id, None)
+        process_registry._completion_consumed.clear()
+        process_registry._poll_observed.clear()
+        while not process_registry.completion_queue.empty():
+            process_registry.completion_queue.get_nowait()
+
+
 def _reasons() -> list[str]:
     return [row["reason"] for row in dispatch_delivery._telemetry.snapshot()["outcomes"]]
 
@@ -544,7 +575,7 @@ def test_the_mirror_is_in_no_freshness_fingerprint(store_home):
 
 @pytest.mark.usefixtures("persisted_persona_samples")
 def test_a_bound_spawn_becomes_a_delivered_turn_in_the_senders_own_thread(
-    monkeypatch, capsys, tmp_path
+    monkeypatch, capsys, tmp_path, registry_left_as_found
 ):
     from types import SimpleNamespace
 
@@ -563,7 +594,6 @@ def test_a_bound_spawn_becomes_a_delivered_turn_in_the_senders_own_thread(
         _TranscriptDB,
     )
     from tools.approval import get_current_session_key
-    from tools.process_registry import process_registry
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("HERMES_HEAD_HOME", str(tmp_path / "home"))
