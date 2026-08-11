@@ -187,6 +187,40 @@ def test_runner_binds_and_resets_skill_runtime_surface():
     assert current_skill_runtime_context() == (None, False)
 
 
+def test_runner_binds_chat_root_session_key_for_the_run():
+    """The run stack must hand the chat root to tools.approval's session-key
+    surface — this wiring is what makes a background spawn's completion event
+    resolvable (see test_background_completion_attribution.py). A green scope
+    unit test plus a green terminal-tool test prove nothing if the runner
+    never enters the scope; this pins the join at the runner."""
+
+    from tools.approval import get_current_session_key
+
+    root = "persona_chat_personainst_dev_cccccccccccc"
+    seen = []
+
+    class KeyAgent(FakeAgent):
+        def run_conversation(self, user_message, system_message=None, task_id=None):
+            seen.append(get_current_session_key(default=""))
+            return super().run_conversation(
+                user_message,
+                system_message=system_message,
+                task_id=task_id,
+            )
+
+    result = ProfileAgentRunner(agent_factory=KeyAgent).run(
+        AgentRunRequest(
+            profile=None,
+            user_message="attribute my spawns",
+            tool_execution_scope_id=root,
+        )
+    )
+
+    assert result.final_response == "ok"
+    assert seen == [root]
+    assert get_current_session_key(default="") == ""
+
+
 def test_persona_chat_runner_forces_native_compression_tip_rotation():
     class CompressionAgent(FakeAgent):
         def __init__(self, **kwargs):
