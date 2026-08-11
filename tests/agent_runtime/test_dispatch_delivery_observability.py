@@ -16,6 +16,7 @@ and ~11 tests would pass vacuously while still printing green.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -23,11 +24,15 @@ import time
 import pytest
 
 from agent_runtime import dispatch_delivery, persona_chat_continuity
+from agent_runtime.dispatch_store import DELIVERY_DELIVERED, get_dispatch
 
 # Reused AS-IS from the drain's own suite: these are the fixtures whose
 # overrides this module has to prove are still honored.
 from tests.agent_runtime.test_dispatch_delivery import (  # noqa: F401
     SENDER_ROOT,
+    _completed,
+    _queue_once,
+    durable_delegation,
     idle_sender,
     resolvable_sender,
     store_home,
@@ -684,3 +689,132 @@ def test_a_bound_spawn_becomes_a_delivered_turn_in_the_senders_own_thread(
     # …and the drain SAYS it delivered, which is the half the incident lacked.
     assert f"completion:{proc.id}" == _row("delivered")["event_key"]
     _drain_the_queue()
+
+
+# ---------------------------------------------------------------------------
+# 10. "delivered" must not be allowed to mean "delivered into silence"
+#
+# 2026-08-11, second incident on this lane: the completion notice reached the
+# operator's thread and the delivery turn's model answered it with no content,
+# three retries deep. The forge returned ok, so the drain logged a delivery,
+# `last_delivery` recorded a delivery, and `harness status` reported a delivery
+# — while the operator sat looking at a thread where nothing had happened. The
+# mechanism worked perfectly; only the report was false, which is the harder
+# failure to catch, because everything upstream of it succeeded.
+# ---------------------------------------------------------------------------
+
+
+def test_an_empty_reply_is_recorded_as_a_silent_delivery(
+    store_home, resolvable_sender, idle_sender
+):
+    """Empty reply -> `delivered_silent`, and the SETTLEMENT is unchanged.
+
+    Both halves matter. The reason has to name the silence, and the dispatch
+    still has to settle: re-queuing would re-forge into the very transcript
+    that produced the silence, once per pass, with a duplicate notice per lap.
+    """
+
+    dispatch_id = _completed()
+
+    tally = dispatch_delivery.drain_once(forge=_Forge(ok=True, payload={"ok": True, "reply": "  "}))
+
+    assert tally["delivered"] == 1
+    assert get_dispatch(dispatch_id)["delivery_state"] == DELIVERY_DELIVERED
+    assert _reasons() == [dispatch_delivery.DELIVERED_SILENT_REASON]
+    assert "empty reply" in _row(dispatch_delivery.DELIVERED_SILENT_REASON)["detail"]
+
+
+def test_a_turn_that_actually_replied_is_still_a_plain_delivery(
+    store_home, resolvable_sender, idle_sender
+):
+    """The other half of the truth table — silence must stay the exception."""
+
+    _completed()
+
+    dispatch_delivery.drain_once(
+        forge=_Forge(ok=True, payload={"ok": True, "reply": "3 failures, all in the chat panel"})
+    )
+
+    assert _reasons() == [dispatch_delivery.DELIVERED_REASON]
+
+
+def test_a_forge_that_reports_no_reply_at_all_is_not_called_silent(
+    store_home, resolvable_sender, idle_sender
+):
+    """Missing evidence is not evidence of silence.
+
+    A caller-supplied forge — this suite's own, and any other lane that borrows
+    the drain — may return a payload with no `reply` key. Manufacturing
+    `delivered_silent` out of that would be the same lie pointed the other way,
+    and it would fire on every test in the sibling module.
+    """
+
+    _completed()
+
+    dispatch_delivery.drain_once(forge=_Forge(ok=True, payload={"ok": True}))
+
+    assert _reasons() == [dispatch_delivery.DELIVERED_REASON]
+
+
+def test_last_delivery_itself_names_the_silence(
+    store_home, resolvable_sender, idle_sender
+):
+    """`last_delivery` is the field a human reads first, so it carries it too.
+
+    A silent delivery is still the last thing this drain delivered — dropping it
+    from the field would trade one blindness for another.
+    """
+
+    dispatch_id = _completed()
+
+    dispatch_delivery.drain_once(forge=_Forge(ok=True, payload={"ok": True, "reply": ""}))
+
+    last = dispatch_delivery._telemetry.snapshot()["last_delivery"]
+    assert last["event_key"] == f"dispatch:{dispatch_id}"
+    assert last["reason"] == dispatch_delivery.DELIVERED_SILENT_REASON
+    assert last["at"] is not None
+
+
+def test_a_silent_delivery_is_logged_at_warning(
+    store_home, resolvable_sender, idle_sender, caplog
+):
+    """Not info. Nobody greps info for a lane that reported success."""
+
+    _completed()
+
+    with caplog.at_level(logging.WARNING, logger="agent_runtime.dispatch_delivery"):
+        dispatch_delivery.drain_once(forge=_Forge(ok=True, payload={"ok": True, "reply": ""}))
+
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+    ]
+    assert any("INTO SILENCE" in message for message in warnings), warnings
+
+
+def test_a_silent_background_completion_keeps_its_producer_detail(
+    durable_delegation, resolvable_sender, idle_sender, monkeypatch
+):
+    """The queue lane splits the same way — and does not lose what it had.
+
+    Its detail already carried `producer_started_at`, which is what dates a
+    completion against the process that produced it. The visibility note is
+    appended to that, not substituted for it.
+    """
+
+    from tools.async_delegation import get_durable_delegation
+
+    _queue_once(monkeypatch, durable_delegation)
+    dispatch_delivery._background_attempts.clear()
+
+    tally = dispatch_delivery.drain_background_completions(
+        forge=_Forge(ok=True, payload={"ok": True, "reply": ""})
+    )
+
+    assert tally["delivered"] == 1
+    detail = _row(dispatch_delivery.DELIVERED_SILENT_REASON)["detail"]
+    assert "producer_started_at=" in detail and "empty reply" in detail
+    # Acknowledged on its durable row exactly as a visible delivery would be:
+    # the turn ran, so the next boot must not re-queue it.
+    assert get_durable_delegation("deleg_testspecimen")["delivery_state"] == "delivered"

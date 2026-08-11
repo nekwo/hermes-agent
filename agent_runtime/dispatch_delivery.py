@@ -32,6 +32,18 @@ The lease is probed and RELEASED before forging, never held across it: the
 handler takes the same lease itself, and a same-process re-entrant acquisition
 is exactly the deadlock this would otherwise be.
 
+What "delivered" is allowed to mean
+-----------------------------------
+A forged turn coming back ``ok`` proves the TURN ran, not that the operator saw
+an answer: the handler returns ``ok: True`` with an empty ``reply`` when the
+model produces no content, and on 2026-08-11 it did exactly that, three retries
+deep, on a real completion notice. So the drain classifies every successful
+forge (:func:`_delivery_outcome`) and records ``delivered_silent`` when the
+reply is empty. Known weakness underneath it: the mission-chat payload exposes
+no typed "this turn produced visible content" field, so that classification is
+re-derived from ``reply`` text here — and would have to be re-derived again by
+the next consumer that cares.
+
 Where the chat database comes from
 ----------------------------------
 Head-home scope ONLY. Persona turns flip ``HERMES_HOME`` process-globally for
@@ -59,6 +71,9 @@ from typing import Any, Callable
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "DELIVERED_REASON",
+    "DELIVERED_SILENT_REASON",
+    "DELIVERY_REASONS",
     "DELIVERY_REQUESTED_BY",
     "MAX_BACKGROUND_DELIVERY_ATTEMPTS",
     "ORPHAN_SWEEP_INTERVAL_SECONDS",
@@ -162,6 +177,26 @@ DRAIN_REPEAT_LOG_EVERY = 12
 #: caught mid-window looks exactly like a stale lock. Repeats are the proof.
 DRAIN_OWNERLESS_WARN_AFTER = 3
 
+#: The two reasons a forged turn that RAN is recorded under. Both are
+#: deliveries — the row settles, the queue moves, the completion is gone from it
+#: — but only ``delivered`` put something on the operator's screen.
+#:
+#: 2026-08-11, the defect this split exists for: the drain called ``ok`` from the
+#: forge "delivered" and stopped there. One delivery turn's model returned no
+#: content three times over, so the completion notice landed in the thread and
+#: was answered by nothing at all — while the log line, ``last_delivery`` and
+#: ``harness status`` all reported a clean delivery. A report that cannot tell
+#: "the operator has been told" from "the operator has been told nothing" is
+#: worse than no report, because it is the one that gets trusted.
+DELIVERED_REASON = "delivered"
+DELIVERED_SILENT_REASON = "delivered_silent"
+
+#: Both of the above. Membership here is what makes an outcome count as a
+#: delivery for ``last_delivery`` — a silent delivery is still the last thing
+#: this drain delivered, and hiding it from that field would restore exactly the
+#: blindness the split is here to end.
+DELIVERY_REASONS = frozenset({DELIVERED_REASON, DELIVERED_SILENT_REASON})
+
 #: The durable cross-process mirror of the state below, written under the
 #: agent-runtime store root. REQUIRED, not a nicety: the launcher's visibility
 #: probe runs ``harness status --json`` as a freshly spawned process, where the
@@ -252,6 +287,11 @@ class _DrainTelemetry:
         self.last_pass_tally: dict[str, int] = {}
         self.last_delivery_at: float | None = None
         self.last_delivery_key: str = ""
+        #: Which of :data:`DELIVERY_REASONS` the last delivery was. Carried
+        #: beside the key so a reader of ``last_delivery`` alone — which is the
+        #: field a human checks first — cannot mistake a silent delivery for a
+        #: visible one.
+        self.last_delivery_reason: str = ""
         self.outcomes: "OrderedDict[tuple[str, str], DrainBounce]" = OrderedDict()
         #: Bumped whenever an outcome row is inserted or updated. The mirror
         #: writer compares it across a pass to decide whether anything happened
@@ -273,6 +313,7 @@ class _DrainTelemetry:
             self.last_pass_tally = {}
             self.last_delivery_at = None
             self.last_delivery_key = ""
+            self.last_delivery_reason = ""
             self.outcomes.clear()
             self.outcome_revision = 0
             self._ownerless_streak.clear()
@@ -297,15 +338,15 @@ class _DrainTelemetry:
     ) -> None:
         """Record one outcome for one event, and log it at a bounded rate.
 
-        ``delivered`` travels this same call — the field is "last outcomes", not
-        "last failures", so "what did the drain last do" has a complete answer
-        rather than one that only ever shows the bad half.
+        Both :data:`DELIVERY_REASONS` travel this same call — the field is "last
+        outcomes", not "last failures", so "what did the drain last do" has a
+        complete answer rather than one that only ever shows the bad half.
         """
 
         key = (str(event_key or ""), str(reason or ""))
         now = time.time()
         text = str(detail or "")[:DRAIN_DETAIL_LIMIT]
-        delivered = key[1] == "delivered"
+        delivered = key[1] in DELIVERY_REASONS
         with self._lock:
             row = self.outcomes.get(key)
             if row is None:
@@ -329,8 +370,20 @@ class _DrainTelemetry:
             if delivered:
                 self.last_delivery_at = now
                 self.last_delivery_key = key[0]
+                self.last_delivery_reason = key[1]
         if count == 1 or count % DRAIN_REPEAT_LOG_EVERY == 0:
-            if delivered:
+            if key[1] == DELIVERED_SILENT_REASON:
+                # WARNING, not info: the delivery mechanism worked perfectly and
+                # the operator still learned nothing, which is the one outcome
+                # nobody goes looking for because everything upstream of it
+                # succeeded.
+                logger.warning(
+                    "delivery drain delivered %s INTO SILENCE root=%s detail=%s",
+                    key[0],
+                    root,
+                    text,
+                )
+            elif delivered:
                 logger.info(
                     "delivery drain delivered %s root=%s detail=%s",
                     key[0],
@@ -388,6 +441,7 @@ class _DrainTelemetry:
                 "last_delivery": {
                     "event_key": self.last_delivery_key,
                     "at": self.last_delivery_at,
+                    "reason": self.last_delivery_reason,
                 },
                 "outcomes": [row.as_dict() for row in self.outcomes.values()],
             }
@@ -410,6 +464,34 @@ def _event_key(evt: dict[str, Any]) -> str:
         evt.get("delegation_id") or evt.get("session_id") or uuid.uuid4().hex
     )[:40]
     return f"{evt.get('type', 'completion')}:{marker}"
+
+
+def _delivery_outcome(payload: dict[str, Any] | None) -> tuple[str, str]:
+    """Classify a forged turn that came back ``ok``: visible, or silent.
+
+    ACCOUNTING [A], never a DECISION. Both outcomes settle, acknowledge and
+    drain identically, and that is deliberate: re-queuing a silent delivery
+    would re-forge into the very transcript that produced the silence — a loop,
+    with a duplicate notice per lap — and the completion notice IS in the
+    thread either way. The turn happened. It just answered with nothing.
+
+    ``reply`` is the only evidence available. The mission-chat success payload
+    exposes no typed "did this turn produce visible content" signal, so every
+    consumer that needs the answer re-derives it exactly here (see the weakness
+    note in the module docstring). Absence of the key is NOT silence: a
+    caller-supplied forge — tests, and any other lane that borrows this drain —
+    may return no payload at all, and manufacturing silence out of missing
+    evidence is the same lie pointed the other way.
+    """
+
+    if not isinstance(payload, dict) or "reply" not in payload:
+        return DELIVERED_REASON, ""
+    if str(payload.get("reply") or "").strip():
+        return DELIVERED_REASON, ""
+    return (
+        DELIVERED_SILENT_REASON,
+        "forged turn produced an empty reply — the operator was shown nothing",
+    )
 
 
 def _owns_event_with_accounting(evt: dict[str, Any]) -> bool:
@@ -1011,7 +1093,11 @@ def drain_once(*, forge: Callable | None = None, limit: int | None = None) -> di
         if ok:
             dispatch_store.mark_delivered(dispatch_id)
             tally["delivered"] += 1
-            _telemetry.record_bounce(event_key, "delivered", "", root=root)  # A
+            # The tally counts what moved through the QUEUE, which a silent
+            # delivery genuinely did; the reason below is what carries whether
+            # anyone saw it.
+            reason, visibility_detail = _delivery_outcome(payload)  # A
+            _telemetry.record_bounce(event_key, reason, visibility_detail, root=root)  # A
             continue
         # The sender took its lease between the idle probe and the forge. That
         # is a RACE WITH A LIVE OPERATOR, not a failure — the completion is
@@ -1350,10 +1436,18 @@ def drain_background_completions(*, forge: Callable | None = None) -> dict[str, 
             _settle_durable_completion(evt, claim, delivered=True)
             _background_attempts.pop(key, None)
             tally["delivered"] += 1
+            reason, visibility_detail = _delivery_outcome(payload)  # A
             _telemetry.record_bounce(  # A
                 key,
-                "delivered",
-                f"producer_started_at={evt.get('started_at')!r}",
+                reason,
+                "; ".join(
+                    part
+                    for part in (
+                        f"producer_started_at={evt.get('started_at')!r}",
+                        visibility_detail,
+                    )
+                    if part
+                ),
                 root=root,
             )
             continue
