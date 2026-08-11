@@ -554,6 +554,21 @@ def _scope_fingerprint() -> str:
     turn-element files are deliberately NOT statted here: element flushes
     land many times per second during a streaming turn and would make the
     watchdog append a reconcile (= one full-core delta) every heartbeat.
+
+    The ``running_work`` durable stores (``processes.json`` + the
+    background-work ``state.db``) are the same class as the SessionDB: a
+    background process starting or exiting rewrites the checkpoint, and a
+    delegation dispatch/finalize writes ``async_delegations`` — with NO
+    EventLog event either way. The serve read-model cache adopted them on
+    2026-08-03 (``_runtime_state_fingerprint``); this backstop did not, so a
+    stream consumer rendered the last pre-exit ``running_work`` row forever
+    (live incident 2026-08-11: a 20-second terminal task showed
+    "Terminal · running" in the Launcher's Activity panel minutes after the
+    durable side had settled). Resolved through the writers' own path
+    authority, ``running_work_store_paths`` — never a second path list free
+    to drift. Note the background-work ``state.db`` can be a DIFFERENT file
+    from the chat SessionDB statted above: the chat scope consults a durable
+    head-home pointer the background-work writers do not.
     """
 
     parts: list[str] = []
@@ -592,6 +607,32 @@ def _scope_fingerprint() -> str:
                 parts.append(f"{candidate.name}:absent")
     except Exception:  # noqa: BLE001 — chat persistence absence is itself stable
         parts.append("session_db:unresolved")
+    try:
+        from .running_work import running_work_store_paths
+
+        store_paths = running_work_store_paths()
+        if not store_paths:
+            # An empty tuple means "the home could not be resolved", not
+            # "nothing to watch" — same sentinel rule as the serve cache: the
+            # part is stable, so an unresolvable home never flaps the
+            # fingerprint, but the absence is recorded rather than silent.
+            parts.append("running_work_stores:unresolved")
+        for store_path in store_paths:
+            # The checkpoint is plain JSON; the delegation store is SQLite,
+            # whose mutations can land in the WAL without moving the main
+            # file's mtime — stat the siblings like the chat DB above.
+            suffixes = ("", "-wal", "-journal") if store_path.suffix == ".db" else ("",)
+            for suffix in suffixes:
+                candidate = store_path.with_name(store_path.name + suffix)
+                try:
+                    stat = candidate.stat()
+                    parts.append(
+                        f"bgwork:{candidate.name}:{stat.st_mtime_ns}:{stat.st_size}"
+                    )
+                except OSError:
+                    parts.append(f"bgwork:{candidate.name}:absent")
+    except Exception:  # noqa: BLE001 — same posture as the chat DB above
+        parts.append("running_work_stores:unresolved")
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()[:16]
 
 

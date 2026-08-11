@@ -712,6 +712,61 @@ def current_tool_execution_scope() -> str | None:
     return _TOOL_EXECUTION_SCOPE.get()
 
 
+@contextmanager
+def chat_root_session_key_scope(scope_id: str | None) -> Iterator[None]:
+    """Bind ``tools.approval``'s session-key ContextVar to this run's chat root.
+
+    Session-scoped upstream surfaces resolve their identity through
+    ``tools.approval.get_current_session_key``: the process registry stamps it
+    onto every background spawn as ``session_key``, ``delegate_task`` records it
+    on delegations, and the terminal tool keys cwd records by it. On the
+    mission-chat lane nothing ever bound it, so a terminal spawned from a chat
+    turn wrote ``session_key: ""`` — which meant (live incident 2026-08-11,
+    ``proc_b0593bc9fb0e``):
+
+    * its ``notify_on_complete`` completion event named no session that
+      resolves to a persona chat root, so serve's completion drain
+      (``dispatch_delivery._chat_root_of_completion`` — positive proof only,
+      the #64484 no-guessing rule) re-queued it every pass forever, and the
+      ledgerless event evaporated on the next serve restart with the output
+      tail it carried;
+    * the ``running_work`` projection could not attribute the row to an agent
+      (the ``1c0e95bc3`` commit message predicted exactly this while wiring
+      the resolver).
+
+    Binding the ROOT chat session id here is positive knowledge at spawn time,
+    not drain-time guessing: the run knows which chat root it executes under.
+    Bound only for ids that name a persona chat root — this scope exists to
+    make attribution resolvable, and pushing any other string into upstream's
+    session-key surface would widen its meaning for no gain. ContextVar
+    propagation into tool worker threads is owned by
+    ``tools.thread_context.propagate_context_to_thread`` (copy_context), the
+    same mechanism the terminal envelope scope already rides on this lane.
+
+    Permission posture is unchanged by design: gated terminal commands on the
+    governed mission-chat lane are decided by ``agent_runtime.terminal_envelope``,
+    which does not consult the approval session key.
+    """
+
+    key = safe_assignment_text(scope_id, limit=240) if scope_id else ""
+    if not key or not key.startswith("persona_chat_"):
+        yield
+        return
+    try:
+        from tools.approval import (
+            reset_current_session_key,
+            set_current_session_key,
+        )
+    except Exception:  # pragma: no cover - upstream surface unavailable
+        yield
+        return
+    token = set_current_session_key(key)
+    try:
+        yield
+    finally:
+        reset_current_session_key(token)
+
+
 class PersonaChatBusyError(RuntimeError):
     error_kind = "chat_busy"
 

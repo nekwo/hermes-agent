@@ -786,7 +786,10 @@ class ProfileAgentRunner:
     ) -> tuple[Any, Any, dict[str, Any]]:
         timing: dict[str, Any] = {}
         ledger = ledger if ledger is not None else RunBudgetLedger()
-        from .persona_chat_continuity import tool_execution_scope
+        from .persona_chat_continuity import (
+            chat_root_session_key_scope,
+            tool_execution_scope,
+        )
         from .terminal_envelope import terminal_envelope_scope
         from agent.skill_utils import skill_runtime_scope
 
@@ -795,6 +798,12 @@ class ProfileAgentRunner:
             persona_profile_context(binding, runtime_root=request.runtime_root),
             _agent_workdir(request.workdir),
             tool_execution_scope(request.tool_execution_scope_id),
+            # Same identity, second consumer: the container scope above keys
+            # sandbox reuse by the chat root; this one hands the SAME root to
+            # tools.approval's session-key surface, so background spawns and
+            # delegations from this run carry a session_key the completion
+            # drain can resolve to a chat root (see chat_root_session_key_scope).
+            chat_root_session_key_scope(request.tool_execution_scope_id),
             # Bound for the whole run so the terminal tool can resolve which
             # lane/role it is executing under. Deliberately INSIDE
             # persona_profile_context but independent of it: the envelope's

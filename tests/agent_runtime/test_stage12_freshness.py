@@ -181,6 +181,35 @@ def test_scope_fingerprint_covers_head_home_session_db():
     assert _scope_fingerprint() != before
 
 
+def test_scope_fingerprint_covers_running_work_stores():
+    """A background process starting or exiting rewrites ``processes.json``
+    with NO EventLog event (``running_work_store_paths``'s own contract). The
+    serve read-model cache adopted these stores on 2026-08-03; the stream
+    backstop did not, so a stream consumer rendered the last pre-exit
+    ``running_work`` row forever (live incident 2026-08-11: a 20-second
+    terminal task showed "Terminal · running" in the Launcher minutes after
+    the durable side had settled). Resolved through the writers' own path
+    authority — never a second path list."""
+
+    import time as _time
+
+    from hermes_constants import get_hermes_background_work_home
+
+    from agent_runtime.stream import _scope_fingerprint
+
+    checkpoint = get_hermes_background_work_home() / "processes.json"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_text("[]", encoding="utf-8")
+
+    before = _scope_fingerprint()
+
+    _time.sleep(0.02)  # NTFS mtime granularity guard
+    # A different byte length so size moves even if the mtime tick doesn't.
+    checkpoint.write_text('[{"id": "proc_fingerprint_probe"}]', encoding="utf-8")
+
+    assert _scope_fingerprint() != before
+
+
 def test_eventless_write_coincident_with_evented_batch_still_converges():
     """Live-proof regression (2026-07-09): the watchdog memo must be taken
     BEFORE the delta batch. A memo taken after the batch absorbed any
