@@ -127,6 +127,25 @@ def _build_status_in_runtime_scope(run_store: RunStore | None = None, incident_s
         "assignment_store_enabled": True,
     }
     data["persona_instances"] = [persona_instance_summary(instance) for instance in instances]
+    # ADDITIVE, and accounting only: "what did the serve delivery drain last do,
+    # and which gate bounced a completion". Imported lazily and wrapped, because
+    # status must never fail — nor refuse to build — because a telemetry surface
+    # was unavailable. The answer comes from this process's live drain when it
+    # has one, otherwise from the durable mirror the serve process writes (the
+    # launcher's visibility probe runs `harness status --json` as a FRESHLY
+    # SPAWNED process, where no in-memory drain state exists), otherwise
+    # "absent".
+    #
+    # `harness status` is NOT the snapshot/stream contract, so
+    # SNAPSHOT_CONTRACT_VERSION does not move for this key; the launcher's two
+    # status consumers read `runtime_health` / `agents` by name and ignore
+    # every other key.
+    try:
+        from .dispatch_delivery import delivery_drain_status
+
+        data["delivery_drain"] = delivery_drain_status()
+    except Exception:
+        data["delivery_drain"] = {"live": False, "source": "absent"}
     session_db = _default_persona_session_db()
     assignments = PersonaAssignmentStore(event_log=event_log).list_all()
     history_accountant = ProjectionAccountant("persona_chat_history")

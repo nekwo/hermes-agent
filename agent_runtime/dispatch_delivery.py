@@ -43,11 +43,16 @@ operator's console never opens.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import threading
 import time
 import uuid
+from collections import OrderedDict
+from contextvars import ContextVar
+from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
@@ -59,11 +64,13 @@ __all__ = [
     "ORPHAN_SWEEP_INTERVAL_SECONDS",
     "delivery_client_message_id",
     "delivery_drain_is_live",
+    "delivery_drain_status",
     "delivery_requested_by",
     "drain_background_completions",
     "drain_once",
     "format_dispatch_delivery",
     "parse_delivery_requested_by",
+    "read_delivery_drain_state",
     "start_delivery_drain",
     "sweep_orphaned_dispatches",
 ]
@@ -120,6 +127,448 @@ _drain_thread: threading.Thread | None = None
 #: Guards the registration/teardown pair above, so a restart and an old loop's
 #: teardown cannot interleave into "registered, then immediately cleared".
 _drain_lock = threading.Lock()
+
+
+# --------------------------------------------------------------------------
+# accounting — NAME the gate that bounced a completion
+#
+# Every line in this section is ACCOUNTING [A]: it reads the values a delivery
+# DECISION [D] was already taken on and records them. Nothing here may steer a
+# decision, and the tagging is kept as comments at each non-obvious call site so
+# the split stays legible. The 2026-08-11 incident (proc_379e2ddbbc4f) is the
+# reason it exists: a completion sat undeliverable for ~5 consecutive passes and
+# the gate that bounced it was structurally unknowable afterwards — the per-pass
+# tally was discarded, the requeues logged nothing, and no store recorded a
+# considered-and-bounced event.
+# --------------------------------------------------------------------------
+
+#: Outcome rows telemetry keeps. Keyed by ``(event_key, reason)`` so a stuck
+#: event occupies ONE row per reason with a rising ``count`` rather than a
+#: growing list. Bounded by construction: past this, the oldest row is evicted.
+MAX_DRAIN_OUTCOME_ROWS = 32
+
+#: Per-row detail bound. Details carry owner payloads and exception reprs, both
+#: of which are unbounded at the source.
+DRAIN_DETAIL_LIMIT = 240
+
+#: Re-log an unchanged ``(event_key, reason)`` pair every Nth repeat — ≈ once a
+#: minute at the 5s cadence. Per-pass logging of a stuck event is spam that
+#: buries the pass that matters.
+DRAIN_REPEAT_LOG_EVERY = 12
+
+#: Consecutive ``lease_busy_ownerless`` probes on one root before the escalation
+#: WARNING. ONE sample is not evidence: the lease release order is
+#: unlink-owner-then-unlock (``persona_chat_continuity``), so a releasing holder
+#: caught mid-window looks exactly like a stale lock. Repeats are the proof.
+DRAIN_OWNERLESS_WARN_AFTER = 3
+
+#: The durable cross-process mirror of the state below, written under the
+#: agent-runtime store root. REQUIRED, not a nicety: the launcher's visibility
+#: probe runs ``harness status --json`` as a freshly spawned process, where the
+#: drain's in-memory state does not exist.
+#:
+#: MUST NOT be added to any freshness fingerprint (serve's
+#: ``_FINGERPRINT_ROOT_FILES``/``_FINGERPRINT_STORE_DIRS``,
+#: ``running_work_store_paths()``, or ``stream._scope_fingerprint``): it changes
+#: every ≤60s by design, which inside a fingerprint would hold the read-model
+#: cache permanently cold and make the stream emit ``state.reconciled`` forever.
+#: Same churn rationale as the per-session turn store's documented exclusion.
+DRAIN_STATE_FILENAME = "dispatch_delivery_drain.json"
+
+#: Heartbeat bound on mirror writes. A pass that changed nothing writes nothing
+#: until this elapses, so an idle serve touches the file once a minute.
+DRAIN_MIRROR_HEARTBEAT_SECONDS = 60.0
+
+
+@dataclass(frozen=True)
+class IdleProbe:
+    """The typed reason :func:`_probe_sender_idle` answered as it did.
+
+    ``is_idle`` is the DECISION (the bool ``_sender_is_idle`` has always
+    returned); ``busy_sub``/``detail`` are ACCOUNTING. Four distinct causes used
+    to collapse into one silent ``False``, which is precisely why the live stall
+    could not be classified after the fact.
+    """
+
+    is_idle: bool
+    busy_sub: str = ""
+    detail: str = ""
+
+    @staticmethod
+    def idle() -> "IdleProbe":
+        return IdleProbe(True)
+
+
+#: Where :func:`_sender_is_idle` stashes the probe behind its bool so the drain
+#: can name the gate WITHOUT re-probing (a second probe would be a second answer
+#: — and, worse, a second lease acquisition).
+#:
+#: A ContextVar rather than a module global: the probe runs on the drain thread
+#: and, in tests, on arbitrary threads. Single writer per context, no locking,
+#: and correct per-thread reads. Cleared at the top of every per-event iteration
+#: so a stale probe can never be attributed to the next event.
+_LAST_IDLE_PROBE: ContextVar[IdleProbe | None] = ContextVar(
+    "dispatch_delivery_last_idle_probe", default=None
+)
+
+
+@dataclass
+class DrainBounce:
+    """One ``(event_key, reason)`` outcome, with its occurrence count."""
+
+    event_key: str
+    reason: str
+    detail: str
+    count: int
+    first_at: float
+    last_at: float
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "event_key": self.event_key,
+            "reason": self.reason,
+            "detail": self.detail,
+            "count": self.count,
+            "first_at": self.first_at,
+            "last_at": self.last_at,
+        }
+
+
+class _DrainTelemetry:
+    """Bounded, in-memory "what did the drain last do, and why".
+
+    Nothing here accumulates: ≤ :data:`MAX_DRAIN_OUTCOME_ROWS` outcome rows,
+    truncated details, one fixed-size tally. It is written by the drain thread
+    and read by ``harness status`` on the serve lane, so every mutation takes
+    the lock.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.started_at: float | None = None
+        self.pass_count = 0
+        self.last_pass_started_at: float | None = None
+        self.last_pass_finished_at: float | None = None
+        self.last_pass_tally: dict[str, int] = {}
+        self.last_delivery_at: float | None = None
+        self.last_delivery_key: str = ""
+        self.outcomes: "OrderedDict[tuple[str, str], DrainBounce]" = OrderedDict()
+        #: Bumped whenever an outcome row is inserted or updated. The mirror
+        #: writer compares it across a pass to decide whether anything happened
+        #: worth persisting — an unchanged revision means an empty pass.
+        self.outcome_revision = 0
+        self._ownerless_streak: "OrderedDict[str, int]" = OrderedDict()
+        self._ownerless_warned: set[str] = set()
+
+    # -- writers ----------------------------------------------------------
+
+    def reset(self) -> None:
+        """Drop all recorded state. Test seam; never called in production."""
+
+        with self._lock:
+            self.started_at = None
+            self.pass_count = 0
+            self.last_pass_started_at = None
+            self.last_pass_finished_at = None
+            self.last_pass_tally = {}
+            self.last_delivery_at = None
+            self.last_delivery_key = ""
+            self.outcomes.clear()
+            self.outcome_revision = 0
+            self._ownerless_streak.clear()
+            self._ownerless_warned.clear()
+
+    def mark_started(self, when: float | None = None) -> None:
+        with self._lock:
+            self.started_at = float(when if when is not None else time.time())
+
+    def note_pass_start(self, when: float | None = None) -> None:
+        with self._lock:
+            self.pass_count += 1
+            self.last_pass_started_at = float(when if when is not None else time.time())
+
+    def note_pass_finished(self, tally: dict[str, int]) -> None:
+        with self._lock:
+            self.last_pass_finished_at = time.time()
+            self.last_pass_tally = dict(tally or {})
+
+    def record_bounce(
+        self, event_key: str, reason: str, detail: str = "", *, root: str = ""
+    ) -> None:
+        """Record one outcome for one event, and log it at a bounded rate.
+
+        ``delivered`` travels this same call — the field is "last outcomes", not
+        "last failures", so "what did the drain last do" has a complete answer
+        rather than one that only ever shows the bad half.
+        """
+
+        key = (str(event_key or ""), str(reason or ""))
+        now = time.time()
+        text = str(detail or "")[:DRAIN_DETAIL_LIMIT]
+        delivered = key[1] == "delivered"
+        with self._lock:
+            row = self.outcomes.get(key)
+            if row is None:
+                if len(self.outcomes) >= MAX_DRAIN_OUTCOME_ROWS:
+                    self.outcomes.popitem(last=False)
+                self.outcomes[key] = DrainBounce(
+                    event_key=key[0],
+                    reason=key[1],
+                    detail=text,
+                    count=1,
+                    first_at=now,
+                    last_at=now,
+                )
+                count = 1
+            else:
+                row.count += 1
+                row.last_at = now
+                row.detail = text
+                count = row.count
+            self.outcome_revision += 1
+            if delivered:
+                self.last_delivery_at = now
+                self.last_delivery_key = key[0]
+        if count == 1 or count % DRAIN_REPEAT_LOG_EVERY == 0:
+            if delivered:
+                logger.info(
+                    "delivery drain delivered %s root=%s detail=%s",
+                    key[0],
+                    root,
+                    text,
+                )
+            else:
+                logger.info(
+                    "delivery drain bounced %s reason=%s detail=%s root=%s%s",
+                    key[0],
+                    key[1],
+                    text,
+                    root,
+                    f" (x{count})" if count > 1 else "",
+                )
+
+    def note_ownerless_streak(self, root: str, *, ownerless: bool) -> int:
+        """Track consecutive ownerless lease probes for one root.
+
+        Returns the streak length WHEN a WARNING is owed (once per episode),
+        else 0. A probe that succeeds — or that fails for any other sub-reason —
+        ends the episode, so the next stale lock warns again.
+        """
+
+        name = str(root or "")
+        if not name:
+            return 0
+        with self._lock:
+            if not ownerless:
+                self._ownerless_streak.pop(name, None)
+                self._ownerless_warned.discard(name)
+                return 0
+            streak = self._ownerless_streak.pop(name, 0) + 1
+            self._ownerless_streak[name] = streak
+            while len(self._ownerless_streak) > MAX_DRAIN_OUTCOME_ROWS:
+                evicted, _ = self._ownerless_streak.popitem(last=False)
+                self._ownerless_warned.discard(evicted)
+            if streak >= DRAIN_OWNERLESS_WARN_AFTER and name not in self._ownerless_warned:
+                self._ownerless_warned.add(name)
+                return streak
+            return 0
+
+    # -- readers ----------------------------------------------------------
+
+    def snapshot(self) -> dict[str, Any]:
+        """A plain-JSON-able copy of everything above."""
+
+        with self._lock:
+            return {
+                "started_at": self.started_at,
+                "pass_count": self.pass_count,
+                "last_pass_started_at": self.last_pass_started_at,
+                "last_pass_finished_at": self.last_pass_finished_at,
+                "last_pass_tally": dict(self.last_pass_tally),
+                "last_delivery": {
+                    "event_key": self.last_delivery_key,
+                    "at": self.last_delivery_at,
+                },
+                "outcomes": [row.as_dict() for row in self.outcomes.values()],
+            }
+
+
+#: The one telemetry instance. Module-level for the same reason
+#: ``_background_attempts`` is: the queue it accounts for is process-local.
+_telemetry = _DrainTelemetry()
+
+
+def _event_key(evt: dict[str, Any]) -> str:
+    """The queue lane's dedup identity for an event.
+
+    Extracted so the forged turn's ``client_message_id`` and the telemetry row
+    are derived from ONE expression and can never drift into naming the same
+    completion two different ways.
+    """
+
+    marker = str(
+        evt.get("delegation_id") or evt.get("session_id") or uuid.uuid4().hex
+    )[:40]
+    return f"{evt.get('type', 'completion')}:{marker}"
+
+
+def _owns_event_with_accounting(evt: dict[str, Any]) -> bool:
+    """The queue's ownership filter — same boolean, now visible when it says no.
+
+    DECISION [D]: byte-identical to the ``lambda evt:
+    _chat_root_of_completion(evt) is not None`` it replaces. Upstream's
+    ``drain_notifications`` re-queues a non-owned event internally, where the
+    caller cannot see it, so this closure — which IS ours — is the only place
+    ``not_owned`` can be observed without editing an upstream file.
+
+    ACCOUNTING [A]: the ``record_bounce`` line, and nothing else.
+    """
+
+    root = _chat_root_of_completion(evt)
+    if root is None:
+        try:  # A — accounting must never be able to change the answer below
+            _telemetry.record_bounce(
+                _event_key(evt),
+                "not_owned",
+                f"session_key={str(evt.get('session_key') or '')!r}",
+            )
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("drain ownership accounting failed", exc_info=True)
+        return False
+    return True
+
+
+def _record_sender_busy(event_key: str, root: str) -> None:
+    """Name the gate ``_sender_is_idle`` just closed. ACCOUNTING ONLY.
+
+    Reads the probe the DECISION stashed rather than probing again. When a test
+    has monkeypatched ``_sender_is_idle`` — ``tests/agent_runtime/
+    test_dispatch_delivery.py`` does, BY NAME, and ~11 tests depend on that
+    override biting — no probe ran for this call and the stash is None. That is
+    recorded as ``sender_busy:unprobed``: the installed decision is honored
+    bit-for-bit and accounting simply admits it could not observe it, rather
+    than re-routing the decision through the probe and quietly making every one
+    of those overrides vacuous.
+    """
+
+    probe = _LAST_IDLE_PROBE.get()
+    if probe is None:
+        _telemetry.record_bounce(
+            event_key,
+            "sender_busy:unprobed",
+            "the idle decision was overridden, so no probe ran",
+            root=root,
+        )
+        return
+    sub = probe.busy_sub or "unknown"
+    _telemetry.record_bounce(event_key, f"sender_busy:{sub}", probe.detail, root=root)
+    streak = _telemetry.note_ownerless_streak(root, ownerless=sub == "lease_busy_ownerless")
+    if streak:
+        logger.warning(
+            "persona chat root lease for %s is LOCKED with no owner for %d consecutive"
+            " probes — stale byte-range lock suspected (see the 2026-08-11"
+            " delivery-stall investigation)",
+            root,
+            streak,
+        )
+
+
+def _drain_state_path(store_root: Path | None = None) -> Path | None:
+    """The mirror's path, or None when the runtime root cannot be resolved.
+
+    Resolved ONCE at drain start (see :func:`start_delivery_drain`) and captured
+    by the loop closure — never per pass. ``persona_profile_context`` flips
+    ``HERMES_HOME`` process-globally for the duration of a persona turn in THIS
+    process, so an ambient mid-pass resolution could land the mirror in whatever
+    profile happened to be running. (``paths.store_root()`` is additionally
+    pinned across those flips via ``HERMES_AGENT_RUNTIME_ROOT``; this is the
+    belt to that pair of braces, and it is the mandatory half.)
+    """
+
+    try:
+        root = Path(store_root) if store_root is not None else _paths_store_root()
+        return root / DRAIN_STATE_FILENAME
+    except Exception:
+        return None
+
+
+def _paths_store_root() -> Path:
+    from . import paths
+
+    return paths.store_root()
+
+
+def _write_drain_state(path: Path | None, *, live: bool) -> bool:
+    """Atomically mirror the telemetry to *path*. Never raises.
+
+    Accounting must not be able to kill the drain, so a failure here is a debug
+    line and nothing else — the same contract serve's own best-effort wrappers
+    hold.
+    """
+
+    if path is None:
+        return False
+    try:
+        payload = _telemetry.snapshot()
+        payload["live"] = bool(live)
+        payload["pid"] = os.getpid()
+        payload["written_at"] = time.time()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+        os.replace(str(tmp), str(path))
+        return True
+    except Exception:
+        logger.debug("delivery drain state mirror write failed", exc_info=True)
+        return False
+
+
+def read_delivery_drain_state(store_root: Path | None = None) -> dict[str, Any] | None:
+    """The last mirrored drain state, or None when absent/unreadable/corrupt.
+
+    The cross-process channel: a freshly spawned ``harness status --json`` has
+    no drain of its own, so this file is the only place the serve process's
+    answer survives. Judge staleness by ``written_at`` — older than ~90s and the
+    writer is not the live drain any more.
+    """
+
+    path = _drain_state_path(store_root)
+    if path is None:
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def delivery_drain_status() -> dict[str, Any]:
+    """What the delivery drain last did and why — for ``harness status --json``.
+
+    Three sources, in order: this process's own live telemetry, the durable
+    mirror left by whichever process runs the drain, or nothing at all. The
+    ``live`` flag is this process's :func:`delivery_drain_is_live` when the
+    answer is in-process; from the mirror it is the WRITER's last claim, which a
+    reader tempers with ``written_at``.
+    """
+
+    try:
+        if delivery_drain_is_live():
+            payload = _telemetry.snapshot()
+            payload["live"] = True
+            payload["source"] = "in_process"
+            payload["pid"] = os.getpid()
+            payload["written_at"] = None
+            return payload
+        mirror = read_delivery_drain_state()
+        if isinstance(mirror, dict):
+            payload = dict(mirror)
+            payload["source"] = "state_file"
+            payload["live"] = bool(payload.get("live"))
+            return payload
+    except Exception:
+        logger.debug("delivery drain status unavailable", exc_info=True)
+    return {"live": False, "source": "absent"}
 
 
 def delivery_drain_is_live() -> bool:
@@ -294,8 +743,8 @@ def format_dispatch_delivery(row: dict[str, Any]) -> str:
 # --------------------------------------------------------------------------
 
 
-def _sender_is_idle(root_session_id: str) -> bool:
-    """True when the sender's chat root has no turn in flight.
+def _probe_sender_idle(root_session_id: str) -> IdleProbe:
+    """Whether the sender's chat root has a turn in flight, AND why not.
 
     Two independent signals, and BOTH are needed. The lease answers "is a turn
     holding this root right now" — but only while its holder is alive, so a
@@ -303,6 +752,24 @@ def _sender_is_idle(root_session_id: str) -> bool:
     it in flight. The journal answers "does the record say a turn is running" —
     but it is written by whichever process ran the turn and lags a live
     acquisition. Trusting either one alone delivers into a thread that is mid-turn.
+
+    Pure: it reads the same two sources in the same order and takes the same
+    zero-timeout, release-immediately lease probe as before — no extra lock
+    traffic. What is new is the typed reason on each way out, because four
+    distinct causes collapsing into one silent ``False`` is exactly why the
+    2026-08-11 stall could not be classified. The busy sub-reasons:
+
+    * ``journal_inflight`` — a turn record says a turn is running.
+    * ``journal_unreadable`` — the journal store itself could not be read
+      (fail-closed: a delayed delivery costs nothing, a spliced one corrupts a
+      conversation).
+    * ``lease_busy_owned`` — the lease is held and the owner file names its
+      holder. Normal contention.
+    * ``lease_busy_ownerless`` — the lease is held and NO owner file is
+      readable. Release order is unlink-owner-then-unlock, so one sample can be
+      a releasing holder caught mid-window; REPEATS across consecutive passes
+      are the stale-byte-range-lock fingerprint.
+    * ``lease_probe_error`` — anything else the probe raised.
     """
 
     from .mission_chat_turns import INFLIGHT_TURN_STATES, mission_chat_turn_records
@@ -310,13 +777,18 @@ def _sender_is_idle(root_session_id: str) -> bool:
 
     try:
         records = mission_chat_turn_records(session_id=root_session_id)
-    except Exception:
+    except Exception as exc:
         # Cannot read the journal ⇒ cannot prove idle. Fail closed: a delayed
         # delivery costs nothing, a spliced one corrupts a conversation.
-        return False
+        return IdleProbe(False, "journal_unreadable", repr(exc))
     for record in records or []:
-        if str((record or {}).get("state") or "") in INFLIGHT_TURN_STATES:
-            return False
+        state = str((record or {}).get("state") or "")
+        if state in INFLIGHT_TURN_STATES:
+            return IdleProbe(
+                False,
+                "journal_inflight",
+                f"client_message_id={(record or {}).get('client_message_id')!r} state={state}",
+            )
 
     try:
         # Probe ONLY: acquire with no wait and release immediately. Holding it
@@ -326,11 +798,34 @@ def _sender_is_idle(root_session_id: str) -> bool:
             root_session_id, owner_id="dispatch-delivery-probe", observer_kind="serve"
         ):
             pass
-    except PersonaChatBusyError:
-        return False
-    except Exception:
-        return False
-    return True
+    except PersonaChatBusyError as exc:
+        # `owner` is populated from `<stem>.owner.json` by the lease itself; an
+        # empty payload means the lock is held with no readable owner.
+        owner = dict(getattr(exc, "owner", None) or {})
+        if owner:
+            return IdleProbe(False, "lease_busy_owned", f"owner={owner}")
+        return IdleProbe(
+            False, "lease_busy_ownerless", "lease held with no readable owner file"
+        )
+    except Exception as exc:
+        return IdleProbe(False, "lease_probe_error", repr(exc))
+    return IdleProbe.idle()
+
+
+def _sender_is_idle(root_session_id: str) -> bool:
+    """True when the sender's chat root has no turn in flight.
+
+    THE DECISION, and the only function the drain's decision consults. It keeps
+    its name, signature and semantics deliberately: the drain's tests override
+    this exact attribute, and routing the decision through anything else would
+    silently stop those overrides from biting while the suite still printed
+    green. Accounting reads the stash below AFTER the fact; it never replaces
+    this call.
+    """
+
+    probe = _probe_sender_idle(root_session_id)
+    _LAST_IDLE_PROBE.set(probe)  # A — accounting stash; see _record_sender_busy
+    return probe.is_idle  # D — unchanged meaning, unchanged truth table
 
 
 def _sender_persona(root_session_id: str) -> tuple[str, str] | None:
@@ -454,6 +949,9 @@ def drain_once(*, forge: Callable | None = None, limit: int | None = None) -> di
         if tally["delivered"] >= budget:
             break
         tally["considered"] += 1
+        # A — a probe stashed for a PREVIOUS row must never be attributed to
+        # this one. Cleared per event, never carried across.
+        _LAST_IDLE_PROBE.set(None)
         dispatch_id = str(row.get("dispatch_id") or "")
         root = str(row.get("sender_session_id") or "")
         if not dispatch_id:
@@ -471,20 +969,30 @@ def drain_once(*, forge: Callable | None = None, limit: int | None = None) -> di
             tally["dropped"] += 1
             continue
 
+        # The dispatch lane's event identity, so a bounced dispatch and a
+        # bounced queue completion read out of the same vocabulary.
+        event_key = f"dispatch:{dispatch_id}"
         if not _sender_is_idle(root):
             tally["busy"] += 1
+            _record_sender_busy(event_key, root)  # A
             continue
+        _telemetry.note_ownerless_streak(root, ownerless=False)  # A — episode over
 
         claim_id = f"serve-{os.getpid()}-{uuid.uuid4().hex[:8]}"
         try:
             if not dispatch_store.claim_delivery(dispatch_id, claim_id):
+                _telemetry.record_bounce(  # A
+                    event_key, "unclaimed", "store refused the claim", root=root
+                )
                 continue
-        except Exception:
+        except Exception as exc:
             logger.debug("dispatch %s claim failed", dispatch_id, exc_info=True)
+            _telemetry.record_bounce(event_key, "unclaimed", repr(exc), root=root)  # A
             continue
 
         persona_id, instance_id = owner
         payload: dict[str, Any] | None = None
+        forge_error = ""  # A
         try:
             ok, payload = forge(
                 root_session_id=root,
@@ -496,24 +1004,34 @@ def drain_once(*, forge: Callable | None = None, limit: int | None = None) -> di
                 notify_operator=bool(row.get("notify_operator")),
                 state=str(row.get("state") or ""),
             )
-        except Exception:
+        except Exception as exc:
             logger.warning("dispatch %s delivery turn failed", dispatch_id, exc_info=True)
             ok = False
+            forge_error = repr(exc)  # A
         if ok:
             dispatch_store.mark_delivered(dispatch_id)
             tally["delivered"] += 1
+            _telemetry.record_bounce(event_key, "delivered", "", root=root)  # A
             continue
         # The sender took its lease between the idle probe and the forge. That
         # is a RACE WITH A LIVE OPERATOR, not a failure — the completion is
         # perfectly deliverable and will be, moments later. Refund the attempt
         # the claim burned: without this, eight unlucky races walk a good
         # completion to a terminal `dropped` having never once failed.
-        busy = str((payload or {}).get("error_kind") or "") == "chat_busy"
+        error_kind = str((payload or {}).get("error_kind") or "")
+        busy = error_kind == "chat_busy"
         dispatch_store.release_delivery_claim(dispatch_id, refund_attempt=busy)
         if busy:
             tally["busy"] += 1
+            _telemetry.record_bounce(event_key, "forge_busy", "", root=root)  # A
         else:
             tally["failed"] += 1
+            _telemetry.record_bounce(  # A
+                event_key,
+                f"forge_failed:{error_kind or ('exception' if forge_error else 'unknown')}",
+                forge_error,
+                root=root,
+            )
     return tally
 
 
@@ -713,37 +1231,60 @@ def drain_background_completions(*, forge: Callable | None = None) -> dict[str, 
     except Exception:
         return tally
 
+    _telemetry.note_pass_start()  # A — a pass with no finish is a HUNG pass
     try:
         pairs = process_registry.drain_notifications(
-            owns_event=lambda evt: _chat_root_of_completion(evt) is not None,
+            # D — the boolean is byte-identical to the `lambda evt:
+            # _chat_root_of_completion(evt) is not None` this replaces. The
+            # named function exists so `not_owned` is visible: upstream
+            # re-queues a rejected event INSIDE drain_notifications, where the
+            # caller can never see it, and this closure is ours.
+            owns_event=_owns_event_with_accounting,
             skip_poll_observed=False,
         )
     except Exception:
         logger.debug("background completion drain failed", exc_info=True)
+        _telemetry.note_pass_finished(tally)  # A
         return tally
 
     for evt, text in pairs:
+        # A — a probe stashed for a PREVIOUS event must never be attributed to
+        # this one. Cleared per event, never carried across.
+        _LAST_IDLE_PROBE.set(None)
         tally["considered"] += 1
         root = _chat_root_of_completion(evt)
         owner = _sender_persona(root) if root else None
+        # The queue has no durable per-event id, so the dedup key is derived
+        # from the event's own stable identity (the process/delegation id plus
+        # its type) rather than minted per attempt. Derived ONCE per event and
+        # reused by both the forge's client_message_id below and the accounting
+        # rows, so the two can never name the same completion differently.
+        key = _event_key(evt)
         if root is None or owner is None or not text:
             # Ownership was proven at drain time; if it cannot be re-proven now
             # the event goes BACK on the queue rather than being dropped.
             process_registry.completion_queue.put(evt)
             tally["requeued"] += 1
+            # A — name WHICH operand failed, tested in the order the `or`
+            # expression above already evaluates them.
+            if root is None:
+                reason = "no_root"
+                detail = f"session_key={str(evt.get('session_key') or '')!r}"
+            elif owner is None:
+                reason = "owner_unresolved"
+                detail = f"root={root}"
+            else:
+                reason = "empty_text"
+                detail = f"root={root}"
+            _telemetry.record_bounce(key, reason, detail, root=root or "")
             continue
         if not _sender_is_idle(root):
             process_registry.completion_queue.put(evt)
             tally["requeued"] += 1
+            _record_sender_busy(key, root)  # A
             continue
+        _telemetry.note_ownerless_streak(root, ownerless=False)  # A — episode over
         persona_id, instance_id = owner
-        # The queue has no durable per-event id, so the dedup key is derived
-        # from the event's own stable identity (the process/delegation id plus
-        # its type) rather than minted per attempt.
-        marker = str(
-            evt.get("delegation_id") or evt.get("session_id") or uuid.uuid4().hex
-        )[:40]
-        key = f"{evt.get('type', 'completion')}:{marker}"
         # Taken AFTER the idle probe: a claim burnt on a busy sender would spend
         # a durable attempt on a race with a live operator, which is the exact
         # over-counting the dispatch lane's `refund_attempt` had to undo.
@@ -754,6 +1295,12 @@ def drain_background_completions(*, forge: Callable | None = None) -> dict[str, 
             # somebody else owns is how a queue silently starves the events
             # behind it.
             tally["unclaimed"] += 1
+            _telemetry.record_bounce(  # A
+                key,
+                "unclaimed",
+                "durable row held by another consumer, or already settled",
+                root=root,
+            )
             continue
         durable = bool(claim)
         if (
@@ -776,7 +1323,14 @@ def drain_background_completions(*, forge: Callable | None = None) -> dict[str, 
             )
             _background_attempts.pop(key, None)
             tally["abandoned"] += 1
+            _telemetry.record_bounce(  # A
+                key,
+                "abandoned",
+                f"{MAX_BACKGROUND_DELIVERY_ATTEMPTS} failed deliveries, dropped for good",
+                root=root,
+            )
             continue
+        forge_error = ""  # A
         try:
             ok, payload = forge(
                 root_session_id=root,
@@ -785,9 +1339,10 @@ def drain_background_completions(*, forge: Callable | None = None) -> dict[str, 
                 message=text,
                 client_message_id=f"bg-completion-{key}",
             )
-        except Exception:
+        except Exception as exc:
             logger.warning("background completion delivery failed", exc_info=True)
             ok, payload = False, None
+            forge_error = repr(exc)  # A
         if ok:
             # Acknowledge on the row that owns the question. Without this the
             # next boot's restore sweep re-queues a completion this process
@@ -795,22 +1350,43 @@ def drain_background_completions(*, forge: Callable | None = None) -> dict[str, 
             _settle_durable_completion(evt, claim, delivered=True)
             _background_attempts.pop(key, None)
             tally["delivered"] += 1
+            _telemetry.record_bounce(  # A
+                key,
+                "delivered",
+                f"producer_started_at={evt.get('started_at')!r}",
+                root=root,
+            )
             continue
         _settle_durable_completion(evt, claim, delivered=False)
         process_registry.completion_queue.put(evt)
         # Same rule the dispatch lane follows: losing a race with a live
         # operator is not a failure, so a `chat_busy` refusal does not count
         # against the cap.
-        if str((payload or {}).get("error_kind") or "") == "chat_busy":
+        error_kind = str((payload or {}).get("error_kind") or "")
+        if error_kind == "chat_busy":
             tally["requeued"] += 1
+            _telemetry.record_bounce(key, "forge_busy", "", root=root)  # A
         elif durable:
             # The durable row counted this attempt at claim time; counting it
             # here as well is the second ledger, so the tally records the
             # failure and nothing else does.
             tally["failed"] += 1
+            _telemetry.record_bounce(  # A
+                key,
+                f"forge_failed:{error_kind or ('exception' if forge_error else 'unknown')}",
+                forge_error,
+                root=root,
+            )
         else:
             _background_attempts[key] = _background_attempts.get(key, 0) + 1
             tally["failed"] += 1
+            _telemetry.record_bounce(  # A
+                key,
+                f"forge_failed:{error_kind or ('exception' if forge_error else 'unknown')}",
+                forge_error,
+                root=root,
+            )
+    _telemetry.note_pass_finished(tally)  # A
     return tally
 
 
@@ -826,11 +1402,20 @@ def start_delivery_drain(
     — which is the same guarantee the restore-on-boot sweep provides.
     """
 
+    # A — resolved ONCE, here, and captured by the loop closure below. Never
+    # per pass: a persona turn flips HERMES_HOME process-globally while it runs
+    # in THIS process, and an ambient mid-pass resolution would scatter the
+    # mirror across whichever profile happened to be mid-turn.
+    mirror_path = _drain_state_path()
+    _telemetry.mark_started()  # A
+
     def _loop() -> None:
         global _drain_thread
         next_sweep = 0.0
+        mirror_written_at = 0.0  # A — 0.0 makes the first pass write the file
         try:
             while not stop_event.wait(interval_seconds):
+                revision_before = _telemetry.outcome_revision  # A
                 try:
                     drain_once()
                 except Exception:  # pragma: no cover - a drain must never die
@@ -846,7 +1431,21 @@ def start_delivery_drain(
                 if now >= next_sweep:
                     next_sweep = now + ORPHAN_SWEEP_INTERVAL_SECONDS
                     sweep_orphaned_dispatches()
+                # A — the cross-process mirror. Written when this pass changed
+                # an outcome row, or once a heartbeat has elapsed. An idle serve
+                # therefore touches the file once a minute and no more; a pass
+                # that did nothing writes nothing.
+                wall = time.time()
+                if (
+                    _telemetry.outcome_revision != revision_before
+                    or (wall - mirror_written_at) >= DRAIN_MIRROR_HEARTBEAT_SECONDS
+                ):
+                    if _write_drain_state(mirror_path, live=True):
+                        mirror_written_at = wall
         finally:
+            # A — a dead drain must be legible from the file too, or a reader
+            # cannot tell "no consumer" from "the mirror is simply old".
+            _write_drain_state(mirror_path, live=False)
             # The capability binding reads this. A drain that died must stop the
             # runtime promising deliveries it can no longer make — the same
             # honesty rule that made the binding conditional in the first place.

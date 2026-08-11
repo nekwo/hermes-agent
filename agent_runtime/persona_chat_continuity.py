@@ -857,15 +857,34 @@ def persona_chat_root_lease(
         os.replace(str(tmp), str(owner_path))
         yield owner
     finally:
+        # Control flow is UNCHANGED: both arms still swallow, the release order
+        # is still unlink-owner → unlock → close, and ``os.close(fd)`` is still
+        # always reached. What is new is that neither failure is silent any
+        # more. This is the producer-side half of the stale-lock discriminator:
+        # a WARNING here, correlated by root and time with the delivery drain's
+        # ``lease_busy_ownerless``, turns a hypothesis into a diagnosis.
         if acquired:
             try:
                 owner_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.warning(
+                    "persona chat root lease owner file for %s could not be removed"
+                    " (%s) — release continues",
+                    root,
+                    exc,
+                    exc_info=True,
+                )
             try:
                 _unlock(fd)
-            except OSError:
-                pass
+            except OSError as exc:
+                logger.warning(
+                    "persona chat root lease byte-unlock FAILED for %s (%s) — the lock"
+                    " will be released by handle close, whose timing Windows does not"
+                    " guarantee; if the delivery drain then reports"
+                    " lease_busy_ownerless, this line is the cause",
+                    root,
+                    exc,
+                )
         os.close(fd)
 
 
