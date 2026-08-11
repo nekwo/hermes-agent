@@ -122,6 +122,42 @@ def test_09_different_root_leases_do_not_contend(isolate_agent_runtime_root):
             assert True
 
 
+def test_09a_a_failed_byte_unlock_is_reported_and_release_still_works(
+    isolate_agent_runtime_root, monkeypatch, caplog
+):
+    """A swallowed unlock failure is the producer side of the stale-lock class.
+
+    The release `finally` may never raise and may never skip `os.close(fd)` —
+    that part is unchanged and is asserted below by re-acquiring the same root.
+    What changed is that the failure is no longer a bare `pass`: without a line
+    naming the root, the delivery drain's `lease_busy_ownerless` on the consumer
+    side has nothing to correlate against and stays a hypothesis forever.
+    """
+
+    import logging
+
+    from agent_runtime import persona_chat_continuity
+
+    monkeypatch.setattr(
+        persona_chat_continuity,
+        "_unlock",
+        lambda fd: (_ for _ in ()).throw(OSError("unlock refused")),
+    )
+
+    with caplog.at_level(logging.WARNING, logger=persona_chat_continuity.__name__):
+        with persona_chat_root_lease("root_unlock_fail"):
+            pass
+
+    warnings = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
+    assert any("root_unlock_fail" in message and "unlock" in message.lower() for message in warnings), warnings
+
+    # Behaviour unchanged: the handle close still released the lock, so the
+    # very next acquisition of the same root succeeds.
+    monkeypatch.undo()
+    with persona_chat_root_lease("root_unlock_fail"):
+        assert True
+
+
 def test_10_journal_happy_path_has_six_state_subset(isolate_agent_runtime_root):
     for state in ("pending", "executing", "native_committed", "projected"):
         assert transition_mission_chat_turn(session_id="root", client_message_id="client", turn_id="turn", state=state) is MissionChatTurnPersistOutcome.PERSISTED
