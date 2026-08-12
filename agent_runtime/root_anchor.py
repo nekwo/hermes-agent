@@ -168,9 +168,15 @@ def _publish(
     parsed: Any = None
     if config_path.exists():
         try:
-            original_text = config_path.read_text(encoding="utf-8")
+            # read_bytes + decode, NEVER read_text: text mode translates the
+            # operator's CRLF endings to LF on read, so a later write would
+            # silently flip the whole file's line endings (the repo's standing
+            # EOL trap, read-side variant — caught by the CRLF test).
+            original_text = config_path.read_bytes().decode("utf-8")
         except OSError:
             return report(RootAnchorOutcome.UNWRITABLE, "config_unreadable")
+        except UnicodeDecodeError:
+            return report(RootAnchorOutcome.UNWRITABLE, "config_not_utf8")
         try:
             parsed = yaml.safe_load(original_text)
         except yaml.YAMLError:
@@ -228,15 +234,20 @@ def _composed_text(original_text: str, base: dict, root: Path) -> str | None:
     """The new config text, or ``None`` when no unambiguous edit exists."""
 
     value_line = f"store_root: {_yaml_single_quoted(str(root))}"
+    newline = "\r\n" if "\r\n" in original_text else "\n"
     if "agent_runtime" not in base:
         # Fresh file, comment-only file, or a mapping without the block:
-        # append a whole block. The operator's bytes are untouched above it.
+        # append a whole block. The operator's bytes are untouched above it,
+        # and the block uses the file's own line endings.
         prefix = original_text
         if prefix and not prefix.endswith("\n"):
-            prefix += "\n"
+            prefix += newline
         if prefix:
-            prefix += "\n"
-        return f"{prefix}{_ANCHOR_COMMENT}agent_runtime:\n  {value_line}\n"
+            prefix += newline
+        block_text = (_ANCHOR_COMMENT + f"agent_runtime:\n  {value_line}\n").replace(
+            "\n", newline
+        )
+        return prefix + block_text
 
     # An `agent_runtime:` block mapping exists without `store_root`: insert one
     # child line directly under its header, at the block's own child indent.
