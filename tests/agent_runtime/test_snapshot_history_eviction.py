@@ -401,15 +401,25 @@ def test_persona_chat_history_hides_runtime_envelope_but_keeps_turn_reference():
     }
 
 
-def test_persona_chat_history_fetch_empty_without_sessiondb():
+def test_persona_chat_history_fetch_refuses_an_ambient_self_resolve(monkeypatch):
+    """INVERTED 2026-08-12. This pin used to assert the retired behavior: a
+    self-resolved fetch under the sandbox (no head named, no pointer, no
+    instance record) opened whichever ``state.db`` ambient resolution produced
+    and returned ``ok: true, count: 0`` — the silent-empty envelope the
+    2026-08-12 incident could not distinguish from a lost transcript. The read
+    now REFUSES with a typed reason and says which scope it refused."""
+
     from agent_runtime.persona_chat_history import persona_chat_session_messages
 
+    monkeypatch.delenv("HERMES_HEAD_HOME", raising=False)
+    monkeypatch.delenv("HERMES_ALLOW_AMBIENT_CHAT_READS", raising=False)
     data = persona_chat_session_messages(session_id="persona_chat_x", limit=40, session_db=None)
-    assert data["ok"] is True
-    assert data["count"] == 0
-    assert data["total_count"] == 0
-    assert data["has_more"] is False
-    assert data["messages"] == []
+    assert data["ok"] is False
+    assert data["error_kind"] == "chat_scope_unresolved"
+    assert data["chat_scope"]["source"] == "ambient_home"
+    # None of the success vocabulary may appear on a read that did not happen.
+    assert "count" not in data
+    assert "messages" not in data
 
 
 def _extract_rows(data):

@@ -1,6 +1,7 @@
 """Agent-to-agent chat relay tool (tools/agent_chat_tool.py)."""
 
 import json
+import os
 
 import pytest
 
@@ -682,7 +683,15 @@ def test_threads_shows_the_thread_with_a_count_after_a_send(isolate_agent_runtim
     assert row["message_count"] == 4  # 2 operator + 2 agent
 
 
-def test_open_returns_the_bounded_tail_and_canonicalizes_handle_input(isolate_agent_runtime_root):
+def test_open_returns_the_bounded_tail_and_canonicalizes_handle_input(
+    isolate_agent_runtime_root, monkeypatch
+):
+    # Explicit head: this test's subject is thread ROUTING, not chat scope. A
+    # headless sandbox is the AMBIENT posture, and since 2026-08-12 a chat read
+    # under it refuses (chat_scope_unresolved) instead of answering from a
+    # guessed state.db — the production agent-tool lane always runs under the
+    # serve/CLI environment (explicit head, or the anchored machine's pointer).
+    monkeypatch.setenv("HERMES_HEAD_HOME", os.environ["HERMES_HOME"])
     session_id = _seed_persona_chat("qa", [("From Neko: hi", "QA here — hi."), ("more", "ack")])
 
     # Handle input canonicalizes to the persona (the resolution send already does).
@@ -800,7 +809,12 @@ def test_threads_shows_canonical_when_no_placement_shadows_it(isolate_agent_runt
     assert by_handle["personainst_qa"]["session_id"] == primary_session
 
 
-def test_open_bare_persona_routes_to_the_in_scope_placement(isolate_agent_runtime_root):
+def test_open_bare_persona_routes_to_the_in_scope_placement(
+    isolate_agent_runtime_root, monkeypatch
+):
+    # Explicit head for the same reason as the bounded-tail test above: the
+    # subject is placement routing; a headless read now refuses by design.
+    monkeypatch.setenv("HERMES_HEAD_HOME", os.environ["HERMES_HOME"])
     from agent_runtime.persona_assignments import PersonaInstanceStore
 
     sibling = PersonaInstanceStore().add_instance(
