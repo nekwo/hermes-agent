@@ -925,3 +925,75 @@ def test_the_supervisors_observed_outcome_beats_the_sweeps_guess(store_home, mon
     assert row["state"] == "completed"
     assert row["result"]["reply"] == "3 failures"
     assert row["delivery_state"] == DELIVERY_PENDING
+
+
+def test_a_child_that_answered_with_nothing_records_the_silence(store_home, monkeypatch):
+    """`ok` + an empty reply is a SILENT turn, and the row is the only witness.
+
+    This supervisor is the last process holding the child's payload. If the
+    verdict is not recorded here it is gone, and the sender reads the same
+    blank for "they answered with nothing" as for "their answer never made it
+    back" — one of which is worth re-dispatching and the other is not.
+    """
+
+    dispatch_id = _armed_dispatch()
+    proc = _FakeProc(
+        stdout=json.dumps(
+            {
+                "ok": True,
+                "reply": "",
+                "session_id": "s-dev",
+                "turn_visibility": {
+                    "state": "silent",
+                    "reason": "truncated",
+                    "finish_reason": "incomplete",
+                    "reply_chars": 0,
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(agent_chat_dispatch.subprocess, "Popen", lambda *a, **k: proc)
+    monkeypatch.setattr(agent_chat_dispatch, "_child_identity", lambda pid: 777)
+
+    agent_chat_dispatch._run_dispatch(dispatch_id, _spec())
+
+    row = get_dispatch(dispatch_id)
+    # Still COMPLETED: the turn ran. Silence is not an error.
+    assert row["state"] == "completed"
+    assert row["result"]["visibility"]["state"] == "silent"
+    assert row["result"]["visibility"]["finish_reason"] == "incomplete"
+
+
+def test_a_child_from_an_older_runtime_still_gets_a_verdict(store_home, monkeypatch):
+    """No block on the payload -> classified from the reply it did send.
+
+    A child process that predates the typed block is exactly the case a deploy
+    produces, and it must not degrade to "unknown" while the evidence is right
+    there in the reply.
+    """
+
+    dispatch_id = _armed_dispatch()
+    proc = _FakeProc(stdout=json.dumps({"ok": True, "reply": "3 failures", "session_id": "s"}))
+    monkeypatch.setattr(agent_chat_dispatch.subprocess, "Popen", lambda *a, **k: proc)
+    monkeypatch.setattr(agent_chat_dispatch, "_child_identity", lambda pid: 777)
+
+    agent_chat_dispatch._run_dispatch(dispatch_id, _spec())
+
+    assert get_dispatch(dispatch_id)["result"]["visibility"]["state"] == "visible"
+
+
+def test_a_child_that_printed_no_payload_records_no_verdict(store_home, monkeypatch):
+    """Absent stays absent: with no payload there is nothing to have a verdict about.
+
+    Writing one here would be the manufactured-from-nothing failure this whole
+    lane exists to retire — and `unknown` on the row would read as a claim
+    rather than as the silence of a process that never spoke.
+    """
+
+    dispatch_id = _armed_dispatch()
+    proc = _FakeProc(stdout="", stderr="Traceback: boom\n", returncode=1)
+    monkeypatch.setattr(agent_chat_dispatch.subprocess, "Popen", lambda *a, **k: proc)
+
+    agent_chat_dispatch._run_dispatch(dispatch_id, _spec())
+
+    assert "visibility" not in get_dispatch(dispatch_id)["result"]

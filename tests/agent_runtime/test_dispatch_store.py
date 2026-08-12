@@ -796,3 +796,26 @@ def test_the_two_guards_hold_while_INTERLEAVED(store_home, monkeypatch):
         assert row["delivery_state"] == DELIVERY_DELIVERED, (
             f"{drained}: a delivered row was re-armed for a second delivery"
         )
+
+
+def test_a_recorded_visibility_verdict_rides_the_result_blob(store_home):
+    """No schema to migrate: the verdict travels in the JSON the row already has."""
+
+    dispatch_id = _dispatch()
+    record_completion(
+        dispatch_id,
+        state=STATE_COMPLETED,
+        reply="",
+        visibility={"state": "silent", "reason": "empty", "finish_reason": "", "reply_chars": 0},
+    )
+
+    assert get_dispatch(dispatch_id)["result"]["visibility"]["state"] == "silent"
+
+
+def test_a_completion_without_a_verdict_carries_no_key(store_home):
+    """Absent stays absent — an older writer's row must not grow a claim."""
+
+    dispatch_id = _dispatch()
+    record_completion(dispatch_id, state=STATE_COMPLETED, reply="done")
+
+    assert "visibility" not in get_dispatch(dispatch_id)["result"]

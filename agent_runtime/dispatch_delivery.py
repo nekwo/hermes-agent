@@ -810,7 +810,25 @@ def format_dispatch_delivery(row: dict[str, Any]) -> str:
         lines.append("--- ERROR ---")
         lines.append(error[:600])
     if not reply and not error:
-        lines.append("They returned no reply text. Read the thread above, or re-dispatch.")
+        # The generic line was the only one available before the supervisor
+        # recorded WHY, and it left the sender to guess between two very
+        # different situations: a teammate who answered with nothing, and an
+        # answer that never made it back. Re-dispatching is right for one of
+        # them and pointless for the other, so the block says which when it
+        # knows and keeps the honest shrug when it does not.
+        from .turn_visibility import TurnVisibility
+
+        visibility = TurnVisibility.from_dict((result or {}).get("visibility"))
+        if visibility.is_silent:
+            lines.append(f"No reply text — {visibility.describe()}.")
+            lines.append(
+                "Their turn ENDED IN SILENCE; the answer was not lost in transit, so "
+                "re-dispatching runs the same turn again. Read the thread above."
+            )
+        else:
+            lines.append(
+                "They returned no reply text. Read the thread above, or re-dispatch."
+            )
     if row.get("notify_operator"):
         lines.append("")
         lines.append(

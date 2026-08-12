@@ -455,6 +455,7 @@ def record_completion(
     error: str = "",
     target_session_id: str = "",
     total_tokens: Any = None,
+    visibility: dict[str, Any] | None = None,
     only_if_running: bool = False,
 ) -> bool:
     """Record the target turn's outcome and arm the row for delivery.
@@ -471,6 +472,14 @@ def record_completion(
     it; the supervisor that actually watched the turn does not. That ordering is
     the point: the supervisor's observed outcome must always beat the sweep's
     inference, never the other way round.
+
+    ``visibility`` is the target turn's typed ``TurnVisibility`` block
+    (``agent_runtime.turn_visibility``), passed only by the writer that HELD the
+    child's payload — nobody else can know it. It rides the result blob, so
+    absent stays absent and there is no schema to migrate: a row written by an
+    older process simply carries no block, and the delivery formatter falls back
+    to the generic wording. Without it, "they answered with nothing" and "their
+    answer never reached us" are the same empty string to the sender.
     """
 
     settled = str(state or STATE_UNKNOWN)
@@ -484,6 +493,8 @@ def record_completion(
         "target_session_id": _text(target_session_id, 240),
         "total_tokens": total_tokens,
     }
+    if isinstance(visibility, dict) and visibility:
+        result["visibility"] = dict(visibility)
     guard = " AND state=?" if only_if_running else ""
     params: list[Any] = [
         settled,

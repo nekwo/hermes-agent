@@ -686,6 +686,14 @@ def _run_dispatch_guarded(dispatch_id: str, spec: dict[str, Any]) -> None:
         return
 
     ok = bool(payload.get("ok")) and returncode == 0
+    # This process is the LAST one holding the child's payload — the row is all
+    # the sender ever sees — so whether that turn produced anything visible has
+    # to be recorded here or it is gone. `ok` does not answer it: a turn whose
+    # model returned no content comes back `ok` with an empty reply, and the
+    # sender then reads the same blank as a reply that never made it out.
+    # Read, never re-derived: `agent_runtime.turn_visibility` owns the verdict.
+    from agent_runtime.turn_visibility import TurnVisibility
+
     dispatch_store.record_completion(
         dispatch_id,
         state=dispatch_store.STATE_COMPLETED if ok else dispatch_store.STATE_ERROR,
@@ -693,6 +701,7 @@ def _run_dispatch_guarded(dispatch_id: str, spec: dict[str, Any]) -> None:
         error="" if ok else _detached_error_text(payload),
         target_session_id=str(payload.get("session_id") or payload.get("chat_session_id") or ""),
         total_tokens=payload.get("total_tokens"),
+        visibility=TurnVisibility.from_payload(payload).as_dict(),
     )
 
 

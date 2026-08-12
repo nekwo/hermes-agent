@@ -724,3 +724,65 @@ def test_a_failed_delegation_delivery_releases_its_claim_for_the_next_pass(
     # for a row that already counts its own attempts is the duplicate ledger
     # this change exists to retire.
     assert dispatch_delivery._background_attempts == {}
+
+
+# --------------------------------------------------------------------------
+# the delivery block tells the sender WHICH kind of nothing it got
+# --------------------------------------------------------------------------
+
+
+def _row_with(result_extra: dict) -> dict:
+    return {
+        "dispatch_id": "dispatch-1",
+        "target_persona": "dev",
+        "ask": "run the suite",
+        "state": "completed",
+        "dispatched_at": 1.0,
+        "completed_at": 2.0,
+        "target_session_id": "persona_chat_personainst_dev_bbbbbbbbbbbb",
+        "result": {"reply": "", "error": "", **result_extra},
+    }
+
+
+def test_a_silent_turn_is_named_as_silence_not_as_a_missing_reply():
+    """Re-dispatching is right for a lost answer and pointless for a silent one.
+
+    The generic line left the sender to guess between the two, and guessing
+    wrong costs a whole extra turn on both ends.
+    """
+
+    block = format_dispatch_delivery(
+        _row_with(
+            {
+                "visibility": {
+                    "state": "silent",
+                    "reason": "truncated",
+                    "finish_reason": "incomplete",
+                    "reply_chars": 0,
+                }
+            }
+        )
+    )
+
+    assert "ENDED IN SILENCE" in block
+    assert "finish_reason=incomplete" in block
+    assert "They returned no reply text." not in block
+
+
+def test_an_unrecorded_verdict_keeps_the_honest_shrug():
+    """A row from a process that recorded no verdict must not be given one."""
+
+    block = format_dispatch_delivery(_row_with({}))
+
+    assert "They returned no reply text." in block
+    assert "ENDED IN SILENCE" not in block
+
+
+def test_a_real_reply_says_neither():
+    block = format_dispatch_delivery(
+        _row_with({"reply": "3 failures, all in the chat panel"})
+    )
+
+    assert "--- THEIR REPLY ---" in block
+    assert "no reply text" not in block
+    assert "ENDED IN SILENCE" not in block
