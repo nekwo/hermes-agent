@@ -364,6 +364,22 @@ class PersonaInstance:
     # Legacy dual-purpose pointer.  Read only for v1 migration; new writers do
     # not use it for either chat or worker ownership.
     session_id: str | None = None
+    # WHERE ``default_chat_session_id`` dereferences: the chat head home whose
+    # ``state.db`` holds this instance's operator transcript, stamped by
+    # ``PersonaInstanceStore.open_chat`` whenever the bind resolved an
+    # AUTHORITATIVE chat scope — at creation, and re-affirmed on every turn
+    # (the send path re-enters ``open_chat`` per turn). This is the
+    # ``INSTANCE_RECORDED`` rung of
+    # ``chat_session_scope.resolve_chat_session_scope``: the chat head is a
+    # PER-CONVERSATION fact (different personas legitimately live in different
+    # profile DBs), so no machine-level pointer can answer it alone.
+    # ``None`` = UNRECORDED, deliberately distinct from a mismatch: a row that
+    # predates the stamp, or one whose every bind so far ran under a degraded
+    # ambient scope, falls through to the shared-root pointer exactly as
+    # before. NOT projected onto the snapshot/patch wire (the wire rows are
+    # explicit allowlists); persisted rows carrying it are safe under older
+    # code because ``serde._coerce`` ignores unknown keys.
+    chat_head_home: str | None = None
     # S70 (contract 54) removed ``context_receipt_id`` / ``compression_receipt_id``
     # / ``tool_budget_used`` / ``watchdog_warning_count`` from this record. Their
     # only writers died with the worker/goal lanes; ``ensure_for_personas`` was

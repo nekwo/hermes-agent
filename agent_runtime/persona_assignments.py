@@ -1471,6 +1471,7 @@ class PersonaInstanceStore:
             instance.mode,
             instance.default_chat_session_id,
             instance.session_id,
+            instance.chat_head_home,
         )
 
         # An explicit ``display_name`` is AUTHORITATIVE — an operator naming this
@@ -1509,6 +1510,22 @@ class PersonaInstanceStore:
         # Read-compatible mirror for v1 consumers. Worker writers never touch
         # this field; default_chat_session_id is the sole new authority.
         instance.session_id = normalized_session
+        # Stamp WHERE the bound conversation's transcript lives — the
+        # INSTANCE_RECORDED rung of ``chat_session_scope``. The send path
+        # re-enters this chokepoint every turn, so the stamp is re-affirmed
+        # per turn for free. Only an AUTHORITATIVE scope may stamp: recording
+        # a degraded ambient guess would launder the very guess the rung
+        # exists to retire, so an ambient bind leaves the field as it was
+        # (``None`` = explicitly UNRECORDED for readers). A re-stamp to a
+        # DIFFERENT authoritative head is deliberate and AUDITED, not silent:
+        # it changes the before/after tuple, so the row is rewritten and the
+        # ``chat_opened`` event below carries both the new and previous head.
+        previous_chat_head = instance.chat_head_home
+        from .chat_session_scope import resolve_chat_session_scope
+
+        scope = resolve_chat_session_scope()
+        if scope.authoritative:
+            instance.chat_head_home = str(scope.head_home)
         after = (
             instance.display_name,
             instance.profile_id,
@@ -1517,6 +1534,7 @@ class PersonaInstanceStore:
             instance.mode,
             instance.default_chat_session_id,
             instance.session_id,
+            instance.chat_head_home,
         )
         if not created and before == after:
             # Idempotent re-open is an observation, not a mutation. Rewriting the
@@ -1525,8 +1543,13 @@ class PersonaInstanceStore:
             # One first-turn path legitimately reaches this chokepoint multiple
             # times; no-op calls must stay invisible to the event/read model.
             return instance
+        event_payload: dict[str, Any] = {"session_id": normalized_session}
+        if instance.chat_head_home:
+            event_payload["chat_head_home"] = instance.chat_head_home
+        if previous_chat_head and previous_chat_head != instance.chat_head_home:
+            event_payload["previous_chat_head_home"] = previous_chat_head
         updated = self.update(instance)
-        self._event("persona_instance.chat_opened", updated, {"session_id": normalized_session})
+        self._event("persona_instance.chat_opened", updated, event_payload)
         return updated
 
     def create_operator_chat(
