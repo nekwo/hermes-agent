@@ -533,6 +533,7 @@ def serve_loop(
     liveness_pump_interval_seconds: float = 5.0,
     boot_timeline: Any = None,
     snapshot_prewarm: Callable[[], None] | None = None,
+    root_anchor: Callable[[], Any] | None = None,
 ) -> int:
     """Core dispatch loop over explicit streams. stdio is transport #1; a
     future remote lane feeds the same loop (design doc §Future).
@@ -594,6 +595,30 @@ def serve_loop(
 
     publish_chat_head_home()
     timeline.mark("head_publish_ms")
+    # Publish the machine root anchor: `agent_runtime.store_root` into the
+    # PLATFORM DEFAULT home's config.yaml, so a later ambient process (no
+    # HERMES_HOME, no HERMES_AGENT_RUNTIME_ROOT) resolves this serve's real
+    # runtime root — and therefore finds the chat-head pointer above — instead
+    # of the %LOCALAPPDATA% shadow runtime (the 2026-08-12 ambient
+    # chat-history incident: `ok: true, count: 0` from the wrong root).
+    # Injected and OFF unless the real entry point turns it on — the same
+    # contract as ``snapshot_prewarm`` — so the loop's unit tests can never
+    # write the machine-global config. Best effort by contract, but ACCOUNTED:
+    # the typed outcome is emitted as its own frame either way, because a
+    # silent skip here is exactly the false-all-clear class the anchor
+    # retires. Consumers that predate this frame ignore unknown events.
+    if root_anchor is not None:
+        try:
+            anchor_report = root_anchor()
+            anchor_frame = {"event": "root_anchor", **anchor_report.payload()}
+        except Exception as exc:  # must never take the boot down
+            anchor_frame = {
+                "event": "root_anchor",
+                "outcome": "unwritable",
+                "detail": type(exc).__name__,
+            }
+        frames.emit(anchor_frame)
+    timeline.mark("root_anchor_ms")
     stdout_proxy = _LineFrameProxy(frames, "line")
     stderr_proxy = _LineFrameProxy(frames, "stderr")
     read_cache = _ReadModelCache(read_cache_max_age)
@@ -1087,6 +1112,9 @@ def _cmd_serve(args) -> int:
         return 2
     protocol_in, protocol_out = _claim_protocol_pipes()
     writer = os.fdopen(protocol_out, "w", encoding="utf-8", newline="\n")
+    # Function-local on purpose: this file is exec'd into harness.py's globals.
+    from agent_runtime.root_anchor import publish_store_root_anchor
+
     try:
         return serve_loop(
             _raw_fd_lines(protocol_in),
@@ -1095,6 +1123,7 @@ def _cmd_serve(args) -> int:
             or DEFAULT_POOL_SIZE,
             boot_timeline=timeline,
             snapshot_prewarm=_prewarm_read_model_snapshot,
+            root_anchor=publish_store_root_anchor,
         )
     finally:
         try:
