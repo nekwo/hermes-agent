@@ -75,6 +75,7 @@ from agent_runtime.persona_chat_mints import (
     reserve_persona_chat_mint,
 )
 from agent_runtime.profile_context import active_profile_name
+from agent_runtime.root_observability import attach_root_observability
 from agent_runtime.realm_sync import (
     RealmSyncError,
     publish_realm_sync,
@@ -2565,7 +2566,13 @@ def _cmd_agent_list(args) -> int:
         # not on `profile` — `profile` is now the agent's own binding, and two
         # agents in different profile homes can legitimately share one binding.
         deduped[(row["id"], row.get("source_profile"))] = row
-    _print_stage42(_list_envelope("agent", _sort_rows(list(deduped.values()), getattr(args, "sort", None))), args=args)
+    # Roster rows are read per enumerated profile, but WHICH agent store they
+    # merged against is a property of the resolved runtime root — the envelope
+    # says so (`source_profile` alone cannot; see the 2026-08-12 incident).
+    envelope = attach_root_observability(
+        _list_envelope("agent", _sort_rows(list(deduped.values()), getattr(args, "sort", None)))
+    )
+    _print_stage42(envelope, args=args)
     return 0
 
 
@@ -3507,6 +3514,9 @@ def _cmd_doctor(args) -> int:
         # command's exit as an all-clear over an unexamined body.
         "ok": True,
         "healthy": bool(hygiene.get("ok", False)),
+        # ``runtime_resolution`` predates the cross-verb ``resolution`` block
+        # and stays for its richer layers table; the standard block is stamped
+        # below from the SAME resolution object (attach_root_observability).
         "runtime_resolution": {
             "store_root": str(resolution.store_root),
             "layer": resolution.layer,
@@ -3517,6 +3527,7 @@ def _cmd_doctor(args) -> int:
         },
         "hygiene": hygiene,
     }
+    attach_root_observability(data, resolution=resolution)
     if args.json:
         print(emit_json(data))
     else:

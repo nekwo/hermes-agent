@@ -139,7 +139,9 @@ def _cmd_status(args) -> int:
     # constants by construction on the producer side (see agent_runtime/status.py),
     # so the human render stopped reporting them rather than keep printing a
     # literal an operator would read as a measurement. The verb is unchanged.
-    data=build_status()
+    from agent_runtime.root_observability import attach_root_observability
+
+    data = attach_root_observability(build_status())
     print(emit_json(data) if args.json else f"open_incidents={data['open_incidents']} dirty={data['dirty_summary']} runtime_health={data['runtime_health']['ok']}")
     return 0
 
@@ -336,12 +338,20 @@ def _cmd_persona_chat_history(args) -> int:
     recency pointer (session id + anchors); this returns the messages."""
 
     from agent_runtime.persona_chat_history import persona_chat_session_messages
+    from agent_runtime.root_observability import attach_root_observability
 
     limit = max(1, min(40, int(getattr(args, "limit", 40) or 40)))
-    data = persona_chat_session_messages(
-        session_id=args.session_id,
-        limit=limit,
-        before=getattr(args, "before", None),
+    # ``chat_scope`` is the incident tell: a ``count: 0`` envelope now says
+    # WHICH state.db it read and how that head was named. ``source:
+    # "ambient_home"`` beside an empty result means "wrong root", not "no
+    # messages" (2026-08-12 ambient chat-history incident).
+    data = attach_root_observability(
+        persona_chat_session_messages(
+            session_id=args.session_id,
+            limit=limit,
+            before=getattr(args, "before", None),
+        ),
+        chat_scope=True,
     )
     if getattr(args, "json", False):
         print(emit_json(data))
