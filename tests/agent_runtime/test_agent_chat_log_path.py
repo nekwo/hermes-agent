@@ -41,11 +41,19 @@ def test_tool_is_registered_on_the_agent_chat_toolset():
     assert "Not appended live" in description and "non-final" in description
 
 
-def test_returns_a_live_path_backfilled_from_the_same_projection(isolate_agent_runtime_root):
+def test_returns_a_live_path_backfilled_from_the_same_projection(
+    isolate_agent_runtime_root, monkeypatch
+):
+    import os
     from pathlib import Path
 
     from tests.agent_runtime.test_agent_chat_tool import _seed_persona_chat
 
+    # Explicit head: the subject is backfill materialization, not chat scope.
+    # The headless sandbox is the AMBIENT posture, and since 2026-08-12 the
+    # backfill's self-resolved read refuses it (chat_scope_unresolved) instead
+    # of answering from a guessed state.db.
+    monkeypatch.setenv("HERMES_HEAD_HOME", os.environ["HERMES_HOME"])
     session_id = _seed_persona_chat("qa", [("hi there", "QA here — hi."), ("more", "ack")])
 
     data = json.loads(agent_chat_log_path(persona_id="qa"))

@@ -91,10 +91,14 @@ def test_attach_leaves_non_dict_payloads_alone():
 def test_empty_chat_history_envelope_now_carries_its_frame_of_reference(
     tmp_path, monkeypatch, capsys
 ):
-    """THE incident pin. ``persona chat history --json`` for a session the
-    resolved state.db does not hold returns the well-formed empty envelope
-    (``ok: true, count: 0``) — which is exactly why it must now say WHICH db
-    and WHICH root produced it, and that the head was only ambient."""
+    """THE incident pin — INVERTED 2026-08-12 (same day, next wave). As first
+    written this pinned the diagnose-only posture: the ambient read still
+    answered ``ok: true, count: 0`` and the ``chat_scope`` block was the tell a
+    reader had to notice. The follow-up wave retired the posture itself —
+    reaching the AMBIENT rung on a chat READ is now a typed refusal
+    (``chat_scope_unresolved``), because "I do not know where to look" must
+    never render as "no messages". The envelope still carries the same frame
+    of reference, now on the refusal."""
 
     import hermes_cli.harness as harness
 
@@ -102,15 +106,18 @@ def test_empty_chat_history_envelope_now_carries_its_frame_of_reference(
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
     monkeypatch.delenv("HERMES_HEAD_HOME", raising=False)
+    monkeypatch.delenv("HERMES_ALLOW_AMBIENT_CHAT_READS", raising=False)
     args = SimpleNamespace(session_id="sess_not_here", json=True, limit=40, before=None)
-    assert harness._cmd_persona_chat_history(args) == 0
+    assert harness._cmd_persona_chat_history(args) == 2
     envelopes = _decode_stdout_envelopes(capsys.readouterr().out)
     assert len(envelopes) == 1, "expected exactly one --json envelope on stdout"
     envelope = envelopes[0]
 
-    assert envelope["ok"] is True
-    assert envelope["count"] == 0
-    # The three facts the incident's envelope lacked entirely:
+    assert envelope["ok"] is False
+    assert envelope["error_kind"] == "chat_scope_unresolved"
+    assert "count" not in envelope and "messages" not in envelope
+    # The three facts the incident's envelope lacked entirely — still carried,
+    # now on the refusal:
     assert envelope["resolution"]["store_root"]
     assert envelope["chat_scope"]["head_home"]
     assert envelope["chat_scope"]["source"] == "ambient_home"
