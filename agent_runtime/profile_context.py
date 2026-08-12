@@ -16,7 +16,12 @@ from hermes_constants import (
     reset_hermes_home_override,
     set_hermes_home_override,
 )
-from hermes_cli.profiles import get_profile_dir, normalize_profile_name, profile_exists
+from hermes_cli.profiles import (
+    get_active_profile,
+    get_profile_dir,
+    normalize_profile_name,
+    profile_exists,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -129,12 +134,14 @@ def active_profile_name() -> str:
     home = get_hermes_home()
     if home.parent.name == "profiles" and home.name:
         return normalize_profile_name(home.name)
-    active_profile = Path.home() / ".hermes" / "active_profile"
-    try:
-        active = active_profile.read_text(encoding="utf-8").strip()
-    except OSError:
-        active = ""
-    return normalize_profile_name(active or "default")
+    # The sticky-marker fallback reads through the CANONICAL resolver
+    # (hermes_cli.profiles → hermes_constants.get_default_hermes_root), never a
+    # hand-spelled ``Path.home() / ".hermes"``: that spelling is the wrong
+    # location on native Windows (the platform default is %LOCALAPPDATA%\
+    # hermes), so this fallback read a marker file no other code wrote and
+    # ``agents --json``'s source_profile column lied under ambient environment
+    # (2026-08-12 root-observability wave).
+    return normalize_profile_name(get_active_profile() or "default")
 
 
 def resolve_persona_profile(persona) -> PersonaProfileBinding:

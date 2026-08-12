@@ -2434,3 +2434,35 @@ shared authority, and the 53 landing moved only two of them — `test_s47`
 `test_s57_unruled_config_debt_removal` and `test_stage19_visibility` were all
 RED on `main` at 52-vs-53 before this wave. All six now read 54. The structural
 fix — import one constant from the producer — is filed, not done.
+
+## Root-observability wave (2026-08-12) — upstream divergent platform-default spellings
+
+The wave that shipped the machine root anchor (`agent_runtime/root_anchor.py`),
+the per-verb `resolution` / `chat_scope` envelope blocks
+(`agent_runtime/root_observability.py` + the
+`test_harness_json_root_observability.py` gate), and the
+`active_profile_name()` fallback fix collapsed the divergent platform-default
+spelling in FORK-OWNED code only. The remaining divergences live in
+upstream-owned files and are recorded here rather than edited (fork boundary;
+edits become upstream-PR candidates):
+
+1. **`hermes_cli/env_loader.py:310` and `:541`** both hand-spell the default
+   home as `Path.home() / ".hermes"`. On native Windows the platform default
+   is `%LOCALAPPDATA%\hermes` (`hermes_constants._get_platform_default_hermes_home`),
+   so an env-file load that falls through to this spelling reads a `.env` from
+   a directory no other resolver uses. Any upstream PR must route both sites
+   through `hermes_constants.get_default_hermes_root()` / `get_hermes_home()`.
+2. **`hermes_state.py:235`** — `DEFAULT_DB_PATH = get_hermes_home() / "state.db"`
+   freezes the ambient home at import time (the frozen-home class the P3
+   ratchet measures; the module's per-call paths do route through the
+   canonical resolver). Already carried by the frozen-home ledger
+   (`tests/test_no_frozen_hermes_home.py`); listed here because it is the
+   `hermes_state` half of the "divergent default resolution" family this wave
+   closed fork-side.
+
+Fork-side closure for the record: `agent_runtime/profile_context.py`'s
+`active_profile_name()` no longer reads a hand-spelled
+`Path.home()/".hermes"/active_profile` (a marker file nothing on native
+Windows writes — it made `agents --json`'s `source_profile` column lie under
+ambient environment); the fallback now delegates to the canonical
+`hermes_cli.profiles.get_active_profile()`.
