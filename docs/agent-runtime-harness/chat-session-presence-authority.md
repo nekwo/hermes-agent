@@ -6,6 +6,53 @@ P2–P6 remain as written. Owner: fork (`agent_runtime/`,
 Trigger: the 2026-07-25 binding massacre (below). Stopgap guard already
 shipped as `8c3942a21`; this document retires the class the guard patched.
 
+## 2026-08-12 addendum — the INSTANCE_RECORDED rung + the ambient-read refusal
+
+Two changes landed on top of P1 and the root-observability wave (machine root
+anchor `root_anchor.py`, per-verb `resolution`/`chat_scope` blocks), closing
+the "silent empty answer from the wrong root" class the 2026-08-12 ambient
+chat-history incident exposed (`ok: true, count: 0` from the platform-default
+shadow runtime; a full operator day lost to two wrong root causes because
+every probe that resolved its own root confirmed health):
+
+1. **The chat head is now recorded PER CONVERSATION.**
+   `PersonaInstance.chat_head_home` stamps the head home the conversation was
+   bound against — written by `PersonaInstanceStore.open_chat` under any
+   AUTHORITATIVE scope (never from an ambient guess), re-affirmed every turn
+   because the send path re-enters `open_chat` per turn, and audited on
+   change (`persona_instance.chat_opened` carries `chat_head_home` +
+   `previous_chat_head_home`). `resolve_chat_session_scope(session_id=…)`
+   consults the record as a new ladder rung **above `SHARED_ROOT_POINTER`**,
+   below env/relay. The rung resolves AND verifies: a disagreeing AUTHORITY
+   (explicit head above, pointer below) is a typed `ChatScopeMismatch`, never
+   a silent preference; absence is typed (`UNRECORDED` / `NO_INSTANCE` /
+   `UNRESOLVABLE` / `RECORDED_HOME_MISSING`) and falls through exactly as
+   before. Newly viable because the anchor made `store_root` — and therefore
+   the instance store — resolvable from ambient processes. The field stays
+   OFF the snapshot/patch wire (both are explicit allowlists).
+
+2. **`ambient_home` stopped being an answer for chat READS.**
+   `persona_chat_session_messages`, when it self-resolves, refuses a typed
+   `chat_scope_unresolved` instead of reading the ambient guess, and a typed
+   `chat_scope_mismatch` when two authorities disagree — each refusal carries
+   the resolved `chat_scope` block, and every envelope (success included) now
+   states its frame of reference. Escape hatch for a deliberately
+   single-root, serve-less setup: `HERMES_ALLOW_AMBIENT_CHAT_READS=1` (plus a
+   WARNING log per allowed ambient read). Consumer enumeration before the
+   flip: the CLI verb prints the failure and exits 2; `agent_chat_open`
+   propagates a typed refusal; the live-log backfill stops (mirror stays
+   pending); the Launcher fetch lane maps exit 2 to a retryable-error tile
+   and always names an explicit head anyway. Callers passing their own
+   `session_db` own the acquisition and are untouched.
+
+Pins: `tests/agent_runtime/test_chat_scope_instance_rung.py` (19, every one
+red-proven by sabotage), plus the inverted
+`test_persona_chat_history_fetch_refuses_an_ambient_self_resolve` (formerly
+asserted the silent-empty success). This lands part of what P2/P3 planned
+(typed refusals on the read lane) without SessionDB identity (P4/P5), which
+remains open — the stamp records a head PATH, not a DB identity, so a
+restored/moved `state.db` is still out of scope until P4.
+
 ## What shipped in P1 — and the THIRD defect it had to fix
 
 The 2026-07-27 cockpit read-lane gap (Chat History listing six stale sessions
