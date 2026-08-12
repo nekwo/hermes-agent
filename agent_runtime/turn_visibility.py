@@ -98,6 +98,29 @@ class VisibilityReason(str, Enum):
 TRUNCATION_FINISH_REASONS = frozenset({"incomplete", "length", "max_output_tokens"})
 FILTER_FINISH_REASONS = frozenset({"content_filter", "content_policy_blocked"})
 
+#: ``finish_reason`` written on the assistant row of an INTERMEDIATE tool-call
+#: round. Such a row is empty because the model called a tool instead of
+#: speaking — it is not the end of a turn, and it has no visibility verdict at
+#: all. Across the operator's live profiles these outnumber genuinely silent
+#: rows 22,179 to 5, which is why the transcript read path has always dropped
+#: EVERY empty assistant row: the scaffolding is the overwhelming majority, and
+#: until this module existed there was nothing typed on the row to separate the
+#: two. Distinguishing them is the whole job of
+#: :func:`classify_persisted_turn_row`.
+TOOL_CALL_FINISH_REASONS = frozenset({"tool_calls"})
+
+#: The reasons that can accompany :attr:`VisibilityState.SILENT`. Exported so a
+#: presentation layer can PROVE its own text table is total over them, instead
+#: of re-listing the vocabulary in a second place and drifting from it.
+SILENT_REASONS = frozenset(
+    {
+        VisibilityReason.EMPTY,
+        VisibilityReason.TRUNCATED,
+        VisibilityReason.FILTERED,
+        VisibilityReason.FAILED,
+    }
+)
+
 
 @dataclass(frozen=True)
 class TurnVisibility:
@@ -236,6 +259,98 @@ def _final_assistant_finish_reason(messages: Any) -> str:
     return ""
 
 
+def _reason_for_empty(finish_reason: str, *, raw: Any = None) -> VisibilityReason:
+    """WHY an empty reply is empty — the one ladder, shared by every entry point.
+
+    Extracted so the live classifier and the persisted-row classifier cannot
+    answer the same question differently. A second copy of this ladder would be
+    the exact defect this module was written to retire, one level down.
+    """
+
+    if finish_reason in FILTER_FINISH_REASONS:
+        return VisibilityReason.FILTERED
+    if finish_reason in TRUNCATION_FINISH_REASONS:
+        return VisibilityReason.TRUNCATED
+    if isinstance(raw, dict) and (raw.get("failed") or raw.get("error")):
+        # Last, and only for an otherwise unexplained silence: `error` is set on
+        # soft/partial outcomes too, so letting it outrank a real finish reason
+        # would relabel every truncation as a failure.
+        return VisibilityReason.FAILED
+    return VisibilityReason.EMPTY
+
+
+def classify_persisted_turn_row(
+    *,
+    content: Any,
+    finish_reason: Any = None,
+    tool_calls: Any = None,
+) -> TurnVisibility | None:
+    """Classify one PERSISTED assistant row. TOTAL — never raises.
+
+    The live classifier above reads a completed run's reply; this one reads a
+    row that was written to SessionDB minutes or weeks ago, where the only
+    evidence left is the three columns the flush persisted. Both share the
+    reason ladder, so a turn cannot be described one way live and another way
+    on reload.
+
+    ``None`` is returned for a row that is NOT a turn boundary — an
+    intermediate tool-call round, whose emptiness means "the model called a
+    tool" and carries no verdict about whether the operator saw anything. That
+    is a third answer, distinct from ``SILENT`` and from ``UNKNOWN``: the
+    question does not apply to this row. It is deliberately not a
+    :class:`VisibilityState` member, because such a row has no visibility, and
+    inventing a state for it would put a non-answer into a vocabulary every
+    consumer switches on exhaustively.
+
+    An unexpected input yields ``None`` rather than ``unknown()``: ``None`` is
+    "drop this row", which is precisely what the read path did for every empty
+    assistant row before this function existed. The failure mode of a bug here
+    is therefore today's behaviour, never a marker manufactured over a turn
+    nobody proved was silent.
+    """
+
+    try:
+        text = "" if content is None else str(content).strip()
+        reason_token = str(finish_reason or "").strip()
+        if text:
+            # Content wins over every finish reason, including ``tool_calls``:
+            # a model that spoke AND called a tool was seen. Same precedence as
+            # the live classifier, for the same reason.
+            return TurnVisibility(
+                state=VisibilityState.VISIBLE,
+                reason=VisibilityReason.CONTENT,
+                finish_reason=reason_token,
+                reply_chars=len(text),
+            )
+        if _has_tool_calls(tool_calls) or reason_token in TOOL_CALL_FINISH_REASONS:
+            return None
+        return TurnVisibility(
+            state=VisibilityState.SILENT,
+            reason=_reason_for_empty(reason_token),
+            finish_reason=reason_token,
+            reply_chars=0,
+        )
+    except Exception:  # pragma: no cover — the totality guarantee itself
+        return None
+
+
+def _has_tool_calls(tool_calls: Any) -> bool:
+    """Does this row carry tool calls? Tolerant of both persisted shapes.
+
+    ``SessionDB.get_messages`` deserialises the column into a list, but the
+    lineage loaders and older rows can still hand back the raw JSON string, and
+    a row that reaches here as ``"[]"`` has no tool calls despite being truthy
+    as a string.
+    """
+
+    if tool_calls is None:
+        return False
+    if isinstance(tool_calls, str):
+        stripped = tool_calls.strip()
+        return bool(stripped) and stripped not in {"[]", "{}", "null"}
+    return bool(tool_calls)
+
+
 def classify_turn_visibility(
     *,
     reply_text: Any,
@@ -270,19 +385,9 @@ def classify_turn_visibility(
                 finish_reason=finish_reason,
                 reply_chars=len(text),
             )
-        reason = VisibilityReason.EMPTY
-        if finish_reason in FILTER_FINISH_REASONS:
-            reason = VisibilityReason.FILTERED
-        elif finish_reason in TRUNCATION_FINISH_REASONS:
-            reason = VisibilityReason.TRUNCATED
-        elif isinstance(raw, dict) and (raw.get("failed") or raw.get("error")):
-            # Last, and only for an otherwise unexplained silence: `error` is
-            # set on soft/partial outcomes too, so letting it outrank a real
-            # finish reason would relabel every truncation as a failure.
-            reason = VisibilityReason.FAILED
         return TurnVisibility(
             state=VisibilityState.SILENT,
-            reason=reason,
+            reason=_reason_for_empty(finish_reason, raw=raw),
             finish_reason=finish_reason,
             reply_chars=0,
         )
@@ -292,10 +397,13 @@ def classify_turn_visibility(
 
 __all__ = [
     "FILTER_FINISH_REASONS",
+    "SILENT_REASONS",
+    "TOOL_CALL_FINISH_REASONS",
     "TRUNCATION_FINISH_REASONS",
     "TURN_VISIBILITY_KEY",
     "TurnVisibility",
     "VisibilityReason",
     "VisibilityState",
+    "classify_persisted_turn_row",
     "classify_turn_visibility",
 ]

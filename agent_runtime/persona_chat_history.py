@@ -29,6 +29,12 @@ from .transcript_order import (
     TURN_SEQ_TERMINAL,
     order_transcript_rows,
 )
+from .turn_visibility import (
+    SILENT_REASONS,
+    TURN_VISIBILITY_KEY,
+    VisibilityReason,
+    classify_persisted_turn_row,
+)
 
 PERSONA_CHAT_SESSION_SOURCE = "agent_runtime_persona_chat"
 # Structural marker for the canned "I'll … then report back with …" pre-trace
@@ -119,6 +125,63 @@ if _UNKNOWN_MARKER_STATES:  # pragma: no cover - import-time contract guard
     raise RuntimeError(
         "TERMINAL_TURN_MARKERS declares non-terminal turn state(s): "
         f"{_UNKNOWN_MARKER_STATES}"
+    )
+
+# ── the turn that ended without saying anything ─────────────────────────────
+#
+# A turn can settle in a state nothing above calls terminal — it ran, it
+# finished, the store calls it completed — and still produce no printable text.
+# Its assistant row IS persisted (empty ``content``, a ``finish_reason`` that
+# explains why), and ``_curate_chat_message_text`` then drops it, because an
+# empty assistant row is overwhelmingly an intermediate tool-call round: across
+# the operator's live profiles, 22,179 of them are scaffolding and 5 are this.
+# The result was a turn that renders as nothing at all — no reply, no marker,
+# no gap — and reopening the conversation showed the same nothing. A forged
+# dispatch DELIVERY turn that ends this way was never rendered at all, so the
+# operator's completion notice appeared to have been answered.
+#
+# The verdict comes from ``turn_visibility.classify_persisted_turn_row``, which
+# is the one authority that separates scaffolding from silence; this table only
+# decides what the marker SAYS. Wording lives here rather than being re-derived
+# downstream for the same reason ``TERMINAL_TURN_MARKERS`` above owns its own
+# prose: a projected row is text the projection is responsible for.
+PERSONA_TURN_SILENT_KIND = "turn_silent"
+
+_SILENT_TURN_RETRY_HINT = (
+    "Nothing was lost in transit — the turn ran and produced no content, so "
+    "sending again runs a fresh turn."
+)
+SILENT_TURN_MARKER_TEXTS: dict[VisibilityReason, str] = {
+    VisibilityReason.TRUNCATED: (
+        "Agent turn ended without a reply — the model was cut off before it "
+        f"produced any content. {_SILENT_TURN_RETRY_HINT}"
+    ),
+    VisibilityReason.FILTERED: (
+        "Agent turn ended without a reply — the provider blocked the content. "
+        "Nothing was lost in transit; only a rephrased message can change the "
+        "outcome, since sending the same one again reruns the same turn."
+    ),
+    VisibilityReason.FAILED: (
+        "Agent turn ended without a reply — the turn ended in an error. "
+        f"{_SILENT_TURN_RETRY_HINT}"
+    ),
+    VisibilityReason.EMPTY: (
+        "Agent turn ended without a reply — the model produced no content and "
+        f"nothing recorded why. {_SILENT_TURN_RETRY_HINT}"
+    ),
+}
+# Same guard shape, and same argument, as _UNKNOWN_MARKER_STATES above: a silent
+# reason with no text would project a marker row with an empty body, which the
+# transcript reader drops — silently restoring the exact defect this table
+# exists to fix. Proven against the authority's own vocabulary, never a second
+# hand-written list.
+_UNTEXTED_SILENT_REASONS = sorted(
+    reason.value for reason in SILENT_REASONS - set(SILENT_TURN_MARKER_TEXTS)
+)
+if _UNTEXTED_SILENT_REASONS:  # pragma: no cover - import-time contract guard
+    raise RuntimeError(
+        "SILENT_TURN_MARKER_TEXTS is missing silent visibility reason(s): "
+        f"{_UNTEXTED_SILENT_REASONS}"
     )
 
 _CHAT_INSTANCE_MODES = {"chat", "free_floating"}
@@ -1240,6 +1303,21 @@ def _safe_curated_messages(
     redacted = False
     assistant_client_message_ids: set[str] = set()
     seen_logical_rows: set[tuple[str, str, str]] = set()
+    # Silent-turn bookkeeping, deliberately two collections rather than one.
+    #
+    # A turn can persist SEVERAL empty assistant rows — the live incident has
+    # one turn with three and the delivery turn after it with two, because each
+    # retry writes its own row. One marker per turn is the honest projection, so
+    # candidates are keyed by LOGICAL turn id and the last one wins (it is how
+    # the turn actually ended).
+    #
+    # And a marker may only survive if the turn produced no visible reply at
+    # all: a turn whose first attempt came back empty and whose retry spoke is a
+    # turn the operator SAW. ``assistant_client_message_ids`` cannot answer that
+    # — it is populated for every agent row including the empty ones — so
+    # visible turns are tracked separately and subtract candidates at the end.
+    visible_agent_logical_ids: set[str] = set()
+    silent_turn_candidates: dict[str, dict[str, Any]] = {}
     # ONE read of this chat's turn journal, shared by the reply rows below and
     # by the terminal-marker rows appended after them. The journal is a
     # per-session file with no read cache, so fetching it again per row — just
@@ -1282,7 +1360,27 @@ def _safe_curated_messages(
             raw_content, skill_preload = extract_skill_preload_envelope(raw_content)
         curated = _curate_chat_message_text(role, raw_content)
         if not curated:
+            # The curator says "not presentable AS WRITTEN", which covers both
+            # the tool-call scaffolding this drop was built for and the turn
+            # that genuinely ended in silence. Only the latter earns a marker;
+            # everything else keeps falling through exactly as before.
+            marker = _silent_turn_marker_row(
+                session_id=session_id,
+                index=index,
+                raw=raw,
+                role=role,
+                raw_content=raw_content,
+                client_message_id=client_message_id,
+                turn_id=turn_id,
+            )
+            if marker is not None and logical_client_message_id:
+                silent_turn_candidates[logical_client_message_id] = marker
             continue
+        if role == "agent" and logical_client_message_id:
+            # This turn SPOKE. Recorded before redaction can replace the body:
+            # a redacted reply is still a reply the operator was shown, and
+            # marking its turn silent would be a second, worse lie.
+            visible_agent_logical_ids.add(logical_client_message_id)
         text, status = _safe_display_body_text(
             curated,
             fallback="Message hidden by redaction boundary",
@@ -1387,6 +1485,11 @@ def _safe_curated_messages(
             )
         rows.append(row)
     rows.extend(
+        marker
+        for logical_id, marker in silent_turn_candidates.items()
+        if logical_id not in visible_agent_logical_ids
+    )
+    rows.extend(
         _terminal_turn_marker_rows(
             session_id=session_id,
             assistant_client_message_ids=assistant_client_message_ids,
@@ -1455,6 +1558,69 @@ def _carry_run_budget(row: dict[str, Any], record: dict[str, Any] | None) -> Non
     block = (record or {}).get(RUN_BUDGET_ACCOUNTING_KEY)
     if isinstance(block, dict) and block:
         row[RUN_BUDGET_ACCOUNTING_KEY] = block
+
+
+def _silent_turn_marker_row(
+    *,
+    session_id: str,
+    index: int,
+    raw: dict[str, Any],
+    role: str,
+    raw_content: Any,
+    client_message_id: str | None,
+    turn_id: str | None,
+) -> dict[str, Any] | None:
+    """The typed marker for an agent row that ended a turn saying nothing.
+
+    Returns ``None`` for every row that is not exactly that — an operator row,
+    a tool-call round, a row with content the curator merely found
+    unpresentable. The classification itself is not made here: this reads
+    ``turn_visibility.classify_persisted_turn_row`` and renders its verdict, so
+    the projection cannot form a second opinion about what silence is.
+
+    The row takes the identity of the assistant row it stands in for, including
+    its ``turn_seq``: a turn has a reply or a marker, never both, and this
+    marker IS that turn's terminal row.
+    """
+
+    if role != "agent":
+        return None
+    visibility = classify_persisted_turn_row(
+        content=raw_content,
+        finish_reason=raw.get("finish_reason"),
+        tool_calls=raw.get("tool_calls"),
+    )
+    if visibility is None or not visibility.is_silent:
+        return None
+    marker_row: dict[str, Any] = {
+        "id": safe_assignment_text(raw.get("id"), limit=120) or f"{session_id}:{index}",
+        # Not the agent speaking — the projection reporting that it did not.
+        # Same role/kind shape as the terminal markers, which the Launcher
+        # already renders as system-level turn status rather than as a message.
+        "role": "system",
+        "kind": PERSONA_TURN_SILENT_KIND,
+        "text": SILENT_TURN_MARKER_TEXTS[visibility.reason],
+        "timestamp": _iso_timestamp(
+            raw.get("created_at")
+            or raw.get("timestamp")
+            or raw.get("time")
+            or raw.get("updated_at")
+        ),
+        # The body is this module's own prose about an EMPTY row. No transcript
+        # content passed through it, so there is nothing a redactor could have
+        # caught and nothing to claim it verified.
+        "redaction_status": "safe",
+        # The typed verdict rides along so a consumer can key on the cause
+        # (truncated / filtered / empty) instead of matching the prose above —
+        # the same discipline as every other typed kind in this projection.
+        TURN_VISIBILITY_KEY: visibility.as_dict(),
+    }
+    if client_message_id:
+        marker_row["client_message_id"] = client_message_id
+        marker_row["turn_seq"] = TURN_SEQ_TERMINAL
+    if turn_id:
+        marker_row["turn_id"] = turn_id
+    return marker_row
 
 
 def _terminal_turn_marker_rows(

@@ -20,10 +20,12 @@ from __future__ import annotations
 import pytest
 
 from agent_runtime.turn_visibility import (
+    SILENT_REASONS,
     TURN_VISIBILITY_KEY,
     TurnVisibility,
     VisibilityReason,
     VisibilityState,
+    classify_persisted_turn_row,
     classify_turn_visibility,
 )
 
@@ -299,3 +301,125 @@ def test_describe_names_the_cause_and_carries_the_finish_reason():
 
 def test_describe_distinguishes_unknown_from_silence():
     assert "unknown" in TurnVisibility.unknown().describe()
+
+
+# ---------------------------------------------------------------------------
+# 7. classify_persisted_turn_row — the same question, asked of a stored row
+#
+# The live classifier reads a completed run. This one reads a row written to
+# SessionDB minutes or weeks ago, where the only evidence left is the three
+# columns the flush persisted. Its hard job is separating a turn that ended in
+# silence from an intermediate tool-call round, which is empty for a completely
+# different reason and outnumbers it 22,179 to 5 in the operator's live data.
+# ---------------------------------------------------------------------------
+
+
+def test_a_tool_call_round_has_no_verdict_at_all():
+    # NOT silent and NOT unknown: the question does not apply. `None` keeps it
+    # dropped, which is what the read path did for every empty row before this.
+    assert (
+        classify_persisted_turn_row(
+            content="",
+            finish_reason="tool_calls",
+            tool_calls=[{"id": "call_54uAB", "type": "function"}],
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    "tool_calls",
+    [
+        [{"id": "call_1"}],
+        '[{"id": "call_1"}]',  # lineage loaders hand back the raw JSON string
+    ],
+)
+def test_tool_calls_alone_suppress_the_verdict_whatever_the_finish_reason(tool_calls):
+    assert (
+        classify_persisted_turn_row(
+            content="", finish_reason="incomplete", tool_calls=tool_calls
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("tool_calls", [None, [], "[]", "", "null"])
+def test_an_empty_tool_calls_column_is_not_a_tool_call_round(tool_calls):
+    # `"[]"` is truthy as a string. A row that reaches here in that shape has no
+    # tool calls, and treating it as scaffolding would re-swallow a real silence.
+    result = classify_persisted_turn_row(
+        content="", finish_reason="incomplete", tool_calls=tool_calls
+    )
+
+    assert result is not None and result.is_silent
+
+
+def test_the_live_incident_row_classifies_as_truncated_silence():
+    # profiles/base/state.db row 2753, verbatim.
+    result = classify_persisted_turn_row(
+        content="", finish_reason="incomplete", tool_calls=None
+    )
+
+    assert result.state is VisibilityState.SILENT
+    assert result.reason is VisibilityReason.TRUNCATED
+    assert result.finish_reason == "incomplete"
+    assert result.reply_chars == 0
+
+
+@pytest.mark.parametrize(
+    "finish_reason,expected",
+    [
+        ("content_filter", VisibilityReason.FILTERED),
+        ("length", VisibilityReason.TRUNCATED),
+        ("stop", VisibilityReason.EMPTY),
+        (None, VisibilityReason.EMPTY),
+    ],
+)
+def test_the_stored_finish_reason_explains_the_silence(finish_reason, expected):
+    result = classify_persisted_turn_row(content="", finish_reason=finish_reason)
+
+    assert result.is_silent and result.reason is expected
+
+
+def test_content_outranks_a_tool_call_round():
+    # A model that spoke AND called a tool was seen. Same precedence as live.
+    result = classify_persisted_turn_row(
+        content="Started it.", finish_reason="tool_calls", tool_calls=[{"id": "c"}]
+    )
+
+    assert result.is_visible and result.reply_chars == len("Started it.")
+
+
+@pytest.mark.parametrize("content", ["   ", "\n\t", ""])
+def test_whitespace_is_silence_not_content(content):
+    assert classify_persisted_turn_row(content=content).is_silent
+
+
+def test_the_two_entry_points_cannot_explain_the_same_silence_differently():
+    # The reason ladder is shared, not copied. A second ladder here would be the
+    # exact defect this module exists to retire, one level down.
+    for finish_reason in ("incomplete", "length", "content_filter", "stop", ""):
+        live = classify_turn_visibility(
+            reply_text="", messages=[_assistant(finish_reason)]
+        )
+        stored = classify_persisted_turn_row(content="", finish_reason=finish_reason)
+        assert live.reason is stored.reason, finish_reason
+        assert live.state is stored.state, finish_reason
+
+
+def test_every_silent_verdict_uses_a_reason_the_authority_publishes():
+    # SILENT_REASONS is what a presentation layer proves its text table against,
+    # so it has to actually cover what the classifiers emit.
+    for finish_reason in ("incomplete", "length", "content_filter", "stop", None):
+        result = classify_persisted_turn_row(content="", finish_reason=finish_reason)
+        assert result.reason in SILENT_REASONS
+
+
+def test_an_input_that_explodes_drops_the_row_rather_than_marking_it_silent():
+    class Hostile:
+        def __str__(self):
+            raise RuntimeError("boom")
+
+    # Fails toward today's behaviour (drop), never toward a marker over a turn
+    # nobody proved was silent.
+    assert classify_persisted_turn_row(content=Hostile()) is None
