@@ -343,6 +343,63 @@ def test_a_producer_that_raises_is_reported_and_never_escapes():
 # ── lifecycle ───────────────────────────────────────────────────────────────
 
 
+def _parking_source(gate: threading.Event, alive: set):
+    """A source that yields one hydrate and then PARKS on its stop event.
+
+    The counting fakes above hold the lane open by polling, which is what the
+    real stream does between frames — and which means a producer notices a
+    superseding generation or an empty room on its own next lap. That is fine
+    for the fan-out tests and useless for the LIFECYCLE ones: it gives the hub
+    a second way to be right, so removing the first leaves the test green.
+
+    This one ends only when something sets the stop event handed to it, so
+    "who stops this producer" is the only variable left.
+    """
+
+    def _factory(stop: threading.Event):
+        def _generate():
+            token = object()
+            alive.add(token)
+            try:
+                yield {"type": "hydrate", "index": 0}
+                # Parks here. Not a poll: the stop event is the only way out.
+                stop.wait(30.0)
+                gate.wait(0.0)
+            finally:
+                alive.discard(token)
+
+        return _generate()
+
+    return _factory
+
+
+def test_unsubscribing_the_last_client_stops_a_producer_that_is_parked():
+    """F5's first half, with the producer's own polling taken away.
+
+    ``unsubscribe`` sets the stop event when the room empties precisely because
+    the producer's in-loop check only fires when a frame arrives — so a source
+    between frames would keep a projection lane alive for nobody. A parked
+    producer is exactly that case.
+    """
+
+    gate = threading.Event()
+    alive: set = set()
+    hub = StreamHub(_parking_source(gate, alive), buffer_limit=64)
+    try:
+        hub.subscribe("a", sink=_Recorder())
+        assert _wait_until(lambda: hub.stats()["frames_produced"] >= 1)
+        assert _wait_until(lambda: len(alive) == 1)
+
+        hub.unsubscribe("a")
+        assert _wait_until(lambda: hub.stats()["producers_live"] == 0, timeout=5.0), (
+            "the room emptied and the parked producer kept the lane alive"
+        )
+        assert _wait_until(lambda: alive == set(), timeout=5.0)
+    finally:
+        gate.set()
+        hub.stop()
+
+
 def test_the_producer_stops_when_the_last_subscriber_leaves():
     """A service nobody is watching must not keep rebuilding projections.
 
@@ -415,23 +472,88 @@ def test_producers_do_not_accumulate_one_per_subscribe():
         hub.stop()
 
 
+def _staggered_source(alive: set, exits: list):
+    """Uninterruptible producers whose parks get SHORTER with each generation.
+
+    Two things have to be true at once for this to test the join and nothing
+    else. The producers must be genuinely uninterruptible between frames —
+    which is the real ``_stream_source``, since it takes no stop event and can
+    only notice anything when it next yields — and the NEWEST one must not be
+    the slowest.
+
+    That second point is the whole design. With every generation sleeping the
+    same 0.4s, joining only the newest still waited 0.4s, and the older ones
+    (whose sleeps started earlier) finished inside that window all by
+    themselves — so a ``stop()`` that ignored them looked correct. Staggering
+    it the other way removes the accident: generation 1 is parked for 3s,
+    generation 4 for 0.75s, so joining the newest alone returns while the first
+    three are demonstrably still running.
+    """
+
+    counter = {"n": 0}
+
+    def _factory():
+        counter["n"] += 1
+        delay = 3.0 / counter["n"]
+
+        def _generate():
+            token = object()
+            alive.add(token)
+            try:
+                yield {"type": "hydrate", "index": 0}
+                while True:
+                    time.sleep(delay)
+                    yield {"type": "heartbeat", "index": -1}
+            finally:
+                alive.discard(token)
+                exits.append(time.monotonic())
+
+        return _generate()
+
+    return _factory
+
+
 def test_stop_joins_every_live_producer_not_only_the_newest():
     """``stop()`` used to join ``self._producer`` — one handle, the last one
-    written. Anything superseded and still running was never waited for."""
+    written. Anything superseded and still running was never waited for.
 
-    gate = threading.Event()
-    factory, _generations, alive = _generational_source(2, gate)
-    hub = StreamHub(factory, buffer_limit=64)
-    for index in range(4):
-        hub.subscribe(f"client-{index}", sink=_Recorder())
-    assert _wait_until(lambda: hub.stats()["frames_produced"] > 0)
+    Asserted two ways, because "they were gone afterwards" is not the claim.
+    The claim is that ``stop()`` DID NOT RETURN until they were gone, so every
+    producer's exit timestamp is compared against the moment ``stop()``
+    returned. A hub that merely outlived them fails that.
+    """
 
-    hub.stop(join_timeout=10.0)
-    # Nothing left running: not the current generation, not a superseded one.
-    assert hub.stats()["producers_live"] == 0
-    assert alive() == set()
-    assert hub.subscriber_count() == 0
-    gate.set()
+    alive: set = set()
+    exits: list = []
+    recorders = []
+    hub = StreamHub(_staggered_source(alive, exits), buffer_limit=64)
+    try:
+        for index in range(4):
+            recorder = _Recorder()
+            recorders.append(recorder)
+            hub.subscribe(f"client-{index}", sink=recorder)
+            # Its hydrate landed, so this producer is now inside its sleep —
+            # which is where the next subscribe will supersede it.
+            assert _wait_until(lambda r=recorder: r.count() >= 1)
+
+        # The state the leak used to leave behind permanently: four live
+        # generations, three of them superseded and unable to act on it yet.
+        assert len(alive) == 4, f"only {len(alive)} producers were live"
+
+        hub.stop(join_timeout=20.0)
+        returned = time.monotonic()
+
+        assert alive == set(), f"{len(alive)} producers outlived stop()"
+        assert len(exits) == 4, f"only {len(exits)} producers ever exited"
+        late = [t for t in exits if t > returned]
+        assert not late, (
+            f"{len(late)} producers were still running when stop() returned — "
+            "it joined the newest and left the rest"
+        )
+        assert hub.stats()["producers_live"] == 0
+        assert hub.subscriber_count() == 0
+    finally:
+        hub.stop()
 
 
 def test_a_stats_row_names_every_producer_and_whether_it_is_superseded():

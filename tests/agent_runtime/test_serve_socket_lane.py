@@ -251,7 +251,8 @@ class _RunningServe:
 def running_serve(**kwargs):
     """A live serve with the socket lane on, torn down at the end of the block."""
 
-    pipe, sink = _StdioPipe(), _Sink()
+    pipe = _StdioPipe()
+    sink = kwargs.pop("sink", None) or _Sink()
     handle = _RunningServe(pipe, sink, None)  # type: ignore[arg-type]
 
     def _run() -> None:
@@ -618,22 +619,32 @@ def test_the_rate_limit_bites_and_then_lets_a_valid_client_back_IN():
             assert reply == {"event": "hello_rejected", "reason": REJECT_BAD_PROOF}
 
         # The window is closed for everyone — the honest cost of a shared door.
+        # The client does what a well-behaved client does: it waits and retries,
+        # holding the RIGHT credential. THREE retries, not one, because that is
+        # what makes the lockout self-sustaining: each refusal charged to the
+        # limiter refills the window it was refused by, so a single retry
+        # inside a limit of three would recover even against the defect and
+        # prove nothing. (The live repro was twelve retries over twelve
+        # seconds, never recovering.)
         clock.advance(5.0)
-        _g, blocked = raw_handshake(port, token="the-shared-secret")
-        assert blocked == {"event": "hello_rejected", "reason": REJECT_RATE_LIMITED}
+        for _ in range(3):
+            _g, blocked = raw_handshake(port, token="the-shared-secret")
+            assert blocked == {"event": "hello_rejected", "reason": REJECT_RATE_LIMITED}
 
-        # THE RECOVERY. Now 11s past the last real failure but only 6s past the
-        # rejection above: if that rejection had re-armed the window (the
-        # defect), this is still blocked. It must not be.
+        # THE RECOVERY. Now 11s past the last genuine auth failure — so those
+        # have aged out — but only 6s past the refusals above. If a refusal
+        # caused by the SERVER's own state had been charged to the limiter, the
+        # window is still full and this client is still locked out, forever, by
+        # its own politeness.
         clock.advance(6.0)
         _g, recovered = raw_handshake(port, token="the-shared-secret")
         assert recovered["event"] == "hello_ok", (
-            "a valid client never recovered — the blocked rejection extended "
-            "its own block"
+            "a valid client never recovered — the blocked rejections extended "
+            "their own block"
         )
         counts = server.connections_payload()["rejected_by_reason"]
         assert counts[REJECT_BAD_PROOF] == 3
-        assert counts[REJECT_RATE_LIMITED] == 1
+        assert counts[REJECT_RATE_LIMITED] == 3
 
 
 def test_a_capacity_refusal_is_not_charged_to_the_auth_limiter():
@@ -1700,6 +1711,93 @@ def test_two_connections_asking_to_drain_at_once_start_exactly_one_drain():
     finally:
         release.set()
         serve_module._DrainState.__init__ = original_init
+
+
+class _StallingSink(_Sink):
+    """A stdout that PARKS on the first frame matching a marker.
+
+    A subscriber's pump is the thing that writes to its transport, so a
+    transport that has stopped draining IS a parked write. This reproduces
+    that at the one seam a test can hold still, which is what makes the
+    backpressure numbers below deterministic rather than a race.
+    """
+
+    def __init__(self, marker: str, release: threading.Event) -> None:
+        super().__init__()
+        self._marker = marker
+        self._release = release
+        self.entered = threading.Event()
+
+    def write(self, text: str) -> int:
+        if self._marker in text and not self.entered.is_set():
+            self.entered.set()
+            self._release.wait(30.0)
+        return super().write(text)
+
+
+def test_a_dropped_subscription_tells_the_client_which_bound_it_tripped():
+    """F8 at the JOIN, which is where it was still broken.
+
+    The hub measures ``drop_bound``, ``bytes_discarded`` and ``byte_limit``;
+    the frame that reaches a CLIENT threw all three away and reported a frame
+    count against a ``buffer_limit`` read from the config — None whenever it
+    was left at the default. Both halves of that seam were right and the join
+    between them was not, which is this workstream's recurring shape.
+
+    The bounds here are set so only ONE of them can possibly trip: 100k frames
+    is unreachable, 64 KiB of 8 KiB frames is eight. So "which bound" has a
+    correct answer that a hard-coded one would get wrong.
+    """
+
+    release = threading.Event()
+    sink = _StallingSink('"type": "delta"', release)
+    payload = "x" * 8192
+
+    def _factory():
+        def _generate():
+            index = 0
+            while not release.is_set():
+                index += 1
+                time.sleep(0.001)
+                yield {"type": "delta", "index": index, "blob": payload}
+
+        return _generate()
+
+    with running_serve(
+        sink=sink,
+        stream_source_factory=_factory,
+        stream_buffer_limit=100_000,
+        stream_byte_limit=64 * 1024,
+    ) as handle:
+        handle.pipe.send({"op": "subscribe"})
+        # The pump is parked mid-write: the subscriber has stopped draining.
+        assert sink.entered.wait(WAIT)
+        # Long enough for the producer to blow past 64 KiB and nowhere near
+        # 100k frames — so the bound that trips is not in doubt.
+        time.sleep(0.5)
+        release.set()
+
+        dropped = sink.wait_for("subscription_dropped")
+        assert dropped["reason"] == "backpressure"
+        assert dropped["bound"] == "bytes"
+        # BOTH bounds and both numbers, so the drop is a fact an operator can
+        # act on instead of an adjective.
+        assert dropped["byte_limit"] == 64 * 1024
+        assert dropped["buffer_limit"] == 100_000
+        assert dropped["bytes_discarded"] > 0
+        assert dropped["frames_discarded"] > 0
+        # The service log line carries the same verdict, not a thinner one.
+        service = [
+            json.loads(row["line"])
+            for row in sink.frames()
+            if row.get("event") == "stderr" and row.get("line", "").startswith("{")
+        ]
+        drop_logs = [
+            row for row in service
+            if row.get("event") == "serve_stream_subscription_dropped"
+        ]
+        assert drop_logs and drop_logs[0]["bound"] == "bytes"
+        assert drop_logs[0]["bytes_discarded"] > 0
 
 
 # ── fingerprint exclusion ───────────────────────────────────────────────────
