@@ -114,6 +114,12 @@ DRAIN_TIMEOUT_EXIT_CODE = 3
 #: after a clean drain before forcing the process down. The pool is provably
 #: empty at that point, so this only covers a reader blocked on an idle pipe.
 _DRAIN_EXIT_GRACE_SECONDS = 5.0
+#: The mirror image: how long the READER waits for the drain monitor to publish
+#: its terminal frame when the transport closed first (a `shutdown` op or EOF
+#: arriving mid-drain). The pool has already been joined by then, so the monitor
+#: is normally one poll interval away; past this bound the drain is declared
+#: abandoned IN A FRAME rather than exiting silently.
+_DRAIN_ABANDON_GRACE_SECONDS = 5.0
 
 # Chat turns must survive supervisor recycles (recording safety): these argv
 # shapes mark a request as an in-flight chat turn for the busy/ping frame.
@@ -855,11 +861,26 @@ def serve_loop(
             with inflight_lock:
                 inflight.pop(request.rid, None)
                 inflight_futures.pop(request.rid, None)
-            # Accounted here rather than by the monitor's before/after arithmetic:
-            # the monitor only ever sees the pending SET, so a request that both
-            # started and finished during the drain would be invisible to it.
-            if drain_state is not None:
-                drain_state.note_completed()
+                # Accounted here rather than by the monitor's before/after
+                # arithmetic: the monitor only ever sees the pending SET, so a
+                # request that both started and finished during the drain would
+                # be invisible to it.
+                #
+                # And accounted INSIDE the same critical section as the pop,
+                # which it did not used to be. With the increment outside, a
+                # request sat in a window where it was gone from ``inflight``
+                # and not yet in ``completed`` — the monitor could observe an
+                # empty pending set and publish ``drain_complete`` with a
+                # completion count LOWER than the number of exits it had
+                # actually let land (reproduced: 5 reported for 8 exits). The
+                # counters are the drain's only evidence, so an under-count
+                # reads to an operator as work the restart dropped.
+                #
+                # Lock order is inflight_lock → _DrainState.lock, and it is the
+                # only nesting of the two: every other site takes them one after
+                # the other, never one inside the other.
+                if drain_state is not None:
+                    drain_state.note_completed()
             exit_frame: dict[str, Any] = {
                 "id": request.rid,
                 "event": "exit",
@@ -1138,6 +1159,24 @@ def serve_loop(
                 # joins worker threads on the way out of the interpreter.
                 pool_shutdown_wait = False
             drain_finished.set()
+            # The forced-exit watchdog is armed BEFORE the wakeup, and on a
+            # thread of its own, because THE WAKEUP ITSELF CAN BLOCK. Observed
+            # live on Windows against a real serve child (2026-08-13, the first
+            # end-to-end drain this stack has ever run): the wakeup closes the
+            # protocol descriptor the reader is parked on, and closing a handle
+            # with a synchronous read pending does not return until that read
+            # does. With the exit gated behind it, the process outlived its own
+            # completed drain — the terminal frame was published, the registry
+            # entry removed, and the child then sat there forever. A drain that
+            # can hang forever is not a drain, so nothing on the path to the
+            # exit may be allowed to block.
+            if hard_exit is not None:
+                threading.Thread(
+                    target=_force_exit_when_reader_is_stuck,
+                    args=(code,),
+                    name="harness-serve-drain-exit",
+                    daemon=True,
+                ).start()
             if drain_wakeup is not None:
                 try:
                     drain_wakeup()
@@ -1150,12 +1189,22 @@ def serve_loop(
             if code != 0:
                 hard_exit(code)
                 return
-            # Clean drain: give the reader loop its chance to unwind normally
-            # (closed sockets, flushed writer, restored stdio). Only force the
-            # exit if the reader is still parked on an idle pipe afterwards —
-            # a wakeup that no platform honours must not become a new "hangs
-            # forever" path.
-            if not reader_unwound.wait(_DRAIN_EXIT_GRACE_SECONDS):
+            # Clean drain: the reader gets its chance to unwind normally
+            # (closed sockets, flushed writer, restored stdio) and the watchdog
+            # above forces the exit if it does not. Nothing is waited on here.
+
+        def _force_exit_when_reader_is_stuck(code: int) -> None:
+            """Force the process down if the reader never unwinds after a drain.
+
+            The grace covers the normal case — the wakeup lands, the reader sees
+            end-of-stream, and the loop returns through its own teardown — so
+            this fires only when the platform would otherwise leave a drained
+            runtime running.
+            """
+
+            if reader_unwound.wait(_DRAIN_EXIT_GRACE_SECONDS):
+                return
+            if hard_exit is not None:
                 hard_exit(code)
 
         def _drain_monitor(state: _DrainState) -> None:
@@ -1469,10 +1518,40 @@ def serve_loop(
             pool.shutdown(wait=pool_shutdown_wait)
         liveness_stop.set()
         if drain_state is not None:
-            # The drain already emitted its own terminal frame
-            # (``drain_complete`` / ``drain_timeout``). Emitting ``shutdown``
-            # here as well would tell a consumer that a TIMED-OUT drain ended
-            # cleanly — the one thing it must not conclude.
+            # The drain owns the terminal frame (``drain_complete`` /
+            # ``drain_timeout``); emitting ``shutdown`` as well would tell a
+            # consumer that a TIMED-OUT drain ended cleanly — the one thing it
+            # must not conclude.
+            #
+            # But the reader can get here BEFORE the monitor has published
+            # anything: a `shutdown` op, or the pipe reaching EOF, while a drain
+            # is still in progress. That path used to fall straight to
+            # ``return drain_exit_code`` — no terminal frame at all, the registry
+            # entry left on disk, and code 0 even when the drain had TIMED OUT.
+            # A drain that exits silently is exactly the crash it exists to
+            # replace, so wait a bounded moment for the monitor (the pool is
+            # already joined above, so it is normally one poll away) and, if it
+            # never publishes, say so in a typed frame of its own.
+            if not drain_finished.wait(_DRAIN_ABANDON_GRACE_SECONDS):
+                frames.emit(
+                    {
+                        "event": "drain_abandoned",
+                        "pid": os.getpid(),
+                        "boot_id": boot_id,
+                        **drain_state.counters(),
+                        "drain_ms": drain_state.elapsed_ms(),
+                        "detail": (
+                            "the transport closed while a drain was still in "
+                            "progress; the drain published no terminal frame"
+                        ),
+                    }
+                )
+                _unregister_instance()
+                # Nonzero on purpose, and the SAME code a timeout uses: a
+                # supervisor must be able to tell "drained" from "gave up".
+                return DRAIN_TIMEOUT_EXIT_CODE
+            # ``_finish_drain`` published the frame and unregistered;
+            # ``drain_exit_code`` is its verdict, not this path's.
             return drain_exit_code
         _unregister_instance()
         frames.emit({"event": "shutdown", "pid": os.getpid()})

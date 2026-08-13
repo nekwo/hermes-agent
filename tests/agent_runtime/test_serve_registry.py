@@ -262,3 +262,51 @@ def test_a_record_without_a_usable_pid_is_unknown(tmp_path, pid):
 
     assert classification == CLASSIFICATION_UNKNOWN
     assert reason == "pid_missing"
+
+
+def test_unregistering_retries_a_transiently_locked_entry(tmp_path, monkeypatch):
+    """On Windows this is the ORDINARY case, not an exotic one.
+
+    A file created seconds ago in a scanned directory is routinely held open by
+    the AV/indexer for a few tens of milliseconds, and ``unlink`` then fails
+    with WinError 32. Observed live on the drain path — the drain published its
+    terminal frame, released the socket lock, and left its registry entry
+    behind, so discovery advertised a serve that had just gone. The lock cleared
+    after ~16ms; one retry was enough.
+    """
+
+    from pathlib import Path
+
+    register_serve_instance(tmp_path, pid=99, probe=_probe())
+    entry = tmp_path / "serve_instances" / "99.json"
+    assert entry.exists()
+
+    real_unlink = Path.unlink
+    attempts = {"count": 0}
+
+    def _locked_twice(self, *args, **kwargs):
+        if self == entry and attempts["count"] < 2:
+            attempts["count"] += 1
+            raise PermissionError(32, "used by another process")
+        return real_unlink(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", _locked_twice)
+    slept: list[float] = []
+
+    assert unregister_serve_instance(
+        tmp_path, pid=99, retry_delay_seconds=0.0, sleep=slept.append
+    ) is True
+    assert attempts["count"] == 2
+    assert len(slept) == 2  # it waited between attempts rather than spinning
+    assert not entry.exists()
+
+
+def test_unregistering_something_already_gone_is_false_without_retrying(tmp_path):
+    """Already gone is a state, not a failure to wait on."""
+
+    slept: list[float] = []
+
+    assert unregister_serve_instance(
+        tmp_path, pid=12345, sleep=slept.append
+    ) is False
+    assert slept == []

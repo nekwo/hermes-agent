@@ -62,6 +62,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -99,6 +100,12 @@ CLASSIFICATION_UNKNOWN = "unknown"
 #: ``python -m hermes_cli.main harness serve --ndjson`` and a packaged
 #: ``hermes.exe harness serve`` satisfy it.
 _SERVE_CMDLINE_TOKENS = ("hermes", "serve")
+
+#: Bounded retry budget for removing an entry on a clean exit (~0.5s). Sized
+#: for the AV/indexer handle window on Windows, which is tens of milliseconds —
+#: long enough to lose the race, far too short to justify waiting on it longer.
+UNREGISTER_ATTEMPTS = 20
+UNREGISTER_RETRY_DELAY_SECONDS = 0.025
 
 #: argv is a HINT, capped hard. A serve's own argv is benign, but this file is
 #: read by operators and pasted into reports, and argv on OTHER harness lanes
@@ -200,20 +207,42 @@ def register_serve_instance(
 
 
 def unregister_serve_instance(
-    store_root: Path | str, *, pid: int | None = None
+    store_root: Path | str,
+    *,
+    pid: int | None = None,
+    attempts: int = UNREGISTER_ATTEMPTS,
+    retry_delay_seconds: float = UNREGISTER_RETRY_DELAY_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> bool:
     """Remove this serve's entry on a clean exit. True when a file was removed.
 
-    Never raises: a runtime on its way down must not fail on bookkeeping, and
-    a leftover entry is a state the reader already classifies honestly.
+    Retries a transiently LOCKED file, because on Windows that is the ordinary
+    case, not an exotic one. A file created seconds ago in a scanned directory
+    is routinely held open by the AV/indexer for a few tens of milliseconds, and
+    ``unlink`` then fails with WinError 32 — observed live on the drain path,
+    where the whole point is a clean handover: the drain published its terminal
+    frame and left its registry entry behind, so the registry advertised a serve
+    that had just gone. The lock was held for ~16ms there; one retry cleared it.
+    FileNotFoundError is NOT retried — already gone is a state, not a failure.
+
+    Never raises: a runtime on its way down must not fail on bookkeeping, and a
+    leftover entry is a state the reader already classifies honestly.
     """
 
     resolved_pid = int(pid if pid is not None else os.getpid())
-    try:
-        serve_instance_path(store_root, resolved_pid).unlink()
-        return True
-    except OSError:
-        return False
+    path = serve_instance_path(store_root, resolved_pid)
+    total = max(1, int(attempts))
+    for attempt in range(total):
+        try:
+            path.unlink()
+            return True
+        except FileNotFoundError:
+            return False
+        except OSError:
+            if attempt + 1 >= total:
+                return False
+            sleep(max(0.0, float(retry_delay_seconds)))
+    return False  # pragma: no cover - loop always returns
 
 
 def list_serve_instances(
