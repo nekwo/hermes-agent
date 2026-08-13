@@ -234,7 +234,7 @@ def test_a_blocking_wakeup_cannot_stop_the_forced_exit(monkeypatch):
     the hang the deadline exists to bound, arriving through the front door.
     """
 
-    monkeypatch.setattr(serve_module, "_DRAIN_EXIT_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(serve_module, "_DRAIN_EXIT_DEADLINE_SECONDS", 0.2)
 
     exits: list[int] = []
     wakeup_entered = threading.Event()
@@ -269,6 +269,127 @@ def test_a_blocking_wakeup_cannot_stop_the_forced_exit(monkeypatch):
         never.set()
         pipe.close()
         result["thread"].join(WAIT)
+
+
+# ── FINDING F6 — the teardown ran outside the deadline that bounds it ───────
+
+
+class _StallingSink(_Sink):
+    """A stdout that PARKS on one named frame, then lets go.
+
+    Not an artificial hazard. Publishing the terminal frame, broadcasting it to
+    attached clients and tearing the socket lane down are all writes against
+    peers that may have stopped reading — a wedged subscriber parks a
+    ``sendall`` for the whole socket timeout, and the hub's joins used to be a
+    per-subscriber budget that SUMMED. This reproduces "the tail of the drain
+    blocks" at the one seam a unit test can hold still.
+    """
+
+    def __init__(self, stall_on: str, release: threading.Event) -> None:
+        super().__init__()
+        self._stall_on = stall_on
+        self._release = release
+        self.entered = threading.Event()
+
+    def write(self, text: str) -> int:
+        if self._stall_on in text and not self.entered.is_set():
+            self.entered.set()
+            self._release.wait(30.0)
+        return super().write(text)
+
+
+def test_the_exit_watchdog_covers_the_teardown_not_just_what_follows_it(monkeypatch):
+    """F6: the watchdog is armed as the FIRST act of the drain's ending.
+
+    It used to be armed AFTER the terminal frame, the broadcast and the socket
+    teardown — which is to say, after every step that can actually hang, so the
+    steps most likely to need a watchdog ran unwatched. Here the very first of
+    those steps parks forever. With the watchdog armed first, the process is
+    still forced down on schedule; armed late, it is never armed at all.
+    """
+
+    monkeypatch.setattr(serve_module, "_DRAIN_EXIT_DEADLINE_SECONDS", 0.3)
+
+    exits: list[int] = []
+    release = threading.Event()
+    pipe = _Pipe()
+    sink = _StallingSink("drain_complete", release)
+    result = _run_serve(
+        pipe,
+        sink,
+        dispatch=lambda argv: 0,
+        drain_poll_interval_seconds=0.005,
+        hard_exit=exits.append,
+    )
+    try:
+        sink.wait_for("ready")
+        pipe.send({"op": "drain", "deadline_seconds": 10})
+        # The drain has DECIDED how it ended and is now parked publishing it.
+        assert sink.entered.wait(WAIT)
+        # Positive proof the hang is where the test thinks it is: the terminal
+        # frame has not been written, so nothing downstream of it has run.
+        assert "drain_complete" not in sink.events()
+
+        deadline = time.monotonic() + WAIT
+        while time.monotonic() < deadline and not exits:
+            time.sleep(0.01)
+        assert exits == [0], (
+            "the drain parked in its own teardown and was never forced down — "
+            "the watchdog is armed too late to cover it"
+        )
+    finally:
+        release.set()
+        pipe.close()
+        result["thread"].join(WAIT)
+
+
+def test_a_completed_drain_is_never_relabelled_abandoned(monkeypatch):
+    """F6's other half, and the contradiction it produced.
+
+    A mid-drain EOF made the reader publish ``drain_abandoned`` and exit 3 —
+    on top of a drain that had ALREADY decided it completed. The frame and the
+    code were both wrong, about work that had actually landed. The terminal
+    latch is taken before anything is published, so the two paths cannot both
+    claim the ending.
+
+    The stall below puts the process in exactly that window: the drain has
+    latched and is mid-publish, and the reader reaches its EOF path first.
+    """
+
+    monkeypatch.setattr(serve_module, "_DRAIN_ABANDON_GRACE_SECONDS", 0.2)
+    monkeypatch.setattr(serve_module, "_DRAIN_EXIT_DEADLINE_SECONDS", 30.0)
+
+    release = threading.Event()
+    pipe = _Pipe()
+    sink = _StallingSink("drain_complete", release)
+    result = _run_serve(
+        pipe, sink, dispatch=lambda argv: 0, drain_poll_interval_seconds=0.005
+    )
+    try:
+        sink.wait_for("ready")
+        pipe.send({"op": "drain", "deadline_seconds": 10})
+        assert sink.entered.wait(WAIT)
+        assert "drain_complete" not in sink.events()
+
+        # The transport goes away while the drain is mid-publish.
+        pipe.close()
+        # Long enough for the abandon grace to lapse several times over.
+        time.sleep(1.0)
+        assert "drain_abandoned" not in sink.events(), (
+            "a drain that had already decided it COMPLETED was relabelled "
+            "abandoned by the reader"
+        )
+    finally:
+        release.set()
+        result["thread"].join(WAIT)
+
+    # Released, the drain finishes publishing on its OWN thread — which the
+    # join above does not cover, so this waits for the frame rather than
+    # assuming the reader's exit dragged it along.
+    sink.wait_for("drain_complete")
+    assert "drain_abandoned" not in sink.events()
+    # ...and the code is the drain's verdict, not the EOF path's.
+    assert result["code"] == 0
 
 
 # ── FINDING B ───────────────────────────────────────────────────────────────

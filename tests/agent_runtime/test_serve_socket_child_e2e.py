@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import time
@@ -34,6 +35,16 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BOOT_TIMEOUT_SECONDS = 180.0
 CLI_TIMEOUT_SECONDS = 180.0
+
+#: The suite's global cap is 30s (``pyproject.toml`` addopts), which is right
+#: for a Python-level hang and wrong for these two: each boots a REAL serve
+#: child and then spawns the CLI verb two or three more times, and a cold
+#: interpreter start on Windows is seconds each. Measured at ~25s on the
+#: reference machine — inside 30 only by luck, and a cap a test passes by luck
+#: is a flake generator, not a bound. The file already declares 180s budgets of
+#: its own for exactly this reason; this makes the outer bound agree with them
+#: instead of silently contradicting them.
+E2E_TEST_TIMEOUT_SECONDS = 300
 
 
 def _sandbox_env(tmp_path: Path) -> dict[str, str]:
@@ -117,6 +128,7 @@ def _connect(env: dict[str, str], *args: str) -> tuple[int, dict | None, str]:
     return completed.returncode, payload, stdout + (completed.stderr or "")
 
 
+@pytest.mark.timeout(E2E_TEST_TIMEOUT_SECONDS)
 def test_probe_then_drain_over_the_socket_against_a_real_serve_child(tmp_path):
     env = _sandbox_env(tmp_path)
     process = subprocess.Popen(
@@ -149,6 +161,14 @@ def test_probe_then_drain_over_the_socket_against_a_real_serve_child(tmp_path):
         assert probe["target"]["classification"] == "live"
         assert probe["version"]["event"] == "version"
         assert probe["version"]["transport"] == "socket"
+        # The challenge it answered, carried on the report, so "which
+        # contract did the thing that worked use" is never archaeology.
+        from agent_runtime.serve_socket import HELLO_CONTRACT_VERSION, NONCE_BYTES
+
+        assert probe["hello_contract"] == HELLO_CONTRACT_VERSION
+        assert probe["server_hello"]["hello_contract"] == HELLO_CONTRACT_VERSION
+        assert probe["server_hello"]["algorithm"] == "hmac-sha256"
+        assert len(probe["server_hello"]["nonce"]) == 2 * NONCE_BYTES
         # A probe running from the same checkout is on the same build.
         assert probe["hello"]["build_mismatch"] in (False, None)
         # The token is never echoed by the client or the service.
@@ -179,13 +199,166 @@ def test_probe_then_drain_over_the_socket_against_a_real_serve_child(tmp_path):
         runtime = tmp_path / "runtime"
         assert list((runtime / "serve_instances").glob("*.json")) == []
         assert not socket_owner_path(runtime).exists()
-        assert not socket_lock_path(runtime).exists()
+        # The lock FILE survives on purpose — see SocketOwnerLock.release.
+        # Unlinking it is a two-owner race on POSIX, where flock is held on
+        # an open description rather than on a path. What must be gone is the
+        # LOCK, and the proof of that is that it is immediately re-takeable.
+        assert socket_lock_path(runtime).exists()
+        from agent_runtime.serve_socket import SocketOwnerLock
+
+        successor = SocketOwnerLock(runtime)
+        assert successor.acquire().acquired is True
+        successor.release()
 
         # 4. And a client that arrives afterwards is told there is nothing to
         # connect to, rather than hanging or inventing a target.
         code, gone, output = _connect(env, "--probe")
         assert code != 0, output
         assert gone["error"] == "no_socket_service"
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=30)
+
+
+def _raw_socket_exchange(port: int, answer_for) -> tuple[dict | None, list[dict], bytes]:
+    """Speak the handshake to a REAL child by hand, over a raw socket.
+
+    ``ServeSocketClient`` is deliberately not used here. It is the code under
+    test on the client side, so driving the child with it would prove the two
+    halves agree with each other and nothing about what actually crosses the
+    wire. This assembles the bytes itself and returns them for inspection.
+
+    ``answer_for`` receives the parsed ``server_hello`` and returns the object
+    to send back, or None to send nothing.
+    """
+
+    sock = socket.create_connection(("127.0.0.1", int(port)), timeout=30.0)
+    sock.settimeout(30.0)
+    sent = b""
+    frames: list[dict] = []
+    try:
+        stream = sock.makefile("rb")
+        line = stream.readline()
+        greeting = json.loads(line) if line.strip() else None
+        answer = answer_for(greeting)
+        if answer is not None:
+            sent = (json.dumps(answer) + "\n").encode("utf-8")
+            sock.sendall(sent)
+        while True:
+            line = stream.readline()
+            if not line:
+                break
+            if not line.strip():
+                continue
+            frames.append(json.loads(line))
+            break
+        return greeting, frames, sent
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+
+@pytest.mark.timeout(E2E_TEST_TIMEOUT_SECONDS)
+def test_the_challenge_response_handshake_against_a_real_serve_child(tmp_path):
+    """F1, end to end, against a process this test actually spawned.
+
+    Everything else about the handshake is exercised in-process. This is the
+    one place the whole thing is real: a real child, a real token file it wrote
+    itself, a real loopback socket, and bytes assembled by hand. The claim being
+    proven is the CRITICAL finding's second half — the token does not travel —
+    and the only way to prove it is to hold the bytes and look.
+    """
+
+    env = _sandbox_env(tmp_path)
+    process = subprocess.Popen(
+        [sys.executable, "-m", "hermes_cli.main", "harness", "serve", "--ndjson"],
+        cwd=str(REPO_ROOT),
+        env=env,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        text=True,
+        bufsize=1,
+    )
+    child = _Child(process, env)
+    try:
+        ready = child.wait_for("ready")
+        assert ready["socket"]["outcome"] == "listening", ready["socket"]
+        port = int(ready["socket"]["port"])
+
+        from agent_runtime.serve_auth import serve_auth_token_path
+        from agent_runtime.serve_socket import (
+            HELLO_CONTRACT_VERSION,
+            NONCE_BYTES,
+            hello_proof,
+        )
+
+        runtime = tmp_path / "runtime"
+        token = serve_auth_token_path(runtime).read_bytes().decode().strip()
+        assert token
+
+        # 1. The real exchange. The SERVER speaks first.
+        transcript: dict = {}
+
+        def _answer(greeting):
+            transcript["server_hello"] = greeting
+            return {
+                "op": "hello",
+                "client": "raw-e2e",
+                "client_build": None,
+                "proof": hello_proof(token, greeting["nonce"]),
+            }
+
+        greeting, frames, sent = _raw_socket_exchange(port, _answer)
+        assert greeting["event"] == "server_hello"
+        assert greeting["hello_contract"] == HELLO_CONTRACT_VERSION
+        assert greeting["algorithm"] == "hmac-sha256"
+        assert len(greeting["nonce"]) == 2 * NONCE_BYTES
+        assert frames and frames[0]["event"] == "hello_ok", frames
+        assert frames[0]["boot_id"] == ready["boot_id"]
+
+        # THE assertion: the exact bytes this client put on the wire, checked
+        # against the exact secret the child wrote to disk.
+        assert token.encode() not in sent
+        answer = json.loads(sent.decode().strip())
+        assert "token" not in answer
+        assert answer["proof"] == hello_proof(token, greeting["nonce"])
+
+        # 2. The nonce is per CONNECTION, so that transcript is unreplayable.
+        replayed_nonce = greeting["nonce"]
+        second_greeting, replay_frames, _sent = _raw_socket_exchange(
+            port,
+            lambda g: (
+                transcript.setdefault("second", g),
+                {"op": "hello", "client": "replayer", "proof": answer["proof"]},
+            )[1],
+        )
+        assert second_greeting["nonce"] != replayed_nonce
+        assert replay_frames == [{"event": "hello_rejected", "reason": "bad_proof"}]
+
+        # 3. The OLD contract — the raw token in the hello — is refused. There
+        #    is no compatibility shim, on purpose: one would keep the cleartext
+        #    lane open forever.
+        _g, old_frames, old_sent = _raw_socket_exchange(
+            port, lambda g: {"op": "hello", "client": "old", "token": token}
+        )
+        assert old_frames == [{"event": "hello_rejected", "reason": "bad_proof"}]
+        assert token.encode() in old_sent  # the old client really did send it...
+        # ...and it bought nothing.
+
+        # 4. The service is unharmed by all of that, and the operator verb still
+        #    works — the rejections above were not charged in a way that locks
+        #    a legitimate client out (the live-proven F3 defect).
+        code, probe, output = _connect(env, "--probe")
+        assert code == 0, output
+        assert probe["ok"] is True
+        assert probe["hello"]["event"] == "hello_ok"
+        assert probe["server_hello"]["hello_contract"] == HELLO_CONTRACT_VERSION
+        assert probe["hello_contract"] == HELLO_CONTRACT_VERSION
+        assert token not in json.dumps(probe)
     finally:
         if process.poll() is None:
             process.kill()

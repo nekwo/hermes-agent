@@ -18,6 +18,9 @@ import time
 import pytest
 
 from agent_runtime.serve_stream_hub import (
+    BOUND_BYTES,
+    BOUND_FRAMES,
+    DEFAULT_BYTE_LIMIT,
     DROP_REASON_BACKPRESSURE,
     DROP_REASON_PRODUCER_ENDED,
     StreamHub,
@@ -341,15 +344,125 @@ def test_a_producer_that_raises_is_reported_and_never_escapes():
 
 
 def test_the_producer_stops_when_the_last_subscriber_leaves():
-    """A service nobody is watching must not keep rebuilding projections."""
+    """A service nobody is watching must not keep rebuilding projections.
+
+    ``producer_running`` alone was never enough to see the leak: it reports the
+    CURRENT generation, so five abandoned producers all showed False. The
+    count is the assertion, and zero is the number.
+    """
 
     gate = threading.Event()
     hub = StreamHub(_counting_source(1000, gate=gate), buffer_limit=256)
     try:
         hub.subscribe("a", sink=_Recorder())
         assert _wait_until(lambda: hub.stats()["frames_produced"] > 0)
+        assert hub.stats()["producers_live"] == 1
         hub.unsubscribe("a")
         assert _wait_until(lambda: hub.stats()["producer_running"] is False, timeout=10.0)
+        assert _wait_until(lambda: hub.stats()["producers_live"] == 0, timeout=10.0)
+        assert hub.stats()["producers"] == []
+    finally:
+        gate.set()
+        hub.stop()
+
+
+def test_producers_do_not_accumulate_one_per_subscribe():
+    """F5, the leak itself.
+
+    Every subscribe supersedes the running producer. That used to be ALL it
+    did: the old generator was noticed only when it next yielded, nothing
+    stopped it when the room emptied, and ``stop()`` joined the newest alone.
+    Five subscribes left five producer threads and five open generators alive
+    forever, each rebuilding a full snapshot core for ``subscriber_count: 0`` —
+    so launcher reconnect churn multiplied the exact cost the one-producer
+    design exists to avoid.
+
+    Both halves are asserted: the count does not GROW with subscribes, and it
+    returns to ZERO when the room empties. Either alone passes vacuously — a
+    hub that never started a producer satisfies the second.
+    """
+
+    gate = threading.Event()
+    factory, generations, alive = _generational_source(3, gate)
+    hub = StreamHub(factory, buffer_limit=64)
+    recorders = {}
+    try:
+        for index in range(5):
+            key = f"client-{index}"
+            recorders[key] = _Recorder()
+            hub.subscribe(key, sink=recorders[key])
+            # Each newcomer really is served — otherwise "one producer" would
+            # be trivially satisfied by a hub that stopped producing.
+            assert _wait_until(lambda k=key: recorders[k].count() >= 3), key
+            assert _wait_until(lambda: hub.stats()["producers_live"] <= 1), index
+
+        stats = hub.stats()
+        assert stats["subscribers"] == 5
+        assert stats["producers_live"] == 1
+        assert stats["producers_superseded"] == 0
+        assert stats["generation"] == 5
+        # ...and the FACTORY's own view agrees: one generator body is running.
+        assert _wait_until(lambda: len(alive()) == 1)
+        assert generations["count"] == 5
+
+        for key in list(recorders):
+            hub.unsubscribe(key)
+        assert _wait_until(lambda: hub.stats()["producers_live"] == 0, timeout=10.0)
+        # The generator bodies really exited; the count is not just bookkeeping.
+        assert _wait_until(lambda: alive() == set(), timeout=10.0)
+    finally:
+        gate.set()
+        hub.stop()
+
+
+def test_stop_joins_every_live_producer_not_only_the_newest():
+    """``stop()`` used to join ``self._producer`` — one handle, the last one
+    written. Anything superseded and still running was never waited for."""
+
+    gate = threading.Event()
+    factory, _generations, alive = _generational_source(2, gate)
+    hub = StreamHub(factory, buffer_limit=64)
+    for index in range(4):
+        hub.subscribe(f"client-{index}", sink=_Recorder())
+    assert _wait_until(lambda: hub.stats()["frames_produced"] > 0)
+
+    hub.stop(join_timeout=10.0)
+    # Nothing left running: not the current generation, not a superseded one.
+    assert hub.stats()["producers_live"] == 0
+    assert alive() == set()
+    assert hub.subscriber_count() == 0
+    gate.set()
+
+
+def test_a_stats_row_names_every_producer_and_whether_it_is_superseded():
+    """A leak has to be a NUMBER an operator can read, not an absence."""
+
+    gate = threading.Event()
+    factory, _generations, _alive = _generational_source(2, gate)
+    hub = StreamHub(factory, buffer_limit=64)
+    try:
+        hub.subscribe("a", sink=_Recorder())
+        assert _wait_until(lambda: hub.stats()["frames_produced"] > 0)
+        row = hub.stats()["producers"][0]
+        assert set(row) == {
+            "generation",
+            "state",
+            "alive",
+            "superseded",
+            "stopping",
+            "frames",
+            "idle_ms",
+            "age_ms",
+        }
+        assert row["generation"] == 1
+        assert row["superseded"] is False
+        assert row["alive"] is True
+        assert row["frames"] >= 1
+        # ``awaiting_frame`` is the load-bearing state: a producer parked in
+        # ``next()`` cannot be interrupted from another thread, so the honest
+        # answer is to report it with the age of its last frame.
+        assert row["state"] in {"awaiting_frame", "fanning_out"}
+        assert row["idle_ms"] >= 0
     finally:
         gate.set()
         hub.stop()
@@ -368,12 +481,129 @@ def test_unsubscribe_is_typed_and_idempotent():
         hub.stop()
 
 
+# ── the two bounds ──────────────────────────────────────────────────────────
+
+
 @pytest.mark.parametrize("limit", [1, 4, 64])
 def test_the_buffer_bound_is_reported_so_a_client_can_reason_about_it(limit):
     gate = threading.Event()
     hub = StreamHub(_counting_source(2, gate=gate), buffer_limit=limit)
     try:
         assert hub.stats()["buffer_limit"] == limit
+        assert hub.stats()["byte_limit"] == DEFAULT_BYTE_LIMIT
     finally:
         gate.set()
         hub.stop()
+
+
+def test_the_byte_bound_trips_before_the_frame_bound_and_says_which():
+    """F8. A frame count was never a memory bound.
+
+    These frames are not a fixed cost — the hydrate at the head of every
+    generation is a complete projection — so 256 of them is a multi-gigabyte
+    buffer per stalled client, times 32 connections. The buffer is bounded
+    TWICE and whichever trips first wins; this sets the frame bound absurdly
+    high so the ONLY thing that can stop the subscriber is the byte total.
+    """
+
+    blocked = threading.Event()
+    slow = _Recorder(gate=blocked)
+    drops: list[tuple[str, dict]] = []
+    payload = "x" * 4096
+
+    def _factory():
+        def _generate():
+            index = 0
+            while not blocked.is_set():
+                index += 1
+                time.sleep(0.0005)
+                yield {"type": "delta", "index": index, "blob": payload}
+
+        return _generate()
+
+    hub = StreamHub(_factory, buffer_limit=100_000, byte_limit=64 * 1024)
+    try:
+        hub.subscribe(
+            "slow", sink=slow, on_drop=lambda reason, stats: drops.append((reason, stats))
+        )
+        assert _wait_until(lambda: hub.stats()["subscriptions"][0]["dropped"] is True)
+        stats = hub.stats()["subscriptions"][0]
+        assert stats["drop_reason"] == DROP_REASON_BACKPRESSURE
+        # WHICH bound, named — not "dropped for backpressure" with no numbers.
+        assert stats["drop_bound"] == BOUND_BYTES
+        assert stats["byte_limit"] == 64 * 1024
+        # It was nowhere near the frame bound, which is the whole point.
+        assert stats["frame_limit"] == 100_000
+        assert stats["buffered"] < 100_000
+
+        blocked.set()
+        assert _wait_until(lambda: bool(drops))
+        _reason, drop_stats = drops[0]
+        assert drop_stats["drop_bound"] == BOUND_BYTES
+        assert drop_stats["bytes_discarded"] > 0
+        assert drop_stats["frames_discarded"] > 0
+    finally:
+        blocked.set()
+        hub.stop()
+
+
+def test_the_frame_bound_still_trips_when_the_frames_are_small():
+    """The other bound, on the other side of the same decision."""
+
+    blocked = threading.Event()
+    slow = _Recorder(gate=blocked)
+    drops: list[tuple[str, dict]] = []
+
+    def _factory():
+        def _generate():
+            index = 0
+            while not blocked.is_set():
+                index += 1
+                time.sleep(0.0005)
+                yield {"type": "delta", "index": index}
+
+        return _generate()
+
+    hub = StreamHub(_factory, buffer_limit=4, byte_limit=64 * 1024 * 1024)
+    try:
+        hub.subscribe(
+            "slow", sink=slow, on_drop=lambda reason, stats: drops.append((reason, stats))
+        )
+        assert _wait_until(lambda: hub.stats()["subscriptions"][0]["dropped"] is True)
+        stats = hub.stats()["subscriptions"][0]
+        assert stats["drop_reason"] == DROP_REASON_BACKPRESSURE
+        assert stats["drop_bound"] == BOUND_FRAMES
+        blocked.set()
+        assert _wait_until(lambda: bool(drops))
+        assert drops[0][1]["drop_bound"] == BOUND_FRAMES
+    finally:
+        blocked.set()
+        hub.stop()
+
+
+def test_a_frame_is_measured_once_by_the_producer_not_once_per_subscriber():
+    """The accounting must not scale with the fan-out it exists to serve."""
+
+    from agent_runtime import serve_stream_hub as hub_module
+
+    measured: list[int] = []
+    original = hub_module._frame_bytes
+
+    def _counting(frame):
+        measured.append(1)
+        return original(frame)
+
+    gate = threading.Event()
+    hub_module._frame_bytes = _counting
+    hub = StreamHub(_counting_source(10, gate=gate), buffer_limit=64)
+    try:
+        for index in range(4):
+            hub.subscribe(f"client-{index}", sink=_Recorder())
+        assert _wait_until(lambda: hub.stats()["frames_produced"] >= 10)
+        produced = hub.stats()["frames_produced"]
+        # One measurement per produced frame — not four (one per subscriber).
+        assert len(measured) <= produced + 2
+    finally:
+        gate.set()
+        hub.stop()
+        hub_module._frame_bytes = original
