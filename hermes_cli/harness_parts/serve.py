@@ -41,16 +41,42 @@ Protocol (NDJSON, one frame per line):
              time. A durable service outlives the install it was started
              from; this is how a client proves it is not talking to last
              week's code.
-- drain:     ``{"op":"drain"[,"deadline_seconds":30]}`` → stop accepting new
-             requests (each is answered ``{"id":…,"event":"draining",…}`` and
-             a terminal ``exit`` frame with code 75), let in-flight requests
-             finish, then ``{"event":"drain_complete","requests_refused":N,
+- drain:     ``{"op":"drain"[,"deadline_seconds":30][,"force":true]}`` → stop
+             accepting new requests (each is answered
+             ``{"id":…,"event":"draining",…}`` and a terminal ``exit`` frame
+             with code 75), let in-flight requests finish, then
+             ``{"event":"drain_complete","requests_refused":N,
              "requests_completed":M,"drain_ms":X}`` and exit 0. If the
              deadline elapses first: ``{"event":"drain_timeout",…,
-             "stuck_request_ids":[…]}`` and a NONZERO exit — a drain that can
-             hang forever is not a drain. Progress is reported as
-             ``{"event":"drain_progress",…}`` while the wait runs, so a
-             draining service never looks dead to a watchdog.
+             "stuck_request_ids":[…],"held_by_chat_turns":N,"terminal":true}``
+             and a NONZERO exit — a drain that can hang forever is not a drain.
+             Progress is reported as ``{"event":"drain_progress",…}`` while the
+             wait runs, so a draining service never looks dead to a watchdog.
+
+             THE DEADLINE IS THE SERVER'S, and so is the kill. Two rules make
+             it so, and both exist because `drain` on the socket is reachable
+             by any local process holding the root's secret while `shutdown` is
+             refused there on purpose:
+
+             * the effective deadline is ``max(client ask, server minimum)`` —
+               a client could previously ask for 0.05s, which turned the
+               restart verb into a kill (`hard_exit(3)` is `os._exit`) over a
+               live chat turn, straight through the never-recycle-during-turns
+               contract this file opens with;
+             * a deadline that expires WHILE A CHAT TURN IS IN FLIGHT does not
+               end the process. It emits a non-terminal
+               ``{"event":"drain_timeout","terminal":false,
+               "held_by_chat_turns":N,…}``, keeps serving, and re-arms. Only an
+               expiry with no chat turn in flight is terminal. Recording safety
+               outranks restart latency: a killed turn is lost work, a late
+               restart is a slow one.
+
+             On the SOCKET lane `drain` additionally requires ``"force":true``.
+             Same reasoning as the `shutdown` refusal — an attached client
+             asking to replace a service other clients are using should have to
+             say so explicitly — and one flag is a trivial cost for the
+             operator verb (`harness serve connect --drain` sets it). The
+             refusal is typed: ``{"event":"error","error":"drain_requires_force"}``.
 - cancel:    ``{"op":"cancel","id":"req-7"}`` → a QUEUED request is dropped
              and answers ``{"id":"req-7","event":"exit","code":130,
              "cancelled":true}``; a request already RUNNING (or unknown)
@@ -81,16 +107,37 @@ because the socket lane is injected and OFF unless ``_cmd_serve`` turns it on.
   ``{"outcome":"lock_held_by","pid":…}``. The winner's ``ready`` carries
   ``{"outcome":"listening","host":"127.0.0.1","port":…}`` and its registry
   entry records ``transport:"stdio+socket"`` plus the port.
-- hello:     the FIRST line on a socket must be
-             ``{"op":"hello","token":…,"client":…,"client_build":…}``, verified
-             against the per-root token (``agent_runtime/serve_auth.verify`` —
-             constant-time, fails closed). Success →
-             ``{"event":"hello_ok","build":{…},"boot_id":…,"contract":1,
-             "build_mismatch":true|false|null}``; failure → ONE
-             ``{"event":"hello_rejected","reason":…}`` and the connection is
-             closed, with a rate limit against hammering. Before that line is
-             verified a connection can do NOTHING. The token appears in no
-             frame, log, error, or registry entry.
+- hello:     CHALLENGE-RESPONSE, and the SERVER speaks first
+             (``hello_contract`` 2). On accept the service writes
+             ``{"event":"server_hello","nonce":<64 hex>,"boot_id":…,
+             "contract":1,"hello_contract":2,"algorithm":"hmac-sha256"}`` and
+             the client answers
+             ``{"op":"hello","client":…,"client_build":…,"proof":<hex>}`` where
+             the proof is ``HMAC-SHA256(key=<per-root token>, msg=<nonce>)``.
+             Success → ``{"event":"hello_ok","build":{…},"boot_id":…,
+             "contract":1,"hello_contract":2,"build_mismatch":true|false|null}``;
+             failure → ONE ``{"event":"hello_rejected","reason":…}`` and the
+             connection is closed, with a rate limit against hammering. Before
+             that proof is verified a connection can do NOTHING.
+
+             THE TOKEN NEVER TRAVELS. It is the HMAC key, never a field, so it
+             appears in no frame, log, error, or registry entry on either side,
+             and a captured transcript is unreplayable (fresh nonce per
+             connection). The first cut sent the raw token and paired that with
+             a discovery fallback that could hand a client a target already
+             classified ``stale_dead_pid`` — an impostor on a dead serve's port
+             harvested the real token, live-proven. There is deliberately no
+             compatibility shim for the old hello: it has no other clients yet,
+             and a shim would keep the cleartext lane open forever.
+
+             Rejection reasons are typed and mean different things:
+             ``bad_proof`` / ``hello_required`` / ``hello_malformed`` are
+             AUTHENTICATION failures and are the only ones that charge the rate
+             limiter; ``too_many_connections`` / ``too_many_pending`` /
+             ``draining`` / ``hello_timeout`` / ``rate_limited`` /
+             ``handshake_throttled`` describe the SERVER's state and never do —
+             charging them made a blocked window extend itself forever, so a
+             client with the right credential could not recover.
 - subscribe: ``{"op":"subscribe","lane":"stream"}`` pushes the SAME hydrate /
              delta / heartbeat frames ``harness stream`` produces, from ONE
              shared producer fanned out to every subscriber (a per-batch
@@ -136,9 +183,15 @@ DEFAULT_POOL_SIZE = 4
 # drain that exited without one would be indistinguishable from the crash it
 # exists to avoid.
 DEFAULT_DRAIN_DEADLINE_SECONDS = 30.0
-#: Bounds on a client-supplied deadline. Zero would make `drain` a `kill`; an
-#: unbounded value would restore "can hang forever" through the front door.
-_DRAIN_DEADLINE_MIN_SECONDS = 0.05
+#: The SERVER's floor under any client-supplied deadline, and the correction
+#: for a real defect: the old floor was 0.05s, so any socket client could ask
+#: for a deadline that expires instantly and `drain` became `kill` — the
+#: timeout path calls `hard_exit`, which is `os._exit`, over whatever was
+#: running. A deadline is a promise about how long in-flight work is allowed to
+#: finish, and a client does not get to shorten a promise the server made to
+#: work it cannot see. `max(ask, this)`, always.
+_DRAIN_MINIMUM_DEADLINE_SECONDS = 30.0
+#: An unbounded value would restore "can hang forever" through the front door.
 _DRAIN_DEADLINE_MAX_SECONDS = 3600.0
 _DRAIN_POLL_INTERVAL_SECONDS = 0.05
 #: While draining, this replaces the `busy` liveness pump (which stops with the
@@ -153,10 +206,16 @@ DRAINING_EXIT_CODE = 75
 #: In-flight work outlived the deadline. Nonzero on purpose: a supervisor must
 #: be able to tell "drained" from "gave up with work still running".
 DRAIN_TIMEOUT_EXIT_CODE = 3
-#: How long the drain monitor waits for the reader loop to actually unwind
-#: after a clean drain before forcing the process down. The pool is provably
-#: empty at that point, so this only covers a reader blocked on an idle pipe.
-_DRAIN_EXIT_GRACE_SECONDS = 5.0
+#: ONE deadline for everything between "the drain has decided how it ended"
+#: and "this process is gone": publishing the terminal frame, broadcasting it
+#: to attached clients, tearing the socket lane down, unregistering, and the
+#: reader unwinding. It is armed as the FIRST act of ``_finish_drain`` rather
+#: than after the teardown, because the teardown is exactly what can hang —
+#: hub joins were 2.0s EACH and a wedged reader can park a broadcast write for
+#: IO_TIMEOUT, so with 32 subscribers the old arrangement could sum past a
+#: minute with the watchdog not yet armed. Summed per-step budgets are not a
+#: bound; this is.
+_DRAIN_EXIT_DEADLINE_SECONDS = 15.0
 #: The mirror image: how long the READER waits for the drain monitor to publish
 #: its terminal frame when the transport closed first (a `shutdown` op or EOF
 #: arriving mid-drain). The pool has already been joined by then, so the monitor
@@ -633,13 +692,25 @@ class _DrainState:
     the difference between a safe restart and lost work.
     """
 
-    __slots__ = ("started_monotonic", "deadline_seconds", "refused", "completed", "lock")
+    __slots__ = (
+        "started_monotonic",
+        "deadline_seconds",
+        "refused",
+        "completed",
+        "deadline_holds",
+        "lock",
+    )
 
     def __init__(self, deadline_seconds: float):
         self.started_monotonic = time.monotonic()
         self.deadline_seconds = deadline_seconds
         self.refused = 0
         self.completed = 0
+        #: How many times the deadline expired and was NOT allowed to end the
+        #: process because a chat turn was still in flight. Counted because
+        #: "this restart is taking a while" and "this restart has been held
+        #: open by recording safety four times" are different operator facts.
+        self.deadline_holds = 0
         self.lock = threading.Lock()
 
     def note_refused(self) -> int:
@@ -651,20 +722,38 @@ class _DrainState:
         with self.lock:
             self.completed += 1
 
+    def note_deadline_held(self) -> int:
+        with self.lock:
+            self.deadline_holds += 1
+            return self.deadline_holds
+
     def counters(self) -> dict[str, Any]:
         with self.lock:
-            return {"requests_refused": self.refused, "requests_completed": self.completed}
+            return {
+                "requests_refused": self.refused,
+                "requests_completed": self.completed,
+                "deadline_holds": self.deadline_holds,
+            }
 
     def elapsed_ms(self) -> int:
         return int((time.monotonic() - self.started_monotonic) * 1000)
 
 
-def _drain_deadline_seconds(raw: Any, default: float) -> float:
-    """Clamp a client-supplied deadline into the sane band, or take the default."""
+def _drain_deadline_seconds(
+    raw: Any, default: float, *, minimum: float = _DRAIN_MINIMUM_DEADLINE_SECONDS
+) -> float:
+    """The EFFECTIVE deadline: the client's ask, floored by the server's.
 
+    A client may lengthen a drain (up to the hard ceiling) and may not shorten
+    it below what this runtime is willing to give work in flight. The floor is
+    a parameter so the loop's own tests can run a drain in milliseconds, and it
+    is a SERVER-side parameter: no field a client sends can lower it.
+    """
+
+    floor = max(0.0, float(minimum))
     if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-        return default
-    return max(_DRAIN_DEADLINE_MIN_SECONDS, min(float(raw), _DRAIN_DEADLINE_MAX_SECONDS))
+        return max(floor, float(default))
+    return max(floor, min(float(raw), _DRAIN_DEADLINE_MAX_SECONDS))
 
 
 def _build_harness_parser() -> argparse.ArgumentParser:
@@ -772,6 +861,7 @@ def serve_loop(
     snapshot_prewarm: Callable[[], None] | None = None,
     root_anchor: Callable[[], Any] | None = None,
     drain_deadline_seconds: float = DEFAULT_DRAIN_DEADLINE_SECONDS,
+    drain_minimum_deadline_seconds: float = _DRAIN_MINIMUM_DEADLINE_SECONDS,
     drain_poll_interval_seconds: float = _DRAIN_POLL_INTERVAL_SECONDS,
     drain_wakeup: Callable[[], None] | None = None,
     hard_exit: Callable[[int], None] | None = None,
@@ -917,6 +1007,13 @@ def serve_loop(
     drain_state: _DrainState | None = None
     drain_exit_code = 0
     drain_finished = threading.Event()
+    #: Latched the instant a drain DECIDES how it ended, before it publishes
+    #: anything. A drain has exactly one terminal frame: without this latch a
+    #: mid-drain EOF could publish ``drain_abandoned`` after a completed drain
+    #: had already published ``drain_complete``, telling a supervisor that a
+    #: successful restart gave up — and exiting 3 on it.
+    drain_terminal_published = threading.Event()
+    drain_terminal_lock = threading.Lock()
     reader_unwound = threading.Event()
     pool_shutdown_wait = True
     boot_id = uuid.uuid4().hex
@@ -929,7 +1026,13 @@ def serve_loop(
     #: when the last subscriber leaves. Never per client: a delta batch rebuilds
     #: a full snapshot core, so N generators would cost N of them.
     stream_hub: Any = None
-    stream_hub_lock = threading.Lock()
+    #: ONE lock over all three lane handles above. They used to be swapped by
+    #: bare ``nonlocal`` assignment from the drain path, the shutdown path, and
+    #: the EOF path — three threads racing an unsynchronised read-modify-write
+    #: on the objects whose whole job is to be released exactly once. Held for
+    #: the SWAP only, never across a join: the point is that two closers cannot
+    #: both take the same handle, not that teardown is serialised.
+    lane_lock = threading.Lock()
 
     def _busy_frame() -> dict[str, Any]:
         with inflight_lock:
@@ -1136,7 +1239,7 @@ def serve_loop(
                     ServeSocketServer,
                     SocketOwnerLock,
                 )
-                from agent_runtime.serve_auth import verify as _verify_serve_token
+                from agent_runtime.serve_auth import read_token as _read_serve_token
 
                 socket_lock = SocketOwnerLock(store_root_path)
                 lock_result = socket_lock.acquire()
@@ -1155,12 +1258,13 @@ def serve_loop(
                         hello_payload=lambda message, connection: _hello_ok_frame(
                             message, connection
                         ),
-                        # The token is verified against THIS root, and the value
-                        # never leaves ``serve_auth``: the transport only ever
-                        # learns the boolean.
-                        verify_token=lambda presented: _verify_serve_token(
-                            presented, store_root_path
-                        ),
+                        # THIS root's secret, read per handshake and used as an
+                        # HMAC key over a per-connection nonce. It is the key
+                        # and never the message, so nothing derived from it and
+                        # put on the wire discloses it — which is the whole
+                        # reason the hello stopped carrying the token at all.
+                        token_provider=lambda: _read_serve_token(store_root_path),
+                        frame_contract=SERVE_SCHEMA_VERSION,
                         on_disconnect=lambda connection: _release_subscription(
                             connection
                         ),
@@ -1484,7 +1588,7 @@ def serve_loop(
 
         def _ensure_stream_hub() -> Any:
             nonlocal stream_hub
-            with stream_hub_lock:
+            with lane_lock:
                 if stream_hub is None:
                     from agent_runtime.serve_stream_hub import (
                         DEFAULT_BUFFER_LIMIT,
@@ -1508,9 +1612,11 @@ def serve_loop(
             """
 
             key = _owner_of(connection)
-            if stream_hub is not None:
+            with lane_lock:
+                hub = stream_hub
+            if hub is not None:
                 try:
-                    stream_hub.unsubscribe(key)
+                    hub.unsubscribe(key)
                 except Exception:
                     pass
             if connection is not None:
@@ -1526,19 +1632,27 @@ def serve_loop(
             """
 
             nonlocal socket_server, socket_lock, stream_hub
-            hub, stream_hub = stream_hub, None
+            # The three swaps happen together, under the lock, and NOTHING
+            # slow happens while it is held: whoever takes a handle owns
+            # closing it, and a second caller gets None and does nothing.
+            with lane_lock:
+                hub, stream_hub = stream_hub, None
+                server, socket_server = socket_server, None
+                lock, socket_lock = socket_lock, None
             if hub is not None:
                 try:
+                    # One TOTAL budget for the hub, not one per subscriber
+                    # join: the drain's exit watchdog is already armed, and a
+                    # teardown that can outlast it is how a drained runtime
+                    # kept running.
                     hub.stop()
                 except Exception:
                     pass
-            server, socket_server = socket_server, None
             if server is not None:
                 try:
                     server.close(reason=reason)
                 except Exception:
                     pass
-            lock, socket_lock = socket_lock, None
             if lock is not None:
                 try:
                     lock.release()
@@ -1569,6 +1683,8 @@ def serve_loop(
         def _hello_ok_frame(message: dict[str, Any], connection: Any) -> dict[str, Any]:
             """The version handshake, enforced end to end at the door."""
 
+            from agent_runtime.serve_socket import HELLO_CONTRACT_VERSION
+
             return {
                 "event": "hello_ok",
                 "pid": os.getpid(),
@@ -1576,6 +1692,10 @@ def serve_loop(
                 # The frame-protocol contract this service speaks. A client that
                 # does not recognise it must not proceed on hope.
                 "contract": SERVE_SCHEMA_VERSION,
+                # Restated from ``server_hello`` so a client that reconnects and
+                # reads only the reply still learns which handshake it just
+                # completed.
+                "hello_contract": HELLO_CONTRACT_VERSION,
                 "schema_version": SERVE_SCHEMA_VERSION,
                 "transport": "socket",
                 "connection": connection.key,
@@ -1589,16 +1709,20 @@ def serve_loop(
 
         def _connections_frame() -> dict[str, Any]:
             payload: dict[str, Any] = {"event": "socket_connections", "boot_id": boot_id}
-            if socket_server is None:
+            with lane_lock:
+                server = socket_server
+            if server is None:
                 payload["enabled"] = False
                 payload["socket"] = socket_block
                 payload["count"] = 0
                 payload["connections"] = []
             else:
                 payload["enabled"] = True
-                payload.update(socket_server.connections_payload())
+                payload.update(server.connections_payload())
+            with lane_lock:
+                hub = stream_hub
             payload["subscriptions"] = (
-                stream_hub.stats() if stream_hub is not None else {"subscribers": 0}
+                hub.stats() if hub is not None else {"subscribers": 0}
             )
             return payload
 
@@ -1618,7 +1742,37 @@ def serve_loop(
 
             nonlocal drain_exit_code, pool_shutdown_wait
 
+            # A drain has ONE terminal frame. The latch is taken before
+            # anything is published, so a mid-drain EOF racing a completing
+            # drain cannot follow ``drain_complete`` with ``drain_abandoned``.
+            with drain_terminal_lock:
+                if drain_terminal_published.is_set():
+                    return
+                drain_terminal_published.set()
             drain_exit_code = code
+            if code != 0:
+                # Stuck workers: do NOT let the pool's context manager join
+                # them (it would hang exactly as long as "forever"), and do not
+                # trust a plain return either — concurrent.futures' atexit hook
+                # joins worker threads on the way out of the interpreter.
+                pool_shutdown_wait = False
+            # THE WATCHDOG IS THE FIRST ACT, before the frame, the broadcast,
+            # and the teardown — because every one of those can block. It used
+            # to be armed after them, so the very steps most likely to hang ran
+            # unwatched: broadcasting to a wedged reader parks a ``sendall``
+            # for IO_TIMEOUT, and the hub's joins were a per-subscriber budget
+            # that SUMMED. And the wakeup itself can block: observed live on
+            # Windows (2026-08-13), closing the protocol descriptor a reader is
+            # parked on does not return until that read does, and the child
+            # outlived its own completed drain. From here to process exit
+            # everything is inside one deadline.
+            if hard_exit is not None:
+                threading.Thread(
+                    target=_force_exit_after_drain,
+                    args=(code,),
+                    name="harness-serve-drain-exit",
+                    daemon=True,
+                ).start()
             frames.emit(frame)
             # Socket clients are owed the SAME terminal frame: a client that
             # asked for the drain over the socket, and every client that was
@@ -1632,31 +1786,7 @@ def serve_loop(
                     pass
             _close_socket_lane(reason="drain")
             _unregister_instance()
-            if code != 0:
-                # Stuck workers: do NOT let the pool's context manager join
-                # them (it would hang exactly as long as "forever"), and do not
-                # trust a plain return either — concurrent.futures' atexit hook
-                # joins worker threads on the way out of the interpreter.
-                pool_shutdown_wait = False
             drain_finished.set()
-            # The forced-exit watchdog is armed BEFORE the wakeup, and on a
-            # thread of its own, because THE WAKEUP ITSELF CAN BLOCK. Observed
-            # live on Windows against a real serve child (2026-08-13, the first
-            # end-to-end drain this stack has ever run): the wakeup closes the
-            # protocol descriptor the reader is parked on, and closing a handle
-            # with a synchronous read pending does not return until that read
-            # does. With the exit gated behind it, the process outlived its own
-            # completed drain — the terminal frame was published, the socket
-            # lane released, the registry entry removed, and the child then sat
-            # there forever. A drain that can hang forever is not a drain, so
-            # nothing on the path to the exit may be allowed to block.
-            if hard_exit is not None:
-                threading.Thread(
-                    target=_force_exit_when_reader_is_stuck,
-                    args=(code,),
-                    name="harness-serve-drain-exit",
-                    daemon=True,
-                ).start()
             if drain_wakeup is not None:
                 try:
                     drain_wakeup()
@@ -1673,17 +1803,25 @@ def serve_loop(
             # (closed sockets, flushed writer, restored stdio) and the watchdog
             # above forces the exit if it does not. Nothing is waited on here.
 
-        def _force_exit_when_reader_is_stuck(code: int) -> None:
-            """Force the process down if the reader never unwinds after a drain.
+        def _force_exit_after_drain(code: int) -> None:
+            """Force the process down if the drain does not finish getting out.
 
-            The grace covers the normal case — the wakeup lands, the reader sees
-            end-of-stream, and the loop returns through its own teardown — so
-            this fires only when the platform would otherwise leave a drained
-            runtime running.
+            Armed at the START of ``_finish_drain``, so its deadline covers the
+            WHOLE tail: publishing the terminal frame, broadcasting it, closing
+            the socket lane (hub joins, connection closes, lock release),
+            unregistering, waking the reader, and the reader unwinding. The
+            normal case returns in milliseconds; anything else is a drained
+            runtime that is still running, which is the state this exists to
+            make impossible.
+
+            Read from the module at call time on purpose — a test lowers it.
             """
 
-            if reader_unwound.wait(_DRAIN_EXIT_GRACE_SECONDS):
-                return
+            deadline = time.monotonic() + _DRAIN_EXIT_DEADLINE_SECONDS
+            while time.monotonic() < deadline:
+                if drain_finished.is_set() and reader_unwound.is_set():
+                    return
+                time.sleep(0.02)
             if hard_exit is not None:
                 hard_exit(code)
 
@@ -1693,6 +1831,12 @@ def serve_loop(
             while True:
                 with inflight_lock:
                     remaining = sorted(inflight)
+                    # Read in the SAME critical section as the pending set: a
+                    # timeout that decided "no chat turns" from a second,
+                    # later read could kill the turn that started in between.
+                    chat_turn_ids = sorted(
+                        key for key, item in inflight.items() if item.is_chat_turn
+                    )
                 if not remaining:
                     _finish_drain(
                         0,
@@ -1707,21 +1851,45 @@ def serve_loop(
                     return
                 now = time.monotonic()
                 if now >= deadline:
-                    _finish_drain(
-                        DRAIN_TIMEOUT_EXIT_CODE,
-                        {
-                            "event": "drain_timeout",
-                            "pid": os.getpid(),
-                            "boot_id": boot_id,
-                            **state.counters(),
-                            "drain_ms": state.elapsed_ms(),
-                            "deadline_seconds": state.deadline_seconds,
-                            # WHICH requests are stuck, by id — a timeout that
-                            # only reported a count would leave the operator
-                            # with nothing to correlate against the stack dump.
-                            "stuck_request_ids": remaining,
-                        },
-                    )
+                    expiry = {
+                        "event": "drain_timeout",
+                        "pid": os.getpid(),
+                        "boot_id": boot_id,
+                        **state.counters(),
+                        "drain_ms": state.elapsed_ms(),
+                        "deadline_seconds": state.deadline_seconds,
+                        # WHICH requests are stuck, by id — a timeout that
+                        # only reported a count would leave the operator
+                        # with nothing to correlate against the stack dump.
+                        "stuck_request_ids": remaining,
+                        # And WHY it is allowed to be stuck. A chat turn in
+                        # flight is recording-safety work: this file's own
+                        # contract says a supervisor must never recycle serve
+                        # while ``chat_turns`` > 0, and a drain deadline firing
+                        # `hard_exit` (which is `os._exit`) over one is that
+                        # recycle by another name.
+                        "held_by_chat_turns": len(chat_turn_ids),
+                        "chat_turn_request_ids": chat_turn_ids,
+                        "terminal": not chat_turn_ids,
+                    }
+                    if chat_turn_ids:
+                        # NOT terminal: say so, keep serving, re-arm. The frame
+                        # is emitted every time the deadline lapses, so a
+                        # supervisor watching a drain that is being held open
+                        # sees each hold rather than silence.
+                        state.note_deadline_held()
+                        expiry.update(state.counters())
+                        frames.emit(expiry)
+                        if socket_server is not None:
+                            try:
+                                socket_server.broadcast(expiry)
+                            except Exception:
+                                pass
+                        deadline = now + state.deadline_seconds
+                        last_progress = now
+                        time.sleep(max(0.0, drain_poll_interval_seconds))
+                        continue
+                    _finish_drain(DRAIN_TIMEOUT_EXIT_CODE, expiry)
                     return
                 if now - last_progress >= _DRAIN_PROGRESS_INTERVAL_SECONDS:
                     frames.emit(
@@ -1925,7 +2093,9 @@ def serve_loop(
                 return None
             if op == "unsubscribe":
                 key = _owner_of(connection)
-                was_subscribed = stream_hub is not None and stream_hub.has(key)
+                with lane_lock:
+                    hub = stream_hub
+                was_subscribed = hub is not None and hub.has(key)
                 _release_subscription(connection)
                 sink.emit(
                     {
@@ -1937,20 +2107,59 @@ def serve_loop(
                 )
                 return None
             if op == "drain":
-                if drain_state is not None:
+                if connection is not None and message.get("force") is not True:
+                    # The socket lane's second key. `shutdown` is refused there
+                    # outright because a client does not get to kill a service
+                    # other clients are using; `drain` is the safe replacement
+                    # verb, but it still ENDS this process, and any local
+                    # process holding the root's secret can ask. One explicit
+                    # field is a trivial cost for an operator and a real
+                    # barrier against an automated or accidental restart.
                     sink.emit(
                         {
-                            "event": "drain_in_progress",
-                            "drain_ms": drain_state.elapsed_ms(),
-                            **drain_state.counters(),
+                            "event": "error",
+                            "error": "drain_requires_force",
+                            "transport": "socket",
+                            "detail": (
+                                "drain over the socket ends the service for every "
+                                'attached client; resend as {"op":"drain","force":true}'
+                            ),
                         }
                     )
                     return None
-                drain_state = _DrainState(
-                    _drain_deadline_seconds(
-                        message.get("deadline_seconds"), drain_deadline_seconds
-                    )
+                # The EFFECTIVE deadline is decided here, server-side, from the
+                # client's ask floored by this runtime's minimum.
+                effective_deadline = _drain_deadline_seconds(
+                    message.get("deadline_seconds"),
+                    drain_deadline_seconds,
+                    minimum=drain_minimum_deadline_seconds,
                 )
+                # ONE critical section for the whole transition. The guard and
+                # the install used to be a bare read-modify-write on a closure
+                # variable, which was harmless while the only caller was the
+                # single stdio reader and became a genuine race the moment N
+                # connection threads could ask: two of them could both observe
+                # ``None``, both install a ``_DrainState``, and the process
+                # would then run two monitors, publish two terminal frames, and
+                # split its counters across two objects. The "already draining"
+                # answer is decided INSIDE the section that would have
+                # installed it, so it cannot be decided against a state a
+                # sibling thread is mid-way through replacing.
+                with inflight_lock:
+                    existing = drain_state
+                    if existing is None:
+                        drain_state = _DrainState(effective_deadline)
+                        started = drain_state
+                        pending_at_start = sorted(inflight)
+                if existing is not None:
+                    sink.emit(
+                        {
+                            "event": "drain_in_progress",
+                            "drain_ms": existing.elapsed_ms(),
+                            **existing.counters(),
+                        }
+                    )
+                    return None
                 # Stop the delivery drain (and with it the busy pump) the
                 # moment we stop accepting work: it forges completed
                 # dispatches back into a sender's thread, and doing that to
@@ -1958,8 +2167,6 @@ def serve_loop(
                 # path already refuses to allow. `drain_progress` frames
                 # take over the liveness duty for the rest of the wait.
                 liveness_stop.set()
-                with inflight_lock:
-                    pending_at_start = sorted(inflight)
                 draining_frame = {
                     "event": "draining",
                     "id": None,
@@ -1967,7 +2174,12 @@ def serve_loop(
                     "boot_id": boot_id,
                     "pending": len(pending_at_start),
                     "request_ids": pending_at_start,
-                    "deadline_seconds": drain_state.deadline_seconds,
+                    "deadline_seconds": started.deadline_seconds,
+                    # What was ASKED for, beside what was granted: a client
+                    # that requested 0.05s and got 30 must be able to see that
+                    # its ask was floored rather than honoured.
+                    "requested_deadline_seconds": message.get("deadline_seconds"),
+                    "minimum_deadline_seconds": drain_minimum_deadline_seconds,
                 }
                 frames.emit(draining_frame)
                 if socket_server is not None:
@@ -1981,7 +2193,7 @@ def serve_loop(
                         pass
                 threading.Thread(
                     target=_drain_monitor,
-                    args=(drain_state,),
+                    args=(started,),
                     name="harness-serve-drain",
                     daemon=True,
                 ).start()
@@ -2215,6 +2427,16 @@ def serve_loop(
             # already joined above, so it is normally one poll away) and, if it
             # never publishes, say so in a typed frame of its own.
             if not drain_finished.wait(_DRAIN_ABANDON_GRACE_SECONDS):
+                if drain_terminal_published.is_set():
+                    # A drain that already DECIDED how it ended owns the
+                    # terminal frame; this path is only for a drain that never
+                    # got one. Publishing ``drain_abandoned`` on top of a
+                    # completed drain told a supervisor that a successful
+                    # restart gave up, and exited 3 on it — the frame and the
+                    # code both wrong, about work that had actually landed. The
+                    # exit watchdog covers the case where the publisher is the
+                    # thing that hung.
+                    return drain_exit_code
                 abandoned = {
                     "event": "drain_abandoned",
                     "pid": os.getpid(),
@@ -2386,7 +2608,11 @@ def _cmd_serve(args) -> int:
 #    over stdio ends the only connection that could observe it.
 # 3. It is the shape the Launcher's client will mirror when it migrates.
 
-#: Nothing to connect to (no live socket service for this root).
+#: Nothing LIVE to connect to for this root — either no registered socket
+#: service at all, or one the registry classified as anything other than
+#: ``live``. Both are "do not connect", and the second is the more important
+#: one: a serve's port outlives the serve, so a dead entry names an address
+#: some other local process may now be answering on.
 SERVE_CONNECT_NO_SERVICE_EXIT_CODE = 4
 #: The service is there; this client could not authenticate to it.
 SERVE_CONNECT_REJECTED_EXIT_CODE = 5
@@ -2398,13 +2624,21 @@ def _cmd_serve_connect(args) -> int:
     from agent_runtime import paths
     from agent_runtime.build_stamp import build_stamp
     from agent_runtime.serve_auth import read_token
-    from agent_runtime.serve_socket import ServeSocketClient, resolve_socket_target
+    from agent_runtime.serve_socket import (
+        HELLO_CONTRACT_VERSION,
+        ServeHelloProtocolError,
+        ServeSocketClient,
+        resolve_socket_target,
+    )
 
     def _emit(payload: dict[str, Any]) -> None:
         print(json.dumps(payload, ensure_ascii=False, default=str, indent=2))
 
     store_root = paths.store_root()
-    target = resolve_socket_target(store_root)
+    # ``allow_stale`` is asked for so the REFUSAL can name what it refused —
+    # not so a non-live target can be used. Discovery itself returns live rows
+    # only; this call is the diagnostic form, and the check below is the gate.
+    target = resolve_socket_target(store_root, allow_stale=True)
     if target is None:
         _emit(
             {
@@ -2415,6 +2649,30 @@ def _cmd_serve_connect(args) -> int:
                     "runtime root"
                 ),
                 "runtime_root": str(store_root),
+            }
+        )
+        return SERVE_CONNECT_NO_SERVICE_EXIT_CODE
+    if not target.live:
+        # The half of the credential-disclosure defect that lives on the client.
+        # A registry row classified ``stale_dead_pid`` names a port whose owner
+        # is gone, and a local port is reusable the moment its owner dies — so
+        # connecting here means handshaking with whatever took it over. That is
+        # not a theory: with the old raw-token hello, an impostor listening on a
+        # dead serve's port harvested the real token. The token no longer
+        # travels, and this connect still refuses, by name.
+        _emit(
+            {
+                "ok": False,
+                "error": "socket_service_not_live",
+                "classification": target.classification,
+                "detail": (
+                    "the only socket service registered for this runtime root is "
+                    f"classified {target.classification!r}, not 'live'; its port may "
+                    "now belong to another process, so this client will not "
+                    "handshake with it"
+                ),
+                "runtime_root": str(store_root),
+                "target": target.payload(),
             }
         )
         return SERVE_CONNECT_NO_SERVICE_EXIT_CODE
@@ -2440,6 +2698,10 @@ def _cmd_serve_connect(args) -> int:
         "target": target.payload(),
         "client": getattr(args, "client", None) or "harness-serve-connect",
         "client_build": client_build,
+        # Which handshake this client speaks. Stated in the report because the
+        # next client of this lane is the Launcher, and "which contract did the
+        # thing that worked use" must not be archaeology.
+        "hello_contract": HELLO_CONTRACT_VERSION,
     }
     timeout = float(getattr(args, "timeout", 10.0) or 10.0)
     connection = ServeSocketClient(target.host, target.port, timeout_seconds=timeout)
@@ -2451,9 +2713,23 @@ def _cmd_serve_connect(args) -> int:
         _emit(report)
         return SERVE_CONNECT_TRANSPORT_EXIT_CODE
     try:
-        hello = connection.hello(
-            token=token, client=report["client"], client_build=client_build
-        )
+        try:
+            hello = connection.hello(
+                token=token, client=report["client"], client_build=client_build
+            )
+        except ServeHelloProtocolError as exc:
+            # Either the peer refused us before the challenge (its typed reason
+            # is the answer) or what is on this port does not speak this
+            # contract. Neither is a case for sending a credential anyway.
+            report["error"] = (
+                "hello_rejected" if exc.reason else "hello_contract_mismatch"
+            )
+            report["detail"] = exc.detail
+            report["reason"] = exc.reason
+            report["hello"] = exc.frame
+            _emit(report)
+            return SERVE_CONNECT_REJECTED_EXIT_CODE
+        report["server_hello"] = connection.server_hello
         report["hello"] = hello
         if not isinstance(hello, dict) or hello.get("event") != "hello_ok":
             report["error"] = (
@@ -2466,7 +2742,10 @@ def _cmd_serve_connect(args) -> int:
             report["version"] = connection.read_frame()
         if getattr(args, "drain", False):
             deadline = getattr(args, "deadline_seconds", None)
-            request: dict[str, Any] = {"op": "drain"}
+            # ``force`` is mandatory on the socket lane — this verb IS the
+            # deliberate operator restart, so it says so rather than being
+            # refused by the service it is trying to replace.
+            request: dict[str, Any] = {"op": "drain", "force": True}
             if deadline is not None:
                 request["deadline_seconds"] = float(deadline)
             connection.send(request)
@@ -2486,11 +2765,29 @@ def _cmd_serve_connect(args) -> int:
                 if frame is None:
                     break
                 observed.append(frame)
-                if frame.get("event") in terminal:
-                    break
+                if frame.get("event") not in terminal:
+                    continue
+                if (
+                    frame.get("event") == "drain_timeout"
+                    and frame.get("terminal") is False
+                ):
+                    # A deadline lapse HELD OPEN by a chat turn in flight: the
+                    # service is still serving and will re-arm, so this is
+                    # progress, not an ending. Reading it as terminal would
+                    # report a restart that has not happened.
+                    continue
+                break
             report["drain"] = observed
             report["drain_outcome"] = (
                 observed[-1].get("event") if observed else "no_frames"
+            )
+            report["drain_deadline_holds"] = len(
+                [
+                    frame
+                    for frame in observed
+                    if frame.get("event") == "drain_timeout"
+                    and frame.get("terminal") is False
+                ]
             )
         report["ok"] = True
         _emit(report)
@@ -2500,5 +2797,10 @@ def _cmd_serve_connect(args) -> int:
         report["detail"] = type(exc).__name__
         _emit(report)
         return SERVE_CONNECT_TRANSPORT_EXIT_CODE
+    except ServeHelloProtocolError as exc:  # pragma: no cover - defensive
+        report["error"] = "hello_contract_mismatch"
+        report["detail"] = exc.detail
+        _emit(report)
+        return SERVE_CONNECT_REJECTED_EXIT_CODE
     finally:
         connection.close()

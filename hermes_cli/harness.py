@@ -1345,7 +1345,7 @@ def build_parser(parent_subparsers) -> None:
     )
     serve_connect.add_argument("--probe", action="store_true", help="Also ask the service for its version block (build, boot_id, connections)")
     serve_connect.add_argument("--drain", action="store_true", help="Ask the service to drain and read to its terminal frame (the durable-service restart verb, from the outside)")
-    serve_connect.add_argument("--deadline-seconds", type=float, default=None, help="Drain deadline handed to the service (clamped there to 0.05s..3600s)")
+    serve_connect.add_argument("--deadline-seconds", type=float, default=None, help="Drain deadline handed to the service (the service floors it at its own minimum, 30s by default, and caps it at 3600s)")
     serve_connect.add_argument("--client", default=None, help="Client name recorded on the connection and in the service's logs (default: harness-serve-connect)")
     serve_connect.add_argument("--timeout", type=float, default=10.0, help="Socket connect/read timeout in seconds")
     serve_connect.set_defaults(func=_cmd_serve_connect)

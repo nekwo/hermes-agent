@@ -23,17 +23,52 @@ mandatory and why the per-root token landed one slice EARLIER than this file
 Windows it permits a second process to bind a port already in use, which would
 turn "the address is taken" into a silent hijack.
 
-Auth is first, and it is the only thing that is first
------------------------------------------------------
+Auth is first, and the token never travels
+------------------------------------------
 
-The first line a client sends MUST be
-``{"op":"hello","token":…,"client":…,"client_build":…}``. Before that line is
-verified, a connection can do exactly nothing: no ops, no subscription, no
-answers. A wrong or missing token gets ONE typed ``hello_rejected`` frame and
-the connection is closed; repeated failures trip a rate limiter, so a local
-process cannot grind the 256-bit token by reconnecting. The token value never
-appears in a frame, a log line, an error, or a registry entry — the connection
-records only whether verification passed.
+The SERVER speaks first. On accept it writes exactly one frame::
+
+    {"event":"server_hello","nonce":"<64 hex chars>","boot_id":…,
+     "contract":<frame schema>,"hello_contract":2,"algorithm":"hmac-sha256"}
+
+and the client answers::
+
+    {"op":"hello","client":…,"client_build":…,
+     "proof":"<hex HMAC-SHA256(key=token, msg=nonce)>"}
+
+Before that proof is verified a connection can do exactly nothing: no ops, no
+subscription, no answers. A wrong or missing proof gets ONE typed
+``hello_rejected`` frame and the connection is closed.
+
+Why a proof and not the token (the hardening this replaced)
+    The first cut sent ``{"op":"hello","token":<raw>}``, and discovery could
+    hand a client a target it had itself classified ``stale_dead_pid`` — so a
+    local impostor that bound the dead serve's port harvested the real token in
+    cleartext, live-proven. Two independent halves close that: discovery
+    returns LIVE rows only (:func:`resolve_socket_target`, with a non-live row
+    reachable exclusively through an explicit ``allow_stale=True`` that carries
+    the classification so the caller must refuse it by name), and the token
+    itself never traverses the wire at all. A stolen transcript is unreplayable
+    — the nonce is fresh per CONNECTION — and an impostor server learns only
+    one HMAC over a nonce of its own choosing, which authenticates nothing
+    anywhere. The token value still appears in no frame, no log line, no error,
+    and no registry entry; the proof is the only derived artifact.
+
+    ``hello_contract`` is versioned on the ``server_hello`` frame precisely so
+    the future Launcher client asserts the handshake it was written against
+    instead of proceeding on hope. There is no compatibility shim: the socket
+    lane has no other clients yet, and a shim that accepted the old token hello
+    would keep the cleartext lane open forever.
+
+Repeated AUTH failures trip a rate limiter, so a local process cannot grind the
+256-bit secret by reconnecting. Capacity, drain, and handshake-timeout
+rejections are NOT auth failures and never touch that limiter — charging them
+to it produced a permanent self-sustaining lockout (a ``rate_limited``
+rejection re-armed its own window, so 12 polite retries with the RIGHT
+credential over 12s never recovered). Handshake timeouts have a throttle of
+their own, and pre-hello connections have a bound of their own: counting only
+AUTHENTICATED peers against ``max_connections`` let 64 silent sockets sit on
+the runtime's threads without a single rejection.
 
 One owner per root
 ------------------
@@ -76,8 +111,11 @@ answering from another — silently, because both answers would be well-formed.
 from __future__ import annotations
 
 import errno
+import hashlib
+import hmac
 import json
 import os
+import secrets
 import socket
 import tempfile
 import threading
@@ -93,22 +131,40 @@ else:  # pragma: no cover - platform split
     import fcntl
 
 __all__ = [
+    "AUTH_FAILURE_REJECT_REASONS",
+    "CLASSIFICATION_OWNER_FILE_UNVERIFIED",
     "DEFAULT_MAX_CONNECTIONS",
+    "DEFAULT_MAX_PENDING_CONNECTIONS",
+    "HELLO_CONTRACT_VERSION",
     "HELLO_FAILURE_LIMIT",
     "HELLO_FAILURE_WINDOW_SECONDS",
+    "HELLO_PROOF_ALGORITHM",
+    "NONCE_BYTES",
+    "REJECT_BAD_PROOF",
+    "REJECT_DRAINING",
+    "REJECT_HANDSHAKE_THROTTLED",
+    "REJECT_HELLO_MALFORMED",
+    "REJECT_HELLO_REQUIRED",
+    "REJECT_HELLO_TIMEOUT",
+    "REJECT_RATE_LIMITED",
+    "REJECT_TOO_MANY_CONNECTIONS",
+    "REJECT_TOO_MANY_PENDING",
     "SOCKET_HOST",
     "SOCKET_LOCK_FILENAME",
     "SOCKET_OWNER_FILENAME",
     "HelloRateLimiter",
+    "ServeHelloProtocolError",
     "ServeSocketClient",
     "ServeSocketServer",
     "SocketLockResult",
     "SocketOwnerLock",
     "SocketTarget",
+    "hello_proof",
     "read_socket_owner",
     "resolve_socket_target",
     "socket_lock_path",
     "socket_owner_path",
+    "verify_hello_proof",
 ]
 
 #: Loopback only. Never configurable: a knob here can only ever widen exposure,
@@ -123,12 +179,65 @@ SOCKET_OWNER_FILENAME = "serve_socket.owner.json"
 #: unbounded accept loop is a local denial of service against the runtime.
 DEFAULT_MAX_CONNECTIONS = 32
 
+#: Connections that have been accepted but have not yet PROVEN anything. Kept
+#: small and counted SEPARATELY from the authenticated pool, because the
+#: authenticated pool is the wrong bound for the pre-auth phase: with capacity
+#: measured against authenticated peers only, 64 sockets that never said hello
+#: sat on 64 threads and drew not one rejection. A peer that has proven nothing
+#: gets a handshake deadline and one of these slots, and no more.
+DEFAULT_MAX_PENDING_CONNECTIONS = 8
+
 #: Failed hellos tolerated inside the window before every new connection is
-#: rejected outright. The token is 256 bits, so this is not what makes guessing
+#: rejected outright. The secret is 256 bits, so this is not what makes guessing
 #: infeasible — it is what stops a local process from spending the runtime's
 #: threads and log volume trying.
 HELLO_FAILURE_LIMIT = 5
 HELLO_FAILURE_WINDOW_SECONDS = 10.0
+#: The SEPARATE, non-auth throttle for peers that connect and then say nothing.
+#: A silent peer is not an authentication failure and must never be charged to
+#: the auth limiter (that is what made the lockout self-sustaining), but it is
+#: still a way to spend the runtime's threads, so it has its own bound.
+HELLO_TIMEOUT_LIMIT = 16
+HELLO_TIMEOUT_WINDOW_SECONDS = 10.0
+
+#: The handshake version stamped on every ``server_hello``. Bumped from the
+#: (implicit) token hello to the nonce/HMAC challenge-response; a client that
+#: does not recognise this number must refuse to proceed rather than guess at
+#: the frame it is expected to answer with.
+HELLO_CONTRACT_VERSION = 2
+#: Challenge size. 32 bytes → 64 hex characters, fresh per CONNECTION.
+NONCE_BYTES = 32
+HELLO_PROOF_ALGORITHM = "hmac-sha256"
+
+#: Typed rejection reasons. The reason IS the classification: whether a
+#: rejection counts against the auth rate limiter is derived from it below,
+#: never from a boolean the caller passes in (a caller-supplied flag is exactly
+#: how capacity refusals came to be charged as auth failures).
+REJECT_TOO_MANY_CONNECTIONS = "too_many_connections"
+REJECT_TOO_MANY_PENDING = "too_many_pending"
+REJECT_RATE_LIMITED = "rate_limited"
+REJECT_HANDSHAKE_THROTTLED = "handshake_throttled"
+REJECT_DRAINING = "draining"
+REJECT_HELLO_TIMEOUT = "hello_timeout"
+REJECT_HELLO_REQUIRED = "hello_required"
+REJECT_HELLO_MALFORMED = "hello_malformed"
+REJECT_BAD_PROOF = "bad_proof"
+
+#: The ONLY reasons that charge the auth rate limiter: a peer that presented a
+#: bad credential, or that spoke something other than a hello where a hello was
+#: mandatory. Capacity, drain, timeout, and throttle refusals say nothing about
+#: whether the peer holds the secret — and counting them made a blocked window
+#: extend itself forever, so a well-behaved client with the RIGHT credential
+#: could never recover.
+AUTH_FAILURE_REJECT_REASONS = frozenset(
+    {REJECT_BAD_PROOF, REJECT_HELLO_REQUIRED, REJECT_HELLO_MALFORMED}
+)
+
+#: Total budget for one broadcast across every attached connection. A drain
+#: announcement must not be summed over N wedged readers: worst case is now one
+#: parked ``sendall`` (bounded by IO_TIMEOUT_SECONDS) plus this, instead of
+#: N × IO_TIMEOUT. Skipped connections are counted and logged, never silent.
+BROADCAST_BUDGET_SECONDS = 2.0
 #: Charged to the REJECTED connection's own thread, never to the accept loop.
 HELLO_REJECT_PENALTY_SECONDS = 0.25
 #: How long a rejected connection half-closes and drains before the final close,
@@ -248,7 +357,27 @@ class SocketOwnerLock:
             pass
 
     def release(self) -> None:
-        """Unlock, close, and remove both files. Idempotent; never raises."""
+        """Unlock, close, and drop the owner sidecar. Idempotent; never raises.
+
+        The LOCK FILE ITSELF IS NEVER UNLINKED. It used to be, and on POSIX that
+        is a two-owner race: ``flock`` is held on an OPEN DESCRIPTION, not on a
+        path, so a contender that has already opened the file but not yet
+        flocked it keeps a descriptor to an inode this release then unlinks —
+        the contender locks a file that no longer has a name, the next boot
+        creates a NEW inode at that path and locks that, and both processes hold
+        an "exclusive" lock on the one root. A persistent zero-byte lock file is
+        the standard pattern for exactly this reason, and it costs nothing: the
+        lock's authority is the OS lock on the open file, never the file's
+        existence, and :meth:`acquire` opens with ``a+b`` so a surviving file is
+        re-lockable immediately.
+
+        Windows behaviour is unchanged in substance (``msvcrt.locking`` is
+        mandatory and released with the handle); it simply stops depending on an
+        unlink that the AV/indexer can lose anyway.
+
+        The owner SIDECAR is still removed: it is discovery data, it advertises
+        a port this process no longer serves, and it holds no lock at all.
+        """
 
         with self._lock:
             handle, self._handle = self._handle, None
@@ -265,12 +394,11 @@ class SocketOwnerLock:
         if not was_acquired:
             return
         # Order matters on Windows: the handle above must be closed before the
-        # file can be unlinked at all.
-        for path in (self._owner_path, self._path):
-            try:
-                path.unlink()
-            except OSError:
-                pass
+        # sidecar's writer can be considered done with the directory.
+        try:
+            self._owner_path.unlink()
+        except OSError:
+            pass
 
 
 def read_socket_owner(store_root: Path | str) -> dict[str, Any]:
@@ -331,6 +459,61 @@ class HelloRateLimiter:
     def _evict(self) -> None:
         cutoff = self._clock() - self._window
         self._failures = [item for item in self._failures if item >= cutoff]
+
+
+# ── the challenge-response proof ─────────────────────────────────────────────
+
+
+class ServeHelloProtocolError(Exception):
+    """The peer did not speak the handshake this contract requires.
+
+    Carries the offending ``frame`` when there was one, because the two
+    interesting cases look identical from a bare exception: a service that
+    rejected us before the challenge (``hello_rejected``, and the reason is the
+    answer), and something on the port that is not this service at all.
+    """
+
+    def __init__(self, detail: str, *, frame: dict[str, Any] | None = None) -> None:
+        super().__init__(detail)
+        self.detail = detail
+        self.frame = frame if isinstance(frame, dict) else None
+
+    @property
+    def reason(self) -> str | None:
+        if self.frame is None:
+            return None
+        value = self.frame.get("reason")
+        return value if isinstance(value, str) else None
+
+
+def hello_proof(token: str, nonce: str) -> str:
+    """``HMAC-SHA256(key=token, msg=nonce)`` as lowercase hex.
+
+    The ONE derivation in this stack: the client computes it, the server
+    recomputes it, and a second copy of this line is how the two ends start
+    disagreeing about what a proof is. The token is the KEY and never the
+    message — a proof therefore reveals nothing about it, which is the whole
+    point of not putting the token on the wire.
+    """
+
+    return hmac.new(
+        str(token).encode("utf-8"), str(nonce).encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+
+
+def verify_hello_proof(presented: Any, nonce: str, token: str | None) -> bool:
+    """Constant-time check of *presented* against the proof this nonce demands.
+
+    Fails CLOSED on every missing input — no token for this root, no proof in
+    the hello, an empty nonce — because the alternative ("nothing configured,
+    let everyone in") is the failure mode that turns a hardening into a bypass.
+    """
+
+    if not token or not nonce:
+        return False
+    if not isinstance(presented, str) or not presented.strip():
+        return False
+    return hmac.compare_digest(presented.strip().lower(), hello_proof(token, nonce))
 
 
 # ── connections ──────────────────────────────────────────────────────────────
@@ -470,12 +653,15 @@ class ServeSocketServer:
         boot_id: str,
         dispatch_line: Callable[[str, SocketConnection], Any],
         hello_payload: Callable[[dict[str, Any], SocketConnection], dict[str, Any]],
-        verify_token: Callable[[str | None], bool],
+        token_provider: Callable[[], str | None],
         on_disconnect: Callable[[SocketConnection], None] | None = None,
         log: Callable[[dict[str, Any]], None] | None = None,
         host: str = SOCKET_HOST,
+        frame_contract: int = 1,
         max_connections: int = DEFAULT_MAX_CONNECTIONS,
+        max_pending_connections: int = DEFAULT_MAX_PENDING_CONNECTIONS,
         rate_limiter: HelloRateLimiter | None = None,
+        timeout_limiter: HelloRateLimiter | None = None,
         hello_deadline_seconds: float = HELLO_DEADLINE_SECONDS,
         io_timeout_seconds: float = IO_TIMEOUT_SECONDS,
         reject_penalty_seconds: float = HELLO_REJECT_PENALTY_SECONDS,
@@ -484,12 +670,21 @@ class ServeSocketServer:
         self._boot_id = str(boot_id)
         self._dispatch_line = dispatch_line
         self._hello_payload = hello_payload
-        self._verify_token = verify_token
+        #: Returns THIS root's shared secret, or None. Called once per
+        #: handshake and never retained: the server needs the key to recompute
+        #: a proof, and nothing else — no frame, log, or error derived from it
+        #: ever carries the value.
+        self._token_provider = token_provider
         self._on_disconnect = on_disconnect
         self._log = log
         self._host = host
+        self._frame_contract = int(frame_contract)
         self._max_connections = max(1, int(max_connections))
+        self._max_pending = max(1, int(max_pending_connections))
         self._rate_limiter = rate_limiter or HelloRateLimiter()
+        self._timeout_limiter = timeout_limiter or HelloRateLimiter(
+            limit=HELLO_TIMEOUT_LIMIT, window_seconds=HELLO_TIMEOUT_WINDOW_SECONDS
+        )
         self._hello_deadline = float(hello_deadline_seconds)
         self._io_timeout = float(io_timeout_seconds)
         self._reject_penalty = float(reject_penalty_seconds)
@@ -504,6 +699,18 @@ class ServeSocketServer:
         self._next_connection = 0
         self._accepted = 0
         self._rejected = 0
+        #: Accepted, not yet authenticated. Bounded separately (see
+        #: DEFAULT_MAX_PENDING_CONNECTIONS) and reported, because a peer that
+        #: has proven nothing is exactly the peer no other counter was watching.
+        self._pending = 0
+        self._pending_peak = 0
+        self._hello_timeouts = 0
+        #: Every way the accept loop can fail, counted and SURFACED. The loop
+        #: dying used to be invisible while the port stayed advertised — a
+        #: service that answers its discovery record and nothing else.
+        self._accept_errors = 0
+        self._accept_loop_exited: str | None = None
+        self._rejected_by_reason: dict[str, int] = {}
         self._started_at: str | None = None
 
     # ── lifecycle ───────────────────────────────────────────────────────────
@@ -554,15 +761,50 @@ class ServeSocketServer:
         self._close_listener()
         self._emit_log({"event": "serve_socket_draining"})
 
-    def broadcast(self, frame: dict[str, Any]) -> int:
-        """Send *frame* to every authenticated connection. Returns the count."""
+    def broadcast(
+        self,
+        frame: dict[str, Any],
+        *,
+        budget_seconds: float | None = BROADCAST_BUDGET_SECONDS,
+    ) -> int:
+        """Send *frame* to every authenticated connection. Returns the count.
+
+        Bounded as a WHOLE, not per connection. This runs on the drain path,
+        where the old per-connection budget summed: 32 subscribers whose
+        readers had stopped reading could each park a ``sendall`` for
+        IO_TIMEOUT_SECONDS, so announcing a drain could outlast the drain. With
+        one deadline across the pass, the worst case is a single parked write
+        plus this budget, and the connections that did not get the frame are
+        COUNTED and logged rather than silently missed.
+        """
 
         delivered = 0
+        skipped = 0
+        deadline = (
+            None if budget_seconds is None else time.monotonic() + float(budget_seconds)
+        )
         for connection in self.connections():
             if not connection.authenticated:
                 continue
-            if connection.try_emit(frame):
+            if deadline is not None and time.monotonic() >= deadline:
+                skipped += 1
+                continue
+            lock_timeout = 0.5
+            if deadline is not None:
+                lock_timeout = max(0.0, min(lock_timeout, deadline - time.monotonic()))
+            if connection.try_emit(frame, lock_timeout=lock_timeout):
                 delivered += 1
+            else:
+                skipped += 1
+        if skipped:
+            self._emit_log(
+                {
+                    "event": "serve_socket_broadcast_incomplete",
+                    "frame_event": frame.get("event"),
+                    "delivered": delivered,
+                    "skipped": skipped,
+                }
+            )
         return delivered
 
     def close(self, reason: str = "shutdown") -> None:
@@ -590,6 +832,11 @@ class ServeSocketServer:
         rows = [connection.payload() for connection in self.connections()]
         with self._lock:
             accepted, rejected, draining = self._accepted, self._rejected, self._draining
+            pending, pending_peak = self._pending, self._pending_peak
+            accept_errors = self._accept_errors
+            accept_loop_exited = self._accept_loop_exited
+            hello_timeouts = self._hello_timeouts
+            by_reason = dict(self._rejected_by_reason)
         return {
             "port": self._port,
             "host": self._host,
@@ -598,42 +845,115 @@ class ServeSocketServer:
             "accepted_total": accepted,
             "rejected_total": rejected,
             "draining": draining,
+            # The pre-auth lane, which no counter used to watch at all.
+            "pending": pending,
+            "pending_peak": pending_peak,
+            "max_pending_connections": self._max_pending,
+            "hello_timeouts": hello_timeouts,
+            "rejected_by_reason": by_reason,
+            # An accept loop that stopped while the port stayed advertised is
+            # the one failure a client cannot detect by connecting; both the
+            # error count and the loop's exit reason are stated, always.
+            "accept_errors": accept_errors,
+            "accept_loop_exited": accept_loop_exited,
+            "hello_contract": HELLO_CONTRACT_VERSION,
             "connections": rows,
         }
 
     # ── accept loop ─────────────────────────────────────────────────────────
 
     def _accept_loop(self) -> None:
-        while not self._stop.is_set():
-            listener = self._listener
-            if listener is None:
-                return
-            try:
-                sock, peer = listener.accept()
-            except OSError as exc:
-                if self._stop.is_set() or self._listener is None:
+        """Accept until stopped, and ANNOUNCE the ending whatever it is.
+
+        Nothing in here may terminate the loop quietly. The listener stays
+        bound and the discovery record stays published for as long as this
+        process lives, so a loop that stopped without a word leaves a service
+        that answers "connect to me" and then never answers anything — the
+        exact false-all-clear shape this workstream exists to retire. Every
+        exit therefore records ``accept_loop_exited`` (readable in the
+        ``connections`` block) and emits a typed log line.
+        """
+
+        outcome = "stopped"
+        try:
+            while not self._stop.is_set():
+                listener = self._listener
+                if listener is None:
+                    outcome = "listener_closed"
                     return
-                # A typed line, never process death: an accept that fails on a
-                # transient OS condition must not take the runtime with it.
-                self._emit_log(
-                    {"event": "serve_socket_accept_error", "reason": type(exc).__name__}
-                )
-                if _is_fatal_accept_error(exc):
-                    return
-                time.sleep(0.05)
-                continue
-            threading.Thread(
-                target=self._serve_connection,
-                args=(sock, peer),
-                name="harness-serve-socket-conn",
-                daemon=True,
-            ).start()
+                try:
+                    sock, peer = listener.accept()
+                except OSError as exc:
+                    if self._stop.is_set() or self._listener is None:
+                        outcome = "listener_closed"
+                        return
+                    # A typed line, never process death: an accept that fails on
+                    # a transient OS condition must not take the runtime with it.
+                    with self._lock:
+                        self._accept_errors += 1
+                    self._emit_log(
+                        {
+                            "event": "serve_socket_accept_error",
+                            "phase": "accept",
+                            "reason": type(exc).__name__,
+                        }
+                    )
+                    if _is_fatal_accept_error(exc):
+                        outcome = f"fatal_accept_error:{type(exc).__name__}"
+                        return
+                    time.sleep(0.05)
+                    continue
+                # INSIDE the loop's error handling, deliberately. A thread
+                # spawn that fails (the interpreter is out of threads — which
+                # is precisely what an unbounded pre-auth flood produces) used
+                # to propagate out of the accept loop and kill it, silently,
+                # while the port stayed advertised. It is now one accounted
+                # rejection of one peer, and the lane keeps serving everybody
+                # else.
+                try:
+                    threading.Thread(
+                        target=self._serve_connection,
+                        args=(sock, peer),
+                        name="harness-serve-socket-conn",
+                        daemon=True,
+                    ).start()
+                except BaseException as exc:  # noqa: BLE001 - reported, never raised out
+                    with self._lock:
+                        self._accept_errors += 1
+                    self._emit_log(
+                        {
+                            "event": "serve_socket_accept_error",
+                            "phase": "spawn",
+                            "reason": type(exc).__name__,
+                        }
+                    )
+                    try:
+                        sock.close()
+                    except OSError:
+                        pass
+                    time.sleep(0.05)
+                    continue
+        except BaseException as exc:  # noqa: BLE001 - reported, never raised out
+            outcome = f"error:{type(exc).__name__}"
+            with self._lock:
+                self._accept_errors += 1
+        finally:
+            with self._lock:
+                self._accept_loop_exited = outcome
+            self._emit_log(
+                {"event": "serve_socket_accept_loop_exit", "outcome": outcome}
+            )
 
     def _serve_connection(self, sock: socket.socket, peer: Any) -> None:
         with self._lock:
             self._next_connection += 1
             key = f"conn-{self._next_connection}"
             at_capacity = len(self._connections) >= self._max_connections
+            pending_full = self._pending >= self._max_pending
+            admitted = not (at_capacity or pending_full)
+            if admitted:
+                self._pending += 1
+                self._pending_peak = max(self._pending_peak, self._pending)
         connection = SocketConnection(
             key=key, sock=sock, peer=_peer_text(peer), connected_at=_now_iso()
         )
@@ -641,33 +961,100 @@ class ServeSocketServer:
             sock.settimeout(self._hello_deadline)
         except OSError:
             pass
-        if at_capacity:
-            self._reject(connection, "too_many_connections")
+        reader: "_LineReader | None" = None
+        try:
+            if at_capacity:
+                self._reject(connection, REJECT_TOO_MANY_CONNECTIONS)
+                return
+            if pending_full:
+                # The bound that did not exist: 64 peers that said nothing sat
+                # on 64 threads because only AUTHENTICATED connections counted.
+                self._reject(connection, REJECT_TOO_MANY_PENDING)
+                return
+            if self._rate_limiter.blocked():
+                self._reject(connection, REJECT_RATE_LIMITED)
+                return
+            if self._timeout_limiter.blocked():
+                self._reject(connection, REJECT_HANDSHAKE_THROTTLED)
+                return
+            if self._draining:
+                self._reject(connection, REJECT_DRAINING)
+                return
+            reader = self._handshake(connection, sock, key)
+        finally:
+            if admitted:
+                with self._lock:
+                    self._pending = max(0, self._pending - 1)
+        if reader is None:
             return
-        if self._rate_limiter.blocked():
-            self._reject(connection, "rate_limited")
-            return
-        if self._draining:
-            self._reject(connection, "draining")
-            return
+        self._read_loop(connection, reader)
+
+    def _handshake(
+        self, connection: SocketConnection, sock: socket.socket, key: str
+    ) -> "_LineReader | None":
+        """Challenge, verify, admit. Returns the reader, or None on rejection.
+
+        The SERVER speaks first — one ``server_hello`` carrying a nonce minted
+        for THIS connection — and the client answers with an HMAC over it. The
+        token never appears on the wire in either direction, so a captured
+        transcript authenticates nothing and cannot be replayed: the next
+        connection demands a proof over a different nonce.
+
+        What an unauthenticated peer learns is deliberately bounded to the
+        challenge itself (nonce, boot id, contract numbers, algorithm). No
+        build, no runtime root, no answer to any op — the boot id is disclosed
+        because a client must be able to tell "the service I was talking to
+        restarted" from "a different service answered" BEFORE it commits to a
+        handshake, and it is a per-boot random value that authorises nothing.
+        """
+
         reader = _LineReader(sock)
+        nonce = secrets.token_hex(NONCE_BYTES)
+        try:
+            connection.emit(
+                {
+                    "event": "server_hello",
+                    "nonce": nonce,
+                    "boot_id": self._boot_id,
+                    "contract": self._frame_contract,
+                    "hello_contract": HELLO_CONTRACT_VERSION,
+                    "algorithm": HELLO_PROOF_ALGORITHM,
+                }
+            )
+        except Exception:
+            connection.close("server_hello_write_failed")
+            return None
         try:
             hello_line = reader.read_line(deadline_seconds=self._hello_deadline)
         except Exception:
             hello_line = None
         if hello_line is None:
-            self._reject(connection, "hello_timeout", count_failure=False)
-            return
+            # NOT an auth failure: a peer that said nothing presented no
+            # credential to be wrong about. It gets its own throttle instead,
+            # so silence can still be bounded without locking out clients that
+            # hold the right secret.
+            with self._lock:
+                self._hello_timeouts += 1
+            self._timeout_limiter.record_failure()
+            self._reject(connection, REJECT_HELLO_TIMEOUT)
+            return None
         message = _parse_object(hello_line)
-        if message is None or message.get("op") != "hello":
-            self._reject(connection, "hello_required")
-            return
-        token = message.get("token")
-        if not isinstance(token, str) or not self._verify_token(token):
+        if message is None:
+            self._reject(connection, REJECT_HELLO_MALFORMED)
+            return None
+        if message.get("op") != "hello":
+            self._reject(connection, REJECT_HELLO_REQUIRED)
+            return None
+        try:
+            token = self._token_provider()
+        except Exception:
+            token = None
+        if not verify_hello_proof(message.get("proof"), nonce, token):
             # ONE typed frame, and nothing else: a rejected connection never
             # learns anything about the runtime it failed to reach.
-            self._reject(connection, "bad_token")
-            return
+            self._reject(connection, REJECT_BAD_PROOF)
+            return None
+        del token
         self._rate_limiter.record_success()
         connection.client = _client_text(message.get("client"))
         connection.client_build = _client_text(message.get("client_build"))
@@ -692,8 +1079,8 @@ class ServeSocketServer:
             connection.emit(self._hello_payload(message, connection))
         except Exception:
             self._drop_connection(connection, reason="hello_write_failed")
-            return
-        self._read_loop(connection, reader)
+            return None
+        return reader
 
     def _read_loop(self, connection: SocketConnection, reader: "_LineReader") -> None:
         reason = "client_disconnect"
@@ -728,13 +1115,26 @@ class ServeSocketServer:
 
     # ── connection teardown / rejection ─────────────────────────────────────
 
-    def _reject(
-        self, connection: SocketConnection, reason: str, *, count_failure: bool = True
-    ) -> None:
-        if count_failure:
+    def _reject(self, connection: SocketConnection, reason: str) -> None:
+        """Refuse one connection, typed, and charge the RIGHT counter.
+
+        Whether this counts as an authentication failure is derived from the
+        reason (:data:`AUTH_FAILURE_REJECT_REASONS`) and from nothing else. It
+        used to be a boolean the caller passed, defaulting to True, so capacity
+        and drain refusals were charged as attacks — and a ``rate_limited``
+        refusal re-armed the very window that produced it. That is a permanent,
+        self-sustaining lockout: proven live, 12 polite retries with the RIGHT
+        credential over 12 seconds, never recovering. A refusal caused by the
+        SERVER's own state can never extend a block against the client.
+        """
+
+        if reason in AUTH_FAILURE_REJECT_REASONS:
             self._rate_limiter.record_failure()
         with self._lock:
             self._rejected += 1
+            self._rejected_by_reason[reason] = (
+                self._rejected_by_reason.get(reason, 0) + 1
+            )
         connection.try_emit({"event": "hello_rejected", "reason": reason})
         self._emit_log(
             {
@@ -799,6 +1199,14 @@ class ServeSocketServer:
 # ── discovery + client ───────────────────────────────────────────────────────
 
 
+#: What the owner sidecar can honestly claim about liveness: nothing. It is
+#: written by the lock holder and is precise while that process lives, and it
+#: cannot prove the process still does. Never ``None`` any more — a null
+#: classification read as "no objection" at exactly the call site that had to
+#: object.
+CLASSIFICATION_OWNER_FILE_UNVERIFIED = "unverified_owner_file"
+
+
 @dataclass(frozen=True, slots=True)
 class SocketTarget:
     """Where the socket service for a root is, and how confidently we know."""
@@ -810,10 +1218,16 @@ class SocketTarget:
     #: ``registry`` (an entry the registry classified) or ``owner_file`` (the
     #: sidecar, when the registry could not answer).
     source: str
-    #: The registry's read-time classification, or None when the sidecar was
-    #: the source. ``live`` is the only value that is evidence of a process;
-    #: everything else is why a connect may fail.
-    classification: str | None
+    #: The registry's read-time classification, or
+    #: ``unverified_owner_file`` when the sidecar was the source. ``live`` is
+    #: the only value that is evidence of a process; everything else is why a
+    #: connect may fail — and, before this was enforced, why a client could
+    #: hand its credential to whatever had taken over a dead serve's port.
+    classification: str
+
+    @property
+    def live(self) -> bool:
+        return self.classification == "live"
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -823,17 +1237,34 @@ class SocketTarget:
             "boot_id": self.boot_id,
             "source": self.source,
             "classification": self.classification,
+            "live": self.live,
         }
 
 
-def resolve_socket_target(store_root: Path | str, *, probe: Any = None) -> SocketTarget | None:
-    """Find the live socket service for *store_root*, or None.
+def resolve_socket_target(
+    store_root: Path | str, *, probe: Any = None, allow_stale: bool = False
+) -> SocketTarget | None:
+    """Find the LIVE socket service for *store_root*, or None.
 
-    The REGISTRY is asked first, because it is the only source that classifies
-    liveness at read time (a dead pid, a recycled pid, and an unreadable probe
-    are three different answers there, and none of them is "live"). The owner
-    sidecar is the fallback: it is written by the lock holder and is precise
-    while that process lives, but it cannot prove the process still does.
+    The REGISTRY is the only source that classifies liveness at read time (a
+    dead pid, a recycled pid, and an unreadable probe are three different
+    answers there, and none of them is "live"), so a live registry row is the
+    only thing this returns by default.
+
+    That default is load-bearing. This used to fall back — ``for row in (live
+    or candidates)`` — and then to the owner sidecar with no classification at
+    all, so a caller asking "where is the service" got back a row the registry
+    had ALREADY classified ``stale_dead_pid`` and connected to it. A dead
+    serve's port is reusable by any local process, and the first cut of the
+    handshake sent the raw token, so the fallback was a credential handed to an
+    impostor. Both halves are closed now (the token no longer travels either),
+    and the returned target still has to be live.
+
+    ``allow_stale=True`` is the deliberate diagnostic path: it returns the best
+    non-live candidate CARRYING its classification, so a caller can name what it
+    is refusing ("stale_dead_pid", "unverified_owner_file") instead of reporting
+    the far less useful "nothing found". A caller that passes it and then
+    connects anyway has made that choice explicitly, in the open.
     """
 
     try:
@@ -848,18 +1279,16 @@ def resolve_socket_target(store_root: Path | str, *, probe: Any = None) -> Socke
         if _int_or_none(row.get("port")) and "socket" in str(row.get("transport") or "")
     ]
     live = [row for row in candidates if row.get("classification") == CLASSIFICATION_LIVE]
-    for row in live or candidates:
-        port = _int_or_none(row.get("port"))
-        if port is None:  # pragma: no cover - filtered above
-            continue
-        return SocketTarget(
-            host=SOCKET_HOST,
-            port=port,
-            pid=_int_or_none(row.get("pid")),
-            boot_id=row.get("boot_id") if isinstance(row.get("boot_id"), str) else None,
-            source="registry",
-            classification=str(row.get("classification") or ""),
-        )
+    for row in live:
+        target = _target_from_row(row)
+        if target is not None:
+            return target
+    if not allow_stale:
+        return None
+    for row in candidates:
+        target = _target_from_row(row)
+        if target is not None:
+            return target
     owner = read_socket_owner(store_root)
     port = _int_or_none(owner.get("port"))
     if port is None:
@@ -870,7 +1299,21 @@ def resolve_socket_target(store_root: Path | str, *, probe: Any = None) -> Socke
         pid=_int_or_none(owner.get("pid")),
         boot_id=owner.get("boot_id") if isinstance(owner.get("boot_id"), str) else None,
         source="owner_file",
-        classification=None,
+        classification=CLASSIFICATION_OWNER_FILE_UNVERIFIED,
+    )
+
+
+def _target_from_row(row: dict[str, Any]) -> SocketTarget | None:
+    port = _int_or_none(row.get("port"))
+    if port is None:  # pragma: no cover - callers filter on this already
+        return None
+    return SocketTarget(
+        host=SOCKET_HOST,
+        port=port,
+        pid=_int_or_none(row.get("pid")),
+        boot_id=row.get("boot_id") if isinstance(row.get("boot_id"), str) else None,
+        source="registry",
+        classification=str(row.get("classification") or "unknown"),
     )
 
 
@@ -888,6 +1331,11 @@ class ServeSocketClient:
         self._timeout = float(timeout_seconds)
         self._sock: socket.socket | None = None
         self._reader: _LineReader | None = None
+        #: The challenge frame this connection was greeted with, once
+        #: :meth:`hello` has read it. Kept so a caller can report the contract
+        #: and boot id it actually answered — not re-read, and never a place
+        #: the token is stored.
+        self.server_hello: dict[str, Any] | None = None
 
     def connect(self) -> None:
         sock = socket.create_connection((self._host, self._port), timeout=self._timeout)
@@ -901,19 +1349,53 @@ class ServeSocketClient:
         token: str,
         client: str,
         client_build: str | None = None,
+        expect_hello_contract: int | None = HELLO_CONTRACT_VERSION,
     ) -> dict[str, Any] | None:
-        """Send the hello and return the single reply frame.
+        """Answer the server's challenge and return the single reply frame.
 
-        The token goes on the wire and NOWHERE else: it is not logged, not
-        echoed into the returned frame, and not retained on this object.
+        The SERVER speaks first, so this reads before it writes: one
+        ``server_hello`` carrying the nonce, then the proof. **The token never
+        goes on the wire** — it is the HMAC key, it is not logged, not echoed
+        into the returned frame, and not retained on this object. A transcript
+        of this exchange authenticates nobody: the nonce is fresh per
+        connection, so a replayed proof is a proof over the wrong challenge.
+
+        Anything other than a well-formed ``server_hello`` raises
+        :class:`ServeHelloProtocolError` with the offending frame attached
+        rather than pressing on: the two ways that happens are a service that
+        refused us before the challenge (its ``hello_rejected`` reason is the
+        answer) and something on this port that is not this service — and
+        neither is a case where sending a credential is the right next move.
         """
 
+        greeting = self.read_frame()
+        if not isinstance(greeting, dict) or greeting.get("event") != "server_hello":
+            raise ServeHelloProtocolError(
+                "the peer did not open with a server_hello challenge",
+                frame=greeting,
+            )
+        nonce = greeting.get("nonce")
+        if not isinstance(nonce, str) or len(nonce) < 2 * NONCE_BYTES:
+            raise ServeHelloProtocolError(
+                "server_hello carried no usable nonce", frame=greeting
+            )
+        contract = greeting.get("hello_contract")
+        if expect_hello_contract is not None and contract != expect_hello_contract:
+            # Refused, not adapted. A client that guesses at an unknown
+            # handshake version is a client that will eventually guess "send
+            # the token" — which is the shape this contract exists to retire.
+            raise ServeHelloProtocolError(
+                f"unsupported hello_contract {contract!r} "
+                f"(this client speaks {expect_hello_contract})",
+                frame=greeting,
+            )
+        self.server_hello = greeting
         self.send(
             {
                 "op": "hello",
-                "token": token,
                 "client": client,
                 "client_build": client_build,
+                "proof": hello_proof(token, nonce),
             }
         )
         return self.read_frame()
