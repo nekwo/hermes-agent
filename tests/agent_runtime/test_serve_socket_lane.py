@@ -23,15 +23,19 @@ from contextlib import contextmanager
 
 import pytest
 
+from agent_runtime import serve_socket
 from agent_runtime.serve_auth import read_token
 from agent_runtime.serve_socket import (
     HELLO_CONTRACT_VERSION,
+    MAX_LINE_BYTES,
     NONCE_BYTES,
     REJECT_BAD_PROOF,
     REJECT_DRAINING,
     REJECT_HELLO_MALFORMED,
     REJECT_HELLO_REQUIRED,
+    REJECT_HANDSHAKE_THROTTLED,
     REJECT_HELLO_TIMEOUT,
+    REJECT_HELLO_TOO_LONG,
     REJECT_RATE_LIMITED,
     REJECT_TOO_MANY_CONNECTIONS,
     REJECT_TOO_MANY_PENDING,
@@ -45,6 +49,7 @@ from agent_runtime.serve_socket import (
     resolve_socket_target,
     socket_lock_path,
     socket_owner_path,
+    verify_hello_proof,
 )
 from hermes_cli.harness_parts import serve as serve_module
 from hermes_cli.harness_parts.serve import serve_loop
@@ -143,7 +148,7 @@ def raw_handshake(port: int, *, token: str | None, client: str = "peer",
             if proof is not None:
                 answer["proof"] = proof
             elif token is not None:
-                answer["proof"] = hello_proof(token, greeting.get("nonce") or "")
+                answer["proof"] = hello_proof(token, greeting.get("nonce") or "", port=port)
             connection.send(answer)
         return greeting, connection.read_frame()
     finally:
@@ -446,7 +451,7 @@ def test_the_server_speaks_first_and_the_token_never_travels():
                     "op": "hello",
                     "client": "transcript",
                     "client_build": None,
-                    "proof": hello_proof(token, greeting["nonce"]),
+                    "proof": hello_proof(token, greeting["nonce"], port=handle.port),
                 }
             )
             reply = connection.read_frame()
@@ -458,7 +463,7 @@ def test_the_server_speaks_first_and_the_token_never_travels():
     wire = b"".join(sent)
     assert token.encode() not in wire
     answer = json.loads(wire.decode().strip())
-    assert answer["proof"] == hello_proof(token, greeting["nonce"])
+    assert answer["proof"] == hello_proof(token, greeting["nonce"], port=handle.port)
     assert "token" not in answer
     # ...and the nonce is per CONNECTION, so the proof above cannot be reused.
     with running_serve() as second:
@@ -491,7 +496,7 @@ def test_a_wrong_proof_gets_one_typed_rejection_and_no_data_at_all():
                 {
                     "op": "hello",
                     "client": "thief",
-                    "proof": hello_proof("not-the-token", greeting["nonce"]),
+                    "proof": hello_proof("not-the-token", greeting["nonce"], port=handle.port),
                 }
             )
             # Sent regardless of the rejection: an unauthenticated peer must not
@@ -844,42 +849,85 @@ def test_an_impostor_on_a_recycled_port_harvests_a_proof_and_never_the_token():
     leaves this process.
     """
 
-    secret = "S3CRET-" + "a" * 40
-    impostor = _ImpostorServer(
-        {
-            "event": "server_hello",
-            "nonce": "b" * (2 * NONCE_BYTES),
-            "boot_id": "impostor",
-            "contract": 1,
-            "hello_contract": HELLO_CONTRACT_VERSION,
-            "algorithm": "hmac-sha256",
-        }
-    )
-    try:
-        connection = ServeSocketClient("127.0.0.1", impostor.port, timeout_seconds=5.0)
-        connection.connect()
-        try:
-            connection.hello(token=secret, client="victim", client_build="deadbeef")
-        except Exception:
-            # The impostor answers nothing, so the read after the proof ends or
-            # times out. What it was SENT is the whole question.
-            pass
-        finally:
-            connection.close()
-        impostor.wait()
-    finally:
-        impostor.close()
+    # The REAL service's token, so the relay below fails for the right reason.
+    # An arbitrary secret would be refused because it is the wrong key, which
+    # would make this test pass without the binding existing at all.
+    with running_serve() as real:
+        secret = read_token(_store_root()) or ""
+        assert secret
 
-    wire = bytes(impostor.received)
-    assert wire, "the client sent nothing at all — this proves nothing"
-    assert secret.encode() not in wire
-    answer = json.loads(wire.decode().strip())
-    assert set(answer) == {"op", "client", "client_build", "proof"}
-    assert answer["op"] == "hello"
-    assert "token" not in answer
-    # It is a proof over the impostor's OWN nonce: worthless anywhere else,
-    # and worthless here on the next connection, which mints a fresh one.
-    assert answer["proof"] == hello_proof(secret, "b" * (2 * NONCE_BYTES))
+        impostor = _ImpostorServer(
+            {
+                "event": "server_hello",
+                # The RELAY: the impostor presents a challenge it took from the
+                # real service, so nonce freshness has nothing left to say.
+                "nonce": _server_nonce(real.port),
+                "boot_id": "impostor",
+                "contract": 1,
+                "hello_contract": HELLO_CONTRACT_VERSION,
+                "algorithm": "hmac-sha256",
+            }
+        )
+        try:
+            assert impostor.port != real.port
+            connection = ServeSocketClient(
+                "127.0.0.1", impostor.port, timeout_seconds=5.0
+            )
+            connection.connect()
+            try:
+                connection.hello(
+                    token=secret, client="victim", client_build="deadbeef"
+                )
+            except Exception:
+                # The impostor answers nothing, so the read after the proof
+                # ends or times out. What it was SENT is the whole question.
+                pass
+            finally:
+                connection.close()
+            impostor.wait()
+            relayed_nonce = impostor.greeting["nonce"]
+        finally:
+            impostor.close()
+
+        wire = bytes(impostor.received)
+        assert wire, "the client sent nothing at all — this proves nothing"
+        assert secret.encode() not in wire
+        answer = json.loads(wire.decode().strip())
+        assert set(answer) == {"op", "client", "client_build", "proof"}
+        assert answer["op"] == "hello"
+        assert "token" not in answer
+        # Bound to the port the victim DIALLED — the impostor's — even though
+        # the nonce came from the real service.
+        assert answer["proof"] == hello_proof(
+            secret, relayed_nonce, port=impostor.port
+        )
+        # THE POINT, and what freshness alone never gave us. The harvested
+        # proof carries the real service's own live nonce and the real token,
+        # and it is still refused there, because it is not bound to that port.
+        assert not verify_hello_proof(
+            answer["proof"], relayed_nonce, secret, port=real.port
+        ), "a proof harvested by an impostor verified at the real service"
+        # ...and the same token dialling the real port IS admitted, so the
+        # refusal above is the binding biting rather than the key being wrong.
+        _, reply = raw_handshake(real.port, token=secret, client="victim")
+        assert reply["event"] == "hello_ok"
+
+
+def _server_nonce(port: int) -> str:
+    """One live challenge from the service on [port], taken and abandoned.
+
+    Exactly what a relaying impostor does: connect, read the challenge, hang
+    up, and reuse it as its own.
+    """
+
+    peer = ServeSocketClient("127.0.0.1", port, timeout_seconds=WAIT)
+    peer.connect()
+    try:
+        greeting = peer.read_frame()
+        assert greeting["event"] == "server_hello"
+        return greeting["nonce"]
+    finally:
+        peer.close()
 
 
 @pytest.mark.parametrize(
@@ -1829,3 +1877,264 @@ def test_the_socket_files_move_no_freshness_fingerprint():
         assert after == before
     finally:
         lock.release()
+
+
+# ── the pre-auth path is driven by an unauthenticated peer ──────────────────
+
+
+def test_a_non_ascii_proof_is_refused_like_any_other_wrong_one():
+    """The [HIGH] finding: one accented character escaped the handshake.
+
+    ``hmac.compare_digest`` RAISES ``TypeError`` when either ``str`` operand is
+    non-ASCII, and the comparison sat on a path an unauthenticated peer drives.
+    The exception unwound out of the connection thread, so the peer got no
+    rejection frame, the attempt was counted nowhere, the rate limiter was
+    never charged — the F3 bound bypassed by one byte — and the traceback went
+    to a stderr the serve loop has redirected onto the NDJSON protocol stream.
+
+    Every clause below is the absence of one of those. The rejection alone
+    would be a weak assertion: a peer being refused proves nothing about
+    whether the refusal was DECIDED or merely survived.
+    """
+
+    clock = _Clock()
+    # Four hostile proofs against a limit of FOUR: every one of them must be
+    # judged on its merits, and only the fifth connection meets a closed window.
+    limiter = HelloRateLimiter(limit=4, window_seconds=10.0, clock=clock)
+    with bare_server(rate_limiter=limiter, reject_penalty_seconds=0.0) as (
+        server,
+        port,
+        _logs,
+    ):
+        for proof in ("é" * 64, "☃" + "a" * 63, "prøøf", "​" * 64):
+            _g, reply = raw_handshake(port, token=None, proof=proof)
+            assert reply == {
+                "event": "hello_rejected",
+                "reason": REJECT_BAD_PROOF,
+            }, f"a non-ASCII proof {proof[:8]!r} did not get a typed rejection"
+
+        payload = server.connections_payload()
+        # COUNTED. The old path left no number anywhere.
+        assert payload["rejected_by_reason"][REJECT_BAD_PROOF] == 4
+        assert payload["rejected_total"] == 4
+        # ...and it did not raise on the way there, so the defence-in-depth
+        # conversion never ran: this is a decided rejection, not a rescued one.
+        assert payload["handshake_errors"] == 0
+        assert payload["last_handshake_error"] is None
+
+        # CHARGED. Four auth failures against a limit of four closes the
+        # window — the guarantee the escaping exception used to skip entirely.
+        _g, blocked = raw_handshake(port, token="the-shared-secret")
+        assert blocked == {"event": "hello_rejected", "reason": REJECT_RATE_LIMITED}
+
+
+def test_a_handshake_that_RAISES_still_rejects_charges_and_is_counted():
+    """Defence in depth for the class, not just the one member of it.
+
+    The finding was a specific call that could raise. The DESIGN defect was
+    that a single uncaught call existed on a path an unauthenticated peer
+    drives — so fixing only the comparison leaves the next such call to
+    rediscover it. Any exception escaping the handshake is now converted into
+    a refusal, charged like one, and counted as the distinct operational fact
+    that it is.
+    """
+
+    clock = _Clock()
+    limiter = HelloRateLimiter(limit=2, window_seconds=10.0, clock=clock)
+    with bare_server(rate_limiter=limiter, reject_penalty_seconds=0.0) as (
+        server,
+        port,
+        _logs,
+    ):
+        original = serve_socket.verify_hello_proof
+
+        def _explode(*args, **kwargs):
+            raise RuntimeError("boom from inside the handshake")
+
+        serve_socket.verify_hello_proof = _explode
+        try:
+            for _ in range(2):
+                _g, reply = raw_handshake(port, token="the-shared-secret")
+                assert reply == {
+                    "event": "hello_rejected",
+                    "reason": REJECT_HELLO_MALFORMED,
+                }
+        finally:
+            serve_socket.verify_hello_proof = original
+
+        payload = server.connections_payload()
+        assert payload["handshake_errors"] == 2
+        assert payload["last_handshake_error"] == "RuntimeError"
+
+        # Charged as an auth failure, so it cannot be used to hammer the
+        # handshake for free. The limit is 2 and both raised.
+        _g, blocked = raw_handshake(port, token="the-shared-secret")
+        assert blocked == {"event": "hello_rejected", "reason": REJECT_RATE_LIMITED}
+
+        # ...and the server is still serving: the escape did not take the lane
+        # down with it.
+        clock.advance(11.0)
+        _g, recovered = raw_handshake(port, token="the-shared-secret")
+        assert recovered["event"] == "hello_ok"
+
+
+def test_a_peer_that_FLOODS_is_not_accounted_as_a_peer_that_was_SILENT():
+    """A 1 MiB garbage line was classified ``hello_timeout``.
+
+    The two throttles exist to be different: auth failures close the shared
+    door, and silence gets its own budget so a burst of abandoned connections
+    cannot lock out a client holding the right credential. Charging a flood to
+    the silence budget spends the quiet clients' allowance on an attack, and
+    records the attack as an absence.
+    """
+
+    with bare_server(reject_penalty_seconds=0.0) as (server, port, _logs):
+        connection = ServeSocketClient("127.0.0.1", port, timeout_seconds=WAIT)
+        connection.connect()
+        try:
+            greeting = connection.read_frame()
+            assert greeting["event"] == "server_hello"
+            # No newline: one line, larger than the reader will ever accept.
+            connection._sock.sendall(b"x" * (MAX_LINE_BYTES + 4096))
+            reply = connection.read_frame()
+        finally:
+            connection.close()
+
+        assert reply == {"event": "hello_rejected", "reason": REJECT_HELLO_TOO_LONG}
+        payload = server.connections_payload()
+        assert payload["rejected_by_reason"] == {REJECT_HELLO_TOO_LONG: 1}
+        assert payload["hello_timeouts"] == 0, (
+            "a flood was accounted as silence, spending the budget reserved "
+            "for peers that presented nothing"
+        )
+
+
+def test_a_completed_handshake_clears_the_SILENCE_throttle_too():
+    """The asymmetry the first pass left behind.
+
+    ``record_success`` was wired to the auth limiter and not to the timeout
+    limiter, so the silence throttle was cleared only by the passage of time.
+    A burst of abandoned connections therefore went on refusing every peer —
+    including one holding the right credential — which is the same "the
+    server's own state locks out a good client" shape F3 set out to retire,
+    applied to the other half of the pair.
+    """
+
+    clock = _Clock()
+    timeouts = HelloRateLimiter(limit=2, window_seconds=60.0, clock=clock)
+    with bare_server(
+        timeout_limiter=timeouts,
+        hello_deadline_seconds=0.05,
+        reject_penalty_seconds=0.0,
+    ) as (server, port, _logs):
+        # STAGGERED on purpose. Two abandoned connections at the same instant
+        # age out together, and then nothing downstream can tell "the window
+        # emptied by itself" from "the handshake cleared it" — the test would
+        # pass against the defect. These are 30s apart so exactly one of them
+        # can be expired at a time.
+        reply = _silent_peer(port)
+        assert reply == {"event": "hello_rejected", "reason": REJECT_HELLO_TIMEOUT}
+        clock.advance(30.0)
+        reply = _silent_peer(port)
+        assert reply == {"event": "hello_rejected", "reason": REJECT_HELLO_TIMEOUT}
+        assert server.connections_payload()["hello_timeouts"] == 2
+
+        # The throttle is closed. A GOOD client is refused — the honest cost.
+        _g, throttled = raw_handshake(port, token="the-shared-secret")
+        assert throttled == {
+            "event": "hello_rejected",
+            "reason": REJECT_HANDSHAKE_THROTTLED,
+        }
+
+        # Now 61s past the FIRST timeout and 31s past the second, so the window
+        # holds exactly one entry and the good client gets in.
+        clock.advance(31.0)
+        _g, admitted = raw_handshake(port, token="the-shared-secret")
+        assert admitted["event"] == "hello_ok"
+
+        # THE ASSERTION. One more silent peer must not re-close a throttle that
+        # a completed handshake proved unnecessary.
+        reply = _silent_peer(port)
+        assert reply == {"event": "hello_rejected", "reason": REJECT_HELLO_TIMEOUT}
+        _g, still_in = raw_handshake(port, token="the-shared-secret")
+        assert still_in["event"] == "hello_ok", (
+            "a completed handshake did not clear the silence throttle, so one "
+            "abandoned connection re-locked a client holding the right secret"
+        )
+
+
+def _silent_peer(port: int) -> dict | None:
+    """A peer that connects, reads the challenge, and then says NOTHING.
+
+    ``raw_handshake`` always answers something, so it can never produce the
+    hello TIMEOUT — an empty ``hello`` object is a malformed answer, not an
+    absent one, and the server rightly classifies it ``hello_required``. The
+    distinction is the whole subject of the throttle under test.
+    """
+
+    connection = ServeSocketClient("127.0.0.1", port, timeout_seconds=WAIT)
+    connection.connect()
+    try:
+        greeting = connection.read_frame()
+        assert greeting["event"] == "server_hello"
+        return connection.read_frame()
+    finally:
+        connection.close()
+
+
+def test_drain_progress_reaches_the_SOCKET_client_and_not_only_stdio(monkeypatch):
+    """The one drain frame that was emitted to stdout and nowhere else.
+
+    Its entire stated purpose is that "a draining service never looks dead to a
+    watchdog" — and the socket client IS such a watchdog: it reads with a
+    finite timeout (10s by default) and reports ``transport_failed`` on
+    silence. Every other drain frame was broadcast to both lanes; this one was
+    not, and the socket lane's own minimum deadline made the gap wider than the
+    client's patience. A healthy, completing drain therefore reported a
+    transport failure.
+
+    The assertion that would pass vacuously is "a drain_progress exists" — it
+    always did, on stdio. What is checked here is that one arrives ON THE
+    SOCKET, before the deadline that used to be the first thing the socket ever
+    saw, and that it carries the in-flight request it is reporting about.
+    """
+
+    monkeypatch.setattr(serve_module, "_DRAIN_PROGRESS_INTERVAL_SECONDS", 0.05)
+
+    started = threading.Event()
+    release = threading.Event()
+
+    def _dispatch(argv):
+        started.set()
+        release.wait(WAIT)
+        return 0
+
+    with running_serve(
+        dispatch=_dispatch,
+        # PRODUCTION floor, deliberately: the defect only bites because the
+        # socket lane holds a drain open far longer than a client will wait,
+        # and a test that shortens the floor cannot see it.
+        drain_poll_interval_seconds=0.01,
+    ) as handle:
+        with client(handle, name="watchdog") as (connection, _reply):
+            connection.send({"id": "slow-1", "argv": ["harness", "status", "--json"]})
+            assert started.wait(WAIT)
+
+            connection.send({"op": "drain", "force": True, "deadline_seconds": 120.0})
+            assert _read_until(connection, "draining")["pending"] == 1
+
+            # THE ASSERTION. Before the fix this read ran until the client's
+            # own timeout and raised, because the next socket-visible frame was
+            # the terminal one — up to two minutes away.
+            progress = _read_until(connection, "drain_progress")
+            assert progress["pending"] == 1
+            assert progress["request_ids"] == ["conn-1:slow-1"]
+            assert progress["drain_ms"] >= 0
+
+            # ...and it keeps arriving, so a watchdog watching a long drain
+            # sees liveness repeatedly rather than once.
+            again = _read_until(connection, "drain_progress")
+            assert again["drain_ms"] >= progress["drain_ms"]
+
+            release.set()
+            assert _read_until(connection, "exit")["id"] == "slow-1"

@@ -50,9 +50,15 @@ Why a proof and not the token (the hardening this replaced)
     the classification so the caller must refuse it by name), and the token
     itself never traverses the wire at all. A stolen transcript is unreplayable
     — the nonce is fresh per CONNECTION — and an impostor server learns only
-    one HMAC over a nonce of its own choosing, which authenticates nothing
-    anywhere. The token value still appears in no frame, no log line, no error,
-    and no registry entry; the proof is the only derived artifact.
+    one HMAC, bound to the port the victim DIALLED, which therefore does not
+    verify at the real service's port. That binding is load-bearing and was not
+    in the first pass: freshness alone stops replay but not a live relay, since
+    an impostor can dial the real service, adopt its nonce as its own
+    challenge, and forward the answer. Binding to anything the greeting merely
+    asserts (`boot_id`, a claimed port) would be binding to a number the
+    impostor echoes; the dialled port is the one value each end knows from its
+    own socket. The token value still appears in no frame, no log line, no
+    error, and no registry entry; the proof is the only derived artifact.
 
     ``hello_contract`` is versioned on the ``server_hello`` frame precisely so
     the future Launcher client asserts the handshake it was written against
@@ -146,6 +152,7 @@ __all__ = [
     "REJECT_HELLO_MALFORMED",
     "REJECT_HELLO_REQUIRED",
     "REJECT_HELLO_TIMEOUT",
+    "REJECT_HELLO_TOO_LONG",
     "REJECT_RATE_LIMITED",
     "REJECT_TOO_MANY_CONNECTIONS",
     "REJECT_TOO_MANY_PENDING",
@@ -204,7 +211,10 @@ HELLO_TIMEOUT_WINDOW_SECONDS = 10.0
 #: (implicit) token hello to the nonce/HMAC challenge-response; a client that
 #: does not recognise this number must refuse to proceed rather than guess at
 #: the frame it is expected to answer with.
-HELLO_CONTRACT_VERSION = 2
+#: 3 binds the proof to the listening PORT (see :func:`hello_proof`). Bumped
+#: rather than shimmed: no client speaks this handshake yet, so the migration
+#: cost is zero today and permanent the moment one does.
+HELLO_CONTRACT_VERSION = 3
 #: Challenge size. 32 bytes → 64 hex characters, fresh per CONNECTION.
 NONCE_BYTES = 32
 HELLO_PROOF_ALGORITHM = "hmac-sha256"
@@ -221,6 +231,7 @@ REJECT_DRAINING = "draining"
 REJECT_HELLO_TIMEOUT = "hello_timeout"
 REJECT_HELLO_REQUIRED = "hello_required"
 REJECT_HELLO_MALFORMED = "hello_malformed"
+REJECT_HELLO_TOO_LONG = "hello_too_long"
 REJECT_BAD_PROOF = "bad_proof"
 
 #: The ONLY reasons that charge the auth rate limiter: a peer that presented a
@@ -230,7 +241,12 @@ REJECT_BAD_PROOF = "bad_proof"
 #: extend itself forever, so a well-behaved client with the RIGHT credential
 #: could never recover.
 AUTH_FAILURE_REJECT_REASONS = frozenset(
-    {REJECT_BAD_PROOF, REJECT_HELLO_REQUIRED, REJECT_HELLO_MALFORMED}
+    {
+        REJECT_BAD_PROOF,
+        REJECT_HELLO_REQUIRED,
+        REJECT_HELLO_MALFORMED,
+        REJECT_HELLO_TOO_LONG,
+    }
 )
 
 #: Total budget for one broadcast across every attached connection. A drain
@@ -486,22 +502,37 @@ class ServeHelloProtocolError(Exception):
         return value if isinstance(value, str) else None
 
 
-def hello_proof(token: str, nonce: str) -> str:
-    """``HMAC-SHA256(key=token, msg=nonce)`` as lowercase hex.
+def hello_proof(token: str, nonce: str, *, port: int) -> str:
+    """``HMAC-SHA256(key=token, msg="v3|<port>|<nonce>")`` as lowercase hex.
 
     The ONE derivation in this stack: the client computes it, the server
     recomputes it, and a second copy of this line is how the two ends start
     disagreeing about what a proof is. The token is the KEY and never the
     message — a proof therefore reveals nothing about it, which is the whole
     point of not putting the token on the wire.
+
+    **The proof is bound to the PORT, and that is what makes it unrelayable.**
+    A fresh nonce stops a captured transcript from being replayed, but it does
+    NOT stop a live relay: an impostor listener can dial the real service, take
+    its nonce, present that same nonce as its own challenge, and forward the
+    answer it receives. Every value in the ``server_hello`` frame is chosen by
+    whoever sent it, so binding to `boot_id` would be bound to a number the
+    impostor simply echoes. The port is different: each end takes it from its
+    OWN socket — the server from what it listens on, the client from what it
+    dialled — so a proof minted for the impostor's port cannot verify at the
+    real one. Channel binding has to use something both ends know independently
+    of anything the other one claims.
     """
 
+    message = f"v{HELLO_CONTRACT_VERSION}|{int(port)}|{nonce}"
     return hmac.new(
-        str(token).encode("utf-8"), str(nonce).encode("utf-8"), hashlib.sha256
+        str(token).encode("utf-8"), message.encode("utf-8"), hashlib.sha256
     ).hexdigest()
 
 
-def verify_hello_proof(presented: Any, nonce: str, token: str | None) -> bool:
+def verify_hello_proof(
+    presented: Any, nonce: str, token: str | None, *, port: int
+) -> bool:
     """Constant-time check of *presented* against the proof this nonce demands.
 
     Fails CLOSED on every missing input — no token for this root, no proof in
@@ -513,7 +544,17 @@ def verify_hello_proof(presented: Any, nonce: str, token: str | None) -> bool:
         return False
     if not isinstance(presented, str) or not presented.strip():
         return False
-    return hmac.compare_digest(presented.strip().lower(), hello_proof(token, nonce))
+    # BYTES, never str. `hmac.compare_digest` RAISES TypeError when either str
+    # operand is non-ASCII, and `presented` is attacker-controlled on a path no
+    # credential is needed to reach: one accented character used to unwind out
+    # of the handshake, so the peer got no rejection frame, the attempt was
+    # never counted, the rate limiter was never charged, and the traceback was
+    # written to a stderr that `serve_loop` has redirected onto the NDJSON
+    # protocol stream. Encoding first makes a hostile proof merely wrong.
+    return hmac.compare_digest(
+        presented.strip().lower().encode("utf-8", "replace"),
+        hello_proof(token, nonce, port=port).encode("ascii"),
+    )
 
 
 # ── connections ──────────────────────────────────────────────────────────────
@@ -710,6 +751,12 @@ class ServeSocketServer:
         #: service that answers its discovery record and nothing else.
         self._accept_errors = 0
         self._accept_loop_exited: str | None = None
+        #: A handshake that raised instead of deciding. Counted separately from
+        #: the rejections it is now converted into, because "we could not even
+        #: process this peer" is a different operational fact from "we refused
+        #: it", and the first one is the one that used to leave no trace at all.
+        self._handshake_errors = 0
+        self._last_handshake_error: str | None = None
         self._rejected_by_reason: dict[str, int] = {}
         self._started_at: str | None = None
 
@@ -836,6 +883,8 @@ class ServeSocketServer:
             accept_errors = self._accept_errors
             accept_loop_exited = self._accept_loop_exited
             hello_timeouts = self._hello_timeouts
+            handshake_errors = self._handshake_errors
+            last_handshake_error = self._last_handshake_error
             by_reason = dict(self._rejected_by_reason)
         return {
             "port": self._port,
@@ -856,6 +905,11 @@ class ServeSocketServer:
             # error count and the loop's exit reason are stated, always.
             "accept_errors": accept_errors,
             "accept_loop_exited": accept_loop_exited,
+            # A handshake that RAISED. Surfaced next to the accept-loop
+            # failures for the same reason: an unauthenticated peer must never
+            # be able to make the service misbehave without leaving a number.
+            "handshake_errors": handshake_errors,
+            "last_handshake_error": last_handshake_error,
             "hello_contract": HELLO_CONTRACT_VERSION,
             "connections": rows,
         }
@@ -980,7 +1034,26 @@ class ServeSocketServer:
             if self._draining:
                 self._reject(connection, REJECT_DRAINING)
                 return
-            reader = self._handshake(connection, sock, key)
+            try:
+                reader = self._handshake(connection, sock, key)
+            except Exception as exc:
+                # The pre-auth path is driven entirely by an unauthenticated
+                # peer, so ONE uncaught call on it is one too many: an escaping
+                # exception used to mean no rejection frame, no accounting, no
+                # limiter charge, a socket left to the garbage collector, and a
+                # traceback on the protocol stream. Anything that gets here is
+                # a peer we could not process — charged as an auth failure so
+                # it cannot be used to hammer the handshake for free — and it
+                # is COUNTED, because the whole point of the finding was that
+                # the attempt was invisible.
+                reader = None
+                with self._lock:
+                    self._handshake_errors += 1
+                    self._last_handshake_error = type(exc).__name__
+                try:
+                    self._reject(connection, REJECT_HELLO_MALFORMED)
+                except Exception:
+                    connection.close("handshake_failed")
         finally:
             if admitted:
                 with self._lock:
@@ -1026,6 +1099,12 @@ class ServeSocketServer:
             return None
         try:
             hello_line = reader.read_line(deadline_seconds=self._hello_deadline)
+        except _LineTooLong:
+            # A peer that FLOODED is not a peer that was silent. Charging this
+            # to the timeout throttle accounted an attack as an absence, and
+            # let it consume the budget reserved for genuinely quiet clients.
+            self._reject(connection, REJECT_HELLO_TOO_LONG)
+            return None
         except Exception:
             hello_line = None
         if hello_line is None:
@@ -1049,13 +1128,24 @@ class ServeSocketServer:
             token = self._token_provider()
         except Exception:
             token = None
-        if not verify_hello_proof(message.get("proof"), nonce, token):
+        # `self._port` — what this server actually listens on — never a value
+        # from the peer's frame, which is the whole point of the binding.
+        if not verify_hello_proof(
+            message.get("proof"), nonce, token, port=self._port or 0
+        ):
             # ONE typed frame, and nothing else: a rejected connection never
             # learns anything about the runtime it failed to reach.
             self._reject(connection, REJECT_BAD_PROOF)
             return None
         del token
         self._rate_limiter.record_success()
+        # Symmetry the first pass missed: a completed handshake proves the lane
+        # is reachable and answering, so the SILENCE throttle has nothing left
+        # to protect against either. Cleared only by time, a burst of abandoned
+        # connections went on refusing the client holding the right credential —
+        # the same "the server's own state locks out a good client" shape the
+        # auth limiter was given `record_success` to retire.
+        self._timeout_limiter.record_success()
         connection.client = _client_text(message.get("client"))
         connection.client_build = _client_text(message.get("client_build"))
         connection.authenticated = True
@@ -1395,7 +1485,11 @@ class ServeSocketClient:
                 "op": "hello",
                 "client": client,
                 "client_build": client_build,
-                "proof": hello_proof(token, nonce),
+                # `self._port` — the port THIS client dialled, taken from its
+                # own socket rather than from anything the greeting claims. A
+                # relay that forwards our answer to a different port cannot
+                # use it.
+                "proof": hello_proof(token, nonce, port=self._port),
             }
         )
         return self.read_frame()

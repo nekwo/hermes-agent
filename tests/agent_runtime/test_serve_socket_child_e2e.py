@@ -309,7 +309,7 @@ def test_the_challenge_response_handshake_against_a_real_serve_child(tmp_path):
                 "op": "hello",
                 "client": "raw-e2e",
                 "client_build": None,
-                "proof": hello_proof(token, greeting["nonce"]),
+                "proof": hello_proof(token, greeting["nonce"], port=port),
             }
 
         greeting, frames, sent = _raw_socket_exchange(port, _answer)
@@ -325,7 +325,7 @@ def test_the_challenge_response_handshake_against_a_real_serve_child(tmp_path):
         assert token.encode() not in sent
         answer = json.loads(sent.decode().strip())
         assert "token" not in answer
-        assert answer["proof"] == hello_proof(token, greeting["nonce"])
+        assert answer["proof"] == hello_proof(token, greeting["nonce"], port=port)
 
         # 2. The nonce is per CONNECTION, so that transcript is unreplayable.
         replayed_nonce = greeting["nonce"]

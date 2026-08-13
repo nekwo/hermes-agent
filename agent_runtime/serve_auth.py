@@ -178,7 +178,16 @@ def verify(presented: str | None, store_root: Path | str) -> bool:
     expected = read_token(store_root)
     if not expected or not presented:
         return False
-    return hmac.compare_digest(str(presented), expected)
+    # BYTES, never str: `hmac.compare_digest` RAISES TypeError when either str
+    # operand is non-ASCII, so a hostile value turns a rejection into an
+    # unhandled exception on the caller's thread. The socket lane hit exactly
+    # that (see `serve_socket.verify_hello_proof`). This comparison has no
+    # production caller today, and a latent copy of the same hazard is how it
+    # comes back the day someone revives it.
+    return hmac.compare_digest(
+        str(presented).encode("utf-8", "replace"),
+        expected.encode("utf-8", "replace"),
+    )
 
 
 def _read_raw(path: Path) -> str | None:

@@ -93,7 +93,25 @@ def test_the_comparison_goes_through_the_constant_time_primitive(tmp_path, monke
     monkeypatch.setattr(serve_auth.hmac, "compare_digest", recording)
 
     assert verify(token, tmp_path) is True
-    assert seen == [(token, token)]
+    # BYTES on both sides, not str: `compare_digest` RAISES TypeError on a
+    # non-ASCII str operand, so comparing text turns a hostile value into an
+    # unhandled exception instead of a rejection.
+    assert seen == [(token.encode(), token.encode())]
+
+
+def test_a_non_ascii_presented_token_is_refused_and_never_raises(tmp_path):
+    """The shape that escaped the socket lane's handshake, pinned here too.
+
+    `hmac.compare_digest` refuses to compare non-ASCII `str`. Reached through
+    an unguarded call it does not return False — it RAISES, so the caller
+    neither rejects nor accounts for the attempt. `verify` has no production
+    caller today, which is precisely why the hazard is worth pinning: the copy
+    left lying around is the one that comes back.
+    """
+
+    ensure_token(tmp_path)
+    assert verify("é" * 32, tmp_path) is False
+    assert verify("☃ not the token", tmp_path) is False
 
 
 def test_the_status_payload_carries_the_posture_and_never_the_secret(tmp_path):

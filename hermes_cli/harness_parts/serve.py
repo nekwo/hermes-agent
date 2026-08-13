@@ -1914,14 +1914,26 @@ def serve_loop(
                     _finish_drain(DRAIN_TIMEOUT_EXIT_CODE, expiry)
                     return
                 if now - last_progress >= _DRAIN_PROGRESS_INTERVAL_SECONDS:
-                    frames.emit(
-                        {
-                            "event": "drain_progress",
-                            "pending": len(remaining),
-                            "request_ids": remaining,
-                            "drain_ms": state.elapsed_ms(),
-                        }
-                    )
+                    progress = {
+                        "event": "drain_progress",
+                        "pending": len(remaining),
+                        "request_ids": remaining,
+                        "drain_ms": state.elapsed_ms(),
+                    }
+                    frames.emit(progress)
+                    # The ONE drain frame that reached stdio and nothing else.
+                    # Its entire purpose is that "a draining service never looks
+                    # dead to a watchdog" — and the socket client IS such a
+                    # watchdog: it reads with a finite timeout and reports
+                    # `transport_failed` on silence. With the socket lane's
+                    # minimum deadline, a drain holding a chat turn open puts
+                    # the first socket-visible frame 30s out, so a healthy,
+                    # completing drain reported a transport failure and exit 6.
+                    if socket_server is not None:
+                        try:
+                            socket_server.broadcast(progress)
+                        except Exception:
+                            pass
                     last_progress = now
                 time.sleep(max(0.0, min(drain_poll_interval_seconds, deadline - now)))
 
