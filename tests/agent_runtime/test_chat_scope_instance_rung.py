@@ -208,6 +208,37 @@ def test_a_disagreeing_pointer_is_a_typed_mismatch_not_a_silent_preference(
     assert scope.mismatch.resolved_source is ChatHeadSource.SHARED_ROOT_POINTER
 
 
+def test_a_config_declaration_disagreeing_with_the_record_is_a_typed_mismatch(
+    monkeypatch, runtime_root
+):
+    """The CONFIG_DECLARED rung is verified exactly like the pointer.
+
+    It is a recorded machine fact, not a guess, so a recorded instance head
+    disagreeing with it is two AUTHORITIES contradicting each other — the same
+    finding the pointer produces, never the silent preference that lets a read
+    answer from the wrong store.
+    """
+
+    _bind(monkeypatch, runtime_root)
+    # No pointer at all: the declaration is the recorded rung that answers.
+    (runtime_root["other_home"] / "config.yaml").write_bytes(
+        f"agent_runtime:\n  head_home: '{runtime_root['other_home']}'\n".encode("utf-8")
+    )
+    monkeypatch.delenv("HERMES_AGENT_RUNTIME_ROOT", raising=False)
+    monkeypatch.delenv("HERMES_HEAD_HOME", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(runtime_root["other_home"]))
+
+    scope = resolve_chat_session_scope(session_id=SESSION_ID)
+
+    # The record still WINS resolution — it is the per-conversation fact.
+    assert scope.source is ChatHeadSource.INSTANCE_RECORDED
+    assert scope.head_home == runtime_root["head_home"]
+    assert scope.mismatch is not None
+    assert scope.mismatch.recorded_head == runtime_root["head_home"]
+    assert scope.mismatch.resolved_head == runtime_root["other_home"]
+    assert scope.mismatch.resolved_source is ChatHeadSource.CONFIG_DECLARED
+
+
 def test_an_explicit_head_disagreeing_with_the_record_is_a_typed_mismatch(
     monkeypatch, runtime_root
 ):

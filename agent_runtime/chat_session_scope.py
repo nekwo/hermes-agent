@@ -55,6 +55,20 @@ Resolution ladder (highest first)
                         processes on an anchored machine.
 ``SHARED_ROOT_POINTER`` ``<store_root>/chat_head_home.json`` — published by an
                         explicitly-headed process for this runtime root.
+``CONFIG_DECLARED``     ``agent_runtime.head_home`` in the runtime config the
+                        resolver itself reads — DECLARED at ``harness serve``
+                        boot by ``root_anchor.py`` into the platform-default
+                        ``config.yaml``. AUTHORITATIVE: a recorded machine
+                        fact written by a process that knew, not a guess.
+                        Below the pointer, which is per-runtime-root and
+                        republished every boot; above the ambient guess. It
+                        earns its rung by being reachable where the pointer is
+                        NOT — the pointer requires a resolvable store root
+                        (that is how the 2026-08-12 shadow runtime hid), the
+                        declaration is read straight from the config an
+                        environment-less process already opens. See
+                        :func:`declared_chat_head_home` for the one condition
+                        that skips it.
 ``AMBIENT_HOME``        degraded: ``get_hermes_home()``. NOT authoritative;
                         this is the state the 2026-07-25 binding massacre and
                         the 2026-07-27 read-lane gap were both computed in.
@@ -62,14 +76,17 @@ Resolution ladder (highest first)
 
 The ``INSTANCE_RECORDED`` rung does DOUBLE DUTY — resolve and verify. When an
 AUTHORITATIVE rung other than the instance record names a DIFFERENT head than
-the record (the explicit env/relay head above it, or the shared-root pointer
-below it), the scope carries a typed :class:`ChatScopeMismatch` instead of
-silently preferring one side: one of the two authorities is wrong, and a read
-served from either could be answering from the wrong store. The AMBIENT guess
-disagreeing with the record is NOT a mismatch — a guess losing to a recorded
-fact is this rung doing its job (that rescue is the 2026-08-12 incident
-retired). Absence is not a mismatch either: an instance predating the stamp
-(``chat_head_home is None``) falls through to the pointer exactly as before.
+the record (the explicit env/relay head above it, or the recorded rung below it
+— the shared-root pointer, else the config declaration), the scope carries a
+typed :class:`ChatScopeMismatch` instead of silently preferring one side: one
+of the two authorities is wrong, and a read served from either could be
+answering from the wrong store. Only the STRONGEST recorded rung present is
+compared, because the mismatch names one disagreeing authority and the pointer
+outranks the declaration. The AMBIENT guess disagreeing with the record is NOT
+a mismatch — a guess losing to a recorded fact is this rung doing its job (that
+rescue is the 2026-08-12 incident retired). Absence is not a mismatch either:
+an instance predating the stamp (``chat_head_home is None``) falls through to
+the pointer exactly as before.
 
 Two postures ride the scope, and callers declare which one they need rather
 than re-deriving a guard:
@@ -102,8 +119,10 @@ __all__ = [
     "ChatSessionScope",
     "InstanceChatHead",
     "InstanceChatHeadStatus",
+    "DECLARED_HEAD_HOME_KEY",
     "ambient_chat_reads_allowed",
     "chat_session_db_path",
+    "declared_chat_head_home",
     "is_canonical_session_persistence",
     "open_chat_session_db",
     "publish_chat_head_home",
@@ -168,6 +187,12 @@ CHAT_HEAD_POINTER_FILENAME = "chat_head_home.json"
 
 CHAT_SESSION_DB_FILENAME = "state.db"
 
+#: The config key ``harness serve`` declares the operator head home under, in
+#: the ``agent_runtime:`` block of the runtime config — beside ``store_root``,
+#: which the machine root anchor writes into the same file. Named here because
+#: this module OWNS the reading of it; ``root_anchor`` writes it.
+DECLARED_HEAD_HOME_KEY = "head_home"
+
 
 class ChatHeadSource(str, Enum):
     """Where the resolved chat head home came from. Ordered strongest-first."""
@@ -176,6 +201,7 @@ class ChatHeadSource(str, Enum):
     ENV_HEAD_HOME = "env_head_home"
     INSTANCE_RECORDED = "instance_recorded"
     SHARED_ROOT_POINTER = "shared_root_pointer"
+    CONFIG_DECLARED = "config_declared"
     AMBIENT_HOME = "ambient_home"
 
 
@@ -408,17 +434,24 @@ def _resolve_chat_scope(session_id: str | None) -> ChatSessionScope:
             )
 
     pointer = recorded_chat_head_home()
+    declared = declared_chat_head_home()
 
     if (
         instance_head is not None
         and instance_head.recorded
         and instance_head.head_home is not None
     ):
-        mismatch = (
-            _mismatch_against(pointer, ChatHeadSource.SHARED_ROOT_POINTER)
-            if pointer is not None
-            else None
-        )
+        # Verify against the STRONGEST recorded rung that answered: the
+        # pointer if there is one, else the config declaration. Both are
+        # authorities, so a disagreement with either is the same finding —
+        # naming the stronger one keeps the mismatch about one authority
+        # rather than an ambiguous set.
+        if pointer is not None:
+            mismatch = _mismatch_against(pointer, ChatHeadSource.SHARED_ROOT_POINTER)
+        elif declared is not None:
+            mismatch = _mismatch_against(declared, ChatHeadSource.CONFIG_DECLARED)
+        else:
+            mismatch = None
         return ChatSessionScope(
             instance_head.head_home,
             ChatHeadSource.INSTANCE_RECORDED,
@@ -429,6 +462,11 @@ def _resolve_chat_scope(session_id: str | None) -> ChatSessionScope:
     if pointer is not None:
         return ChatSessionScope(
             pointer, ChatHeadSource.SHARED_ROOT_POINTER, instance_head=instance_head
+        )
+
+    if declared is not None:
+        return ChatSessionScope(
+            declared, ChatHeadSource.CONFIG_DECLARED, instance_head=instance_head
         )
 
     try:
@@ -554,6 +592,63 @@ def recorded_chat_head_home() -> Path | None:
     if not isinstance(raw, dict):
         return None
     recorded = str(raw.get("head_home") or "").strip()
+    if not recorded:
+        return None
+    candidate = Path(recorded).expanduser()
+    try:
+        if not candidate.is_dir():
+            return None
+    except OSError:  # pragma: no cover - defensive
+        return None
+    return candidate
+
+
+def declared_chat_head_home() -> Path | None:
+    """The head home this machine's runtime config DECLARES, if usable.
+
+    Written by ``harness serve`` at boot (``root_anchor.publish_store_root_anchor``)
+    into the platform-default ``config.yaml`` — the one file a process with no
+    hermes environment at all still opens. Read here from
+    ``RuntimeResolution.config_path``, i.e. the very config
+    :func:`agent_runtime.resolution.resolve_runtime` consulted, so the
+    declaration and the store root it sits beside always come from the same
+    document; an operator may equally hand-declare a head in a pinned
+    ``HERMES_HOME``'s config.
+
+    A declaration naming a home that no longer exists is IGNORED, mirroring the
+    pointer: a stale declaration must not strand every chat in a directory
+    nothing writes.
+
+    **Skipped entirely when ``HERMES_AGENT_RUNTIME_ROOT`` pins the store root**
+    (``resolution.layer == "env"``). Two reasons, and the first alone decides
+    it: a process that pins its own root can always reach the SHARED_ROOT_POINTER
+    rung above this one, so the declaration would be redundant exactly where it
+    is skipped. And an explicitly pinned root is a deliberate alternate
+    resolution — tests, probes, persona isolation — which
+    ``resolve_runtime`` itself refuses to let inherit ambient scope; a
+    MACHINE-DEFAULT declaration is a fact about the default runtime, not about
+    wherever the caller pointed itself.
+
+    Never raises: an unreadable or unparseable config yields ``None``, the same
+    as no declaration, because this rung's job is to answer or step aside.
+    """
+
+    try:
+        from .parse_cache import cached_yaml_file
+        from .resolution import resolve_runtime
+
+        item = resolve_runtime()
+        if item.layer == "env":
+            return None
+        raw = cached_yaml_file(Path(item.config_path), default=None)
+    except Exception:  # pragma: no cover - defensive
+        return None
+    if not isinstance(raw, dict):
+        return None
+    block = raw.get("agent_runtime")
+    if not isinstance(block, dict):
+        return None
+    recorded = str(block.get(DECLARED_HEAD_HOME_KEY) or "").strip()
     if not recorded:
         return None
     candidate = Path(recorded).expanduser()

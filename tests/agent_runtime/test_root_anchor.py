@@ -237,6 +237,216 @@ def test_publish_never_raises(anchor_env, monkeypatch):
     assert report.detail == "RuntimeError"
 
 
+# ── the head-home declaration ────────────────────────────────────────────────
+#
+# Same property, one level up: after ``harness serve`` declares its head, a
+# process with NO hermes environment resolves the operator's real chat head
+# through the CONFIG_DECLARED rung instead of degrading to the ambient guess.
+# Until this shipped, the only authority that named the head was a string
+# literal in the Launcher's Dart settings — so only launcher-spawned processes
+# ever learned it.
+
+
+def _declared_head(config_path):
+    """The declared ``agent_runtime.head_home``, PARSED — never a substring
+    search: pytest's tmp dir is named after the test, so a test with
+    ``head_home`` in its own name matches its own path inside the config."""
+
+    import yaml
+
+    if not config_path.exists():
+        return None
+    parsed = yaml.safe_load(config_path.read_bytes().decode("utf-8"))
+    if not isinstance(parsed, dict):
+        return None
+    return (parsed.get("agent_runtime") or {}).get("head_home")
+
+
+def _explicit_scope(head):
+    """A scope naming *head* explicitly — the serve-with-HERMES_HEAD_HOME posture."""
+
+    from agent_runtime.chat_session_scope import ChatHeadSource, ChatSessionScope
+
+    return ChatSessionScope(head, ChatHeadSource.ENV_HEAD_HOME)
+
+
+def _ambient_scope(head):
+    from agent_runtime.chat_session_scope import ChatHeadSource, ChatSessionScope
+
+    return ChatSessionScope(head, ChatHeadSource.AMBIENT_HOME)
+
+
+@pytest.fixture
+def head_env(anchor_env, tmp_path):
+    """(env, head_home, config_path) — an existing operator head to declare."""
+
+    env, _, config_path = anchor_env
+    head_home = tmp_path / "real" / "profiles" / "base"
+    head_home.mkdir(parents=True)
+    return env, head_home, config_path
+
+
+def test_the_declared_head_wins_the_config_rung_for_an_ambient_process(
+    head_env, monkeypatch
+):
+    """THE rung verification, and the reason this slice exists."""
+
+    import yaml
+
+    from agent_runtime.chat_session_scope import (
+        ChatHeadSource,
+        declared_chat_head_home,
+        resolve_process_chat_scope,
+    )
+
+    env, head_home, config_path = head_env
+    report = publish_store_root_anchor(env, chat_scope=_explicit_scope(head_home))
+
+    assert report.head is not None
+    assert report.head.outcome is RootAnchorOutcome.PUBLISHED
+    assert report.head.declared
+    assert report.head.head_home == str(head_home)
+    parsed = yaml.safe_load(config_path.read_bytes().decode("utf-8"))
+    assert parsed["agent_runtime"]["head_home"] == str(head_home)
+
+    # An ambient process — no head named, no pointer, and (deliberately) no
+    # pinned runtime root — now READS the declaration instead of guessing.
+    monkeypatch.delenv("HERMES_AGENT_RUNTIME_ROOT", raising=False)
+    monkeypatch.delenv("HERMES_HEAD_HOME", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(config_path.parent))
+    assert declared_chat_head_home() == head_home
+    scope = resolve_process_chat_scope()
+    assert scope.source is ChatHeadSource.CONFIG_DECLARED
+    assert scope.head_home == head_home
+    assert scope.authoritative and not scope.explicitly_named
+
+
+def test_a_serve_with_no_explicit_head_declares_nothing(head_env):
+    """A guess must never be laundered into a machine-wide declaration."""
+
+    env, head_home, config_path = head_env
+    report = publish_store_root_anchor(env, chat_scope=_ambient_scope(head_home))
+
+    assert report.head.outcome is RootAnchorOutcome.NO_EXPLICIT_HEAD
+    # The rung it actually resolved is named, so the skip is legible.
+    assert report.head.detail == "ambient_home"
+    assert _declared_head(config_path) is None
+
+
+def test_an_operator_head_declaration_is_never_overwritten(head_env):
+    env, head_home, config_path = head_env
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_bytes(b"agent_runtime:\n  head_home: 'D:/operator/head'\n")
+    before = config_path.read_bytes()
+
+    report = publish_store_root_anchor(env, chat_scope=_explicit_scope(head_home))
+
+    assert report.head.outcome is RootAnchorOutcome.OPERATOR_VALUE_KEPT
+    assert report.head.detail == "D:/operator/head"
+    # store_root is still absent from that file, so the ROOT lane wrote — the
+    # head lane leaving the operator's value alone must not have blocked it.
+    assert report.outcome is RootAnchorOutcome.PUBLISHED
+    assert b"D:/operator/head" in config_path.read_bytes()
+    assert config_path.read_bytes() != before  # only by the store_root line
+
+
+def test_a_second_boot_re_declaring_the_same_head_writes_nothing(head_env):
+    env, head_home, config_path = head_env
+    scope = _explicit_scope(head_home)
+    assert (
+        publish_store_root_anchor(env, chat_scope=scope).head.outcome
+        is RootAnchorOutcome.PUBLISHED
+    )
+    before = config_path.read_bytes()
+
+    report = publish_store_root_anchor(env, chat_scope=scope)
+
+    assert report.head.outcome is RootAnchorOutcome.ALREADY_RECORDED
+    assert config_path.read_bytes() == before
+
+
+def test_a_head_home_that_does_not_exist_is_not_declared(head_env, tmp_path):
+    env, _, config_path = head_env
+    gone = tmp_path / "real" / "profiles" / "gone"
+
+    report = publish_store_root_anchor(env, chat_scope=_explicit_scope(gone))
+
+    assert report.head.outcome is RootAnchorOutcome.HEAD_HOME_MISSING
+    assert _declared_head(config_path) is None
+
+
+def test_the_platform_default_head_is_not_declared(head_env):
+    """Recording what an ambient process resolves anyway says nothing."""
+
+    env, _, config_path = head_env
+    default_home = config_path.parent
+    default_home.mkdir(parents=True, exist_ok=True)
+
+    report = publish_store_root_anchor(env, chat_scope=_explicit_scope(default_home))
+
+    assert report.head.outcome is RootAnchorOutcome.AMBIENT_HEAD
+
+
+def test_probe_isolation_refuses_to_declare_a_head(head_env):
+    env, head_home, config_path = head_env
+
+    report = publish_store_root_anchor(
+        {**env, PROBE_ISOLATION_ENV: "1"}, chat_scope=_explicit_scope(head_home)
+    )
+
+    assert report.head.outcome is RootAnchorOutcome.PROBE_ISOLATED
+    assert not config_path.exists()
+
+
+def test_both_declarations_share_one_agent_runtime_block(head_env):
+    """The merge is exactly the old document plus the two anchor keys."""
+
+    import yaml
+
+    env, head_home, config_path = head_env
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text("redaction_mode: strict\n", encoding="utf-8", newline="")
+
+    report = publish_store_root_anchor(env, chat_scope=_explicit_scope(head_home))
+
+    assert report.outcome is RootAnchorOutcome.PUBLISHED
+    assert report.head.outcome is RootAnchorOutcome.PUBLISHED
+    parsed = yaml.safe_load(config_path.read_bytes().decode("utf-8"))
+    assert parsed == {
+        "redaction_mode": "strict",
+        "agent_runtime": {
+            "store_root": str(resolve_runtime(env).store_root),
+            "head_home": str(head_home),
+        },
+    }
+
+
+def test_crlf_config_survives_both_declarations(head_env):
+    env, head_home, config_path = head_env
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_bytes(b"agent_runtime:\r\n  read_model:\r\n    enabled: false\r\n")
+
+    publish_store_root_anchor(env, chat_scope=_explicit_scope(head_home))
+
+    raw = config_path.read_bytes()
+    assert raw.count(b"\n") == raw.count(b"\r\n"), "an existing CRLF file must stay CRLF"
+    assert b"head_home" in raw and b"store_root" in raw
+
+
+def test_the_head_lane_never_raises(head_env, monkeypatch):
+    env, head_home, _ = head_env
+    import agent_runtime.root_anchor as module
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("io exploded")
+
+    monkeypatch.setattr(module, "_merge_key", boom)
+    report = publish_store_root_anchor(env, chat_scope=_explicit_scope(head_home))
+
+    assert report.head.outcome is RootAnchorOutcome.UNWRITABLE
+    assert report.head.detail == "RuntimeError"
+
+
 # ── serve wiring ─────────────────────────────────────────────────────────────
 
 
@@ -265,6 +475,47 @@ def test_serve_emits_the_anchor_outcome_as_its_own_frame():
             "store_root": "X:/somewhere/agent-runtime",
             "config_path": "X:/appdata/hermes/config.yaml",
             "detail": "created",
+        }
+    ]
+
+
+def test_the_serve_frame_carries_the_head_declaration_additively():
+    """One frame line must say what was declared, what was already there, and
+    what was declined — the operator's whole view of the boot's root decisions.
+
+    The block is ADDITIVE: the assertion above pins that a report without a
+    head declaration emits the pre-2026-08-13 frame byte-for-byte, so a
+    consumer that predates this block is unaffected.
+    """
+
+    from agent_runtime.root_anchor import HeadAnchorReport
+
+    report = RootAnchorReport(
+        outcome=RootAnchorOutcome.ALREADY_RECORDED,
+        store_root="X:/somewhere/agent-runtime",
+        config_path="X:/appdata/hermes/config.yaml",
+        head=HeadAnchorReport(
+            outcome=RootAnchorOutcome.PUBLISHED,
+            head_home="X:/somewhere/profiles/base",
+            config_path="X:/appdata/hermes/config.yaml",
+            detail="extended",
+        ),
+    )
+    frames = _serve_frames(lambda: report)
+    anchor = [frame for frame in frames if frame.get("event") == "root_anchor"]
+    assert anchor == [
+        {
+            "event": "root_anchor",
+            "outcome": "already_recorded",
+            "store_root": "X:/somewhere/agent-runtime",
+            "config_path": "X:/appdata/hermes/config.yaml",
+            "detail": "",
+            "head": {
+                "outcome": "published",
+                "head_home": "X:/somewhere/profiles/base",
+                "config_path": "X:/appdata/hermes/config.yaml",
+                "detail": "extended",
+            },
         }
     ]
 

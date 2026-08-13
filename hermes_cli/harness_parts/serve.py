@@ -730,6 +730,14 @@ def serve_loop(
     # the typed outcome is emitted as its own frame either way, because a
     # silent skip here is exactly the false-all-clear class the anchor
     # retires. Consumers that predate this frame ignore unknown events.
+    #
+    # Since 2026-08-13 the same call also DECLARES `agent_runtime.head_home`
+    # when this serve was started with an explicit head, and the frame carries
+    # that outcome additively under `head`. That is the runtime declaring its
+    # own identity: the Launcher's `HERMES_HEAD_HOME` pin demotes from sole
+    # authority to an override plus a consistency check, and the launcher
+    # compares its pin against this frame (a disagreement is a durable
+    # `root_declaration_mismatch` transport receipt, never a silent divergence).
     if root_anchor is not None:
         try:
             anchor_report = root_anchor()

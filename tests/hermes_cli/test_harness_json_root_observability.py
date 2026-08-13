@@ -30,7 +30,14 @@ _ATTACH_CALL = "attach_root_observability"
 
 # Chat lanes must also stamp ``chat_scope`` — ``source: "ambient_home"``
 # beside an empty result is the tell the incident lacked entirely.
-CHAT_SCOPE_REQUIRED = {"_cmd_persona_chat_history"}
+#
+# ``_cmd_status`` is here for the other half of the same property: it is the
+# ORIENTATION verb, and since 2026-08-13 the head home is a durable runtime
+# declaration (``config_declared``) rather than a string only the Launcher's
+# spawn environment carried. Status must therefore be able to say which rung
+# named the head it would read from — otherwise the runtime declares its own
+# identity and the verb an operator uses to check it still cannot show it.
+CHAT_SCOPE_REQUIRED = {"_cmd_persona_chat_history", "_cmd_status"}
 
 _BACKLOG_REASON = (
     "predates the resolution block (2026-08-12 root-observability wave); "

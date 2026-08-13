@@ -32,6 +32,7 @@ from agent_runtime.chat_session_scope import (
     CHAT_HEAD_POINTER_FILENAME,
     ChatHeadSource,
     chat_session_db_path,
+    declared_chat_head_home,
     publish_chat_head_home,
     recorded_chat_head_home,
     resolve_chat_session_scope,
@@ -192,6 +193,111 @@ def test_a_pointer_at_a_vanished_home_is_ignored_not_honored(
     _cli_lane(monkeypatch, runtime_root)
 
     assert recorded_chat_head_home() is None
+    assert resolve_process_chat_scope().source is ChatHeadSource.AMBIENT_HOME
+
+
+# ── the CONFIG_DECLARED rung (2026-08-13) ───────────────────────────────────
+#
+# The runtime declaring its OWN head. Until this rung, the only authority that
+# named the head was ``HERMES_HEAD_HOME`` — hardcoded in the Launcher's Dart
+# settings — so a process the Launcher did not spawn had nothing to read and
+# degraded to the ambient guess. ``harness serve`` now writes
+# ``agent_runtime.head_home`` into the config an environment-less process
+# already opens (``root_anchor.py``), and this rung reads it.
+#
+# Every test here DELETES ``HERMES_AGENT_RUNTIME_ROOT`` deliberately: the rung
+# is skipped whenever a process pins its own runtime root, which is both the
+# rung's real domain (a pinned root can always reach the pointer above it) and
+# what keeps the machine's own declaration out of every other test in this
+# repo — the autouse fixture pins that variable for the whole suite.
+
+
+def _declaring_lane(monkeypatch, runtime_root, head_home, *, home_key="other_home"):
+    """A bare process — no head, no pinned root — whose config DECLARES a head."""
+
+    config = runtime_root[home_key] / "config.yaml"
+    config.write_bytes(
+        f"agent_runtime:\n  head_home: '{head_home}'\n".encode("utf-8")
+    )
+    monkeypatch.delenv("HERMES_AGENT_RUNTIME_ROOT", raising=False)
+    monkeypatch.delenv("HERMES_HEAD_HOME", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(runtime_root[home_key]))
+    return config
+
+
+def test_the_config_declaration_beats_the_ambient_home_but_is_not_explicit(
+    monkeypatch, runtime_root
+):
+    _declaring_lane(monkeypatch, runtime_root, runtime_root["head_home"])
+
+    scope = resolve_process_chat_scope()
+
+    assert scope.source is ChatHeadSource.CONFIG_DECLARED
+    assert scope.head_home == runtime_root["head_home"]
+    # A recorded machine fact: good enough to READ or MINT, deliberately not
+    # good enough to clear a live binding.
+    assert scope.authoritative
+    assert not scope.explicitly_named
+
+
+def test_the_shared_root_pointer_outranks_the_config_declaration(
+    monkeypatch, runtime_root
+):
+    """Both are recorded facts; the pointer is per-root and republished every
+    serve boot, so it is the fresher of the two."""
+
+    _serve_lane(monkeypatch, runtime_root)
+    assert publish_chat_head_home() == runtime_root["head_home"]
+    _declaring_lane(monkeypatch, runtime_root, runtime_root["other_home"])
+
+    scope = resolve_process_chat_scope()
+
+    assert scope.source is ChatHeadSource.SHARED_ROOT_POINTER
+    assert scope.head_home == runtime_root["head_home"]
+
+
+def test_an_explicit_head_always_beats_the_config_declaration(
+    monkeypatch, runtime_root
+):
+    _declaring_lane(monkeypatch, runtime_root, runtime_root["head_home"])
+    monkeypatch.setenv("HERMES_HEAD_HOME", str(runtime_root["other_home"]))
+
+    scope = resolve_process_chat_scope()
+
+    assert scope.source is ChatHeadSource.ENV_HEAD_HOME
+    assert scope.head_home == runtime_root["other_home"]
+
+
+def test_a_declaration_at_a_vanished_home_is_ignored_not_honored(
+    monkeypatch, runtime_root
+):
+    """Mirrors the pointer: a stale declaration must not strand every chat in a
+    directory nothing writes."""
+
+    _declaring_lane(
+        monkeypatch, runtime_root, runtime_root["root"] / "profiles" / "gone"
+    )
+
+    assert declared_chat_head_home() is None
+    assert resolve_process_chat_scope().source is ChatHeadSource.AMBIENT_HOME
+
+
+def test_a_process_that_pins_its_own_runtime_root_skips_the_declaration(
+    monkeypatch, runtime_root
+):
+    """The rung's domain, stated as a test.
+
+    A process that pins ``HERMES_AGENT_RUNTIME_ROOT`` can always reach the
+    SHARED_ROOT_POINTER rung above this one, so the declaration would be
+    redundant exactly where it is skipped — and an explicitly pinned root is a
+    deliberate alternate resolution (tests, probes, persona isolation) that
+    must not inherit a MACHINE-DEFAULT fact.
+    """
+
+    _declaring_lane(monkeypatch, runtime_root, runtime_root["head_home"])
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(runtime_root["store_root"]))
+
+    assert declared_chat_head_home() is None
     assert resolve_process_chat_scope().source is ChatHeadSource.AMBIENT_HOME
 
 

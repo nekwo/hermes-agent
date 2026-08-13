@@ -141,7 +141,14 @@ def _cmd_status(args) -> int:
     # literal an operator would read as a measurement. The verb is unchanged.
     from agent_runtime.root_observability import attach_root_observability
 
-    data = attach_root_observability(build_status())
+    # ``chat_scope`` here is not chat data — it is this machine's ORIENTATION.
+    # ``status`` is the verb an operator (and an agent) runs to ask "which
+    # runtime am I talking to", and until the head home was a durable runtime
+    # declaration (``config_declared``, 2026-08-13) the honest answer needed
+    # the Launcher's spawn environment to be visible. Now the winning rung
+    # says it: ``source: "config_declared"`` means the runtime declared its own
+    # head, ``ambient_home`` means nobody did and the answer is a guess.
+    data = attach_root_observability(build_status(), chat_scope=True)
     _attach_runtime_service_blocks(
         data, prune_stale=bool(getattr(args, "prune_stale", False))
     )
