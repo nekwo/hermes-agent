@@ -231,7 +231,7 @@ def test_publish_never_raises(anchor_env, monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("io exploded")
 
-    monkeypatch.setattr(module, "_publish", boom)
+    monkeypatch.setattr(module, "_store_plan", boom)
     report = publish_store_root_anchor(env)
     assert report.outcome is RootAnchorOutcome.UNWRITABLE
     assert report.detail == "RuntimeError"
@@ -440,11 +440,243 @@ def test_the_head_lane_never_raises(head_env, monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("io exploded")
 
-    monkeypatch.setattr(module, "_merge_key", boom)
+    monkeypatch.setattr(module, "_merge_keys", boom)
     report = publish_store_root_anchor(env, chat_scope=_explicit_scope(head_home))
 
     assert report.head.outcome is RootAnchorOutcome.UNWRITABLE
     assert report.head.detail == "RuntimeError"
+    # And the raising editor is SHARED, so the root lane is accounted too —
+    # neither declaration may escape as an exception out of a boot path.
+    assert report.outcome is RootAnchorOutcome.UNWRITABLE
+    assert report.detail == "RuntimeError"
+
+
+# ── what the machine RECORDED, not what this process is running with ─────────
+#
+# The head block's ``head_home`` is the process's own head. For a
+# launcher-spawned serve that is the client's ``HERMES_HEAD_HOME`` pin echoed
+# back, so the consistency check the Launcher runs against it was true by
+# construction — a config declaring a SHADOW head still read CONFIRMED
+# (reproduced 2026-08-13). ``recorded_head_home`` is the machine's answer.
+
+
+def test_a_kept_operator_value_is_reported_as_the_recorded_head(head_env):
+    env, head_home, config_path = head_env
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    shadow = config_path.parent / "profiles" / "base"
+    shadow.mkdir(parents=True)
+    config_path.write_bytes(
+        f"agent_runtime:\n  head_home: '{shadow}'\n".encode("utf-8")
+    )
+
+    report = publish_store_root_anchor(env, chat_scope=_explicit_scope(head_home))
+
+    assert report.head.outcome is RootAnchorOutcome.OPERATOR_VALUE_KEPT
+    # The process's own head — equal to the pin, and therefore useless alone.
+    assert report.head.head_home == str(head_home)
+    # The MACHINE's head: what every process this launcher did not spawn will
+    # resolve. Different directory, reported in its own field.
+    assert report.head.recorded_head_home == str(shadow)
+    assert report.head.payload()["recorded_head_home"] == str(shadow)
+
+
+def test_a_landed_declaration_records_our_own_head(head_env):
+    env, head_home, _ = head_env
+
+    first = publish_store_root_anchor(env, chat_scope=_explicit_scope(head_home))
+    second = publish_store_root_anchor(env, chat_scope=_explicit_scope(head_home))
+
+    assert first.head.outcome is RootAnchorOutcome.PUBLISHED
+    assert first.head.recorded_head_home == str(head_home)
+    assert second.head.outcome is RootAnchorOutcome.ALREADY_RECORDED
+    assert second.head.recorded_head_home == str(head_home)
+
+
+@pytest.mark.parametrize(
+    "prepare, expected",
+    [
+        (lambda cfg: cfg.write_bytes(b"{{{ not yaml ::\n"), RootAnchorOutcome.UNWRITABLE),
+        (
+            lambda cfg: cfg.write_bytes(b"agent_runtime: legacy-string\n"),
+            RootAnchorOutcome.DECLINED_UNSAFE_MERGE,
+        ),
+    ],
+)
+def test_a_declaration_that_did_not_land_records_nothing(head_env, prepare, expected):
+    """No value means NO value — never this process's own head as a stand-in.
+
+    A refusal that echoed the process head into the recorded field would put
+    the vacuous comparison back exactly where it was.
+    """
+
+    env, head_home, config_path = head_env
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    prepare(config_path)
+
+    report = publish_store_root_anchor(env, chat_scope=_explicit_scope(head_home))
+
+    assert report.head.outcome is expected
+    assert report.head.recorded_head_home is None
+
+
+def test_a_probe_prefixed_root_refuses_to_declare_a_head(tmp_path, monkeypatch):
+    """The store-root lane's guard, mirrored (finding 5).
+
+    A serve on an isolated ``agent-runtime-probe-*`` root that carries an
+    explicit ``HERMES_HEAD_HOME`` but no ``HERMES_REQUIRE_ISOLATED_ROOT`` used
+    to write the QA/worktree head into the OPERATOR's machine config — a
+    write-once key, so the damage was permanent and invisible.
+    """
+
+    monkeypatch.setenv("HOME", str(tmp_path / "posix-home"))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path / "posix-home"))
+    probe_root = tmp_path / "agent-runtime-probe-xyz"
+    (probe_root / "sessions").mkdir(parents=True)
+    head_home = tmp_path / "worktree" / "profiles" / "base"
+    head_home.mkdir(parents=True)
+    env = {
+        "LOCALAPPDATA": str(tmp_path / "appdata"),
+        "HERMES_AGENT_RUNTIME_ROOT": str(probe_root),
+    }
+
+    report = publish_store_root_anchor(env, chat_scope=_explicit_scope(head_home))
+
+    assert report.head.outcome is RootAnchorOutcome.PROBE_ISOLATED
+    assert report.outcome is RootAnchorOutcome.PROBE_ISOLATED
+    from agent_runtime.resolution import _platform_default_hermes_home
+
+    assert not (_platform_default_hermes_home(env) / "config.yaml").exists()
+
+
+def test_the_two_key_names_match_the_readers(head_env):
+    """The writer and the reader spell the keys in their own vocabularies; a
+    rename on either side must fail here rather than in production silence."""
+
+    from agent_runtime.chat_session_scope import DECLARED_HEAD_HOME_KEY
+    from agent_runtime.root_anchor import HEAD_HOME_KEY, STORE_ROOT_KEY
+
+    assert HEAD_HOME_KEY == DECLARED_HEAD_HOME_KEY
+    env, head_home, config_path = head_env
+    publish_store_root_anchor(env, chat_scope=_explicit_scope(head_home))
+    import yaml
+
+    block = yaml.safe_load(config_path.read_bytes().decode("utf-8"))["agent_runtime"]
+    assert set(block) == {STORE_ROOT_KEY, HEAD_HOME_KEY}
+
+
+# ── one read-modify-write, verified against the DISK (finding 4) ─────────────
+
+
+def test_both_keys_land_in_a_single_write(head_env, monkeypatch):
+    """The lost-update fix, pinned structurally.
+
+    Two sequential merges each re-read the file, so runtime A's ``store_root``
+    could land beside runtime B's ``head_home`` with both processes reporting
+    ``published``. One rename for both keys is what closes that window; count
+    the renames rather than describe them.
+    """
+
+    import agent_runtime.root_anchor as module
+
+    env, head_home, _ = head_env
+    writes: list[str] = []
+    real_write = module._atomic_write_text
+
+    def counting_write(path, text):
+        writes.append(text)
+        return real_write(path, text)
+
+    monkeypatch.setattr(module, "_atomic_write_text", counting_write)
+    report = publish_store_root_anchor(env, chat_scope=_explicit_scope(head_home))
+
+    assert report.outcome is RootAnchorOutcome.PUBLISHED
+    assert report.head.outcome is RootAnchorOutcome.PUBLISHED
+    assert len(writes) == 1, "both anchor keys must share one read-modify-write"
+    assert "store_root" in writes[0] and "head_home" in writes[0]
+
+
+def test_a_concurrent_publisher_that_wins_is_reported_not_claimed(
+    head_env, monkeypatch
+):
+    """A rename that lands after ours makes the machine fact THEIRS.
+
+    The composed-text re-parse cannot see this — it verifies the text we built,
+    not the file another process left behind. Only the post-write read can, and
+    without it both runtimes report ``published`` for a value only one of them
+    has.
+    """
+
+    import agent_runtime.root_anchor as module
+
+    env, head_home, _ = head_env
+    real_write = module._atomic_write_text
+
+    def losing_write(path, text):
+        ok = real_write(path, text)
+        # The competing publisher's whole-file rename, landing after ours.
+        real_write(
+            path,
+            "agent_runtime:\n"
+            "  store_root: 'D:/other/agent-runtime'\n"
+            "  head_home: 'D:/other/profiles/base'\n",
+        )
+        return ok
+
+    monkeypatch.setattr(module, "_atomic_write_text", losing_write)
+    report = publish_store_root_anchor(env, chat_scope=_explicit_scope(head_home))
+
+    assert report.outcome is RootAnchorOutcome.LOST_RACE
+    assert report.detail == "D:/other/agent-runtime"
+    assert report.head.outcome is RootAnchorOutcome.LOST_RACE
+    # And the head lane says WHOSE head the machine now carries — the whole
+    # point of reporting instead of silently claiming the publish.
+    assert report.head.recorded_head_home == "D:/other/profiles/base"
+    assert report.head.head_home == str(head_home)
+
+
+def test_a_write_we_cannot_read_back_is_not_a_publish(head_env, monkeypatch):
+    import agent_runtime.root_anchor as module
+
+    env, head_home, _ = head_env
+    monkeypatch.setattr(module, "_recorded_values", lambda *args, **kwargs: {})
+
+    report = publish_store_root_anchor(env, chat_scope=_explicit_scope(head_home))
+
+    assert report.head.outcome is RootAnchorOutcome.LOST_RACE
+    assert report.head.detail == "post_write_unverifiable"
+    assert report.head.recorded_head_home is None
+
+
+def test_the_write_lock_is_released_even_when_the_merge_refuses(head_env):
+    """A lock left behind would wedge every later boot for its stale window."""
+
+    import agent_runtime.root_anchor as module
+
+    env, head_home, config_path = head_env
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_bytes(b"agent_runtime: legacy-string\n")
+    lock_path = config_path.with_name(config_path.name + module._CONFIG_LOCK_SUFFIX)
+
+    report = publish_store_root_anchor(env, chat_scope=_explicit_scope(head_home))
+
+    assert report.outcome is RootAnchorOutcome.DECLINED_UNSAFE_MERGE
+    assert not lock_path.exists()
+
+
+def test_a_stale_lock_is_broken_rather_than_obeyed(head_env, monkeypatch):
+    import agent_runtime.root_anchor as module
+
+    env, head_home, config_path = head_env
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = config_path.with_name(config_path.name + module._CONFIG_LOCK_SUFFIX)
+    lock_path.write_bytes(b"99999")
+    # Age it past the staleness bound rather than sleeping through it.
+    monkeypatch.setattr(module, "_CONFIG_LOCK_STALE_SECONDS", -1.0)
+
+    report = publish_store_root_anchor(env, chat_scope=_explicit_scope(head_home))
+
+    assert report.head.outcome is RootAnchorOutcome.PUBLISHED
+    assert not lock_path.exists()
 
 
 # ── serve wiring ─────────────────────────────────────────────────────────────
@@ -499,6 +731,7 @@ def test_the_serve_frame_carries_the_head_declaration_additively():
             head_home="X:/somewhere/profiles/base",
             config_path="X:/appdata/hermes/config.yaml",
             detail="extended",
+            recorded_head_home="X:/somewhere/profiles/base",
         ),
     )
     frames = _serve_frames(lambda: report)
@@ -515,6 +748,12 @@ def test_the_serve_frame_carries_the_head_declaration_additively():
                 "head_home": "X:/somewhere/profiles/base",
                 "config_path": "X:/appdata/hermes/config.yaml",
                 "detail": "extended",
+                # The MACHINE's value, always present (null when nothing
+                # landed). The Launcher's consistency check reads THIS; while
+                # the block carried only `head_home` — the child's own head,
+                # i.e. the Launcher's pin echoed back — the check compared a
+                # value against itself and confirmed everything.
+                "recorded_head_home": "X:/somewhere/profiles/base",
             },
         }
     ]
