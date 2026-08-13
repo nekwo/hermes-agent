@@ -58,11 +58,15 @@ Protocol (NDJSON, one frame per line):
              by any local process holding the root's secret while `shutdown` is
              refused there on purpose:
 
-             * the effective deadline is ``max(client ask, server minimum)`` —
-               a client could previously ask for 0.05s, which turned the
-               restart verb into a kill (`hard_exit(3)` is `os._exit`) over a
-               live chat turn, straight through the never-recycle-during-turns
-               contract this file opens with;
+             * ON THE SOCKET the effective deadline is ``max(client ask,
+               server minimum)`` — a socket client could previously ask for
+               0.05s, which turned the restart verb into a kill
+               (`hard_exit(3)` is `os._exit`) over a live chat turn, straight
+               through the never-recycle-during-turns contract this file opens
+               with. Over STDIO the ask still stands as given: that asker is
+               the parent that spawned this process and owns its stdin, so it
+               can end the runtime with a signal regardless, and flooring it
+               would change a contract this lane promised to leave untouched;
              * a deadline that expires WHILE A CHAT TURN IS IN FLIGHT does not
                end the process. It emits a non-terminal
                ``{"event":"drain_timeout","terminal":false,
@@ -183,14 +187,24 @@ DEFAULT_POOL_SIZE = 4
 # drain that exited without one would be indistinguishable from the crash it
 # exists to avoid.
 DEFAULT_DRAIN_DEADLINE_SECONDS = 30.0
-#: The SERVER's floor under any client-supplied deadline, and the correction
-#: for a real defect: the old floor was 0.05s, so any socket client could ask
-#: for a deadline that expires instantly and `drain` became `kill` — the
-#: timeout path calls `hard_exit`, which is `os._exit`, over whatever was
-#: running. A deadline is a promise about how long in-flight work is allowed to
-#: finish, and a client does not get to shorten a promise the server made to
-#: work it cannot see. `max(ask, this)`, always.
-_DRAIN_MINIMUM_DEADLINE_SECONDS = 30.0
+#: The absolute sanity floor, both transports: a deadline of zero is not a
+#: deadline. This is the long-standing stdio contract and is unchanged.
+_DRAIN_DEADLINE_FLOOR_SECONDS = 0.05
+#: The SOCKET lane's floor under a client-supplied deadline, and the
+#: correction for a real defect: with only the sanity floor above, any local
+#: process holding the root's secret could ask for a deadline that expires
+#: instantly, and `drain` became `kill` — the timeout path calls `hard_exit`,
+#: which is `os._exit`, over whatever was running.
+#:
+#: Why the SOCKET lane only. A deadline is a promise about how long in-flight
+#: work is allowed to finish, and the question is who is entitled to shorten
+#: it. Over stdio the asker is the PARENT that spawned this process and owns
+#: its stdin; it can end this runtime with a signal whether or not the drain
+#: cooperates, so a floor there buys no safety and would silently rewrite a
+#: contract the socket slice promised to leave byte-identical. Over the socket
+#: the asker is any local process that could read the token file, refereeing
+#: work it cannot see. `max(ask, this)` on that lane, always.
+_DRAIN_SOCKET_MINIMUM_DEADLINE_SECONDS = 30.0
 #: An unbounded value would restore "can hang forever" through the front door.
 _DRAIN_DEADLINE_MAX_SECONDS = 3600.0
 _DRAIN_POLL_INTERVAL_SECONDS = 0.05
@@ -740,14 +754,17 @@ class _DrainState:
 
 
 def _drain_deadline_seconds(
-    raw: Any, default: float, *, minimum: float = _DRAIN_MINIMUM_DEADLINE_SECONDS
+    raw: Any, default: float, *, minimum: float = _DRAIN_DEADLINE_FLOOR_SECONDS
 ) -> float:
     """The EFFECTIVE deadline: the client's ask, floored by the server's.
 
     A client may lengthen a drain (up to the hard ceiling) and may not shorten
-    it below what this runtime is willing to give work in flight. The floor is
-    a parameter so the loop's own tests can run a drain in milliseconds, and it
-    is a SERVER-side parameter: no field a client sends can lower it.
+    it below the floor the caller passes for its TRANSPORT: the sanity floor on
+    stdio (unchanged — that asker owns the process), the socket minimum on the
+    socket lane. The floor is a parameter rather than a constant read in here
+    precisely so the two lanes can differ and so the loop's own tests can run a
+    drain in milliseconds; it is a SERVER-side parameter either way, and no
+    field a client sends can lower it.
     """
 
     floor = max(0.0, float(minimum))
@@ -861,13 +878,16 @@ def serve_loop(
     snapshot_prewarm: Callable[[], None] | None = None,
     root_anchor: Callable[[], Any] | None = None,
     drain_deadline_seconds: float = DEFAULT_DRAIN_DEADLINE_SECONDS,
-    drain_minimum_deadline_seconds: float = _DRAIN_MINIMUM_DEADLINE_SECONDS,
+    drain_socket_minimum_deadline_seconds: float = (
+        _DRAIN_SOCKET_MINIMUM_DEADLINE_SECONDS
+    ),
     drain_poll_interval_seconds: float = _DRAIN_POLL_INTERVAL_SECONDS,
     drain_wakeup: Callable[[], None] | None = None,
     hard_exit: Callable[[int], None] | None = None,
     socket_lane: bool = False,
     stream_source_factory: Callable[[], Any] | None = None,
     stream_buffer_limit: int | None = None,
+    stream_byte_limit: int | None = None,
 ) -> int:
     """Core dispatch loop over explicit streams. stdio is transport #1; the
     localhost socket is transport #2, and both feed THIS dispatcher.
@@ -1592,12 +1612,14 @@ def serve_loop(
                 if stream_hub is None:
                     from agent_runtime.serve_stream_hub import (
                         DEFAULT_BUFFER_LIMIT,
+                        DEFAULT_BYTE_LIMIT,
                         StreamHub,
                     )
 
                     stream_hub = StreamHub(
                         _stream_source,
                         buffer_limit=int(stream_buffer_limit or DEFAULT_BUFFER_LIMIT),
+                        byte_limit=int(stream_byte_limit or DEFAULT_BYTE_LIMIT),
                         log=_service_log,
                     )
                 return stream_hub
@@ -2041,15 +2063,29 @@ def serve_loop(
                     # Typed, never silent: an unsubscribed client that was told
                     # nothing would keep folding a stream that stopped arriving
                     # and believe itself current.
+                    #
+                    # The buffer is bounded TWICE — by frame count and by bytes
+                    # — so the drop has to say WHICH bound tripped and carry
+                    # both sets of numbers. The hub measures all of this and
+                    # this frame used to throw it away, reporting a count
+                    # against a `buffer_limit` read from the CONFIG rather than
+                    # from the hub (None whenever it was left at the default).
+                    # A client told only `backpressure` cannot tell one that
+                    # fell 256 heartbeats behind from one that pinned 32 MiB,
+                    # which is the difference between resubscribing and fixing
+                    # its reader.
                     _emit_safely(
                         sink,
                         {
                             "event": "subscription_dropped",
                             "lane": "stream",
                             "reason": reason,
+                            "bound": stats.get("drop_bound"),
                             "frames_delivered": stats.get("frames_delivered"),
                             "frames_discarded": stats.get("frames_discarded"),
-                            "buffer_limit": stream_buffer_limit,
+                            "bytes_discarded": stats.get("bytes_discarded"),
+                            "buffer_limit": stats.get("frame_limit"),
+                            "byte_limit": stats.get("byte_limit"),
                         },
                     )
                     _release_subscription(connection)
@@ -2060,6 +2096,9 @@ def serve_loop(
                             "connection": key,
                             "client": getattr(connection, "client", None),
                             "reason": reason,
+                            "bound": stats.get("drop_bound"),
+                            "frames_discarded": stats.get("frames_discarded"),
+                            "bytes_discarded": stats.get("bytes_discarded"),
                         }
                     )
 
@@ -2128,11 +2167,21 @@ def serve_loop(
                     )
                     return None
                 # The EFFECTIVE deadline is decided here, server-side, from the
-                # client's ask floored by this runtime's minimum.
+                # client's ask floored by the minimum for the TRANSPORT it came
+                # in on. Over stdio the asker owns this process outright and the
+                # ask stands as given (the pre-socket contract, untouched); over
+                # the socket it is floored, because that asker is any local
+                # process holding the root's secret and it is shortening a
+                # promise made to work it cannot see.
+                effective_minimum = (
+                    drain_socket_minimum_deadline_seconds
+                    if connection is not None
+                    else _DRAIN_DEADLINE_FLOOR_SECONDS
+                )
                 effective_deadline = _drain_deadline_seconds(
                     message.get("deadline_seconds"),
                     drain_deadline_seconds,
-                    minimum=drain_minimum_deadline_seconds,
+                    minimum=effective_minimum,
                 )
                 # ONE critical section for the whole transition. The guard and
                 # the install used to be a bare read-modify-write on a closure
@@ -2179,7 +2228,7 @@ def serve_loop(
                     # that requested 0.05s and got 30 must be able to see that
                     # its ask was floored rather than honoured.
                     "requested_deadline_seconds": message.get("deadline_seconds"),
-                    "minimum_deadline_seconds": drain_minimum_deadline_seconds,
+                    "minimum_deadline_seconds": effective_minimum,
                 }
                 frames.emit(draining_frame)
                 if socket_server is not None:
