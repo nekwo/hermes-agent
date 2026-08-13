@@ -58,6 +58,38 @@ def test_status_human_line_reports_only_measurable_fields(monkeypatch, tmp_path,
     assert "running_runs=" not in line
 
 
+def test_status_says_unavailable_when_the_serve_registry_could_not_be_read(
+    monkeypatch, tmp_path, capsys
+):
+    """S28's rule, applied to the field that arrived after it.
+
+    When the registry read throws, ``_attach_runtime_service_blocks`` sets
+    ``serve_instances = []`` plus a typed ``serve_instances_error``. The human
+    line rendered ``serves=0/0`` off that empty list — not a degraded
+    measurement but a measurement that never happened, reporting the most
+    reassuring value it could ("no serves, all accounted for"). An operator
+    chasing a serve that will not appear would read the failure as an empty
+    registry.
+    """
+
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "agent-runtime"))
+    monkeypatch.setattr("hermes_cli.harness.build_status", _status_payload)
+
+    def exploding_list(*args, **kwargs):
+        raise PermissionError("registry unreadable")
+
+    monkeypatch.setattr(
+        "agent_runtime.serve_registry.list_serve_instances", exploding_list
+    )
+    args = _parser().parse_args(["harness", "status"])
+
+    assert args.func(args) == 0
+
+    line = capsys.readouterr().out.strip()
+    assert line.endswith("serves=unavailable(PermissionError)")
+    assert "serves=0/0" not in line
+
+
 def test_observe_passes_no_literal_fed_parameters(monkeypatch, capsys):
     observed: dict = {}
 

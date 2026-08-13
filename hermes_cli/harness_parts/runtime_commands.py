@@ -155,17 +155,39 @@ def _cmd_status(args) -> int:
     if args.json:
         print(emit_json(data))
     else:
-        instances = data.get("serve_instances") or []
-        live = sum(1 for row in instances if row.get("classification") == "live")
         build = data.get("runtime_build") or {}
         commit = build.get("commit_short") or "unknown"
         dirty = "+dirty" if build.get("dirty") else ""
         print(
             f"open_incidents={data['open_incidents']} dirty={data['dirty_summary']} "
             f"runtime_health={data['runtime_health']['ok']} "
-            f"build={commit}{dirty} serves={live}/{len(instances)}"
+            f"build={commit}{dirty} serves={_serves_render(data)}"
         )
     return 0
+
+
+def _serves_render(data: dict) -> str:
+    """``<live>/<entries>`` when the registry was READ; else why it was not.
+
+    S28's rule, applied to the field that arrived after it: no constant dressed
+    as a count. When ``_attach_runtime_service_blocks`` cannot read the serve
+    registry it sets ``serve_instances`` to ``[]`` plus a typed
+    ``serve_instances_error`` — the ``--json`` consumer sees both, but the
+    human line rendered ``serves=0/0``, which is not a degraded measurement, it
+    is a measurement that never happened claiming the most reassuring possible
+    value ("no serves, all accounted for"). An operator debugging a serve that
+    will not appear would read the registry failure as an empty registry.
+    """
+
+    error = data.get("serve_instances_error")
+    if error:
+        kind = "unknown"
+        if isinstance(error, dict):
+            kind = str(error.get("error_kind") or "unknown")
+        return f"unavailable({kind})"
+    instances = data.get("serve_instances") or []
+    live = sum(1 for row in instances if row.get("classification") == "live")
+    return f"{live}/{len(instances)}"
 
 
 def _attach_runtime_service_blocks(data: dict, *, prune_stale: bool) -> None:
