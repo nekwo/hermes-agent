@@ -142,8 +142,79 @@ def _cmd_status(args) -> int:
     from agent_runtime.root_observability import attach_root_observability
 
     data = attach_root_observability(build_status())
-    print(emit_json(data) if args.json else f"open_incidents={data['open_incidents']} dirty={data['dirty_summary']} runtime_health={data['runtime_health']['ok']}")
+    _attach_runtime_service_blocks(
+        data, prune_stale=bool(getattr(args, "prune_stale", False))
+    )
+    if args.json:
+        print(emit_json(data))
+    else:
+        instances = data.get("serve_instances") or []
+        live = sum(1 for row in instances if row.get("classification") == "live")
+        build = data.get("runtime_build") or {}
+        commit = build.get("commit_short") or "unknown"
+        dirty = "+dirty" if build.get("dirty") else ""
+        print(
+            f"open_incidents={data['open_incidents']} dirty={data['dirty_summary']} "
+            f"runtime_health={data['runtime_health']['ok']} "
+            f"build={commit}{dirty} serves={live}/{len(instances)}"
+        )
     return 0
+
+
+def _attach_runtime_service_blocks(data: dict, *, prune_stale: bool) -> None:
+    """Stamp ``runtime_build`` + ``serve_instances`` onto a status envelope.
+
+    The two questions a durable runtime-root service makes newly askable, and
+    which nothing on this machine could answer before: *what code is answering
+    me*, and *how many serves are running against this root*.
+
+    ``runtime_build`` is the build of the PROCESS THAT ANSWERED — which is the
+    point, not a caveat. Run as a plain CLI it reports the install; answered
+    through ``harness serve`` it reports the SERVICE, because the handler runs
+    inside the serve process. ``answered_by`` says which, so an operator
+    comparing the two readings sees a service pinned to older code. That
+    provenance comes from ``current_serve_request_id()`` — the one honest
+    "did this arrive via serve" fact (two proxies for it have already been
+    retired for impersonating it; see its docstring).
+
+    ``serve_instances`` is reported, never silently repaired: stale entries
+    stay visible until ``--prune-stale`` deletes the provably-dead ones and
+    says exactly which. A plain ``harness status --json`` is cacheable inside
+    serve for up to 20s, so its instance list can be that stale (the exit
+    frame's ``served_from_cache`` discloses it); the ``--prune-stale`` argv
+    does not match the cacheable shape at all, so a prune is always freshly
+    computed and never itself cached.
+
+    Additive and fail-open: each block degrades to a typed error marker rather
+    than raising, because a diagnostic that can fail the verb it instruments is
+    worse than no diagnostic. Function-local imports — this file is exec'd into
+    harness.py's globals.
+    """
+
+    try:
+        from agent_runtime.build_stamp import build_stamp
+        from hermes_cli.harness_parts.serve import current_serve_request_id
+
+        data["runtime_build"] = {
+            **build_stamp().payload(),
+            "answered_by": "serve" if current_serve_request_id() else "cli",
+        }
+    except Exception as exc:
+        data["runtime_build"] = {"error_kind": type(exc).__name__}
+
+    try:
+        from agent_runtime.serve_registry import (
+            list_serve_instances,
+            prune_stale_serve_instances,
+        )
+
+        root = paths.store_root()
+        if prune_stale:
+            data["serve_instances_pruned"] = prune_stale_serve_instances(root)
+        data["serve_instances"] = list_serve_instances(root)
+    except Exception as exc:
+        data["serve_instances"] = []
+        data["serve_instances_error"] = {"error_kind": type(exc).__name__}
 
 
 def _cmd_health(args) -> int:

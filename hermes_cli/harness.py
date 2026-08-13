@@ -1152,6 +1152,14 @@ def build_parser(parent_subparsers) -> None:
 
     status = subs.add_parser("status", help="Show harness status")
     status.add_argument("--json", action="store_true")
+    status.add_argument(
+        "--prune-stale",
+        action="store_true",
+        help=(
+            "Delete serve_instances entries whose PID is PROVABLY dead, and report "
+            "exactly which (recycled-PID and unclassifiable entries are always kept)"
+        ),
+    )
     status.set_defaults(func=_cmd_status)
 
     providers = subs.add_parser(

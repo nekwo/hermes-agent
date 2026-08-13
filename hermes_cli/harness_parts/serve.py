@@ -7,13 +7,23 @@ arrives verbatim as the bridge already builds it, so intent→argv mapping,
 the capability registry, and the per-call CLI fallback stay byte-identical.
 
 Design doc: ``docs/agent-runtime-harness/harness-serve-design.md``
-(settled 2026-07-08). Explicit non-goals: no network listener, no auth
-(a local stdio child IS the security model), not the mission daemon, no
-second chat pipeline.
+(settled 2026-07-08). Explicit non-goals: no network listener, not the
+mission daemon, no second chat pipeline. "No auth (a local stdio child IS
+the security model)" held while the transport was an inherited pipe; the
+durable runtime-root service replaces that pipe with one any local process
+can reach, so a per-root token is now minted at boot (unwired — see
+``agent_runtime/serve_auth.py``) rather than retrofitted after the socket
+exists.
 
 Protocol (NDJSON, one frame per line):
 
 - boot:      ``{"event":"ready","pid":…,"schema_version":1,"runtime_root":…}``
+             plus the durable-service foundations, all additive:
+             ``"build"`` (which commit this runtime is on —
+             ``agent_runtime/build_stamp.py``), ``"auth"``
+             (``{"token_file":"present"|"minted"|"error:<reason>"}`` — the
+             posture, NEVER the token itself), and ``"instance"`` (this
+             serve's registry entry under ``<store_root>/serve_instances/``).
 - request:   ``{"id":"req-7","argv":["harness","status","--json"]}``
 - reply:     ``{"id":"req-7","event":"line","line":…}`` × N then
              ``{"id":"req-7","event":"exit","code":0}``
@@ -25,6 +35,22 @@ Protocol (NDJSON, one frame per line):
              (the Launcher supervisor must NEVER recycle serve while
              ``chat_turns`` > 0 — recording safety)
 - shutdown:  ``{"op":"shutdown"}`` → drain in-flight requests, exit 0
+- version:   ``{"op":"version"}`` → ``{"event":"version","build":{…},
+             "runtime_root":…,"boot_id":…,"transport":"stdio","auth":{…}}``
+             — the SAME stamp the ready frame carried, re-askable at any
+             time. A durable service outlives the install it was started
+             from; this is how a client proves it is not talking to last
+             week's code.
+- drain:     ``{"op":"drain"[,"deadline_seconds":30]}`` → stop accepting new
+             requests (each is answered ``{"id":…,"event":"draining",…}`` and
+             a terminal ``exit`` frame with code 75), let in-flight requests
+             finish, then ``{"event":"drain_complete","requests_refused":N,
+             "requests_completed":M,"drain_ms":X}`` and exit 0. If the
+             deadline elapses first: ``{"event":"drain_timeout",…,
+             "stuck_request_ids":[…]}`` and a NONZERO exit — a drain that can
+             hang forever is not a drain. Progress is reported as
+             ``{"event":"drain_progress",…}`` while the wait runs, so a
+             draining service never looks dead to a watchdog.
 - cancel:    ``{"op":"cancel","id":"req-7"}`` → a QUEUED request is dropped
              and answers ``{"id":"req-7","event":"exit","code":130,
              "cancelled":true}``; a request already RUNNING (or unknown)
@@ -52,11 +78,42 @@ import os
 import sys
 import threading
 import time
+import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Any, Callable, TextIO
 
 SERVE_SCHEMA_VERSION = 1
 DEFAULT_POOL_SIZE = 4
+
+# ── Drain ────────────────────────────────────────────────────────────────────
+#
+# A durable service must be replaceable WITHOUT killing work: `drain` refuses
+# new requests, lets the in-flight ones land, and exits. Every path emits its
+# typed terminal frame BEFORE exiting — the frame is the observability, and a
+# drain that exited without one would be indistinguishable from the crash it
+# exists to avoid.
+DEFAULT_DRAIN_DEADLINE_SECONDS = 30.0
+#: Bounds on a client-supplied deadline. Zero would make `drain` a `kill`; an
+#: unbounded value would restore "can hang forever" through the front door.
+_DRAIN_DEADLINE_MIN_SECONDS = 0.05
+_DRAIN_DEADLINE_MAX_SECONDS = 3600.0
+_DRAIN_POLL_INTERVAL_SECONDS = 0.05
+#: While draining, this replaces the `busy` liveness pump (which stops with the
+#: delivery drain the moment draining starts). A watchdog keyed on "no frames
+#: for N seconds" must not declare a healthily-draining runtime dead.
+_DRAIN_PROGRESS_INTERVAL_SECONDS = 5.0
+#: Refused-because-draining. 75 is EX_TEMPFAIL: "try again", which is exactly
+#: what a client should do — against the replacement runtime. The refusal also
+#: carries this terminal `exit` frame so a client that predates the typed
+#: `draining` event still terminates its request instead of waiting forever.
+DRAINING_EXIT_CODE = 75
+#: In-flight work outlived the deadline. Nonzero on purpose: a supervisor must
+#: be able to tell "drained" from "gave up with work still running".
+DRAIN_TIMEOUT_EXIT_CODE = 3
+#: How long the drain monitor waits for the reader loop to actually unwind
+#: after a clean drain before forcing the process down. The pool is provably
+#: empty at that point, so this only covers a reader blocked on an idle pipe.
+_DRAIN_EXIT_GRACE_SECONDS = 5.0
 
 # Chat turns must survive supervisor recycles (recording safety): these argv
 # shapes mark a request as an in-flight chat turn for the busy/ping frame.
@@ -111,6 +168,13 @@ _FINGERPRINT_STORE_DIRS = (
     "persona_assignments",
     "workspaces",
     "realms",
+    # DELIBERATELY ABSENT: "serve_instances". Its entries appear and vanish at
+    # every serve boot/exit, and the ``serve_auth_token`` file appears at first
+    # boot — inside a fingerprint either one would cold the read-model cache
+    # exactly when a fresh runtime is warming up, and make the stream emit
+    # ``state.reconciled`` on every restart. Same standing precedent as
+    # ``dispatch_delivery.DRAIN_STATE_FILENAME``; the rule is restated at both
+    # ``agent_runtime/serve_registry.py`` and ``agent_runtime/serve_auth.py``.
 )
 
 # The ``running_work`` durable stores (``processes.json``, ``state.db``) are
@@ -430,6 +494,49 @@ class _ArgvRequest:
         self.cancel_event = threading.Event()
 
 
+class _DrainState:
+    """One drain in progress, and everything its terminal frame must account for.
+
+    The counters are the point. A `drain_complete` that only said "done" would
+    be a frame with the right NAME and no evidence — it could not distinguish a
+    drain that let three turns land from one that refused them all, which is
+    the difference between a safe restart and lost work.
+    """
+
+    __slots__ = ("started_monotonic", "deadline_seconds", "refused", "completed", "lock")
+
+    def __init__(self, deadline_seconds: float):
+        self.started_monotonic = time.monotonic()
+        self.deadline_seconds = deadline_seconds
+        self.refused = 0
+        self.completed = 0
+        self.lock = threading.Lock()
+
+    def note_refused(self) -> int:
+        with self.lock:
+            self.refused += 1
+            return self.refused
+
+    def note_completed(self) -> None:
+        with self.lock:
+            self.completed += 1
+
+    def counters(self) -> dict[str, Any]:
+        with self.lock:
+            return {"requests_refused": self.refused, "requests_completed": self.completed}
+
+    def elapsed_ms(self) -> int:
+        return int((time.monotonic() - self.started_monotonic) * 1000)
+
+
+def _drain_deadline_seconds(raw: Any, default: float) -> float:
+    """Clamp a client-supplied deadline into the sane band, or take the default."""
+
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return default
+    return max(_DRAIN_DEADLINE_MIN_SECONDS, min(float(raw), _DRAIN_DEADLINE_MAX_SECONDS))
+
+
 def _build_harness_parser() -> argparse.ArgumentParser:
     """A fresh top-level parser holding only the harness tree. Built per
     request: cheap next to any handler, and avoids sharing one parser
@@ -534,9 +641,25 @@ def serve_loop(
     boot_timeline: Any = None,
     snapshot_prewarm: Callable[[], None] | None = None,
     root_anchor: Callable[[], Any] | None = None,
+    drain_deadline_seconds: float = DEFAULT_DRAIN_DEADLINE_SECONDS,
+    drain_poll_interval_seconds: float = _DRAIN_POLL_INTERVAL_SECONDS,
+    drain_wakeup: Callable[[], None] | None = None,
+    hard_exit: Callable[[int], None] | None = None,
 ) -> int:
     """Core dispatch loop over explicit streams. stdio is transport #1; a
     future remote lane feeds the same loop (design doc §Future).
+
+    ``drain_wakeup`` and ``hard_exit`` are the two process-level levers the
+    drain needs and a unit test must not be given: the first unblocks a reader
+    parked on an idle pipe once the drain has finished (the real entry point
+    closes the protocol descriptor), the second takes the process down when
+    in-flight work outlived the deadline. The timeout case CANNOT be a plain
+    return: ``concurrent.futures`` registers an atexit hook that JOINS every
+    worker thread, so an interpreter carrying a stuck worker hangs on the way
+    out — which is the same "forever" the deadline exists to bound. Both are
+    injected and OFF by default, the same contract as ``snapshot_prewarm`` and
+    ``root_anchor``, so ``serve_loop``'s own tests observe the frames and the
+    return code without ever exiting the test process.
 
     ``boot_timeline`` is the caller's already-running :class:`BootTimeline`
     (``_cmd_serve`` starts one at the process's first hermes instruction, so
@@ -634,6 +757,16 @@ def serve_loop(
     inflight_futures: dict[str, Future] = {}
     inflight_lock = threading.Lock()
 
+    # Drain state. ``None`` until a `drain` op arrives; from then on it is the
+    # single answer to "are we still accepting work", read by the request path
+    # and written once by the op.
+    drain_state: _DrainState | None = None
+    drain_exit_code = 0
+    drain_finished = threading.Event()
+    reader_unwound = threading.Event()
+    pool_shutdown_wait = True
+    boot_id = uuid.uuid4().hex
+
     def _busy_frame() -> dict[str, Any]:
         with inflight_lock:
             pending = len(inflight)
@@ -714,6 +847,11 @@ def serve_loop(
             with inflight_lock:
                 inflight.pop(request.rid, None)
                 inflight_futures.pop(request.rid, None)
+            # Accounted here rather than by the monitor's before/after arithmetic:
+            # the monitor only ever sees the pending SET, so a request that both
+            # started and finished during the drain would be invisible to it.
+            if drain_state is not None:
+                drain_state.note_completed()
             exit_frame: dict[str, Any] = {
                 "id": request.rid,
                 "event": "exit",
@@ -727,13 +865,73 @@ def serve_loop(
     original_stdout, original_stderr = sys.stdout, sys.stderr
     sys.stdout, sys.stderr = stdout_proxy, stderr_proxy
     try:
+        store_root_path: Any = None
         try:
             from agent_runtime import paths as _paths
 
-            runtime_root = str(_paths.store_root())
+            store_root_path = _paths.store_root()
+            runtime_root = str(store_root_path)
         except Exception:
+            store_root_path = None
             runtime_root = None
         timeline.mark("store_root_ms")
+        # ── Durable-service foundations (slice 2) ───────────────────────────
+        #
+        # These three run BEFORE ``ready`` because ``ready`` is the frame that
+        # carries them: a client that has to ask a second question to learn
+        # what code it just connected to has a window in which it does not
+        # know, and windows like that are how a stale service serves a whole
+        # session before anyone notices.
+        #
+        # 1. WHICH CODE. Today serve is a per-client child, so a launcher
+        #    restart picks up landed fixes for free and nobody ever had to
+        #    ask. A durable service silently pins last week's code instead —
+        #    the shape of the dispatch dead-flag-proxy incident, which ran
+        #    green for a week. Resolved once per process and cached.
+        try:
+            from agent_runtime.build_stamp import build_stamp
+
+            build_block = build_stamp().frame_payload()
+        except Exception as exc:  # an instrument must never take the boot down
+            build_block = {
+                "commit": None,
+                "dirty": None,
+                "source": "unknown",
+                "resolved_at": None,
+                "reason": f"stamp_failed:{type(exc).__name__}",
+            }
+        # 2. THE SECRET. Unwired to any transport (stdio needs none), minted
+        #    now so the socket slice starts with a lock already on the door
+        #    rather than shipping open. The frame carries the POSTURE only —
+        #    the token value must never appear in a frame, a log, or an event.
+        auth_block: dict[str, Any] = {"token_file": "error:root_unresolved"}
+        if store_root_path is not None:
+            try:
+                from agent_runtime.serve_auth import ensure_token
+
+                auth_block = ensure_token(store_root_path).payload()
+            except Exception as exc:
+                auth_block = {"token_file": f"error:{type(exc).__name__}"}
+        # 3. DISCOVERY. Multiple runtime roots legitimately coexist on this
+        #    machine (QA lanes, isolated worktree roots), and until now
+        #    "how many serves are running against this root, on what code"
+        #    had no answer at all. The entry is removed on every clean exit
+        #    (shutdown AND drain); a crash leaves it, which is why liveness is
+        #    proven at READ time and never trusted from the file.
+        instance_block: dict[str, Any] = {"outcome": "error:root_unresolved"}
+        if store_root_path is not None:
+            try:
+                from agent_runtime.serve_registry import register_serve_instance
+
+                instance_block = register_serve_instance(
+                    store_root_path,
+                    transport="stdio",
+                    build=build_block,
+                    boot_id=boot_id,
+                ).payload()
+            except Exception as exc:
+                instance_block = {"outcome": f"error:{type(exc).__name__}"}
+        timeline.mark("service_foundations_ms")
         # Orphaned-turn sweep BEFORE the ready frame: serve boot is the moment
         # a launcher restart replaces a dead runtime, and the first hydrate is
         # only requested after ready — so records a dead executor left frozen
@@ -769,6 +967,14 @@ def serve_loop(
             "pid": os.getpid(),
             "schema_version": SERVE_SCHEMA_VERSION,
             "runtime_root": runtime_root,
+            # Additive, always present (never conditional on success): a
+            # missing block would read as "old runtime", while a block whose
+            # own fields say `unknown`/`error:…` reads as what it is — the
+            # measurement was attempted and this is what it found.
+            "boot_id": boot_id,
+            "build": build_block,
+            "auth": auth_block,
+            "instance": instance_block,
         }
         if orphaned_repaired:
             ready_frame["orphaned_turns_repaired"] = len(orphaned_repaired)
@@ -890,9 +1096,115 @@ def serve_loop(
                 "agent_chat_send(wait=false) will be refused for this serve",
                 exc_info=True,
             )
-        with ThreadPoolExecutor(
+
+        def _unregister_instance() -> None:
+            """Drop this serve's registry entry. Idempotent, never raises."""
+
+            if store_root_path is None:
+                return
+            try:
+                from agent_runtime.serve_registry import unregister_serve_instance
+
+                unregister_serve_instance(store_root_path)
+            except Exception:
+                pass
+
+        def _finish_drain(code: int, frame: dict[str, Any]) -> None:
+            """Emit the drain's terminal frame, then get the process out.
+
+            Order is the contract: the frame is written and flushed BEFORE any
+            exit path, because a drain that took the process down without
+            accounting for what it refused and what it completed is
+            indistinguishable from the crash the drain exists to replace.
+            """
+
+            nonlocal drain_exit_code, pool_shutdown_wait
+
+            drain_exit_code = code
+            frames.emit(frame)
+            _unregister_instance()
+            if code != 0:
+                # Stuck workers: do NOT let the pool's context manager join
+                # them (it would hang exactly as long as "forever"), and do not
+                # trust a plain return either — concurrent.futures' atexit hook
+                # joins worker threads on the way out of the interpreter.
+                pool_shutdown_wait = False
+            drain_finished.set()
+            if drain_wakeup is not None:
+                try:
+                    drain_wakeup()
+                except Exception:
+                    pass
+            if hard_exit is None:
+                # Unit-test path: the loop returns ``drain_exit_code`` and the
+                # caller observes the frames. No process-level lever is pulled.
+                return
+            if code != 0:
+                hard_exit(code)
+                return
+            # Clean drain: give the reader loop its chance to unwind normally
+            # (closed sockets, flushed writer, restored stdio). Only force the
+            # exit if the reader is still parked on an idle pipe afterwards —
+            # a wakeup that no platform honours must not become a new "hangs
+            # forever" path.
+            if not reader_unwound.wait(_DRAIN_EXIT_GRACE_SECONDS):
+                hard_exit(code)
+
+        def _drain_monitor(state: _DrainState) -> None:
+            deadline = state.started_monotonic + state.deadline_seconds
+            last_progress = state.started_monotonic
+            while True:
+                with inflight_lock:
+                    remaining = sorted(inflight)
+                if not remaining:
+                    _finish_drain(
+                        0,
+                        {
+                            "event": "drain_complete",
+                            "pid": os.getpid(),
+                            "boot_id": boot_id,
+                            **state.counters(),
+                            "drain_ms": state.elapsed_ms(),
+                        },
+                    )
+                    return
+                now = time.monotonic()
+                if now >= deadline:
+                    _finish_drain(
+                        DRAIN_TIMEOUT_EXIT_CODE,
+                        {
+                            "event": "drain_timeout",
+                            "pid": os.getpid(),
+                            "boot_id": boot_id,
+                            **state.counters(),
+                            "drain_ms": state.elapsed_ms(),
+                            "deadline_seconds": state.deadline_seconds,
+                            # WHICH requests are stuck, by id — a timeout that
+                            # only reported a count would leave the operator
+                            # with nothing to correlate against the stack dump.
+                            "stuck_request_ids": remaining,
+                        },
+                    )
+                    return
+                if now - last_progress >= _DRAIN_PROGRESS_INTERVAL_SECONDS:
+                    frames.emit(
+                        {
+                            "event": "drain_progress",
+                            "pending": len(remaining),
+                            "request_ids": remaining,
+                            "drain_ms": state.elapsed_ms(),
+                        }
+                    )
+                    last_progress = now
+                time.sleep(max(0.0, min(drain_poll_interval_seconds, deadline - now)))
+
+        pool = ThreadPoolExecutor(
             max_workers=max(1, pool_size), thread_name_prefix="harness-serve"
-        ) as pool:
+        )
+        # Explicit construction + shutdown rather than ``with``: the drain's
+        # timeout path must be able to stop waiting on work that has proven it
+        # will not finish, and a context manager always joins.
+        try:
             for raw in reader:
                 line = raw.strip()
                 if not line:
@@ -922,6 +1234,79 @@ def serve_loop(
                 op = message.get("op")
                 if op == "ping":
                     frames.emit(_busy_frame())
+                    continue
+                if op == "version":
+                    # Re-askable at any time, and deliberately NOT re-measured:
+                    # the answer is what code THIS interpreter loaded, which
+                    # cannot change while it lives. A client comparing against
+                    # its own install is how "the service is stale" becomes a
+                    # measurement instead of a theory.
+                    try:
+                        from agent_runtime.build_stamp import build_stamp
+
+                        version_build = build_stamp().payload()
+                    except Exception as exc:
+                        version_build = {
+                            "commit": None,
+                            "dirty": None,
+                            "source": "unknown",
+                            "reason": f"stamp_failed:{type(exc).__name__}",
+                        }
+                    frames.emit(
+                        {
+                            "event": "version",
+                            "schema_version": SERVE_SCHEMA_VERSION,
+                            "pid": os.getpid(),
+                            "boot_id": boot_id,
+                            "transport": "stdio",
+                            "runtime_root": runtime_root,
+                            "build": version_build,
+                            "auth": auth_block,
+                            "draining": drain_state is not None,
+                        }
+                    )
+                    continue
+                if op == "drain":
+                    if drain_state is not None:
+                        frames.emit(
+                            {
+                                "event": "drain_in_progress",
+                                "drain_ms": drain_state.elapsed_ms(),
+                                **drain_state.counters(),
+                            }
+                        )
+                        continue
+                    drain_state = _DrainState(
+                        _drain_deadline_seconds(
+                            message.get("deadline_seconds"), drain_deadline_seconds
+                        )
+                    )
+                    # Stop the delivery drain (and with it the busy pump) the
+                    # moment we stop accepting work: it forges completed
+                    # dispatches back into a sender's thread, and doing that to
+                    # a process on its way down is exactly what the shutdown
+                    # path already refuses to allow. `drain_progress` frames
+                    # take over the liveness duty for the rest of the wait.
+                    liveness_stop.set()
+                    with inflight_lock:
+                        pending_at_start = sorted(inflight)
+                    frames.emit(
+                        {
+                            "event": "draining",
+                            "id": None,
+                            "pid": os.getpid(),
+                            "boot_id": boot_id,
+                            "pending": len(pending_at_start),
+                            "request_ids": pending_at_start,
+                            "deadline_seconds": drain_state.deadline_seconds,
+                        }
+                    )
+                    threading.Thread(
+                        target=_drain_monitor,
+                        args=(drain_state,),
+                        name="harness-serve-drain",
+                        daemon=True,
+                    ).start()
                     continue
                 if op == "stacks":
                     # Operator diagnostic: dump every thread's stack as
@@ -1018,6 +1403,34 @@ def serve_loop(
                         }
                     )
                     continue
+                if drain_state is not None:
+                    # Refused, and ACCOUNTED: the count lands on the terminal
+                    # drain frame, so "the restart dropped work" is a number an
+                    # operator can read rather than an inference.
+                    drain_state.note_refused()
+                    frames.emit(
+                        {
+                            "id": rid.strip(),
+                            "event": "draining",
+                            "detail": (
+                                "serve is draining and is not accepting new requests; "
+                                "reconnect to the replacement runtime"
+                            ),
+                            "drain_ms": drain_state.elapsed_ms(),
+                        }
+                    )
+                    # Terminal frame too: a client that predates the `draining`
+                    # event is waiting for an `exit` and would otherwise hang
+                    # for the life of its request.
+                    frames.emit(
+                        {
+                            "id": rid.strip(),
+                            "event": "exit",
+                            "code": DRAINING_EXIT_CODE,
+                            "draining": True,
+                        }
+                    )
+                    continue
                 request = _ArgvRequest(rid.strip(), [str(item) for item in argv])
                 with inflight_lock:
                     if request.rid in inflight:
@@ -1038,8 +1451,22 @@ def serve_loop(
                     # the registry cannot leak completed entries.
                     if request.rid in inflight:
                         inflight_futures[request.rid] = future
-            # Context-manager exit drains in-flight work before shutdown.
+        finally:
+            # The reader is done; from here the process is unwinding normally,
+            # which is what the drain monitor's grace window is waiting to see.
+            reader_unwound.set()
+            # ``wait`` is True everywhere except after a drain TIMEOUT, where
+            # the whole point is that the remaining work has already outlived
+            # its deadline and joining it would restore the hang.
+            pool.shutdown(wait=pool_shutdown_wait)
         liveness_stop.set()
+        if drain_state is not None:
+            # The drain already emitted its own terminal frame
+            # (``drain_complete`` / ``drain_timeout``). Emitting ``shutdown``
+            # here as well would tell a consumer that a TIMED-OUT drain ended
+            # cleanly — the one thing it must not conclude.
+            return drain_exit_code
+        _unregister_instance()
         frames.emit({"event": "shutdown", "pid": os.getpid()})
         return 0
     finally:
@@ -1115,6 +1542,19 @@ def _cmd_serve(args) -> int:
     # Function-local on purpose: this file is exec'd into harness.py's globals.
     from agent_runtime.root_anchor import publish_store_root_anchor
 
+    def _wake_reader() -> None:
+        """Unblock a reader parked on an idle protocol pipe after a drain.
+
+        Closing the descriptor makes the in-progress (or next) ``os.read``
+        fail, which ``_raw_fd_lines`` already treats as end-of-stream. The
+        second close in the ``finally`` below is a harmless no-op.
+        """
+
+        try:
+            os.close(protocol_in)
+        except OSError:
+            pass
+
     try:
         return serve_loop(
             _raw_fd_lines(protocol_in),
@@ -1124,6 +1564,13 @@ def _cmd_serve(args) -> int:
             boot_timeline=timeline,
             snapshot_prewarm=_prewarm_read_model_snapshot,
             root_anchor=publish_store_root_anchor,
+            drain_wakeup=_wake_reader,
+            # ``os._exit``, not ``sys.exit``: after a drain TIMEOUT the
+            # interpreter cannot be trusted to come down at all — the
+            # concurrent.futures atexit hook joins worker threads, and the
+            # stuck ones are precisely why the deadline fired. Every frame is
+            # flushed at emit, so nothing observable is lost.
+            hard_exit=os._exit,
         )
     finally:
         try:

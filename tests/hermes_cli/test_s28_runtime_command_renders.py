@@ -40,14 +40,20 @@ def _status_payload() -> dict:
     }
 
 
-def test_status_human_line_reports_only_measurable_fields(monkeypatch, capsys):
+def test_status_human_line_reports_only_measurable_fields(monkeypatch, tmp_path, capsys):
+    # The line gained two REAL measurements in the durable-runtime-root service
+    # slice — `build=` (which code answered) and `serves=<live>/<entries>` — so
+    # the exact-equality pin becomes a prefix + suffix pin. S28's rule is
+    # unchanged and still what is under test: no constant dressed as a count.
+    monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(tmp_path / "agent-runtime"))
     monkeypatch.setattr("hermes_cli.harness.build_status", _status_payload)
     args = _parser().parse_args(["harness", "status"])
 
     assert args.func(args) == 0
 
     line = capsys.readouterr().out.strip()
-    assert line == "open_incidents=3 dirty=runtime=clean runtime_health=True"
+    assert line.startswith("open_incidents=3 dirty=runtime=clean runtime_health=True")
+    assert line.endswith("serves=0/0")
     assert "open_tasks=" not in line
     assert "running_runs=" not in line
 
