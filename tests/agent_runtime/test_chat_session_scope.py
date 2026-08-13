@@ -256,6 +256,70 @@ def test_the_shared_root_pointer_outranks_the_config_declaration(
     assert scope.head_home == runtime_root["head_home"]
 
 
+def test_the_losing_declaration_is_stamped_when_it_names_another_directory(
+    monkeypatch, runtime_root
+):
+    """The pointer still wins; the divergence stops being invisible.
+
+    The two recorded authorities drift apart BY DESIGN — the pointer is
+    rewritten on every explicitly-headed serve boot, the declaration is
+    write-once — and ``ChatScopeMismatch`` models only instance-record vs
+    resolving rung, so a declaration naming a different directory was compared
+    against nothing and reported nowhere. It surfaces in the ``--json`` scope
+    block now, without changing which rung answers.
+    """
+
+    _serve_lane(monkeypatch, runtime_root)
+    assert publish_chat_head_home() == runtime_root["head_home"]
+    _declaring_lane(monkeypatch, runtime_root, runtime_root["other_home"])
+
+    scope = resolve_process_chat_scope()
+
+    assert scope.source is ChatHeadSource.SHARED_ROOT_POINTER
+    assert scope.head_home == runtime_root["head_home"]  # resolution UNCHANGED
+    assert scope.declared_head_home == runtime_root["other_home"]
+    assert scope.declaration_diverges
+    payload = scope.payload()
+    assert payload["declared_head_home"] == str(runtime_root["other_home"])
+    assert payload["declaration_diverges"] is True
+
+
+def test_a_declaration_agreeing_with_the_pointer_is_stamped_as_agreeing(
+    monkeypatch, runtime_root
+):
+    """Agreement is reported too — a presence-only field would leave an
+    operator unable to tell "they agree" from "nothing was compared"."""
+
+    _serve_lane(monkeypatch, runtime_root)
+    assert publish_chat_head_home() == runtime_root["head_home"]
+    _declaring_lane(monkeypatch, runtime_root, runtime_root["head_home"])
+
+    scope = resolve_process_chat_scope()
+
+    assert scope.source is ChatHeadSource.SHARED_ROOT_POINTER
+    assert not scope.declaration_diverges
+    assert scope.payload()["declaration_diverges"] is False
+
+
+def test_no_declaration_means_no_divergence_fields_at_all(monkeypatch, runtime_root):
+    """Absence is not divergence — and a ``declaration_diverges: false`` with
+    nothing behind it would read as a check that ran and passed."""
+
+    _serve_lane(monkeypatch, runtime_root)
+    assert publish_chat_head_home() == runtime_root["head_home"]
+    monkeypatch.delenv("HERMES_AGENT_RUNTIME_ROOT", raising=False)
+    monkeypatch.delenv("HERMES_HEAD_HOME", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(runtime_root["other_home"]))
+
+    scope = resolve_process_chat_scope()
+
+    assert scope.source is ChatHeadSource.SHARED_ROOT_POINTER
+    assert scope.declared_head_home is None
+    assert not scope.declaration_diverges
+    assert "declared_head_home" not in scope.payload()
+    assert "declaration_diverges" not in scope.payload()
+
+
 def test_an_explicit_head_always_beats_the_config_declaration(
     monkeypatch, runtime_root
 ):

@@ -88,6 +88,16 @@ rescue is the 2026-08-12 incident retired). Absence is not a mismatch either:
 an instance predating the stamp (``chat_head_home is None``) falls through to
 the pointer exactly as before.
 
+One divergence the mismatch machinery does NOT model, and why it is reported
+separately: when the POINTER wins, a ``CONFIG_DECLARED`` value naming a
+different directory is never compared — ``ChatScopeMismatch`` is about the
+instance record versus the resolving rung, not about two recorded authorities
+disagreeing with each other. Those two drift apart by design (the pointer is
+rewritten on every explicitly-headed serve boot; the declaration is
+write-once), so the losing declaration rides the scope as
+``declared_head_home`` with a ``declaration_diverges`` flag, and surfaces in
+the ``--json`` scope block. It does not change which rung wins.
+
 Two postures ride the scope, and callers declare which one they need rather
 than re-deriving a guard:
 
@@ -295,10 +305,38 @@ class ChatSessionScope:
     source: ChatHeadSource
     instance_head: InstanceChatHead | None = None
     mismatch: ChatScopeMismatch | None = None
+    #: The ``CONFIG_DECLARED`` value that LOST to the rung above it, when one
+    #: existed. ``None`` means no declaration answered (or the declaration is
+    #: itself the winning rung, where ``head_home`` already carries it).
+    #:
+    #: Why it rides here at all: the two recorded authorities drift apart BY
+    #: DESIGN — the shared-root pointer is rewritten on every explicitly-headed
+    #: serve boot, the config declaration is write-once — and the
+    #: :class:`ChatScopeMismatch` machinery models only instance-record vs
+    #: resolving rung, so a declaration naming a DIFFERENT directory than the
+    #: winning pointer was compared against nothing and reported nowhere. This
+    #: does not change which rung wins (the pointer still does, and should:
+    #: it is the fresher fact). It makes the divergence visible in
+    #: ``harness status --json``'s ``chat_scope`` block, so an operator whose
+    #: machine declaration has gone stale can SEE that rather than discover it
+    #: the day the pointer stops answering and every read silently moves.
+    declared_head_home: Path | None = None
 
     @property
     def db_path(self) -> Path:
         return self.head_home / CHAT_SESSION_DB_FILENAME
+
+    @property
+    def declaration_diverges(self) -> bool:
+        """Does the losing config declaration name a DIFFERENT directory?
+
+        False when there is no losing declaration to compare — absence is not
+        divergence, exactly as it is not a mismatch one rung up.
+        """
+
+        return self.declared_head_home is not None and not _same_path(
+            self.declared_head_home, self.head_home
+        )
 
     @property
     def explicitly_named(self) -> bool:
@@ -332,6 +370,11 @@ class ChatSessionScope:
             block["instance_head"] = self.instance_head.payload()
         if self.mismatch is not None:
             block["mismatch"] = self.mismatch.payload()
+        if self.declared_head_home is not None:
+            # Both fields or neither: a bare ``declaration_diverges: false``
+            # would be unreadable without the value it was compared against.
+            block["declared_head_home"] = str(self.declared_head_home)
+            block["declaration_diverges"] = self.declaration_diverges
         return block
 
 
@@ -460,8 +503,18 @@ def _resolve_chat_scope(session_id: str | None) -> ChatSessionScope:
         )
 
     if pointer is not None:
+        # The pointer WINS — it is the fresher fact, republished every
+        # explicitly-headed serve boot, while the declaration below is
+        # write-once. But a declaration naming a different directory is a
+        # standing divergence between two recorded authorities, and until now
+        # it was compared against nothing: the mismatch machinery models
+        # instance-record vs resolving rung only. Carry the loser so the
+        # ``--json`` scope block can say so. Resolution is unchanged.
         return ChatSessionScope(
-            pointer, ChatHeadSource.SHARED_ROOT_POINTER, instance_head=instance_head
+            pointer,
+            ChatHeadSource.SHARED_ROOT_POINTER,
+            instance_head=instance_head,
+            declared_head_home=declared,
         )
 
     if declared is not None:
