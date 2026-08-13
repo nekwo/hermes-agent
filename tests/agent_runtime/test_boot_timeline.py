@@ -17,12 +17,20 @@ def test_phases_are_recorded_in_completion_order_and_sum_into_elapsed():
     timeline = BootTimeline(process_start_monotonic=time.monotonic() - 1.5)
 
     timeline.mark("imports_ms")
+    # Measure the sleep instead of assuming it. Windows' timer granularity is
+    # ~15.6ms, so `sleep(0.02)` routinely returns after 14ms of monotonic time
+    # — a bare `>= 15` here failed on real runs while the instrument was
+    # perfectly correct. The property is "the phase records the interval that
+    # actually elapsed", which is what this now asserts.
+    before = time.monotonic()
     time.sleep(0.02)
+    slept_ms = (time.monotonic() - before) * 1000
     timeline.mark("sweep_ms")
 
     phases = timeline.phases()
     assert list(phases) == ["imports_ms", "sweep_ms"]
-    assert phases["sweep_ms"] >= 15
+    # -2ms absorbs integer truncation plus the mark() call itself.
+    assert phases["sweep_ms"] >= slept_ms - 2
     # Complete: every phase is inside the elapsed window, and the elapsed
     # window is inside the total (which also carries the interpreter term).
     assert sum(phases.values()) <= timeline.elapsed_ms() + 5
@@ -59,13 +67,19 @@ def test_an_unresolvable_process_start_reports_no_interpreter_term(monkeypatch):
 def test_a_repeated_phase_accumulates_instead_of_overwriting():
     timeline = BootTimeline(process_start_monotonic=time.monotonic())
 
+    # TWO comparable intervals, so accumulate and overwrite give visibly
+    # different answers: ~100ms vs ~50ms. The previous shape slept once and
+    # asserted a fixed floor, which discriminated nothing — an implementation
+    # that overwrote would have passed it just as happily — while still being
+    # flaky against the platform's ~15.6ms timer granularity.
+    time.sleep(0.05)
     timeline.mark("retry_ms")
-    time.sleep(0.02)
+    time.sleep(0.05)
     timeline.mark("retry_ms")
 
     # A boot that repeated a step paid for BOTH attempts; reporting only the
     # last one would understate the boot it is attributing.
-    assert timeline.phases()["retry_ms"] >= 15
+    assert timeline.phases()["retry_ms"] >= 80
 
 
 def test_a_process_start_in_the_future_is_refused(monkeypatch):

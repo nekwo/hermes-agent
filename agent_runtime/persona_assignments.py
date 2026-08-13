@@ -79,7 +79,7 @@ def _session_presence_probe(session_db: Any | None = None) -> tuple[Any | None, 
     db = session_db
     if db is None:
         try:
-            from .chat_session_scope import resolve_chat_session_scope
+            from .chat_session_scope import resolve_process_chat_scope
 
             from .persona_chat_history import _default_session_db
 
@@ -89,7 +89,9 @@ def _session_presence_probe(session_db: Any | None = None) -> tuple[Any | None, 
             # process named the head — byte-identical to the shipped 8c3942a21
             # guard. The acquisition itself stays on the shared
             # ``_default_session_db`` delegate, so there is still exactly one.
-            if not resolve_chat_session_scope().explicitly_named:
+            # A PROCESS question — "did this process name a head" — not a
+            # per-conversation one, so it resolves on the process ladder.
+            if not resolve_process_chat_scope().explicitly_named:
                 return None, "head_home_not_authoritative"
             db = _default_session_db()
         except Exception:
@@ -1521,9 +1523,15 @@ class PersonaInstanceStore:
         # it changes the before/after tuple, so the row is rewritten and the
         # ``chat_opened`` event below carries both the new and previous head.
         previous_chat_head = instance.chat_head_home
-        from .chat_session_scope import resolve_chat_session_scope
+        from .chat_session_scope import resolve_process_chat_scope
 
-        scope = resolve_chat_session_scope()
+        # PROCESS ladder, deliberately — this is the site that WRITES the
+        # INSTANCE_RECORDED rung, and ``normalized_session`` is in hand
+        # right here, so omitting it would otherwise read as an oversight.
+        # A writer that consulted its own rung would re-affirm a stale head
+        # forever: the record would always agree with itself and the
+        # pointer beneath it could never correct it.
+        scope = resolve_process_chat_scope()
         if scope.authoritative:
             instance.chat_head_home = str(scope.head_home)
         after = (

@@ -35,6 +35,7 @@ from agent_runtime.chat_session_scope import (
     publish_chat_head_home,
     recorded_chat_head_home,
     resolve_chat_session_scope,
+    resolve_process_chat_scope,
 )
 from agent_runtime.models import PersonaInstance
 from agent_runtime.persona_chat_history import (
@@ -105,7 +106,7 @@ def _instance(session_id: str) -> PersonaInstance:
 def test_the_env_head_wins_and_is_explicitly_named(monkeypatch, runtime_root):
     _serve_lane(monkeypatch, runtime_root)
 
-    scope = resolve_chat_session_scope()
+    scope = resolve_process_chat_scope()
 
     assert scope.source is ChatHeadSource.ENV_HEAD_HOME
     assert scope.head_home == runtime_root["head_home"]
@@ -118,7 +119,7 @@ def test_with_no_head_named_the_scope_degrades_to_the_ambient_home(
 ):
     _cli_lane(monkeypatch, runtime_root)
 
-    scope = resolve_chat_session_scope()
+    scope = resolve_process_chat_scope()
 
     assert scope.source is ChatHeadSource.AMBIENT_HOME
     assert scope.head_home == runtime_root["other_home"]
@@ -135,7 +136,7 @@ def test_the_recorded_pointer_beats_the_ambient_home_but_is_not_explicit(
     assert publish_chat_head_home() == runtime_root["head_home"]
 
     _cli_lane(monkeypatch, runtime_root)
-    scope = resolve_chat_session_scope()
+    scope = resolve_process_chat_scope()
 
     assert scope.source is ChatHeadSource.SHARED_ROOT_POINTER
     assert scope.head_home == runtime_root["head_home"]
@@ -150,7 +151,7 @@ def test_an_explicit_head_always_beats_a_recorded_pointer(monkeypatch, runtime_r
     publish_chat_head_home()
 
     monkeypatch.setenv("HERMES_HEAD_HOME", str(runtime_root["other_home"]))
-    scope = resolve_chat_session_scope()
+    scope = resolve_process_chat_scope()
 
     assert scope.source is ChatHeadSource.ENV_HEAD_HOME
     assert scope.head_home == runtime_root["other_home"]
@@ -191,7 +192,7 @@ def test_a_pointer_at_a_vanished_home_is_ignored_not_honored(
     _cli_lane(monkeypatch, runtime_root)
 
     assert recorded_chat_head_home() is None
-    assert resolve_chat_session_scope().source is ChatHeadSource.AMBIENT_HOME
+    assert resolve_process_chat_scope().source is ChatHeadSource.AMBIENT_HOME
 
 
 # ── the live gap: mint on the CLI lane, read on the serve lane ───────────────

@@ -31,6 +31,7 @@ from agent_runtime.chat_session_scope import (
     publish_chat_head_home,
     recorded_instance_chat_head,
     resolve_chat_session_scope,
+    resolve_process_chat_scope,
 )
 from agent_runtime.persona_assignments import PersonaInstanceStore
 from agent_runtime.persona_chat_history import (
@@ -289,16 +290,20 @@ def test_a_recorded_home_that_vanished_falls_through_under_its_own_name(
     )
 
 
-def test_without_a_session_id_the_process_ladder_is_unchanged(
+def test_the_process_lane_never_consults_the_instance_rung(
     monkeypatch, runtime_root
 ):
-    """Every pre-existing caller resolves WITHOUT a conversation identity and
-    must stay byte-identical: no lookup, no mismatch, no instance block."""
+    """A caller with no conversation in hand resolves the process ladder only:
+    no lookup, no mismatch, no instance block — even with a record present.
+
+    This is now spelled by NAME (``resolve_process_chat_scope``) rather than by
+    omitting an argument, so the session-less lane is a decision a reader can
+    grep for instead of an oversight nobody can distinguish from one."""
 
     _bind(monkeypatch, runtime_root)
     _ambient_lane(monkeypatch, runtime_root)
 
-    scope = resolve_chat_session_scope()
+    scope = resolve_process_chat_scope()
 
     assert scope.source is ChatHeadSource.AMBIENT_HOME
     assert scope.instance_head is None
@@ -432,3 +437,40 @@ def test_a_healthy_explicit_read_now_states_its_frame_of_reference(
     assert data["ok"] is True
     assert data["chat_scope"]["source"] == "env_head_home"
     assert data["chat_scope"]["authoritative"] is True
+
+
+def test_the_per_conversation_lane_requires_a_session_id() -> None:
+    """Omitting the conversation is a TypeError, not a silent process-lane read.
+
+    The default used to be ``session_id=None``, which made the WRONG answer the
+    one you got by typing less: a caller holding a session id could drop it and
+    resolve some other frame of reference. Because a wrong root answers
+    ``ok: true, count: 0`` rather than failing, nothing above ever noticed. The
+    signature now refuses, so the mistake cannot survive to runtime.
+    """
+
+    with pytest.raises(TypeError):
+        resolve_chat_session_scope()  # type: ignore[call-arg]
+
+
+def test_a_blank_session_id_never_adopts_another_conversations_head(
+    monkeypatch, runtime_root
+):
+    """A blank id is the same omission wearing a different hat.
+
+    It resolves — this function never raises — but on the PROCESS ladder, with
+    the instance rung skipped. Falling through to the rung with an empty id
+    would be strictly worse than the old default: it would let whatever the
+    lookup happened to return stand in for a conversation nobody named.
+    """
+
+    _bind(monkeypatch, runtime_root)
+    _ambient_lane(monkeypatch, runtime_root)
+
+    for blank in ("", "   "):
+        scope = resolve_chat_session_scope(session_id=blank)
+        assert scope.source is ChatHeadSource.AMBIENT_HOME
+        assert scope.instance_head is None, (
+            "a blank id must skip the instance rung entirely, not consult it"
+        )
+        assert scope.mismatch is None

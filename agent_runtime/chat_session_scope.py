@@ -110,6 +110,7 @@ __all__ = [
     "recorded_chat_head_home",
     "recorded_instance_chat_head",
     "resolve_chat_session_scope",
+    "resolve_process_chat_scope",
 ]
 
 #: The opt-in marker a NON-``hermes_state`` object sets to declare that it is
@@ -308,16 +309,56 @@ class ChatSessionScope:
         return block
 
 
-def resolve_chat_session_scope(*, session_id: str | None = None) -> ChatSessionScope:
-    """Resolve the chat-database scope. Never raises.
+def resolve_chat_session_scope(*, session_id: str) -> ChatSessionScope:
+    """Resolve the chat-database scope FOR ONE CONVERSATION. Never raises.
 
-    With a ``session_id`` the resolution is PER-CONVERSATION: the
-    ``INSTANCE_RECORDED`` rung is consulted between the explicit env/relay
-    rungs and the shared-root pointer, and the returned scope carries the
-    lookup result plus any :class:`ChatScopeMismatch` between authorities.
-    Without one, the ladder is exactly the process-level ladder it has always
-    been — every existing caller is byte-identical.
+    ``session_id`` is REQUIRED, and that is the entire point of this entry
+    point: the ``INSTANCE_RECORDED`` rung is consulted between the explicit
+    env/relay rungs and the shared-root pointer, and the returned scope carries
+    the lookup result plus any :class:`ChatScopeMismatch` between authorities.
+
+    It used to default to ``None``. That made the process ladder the path of
+    least resistance: a caller holding a session id could omit it and resolve
+    some OTHER frame of reference, and because a wrong root answers
+    ``ok: true, count: 0`` rather than failing, the omission stayed invisible
+    at every layer above. Callers with no conversation in hand now say so by
+    name via :func:`resolve_process_chat_scope`, which turns every session-less
+    resolution from an omission into a greppable decision.
     """
+
+    if not isinstance(session_id, str) or not session_id.strip():
+        # A blank id is the same omission wearing a different hat. This
+        # function never raises, so resolve — but on the PROCESS ladder, never
+        # with the instance rung: a blank id must not be able to adopt some
+        # other conversation's recorded head.
+        return _resolve_chat_scope(None)
+    return _resolve_chat_scope(session_id)
+
+
+def resolve_process_chat_scope() -> ChatSessionScope:
+    """Resolve the PROCESS-level chat scope: env/relay → pointer → ambient.
+
+    The ``INSTANCE_RECORDED`` rung is deliberately not consulted, so
+    ``instance_head`` and ``mismatch`` are always ``None`` on the result.
+
+    Three kinds of caller belong here, and nothing else does:
+
+    * process-wide plumbing with no conversation in hand — log directories,
+      default SessionDB acquisition, posture checks such as
+      ``explicitly_named``;
+    * observability stamping the PROCESS frame of reference, where a
+      per-conversation stamp would be a different fact and would overstate
+      what the envelope knows;
+    * the binder that WRITES the instance record. A writer that consulted the
+      rung it maintains would let a stale head re-affirm itself forever
+      instead of being corrected by the pointer beneath it.
+    """
+
+    return _resolve_chat_scope(None)
+
+
+def _resolve_chat_scope(session_id: str | None) -> ChatSessionScope:
+    """The shared ladder behind both public entry points. Never raises."""
 
     from hermes_constants import (
         get_hermes_head_home,
@@ -477,7 +518,7 @@ def chat_session_db_path() -> Path:
     poll.
     """
 
-    return resolve_chat_session_scope().db_path
+    return resolve_process_chat_scope().db_path
 
 
 def open_chat_session_db(scope: ChatSessionScope | None = None) -> Any | None:
@@ -487,7 +528,7 @@ def open_chat_session_db(scope: ChatSessionScope | None = None) -> Any | None:
     the acquisition is shared, the failure posture is not.
     """
 
-    resolved = scope or resolve_chat_session_scope()
+    resolved = scope or resolve_process_chat_scope()
     try:
         from hermes_state import SessionDB
 
@@ -537,7 +578,7 @@ def publish_chat_head_home(scope: ChatSessionScope | None = None) -> Path | None
     must never be able to fail the process that happens to know the answer.
     """
 
-    resolved = scope or resolve_chat_session_scope()
+    resolved = scope or resolve_process_chat_scope()
     if not resolved.explicitly_named:
         return None
     path = _pointer_path()

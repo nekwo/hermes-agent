@@ -86,7 +86,7 @@ So the root is **captured once** per process
 1. the directory of the chat ``SessionDB`` handed to the persist seam
    (``session_db.db_path.parent``) — the strongest answer, because it is
    literally where the transcript this mirrors landed;
-2. otherwise ``chat_session_scope.resolve_chat_session_scope().head_home`` —
+2. otherwise ``chat_session_scope.resolve_process_chat_scope().head_home`` —
    the same head-home ladder the SessionDB acquisition itself uses.
 
 A capture from a real ``session_db`` upgrades an earlier scope-derived capture
@@ -774,9 +774,10 @@ def _root_from_session_db(session_db: Any) -> Path | None:
 
 def _root_from_scope() -> Path | None:
     try:
-        from .chat_session_scope import resolve_chat_session_scope
+        from .chat_session_scope import resolve_process_chat_scope
 
-        return Path(resolve_chat_session_scope().head_home)
+        # Process-wide log directory: no conversation is in hand here.
+        return Path(resolve_process_chat_scope().head_home)
     except Exception:  # pragma: no cover - defensive
         return None
 

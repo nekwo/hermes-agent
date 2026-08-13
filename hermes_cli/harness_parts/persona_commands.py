@@ -4865,7 +4865,7 @@ def _default_persona_session_db():
 
         from agent_runtime.chat_session_scope import (
             open_chat_session_db,
-            resolve_chat_session_scope,
+            resolve_process_chat_scope,
         )
 
         # The persona-chat SessionDB is the OPERATOR-visible transcript store —
@@ -4884,7 +4884,9 @@ def _default_persona_session_db():
         # base profile) relaying in-process. The former path-equality check
         # conflated the two and killed every relay such a persona sent (live
         # 2026-07-23, chat_session_db_unavailable).
-        scope = resolve_chat_session_scope()
+        # Default DB acquisition for the process: no session in hand. A
+        # caller that HAS one passes its own scope to open_chat_session_db.
+        scope = resolve_process_chat_scope()
         override = get_hermes_home_override()
         if override is not None and not scope.authoritative:
             raise PersonaChatPersistenceError("session_db_acquire")

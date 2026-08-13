@@ -66,9 +66,13 @@ def attach_root_observability(
             }
     if chat_scope and "chat_scope" not in payload:
         try:
-            from .chat_session_scope import resolve_chat_session_scope
+            from .chat_session_scope import resolve_process_chat_scope
 
-            payload["chat_scope"] = resolve_chat_session_scope().payload()
+            # The PROCESS frame of reference. A per-conversation stamp
+            # would be a different fact, and lanes that own one (e.g.
+            # persona-chat history) stamp it themselves — this never
+            # overwrites an existing block.
+            payload["chat_scope"] = resolve_process_chat_scope().payload()
         except Exception as exc:  # accounted, never raised
             payload["chat_scope"] = {
                 "error_kind": "chat_scope_unavailable",
