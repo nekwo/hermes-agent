@@ -56,6 +56,7 @@ from __future__ import annotations
 import hmac
 import os
 import secrets
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -126,16 +127,23 @@ def ensure_token(store_root: Path | str) -> ServeAuthStatus:
     except FileExistsError:
         # Another serve for this root won the race; its value is as good as
         # ours would have been, and rewriting it would lock out its clients.
-        # Unless the file that beat us is EMPTY — an interrupted mint — in
-        # which case reporting ``present`` would claim a secret that does not
-        # exist, and every later ``verify`` would fail closed against a token
-        # nobody can hold. That is a state an operator has to be told about.
+        # Unless the file that beat us is EMPTY — a process killed between the
+        # O_EXCL create and the write — in which case there is no secret to
+        # protect: nobody can hold the value of an empty file, so replacing it
+        # locks nobody out. Reporting ``present`` would claim a token that does
+        # not exist, and LEAVING it wedges the root permanently — mint-iff-
+        # absent means every later boot takes this same branch and every
+        # ``verify`` fails closed against a token nobody holds. So heal it.
         try:
             if _read_raw(path):
                 return ServeAuthStatus(state=STATE_PRESENT, path=str(path))
         except OSError:
             return ServeAuthStatus(state="error:unreadable", path=str(path))
-        return ServeAuthStatus(state="error:empty_token_file", path=str(path))
+        if _heal_empty(path) is None:
+            # Still nothing readable — the typed wedge state is kept for the
+            # boot that observes it mid-heal, and for a root we cannot write.
+            return ServeAuthStatus(state="error:empty_token_file", path=str(path))
+        return ServeAuthStatus(state=STATE_MINTED, path=str(path))
     except OSError as exc:
         return ServeAuthStatus(
             state=f"error:{_error_token(exc)}", path=str(path)
@@ -204,6 +212,57 @@ def _mint(path: Path) -> None:
             os.chmod(path, 0o600)
         except OSError:
             pass
+
+
+def _heal_empty(path: Path) -> str | None:
+    """Replace a ZERO-BYTE token file with a fresh mint; return what won.
+
+    Only ever called for a file already observed empty, and that precondition
+    is what makes replacing it safe: an empty file's value is held by nobody,
+    so this cannot lock out a reconnecting client the way rotating a real token
+    would.
+
+    The heal is itself concurrent-safe without a lock. Two healers write two
+    distinct O_EXCL temp files and ``os.replace`` them in turn; the second
+    rename wins the file, and BOTH then read the file back and return whatever
+    is actually there. So neither reports a token it does not hold — the same
+    read-after-write discipline the root anchor's post-write verification uses,
+    for the same reason: a rename is atomic but not exclusive.
+
+    Returns ``None`` when the file still has no readable value afterwards.
+    """
+
+    token = secrets.token_hex(TOKEN_BYTES)
+    handle = None
+    try:
+        handle = tempfile.NamedTemporaryFile(
+            "wb",
+            dir=str(path.parent),
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            delete=False,
+        )
+        with handle:
+            handle.write((token + "\n").encode("utf-8"))
+        if os.name != "nt":
+            # Same honesty as ``_mint``: chmod means something here and
+            # nothing on Windows (see the module docstring).
+            try:
+                os.chmod(handle.name, 0o600)
+            except OSError:
+                pass
+        os.replace(handle.name, path)
+    except Exception:
+        if handle is not None:
+            try:
+                os.unlink(handle.name)
+            except OSError:
+                pass
+        # Fall through to the read: another healer may have fixed it for us.
+    try:
+        return _read_raw(path)
+    except OSError:
+        return None
 
 
 def _error_token(exc: OSError) -> str:

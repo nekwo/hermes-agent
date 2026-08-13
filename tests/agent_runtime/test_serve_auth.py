@@ -119,20 +119,79 @@ def test_an_unwritable_root_is_reported_as_a_typed_error_not_an_exception(tmp_pa
     assert verify("anything", blocked / "root") is False
 
 
-def test_an_interrupted_mint_is_reported_rather_than_claimed_as_present(tmp_path):
-    """An EMPTY token file is not a token.
+def test_an_interrupted_mint_self_heals_instead_of_wedging_the_root(tmp_path):
+    """An EMPTY token file is not a token — and it must not be permanent.
 
-    Reporting ``present`` for it would claim a secret nobody holds, and every
-    later ``verify`` would fail closed against it — silently, forever.
+    A process killed between the ``O_EXCL`` create and the write leaves a
+    zero-byte file. Under mint-iff-absent, NOTHING ever repaired it: every
+    later boot saw a file that exists, reported ``error:empty_token_file``, and
+    every ``verify`` failed closed against a token nobody could hold. Replacing
+    it is safe precisely because it is empty — an empty file's value is held by
+    no client, so this cannot lock anyone out the way rotating a real token
+    would.
+
+    This test replaces one that asserted the wedge (it pinned the report, which
+    was right, and the permanence, which was not).
     """
 
-    serve_auth_token_path(tmp_path).parent.mkdir(parents=True, exist_ok=True)
-    serve_auth_token_path(tmp_path).write_bytes(b"")
+    path = serve_auth_token_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"")
+
+    status = ensure_token(tmp_path)
+
+    assert status.state == "minted"
+    token = read_token(tmp_path)
+    assert token
+    # The root is USABLE again, which is the whole point of healing it.
+    assert verify(token, tmp_path) is True
+    # And a later boot is an ordinary no-op, not a second heal.
+    assert ensure_token(tmp_path).state == "present"
+    assert read_token(tmp_path) == token
+
+
+def test_two_healers_converge_on_one_token(tmp_path):
+    """Both healers replace; the second rename wins the file. Neither may
+    report a token it does not hold, so both read the file back."""
+
+    path = serve_auth_token_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"")
+
+    first = serve_auth._heal_empty(path)
+    second = serve_auth._heal_empty(path)
+    on_disk = read_token(tmp_path)
+
+    assert second == on_disk
+    # The first healer's value lost the file; what matters is that the file
+    # holds exactly one token and it verifies.
+    assert first != on_disk
+    assert verify(on_disk, tmp_path) is True
+
+
+def test_an_empty_token_file_we_cannot_replace_is_still_reported(tmp_path, monkeypatch):
+    """The typed wedge state stays for the boot that cannot heal — a root we
+    cannot write must say so rather than claim a secret."""
+
+    path = serve_auth_token_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"")
+
+    def refuse(*args, **kwargs):
+        raise PermissionError("read-only root")
+
+    monkeypatch.setattr(serve_auth.os, "replace", refuse)
 
     status = ensure_token(tmp_path)
 
     assert status.state == "error:empty_token_file"
     assert read_token(tmp_path) is None
+    # No temp files left behind by the failed heal.
+    assert not [
+        entry.name
+        for entry in tmp_path.iterdir()
+        if entry.name.startswith(f".{path.name}.")
+    ]
 
 
 def test_a_token_saved_with_crlf_still_verifies(tmp_path):
