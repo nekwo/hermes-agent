@@ -66,6 +66,49 @@ deltas live, so ``sys.stdout``/``sys.stderr`` are swapped once for
 contextvar-dispatching proxies; each pool worker binds its request id and a
 single write lock keeps frames atomic. Writes from threads a handler spawns
 itself carry no request id and are forwarded with ``"id": null``.
+
+The socket lane (slice 3)
+-------------------------
+
+``serve_loop`` is now transport-agnostic: ONE dispatcher answers ops arriving
+on stdio and on a localhost socket alike. Everything above this line is
+unchanged on stdio — every frame, reply, and exit code is byte-identical,
+because the socket lane is injected and OFF unless ``_cmd_serve`` turns it on.
+
+- ownership: one serve per root owns the socket, decided by an OS-held
+  exclusive lock (``agent_runtime/serve_socket.py``). The loser runs
+  stdio-only and says so on ``ready`` under ``"socket"``:
+  ``{"outcome":"lock_held_by","pid":…}``. The winner's ``ready`` carries
+  ``{"outcome":"listening","host":"127.0.0.1","port":…}`` and its registry
+  entry records ``transport:"stdio+socket"`` plus the port.
+- hello:     the FIRST line on a socket must be
+             ``{"op":"hello","token":…,"client":…,"client_build":…}``, verified
+             against the per-root token (``agent_runtime/serve_auth.verify`` —
+             constant-time, fails closed). Success →
+             ``{"event":"hello_ok","build":{…},"boot_id":…,"contract":1,
+             "build_mismatch":true|false|null}``; failure → ONE
+             ``{"event":"hello_rejected","reason":…}`` and the connection is
+             closed, with a rate limit against hammering. Before that line is
+             verified a connection can do NOTHING. The token appears in no
+             frame, log, error, or registry entry.
+- subscribe: ``{"op":"subscribe","lane":"stream"}`` pushes the SAME hydrate /
+             delta / heartbeat frames ``harness stream`` produces, from ONE
+             shared producer fanned out to every subscriber (a per-batch
+             snapshot rebuild is why it is not one generator per client). A
+             subscriber that outruns its bounded buffer gets
+             ``{"event":"subscription_dropped","reason":"backpressure",…}`` and
+             is unsubscribed — never silently stalled, and never able to wedge
+             the producer or another subscriber. ``{"op":"unsubscribe"}`` ends
+             it cleanly, and so does a disconnect.
+- connections: ``{"op":"connections"}`` → ``{"event":"socket_connections",…}``
+             (count, and per client: name, build, subscribed, connected_at,
+             frames and bytes pushed). The same block rides the ``version``
+             reply, so "who is attached to this runtime" is answerable from the
+             handshake a client already performs.
+
+Client disconnect unsubscribes and does NOTHING else: the backend state a
+client was watching is the runtime's, not the client's, and surviving a client
+is the entire point of the durable service.
 """
 
 from __future__ import annotations
@@ -390,6 +433,18 @@ _request_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "harness_serve_request_id", default=None
 )
 
+#: WHERE this request's frames go. Bound by ``_run`` alongside the request id,
+#: for the same span and in the same pool-worker context.
+#:
+#: A durable service answers more than one transport, and a handler's ``print``
+#: belongs to the client that asked — not to whoever owns stdout. Unset (the
+#: default) means stdout, which is every stdio request and every thread a
+#: handler spawns for itself, so the stdio lane is byte-identical to the
+#: pre-socket loop: same proxy, same frames, same order.
+_request_sink: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "harness_serve_request_sink", default=None
+)
+
 
 def current_serve_request_id() -> str | None:
     """The serve frame-protocol request id bound to THIS context, or None.
@@ -434,8 +489,8 @@ class _LineFrameProxy(io.TextIOBase):
         super().__init__()
         self._frames = frames
         self._event = event
-        self._buffers: dict[str | None, str] = {}
-        self._captures: dict[str | None, list[str]] = {}
+        self._buffers: dict[tuple[int | None, str | None], str] = {}
+        self._captures: dict[tuple[int | None, str | None], list[str]] = {}
         self._lock = threading.Lock()
 
     def writable(self) -> bool:  # pragma: no cover - io protocol
@@ -445,19 +500,36 @@ class _LineFrameProxy(io.TextIOBase):
         # Handlers key default output on isatty(); serve is a pipe.
         return False
 
+    @staticmethod
+    def _slot(rid: str | None) -> tuple[int | None, str | None]:
+        """The partial-line buffer this write belongs to.
+
+        Keyed by (destination, request id), not by request id alone. Request
+        ids are chosen by CLIENTS, so once more than one transport is attached
+        two connections may legitimately both be running ``req-1`` — and a
+        buffer keyed on the id alone would splice one client's half-written
+        line into the other's. Stdio's destination is None (stdout), which is
+        what every pre-socket request already was.
+        """
+
+        sink = _request_sink.get()
+        return (id(sink) if sink is not None else None, rid)
+
     def write(self, text: str) -> int:
         if not text:
             return 0
         rid = _request_id.get()
+        slot = self._slot(rid)
         with self._lock:
-            buffered = self._buffers.get(rid, "") + str(text)
+            buffered = self._buffers.get(slot, "") + str(text)
             *lines, remainder = buffered.split("\n")
-            self._buffers[rid] = remainder
-            capture = self._captures.get(rid)
+            self._buffers[slot] = remainder
+            capture = self._captures.get(slot)
             if capture is not None:
                 capture.extend(lines)
+        sink = _request_sink.get() or self._frames
         for line in lines:
-            self._frames.emit({"id": rid, "event": self._event, "line": line})
+            sink.emit({"id": rid, "event": self._event, "line": line})
         return len(text)
 
     def flush(self) -> None:  # pragma: no cover - io protocol
@@ -466,30 +538,72 @@ class _LineFrameProxy(io.TextIOBase):
     def begin_capture(self, rid: str | None) -> None:
         """Start mirroring [rid]'s emitted lines for the read-model cache."""
         with self._lock:
-            self._captures[rid] = []
+            self._captures[self._slot(rid)] = []
 
     def end_capture(self, rid: str | None) -> list[str]:
         """Stop mirroring and return everything captured for [rid]."""
         with self._lock:
-            return self._captures.pop(rid, [])
+            return self._captures.pop(self._slot(rid), [])
 
     def flush_request(self, rid: str | None) -> None:
         """Emit a request's unterminated tail (handler printed without a
         trailing newline) and drop its buffer."""
+        slot = self._slot(rid)
         with self._lock:
-            remainder = self._buffers.pop(rid, "")
+            remainder = self._buffers.pop(slot, "")
             if remainder:
-                capture = self._captures.get(rid)
+                capture = self._captures.get(slot)
                 if capture is not None:
                     capture.append(remainder)
         if remainder:
-            self._frames.emit({"id": rid, "event": self._event, "line": remainder})
+            sink = _request_sink.get() or self._frames
+            sink.emit({"id": rid, "event": self._event, "line": remainder})
+
+
+class _SafeSink:
+    """A frame sink that never raises — the socket lane's request path.
+
+    A pool worker's ``finally`` MUST emit its terminal ``exit`` frame and clean
+    up its inflight entry; a client that hung up mid-request would otherwise
+    take that bookkeeping down with it, leaking the request id forever and
+    stalling any drain waiting on it. Stdout is deliberately NOT wrapped: the
+    stdio pipe failing is the process losing its transport, and that has always
+    propagated.
+    """
+
+    __slots__ = ("_target", "write_failures")
+
+    def __init__(self, target: Any):
+        self._target = target
+        self.write_failures = 0
+
+    def emit(self, frame: dict[str, Any]) -> None:
+        try:
+            self._target.emit(frame)
+        except Exception:
+            self.write_failures += 1
 
 
 class _ArgvRequest:
-    __slots__ = ("rid", "argv", "is_chat_turn", "is_runtime_stream", "cancel_event")
+    __slots__ = (
+        "rid",
+        "argv",
+        "is_chat_turn",
+        "is_runtime_stream",
+        "cancel_event",
+        "key",
+        "owner",
+        "sink",
+    )
 
-    def __init__(self, rid: str, argv: list[str]):
+    def __init__(
+        self,
+        rid: str,
+        argv: list[str],
+        *,
+        owner: str = "stdio",
+        sink: Any = None,
+    ):
         self.rid = rid
         self.argv = argv
         tail = argv[1:] if argv and argv[0] == "harness" else argv
@@ -498,6 +612,16 @@ class _ArgvRequest:
         )
         self.is_runtime_stream = bool(tail and tail[0] == "stream")
         self.cancel_event = threading.Event()
+        #: Which connection asked. ``stdio`` for the inherited pipe.
+        self.owner = owner
+        #: The inflight-table key. Request ids are chosen by CLIENTS, so two
+        #: connections may legitimately both use ``req-1``; the table is keyed
+        #: per owner so neither can collide with — or cancel — the other's work.
+        #: Stdio keeps the bare id, so its frames and its drain reports are
+        #: byte-identical to the single-transport loop.
+        self.key = rid if owner == "stdio" else f"{owner}:{rid}"
+        #: Where this request's frames go. None means stdout.
+        self.sink = sink
 
 
 class _DrainState:
@@ -651,9 +775,25 @@ def serve_loop(
     drain_poll_interval_seconds: float = _DRAIN_POLL_INTERVAL_SECONDS,
     drain_wakeup: Callable[[], None] | None = None,
     hard_exit: Callable[[int], None] | None = None,
+    socket_lane: bool = False,
+    stream_source_factory: Callable[[], Any] | None = None,
+    stream_buffer_limit: int | None = None,
 ) -> int:
-    """Core dispatch loop over explicit streams. stdio is transport #1; a
-    future remote lane feeds the same loop (design doc §Future).
+    """Core dispatch loop over explicit streams. stdio is transport #1; the
+    localhost socket is transport #2, and both feed THIS dispatcher.
+
+    ``socket_lane`` is injected and OFF by default — the same contract as
+    ``root_anchor`` and ``hard_exit`` — so every pre-socket test observes the
+    byte-identical stdio loop, and a caller that wants the durable service says
+    so explicitly. When it is on, this loop races for the per-root socket lock,
+    binds an ephemeral loopback port before ``ready`` (so the ready frame and
+    the registry entry can both carry it), and starts accepting only after the
+    request pool exists.
+
+    ``stream_source_factory`` is the shared subscription producer, likewise
+    injectable: the default builds the real ``agent_runtime.stream``
+    generator, and a test hands over a finite fake so a subscription test costs
+    milliseconds instead of a projection build.
 
     ``drain_wakeup`` and ``hard_exit`` are the two process-level levers the
     drain needs and a unit test must not be given: the first unblocks a reader
@@ -781,16 +921,47 @@ def serve_loop(
     pool_shutdown_wait = True
     boot_id = uuid.uuid4().hex
 
+    # ── socket lane state (all None unless ``socket_lane`` is on AND this
+    # serve wins the per-root ownership lock) ────────────────────────────────
+    socket_server: Any = None
+    socket_lock: Any = None
+    #: The ONE stream producer, built on the first ``subscribe`` and stopped
+    #: when the last subscriber leaves. Never per client: a delta batch rebuilds
+    #: a full snapshot core, so N generators would cost N of them.
+    stream_hub: Any = None
+    stream_hub_lock = threading.Lock()
+
     def _busy_frame() -> dict[str, Any]:
         with inflight_lock:
             pending = len(inflight)
             chat_turns = sum(1 for item in inflight.values() if item.is_chat_turn)
         return {"event": "busy", "chat_turns": chat_turns, "pending": pending}
 
+    def _service_log(payload: dict[str, Any]) -> None:
+        """One structured line per transport event, on the serve's own stderr.
+
+        Which means it arrives at the supervisor as an ordinary
+        ``{"id":null,"event":"stderr","line":…}`` frame — the lane serve already
+        uses for everything a handler writes to stderr. No new frame type, no
+        new sink, and correlatable by ``boot_id`` against the ready frame.
+        """
+
+        try:
+            sys.stderr.write(
+                json.dumps(payload, ensure_ascii=False, default=str) + "\n"
+            )
+        except Exception:
+            pass
+
     def _run(request: _ArgvRequest) -> None:
         from agent_runtime.request_control import request_cancel_scope
 
         token = _request_id.set(request.rid)
+        # Answers go back to whoever asked. ``request.sink`` is None on stdio,
+        # which leaves the contextvar unset and the proxy on stdout — the
+        # pre-socket path, unchanged.
+        sink_token = _request_sink.set(request.sink)
+        sink: Any = request.sink if request.sink is not None else frames
         code = 1
         cache_key = _CACHEABLE_ARGV.get(tuple(request.argv))
         request_fingerprint: tuple | None = None
@@ -811,7 +982,7 @@ def serve_loop(
                 )
                 code = cached.code
                 for line in cached.lines:
-                    frames.emit({"id": request.rid, "event": "line", "line": line})
+                    sink.emit({"id": request.rid, "event": "line", "line": line})
                 return
             if cache_key is not None and request_fingerprint is not None:
                 stdout_proxy.begin_capture(request.rid)
@@ -829,7 +1000,7 @@ def serve_loop(
                 raw = exc.code
                 code = raw if isinstance(raw, int) else (0 if raw is None else 2)
                 if code != 0:
-                    frames.emit(
+                    sink.emit(
                         {
                             "id": request.rid,
                             "event": "error",
@@ -838,7 +1009,7 @@ def serve_loop(
                         }
                     )
             except BaseException as exc:  # dispatch() already enveloped harness errors
-                frames.emit(
+                sink.emit(
                     {
                         "id": request.rid,
                         "event": "error",
@@ -858,9 +1029,10 @@ def serve_loop(
                     time.monotonic(),
                 )
             _request_id.reset(token)
+            _request_sink.reset(sink_token)
             with inflight_lock:
-                inflight.pop(request.rid, None)
-                inflight_futures.pop(request.rid, None)
+                inflight.pop(request.key, None)
+                inflight_futures.pop(request.key, None)
                 # Accounted here rather than by the monitor's before/after
                 # arithmetic: the monitor only ever sees the pending SET, so a
                 # request that both started and finished during the drain would
@@ -889,7 +1061,7 @@ def serve_loop(
             if served_from_cache:
                 exit_frame["served_from_cache"] = True
                 exit_frame["cache_age_ms"] = cache_age_ms
-            frames.emit(exit_frame)
+            sink.emit(exit_frame)
 
     original_stdout, original_stderr = sys.stdout, sys.stderr
     sys.stdout, sys.stderr = stdout_proxy, stderr_proxy
@@ -941,12 +1113,102 @@ def serve_loop(
                 auth_block = ensure_token(store_root_path).payload()
             except Exception as exc:
                 auth_block = {"token_file": f"error:{type(exc).__name__}"}
-        # 3. DISCOVERY. Multiple runtime roots legitimately coexist on this
+        # 3. THE TRANSPORT (slice 3). One serve per root owns the socket lane,
+        #    decided by an OS-held exclusive lock rather than by who booted
+        #    first: two serves against one root is a real, ordinary concurrency
+        #    (a launcher restart overlaps its replacement), and "connect to the
+        #    service for root X" must have exactly one answer. The loser keeps
+        #    serving stdio and SAYS so on the ready frame — a socket that
+        #    silently never came up is indistinguishable from one that is
+        #    broken.
+        #
+        #    Bound here, BEFORE the registry entry and the ready frame, so both
+        #    can carry the real port; accepting starts later, once the request
+        #    pool exists (see ``start_accepting`` below). A client that connects
+        #    in between waits in the listen backlog, which is what a backlog is
+        #    for.
+        socket_block: dict[str, Any] = {"outcome": "disabled"}
+        socket_transport = "stdio"
+        if socket_lane and store_root_path is not None:
+            try:
+                from agent_runtime.serve_socket import (
+                    SOCKET_HOST,
+                    ServeSocketServer,
+                    SocketOwnerLock,
+                )
+                from agent_runtime.serve_auth import verify as _verify_serve_token
+
+                socket_lock = SocketOwnerLock(store_root_path)
+                lock_result = socket_lock.acquire()
+                if lock_result.acquired:
+                    socket_server = ServeSocketServer(
+                        store_root_path,
+                        boot_id=boot_id,
+                        # Late-bound on purpose: these two closures are defined
+                        # further down (they need the pool and the drain state),
+                        # and a Python closure resolves its enclosing names at
+                        # CALL time — which cannot happen before the accept loop
+                        # starts, which is after both exist.
+                        dispatch_line=lambda line, connection: _handle_socket_line(
+                            line, connection
+                        ),
+                        hello_payload=lambda message, connection: _hello_ok_frame(
+                            message, connection
+                        ),
+                        # The token is verified against THIS root, and the value
+                        # never leaves ``serve_auth``: the transport only ever
+                        # learns the boolean.
+                        verify_token=lambda presented: _verify_serve_token(
+                            presented, store_root_path
+                        ),
+                        on_disconnect=lambda connection: _release_subscription(
+                            connection
+                        ),
+                        log=_service_log,
+                    )
+                    port = socket_server.bind()
+                    socket_lock.publish_owner(
+                        {
+                            "pid": os.getpid(),
+                            "boot_id": boot_id,
+                            "host": SOCKET_HOST,
+                            "port": port,
+                            "started_at": socket_server.started_at,
+                            "store_root": runtime_root,
+                        }
+                    )
+                    socket_transport = "stdio+socket"
+                    socket_block = {
+                        "outcome": "listening",
+                        "host": SOCKET_HOST,
+                        "port": port,
+                        "started_at": socket_server.started_at,
+                    }
+                else:
+                    socket_block = lock_result.payload()
+            except Exception as exc:
+                # A transport that failed to come up must not take the runtime
+                # with it: stdio still works, and the typed outcome is how an
+                # operator learns the socket did not.
+                try:
+                    if socket_lock is not None:
+                        socket_lock.release()
+                except Exception:
+                    pass
+                socket_server = None
+                socket_lock = None
+                socket_block = {"outcome": f"error:{type(exc).__name__}"}
+        # 4. DISCOVERY. Multiple runtime roots legitimately coexist on this
         #    machine (QA lanes, isolated worktree roots), and until now
         #    "how many serves are running against this root, on what code"
         #    had no answer at all. The entry is removed on every clean exit
         #    (shutdown AND drain); a crash leaves it, which is why liveness is
         #    proven at READ time and never trusted from the file.
+        #
+        #    The socket fields ride the SAME entry (additive): a client
+        #    discovering "the service for root X" reads the port from the
+        #    instance whose liveness the registry has just classified, rather
+        #    than from a second file with its own staleness story.
         instance_block: dict[str, Any] = {"outcome": "error:root_unresolved"}
         if store_root_path is not None:
             try:
@@ -954,9 +1216,13 @@ def serve_loop(
 
                 instance_block = register_serve_instance(
                     store_root_path,
-                    transport="stdio",
+                    transport=socket_transport,
                     build=build_block,
                     boot_id=boot_id,
+                    port=socket_server.port if socket_server is not None else None,
+                    socket_started_at=(
+                        socket_server.started_at if socket_server is not None else None
+                    ),
                 ).payload()
             except Exception as exc:
                 instance_block = {"outcome": f"error:{type(exc).__name__}"}
@@ -1004,6 +1270,10 @@ def serve_loop(
             "build": build_block,
             "auth": auth_block,
             "instance": instance_block,
+            # ``disabled`` (no socket lane asked for), ``listening`` with the
+            # port, ``lock_held_by`` with the winner's pid, or ``error:<reason>``
+            # — the outcome is stated either way, never inferred from absence.
+            "socket": socket_block,
         }
         if orphaned_repaired:
             ready_frame["orphaned_turns_repaired"] = len(orphaned_repaired)
@@ -1132,11 +1402,210 @@ def serve_loop(
             if store_root_path is None:
                 return
             try:
-                from agent_runtime.serve_registry import unregister_serve_instance
+                from agent_runtime.serve_registry import (
+                    serve_instance_path,
+                    unregister_serve_instance,
+                )
 
-                unregister_serve_instance(store_root_path)
+                if not unregister_serve_instance(store_root_path):
+                    # Reported, not swallowed. A clean exit that leaves its
+                    # entry behind makes the registry claim a serve that is on
+                    # its way out, and the next client's discovery would try to
+                    # connect to it. The read-time classification eventually
+                    # calls it dead — "eventually" is the part an operator has
+                    # to be able to see coming.
+                    if serve_instance_path(store_root_path, os.getpid()).exists():
+                        _service_log(
+                            {
+                                "event": "serve_instance_unregister_failed",
+                                "boot_id": boot_id,
+                                "pid": os.getpid(),
+                                "path": str(
+                                    serve_instance_path(store_root_path, os.getpid())
+                                ),
+                            }
+                        )
             except Exception:
                 pass
+
+        # ── socket lane plumbing ────────────────────────────────────────────
+        #
+        # Everything below is inert on a stdio-only serve: ``socket_server`` is
+        # None, no connection ever exists, and the stdio path never reaches a
+        # branch that touches it.
+
+        connection_sinks: dict[str, _SafeSink] = {}
+        connection_sinks_lock = threading.Lock()
+
+        def _emit_safely(sink: Any, frame: dict[str, Any]) -> None:
+            try:
+                sink.emit(frame)
+            except Exception:
+                pass
+
+        def _sink_for(connection: Any) -> Any:
+            """The STABLE per-connection request sink.
+
+            Stable matters twice: the partial-line buffers in
+            ``_LineFrameProxy`` are keyed on the sink's identity, and a sink
+            rebuilt per line would split one handler's output across two
+            buffers mid-line.
+            """
+
+            if connection is None:
+                return frames
+            with connection_sinks_lock:
+                sink = connection_sinks.get(connection.key)
+                if sink is None:
+                    sink = _SafeSink(connection)
+                    connection_sinks[connection.key] = sink
+                return sink
+
+        def _owner_of(connection: Any) -> str:
+            return "stdio" if connection is None else str(connection.key)
+
+        def _stream_source() -> Any:
+            """The shared subscription producer. One per serve, never per client."""
+
+            if stream_source_factory is not None:
+                return stream_source_factory()
+            from agent_runtime.serde import to_jsonable
+            from agent_runtime.stream import stream_frames
+
+            def _generate():
+                for frame in stream_frames():
+                    # Byte-for-byte the frames ``harness stream`` writes: a
+                    # subscriber folds the same hydrate/delta/patch/heartbeat
+                    # shapes it already folds, so the socket lane introduces no
+                    # second stream contract to keep in sync.
+                    yield to_jsonable(frame)
+
+            return _generate()
+
+        def _ensure_stream_hub() -> Any:
+            nonlocal stream_hub
+            with stream_hub_lock:
+                if stream_hub is None:
+                    from agent_runtime.serve_stream_hub import (
+                        DEFAULT_BUFFER_LIMIT,
+                        StreamHub,
+                    )
+
+                    stream_hub = StreamHub(
+                        _stream_source,
+                        buffer_limit=int(stream_buffer_limit or DEFAULT_BUFFER_LIMIT),
+                        log=_service_log,
+                    )
+                return stream_hub
+
+        def _release_subscription(connection: Any) -> None:
+            """A client left. Unsubscribe it, and do NOTHING else.
+
+            Not a cancellation, not a shutdown, not a state change: the runtime
+            outliving its clients is the entire point of the durable service,
+            and a disconnect that touched backend state would reintroduce the
+            per-client lifecycle ownership this workstream exists to retire.
+            """
+
+            key = _owner_of(connection)
+            if stream_hub is not None:
+                try:
+                    stream_hub.unsubscribe(key)
+                except Exception:
+                    pass
+            if connection is not None:
+                connection.subscribed = False
+                with connection_sinks_lock:
+                    connection_sinks.pop(connection.key, None)
+
+        def _close_socket_lane(reason: str) -> None:
+            """Stop the hub, close every connection, release the ownership lock.
+
+            Idempotent and never raises: it runs on the drain path, the
+            shutdown path, and the EOF path, and any of them may be second.
+            """
+
+            nonlocal socket_server, socket_lock, stream_hub
+            hub, stream_hub = stream_hub, None
+            if hub is not None:
+                try:
+                    hub.stop()
+                except Exception:
+                    pass
+            server, socket_server = socket_server, None
+            if server is not None:
+                try:
+                    server.close(reason=reason)
+                except Exception:
+                    pass
+            lock, socket_lock = socket_lock, None
+            if lock is not None:
+                try:
+                    lock.release()
+                except Exception:
+                    pass
+
+        def _build_mismatch(client_build: Any) -> bool | None:
+            """Does the client's build disagree with the code answering it?
+
+            None means NOT COMPARABLE — the client named no build, or this
+            runtime could not measure its own. A fabricated ``false`` there
+            would answer "you are current" for a runtime that does not know,
+            which is exactly the false-all-clear the build stamp exists to
+            retire. Prefix comparison so a short hash and a full one agree.
+            """
+
+            serve_commit = build_block.get("commit")
+            if not isinstance(serve_commit, str) or not serve_commit:
+                return None
+            if not isinstance(client_build, str) or len(client_build.strip()) < 7:
+                return None
+            claimed = client_build.strip().lower()
+            actual = serve_commit.lower()
+            return not (
+                actual.startswith(claimed) or claimed.startswith(actual)
+            )
+
+        def _hello_ok_frame(message: dict[str, Any], connection: Any) -> dict[str, Any]:
+            """The version handshake, enforced end to end at the door."""
+
+            return {
+                "event": "hello_ok",
+                "pid": os.getpid(),
+                "boot_id": boot_id,
+                # The frame-protocol contract this service speaks. A client that
+                # does not recognise it must not proceed on hope.
+                "contract": SERVE_SCHEMA_VERSION,
+                "schema_version": SERVE_SCHEMA_VERSION,
+                "transport": "socket",
+                "connection": connection.key,
+                "runtime_root": runtime_root,
+                "build": build_block,
+                # Visible, never fatal: a client on other code still gets to
+                # work, and now KNOWS it is talking to a different build.
+                "build_mismatch": _build_mismatch(connection.client_build),
+                "draining": drain_state is not None,
+            }
+
+        def _connections_frame() -> dict[str, Any]:
+            payload: dict[str, Any] = {"event": "socket_connections", "boot_id": boot_id}
+            if socket_server is None:
+                payload["enabled"] = False
+                payload["socket"] = socket_block
+                payload["count"] = 0
+                payload["connections"] = []
+            else:
+                payload["enabled"] = True
+                payload.update(socket_server.connections_payload())
+            payload["subscriptions"] = (
+                stream_hub.stats() if stream_hub is not None else {"subscribers": 0}
+            )
+            return payload
+
+        def _handle_socket_line(line: str, connection: Any) -> None:
+            """Every authenticated socket line enters the SHARED dispatcher."""
+
+            _handle_line(line, _sink_for(connection), connection=connection)
 
         def _finish_drain(code: int, frame: dict[str, Any]) -> None:
             """Emit the drain's terminal frame, then get the process out.
@@ -1151,6 +1620,17 @@ def serve_loop(
 
             drain_exit_code = code
             frames.emit(frame)
+            # Socket clients are owed the SAME terminal frame: a client that
+            # asked for the drain over the socket, and every client that was
+            # merely attached, learns how it ended on the transport it is on.
+            # Broadcast before teardown — after ``_close_socket_lane`` there is
+            # nobody left to tell.
+            if socket_server is not None:
+                try:
+                    socket_server.broadcast(frame)
+                except Exception:
+                    pass
+            _close_socket_lane(reason="drain")
             _unregister_instance()
             if code != 0:
                 # Stuck workers: do NOT let the pool's context manager join
@@ -1166,10 +1646,10 @@ def serve_loop(
             # protocol descriptor the reader is parked on, and closing a handle
             # with a synchronous read pending does not return until that read
             # does. With the exit gated behind it, the process outlived its own
-            # completed drain — the terminal frame was published, the registry
-            # entry removed, and the child then sat there forever. A drain that
-            # can hang forever is not a drain, so nothing on the path to the
-            # exit may be allowed to block.
+            # completed drain — the terminal frame was published, the socket
+            # lane released, the registry entry removed, and the child then sat
+            # there forever. A drain that can hang forever is not a drain, so
+            # nothing on the path to the exit may be allowed to block.
             if hard_exit is not None:
                 threading.Thread(
                     target=_force_exit_when_reader_is_stuck,
@@ -1255,9 +1735,451 @@ def serve_loop(
                     last_progress = now
                 time.sleep(max(0.0, min(drain_poll_interval_seconds, deadline - now)))
 
+        # ── the shared dispatcher ───────────────────────────────────────────
+        #
+        # ONE op table, N transports. ``sink`` is where this message's answers
+        # go (stdout for stdio, the originating connection for a socket client)
+        # and ``connection`` is None on stdio. Every branch below was previously
+        # inline in the stdio reader loop and is unchanged in behaviour: on
+        # stdio, ``sink is frames`` and ``connection is None``, so the frames,
+        # their order, and the exit codes are byte-identical.
+
+        def _handle_line(line: str, sink: Any, *, connection: Any = None) -> str | None:
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                sink.emit(
+                    {
+                        "id": None,
+                        "event": "error",
+                        "error": "invalid_request",
+                        "detail": "request line is not valid JSON",
+                    }
+                )
+                return None
+            if not isinstance(message, dict):
+                sink.emit(
+                    {
+                        "id": None,
+                        "event": "error",
+                        "error": "invalid_request",
+                        "detail": "request must be a JSON object",
+                    }
+                )
+                return None
+            return _handle_message(message, sink, connection=connection)
+
+        def _handle_message(
+            message: dict[str, Any], sink: Any, *, connection: Any = None
+        ) -> str | None:
+            """Answer one op. Returns ``"shutdown"`` to stop the stdio reader."""
+
+            nonlocal drain_state
+
+            op = message.get("op")
+            if op == "ping":
+                sink.emit(_busy_frame())
+                return None
+            if op == "hello":
+                # The socket lane authenticates BEFORE this dispatcher ever
+                # sees a line, so a hello arriving here is a second one (or a
+                # stdio client speaking the socket handshake at a pipe that
+                # needs no handshake). Typed, and never a second auth path.
+                sink.emit(
+                    {
+                        "event": "error",
+                        "error": "unexpected_hello",
+                        "detail": (
+                            "this connection is already established; hello is the "
+                            "first line of a SOCKET connection only"
+                        ),
+                    }
+                )
+                return None
+            if op == "version":
+                # Re-askable at any time, and deliberately NOT re-measured:
+                # the answer is what code THIS interpreter loaded, which
+                # cannot change while it lives. A client comparing against
+                # its own install is how "the service is stale" becomes a
+                # measurement instead of a theory.
+                try:
+                    from agent_runtime.build_stamp import build_stamp
+
+                    version_build = build_stamp().payload()
+                except Exception as exc:
+                    version_build = {
+                        "commit": None,
+                        "dirty": None,
+                        "source": "unknown",
+                        "reason": f"stamp_failed:{type(exc).__name__}",
+                    }
+                sink.emit(
+                    {
+                        "event": "version",
+                        "schema_version": SERVE_SCHEMA_VERSION,
+                        "pid": os.getpid(),
+                        "boot_id": boot_id,
+                        # The transport THIS reply came over — honest per
+                        # connection, and unchanged for every stdio consumer.
+                        "transport": "stdio" if connection is None else "socket",
+                        "runtime_root": runtime_root,
+                        "build": version_build,
+                        "auth": auth_block,
+                        "draining": drain_state is not None,
+                        # Additive: what else is attached to this runtime, on
+                        # the reply a client already asks for.
+                        "socket": socket_block,
+                        "connections": _connections_frame(),
+                    }
+                )
+                return None
+            if op == "connections":
+                sink.emit(_connections_frame())
+                return None
+            if op == "subscribe":
+                lane = message.get("lane", "stream")
+                if lane != "stream":
+                    sink.emit(
+                        {
+                            "event": "subscribe_denied",
+                            "lane": lane,
+                            "reason": "unsupported_lane",
+                        }
+                    )
+                    return None
+                if drain_state is not None:
+                    sink.emit(
+                        {
+                            "event": "subscribe_denied",
+                            "lane": "stream",
+                            "reason": "draining",
+                        }
+                    )
+                    return None
+                key = _owner_of(connection)
+                hub = _ensure_stream_hub()
+                if hub.has(key):
+                    sink.emit(
+                        {
+                            "event": "subscribe_denied",
+                            "lane": "stream",
+                            "reason": "already_subscribed",
+                        }
+                    )
+                    return None
+                raw_sink = connection.emit if connection is not None else frames.emit
+
+                def _on_drop(reason: str, stats: dict[str, Any]) -> None:
+                    # Typed, never silent: an unsubscribed client that was told
+                    # nothing would keep folding a stream that stopped arriving
+                    # and believe itself current.
+                    _emit_safely(
+                        sink,
+                        {
+                            "event": "subscription_dropped",
+                            "lane": "stream",
+                            "reason": reason,
+                            "frames_delivered": stats.get("frames_delivered"),
+                            "frames_discarded": stats.get("frames_discarded"),
+                            "buffer_limit": stream_buffer_limit,
+                        },
+                    )
+                    _release_subscription(connection)
+                    _service_log(
+                        {
+                            "event": "serve_stream_subscription_dropped",
+                            "boot_id": boot_id,
+                            "connection": key,
+                            "client": getattr(connection, "client", None),
+                            "reason": reason,
+                        }
+                    )
+
+                # The ACK precedes the subscription, deliberately. The producer
+                # starts pushing the moment ``subscribe`` returns, so acking
+                # afterwards would let the hydrate overtake the ack — and a
+                # client reading "everything up to my ack is a reply to
+                # something else" would discard its own baseline.
+                if connection is not None:
+                    connection.subscribed = True
+                sink.emit(
+                    {
+                        "event": "subscribed",
+                        "lane": "stream",
+                        "connection": key,
+                        "buffer_limit": hub.stats().get("buffer_limit"),
+                    }
+                )
+                if not hub.subscribe(key, sink=raw_sink, on_drop=_on_drop):
+                    # Lost a race with another subscribe for the same key. Say
+                    # so rather than leave a client believing it is attached.
+                    if connection is not None:
+                        connection.subscribed = False
+                    sink.emit(
+                        {
+                            "event": "subscribe_denied",
+                            "lane": "stream",
+                            "reason": "already_subscribed",
+                        }
+                    )
+                return None
+            if op == "unsubscribe":
+                key = _owner_of(connection)
+                was_subscribed = stream_hub is not None and stream_hub.has(key)
+                _release_subscription(connection)
+                sink.emit(
+                    {
+                        "event": "unsubscribed",
+                        "lane": "stream",
+                        "connection": key,
+                        "was_subscribed": was_subscribed,
+                    }
+                )
+                return None
+            if op == "drain":
+                if drain_state is not None:
+                    sink.emit(
+                        {
+                            "event": "drain_in_progress",
+                            "drain_ms": drain_state.elapsed_ms(),
+                            **drain_state.counters(),
+                        }
+                    )
+                    return None
+                drain_state = _DrainState(
+                    _drain_deadline_seconds(
+                        message.get("deadline_seconds"), drain_deadline_seconds
+                    )
+                )
+                # Stop the delivery drain (and with it the busy pump) the
+                # moment we stop accepting work: it forges completed
+                # dispatches back into a sender's thread, and doing that to
+                # a process on its way down is exactly what the shutdown
+                # path already refuses to allow. `drain_progress` frames
+                # take over the liveness duty for the rest of the wait.
+                liveness_stop.set()
+                with inflight_lock:
+                    pending_at_start = sorted(inflight)
+                draining_frame = {
+                    "event": "draining",
+                    "id": None,
+                    "pid": os.getpid(),
+                    "boot_id": boot_id,
+                    "pending": len(pending_at_start),
+                    "request_ids": pending_at_start,
+                    "deadline_seconds": drain_state.deadline_seconds,
+                }
+                frames.emit(draining_frame)
+                if socket_server is not None:
+                    # New sockets are refused from here (existing ones stay up
+                    # to be told how it ends), and every attached client hears
+                    # it at the same moment the stdio supervisor does.
+                    try:
+                        socket_server.begin_drain()
+                        socket_server.broadcast(draining_frame)
+                    except Exception:
+                        pass
+                threading.Thread(
+                    target=_drain_monitor,
+                    args=(drain_state,),
+                    name="harness-serve-drain",
+                    daemon=True,
+                ).start()
+                return None
+            if op == "stacks":
+                # Operator diagnostic: dump every thread's stack as
+                # stderr frames (hung-request forensics without py-spy).
+                import traceback
+
+                for thread_id, frame in sys._current_frames().items():
+                    sink.emit(
+                        {
+                            "id": None,
+                            "event": "stderr",
+                            "line": f"--- thread {thread_id} ---",
+                        }
+                    )
+                    for entry in traceback.format_stack(frame):
+                        for line in entry.rstrip().splitlines():
+                            sink.emit(
+                                {"id": None, "event": "stderr", "line": line}
+                            )
+                sink.emit({"event": "stacks_dumped"})
+                return None
+            if op == "shutdown":
+                if connection is not None:
+                    # A socket client does NOT get to kill a service other
+                    # clients are using. `drain` is the multi-client lifecycle
+                    # verb — it refuses new work, lets in-flight work land, and
+                    # accounts for both — and `shutdown` stays what it has
+                    # always been: the verb of the process that owns the pipe.
+                    sink.emit(
+                        {
+                            "event": "error",
+                            "error": "op_not_available_on_socket",
+                            "detail": (
+                                "shutdown is the stdio owner's verb; use "
+                                '{"op":"drain"} to replace the service safely'
+                            ),
+                        }
+                    )
+                    return None
+                return "shutdown"
+            if op == "cancel":
+                cancel_id = message.get("id")
+                cancel_id = cancel_id.strip() if isinstance(cancel_id, str) else ""
+                if not cancel_id:
+                    sink.emit(
+                        {
+                            "id": None,
+                            "event": "error",
+                            "error": "invalid_request",
+                            "detail": 'cancel needs {"op": "cancel", "id": "<request id>"}',
+                        }
+                    )
+                    return None
+                # Scoped to the asker's OWN work: the inflight table is keyed
+                # per owner, so one client can neither cancel nor even observe
+                # another's request id.
+                owner = _owner_of(connection)
+                cancel_key = (
+                    cancel_id if owner == "stdio" else f"{owner}:{cancel_id}"
+                )
+                with inflight_lock:
+                    future = inflight_futures.get(cancel_key)
+                    running_request = inflight.get(cancel_key)
+                    known = running_request is not None
+                if future is not None and future.cancel():
+                    with inflight_lock:
+                        inflight.pop(cancel_key, None)
+                        inflight_futures.pop(cancel_key, None)
+                    sink.emit(
+                        {
+                            "id": cancel_id,
+                            "event": "exit",
+                            "code": 130,
+                            "cancelled": True,
+                        }
+                    )
+                elif running_request is not None and running_request.is_runtime_stream:
+                    # The state stream is read-only and infinite. Unlike a
+                    # mutation, it has a cooperative cancellation seam and
+                    # MUST release its worker when the Launcher reconnects;
+                    # otherwise four watchdog cycles exhaust the entire
+                    # serve pool with abandoned streams.
+                    running_request.cancel_event.set()
+                    sink.emit(
+                        {
+                            "id": cancel_id,
+                            "event": "cancel_accepted",
+                            "state": "running",
+                        }
+                    )
+                else:
+                    # Already running (uninterruptible) or unknown — the
+                    # side effect may still land; mutation verbs' own
+                    # --issued-at replay guard is what makes that safe.
+                    sink.emit(
+                        {
+                            "id": cancel_id,
+                            "event": "cancel_denied",
+                            "state": "running" if known else "unknown",
+                        }
+                    )
+                return None
+            rid = message.get("id")
+            argv = message.get("argv")
+            if (
+                not isinstance(rid, str)
+                or not rid.strip()
+                or not isinstance(argv, list)
+                or not argv
+                or not all(isinstance(item, str) for item in argv)
+            ):
+                sink.emit(
+                    {
+                        "id": rid if isinstance(rid, str) else None,
+                        "event": "error",
+                        "error": "invalid_request",
+                        "detail": 'request needs {"id": "<non-empty>", "argv": ["harness", …]}',
+                    }
+                )
+                return None
+            if drain_state is not None:
+                # Refused, and ACCOUNTED: the count lands on the terminal
+                # drain frame, so "the restart dropped work" is a number an
+                # operator can read rather than an inference.
+                drain_state.note_refused()
+                sink.emit(
+                    {
+                        "id": rid.strip(),
+                        "event": "draining",
+                        "detail": (
+                            "serve is draining and is not accepting new requests; "
+                            "reconnect to the replacement runtime"
+                        ),
+                        "drain_ms": drain_state.elapsed_ms(),
+                    }
+                )
+                # Terminal frame too: a client that predates the `draining`
+                # event is waiting for an `exit` and would otherwise hang
+                # for the life of its request.
+                sink.emit(
+                    {
+                        "id": rid.strip(),
+                        "event": "exit",
+                        "code": DRAINING_EXIT_CODE,
+                        "draining": True,
+                    }
+                )
+                return None
+            request = _ArgvRequest(
+                rid.strip(),
+                [str(item) for item in argv],
+                owner=_owner_of(connection),
+                sink=None if connection is None else sink,
+            )
+            with inflight_lock:
+                if request.key in inflight:
+                    sink.emit(
+                        {
+                            "id": request.rid,
+                            "event": "error",
+                            "error": "duplicate_request_id",
+                            "detail": "a request with this id is still in flight",
+                        }
+                    )
+                    return None
+                inflight[request.key] = request
+            future = pool.submit(_run, request)
+            with inflight_lock:
+                # _run may already have finished and popped the request;
+                # only track the future while the request is in flight so
+                # the registry cannot leak completed entries.
+                if request.key in inflight:
+                    inflight_futures[request.key] = future
+            return None
+
         pool = ThreadPoolExecutor(
             max_workers=max(1, pool_size), thread_name_prefix="harness-serve"
         )
+        # The socket starts ACCEPTING only now: the listener has been bound
+        # since before the ready frame (so the port could be published), but a
+        # connection whose first request landed before this pool existed would
+        # have nowhere to dispatch. The backlog holds them for the microseconds
+        # in between.
+        if socket_server is not None:
+            try:
+                socket_server.start_accepting()
+            except Exception as exc:
+                _service_log(
+                    {
+                        "event": "serve_socket_accept_start_failed",
+                        "boot_id": boot_id,
+                        "reason": type(exc).__name__,
+                    }
+                )
+                _close_socket_lane(reason="accept_start_failed")
         # Explicit construction + shutdown rather than ``with``: the drain's
         # timeout path must be able to stop waiting on work that has proven it
         # will not finish, and a context manager always joins.
@@ -1266,248 +2188,8 @@ def serve_loop(
                 line = raw.strip()
                 if not line:
                     continue
-                try:
-                    message = json.loads(line)
-                except json.JSONDecodeError:
-                    frames.emit(
-                        {
-                            "id": None,
-                            "event": "error",
-                            "error": "invalid_request",
-                            "detail": "request line is not valid JSON",
-                        }
-                    )
-                    continue
-                if not isinstance(message, dict):
-                    frames.emit(
-                        {
-                            "id": None,
-                            "event": "error",
-                            "error": "invalid_request",
-                            "detail": "request must be a JSON object",
-                        }
-                    )
-                    continue
-                op = message.get("op")
-                if op == "ping":
-                    frames.emit(_busy_frame())
-                    continue
-                if op == "version":
-                    # Re-askable at any time, and deliberately NOT re-measured:
-                    # the answer is what code THIS interpreter loaded, which
-                    # cannot change while it lives. A client comparing against
-                    # its own install is how "the service is stale" becomes a
-                    # measurement instead of a theory.
-                    try:
-                        from agent_runtime.build_stamp import build_stamp
-
-                        version_build = build_stamp().payload()
-                    except Exception as exc:
-                        version_build = {
-                            "commit": None,
-                            "dirty": None,
-                            "source": "unknown",
-                            "reason": f"stamp_failed:{type(exc).__name__}",
-                        }
-                    frames.emit(
-                        {
-                            "event": "version",
-                            "schema_version": SERVE_SCHEMA_VERSION,
-                            "pid": os.getpid(),
-                            "boot_id": boot_id,
-                            "transport": "stdio",
-                            "runtime_root": runtime_root,
-                            "build": version_build,
-                            "auth": auth_block,
-                            "draining": drain_state is not None,
-                        }
-                    )
-                    continue
-                if op == "drain":
-                    if drain_state is not None:
-                        frames.emit(
-                            {
-                                "event": "drain_in_progress",
-                                "drain_ms": drain_state.elapsed_ms(),
-                                **drain_state.counters(),
-                            }
-                        )
-                        continue
-                    drain_state = _DrainState(
-                        _drain_deadline_seconds(
-                            message.get("deadline_seconds"), drain_deadline_seconds
-                        )
-                    )
-                    # Stop the delivery drain (and with it the busy pump) the
-                    # moment we stop accepting work: it forges completed
-                    # dispatches back into a sender's thread, and doing that to
-                    # a process on its way down is exactly what the shutdown
-                    # path already refuses to allow. `drain_progress` frames
-                    # take over the liveness duty for the rest of the wait.
-                    liveness_stop.set()
-                    with inflight_lock:
-                        pending_at_start = sorted(inflight)
-                    frames.emit(
-                        {
-                            "event": "draining",
-                            "id": None,
-                            "pid": os.getpid(),
-                            "boot_id": boot_id,
-                            "pending": len(pending_at_start),
-                            "request_ids": pending_at_start,
-                            "deadline_seconds": drain_state.deadline_seconds,
-                        }
-                    )
-                    threading.Thread(
-                        target=_drain_monitor,
-                        args=(drain_state,),
-                        name="harness-serve-drain",
-                        daemon=True,
-                    ).start()
-                    continue
-                if op == "stacks":
-                    # Operator diagnostic: dump every thread's stack as
-                    # stderr frames (hung-request forensics without py-spy).
-                    import traceback
-
-                    for thread_id, frame in sys._current_frames().items():
-                        frames.emit(
-                            {
-                                "id": None,
-                                "event": "stderr",
-                                "line": f"--- thread {thread_id} ---",
-                            }
-                        )
-                        for entry in traceback.format_stack(frame):
-                            for line in entry.rstrip().splitlines():
-                                frames.emit(
-                                    {"id": None, "event": "stderr", "line": line}
-                                )
-                    frames.emit({"event": "stacks_dumped"})
-                    continue
-                if op == "shutdown":
+                if _handle_line(line, frames) == "shutdown":
                     break
-                if op == "cancel":
-                    cancel_id = message.get("id")
-                    cancel_id = cancel_id.strip() if isinstance(cancel_id, str) else ""
-                    if not cancel_id:
-                        frames.emit(
-                            {
-                                "id": None,
-                                "event": "error",
-                                "error": "invalid_request",
-                                "detail": 'cancel needs {"op": "cancel", "id": "<request id>"}',
-                            }
-                        )
-                        continue
-                    with inflight_lock:
-                        future = inflight_futures.get(cancel_id)
-                        running_request = inflight.get(cancel_id)
-                        known = running_request is not None
-                    if future is not None and future.cancel():
-                        with inflight_lock:
-                            inflight.pop(cancel_id, None)
-                            inflight_futures.pop(cancel_id, None)
-                        frames.emit(
-                            {
-                                "id": cancel_id,
-                                "event": "exit",
-                                "code": 130,
-                                "cancelled": True,
-                            }
-                        )
-                    elif running_request is not None and running_request.is_runtime_stream:
-                        # The state stream is read-only and infinite. Unlike a
-                        # mutation, it has a cooperative cancellation seam and
-                        # MUST release its worker when the Launcher reconnects;
-                        # otherwise four watchdog cycles exhaust the entire
-                        # serve pool with abandoned streams.
-                        running_request.cancel_event.set()
-                        frames.emit(
-                            {
-                                "id": cancel_id,
-                                "event": "cancel_accepted",
-                                "state": "running",
-                            }
-                        )
-                    else:
-                        # Already running (uninterruptible) or unknown — the
-                        # side effect may still land; mutation verbs' own
-                        # --issued-at replay guard is what makes that safe.
-                        frames.emit(
-                            {
-                                "id": cancel_id,
-                                "event": "cancel_denied",
-                                "state": "running" if known else "unknown",
-                            }
-                        )
-                    continue
-                rid = message.get("id")
-                argv = message.get("argv")
-                if (
-                    not isinstance(rid, str)
-                    or not rid.strip()
-                    or not isinstance(argv, list)
-                    or not argv
-                    or not all(isinstance(item, str) for item in argv)
-                ):
-                    frames.emit(
-                        {
-                            "id": rid if isinstance(rid, str) else None,
-                            "event": "error",
-                            "error": "invalid_request",
-                            "detail": 'request needs {"id": "<non-empty>", "argv": ["harness", …]}',
-                        }
-                    )
-                    continue
-                if drain_state is not None:
-                    # Refused, and ACCOUNTED: the count lands on the terminal
-                    # drain frame, so "the restart dropped work" is a number an
-                    # operator can read rather than an inference.
-                    drain_state.note_refused()
-                    frames.emit(
-                        {
-                            "id": rid.strip(),
-                            "event": "draining",
-                            "detail": (
-                                "serve is draining and is not accepting new requests; "
-                                "reconnect to the replacement runtime"
-                            ),
-                            "drain_ms": drain_state.elapsed_ms(),
-                        }
-                    )
-                    # Terminal frame too: a client that predates the `draining`
-                    # event is waiting for an `exit` and would otherwise hang
-                    # for the life of its request.
-                    frames.emit(
-                        {
-                            "id": rid.strip(),
-                            "event": "exit",
-                            "code": DRAINING_EXIT_CODE,
-                            "draining": True,
-                        }
-                    )
-                    continue
-                request = _ArgvRequest(rid.strip(), [str(item) for item in argv])
-                with inflight_lock:
-                    if request.rid in inflight:
-                        frames.emit(
-                            {
-                                "id": request.rid,
-                                "event": "error",
-                                "error": "duplicate_request_id",
-                                "detail": "a request with this id is still in flight",
-                            }
-                        )
-                        continue
-                    inflight[request.rid] = request
-                future = pool.submit(_run, request)
-                with inflight_lock:
-                    # _run may already have finished and popped the request;
-                    # only track the future while the request is in flight so
-                    # the registry cannot leak completed entries.
-                    if request.rid in inflight:
-                        inflight_futures[request.rid] = future
         finally:
             # The reader is done; from here the process is unwinding normally,
             # which is what the drain monitor's grace window is waiting to see.
@@ -1533,28 +2215,44 @@ def serve_loop(
             # already joined above, so it is normally one poll away) and, if it
             # never publishes, say so in a typed frame of its own.
             if not drain_finished.wait(_DRAIN_ABANDON_GRACE_SECONDS):
-                frames.emit(
-                    {
-                        "event": "drain_abandoned",
-                        "pid": os.getpid(),
-                        "boot_id": boot_id,
-                        **drain_state.counters(),
-                        "drain_ms": drain_state.elapsed_ms(),
-                        "detail": (
-                            "the transport closed while a drain was still in "
-                            "progress; the drain published no terminal frame"
-                        ),
-                    }
-                )
+                abandoned = {
+                    "event": "drain_abandoned",
+                    "pid": os.getpid(),
+                    "boot_id": boot_id,
+                    **drain_state.counters(),
+                    "drain_ms": drain_state.elapsed_ms(),
+                    "detail": (
+                        "the transport closed while a drain was still in "
+                        "progress; the drain published no terminal frame"
+                    ),
+                }
+                frames.emit(abandoned)
+                if socket_server is not None:
+                    try:
+                        socket_server.broadcast(abandoned)
+                    except Exception:
+                        pass
+                _close_socket_lane(reason="drain_abandoned")
                 _unregister_instance()
                 # Nonzero on purpose, and the SAME code a timeout uses: a
                 # supervisor must be able to tell "drained" from "gave up".
                 return DRAIN_TIMEOUT_EXIT_CODE
-            # ``_finish_drain`` published the frame and unregistered;
-            # ``drain_exit_code`` is its verdict, not this path's.
+            # ``_finish_drain`` published the frame, closed the socket lane, and
+            # unregistered; ``drain_exit_code`` is its verdict, not this path's.
             return drain_exit_code
+        shutdown_frame = {"event": "shutdown", "pid": os.getpid()}
+        # Socket clients hear it BEFORE the transport closes under them: an
+        # attached client whose socket simply died could not tell a clean
+        # service shutdown from a crash, which is the distinction the durable
+        # service exists to make legible.
+        if socket_server is not None:
+            try:
+                socket_server.broadcast(shutdown_frame)
+            except Exception:
+                pass
+        _close_socket_lane(reason="shutdown")
         _unregister_instance()
-        frames.emit({"event": "shutdown", "pid": os.getpid()})
+        frames.emit(shutdown_frame)
         return 0
     finally:
         sys.stdout, sys.stderr = original_stdout, original_stderr
@@ -1658,6 +2356,10 @@ def _cmd_serve(args) -> int:
             # stuck ones are precisely why the deadline fired. Every frame is
             # flushed at emit, so nothing observable is lost.
             hard_exit=os._exit,
+            # The durable service's transport. ON here and nowhere else: every
+            # ``serve_loop`` unit test observes the byte-identical stdio loop
+            # unless it asks for the socket by name.
+            socket_lane=not getattr(args, "no_socket", False),
         )
     finally:
         try:
@@ -1668,3 +2370,135 @@ def _cmd_serve(args) -> int:
             os.close(protocol_in)
         except OSError:
             pass
+
+
+# ── the first real client ────────────────────────────────────────────────────
+#
+# ``harness serve connect`` is the operator/agent lane onto the socket: it
+# resolves the root's live service from the registry, performs the mandatory
+# hello, and prints what it got as JSON. It exists for three reasons, in order
+# of importance:
+#
+# 1. A transport with no client is a transport nobody has proven. This performs
+#    the REAL handshake against the REAL auth token over the REAL socket.
+# 2. ``--drain`` gives the durable service its restart verb from the outside —
+#    the thing slice 2 could describe but could not exercise, because a drain
+#    over stdio ends the only connection that could observe it.
+# 3. It is the shape the Launcher's client will mirror when it migrates.
+
+#: Nothing to connect to (no live socket service for this root).
+SERVE_CONNECT_NO_SERVICE_EXIT_CODE = 4
+#: The service is there; this client could not authenticate to it.
+SERVE_CONNECT_REJECTED_EXIT_CODE = 5
+#: The connection itself failed (refused, timed out, died mid-handshake).
+SERVE_CONNECT_TRANSPORT_EXIT_CODE = 6
+
+
+def _cmd_serve_connect(args) -> int:
+    from agent_runtime import paths
+    from agent_runtime.build_stamp import build_stamp
+    from agent_runtime.serve_auth import read_token
+    from agent_runtime.serve_socket import ServeSocketClient, resolve_socket_target
+
+    def _emit(payload: dict[str, Any]) -> None:
+        print(json.dumps(payload, ensure_ascii=False, default=str, indent=2))
+
+    store_root = paths.store_root()
+    target = resolve_socket_target(store_root)
+    if target is None:
+        _emit(
+            {
+                "ok": False,
+                "error": "no_socket_service",
+                "detail": (
+                    "no live serve with a socket transport is registered for this "
+                    "runtime root"
+                ),
+                "runtime_root": str(store_root),
+            }
+        )
+        return SERVE_CONNECT_NO_SERVICE_EXIT_CODE
+    token = read_token(store_root)
+    if not token:
+        # Fails CLOSED, and says which side is missing: a client with no token
+        # cannot authenticate, and pretending otherwise would send a hello that
+        # can only ever be rejected.
+        _emit(
+            {
+                "ok": False,
+                "error": "no_auth_token",
+                "detail": "this runtime root has no serve auth token to present",
+                "runtime_root": str(store_root),
+                "target": target.payload(),
+            }
+        )
+        return SERVE_CONNECT_REJECTED_EXIT_CODE
+    client_build = build_stamp().commit
+    report: dict[str, Any] = {
+        "ok": False,
+        "runtime_root": str(store_root),
+        "target": target.payload(),
+        "client": getattr(args, "client", None) or "harness-serve-connect",
+        "client_build": client_build,
+    }
+    timeout = float(getattr(args, "timeout", 10.0) or 10.0)
+    connection = ServeSocketClient(target.host, target.port, timeout_seconds=timeout)
+    try:
+        connection.connect()
+    except OSError as exc:
+        report["error"] = "connect_failed"
+        report["detail"] = type(exc).__name__
+        _emit(report)
+        return SERVE_CONNECT_TRANSPORT_EXIT_CODE
+    try:
+        hello = connection.hello(
+            token=token, client=report["client"], client_build=client_build
+        )
+        report["hello"] = hello
+        if not isinstance(hello, dict) or hello.get("event") != "hello_ok":
+            report["error"] = (
+                "hello_rejected" if isinstance(hello, dict) else "no_hello_reply"
+            )
+            _emit(report)
+            return SERVE_CONNECT_REJECTED_EXIT_CODE
+        if getattr(args, "probe", False):
+            connection.send({"op": "version"})
+            report["version"] = connection.read_frame()
+        if getattr(args, "drain", False):
+            deadline = getattr(args, "deadline_seconds", None)
+            request: dict[str, Any] = {"op": "drain"}
+            if deadline is not None:
+                request["deadline_seconds"] = float(deadline)
+            connection.send(request)
+            # Read to the TERMINAL frame, not to the first one: the drain's
+            # evidence (what it refused, what it completed) is on the terminal
+            # frame, and a client that stopped at ``draining`` would report a
+            # restart it never watched finish.
+            observed: list[dict[str, Any]] = []
+            terminal = {
+                "drain_complete",
+                "drain_timeout",
+                "drain_abandoned",
+                "drain_in_progress",
+            }
+            while True:
+                frame = connection.read_frame()
+                if frame is None:
+                    break
+                observed.append(frame)
+                if frame.get("event") in terminal:
+                    break
+            report["drain"] = observed
+            report["drain_outcome"] = (
+                observed[-1].get("event") if observed else "no_frames"
+            )
+        report["ok"] = True
+        _emit(report)
+        return 0
+    except OSError as exc:
+        report["error"] = "transport_failed"
+        report["detail"] = type(exc).__name__
+        _emit(report)
+        return SERVE_CONNECT_TRANSPORT_EXIT_CODE
+    finally:
+        connection.close()

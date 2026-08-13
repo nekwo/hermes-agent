@@ -264,6 +264,36 @@ def test_a_record_without_a_usable_pid_is_unknown(tmp_path, pid):
     assert reason == "pid_missing"
 
 
+# ── the socket lane's additive fields (slice 3) ─────────────────────────────
+
+
+def test_the_socket_fields_are_always_present_even_on_a_stdio_only_serve(tmp_path):
+    """Null says "this serve has no socket". A MISSING key would say "this entry
+    predates the socket lane" — a different fact, and one a client discovering a
+    service must not have to guess between."""
+
+    register_serve_instance(tmp_path, pid=4242, probe=_probe())
+    stdio_only = json.loads((tmp_path / "serve_instances" / "4242.json").read_bytes())
+
+    assert stdio_only["transport"] == "stdio"
+    assert stdio_only["port"] is None
+    assert stdio_only["socket_started_at"] is None
+
+    register_serve_instance(
+        tmp_path,
+        pid=4243,
+        probe=_probe(),
+        transport="stdio+socket",
+        port=51515,
+        socket_started_at="2026-08-13T00:00:00.000Z",
+    )
+    with_socket = json.loads((tmp_path / "serve_instances" / "4243.json").read_bytes())
+
+    assert with_socket["transport"] == "stdio+socket"
+    assert with_socket["port"] == 51515
+    assert with_socket["socket_started_at"] == "2026-08-13T00:00:00.000Z"
+
+
 def test_unregistering_retries_a_transiently_locked_entry(tmp_path, monkeypatch):
     """On Windows this is the ORDINARY case, not an exotic one.
 

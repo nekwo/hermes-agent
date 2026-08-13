@@ -168,8 +168,20 @@ def register_serve_instance(
     boot_id: str | None = None,
     argv: list[str] | None = None,
     probe: ProcessProbe | None = None,
+    port: int | None = None,
+    socket_started_at: str | None = None,
 ) -> ServeInstanceRegistration:
-    """Announce this serve under *store_root*. Best effort, always reported."""
+    """Announce this serve under *store_root*. Best effort, always reported.
+
+    ``port`` / ``socket_started_at`` are the socket lane's additive fields
+    (slice 3), and they are ALWAYS written — ``null`` on a stdio-only serve. A
+    conditional key could not distinguish "this serve has no socket" from "this
+    entry predates the socket lane"; a null says the first, plainly.
+    ``transport`` becomes ``stdio+socket`` on the serve that won the per-root
+    socket ownership lock, so discovery reads the port off the entry whose
+    liveness this module has already classified rather than out of a second file
+    with its own staleness story.
+    """
 
     resolved_pid = int(pid if pid is not None else os.getpid())
     resolved_boot_id = boot_id or uuid.uuid4().hex
@@ -180,6 +192,8 @@ def register_serve_instance(
         "pid": resolved_pid,
         "boot_id": resolved_boot_id,
         "transport": transport,
+        "port": None if port is None else int(port),
+        "socket_started_at": socket_started_at,
         "store_root": str(store_root),
         "started_at": _now_iso(),
         # The identity baseline the recycled-pid check compares against. None
@@ -221,9 +235,10 @@ def unregister_serve_instance(
     is routinely held open by the AV/indexer for a few tens of milliseconds, and
     ``unlink`` then fails with WinError 32 — observed live on the drain path,
     where the whole point is a clean handover: the drain published its terminal
-    frame and left its registry entry behind, so the registry advertised a serve
-    that had just gone. The lock was held for ~16ms there; one retry cleared it.
-    FileNotFoundError is NOT retried — already gone is a state, not a failure.
+    frame, released the socket lock, and left its registry entry behind, so the
+    registry advertised a serve that had just gone. The lock was held for ~16ms
+    there; one retry cleared it. FileNotFoundError is NOT retried — already gone
+    is a state, not a failure.
 
     Never raises: a runtime on its way down must not fail on bookkeeping, and a
     leftover entry is a state the reader already classifies honestly.

@@ -1326,10 +1326,29 @@ def build_parser(parent_subparsers) -> None:
         help="Force the first post-hydrate batch to a full core (S6: a reconnecting fold client re-baselining before it folds patches)",
     )
     stream.set_defaults(func=_cmd_stream)
-    serve = subs.add_parser("serve", help="Persistent NDJSON stdio bridge: dispatch harness argv requests in one warm process (Mission Control serve lane)")
+    serve = subs.add_parser("serve", help="Persistent NDJSON bridge: dispatch harness argv requests in one warm process (Mission Control serve lane), on stdio and on the per-root localhost socket")
     serve.add_argument("--ndjson", action="store_true", help="NDJSON frame transport over stdio (the only v1 transport)")
     serve.add_argument("--pool-size", type=int, default=4, help=argparse.SUPPRESS)
+    serve.add_argument(
+        "--no-socket",
+        action="store_true",
+        help="Run stdio-only: do not race for the per-root socket ownership lock and do not listen (the ready frame reports socket.outcome=disabled)",
+    )
     serve.set_defaults(func=_cmd_serve)
+    # Sub-verbs under `serve`. The subparser is NOT required, so a bare
+    # `harness serve --ndjson` keeps parsing exactly as it always has and still
+    # dispatches to `_cmd_serve`.
+    serve_subs = serve.add_subparsers(dest="serve_command")
+    serve_connect = serve_subs.add_parser(
+        "connect",
+        help="Connect to this root's live serve socket, perform the hello handshake, and print the reply as JSON",
+    )
+    serve_connect.add_argument("--probe", action="store_true", help="Also ask the service for its version block (build, boot_id, connections)")
+    serve_connect.add_argument("--drain", action="store_true", help="Ask the service to drain and read to its terminal frame (the durable-service restart verb, from the outside)")
+    serve_connect.add_argument("--deadline-seconds", type=float, default=None, help="Drain deadline handed to the service (clamped there to 0.05s..3600s)")
+    serve_connect.add_argument("--client", default=None, help="Client name recorded on the connection and in the service's logs (default: harness-serve-connect)")
+    serve_connect.add_argument("--timeout", type=float, default=10.0, help="Socket connect/read timeout in seconds")
+    serve_connect.set_defaults(func=_cmd_serve_connect)
     rebuild_read_model = subs.add_parser("rebuild-read-model", help="Rebuild read_model.db from the current event-sourced store")
     rebuild_read_model.add_argument("--json", action="store_true")
     rebuild_read_model.set_defaults(func=_cmd_rebuild_read_model)
@@ -3619,6 +3638,12 @@ def _cmd_serve(args) -> int:
     from hermes_cli.harness_parts.serve import _cmd_serve as _run_serve
 
     return _run_serve(args)
+
+
+def _cmd_serve_connect(args) -> int:
+    from hermes_cli.harness_parts.serve import _cmd_serve_connect as _run_connect
+
+    return _run_connect(args)
 
 
 def _load_command_parts() -> None:
