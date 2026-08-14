@@ -115,6 +115,13 @@ PINNED_ONLY_FILES = (
     "patch.json",
     "patch_upsert_profile.json",
     "patch_remove.json",
+    # The S7-A OFFICE leg: an ``office_actor`` upsert for one dragged desk. Its
+    # ``changed`` is a real capture off the production generator (the actor row
+    # ``snapshot._office_actor_summary_row`` builds, verbatim); only the
+    # timestamps are normalized to the pinned stamp its siblings carry. Pinned
+    # rather than generated for the same reason they are: the seeded isolated
+    # root the generator builds holds no office surface.
+    "patch_office_actor.json",
     "patch_coverage_manifest.json",
 )
 

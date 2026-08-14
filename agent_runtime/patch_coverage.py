@@ -30,8 +30,10 @@ per-field allowlist, no re-derivation. So coverage is defined at the OP level:
   run traces, the ``state.reconciled`` watchdog, ``persona_assignment.*`` (the
   ``persona_assignments`` frame section is a ``{active, recent}`` projection, not
   an id-keyed table the launcher can fold a remove into), ``task.*`` domain
-  events, board/flow/office writes, and — the known uncovered case the plan names —
-  ``planning.py`` chokepoint-less mutations (no ``state.patched`` at all).
+  events, board/flow writes, every office write EXCEPT the actor-only upsert
+  (see ``LIVE_COVERED_DOMAIN_EVENT_TYPES``), and — the known uncovered case the
+  plan names — ``planning.py`` chokepoint-less mutations (no ``state.patched``
+  at all).
 
 Conservative-by-construction: a single uncovered event in a batch demotes the
 whole batch, so the launcher never sees a patch frame it cannot fold.
@@ -113,6 +115,21 @@ LIVE_COVERED_DOMAIN_EVENT_TYPES: frozenset[str] = frozenset(
     {
         "persona_instance.steered",
         "persona_instance.profile_updated",
+        # Pairs with the ``office_actor`` patch ``OfficeStore.upsert_actor``
+        # emits from inside the same ``office_lock`` — same chokepoint, same
+        # batch, no fold state of its own (its payload is an item count and a
+        # revision the patch's own row already carries).
+        #
+        # Its SIBLINGS are deliberately absent and must stay absent.
+        # ``office.actor.removed`` / ``.restored`` / ``.conflict_resolved`` and
+        # ``office.surface.*`` each rewrite the SURFACE row —
+        # ``archived_actor_keys``, ``folders``, the surface's own ``revision``
+        # and ``updated_at`` — which an actor-row patch cannot express. Leaving
+        # them uncovered is what routes their batches down the full-core lane
+        # with no new code and no new failure mode; covering one would ship a
+        # patch frame that folded an actor and silently dropped the surface
+        # change riding beside it.
+        "office.actor.upserted",
     }
 )
 
@@ -255,9 +272,9 @@ def event_is_patch_coverable(
     paired patch — it is not entity-gated, because it carries no state to fold
     and the launcher ignores it; the gate that matters is on the paired
     ``state.patched``, which rides the same batch. Anything else (task/assignment
-    domain events, run traces, ``state.reconciled`` watchdog, board/flow/office
-    writes, planning.py chokepoint-less mutations) is uncovered → the whole batch
-    falls back to a full core."""
+    domain events, run traces, ``state.reconciled`` watchdog, board/flow writes,
+    the office SURFACE/remove/restore writes, planning.py chokepoint-less
+    mutations) is uncovered → the whole batch falls back to a full core."""
 
     event_type = getattr(event, "type", None)
     if event_type == STATE_PATCHED_EVENT_TYPE:

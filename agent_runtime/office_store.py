@@ -159,6 +159,55 @@ class OfficeStore:
 
             logging.getLogger(__name__).warning("office event append failed: %s", event_type, exc_info=True)
 
+    def _emit_actor_patch(self, actor: OfficeActor, *, replaced_existing: bool, surface_rewritten: bool) -> None:
+        """Emit the S7-A ``office_actor`` patch for one actor write.
+
+        Called from INSIDE ``office_lock`` and handed the in-memory actor that
+        was just written. Both are load-bearing, and together they are the
+        monotonicity guarantee the whole patch lane rests on:
+
+        * **Inside the lock.** ``office_lock`` is a cross-process file lock, so
+          holding it across (write file → append event) makes EventLog order
+          agree with revision order for a given actor. Appending after release
+          admits the inversion: writer A takes rev 2 and writer B takes rev 3,
+          B's append wins the race, and the fold applies rev 3 at the lower
+          offset then rev 2 at the higher — leaving the launcher's core at rev 2
+          while disk says 3, with no gap for the ``base_offset`` check to catch.
+          The stream watermark stays monotonic (it is the log offset); the
+          ENTITY watermark would not be, and nothing downstream would notice.
+        * **From the written object rather than a re-read.** Stated honestly
+          after mutation testing showed it is NOT independently load-bearing:
+          swapping in a ``get_actor`` re-read stayed green, because the re-read
+          happens under the same lock and therefore cannot see another writer.
+          It is defense-in-depth for the day someone moves this call out of the
+          lock — the placement above is the actual guarantee, and the re-read
+          would only turn a lock bug into a subtler one. Do not read the two
+          bullets as two independent guards; there is one, and it is the lock.
+
+        ``replaced_existing`` / ``surface_rewritten`` decide upsert vs. refresh:
+        a patch describes the ACTOR row only, so a write that moved the parent
+        office row (a create bumps ``actor_count``; a re-add of an archived key
+        rewrites ``archived_actor_keys`` and the surface ``updated_at``) takes
+        the accounted degrade instead. Best-effort like ``_emit`` beside it: a
+        patch-lane fault must never take an office write down, and a missing
+        patch is a missing PROMOTION — the batch then ships the full core it
+        would have shipped before this lane existed.
+        """
+
+        try:
+            from .state_patches import emit_office_actor_patch, emit_office_actor_refresh
+
+            if replaced_existing and not surface_rewritten:
+                emit_office_actor_patch(self.event_log, actor)
+            else:
+                emit_office_actor_refresh(self.event_log, actor.workspace_id, actor.actor_key)
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "office actor patch emit failed: %s", actor.actor_key, exc_info=True
+            )
+
     # --- surface reads ----------------------------------------------------
 
     def get_surface(self, workspace_id: str) -> OfficeSurface:
@@ -344,11 +393,19 @@ class OfficeStore:
             # An explicit local upsert of an archived key is operator intent to
             # re-add: clear the resurrection-guard ledger entry + archive copy
             # so a later pull doesn't re-archive it.
-            if actor_key in surface.archived_actor_keys:
+            surface_rewritten = actor_key in surface.archived_actor_keys
+            if surface_rewritten:
                 surface.archived_actor_keys = [k for k in surface.archived_actor_keys if k != actor_key]
                 surface.updated_at = ts
                 _write_surface(surface)
             archived_path.unlink(missing_ok=True)
+            # INSIDE the lock, and from the actor object just written — see
+            # _emit_actor_patch for why both halves of that are load-bearing.
+            self._emit_actor_patch(
+                actor,
+                replaced_existing=existing is not None,
+                surface_rewritten=surface_rewritten,
+            )
             self._emit(
                 "office.actor.upserted",
                 workspace_id=wsid,

@@ -488,6 +488,200 @@ def emit_persona_instance_remove(
     )
 
 
+def project_office_actor_wire_row(actor: Any) -> dict[str, Any]:
+    """The office-actor WIRE row, produced by the SNAPSHOT's own row builder.
+
+    Unlike the persona-instance projection above — which reproduces
+    ``persona_instance_summary``'s derived-field logic field-for-field and is
+    held to it by a golden — this one CALLS ``snapshot._office_actor_summary_row``
+    directly. It can, because that builder is already pure (a field copy off an
+    ``OfficeActor`` plus the caller-supplied ``unpublished``): there is no
+    ``_profile_visibility_persona`` equivalent to seed a store or emit a stray
+    domain event into the mutation's own batch. Byte-parity with a full rebuild
+    is therefore STRUCTURAL rather than asserted, which is the stronger of the
+    two — a field added to the summary row reaches the patch lane in the same
+    commit and cannot drift out of it.
+
+    ``unpublished`` is the one field the builder does not compute, and it MUST be
+    recomputed here rather than left to the fold's merge: a drag changes the
+    actor's content hash, so a realm-bound actor flips ``unpublished`` False→True
+    on the same write. A patch that omitted the key would leave the launcher's
+    "unpublished" badge showing the pre-drag answer for the rest of the session —
+    the exact stale-derived-field failure S6→S7-A was rewritten to end. The
+    derivation mirrors ``snapshot._offices_summary``: no realm behind the
+    workspace → no baseline → the key is OMITTED (not False), because "this
+    workspace does not publish" and "this actor is published" are different facts.
+    """
+
+    from .snapshot import _office_actor_summary_row
+
+    return _office_actor_summary_row(actor, unpublished=_office_actor_unpublished(actor))
+
+
+def _office_actor_unpublished(actor: Any) -> bool | None:
+    """``True``/``False`` for a realm-bound actor, ``None`` (→ key omitted) when
+    the workspace has no realm or the lookup fails.
+
+    Mirrors ``snapshot._offices_summary``'s ``_actor_unpublished`` closure,
+    including its archived-workspace behaviour: that function builds its
+    workspace→realm map from ``WorkspaceStore.list_all()``, which excludes
+    archived workspaces, so an actor under an archived workspace resolves to
+    ``None`` there and must resolve to ``None`` here.
+
+    Best-effort by design: a publication-honesty flag must never be able to take
+    an office write down, and ``None`` degrades to the same key-omitted shape a
+    non-realm workspace produces.
+    """
+
+    try:
+        from .office_models import office_content_hash
+        from .office_sync import read_office_baseline
+        from .store import WorkspaceStore
+
+        workspace = WorkspaceStore().get(str(getattr(actor, "workspace_id", "") or ""))
+        if getattr(workspace, "archived", False):
+            return None
+        realm_id = getattr(workspace, "realm_id", None)
+        if not realm_id:
+            return None
+        baseline = read_office_baseline(str(realm_id))
+        key = f"{actor.workspace_id}:actor:{actor.actor_key}"
+        return baseline.get(key) != office_content_hash(actor)
+    except Exception:
+        return None
+
+
+# What an office patch INVALIDATES on disk: nothing — and that is a measured
+# fact about a lane NOBODY owns, not a choice this leg made.
+#
+# The launcher paints from a disk-cached snapshot at boot before authoritative
+# truth arrives. That cache is ``paths.snapshot_path()`` (``snapshot.json`` in
+# the store root), and the question "what happens to it when a patch folds" has
+# a flat answer: it is not touched, it cannot be touched from here, and it was
+# already going stale before this leg existed.
+#
+# * The ONLY writer is :func:`snapshot.write_snapshot`, reached from exactly one
+#   production call site — ``read_model.resolve_snapshot_frame``, i.e. the
+#   ``harness snapshot`` CLI verb. The stream lane calls ``build_snapshot()``
+#   and never ``write_snapshot``; a ``harness snapshot`` answered from serve's
+#   20-second read cache does not write either.
+# * The launcher has NO writer at all — it only reads the file — and a folded
+#   core never reaches it (``MissionReadModel.commitFold`` mutates memory only).
+#   The cache is also never used as a fold BASE, so it can neither corrupt nor
+#   be corrected by this lane.
+# * The launcher's cached-boot lane gates on CONTRACT SHAPE, not freshness: no
+#   TTL, no age check, no watermark comparison. A ``snapshot.json`` written
+#   weeks ago paints on boot if it parses.
+#
+# So the staleness the office push leg is accused of creating is pre-existing
+# and lane-wide: every persona-instance patch since S7-A, and every full-core
+# stream delta too, has left that file untouched. This leg does not widen the
+# window; it makes reaching it cheaper, because cheap patches flow more often.
+#
+# What this leg therefore does NOT do, deliberately: invalidate or rewrite
+# ``snapshot.json`` from the office chokepoint. Doing so would put a
+# cross-process file mutation on a drag's hot path, and deleting it would take
+# the boot-paint fast path away from every surface to fix one section of it.
+#
+# WHAT REMAINS OPEN, and it is not this slice's to close: the cached boot lane
+# has no defined staleness bound and no receipt saying which it painted. The
+# fix is one of (a) a freshness gate on the cached read — the file's
+# ``generated_at`` is already in it — or (b) a boot receipt naming the cache's
+# age, the same shape that made the READ leg verifiable. Whoever owns the
+# cached-boot lane must take it; nothing in the read, write, or push leg can.
+# Note the office is the one section where a client CAN already detect its own
+# staleness unaided: ``runtime.office.get`` puts the actor ``revision`` on every
+# item, so a cached canvas can be diffed against server truth for ~2.5 KB.
+
+OFFICE_ACTOR_ENTITY = "office_actor"
+
+
+def office_actor_patch_id(workspace_id: Any, actor_key: Any) -> str:
+    """The patch identity for one office actor: ``"<workspace_id>/<actor_key>"``.
+
+    An ``actor_key`` alone is NOT an identity. Actor files live at
+    ``office/<workspace_id>/actors/<token>.json``, so uniqueness is per-workspace
+    by construction and two workspaces may legitimately hold the same key — a
+    bare key on the wire would address whichever one the fold happened to find.
+
+    ``/`` is the separator because it is the one character that CANNOT appear in
+    either half: ``office_store._safe_id`` and ``paths._safe_path_token`` both
+    keep only ``alnum`` plus ``_.:-`` and rewrite everything else to ``_``. Note
+    ``:`` survives that filter and so could not have been used. Split on the
+    FIRST ``/`` — single authority, mirrored by the launcher's fold.
+    """
+
+    return f"{workspace_id}/{actor_key}"
+
+
+def emit_office_actor_patch(
+    event_log: EventLog,
+    actor: Any,
+    *,
+    config: AgentRuntimeConfig | None = None,
+) -> bool:
+    """Emit an office-actor ``upsert`` carrying the actor's COMPLETE wire row.
+
+    Complete, not a changed-field subset, and that is deliberate: the store has
+    no per-field office write — ``upsert_actor`` rewrites the whole actor file
+    from a whole payload — so a subset would be an invention of the patch lane,
+    and the whole row measures 663–764 bytes against the live canvas (four
+    actors, 2026-08-14), an order of magnitude inside the 3584-byte per-value
+    budget. It is also what lets the fold be a plain row replace.
+
+    **Emitted ONLY for a write that changed nothing outside this actor's row.**
+    The office core section is workspace-keyed with a nested actor list, and the
+    parent row carries derived state — ``actor_count``, ``actors_truncated``,
+    ``folders``, ``archived_actor_keys``, the SURFACE's own ``revision`` and
+    ``updated_at``. A create moves ``actor_count``; a re-add of an archived key
+    rewrites the surface's resurrection ledger; an archive moves both. None of
+    those are expressible as an actor-row patch, so the chokepoint calls
+    :func:`emit_office_actor_refresh` for them instead and the batch takes the
+    honest full-core lane. See ``OfficeStore.upsert_actor``.
+    """
+
+    if not delta_patches_enabled(config):
+        return False
+    return emit_state_patch(
+        event_log,
+        entity=OFFICE_ACTOR_ENTITY,
+        entity_id=office_actor_patch_id(actor.workspace_id, actor.actor_key),
+        op=PATCH_OP_UPSERT,
+        changed=project_office_actor_wire_row(actor),
+        persona_id=getattr(actor, "persona_id", None),
+        config=config,
+    )
+
+
+def emit_office_actor_refresh(
+    event_log: EventLog,
+    workspace_id: Any,
+    actor_key: Any,
+    *,
+    config: AgentRuntimeConfig | None = None,
+) -> bool:
+    """The accounted degrade for an office write that moved the SURFACE row too.
+
+    ``refresh`` is not in :data:`FOLDABLE_PATCH_OPS`, so the batch carrying it
+    demotes to a full core — which IS the refetch. Emitting this rather than
+    simply staying silent is what makes the degrade visible in the log: a silent
+    skip would leave the paired (covered) ``office.actor.upserted`` as the only
+    entry in an otherwise-coverable batch, which would ship a patch frame with an
+    EMPTY ``patches`` list — the launcher would advance its watermark having
+    folded nothing and keep the pre-write surface row forever.
+    """
+
+    if not delta_patches_enabled(config):
+        return False
+    return emit_state_patch(
+        event_log,
+        entity=OFFICE_ACTOR_ENTITY,
+        entity_id=office_actor_patch_id(workspace_id, actor_key),
+        op=PATCH_OP_REFRESH,
+        config=config,
+    )
+
+
 # S54 removed ``emit_task_refresh``: the task-refresh patch op, orphaned since
 # the ``Task`` record went at S8.
 #

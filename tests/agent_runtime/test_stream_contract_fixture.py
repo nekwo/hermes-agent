@@ -178,6 +178,7 @@ def test_manifest_pins_fixture_bytes():
         "patch.json",
         "patch_upsert_profile.json",
         "patch_remove.json",
+        "patch_office_actor.json",
         "patch_coverage_manifest.json",
     }
     for name, digest in entries.items():

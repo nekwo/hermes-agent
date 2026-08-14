@@ -280,11 +280,17 @@ def test_upsert_dry_run_is_byte_identical_and_eventless():
     assert path.read_bytes() == before_bytes, "dry-run must not rewrite the actor file"
     assert _office_event_count() == before_events, "dry-run must emit no event"
 
-    # The real run mutates + emits.
+    # The real run mutates + emits. TWO events, not one: the S7-A office leg
+    # pairs every actor-only upsert with an ``office_actor`` ``state.patched``
+    # from inside the same lock (``OfficeStore._emit_actor_patch``). Asserted by
+    # TYPE rather than as ``+2`` so the pairing is the thing under test — a bare
+    # count would go green again if either half were replaced by an unrelated
+    # event.
     real = store.upsert_actor(ws, _actor_payload("dev"))
     assert real.revision == 2
     assert path.read_bytes() != before_bytes
-    assert _office_event_count() == before_events + 1
+    emitted = [event.type for _, event in EventLog().iter_from_offset(0)][before_events:]
+    assert emitted == ["state.patched", "office.actor.upserted"]
 
 
 def test_upsert_dry_run_on_fresh_office_creates_nothing():
