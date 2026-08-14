@@ -151,6 +151,18 @@ because the socket lane is injected and OFF unless ``_cmd_serve`` turns it on.
              is unsubscribed — never silently stalled, and never able to wedge
              the producer or another subscriber. ``{"op":"unsubscribe"}`` ends
              it cleanly, and so does a disconnect.
+             An optional ``"fold_entities":["persona_instance",…]`` declares
+             which entity classes THIS client can fold in place; the producer
+             promotes a coalesced batch to a small ``patch`` frame only for
+             declared entities and demotes anything else to the full core it
+             would have sent anyway. Omitting it means the historical
+             ``{persona_instance, incident}`` — exactly today's wire, so an
+             un-updated client is unaffected. The producer is SHARED, so the
+             ACCEPTED set is the intersection over every attached subscriber and
+             is echoed on the ``subscribed`` ack (and on the hydrate) rather than
+             left for the client to assume. A malformed declaration is refused
+             with ``{"event":"subscribe_denied","reason":"invalid_fold_entities"}``
+             instead of being silently read as absent.
 - connections: ``{"op":"connections"}`` → ``{"event":"socket_connections",…}``
              (count, and per client: name, build, subscribed, connected_at,
              frames and bytes pushed). The same block rides the ``version``
@@ -166,6 +178,7 @@ from __future__ import annotations
 
 import argparse
 import contextvars
+import inspect
 import io
 import json
 import os
@@ -1053,6 +1066,13 @@ def serve_loop(
     #: the SWAP only, never across a join: the point is that two closers cannot
     #: both take the same handle, not that teardown is serialised.
     lane_lock = threading.Lock()
+    #: Per-subscriber patch-fold declarations: connection key → the entity
+    #: classes that client said it can fold, or None when it said nothing (which
+    #: is NOT the empty set — see ``patch_coverage.HISTORICAL_FOLD_ENTITIES``).
+    #: Guarded by ``lane_lock`` because the producer thread reads it while a
+    #: request thread is writing it. The producer is SHARED, so what it may
+    #: promote is the INTERSECTION over this table, not any one client's answer.
+    stream_fold_entities: dict[str, Any] = {}
 
     def _busy_frame() -> dict[str, Any]:
         with inflight_lock:
@@ -1588,16 +1608,59 @@ def serve_loop(
         def _owner_of(connection: Any) -> str:
             return "stdio" if connection is None else str(connection.key)
 
+        def _accepted_fold_entities() -> Any:
+            """What the SHARED producer may promote: the intersection of every
+            attached subscriber's declaration.
+
+            One producer feeds N subscribers (``serve_stream_hub``), so a patch
+            frame promoted for a client that declared ``office_actor`` would ALSO
+            be fanned out to the launcher next to it, which cannot fold that
+            entity and would answer with a full re-hydrate. Intersection is the
+            only rule under which a promotion is safe for everyone in the room;
+            a client that declared nothing contributes the historical set, so a
+            room of only today's clients accepts exactly today's set.
+
+            Read at PRODUCER-BUILD time (``subscribe`` restarts the producer, so
+            every join re-derives it). A LEAVE deliberately does not re-widen the
+            running producer: it would have to restart it — costing every
+            remaining subscriber a fresh full core — to buy back a promotion they
+            were already living without. The next join re-derives it anyway.
+            """
+
+            from agent_runtime.patch_coverage import accepted_fold_entities
+
+            with lane_lock:
+                declarations = list(stream_fold_entities.values())
+            return accepted_fold_entities(declarations)
+
+        #: Does an INJECTED source factory want the negotiated fold set? Answered
+        #: once, by signature — never by calling it and catching ``TypeError``,
+        #: which would swallow a TypeError raised INSIDE a zero-arg factory and
+        #: retry it at a different arity (the reasoning ``serve_stream_hub``
+        #: records for its own stop-event probe, one seam up).
+        stream_factory_takes_fold_entities = False
+        if stream_source_factory is not None:
+            try:
+                inspect.signature(stream_source_factory).bind(frozenset())
+                stream_factory_takes_fold_entities = True
+            except (TypeError, ValueError):
+                stream_factory_takes_fold_entities = False
+
         def _stream_source() -> Any:
             """The shared subscription producer. One per serve, never per client."""
 
+            fold_entities = _accepted_fold_entities()
             if stream_source_factory is not None:
-                return stream_source_factory()
+                return (
+                    stream_source_factory(fold_entities)
+                    if stream_factory_takes_fold_entities
+                    else stream_source_factory()
+                )
             from agent_runtime.serde import to_jsonable
             from agent_runtime.stream import stream_frames
 
             def _generate():
-                for frame in stream_frames():
+                for frame in stream_frames(fold_entities=fold_entities):
                     # Byte-for-byte the frames ``harness stream`` writes: a
                     # subscriber folds the same hydrate/delta/patch/heartbeat
                     # shapes it already folds, so the socket lane introduces no
@@ -1636,6 +1699,10 @@ def serve_loop(
             key = _owner_of(connection)
             with lane_lock:
                 hub = stream_hub
+                # A departed client's fold declaration must not keep narrowing
+                # the lane for the clients that remain — the next subscribe
+                # re-derives the accepted set from whoever is actually here.
+                stream_fold_entities.pop(key, None)
             if hub is not None:
                 try:
                     hub.unsubscribe(key)
@@ -1661,6 +1728,7 @@ def serve_loop(
                 hub, stream_hub = stream_hub, None
                 server, socket_server = socket_server, None
                 lock, socket_lock = socket_lock, None
+                stream_fold_entities.clear()
             if hub is not None:
                 try:
                     # One TOTAL budget for the hub, not one per subscriber
@@ -2058,6 +2126,32 @@ def serve_loop(
                         }
                     )
                     return None
+                # Optional patch-fold capability declaration. ABSENT means the
+                # client said nothing — the historical {persona_instance,
+                # incident} — which is what every client in the field sends and
+                # is exactly today's wire. Present-but-malformed is REFUSED
+                # rather than quietly read as absent: a client that meant to
+                # narrow the set and was silently widened back to the historical
+                # one would get patches it cannot fold, which is the precise
+                # failure this negotiation exists to prevent.
+                declared_raw = message.get("fold_entities")
+                if declared_raw is None:
+                    declared_fold_entities: Any = None
+                elif isinstance(declared_raw, list) and all(
+                    isinstance(name, str) and name.strip() for name in declared_raw
+                ):
+                    declared_fold_entities = frozenset(
+                        name.strip() for name in declared_raw
+                    )
+                else:
+                    sink.emit(
+                        {
+                            "event": "subscribe_denied",
+                            "lane": "stream",
+                            "reason": "invalid_fold_entities",
+                        }
+                    )
+                    return None
                 key = _owner_of(connection)
                 hub = _ensure_stream_hub()
                 if hub.has(key):
@@ -2069,6 +2163,13 @@ def serve_loop(
                         }
                     )
                     return None
+                # Recorded BEFORE ``hub.subscribe``: that call starts the new
+                # producer generation, which reads this table to decide what it
+                # may promote. Recorded after, this subscriber's declaration
+                # would not reach the very producer its own subscribe created.
+                with lane_lock:
+                    stream_fold_entities[key] = declared_fold_entities
+                accepted_entities = sorted(_accepted_fold_entities())
                 raw_sink = connection.emit if connection is not None else frames.emit
 
                 def _on_drop(reason: str, stats: dict[str, Any]) -> None:
@@ -2127,6 +2228,12 @@ def serve_loop(
                         "lane": "stream",
                         "connection": key,
                         "buffer_limit": hub.stats().get("buffer_limit"),
+                        # What the shared producer will actually promote — which
+                        # can be LESS than this client asked for, because another
+                        # subscriber folds less. Echoed on the ack (and again on
+                        # the hydrate) so a client can see the answer instead of
+                        # assuming its request was the answer.
+                        "fold_entities": accepted_entities,
                     }
                 )
                 if not hub.subscribe(key, sink=raw_sink, on_drop=_on_drop):
@@ -2134,6 +2241,13 @@ def serve_loop(
                     # so rather than leave a client believing it is attached.
                     if connection is not None:
                         connection.subscribed = False
+                    # The declaration is deliberately LEFT in place. This branch
+                    # means another subscribe for the same key won the race, so
+                    # that key IS attached — dropping its declaration here could
+                    # only WIDEN the lane under a subscriber that never asked
+                    # for the wider set, which is the failure direction. A stale
+                    # entry can only ever narrow, and ``_release_subscription``
+                    # (or the lane close) clears it.
                     sink.emit(
                         {
                             "event": "subscribe_denied",

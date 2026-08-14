@@ -4,7 +4,7 @@ import hashlib
 import logging
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from typing import Any
 
 from hermes_time import now
@@ -13,7 +13,7 @@ from . import paths
 from .events import EventLog
 from .models import Event
 from .parity import events_watermark
-from .patch_coverage import batch_is_patch_coverable
+from .patch_coverage import batch_is_patch_coverable, normalize_fold_entities
 from .redaction import ENV_SECRET_ASSIGNMENT_RE
 from .request_control import request_cancelled
 from .serde import to_jsonable
@@ -39,7 +39,10 @@ _SECRET_ASSIGNMENT_RE = ENV_SECRET_ASSIGNMENT_RE
 
 
 def hydrate_frame(
-    snapshot: dict[str, Any] | None = None, *, delta_patches: bool = False
+    snapshot: dict[str, Any] | None = None,
+    *,
+    delta_patches: bool = False,
+    fold_entities: Iterable[str] | None = None,
 ) -> dict[str, Any]:
     """Build the initial warm-stream hydrate frame.
 
@@ -54,6 +57,18 @@ def hydrate_frame(
     ``patch`` frame folds instead of resyncing). The marker is absent when the
     flag is off, so a flag-off hydrate stays byte-identical (its golden asserts
     the key-set, Ruling 0).
+
+    Beside it rides the ACCEPTED ``fold_entities`` (sorted), completing that
+    handshake in the direction it was missing: ``delta_patches: true`` told the
+    client the lane exists, but nothing told the client which of the entities it
+    declared the server actually honoured. On the socket lane that answer is not
+    a restatement of the request — the producer is SHARED, so the accepted set is
+    the intersection across every attached subscriber (see
+    :func:`patch_coverage.accepted_fold_entities`) and a client can be honoured
+    for strictly less than it asked for, by somebody else's declaration. A client
+    that cannot read the echo is unaffected: it is one additive key on a frame
+    that only exists when the lane is on, and the echo is absent entirely when
+    the flag is off, so the flag-off hydrate stays byte-identical.
     """
 
     # ``accept_inflight``: this hydrate may ride the build that is ALREADY
@@ -79,6 +94,7 @@ def hydrate_frame(
     }
     if delta_patches:
         frame["delta_patches"] = True
+        frame["fold_entities"] = sorted(normalize_fold_entities(fold_entities))
     return frame
 
 
@@ -326,8 +342,15 @@ def _batch_frames_with_liveness(
     delta_patches: bool,
     resync: bool,
     heartbeat_interval_seconds: float,
+    fold_entities: Iterable[str] | None = None,
 ) -> Iterator[dict[str, Any]]:
-    if delta_patches and not resync and batch_is_patch_coverable(event for _, event in batch):
+    if (
+        delta_patches
+        and not resync
+        and batch_is_patch_coverable(
+            (event for _, event in batch), fold_entities=fold_entities
+        )
+    ):
         yield patch_batch_frame(batch, base_offset=base_offset)
         return
     yield from _full_core_batch_frames(
@@ -345,6 +368,7 @@ def stream_frames(
     delta_debounce_seconds: float = 0.2,
     max_frames: int | None = None,
     resync: bool = False,
+    fold_entities: Iterable[str] | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Yield hydrate, delta/patch, and heartbeat frames for ``hermes harness stream``.
 
@@ -367,6 +391,15 @@ def stream_frames(
     core — the "explicit resync request" a reconnecting client makes to re-baseline
     before folding. Flag off → every batch is the byte-identical full-core frame.
 
+    ``fold_entities`` is the CLIENT's declaration of which entity classes it can
+    fold in place; a batch naming any other entity is demoted to the full core
+    (see :mod:`agent_runtime.patch_coverage`). ``None`` — nothing declared, which
+    is what every client in the field sends today — resolves to the historical
+    ``{persona_instance, incident}``, so an un-updated launcher gets exactly the
+    wire it gets now. Resolved ONCE, here: what "absent" means must not be
+    re-decided per batch on a hot path, and the hydrate must echo the same answer
+    the promotion decision uses.
+
     **An unknown resume position is not byte 0.** ``or 0`` folded BOTH a missing
     watermark key and an explicitly unknown one (``events_watermark`` returns
     ``None`` when the log's end offset could not be stat'ed) into 0, and then
@@ -378,9 +411,10 @@ def stream_frames(
 
     log = event_log or EventLog()
     delta_patches = delta_patches_enabled()
+    declared_entities = normalize_fold_entities(fold_entities)
     resync_pending = bool(resync)
     emitted = 0
-    hydrate = hydrate_frame(delta_patches=delta_patches)
+    hydrate = hydrate_frame(delta_patches=delta_patches, fold_entities=declared_entities)
     offset = _resume_offset(hydrate)
     if offset is None:
         # Cannot resume from an unknown position. Re-baseline the client on the
@@ -419,7 +453,9 @@ def stream_frames(
             # OWN measured offset, so the recovery leaves neither a gap nor a
             # replay. Resuming from the newly measured tail alone would silently
             # drop the span; resuming from 0 would re-render the whole log.
-            rebaseline = hydrate_frame(delta_patches=delta_patches)
+            rebaseline = hydrate_frame(
+                delta_patches=delta_patches, fold_entities=declared_entities
+            )
             offset = _resume_offset(rebaseline)
             if offset is None:
                 continue
@@ -455,6 +491,7 @@ def stream_frames(
                     delta_patches=delta_patches,
                     resync=resync_pending,
                     heartbeat_interval_seconds=heartbeat_interval_seconds,
+                    fold_entities=declared_entities,
                 ):
                     yield frame
                     emitted += 1
@@ -482,6 +519,7 @@ def stream_frames(
                         delta_patches=delta_patches,
                         resync=resync_pending,
                         heartbeat_interval_seconds=heartbeat_interval_seconds,
+                        fold_entities=declared_entities,
                     ):
                         yield frame
                         emitted += 1
@@ -500,6 +538,7 @@ def stream_frames(
                 delta_patches=delta_patches,
                 resync=resync_pending,
                 heartbeat_interval_seconds=heartbeat_interval_seconds,
+                fold_entities=declared_entities,
             ):
                 yield frame
                 emitted += 1

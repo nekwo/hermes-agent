@@ -1334,6 +1334,125 @@ def test_an_unsupported_lane_is_refused_by_name():
             }
 
 
+def test_a_subscriber_declares_what_it_can_fold_and_the_ack_says_what_was_accepted():
+    """Patch-lane capability negotiation, over the subscribe op.
+
+    The producer here is SHARED — one generator, N subscribers — so a client's
+    declaration is a REQUEST, not a setting: what the lane may actually promote
+    is the INTERSECTION over everybody attached, because every frame is fanned
+    out to all of them. A client that assumed its own request was the answer
+    would fold against a lane narrower than it believes, so the accepted set is
+    stated back on the ack.
+    """
+
+    gate = threading.Event()
+    try:
+        with running_serve(stream_source_factory=_fake_stream(gate)) as handle:
+            with client(handle, name="new") as (first, _r1), client(
+                handle, name="legacy"
+            ) as (second, _r2):
+                # A fold-aware client naming an entity nothing else folds yet.
+                first.send(
+                    {
+                        "op": "subscribe",
+                        "lane": "stream",
+                        "fold_entities": ["persona_instance", "office_actor"],
+                    }
+                )
+                alone = _read_until(first, "subscribed")
+                # Anti-vacuity: alone in the room, its declaration IS the answer,
+                # so the narrowing below can only come from the second client.
+                assert alone["fold_entities"] == ["office_actor", "persona_instance"]
+
+                # A client that says nothing declares the historical set, and it
+                # NARROWS the shared lane: the new entity stops being promotable
+                # for anyone, because this one would re-hydrate on it.
+                second.send({"op": "subscribe"})
+                joined = _read_until(second, "subscribed")
+                assert joined["fold_entities"] == ["persona_instance"]
+    finally:
+        gate.set()
+
+
+def test_the_negotiated_set_reaches_the_producer_and_not_only_the_ack():
+    """The ack could be honest and the producer still ignore the declaration.
+
+    So this asserts at the other end of the plumbing: the source factory — the
+    seam the real one builds ``stream_frames(fold_entities=…)`` from — is handed
+    the accepted set, and is handed it AGAIN when a joiner narrows the room.
+    """
+
+    gate = threading.Event()
+    handed: list[frozenset] = []
+
+    def _recording_factory(fold_entities):
+        handed.append(fold_entities)
+        return _fake_stream(gate)()
+
+    try:
+        with running_serve(stream_source_factory=_recording_factory) as handle:
+            with client(handle, name="new") as (first, _r1), client(
+                handle, name="legacy"
+            ) as (second, _r2):
+                first.send(
+                    {
+                        "op": "subscribe",
+                        "lane": "stream",
+                        "fold_entities": ["persona_instance", "office_actor"],
+                    }
+                )
+                _read_until(first, "subscribed")
+                deadline = time.monotonic() + WAIT
+                while not handed and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                # Anti-vacuity: the first producer really was built with the
+                # declared set, so the narrowing below is not "it never got one".
+                assert handed[0] == frozenset({"persona_instance", "office_actor"})
+
+                second.send({"op": "subscribe"})
+                _read_until(second, "subscribed")
+                deadline = time.monotonic() + WAIT
+                while len(handed) < 2 and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert handed[-1] == frozenset({"persona_instance"})
+    finally:
+        gate.set()
+
+
+def test_a_subscriber_that_declares_nothing_is_told_the_historical_set():
+    """The un-updated client sends exactly what it sends today and is answered
+    with today's wire — NOT with an empty set, which would demote it to full
+    cores forever."""
+
+    gate = threading.Event()
+    try:
+        with running_serve(stream_source_factory=_fake_stream(gate)) as handle:
+            with client(handle, name="a") as (connection, _reply):
+                connection.send({"op": "subscribe", "lane": "stream"})
+                ack = _read_until(connection, "subscribed")
+                assert ack["fold_entities"] == ["incident", "persona_instance"]
+    finally:
+        gate.set()
+
+
+def test_a_malformed_fold_declaration_is_refused_instead_of_read_as_absent():
+    """Reading a malformed declaration as absence would WIDEN a client that
+    meant to narrow — handing it patches it cannot fold, which is precisely the
+    failure this negotiation exists to prevent. It is refused by name."""
+
+    with running_serve() as handle:
+        with client(handle, name="a") as (connection, _reply):
+            for malformed in ("persona_instance", [""], [7], {"persona_instance": True}):
+                connection.send(
+                    {"op": "subscribe", "lane": "stream", "fold_entities": malformed}
+                )
+                assert _read_until(connection, "subscribe_denied") == {
+                    "event": "subscribe_denied",
+                    "lane": "stream",
+                    "reason": "invalid_fold_entities",
+                }
+
+
 # ── observability ───────────────────────────────────────────────────────────
 
 

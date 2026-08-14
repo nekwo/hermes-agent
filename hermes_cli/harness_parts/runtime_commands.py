@@ -497,6 +497,7 @@ def _cmd_snapshot(args) -> int:
 
 
 def _cmd_stream(args) -> int:
+    from agent_runtime.patch_coverage import parse_fold_entities_option
     from agent_runtime.stream import stream_frames
     from agent_runtime.serde import to_jsonable
 
@@ -514,6 +515,13 @@ def _cmd_stream(args) -> int:
             # full-core baseline before it folds any patch (else it would fold
             # onto stale/absent state). Off by default → normal patch/delta lane.
             resync=bool(getattr(args, "resync", False)),
+            # The client's fold-capability declaration. ``getattr`` defaults to
+            # None — an old Namespace shape without the flag says NOTHING, which
+            # resolves to the historical {persona_instance, incident} and is
+            # exactly today's wire. An empty STRING is a different statement
+            # ("I fold nothing") and `parse_fold_entities_option` keeps the two
+            # apart all the way down.
+            fold_entities=parse_fold_entities_option(getattr(args, "fold_entities", None)),
         ):
             sys.stdout.write(json.dumps(to_jsonable(frame), ensure_ascii=False, separators=(",", ":")) + "\n")
             sys.stdout.flush()

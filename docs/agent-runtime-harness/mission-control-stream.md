@@ -78,6 +78,14 @@ Fields:
 - `completeness`: copied from `core.parity.completeness` when present; otherwise `{}`.
 - `drops`: copied from `core.parity.drops` when present; otherwise `[]`.
 - `parity_warnings`: copied from `core.parity.warnings` when present; otherwise `[]`.
+- `delta_patches`: present and `true` only when the `read_model.delta_patches`
+  lane is on; it tells a fold-aware consumer to retain this frame's raw `core`
+  as the patch base. Absent when the flag is off.
+- `fold_entities`: rides with `delta_patches` and is absent without it. The
+  sorted entity classes this stream will actually promote to `patch` frames —
+  see [Patch-lane capability negotiation](#patch-lane-capability-negotiation).
+  It is the ACCEPTED set, not an echo of the request: on the socket lane it can
+  be narrower than what this client asked for.
 
 ### `completeness` row shape
 
@@ -235,6 +243,50 @@ CLI timing flags:
   delta frame; default `200`, and `0` disables coalescing.
 - `--resync`: forces the first post-hydrate batch to use a full-core delta so a
   reconnecting patch consumer can re-baseline before folding patches.
+- `--fold-entities`: comma-separated entity classes this client can fold in
+  place. Omit it for the historical default; pass an empty value to declare that
+  you fold nothing. See below.
+
+## Patch-lane capability negotiation
+
+A consumer's fold is only as wide as its own entity → core-section table. The
+Launcher's has two entries (`persona_instance`, `incident`) and an unknown
+entity makes its fold return `needsResync`, i.e. re-hydrate from a fresh
+checkpoint. A `patch` frame for an entity the consumer cannot fold is therefore
+strictly WORSE than the full-core `delta` it replaced: the consumer pays the
+patch and then a whole core anyway.
+
+So the consumer declares what it can fold and the producer promotes only within
+that set:
+
+- stdio: `hermes harness stream --fold-entities persona_instance,incident`
+- socket: `{"op":"subscribe","lane":"stream","fold_entities":["persona_instance"]}`
+
+Rules:
+
+- **Omitting the declaration means the historical `{persona_instance, incident}`,
+  not the empty set.** Absence is what every existing consumer sends, and the
+  historical set is exactly today's wire, so an un-updated consumer is
+  unaffected. An explicitly empty declaration (`--fold-entities ""` /
+  `"fold_entities": []`) is a different statement — "I fold nothing" — and puts
+  every batch on the full-core lane.
+- A batch containing ANY `state.patched` for an undeclared entity is demoted in
+  full to a `delta` frame with a core. This is the same honest fallback an
+  uncovered op already takes; there is no partial patch frame.
+- The op rules are unchanged and are applied first: a `refresh` op, an
+  assignment/task domain event, or a chokepoint-less write still demotes the
+  batch regardless of what was declared.
+- The socket lane runs ONE shared producer for all subscribers, so the accepted
+  set is the INTERSECTION of every attached subscriber's declaration — a
+  promotion has to be safe for everyone the frame is fanned out to. The accepted
+  set is reported on the `subscribed` ack and on the hydrate's `fold_entities`;
+  a subscriber can be honoured for less than it asked for. A malformed
+  declaration is refused with
+  `{"event":"subscribe_denied","reason":"invalid_fold_entities"}` rather than
+  being read as absent.
+
+Negotiation makes a new entity possible; it does not enable one. The producer
+still emits `state.patched` only for the entities its chokepoints already cover.
 
 ## Consumer guidance
 

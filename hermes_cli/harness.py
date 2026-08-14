@@ -1325,6 +1325,18 @@ def build_parser(parent_subparsers) -> None:
         action="store_true",
         help="Force the first post-hydrate batch to a full core (S6: a reconnecting fold client re-baselining before it folds patches)",
     )
+    stream.add_argument(
+        "--fold-entities",
+        default=None,
+        metavar="persona_instance,incident",
+        help=(
+            "Comma-separated entity classes THIS client can fold in place. A batch naming any "
+            "other entity is demoted to a full core rather than shipping a patch the client "
+            "would have to re-hydrate from. Omit the flag for the historical set "
+            "(persona_instance,incident) — exactly today's wire; pass an empty value to declare "
+            "that you fold nothing."
+        ),
+    )
     stream.set_defaults(func=_cmd_stream)
     serve = subs.add_parser("serve", help="Persistent NDJSON bridge: dispatch harness argv requests in one warm process (Mission Control serve lane), on stdio and on the per-root localhost socket")
     serve.add_argument("--ndjson", action="store_true", help="NDJSON frame transport over stdio (the only v1 transport)")
