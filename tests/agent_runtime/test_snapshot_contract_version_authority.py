@@ -300,6 +300,50 @@ def _scanned_modules_uncached() -> dict[str, ast.Module]:
 
 
 # --------------------------------------------------------------------------- #
+# The scan is paid HERE, at import
+# --------------------------------------------------------------------------- #
+# Three tests parse the scanned roots and they share it through the cache above,
+# so exactly ONE of them pays — and which one is decided by collection order,
+# which none of them chose. Standalone that is ~8s against the 30s per-test cap
+# in pyproject.toml, which looks like plenty of headroom and is not: in a
+# long-lived single-process run of tests/agent_runtime/ the same walk crossed 30s
+# and, because `--timeout-method=thread` KILLS the process, took every test after
+# it with it. Measured, on the run that found this.
+#
+# Same fix as tests/agent_runtime/test_s55_registered_events_have_emitters.py:
+# warm at module scope so the cost lands in collection, which pytest-timeout does
+# not clock (verified — a module that sleeps 35s at import passes under
+# --timeout=30). A per-test budget should not be charged for a per-session walk,
+# and no test is excluded to achieve it.
+_scanned_modules_cached()
+
+#: Cache occupancy AS OF IMPORT, so the guard below fails deterministically if
+#: the warm is deleted rather than depending on which test runs first.
+_SCAN_CACHE_SIZE_AT_IMPORT = _scanned_modules_cached.cache_info().currsize
+
+
+def test_the_shared_scan_is_paid_at_import_and_not_by_whichever_test_runs_first():
+    """REGRESSION GUARD for the timeout, pinning the cause rather than a clock.
+
+    A wall-clock assertion would be a flake generator on a box that measured this
+    same walk between 5s and 30s depending on load — and it would be asserting
+    the symptom. What must be true is that the walk ran once, at import.
+    """
+
+    assert _SCAN_CACHE_SIZE_AT_IMPORT == 1, (
+        "the scanned-module tree was NOT warmed at module import (cache size at "
+        f"import: {_SCAN_CACHE_SIZE_AT_IMPORT}). Whichever test parses first now "
+        "pays for the whole walk inside its own item, against the 30s per-test "
+        "cap — and --timeout-method=thread kills the process, so nothing after "
+        "this file would run. Restore the module-scope warm."
+    )
+    assert _scanned_modules_cached.cache_info().misses == 1, (
+        "the scanned-module walk ran more than once; a caller is going around "
+        f"the cache ({_scanned_modules_cached.cache_info()})"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # The pin
 # --------------------------------------------------------------------------- #
 def test_the_contract_version_literal():
