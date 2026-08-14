@@ -320,6 +320,138 @@ def load_root_runtime_config() -> AgentRuntimeConfig:
     return load_agent_runtime_config(harness_root_config_path())
 
 
+#: Keys under ``agent_runtime`` that are ONLY ever read through the ROOT config,
+#: paired with the reader that consumes each. ``"*"`` matches any persona id.
+#:
+#: Setting one of these in a PROFILE ``config.yaml`` is silently inert: the
+#: reader resolves :func:`harness_root_config_path` and never looks at the
+#: profile, so the operator's value is accepted by YAML, reported back by any
+#: profile-aware surface, and ignored by the only code that acts on it.
+#:
+#: This is a REPEATED defect class, twice in three weeks, in both directions:
+#:
+#: * 2026-07-23 — the ruling lived in the ROOT and the reader used the profile,
+#:   so ``chat_lane_restore_toolsets`` resolved off ``profiles/alice`` and the
+#:   operator's root-config ruling was dead on arrival. Fixed by moving the
+#:   READER to the root (that is why :func:`harness_root_config_path` exists).
+#: * 2026-08-13 — the mirror image. ``read_model.delta_patches: true`` was
+#:   written into ``profiles/base`` and ``profiles/alice`` while the reader
+#:   correctly used the root, which carried no ``read_model`` block at all. The
+#:   S7-A patch producer therefore stayed dark for its whole life: measured
+#:   live, ONE field change on ONE persona instance shipped an 822,671-byte
+#:   delta carrying an 864,241-byte full snapshot core, where the patch frame
+#:   the lane was built for is 486 bytes. ``harness status`` reported
+#:   ``delta_patches: true`` throughout, because status reads profile-aware.
+#:
+#: Note ``read_model`` is SPLIT across both loaders and only the leaf is
+#: root-only: ``read_model.enabled`` is read profile-aware (``snapshot.py``
+#: consults the passed cfg), while ``read_model.delta_patches`` is root-only.
+#: So this list keys on LEAVES, never blocks — a block-level rule would raise a
+#: false positive on every profile that legitimately sets ``enabled``.
+ROOT_ONLY_CONFIG_KEYS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("read_model", "delta_patches"), "agent_runtime.state_patches.delta_patches_enabled"),
+    (("mcp_admission",), "agent_runtime.mcp_admission.admission_config"),
+    (("personas", "*", "chat_lane_restore_toolsets"), "agent_runtime.config.chat_lane_restore_toolsets"),
+    (("personas", "*", "workdir"), "agent_runtime.config.mission_chat_workdir"),
+)
+
+
+def _profile_config_paths() -> list[Path]:
+    """Every ``profiles/<name>/config.yaml`` under the Hermes root.
+
+    Returns ``[]`` when the profiles directory cannot be listed — the caller
+    must treat that as "could not examine", never as "none found".
+    """
+
+    from hermes_constants import get_default_hermes_root
+
+    try:
+        profiles = get_default_hermes_root() / "profiles"
+        return sorted(
+            entry / "config.yaml"
+            for entry in profiles.iterdir()
+            if entry.is_dir() and (entry / "config.yaml").is_file()
+        )
+    except OSError:
+        return []
+
+
+def _key_present(raw: dict[str, Any], path: tuple[str, ...]) -> list[tuple[str, ...]]:
+    """Concrete key paths PRESENT in ``raw`` matching ``path`` (``*`` = any key).
+
+    Presence, not truthiness: a profile that omits ``delta_patches`` parses
+    identically to one that sets it ``false``, so a value check could not tell
+    an operator's inert instruction from an absent one.
+    """
+
+    if not path:
+        return [()]
+    head, rest = path[0], path[1:]
+    if not isinstance(raw, dict):
+        return []
+    if head == "*":
+        found: list[tuple[str, ...]] = []
+        for key, value in raw.items():
+            for tail in _key_present(value, rest):
+                found.append((str(key),) + tail)
+        return found
+    if head not in raw:
+        return []
+    return [(head,) + tail for tail in _key_present(raw[head], rest)]
+
+
+def find_misplaced_root_only_keys() -> list[dict[str, Any]]:
+    """Root-only keys that an operator has set in a PROFILE config, where they
+    are inert.
+
+    Each row names the profile, the full dotted key, and the reader that will
+    never see it — enough to fix without re-deriving the analysis. An empty
+    list means "examined and none found"; the caller distinguishes "could not
+    examine" by catching the exception this may raise.
+
+    ``set_in_root`` separates the two cases, which are NOT the same defect and
+    must not be reported at one severity:
+
+    * ``False`` — the key is set ONLY in a profile, so the operator's value is
+      being IGNORED. This is the 2026-08-13 shape and it is actionable.
+    * ``True`` — the root also carries it, so the live value is correct and the
+      profile copy is a redundant leftover. Reporting this at defect severity
+      would leave ``harness doctor`` permanently red for a cosmetic duplicate,
+      which is the "a gate that is always red is not a gate" failure.
+    """
+
+    from .parse_cache import cached_yaml_file
+
+    root_path = harness_root_config_path()
+    root_loaded = cached_yaml_file(root_path, default=None)
+    root_raw = (
+        (root_loaded or {}).get("agent_runtime") or {} if isinstance(root_loaded, dict) else {}
+    )
+
+    rows: list[dict[str, Any]] = []
+    for config_path in _profile_config_paths():
+        loaded = cached_yaml_file(config_path, default=None)
+        raw = (loaded or {}).get("agent_runtime") or {} if isinstance(loaded, dict) else {}
+        if not isinstance(raw, dict):
+            continue
+        for key_path, reader in ROOT_ONLY_CONFIG_KEYS:
+            for concrete in _key_present(raw, key_path):
+                # Presence of the SAME concrete path in the root, not merely of
+                # the pattern: a root that pins ``personas.neko.workdir`` does
+                # not make a profile's ``personas.qa.workdir`` effective.
+                rows.append(
+                    {
+                        "profile": config_path.parent.name,
+                        "config_path": str(config_path),
+                        "key": "agent_runtime." + ".".join(concrete),
+                        "read_only_by": reader,
+                        "root_config_path": str(root_path),
+                        "set_in_root": bool(_key_present(root_raw, concrete)),
+                    }
+                )
+    return rows
+
+
 def chat_lane_restore_toolsets(persona_id: str, cfg: AgentRuntimeConfig | None = None) -> list[str]:
     """Per-persona operator override for the chat-lane toolset cost policy.
 

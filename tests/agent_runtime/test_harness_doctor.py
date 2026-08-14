@@ -74,7 +74,11 @@ def test_harness_doctor_reports_snapshot_null_ids(isolate_agent_runtime_root):
 
     counts = report["summary"]["finding_counts"]
     assert counts["snapshot_null_id_rows"] == 1
-    assert set(counts) == {"orphan_worktrees", "snapshot_null_id_rows"}
+    assert set(counts) == {
+        "orphan_worktrees",
+        "snapshot_null_id_rows",
+        "misplaced_root_only_keys",
+    }
     assert report["findings"]["snapshot_null_id_rows"] == [
         {"collection": "persona_instances", "index": 0, "id_key": "persona_instance_id"}
     ]
@@ -106,6 +110,7 @@ def test_harness_doctor_fix_is_idempotent(isolate_agent_runtime_root):
     assert again["summary"]["finding_counts"] == {
         "orphan_worktrees": 0,
         "snapshot_null_id_rows": 0,
+        "misplaced_root_only_keys": 0,
     }
 
 
@@ -264,6 +269,7 @@ def test_harness_doctor_clean_runtime_still_reads_ok(isolate_agent_runtime_root)
         "event_log": "ok",
         "model_authority": "ok",
         "persona_binding": "ok",
+        "root_config_misplacement": "ok",
     }
     assert report["summary"]["needs_fix"] is False
     assert report["ok"] is True

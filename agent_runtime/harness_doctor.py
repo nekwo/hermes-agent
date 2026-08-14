@@ -85,6 +85,7 @@ def run_harness_doctor(
     event_health = _event_log_report()
     model_authority = _model_authority_report()
     persona_binding = _persona_binding_report()
+    root_config = _root_config_misplacement_report()
     # A count is an OBSERVATION. When the probe for a class did not run, the
     # honest count is ``None`` ("not observed"), never ``0`` ("observed none") —
     # a zero here is what sends an investigator hunting a defect class the
@@ -98,6 +99,11 @@ def run_harness_doctor(
         "snapshot_null_id_rows": (
             None if snapshot_build["health"] == HEALTH_UNKNOWN else len(snapshot_defects)
         ),
+        "misplaced_root_only_keys": (
+            None
+            if root_config.get("health") == HEALTH_UNKNOWN
+            else len(root_config.get("misplaced") or [])
+        ),
     }
     section_health = {
         "orphan_worktrees": worktrees.get("health", HEALTH_UNKNOWN),
@@ -105,6 +111,7 @@ def run_harness_doctor(
         "event_log": event_health.get("health", HEALTH_UNKNOWN),
         "model_authority": model_authority.get("health", HEALTH_UNKNOWN),
         "persona_binding": persona_binding.get("health", HEALTH_UNKNOWN),
+        "root_config_misplacement": root_config.get("health", HEALTH_UNKNOWN),
     }
     defective = sorted(k for k, v in section_health.items() if v == HEALTH_DEFECT)
     unexamined = sorted(k for k, v in section_health.items() if v == HEALTH_UNKNOWN)
@@ -122,7 +129,12 @@ def run_harness_doctor(
         # ``finding_counts`` value may now be ``None`` (class not observed), and
         # ``findings.snapshot_build`` separates a snapshot CRASH from an
         # observation of null-id rows.
-        "schema_version": 3,
+        # 4: ``findings.root_config_misplacement`` is new — root-only keys an
+        # operator set in a PROFILE config, where the reader never looks. It is
+        # a DEFECT rather than a notice because the value is silently inert:
+        # the 2026-08-13 case left the S7-A patch producer dark for its whole
+        # life while ``harness status`` reported the flag as on.
+        "schema_version": 4,
         "generated_at": ref,
         "ok": not defective and not unexamined,
         "mode": {"fix": bool(fix), "dry_run": bool(dry_run)},
@@ -145,6 +157,7 @@ def run_harness_doctor(
             "snapshot_null_id_rows": snapshot_defects,
             "snapshot_build": snapshot_build,
             "event_log": event_health,
+            "root_config_misplacement": root_config,
         },
         "model_authority": model_authority,
         "persona_binding": persona_binding,
@@ -224,6 +237,60 @@ def _persona_binding_report() -> dict[str, Any]:
         "diverged_count": len(diverged),
         "diverged": sorted(diverged, key=lambda row: row["persona_id"]),
         "remediation": "harness agent set-profile <persona_id> --profile <name> (moves the store) or edit config.yaml (moves the declaration)",
+    }
+
+
+def _root_config_misplacement_report() -> dict[str, Any]:
+    """Root-only config keys an operator set in a PROFILE, where nothing reads them.
+
+    Four keys resolve through :func:`config.harness_root_config_path` and never
+    consult the active profile (``read_model.delta_patches``, ``mcp_admission``,
+    and the per-persona ``chat_lane_restore_toolsets`` / ``workdir``). YAML
+    accepts them anywhere, and profile-aware surfaces like ``harness status``
+    report them back, so a value written one layer below its reader looks
+    applied and does nothing.
+
+    Severity splits on whether the ROOT also carries the key:
+
+    * ``defect`` — profile only. The operator's instruction is INERT. Measured
+      cost of the 2026-08-13 instance: the S7-A patch producer stayed dark, so
+      one field change shipped an 822,671-byte delta instead of a 486-byte
+      patch, while ``harness status`` reported the flag on the whole time.
+    * ``notice`` — set in both. The live value is correct; the profile copy is a
+      redundant leftover worth deleting but not worth failing a health check
+      over.
+    """
+
+    from .config import find_misplaced_root_only_keys
+
+    try:
+        rows = find_misplaced_root_only_keys()
+    except Exception as exc:
+        return {"available": False, "health": HEALTH_UNKNOWN, "error": _error_text(exc)}
+
+    inert = [row for row in rows if not row.get("set_in_root")]
+    redundant = [row for row in rows if row.get("set_in_root")]
+    if inert:
+        health = HEALTH_DEFECT
+    elif redundant:
+        health = HEALTH_NOTICE
+    else:
+        health = HEALTH_OK
+    return {
+        "available": True,
+        "health": health,
+        "misplaced": rows,
+        "inert": inert,
+        "redundant": redundant,
+        "notices": [
+            f"{row['key']} set in profile '{row['profile']}' is ignored — "
+            f"{row['read_only_by']} reads {row['root_config_path']}"
+            for row in inert
+        ]
+        + [
+            f"{row['key']} in profile '{row['profile']}' duplicates the root value and is unread"
+            for row in redundant
+        ],
     }
 
 
