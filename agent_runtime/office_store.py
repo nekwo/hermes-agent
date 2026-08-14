@@ -430,12 +430,17 @@ class OfficeStore:
         *,
         take: str,
         updated_by: str = "operator",
+        allow_class_key: bool = False,
         dry_run: bool = False,
     ) -> OfficeActor | None:
         """Resolve a realm-sync conflict sidecar for an actor. ``take=local``
         keeps the local actor; ``take=remote`` adopts the sidecar's remote copy
         (or archives the local actor for an edit-vs-remove tombstone). Always
-        archives the sidecar and emits ``office.actor.conflict_resolved``."""
+        archives the sidecar and emits ``office.actor.conflict_resolved``.
+
+        ``allow_class_key`` is the operator's on-the-record override for the
+        class-key fence below (``harness office resolve-conflict
+        --allow-class-key``); see ``_guard_class_keyed_adoption``."""
 
         take = str(take or "").strip().lower()
         if take not in {"local", "remote"}:
@@ -458,6 +463,7 @@ class OfficeStore:
                     actor = from_jsonable(OfficeActor, remote)
                     actor.workspace_id = wsid
                     actor.state = "active"
+                    self._guard_class_keyed_adoption(wsid, actor, allow_class_key=allow_class_key)
                     actor.revision = max(int(actor.revision or 1), 1) + 1
                     actor.updated_at = now()
                     actor.updated_by = _safe_actor_ref(updated_by)
@@ -555,6 +561,71 @@ class OfficeStore:
     def _guard_no_conflict(self, workspace_id: str, actor_key: str) -> None:
         if paths.office_conflict_path(workspace_id, actor_key).exists():
             raise SyncConflict(f"actor_conflict:{actor_key}")
+
+    def _guard_class_keyed_adoption(self, workspace_id: str, actor: OfficeActor, *, allow_class_key: bool) -> None:
+        """The class-key fence for ``resolve_conflict(take="remote")``.
+
+        That branch writes a PEER's actor with ``_write_actor`` DIRECTLY,
+        bypassing ``upsert_actor`` and therefore every class-key guard the other
+        writers call. So it can put an archived CLASS key back on disk as
+        ACTIVE beside its instance-keyed sibling — the same double placement the
+        re-key migration exists to remove, reached through the one door the fence
+        did not cover.
+
+        The fence lives in the store rather than at the CLI (where
+        ``actor-upsert``'s does) because the hazard is intrinsic to THIS METHOD,
+        not to any one caller: the payload is peer-authored and never passes
+        ``upsert_actor``'s chokepoint, so a future second caller would reopen the
+        hole by default. ``upsert_actor``'s guard is at its callers for the
+        opposite reason — its payload IS the caller's intent.
+
+        Refuses, rather than silently re-keying the incoming actor onto the
+        instance binding: that would rewrite what the peer published into a
+        different identity (the next push sends back an actor the peer never
+        had), and in the duplicate-item case it would land ON TOP of the
+        migrated instance-keyed actor — trading a visible double placement for a
+        silent clobber. ``allow_class_key`` is the operator's way through.
+
+        Normalizes BOTH sides of the class-key test. This is the one path whose
+        input never met ``_normalize_persona_id``, so a peer's ``Backend_Dev``
+        arrives verbatim; a raw comparison would read it as instance-keyed and
+        wave the write through.
+        """
+
+        if allow_class_key:
+            return
+        from .office_class_key_guard import (
+            ClassKeyedPlacementRefused,
+            class_key_collision,
+            refusal_message,
+        )
+
+        persona_id = _normalize_persona_id(actor.persona_id)
+        if not persona_id or _normalize_persona_id(actor.actor_key) != persona_id:
+            # Instance-keyed adoption: it IS the migration's shape, never undoes it.
+            return
+        collision = class_key_collision(
+            self,
+            workspace_id,
+            # Deliberately class-keyed and deliberately UN-normalized: the guard
+            # owns normalization (one derivation authority), and the key that
+            # would actually be written is the class key regardless of what
+            # ``persona_instance_id`` the peer's record happens to carry.
+            {
+                "persona_id": actor.persona_id,
+                "items": [{"item_id": item.item_id} for item in actor.items],
+            },
+        )
+        if collision is None:
+            return
+        # ``refusal_message`` is left untouched (three other writers assert on
+        # it); the resolve-specific exit gets appended, because "--take local" is
+        # the answer an operator under conflict pressure actually needs and the
+        # shared message cannot know to offer it.
+        raise ClassKeyedPlacementRefused(
+            refusal_message(collision) + " Resolve with --take local to keep the migrated state.",
+            safe_details={**collision, "take": "remote"},
+        )
 
 
 # --- module-level file helpers ---------------------------------------------

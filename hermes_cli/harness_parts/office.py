@@ -292,12 +292,33 @@ def _cmd_office_set_folders(args) -> int:
 
 
 def _cmd_office_resolve_conflict(args) -> int:
+    """`harness office resolve-conflict` — adopt one side of a realm-sync conflict.
+
+    ``--take remote`` is fenced against the class→instance re-key migration in
+    the STORE (``OfficeStore._guard_class_keyed_adoption``), because that branch
+    writes peer data past ``upsert_actor``. Caught and re-emitted here so the
+    refusal lands as ``duplicate_conflict`` (exit 4) like the other writers':
+    ``emit_harness_error`` reads ``AgentRuntimeError`` subclasses it does not
+    name as ``internal_error``, and an operator refusal is not an internal error.
+    """
+
+    from agent_runtime.office_class_key_guard import CLASS_KEY_REFUSAL_CODE, ClassKeyedPlacementRefused
+
     store = _office_store()
     workspace = _office_workspace_for(args)
     if not workspace:
         return emit_harness_error(ValueError("no workspace selected; pass --workspace"), args=args, code="invalid_request")
     dry_run = bool(getattr(args, "dry_run", False))
-    actor = store.resolve_conflict(workspace, args.actor, take=args.take, dry_run=dry_run)
+    try:
+        actor = store.resolve_conflict(
+            workspace,
+            args.actor,
+            take=args.take,
+            allow_class_key=bool(getattr(args, "allow_class_key", False)),
+            dry_run=dry_run,
+        )
+    except ClassKeyedPlacementRefused as exc:
+        return emit_harness_error(exc, args=args, code=CLASS_KEY_REFUSAL_CODE, message=str(exc))
     row = (
         _office_actor_row(actor, full=True)
         if actor is not None

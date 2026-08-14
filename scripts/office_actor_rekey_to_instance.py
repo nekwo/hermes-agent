@@ -57,8 +57,15 @@ The interaction that is NOT clean is realm sync, in two directions:
     OLD key (``_guard_no_conflict``). It does not block the new key. Resolve
     with ``--take local`` (keeps the archive). ``--take remote`` would write
     ``backend_dev`` back as ACTIVE beside the instance-keyed actor: the same
-    agent placed twice, with duplicate ``item_id`` values on the canvas. That is
-    the one operator action this migration makes dangerous.
+    agent placed twice, with duplicate ``item_id`` values on the canvas.
+
+    FENCED as of ``OfficeStore._guard_class_keyed_adoption``. That branch calls
+    ``_write_actor`` directly, past ``upsert_actor`` and past every caller-side
+    guard below, so the fence sits in the STORE: a class-keyed adoption that
+    resurrects an archived key or duplicates an item id is refused with
+    ``duplicate_conflict``, naming ``--take local`` as the exit.
+    ``--allow-class-key`` on ``harness office resolve-conflict`` is the
+    operator's on-the-record override.
 
 (b) Any later class-keyed WRITE re-creates the old actor and CLEARS the guard.
     ``upsert_actor`` treats an explicit local upsert of an archived key as
@@ -85,11 +92,12 @@ The interaction that is NOT clean is realm sync, in two directions:
     active instance-keyed sibling. Class-keyed placements remain legal
     (``archive_actors_for_instance``: they survive instance churn by design).
 
-    Still unfenced by construction: ``resolve_conflict --take remote`` (case
-    (a) above), and any NEW writer. ``runtime.office.upsert`` — under
-    construction in ``serve_rpc.py`` at the time of writing — must call
-    ``office_class_key_guard.class_key_collision`` before it upserts, or it
-    reopens this hole from the wire.
+    Still unfenced by construction: any NEW writer that reaches
+    ``_write_actor`` without going through ``upsert_actor`` or
+    ``resolve_conflict``. ``runtime.office.upsert`` — under construction in
+    ``serve_rpc.py`` at the time of writing — calls
+    ``office_class_key_guard.class_key_collision`` before it upserts, and any
+    successor must too, or it reopens this hole from the wire.
 """
 
 from __future__ import annotations

@@ -768,6 +768,7 @@ def build_parser(parent_subparsers) -> None:
     office_resolve.add_argument("--workspace", default=None)
     office_resolve.add_argument("--actor", required=True, help="Actor key")
     office_resolve.add_argument("--take", required=True, choices=["local", "remote"])
+    office_resolve.add_argument("--allow-class-key", dest="allow_class_key", action="store_true", help="Escape hatch: adopt a remote actor on a persona CLASS key the re-key migration archived (re-creates the class-keyed placement beside its instance-keyed sibling)")
     _add_stage42_global_args(
         office_resolve, controls=frozenset({"dry_run"})
     )
