@@ -90,7 +90,8 @@ Protocol (NDJSON, one frame per line):
              A RUNNING read-only ``harness stream`` is cooperatively cancelled
              and releases its pool worker; it is the sole running exception.
 - errors:    ``{"id":…,"event":"error","error":"invalid_request"|…,"detail":…}``
-- method:    ``{"jsonrpc":"2.0","id":…,"method":"runtime.office.get",
+- method:    ``{"jsonrpc":"2.0","id":…,"method":"runtime.office.get"|
+             "runtime.office.upsert",
              "params":{…}}`` → ``{"jsonrpc":"2.0","id":…,"result":{…}}`` or
              ``{"jsonrpc":"2.0","id":…,"error":{"code":…,"message":…,"data":…}}``.
 
@@ -2536,12 +2537,23 @@ def serve_loop(
             #
             # Answered INLINE, like `ping` / `version` / `connections` and
             # unlike an argv request. The pool exists for handlers that block —
-            # chat turns, streams — and `runtime.office.get` is a bounded read
-            # of a handful of small JSON files. It is also why the lane is not
-            # refused while draining: a drain refuses new WORK so in-flight
-            # work can land, and a read that holds nothing and finishes in
-            # microseconds is not the thing a drain is protecting against —
+            # chat turns, streams — and these methods touch a handful of small
+            # JSON files under the office lock and are done in microseconds.
+            #
+            # It is also why the lane is not refused while draining, and the
+            # test that matters here is NOT "is it a read": `runtime.office.
+            # upsert` mutates and is still answered. A drain refuses new WORK so
+            # in-flight work can land, and the work it is protecting is the kind
+            # that can be CUT OFF HALF-DONE — a chat turn whose frames stop
+            # mid-stream when the process exits. An inline handler cannot be:
+            # `OfficeStore` has written the actor file atomically and released
+            # the lock before the ack is emitted, and the replacement runtime
+            # reads that same file. Refusing it would fail an operator's drag
+            # during a restart to protect against a loss that cannot occur.
             # `version` and `ping` are answered throughout for the same reason.
+            # (Pinned by `test_a_write_during_a_drain_lands_because_it_cannot_be
+            # _cut_off_half_done` in tests/agent_runtime/test_serve_rpc_office_
+            # upsert.py — this is a decision, not an oversight.)
             if serve_rpc.is_rpc_frame(message):
                 sink.emit(serve_rpc.handle_request(message))
                 return None

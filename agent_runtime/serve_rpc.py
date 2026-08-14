@@ -14,11 +14,28 @@ do not invent a third convention.** Everything structural here is copied from
 ``-32602``   invalid params (missing, wrong type, malformed)
 ``-32000``   the handler raised — mirrors ``server.py:1733``
 ``4001``     the named entity does not exist (upstream: "session not found")
+``4090``     the write lost a race with the store (fork-minted — see below)
 ===========  ===========================================================
 
 ``4001`` is reused verbatim rather than minted: upstream already spends it on
 exactly this meaning, and a fork that renumbers "not found" makes a future
 union of the two dispatchers a translation layer instead of a merge.
+
+``4090`` had to be minted — upstream has no concurrency code, because its
+domain (one TUI session, one writer) never contends. The NUMBER is chosen to
+survive that future merge: upstream allocates its 4xxx band sequentially from
+4001 and has reached 4020, and ``4002`` — the number a first guess reaches for —
+is already spent there on "invalid value", so taking it would have collided on
+day one. 4090 sits far above the live allocation and reads as HTTP 409, which
+is the one number every client developer already associates with this meaning.
+
+Codes are the coarse family; ``data.reason`` is the branch point (see
+:func:`err`). 4090 carries TWO reasons, and conflating them would be the whole
+bug: ``stale_revision`` means refetch and rebase — the client's own prediction
+is behind — while ``sync_conflict`` means a realm-sync sidecar is unresolved
+and NO amount of refetch-and-retry clears it; it needs an operator running
+``harness office actor-resolve``. A client that retried a ``sync_conflict``
+would spin forever.
 
 Why this is a lane and not a replacement
 ----------------------------------------
@@ -58,6 +75,32 @@ has. The bound is the snapshot's own ``MAX_OFFICE_ACTORS_PROJECTED``, reused
 rather than re-declared, and a truncation is ACCOUNTED (``actors_truncated``) —
 a silent cut that reads as an empty office is the failure this whole document
 is about.
+
+Prediction and reconciliation (decision doc, Stage 2c)
+-----------------------------------------------------
+The write leg is game netcode, not request/response: the launcher renders a
+drag immediately as a PREDICTION, sends it, and reconciles against the server's
+answer. Two consequences shape ``runtime.office.upsert``.
+
+The ack is LIGHT — ``{actor_key, revision}`` and nothing else. Returning the
+re-projected actor would be returning the client its own input plus a number,
+on the hot path of a drag, and would tempt a client to adopt the echo as truth
+instead of keeping the prediction it already drew. The two fields are the two
+facts the client provably cannot compute: ``actor_key`` because the store
+canonicalizes the identity triple at its own boundary (drift aliases such as
+``persona_personainst_dev_agent_*`` collapse), and ``revision`` because it is
+the token the NEXT write must present.
+
+Which is why ``revision`` also rides every item of the READ projection. It is
+the actor's, repeated onto its items exactly as ``persona_instance_id`` is,
+because ``expect_revision`` guards the ACTOR row while the surface-level
+``revision`` beside it is the SURFACE's — and the surface's does not move when
+an actor moves (``OfficeStore.upsert_actor`` rewrites the actor file and leaves
+``office.json`` alone). Without it a client had no honest first value for
+``expect_revision`` and could only write unguarded, which is precisely the
+lost-update the guard exists to prevent. Additive, so the integer holds: the
+launcher's item decoder gates on required-key PRESENCE
+(``mission_office_rpc.dart:260``) and never on a key count.
 """
 
 from __future__ import annotations
@@ -76,6 +119,9 @@ ERR_METHOD_NOT_FOUND = -32601
 ERR_INVALID_PARAMS = -32602
 ERR_HANDLER_FAILED = -32000
 ERR_NOT_FOUND = 4001
+# Fork-minted; see the module docstring for why the number is 4090 and not the
+# 4002 a first guess reaches for.
+ERR_CONFLICT = 4090
 
 _METHODS: dict[str, Callable[[Any, dict], dict]] = {}
 
@@ -231,9 +277,10 @@ def _runtime_office_get(rid: Any, params: dict) -> dict:
 
     Carries per item: ``item_id``, ``kind``, ``persona_id`` (the character-class
     POINTER), ``persona_instance_id`` (the owning actor's IDENTITY binding, or
-    ``null`` when the actor is class-keyed), ``folder``, ``position``, ``scale``,
-    ``display_name``, ``pet_slug``; plus surface-level ``folders``, ``revision``,
-    ``updated_at``.
+    ``null`` when the actor is class-keyed), ``revision`` (the owning actor's,
+    and the token ``runtime.office.upsert`` guards on), ``folder``, ``position``,
+    ``scale``, ``display_name``, ``pet_slug``; plus surface-level ``folders``,
+    ``revision``, ``updated_at``.
 
     ``persona_instance_id`` is the actor's, not the item's — an actor file is
     the binding unit (all of one agent's placements plus its coupled desk live
@@ -301,6 +348,12 @@ def _runtime_office_get(rid: Any, params: dict) -> dict:
             # ``display_name`` / ``pet_slug``: a client decoding into a typed
             # struct must not have to special-case which keys exist.
             "persona_instance_id": actor.persona_instance_id,
+            # The ACTOR's revision, likewise repeated onto each of its items:
+            # the concurrency token ``runtime.office.upsert``'s
+            # ``expect_revision`` is checked against. NOT the ``revision``
+            # beside ``folders`` above — that one is the SURFACE's and does not
+            # move when an actor moves.
+            "revision": actor.revision,
             "folder": item.folder,
             "position": [float(item.position[0]), float(item.position[1])],
             "scale": float(item.scale),
@@ -325,3 +378,143 @@ def _runtime_office_get(rid: Any, params: dict) -> dict:
             "actors_truncated": max(0, len(actors) - len(projected)),
         },
     )
+
+
+@method("runtime.office.upsert")
+def _runtime_office_upsert(rid: Any, params: dict) -> dict:
+    """ONE actor placement, written — and acked LIGHT so a drag can predict.
+
+    Params: ``workspace_id`` (required), ``actor`` (required object — the same
+    identity-triple-plus-items payload ``harness office actor-upsert`` takes on
+    ``--actor-json``, deliberately not a second schema), ``expect_revision``
+    (optional int) and ``updated_by`` (optional string, defaults to the argv
+    lane's own ``operator``).
+
+    Result: ``{"actor_key", "revision"}``. See the module docstring for why it
+    is those two and not the actor.
+
+    Why this method REFUSES an unknown workspace instead of authoring one
+    ---------------------------------------------------------------------
+    ``OfficeStore.upsert_actor`` calls ``ensure_surface`` and would happily
+    lazily create the office, which is right for the CLI: a human typed
+    ``--workspace`` and can see what they made. This lane's caller is the same
+    program that just called ``runtime.office.get``, which REFUSES an unknown
+    workspace so a typo cannot render as a blank canvas. A pair where the read
+    refuses a typo and the write silently authors a whole new office for it is
+    incoherent, and the write side is the worse half — a mis-rendered canvas is
+    repainted on the next poll, a mis-authored one is on disk forever. So the
+    existence check happens HERE, before the store's own lazy create, and the
+    surface-authoring path stays where it already works: the argv lane.
+
+    Concurrency is the store's, not a second scheme
+    -----------------------------------------------
+    ``expect_revision`` and the realm-sync conflict guard are passed straight
+    through to ``upsert_actor``; both refusals arrive as typed exceptions and
+    are translated, never re-implemented. Note what ``expect_revision`` can and
+    cannot express: ``_check_revision`` compares against ``None`` for an actor
+    that does not exist yet, so EVERY value — including ``0`` — refuses a
+    create. A create is therefore necessarily unguarded, and a client must send
+    ``expect_revision`` only for a placement it has already seen.
+    """
+
+    from agent_runtime.errors import StaleRevision, SyncConflict
+    from agent_runtime.office_store import OfficeStore
+
+    workspace_id = _workspace_id_param(params)
+    if workspace_id is None:
+        # The same reason string the read leg spends, on purpose: one client
+        # branch covers "the launcher forgot the workspace" on either lane.
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            "invalid params: workspace_id must be a non-empty string",
+            {"reason": "workspace_id_required"},
+        )
+
+    actor_payload = params.get("actor")
+    if not isinstance(actor_payload, dict):
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            "invalid params: actor must be an object",
+            {"reason": "actor_required"},
+        )
+
+    expect_revision = params.get("expect_revision")
+    # ``bool`` is an ``int`` in Python and ``True`` would silently mean revision
+    # 1 — a wrong guard is worse than no guard, so the type check is explicit.
+    if expect_revision is not None and (
+        isinstance(expect_revision, bool) or not isinstance(expect_revision, int)
+    ):
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            "invalid params: expect_revision must be an integer or omitted",
+            {"reason": "expect_revision_invalid"},
+        )
+
+    updated_by = params.get("updated_by")
+    if updated_by is not None and not isinstance(updated_by, str):
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            "invalid params: updated_by must be a string or omitted",
+            {"reason": "updated_by_invalid"},
+        )
+
+    store = OfficeStore()
+    if not store.surface_exists(workspace_id):
+        return err(
+            rid,
+            ERR_NOT_FOUND,
+            f"unknown workspace: {workspace_id}",
+            {"reason": "workspace_not_found", "workspace_id": workspace_id},
+        )
+
+    try:
+        actor = store.upsert_actor(
+            workspace_id,
+            actor_payload,
+            updated_by=updated_by or "operator",
+            expect_revision=expect_revision,
+        )
+    except StaleRevision as exc:
+        # The prediction is behind. ``data`` deliberately does NOT carry the
+        # current revision: the prescribed cure is to refetch and rebase onto
+        # server truth, and handing back a bare integer invites a retry with it
+        # — which is the lost update this guard exists to refuse. The number is
+        # in ``message``, where an operator can read it and a client should not.
+        return err(
+            rid,
+            ERR_CONFLICT,
+            str(exc),
+            {
+                "reason": "stale_revision",
+                "workspace_id": workspace_id,
+                "expect_revision": expect_revision,
+            },
+        )
+    except SyncConflict as exc:
+        # A different refusal with a different cure — an unresolved realm-sync
+        # sidecar. Retrying never clears it; an operator resolving it does.
+        return err(
+            rid,
+            ERR_CONFLICT,
+            str(exc),
+            {"reason": "sync_conflict", "workspace_id": workspace_id},
+        )
+    except ValueError as exc:
+        # Every ``invalid_request: …`` the store raises while normalizing the
+        # payload — a missing persona_id, an unparseable position, a
+        # secret-shaped display name. One reason, because the client's response
+        # to all of them is identical: fix the payload, it is a launcher bug.
+        # The store's own sentence rides ``message`` so the dev knows which.
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            str(exc),
+            {"reason": "actor_invalid", "workspace_id": workspace_id},
+        )
+
+    # Light, and both fields are things the caller could not have computed.
+    return ok(rid, {"actor_key": actor.actor_key, "revision": actor.revision})

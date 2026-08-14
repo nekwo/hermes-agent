@@ -108,15 +108,32 @@ supports — so the first typed method carries its own manifest. JSON-RPC 2.0
 framing mirroring upstream's `tui_gateway`, answered on stdio and socket alike,
 beside the argv lane rather than replacing it.
 
-`{"rpc":{"contract":1,"methods":["runtime.office.get"]}}` rides `ready` (stdio's
-greeting), `hello_ok` (the socket's), and the re-askable `version` reply. It is
-**a set plus an integer**: the integer moves when a method's shape changes
-incompatibly, the set grows when a method is added — so methods are adoptable
-one at a time. A runtime predating the lane has no `rpc` key, which reads as
-"argv only", and a client must degrade rather than error on that.
+`{"rpc":{"contract":1,"methods":["runtime.office.get","runtime.office.upsert"]}}`
+rides `ready` (stdio's greeting), `hello_ok` (the socket's), and the re-askable
+`version` reply. It is **a set plus an integer**: the integer moves when a
+method's shape changes incompatibly, the set grows when a method is added — so
+methods are adoptable one at a time. A runtime predating the lane has no `rpc`
+key, which reads as "argv only", and a client must degrade rather than error on
+that. `runtime.office.upsert` grew the set and left the integer at 1 — that rule
+being used rather than merely stated.
+
+`runtime.office.upsert` is the WRITE leg, and it is client-prediction shaped:
+the launcher draws a drag immediately, sends it, and the server acks LIGHT —
+`{"actor_key","revision"}`, the two facts the client cannot compute — rather
+than re-projecting the actor onto the hot path of a drag. `expect_revision` is
+`OfficeStore`'s existing optimistic guard, not a second scheme; a mismatch is
+`4090` / `data.reason:"stale_revision"` and the client refetches and rebases.
+That per-actor revision is why the read projection's items now carry `revision`:
+the surface-level `revision` beside `folders` is the SURFACE's and does NOT move
+when an actor moves, so it was never a usable guard. Unlike the CLI verb beside
+it, the method REFUSES an unknown workspace rather than lazily authoring one —
+the read leg already refuses a typo, and a mis-authored office is on disk
+forever where a mis-rendered canvas is repainted on the next poll.
 
 Errors carry `data.reason`; clients branch on the reason, never on message
-prose. See `agent_runtime/serve_rpc.py` and
+prose. `4090` is the one code minted rather than borrowed — upstream has no
+concurrency code, and `4002` (the obvious guess) is already spent there on
+"invalid value". See `agent_runtime/serve_rpc.py` and
 `docs/mission_control/DECISION_push_and_rpc_2026-08-13.md` (launcher repo) for
 the fork-boundary reasoning behind building the union of our PUSH and upstream's
 CALL.

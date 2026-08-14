@@ -163,6 +163,13 @@ EXPECTED_ITEM_KEYS = {
     # already shipped folds a 9-key item unchanged. See
     # ``test_the_contract_integer_does_not_move_for_a_purely_additive_key``.
     "persona_instance_id",
+    # The 10th key, added on the same terms and for the WRITE leg: the OWNING
+    # ACTOR's revision, which is the token ``runtime.office.upsert``'s
+    # ``expect_revision`` is checked against. A client had no other honest
+    # source for it — the surface-level ``revision`` beside ``folders`` is a
+    # DIFFERENT number and does not move when an actor moves. See
+    # ``tests/agent_runtime/test_serve_rpc_office_upsert.py``.
+    "revision",
     "folder",
     "position",
     "scale",
@@ -213,6 +220,10 @@ def test_the_office_method_answers_one_workspace_with_the_canvas_projection():
         # instance-shaped (``personainst_neko_agent``): the two are independent,
         # which is exactly why the binding has to be sent rather than sniffed.
         "persona_instance_id": None,
+        # The owning ACTOR's revision — first write, so 1. This is the number
+        # ``runtime.office.upsert``'s ``expect_revision`` is checked against,
+        # and NOT the surface-level ``revision`` asserted above.
+        "revision": 1,
         "folder": "Agents",
         "position": [0.5, 6.75],
         "scale": 1.25,
@@ -505,7 +516,10 @@ def test_the_envelope_itself_is_validated_with_upstreams_codes():
     assert unknown["error"]["code"] == -32601
     assert unknown["error"]["message"] == "unknown method: runtime.nope.get"
     # The refusal names what DOES exist — the manifest a client may have missed.
-    assert unknown["error"]["data"]["methods"] == ["runtime.office.get"]
+    assert unknown["error"]["data"]["methods"] == [
+        "runtime.office.get",
+        "runtime.office.upsert",
+    ]
 
     assert _reply(out, "old")["error"]["code"] == -32600
     assert _reply(out, "old")["error"]["data"]["reason"] == "bad_jsonrpc_version"
@@ -640,7 +654,10 @@ def test_stdio_learns_the_method_set_from_ready_and_can_re_ask_version():
     out = _run([json.dumps({"op": "version"}) + "\n", SHUTDOWN])
     frames = _frames(out)
 
-    expected = {"contract": 1, "methods": ["runtime.office.get"]}
+    expected = {
+        "contract": 1,
+        "methods": ["runtime.office.get", "runtime.office.upsert"],
+    }
     ready = next(f for f in frames if f.get("event") == "ready")
     assert ready["rpc"] == expected
     version = next(f for f in frames if f.get("event") == "version")
@@ -676,7 +693,10 @@ def test_the_method_surface_is_transport_agnostic_and_answers_on_the_socket():
         with client(handle, name="rpc-peer") as (connection, hello_ok):
             # The socket's greeting carries the manifest — a socket client
             # never sees ``ready``, and should not need a round trip for it.
-            assert hello_ok["rpc"] == {"contract": 1, "methods": ["runtime.office.get"]}
+            assert hello_ok["rpc"] == {
+                "contract": 1,
+                "methods": ["runtime.office.get", "runtime.office.upsert"],
+            }
 
             connection.send(
                 {
