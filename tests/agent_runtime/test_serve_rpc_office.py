@@ -157,6 +157,12 @@ EXPECTED_ITEM_KEYS = {
     "item_id",
     "kind",
     "persona_id",
+    # The 9th key, added WITHOUT moving the contract integer: the launcher's
+    # item decoder gates on required-key PRESENCE (``containsKey``, launcher
+    # ``mission_office_rpc.dart:484``) and never on the key count, so the client
+    # already shipped folds a 9-key item unchanged. See
+    # ``test_the_contract_integer_does_not_move_for_a_purely_additive_key``.
+    "persona_instance_id",
     "folder",
     "position",
     "scale",
@@ -203,6 +209,10 @@ def test_the_office_method_answers_one_workspace_with_the_canvas_projection():
         # The character-class POINTER (Stage 2b). Everything the launcher
         # renders for that class is a bundled app asset on its side.
         "persona_id": "neko_supervisor",
+        # Class-keyed actor → explicit null. Note the item id BESIDE it is
+        # instance-shaped (``personainst_neko_agent``): the two are independent,
+        # which is exactly why the binding has to be sent rather than sniffed.
+        "persona_instance_id": None,
         "folder": "Agents",
         "position": [0.5, 6.75],
         "scale": 1.25,
@@ -246,7 +256,6 @@ def test_the_projection_carries_pointers_and_never_cosmetics_or_a_ledger():
         "backing_profile",
         "qa_profile",
         "actor_key",
-        "persona_instance_id",
         "schema_version",
         # Conflict/sync bookkeeping, and the archived placements themselves.
         "conflict",
@@ -259,6 +268,174 @@ def test_the_projection_carries_pointers_and_never_cosmetics_or_a_ledger():
     # And it stays small. The live workspace projects under 2 KB for four
     # actors; a regression that re-attached actor rows would blow past this.
     assert len(blob) < 4096
+
+
+# ── the persona-instance binding (the 9th key) ──────────────────────────────
+
+
+def test_every_item_carries_the_instance_binding_and_it_is_the_owning_actors():
+    """The binding is the ACTOR's, repeated onto each of its flattened items.
+
+    Asserted per item and not once, because the wire shape is flat while the
+    binding lives one level up: a projection that read the binding off the ITEM
+    (``OfficeItem`` has no such field) or that attached it only to ``agent``
+    items would produce a desk whose binding disagrees with its own agent's —
+    two rows the launcher pairs by ``item_id`` + ``kind`` and would then render
+    as one bound and one unbound occupant of the same desk.
+    """
+
+    _seed_office()
+    out = _run([_rpc("rpc-1", "runtime.office.get", {"workspace_id": WORKSPACE}), SHUTDOWN])
+    result = _reply(out, "rpc-1")["result"]
+
+    # Present on EVERY item — the key, not merely a truthy value.
+    for item in result["items"]:
+        assert "persona_instance_id" in item, item
+
+    assert [(i["item_id"], i["persona_instance_id"]) for i in result["items"]] == [
+        # Class-keyed actor: explicit null on BOTH its items, agent and desk.
+        ("personainst_neko_agent", None),
+        ("desk-neko_supervisor", None),
+        # Instance-keyed actor: the real id on BOTH its items, agent and desk.
+        ("personainst_qa_agent_9c8a382f", "personainst_qa_agent_9c8a382f"),
+        ("qa_desk", "personainst_qa_agent_9c8a382f"),
+    ]
+
+
+def test_a_class_keyed_actor_sends_an_explicit_null_never_an_omitted_key():
+    """The standing rule desks already follow for ``display_name`` /
+    ``pet_slug``, now load-bearing for identity: EVERY live actor is class-keyed
+    today, so a projection that omitted the key on the null branch would look
+    correct in every hand-check and hand the launcher a ``badItemShape``
+    degrade — its decoder gates on ``containsKey``, not on truthiness."""
+
+    _seed_office()
+    out = _run([_rpc("rpc-1", "runtime.office.get", {"workspace_id": WORKSPACE}), SHUTDOWN])
+    result = _reply(out, "rpc-1")["result"]
+
+    class_keyed = [i for i in result["items"] if i["persona_id"] == "neko_supervisor"]
+    assert class_keyed, "seed lost its class-keyed actor"
+    for item in class_keyed:
+        assert set(item) == EXPECTED_ITEM_KEYS, item
+        assert item["persona_instance_id"] is None
+
+    # Present as an explicit JSON null on the wire, not merely absent-and-falsy.
+    for line in _lines(out):
+        if '"persona_instance_id"' in line:
+            assert '"persona_instance_id": null' in line
+            break
+    else:
+        raise AssertionError("the binding never reached the wire at all")
+
+
+def test_the_binding_is_read_from_the_actor_and_never_sniffed_from_the_item_id():
+    """The defect this field exists to prevent, pinned from both sides.
+
+    The seed is built so that item-id sniffing gives the WRONG answer twice:
+    ``personainst_neko_agent`` is instance-SHAPED but belongs to a class-keyed
+    actor (must be null), and ``qa_desk`` is not instance-shaped at all but
+    belongs to an instance-keyed actor (must carry the id). A projection that
+    derived the binding from ``item_id`` passes neither.
+    """
+
+    _seed_office()
+    out = _run([_rpc("rpc-1", "runtime.office.get", {"workspace_id": WORKSPACE}), SHUTDOWN])
+    items = {i["item_id"]: i for i in _reply(out, "rpc-1")["result"]["items"]}
+
+    assert items["personainst_neko_agent"]["item_id"].startswith("personainst_")
+    assert items["personainst_neko_agent"]["persona_instance_id"] is None
+
+    assert not items["qa_desk"]["item_id"].startswith("personainst_")
+    assert items["qa_desk"]["persona_instance_id"] == "personainst_qa_agent_9c8a382f"
+
+
+def test_the_binding_on_the_wire_is_the_canonical_id_and_equals_the_actor_key():
+    """What crosses is the CANONICAL binding — ``OfficeStore`` canonicalizes at
+    the write chokepoint (``office_store.py`` header, plan §4.3), so the wire
+    value is byte-equal to the actor's own sync key. Seeded through the
+    ``persona_personainst_*`` actor-token drift alias precisely so a raw echo of
+    the caller's token would differ from the canonical one."""
+
+    from agent_runtime.office_store import OfficeStore
+
+    store = _seed_office()
+    store.upsert_actor(
+        WORKSPACE,
+        {
+            "persona_id": "dev",
+            "persona_instance_id": "persona_personainst_dev_agent_3ebfce41",
+            "items": [{"item_id": "desk-dev", "kind": "desk", "position": [3.0, 4.0]}],
+        },
+    )
+    actor = OfficeStore().get_actor(WORKSPACE, "personainst_dev_agent_3ebfce41")
+
+    out = _run([_rpc("rpc-1", "runtime.office.get", {"workspace_id": WORKSPACE}), SHUTDOWN])
+    dev_items = [i for i in _reply(out, "rpc-1")["result"]["items"] if i["persona_id"] == "dev"]
+
+    assert [i["item_id"] for i in dev_items] == ["desk-dev"]
+    assert dev_items[0]["persona_instance_id"] == "personainst_dev_agent_3ebfce41"
+    assert dev_items[0]["persona_instance_id"] == actor.actor_key
+
+
+def test_the_contract_integer_does_not_move_for_a_purely_additive_key():
+    """Why a 9th key did NOT bump the contract — a reader will expect it to.
+
+    The integer moves when a client that folds v1 must REFUSE v2. The launcher's
+    item decoder checks required-key presence (``containsKey``,
+    ``mission_office_rpc.dart:484``) and never a key count, so the client
+    already shipped folds the 9-key item and simply ignores the new key. Bumping
+    would have made that shipped client refuse a payload it can read.
+
+    Asserted together with the key's presence on purpose: an unchanged integer
+    is only interesting while the field is actually there.
+    """
+
+    _seed_office()
+    out = _run(
+        [
+            _rpc("rpc-1", "runtime.office.get", {"workspace_id": WORKSPACE}),
+            json.dumps({"op": "version"}) + "\n",
+            SHUTDOWN,
+        ]
+    )
+
+    for item in _reply(out, "rpc-1")["result"]["items"]:
+        assert "persona_instance_id" in item
+
+    assert serve_rpc.RPC_CONTRACT_VERSION == 1
+    assert serve_rpc.manifest()["contract"] == 1
+    frames = _frames(out)
+    assert next(f for f in frames if f.get("event") == "ready")["rpc"]["contract"] == 1
+    assert next(f for f in frames if f.get("event") == "version")["rpc"]["contract"] == 1
+
+
+def test_the_snapshot_office_lane_carries_the_same_binding_field():
+    """Cross-LANE parity, the divergence class this program keeps paying for.
+
+    The launcher reads the office twice — this method and the office section of
+    the ~842 KB snapshot. The snapshot row has carried ``persona_instance_id``
+    since it was written (``snapshot.py``'s ``_office_actor_summary_row``); this
+    pins that the two lanes agree on the field NAME and on the value for the
+    same actor, so neither lane can quietly drop it alone.
+    """
+
+    from agent_runtime.snapshot import office_summary_row
+
+    store = _seed_office()
+    row = office_summary_row(store.get_surface(WORKSPACE), store.list_actors(WORKSPACE))
+    snapshot_bindings = {a["actor_key"]: a["persona_instance_id"] for a in row["actors"]}
+    assert snapshot_bindings == {
+        "neko_supervisor": None,
+        "personainst_qa_agent_9c8a382f": "personainst_qa_agent_9c8a382f",
+    }
+
+    out = _run([_rpc("rpc-1", "runtime.office.get", {"workspace_id": WORKSPACE}), SHUTDOWN])
+    result = _reply(out, "rpc-1")["result"]
+
+    # Every binding the RPC lane emits is one the snapshot lane also emits, for
+    # the actor that owns the item — same field name, same value, both lanes.
+    rpc_bindings = {i["persona_instance_id"] for i in result["items"]}
+    assert rpc_bindings == set(snapshot_bindings.values())
 
 
 # ── typed failures, asserted as whole frames ────────────────────────────────

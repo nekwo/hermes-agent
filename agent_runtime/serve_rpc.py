@@ -51,10 +51,13 @@ Projection rule (decision doc, Stage 2b)
 ----------------------------------------
 The runtime owns who exists, where it sits, what state it is in, and a POINTER
 to the character class. The launcher owns what that class looks like. So
-``persona_id`` crosses the wire and nothing cosmetic does. The bound is the
-snapshot's own ``MAX_OFFICE_ACTORS_PROJECTED``, reused rather than re-declared,
-and a truncation is ACCOUNTED (``actors_truncated``) — a silent cut that reads
-as an empty office is the failure this whole document is about.
+``persona_id`` crosses the wire and nothing cosmetic does — and so does
+``persona_instance_id``, which is identity (WHICH one of a class is placed
+here), not cosmetics, and which no client can derive from the ids it already
+has. The bound is the snapshot's own ``MAX_OFFICE_ACTORS_PROJECTED``, reused
+rather than re-declared, and a truncation is ACCOUNTED (``actors_truncated``) —
+a silent cut that reads as an empty office is the failure this whole document
+is about.
 """
 
 from __future__ import annotations
@@ -227,16 +230,27 @@ def _runtime_office_get(rid: Any, params: dict) -> dict:
     """ONE workspace's office projection — canvas-shaped, and bounded.
 
     Carries per item: ``item_id``, ``kind``, ``persona_id`` (the character-class
-    POINTER), ``folder``, ``position``, ``scale``, ``display_name``,
-    ``pet_slug``; plus surface-level ``folders``, ``revision``, ``updated_at``.
+    POINTER), ``persona_instance_id`` (the owning actor's IDENTITY binding, or
+    ``null`` when the actor is class-keyed), ``folder``, ``position``, ``scale``,
+    ``display_name``, ``pet_slug``; plus surface-level ``folders``, ``revision``,
+    ``updated_at``.
+
+    ``persona_instance_id`` is the actor's, not the item's — an actor file is
+    the binding unit (all of one agent's placements plus its coupled desk live
+    in it), so every item flattened out of one actor carries the same value.
+    It is NOT derivable client-side: an ``item_id`` such as
+    ``personainst_qa_agent_9c8a382f`` is instance-SHAPED but is an item id, and
+    reading it as a binding would invent an instance for a class-keyed actor.
+    Every live actor today is class-keyed, so this is ``null`` across the board;
+    the field exists so that stops being invisible.
 
     Deliberately NOT carried, though the store holds them: the surface's
     ``archived_actor_keys`` (an append-only ledger capped at 5000 — the one
     genuinely unbounded field in this domain), and the actors' ``updated_by`` /
-    ``created_at`` / ``state`` / ``backing_profile`` / ``persona_instance_id``.
-    None of it is renderable and the first four are provenance for a different
-    surface. Archived actors are excluded outright: ``list_actors`` without
-    ``include_archived`` is the placement set the canvas draws.
+    ``created_at`` / ``state`` / ``backing_profile``. None of it is renderable
+    and the first three are provenance for a different surface. Archived actors
+    are excluded outright: ``list_actors`` without ``include_archived`` is the
+    placement set the canvas draws.
 
     Items are flattened out of their actor files in ``(actor_key, file order)``
     — ``list_actors`` sorts by ``actor_key`` — so the same store state produces
@@ -281,6 +295,12 @@ def _runtime_office_get(rid: Any, params: dict) -> dict:
             "item_id": item.item_id,
             "kind": item.kind,
             "persona_id": item.persona_id,
+            # The actor's binding, repeated onto each of its items because the
+            # wire shape is flat. Explicit ``None`` for a class-keyed actor —
+            # NEVER an omitted key, the same rule desks already follow for
+            # ``display_name`` / ``pet_slug``: a client decoding into a typed
+            # struct must not have to special-case which keys exist.
+            "persona_instance_id": actor.persona_instance_id,
             "folder": item.folder,
             "position": [float(item.position[0]), float(item.position[1])],
             "scale": float(item.scale),
