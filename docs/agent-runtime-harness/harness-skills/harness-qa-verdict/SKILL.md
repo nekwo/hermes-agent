@@ -105,34 +105,3 @@ whole mechanism, and nothing is blocked while you wait.
 Use when evidence cannot be collected or reviewed at all because of an external,
 environmental, or tooling blocker. Include exact redaction-safe detail: the command label,
 the failure mode, and what would unblock it. Never raw logs, never absolute local paths.
-
-## Retired AgentDecision Template
-
-**Do not emit this.** No live lane consumes an `AgentDecision`; a chat turn answers in
-prose. Allowed `qa_verdict` payload keys only: `verdict`, `coverage`, `findings`, and
-`proof_ids`. Do not add `notes`, `confidence`, `raw_logs`, `paths`, nested review objects,
-or absolute paths. Coverage values were `not_required`, `missing`, `reviewed`, `blocked`,
-`failed`. The block below is retained only as a fixture for
-`hermes harness contracts verify-examples`, which still validates the decision registry
-that outlived the lane, and is pinned by `tests/agent_runtime/test_decision_contracts.py`
-and `tests/agent_runtime/test_decision_contract_registry.py`.
-
-```json
-{
-  "type": "qa_verdict",
-  "summary": "Implementation proof reviewed; required Stage 46 coverage is satisfied.",
-  "rationale": "Reviewed attached proof IDs and any required packet/proof lanes. Visual/MCP and cross-stack proof were not required unless listed by HUD.",
-  "payload": {
-    "verdict": "approved",
-    "proof_ids": [
-      "actual_required_proof_id"
-    ],
-    "coverage": {
-      "command_gate": "reviewed",
-      "visual_or_mcp": "not_required",
-      "cross_stack_join": "not_required"
-    },
-    "findings": []
-  }
-}
-```
