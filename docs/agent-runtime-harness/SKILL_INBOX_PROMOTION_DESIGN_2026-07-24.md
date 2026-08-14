@@ -1,6 +1,13 @@
 # Realm Skill Inbox + Hash-Guarded Promotion — Implementation Design (2026-07-24)
 
-Status: implementation-ready. Operator-approved design (Tony, 2026-07-24).
+Status: **SHIPPED** (design implementation-ready 2026-07-24, operator-approved
+by Tony; landed in full plus two follow-on slices). `classify_promotion` /
+`execute_promotion` / `list_inbox_packages` are in
+`agent_runtime/skill_promotion.py`, `apply_skill_inbox_pull` in
+`agent_runtime/realm_sync.py`, and `skills inbox|promote|publishable` are
+registered CLI verbs. **Read the Problem section and the "do not re-derive"
+fact block below as a 2026-07-24 snapshot, not as current state** — this
+design is what changed both.
 
 ## Problem
 

@@ -161,8 +161,10 @@ Delete the 9 proof/gate files, `burn_in.py`, `smoke.py`, `replay_scenarios.py`,
 `scripts/cert_streak.py`, and the REMOVE halves of `visual_proof.py` (from line 60) and
 `visual_trace_evidence.py` (from line 44).
 **KEEP — named like the remove set, are not:** `parity.py` (ProjectionAccountant,
-read-model infra), `patch_coverage.py` (stream frames), `proof_capture.py` (Stage C
-dataclasses — **rename it**).
+read-model infra), `patch_coverage.py` (stream frames), ~~`proof_capture.py` (Stage C
+dataclasses — **rename it**)~~ — **superseded: `proof_capture.py` was deleted by
+S14 with the rest of the Stage C Python capture lane; `parity.py` and
+`patch_coverage.py` are still live.**
 **Gate:** `rg "proof_gates|proof_runner|proof_batches|promotion_gates|final_gate|ProofStore" agent_runtime hermes_cli` → 0 ·
 **negative gate:** `rg "ProjectionAccountant" agent_runtime/parity.py` → non-zero ·
 `pytest tests/agent_runtime -q`
@@ -278,7 +280,7 @@ operator has accepted — expect `tests/`, `docs/`, and the deleted `tools/missi
 |---|---|---|
 | goal | harness mission records | `hermes_cli/goals.py` (upstream session goals / Ralph loop) |
 | kanban / board | — | upstream kanban (~14k lines) **and** the fork board |
-| proof | proof gates, `proofs/` store | Stage C MCP + PS helper, `proof_capture.py` |
+| proof | proof gates, `proofs/` store | Stage C MCP + PS helper (~~`proof_capture.py`~~ — deleted by S14) |
 | task | goal/task records | `TaskStore` stub (permanent, ruling R-3) |
 | graph | stage graph, `agent_topology` | the agent runtime graph + `flow_graph.py` |
 
@@ -333,8 +335,9 @@ outcomes below are the commit-recorded decisions, not a filename-based deletion 
 
 - **Five small-module candidates:** only `agent_runtime/role_sessions.py` was actually
   dead and was removed. The other four — `dev_discipline`, `simplified_contract`,
-  `scope_control`, and `role_checklists` — have live production callers, so whole-module
-  deletion was skipped. The same commit removed only the already-dead `repo_context`
+  `scope_control`, and `role_checklists` — had live production callers at the time, so
+  whole-module deletion was skipped **in this wave. All four have since been deleted
+  outright by the later waves (S41/S44/S45); none of the five modules survives.** The same commit removed only the already-dead `repo_context`
   worktree-creator import from `persona_runtime.py` (`3a32ec617`). A later
   reachability pass established the precise correction: **four of the five modules are
   live modules with dead insides.** It removed 800 lines of unreachable mission-lane
@@ -534,7 +537,9 @@ Both were executed on `main` with red-first removal contracts.
   `role_checklists.py` went 420 → 113 lines, keeping only
   `validate_checklist_payload_structure` (live via
   `decision_contract_registry.validate_payload_keys`) and staying in place as a
-  small leaf. Six contracts de-registered
+  small leaf. **Superseded: `agent_runtime/role_checklists.py` no longer exists
+  — a later wave deleted the leaf too (see `agent_runtime/runtime_config.py`,
+  "S44 deleted the `role_envelopes` / `role_checklists`…").** Six contracts de-registered
   (`role_envelope.opened/continued/paused/closed`,
   `role_checklist.created/item_updated`) per the S36/S37 rule; the two
   writer-less checkpoint EntityClass rows and eight orphaned path helpers went

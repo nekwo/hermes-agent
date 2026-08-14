@@ -13,11 +13,17 @@ Parent audit:
 G4 + G5b slice. Sibling precedent (deliberately mirrored):
 [`mission-chat-mcp-admission.md`](mission-chat-mcp-admission.md).
 
-**Activation is operator-pending.** Enforcement is live the moment this ships;
-*grants* require the operator to write the stanza in §3 into the ROOT
-`config.yaml`. Until then every envelope-gated class on mission-chat is a typed
-refusal — which is strictly better than today's coin flip, but it is not "an
-agent can push".
+**Activation was operator-pending — SUPERSEDED 2026-08-09. Read §2.1 before
+acting on anything below.** As written (2026-07), grants required the operator
+to write the §3 stanza into the ROOT `config.yaml`, and until then every
+envelope-gated class on mission-chat was a typed refusal. **That is no longer
+the posture.** `unbounded` is now the shipped runtime-wide default
+(`agent_runtime/permission_modes.py` `SHIPPED_DEFAULT_PERMISSION_MODE`), and
+`agent_runtime/terminal_envelope.py` grants any class in
+`GRANTABLE_COMMAND_CLASSES` on permission mode alone, before the floor check,
+sourced `GRANT_SOURCE_PERMISSION_MODE`. With **no stanza written at all**, every
+grantable class runs and is receipted. A refusal today means the opposite of
+what this paragraph said: that an operator NARROWED the session.
 
 ---
 
@@ -153,8 +159,10 @@ Config key referenced in refusals:
 `agent_runtime.terminal_envelope.grants.<role>.<lane>`.
 
 * **Roles**: `pm`, `dev`, `qa`, `alice_supervisor` (spell it `neko_supervisor`
-  or `neko` if you prefer — the alias resolves to `alice_supervisor`; the
-  canonical spelling wins when both are present, and the two are never unioned).
+  if you prefer — that alias resolves to `alice_supervisor`; the canonical
+  spelling wins when both are present, and the two are never unioned). **A bare
+  `neko:` key grants nothing** — S66 removed that third alias from
+  `_ROLE_ALIASES` precisely because it silently widened a permission table.
 * **Lanes**: `mission_chat` is the only governed lane. A grant on any other
   lane key is inert.
 * **Deny by default**: no `*` role, no `*` lane, no inheritance. A role with no

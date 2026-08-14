@@ -294,7 +294,7 @@ launcher-visible history by `agent_runtime/persona_chat_history.py` (~line
     only when `state` is None (legacy call shape).
 - New `mission_chat_turn_record(session_id, client_message_id) -> dict | None`
   returning `{turn_id, state, updated_at, elements}` (safe-parsed).
-- New `mark_stale_running_turns_interrupted(session_id, active_client_message_id)
+- New `mark_stale_inflight_turns_interrupted(session_id, active_client_message_id)
   -> list[str]`: every record in the session with `state == "running"` and a
   different client id flips to `interrupted`; returns flipped client ids.
   This is repair-on-next-write: a killed turn is visibly `interrupted` no
@@ -329,7 +329,7 @@ Applies to `_cmd_mission_chat_message` AND the free-floating chat turn
 
 1. Construct the emitter **unconditionally** with `emit_frames=<stream flag>`.
 2. Before the provider call (after the operator message is appended):
-   - `mark_stale_running_turns_interrupted(session_id, client_message_id)`
+   - `mark_stale_inflight_turns_interrupted(session_id, client_message_id)`
    - `persist_mission_chat_turn(..., elements=emitter.elements, state="running")`
 3. `on_update` lambda passes `state="running"`.
 4. Exception path: `emitter.finish(state="failed")` unconditionally
@@ -377,7 +377,7 @@ Store (`tests/agent_runtime/test_persona_chat_history_curation.py` or new
 module):
 - state persists with empty elements; `state=None` preserves existing state;
   new record defaults `running`; invalid state rejected/ignored.
-- `mark_stale_running_turns_interrupted` flips only other-client running
+- `mark_stale_inflight_turns_interrupted` flips only other-client running
   records in the same session; returns the flipped ids.
 - Legacy record without `state` reads as `completed`.
 
@@ -411,7 +411,7 @@ following retire the structural weaknesses the review flagged.
 ### Store — single write chokepoint + cross-process lock (W1)
 
 All mutations (`persist_mission_chat_turn`,
-`mark_stale_running_turns_interrupted`) go through `_mutate_store`, which
+`mark_stale_inflight_turns_interrupted`) go through `_mutate_store`, which
 holds an exclusive cross-process file lock (`mission_chat_turns.lock`,
 `msvcrt.locking` on Windows / `flock` elsewhere) for the whole
 read-modify-write window. Concurrent CLI turns can no longer lose each

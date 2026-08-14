@@ -256,7 +256,8 @@ in a session scratchpad (ephemeral — regenerate from the commits if gone).**
    themselves (`05504bd9f`, function-local import). FLOWS FORK-WARD instead —
    the fork still carries the module-level import at test_gateway.py:20; adopt
    at the next sync (currently fenced by the env-gap markers, so invisible in
-   the canonical runner).**
+   the canonical runner).** **CLOSED:** `tests/hermes_cli/test_gateway.py` now
+   guards the import with `if sys.platform == "win32": pty = None / else: import pty`.
 4. Git-Bash discovery: WSL-stub rejection on the PATH lookup (upstream dropped
    it; a WSL stub passes `_bash_starts()` and then fails every Windows path).
    → `upstream-pr/reject-wsl-bash-stub` (`322c3635c`), stub live-probed on this
@@ -303,8 +304,10 @@ in a session scratchpad (ephemeral — regenerate from the commits if gone).**
 - `tools/skills_sync.py`: upstream's rename-recovery helpers use import-time
   `SKILLS_DIR` while the fork migrated to live `_skills_dir()` — divergent after
   a profile switch; needs a deliberate migration pass.
-- `tools/environments/singularity.py:27` resolves `get_hermes_home()` at module
-  import time — imports of `tools.terminal_tool` fail under a scrubbed env.
+- ~~`tools/environments/singularity.py:27` resolves `get_hermes_home()` at module
+  import time — imports of `tools.terminal_tool` fail under a scrubbed env.~~
+  **CLOSED:** the module now imports the NAME at module scope and calls it inside
+  a function body.
 - Packaging: `psutil`/`fire` declared but absent on the ambient interpreter the
   test fences were built against; `markdown` used by the matrix adapter but
   declared nowhere. The env-gap registries are pinned to the ambient

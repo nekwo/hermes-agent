@@ -137,6 +137,8 @@ duplicated or newly-dead:
    drift-guard test. **Not deletable** in this change; note only that the
    already-documented one-line delegation of `_log_harness_blocked_attempt` to
    `terminal_envelope.record_legacy_block` (see that docstring) is still owed.
+   **Since shipped:** `tools/terminal_tool.py::_log_harness_blocked_attempt`
+   now imports and calls `record_legacy_block`.
 4. **Nothing else qualifies.** `PERSONA_BLOCKED_TOOLS` (the 5-name set) stays:
    it is the definition of what `profile_default` blocks, and `profile_default`
    survives as the downgrade tier. The `read_only` MCP tables

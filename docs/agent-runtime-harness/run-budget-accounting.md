@@ -200,8 +200,9 @@ graceful window is reachable inside a second.
 
 ## 6. Follow-ups
 
-- Link this doc from `00-index.md` under Operator forensics (left out of the
-  landing commit to avoid colliding with parallel wave-4 edits to the index).
+- ~~Link this doc from `00-index.md` under Operator forensics (left out of the
+  landing commit to avoid colliding with parallel wave-4 edits to the index).~~
+  **DONE** — `00-index.md` links it under the mission-chat lane docs.
 - ~~The block is not yet rendered on any operator surface~~ — the run-record row
   landed in the launcher (Mission Control `mission_run_budget_row.dart`), and as
   of 2026-07-27 the chat lane has its own home on the turn record (§3) for the
