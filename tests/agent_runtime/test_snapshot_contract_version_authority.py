@@ -76,8 +76,10 @@ RED-PROOF. Three, run before this file landed:
 from __future__ import annotations
 
 import ast
+import functools
 import os
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -102,6 +104,57 @@ AUTHORITY_FILE = "test_snapshot_contract_version_authority.py"
 #: the exemption cannot widen to some other literal in the same module, and
 #: witnessed by :func:`test_the_definition_site_is_where_it_claims_to_be`.
 DEFINITION_SITE = ("snapshot.py", "SNAPSHOT_CONTRACT_VERSION")
+
+#: The authority's own symbol. Derived from :data:`DEFINITION_SITE` so the two
+#: cannot drift, and used below to make it STRUCTURALLY impossible for any
+#: exemption to cover a second declaration of the snapshot contract version.
+AUTHORITY_SYMBOL = DEFINITION_SITE[1]
+
+#: Contract constants belonging to a DIFFERENT contract that happens to spell
+#: its name the same way.
+#:
+#: The detector matches on the name suffix ``CONTRACT_VERSION``, which is the
+#: right net for the defect it was built for — six restatements of ONE number —
+#: but this repo versions more than one wire. The snapshot frame, the JSON-RPC
+#: method manifest and the socket hello handshake each move on their own
+#: schedule, on purpose: adding an RPC method must not restamp every live
+#: persona instance's ``contract_hash``, and binding the hello proof to the
+#: listening port must not make the Launcher read every snapshot frame as stale.
+#: Three independent numbers is the design, not the debt.
+#:
+#: WHY THIS DOES NOT WEAKEN THE GATE. Entries are keyed on the exact
+#: ``(filename, symbol)`` PAIR, never on a filename or a name pattern, so an
+#: exemption covers precisely one declaration in one module and nothing else. A
+#: module that redeclared ``SNAPSHOT_CONTRACT_VERSION = 54`` — the genuine
+#: duplicate this gate exists to catch — matches no pair here and is still
+#: flagged. Belt and braces, :data:`AUTHORITY_SYMBOL` may never appear as the
+#: symbol of an entry: the lookup below refuses it, and
+#: :func:`test_no_lane_exemption_can_ever_cover_the_snapshot_version` drives
+#: that refusal on a synthetic module rather than trusting the rule.
+#:
+#: Each entry is witnessed on its own module below: the constant must still be a
+#: singular module-scope int literal there, and the module must not import or
+#: mention the snapshot authority — a lane that started deriving from
+#: ``SNAPSHOT_CONTRACT_VERSION`` would no longer be independent, and the entry
+#: would have stopped being true.
+LANE_CONTRACT_ALLOWLIST = {
+    ("serve_rpc.py", "RPC_CONTRACT_VERSION"): (
+        "the JSON-RPC METHOD-SURFACE contract, published at serve_rpc.py:178 as "
+        "`{'contract': RPC_CONTRACT_VERSION, 'methods': method_names()}`. It "
+        "versions request/result SHAPES on the method manifest, which argv on "
+        "the wire cannot version for itself; adding a method deliberately does "
+        "not move it. Nothing on the snapshot frame reads it and it never "
+        "reaches `parity.contract_version`."
+    ),
+    ("serve_socket.py", "HELLO_CONTRACT_VERSION"): (
+        "the socket HELLO HANDSHAKE contract, stamped on every `server_hello` "
+        "(serve_socket.py:913, :1093) and folded into the HMAC proof preimage "
+        "at :527 (`f'v{HELLO_CONTRACT_VERSION}|{port}|{nonce}'`). It gates "
+        "whether a client can answer the challenge frame at all — a connection "
+        "concern that is settled before any snapshot is ever sent, and one that "
+        "must be able to move without restamping contract_hash."
+    ),
+}
 
 #: Integer literals bound to a contract-version name that are NOT restatements,
 #: each with the reason it cannot rot. Witnessed below rather than trusted.
@@ -170,6 +223,17 @@ def restatements(tree: ast.Module, *, filename: str) -> list[tuple[int, str]]:
                         continue
                     if (filename, target.id) in FLOOR_ALLOWLIST:
                         continue
+                    # A different contract that spells its name the same way.
+                    # The `!= AUTHORITY_SYMBOL` leg is not defensive clutter: it
+                    # is what makes "this exemption can never cover a second
+                    # declaration of the SNAPSHOT version" a property of the
+                    # code rather than a property of what happens to be in the
+                    # dict today. Adding such an entry by hand would be inert.
+                    if (
+                        target.id != AUTHORITY_SYMBOL
+                        and (filename, target.id) in LANE_CONTRACT_ALLOWLIST
+                    ):
+                        continue
                     found.append((node.lineno, f"{target.id} = {value.value}"))
 
         # 2. <version expr> ==/!= <int>   (either side)
@@ -202,7 +266,20 @@ def restatements(tree: ast.Module, *, filename: str) -> list[tuple[int, str]]:
     return sorted(set(found))
 
 
+@functools.lru_cache(maxsize=1)
+def _scanned_modules_cached() -> tuple[tuple[str, ast.Module], ...]:
+    return tuple(_scanned_modules_uncached().items())
+
+
 def _scanned_modules() -> dict[str, ast.Module]:
+    """Parsing the scanned roots is the expensive step and three cases need it,
+    so it is parsed once per session. Callers get a fresh dict; the trees inside
+    are shared, and every reader here treats them as read-only."""
+
+    return dict(_scanned_modules_cached())
+
+
+def _scanned_modules_uncached() -> dict[str, ast.Module]:
     root = _repo_root()
     trees: dict[str, ast.Module] = {}
     for scoped in SCANNED_ROOTS:
@@ -366,6 +443,144 @@ def test_the_restatement_detector_is_not_vacuous(source: str, flagged: bool):
 
     hits = restatements(ast.parse(source), filename="synthetic.py")
     assert bool(hits) is flagged, f"detector returned {hits} for: {source!r}"
+
+
+def test_no_lane_exemption_can_ever_cover_the_snapshot_version():
+    """THE PROOF that the exemption above did not widen the gate.
+
+    The whole value of this file is catching a SECOND declaration of the
+    snapshot contract version. An allowlist is the classic way that value gets
+    given away — one entry at a time, each individually reasonable.
+
+    So the refusal is driven, not asserted about the dict's current contents: a
+    lane entry for ``SNAPSHOT_CONTRACT_VERSION`` is INSTALLED here, in the worst
+    spelling (the authority's own module, the exact literal in flight), and the
+    detector must still flag it. A gate that merely happened to lack the entry
+    would pass this by accident; only one that refuses the symbol passes it on
+    purpose.
+    """
+
+    poisoned = ast.parse(f"{AUTHORITY_SYMBOL} = {SNAPSHOT_CONTRACT_VERSION}")
+
+    # 1. Baseline: in some OTHER module it is already a restatement today.
+    assert restatements(poisoned, filename="serve_rpc.py"), (
+        "a redeclaration of the snapshot version is not being flagged even "
+        "without an exemption — the detector itself has regressed"
+    )
+
+    # 2. And it stays flagged with a lane exemption naming it exactly.
+    with mock.patch.dict(
+        LANE_CONTRACT_ALLOWLIST,
+        {("serve_rpc.py", AUTHORITY_SYMBOL): "a lie, installed on purpose"},
+    ):
+        assert restatements(poisoned, filename="serve_rpc.py"), (
+            f"a LANE_CONTRACT_ALLOWLIST entry was able to exempt {AUTHORITY_SYMBOL}. "
+            "That is the one thing this gate exists to catch, and the exemption "
+            "must refuse the authority symbol structurally, not by omission."
+        )
+
+    # 3. The definition site's exemption is a PAIR for the same reason: it must
+    #    not travel to another module.
+    assert restatements(poisoned, filename="serve_socket.py")
+    assert not restatements(poisoned, filename=DEFINITION_SITE[0])
+
+
+def test_the_lane_allowlist_exempts_a_pair_and_not_a_pattern():
+    """Neither half of the key may be a wildcard.
+
+    A filename-scoped exemption would let ``serve_rpc.py`` state any contract
+    version it liked; a symbol-scoped one would let any module claim to own the
+    RPC contract. Both are the shape this gate was built to refuse, so both are
+    driven.
+    """
+
+    (lane_file, lane_symbol), _ = next(iter(LANE_CONTRACT_ALLOWLIST.items()))
+
+    # The exempt pair itself is clean.
+    assert not restatements(ast.parse(f"{lane_symbol} = 1"), filename=lane_file)
+    # Same symbol, different module — still a restatement.
+    assert restatements(ast.parse(f"{lane_symbol} = 1"), filename="snapshot_wire.py")
+    # Same module, different contract-version symbol — still a restatement.
+    assert restatements(ast.parse("SOME_OTHER_CONTRACT_VERSION = 1"), filename=lane_file)
+
+
+def test_each_lane_contract_is_witnessed_as_an_INDEPENDENT_contract():
+    """Every lane entry's premise, asserted on the module it names.
+
+    The claim is not "this constant is fine", it is "this is a DIFFERENT
+    contract that versions on its own schedule". Two things have to be true for
+    that, and neither is checked by the entry existing:
+
+    1. the symbol is still a singular module-scope int literal there — if it
+       became derived, or was defined twice, the exemption is covering something
+       other than what it was written for;
+    2. the module does not reach for ``SNAPSHOT_CONTRACT_VERSION`` at all. A lane
+       that started importing, comparing against, or deriving from the snapshot
+       authority would no longer be independent, and the honest response would
+       be to delete the second number rather than keep exempting it.
+    """
+
+    root = _repo_root()
+    for (filename, symbol), reason in LANE_CONTRACT_ALLOWLIST.items():
+        module = root / "agent_runtime" / filename
+        assert module.is_file(), f"lane allowlist names {filename}, which no longer exists"
+
+        source = module.read_text(encoding="utf-8")
+        tree = ast.parse(source)
+
+        definitions = [
+            node
+            for node in tree.body  # module scope only
+            if isinstance(node, ast.Assign)
+            and any(isinstance(t, ast.Name) and t.id == symbol for t in node.targets)
+        ]
+        assert len(definitions) == 1, (
+            f"{filename} defines {symbol} {len(definitions)} times at module "
+            f"scope; the exemption ({reason}) covers a singular constant"
+        )
+        assert _is_int_literal(definitions[0].value), (
+            f"{filename}:{definitions[0].lineno}: {symbol} is no longer a plain "
+            "int literal. If it now derives from another version, the two "
+            "contracts are entangled and this exemption is wrong."
+        )
+
+        entangled = [
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name) and node.id == AUTHORITY_SYMBOL
+        ]
+        assert entangled == [], (
+            f"{filename} now references {AUTHORITY_SYMBOL} at line(s) {entangled}. "
+            f"The exemption claims an independent contract ({reason}); a lane "
+            "that derives from the snapshot authority is not independent, and "
+            "the second number should be deleted rather than exempted."
+        )
+
+
+def test_a_lane_exemption_cannot_be_claimed_by_a_lookalike_basename():
+    """The detector keys on BASENAME, so a second file of the same name anywhere
+    in the scanned roots would inherit the exemption for free.
+
+    ``tests/agent_runtime/serve_rpc.py`` does not exist today. If it ever does,
+    it would be exempt from a gate it was never reasoned about — so the
+    uniqueness the exemption silently depends on is stated here instead of
+    assumed.
+    """
+
+    counts: dict[str, list[str]] = {}
+    for path in _scanned_modules():
+        counts.setdefault(Path(path).name, []).append(path)
+
+    for filename, _symbol in LANE_CONTRACT_ALLOWLIST:
+        paths = counts.get(filename, [])
+        assert len(paths) == 1, (
+            f"{filename} exists {len(paths)} times in the scanned roots ({paths}). "
+            "The lane exemption is keyed on the basename, so every one of them "
+            "is exempt. Make the key a path, or rename the newcomer."
+        )
+        assert Path(paths[0]).parent.name == "agent_runtime", (
+            f"the only {filename} is at {paths[0]}, not in agent_runtime/"
+        )
 
 
 def test_the_floor_allowlist_is_witnessed_not_trusted():
