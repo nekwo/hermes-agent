@@ -147,6 +147,43 @@ def _cmd_office_show(args) -> int:
 
 
 def _cmd_office_actor_upsert(args) -> int:
+    """`harness office actor-upsert` — the operator's raw placement writer.
+
+    Also the LAUNCHER's save path: the Flutter bridge shells out to this exact
+    verb with ``--actor-json`` (mission_control_bridge.dart, `actor-upsert`),
+    so whatever this verb permits is what the live canvas can persist.
+
+    Class-key policy — why ``--persona-instance-id`` is OPTIONAL, not required:
+
+    Class-keyed placements are a supported shape, not a defect. The store says
+    so itself (``archive_actors_for_instance``: "Persona-id-keyed placements
+    survive instance churn by design"), and the launcher codec emits a payload
+    with no binding whenever a canvas group has none. A hard
+    ``required=True`` would outlaw a legal placement and break the launcher's
+    save for every unbound group — a migration fence is not worth that.
+
+    Warn-and-proceed is the other wrong answer: this verb's default output is
+    JSON consumed by the bridge, and the harm it would warn about is silent
+    data corruption discovered days later. A warning nobody reads is the same
+    as no guard.
+
+    So: the flag is a convenience (fill/override the payload's binding without
+    hand-editing JSON), and the GUARD is conditional. A class-keyed write is
+    refused only when it would actually undo the re-key migration — archived
+    class key, or duplicate item ids against an instance-keyed sibling. Every
+    other class-keyed write proceeds untouched, and ``--allow-class-key`` is
+    the documented escape hatch for the operator who means it (it forces the
+    write and rides an ``office_actor_class_key_forced`` warning, so the
+    override is on the record rather than invisible).
+    """
+
+    from agent_runtime.office_class_key_guard import (
+        CLASS_KEY_REFUSAL_CODE,
+        ClassKeyedPlacementRefused,
+        class_key_collision,
+        refusal_message,
+    )
+
     store = _office_store()
     workspace = _office_workspace_for(args)
     if not workspace:
@@ -157,6 +194,33 @@ def _cmd_office_actor_upsert(args) -> int:
         return emit_harness_error(exc, args=args, code="invalid_payload")
     if not isinstance(payload, dict):
         return emit_harness_error(ValueError("--actor-json must be an actor object"), args=args, code="invalid_request")
+    instance_id = str(getattr(args, "persona_instance_id", None) or "").strip()
+    if instance_id:
+        # The flag wins over the JSON: an operator who typed it is being more
+        # specific than the file they piped in. The store still mints the key.
+        payload = {**payload, "persona_instance_id": instance_id}
+
+    warnings: list[dict] = []
+    collision = class_key_collision(store, workspace, payload)
+    if collision is not None:
+        message = refusal_message(collision)
+        if not bool(getattr(args, "allow_class_key", False)):
+            return emit_harness_error(
+                ClassKeyedPlacementRefused(message, safe_details=collision),
+                args=args,
+                code=CLASS_KEY_REFUSAL_CODE,
+                message=message,
+            )
+        warnings.append(
+            {
+                "code": "office_actor_class_key_forced",
+                "actor_key": collision["class_actor_key"],
+                "message": message,
+                "reasons": collision["reasons"],
+                "conflicting_actor_keys": collision["conflicting_actor_keys"],
+            }
+        )
+
     dry_run = bool(getattr(args, "dry_run", False))
     actor = store.upsert_actor(
         workspace,
@@ -165,7 +229,7 @@ def _cmd_office_actor_upsert(args) -> int:
         expect_revision=getattr(args, "expect_revision", None),
         dry_run=dry_run,
     )
-    envelope = _object_envelope("office_actor", _office_actor_row(actor, full=True))
+    envelope = _object_envelope("office_actor", _office_actor_row(actor, full=True), warnings=warnings or None)
     if dry_run:
         envelope["dry_run"] = True
     _print_stage42(envelope, args=args, default_output="json")

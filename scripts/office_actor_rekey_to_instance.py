@@ -62,13 +62,34 @@ The interaction that is NOT clean is realm sync, in two directions:
 
 (b) Any later class-keyed WRITE re-creates the old actor and CLEARS the guard.
     ``upsert_actor`` treats an explicit local upsert of an archived key as
-    operator intent to re-add (``office_store.py:345-350``). So a launcher save,
-    a ``harness office actor upsert`` without ``persona_instance_id``, or a
-    ``workspace_template`` apply that copies class-keyed payloads
-    (``workspace_template.py:109``) undoes the migration for that actor AND
-    leaves the instance-keyed actor in place — again a double placement. The
-    migration is therefore NOT durable until every writer sends the instance id.
-    Verify that first; this script does not check it and cannot.
+    operator intent to re-add (``office_store.py:344-351``). So a launcher save,
+    a ``harness office actor-upsert`` without ``persona_instance_id``, or a
+    ``workspace_template`` apply that copies class-keyed payloads would undo the
+    migration for that actor AND leave the instance-keyed actor in place — again
+    a double placement.
+
+    FENCED as of ``agent_runtime/office_class_key_guard.py``. Both non-launcher
+    writers now ask before writing:
+
+    - ``workspace_template._copy_office`` REFUSES the copy per-actor
+      (``office_actor_class_key_refused`` warning on the create envelope). It
+      has no escape hatch: a template apply holds no operator intent about the
+      destination.
+    - ``harness office actor-upsert`` (also the launcher's save path — the
+      Flutter bridge shells out to this verb) refuses with
+      ``duplicate_conflict``. ``--persona-instance-id`` threads the binding
+      through; ``--allow-class-key`` forces the write and records the override.
+
+    The guard is CONDITIONAL, not a blanket ban — a class-keyed write only
+    fails when the class key is archived or its item ids already belong to an
+    active instance-keyed sibling. Class-keyed placements remain legal
+    (``archive_actors_for_instance``: they survive instance churn by design).
+
+    Still unfenced by construction: ``resolve_conflict --take remote`` (case
+    (a) above), and any NEW writer. ``runtime.office.upsert`` — under
+    construction in ``serve_rpc.py`` at the time of writing — must call
+    ``office_class_key_guard.class_key_collision`` before it upserts, or it
+    reopens this hole from the wire.
 """
 
 from __future__ import annotations

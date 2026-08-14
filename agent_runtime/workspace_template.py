@@ -19,6 +19,14 @@ Per-artifact failures degrade to typed warnings instead of aborting the
 create: the workspace already exists at that point, and a half-copied
 template with an honest warning beats a rolled-back create with a dead
 workspace id in the event log.
+
+Office actor copies carry the source's ``persona_instance_id`` through, so a
+bound source placement copies as a bound placement. A source placement with NO
+binding produces a CLASS-KEYED write, which is refused per-actor
+(``office_actor_class_key_refused``) when the destination already holds the
+same persona under an instance key or has that class key archived — see
+``office_class_key_guard``. Copying class-keyed actors into a workspace with no
+office of its own is the normal path and stays untouched.
 """
 
 from __future__ import annotations
@@ -69,6 +77,7 @@ def _copy_office(
     copied: dict[str, int],
     warnings: list[dict[str, Any]],
 ) -> None:
+    from .office_class_key_guard import class_key_collision, refusal_message
     from .office_store import OfficeStore
 
     store = OfficeStore()
@@ -86,9 +95,19 @@ def _copy_office(
             copied["office_folders"] = len(surface.folders)
         except Exception as exc:  # noqa: BLE001
             warnings.append({"code": "office_folders_copy_failed", "message": str(exc)})
-    for actor in store.list_actors(source_workspace_id):
+    # Instance-BOUND actors copy first so the class-key guard below is
+    # order-independent: a source that itself carries a bound and an unbound
+    # placement of one persona (a pre-existing double placement) then lands as
+    # the bound copy plus a named refusal, not as a faithfully duplicated mess.
+    # ``list_actors`` sorts by actor_key, which would otherwise put the bare
+    # class key first purely because "dev" < "personainst_dev_…".
+    source_actors = sorted(store.list_actors(source_workspace_id), key=lambda a: not a.persona_instance_id)
+    for actor in source_actors:
         payload = {
             "persona_id": actor.persona_id,
+            # Already threaded: a bound source actor copies as a bound payload,
+            # so the destination store mints the same instance key. Only a
+            # source actor with NO binding produces a class-keyed write.
             "persona_instance_id": actor.persona_instance_id,
             "backing_profile": actor.backing_profile,
             "items": [
@@ -105,6 +124,23 @@ def _copy_office(
                 for item in actor.items
             ],
         }
+        # REFUSE, never warn-and-proceed: a template apply holds no operator
+        # intent about THIS destination, so it cannot be the caller that
+        # decides an archived class key should come back. There is no escape
+        # hatch here (unlike the CLI) for the same reason — nobody is in the
+        # loop at copy time to take responsibility for the double placement.
+        collision = class_key_collision(store, dest_workspace_id, payload)
+        if collision is not None:
+            warnings.append(
+                {
+                    "code": "office_actor_class_key_refused",
+                    "actor_key": actor.actor_key,
+                    "message": refusal_message(collision),
+                    "reasons": collision["reasons"],
+                    "conflicting_actor_keys": collision["conflicting_actor_keys"],
+                }
+            )
+            continue
         try:
             store.upsert_actor(dest_workspace_id, payload, updated_by=updated_by)
             copied["office_actors"] += 1

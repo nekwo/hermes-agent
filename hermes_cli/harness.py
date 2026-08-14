@@ -729,6 +729,11 @@ def build_parser(parent_subparsers) -> None:
     office_actor_upsert = office_subs.add_parser("actor-upsert", help="Create or update one actor placement (keys are minted store-side)")
     office_actor_upsert.add_argument("--workspace", default=None)
     office_actor_upsert.add_argument("--actor-json", dest="actor_json", required=True, help="Actor object (path or inline JSON): {persona_id, persona_instance_id?, backing_profile?, items:[...]}")
+    # Optional, never required: class-keyed placements are a legal shape (see
+    # OfficeStore.archive_actors_for_instance). The re-key migration's fence is
+    # the CONDITIONAL refusal in _cmd_office_actor_upsert, not a mandatory flag.
+    office_actor_upsert.add_argument("--persona-instance-id", dest="persona_instance_id", default=None, help="Bind the placement to this persona instance (overrides --actor-json's persona_instance_id); the store still mints the key")
+    office_actor_upsert.add_argument("--allow-class-key", dest="allow_class_key", action="store_true", help="Escape hatch: force a class-keyed write that would otherwise be refused for re-creating an archived or duplicated placement")
     office_actor_upsert.add_argument("--expect-revision", dest="expect_revision", type=int, default=None)
     office_actor_upsert.add_argument("--updated-by", dest="updated_by", default=None)
     _add_stage42_global_args(
