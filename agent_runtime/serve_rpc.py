@@ -296,8 +296,11 @@ def _runtime_office_get(rid: Any, params: dict) -> dict:
     It is NOT derivable client-side: an ``item_id`` such as
     ``personainst_qa_agent_9c8a382f`` is instance-SHAPED but is an item id, and
     reading it as a binding would invent an instance for a class-keyed actor.
-    Every live actor today is class-keyed, so this is ``null`` across the board;
-    the field exists so that stops being invisible.
+    When this field was added every live actor was class-keyed, so it was
+    ``null`` across the board and existed precisely so that stopped being
+    invisible. The re-key migration has since landed: all eight live actors
+    across both workspaces are instance-keyed and carry a populated value. The
+    field is now the normal case, not the empty warning it was written as.
 
     Deliberately NOT carried, though the store holds them: the surface's
     ``archived_actor_keys`` (an append-only ledger capped at 5000 — the one
