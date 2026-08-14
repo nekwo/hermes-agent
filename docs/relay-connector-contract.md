@@ -180,11 +180,18 @@ present (may be `null`); the rest are included only when set.
 | `guild_id` | string | no | **Legacy alias, no longer read by the connector.** As of D-Q2.5c the connector reads and writes only `scope_id`; the gateway's agent-wide `SessionSource.to_dict()` still emits `guild_id` (mirrored to `scope_id`) for non-relay session persistence, so it may still appear on the wire but the connector ignores it. Do not depend on it. |
 | `parent_chat_id` | string | no | Parent channel when `chat_id` refers to a thread. |
 | `message_id` | string | no | Id of the triggering message (for pin/reply/react). |
+| `profile` | string | no | Target HERMES profile in a multiplexing gateway. Stamped by the connector when it resolves a Team-Gateway message to a specific profile; omit for a single-profile gateway (the gateway then uses its active/default profile and the legacy `agent:main` namespace). Namespaces the session key and scopes the turn's config/credentials — the wire equivalent of the `/p/<profile>/` HTTP prefix. Read back by `ws_transport._event_from_wire`. |
+| `auto_thread_created` | bool | no | `true` when this event's thread was created by the connector's auto-thread egress policy (see §4, "Auto-thread markers"). Lights the gateway's semantic-rename lane; omit (or send `false`) for pre-existing or human-created threads, which must never be renamed. |
+| `auto_thread_initial_name` | string | no | The placeholder title the connector gave that auto-created thread, so the gateway's GUARDED `thread_rename` (`only_if_current_name`) can prove a human has not renamed it since (see §4). |
 
 > `is_bot` (author-is-a-bot/webhook classification) exists on the gateway-side
 > dataclass but is **intentionally NOT on the wire** in v1 — it is not part of
 > `to_dict()`. Do not add it to the connector's `SessionSource` until it is
-> first added here and to `to_dict()` (additive bump).
+> first added here and to `to_dict()` (additive bump). The same applies to
+> `role_authorized` and `delivered_via_upstream_relay`: both are trust signals
+> stamped LOCALLY by the gateway, and `delivered_via_upstream_relay` in
+> particular is what authz keys the upstream-trust decision off — it must never
+> become a wire key a peer could forge.
 
 ### SessionSource discriminators per platform
 
