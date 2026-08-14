@@ -160,6 +160,17 @@ def _session_source_wire_keys() -> set[str]:
     return set(SessionSource(**kwargs).to_dict().keys())
 
 
+def _table_cells(line: str) -> list[str]:
+    """Split one markdown table row into cells, honouring escaped pipes.
+
+    Type cells like ``string\\|null`` contain an ESCAPED pipe, so a naive
+    ``split("|")`` shifts every later cell left by one and silently reads the
+    wrong column — which is how ``user_id`` and ``thread_id`` first went
+    missing from the discriminator set here without any test going red.
+    """
+    return [c.strip().strip("*` ") for c in re.split(r"(?<!\\)\|", line.strip("|"))]
+
+
 def _parse_session_source_table(text: str) -> set[str]:
     """Parse §3's "SessionSource fields (the wire surface)" table → field names."""
     section = text.split("### SessionSource fields (the wire surface)", 1)[-1]
@@ -178,8 +189,7 @@ def _parse_discriminator_columns(text: str) -> list[str]:
     for line in section.splitlines():
         line = line.strip()
         if line.startswith("|"):
-            cells = [c.strip().strip("*` ") for c in line.strip("|").split("|")]
-            return [c for c in cells[1:] if c]
+            return [c for c in _table_cells(line)[1:] if c]
     return []
 
 
@@ -264,13 +274,16 @@ def test_session_key_discriminators_have_a_per_platform_column():
     text = _doc_text()
     section = text.split("### SessionSource fields (the wire surface)", 1)[-1]
     section = section.split("### SessionSource discriminators per platform", 1)[0]
-    key_forming = {
-        name
-        for name, meaning in re.findall(
-            r"^\|\s*`([a-z_]+)`\s*\|[^|]*\|[^|]*\|([^|]*)\|", section, re.M
-        )
-        if "Session-key discriminator" in meaning
-    }
+    key_forming = set()
+    for line in section.splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            continue
+        cells = _table_cells(line)
+        # | field | type | always sent | meaning |
+        if len(cells) >= 4 and re.fullmatch(r"[a-z_]+", cells[0]):
+            if "Session-key discriminator" in cells[3]:
+                key_forming.add(cells[0])
     assert key_forming, "Failed to parse any session-key discriminators from §3."
 
     columns = set(_parse_discriminator_columns(text))
