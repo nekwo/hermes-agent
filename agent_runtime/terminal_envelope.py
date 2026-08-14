@@ -53,10 +53,34 @@ Because the decision is keyed on a bound :class:`TerminalEnvelopeScope` rather
 than on ``HERMES_AGENT_RUNTIME_ROOT``, the fail-open branch is closed: a
 mission-chat turn is governed whether or not its persona binds a profile.
 
+TWO DOORS — read this before believing "deny by default"
+---------------------------------------------------------
+A class can be granted by **either** of two independent paths, and only the
+first is described below:
+
+1. the **grants table**, which is deny-by-default (rules 1-4 below), and
+2. the **permission mode**, where :func:`resolve` grants any class in
+   :data:`GRANTABLE_COMMAND_CLASSES` on ``resolved.unbounded`` alone —
+   without consulting the grants table at all.
+
+``unbounded`` is the SHIPPED DEFAULT. Ruling R-2 also removed the last hard
+floors, so today, with no stanza written anywhere, **every class in
+:data:`COMMAND_CLASSES` runs on a governed lane.** That is deliberate: R-2
+traded a preventive control for a detective one, and the compensating control
+is that a mode grant is receipted through ``record_envelope_decision`` exactly
+like a config grant. Nothing runs unaudited.
+
+This note exists because the section below is true of the grants table and
+says nothing about the mode door, and a reader who stops here concludes the
+opposite of the live posture. A doc did exactly that for weeks
+(``docs/agent-runtime-harness/mission-chat-terminal-envelope-grants.md``,
+corrected 2026-08-14) while quoting rule 2 accurately.
+
 Grants are ROOT-config only
 ---------------------------
 Mirrors the ``agent_runtime/mcp_admission.py`` precedent (landed 2026-07-26)
-in every load-bearing respect:
+in every load-bearing respect. Everything in this section describes the GRANTS
+TABLE door only — see "TWO DOORS" above:
 
 1. **Root config only.** Read through
    :func:`agent_runtime.config.load_root_runtime_config`, so a sticky-active
@@ -80,7 +104,8 @@ Root ``config.yaml`` shape::
           dev:
             mission_chat: [git_push]
 
-Nothing here weakens the envelope for a class that has no grant.
+Nothing in THIS section weakens the envelope for a class that has no grant.
+The mode door above is what does, and it does so by design.
 """
 
 from __future__ import annotations
