@@ -265,6 +265,62 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     # already-sandboxed HERMES_HOME. Tests of head-home behavior set it
     # explicitly in their own fixtures, which run after this one.
     "HERMES_HEAD_HOME",
+    # The detached-service marker, and it SHORT-CIRCUITS a fallback rather than
+    # merely tinting one. ``_windows_gateway_should_absorb_console_controls``
+    # (``hermes_cli/gateway.py:1737``) returns True the moment this reads as a
+    # truthy word and never reaches the ``sys.stdin.isatty()`` branch below it;
+    # ``gateway.py:4924`` then installs ``SIG_IGN`` for SIGINT/SIGBREAK and calls
+    # ``SetConsoleCtrlHandler(NULL, TRUE)``. So the suite exercised a DIFFERENT
+    # branch of a signal-handling decision depending on whose shell launched it.
+    # The Windows service wrappers export it verbatim (``gateway_windows.py:413``,
+    # ``:498``, ``:816``, ``:883``), and an operator shell descended from one
+    # inherits it — which is exactly how it came to be set live on the machine
+    # that found this. Deleted rather than re-pinned, per HERMES_HEAD_HOME above:
+    # unset is what CI has, and unset degrades to the isatty() fallback, which
+    # under pytest's captured stdin answers the sandboxed way. Both branches are
+    # covered by tests that set it explicitly (``tests/hermes_cli/test_gateway.py``
+    # :259 deletes it, :289 sets it), and those run after this fixture.
+    "HERMES_GATEWAY_DETACHED",
+    # ── Path-shaped discovery overrides ──────────────────────────────────────
+    # Every one of these REDIRECTS a lookup at a filesystem path the operator
+    # controls: which profile name the kanban/author defaults resolve to
+    # (``agent_runtime/profile_context.py:129``, ``hermes_cli/kanban_db.py:9450``),
+    # which auth home and shared-secret dir the credential resolver reads, which
+    # skill / MCP / plugin trees discovery walks, which ``hermes`` binary, TUI
+    # bundle and web dist a launcher shells out to, and which home the ACP child
+    # inherits. That is the same hazard class as HERMES_HEAD_HOME — not "a flag
+    # tints a default" but "a path outside the sandbox wins" — and unlike
+    # HERMES_HEAD_HOME it is not one variable but the whole discovery surface.
+    #
+    # These are blanked as a SET rather than one at a time on purpose. "Not
+    # currently set on this machine" is a fact about one operator's shell on one
+    # day, not a property of the code: HERMES_HEAD_HOME was also unset until the
+    # Launcher's serve started exporting it, and it took a live incident to
+    # notice. Four test files already hand-roll a private defence against exactly
+    # these names leaking in — ``tests/agent_runtime/test_realm_sync_skill_inbox.py:56``
+    # and ``test_skill_promotion.py:35`` pop HERMES_SHARED_SKILLS with the comment
+    # "a stray ... from the ambient env would break isolation",
+    # ``tests/agent/test_external_skills.py:88`` pops the same one, and
+    # ``tests/agent/test_copilot_acp_client.py:200`` names an "ambient
+    # HERMES_REAL_HOME". Four independent workarounds for one missing central
+    # blank is the argument for blanking centrally.
+    #
+    # Unset is what CI has for all of them: ``scripts/run_tests.sh`` forwards only
+    # HERMES_RUN_SLOW_PET_TESTS and HERMES_E2E_BROWSER into the per-file
+    # subprocesses (:182-183), and ``.github/workflows/tests.yml`` sets none of
+    # them. Tests that need one set it explicitly with monkeypatch, after this.
+    "HERMES_PROFILE",
+    "HERMES_AUTH_HOME",
+    "HERMES_SHARED_AUTH_DIR",
+    "HERMES_OPTIONAL_SKILLS",
+    "HERMES_OPTIONAL_MCPS",
+    "HERMES_BUNDLED_SKILLS",
+    "HERMES_SHARED_SKILLS",
+    "HERMES_BUNDLED_PLUGINS",
+    "HERMES_BIN",
+    "HERMES_TUI_DIR",
+    "HERMES_WEB_DIST",
+    "HERMES_REAL_HOME",
     "HERMES_AGENT_USE_LEGACY_SESSION_KEYS",
     # Kanban path/board pins must never leak from a developer shell or
     # dispatched worker into tests; otherwise tests can write fake tasks to
