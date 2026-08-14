@@ -252,6 +252,19 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
     "HERMES_BACKGROUND_NOTIFICATIONS",
     "HERMES_EXEC_ASK",
     "HERMES_HOME_MODE",
+    # HERMES_HOME is sandboxed below (step 3), but HERMES_HEAD_HOME OUTRANKS it:
+    # get_hermes_head_home() (hermes_constants.py:94-108) returns HERMES_HEAD_HOME
+    # verbatim and only falls back to get_hermes_home() when it is unset. The
+    # Launcher's serve exports HERMES_HEAD_HOME=<root>/profiles/base, so a suite
+    # run from a Launcher-shaped shell inherited the operator's LIVE head home
+    # while HERMES_HOME was hermetic — and that home is not read-only config: it
+    # selects the SessionDB the Mission Control transcript store WRITES to, and
+    # it flips hermes_head_home_is_authoritative() True, which changes which
+    # branch the fail-closed guards in persona_chat_history take. Deleting (not
+    # re-pinning) is the fix: unset is what CI has, and unset degrades to the
+    # already-sandboxed HERMES_HOME. Tests of head-home behavior set it
+    # explicitly in their own fixtures, which run after this one.
+    "HERMES_HEAD_HOME",
     "HERMES_AGENT_USE_LEGACY_SESSION_KEYS",
     # Kanban path/board pins must never leak from a developer shell or
     # dispatched worker into tests; otherwise tests can write fake tasks to

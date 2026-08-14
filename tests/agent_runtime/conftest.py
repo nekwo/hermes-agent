@@ -1,6 +1,8 @@
 import pytest
 
 from agent_runtime import repo_context as _repo_context
+from agent_runtime.config import harness_root_config_path
+from hermes_constants import get_hermes_head_home
 
 
 _PRODUCTION_WORKTREE_BASE_DIR = _repo_context._worktree_base_dir
@@ -101,6 +103,82 @@ def isolate_agent_runtime_root(tmp_path, monkeypatch):
         lambda: tmp_path / "legacy-worktrees",
     )
     yield root
+
+
+def assert_under(path, base, *, what: str) -> None:
+    """Fail unless ``path`` resolves INSIDE ``base``.
+
+    Shared by the guard fixture below and ``test_root_config_hermetic.py`` so
+    the guard and the test that proves the guard cannot drift apart.
+    """
+
+    resolved = path.resolve()
+    root = base.resolve()
+    assert root == resolved or root in resolved.parents, (
+        f"{what} resolved to {resolved}, which is OUTSIDE the per-test tmp dir "
+        f"{root}. Root-config resolution has escaped the sandbox: this test is "
+        "reading the OPERATOR's live runtime root, so what it exercises depends "
+        "on a file nobody in this repo controls."
+    )
+
+
+@pytest.fixture(autouse=True)
+def assert_root_config_resolution_is_hermetic(tmp_path, _hermetic_environment):
+    """Prove — before every agent-runtime test body — that ROOT-scope config
+    resolution lands inside the per-test tmp dir.
+
+    WHY AN ASSERTION AND NOT A THIRD PIN. The ``HERMES_HOME`` pin already
+    exists and already works: ``tests/conftest.py::_hermetic_environment``
+    (autouse, repo-wide) redirects it to ``tmp_path/hermes_test``, and
+    ``config.harness_root_config_path()`` reads ``HERMES_HOME`` through
+    ``hermes_constants.get_default_hermes_root()``, so the ROOT config a test
+    sees is already synthetic. Re-pinning ``HERMES_HOME`` HERE would create a
+    SECOND authority for the same variable pointing at a DIFFERENT directory
+    than the one the root fixture pre-populates (``sessions/``, ``cron/``,
+    ``memories/``, ``skills/``), and the two would drift the first time either
+    moved. What was actually missing is not a pin — it is any statement,
+    anywhere, that the pin is load-bearing for this package.
+
+    That matters here specifically. ``ROOT_ONLY_CONFIG_KEYS``
+    (``agent_runtime/config.py:361``) names four readers —
+    ``state_patches.delta_patches_enabled``, ``mcp_admission.admission_config``,
+    ``config.chat_lane_restore_toolsets``, ``config.mission_chat_workdir`` —
+    that resolve ONLY through the root config. If the root pin ever regresses,
+    those four silently start answering out of the operator's live
+    ``config.yaml``, every one of them gates real behavior, and NOTHING in the
+    suite goes red: the tests keep passing, against a different runtime. That
+    is the failure mode this fixture converts into a loud one.
+
+    ``HERMES_HEAD_HOME`` is asserted alongside it because it is the same hole
+    one variable over, and unlike ``HERMES_HOME`` it was genuinely unpinned
+    until this change (see ``tests/conftest.py::_HERMES_BEHAVIORAL_VARS``). It
+    is not merely read: ``get_hermes_head_home()`` selects the SessionDB the
+    Mission Control transcript store WRITES to, and the Launcher's serve does
+    export it, so a suite run from a Launcher-shaped shell wrote test rows into
+    the operator's live ``profiles/base/state.db``.
+
+    Declares ``_hermetic_environment`` explicitly rather than trusting autouse
+    ordering: this fixture asserts a property that fixture establishes, so the
+    dependency is real and stating it removes any question of which runs first.
+
+    SETUP ONLY, deliberately. Tests that must read the live tree opt out of the
+    sandbox INSIDE their own body — ``test_launcher_qa_template_drift.py``
+    restores the pre-sandbox ``HERMES_HOME`` on purpose to check the real
+    profile tree — and a teardown assertion would punish exactly that legitimate
+    pattern for doing the honest thing.
+    """
+
+    assert_under(
+        harness_root_config_path(),
+        tmp_path,
+        what="config.harness_root_config_path()",
+    )
+    assert_under(
+        get_hermes_head_home(),
+        tmp_path,
+        what="hermes_constants.get_hermes_head_home()",
+    )
+    yield
 
 
 @pytest.fixture
