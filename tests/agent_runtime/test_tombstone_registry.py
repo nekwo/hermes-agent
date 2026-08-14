@@ -124,9 +124,11 @@ repo has no upstream.)
 from __future__ import annotations
 
 import ast
+import functools
 import importlib
 import importlib.util
 import subprocess
+import sys
 import textwrap
 import warnings
 from dataclasses import dataclass
@@ -2918,6 +2920,25 @@ def _production_files(packages: tuple[str, ...]) -> list[Path]:
     return files
 
 
+#: This file, resolved ONCE. It used to be re-resolved inside the per-file loop
+#: in :func:`code_offenders` — a filesystem syscall per file per row, 934 files
+#: x 156 scans. Measured at 1.04s of pure ``resolve()`` per scan, which was the
+#: dominant cost of every row test, for an answer that cannot change.
+_THIS_FILE = Path(__file__).resolve()
+
+
+@functools.lru_cache(maxsize=None)
+def _scan_paths(packages: tuple[str, ...]) -> tuple[Path, ...]:
+    """The files a scan over ``packages`` visits, with this file excluded.
+
+    The same set :func:`code_offenders` used to recompute inline on every call.
+    Both the glob and the self-exclusion are pure functions of ``packages``, and
+    ``packages`` is one of a handful of scope tuples shared by 154 rows.
+    """
+
+    return tuple(path for path in _production_files(packages) if path.resolve() != _THIS_FILE)
+
+
 _CODE_CACHE: dict[Path, str] = {}
 
 
@@ -2939,9 +2960,7 @@ def code_offenders(row: Tombstone) -> list[str]:
     """Every production file whose comment-stripped code still names the row."""
 
     offenders: list[str] = []
-    for path in _production_files(row.scope):
-        if path.resolve() == Path(__file__).resolve():
-            continue
+    for path in _scan_paths(row.scope):
         if row.text in _rendered(path):
             offenders.append(str(path.relative_to(HERMES_ROOT)).replace("\\", "/"))
     return offenders
@@ -2950,6 +2969,147 @@ def code_offenders(row: Tombstone) -> list[str]:
 def _resolve(dotted: str):
     module = importlib.import_module(dotted)
     return module
+
+
+# --------------------------------------------------------------------------- #
+# The render is paid HERE, at import
+# --------------------------------------------------------------------------- #
+# Rendering the production tree — ``ast.parse`` 27.6s plus ``ast.unparse`` 12.4s
+# over 934 files — is a per-SESSION cost that ``_CODE_CACHE`` already shares
+# between every scan in this file. What it did NOT have was an owner: the first
+# test to reach a full-scope row paid all of it inside its own item, and which
+# test that is, is collection order's choice rather than any test's.
+#
+# `--timeout=30` is a PER-TEST budget, so that test failed for a reason having
+# nothing to do with what it asserts — and because ``addopts`` sets
+# `--timeout-method=thread`, the timeout KILLS the process rather than failing
+# the item, taking every test after this file with it. Measured before this
+# change: `pytest tests/agent_runtime/test_tombstone_registry.py -q` exits 1 with
+# `+++ Timeout +++` inside `test_the_scanner_is_not_vacuous`, and no summary line
+# is ever printed.
+#
+# Warming here puts the cost in collection, which pytest-timeout does not clock
+# (verified directly: a module that sleeps 35s at import passes under
+# `--timeout=30`). Nothing is excluded and no marker is involved — the same fix
+# and the same reasoning as
+# ``tests/agent_runtime/test_s55_registered_events_have_emitters.py``.
+#
+# NOT marked `integration`: ``addopts`` filters `-m 'not integration'` in every
+# pytest invocation, including each per-file subprocess
+# ``scripts/run_tests_parallel.py`` spawns, and there is no integration lane —
+# ``.github/workflows/tests.yml`` runs ``scripts/run_tests.sh`` and the marker
+# appears nowhere in ``.github/workflows/``. The marker would delete this
+# registry from every run on every machine, which is worse than a slow gate.
+#
+# The unparse is NOT dropped, though it is the obvious thing to cut. It is load
+# bearing twice over: ``test_no_production_file_failed_to_parse`` treats a file
+# the scanner cannot RENDER as a hole rather than a pass, and the docstring on
+# ``_code_only`` records that S46's cheaper token-join turned ``card.title`` into
+# three tokens so no dotted assertion could ever match — a gate that passed
+# vacuously. Making the comparison cheaper means changing what is compared, and
+# the cheaper thing was already tried and already failed.
+for _warm_path in _scan_paths(PRODUCTION_PACKAGES):
+    _rendered(_warm_path)
+
+#: Render-cache occupancy AS OF IMPORT. Snapshotted so the guard below fails
+#: deterministically when the warm is deleted, instead of depending on which
+#: test happens to run first.
+_CODE_CACHE_SIZE_AT_IMPORT = len(_CODE_CACHE)
+
+
+def test_the_shared_render_is_paid_at_import_not_by_whichever_test_runs_first():
+    """REGRESSION GUARD for the timeout, pinning the cause and not a clock.
+
+    A wall-clock assertion would be a flake generator on a box that measured this
+    same walk between 40s and 82s depending on load, and it would be asserting
+    the symptom. What must be true is that the render ran during collection and
+    covered the whole scan set.
+    """
+
+    assert _CODE_CACHE_SIZE_AT_IMPORT > 900, (
+        "the production tree was NOT rendered at module import (cache size at "
+        f"import: {_CODE_CACHE_SIZE_AT_IMPORT}). Whichever test reaches a "
+        "full-scope row first now pays ~40s of parse+unparse inside its own "
+        "item, against the 30s per-test cap in pyproject.toml — and "
+        "--timeout-method=thread kills the process, so nothing after this file "
+        "would run at all. Restore the module-scope warm."
+    )
+    assert _CODE_CACHE_SIZE_AT_IMPORT == len(_scan_paths(PRODUCTION_PACKAGES)), (
+        "the import warm covered "
+        f"{_CODE_CACHE_SIZE_AT_IMPORT} files but the full scan visits "
+        f"{len(_scan_paths(PRODUCTION_PACKAGES))}. The uncovered remainder is "
+        "billed to a test."
+    )
+
+
+def test_the_scan_path_cache_is_keyed_so_repeat_scans_are_free():
+    """The 154 row tests share a handful of scope tuples; each must glob once.
+
+    A cache key that varied per call — a list instead of a tuple, an unhashable
+    row, a key including something mutable — would restore the per-row filesystem
+    walk while every assertion in this file stayed green. So the hit is measured
+    rather than assumed.
+    """
+
+    before = _scan_paths.cache_info()
+    for _ in range(20):
+        _scan_paths(PRODUCTION_PACKAGES)
+    after = _scan_paths.cache_info()
+
+    assert after.misses == before.misses, (
+        f"repeat scans re-globbed the tree ({before} -> {after}). The scope "
+        "tuple is supposed to be the cache key; something in it is no longer "
+        "hashable-stable, and every row test is paying for a filesystem walk."
+    )
+    assert after.hits == before.hits + 20, f"{before} -> {after}"
+
+    # The check above only proves a REPEATED key hits, which is not the
+    # regression worth guarding. The likely one is a caller mixing something
+    # per-row into the key — the row's own text, say — so 154 rows produce 154
+    # keys and every one of them re-globs the tree.
+    #
+    # Caught by mutation, and the FIRST attempt at this assertion was wrong in an
+    # instructive way: driving every row twice and requiring the second pass to
+    # add no misses stays GREEN under exactly that change, because `maxsize=None`
+    # keeps all 154 bad entries and the second pass hits every one. Warming a
+    # cache and then measuring hits proves the cache is a cache; it says nothing
+    # about whether the key is right.
+    #
+    # What actually has to hold is a bound on the number of ENTRIES: the key is
+    # the scope, so the cache can never hold more entries than there are distinct
+    # scopes, however many rows are driven through it.
+    for row in CODE_ROWS:
+        code_offenders(row)
+
+    distinct_scopes = {row.scope for row in TOMBSTONES} | {PRODUCTION_PACKAGES}
+    info = _scan_paths.cache_info()
+    assert info.currsize <= len(distinct_scopes), (
+        f"the scan cache holds {info.currsize} entries after driving "
+        f"{len(CODE_ROWS)} rows, but there are only {len(distinct_scopes)} "
+        "distinct scopes. The key has picked up something per-row, so every row "
+        "re-globs the tree instead of sharing one walk per scope."
+    )
+
+
+def test_the_render_cache_absorbs_every_repeat_read(monkeypatch):
+    """The render cache is driven, not inspected.
+
+    A size assertion alone would survive a ``_rendered`` that consulted the cache
+    and then re-rendered anyway. This makes re-rendering IMPOSSIBLE to do
+    silently: ``_code_only`` is replaced with a landmine and every path in the
+    full scan set is read back. ``_rendered`` catches SyntaxError, ValueError and
+    RecursionError, so the landmine raises something it does not catch.
+    """
+
+    def _landmine(source: str) -> str:
+        raise AssertionError(
+            "_code_only ran again for a path already in _CODE_CACHE — the render "
+            "cache is not absorbing repeat reads, so every scan re-parses the tree"
+        )
+
+    monkeypatch.setattr(sys.modules[__name__], "_code_only", _landmine)
+    for path in _scan_paths(PRODUCTION_PACKAGES):
+        _rendered(path)
 
 
 # =========================================================================
@@ -3301,8 +3461,16 @@ def _live_production_symbol(subject: tuple[str, str]) -> bool:
     )
 
 
-def test_round4_deleted_tests_left_no_live_production_subject_uncovered():
-    """A removed input vector may not silently erase a live symbol's coverage."""
+@functools.lru_cache(maxsize=1)
+def _covered_production_subjects() -> frozenset[tuple[str, str]]:
+    """Every ``(module, symbol)`` any test in the tree references.
+
+    A SECOND full-tree walk, independent of the production render above and
+    larger: 2880 files under ``tests/``, 43.9s to parse. It was inline in the
+    test below, so that one item carried all of it — the same per-test-budget /
+    per-session-cost mismatch, one screen further down the same file, and the
+    one that surfaced the moment the first was fixed.
+    """
 
     covered: set[tuple[str, str]] = set()
     for path in (HERMES_ROOT / "tests").rglob("test_*.py"):
@@ -3311,6 +3479,64 @@ def test_round4_deleted_tests_left_no_live_production_subject_uncovered():
             continue
         direct, modules = _production_imports(tree)
         covered.update(_production_references(tree, direct, modules))
+    return frozenset(covered)
+
+
+# Warmed at import for the same reason as the production render above: the walk
+# belongs to the session, not to whichever item reaches it first.
+_covered_production_subjects()
+
+#: Snapshotted at import so the guard fails deterministically if the warm goes.
+_COVERAGE_CACHE_SIZE_AT_IMPORT = _covered_production_subjects.cache_info().currsize
+
+
+def test_the_test_tree_walk_is_also_paid_at_import():
+    """The second walk's guard, and it exists because the first fix revealed it.
+
+    Fixing ``test_the_scanner_is_not_vacuous`` moved the process death forward to
+    here rather than removing it — this file had TWO independent full-tree walks
+    billed to two different test items. A guard on only the first would have
+    reported success on a file that still could not finish.
+    """
+
+    assert _COVERAGE_CACHE_SIZE_AT_IMPORT == 1, (
+        "the tests/ tree walk was NOT warmed at module import (cache size at "
+        f"import: {_COVERAGE_CACHE_SIZE_AT_IMPORT}). "
+        "test_round4_deleted_tests_left_no_live_production_subject_uncovered "
+        "then pays ~44s of parsing inside its own item, against the 30s cap — "
+        "and --timeout-method=thread kills the process. Restore the warm."
+    )
+    assert _covered_production_subjects.cache_info().misses == 1, (
+        "the tests/ tree was walked more than once: "
+        f"{_covered_production_subjects.cache_info()}"
+    )
+    assert len(_covered_production_subjects()) > 100, (
+        "the coverage walk resolved almost nothing; the gate below would pass "
+        "vacuously"
+    )
+
+
+@functools.lru_cache(maxsize=1)
+def _round4_uncovered_subjects() -> tuple[str, ...]:
+    """Live production symbols whose last direct test reference a deletion took.
+
+    Hoisted and warmed for the same reason as the two walks above, and this one
+    is the least obviously expensive of the three, which is exactly why it is
+    worth stating. Its cost is not a walk but a `git show` SUBPROCESS per test
+    file changed since ``_ROUND4_COVERAGE_BASE``, plus a parse of each revision.
+    Measured at 21.4s after the tests/ walk was hoisted off it.
+
+    21s under a 30s cap reads like headroom and is not. The
+    ``test_no_other_module_states_the_contract_version`` case in this same sweep
+    measured 8s standalone and still crossed 30s inside a long-lived
+    single-process run — a ~4x dilation once several thousand tests have already
+    executed in the interpreter. And unlike a fixed tree walk this cost GROWS: the
+    base commit is pinned while HEAD advances, so the changed-file list gets
+    longer every week. Leaving it at 21s would just be scheduling the same
+    process kill for a later date.
+    """
+
+    covered = _covered_production_subjects()
 
     changed_tests = subprocess.run(
         [
@@ -3369,7 +3595,42 @@ def test_round4_deleted_tests_left_no_live_production_subject_uncovered():
                         f"{relative}::{old_test.name} deleted the last direct test "
                         f"reference to {subject[0]}.{subject[1]}"
                     )
-    assert uncovered == [], "\n".join(uncovered)
+    return tuple(uncovered)
+
+
+# Warmed at import, like the two walks above.
+_round4_uncovered_subjects()
+
+#: Snapshotted at import so the guard fails deterministically if the warm goes.
+_ROUND4_CACHE_SIZE_AT_IMPORT = _round4_uncovered_subjects.cache_info().currsize
+
+
+def test_round4_deleted_tests_left_no_live_production_subject_uncovered():
+    """A removed input vector may not silently erase a live symbol's coverage."""
+
+    uncovered = _round4_uncovered_subjects()
+    assert uncovered == (), "\n".join(uncovered)
+
+
+def test_the_round4_git_walk_is_also_paid_at_import():
+    """The third warm's guard.
+
+    Three independent session-scoped computations in one file, each of which was
+    billed to a single test item. This one was never over the cap on the day it
+    was written — it is here because its cost grows with every commit to
+    ``tests/`` while its base stays pinned.
+    """
+
+    assert _ROUND4_CACHE_SIZE_AT_IMPORT == 1, (
+        "the round-4 coverage diff was NOT warmed at module import (cache size "
+        f"at import: {_ROUND4_CACHE_SIZE_AT_IMPORT}). It runs a `git show` per "
+        "changed test file and measured 21.4s inside its own item against the "
+        "30s cap — a margin that shrinks with every commit. Restore the warm."
+    )
+    assert _round4_uncovered_subjects.cache_info().misses == 1, (
+        "the round-4 git walk ran more than once: "
+        f"{_round4_uncovered_subjects.cache_info()}"
+    )
 
 
 #: S40 gated its two names in MARKDOWN too, on CODE FORMS ONLY — a doc may name
