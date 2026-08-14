@@ -243,59 +243,205 @@ def emitted_event_types() -> dict[str, list[str]]:
     return {k: list(v) for k, v in _emitted_event_types_cached()}
 
 
+#: One function, flattened into everything the resolver needs about it:
+#: ``(path, func_name, positional, keyword_only, is_method, calls)`` where
+#: ``calls`` is ``((callee_name, call_node), ...)``.
+_FunctionRecord = tuple[
+    str, str, tuple[str, ...], tuple[str, ...], bool, tuple[tuple[str, ast.Call], ...]
+]
+
+
+@functools.lru_cache(maxsize=1)
+def _production_call_index() -> tuple[_FunctionRecord, ...]:
+    """Every function in the production tree, with its calls already resolved
+    to a callee NAME. Built once; the fixed-point loop below then re-reads it.
+
+    WHY THIS EXISTS (2026-08-14). The resolver is a fixed-point: it discovers
+    wrapper sinks, then re-scans to find what those wrappers are called with.
+    It used to re-walk all 934 production ASTs on every one of its rounds, and
+    ``ast.walk(func)`` inside ``ast.walk(tree)`` re-walks each nested function
+    once per enclosing function on top of that. Nothing about the TREES changes
+    between rounds — only the sink set does — so all of that work was repeated
+    for an answer that could not have moved.
+
+    Measured on this tree: 42.6s -> 8.2s for the resolver, with byte-identical
+    output (same 111 types, same site lists). That is not a micro-optimization:
+    at 42.6s the first test to touch the resolver blew the 30s per-test cap in
+    ``pyproject.toml``, and ``--timeout-method=thread`` KILLS the process, so
+    ``pytest tests/agent_runtime/`` collected nothing after this file.
+
+    The structure is deliberately a flat tuple of records rather than anything
+    cleverer: the rounds below do nothing but re-read it, and a record that
+    carries its own arg lists means the loop never touches an AST node it did
+    not already index.
+    """
+
+    records: list[_FunctionRecord] = []
+    for path, tree in _production_trees().items():
+        for func in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
+            args = func.args
+            positional = tuple(a.arg for a in (*args.posonlyargs, *args.args))
+            keyword_only = tuple(a.arg for a in args.kwonlyargs)
+            is_method = bool(positional) and positional[0] in {"self", "cls"}
+            calls: list[tuple[str, ast.Call]] = []
+            for call in [n for n in ast.walk(func) if isinstance(n, ast.Call)]:
+                func_node = call.func
+                if isinstance(func_node, ast.Name):
+                    name = func_node.id
+                elif isinstance(func_node, ast.Attribute):
+                    name = func_node.attr
+                else:
+                    continue
+                calls.append((name, call))
+            if calls:
+                records.append((path, func.name, positional, keyword_only, is_method, tuple(calls)))
+    return tuple(records)
+
+
 def _emitted_event_types() -> dict[str, list[str]]:
     """Every event-type literal that reaches an ``Event(...)`` construction.
 
     Returns ``{event_type: [\"path:line\", ...]}`` so a failure names the site.
     """
 
-    trees = _production_trees()
-    constants = _module_string_constants(trees)
+    constants = _module_string_constants(_production_trees())
 
     # A sink is (callee_name, positional_index, keyword_name). Seeded with the
     # Event dataclass itself: ``type`` is keyword ``type`` or positional 1.
     sinks: set[tuple[str, int | None, str | None]] = {("Event", 1, "type")}
+    # Same set, keyed by callee name, so a call is matched by ONE dict lookup
+    # instead of a scan over every sink discovered so far.
+    slots_by_name: dict[str, set[tuple[int | None, str | None]]] = {"Event": {(1, "type")}}
     emitted: dict[str, list[str]] = {}
 
     for _round in range(8):
         discovered: set[tuple[str, int | None, str | None]] = set()
-        for path, tree in trees.items():
-            for func in [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]:
-                args = func.args
-                positional = [a.arg for a in (*args.posonlyargs, *args.args)]
-                keyword_only = [a.arg for a in args.kwonlyargs]
-                is_method = bool(positional) and positional[0] in {"self", "cls"}
-                for call in [n for n in ast.walk(func) if isinstance(n, ast.Call)]:
-                    func_node = call.func
-                    if isinstance(func_node, ast.Name):
-                        name = func_node.id
-                    elif isinstance(func_node, ast.Attribute):
-                        name = func_node.attr
-                    else:
+        for path, func_name, positional, keyword_only, is_method, calls in _production_call_index():
+            for name, call in calls:
+                slots = slots_by_name.get(name)
+                if not slots:
+                    continue
+                for index, keyword in slots:
+                    value = _slot_value(call, index, keyword)
+                    if value is None:
                         continue
-                    for sink_name, index, keyword in list(sinks):
-                        if name != sink_name:
-                            continue
-                        value = _slot_value(call, index, keyword)
-                        if value is None:
-                            continue
-                        if isinstance(value, ast.Constant) and isinstance(value.value, str):
-                            emitted.setdefault(value.value, []).append(f"{path}:{call.lineno}")
-                        elif isinstance(value, ast.Name) and value.id in constants:
-                            emitted.setdefault(constants[value.id], []).append(f"{path}:{call.lineno}")
-                        elif isinstance(value, ast.Name):
-                            # This function forwards a parameter into a sink, so
-                            # it IS a sink (idiom 3). Bound methods drop `self`
-                            # from the call-site argument list.
-                            if value.id in positional:
-                                at = positional.index(value.id)
-                                discovered.add((func.name, at - 1 if is_method else at, value.id))
-                            elif value.id in keyword_only:
-                                discovered.add((func.name, None, value.id))
+                    if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                        emitted.setdefault(value.value, []).append(f"{path}:{call.lineno}")
+                    elif isinstance(value, ast.Name) and value.id in constants:
+                        emitted.setdefault(constants[value.id], []).append(f"{path}:{call.lineno}")
+                    elif isinstance(value, ast.Name):
+                        # This function forwards a parameter into a sink, so
+                        # it IS a sink (idiom 3). Bound methods drop `self`
+                        # from the call-site argument list.
+                        if value.id in positional:
+                            at = positional.index(value.id)
+                            discovered.add((func_name, at - 1 if is_method else at, value.id))
+                        elif value.id in keyword_only:
+                            discovered.add((func_name, None, value.id))
         if discovered <= sinks:
             break
         sinks |= discovered
+        slots_by_name = {}
+        for sink_name, index, keyword in sinks:
+            slots_by_name.setdefault(sink_name, set()).add((index, keyword))
     return emitted
+
+
+# --------------------------------------------------------------------------- #
+# The walk is paid HERE, at import
+# --------------------------------------------------------------------------- #
+# Six tests below need the resolver and the parsed tree. They share it through
+# the caches above, so exactly one of them pays for it — and WHICH one is decided
+# by collection order, which is not a thing any of them chose.
+#
+# That is the actual defect, and the 30s cap in pyproject.toml is only where it
+# surfaced. `--timeout` is a PER-TEST budget; this cost is a per-SESSION cost
+# that six tests share. Charging a shared setup to whichever test happened to run
+# first made a passing test fail for a reason that has nothing to do with what it
+# asserts — and because `--timeout-method=thread` kills the process rather than
+# failing the item, a single-process `pytest tests/agent_runtime/` collected
+# NOTHING after this file.
+#
+# Warming at module scope puts the cost where it belongs: in collection, which
+# pytest-timeout does not clock (verified — a module that sleeps 35s at import
+# passes under --timeout=30). No test is excluded, no marker is involved, and the
+# gate runs in CI exactly as before. That last point is not a detail: the
+# suggested alternative was marking this file `integration`, and `addopts` filters
+# `-m 'not integration'` in EVERY pytest invocation, including the per-file
+# subprocesses `scripts/run_tests_parallel.py` spawns. There is no integration
+# lane — `.github/workflows/tests.yml` runs `scripts/run_tests.sh` and neither it
+# nor ci.yml mentions the marker — so the file would have stopped running
+# anywhere, which is strictly worse than running slowly.
+#
+# The resolver rewrite above is what makes the cost merely large rather than
+# unbounded (42.6s -> 8.2s). This warm is what makes it not a test's problem.
+_production_trees_cached()
+_emitted_event_types_cached()
+
+#: Cache occupancy AS OF IMPORT. Read by the guard below: if the two warm calls
+#: are ever deleted, this records (0, 0) no matter which test runs first, so the
+#: guard fails deterministically instead of depending on collection order.
+_CACHE_SIZES_AT_IMPORT = (
+    _production_trees_cached.cache_info().currsize,
+    _emitted_event_types_cached.cache_info().currsize,
+)
+
+
+def test_the_shared_walk_is_paid_at_import_and_not_by_whichever_test_runs_first():
+    """REGRESSION GUARD for the timeout, and it pins the CAUSE, not the symptom.
+
+    A wall-clock assertion here would be a flake generator and would also be
+    checking the wrong thing — the file is not required to be fast, it is
+    required not to bill a session-wide cost to a single test item. So that is
+    what is asserted, off the caches' own bookkeeping.
+
+    Delete either warm call above and this goes red on every machine regardless
+    of collection order, because the sizes are snapshotted at import.
+    """
+
+    assert _CACHE_SIZES_AT_IMPORT == (1, 1), (
+        "the production tree / emitter resolver was NOT warmed at module import "
+        f"(cache sizes at import: {_CACHE_SIZES_AT_IMPORT}). Whichever test "
+        "touches the resolver first now pays for the whole walk inside its own "
+        "item, against the 30s per-test cap in pyproject.toml — and "
+        "--timeout-method=thread kills the process, so nothing collected after "
+        "this file would run. Restore the module-scope warm."
+    )
+
+
+def test_the_two_expensive_builders_run_exactly_once_per_session():
+    """The second half, and it names the helpers that actually cost something.
+
+    MEASURED, because the intuition was wrong and a first draft of this test
+    guarded the wrong thing. The whole cost of this file is in two places:
+    parsing 934 production modules (:func:`_production_trees_cached`, ~13s) and
+    flattening them into the call index (:func:`_production_call_index`, ~12.7s).
+    The fixed-point resolve on top of a warm index is **0.33s**. So a caller that
+    bypassed ``_emitted_event_types_cached`` entirely would cost a third of a
+    second and is not worth a gate; a caller that rebuilt either builder would
+    cost twenty-five, and that is the regression.
+
+    Stated as a call count rather than a wall clock on purpose. A timing
+    assertion on a machine that measured this same walk anywhere from 8s to 43s
+    depending on load is a flake generator, and it would also be asserting the
+    symptom. ``misses`` is exact: 1 means the walk happened once. Combined with
+    :data:`_CACHE_SIZES_AT_IMPORT` above — which proves the once was at import —
+    the pair pins both halves of the contract.
+
+    Removing either ``@functools.lru_cache`` fails this by AttributeError on
+    ``cache_info``, which is the bluntest and most reliable kill available.
+    """
+
+    trees = _production_trees_cached.cache_info()
+    index = _production_call_index.cache_info()
+
+    assert (trees.misses, index.misses) == (1, 1), (
+        "the expensive builders did not run exactly once: "
+        f"_production_trees_cached={trees}, _production_call_index={index}. "
+        "Each miss is a full re-parse or re-index of the production tree "
+        "(~13s and ~12.7s here). More than one means a caller is going around "
+        "the cache and every test in this file is paying for the walk again."
+    )
 
 
 def test_every_registered_event_type_has_a_production_emitter():
