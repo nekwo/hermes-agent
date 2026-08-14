@@ -299,10 +299,10 @@ Reset policies control when a session automatically loses context (gets a new `s
 
 | Mode | Behavior | Default Config |
 |---|---|---|
-| `"none"` | Never auto-reset. Context managed only by compression. | — |
+| `"none"` | Never auto-reset. Context managed only by compression. | **(default)** |
 | `"idle"` | Reset after N minutes of inactivity from `updated_at`. | `idle_minutes: 1440` (24h) |
 | `"daily"` | Reset at a specific hour each day (local time). | `at_hour: 4` (4 AM) |
-| `"both"` | Whichever triggers first — daily boundary OR idle timeout. | **(default)** |
+| `"both"` | Whichever triggers first — daily boundary OR idle timeout. | — |
 
 ### Policy Evaluation
 
@@ -399,7 +399,8 @@ unexpected exit). For each session updated within the last 120 seconds:
 
 ### Stuck-Loop Detection (`_suspend_stuck_loop_sessions`)
 
-Counts consecutive restarts via a JSON file (`{HERMES_HOME}/restart_counts.json`). If a
+Counts consecutive restarts via a JSON file (`{HERMES_HOME}/.restart_failure_counts`,
+`GatewayRunner._STUCK_LOOP_FILE`). If a
 session has been active across 3+ consecutive restarts, it's auto-suspended so the user
 gets a clean slate.
 
@@ -620,7 +621,7 @@ When a session expires:
 |---|---|---|---|
 | `group_sessions_per_user` | `bool` | `true` | Isolate group/channel sessions per user |
 | `thread_sessions_per_user` | `bool` | `false` | Isolate thread sessions per user |
-| `session_store_max_age_days` | `int` | `0` | Prune sessions older than N days (0=disabled) |
+| `session_store_max_age_days` | `int` | `90` | Prune sessions older than N days (0=disabled) |
 | `agent.gateway_auto_continue_freshness` | `int` | `3600` | Seconds for resume freshness window |
 | `agent.gateway_timeout` | `int` | `1800` | Agent turn timeout (30 min default) |
 

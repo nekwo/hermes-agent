@@ -132,7 +132,7 @@ public HTTP surface on hosted deployments (the gateway may be idle/scaled down);
 it is in `PUBLIC_API_PATHS` so the dashboard cookie gate lets the bearer-JWT
 callback through to the verifier. (Also registered on the optional
 `APIServerAdapter` for self-host API-server deployments.) The verifier is
-`plugins/cron/chronos/verify.py`.
+`plugins/cron_providers/chronos/verify.py`.
 
 - **Auth:** `Authorization: Bearer <NAS-minted JWT>`. The agent verifies:
   - signature against the NAS JWKS (`cron.chronos.nas_jwks_url`),

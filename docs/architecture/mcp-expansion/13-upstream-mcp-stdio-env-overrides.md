@@ -1,5 +1,15 @@
 # Stage 7 — Upstream MCP stdio environment overrides
 
+> **STATUS: SHIPPED.** This plan has landed on `main` — do not re-implement it.
+> The delivered surface is `_normalize_mcp_env_server_name` / `_get_process_mcp_env_overrides`
+> and `_build_safe_env(..., server_name=, runtime_env=)` in [`tools/mcp_tool.py`](../../../tools/mcp_tool.py),
+> threaded through `MCPServer._run_stdio()`; the `hermes mcp test --env KEY=VALUE`
+> flag in [`hermes_cli/subcommands/mcp.py`](../../../hermes_cli/subcommands/mcp.py);
+> coverage in [`tests/tools/test_mcp_env_overrides.py`](../../../tests/tools/test_mcp_env_overrides.py);
+> user docs in [`website/docs/reference/mcp-config-reference.md`](../../../website/docs/reference/mcp-config-reference.md).
+> Everything below the "Current behavior" heading is retained as the design
+> record of how it was built, and describes the pre-implementation state.
+>
 > **For Claude:** Implement this from a fresh branch based on `upstream/main`, not from Tony's local migration branch. Keep the PR generic to Hermes Agent; do not include Eternia, Arcadia, Launcher, Stage C, TonyBrain, or private profile artifacts in the upstream commit.
 >
 > Parent docs: [`README.md`](README.md), [`../mcp-expansion-roadmap.md`](../mcp-expansion-roadmap.md).

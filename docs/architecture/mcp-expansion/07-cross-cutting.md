@@ -178,6 +178,7 @@ docs/architecture/
     10-stage-6-eternia-backend-mcp.md            # added in pass 3
     11-stage-2.5-hermes-control-mutate.md        # added in pass 3
     12-third-pass-addendum.md                    # routines audit, mcp_serve reconciliation, ops concerns
+    13-upstream-mcp-stdio-env-overrides.md       # per-process stdio MCP env overrides (SHIPPED)
     examples/                                    # placeholder mcpServers JSON, one per server
     schemas/                                     # pinned contracts (verification, control_events, worker handoff, ...)
     templates/                                   # markdown skeletons (handoff, closure note, escalation, recovery card)

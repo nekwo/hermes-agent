@@ -69,7 +69,7 @@ Pass 1 was silent on whether they should federate. Decision:
 
 **They stay independent servers.** Rationale:
 
-1. **Different threading models.** [`mcp_serve.py`](../../../mcp_serve.py) runs an `EventBridge` background thread that polls platforms for incoming messages (`bridge.start()` at module load, see [`mcp_serve.py:880-883`](../../../mcp_serve.py)). The control-plane server is pure request/response. Federating would pay the event-bridge startup cost on every control-plane spawn, including read-only sessions.
+1. **Different threading models.** [`mcp_serve.py`](../../../mcp_serve.py) runs an `EventBridge` background thread that polls platforms for incoming messages (`bridge.start()` on every server start, see [`mcp_serve.py` `run_mcp_server()`](../../../mcp_serve.py)). The control-plane server is pure request/response. Federating would pay the event-bridge startup cost on every control-plane spawn, including read-only sessions.
 2. **Different blast radius.** Messaging tools can *send messages* — a leaked credential in a messaging tool config compromises Tony's Telegram/Discord. Control tools can mutate kanban/cron — leaks compromise project state. Separating means a worker that needs kanban reads does not also have a path to send a Slack message.
 3. **Different upstream profile.** Messaging is platform-bridge specific (Telegram/Discord/Slack adapters in `gateway/platforms/`). Control is generic. The roadmap §Layer 1 says control is upstream-worthy; messaging is closer to a Hermes-specific addon.
 

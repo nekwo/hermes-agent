@@ -62,11 +62,13 @@ Source: `renderBillingError` in `ui-tui/src/app/slash/commands/topup.ts:37-149`.
 
 ## 3. Charge settlement outcomes (`pollCharge` / `renderChargeFailed`)
 
-Source: `pollCharge` (`ui-tui/src/app/slash/commands/topup.ts:170-258`) and
-`renderChargeFailed` (`:260-290`). Poll cadence: 2s interval, 5-minute cap
-(`POLL_INTERVAL_MS=2000`, `POLL_CAP_MS=5*60*1000`), applied on **every**
-non-terminal path (pending *and* throttled), so a sustained 429/503 can't
-keep the poll alive forever.
+Source: `pollCharge` / `renderChargeFailed` in
+`ui-tui/src/app/slash/commands/topup.ts` — they render the outcomes; the poll
+loop itself lives in the shared `driveChargeSettlement`
+(`apps/shared/src/charge-settlement.ts`). Poll cadence: 2s interval, 5-minute cap
+(`SETTLEMENT_POLL_INTERVAL_MS=2000`, `SETTLEMENT_POLL_CAP_MS=5*60*1000`), applied
+on **every** non-terminal path (pending *and* throttled), so a sustained 429/503
+can't keep the poll alive forever.
 
 | Outcome | Copy | Notes |
 |---|---|---|

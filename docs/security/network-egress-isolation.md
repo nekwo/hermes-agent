@@ -164,7 +164,7 @@ docker compose exec gateway \
 
 # From the agent container: this should SUCCEED (internal network)
 docker compose exec gateway \
-  curl -sf --max-time 5 http://hermes-dashboard:9119/health && echo "OK: internal reachable" || echo "FAIL"
+  curl -sf --max-time 5 http://hermes-dashboard:9119/api/health && echo "OK: internal reachable" || echo "FAIL"
 
 # If using egress proxy: this should SUCCEED (allowlisted)
 docker compose exec gateway \

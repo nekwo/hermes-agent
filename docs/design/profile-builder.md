@@ -1,6 +1,13 @@
 # Profile Builder — Dashboard-Native, Full-Featured Profile Creation
 
-Status: design proposal (not yet implemented)
+Status: **IMPLEMENTED** — retained as the design record, not as open work.
+The backend additions live on `ProfileCreate` (`hermes_cli/web_models.py`) and the
+dedicated builder page is `web/src/pages/ProfileBuilderPage.tsx`, routed at
+`/profiles/new` (`web/src/App.tsx`). Two details diverged from the proposal below:
+the shipped skills field is `keep_skills` (replace semantics), not `builtin_skills`;
+and seam #1 no longer holds — `tools/skills_hub.py` now resolves `SKILLS_DIR`
+per call via `__getattr__` instead of binding it at import (the hub-install
+subprocess path was kept regardless).
 Author: drafted for Teknium
 Supersedes: PR #31781 (prompt_toolkit `hermes profile wizard`)
 

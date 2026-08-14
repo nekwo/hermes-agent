@@ -20,7 +20,7 @@ Stage 1 is **closure + portability**. The roadmap calls Stage C "the path that a
 | Direct↔MCP parity diff | `docs/stages/qa-reboot/scripts/Test-StageCMcpParityDiff.ps1` | runs on every label |
 | Screenshot capture | `docs/stages/qa-reboot/scripts/Capture-StageCWindowScreenshot.ps1` | Win32 PrintWindow + blank-pixel sanity |
 | Redaction scan | `docs/stages/qa-reboot/scripts/Invoke-RedactionScan.ps1` | bearer matching hardened (commit `3969973e`) |
-| Browser PKCE login | `tool/stagec_qa_mcp_server/bin/stagec_browser_login.py` + commit `b84db539` | headless browser auth |
+| Browser PKCE login | `docs/stages/qa-reboot/scripts/stagec_browser_login.py` + commit `b84db539` | headless browser auth |
 | Process hygiene | `docs/stages/qa-reboot/scripts/Invoke-StageCProcessHygiene.ps1` | reaps stray Launcher PIDs |
 | Operator runbook | `docs/stages/qa-reboot/STAGEC_MCP_OPERATOR_RUNBOOK_2026-05-14.md` | current operator pages |
 | Hermes-side recipe | `docs/stages/qa-reboot/STAGEC_MCP_AUTH_RECIPE_2026-05-14.md` | per-step auth flow |

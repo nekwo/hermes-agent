@@ -80,7 +80,7 @@ sequenceDiagram
 **Dependencies:** None
 
 **Files:**
-- `gateway/platforms/telegram.py`
+- `plugins/platforms/telegram/adapter.py`
 - `tests/gateway/test_telegram_send.py` or the existing Telegram adapter test module that already covers `edit_message` overflow behaviour
 
 **Approach:**
@@ -140,7 +140,7 @@ sequenceDiagram
 **Dependencies:** U1, U2
 
 **Files:**
-- `gateway/platforms/telegram.py`
+- `plugins/platforms/telegram/adapter.py`
 - `gateway/stream_consumer.py`
 - `tests/gateway/test_stream_consumer_thread_routing.py`
 - Relevant Telegram adapter routing tests, if existing coverage is closer there
@@ -225,7 +225,7 @@ sequenceDiagram
 
 - User-provided screenshot at `/root/.hermes/image_cache/img_f664e68f6ddf.jpg`.
 - `gateway/stream_consumer.py` streamed edit, overflow, fallback, and final-delivery state handling.
-- `gateway/platforms/telegram.py` Telegram send/edit overflow splitting and topic routing helpers.
+- `plugins/platforms/telegram/adapter.py` Telegram send/edit overflow splitting and topic routing helpers.
 - `gateway/platforms/base.py` `SendResult` contract and shared message chunking helper.
 - `tests/gateway/test_stream_consumer.py`, `tests/gateway/test_stream_consumer_thread_routing.py`, and Telegram adapter tests for focused regression coverage.
 
