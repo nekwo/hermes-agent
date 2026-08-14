@@ -43,25 +43,64 @@ from agent_runtime.permission_modes import SHIPPED_DEFAULT_PERMISSION_MODE
 # ``tests/agent_runtime/test_s47_wire_constant_field_removal.py``.
 
 
+#: What ``agent_runtime.read_model.delta_patches`` SHIPS as.
+#:
+#: True since 2026-08-14. The flag was born ``False`` because "the producer lane
+#: is dark until the launcher fold exists" — that precondition expired: the fold
+#: consumer shipped (``mission_read_model.dart``), the stream promotes coverable
+#: batches to v2 ``patch`` frames, and the fold-entity handshake landed so a
+#: batch naming an entity the client did not declare is demoted to the honest
+#: full core rather than shipped as a patch nobody can apply.
+#:
+#: This is a SHIPPED DEFAULT and not a scaffolded file, deliberately. The flag is
+#: ROOT-ONLY (``config.ROOT_ONLY_CONFIG_KEYS``): the only reader,
+#: ``state_patches.delta_patches_enabled``, resolves
+#: ``config.harness_root_config_path`` and never consults the active profile. A
+#: value that must live in exactly one file is a value a WRITER can put in the
+#: wrong file, and one already did — the Launcher installer's seed template
+#: (``kMissionControlBaseSeedConfigYaml``) stamps ``delta_patches: true`` into
+#: the fresh ``base`` PROFILE, where the reader never looks. So the lane was dark
+#: for its whole life on every install: measured live 2026-08-13, ONE field
+#: change on ONE persona instance shipped an 822,671-byte delta carrying an
+#: 864,241-byte full snapshot core, where the patch frame the lane exists for is
+#: 486 bytes. ``harness status`` reported ``delta_patches: true`` the entire time,
+#: because status reads profile-aware.
+#:
+#: A dataclass default cannot be written to the wrong file, needs no init/upgrade
+#: step to reach an install that already exists, and is applied by
+#: ``config._read_model_config`` through ``raw.get(key, defaults.key)`` — so an
+#: operator's explicit ``false`` still wins, and only silence resolves here.
+SHIPPED_DELTA_PATCHES = True
+
+#: Where a delta-patch config FAULT lands. Deliberately NOT the shipped default,
+#: mirroring ``permission_modes.FALLBACK_DEFAULT_PERMISSION_MODE``: a config the
+#: runtime could not parse has told us nothing, and "emit a new class of event
+#: from every store chokepoint" is not what a runtime should infer from silence
+#: it could not read. The fault path is off AND LOUD — ``delta_patches_enabled``
+#: warns with the config path — because an unannounced fault-off is the exact
+#: silent-dark failure the shipped default exists to retire.
+FALLBACK_DELTA_PATCHES = False
+
+
 @dataclass(slots=True)
 class ReadModelConfig:
     enabled: bool = False
     serve_snapshot_from_db: bool = True
     db_filename: str = "read_model.db"
-    # S6 producer kill-switch. When False (default), store chokepoints emit NO
-    # ``state.patched`` field-patch entries — the producer lane is dark until the
-    # launcher fold exists (the consumer + stream wire land after S4). Flip True
-    # to have steer/profile/task-transition/incident-close chokepoints append a
-    # ``state.patched`` EventLog entry carrying the field-level patch. Log-only:
-    # no stream/wire change rides this flag in S6.
+    # S6 producer kill-switch, now shipped ON (see ``SHIPPED_DELTA_PATCHES``).
+    # When True, the steer / profile / task-transition / incident-close store
+    # chokepoints append a ``state.patched`` EventLog entry carrying the
+    # field-level patch, and ``stream.stream_frames`` promotes a fully-coverable
+    # batch to a v2 ``patch`` frame. Set it ``false`` in the ROOT ``config.yaml``
+    # to take the lane back to full-core deltas; a profile copy is inert.
     #
     # NOTE (S7-B RULING-0 COMPAT STRIP, 2026-07-16): the S2 ``history_in_frame``
     # and S3 ``inline_prompt_payloads`` kill-switches were removed here — the
     # evicted/hoisted read-model shape is the ONLY shape (operator ruling: "no
     # backward-shape support; makes things stale"). Rollback = ``git revert`` of
     # the landing, not a runtime flag flip. ``delta_patches`` stays: it gates the
-    # in-progress S6 producer lane, not a legacy-emission fallback.
-    delta_patches: bool = False
+    # S7-A producer lane, not a legacy-emission fallback.
+    delta_patches: bool = SHIPPED_DELTA_PATCHES
 
 
 @dataclass(slots=True)

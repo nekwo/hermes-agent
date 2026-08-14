@@ -309,7 +309,8 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     # ``changed``. ``entity``/``id``/``op`` are the summary fields every emission
     # carries; ``changed`` is optional (detail). ``seq``/``ts`` ride the EventLog
     # envelope, not the payload. Emitted only when ``read_model.delta_patches``
-    # is on (default off → this type never appears).
+    # is on — which it now SHIPS as (runtime_config.SHIPPED_DELTA_PATCHES); an
+    # operator's explicit root-config ``false`` is what makes this type absent.
     "state.patched": EventContract("state.patched", "State patched", ("entity", "id", "op"), ("changed",)),
     # The LIVE orphan-worktree janitor (delivery_directive.reap_orphan_worktrees,
     # two production callers: harness_doctor and the `worktree reap` CLI verb).

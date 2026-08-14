@@ -343,6 +343,16 @@ def load_root_runtime_config() -> AgentRuntimeConfig:
 #:   the lane was built for is 486 bytes. ``harness status`` reported
 #:   ``delta_patches: true`` throughout, because status reads profile-aware.
 #:
+#:   2026-08-14 follow-up: a doctor row only helps an operator who RUNS the
+#:   doctor, and the misplaced value had a WRITER — the Launcher installer's
+#:   ``kMissionControlBaseSeedConfigYaml`` seeds ``delta_patches: true`` into the
+#:   fresh ``base`` PROFILE — so every fresh install reproduced it. The lane's
+#:   durability therefore does not depend on any file at all any more:
+#:   ``read_model.delta_patches`` SHIPS on
+#:   (``runtime_config.SHIPPED_DELTA_PATCHES``) and silence resolves to LIVE. A
+#:   profile copy is still reported here, because it is still inert and still
+#:   worth deleting — it just no longer decides whether the lane runs.
+#:
 #: Note ``read_model`` is SPLIT across both loaders and only the leaf is
 #: root-only: ``read_model.enabled`` is read profile-aware (``snapshot.py``
 #: consults the passed cfg), while ``read_model.delta_patches`` is root-only.

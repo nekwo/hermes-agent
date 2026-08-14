@@ -77,8 +77,8 @@ that stops being true fails just like a missing emitter.
 
 NOT allowlisted, though the wave expected them to be:
 
-* ``state.patched`` — config-gated behind ``read_model.delta_patches`` (default
-  off), but the emitter is a plain ``Event(type=STATE_PATCHED_EVENT_TYPE)`` and
+* ``state.patched`` — config-gated behind ``read_model.delta_patches`` (which
+  ships ON), but the emitter is a plain ``Event(type=STATE_PATCHED_EVENT_TYPE)`` and
   idiom 4 resolves it. Config gating is a RUNTIME condition; this gate is
   static, so a gated emitter is still an emitter. No entry needed.
 * ``child.returned`` — gated behind ``supervision.child_events_enabled``, same

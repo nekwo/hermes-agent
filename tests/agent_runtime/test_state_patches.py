@@ -2,7 +2,8 @@
 
 Covers the S7-A producer contract:
 
-* flag off (default) → ZERO ``state.patched`` entries; a steer write's event
+* flag off (an operator's explicit root ``false``; the flag SHIPS on) → ZERO
+  ``state.patched`` entries; a steer write's event
   stream is byte-identical to before the lane (the inertness golden);
 * flag on → each chokepoint emits ONE op-based entry:
   - steer / profile → a persona-instance ``upsert`` carrying the PROJECTED wire

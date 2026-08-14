@@ -875,8 +875,8 @@ class PersonaInstanceStore:
         )
         # S6 producer: the flagship field-patch case. ``changed_fields`` is the
         # exact set this steer mutation wrote (steered_by/spawned_by, plus
-        # goal_id/mode/current_task_id when the re-route changed them). Dark by
-        # default (read_model.delta_patches off).
+        # goal_id/mode/current_task_id when the re-route changed them). Live
+        # unless read_model.delta_patches is explicitly off (it ships on).
         self._emit_state_patch(instance, changed_fields)
 
     def update_profile(
@@ -995,8 +995,8 @@ class PersonaInstanceStore:
                 payload["requested_by"] = str(requested_by)[:80]
             self._event("persona_instance.profile_updated", instance, payload)
             # S6 producer: the persona-instance profile/model write funnel. Emit
-            # only the operator-editable fields this call actually changed. Dark
-            # by default (read_model.delta_patches off).
+            # only the operator-editable fields this call actually changed. Live
+            # unless read_model.delta_patches is explicitly off (it ships on).
             after_patch_fields = self._profile_patch_snapshot(instance)
             self._emit_state_patch(
                 instance,
@@ -1215,8 +1215,8 @@ class PersonaInstanceStore:
             payload["requested_by"] = normalized_requested_by
         self._event("persona_instance.retired", instance, payload)
         # S7-A producer: the retired row leaves the active frame, so the launcher
-        # deletes the keyed row (never renders it as a live idle agent). Dark by
-        # default (read_model.delta_patches off).
+        # deletes the keyed row (never renders it as a live idle agent). Live
+        # unless read_model.delta_patches is explicitly off (it ships on).
         emit_persona_instance_remove(self.event_log, instance, reason=safe_reason)
         # Prune-lane hook (mirrors close_for_task / the janitor): a retired
         # instance must not leave a phantom office desk. Best-effort; office
@@ -1742,8 +1742,8 @@ class PersonaInstanceStore:
 
     def _emit_state_patch(self, instance: PersonaInstance, changed: dict[str, Any]) -> None:
         """Emit an ``upsert`` ``state.patched`` entry for a persona-instance
-        field change (S7-A producer; dark unless ``read_model.delta_patches`` is
-        on). The store field NAMES that changed drive a WIRE-LEVEL projection
+        field change (S7-A producer; live unless ``read_model.delta_patches`` is
+        explicitly off — it ships on). The store field NAMES that changed drive a WIRE-LEVEL projection
         (see :func:`emit_persona_instance_patch`) so the derived wire fields the
         launcher reads (``effective_model`` / ``skills`` / the display-name
         mirror / …) ship recomputed, not stale."""
