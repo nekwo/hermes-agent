@@ -29,13 +29,21 @@ is already spent there on "invalid value", so taking it would have collided on
 day one. 4090 sits far above the live allocation and reads as HTTP 409, which
 is the one number every client developer already associates with this meaning.
 
-Codes are the coarse family; ``data.reason`` is the branch point (see
-:func:`err`). 4090 carries TWO reasons, and conflating them would be the whole
-bug: ``stale_revision`` means refetch and rebase — the client's own prediction
-is behind — while ``sync_conflict`` means a realm-sync sidecar is unresolved
-and NO amount of refetch-and-retry clears it; it needs an operator running
-``harness office actor-resolve``. A client that retried a ``sync_conflict``
-would spin forever.
+Codes are the coarse family — "a guard refused this write" — and
+``data.reason`` is the branch point (see :func:`err`). 4090 carries THREE
+reasons, and conflating any two of them would be the whole bug, because each
+has a different cure:
+
+``stale_revision``
+    The client's own prediction is behind. Refetch and rebase.
+``sync_conflict``
+    A realm-sync sidecar is unresolved. NO amount of refetch-and-retry clears
+    it — it needs an operator running ``harness office actor-resolve``. A
+    client that retried this one would spin forever.
+``class_key_collision``
+    The write is class-keyed and would undo the class→instance re-key
+    migration (``office_class_key_guard``). Neither refetching nor retrying
+    helps; the client must name WHICH instance it is placing.
 
 Why this is a lane and not a replacement
 ----------------------------------------
@@ -415,9 +423,30 @@ def _runtime_office_upsert(rid: Any, params: dict) -> dict:
     that does not exist yet, so EVERY value — including ``0`` — refuses a
     create. A create is therefore necessarily unguarded, and a client must send
     ``expect_revision`` only for a placement it has already seen.
+
+    The class-key fence, and why it has NO override here
+    ----------------------------------------------------
+    ``office_class_key_guard`` is called before the store, for the reason that
+    module gives: ``upsert_actor`` reads an explicit upsert of an ARCHIVED key
+    as operator intent to re-add and clears the resurrection ledger, so one
+    surviving class-keyed write undoes the class→instance re-key and places the
+    same agent twice. This method is the third writer through that hole and the
+    only one reachable from the network.
+
+    The CLI verb beside it takes ``--allow-class-key``. This one takes no
+    equivalent, and that asymmetry is the point rather than an omission. The
+    flag is consent: an operator read the refusal, typed the override, and owns
+    the double placement. A wire PARAMETER is not consent — it is a constant in
+    a client build, set once by whoever was debugging the day drags started
+    failing, and thereafter sent by every install on every write with no human
+    in any loop. And the wire client needs it least: the read projection hands
+    it ``persona_instance_id`` on every item, so its remedy is to send back the
+    binding it was already given. The genuine operator-intent paths are
+    untouched — ``harness office actor-restore``, and the CLI's own override.
     """
 
     from agent_runtime.errors import StaleRevision, SyncConflict
+    from agent_runtime.office_class_key_guard import class_key_collision
     from agent_runtime.office_store import OfficeStore
 
     workspace_id = _workspace_id_param(params)
@@ -469,6 +498,46 @@ def _runtime_office_upsert(rid: Any, params: dict) -> dict:
             ERR_NOT_FOUND,
             f"unknown workspace: {workspace_id}",
             {"reason": "workspace_not_found", "workspace_id": workspace_id},
+        )
+
+    collision = class_key_collision(store, workspace_id, actor_payload)
+    if collision is not None:
+        # Its own reason: the remedy is neither "refetch and rebase" nor "fix
+        # the payload shape" — the payload is well-formed and the client is not
+        # behind. It is "name WHICH instance you are placing". The guard's two
+        # narrow reasons ride beside it as a list rather than as the branch
+        # point, because they share that one remedy and because a client
+        # decoder switches on a single stable string.
+        #
+        # ``refusal_message`` is deliberately NOT reused: it ends by offering
+        # ``--allow-class-key``, which is a CLI flag that does not exist on this
+        # lane. Advice a caller cannot follow is worse than none.
+        return err(
+            rid,
+            ERR_CONFLICT,
+            (
+                f"class-keyed write for persona {collision['persona_id']!r} refused: "
+                f"{', '.join(collision['reasons'])}"
+                # Named when there is one. The two reasons fire on different
+                # evidence — a ledger entry vs. a live sibling — and only the
+                # second has another actor to point at.
+                + (
+                    f" (conflicts with {', '.join(collision['conflicting_actor_keys'])})"
+                    if collision["conflicting_actor_keys"]
+                    else ""
+                )
+                + ". The class→instance re-key archived this class key; writing it "
+                "back undoes that migration. Send persona_instance_id to place a "
+                "specific instance."
+            ),
+            {
+                "reason": "class_key_collision",
+                "workspace_id": workspace_id,
+                "persona_id": collision["persona_id"],
+                "class_actor_key": collision["class_actor_key"],
+                "reasons": collision["reasons"],
+                "conflicting_actor_keys": collision["conflicting_actor_keys"],
+            },
         )
 
     try:

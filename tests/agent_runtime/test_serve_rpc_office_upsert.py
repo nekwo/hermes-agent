@@ -187,15 +187,16 @@ def test_an_upsert_of_an_existing_actor_updates_it_and_never_forks_a_second_file
 # ── the instance binding, which the write must not drop ─────────────────────
 
 
-def test_the_write_honours_the_instance_binding_and_does_not_rekey_onto_the_class():
+def test_the_write_honours_the_instance_binding_and_the_fence_refuses_the_rekey():
     """Design question 4, from both sides.
 
     WITH the binding the write lands on the instance-keyed actor already there.
-    WITHOUT it the same persona_id mints a SECOND, class-keyed actor beside it —
-    one placement rendered twice, and a client whose next guarded write targets
-    whichever of the two it happened to read. The method must therefore pass the
-    binding through, and this pins that it does by showing the split that
-    happens when it is absent.
+    WITHOUT it the same persona_id would key onto the CLASS — a second actor
+    file holding the same ``item_id`` values, one agent rendered twice, and a
+    client whose next guarded write targets whichever of the two it happened to
+    read. ``office_class_key_guard`` refuses that write, and this pins both the
+    pass-through and the refusal in one place because they are one behaviour:
+    the binding is what distinguishes them.
     """
 
     _seed()
@@ -203,14 +204,164 @@ def test_the_write_honours_the_instance_binding_and_does_not_rekey_onto_the_clas
     assert bound["result"]["actor_key"] == QA_INSTANCE
     assert [a.actor_key for a in _store().list_actors(WORKSPACE)] == [QA_INSTANCE]
 
-    # The hazard, demonstrated rather than described: drop the binding and the
-    # SAME persona_id keys onto the class.
     unbound = _upsert(
         "unbound",
         {"workspace_id": WORKSPACE, "actor": _actor_payload(1.0, 1.0, instance=None)},
     )
-    assert unbound["result"]["actor_key"] == "qa"
-    assert sorted(a.actor_key for a in _store().list_actors(WORKSPACE)) == [QA_INSTANCE, "qa"]
+    assert unbound["error"]["data"]["reason"] == "class_key_collision"
+    # No second actor file, which is the harm the reason names.
+    assert [a.actor_key for a in _store().list_actors(WORKSPACE)] == [QA_INSTANCE]
+
+
+def test_a_class_keyed_write_that_would_duplicate_a_placement_is_a_typed_refusal():
+    """The fence, as a whole frame, with its own ``data.reason``.
+
+    Not ``stale_revision``: the client is not behind and refetching tells it
+    nothing new. Not ``actor_invalid``: the payload is well-formed and was legal
+    before the class→instance re-key. The remedy is a third thing — name WHICH
+    instance you are placing — so it gets a third reason. ``data`` carries the
+    guard's own structured facts, including the key it collided WITH, because a
+    refusal that does not name the other actor is one nobody can act on.
+    """
+
+    _seed()
+    reply = _upsert(
+        "dup",
+        {"workspace_id": WORKSPACE, "actor": _actor_payload(1.0, 1.0, instance=None)},
+    )
+
+    assert reply == {
+        "jsonrpc": "2.0",
+        "id": "dup",
+        "error": {
+            "code": 4090,
+            "message": (
+                "class-keyed write for persona 'qa' refused: duplicate_item_placement "
+                f"(conflicts with {QA_INSTANCE}). The class→instance re-key archived "
+                "this class key; writing it back undoes that migration. Send "
+                "persona_instance_id to place a specific instance."
+            ),
+            "data": {
+                "reason": "class_key_collision",
+                "workspace_id": WORKSPACE,
+                "persona_id": "qa",
+                "class_actor_key": "qa",
+                "reasons": ["duplicate_item_placement"],
+                "conflicting_actor_keys": [QA_INSTANCE],
+            },
+        },
+    }
+    assert _positions()[QA_INSTANCE] == [-8.0, -2.0]
+
+
+def test_a_class_keyed_write_that_would_resurrect_an_archived_key_is_refused():
+    """The guard's OTHER narrow reason, which no item-id overlap would catch.
+
+    ``upsert_actor`` treats an explicit upsert of an archived key as operator
+    intent to re-add and CLEARS the resurrection ledger. Over the wire nobody is
+    holding that intent, so the same write that is a feature at a terminal is
+    silent corruption from a client. Seeded through a real
+    ``remove_actor`` so the ledger entry is the store's own, not a fixture's.
+    """
+
+    store = _seed()
+    store.upsert_actor(
+        WORKSPACE,
+        {
+            "persona_id": "ghost",
+            "items": [{"item_id": "ghost_desk", "kind": "desk", "position": [1.0, 1.0]}],
+        },
+    )
+    store.remove_actor(WORKSPACE, "ghost", updated_by="seed-operator")
+    assert "ghost" in store.get_surface(WORKSPACE).archived_actor_keys
+
+    reply = _upsert(
+        "resurrect",
+        {
+            "workspace_id": WORKSPACE,
+            "actor": {
+                "persona_id": "ghost",
+                # Fresh item id, so ONLY the archived-key reason can fire — the
+                # two reasons are proven independent rather than co-triggered.
+                "items": [{"item_id": "ghost_desk_2", "kind": "desk", "position": [2.0, 2.0]}],
+            },
+        },
+    )
+
+    assert reply["error"]["code"] == 4090
+    assert reply["error"]["data"]["reason"] == "class_key_collision"
+    assert reply["error"]["data"]["reasons"] == ["resurrects_archived_class_key"]
+    assert reply["error"]["data"]["conflicting_actor_keys"] == []
+    # Nothing to point AT on this branch, so the message must not invent one —
+    # the ledger is the whole evidence.
+    assert "conflicts with" not in reply["error"]["message"]
+    assert "resurrects_archived_class_key." in reply["error"]["message"]
+    # The ledger still guards the key, which is the thing the write would have
+    # cleared on its way through.
+    assert "ghost" in _store().get_surface(WORKSPACE).archived_actor_keys
+    assert not _store().actor_exists(WORKSPACE, "ghost")
+
+
+def test_a_class_keyed_write_on_a_clean_canvas_still_goes_through():
+    """The fence is CONDITIONAL, not a ban — and this is the assertion that
+    keeps it that way. Class-keyed placements are a supported shape (the store
+    says so itself: "Persona-id-keyed placements survive instance churn by
+    design"). A guard that refused every unbound write would outlaw a legal
+    canvas, and would pass every test above."""
+
+    _seed()
+    reply = _upsert(
+        "clean",
+        {
+            "workspace_id": WORKSPACE,
+            "actor": {
+                "persona_id": "archivist",
+                "items": [{"item_id": "desk-archivist", "kind": "desk", "position": [5.0, 5.0]}],
+            },
+        },
+    )
+
+    assert reply["result"] == {"actor_key": "archivist", "revision": 1}
+    assert sorted(a.actor_key for a in _store().list_actors(WORKSPACE)) == [
+        "archivist",
+        QA_INSTANCE,
+    ]
+
+
+def test_no_wire_parameter_can_force_a_class_keyed_write_past_the_fence():
+    """The CLI's ``--allow-class-key`` has no equivalent here, and the asymmetry
+    is deliberate.
+
+    A flag is consent: an operator read the refusal, typed the override, and
+    owns the double placement. A wire PARAMETER is not — it becomes a constant
+    in a client build, set once by whoever was debugging the day drags started
+    failing, and sent forever by every install with no human in any loop. The
+    wire client also needs it least: the read projection hands it
+    ``persona_instance_id`` on every item, so its remedy is to send back the
+    binding it was already given.
+
+    Pinned by trying the names an implementer would reach for. Unknown params
+    are IGNORED by this method, so a future author who adds one has to delete
+    this test rather than merely not notice it.
+    """
+
+    _seed()
+    for rid, extra in {
+        "allow": {"allow_class_key": True},
+        "force": {"force": True},
+        "override": {"allow_class_key": "yes", "force_class_key": True},
+    }.items():
+        reply = _upsert(
+            rid,
+            {
+                "workspace_id": WORKSPACE,
+                "actor": _actor_payload(1.0, 1.0, instance=None),
+                **extra,
+            },
+        )
+        assert reply["error"]["data"]["reason"] == "class_key_collision", rid
+
+    assert [a.actor_key for a in _store().list_actors(WORKSPACE)] == [QA_INSTANCE]
 
 
 def test_the_binding_survives_the_round_trip_onto_the_read_projection():
