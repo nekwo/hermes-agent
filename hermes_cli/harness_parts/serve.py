@@ -90,6 +90,29 @@ Protocol (NDJSON, one frame per line):
              A RUNNING read-only ``harness stream`` is cooperatively cancelled
              and releases its pool worker; it is the sole running exception.
 - errors:    ``{"id":…,"event":"error","error":"invalid_request"|…,"detail":…}``
+- method:    ``{"jsonrpc":"2.0","id":…,"method":"runtime.office.get",
+             "params":{…}}`` → ``{"jsonrpc":"2.0","id":…,"result":{…}}`` or
+             ``{"jsonrpc":"2.0","id":…,"error":{"code":…,"message":…,"data":…}}``.
+
+             The CALL half (``agent_runtime/serve_rpc.py``), mirroring
+             ``tui_gateway``'s JSON-RPC 2.0 shape and its error codes rather
+             than minting a third convention. It sits BESIDE the argv lane
+             above, which is unchanged and remains the fallback: a frame is
+             claimed by this lane only when it names ``jsonrpc`` or ``method``,
+             neither of which an argv request has ever carried.
+
+             HOW A CLIENT LEARNS THE SURFACE — the ``hello_contract``
+             precedent, not a parallel scheme. ``{"contract":N,"methods":[…]}``
+             rides the greeting each transport already reads (``ready`` on
+             stdio, ``hello_ok`` on the socket) under ``"rpc"``, and is
+             restated on the re-askable ``version`` reply because a durable
+             service outlives the install it was started from. The manifest is
+             a SET plus an integer: the integer moves when an existing
+             method's shape changes incompatibly, the set grows when a method
+             is added — so methods can be adopted one at a time, exactly as
+             ``fold_entities`` does for patch entities. A runtime that
+             predates the lane carries no ``rpc`` key, which reads as "argv
+             only" rather than as a failure.
 
 Per-request stdout: handlers ``print()`` directly and streaming turns emit
 deltas live, so ``sys.stdout``/``sys.stderr`` are swapped once for
@@ -964,6 +987,13 @@ def serve_loop(
             "boot": timeline.stamps(),
         }
     )
+    # The METHOD lane's registry + its manifest. Imported here rather than at
+    # module scope for the same reason as everything else in this function —
+    # nothing agent_runtime-shaped is paid for before ``booting`` is out — and
+    # it is cheap: ``serve_rpc`` imports only stdlib, and each method reaches
+    # for its stores function-locally when it is actually called.
+    from agent_runtime import serve_rpc
+
     from agent_runtime.persona_chat_continuity import (
         initialize_persona_chat_runtime_registry,
     )
@@ -1418,6 +1448,15 @@ def serve_loop(
             # port, ``lock_held_by`` with the winner's pid, or ``error:<reason>``
             # — the outcome is stated either way, never inferred from absence.
             "socket": socket_block,
+            # The METHOD lane's capability manifest — ``{"contract":N,
+            # "methods":[…]}``. This is stdio's greeting, so this is where a
+            # stdio client learns the method set; the socket's equivalent is
+            # ``hello_ok``, and both are restated on the re-askable ``version``
+            # reply. Same shape of promise as ``hello_contract``: the server
+            # advertises, the client asserts, and a runtime that predates the
+            # lane carries no ``rpc`` key at all — which reads as "argv only"
+            # rather than as a failure.
+            "rpc": serve_rpc.manifest(),
         }
         if orphaned_repaired:
             ready_frame["orphaned_turns_repaired"] = len(orphaned_repaired)
@@ -1795,6 +1834,12 @@ def serve_loop(
                 # work, and now KNOWS it is talking to a different build.
                 "build_mismatch": _build_mismatch(connection.client_build),
                 "draining": drain_state is not None,
+                # The socket's half of the method-lane advertisement. A socket
+                # client never reads ``ready`` (that frame goes to the stdio
+                # owner), so without this it could only learn the method set by
+                # asking ``version`` — one extra round trip on every connect,
+                # for something the handshake it already performs can carry.
+                "rpc": serve_rpc.manifest(),
             }
 
         def _connections_frame() -> dict[str, Any]:
@@ -2100,6 +2145,13 @@ def serve_loop(
                         # the reply a client already asks for.
                         "socket": socket_block,
                         "connections": _connections_frame(),
+                        # Re-askable, like the build stamp beside it and for the
+                        # same reason: a durable service outlives the install it
+                        # was started from, so "which methods does the thing I
+                        # am attached to actually have" must be answerable at
+                        # any time, not only at the greeting a client may have
+                        # read hours ago.
+                        "rpc": serve_rpc.manifest(),
                     }
                 )
                 return None
@@ -2473,6 +2525,25 @@ def serve_loop(
                             "state": "running" if known else "unknown",
                         }
                     )
+                return None
+            # ── the METHOD lane ─────────────────────────────────────────────
+            #
+            # Named JSON-RPC 2.0 methods, BESIDE the argv lane rather than
+            # instead of it (decision doc §3 / launcher `fa2226750`). The argv
+            # lane below is unchanged and stays the fallback: it has never sent
+            # `jsonrpc` or `method`, so nothing that used to reach it can be
+            # captured here, and nothing about its frames or exit codes moves.
+            #
+            # Answered INLINE, like `ping` / `version` / `connections` and
+            # unlike an argv request. The pool exists for handlers that block —
+            # chat turns, streams — and `runtime.office.get` is a bounded read
+            # of a handful of small JSON files. It is also why the lane is not
+            # refused while draining: a drain refuses new WORK so in-flight
+            # work can land, and a read that holds nothing and finishes in
+            # microseconds is not the thing a drain is protecting against —
+            # `version` and `ping` are answered throughout for the same reason.
+            if serve_rpc.is_rpc_frame(message):
+                sink.emit(serve_rpc.handle_request(message))
                 return None
             rid = message.get("id")
             argv = message.get("argv")
