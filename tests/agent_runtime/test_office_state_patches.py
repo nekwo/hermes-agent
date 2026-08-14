@@ -132,20 +132,8 @@ def seeded_office(isolate_agent_runtime_root):
     return store
 
 
-def _patches() -> list:
-    return [e for _, e in EventLog().iter_from_offset(0) if e.type == STATE_PATCHED_EVENT_TYPE]
-
-
-def _office_patches() -> list[dict]:
-    return [e.payload for e in _patches() if e.payload.get("entity") == OFFICE_ACTOR_ENTITY]
-
-
 def _drain() -> list:
     return [e for _, e in EventLog().iter_from_offset(0)]
-
-
-def _batch_from(offset: int) -> list[tuple[int, object]]:
-    return list(EventLog().iter_from_offset(offset))
 
 
 def _log_end() -> int:
