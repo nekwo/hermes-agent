@@ -2,8 +2,12 @@
 
 > **2026-07-30 — scoped correction.** The SQLite DDL in this doc creates `goals`,
 > `runs`, `proofs`, `incidents` row tables and three indexes that were removed by
-> [16 — Mission Lane Removal](16-mission-lane-removal.md) S9 (read-model schema is
-> now 2, contract 45). Everything else — the read-model projector, watermarks,
+> [16 — Mission Lane Removal](16-mission-lane-removal.md) S9 (which moved the
+> read-model schema to 2 and the snapshot contract to 45). **Both numbers have
+> moved on since:** `READ_MODEL_SCHEMA_VERSION` is now **3**
+> (`agent_runtime/read_model.py`) and `SNAPSHOT_CONTRACT_VERSION` is now **54**
+> (`agent_runtime/snapshot.py`) — read them from the code, not from here.
+> Everything else — the read-model projector, watermarks,
 > NDJSON change feed, fail-loud root resolution, backup drills — is live and
 > current.
 

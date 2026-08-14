@@ -63,7 +63,6 @@ trampoline working as designed.
   (`_cmd_snapshot` → `agent_runtime.snapshot.write_snapshot`, which
   `atomic_json_write`s `paths.snapshot_path()`). Nothing else writes it.
 - **`read_model.db`** is additionally written by:
-  - the **ticker** during active runs (incremental projection as events land),
   - **`harness read-model rebuild`** (`_cmd_rebuild_read_model` →
     `Projector(...).full_rebuild()`),
   - and `write_snapshot`'s dual-write when `agent_runtime.read_model.enabled`
@@ -80,15 +79,16 @@ short-lived **RAM cache** instead of re-dispatching the command. See
 - On a cache hit the `_run` path returns the cached stdout payload **without
   dispatching** the command — so `write_snapshot` is never called and
   `snapshot.json` is not rewritten.
-- The cache is keyed on a cheap runtime-state fingerprint (events.jsonl, turn
-  store, daemon status, scope pointers, store dirs, SessionDB files) and bounded
+- The cache is keyed on a cheap runtime-state fingerprint (events.jsonl + the
+  rotation manifest/live slice, the per-session turn store, scope pointers,
+  store dirs, the boards subtree, the `running_work` stores, and the resolved
+  chat-scope SessionDB files) and bounded
   by a TTL, `_READ_CACHE_MAX_AGE_SECONDS = 20.0`. A replayed response stamps
   `served_from_cache` + `cache_age_ms` on its exit frame; the payload's parity
   envelope keeps the honest original `generated_at`.
 
-So during an idle-but-live serve, neither the ticker (no active run mutating
-state) nor a `snapshot` dispatch (served from cache) touches disk. **The two
-files' mtimes stay frozen. That is expected.**
+So during an idle-but-live serve, no `snapshot` dispatch reaches disk (it is
+served from cache). **The two files' mtimes stay frozen. That is expected.**
 
 ### Retire the old tell
 
@@ -97,7 +97,7 @@ files' mtimes stay frozen. That is expected.**
 A frozen `read_model.db` (or `snapshot.json`) mtime says nothing about whether a
 serve is live. A healthy live serve serves Mission Control entirely from RAM
 (in-memory lanes + the ≤20s cache) and only rewrites those files when something
-actually **dispatches** a write (an active run's ticker, an explicit
+actually **dispatches** a write (an explicit
 `harness snapshot` / `harness read-model rebuild`, or a cache miss/TTL expiry
 that forces a real snapshot build). To check liveness, look at the serve process
 / its stream frames — **not** at these file mtimes.

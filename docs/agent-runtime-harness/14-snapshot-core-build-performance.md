@@ -51,6 +51,17 @@ degrade under concurrency.**
 
 ## Remaining plan (in value order, not scheduled)
 
+> **Status correction (2026-08-14).** Items 3 and 4 below have since SHIPPED:
+> event-log rotation with a sidecar `base_offset` is
+> `agent_runtime/event_rotation.py` (the manifest carries
+> `{"live": {"file": …, "base_offset": …}}`), and delta diffing on the wire is
+> the S7-A patch lane — `agent_runtime/state_patches.py` +
+> `schema_version: 2` `patch` frames in `agent_runtime/stream.py`, documented in
+> [mission-control-stream.md](mission-control-stream.md). Item 1 shipped in
+> part as `agent_runtime/parse_cache.py` (the `(path, mtime_ns, size)` key it
+> asks for, applied to the YAML/frontmatter leaf loads rather than the JSON
+> store models). Item 2 is still open.
+
 1. **Per-domain store read caches in the serve child** — most of the 7,302
    JSON reads are files that did not change between deltas. Cache parsed
    models keyed on `(path, mtime_ns, size)`; invalidate per event type where

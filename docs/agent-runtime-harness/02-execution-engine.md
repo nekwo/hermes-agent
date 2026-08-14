@@ -11,7 +11,8 @@
 > (`agent_runtime/docs/blueprint_goal_flow_stages.md`) was deleted with the engine
 > (S7), and companion doc 03 was deleted 2026-07-30.
 
-> **Status: the live engine spec + remaining build.** How a Mission Control goal
+> **Status (as written 2026-07; NO LONGER TRUE — see the removal note above):
+> "the live engine spec + remaining build."** How a Mission Control goal
 > actually runs: a stable **graph** of swappable **agent bindings**, 1 to N agents, not
 > a forced 3–4. This folds the blueprint goal-flow staged plan and the simplified-state
 > work that preceded it into one source of truth.

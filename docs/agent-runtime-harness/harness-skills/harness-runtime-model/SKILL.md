@@ -82,7 +82,7 @@ expect their output shapes, and do not repeat them to an operator as if they wer
 - The `mission_goal_create` tool and the `--allow-mission-goal` opt-in on `mission-chat
   message` — no chat turn can create a goal, because there are no goals.
 
-`harness snapshot --json` is contract 45 and carries no goal, stage, run, proof, or
+`harness snapshot --json` is contract 54 and carries no goal, stage, run, proof, or
 incident sections. If you are looking for one, it is gone, not missing.
 
 ## Operate
