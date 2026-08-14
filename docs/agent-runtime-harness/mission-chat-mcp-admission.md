@@ -6,6 +6,24 @@ The persona profile's MCP declarations are now the sole server authority.
 after mission-lane S11 and are removed; role/lane remain informational fields
 on admission rows only. Historical design/log sections below are retained as a
 record and must not be read as current configuration guidance.
+
+> **Correction (2026-08-14) — the fallback lane this document leaned on is
+> GONE.** `agent_runtime/stagec_mcp_visual_provider.py` was deleted in
+> `5a1267ef60` (post-removal cleanup wave 3); `VisualProofRunner` has zero
+> matches repo-wide and there is no `request_screenshot` entry in
+> `decision_contract_registry._EVENT_CONTRACTS`. This document argued in at
+> least six places that denial is cheap **because** the agent can take the
+> `qa.request_screenshot` decision contract instead. It cannot: there is no
+> replacement contract, and none is planned. Worse, the §D3 line was still
+> *telling* denied agents to take it — routing them at a lane that does not
+> exist, which is precisely the improvisation the sentence was written to
+> prevent. The code now says the route is closed, tells the agent to report the
+> denial and finish, and names the operator as the only one who can lift it.
+> Every argument below that rested on the fallback is corrected in place and
+> marked **[2026-08-14]**; where an argument does not survive the correction it
+> is withdrawn rather than rewritten. Historical §Established-facts entries are
+> left as the record of what was true in 2026-07, and flagged, not edited.
+
 Owner: fork (`agent_runtime/`, plus one config key). R0 — the typed
 `mcp_not_registered_on_lane` failure this document is the **producer** of —
 landed first and stands alone (`agent_runtime/mcp_lane.py`, commit `b6277e023`).
@@ -61,7 +79,9 @@ registered on the harness lane at all.** No permission mode can expose a tool
 that is absent from the registry. The two working paths are the CLI chat lane
 (`hermes -p launcher-qa chat`, where discovery *does* run — proven live, the
 agent got and used `mcp__launcher_qa__*` tools) and the `qa.request_screenshot`
-decision-contract → `VisualProofRunner` lane.
+decision-contract → `VisualProofRunner` lane. **[2026-08-14: the second of those
+two paths no longer exists — deleted in `5a1267ef60`. The CLI chat lane is now
+the only one. Left unedited as the 2026-07-25 record.]**
 
 The exclusion is **deliberate and correct as a default**. What is wrong is
 that it is (a) invisible, (b) absolute, and (c) contradicted by three
@@ -247,7 +267,10 @@ missing requirement.
   `command_missing | not_ready | tool_missing | ready`),
   `default_launcher_qa_visual_provider` (`:293`). Defaults `timeout: 260s`,
   `connect_timeout: 60s` (`:45-46`). This is the `qa.request_screenshot` /
-  `VisualProofRunner` lane.
+  `VisualProofRunner` lane. **[2026-08-14: this entire file was deleted in
+  `5a1267ef60`. Every symbol and line number in this bullet is dead — do not
+  re-derive from it. W4 ("a second, hand-rolled MCP client") is therefore
+  resolved by deletion, not by consolidation.]**
 - **The launcher already ships a per-profile per-tool allowlist**:
   `EterniaLauncher docs/stages/qa-reboot/launcher_qa_profile_allowlists.yaml`
   (v1, 2026-05-17) — full glob `mcp_launcher_qa_*` for
@@ -430,11 +453,18 @@ ticks the daemon, and executes N persona turns under N different
    already severity-ranked and already emitting `missing_mcp_servers`. No new
    taxonomy.
 3. **The agent's own turn context** — when a declared server is denied or
-   unavailable, the turn states it plainly, with the sanctioned alternative:
-   *"launcher_qa is declared for this role but is not available on this lane
-   (`<code>`: `<summary>`). Use the `qa.request_screenshot` decision contract
-   for visual proof."* This retires **W3**: the agent stops improvising and
-   uses the lane that works.
+   unavailable, the turn states it plainly. **[2026-08-14: as designed, this
+   item named a sanctioned alternative — *"Use the `qa.request_screenshot`
+   decision contract for visual proof."* That contract is deleted, so the
+   design's own mechanism for retiring W3 is gone.]** W3 is now retired by
+   closure rather than redirection: the line says there is no harness-side
+   fallback to take, that the route is closed for the turn, that the agent
+   should report what it could not verify and finish, and that only an operator
+   can lift it. That is weaker than "use the lane that works" — an agent told
+   *stop* is likelier to improvise than one handed a sanctioned alternative —
+   and the honest reading is that the "PowerShell workaround" pressure this
+   design was built against is **not fully retired**, only named and forbidden.
+   The remaining fence is the launcher repo's `pwsh -File` grep gate.
 
 ### Relationship to the parallel `mcp_not_registered_on_lane` work
 
@@ -451,8 +481,12 @@ deliberate.
 - Never widen `_AGENT_COMMANDS`, and never call `discover_mcp_tools()` on the
   harness lane.
 - No change to the launcher_qa MCP server or its 25 tools.
-- `qa.request_screenshot` / `VisualProofRunner` is **not** retired — it stays
-  the fallback, and the only lane on platform-unsupported hosts.
+- ~~`qa.request_screenshot` / `VisualProofRunner` is **not** retired — it stays
+  the fallback, and the only lane on platform-unsupported hosts.~~
+  **[2026-08-14: WITHDRAWN. It was retired anyway, out of band, by the
+  post-removal cleanup wave (`5a1267ef60`) — this non-goal did not hold. There
+  is now NO fallback and NO lane at all on platform-unsupported hosts: a denied
+  QA turn on such a host produces no visual proof by any route.]**
 - No new permission-mode; admission composes with the existing three.
 - No per-tool call-time approval gate (a much larger, upstream-touching
   change; the tool list stays the control surface).
@@ -527,10 +561,19 @@ system, not a call-time approval system. That produces two requirements:
   screen at save and spawn time, but admitting an arbitrary configured server
   to an autonomous lane is a materially different act from a human running
   `hermes chat` and watching the output.
-- **The blast radius is asymmetric.** Cost of denying: a QA agent uses
-  `qa.request_screenshot`, which already works. Cost of over-admitting: a
+- **The blast radius is asymmetric.** ~~Cost of denying: a QA agent uses
+  `qa.request_screenshot`, which already works.~~ Cost of over-admitting: a
   looping agent holding process-control tools. There is no symmetry argument
   for defaulting open.
+  **[2026-08-14: the cheap-denial half of this argument is void.]** The cost of
+  denying is no longer "the agent takes the other lane" — it is **the QA turn
+  produces no visual proof at all**, because the other lane was deleted. The
+  asymmetry is therefore narrower than this section claimed when it was
+  written. It still points the same way, and deny-by-default still stands, but
+  it now rests entirely on the over-admitting side: an unattended agent holding
+  process-control tools is a worse outcome than a turn that reports it could
+  not verify something. That is a real argument; "denial is nearly free" is not
+  one any more, and this section must not be cited as if it were.
 
 **Residual risks, accepted with mitigations:**
 
@@ -629,9 +672,13 @@ Design consequences:
    `launcher_qa`, potentially re-attach a Flutter window).
 3. **Bound admission well under the turn budget.** Proposal: 20s connect for
    a mission-chat admission (vs the 60s default), degrading to a typed
-   `mcp_admission_timeout` + the `qa.request_screenshot` fallback rather than
+   `mcp_admission_timeout` ~~+ the `qa.request_screenshot` fallback~~ rather than
    blocking. A QA turn that stalls 120s waiting for a launcher to boot is a
-   worse outcome than one that reports honestly and takes the proof lane.
+   worse outcome than one that reports honestly. **[2026-08-14: there is no
+   proof lane to degrade INTO any more — the degradation is now to a turn that
+   reports the timeout and finishes without visual proof. The timing argument
+   (a stall is worse than an honest report) survives intact; only the
+   destination changed.]**
 4. **Teardown vs warmth.** Full teardown restores isolation but forfeits the
    warm-process win. **Proposal: keep the server connected, tear down the
    registry scope** — leave `_servers` warm while removing the tool entries
@@ -665,7 +712,11 @@ Design consequences:
 **Not touched:** `hermes_cli/main.py` (`_AGENT_COMMANDS` unchanged),
 `tools/mcp_tool.py`, `tools/registry.py`, `model_tools.py`, `agent/agent_init.py`,
 the launcher_qa server, `qa.request_screenshot` / `VisualProofRunner`,
-`stagec_mcp_visual_provider.py`. Upstream (non-fork) files stay untouched —
+`stagec_mcp_visual_provider.py`. **[2026-08-14: the last three of those were
+not "not touched" — they were DELETED in `5a1267ef60`, after this table was
+written and by unrelated work. The blast-radius table was accurate for its own
+commit; it is not a statement about the tree today.]** Upstream (non-fork)
+files stay untouched —
 the fork boundary (`agent_runtime/` + `hermes_cli/harness.py`) holds, which
 is deliberate: this is the reason admission goes in `profile_runner` rather
 than in the upstream `tools/mcp_tool.py` registration path.
@@ -896,9 +947,19 @@ needs at most a serve-child recycle, never a redeploy or a venv change.
 
 **Reversibility property:** every stage is a strict *widening* of capability
 from a deny-by-default floor, so a rollback can only reduce what an agent can
-reach. The failure mode of a bad rollout is "the QA agent falls back to
-`qa.request_screenshot`" — the lane that works today. There is no state
+reach. ~~The failure mode of a bad rollout is "the QA agent falls back to
+`qa.request_screenshot`" — the lane that works today.~~ There is no state
 migration, no schema change, and no persisted artifact to unwind.
+
+**[2026-08-14 — the rollback's comfort clause is withdrawn.]** The mechanical
+rollback claims survive unchanged: the kill switch is still a config edit, the
+stage table is still accurate, and reverting still only ever *reduces* what an
+agent can reach — none of that depended on the fallback. What does not survive
+is the reassurance about the resulting state. The failure mode of a bad
+rollout is now "the QA agent has no way to capture visual proof and says so",
+not "it falls back to the lane that works". Rollback is still safe; it is no
+longer free, and an operator choosing `enabled: false` should know they are
+choosing turns without visual proof rather than turns on a slower proof path.
 
 **One asymmetry to state plainly:** R2 is the first time an autonomous
 mission-chat agent can spawn a local executable that controls a GUI process.
@@ -993,6 +1054,13 @@ of R2 rather than a nice-to-have.
    (marionette-target detection, auto-rebuild) that the generic client has no
    place for. *Recommendation: keep both for now, record the duplication as
    debt, and revisit after R3 — do not bundle it into this workstream.*
+
+   **MOOT (2026-08-14).** The question was answered by deletion, not by this
+   workstream: `stagec_mcp_visual_provider.py` went in `5a1267ef60`. W4 is
+   closed, and so is the bespoke launcher-preflight logic (marionette-target
+   detection, auto-rebuild) the recommendation wanted to preserve — nothing
+   inherited it. Admission on the harness lane is now the only MCP path to
+   `launcher_qa`, which raises the stakes on R2's still-owed live proof.
 
 ---
 
@@ -1229,10 +1297,20 @@ of R2 rather than a nice-to-have.
     NOT available on this turn, so no mcp__<server>__* tools for it are in your
     tool list. This is a capability fact, not a permission problem: do not retry,
     do not hunt for a permission mode, and do not substitute a shell/PowerShell
-    workaround or a second lane. Use the server's harness-side contract instead
-    (for launcher_qa: the qa.request_screenshot decision contract), and say plainly
-    in your reply that the tools were unavailable.
+    workaround or a second lane. There is no harness-side fallback contract to take
+    instead — that lane no longer exists, so this route is closed for the turn. Say
+    plainly in your reply that the tools were unavailable and what you could not
+    verify without them, then finish the turn. Only an operator can lift this, by
+    fixing the condition the code above names in the root or persona-profile
+    config.yaml.
   ```
+
+  **[2026-08-14: the tail above was updated.** As shipped in R2 it ended
+  *"Use the server's harness-side contract instead (for launcher_qa: the
+  qa.request_screenshot decision contract), and say plainly in your reply that
+  the tools were unavailable."* — which pointed the agent at a contract that
+  was later deleted. The block is kept current rather than frozen because it is
+  the format spec the drift guard compares against, not a log entry.]
 
   Two delivery lanes, mirroring `turn_budget` exactly. **Resolution-time**
   denials (`mcp_server_not_configured`,

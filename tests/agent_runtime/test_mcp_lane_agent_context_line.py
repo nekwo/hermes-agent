@@ -30,6 +30,7 @@ from agent_runtime.mcp_admission import render_mcp_admission_line
 from agent_runtime.mcp_lane import (
     HARNESS_LANE,
     MCP_CONTEXT_LINE_PREFIX,
+    MCP_CONTEXT_LINE_TAIL,
     MCP_NOT_REGISTERED_ON_LANE,
     mcp_lane_requirement_failures,
     mission_chat_mcp_lane_line,
@@ -79,7 +80,32 @@ def test_the_line_names_the_server_and_the_typed_code():
     # and stop it inventing a shell workaround.
     assert "not a permission problem" in line
     assert "PowerShell" in line
-    assert "qa.request_screenshot" in line
+    # ...and, since the harness-side screenshot contract was deleted, tell it
+    # plainly that there is nothing to fall back to, what to do instead, and who
+    # can unblock it. Pointing at a lane that does not exist CAUSES improvising.
+    assert "no harness-side fallback contract" in line
+    assert "closed for the turn" in line
+    assert "finish the turn" in line
+    assert "Only an operator can lift this" in line
+
+
+def test_the_line_never_points_at_the_deleted_screenshot_contract():
+    """Regression fence: ``qa.request_screenshot`` / ``VisualProofRunner`` /
+    ``stagec_mcp_visual_provider`` no longer exist. Naming one in agent-facing
+    text routes a denied agent at a lane that is not there."""
+
+    line = render_mcp_lane_line(
+        mcp_lane_requirement_failures(
+            declared_servers=["launcher_qa"],
+            lane=HARNESS_LANE,
+            registered_servers=[],
+        )
+    )
+
+    assert "request_screenshot" not in line
+    assert "VisualProofRunner" not in line
+    # The shared constant itself, not just one rendering of it.
+    assert "request_screenshot" not in MCP_CONTEXT_LINE_TAIL
 
 
 def test_nothing_dropped_renders_nothing():

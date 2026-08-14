@@ -1136,8 +1136,13 @@ def admit_mcp_servers(
     the background and may land for a LATER turn, which is why the timeout row
     says "not available for this turn" rather than "failed"), and
     ``mcp_not_registered_on_lane`` (the registrar returned but the server is not
-    in the registry) — so the turn can state the truth and take the
-    ``qa.request_screenshot`` fallback.
+    in the registry) — so the turn can state the truth and finish without the
+    server. There is no fallback lane behind these codes: the harness-side
+    ``qa.request_screenshot`` decision contract they used to point at was removed
+    with the mission lane, so a denial is terminal for this route. The agent-facing
+    wording says exactly that and names the operator as the only one who can lift
+    it — being pointed at a lane that does not exist is the improvisation the
+    sentence was written to prevent.
 
     Registration is also where the run's CALL budget is armed: every tool this
     admission puts in the registry is metered by a fresh :class:`McpCallBudget`
@@ -1166,8 +1171,9 @@ def admit_mcp_servers(
                 ),
                 fix_hint=(
                     "MCP registration is process-global; admissions are serialized on "
-                    "purpose. Retry the turn, or use the server's harness-side contract "
-                    "(e.g. qa.request_screenshot) for this one."
+                    "purpose. There is no harness-side contract to take instead, so the "
+                    "only routes are: retry the turn, or finish this one without the "
+                    "server and say what went unverified."
                 ),
             )
             for name in admission.server_names
@@ -1236,8 +1242,9 @@ def admit_mcp_servers(
                     "not available for this turn."
                 ),
                 fix_hint=(
-                    "The turn continues without it — report that plainly and use the "
-                    "server's harness-side contract (e.g. qa.request_screenshot). If the "
+                    "The turn continues without it and there is no harness-side contract "
+                    "to take instead — report that plainly and finish without it rather "
+                    "than improvising a second lane. If the "
                     "server is slow to start, start it before the turn rather than raising "
                     "agent_runtime.mcp_admission.connect_timeout_seconds into the turn budget."
                 ),
@@ -1779,9 +1786,12 @@ def render_mcp_admission_line(
         "on this turn, so no mcp__<server>__* tools for it are in your tool list. This is a "
         "capability fact, not a permission problem: do not retry, do not hunt for a "
         "permission mode, and do not substitute a shell/PowerShell workaround or a second "
-        "lane. Use the server's harness-side contract instead (for launcher_qa: the "
-        "qa.request_screenshot decision contract), and say plainly in your reply that the "
-        "tools were unavailable." + _admitted_clause(admission, ordered)
+        "lane. There is no harness-side fallback contract to take instead — that lane no "
+        "longer exists, so this route is closed for the turn. Say plainly in your reply "
+        "that the tools were unavailable and what you could not verify without them, then "
+        "finish the turn. Only an operator can lift this, by fixing the condition the code "
+        "above names in the root or persona-profile config.yaml."
+        + _admitted_clause(admission, ordered)
     )
 
 

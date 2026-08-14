@@ -82,6 +82,18 @@ def test_harness_lane_reports_declared_mcp_servers_as_a_typed_drop():
     assert "launcher_qa" in failure["summary"]
     assert HARNESS_LANE in failure["summary"]
     assert failure["fix_hint"]
+    # ...and the hint has to send the reader somewhere that EXISTS. It used to
+    # end "or use launcher_qa's own harness-side contract" — that contract
+    # (`qa.request_screenshot` → `stagec_mcp_visual_provider.py`) was deleted in
+    # `5a1267ef60`, so the hint was routing a blocked agent at a dead lane. It
+    # now names the real remedy (an MCP-registering lane) and says plainly that
+    # there is no fallback.
+    hint = failure["fix_hint"]
+    assert "request_screenshot" not in hint
+    assert "VisualProofRunner" not in hint
+    assert "no harness-side fallback contract" in hint
+    assert "chat`)" in hint  # the operator-runnable alternative lane
+    assert "finish the turn without it" in hint
 
 
 def test_harness_lane_names_every_declared_server():

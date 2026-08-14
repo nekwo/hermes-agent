@@ -204,9 +204,10 @@ def mcp_lane_requirement_failures(
                 "tool that was never registered, so do not chase permission modes or "
                 "blocked-tool counts. Only the agent entry points (chat/acp/rl, "
                 "cron run|tick, gateway run, mcp serve) run MCP discovery; the harness "
-                "lane never calls discover_mcp_tools(). Run the persona on an "
-                f"MCP-registering lane (e.g. `hermes -p <profile> chat`), or use {name}'s "
-                "own harness-side contract."
+                "lane never calls discover_mcp_tools(). An operator can run the persona "
+                "on an MCP-registering lane (e.g. `hermes -p <profile> chat`); there is "
+                f"no harness-side fallback contract for {name} to take on this lane, so "
+                "otherwise report the drop and finish the turn without it."
             ),
         }
         for name in declared
@@ -243,9 +244,11 @@ MCP_CONTEXT_LINE_TAIL = (
     "mcp__<server>__* tools for it are in your tool list. This is a capability "
     "fact, not a permission problem: do not retry, do not hunt for a permission "
     "mode, and do not substitute a shell/PowerShell workaround or a second lane. "
-    "Use the server's harness-side contract instead (for launcher_qa: the "
-    "qa.request_screenshot decision contract), and say plainly in your reply that "
-    "the tools were unavailable."
+    "There is no harness-side fallback contract to take instead — that lane no "
+    "longer exists, so this route is closed for the turn. Say plainly in your "
+    "reply that the tools were unavailable and what you could not verify without "
+    "them, then finish the turn. Only an operator can lift this, by fixing the "
+    "condition the code above names in the root or persona-profile config.yaml."
 )
 
 

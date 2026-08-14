@@ -718,20 +718,49 @@ def test_every_denial_code_produces_one_compact_line(code):
     assert code in line
 
 
-def test_the_line_names_the_sanctioned_alternative_and_forbids_improvising():
+def test_the_line_closes_the_route_and_forbids_improvising():
     """This is the whole point of §D3 — it retires W3.
 
     A QA agent that sees no ``mcp__launcher_qa__*`` tools and no explanation
     invents alternatives, which is why the launcher repo needs a grep gate
-    against agents writing ``pwsh -File``. Naming the fallback is cheaper than
-    fencing every workaround the model can invent.
+    against agents writing ``pwsh -File``. The line used to name
+    ``qa.request_screenshot`` as the sanctioned alternative; that contract was
+    removed with the mission lane, so naming it CAUSED the improvisation it was
+    written to prevent. The honest replacement says the route is closed, says
+    what to do instead (report and finish), and names the operator as the only
+    one who can lift it.
     """
 
     line = render_mcp_admission_line(_denied(MCP_SERVER_NOT_CONFIGURED))
 
-    assert "qa.request_screenshot" in line
+    assert "no harness-side fallback contract" in line
+    assert "closed for the turn" in line
+    # (c) what to do instead, and (d) who can unblock it.
+    assert "finish the turn" in line
+    assert "Only an operator can lift this" in line
     assert "PowerShell" in line
     assert "not a permission problem" in line
+
+
+def test_the_line_never_points_at_the_deleted_screenshot_contract():
+    """Regression fence for the defect this replaced.
+
+    ``qa.request_screenshot`` / ``VisualProofRunner`` /
+    ``stagec_mcp_visual_provider`` are gone from the repo. If any of them
+    reappears in agent-facing text, the runtime is routing a denied agent to a
+    lane that does not exist. Every denial code is checked, not just one.
+    """
+
+    for code in (
+        MCP_SERVER_NOT_CONFIGURED,
+        MCP_ADMISSION_DISABLED,
+        MCP_ADMISSION_TIMEOUT,
+        MCP_ADMISSION_LANE_BUSY,
+        MCP_NOT_REGISTERED_ON_LANE,
+    ):
+        line = render_mcp_admission_line(_denied(code))
+        assert "request_screenshot" not in line
+        assert "VisualProofRunner" not in line
 
 
 def _timed_out_outcome() -> McpAdmissionOutcome:
@@ -1093,7 +1122,10 @@ def test_a_fully_denied_turn_still_renders_the_denial_line_verbatim():
     line = render_mcp_admission_line(_denied(MCP_ADMISSION_TIMEOUT))
 
     assert "Admitted on this turn" not in line
-    assert line.endswith("say plainly in your reply that the tools were unavailable.")
+    assert line.endswith(
+        "Only an operator can lift this, by fixing the condition the code above "
+        "names in the root or persona-profile config.yaml."
+    )
 
 
 def test_a_clean_admission_renders_the_admitted_half_alone():

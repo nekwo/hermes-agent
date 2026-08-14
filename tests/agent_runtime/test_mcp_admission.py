@@ -6,9 +6,12 @@ servers for one run. Design:
 ``docs/agent-runtime-harness/mission-chat-mcp-admission.md``.
 
 These tests pin the security floor first and the happy path second, because the
-failure modes are asymmetric: denying costs a QA agent the
-``qa.request_screenshot`` fallback that already works, while over-admitting hands
-an autonomous agent process-control tools. In particular they pin that
+failure modes are asymmetric: denying costs a QA agent its visual proof for the
+turn outright — the ``qa.request_screenshot`` fallback that once softened this
+was removed with the mission lane, so a denial is now terminal for the route —
+while over-admitting hands an autonomous agent process-control tools it can loop
+on. Deny-by-default still wins, but on the second half of that sentence alone.
+In particular they pin that
 
 * nothing is admitted with the flag off (the default),
 * the persona/profile DECLARATION is the whole admission authority — role names
@@ -806,6 +809,13 @@ def test_a_stalled_registrar_yields_a_typed_timeout_and_the_turn_continues(qa_pr
         assert elapsed < 5
         assert outcome.admitted == ()
         assert [row["code"] for row in outcome.denial_rows()] == [MCP_ADMISSION_TIMEOUT]
+        # "The turn continues" has to continue somewhere real. This hint used to
+        # send the agent to `qa.request_screenshot`; that contract was deleted in
+        # `5a1267ef60`, so it now says there is none and to finish without it.
+        hint = outcome.denial_rows()[0]["fix_hint"]
+        assert "request_screenshot" not in hint
+        assert "no harness-side contract" in hint
+        assert "finish without it" in hint
     finally:
         release.set()
 
@@ -836,6 +846,12 @@ def test_concurrent_admission_is_refused_not_interleaved(qa_profile):
 
         assert second.admitted == ()
         assert [row["code"] for row in second.denial_rows()] == [MCP_ADMISSION_LANE_BUSY]
+        # Same fence as the timeout row: retrying is a real route, the deleted
+        # `qa.request_screenshot` contract is not.
+        hint = second.denial_rows()[0]["fix_hint"]
+        assert "request_screenshot" not in hint
+        assert "no harness-side contract to take instead" in hint
+        assert "retry the turn" in hint.lower()
     finally:
         release.set()
         worker.join(30)

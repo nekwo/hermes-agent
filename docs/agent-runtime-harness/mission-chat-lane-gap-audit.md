@@ -186,6 +186,12 @@ is the `qa.request_screenshot` decision contract →
 mission-chat. This is the mechanical cause of the 2026-07-25 "Blocked 21 tools"
 escalation.
 
+**[2026-08-14: that last working lane is gone.]** `stagec_mcp_visual_provider.py`
+was deleted in `5a1267ef60` and there is no `request_screenshot` entry in
+`decision_contract_registry`. G2 is therefore worse than recorded, not better: a
+QA persona now has zero paths to a screenshot on **any** lane, not just on
+mission-chat. MCP admission (G3) is the only remaining candidate fix.
+
 **Seam:** same as G1, plus MCP admission (G3).
 
 ### G3 — MCP never registered (KNOWN; catalogued for completeness)
