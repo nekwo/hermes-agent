@@ -100,6 +100,26 @@ def office_subscription_key(connection_key: str | None, workspace_id: str) -> st
     return f"rpc:office:{connection_key or 'stdio'}:{workspace_id}"
 
 
+def _event_offset_of(watermark: Any) -> int | None:
+    """The frame's post-batch offset, or None when it carries none.
+
+    None is a THIRD answer, not a zero. A frame we cannot place must not be
+    silently dropped by the baseline gate — an unplaceable frame is exactly the
+    case where a resync is the honest reply, and coercing it to 0 would make it
+    look like ancient history and drop it.
+    """
+
+    if not isinstance(watermark, dict):
+        return None
+    raw = watermark.get("event_offset")
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def office_patch_sink(
     *,
     workspace_id: str,
@@ -122,9 +142,34 @@ def office_patch_sink(
         frame_type = frame.get("type")
         if frame_type in _LIVENESS_FRAME_TYPES:
             return
+        watermark = frame.get("watermark") or {}
+        event_offset = _event_offset_of(watermark)
+        # THE BASELINE GATE RUNS BEFORE THE TYPE BRANCH, and that ordering is
+        # the whole rule rather than a detail.
+        #
+        # It was written the other way round first, and the lane did not work:
+        # `StreamHub.subscribe` deliberately restarts the producer so a late
+        # joiner's first frame is a HYDRATE — a full core — which the type
+        # branch answered with an unconditional resync. That is a LOOP, not a
+        # slow start: the client resyncs, re-subscribes, the hub restarts the
+        # producer, the new hydrate resyncs it again, and every other
+        # subscriber on that shared producer pays a fresh core each lap. The 23
+        # fake-hub tests could not see it, because a fake never delivers a
+        # frame nobody asked for.
+        #
+        # Stated positively: a frame at or behind what the subscribe reply
+        # already carried has nothing to tell this client, WHATEVER its type.
+        # Only frames that are genuinely new get classified.
+        if event_offset is not None and event_offset <= int(baseline_offset or 0):
+            return
         if frame_type != "patch":
             # Includes the unknown-type branch on purpose — see the module
             # docstring. A resync is recoverable; a dropped change is not.
+            #
+            # An UNPLACEABLE frame (no readable watermark) reaches here too, and
+            # must: the gate above deliberately does not fire without an offset,
+            # because silently dropping a frame we cannot place would turn the
+            # one recoverable outcome into the unrecoverable one.
             emit(
                 notification(
                     OFFICE_RESYNC_METHOD,
@@ -136,16 +181,6 @@ def office_patch_sink(
                     },
                 )
             )
-            return
-        watermark = frame.get("watermark") or {}
-        try:
-            event_offset = int(watermark.get("event_offset") or 0)
-        except (TypeError, ValueError):
-            event_offset = 0
-        if event_offset <= int(baseline_offset or 0):
-            # Already in the baseline the subscribe reply carried. See the
-            # module docstring: this one comparison covers both the hub's
-            # re-hydrate and the reply-after-push ordering.
             return
         rows = [
             patch

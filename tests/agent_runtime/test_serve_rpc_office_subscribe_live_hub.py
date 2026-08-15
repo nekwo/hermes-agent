@@ -548,18 +548,16 @@ def test_the_baseline_boundary_drops_at_or_below_and_admits_above(live_hub):
         assert len(got) == expected, f"{why} (baseline={baseline}, offset={offset})"
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "office_patch_sink branches on frame TYPE before it compares offsets, "
-        "so the hub's mandatory re-baselining hydrate takes the full_core "
-        "resync exit instead of being dropped as at-or-below the baseline — "
-        "the absorption serve_office_subscriptions' docstring claims. Every "
-        "subscribe therefore answers itself with 'subscribe again'."
-    ),
-)
-def test_the_baseline_rule_should_absorb_the_hubs_mandatory_rehydrate(live_hub):
+def test_the_baseline_rule_absorbs_the_hubs_mandatory_rehydrate(live_hub):
     """The docstring's first stated seam, tested against the real hub.
+
+    Was ``xfail(strict=True)`` when this file landed, and it earned the marker:
+    ``office_patch_sink`` branched on frame TYPE before it compared offsets, so
+    the hydrate took the ``full_core`` resync exit and every subscribe answered
+    itself with "subscribe again". The fix moved the baseline gate ABOVE the
+    type branch, which is what the module docstring had claimed all along — the
+    defect was the code disagreeing with its own stated rule, and only a real
+    producer could show it.
 
     ``StreamHub.subscribe`` restarts the producer precisely so a late joiner
     opens on a full core, and ``serve_office_subscriptions`` answers that by
