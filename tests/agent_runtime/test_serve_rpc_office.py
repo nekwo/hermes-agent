@@ -532,7 +532,7 @@ def test_a_raising_handler_becomes_a_typed_error_and_never_reaches_the_loop(monk
     handler that escaped would take the reader loop — and the durable service —
     down with it, which no read method is permitted to do."""
 
-    def _boom(rid, params):
+    def _boom(rid, params, context):
         raise RuntimeError("store on fire")
 
     monkeypatch.setitem(serve_rpc._METHODS, "runtime.office.get", _boom)

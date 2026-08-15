@@ -2554,8 +2554,24 @@ def serve_loop(
             # (Pinned by `test_a_write_during_a_drain_lands_because_it_cannot_be
             # _cut_off_half_done` in tests/agent_runtime/test_serve_rpc_office_
             # upsert.py — this is a decision, not an oversight.)
+            #
+            # The handler is told WHO asked, not just what. Both facts come
+            # from this frame's own dispatch — ``sink`` is the stable
+            # per-connection writer ``_sink_for`` hands out, and ``connection``
+            # is None exactly on stdio. Nothing here is office-specific: it is
+            # the argument a method needs before it can push to its caller
+            # LATER, which request/response methods simply ignore.
             if serve_rpc.is_rpc_frame(message):
-                sink.emit(serve_rpc.handle_request(message))
+                sink.emit(
+                    serve_rpc.handle_request(
+                        message,
+                        serve_rpc.RpcContext(
+                            connection_key=getattr(connection, "key", None),
+                            transport=getattr(connection, "transport", "stdio"),
+                            emit=sink.emit,
+                        ),
+                    )
+                )
                 return None
             rid = message.get("id")
             argv = message.get("argv")

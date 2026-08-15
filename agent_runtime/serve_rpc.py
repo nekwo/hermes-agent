@@ -113,6 +113,7 @@ launcher's item decoder gates on required-key PRESENCE
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Callable
 
 # The method-surface contract. Bump ONLY when an existing method's request or
@@ -131,7 +132,7 @@ ERR_NOT_FOUND = 4001
 # 4002 a first guess reaches for.
 ERR_CONFLICT = 4090
 
-_METHODS: dict[str, Callable[[Any, dict], dict]] = {}
+_METHODS: dict[str, Callable[[Any, dict, "RpcContext"], dict]] = {}
 
 
 def ok(rid: Any, result: dict) -> dict:
@@ -152,6 +153,76 @@ def err(rid: Any, code: int, message: str, data: dict | None = None) -> dict:
     if data is not None:
         error["data"] = data
     return {"jsonrpc": JSONRPC_VERSION, "id": rid, "error": error}
+
+
+def notification(method_name: str, params: dict) -> dict:
+    """A JSON-RPC 2.0 NOTIFICATION — a frame the runtime sends UNPROMPTED.
+
+    The PUSH half of the union ruling, in its smallest form. Structurally it is
+    a request object minus ``id`` (spec §4.1), and the ``id`` key is ABSENT
+    rather than ``null``: ``null`` is a legal request id, so a strict client
+    that correlates on key presence would file a null-id push into its
+    pending-call table and leak the entry forever. Our own launcher happens to
+    be tolerant here — it treats ``"id": null`` as a notification on purpose
+    (``mission_control_serve_session_io.dart:691``) — so this is a contract
+    choice for the next client, not a fix for the current one.
+
+    There is NO reply, and therefore no error channel: a notification the
+    transport cannot deliver is dropped. Whoever owns the fan-out has to
+    ACCOUNT for that drop, because the client's only other way to learn it
+    missed one is the sequence gap. That is why the patch lane carries ``seq``
+    and why a dropped subscriber is closed rather than quietly skipped.
+    """
+
+    return {"jsonrpc": JSONRPC_VERSION, "method": method_name, "params": params}
+
+
+@dataclass(frozen=True)
+class RpcContext:
+    """WHO is calling — the half of a request that is not in its ``params``.
+
+    Handlers took ``(rid, params)`` for the whole life of the CALL half, which
+    was right while every method was request/response: an answer goes back the
+    way the question came, and the transport already knew how. It stops being
+    right the moment a method's job is to keep talking AFTERWARDS.
+    ``runtime.office.subscribe`` cannot be written against ``(rid, params)`` at
+    all — not because the emitter is missing (``SocketConnection.emit`` and
+    ``ServeSocketServer.broadcast`` have always existed) but because a handler
+    had no way to name the connection it would later push to. This is that
+    missing argument, and it is deliberately the ONLY new one.
+
+    ``emit`` is the caller's own frame sink, already per-connection and stable
+    across a connection's lifetime (``serve.py``'s ``_sink_for``). ``None``
+    means the caller has no push channel, which is the honest state for a
+    context built by a test or by a future non-duplex transport — a method that
+    needs one must refuse rather than assume.
+
+    ``connection_key`` is the SUBSCRIPTION identity: it is what the teardown
+    path (``connection_sinks.pop`` on drop) can name, so a registry keyed on it
+    can be swept when the socket dies. On stdio there is one implicit caller
+    and no key, which is why a stdio subscribe is a different question from a
+    socket one rather than the same code with a null.
+    """
+
+    connection_key: str | None = None
+    transport: str = "stdio"
+    emit: Callable[[dict], None] | None = None
+
+    def push(self, method_name: str, params: dict) -> bool:
+        """Send one notification to THIS caller. False when there is no channel.
+
+        Not exception-swallowing on purpose. A push raised from inside a
+        handler is still inside :func:`handle_request`'s boundary, so it
+        becomes a typed ``-32000`` on the very call that tried it — which is
+        the one moment a dead channel is reportable at all. Fan-out to OTHER
+        subscribers is a different path with a different answer (drop, account,
+        close), and it must not borrow this one.
+        """
+
+        if self.emit is None:
+            return False
+        self.emit(notification(method_name, params))
+        return True
 
 
 def method(name: str):
@@ -237,14 +308,21 @@ def _normalize_request(req: Any) -> tuple[Any, str, dict] | dict:
     return rid, name, params
 
 
-def handle_request(req: Any) -> dict:
+def handle_request(req: Any, context: RpcContext | None = None) -> dict:
     """Answer one JSON-RPC request. Always returns a frame — never raises.
 
     A handler that raises becomes ``-32000`` rather than escaping into the
     serve reader loop: this lane shares a thread with the transport dispatcher,
     and a read method is not permitted to take a durable service down.
+
+    ``context`` is optional and defaults to an EMPTY one rather than to
+    ``None``, so a handler can always ask ``context.emit is None`` instead of
+    guarding the argument itself. A caller that omits it (every test, and the
+    argv lane's own probes) gets a caller with no push channel, which is the
+    truth about it.
     """
 
+    context = context or RpcContext()
     normalized = _normalize_request(req)
     if isinstance(normalized, dict):
         return normalized
@@ -259,7 +337,7 @@ def handle_request(req: Any) -> dict:
             {"reason": "unknown_method", "methods": method_names()},
         )
     try:
-        return fn(rid, params)
+        return fn(rid, params, context)
     except Exception as exc:  # noqa: BLE001 - the boundary is the point
         return err(
             rid,
@@ -280,7 +358,9 @@ def _workspace_id_param(params: dict) -> str | None:
 
 
 @method("runtime.office.get")
-def _runtime_office_get(rid: Any, params: dict) -> dict:
+def _runtime_office_get(
+    rid: Any, params: dict, context: RpcContext | None = None
+) -> dict:
     """ONE workspace's office projection — canvas-shaped, and bounded.
 
     Carries per item: ``item_id``, ``kind``, ``persona_id`` (the character-class
@@ -392,7 +472,9 @@ def _runtime_office_get(rid: Any, params: dict) -> dict:
 
 
 @method("runtime.office.upsert")
-def _runtime_office_upsert(rid: Any, params: dict) -> dict:
+def _runtime_office_upsert(
+    rid: Any, params: dict, context: RpcContext | None = None
+) -> dict:
     """ONE actor placement, written — and acked LIGHT so a drag can predict.
 
     Params: ``workspace_id`` (required), ``actor`` (required object — the same
