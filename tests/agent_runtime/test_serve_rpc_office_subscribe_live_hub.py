@@ -9,46 +9,51 @@ to carry an actual office write. This file closes that gap: one real
 one real ``OfficeStore`` write, and an assertion about what a subscriber
 actually received.
 
-Two things only a real producer could say, and both are BAD NEWS
----------------------------------------------------------------
-The lane does not work end to end today, and it fails in two independent
-places. Both are marked ``xfail(strict=True)`` below rather than asserted as
-correct behaviour, so the suite states the intent and turns red the moment
-either is fixed (an XPASS is a failure) instead of blessing today's output:
+Two defects only a real producer could say, both since FIXED
+------------------------------------------------------------
+This file landed with two ``xfail(strict=True)`` tests, because the lane did
+not work end to end and failed in two independent places. Both are indicative
+assertions now, and the history is kept because it IS the red-proof — each
+turned red before its fix and green after, by construction:
 
-1. **Every subscribe immediately pushes a spurious ``runtime.office.resync``.**
+1. **Every subscribe immediately pushed a spurious ``runtime.office.resync``.**
    ``StreamHub.subscribe`` deliberately restarts the producer so a late joiner
-   opens on a ``hydrate``. ``serve_office_subscriptions``' module docstring
-   says the baseline rule absorbs exactly that re-hydrate — "both are answered
-   by dropping any frame whose ``watermark.event_offset`` does not exceed the
-   offset captured with the baseline". It does not: ``office_patch_sink``
-   branches on the frame TYPE before it ever compares offsets, so a hydrate at
-   or below the baseline takes the ``full_core`` resync exit unconditionally.
-   The first thing a freshly subscribed client is told is to subscribe again,
-   which restarts the producer, which emits another hydrate. See
-   :func:`test_the_baseline_rule_should_absorb_the_hubs_mandatory_rehydrate`.
+   opens on a ``hydrate``, and ``office_patch_sink`` branched on the frame TYPE
+   before it ever compared offsets — so a hydrate at or below the baseline took
+   the ``full_core`` resync exit unconditionally and every subscribe answered
+   itself with "subscribe again". Fixed by moving the baseline gate above the
+   type branch (``2ccf3ab337``); see
+   :func:`test_the_baseline_rule_absorbs_the_hubs_mandatory_rehydrate`.
 
-2. **The producer never promotes ``office_actor``, so a real office write
-   arrives as a resync and never as a patch.** Promotion is entity-NEGOTIATED
+2. **The producer never promoted ``office_actor``, so a real office write
+   arrived as a resync and never as a patch.** Promotion is entity-NEGOTIATED
    (``patch_coverage``): a batch ships as a ``patch`` frame only when every
    ``state.patched`` in it names an entity the room declared it can fold, and
-   ``serve.py``'s ``_accepted_fold_entities`` intersects the declarations of
-   the STREAM-lane subscribers only. An RPC office subscriber contributes
-   nothing to that table, so an office-only room resolves to
-   ``HISTORICAL_FOLD_ENTITIES`` — ``{persona_instance, incident}`` — and every
-   office write demotes to a full core. See
-   :func:`test_a_real_office_write_should_reach_a_default_wired_subscriber_as_a_patch`.
+   ``serve.py``'s ``_accepted_fold_entities`` read the STREAM lane's
+   declarations only. An RPC office subscriber contributed nothing to that
+   table, so an office-only room resolved to ``HISTORICAL_FOLD_ENTITIES`` —
+   ``{persona_instance, incident}`` — and every office write for the whole
+   production life of this lane demoted to a full core. Fixed by having the
+   office registry declare
+   :data:`~agent_runtime.serve_office_subscriptions.OFFICE_FOLD_ENTITIES` per
+   live subscription and ``_accepted_fold_entities`` intersect over BOTH lanes;
+   see
+   :func:`test_a_real_office_write_reaches_a_default_wired_subscriber_as_a_patch`.
 
-What IS proven, and it is not nothing
--------------------------------------
-Given a producer that DOES declare ``office_actor`` (which is a one-word
-change to a set, not a redesign), the whole chain works: the write reaches the
-subscriber as a ``runtime.office.patch`` carrying the actor's row, the
-subscribe reply's baseline offset is the very same counter the producer bases
-its batch on, an RPC subscription alone sustains the producer, and
-``release`` genuinely unsubscribes from the real hub. Those are asserted
-normally, so the two xfails above are the only gap between here and a working
-lane.
+Two producers, on purpose
+-------------------------
+``live_hub`` builds its source the way ``serve.py``'s ``_stream_source`` does
+and — like it — DERIVES the fold set per producer generation from the office
+registry when a test does not pin one. A test that passes an explicit
+``fold_entities=OFFICE_FOLD_ENTITIES`` asserts about everything downstream of
+the negotiation; a test that passes nothing asserts about the negotiation
+itself. Keeping both is what stops a regression in the declaration from hiding
+behind a fixture that hard-codes the answer.
+
+The composition inside ``serve.py`` is MIRRORED here, not executed. That seam
+is pinned against the real ``serve_loop`` in ``test_serve_socket_lane.py``
+(``test_an_rpc_office_subscriber_declares_into_the_shared_producer`` and the
+empty-intersection trap beside it).
 
 Timing: every wait is a bounded poll on a CONDITION, never a sleep — threads
 are involved and a flaky test here is worse than no test. The producer is run
@@ -63,8 +68,9 @@ import time
 import pytest
 
 from agent_runtime import serve_rpc
-from agent_runtime.patch_coverage import HISTORICAL_FOLD_ENTITIES
+from agent_runtime.patch_coverage import HISTORICAL_FOLD_ENTITIES, accepted_fold_entities
 from agent_runtime.serve_office_subscriptions import (
+    OFFICE_FOLD_ENTITIES,
     OFFICE_PATCH_METHOD,
     OFFICE_RESYNC_METHOD,
     OFFICE_SUBSCRIPTIONS,
@@ -78,11 +84,32 @@ ACTOR = "personainst_qa_agent_9c8a382f"
 OTHER_WORKSPACE = "ws_live_hub_somebody_else"
 OTHER_ACTOR = "personainst_dev_3ebfce41"
 
-#: What a client that can fold office rows would declare. Exactly today's
-#: historical set plus the one entity this lane exists to carry — the change
-#: the second xfail below is waiting on, modelled here so everything downstream
-#: of the negotiation can still be proven.
-OFFICE_FOLD_ENTITIES = HISTORICAL_FOLD_ENTITIES | {"office_actor"}
+#: Pinned locally so this file states the set it expects rather than importing
+#: whatever production currently holds: a widening of
+#: ``OFFICE_FOLD_ENTITIES`` that nobody meant must turn this red, and an
+#: assertion written as ``x == x`` cannot do that.
+EXPECTED_OFFICE_FOLD_ENTITIES = HISTORICAL_FOLD_ENTITIES | {"office_actor"}
+
+
+def test_the_office_declaration_is_the_historical_set_plus_office_actor():
+    """The one-line claim the rest of this file is built on top of.
+
+    A SUPERSET, not ``{office_actor}`` alone, and that is the difference
+    between a fix and a regression: the accepted set is an INTERSECTION over
+    the room, so a bare ``{office_actor}`` would zero out against any legacy
+    stream client sitting beside this subscriber — promoting nothing at all for
+    anyone, which is strictly worse than the bug it was meant to fix. Pinned in
+    both directions so neither half can be dropped silently.
+    """
+
+    assert OFFICE_FOLD_ENTITIES == EXPECTED_OFFICE_FOLD_ENTITIES
+    assert HISTORICAL_FOLD_ENTITIES < OFFICE_FOLD_ENTITIES
+    assert "office_actor" in OFFICE_FOLD_ENTITIES
+    # The trap, stated as the arithmetic: a legacy client beside an office
+    # subscriber must still accept the historical set, NOT the empty set.
+    assert accepted_fold_entities([None, OFFICE_FOLD_ENTITIES]) == HISTORICAL_FOLD_ENTITIES
+    # Anti-vacuity for the line above: the singleton really would have zeroed.
+    assert accepted_fold_entities([None, frozenset({"office_actor"})]) == frozenset()
 
 #: One bounded deadline for every condition wait. Generous against a cold
 #: snapshot build, and four of them still sit inside the 30s per-test cap.
@@ -102,6 +129,11 @@ def _clean_registry():
     OFFICE_SUBSCRIPTIONS.bind(None)
 
 
+#: "derive it, do not pin it" — distinguishable from an explicit ``None``,
+#: which is a real declaration meaning "this producer was told nothing".
+_DERIVE = object()
+
+
 @pytest.fixture
 def live_hub():
     """A REAL ``StreamHub`` over the REAL ``stream_frames`` producer, bound.
@@ -112,20 +144,32 @@ def live_hub():
     cannot interrupt a generator parked in ``next()``: without it, a superseded
     or abandoned generation would sit on the default 5s heartbeat and the
     teardown assertions would be measuring the heartbeat, not the lifecycle.
+
+    Called with NO argument it also mirrors serve.py's other half: the fold set
+    is DERIVED, inside ``_source`` so it is re-read per producer generation
+    exactly as ``_accepted_fold_entities`` is. That is what makes ``live_hub()``
+    mean "the producer serve.py actually builds" rather than "a producer that
+    was told nothing" — and it is the only way a test can catch the office
+    registry failing to declare.
     """
 
     hubs: list[StreamHub] = []
 
-    def _make(fold_entities=None) -> StreamHub:
+    def _make(fold_entities=_DERIVE) -> StreamHub:
         from agent_runtime.serde import to_jsonable
         from agent_runtime.stream import stream_frames
 
         def _source(stop):
+            declared = (
+                accepted_fold_entities(OFFICE_SUBSCRIPTIONS.declarations())
+                if fold_entities is _DERIVE
+                else fold_entities
+            )
             for frame in stream_frames(
                 poll_interval_seconds=0.02,
                 heartbeat_interval_seconds=0.25,
                 delta_debounce_seconds=0.05,
-                fold_entities=fold_entities,
+                fold_entities=declared,
             ):
                 if stop.is_set():
                     return
@@ -301,33 +345,30 @@ def test_a_real_office_write_reaches_a_subscriber_as_an_office_patch(live_hub):
     assert rows[0]["changed"]["items"][0]["position"] == [42.0, 43.0]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "The producer's accepted fold set never contains office_actor: "
-        "serve.py intersects the STREAM lane's declarations and an RPC office "
-        "subscriber contributes none, so an office-only room resolves to "
-        "HISTORICAL_FOLD_ENTITIES and every office write demotes to a full "
-        "core. The push lane therefore only ever emits resync in production."
-    ),
-)
-def test_a_real_office_write_should_reach_a_default_wired_subscriber_as_a_patch(
+def test_a_real_office_write_reaches_a_default_wired_subscriber_as_a_patch(
     live_hub,
 ):
     """The SAME write, against the producer ``serve.py`` actually builds.
 
-    ``fold_entities=None`` is not a shortcut here — it is precisely what
-    ``_accepted_fold_entities`` returns for a room holding only RPC office
-    subscribers, which is the room the ruling creates when the launcher stops
-    joining the legacy stream. Under it the batch is not patch-coverable, the
-    frame is a full core, and the subscriber is told to refetch.
+    Nothing is pinned here: the fold set is derived from the office registry
+    per producer generation, exactly as ``_accepted_fold_entities`` derives it
+    — so this is the room the ruling creates when the launcher stops joining
+    the legacy stream, holding nothing but RPC office subscribers.
 
-    That is not merely "no better than the legacy lane": it is worse. The
-    client pays a resync round trip per office write, and each resync's
-    re-subscribe restarts the producer and costs every other subscriber a fresh
-    822 KB core. Widening the negotiated set (or letting an office subscriber
-    declare into it) is the missing piece, and it is a cross-stack change —
-    see ``patch_coverage.HISTORICAL_FOLD_ENTITIES``.
+    Was ``xfail(strict=True)`` when this file landed, and it earned the marker.
+    ``_accepted_fold_entities`` read the STREAM lane's declaration table only;
+    an RPC office subscriber contributed nothing to it, so the room resolved to
+    ``HISTORICAL_FOLD_ENTITIES``, the batch was not patch-coverable, the frame
+    was a full core, and the subscriber was told to refetch. That is not merely
+    "no better than the legacy lane": it is worse. The client paid a resync
+    round trip per office write, and each resync's re-subscribe restarted the
+    producer and cost every other subscriber a fresh 822 KB core. The lane had
+    therefore never carried a single patch in production, on any transport.
+
+    The fix is a declaration, not a widening: the office registry contributes
+    :data:`OFFICE_FOLD_ENTITIES` per live subscription and the producer
+    intersects over both lanes. ``HISTORICAL_FOLD_ENTITIES`` is untouched, so a
+    client that says nothing is answered exactly as it was yesterday.
     """
 
     store = _seed_office()
@@ -347,6 +388,12 @@ def test_a_real_office_write_should_reach_a_default_wired_subscriber_as_a_patch(
         "the default-wired producer sent "
         f"{frame['method']} / {frame['params'].get('reason')} instead of a patch"
     )
+    # The row, not just the envelope: a lane that promoted the batch and then
+    # forwarded a stale actor would satisfy the assertion above and still leave
+    # the canvas wrong.
+    rows = frame["params"]["patches"]
+    assert [row["id"] for row in rows] == [f"{WORKSPACE}/{ACTOR}"]
+    assert rows[0]["changed"]["items"][0]["position"] == [42.0, 43.0]
 
 
 def test_another_workspaces_real_write_never_reaches_this_subscriber(live_hub):
@@ -425,6 +472,72 @@ def test_an_rpc_subscription_alone_sustains_the_real_producer(live_hub):
 
 
 # ── claim 3: teardown does not leak ─────────────────────────────────────────
+
+
+def test_a_refused_duplicate_subscribe_leaves_no_declaration_behind(live_hub):
+    """The declaration index is written BEFORE the hub is asked, so it can lie.
+
+    Recording ahead of ``hub.subscribe`` is what stops the producer racing the
+    index (see :meth:`OfficeSubscriptions.subscribe`), but it means a refused
+    subscribe has already added an entry. Left there, the room would keep being
+    widened on behalf of a subscriber that does not exist — and a phantom
+    declaration is the one direction this negotiation may never be wrong in,
+    because it promotes patches to clients that never promised to fold them.
+
+    A duplicate is the reachable way to make the hub refuse: the same
+    connection asking for the same workspace twice, which is a retry, not an
+    error condition invented for a test.
+    """
+
+    _seed_office()
+    hub = live_hub()
+    sent: list[dict] = []
+    _settled_subscription(sent, hub)
+    assert len(OFFICE_SUBSCRIPTIONS.declarations()) == 1
+
+    duplicate = _subscribe([], rid="r2")
+    assert duplicate["error"]["data"]["reason"] == "already_subscribed"
+    assert len(OFFICE_SUBSCRIPTIONS.declarations()) == 1, (
+        "a refused subscribe left a declaration behind: the accepted set is "
+        "now widened for a subscriber the hub does not have"
+    )
+
+    # And the one real subscription still empties cleanly, so the pruning above
+    # did not simply remove the live entry instead of the refused one.
+    assert OFFICE_SUBSCRIPTIONS.release("c1") == 1
+    assert OFFICE_SUBSCRIPTIONS.declarations() == []
+
+
+def test_a_subscribe_the_hub_refuses_withdraws_its_own_declaration(live_hub):
+    """The OTHER refusal, and the only one where a declaration can truly leak.
+
+    The duplicate above adds nothing to withdraw. A STOPPED hub is the
+    reachable case where a subscribe declares first and is then refused:
+    ``_close_socket_lane`` stops the hub on the drain and shutdown paths, and a
+    subscribe already in flight loses that race — ``StreamHub.subscribe``
+    answers False for a stopped hub before it looks at the key at all.
+
+    Left behind, that declaration outlives the connection entirely (the client
+    never got a subscription, so it will never be released) and keeps widening
+    the accepted set for the next serve in the same process — the registry is
+    process-global.
+    """
+
+    _seed_office()
+    hub = live_hub()
+    hub.stop(join_timeout=2.0)
+
+    registered = OFFICE_SUBSCRIPTIONS.subscribe(
+        connection_key="c9",
+        workspace_id=WORKSPACE,
+        baseline_offset=0,
+        emit=lambda frame: None,
+    )
+    assert registered is False
+    assert OFFICE_SUBSCRIPTIONS.declarations() == [], (
+        "a subscribe the hub refused left its declaration in the registry"
+    )
+    assert OFFICE_SUBSCRIPTIONS.owned_keys("c9") == set()
 
 
 def test_release_unsubscribes_from_the_real_hub_and_the_producer_stops(live_hub):

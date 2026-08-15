@@ -64,8 +64,38 @@ from __future__ import annotations
 import threading
 from typing import Any, Callable
 
+from .patch_coverage import HISTORICAL_FOLD_ENTITIES
 from .serve_rpc import notification
 from .state_patches import OFFICE_ACTOR_ENTITY
+
+#: What an RPC office subscriber declares it can fold — the historical set PLUS
+#: ``office_actor``, and the union half of that is the whole point.
+#:
+#: **Why not ``{office_actor}`` alone.** The accepted set is the INTERSECTION
+#: over everybody attached to the shared producer
+#: (:func:`~agent_runtime.patch_coverage.accepted_fold_entities`), and a client
+#: that declares nothing contributes
+#: :data:`~agent_runtime.patch_coverage.HISTORICAL_FOLD_ENTITIES`. A bare
+#: ``{office_actor}`` therefore intersects to the EMPTY SET against any legacy
+#: stream client in the room: nothing would be promotable for anyone, and the
+#: persona-instance patch lane that works today would go dark the moment an
+#: office subscriber joined. That is a regression wearing a fix's clothes, and
+#: it is exactly what the intersection rule exists to make visible.
+#:
+#: **Why the superset is honest and not merely convenient.** A declaration is a
+#: promise to fold, and this subscriber keeps it for every entity named.
+#: :func:`office_patch_sink` discards every row that is not an ``office_actor``
+#: under its own workspace — and a discard is a CORRECT fold for an entity a
+#: subscriber does not track: the office lane is a projection of one
+#: workspace's actors, not a read model of the whole core, so a persona-instance
+#: patch fanned out to this sink leaves nothing it holds stale.
+#:
+#: **Why not widen HISTORICAL_FOLD_ENTITIES instead.** That constant is what a
+#: client which said NOTHING is taken to fold, so widening it would declare
+#: ``office_actor`` on behalf of every un-updated client in the field — see its
+#: own comment: it may only name entities every fielded client already folds.
+#: This one declares for exactly the subscriber that can keep the promise.
+OFFICE_FOLD_ENTITIES: frozenset[str] = HISTORICAL_FOLD_ENTITIES | {OFFICE_ACTOR_ENTITY}
 
 #: The push. Params mirror the patch frame's own body minus its envelope, so a
 #: client's fold is byte-identical work on either lane — which is what makes
@@ -292,11 +322,57 @@ class OfficeSubscriptions:
             except Exception:
                 pass
 
-        if not hub.subscribe(key, sink=sink, on_drop=_on_drop):
-            return False
+        owner = str(connection_key or "stdio")
+        # Recorded BEFORE ``hub.subscribe``, and the order is load-bearing.
+        # That call bumps the hub's generation and starts a producer thread,
+        # and the producer asks :meth:`declarations` what it may promote. An
+        # index written afterwards would race that thread — this subscription
+        # would be missing from the very producer its own subscribe created,
+        # and the first office write after a join would demote to a full core
+        # for no reason a reader could find. The stream lane records its own
+        # declaration before ``hub.subscribe`` for exactly the same reason.
         with self._lock:
-            self._owned.setdefault(str(connection_key or "stdio"), set()).add(key)
-        return True
+            owned = self._owned.setdefault(owner, set())
+            # Whether THIS call is the one that declared it. A duplicate
+            # subscribe adds nothing (the key is already there) and must not be
+            # allowed to withdraw the LIVE subscription's declaration on its way
+            # out — the retry would silently narrow the room for the very
+            # subscription it was refused in favour of.
+            declared_here = key not in owned
+            owned.add(key)
+        registered = False
+        try:
+            registered = bool(hub.subscribe(key, sink=sink, on_drop=_on_drop))
+        finally:
+            # A refused or raising subscribe must not leave a declaration
+            # behind: it would keep widening the accepted set on behalf of a
+            # subscriber that does not exist, which is the one direction this
+            # negotiation may never be wrong in.
+            if not registered and declared_here:
+                self._forget(owner, key)
+        return registered
+
+    def _forget(self, owner: str, key: str) -> None:
+        with self._lock:
+            keys = self._owned.get(owner)
+            if keys is None:
+                return
+            keys.discard(key)
+            if not keys:
+                self._owned.pop(owner, None)
+
+    def declarations(self) -> list[frozenset[str]]:
+        """One :data:`OFFICE_FOLD_ENTITIES` per LIVE office subscription.
+
+        A list rather than a set, because the consumer (``serve.py``'s
+        ``_accepted_fold_entities``) intersects a SEQUENCE of per-subscriber
+        declarations, and an empty sequence is meaningfully different from one
+        entry: no office subscriber at all must leave the room exactly as it
+        was, contributing nothing to narrow OR to widen.
+        """
+
+        with self._lock:
+            return [OFFICE_FOLD_ENTITIES for keys in self._owned.values() for _ in keys]
 
     def release(self, connection_key: str | None) -> int:
         """Drop every office subscription this connection owns. Returns a count.

@@ -55,10 +55,10 @@ entries (``mission_read_model.dart``)::
     if (section == null) return 'patch_unknown_entity:$entity';
 
 and a ``patch_unknown_entity:`` fold outcome is ``needsResync`` — the caller MUST
-re-hydrate from a fresh checkpoint. So the moment hermes emits a patch for a
-THIRD entity (``office_actor``, ``running_work``, …), every such frame costs a
-connected launcher a full re-hydrate: strictly WORSE than the full-core delta it
-replaced, because the client now pays the patch AND a fresh core.
+re-hydrate from a fresh checkpoint. So the moment hermes emits a patch for an
+entity that table does not hold, every such frame costs a connected launcher a
+full re-hydrate: strictly WORSE than the full-core delta it replaced, because
+the client now pays the patch AND a fresh core.
 
 The producer cannot know unilaterally which entities are promotable — only the
 client knows what its fold table holds. So the CLIENT DECLARES the entity classes
@@ -69,8 +69,20 @@ undeclared entity demotes the WHOLE batch onto the same honest-fallback full cor
 an uncovered op already takes — no new lane, no new frame kind, and the demotion
 is the outcome the client would have got anyway if it had never folded at all.
 
-This makes a third entity POSSIBLE. It does not enable one: nothing in this
-change widens what the producer emits.
+The third entity has since arrived (2026-08-14/15)
+--------------------------------------------------
+The quoted snippet above is still the launcher's GENERIC path, and it is still
+two entries — but it is no longer the whole fold. ``office_actor`` is dispatched
+ahead of that table into ``_applyOfficeActorPatch``, which folds an actor row
+into ``offices[<workspace_id>].actors[]`` (nested, because the office core
+section is workspace-keyed and has no top-level actor table for the generic
+merge to reach). The launcher declares the wider set on its own subscribe —
+``harness stream --fold-entities persona_instance,incident,office_actor`` — so
+the negotiation is doing exactly the job it was built for.
+
+What that entity is NOT is a widening of :data:`HISTORICAL_FOLD_ENTITIES`. The
+declaration is per-subscriber, and a client that says nothing still gets the
+historical two.
 """
 
 from __future__ import annotations

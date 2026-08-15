@@ -1419,6 +1419,138 @@ def test_the_negotiated_set_reaches_the_producer_and_not_only_the_ack():
         gate.set()
 
 
+@contextmanager
+def _rpc_office_subscription(workspace_id: str, *, connection_key: str):
+    """One RPC office subscription against the serve under test, released.
+
+    The registry is PROCESS-GLOBAL, so a subscription leaked out of a failing
+    assertion would widen the accepted set for every test that ran afterwards
+    — which is the shape of bug that makes a suite pass in one order and fail
+    in another.
+
+    The wait for ``bound()`` is not padding. ``serve_loop`` announces ``ready``
+    at line ~1436 and binds this registry several hundred lines later, so a
+    client that subscribes the instant it sees ``ready`` is genuinely refused
+    with ``push_lane_unavailable``. Without the wait this helper races that
+    window and fails on scheduling.
+    """
+
+    from agent_runtime.serve_office_subscriptions import OFFICE_SUBSCRIPTIONS
+
+    deadline = time.monotonic() + WAIT
+    while not OFFICE_SUBSCRIPTIONS.bound() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert OFFICE_SUBSCRIPTIONS.bound(), "serve never bound the office push lane"
+
+    registered = OFFICE_SUBSCRIPTIONS.subscribe(
+        connection_key=connection_key,
+        workspace_id=workspace_id,
+        baseline_offset=0,
+        emit=lambda frame: None,
+    )
+    assert registered is True, "the office lane refused to register"
+    try:
+        yield
+    finally:
+        OFFICE_SUBSCRIPTIONS.release(connection_key)
+
+
+def test_an_rpc_office_subscriber_declares_into_the_shared_producer():
+    """The defect this lane spent its whole production life inside.
+
+    ``_accepted_fold_entities`` read the STREAM lane's declaration table and
+    nothing else. An RPC office subscriber registers against the SAME hub and
+    is fanned the SAME frames, but contributed no declaration — so a room
+    holding only office subscribers resolved to the historical
+    ``{persona_instance, incident}``, ``office_actor`` was never promotable,
+    and every office write demoted to a full core. The push lane could emit
+    nothing but resync, on every transport, for its entire life.
+
+    Asserted at the producer rather than at an ack, because the office lane has
+    no ack to carry an accepted set: the factory is the seam the real
+    ``stream_frames(fold_entities=…)`` is built from, and being handed the set
+    is the only observable that means the promotion can actually happen.
+    """
+
+    from agent_runtime.serve_office_subscriptions import OFFICE_FOLD_ENTITIES
+
+    gate = threading.Event()
+    handed: list[frozenset] = []
+
+    def _recording_factory(fold_entities):
+        handed.append(fold_entities)
+        return _fake_stream(gate)()
+
+    try:
+        with running_serve(stream_source_factory=_recording_factory) as handle:
+            assert handle.ready["socket"]["outcome"] == "listening"
+            with _rpc_office_subscription("ws_decl", connection_key="rpc-1"):
+                deadline = time.monotonic() + WAIT
+                while not handed and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert handed, "the office subscribe never built a producer"
+                assert handed[0] == OFFICE_FOLD_ENTITIES
+                assert "office_actor" in handed[0]
+    finally:
+        gate.set()
+
+
+def test_a_legacy_stream_client_beside_an_office_subscriber_does_not_zero_the_room():
+    """The trap the SUPERSET declaration exists to avoid, at serve level.
+
+    The accepted set is an INTERSECTION over everyone attached. Had the office
+    lane declared ``{office_actor}`` alone — the obvious-looking fix — then the
+    moment a legacy stream client joined (declaring nothing, i.e. the
+    historical set) the intersection would be EMPTY: nothing promotable for
+    anybody, and the persona-instance patch lane that works today would go dark
+    the instant an office subscriber existed. A regression, not a fix, and one
+    that would look like a fix in every office-only test.
+
+    So the office lane declares the historical set PLUS ``office_actor``, and
+    the mixed room degrades to exactly today's wire instead of to nothing.
+    Both halves are asserted: the accepted set is the historical one, and it is
+    not empty.
+    """
+
+    from agent_runtime.patch_coverage import HISTORICAL_FOLD_ENTITIES
+    from agent_runtime.serve_office_subscriptions import OFFICE_FOLD_ENTITIES
+
+    gate = threading.Event()
+    handed: list[frozenset] = []
+
+    def _recording_factory(fold_entities):
+        handed.append(fold_entities)
+        return _fake_stream(gate)()
+
+    try:
+        with running_serve(stream_source_factory=_recording_factory) as handle:
+            with _rpc_office_subscription("ws_mixed", connection_key="rpc-1"):
+                deadline = time.monotonic() + WAIT
+                while not handed and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                # Anti-vacuity: alone in the room the office subscriber really
+                # did widen it, so the narrowing below is the legacy client's
+                # doing and not "the declaration never arrived".
+                assert handed[0] == OFFICE_FOLD_ENTITIES
+
+                with client(handle, name="legacy") as (connection, _reply):
+                    connection.send({"op": "subscribe", "lane": "stream"})
+                    ack = _read_until(connection, "subscribed")
+                    assert ack["fold_entities"] == ["incident", "persona_instance"]
+                    assert ack["fold_entities"] != []
+
+                    deadline = time.monotonic() + WAIT
+                    while len(handed) < 2 and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    assert handed[-1] == HISTORICAL_FOLD_ENTITIES
+                    assert handed[-1] != frozenset(), (
+                        "the office declaration zeroed the room: a legacy "
+                        "client beside it can promote nothing at all"
+                    )
+    finally:
+        gate.set()
+
+
 def test_a_subscriber_that_declares_nothing_is_told_the_historical_set():
     """The un-updated client sends exactly what it sends today and is answered
     with today's wire — NOT with an empty set, which would demote it to full

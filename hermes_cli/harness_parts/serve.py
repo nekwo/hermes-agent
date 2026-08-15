@@ -1654,11 +1654,22 @@ def serve_loop(
 
             One producer feeds N subscribers (``serve_stream_hub``), so a patch
             frame promoted for a client that declared ``office_actor`` would ALSO
-            be fanned out to the launcher next to it, which cannot fold that
-            entity and would answer with a full re-hydrate. Intersection is the
-            only rule under which a promotion is safe for everyone in the room;
-            a client that declared nothing contributes the historical set, so a
-            room of only today's clients accepts exactly today's set.
+            be fanned out to whoever sits next to it, and a subscriber that
+            cannot fold that entity answers with a full re-hydrate. Intersection
+            is the only rule under which a promotion is safe for everyone in the
+            room; a client that declared nothing contributes the historical set,
+            so a room of only today's clients accepts exactly today's set.
+
+            The room is BOTH LANES. ``stream_fold_entities`` holds the socket
+            stream lane's declarations, but an RPC office subscriber
+            (``serve_office_subscriptions``) registers against this same hub and
+            is fanned exactly the same frames — it is an attached subscriber in
+            every sense that matters here. Reading only the stream table is how
+            ``office_actor`` was never once promoted in production: an
+            office-only room resolved to the historical default, every office
+            write demoted to a full core, and the push lane could emit nothing
+            but resync. Both tables are read, so the intersection is taken over
+            everyone actually attached.
 
             Read at PRODUCER-BUILD time (``subscribe`` restarts the producer, so
             every join re-derives it). A LEAVE deliberately does not re-widen the
@@ -1668,9 +1679,13 @@ def serve_loop(
             """
 
             from agent_runtime.patch_coverage import accepted_fold_entities
+            from agent_runtime.serve_office_subscriptions import OFFICE_SUBSCRIPTIONS
 
             with lane_lock:
                 declarations = list(stream_fold_entities.values())
+            # Taken OUTSIDE ``lane_lock``: the registry holds a lock of its own,
+            # and the two are never nested in the opposite order anywhere.
+            declarations.extend(OFFICE_SUBSCRIPTIONS.declarations())
             return accepted_fold_entities(declarations)
 
         #: Does an INJECTED source factory want the negotiated fold set? Answered
