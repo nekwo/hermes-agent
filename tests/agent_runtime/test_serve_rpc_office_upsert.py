@@ -908,7 +908,9 @@ def test_the_method_set_grew_and_the_contract_integer_did_not_move():
     out = _run([json.dumps({"op": "version"}) + "\n", SHUTDOWN])
     frames = _frames(out)
 
-    expected = {"contract": 1, "methods": ["runtime.office.get", "runtime.office.upsert"]}
+    expected = {"contract": 1, "methods": ["runtime.office.get",
+            "runtime.office.subscribe",
+            "runtime.office.upsert",]}
     assert serve_rpc.manifest() == expected
     assert serve_rpc.RPC_CONTRACT_VERSION == 1
     assert next(f for f in frames if f.get("event") == "ready")["rpc"] == expected
@@ -1020,7 +1022,9 @@ def test_the_write_method_is_transport_agnostic_and_answers_on_the_socket():
         with client(handle, name="rpc-writer") as (connection, hello_ok):
             assert hello_ok["rpc"] == {
                 "contract": 1,
-                "methods": ["runtime.office.get", "runtime.office.upsert"],
+                "methods": ["runtime.office.get",
+            "runtime.office.subscribe",
+            "runtime.office.upsert",],
             }
 
             connection.send(

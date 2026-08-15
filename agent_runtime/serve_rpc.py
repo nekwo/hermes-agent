@@ -396,11 +396,6 @@ def _runtime_office_get(
     compare them.
     """
 
-    from agent_runtime import paths  # noqa: F401 - store_root side of the read
-    from agent_runtime.office_store import OfficeStore
-    from agent_runtime.serde import to_jsonable
-    from agent_runtime.snapshot import MAX_OFFICE_ACTORS_PROJECTED
-
     workspace_id = _workspace_id_param(params)
     if workspace_id is None:
         return err(
@@ -409,9 +404,8 @@ def _runtime_office_get(
             "invalid params: workspace_id must be a non-empty string",
             {"reason": "workspace_id_required"},
         )
-
-    store = OfficeStore()
-    if not store.surface_exists(workspace_id):
+    projection = _office_projection(workspace_id)
+    if projection is None:
         # NOT an empty projection. `office show` answers an unauthored office
         # with an honest empty because a CLI reader is a human who can see the
         # zero; a program told `folders: [], items: []` cannot tell "this
@@ -423,6 +417,26 @@ def _runtime_office_get(
             f"unknown workspace: {workspace_id}",
             {"reason": "workspace_not_found", "workspace_id": workspace_id},
         )
+    return ok(rid, projection)
+
+
+def _office_projection(workspace_id: str) -> dict | None:
+    """The canvas projection for one workspace, or None when it does not exist.
+
+    Extracted so ``runtime.office.subscribe``'s BASELINE is not a second
+    derivation of the same thing. A subscribe whose baseline could disagree
+    with a ``get`` would put the client back in the state this whole lane
+    exists to end — two readers of one truth, differing silently.
+    """
+
+    from agent_runtime import paths  # noqa: F401 - store_root side of the read
+    from agent_runtime.office_store import OfficeStore
+    from agent_runtime.serde import to_jsonable
+    from agent_runtime.snapshot import MAX_OFFICE_ACTORS_PROJECTED
+
+    store = OfficeStore()
+    if not store.surface_exists(workspace_id):
+        return None
 
     surface = store.get_surface(workspace_id)
     actors = store.list_actors(workspace_id)
@@ -455,19 +469,124 @@ def _runtime_office_get(
         for item in actor.items
     ]
 
+    return {
+        "workspace_id": surface.workspace_id,
+        "folders": list(surface.folders),
+        "revision": surface.revision,
+        "updated_at": to_jsonable(surface.updated_at),
+        "items": items,
+        # Accounted, never silent. Zero on every real workspace today; a cut
+        # that read as a smaller office would be indistinguishable from actors
+        # having been removed.
+        "actors_truncated": max(0, len(actors) - len(projected)),
+    }
+
+
+@method("runtime.office.subscribe")
+def _runtime_office_subscribe(
+    rid: Any, params: dict, context: RpcContext | None = None
+) -> dict:
+    """The baseline AND the registration, in one call. The push leg's keystone.
+
+    Params: ``workspace_id`` (required).
+
+    Result: the SAME body ``runtime.office.get`` returns, plus ``watermark``
+    ``{"event_offset": N}`` — the event-log offset the baseline was read at.
+    Subsequent ``runtime.office.patch`` notifications carry ``base_offset`` /
+    ``watermark`` from the same counter, so the client's existing ``>``-only
+    sequence gate applies unchanged and a gap is a gap on either lane.
+
+    Why one call and not two
+    ------------------------
+    A ``get`` followed by a separate join is two reads of one truth with a
+    window between them, and nothing tells the client whether anything moved
+    inside that window. Taking the projection and the offset together — and
+    registering with the same value — is what makes "I have the office as of N,
+    push me everything after N" a statement the runtime can honour rather than
+    a hope. The office lock is held across the pair so a write cannot land
+    between them.
+
+    The ordering seam, stated rather than papered over
+    --------------------------------------------------
+    The dispatcher emits this reply AFTER the handler returns, so a patch
+    published in between reaches the client BEFORE the baseline it rebases on.
+    That is not fixed by a server-side buffer; it is fixed by the sink dropping
+    any frame at or below ``event_offset``, which is the same rule that absorbs
+    the hub's mandatory re-hydrate. See ``serve_office_subscriptions``.
+
+    Refusals are typed because their cures differ:
+
+    ``push_channel_unavailable``
+        This caller has no push channel — a stdio probe, a test double. The
+        method refuses rather than registering into a void, which is the whole
+        reason ``RpcContext.emit`` is allowed to be ``None``.
+    ``push_lane_unavailable``
+        The runtime has no stream hub bound (no socket lane). Nothing the
+        client can do; it is a runtime configuration fact.
+    ``already_subscribed``
+        This connection already holds a subscription to this workspace.
+        Idempotent and typed rather than silently re-registering, which would
+        leak a subscriber per retry.
+    """
+
+    from agent_runtime.locks import office_lock
+    from agent_runtime.parity import events_watermark
+    from agent_runtime.serve_office_subscriptions import OFFICE_SUBSCRIPTIONS
+
+    workspace_id = _workspace_id_param(params)
+    if workspace_id is None:
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            "invalid params: workspace_id must be a non-empty string",
+            {"reason": "workspace_id_required"},
+        )
+    context = context or RpcContext()
+    if context.emit is None:
+        return err(
+            rid,
+            ERR_INVALID_REQUEST,
+            "this transport cannot carry pushes; use runtime.office.get",
+            {"reason": "push_channel_unavailable", "transport": context.transport},
+        )
+
+    with office_lock(workspace_id):
+        projection = _office_projection(workspace_id)
+        if projection is None:
+            return err(
+                rid,
+                ERR_NOT_FOUND,
+                f"unknown workspace: {workspace_id}",
+                {"reason": "workspace_not_found", "workspace_id": workspace_id},
+            )
+        try:
+            baseline_offset = int(events_watermark().get("event_offset") or 0)
+        except (TypeError, ValueError):
+            baseline_offset = 0
+        registered = OFFICE_SUBSCRIPTIONS.subscribe(
+            connection_key=context.connection_key,
+            workspace_id=workspace_id,
+            baseline_offset=baseline_offset,
+            emit=context.emit,
+        )
+
+    if not registered:
+        bound = OFFICE_SUBSCRIPTIONS.bound()
+        return err(
+            rid,
+            ERR_CONFLICT if bound else ERR_INVALID_REQUEST,
+            "already subscribed to this workspace"
+            if bound
+            else "this runtime has no push lane",
+            {
+                "reason": "already_subscribed" if bound else "push_lane_unavailable",
+                "workspace_id": workspace_id,
+            },
+        )
+
     return ok(
         rid,
-        {
-            "workspace_id": surface.workspace_id,
-            "folders": list(surface.folders),
-            "revision": surface.revision,
-            "updated_at": to_jsonable(surface.updated_at),
-            "items": items,
-            # Accounted, never silent. Zero on every real workspace today; a
-            # cut that read as a smaller office would be indistinguishable
-            # from actors having been removed.
-            "actors_truncated": max(0, len(actors) - len(projected)),
-        },
+        {**projection, "watermark": {"event_offset": baseline_offset}},
     )
 
 

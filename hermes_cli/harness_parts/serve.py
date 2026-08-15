@@ -1727,6 +1727,17 @@ def serve_loop(
                     )
                 return stream_hub
 
+        # The office push lane reaches the hub through a FACTORY, not a handle:
+        # `_ensure_stream_hub` builds lazily and `_close_socket_lane` can swap
+        # the hub out across a drain, so a captured instance would go stale at
+        # exactly the moment a client reconnects. Binding the factory also means
+        # an RPC subscriber COUNTS as a hub subscriber — load-bearing, because
+        # the hub stops producing when its room empties, and the whole point of
+        # the ruling is that the launcher stops joining the legacy stream.
+        from agent_runtime.serve_office_subscriptions import OFFICE_SUBSCRIPTIONS
+
+        OFFICE_SUBSCRIPTIONS.bind(_ensure_stream_hub)
+
         def _release_subscription(connection: Any) -> None:
             """A client left. Unsubscribe it, and do NOTHING else.
 
@@ -1748,6 +1759,15 @@ def serve_loop(
                     hub.unsubscribe(key)
                 except Exception:
                     pass
+            # The office lane's keys are NAMESPACED away from `key` (which the
+            # stream lane owns), so the unsubscribe above cannot reach them and
+            # a departing connection would otherwise leak a subscriber — which
+            # would in turn keep a producer alive for nobody.
+            from agent_runtime.serve_office_subscriptions import (
+                OFFICE_SUBSCRIPTIONS as _office_subs,
+            )
+
+            _office_subs.release(key)
             if connection is not None:
                 connection.subscribed = False
                 with connection_sinks_lock:
@@ -1761,6 +1781,17 @@ def serve_loop(
             """
 
             nonlocal socket_server, socket_lock, stream_hub
+            # Unbound FIRST, so a subscribe racing the drain is refused with a
+            # typed `push_lane_unavailable` instead of registering against a hub
+            # that is about to be stopped. The registry is process-global and
+            # outlives this loop, so leaving it bound would also hand the next
+            # serve_loop in the same process a factory closed over a dead lane —
+            # which is a test-suite failure mode, not only a production one.
+            from agent_runtime.serve_office_subscriptions import (
+                OFFICE_SUBSCRIPTIONS as _office_subs,
+            )
+
+            _office_subs.bind(None)
             # The three swaps happen together, under the lock, and NOTHING
             # slow happens while it is held: whoever takes a handle owns
             # closing it, and a second caller gets None and does nothing.

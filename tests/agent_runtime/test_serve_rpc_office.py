@@ -518,6 +518,7 @@ def test_the_envelope_itself_is_validated_with_upstreams_codes():
     # The refusal names what DOES exist — the manifest a client may have missed.
     assert unknown["error"]["data"]["methods"] == [
         "runtime.office.get",
+        "runtime.office.subscribe",
         "runtime.office.upsert",
     ]
 
@@ -656,7 +657,9 @@ def test_stdio_learns_the_method_set_from_ready_and_can_re_ask_version():
 
     expected = {
         "contract": 1,
-        "methods": ["runtime.office.get", "runtime.office.upsert"],
+        "methods": ["runtime.office.get",
+            "runtime.office.subscribe",
+            "runtime.office.upsert",],
     }
     ready = next(f for f in frames if f.get("event") == "ready")
     assert ready["rpc"] == expected
@@ -695,7 +698,9 @@ def test_the_method_surface_is_transport_agnostic_and_answers_on_the_socket():
             # never sees ``ready``, and should not need a round trip for it.
             assert hello_ok["rpc"] == {
                 "contract": 1,
-                "methods": ["runtime.office.get", "runtime.office.upsert"],
+                "methods": ["runtime.office.get",
+            "runtime.office.subscribe",
+            "runtime.office.upsert",],
             }
 
             connection.send(
