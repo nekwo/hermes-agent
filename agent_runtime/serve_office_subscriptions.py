@@ -57,11 +57,61 @@ Both are "this frame is at or behind what the client already has", so both are
 answered by dropping any frame whose ``watermark.event_offset`` does not exceed
 the offset captured with the baseline. That capture happens under the office
 lock in :mod:`agent_runtime.serve_rpc`; here it is just a number.
+
+Why a second subscribe REPLACES rather than being refused
+---------------------------------------------------------
+Registering and answering in one call is what makes the baseline honest, and it
+has one consequence that was not thought through when the lane landed: by the
+time the client has PARSED the reply the subscription already exists. A client
+that reads the baseline and finds it unusable — a truncated projection, an
+unreadable watermark, a workspace id it did not ask for — is right to refuse it
+rather than fold a knowingly-partial office as authoritative. But refusing left
+a live subscription it would never fold against, and the old
+``already_subscribed`` answer meant a retry on the same connection could not
+reclaim it. Short of dropping the connection, the runtime could not take that
+subscriber back.
+
+So a second subscribe for the same ``(connection, workspace)`` now TEARS DOWN
+the existing registration and installs a fresh sink at a fresh baseline. The
+stuck subscription stops being a state that can exist, because the cure for a
+bad baseline is the same call that produced it. The refusal it replaces existed
+only to stop a subscriber leaking per retry, and replacement prevents that leak
+by the same mechanism — one key, one subscription — while being useful rather
+than merely safe.
+
+It is not free, and it must not look free
+-----------------------------------------
+:meth:`StreamHub.subscribe` restarts the producer on purpose, so every OTHER
+subscriber attached to that hub pays a fresh full core when this connection
+re-baselines. Under the old refusal a redundant subscribe cost nothing at all —
+the hub declined the duplicate key before it ever bumped a generation — so this
+is a real new cost on the path a confused client takes repeatedly. (It is one
+restart and not two: the teardown below stops a producer without starting one,
+and the re-subscribe starts the single new generation any first subscribe would
+have started. What changed is that a REDUNDANT subscribe went from free to
+costing exactly what a first one costs.)
+
+That is why a replacement is a RECEIPT rather than a silent success: the reply
+carries ``replaced`` and a bound service log is told. A client in a retry loop
+taxing the whole room is something an operator must be able to see in the log
+and the client must be able to see in its own answer. The one shape this
+program keeps refusing to ship is the cost nobody is billed for.
+
+Giving a subscription back without dropping the connection
+----------------------------------------------------------
+:meth:`OfficeSubscriptions.release_one` is the other half. ``release`` sweeps a
+DEPARTING connection and is the disconnect path's; a client that merely gave up
+on a workspace, or navigated away from it, needs to hand one subscription back
+while keeping the socket it is still using for everything else. Releasing
+something already released answers False rather than raising, because that is
+precisely what a recovering client does and an error there would make recovery
+indistinguishable from a fault.
 """
 
 from __future__ import annotations
 
 import threading
+from dataclasses import dataclass
 from typing import Any, Callable
 
 from .serve_rpc import notification
@@ -208,6 +258,58 @@ def office_patch_sink(
     return _deliver
 
 
+@dataclass(frozen=True)
+class SubscribeOutcome:
+    """What a subscribe DID — not merely whether it worked.
+
+    A bare ``bool`` was enough while the only two answers were "registered" and
+    "refused". Re-baselining adds a third fact that the caller has to be able to
+    put on the wire: whether this registration DISPLACED a live one, and
+    therefore whether every other subscriber on the shared producer just paid a
+    fresh full core for it. That is the receipt, and a receipt that the handler
+    cannot see is not a receipt.
+
+    ``reason`` is the second thing a bool could not carry, and it is not
+    cosmetic either. ``StreamHub.subscribe`` answers False for two unrelated
+    situations, and until now the handler guessed between them by asking
+    ``bound()`` — which cannot tell "no hub at all" from "a bound factory whose
+    hub is draining", and so told a client racing ``_close_socket_lane`` that it
+    was ALREADY SUBSCRIBED. That was a lie in the one direction that matters: it
+    points the client at a cure (stop retrying, you are already registered) for
+    a state where the only cure is to reconnect. Removing the
+    ``already_subscribed`` arm would otherwise have silently rehomed that
+    mislabel onto ``push_lane_unavailable``, which is nearly as wrong — a
+    permanent runtime fact where the truth is a transient one.
+
+    ``__bool__`` is defined deliberately rather than left to the dataclass
+    default. Every dataclass instance is truthy, so a caller who wrote the
+    natural ``if not registered:`` against this type would get a branch that can
+    never be taken — a refusal reported as a success, which is the exact failure
+    shape this lane exists to delete.
+    """
+
+    registered: bool
+    replaced: bool = False
+    #: ``None`` when registered. Otherwise the typed reason the handler puts on
+    #: the wire verbatim, because the registry is the only layer that can tell
+    #: these two apart.
+    reason: str | None = None
+
+    def __bool__(self) -> bool:
+        return self.registered
+
+
+#: No hub is bound at all: this runtime has no socket lane, or the serve loop
+#: has not reached its bind yet. A fact about the runtime, not about the call.
+NO_PUSH_LANE = "push_lane_unavailable"
+
+#: A hub IS bound but refused the registration, which after re-baselining has
+#: exactly one remaining cause: the hub is stopping (``StreamHub.subscribe``
+#: returns False once its stop event is set). Transient by nature — the cure is
+#: to reconnect and subscribe again, never to assume this runtime cannot push.
+PUSH_LANE_DRAINING = "push_lane_draining"
+
+
 class OfficeSubscriptions:
     """Which connections are subscribed to which workspaces, and the teardown.
 
@@ -229,12 +331,32 @@ class OfficeSubscriptions:
         #: whether a subscription is live; this is only the index the release
         #: path needs, and it is pruned in the same breath as the hub call.
         self._owned: dict[str, set[str]] = {}
+        #: Where a re-baseline is BILLED. Optional because this registry is
+        #: process-global and reachable from a runtime that has no service log
+        #: (a test, a stdio probe); ``None`` means the receipt still reaches the
+        #: client on its reply, just not an operator's tail.
+        self._log: Callable[[dict[str, Any]], None] | None = None
 
     # ── wiring ──────────────────────────────────────────────────────────────
 
-    def bind(self, hub_factory: Callable[[], Any] | None) -> None:
+    def bind(
+        self,
+        hub_factory: Callable[[], Any] | None,
+        *,
+        log: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
+        """Point the lane at a hub factory, and optionally at a service log.
+
+        ``log`` rides ``bind`` rather than being a constructor argument for the
+        same reason the hub does: this object outlives any one serve loop, and
+        the log it should write to belongs to whichever loop is currently
+        running. Unbinding clears it, so a stopped loop's sink cannot be handed
+        a line by the next one.
+        """
+
         with self._lock:
             self._hub_factory = hub_factory
+            self._log = log if hub_factory is not None else None
             if hub_factory is None:
                 self._owned.clear()
 
@@ -251,23 +373,34 @@ class OfficeSubscriptions:
         workspace_id: str,
         baseline_offset: int,
         emit: Callable[[dict[str, Any]], None],
-    ) -> bool:
-        """Register one subscription. False when the lane cannot carry it.
+    ) -> SubscribeOutcome:
+        """Register one subscription, REPLACING this connection's existing one.
 
-        False is returned — rather than raised — for the two states a caller
-        must answer differently from a crash: no hub bound (this runtime has no
-        socket lane, so there is nothing to push over) and a duplicate key (the
-        client is already subscribed to this workspace). The method handler
-        turns each into its own typed error.
+        A falsy outcome — rather than a raise — is reserved for the two states a
+        caller must answer differently from a crash, and ``reason`` is what
+        tells them apart: no hub is bound at all (:data:`NO_PUSH_LANE`), or a
+        bound hub refused because it is stopping (:data:`PUSH_LANE_DRAINING`).
+        Neither is a fault, and their cures are opposites — give up on pushes,
+        versus reconnect and ask again — which is why the registry names them
+        here rather than leaving the handler to guess from ``bound()``.
+
+        A duplicate key is no longer among those states. It used to be, and the
+        module docstring above says why it stopped being: refusing left the
+        client holding a subscription it had already decided not to fold
+        against, with no way back short of dropping the connection.
         """
 
         with self._lock:
             factory = self._hub_factory
+            log = self._log
         if factory is None:
-            return False
+            return SubscribeOutcome(False, reason=NO_PUSH_LANE)
         hub = factory()
         if hub is None:
-            return False
+            # A BOUND factory that answers None is still "no lane", not a
+            # duplicate — the case the old ``bound()`` guess reported as
+            # ``already_subscribed`` to a client that held no subscription.
+            return SubscribeOutcome(False, reason=NO_PUSH_LANE)
         key = office_subscription_key(connection_key, workspace_id)
         sink = office_patch_sink(
             workspace_id=workspace_id,
@@ -292,11 +425,109 @@ class OfficeSubscriptions:
             except Exception:
                 pass
 
+        # RE-BASELINE: the old registration goes FIRST, and it has to. The hub
+        # refuses a duplicate key, so there is no atomic swap available to us
+        # and no ordering in which the new sink is installed before the old one
+        # is gone. What makes that safe for this lane rather than a gap is the
+        # caller: ``_runtime_office_subscribe`` holds ``office_lock`` across the
+        # projection, the watermark and this call, so no office write can land
+        # inside the window the teardown opens. A caller that dropped the lock
+        # here would be re-introducing exactly the unreportable window that
+        # made subscribe one call in the first place.
+        try:
+            replaced = bool(hub.unsubscribe(key))
+        except Exception:
+            # The hub's own accounting has the truth; a teardown that raised
+            # must not turn a re-baseline into a handler error, because the
+            # client asking for one is already trying to recover.
+            replaced = False
         if not hub.subscribe(key, sink=sink, on_drop=_on_drop):
-            return False
+            # ONE cause remains now that a duplicate key is impossible here: the
+            # hub is stopping (``StreamHub.subscribe`` refuses once its stop
+            # event is set), i.e. this call raced ``_close_socket_lane``. It is
+            # reported as its own transient reason rather than folded into
+            # ``push_lane_unavailable``, because the cures differ — reconnect,
+            # versus give up on pushes entirely.
+            #
+            # ``replaced`` is carried out with it. The teardown above ran, so a
+            # client that DID hold a subscription no longer does, and telling it
+            # only "refused" would leave it believing its old lane survived.
+            # Tearing that lane down early costs nothing: ``StreamHub.stop``
+            # releases every subscriber moments later anyway.
+            #
+            # The index must lose the key in the same breath — a key kept here
+            # that the hub does not hold would make ``release`` report a
+            # teardown it never performed.
+            self._forget(connection_key, key)
+            return SubscribeOutcome(False, replaced=replaced, reason=PUSH_LANE_DRAINING)
         with self._lock:
             self._owned.setdefault(str(connection_key or "stdio"), set()).add(key)
-        return True
+        if replaced and log is not None:
+            try:
+                log(
+                    {
+                        "event": "serve_office_subscription_rebaselined",
+                        "connection": str(connection_key or "stdio"),
+                        "workspace_id": workspace_id,
+                        "key": key,
+                        "baseline_offset": int(baseline_offset or 0),
+                        # Named on the line rather than left to be inferred:
+                        # this is the whole reason the line exists. A retry loop
+                        # shows up here as a repeating cost, not as a mystery in
+                        # the hub's generation counter.
+                        "producer_restarted": True,
+                    }
+                )
+            except Exception:
+                # A logging sink is never allowed to fail a subscribe that has
+                # already succeeded against the hub.
+                pass
+        return SubscribeOutcome(True, replaced=replaced)
+
+    def _forget(self, connection_key: str | None, key: str) -> None:
+        """Drop one key from the index only. Never touches the hub."""
+
+        owner = str(connection_key or "stdio")
+        with self._lock:
+            owned = self._owned.get(owner)
+            if owned is None:
+                return
+            owned.discard(key)
+            if not owned:
+                self._owned.pop(owner, None)
+
+    def release_one(self, connection_key: str | None, workspace_id: str) -> bool:
+        """Give ONE workspace's subscription back, keeping the connection.
+
+        ``release`` is the disconnect sweep and takes everything a departing
+        connection owns. This is the opposite situation: the client is still
+        here and still talking, it has simply stopped caring about one
+        workspace — it navigated away, or it refused a baseline it could not
+        use. Without this the only way to stop a push lane was to drop the
+        socket carrying every other call too.
+
+        The answer is the HUB's, not the index's. A key sitting in ``_owned``
+        that the hub no longer holds is a bookkeeping error, and reporting it as
+        a successful release would hide the one leak this whole registry exists
+        to make visible. False therefore means "nothing was live here" — an
+        answer, not a fault, because a client recovering from a half-finished
+        subscribe releases what it is not sure it holds.
+        """
+
+        key = office_subscription_key(connection_key, workspace_id)
+        # Pruned FIRST and unconditionally: whatever the hub says, this
+        # connection is no longer claiming the key, and an index that outlived
+        # the claim would have the disconnect sweep chase a phantom.
+        self._forget(connection_key, key)
+        with self._lock:
+            factory = self._hub_factory
+        hub = factory() if factory is not None else None
+        if hub is None:
+            return False
+        try:
+            return bool(hub.unsubscribe(key))
+        except Exception:
+            return False
 
     def release(self, connection_key: str | None) -> int:
         """Drop every office subscription this connection owns. Returns a count.

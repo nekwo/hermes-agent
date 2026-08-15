@@ -108,7 +108,7 @@ supports — so the first typed method carries its own manifest. JSON-RPC 2.0
 framing mirroring upstream's `tui_gateway`, answered on stdio and socket alike,
 beside the argv lane rather than replacing it.
 
-`{"rpc":{"contract":1,"methods":["runtime.office.get","runtime.office.upsert"]}}`
+`{"rpc":{"contract":1,"methods":["runtime.office.get","runtime.office.subscribe","runtime.office.unsubscribe","runtime.office.upsert"]}}`
 rides `ready` (stdio's greeting), `hello_ok` (the socket's), and the re-askable
 `version` reply. It is **a set plus an integer**: the integer moves when a
 method's shape changes incompatibly, the set grows when a method is added — so
@@ -129,6 +129,44 @@ when an actor moves, so it was never a usable guard. Unlike the CLI verb beside
 it, the method REFUSES an unknown workspace rather than lazily authoring one —
 the read leg already refuses a typo, and a mis-authored office is on disk
 forever where a mis-rendered canvas is repainted on the next poll.
+
+`runtime.office.subscribe` is the PUSH leg's keystone, and it registers and
+answers in ONE call: the baseline projection and the event-log offset are taken
+together under `office_lock`, because a `get` followed by a separate join is two
+reads of one truth with an unreportable window between them. That shape has a
+consequence the first cut did not follow through on — the subscription is live
+before the client has finished parsing the reply. A client that finds the
+baseline unusable is right to refuse it (folding a knowingly-partial office
+would render it as authoritative), and it was then stuck holding a subscription
+it would never fold against, with no method that could release it and
+`already_subscribed` waiting on every retry.
+
+Two additions close that, and neither moves the integer. A second subscribe from
+one connection for one workspace now **re-baselines**: it replaces the
+registration with a fresh baseline and watermark rather than refusing, so the
+cure for a bad baseline is the same call that produced it. And
+`runtime.office.unsubscribe` `{workspace_id}` hands one subscription back
+without dropping the connection the client is still using for everything else.
+
+Re-baselining is correct but not free, and it says so. `StreamHub.subscribe`
+restarts the producer, so a replace makes every OTHER subscriber on that hub
+rebuild a full core — where the retired refusal cost nothing at all, because the
+hub declined a duplicate key before bumping a generation. So it is a **receipt**:
+`replaced` on the reply for the client, `serve_office_subscription_rebaselined`
+in the service log for the operator. A client in a retry loop must not be able to
+tax the whole room invisibly. Releasing an unknown subscription answers
+`{"released": false}` rather than erroring — releasing what you are not sure you
+hold is exactly what a recovering client does, and an error there would make
+recovery indistinguishable from a fault.
+
+Removing `already_subscribed` also retired a mislabel riding with it. The old
+branch chose its reason by asking whether a hub was bound, which is true for a
+hub that is *draining* exactly as for a live one — so a subscribe racing
+`_close_socket_lane` was told "already subscribed" while holding nothing, and
+pointed at the one cure that cannot work. A refused registration now carries
+either `push_lane_unavailable` (no hub at all) or `push_lane_draining` (bound,
+stopping, reconnect), plus `prior_subscription_released` when the re-baseline's
+teardown had already run.
 
 Errors carry `data.reason`; clients branch on the reason, never on message
 prose. `4090` is the one code minted rather than borrowed — upstream has no

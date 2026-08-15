@@ -491,8 +491,9 @@ def _runtime_office_subscribe(
     Params: ``workspace_id`` (required).
 
     Result: the SAME body ``runtime.office.get`` returns, plus ``watermark``
-    ``{"event_offset": N}`` — the event-log offset the baseline was read at.
-    Subsequent ``runtime.office.patch`` notifications carry ``base_offset`` /
+    ``{"event_offset": N}`` — the event-log offset the baseline was read at —
+    and ``replaced``, the re-baselining receipt described below. Subsequent
+    ``runtime.office.patch`` notifications carry ``base_offset`` /
     ``watermark`` from the same counter, so the client's existing ``>``-only
     sequence gate applies unchanged and a gap is a gap on either lane.
 
@@ -514,6 +515,32 @@ def _runtime_office_subscribe(
     any frame at or below ``event_offset``, which is the same rule that absorbs
     the hub's mandatory re-hydrate. See ``serve_office_subscriptions``.
 
+    A second subscribe RE-BASELINES, and says so
+    --------------------------------------------
+    Registering and answering together has a consequence the first cut did not
+    follow through on: the subscription exists before the client has finished
+    reading the reply. A client that finds the baseline unusable is right to
+    refuse it — folding a knowingly-partial office would render it as
+    authoritative — but the old ``already_subscribed`` refusal then left a live
+    subscription the client would never fold against, reclaimable only by
+    dropping the connection. There is no method that could have released it.
+
+    So a repeat subscribe for this ``(connection, workspace)`` replaces the
+    registration with a fresh baseline and watermark, and the stuck state stops
+    existing by construction. The refusal it retires was only ever there to stop
+    a subscriber leaking per retry; one key still means one subscription, so
+    nothing leaks either way, and replacement is the answer that gets a confused
+    client out of the hole rather than deeper into it.
+
+    ``replaced`` on the result is the bill. ``StreamHub.subscribe`` restarts the
+    producer, so a re-baseline costs every OTHER subscriber on that hub a fresh
+    full core — a cost the old refusal did not incur, because a duplicate key
+    was declined before a generation was ever bumped. A client that sees
+    ``replaced: true`` on a call it thought was its first has learned something
+    true about its own state, and the same event is written to the service log
+    for the operator (``serve_office_subscription_rebaselined``). Silent
+    re-baselining would let a retry loop tax the whole room invisibly.
+
     Refusals are typed because their cures differ:
 
     ``push_channel_unavailable``
@@ -521,17 +548,34 @@ def _runtime_office_subscribe(
         method refuses rather than registering into a void, which is the whole
         reason ``RpcContext.emit`` is allowed to be ``None``.
     ``push_lane_unavailable``
-        The runtime has no stream hub bound (no socket lane). Nothing the
-        client can do; it is a runtime configuration fact.
-    ``already_subscribed``
-        This connection already holds a subscription to this workspace.
-        Idempotent and typed rather than silently re-registering, which would
-        leak a subscriber per retry.
+        The runtime has no stream hub bound — no socket lane, or a serve loop
+        that has not reached its bind yet. Nothing the client can do about the
+        first; the second is a startup window ``serve.py`` announces ``ready``
+        several hundred lines before closing, and it is a separate bug.
+    ``push_lane_draining``
+        A hub IS bound and it refused: it is stopping, so this call raced
+        ``_close_socket_lane``. Transient, and the cure is to reconnect — which
+        is precisely why it must not share a name with the case above. When the
+        caller held a subscription, ``data.prior_subscription_released`` says
+        so: the re-baseline's teardown already ran, so the old lane is gone too.
+
+    ``already_subscribed`` is GONE. It was the only ``ERR_CONFLICT`` this method
+    raised, and its disappearance also retires a mislabel that shipped with it:
+    the old branch chose its reason by asking ``bound()``, which answers True
+    for a bound-but-draining hub as readily as for a live one. A client racing
+    the drain was therefore told "already subscribed to this workspace" while
+    holding no subscription at all — sent to the one cure (stop retrying) that
+    could not work. Splitting the two reasons is what keeps replacement from
+    quietly inheriting that lie under a new name.
     """
 
     from agent_runtime.locks import office_lock
     from agent_runtime.parity import events_watermark
-    from agent_runtime.serve_office_subscriptions import OFFICE_SUBSCRIPTIONS
+    from agent_runtime.serve_office_subscriptions import (
+        NO_PUSH_LANE,
+        OFFICE_SUBSCRIPTIONS,
+        PUSH_LANE_DRAINING,
+    )
 
     workspace_id = _workspace_id_param(params)
     if workspace_id is None:
@@ -563,31 +607,112 @@ def _runtime_office_subscribe(
             baseline_offset = int(events_watermark().get("event_offset") or 0)
         except (TypeError, ValueError):
             baseline_offset = 0
-        registered = OFFICE_SUBSCRIPTIONS.subscribe(
+        outcome = OFFICE_SUBSCRIPTIONS.subscribe(
             connection_key=context.connection_key,
             workspace_id=workspace_id,
             baseline_offset=baseline_offset,
             emit=context.emit,
         )
 
-    if not registered:
-        bound = OFFICE_SUBSCRIPTIONS.bound()
+    if not outcome.registered:
+        # The reason comes from the REGISTRY, not from a second guess here. The
+        # old branch re-derived it by asking ``bound()``, which cannot separate
+        # "no hub" from "a bound hub that is draining" — see the docstring.
+        # Both share ``-32600`` on purpose: this lane's clients branch on
+        # ``data.reason``, which is the whole reason ``data`` is populated at
+        # all, and minting a code per transient state would make the numbers
+        # the contract instead of the names.
         return err(
             rid,
-            ERR_CONFLICT if bound else ERR_INVALID_REQUEST,
-            "already subscribed to this workspace"
-            if bound
+            ERR_INVALID_REQUEST,
+            "this runtime's push lane is draining; reconnect and subscribe again"
+            if outcome.reason == PUSH_LANE_DRAINING
             else "this runtime has no push lane",
             {
-                "reason": "already_subscribed" if bound else "push_lane_unavailable",
+                "reason": outcome.reason or NO_PUSH_LANE,
                 "workspace_id": workspace_id,
+                # Honest even on the failure path: a re-baseline that raced the
+                # drain destroyed the caller's previous subscription before it
+                # learned the new one would not be granted. Silence here would
+                # leave the client believing its old lane survived.
+                "prior_subscription_released": bool(outcome.replaced),
             },
         )
 
     return ok(
         rid,
-        {**projection, "watermark": {"event_offset": baseline_offset}},
+        {
+            **projection,
+            "watermark": {"event_offset": baseline_offset},
+            # Always present, never omitted on the False case — the same rule
+            # the projection's own nullable keys follow. A client decoding into
+            # a typed struct must not have to special-case which keys exist,
+            # and a receipt that appears only sometimes is one a client learns
+            # to stop reading.
+            "replaced": bool(outcome.replaced),
+        },
     )
+
+
+@method("runtime.office.unsubscribe")
+def _runtime_office_unsubscribe(
+    rid: Any, params: dict, context: RpcContext | None = None
+) -> dict:
+    """Hand ONE workspace's push subscription back, keeping the connection.
+
+    Params: ``workspace_id`` (required).
+    Result: ``{"workspace_id": ..., "released": bool}``.
+
+    Why the method exists at all
+    ----------------------------
+    ``runtime.office.subscribe`` registers and answers together, so a
+    subscription outlives the client's decision about the reply that created it.
+    Re-baselining covers the client that wants a BETTER baseline; this covers
+    the one that wants none — it navigated away from the workspace, or it gave
+    up. Before this, the only release was closing the socket, which also took
+    every unrelated call riding it. A subscriber the runtime could not reclaim
+    keeps a producer rebuilding projections for nobody.
+
+    Why an unknown subscription is an ANSWER and not an error
+    ---------------------------------------------------------
+    ``released: false`` is the honest report that nothing was live under this
+    key, and it is deliberately a result rather than a 4001. Releasing something
+    already released is exactly what a recovering client does: it lost track of
+    whether its subscribe landed, and asking is how it finds out. An error there
+    would make ordinary recovery indistinguishable from a fault, and a client
+    that cannot tell those apart either logs noise forever or stops looking.
+
+    Deliberately NOT here
+    ---------------------
+    No ``office_lock``, and no existence check on the workspace. There is no
+    baseline to pair a read with, so the lock would buy nothing and could only
+    make a release wait behind a write. And a client must still be able to
+    release a workspace that has since been deleted — refusing there would
+    strand the subscription for good, which is the very failure being closed.
+
+    No ``push_channel_unavailable`` either. Subscribe needs an emitter because
+    it registers one; this only names a key, and a caller with no push channel
+    has no subscription to release — which ``released: false`` already says.
+    """
+
+    from agent_runtime.serve_office_subscriptions import OFFICE_SUBSCRIPTIONS
+
+    workspace_id = _workspace_id_param(params)
+    if workspace_id is None:
+        # A caller BUG, unlike everything else this method tolerates: there is
+        # no key to name, so there is nothing to answer False about.
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            "invalid params: workspace_id must be a non-empty string",
+            {"reason": "workspace_id_required"},
+        )
+    context = context or RpcContext()
+
+    released = OFFICE_SUBSCRIPTIONS.release_one(
+        context.connection_key, workspace_id
+    )
+    return ok(rid, {"workspace_id": workspace_id, "released": bool(released)})
 
 
 @method("runtime.office.upsert")

@@ -1736,7 +1736,14 @@ def serve_loop(
         # the ruling is that the launcher stops joining the legacy stream.
         from agent_runtime.serve_office_subscriptions import OFFICE_SUBSCRIPTIONS
 
-        OFFICE_SUBSCRIPTIONS.bind(_ensure_stream_hub)
+        # `log` is where a RE-BASELINE is billed. A second subscribe on one
+        # connection replaces the first rather than being refused, which cures a
+        # client stuck holding a baseline it refused — but `StreamHub.subscribe`
+        # restarts the producer, so a re-baseline makes every OTHER subscriber
+        # on this hub pay a fresh full core. The client sees `replaced` on its
+        # own reply; without this line the operator would see a retry loop only
+        # as an unexplained climb in the hub's generation counter.
+        OFFICE_SUBSCRIPTIONS.bind(_ensure_stream_hub, log=_service_log)
 
         def _release_subscription(connection: Any) -> None:
             """A client left. Unsubscribe it, and do NOTHING else.
