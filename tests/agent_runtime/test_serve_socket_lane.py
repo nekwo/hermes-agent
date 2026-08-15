@@ -1448,7 +1448,10 @@ def _rpc_office_subscription(workspace_id: str, *, connection_key: str):
         baseline_offset=0,
         emit=lambda frame: None,
     )
-    assert registered is True, "the office lane refused to register"
+    # `.registered`, never the object's truthiness: `SubscribeOutcome.__bool__`
+    # is unconditionally true, so `assert registered` would pass against every
+    # refusal this helper exists to catch.
+    assert registered.registered is True, "the office lane refused to register"
     try:
         yield
     finally:

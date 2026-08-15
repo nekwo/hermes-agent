@@ -250,6 +250,34 @@ def _subscribe(sent: list, *, connection_key: str = "c1", rid: str = "r1") -> di
     )
 
 
+def _unsubscribe(*, connection_key: str = "c1", rid: str = "u1") -> dict:
+    """The METHOD, not ``release`` — and the distinction is what the tests below
+    are about. ``release`` is the disconnect sweep and takes everything a
+    departing connection owns; this is a live client handing ONE workspace back
+    over a socket it is still using for everything else."""
+
+    return serve_rpc.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "method": "runtime.office.unsubscribe",
+            "params": {"workspace_id": WORKSPACE},
+        },
+        serve_rpc.RpcContext(
+            connection_key=connection_key, transport="socket", emit=lambda _f: None
+        ),
+    )
+
+
+def _await_patch(sent: list, what: str) -> dict:
+    return _wait_for(
+        lambda: next(
+            (item for item in sent if item["method"] == OFFICE_PATCH_METHOD), None
+        ),
+        what=what,
+    )
+
+
 def _settled_subscription(sent: list, hub: StreamHub, **kwargs) -> dict:
     """Subscribe, then wait out the hub's mandatory re-hydrate.
 
@@ -495,11 +523,17 @@ def test_a_refused_duplicate_subscribe_leaves_no_declaration_behind(live_hub):
     _settled_subscription(sent, hub)
     assert len(OFFICE_SUBSCRIPTIONS.declarations()) == 1
 
+    # This asserted `already_subscribed` when it was written. That refusal is
+    # gone — a repeat subscribe now RE-BASELINES — so the failure mode moved
+    # rather than disappearing: a replacement that added its key without the
+    # teardown pruning the old one would leave TWO declarations for one live
+    # subscription, and the accepted set would be widened on behalf of a
+    # subscriber the hub does not have. Same defect, different route to it.
     duplicate = _subscribe([], rid="r2")
-    assert duplicate["error"]["data"]["reason"] == "already_subscribed"
+    assert duplicate["result"]["replaced"] is True
     assert len(OFFICE_SUBSCRIPTIONS.declarations()) == 1, (
-        "a refused subscribe left a declaration behind: the accepted set is "
-        "now widened for a subscriber the hub does not have"
+        "a re-baselined subscribe left a second declaration behind: the "
+        "accepted set is now widened for a subscriber the hub does not have"
     )
 
     # And the one real subscription still empties cleanly, so the pruning above
@@ -533,7 +567,11 @@ def test_a_subscribe_the_hub_refuses_withdraws_its_own_declaration(live_hub):
         baseline_offset=0,
         emit=lambda frame: None,
     )
-    assert registered is False
+    assert registered.registered is False
+    # The drain race has its own reason since the re-baseline landed: folding it
+    # into `push_lane_unavailable` would tell a client that CAN reconnect that
+    # this runtime does not push at all.
+    assert registered.reason == "push_lane_draining"
     assert OFFICE_SUBSCRIPTIONS.declarations() == [], (
         "a subscribe the hub refused left its declaration in the registry"
     )
@@ -738,3 +776,288 @@ def test_a_create_moves_the_surface_row_so_the_batch_degrades_to_a_resync(live_h
     )
     assert frame["method"] == OFFICE_RESYNC_METHOD
     assert frame["params"] == {"workspace_id": WORKSPACE, "reason": "full_core"}
+
+
+# ── claim 6: a stuck subscription can be reclaimed ──────────────────────────
+
+
+def test_a_re_subscribe_hands_back_a_genuinely_fresher_baseline(live_hub):
+    """The whole reason re-baselining replaces ``already_subscribed``.
+
+    A client that refused an unusable baseline needs the SECOND answer to be a
+    better one, not an acknowledgement that it is still registered. So the
+    watermark is asserted to have MOVED across an intervening write, and the
+    projection to carry the moved coordinate — not merely that a reply came
+    back. A handler that returned a cached or re-wrapped first answer would
+    satisfy "no error" and every shape assertion in the fake-hub file, and would
+    leave the client exactly as stuck as the refusal did.
+
+    Only a real event log can say this: the fake hub has no offsets of its own,
+    so ``event_offset`` there is whatever ``events_watermark`` happened to read
+    and cannot be shown to advance for the right reason.
+    """
+
+    store = _seed_office()
+    hub = live_hub(fold_entities=OFFICE_FOLD_ENTITIES)
+    sent: list[dict] = []
+    first = _settled_subscription(sent, hub)
+    assert first["replaced"] is False
+
+    store.upsert_actor(
+        WORKSPACE, _actor_payload(position=(42.0, 43.0)), updated_by="between-subscribes"
+    )
+    # The write must be IN the log before the second baseline is taken, or the
+    # comparison below would be measuring a race rather than a re-derivation.
+    _await_patch(sent, "the intervening write, so the re-subscribe follows it")
+
+    second = _subscribe(sent, rid="r2")
+    assert "error" not in second, second
+    second = second["result"]
+
+    assert second["replaced"] is True
+    assert second["watermark"]["event_offset"] > first["watermark"]["event_offset"]
+    positions = [item["position"] for item in second["items"]]
+    assert positions == [[42.0, 43.0]], positions
+    assert [item["position"] for item in first["items"]] == [[1.0, 2.0]]
+
+
+def test_the_re_baselined_sink_is_the_live_one_and_the_old_sink_is_dead(live_hub):
+    """Replacement means the NEW sink carries the lane, at the NEW baseline.
+
+    Two ways this goes wrong and both are silent. If the old registration
+    survived, the client is fed by a sink still holding the FIRST baseline
+    offset, which would re-deliver frames the new baseline already contains — a
+    duplicate fold. If the teardown ran but the re-registration did not, the
+    client holds a fresh baseline and hears nothing ever again, which is the
+    worst outcome available: a subscriber that believes it is current.
+
+    Proven by delivery through the new registration after the replace, plus a
+    subscriber count that never grew — a leak per retry is exactly what the
+    retired refusal existed to prevent, and replacement has to prevent it too.
+    """
+
+    store = _seed_office()
+    hub = live_hub(fold_entities=OFFICE_FOLD_ENTITIES)
+    sent: list[dict] = []
+    _settled_subscription(sent, hub)
+
+    assert "error" not in _subscribe(sent, rid="r2")
+    assert hub.subscriber_count() == 1
+    assert hub.has(office_subscription_key("c1", WORKSPACE))
+    _wait_for(
+        lambda: _frames_delivered(hub) >= 1,
+        what="the re-baselining hydrate to reach the replacement sink",
+    )
+    del sent[:]
+
+    store.upsert_actor(
+        WORKSPACE, _actor_payload(position=(51.0, 52.0)), updated_by="after-rebaseline"
+    )
+
+    frame = _await_patch(sent, "a patch through the REPLACEMENT sink")
+    assert frame["params"]["patches"][0]["changed"]["items"][0]["position"] == [
+        51.0,
+        52.0,
+    ]
+
+
+def test_a_re_baseline_makes_every_other_subscriber_pay_a_fresh_core(live_hub):
+    """The cost, charged where it actually lands — on the OTHER client.
+
+    ``StreamHub.subscribe`` restarts the producer on purpose, so a re-baseline
+    is not a private transaction between one connection and the runtime: every
+    subscriber attached to that hub is handed a fresh full core it did not ask
+    for. Under the retired refusal a redundant subscribe cost nothing at all,
+    because the hub declined the duplicate key before bumping a generation. This
+    is the receipt's justification, and it is asserted rather than described so
+    that removing the log line or the ``replaced`` flag has to argue with a test.
+
+    Measured on the peer's own delivery count rather than on ``generation``
+    alone: a generation bump proves a thread was started, while the peer's count
+    proves the peer was actually made to re-read a projection.
+    """
+
+    _seed_office()
+    hub = live_hub(fold_entities=OFFICE_FOLD_ENTITIES)
+    mine: list[dict] = []
+    peer: list[dict] = []
+    _settled_subscription(mine, hub)
+    _settled_subscription(peer, hub, connection_key="c2")
+
+    generation = hub.stats()["generation"]
+    peer_delivered = _frames_delivered(hub, "c2")
+
+    assert _subscribe(mine, rid="r2")["result"]["replaced"] is True
+
+    assert hub.stats()["generation"] > generation
+    _wait_for(
+        lambda: _frames_delivered(hub, "c2") > peer_delivered,
+        what="the peer subscriber to be handed a core it did not ask for",
+    )
+    # Paid, but not CONFUSED: the peer's own baseline gate swallows the core, so
+    # nothing crosses to its client. A resync here would mean the re-baseline
+    # had also kicked every other client into a refetch round trip.
+    assert _methods(peer) == [], peer
+
+
+def test_unsubscribe_stops_delivery_against_the_real_producer(live_hub):
+    """The claim only a live hub can make: the pushes genuinely STOP.
+
+    The absence is synchronised on a PEER, never on a sleep. With the departing
+    subscriber gone its own delivery counter can no longer advance, so there is
+    nothing on its side left to wait for; a second connection stays attached,
+    the write is awaited on ITS lane, and only then is the released client's
+    silence an observation rather than a guess about thread scheduling.
+
+    Asserted against the hub's key set as well as the notification list, because
+    a registry that pruned only its own index would leave the hub fanning frames
+    into a sink whose connection has stopped reading — a producer kept alive for
+    nobody, which is the leak this method exists to make impossible.
+    """
+
+    store = _seed_office()
+    hub = live_hub(fold_entities=OFFICE_FOLD_ENTITIES)
+    mine: list[dict] = []
+    peer: list[dict] = []
+    _settled_subscription(mine, hub)
+    _settled_subscription(peer, hub, connection_key="c2")
+
+    assert _unsubscribe()["result"] == {"workspace_id": WORKSPACE, "released": True}
+    assert hub.has(office_subscription_key("c1", WORKSPACE)) is False
+    assert hub.has(office_subscription_key("c2", WORKSPACE)) is True
+    assert hub.subscriber_count() == 1
+    del mine[:]
+
+    store.upsert_actor(
+        WORKSPACE, _actor_payload(position=(61.0, 62.0)), updated_by="after-unsubscribe"
+    )
+
+    _await_patch(peer, "the peer's patch, which is what makes the silence readable")
+    assert mine == [], f"a released subscriber was still being pushed to: {mine}"
+
+
+def test_unsubscribe_then_subscribe_starts_a_lane_that_actually_carries(live_hub):
+    """Release is not a one-way door, and the second subscribe is a FIRST one.
+
+    ``replaced: false`` is the load-bearing half. Had unsubscribe pruned only
+    the registry's index and left the hub holding the key, the re-subscribe
+    would report ``replaced: true`` — the leak surfacing as a receipt, and the
+    one way this pair can be wrong while each half looks right on its own. The
+    delivery afterwards is the other half: a lane that reports itself restored
+    and then carries nothing is the failure this whole workstream exists to end.
+    """
+
+    store = _seed_office()
+    hub = live_hub(fold_entities=OFFICE_FOLD_ENTITIES)
+    sent: list[dict] = []
+    _settled_subscription(sent, hub)
+
+    assert _unsubscribe()["result"]["released"] is True
+    assert hub.subscriber_count() == 0
+
+    again = _subscribe(sent, rid="r2")
+    assert "error" not in again, again
+    assert again["result"]["replaced"] is False
+    _wait_for(
+        lambda: _frames_delivered(hub) >= 1,
+        what="the re-join hydrate to reach the new sink",
+    )
+    del sent[:]
+
+    store.upsert_actor(
+        WORKSPACE, _actor_payload(position=(71.0, 72.0)), updated_by="after-rejoin"
+    )
+
+    frame = _await_patch(sent, "a patch on the re-joined lane")
+    assert frame["params"]["patches"][0]["changed"]["items"][0]["position"] == [
+        71.0,
+        72.0,
+    ]
+
+
+def test_releasing_an_unknown_subscription_is_a_clean_no_op_on_the_real_hub(live_hub):
+    """A recovering client releases what it is not sure it holds.
+
+    Two shapes, both answered ``released: false`` and neither an error: a
+    connection that never subscribed, and one releasing a second time. Against a
+    real hub this also has to be shown INERT — the fake shares the registry's
+    bookkeeping and cannot fail this, whereas a real ``unsubscribe`` reaching the
+    wrong key would take a live subscriber off the lane and stop the producer
+    for everyone. So a peer subscription is held throughout and checked
+    afterwards, which is the assertion a fake could not make.
+    """
+
+    _seed_office()
+    hub = live_hub(fold_entities=OFFICE_FOLD_ENTITIES)
+    peer: list[dict] = []
+    _settled_subscription(peer, hub, connection_key="c2")
+
+    never = _unsubscribe(connection_key="c_never_here")
+    assert "error" not in never, never
+    assert never["result"] == {"workspace_id": WORKSPACE, "released": False}
+
+    mine: list[dict] = []
+    _settled_subscription(mine, hub)
+    assert _unsubscribe()["result"]["released"] is True
+    twice = _unsubscribe(rid="u2")
+    assert "error" not in twice, twice
+    assert twice["result"]["released"] is False
+
+    assert hub.has(office_subscription_key("c2", WORKSPACE)) is True
+    assert hub.subscriber_count() == 1
+    assert hub.stats()["producer_running"] is True
+
+
+def test_the_disconnect_sweep_still_works_after_a_re_baseline(live_hub):
+    """The index has to survive replacement, and the count is how you tell.
+
+    A replace that added the key without removing the old one would leave
+    ``_owned`` holding a duplicate that the hub cannot honour — the sweep would
+    claim two teardowns and perform one. Because ``_owned`` stores a SET the
+    duplicate cannot show up as a length, so it is the sweep's own return value
+    and the hub's emptiness afterwards that pin it.
+    """
+
+    _seed_office()
+    hub = live_hub(fold_entities=OFFICE_FOLD_ENTITIES)
+    sent: list[dict] = []
+    _settled_subscription(sent, hub)
+    assert _subscribe(sent, rid="r2")["result"]["replaced"] is True
+    assert _subscribe(sent, rid="r3")["result"]["replaced"] is True
+
+    assert OFFICE_SUBSCRIPTIONS.release("c1") == 1
+
+    assert hub.has(office_subscription_key("c1", WORKSPACE)) is False
+    assert hub.subscriber_count() == 0
+    assert OFFICE_SUBSCRIPTIONS.owned_keys("c1") == set()
+    _wait_for(
+        lambda: hub.stats()["producers_live"] == 0,
+        what="the producer to stop once the re-baselined subscriber left",
+    )
+
+
+def test_the_disconnect_sweep_still_works_after_an_explicit_unsubscribe(live_hub):
+    """``_release_subscription`` runs on EVERY disconnect, including the tidy
+    ones.
+
+    A client that released its workspace and then closed the socket must leave
+    the sweep with nothing to do and no way to raise. Zero is the honest count
+    — asserting 1 would mean the index had kept a key the hub no longer held —
+    and the peer's survival is what proves the sweep did not go looking for
+    something else to release when it found its own set empty.
+    """
+
+    _seed_office()
+    hub = live_hub(fold_entities=OFFICE_FOLD_ENTITIES)
+    mine: list[dict] = []
+    peer: list[dict] = []
+    _settled_subscription(mine, hub)
+    _settled_subscription(peer, hub, connection_key="c2")
+
+    assert _unsubscribe()["result"]["released"] is True
+
+    assert OFFICE_SUBSCRIPTIONS.release("c1") == 0
+    assert hub.has(office_subscription_key("c2", WORKSPACE)) is True
+    assert hub.subscriber_count() == 1
+    assert OFFICE_SUBSCRIPTIONS.release("c2") == 1
+    assert hub.subscriber_count() == 0

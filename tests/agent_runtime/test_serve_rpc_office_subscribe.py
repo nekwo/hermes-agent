@@ -21,6 +21,18 @@ SILENTLY when wrong:
 4. **teardown.** The office keys are namespaced away from the stream lane's
    bare connection key, so a disconnect that swept only the latter would leak a
    subscriber — and a leaked subscriber keeps a producer alive for nobody.
+5. **reclaim.** Subscribe registers and answers in ONE call, so the
+   subscription outlives the client's decision about the reply that created it.
+   A client that refuses an unusable baseline used to be stuck with a live
+   subscription it would never fold against, and no method existed that could
+   release it. Two answers close that: a repeat subscribe RE-BASELINES rather
+   than refusing, and ``runtime.office.unsubscribe`` hands one back without
+   dropping the connection. What is pinned HERE is the shape half — the
+   ``replaced`` receipt, the ``released`` boolean, which typed reason a refusal
+   carries, what the index holds afterwards. The behaviour half (a genuinely
+   FRESHER baseline, delivery actually stopping) is pinned in the live-hub file,
+   because a fake hub agrees with the registry's own bookkeeping and so cannot
+   contradict it.
 
 The sink is tested against hand-built frames rather than a live hub: these are
 FILTERING rules, and an integration test that happened to produce no frame
@@ -28,6 +40,8 @@ would look identical to a filter that drops everything.
 """
 
 from __future__ import annotations
+
+import json
 
 import pytest
 
@@ -65,17 +79,30 @@ class _FakeHub:
     """Just enough StreamHub to answer subscribe/unsubscribe truthfully.
 
     Deliberately NOT a mock that records calls: the behaviours that matter are
-    the REFUSAL of a duplicate key (which is what `already_subscribed` is
-    derived from) and returning False from `unsubscribe` for a key it never
-    held, and a permissive mock would let a bug in either pass.
+    the REFUSAL of a duplicate key and returning False from `unsubscribe` for a
+    key it never held, and a permissive mock would let a bug in either pass.
+    The duplicate refusal is still modelled even though the office lane no
+    longer relies on it — it is what forces the re-baselining path to actually
+    tear the old key down rather than write over it, which is the difference
+    between a replacement and a silent second registration.
+
+    ``draining`` models the one remaining way a real ``StreamHub.subscribe``
+    answers False: its stop event is set. That is a serve-loop shutdown race,
+    unreachable from a test that owns its own hub, and it is the state the old
+    ``already_subscribed`` arm mislabelled.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, draining: bool = False) -> None:
         self.sinks: dict[str, object] = {}
         self.drops: dict[str, object] = {}
+        self.draining = draining
+        #: Every key ever handed to `subscribe`, in order, kept ONLY so a test
+        #: can tell a replacement from a no-op: both leave one live key behind.
+        self.subscribe_calls: list[str] = []
 
     def subscribe(self, key, *, sink, on_drop=None) -> bool:
-        if key in self.sinks:
+        self.subscribe_calls.append(key)
+        if self.draining or key in self.sinks:
             return False
         self.sinks[key] = sink
         self.drops[key] = on_drop
@@ -146,6 +173,18 @@ def _subscribe(rid="r1", workspace_id=WORKSPACE, context=None) -> dict:
             "jsonrpc": "2.0",
             "id": rid,
             "method": "runtime.office.subscribe",
+            "params": {"workspace_id": workspace_id},
+        },
+        context,
+    )
+
+
+def _unsubscribe(rid="u1", workspace_id=WORKSPACE, context=None) -> dict:
+    return serve_rpc.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "method": "runtime.office.unsubscribe",
             "params": {"workspace_id": workspace_id},
         },
         context,
@@ -413,28 +452,445 @@ def test_the_reply_carries_the_get_projection_plus_the_baseline_watermark():
     )["result"]
 
     watermark = subscribed.pop("watermark")
+    # ``replaced`` is the OTHER key subscribe adds on top of the get body — the
+    # re-baselining receipt. Popped here for the same reason the watermark is:
+    # what this test is about is that everything ELSE is byte-identical to the
+    # get, so the two derivations cannot drift.
+    replaced = subscribed.pop("replaced")
     assert subscribed == got
     assert isinstance(watermark["event_offset"], int)
+    assert replaced is False
     assert set(hub.sinks) == {office_subscription_key("c1", WORKSPACE)}
 
 
-def test_a_second_subscribe_on_one_connection_is_typed_not_a_silent_reregister():
-    """Idempotence with a receipt. A silent re-register would leak a subscriber
-    per retry, and a retry is exactly what a client does when it is unsure."""
+def test_a_second_subscribe_on_one_connection_re_baselines_instead_of_refusing():
+    """The gap this change exists to close, at its narrowest.
+
+    Subscribe registers and answers in one call, so the subscription is live
+    before the client has read the reply. A client that finds the baseline
+    unusable — truncated, an unreadable watermark, a workspace id it did not ask
+    for — is RIGHT to refuse it, and the old ``already_subscribed`` answer then
+    left it holding a subscription it would never fold against with no way to
+    reclaim it short of dropping the connection. Asking again is the natural
+    move, and it now works.
+
+    The refusal is asserted GONE by its code as well as its reason: an error
+    frame carrying some other 4090 would satisfy a reason-only check.
+    """
 
     _seed_office()
     # ONE hub, held across both calls — `_ensure_stream_hub` memoizes under a
     # lock, so a factory minting a fresh hub per call would be testing a
-    # runtime that does not exist (and would make the duplicate invisible).
+    # runtime that does not exist (and would hide the duplicate entirely).
     hub = _FakeHub()
     OFFICE_SUBSCRIPTIONS.bind(lambda: hub)
     context = serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
 
+    first = _subscribe(context=context)
+    second = _subscribe(rid="r2", context=context)
+
+    assert "error" not in second, second
+    assert first["result"]["replaced"] is False
+    assert second["result"]["replaced"] is True
+    # The projection came back whole on the retry, not a bare acknowledgement:
+    # the point of re-subscribing is to get a baseline, and an answer that
+    # merely said "yes, still subscribed" would leave the client exactly as
+    # stuck as the refusal did.
+    assert second["result"]["items"] == first["result"]["items"]
+    assert isinstance(second["result"]["watermark"]["event_offset"], int)
+
+
+def test_a_re_baseline_leaves_exactly_one_subscription_and_it_is_the_new_sink():
+    """Replacement, not a second registration and not a no-op.
+
+    Both failure modes leave one live key behind and are invisible from the
+    key set alone: a hub that silently accepted a duplicate would leak a
+    subscriber per retry (the leak ``already_subscribed`` existed to prevent),
+    and a handler that skipped the hub entirely would report a fresh baseline
+    while the client kept being fed by the STALE sink — the worse of the two,
+    because the sink still carries the old baseline offset and would re-deliver
+    frames the new baseline already contains.
+
+    So the old sink is caught by identity: it must no longer be the one the hub
+    holds, and the hub must have been asked twice.
+    """
+
+    _seed_office()
+    hub = _FakeHub()
+    OFFICE_SUBSCRIPTIONS.bind(lambda: hub)
+    context = serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+    key = office_subscription_key("c1", WORKSPACE)
+
+    _subscribe(context=context)
+    first_sink = hub.sinks[key]
+    _subscribe(rid="r2", context=context)
+
+    assert set(hub.sinks) == {key}
+    assert hub.sinks[key] is not first_sink
+    assert hub.subscribe_calls == [key, key]
+    assert OFFICE_SUBSCRIPTIONS.owned_keys("c1") == {key}
+
+
+def test_a_refused_outcome_is_falsy_so_the_natural_guard_cannot_invert():
+    """``SubscribeOutcome`` replaced a bare ``bool``, and that is a trap.
+
+    Every dataclass instance is truthy by default, so the guard a caller reaches
+    for without thinking — ``if not outcome:`` — would be a branch that can
+    never be taken, reporting every refusal as a success. Today's handler asks
+    ``outcome.registered`` and so never exercises ``__bool__`` at all, which is
+    exactly why the guard needs a test of its own rather than incidental
+    coverage: an untested safety rail is one that quietly stops being a rail.
+    """
+
+    from agent_runtime.serve_office_subscriptions import (
+        NO_PUSH_LANE,
+        PUSH_LANE_DRAINING,
+        SubscribeOutcome,
+    )
+
+    assert not SubscribeOutcome(False, reason=NO_PUSH_LANE)
+    assert not SubscribeOutcome(False, replaced=True, reason=PUSH_LANE_DRAINING)
+    assert SubscribeOutcome(True)
+    assert SubscribeOutcome(True, replaced=True)
+    # A refusal never carries a null reason: the handler puts this straight on
+    # the wire, and an unnamed refusal is the mislabel this type exists to end.
+    assert SubscribeOutcome(True).reason is None
+
+
+def test_a_re_baseline_is_billed_to_the_service_log_not_only_to_the_client():
+    """The cost has to be visible to the party that pays for it.
+
+    ``StreamHub.subscribe`` restarts the producer, so a re-baseline makes every
+    OTHER subscriber on that hub rebuild a full core. Under the old refusal a
+    redundant subscribe cost nothing at all — the duplicate key was declined
+    before a generation was ever bumped — so this is a real new cost on the path
+    a confused client takes repeatedly. The client learns of it from
+    ``replaced``; the operator has no reply to read, and without this line a
+    retry loop would surface only as an unexplained climb in the hub's
+    generation counter.
+
+    The FIRST subscribe must write nothing: a line per subscribe would bury the
+    signal in the ordinary case, which is the same as not having it.
+    """
+
+    _seed_office()
+    hub = _FakeHub()
+    lines: list[dict] = []
+    OFFICE_SUBSCRIPTIONS.bind(lambda: hub, log=lines.append)
+    context = serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+
+    _subscribe(context=context)
+    assert lines == []
+
+    _subscribe(rid="r2", context=context)
+
+    assert len(lines) == 1
+    assert lines[0]["event"] == "serve_office_subscription_rebaselined"
+    assert lines[0]["workspace_id"] == WORKSPACE
+    assert lines[0]["connection"] == "c1"
+    assert lines[0]["key"] == office_subscription_key("c1", WORKSPACE)
+    # Named rather than left to be inferred from the hub's stats — this is the
+    # cost the line exists to report.
+    assert lines[0]["producer_restarted"] is True
+
+
+def test_unbinding_drops_the_log_so_a_stopped_loops_sink_is_never_written_to():
+    """The registry outlives any one serve loop; its log must not.
+
+    ``_close_socket_lane`` unbinds on the way down, and the next serve_loop in
+    the same process binds its own ``_service_log``. A log left behind would
+    have the new loop's re-baselines written into the old loop's sink — which in
+    a test suite is a closed stream and in production is a shutdown path's
+    buffer nobody reads."""
+
+    _seed_office()
+    hub = _FakeHub()
+    lines: list[dict] = []
+    OFFICE_SUBSCRIPTIONS.bind(lambda: hub, log=lines.append)
+    OFFICE_SUBSCRIPTIONS.bind(None)
+    OFFICE_SUBSCRIPTIONS.bind(lambda: hub)
+    context = serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+
+    _subscribe(context=context)
+    _subscribe(rid="r2", context=context)
+
+    assert lines == []
+
+
+def test_a_subscribe_racing_the_drain_is_typed_draining_and_not_no_lane():
+    """The mislabel that removing ``already_subscribed`` would have inherited.
+
+    ``StreamHub.subscribe`` also answers False once its stop event is set, and
+    the old branch derived its reason by asking ``bound()`` — which is True for
+    a draining hub exactly as for a live one. A client racing
+    ``_close_socket_lane`` was therefore told "already subscribed to this
+    workspace" while holding nothing, and pointed at the one cure (stop
+    retrying) that cannot work.
+
+    Collapsing that arm into ``push_lane_unavailable`` would be nearly as wrong:
+    that reason means this runtime does not push at all, and a client that
+    believes it will not reconnect. The two are separate names because the cures
+    are separate, and the ``prior_subscription_released`` flag is asserted False
+    here so the True case below is a real distinction rather than a constant.
+    """
+
+    _seed_office()
+    OFFICE_SUBSCRIPTIONS.bind(lambda: _FakeHub(draining=True))
+
+    frame = _subscribe(
+        context=serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+    )
+
+    assert frame["error"]["data"]["reason"] == "push_lane_draining"
+    assert frame["error"]["data"]["prior_subscription_released"] is False
+    assert frame["error"]["data"]["workspace_id"] == WORKSPACE
+
+
+def test_a_re_baseline_that_loses_the_drain_race_admits_it_took_the_old_lane():
+    """The re-baseline tears down BEFORE it registers, and it cannot not.
+
+    The hub refuses a duplicate key, so there is no ordering in which the new
+    sink is installed before the old one is gone. If the hub then refuses the
+    re-registration because it is stopping, the client's previous subscription
+    has already been destroyed — and a refusal that said only "draining" would
+    leave it believing its old lane survived, waiting on pushes that will never
+    come.
+
+    The index must lose the key too. A key kept there that the hub does not hold
+    would have the disconnect sweep report a teardown it never performed, which
+    is the accounting error the whole registry exists to make impossible.
+    """
+
+    _seed_office()
+    hub = _FakeHub()
+    OFFICE_SUBSCRIPTIONS.bind(lambda: hub)
+    context = serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
     assert "result" in _subscribe(context=context)
+
+    hub.draining = True
     frame = _subscribe(rid="r2", context=context)
 
-    assert frame["error"]["code"] == serve_rpc.ERR_CONFLICT
-    assert frame["error"]["data"]["reason"] == "already_subscribed"
+    assert frame["error"]["data"]["reason"] == "push_lane_draining"
+    assert frame["error"]["data"]["prior_subscription_released"] is True
+    assert hub.sinks == {}
+    assert OFFICE_SUBSCRIPTIONS.owned_keys("c1") == set()
+    assert OFFICE_SUBSCRIPTIONS.release("c1") == 0
+
+
+def test_a_re_baseline_is_per_connection_and_never_displaces_another_client():
+    """The key is per connection per workspace, and replacement respects that.
+
+    A replace keyed on the workspace alone would take the OTHER operator's
+    launcher off the lane — and it would go quiet with no error to show for it,
+    because a hub unsubscribe is silent by design. The two-connection case is
+    already pinned for a first subscribe; this pins it for the new path, which
+    is the one that actively tears a key down.
+    """
+
+    _seed_office()
+    hub = _FakeHub()
+    OFFICE_SUBSCRIPTIONS.bind(lambda: hub)
+    for key in ("c1", "c2"):
+        _subscribe(context=serve_rpc.RpcContext(connection_key=key, emit=lambda _f: None))
+    other_sink = hub.sinks[office_subscription_key("c2", WORKSPACE)]
+
+    _subscribe(
+        rid="r3", context=serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+    )
+
+    assert set(hub.sinks) == {
+        office_subscription_key("c1", WORKSPACE),
+        office_subscription_key("c2", WORKSPACE),
+    }
+    assert hub.sinks[office_subscription_key("c2", WORKSPACE)] is other_sink
+
+
+# ── the method: giving a subscription back ──────────────────────────────────
+
+
+def test_unsubscribe_releases_this_connections_subscription_and_says_so():
+    """The other half of reclaim: a client that gives up, without a disconnect.
+
+    Before this method the only way to stop a push lane was to close the socket
+    — which also took every unrelated call riding it. Asserted against the HUB's
+    key set rather than the registry's index, because the registry pruning its
+    own dictionary while the hub kept the subscription is precisely the leak
+    that keeps a producer rebuilding projections for nobody.
+    """
+
+    _seed_office()
+    hub = _FakeHub()
+    OFFICE_SUBSCRIPTIONS.bind(lambda: hub)
+    context = serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+    _subscribe(context=context)
+
+    frame = _unsubscribe(context=context)
+
+    assert frame["result"] == {"workspace_id": WORKSPACE, "released": True}
+    assert hub.sinks == {}
+    assert OFFICE_SUBSCRIPTIONS.owned_keys("c1") == set()
+
+
+def test_unsubscribing_something_never_subscribed_is_a_typed_no_op_not_an_error():
+    """The recovering client's case, and the reason this is a result and not a
+    4001.
+
+    A client that lost track of whether its subscribe landed releases what it is
+    not sure it holds — that is what recovery looks like. An error there would
+    make ordinary recovery indistinguishable from a fault, and a client that
+    cannot tell those apart either logs noise forever or stops looking at the
+    channel that would have told it something real.
+
+    Both no-op shapes are pinned: never-subscribed, and released twice.
+    """
+
+    _seed_office()
+    hub = _FakeHub()
+    OFFICE_SUBSCRIPTIONS.bind(lambda: hub)
+    context = serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+
+    fresh = _unsubscribe(context=context)
+    assert fresh["result"] == {"workspace_id": WORKSPACE, "released": False}
+
+    _subscribe(context=context)
+    assert _unsubscribe(rid="u2", context=context)["result"]["released"] is True
+    again = _unsubscribe(rid="u3", context=context)
+
+    assert "error" not in again
+    assert again["result"] == {"workspace_id": WORKSPACE, "released": False}
+
+
+def test_unsubscribe_needs_no_push_channel_and_no_bound_hub():
+    """Neither is a reason to refuse, and both would strand a subscription.
+
+    Subscribe demands an emitter because it REGISTERS one; unsubscribe only
+    names a key. And a runtime with no hub bound holds no subscription for this
+    caller either — which ``released: false`` already says truthfully. Refusing
+    on either would mean a client that reconnected into a drained runtime could
+    never tidy up after itself.
+    """
+
+    _seed_office()
+
+    no_hub = _unsubscribe(context=serve_rpc.RpcContext(connection_key="c1"))
+    assert no_hub["result"] == {"workspace_id": WORKSPACE, "released": False}
+
+    OFFICE_SUBSCRIPTIONS.bind(lambda: _FakeHub())
+    no_channel = _unsubscribe(
+        rid="u2", context=serve_rpc.RpcContext(connection_key="c1")
+    )
+    assert no_channel["result"] == {"workspace_id": WORKSPACE, "released": False}
+
+
+def test_unsubscribe_still_refuses_a_missing_workspace_id():
+    """Tolerance has a floor. Every other refusal this method retires is about a
+    state the client can legitimately be IN; a missing ``workspace_id`` names no
+    key at all, so there is nothing to answer False about and answering False
+    anyway would swallow a caller bug."""
+
+    OFFICE_SUBSCRIPTIONS.bind(lambda: _FakeHub())
+
+    for params in ({}, {"workspace_id": "  "}, {"workspace_id": 7}):
+        frame = serve_rpc.handle_request(
+            {
+                "jsonrpc": "2.0",
+                "id": "u1",
+                "method": "runtime.office.unsubscribe",
+                "params": params,
+            },
+            serve_rpc.RpcContext(connection_key="c1"),
+        )
+        assert frame["error"]["code"] == serve_rpc.ERR_INVALID_PARAMS, params
+        assert frame["error"]["data"]["reason"] == "workspace_id_required", params
+
+
+def test_unsubscribe_asks_the_HUB_even_when_the_index_has_forgotten_the_key():
+    """The index is a cache of the hub's truth, and divergence resolves the
+    hub's way.
+
+    This is not hypothetical. ``bind(None)`` clears ``_owned`` and deliberately
+    does NOT unsubscribe anything — the drain unbinds first so a subscribe
+    racing it is refused — so a hub that outlives one bind/rebind cycle holds
+    keys the index has never heard of. That is the orphan shape: a live
+    subscription nobody is indexed as owning, keeping a producer rebuilding
+    projections for a client that may well have gone.
+
+    A ``release_one`` that consulted the index BEFORE the hub would short-circuit
+    to ``released: false`` and leave the orphan attached forever — and it would
+    look correct in every other test here, because in the ordinary case the two
+    tables agree. Only a divergence can tell them apart.
+    """
+
+    _seed_office()
+    hub = _FakeHub()
+    OFFICE_SUBSCRIPTIONS.bind(lambda: hub)
+    context = serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+    _subscribe(context=context)
+    key = office_subscription_key("c1", WORKSPACE)
+
+    # A drain and a fresh loop over the SAME hub: the index is emptied, the
+    # hub's subscription is not.
+    OFFICE_SUBSCRIPTIONS.bind(None)
+    OFFICE_SUBSCRIPTIONS.bind(lambda: hub)
+    assert OFFICE_SUBSCRIPTIONS.owned_keys("c1") == set()
+    assert set(hub.sinks) == {key}
+
+    frame = _unsubscribe(context=context)
+
+    assert frame["result"]["released"] is True
+    assert hub.sinks == {}
+
+
+def test_unsubscribe_touches_only_this_connection_and_only_this_workspace():
+    """Two axes, one test, because the key joins them and a bug in either
+    direction is silent: a release keyed on the workspace alone would take the
+    other operator's launcher off the lane, and one keyed on the connection
+    alone would drop every workspace that connection watches."""
+
+    _seed_office()
+    _seed_office(OTHER)
+    hub = _FakeHub()
+    OFFICE_SUBSCRIPTIONS.bind(lambda: hub)
+    for connection in ("c1", "c2"):
+        for workspace in (WORKSPACE, OTHER):
+            _subscribe(
+                workspace_id=workspace,
+                context=serve_rpc.RpcContext(connection_key=connection, emit=lambda _f: None),
+            )
+
+    _unsubscribe(context=serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None))
+
+    assert set(hub.sinks) == {
+        office_subscription_key("c1", OTHER),
+        office_subscription_key("c2", WORKSPACE),
+        office_subscription_key("c2", OTHER),
+    }
+    assert OFFICE_SUBSCRIPTIONS.owned_keys("c1") == {
+        office_subscription_key("c1", OTHER)
+    }
+
+
+def test_unsubscribe_then_subscribe_gets_a_fresh_registration_not_a_replace():
+    """A released subscription is genuinely gone, so the next subscribe is a
+    FIRST one.
+
+    ``replaced: false`` is the assertion that matters here. If unsubscribe had
+    pruned only the registry index and left the hub's key in place, the
+    re-subscribe would report ``replaced: true`` — which is the leak showing up
+    as a receipt, and the one way this pair can be wrong while both halves
+    individually look right."""
+
+    _seed_office()
+    hub = _FakeHub()
+    OFFICE_SUBSCRIPTIONS.bind(lambda: hub)
+    context = serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+
+    _subscribe(context=context)
+    _unsubscribe(context=context)
+    again = _subscribe(rid="r2", context=context)
+
+    assert again["result"]["replaced"] is False
+    assert set(hub.sinks) == {office_subscription_key("c1", WORKSPACE)}
 
 
 def test_two_connections_may_each_subscribe_to_the_same_workspace():
@@ -508,18 +964,135 @@ def test_a_dropped_subscriber_is_told_to_resync_rather_than_left_quiet():
     }
 
 
+# ── the receipt reaches a REAL operator ─────────────────────────────────────
+
+
+def test_the_real_serve_loop_bills_a_re_baseline_to_its_own_service_log():
+    """The wire from ``serve.py`` to the log, over a real socket.
+
+    Everything above binds the registry itself and hands it a list, which proves
+    the registry writes when told to and nothing about whether the SERVE LOOP
+    ever tells it. That one keyword argument is the whole operator-facing half of
+    the receipt, and deleting it breaks no unit test — a client in a retry loop
+    would go on taxing every other subscriber on the hub with the log silent,
+    which is precisely the invisible cost this change refuses to ship.
+
+    So the real loop is started with the real socket lane, a real client
+    subscribes twice over a real connection, and the assertion is made against
+    the line as it actually reaches an operator: ``_service_log`` writes to the
+    serve's stderr, which arrives on the supervisor's NDJSON stream as an
+    ordinary ``{"event":"stderr","line":…}`` frame. No new sink, and no reading
+    of a closure this test has no business knowing about.
+
+    A socket client is required rather than convenient: stdio has no push
+    channel, so a stdio subscribe is refused before it can ever re-baseline.
+    """
+
+    from tests.agent_runtime.test_serve_socket_lane import client, running_serve
+
+    _seed_office()
+
+    with running_serve() as handle:
+        with client(handle, name="rebaseline-peer") as (connection, _hello):
+            for rid in ("sub-1", "sub-2"):
+                connection.send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": rid,
+                        "method": "runtime.office.subscribe",
+                        "params": {"workspace_id": WORKSPACE},
+                    }
+                )
+                reply = _read_socket_rpc(connection, rid)
+                assert "error" not in reply, reply
+            # The receipt the CLIENT gets, asserted on the same round trip: the
+            # two halves are one decision, and a test that pinned only the log
+            # would let the wire half rot.
+            assert reply["result"]["replaced"] is True
+
+            lines = _poll_service_log(
+                handle, "serve_office_subscription_rebaselined"
+            )
+
+    assert len(lines) == 1, f"expected exactly one re-baseline line, got {lines}"
+    assert lines[0]["workspace_id"] == WORKSPACE
+    assert lines[0]["producer_restarted"] is True
+    # The connection key is the serve loop's own, not one this test invented —
+    # asserted as merely present and non-empty, because pinning its format here
+    # would couple this file to the socket lane's naming.
+    assert lines[0]["connection"]
+    assert lines[0]["key"].startswith("rpc:office:")
+
+
+def _read_socket_rpc(connection, rid: str, *, limit: int = 200) -> dict:
+    """Read past the notifications. The office lane pushes UNPROMPTED frames on
+    this very connection, so a reader that took the next frame would race a
+    hydrate-driven resync and fail intermittently."""
+
+    for _ in range(limit):
+        frame = connection.read_frame()
+        if frame is None:
+            raise AssertionError(f"connection closed before a reply to {rid!r}")
+        if frame.get("id") == rid and "jsonrpc" in frame:
+            return frame
+    raise AssertionError(f"no JSON-RPC reply for {rid!r} within {limit} frames")
+
+
+def _poll_service_log(handle, event: str, timeout: float = 5.0) -> list[dict]:
+    """Poll the serve's stderr frames for structured log lines naming *event*.
+
+    Polled rather than read once because ``_service_log`` writes on the
+    connection's own thread: the reply this test already has in hand is no
+    guarantee the line has been flushed yet, and a single read would fail on
+    scheduling rather than on behaviour."""
+
+    import time as _time
+
+    deadline = _time.monotonic() + timeout
+    while True:
+        found = [
+            json.loads(row["line"])
+            for row in handle.sink.frames()
+            if row.get("event") == "stderr" and row.get("line", "").startswith("{")
+        ]
+        matched = [row for row in found if row.get("event") == event]
+        if matched or _time.monotonic() >= deadline:
+            return matched
+        _time.sleep(0.01)
+
+
 # ── the lane stays additive ─────────────────────────────────────────────────
 
 
-def test_subscribe_joins_the_manifest_without_moving_the_contract_version():
+def test_the_reclaim_pair_joins_the_manifest_without_moving_the_contract_version():
     """The set grows when a method is ADDED; the integer moves only when an
     existing method's shape changes incompatibly. A client only ever calls
     methods it found in the set, so adding one needs no bump — the reasoning
-    the module docstring already commits to, asserted rather than assumed."""
+    the module docstring already commits to, asserted rather than assumed.
+
+    Both halves of this change are additive under that rule, and the second is
+    the one worth stating out loud because it looks like it might not be:
+    ``runtime.office.subscribe``'s RESULT gained ``replaced``. Adding a key to a
+    result does not move the integer either — the same precedent
+    ``runtime.office.get`` set when it gained ``persona_instance_id``, because
+    the launcher's decoder gates on required-key PRESENCE
+    (``mission_office_rpc.dart:260``) and never on a key count. A client that
+    folds today's reply folds tomorrow's unchanged; bumping would have made it
+    REFUSE a payload it can read.
+
+    What WOULD move the integer is the refusal that went away: a client keyed on
+    ``already_subscribed`` would now never see it. No such client exists — the
+    launcher has no ``runtime.office.subscribe`` caller yet, which is the whole
+    reason this contract hole is being closed before one ships — and a refusal
+    that could only ever be answered by giving up is not a shape anything can
+    depend on having.
+    """
 
     assert serve_rpc.method_names() == [
         "runtime.office.get",
         "runtime.office.subscribe",
+        "runtime.office.unsubscribe",
         "runtime.office.upsert",
     ]
     assert serve_rpc.RPC_CONTRACT_VERSION == 1
+    assert serve_rpc.manifest()["contract"] == 1
