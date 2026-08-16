@@ -40,7 +40,8 @@ rather than fenced.
 `widget.onMoveSceneItem!(dragging, _game.layoutPositionForDrag(...))` on every move. A drag therefore
 emits hundreds of mutations.
 
-**`interactionMode` is a DEAD FIELD — this is the invisible drag's root cause.**
+**`interactionMode` is a DEAD FIELD.** True, and worth knowing — but **NOT established as the invisible
+drag's root cause**, which an earlier revision of this section claimed. See the correction below.
 `mission_office_game.dart:199-201`:
 
 ```dart
@@ -52,8 +53,26 @@ void setInteractionMode(MissionOfficeInteractionMode mode) {
 `rg interactionMode lib/features/mission_control/office/mission_office_game.dart` returns **only that
 line** (RAN). Nothing reads it. The game is told a node drag is in progress and does nothing with the
 fact. The enum exists (`mission_office_render_model.dart:155`), the setter exists, the consumer never
-did. The node's on-screen position comes solely from the layout being re-applied — so the drag is
-invisible until something forces a re-seed, which the release does.
+did. `git log -S interactionMode` returns exactly one commit — `b2f815cd8`, the 2026-06-28 renderer
+rewrite — so the field has been dead since it was born.
+
+> **CORRECTION, same day.** This section first said the dead field *is* the root cause. That does not
+> hold, and the operator was right to push back with *"the drag used to work fine, I used to be dragging
+> around."* Re-reading the chain: the mount re-applies on `!identical(oldWidget.model, widget.model)`
+> (`mission_office_mount.dart:110-114`), and the host builds `model` **fresh in every `build()`**
+> (`mission_office_host.dart:161-165`), so the identity guard should pass and `applyModel` →
+> `_reconcileAvatars` should run on each frame of a drag. The node should therefore re-render *without*
+> anything reading `interactionMode`. It does not, and **why is unresolved.**
+>
+> The open questions, none of which I settled: (a) does the host actually rebuild during a drag, and does
+> `_officeLayoutOverride` reach `widget.layout`, or does the host's own `_layoutOverride` (`:147`) shadow
+> it; (b) does `_reconcileAvatars` (`:273`) *move* existing avatars or only add and remove them; (c)
+> which commit broke it, since the operator reports it working previously. Scoped out separately.
+>
+> The lesson is the one §10.2 of the fold plan already records twice: I found a true fact — the dead
+> field — and promoted it to a cause because it was the first thing that looked like an explanation. A
+> dead field explains why there is no *special* drag rendering; it does not explain why the *ordinary*
+> re-render fails.
 
 **The debounces exist only to clean up after the per-frame streaming.** `mission_control_page.dart:3689`
 gates a 220 ms debounce on whether the operator-facing message string starts with `'Moved '`; the write
