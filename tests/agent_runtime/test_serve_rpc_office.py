@@ -517,6 +517,7 @@ def test_the_envelope_itself_is_validated_with_upstreams_codes():
     assert unknown["error"]["message"] == "unknown method: runtime.nope.get"
     # The refusal names what DOES exist — the manifest a client may have missed.
     assert unknown["error"]["data"]["methods"] == [
+        "runtime.agent.create",
         "runtime.office.get",
         "runtime.office.subscribe",
         "runtime.office.unsubscribe",
@@ -659,6 +660,7 @@ def test_stdio_learns_the_method_set_from_ready_and_can_re_ask_version():
     expected = {
         "contract": 1,
         "methods": [
+            "runtime.agent.create",
             "runtime.office.get",
             "runtime.office.subscribe",
             "runtime.office.unsubscribe",
@@ -703,6 +705,7 @@ def test_the_method_surface_is_transport_agnostic_and_answers_on_the_socket():
             assert hello_ok["rpc"] == {
                 "contract": 1,
                 "methods": [
+                    "runtime.agent.create",
                     "runtime.office.get",
                     "runtime.office.subscribe",
                     "runtime.office.unsubscribe",

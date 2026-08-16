@@ -105,6 +105,23 @@ def persona_chat_instance_lock(persona_instance_id: str) -> Iterator[None]:
 
 
 @contextlib.contextmanager
+def agent_create_lock(key_digest: str) -> Iterator[None]:
+    """Serialize one ``runtime.agent.create`` idempotency key across processes.
+
+    Nothing else in the runtime takes this lock, which is what lets the office
+    lock be acquired INSIDE it (``upsert_actor``) without minting a new
+    deadlock order: no path ever waits on an agent-create lock while holding an
+    office one.
+    """
+    with _file_lock(
+        paths.lock_dir()
+        / "agent_creates"
+        / f"{paths._safe_path_token(key_digest)}.lock"
+    ):
+        yield
+
+
+@contextlib.contextmanager
 def archive_lock() -> Iterator[None]:
     with _file_lock(paths.lock_dir() / "archive.lock"):
         yield

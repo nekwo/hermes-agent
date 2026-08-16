@@ -51,6 +51,21 @@ def persona_chat_mint_receipt_path(key_digest: str) -> Path:
     return persona_chat_mint_receipts_dir() / f"{_safe_path_token(key_digest)}.json"
 
 
+def agent_create_reservations_dir() -> Path:
+    """Recorded-progress receipts for ``runtime.agent.create``.
+
+    A sibling of ``persona_chat_mint_receipts`` rather than a directory inside
+    it: the two ledgers answer different questions (one write vs. a two-store
+    sequence) and share no reader, and nesting them would make a sweep of one
+    silently sweep the other.
+    """
+    return store_root() / "agent_create_reservations"
+
+
+def agent_create_reservation_path(key_digest: str) -> Path:
+    return agent_create_reservations_dir() / f"{_safe_path_token(key_digest)}.json"
+
+
 def runtime_instances_dir() -> Path:
     return store_root() / "runtime_instances"
 
