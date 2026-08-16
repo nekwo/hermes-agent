@@ -1021,7 +1021,15 @@ Ordered by measured value, not by tidiness. Each item states what it buys and wh
    shipped cleanly for `office_actor`. *Does not* fix the race, the half-created agent, or the ~450 ms
    poll+settle floor.
 
-2. **Log the `snapshot_build` `elapsed_ms` that is already on the wire.** `stream.py:316-327` emits it in
+2. **Log the `snapshot_build` `elapsed_ms` that is already on the wire.** **Launcher half LANDED**
+   (`2eeb25c45`) — every build-time heartbeat now writes a `[MissionBuild]` receipt through
+   `package:logging` rather than `debugPrint`, so it survives a windowed release build (R#46's defect
+   class). Two caveats worth carrying: the wire value is a **cadence sample** — how long the build had
+   been running when a heartbeat came due — never the total, and a build finishing inside one 5 s interval
+   emits none at all. And that commit's docstring points at a producer-side total
+   (`snapshot_build reason=… elapsed_ms=…` in hermes' `agent.log`) which **did not exist when it landed**;
+   hermes has only the heartbeat at `stream.py:316-327`. Either the producer half lands and the reference
+   becomes true, or the docstring is corrected. `stream.py:316-327` emits it in
    the liveness heartbeat during every build. No consumer logs it. It is the exact number two diagnostic
    passes spent hours bracketing by subtraction and probe measurement. Nearly free; turns the next
    investigation into a grep.
@@ -1039,13 +1047,39 @@ Ordered by measured value, not by tidiness. Each item states what it buys and wh
    make the create foldable** — if the unified call still emits `refresh`, the batch still demotes and the
    6.5 s stays. Do it *for* correctness and measurability, not for speed.
 
-4. **Client prediction + revision reconciliation (§7 / R#43).** The canvas moves on release; the
-   write's own reply is the acknowledgement, so the client stops waiting on a push about its own change.
-   Independent of 1–3. Note it *masks* rather than removes: applied before D3 it would have hidden six and
-   a half seconds of real work.
+4. **Client prediction + revision reconciliation (§7 / R#43).** ~~The canvas moves on release~~ —
+   **LANDED 2026-08-16 (launcher `2a7f0fc65`), and this item was substantially wrong about what remained
+   to build.** The prediction loop already existed and was already mutation-tested before the branch that
+   "added" it: `missionOfficePredictedRevision`, the `MissionOfficeUpsertOk` revision compare, the miss
+   rollback with its `REVISION MISS` receipt, and the corrective read gated on `rolledBack > 0` are all
+   present at `2eeb25c45`. The canvas was never waiting on the echo to paint either — the page sets
+   `_officeLayoutOverride` inside `setState` on every pan update. What it waited for was the round trip to
+   *start*, which is item 5's subject, not this one.
 
-5. **Commit on pointer-up rather than 600 ms after the last movement.** The debounce already coalesces a
-   drag correctly; it just adds 600 ms of dead time before a round trip. Free.
+   **The one real gap was the archive half, and it was a live defect.** A deletion is a prediction too:
+   the placement leaves the canvas the instant the operator asks, before anything is submitted. When the
+   store refused `office.actor.remove` the lane correctly retracted (`sync.removed.remove(key)`) and
+   incremented `refused`, but **never `rolledBack`** — the counter the corrective read is gated on. So the
+   rollback was real and *invisible*: the actor stayed gone from a canvas the store still had it on until
+   some later poll happened to re-resolve. Both arms now count (the store's refusal and the mass-archive
+   backstop's). A prediction that never visibly retracts is worse than no prediction, because the canvas
+   then lies persistently rather than briefly.
+
+   The masking caveat stands: prediction hides latency, it does not remove it. Applied before D3 it would
+   have concealed six and a half seconds of real work.
+
+5. **Commit on pointer-up rather than 600 ms after the last movement.** **LANDED 2026-08-16** (same
+   merge). The cost was larger than this item priced it: a drag paid **two** trailing debounces, 220 ms in
+   the page and 600 ms in the write lane — 820 ms, not 600. Both stay (they are what collapses a drag's
+   hundreds of frames into one write); a node release now runs the page's staged save immediately and asks
+   the controller to flush rather than waiting out its timer. A camera pan or a tap commits nothing.
+   Makes nothing faster — stops the launcher waiting before a round trip whose cost is unchanged.
+
+   Two loose ends recorded rather than half-fixed: the page glue between the release event and `commitNow`
+   has no widget test (both ends are pinned, the ~5 lines between them are not, and covering it needs the
+   Flame canvas inside the full page); and the page debounce is still gated on whether a human-readable
+   message string starts with `'Moved '`, so it coalesces by coincidence rather than intent. The honest
+   shape is a `coalesces:` flag on the mutation.
 
 6. **Scoped invalidation — name what changed instead of "re-fetch everything."** Upstream's `{dirs, full}`
    shape (R15). Turns every future uncoverable event from a cliff into a step, and stops the
