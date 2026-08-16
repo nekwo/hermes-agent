@@ -1029,12 +1029,17 @@ Ordered by measured value, not by tidiness. Each item states what it buys and wh
 3. **`runtime.agent.create` — one call: `{persona, workspace_id, position:[x,y]}` returning the placed
    actor.** The launcher must not know that creating an agent involves a chat; that is backend mechanics
    leaking into the client. Kills the coalescing lottery (one call, one event, one batch, deterministic),
-   makes the half-created agent unrepresentable (incident #37), moots `_addDistinctPlacement`'s
-   no-instance-to-thread problem, and creates the timing envelope phase-level analytics needs. **Does not
+   makes the half-created agent unrepresentable (R#37), and creates the timing envelope phase-level
+   analytics needs. **Correction:** an earlier draft of this item said it "moots `_addDistinctPlacement`'s
+   no-instance-to-thread problem". That function no longer exists — launcher `af2c62541` replaced it with
+   `_refuseDropWithNoResolvableInstance` (`mission_control_page.dart:2443`), an out-loud refusal whose own
+   docstring names `runtime.agent.create` as its retirement. The live problems this item actually retires
+   are that refusal branch (a drop the operator cannot complete) and the placement-without-instance write
+   the office store still accepts. **Does not
    make the create foldable** — if the unified call still emits `refresh`, the batch still demotes and the
    6.5 s stays. Do it *for* correctness and measurability, not for speed.
 
-4. **Client prediction + revision reconciliation (§7 / task #43).** The canvas moves on release; the
+4. **Client prediction + revision reconciliation (§7 / R#43).** The canvas moves on release; the
    write's own reply is the acknowledgement, so the client stops waiting on a push about its own change.
    Independent of 1–3. Note it *masks* rather than removes: applied before D3 it would have hidden six and
    a half seconds of real work.
@@ -1048,10 +1053,20 @@ Ordered by measured value, not by tidiness. Each item states what it buys and wh
    the change that makes foldability an optimisation rather than a precondition. Also fixes the boot
    demote for free: one `office.surface.updated` currently sinks a 23-event startup batch.
 
-7. **Collapse to one transport (D7 / ruling #42).** Now a *performance* item as well as a correctness one:
-   every demoted batch is built **twice concurrently** — the serve hub's producer and the launcher's own
-   `harness stream` child — over the same ~2,000 files on the same disk. That contention is a live
-   candidate for why builds hit the cold 6.9 s rather than the warm 1.2 s.
+7. **Collapse to one transport (D7 / R#42).** Now a *performance* item as well as a correctness one:
+   every demoted batch is built **twice** — once for the serve hub's producer and once for the launcher's
+   own stream request — over the same ~2,000 files. Pure waste either way.
+
+   **Correction to an earlier draft, which said "twice *concurrently*, same disk, contention".** That is
+   wrong in the normal topology, for two independent reasons, both verified in code rather than assumed:
+   (a) the launcher's stream lane rides **inside the serve child** as an argv streaming request —
+   `mission_control_provider.dart:240` injects `runMissionControlCommandStreamingPreferServe`, which
+   spawns a separate `hermes harness stream` process only when there is no serve session or the child
+   answers stale (`mission_control_serve_session_io.dart:1750-1775`); (b) within one process
+   `build_snapshot()` is serialised by `_BUILD_COALESCE` (`snapshot.py:345-388`), so two demoted-batch
+   builds run **back to back, never against the disk at once**. The disk-contention hypothesis for why
+   builds hit the cold 6.9 s rather than the warm 1.2 s therefore holds only in the *fallback* topology,
+   and should not be carried forward as the leading explanation. Measure before believing it.
 
 8. **End-to-end correlation id** (gesture, RPC, events, batch, frame, fold). Every receipt today is
    per-lane; causality is inferred from timestamps. That inference **actively misled this investigation**:
@@ -1059,13 +1074,46 @@ Ordered by measured value, not by tidiness. Each item states what it buys and wh
    3.8 s" figure and, from it, a confident and wrong recommendation to prioritise prediction over D3. The
    cost of no correlation id is not slow diagnosis; it is fluent, confident, wrong diagnosis.
 
+   **Cheaper than this item first priced it:** the read half of the wire is already built and contracted.
+   `stream.py:157-168` surfaces `entity.correlation_id` from the event payload on every delta frame
+   (`mission-control-stream.md:182`), and patch rows spread the payload verbatim (`stream.py:242-246`), so
+   a correlation id present in a payload already reaches the launcher. The slot exists end to end and is
+   populated by nothing on any gesture path. The work is minting and stamping, not plumbing.
+
 9. **The page-open write storm.** Every Mission Office open re-upserts all 11 desk actors plus a surface
    write, off a 21-hour-old cache with five dropped predictions. Its surface write demotes the boot batch
    every time. The same shape — the launcher inferring server state and writing off that inference —
-   caused incident #40. Unowned, and the largest un-investigated behaviour left on this surface.
+   caused R#40. Unowned, and the largest un-investigated behaviour left on this surface.
 
 10. **The ~4.3 s `laneAbsent` window on every page open** (not just cold boot). A gesture inside it falls
     back to the CLI lane and raises the fallback toast. Unowned, and untouched by items 1–9.
 
 **If only three:** D3 (removes the delay), the `elapsed_ms` log line (stops the next diagnosis costing a
 night), prediction (makes it feel instant regardless).
+
+### 10.4 Register — the numbers this document cites
+
+This document and its four follow-on plans cite incidents, rulings and tasks by number. Those numbers
+originated in a working session list and were **recorded nowhere on disk**: an agent searched both repos
+and the live board store and found no definition for any of them. A reader of the committed docs got
+dangling references. They are defined here, and this section is the authority until a real register
+exists.
+
+Cited as `R#nn` from here on, to make clear they resolve to this table and not to a GitHub issue.
+
+| Ref | Kind | 2026 | What it is |
+| --- | --- | --- | --- |
+| **R#10** | task | 08-14 | `runtime.agent.create` — one atomic call minting roster row, placement and chat root together. Plan A. |
+| **R#37** | incident | 08-15 | An office drag created the roster instance but never persisted the placement. The two halves came apart; the write lane emitted no receipt, so "never submitted" was indistinguishable from "submitted and refused". |
+| **R#40** | incident | 08-15 | **Data loss.** One drag archived every other actor in the workspace — `_flush` treated absence from the in-memory layout as intent to delete, while the read path is designed to hand back degraded layouts as a normal outcome. Restored via `office actor-restore`. |
+| **R#42** | ruling | 08-15 | Office becomes **RPC + push only**; every fallback lane is deleted once the main path is proven. Operator-stated accepted cost: *"no serve no office"*. Caching may return later as an optimisation, never as a fifth fallback. Plan C. |
+| **R#43** | task | 08-15 | Client prediction + revision reconciliation on drag. The write's own reply is the acknowledgement; notifications are for other clients' changes. |
+| **R#53** | task | 08-16 | No end-to-end correlation id — every receipt is per-lane, so causality is inferred from timestamps. Plan D. |
+
+Two of these are load-bearing for the plans and should be read before the plans that depend on them:
+**R#42** is the only recorded statement of the single-transport sequence, and **R#40** is the evidence
+that motivates prediction (R#43) being a correctness change rather than UX polish.
+
+The lesson worth keeping is narrower than "write things down": a number is not a reference. Every one of
+these was cited confidently in committed prose while resolving to nothing — the documentary form of the
+same error §10.2 records twice, an assertion whose backing was never checked.

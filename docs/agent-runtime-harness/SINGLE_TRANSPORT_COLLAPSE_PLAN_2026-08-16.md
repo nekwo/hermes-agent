@@ -46,10 +46,15 @@ one batch boundary, V6 gone by construction) carries the plan on its own.
   DECISION doc's borrowed cutover pattern: keep old polls as "SLOW BACKSTOPS
   … so nothing goes dark mid-upgrade"
   (`DECISION_push_and_rpc_2026-08-13.md:165-169`, launcher repo, READ).
-  **Work item C-W1 (for the coordinator/operator, not this repo):** record
-  ruling #42's verbatim text and the accepted-cost sentence into that
-  DECISION doc; until then, every citation of #42 is relayed text and this
-  plan says so at each use.
+  **Work item C-W1 — PARTLY DISCHARGED 2026-08-16.** The ruling, its accepted
+  cost and the other cited numbers are now recorded on disk in
+  `OFFICE_GESTURE_FOLD_PROMOTION_PLAN_2026-08-16.md` §10.4 ("Register — the
+  numbers this document cites"), which is the authority until a real register
+  exists; read `R#42` there for this plan's citations of `#42`. What remains
+  open is the narrower half: the ruling's verbatim text belongs in the
+  launcher's `DECISION_push_and_rpc_2026-08-13.md` beside the cutover pattern
+  it extends. Until that lands, the §10.4 entry is a paraphrase written from
+  relayed text, not a quotation — treat it as such.
 
 ## 1. Baseline — the actual transport inventory (evidence sweep + READ)
 
