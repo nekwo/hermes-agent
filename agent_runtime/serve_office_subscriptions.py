@@ -116,7 +116,7 @@ from typing import Any, Callable
 
 from .patch_coverage import HISTORICAL_FOLD_ENTITIES
 from .serve_rpc import notification
-from .state_patches import OFFICE_ACTOR_ENTITY
+from .state_patches import OFFICE_ACTOR_ENTITY, STATE_PATCHED_EVENT_TYPE
 
 #: What an RPC office subscriber declares it can fold — the historical set PLUS
 #: ``office_actor``, and the union half of that is the whole point.
@@ -202,6 +202,69 @@ OFFICE_RESYNC_METHOD = "runtime.office.resync"
 #: patch-coverable, so no office patch exists to forward.
 _FULL_CORE_FRAME_TYPES = frozenset({"hydrate", "delta"})
 
+#: The one frame type that ENUMERATES what it carried, and therefore the only
+#: one whose relevance to a given workspace is decidable (see
+#: :func:`_delta_touches_workspace`). A ``hydrate`` says only "here is
+#: everything", which is precisely the case that cannot be scoped.
+_ENUMERATED_FRAME_TYPE = "delta"
+
+
+def _delta_touches_workspace(frame: dict[str, Any], workspace_id: str, prefix: str) -> bool | None:
+    """Did this uncovered batch carry anything for ``workspace_id``?
+
+    ``True``/``False`` when the frame's ``events`` list can be read; ``None``
+    when it cannot — a THIRD answer, not a False, because a frame this function
+    cannot enumerate is exactly the case where the conservative resync is the
+    honest reply. Coercing it to "no" would silently drop a change.
+
+    Why this is answerable at all: a coalesced ``delta`` carries ``events`` —
+    one redaction-safe block per batched event, built by ``stream._delta_entity``
+    — so the frame already says what it was about. Two things count as touching
+    this workspace, and they are different facts rather than one restated:
+
+    * an ``office.*`` domain event whose payload names this ``workspace_id``
+      (the surface/actor writes that are uncovered ON PURPOSE and genuinely need
+      a refetch here);
+    * a ``state.patched`` naming an ``office_actor`` under this workspace — a
+      patch that rode in an UNCOVERABLE batch, i.e. one demoted by something
+      else in the same drain. The office row moved and this lane is not getting
+      a patch frame for it, so it must refetch.
+
+    Everything else — an agent's turn, a board write, another workspace's
+    office — moved nothing this subscriber holds.
+    """
+
+    events = frame.get("events")
+    if not isinstance(events, list):
+        return None
+    for entry in events:
+        if not isinstance(entry, dict):
+            return None
+        event = entry.get("event")
+        if not isinstance(event, dict):
+            return None
+        event_type = event.get("type")
+        if not isinstance(event_type, str):
+            return None
+        payload = event.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        if event_type.startswith("office."):
+            # An office event that does not name its workspace is unplaceable,
+            # and unplaceable takes the conservative arm like every other
+            # ambiguity on this lane.
+            named = payload.get("workspace_id")
+            if not isinstance(named, str) or not named:
+                return None
+            if named == workspace_id:
+                return True
+            continue
+        if event_type == STATE_PATCHED_EVENT_TYPE:
+            if payload.get("entity") == OFFICE_ACTOR_ENTITY and str(
+                payload.get("id") or ""
+            ).startswith(prefix):
+                return True
+    return False
+
 #: Carries no state, so it is neither a patch nor a resync.
 _LIVENESS_FRAME_TYPES = frozenset({"heartbeat"})
 
@@ -284,6 +347,32 @@ def office_patch_sink(
         if event_offset is not None and event_offset <= int(baseline_offset or 0):
             return
         if frame_type != "patch":
+            # SCOPED (office fold-promotion plan O-H4, 2026-08-16). An uncovered
+            # batch used to resync EVERY office subscription runtime-wide, which
+            # meant an agent's turn, a board write or another workspace's office
+            # edit each cost this lane a full re-subscribe — and a re-subscribe
+            # restarts the shared producer, billing every OTHER subscriber a
+            # fresh ~822 KB core for a frame that carried nothing for anyone
+            # here. Background activity alone could walk the client up the
+            # 250ms→500ms→1s backoff and park it at 5 in 60s, which is the park
+            # threshold being consumed by noise instead of by defects.
+            #
+            # Only a ``delta`` is scopable, and the asymmetry is the rule rather
+            # than an optimisation: a delta ENUMERATES its batch (``events``), so
+            # its relevance is decidable; a hydrate says "here is everything" and
+            # a type this module has not been taught says nothing at all. Both
+            # keep the unconditional resync — upstream's ``full`` bit, by
+            # another name.
+            #
+            # CAVEAT for a future stream-less client: skipping is sound TODAY
+            # because the stream lane owns read-model currency and this
+            # subscriber's canvas is a projection of one workspace. A client
+            # whose only lane is this one would need the skip path to advance a
+            # bookmark before this rule could carry it alone.
+            if frame_type == _ENUMERATED_FRAME_TYPE and (
+                _delta_touches_workspace(frame, workspace_id, prefix) is False
+            ):
+                return
             # Includes the unknown-type branch on purpose — see the module
             # docstring. A resync is recoverable; a dropped change is not.
             #

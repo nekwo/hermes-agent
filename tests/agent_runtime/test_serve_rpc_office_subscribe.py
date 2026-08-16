@@ -397,11 +397,15 @@ def test_the_first_frame_past_the_baseline_does_cross():
 
 @pytest.mark.parametrize("frame_type", ["hydrate", "delta"])
 def test_a_full_core_frame_becomes_a_resync_rather_than_silence(frame_type):
-    """A full core means ``batch_is_patch_coverable`` said no — a create moved
-    ``actor_count``, an archive rewrote the resurrection ledger. There is no
-    honest office patch to forward, and silence would leave the client
-    believing it is current. That is the exact failure class this lane exists
-    to delete."""
+    """A full core means ``batch_is_patch_coverable`` said no — an uncovered
+    office event, a restore, a surface edit. There is no honest office patch to
+    forward, and silence would leave the client believing it is current. That is
+    the exact failure class this lane exists to delete.
+
+    Neither frame here carries an ``events`` list, so both take the conservative
+    arm of O-H4's scoping: a batch this lane cannot enumerate is one it cannot
+    prove irrelevant. The scoped cases are the three tests below.
+    """
 
     sent, deliver = _sink()
 
@@ -409,6 +413,196 @@ def test_a_full_core_frame_becomes_a_resync_rather_than_silence(frame_type):
 
     assert sent[0]["method"] == OFFICE_RESYNC_METHOD
     assert sent[0]["params"] == {"workspace_id": WORKSPACE, "reason": "full_core"}
+
+
+# ── O-H4: the resync is scoped to batches that touched this workspace ────────
+
+
+def _delta_frame(*events: dict, event_offset: int = 99) -> dict:
+    """A coalesced delta shaped like ``stream.delta_batch_frame``'s output.
+
+    Only the two fields the scoping reads are populated — the real frame also
+    carries an 822 KB ``core``, which is the whole point: this lane never wanted
+    it and now does not pay a resync for it either.
+    """
+
+    return {
+        "type": "delta",
+        "watermark": {"event_offset": event_offset},
+        "events": [{"event": event} for event in events],
+        "coalesced_count": len(events),
+    }
+
+
+def test_a_delta_carrying_nothing_for_this_workspace_does_not_resync():
+    """The cost O-H4 removes.
+
+    An agent turn or a board write demoted its own batch for reasons that have
+    nothing to do with any office, and this lane used to answer each one with a
+    full re-subscribe — which restarts the shared producer and bills every other
+    subscriber a fresh core. The operator's session shows the backoff ladder
+    being walked by exactly this.
+
+    Kill-mutation: restore the unconditional resync.
+    """
+
+    sent, deliver = _sink()
+
+    deliver(
+        _delta_frame(
+            {"type": "persona_chat.projected", "payload": {"persona_instance_id": "p1"}},
+            {"type": "board.card.moved", "payload": {"board_id": "b1"}},
+        )
+    )
+
+    assert sent == []
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        pytest.param(
+            {"type": "office.actor.restored", "payload": {"workspace_id": WORKSPACE}},
+            id="an uncovered office domain event for this workspace",
+        ),
+        pytest.param(
+            {
+                "type": "state.patched",
+                "payload": {
+                    "entity": "office_actor",
+                    "id": f"{WORKSPACE}/personainst_qa_agent_9c8a382f",
+                    "op": "upsert",
+                },
+            },
+            id="an office patch that rode an uncoverable batch",
+        ),
+    ],
+)
+def test_a_delta_that_did_touch_this_workspace_still_resyncs(event):
+    """Anti-vacuity, and the two ways a demoted batch can still be ours.
+
+    The first is the obvious one: an office write this lane cannot express.
+    The second is subtler and is why the scoping reads BOTH lists — an office
+    ``state.patched`` can ride a batch that some OTHER event demoted, so the
+    actor row moved and no patch frame is coming for it. Scoping on domain
+    events alone would silently drop that, which is the one outcome worse than
+    an unnecessary resync.
+
+    Kill-mutation: over-scope the skip (drop either arm of the check).
+    """
+
+    sent, deliver = _sink()
+
+    deliver(_delta_frame(event))
+
+    assert sent[0]["method"] == OFFICE_RESYNC_METHOD
+    assert sent[0]["params"]["reason"] == "full_core"
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        pytest.param([{"type": "office.actor.removed", "payload": {"workspace_id": OTHER}}],
+                     id="another workspace's office write"),
+        pytest.param(
+            [
+                {
+                    "type": "state.patched",
+                    "payload": {"entity": "office_actor", "id": f"{OTHER}/x", "op": "remove"},
+                }
+            ],
+            id="another workspace's office patch",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "state.patched",
+                    "payload": {"entity": "persona_instance", "id": "p1", "op": "remove"},
+                }
+            ],
+            id="a persona patch that named no office",
+        ),
+    ],
+)
+def test_another_workspaces_uncovered_batch_is_not_this_subscribers_business(events):
+    """Scoping is per WORKSPACE, not merely per topic.
+
+    Two offices on one runtime are two independent canvases, and the prefix
+    match is the same one the patch path uses — so a workspace whose id merely
+    shares a prefix cannot smuggle a resync either (its own test lives above).
+    """
+
+    sent, deliver = _sink()
+
+    deliver(_delta_frame(*events))
+
+    assert sent == []
+
+
+@pytest.mark.parametrize(
+    "frame",
+    [
+        pytest.param({"type": "delta", "watermark": {"event_offset": 99}}, id="no events list"),
+        pytest.param(
+            {"type": "delta", "watermark": {"event_offset": 99}, "events": "not-a-list"},
+            id="an unreadable events value",
+        ),
+        pytest.param(
+            {"type": "delta", "watermark": {"event_offset": 99}, "events": [{"event": None}]},
+            id="an entry with no event block",
+        ),
+        pytest.param(
+            {
+                "type": "delta",
+                "watermark": {"event_offset": 99},
+                "events": [{"event": {"type": "office.actor.removed", "payload": {}}}],
+            },
+            id="an office event that does not name its workspace",
+        ),
+    ],
+)
+def test_a_delta_this_lane_cannot_enumerate_still_resyncs(frame):
+    """ANTI-VACUITY: the conservative arm must be REACHABLE.
+
+    A scoping rule whose "I cannot tell" branch is dead is a scoping rule that
+    will one day skip a frame it should have resynced, and no test above would
+    notice. Each case here is a real shape — an older producer with no
+    ``events``, a malformed entry, and the one that is genuinely load-bearing:
+    an office event carrying no ``workspace_id`` is UNPLACEABLE, and unplaceable
+    must take the same conservative arm as an unknown frame type rather than
+    being read as "not mine".
+
+    Kill-mutation: make ``_delta_touches_workspace`` return False instead of
+    None for any of these.
+    """
+
+    sent, deliver = _sink()
+
+    deliver(frame)
+
+    assert sent[0]["method"] == OFFICE_RESYNC_METHOD
+    assert sent[0]["params"]["reason"] == "full_core"
+
+
+def test_a_hydrate_is_never_scoped_away():
+    """A hydrate says "here is everything" and enumerates nothing, so its
+    relevance is not decidable — upstream's ``full`` bit. Pinned separately from
+    the delta cases because the asymmetry between the two frame types IS the
+    rule, and a scoping that leaked onto hydrates would drop the one frame a
+    late joiner cannot do without."""
+
+    sent, deliver = _sink()
+
+    deliver(
+        {
+            "type": "hydrate",
+            "watermark": {"event_offset": 99},
+            # Even WITH an enumerable-looking list that names nothing of ours.
+            "events": [{"event": {"type": "board.card.moved", "payload": {}}}],
+        }
+    )
+
+    assert sent[0]["method"] == OFFICE_RESYNC_METHOD
 
 
 def test_an_unknown_frame_type_also_resyncs_and_says_so():

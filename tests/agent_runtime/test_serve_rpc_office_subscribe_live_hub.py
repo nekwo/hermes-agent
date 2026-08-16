@@ -524,6 +524,43 @@ def test_the_same_create_still_resyncs_a_subscriber_that_declares_nothing(live_h
     assert frame["params"]["reason"] == "full_core"
 
 
+def test_unrelated_runtime_activity_no_longer_resyncs_this_lane(live_hub):
+    """O-H4 against a REAL producer, which is the only place it can be shown.
+
+    The fake-hub file proves the scoping rule on hand-built frames. What only a
+    real producer adds is that an unrelated write genuinely produces an
+    uncovered ``delta`` — a full core — that genuinely reaches this sink, and is
+    genuinely skipped there rather than never being offered. Before O-H4 this
+    exact sequence answered with ``runtime.office.resync``, and each of those
+    cost a re-subscribe whose producer restart billed every other subscriber a
+    fresh core.
+
+    A board write is used because it is uncovered for reasons that have nothing
+    to do with any office — so a scoping bug that keyed on "was this batch
+    coverable" instead of "did it touch my workspace" would still resync here.
+
+    The absence is asserted only AFTER the frame reached the sink; measured
+    before the pump ran it would be an assertion about thread timing and would
+    pass against a sink that dropped everything.
+    """
+
+    from agent_runtime.board_store import BoardStore
+
+    _seed_office()
+    hub = live_hub(fold_entities=OFFICE_FOLD_ENTITIES)
+    sent: list[dict] = []
+    _settled_subscription(sent, hub)
+    delivered = _frames_delivered(hub)
+
+    BoardStore().add_card(workspace_id="ws_live_hub_board_noise", title="unrelated work")
+
+    _wait_for(
+        lambda: _frames_delivered(hub) > delivered,
+        what="the unrelated batch's frame to reach this subscriber's sink",
+    )
+    assert sent == [], f"unrelated runtime activity resynced the office lane: {sent}"
+
+
 def test_another_workspaces_real_write_never_reaches_this_subscriber(live_hub):
     """Addressed, not broadcast — against a real producer this time.
 
