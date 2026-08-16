@@ -502,18 +502,51 @@ class StreamHub:
 
     # ── subscription table ──────────────────────────────────────────────────
 
+    def _current_producer_alive_locked(self) -> bool:
+        """Is THIS generation's producer running? Caller holds ``self._lock``.
+
+        Not "is any producer alive": a superseded generation is one that has
+        been told to stop and is merely still winding down, so attaching to it
+        would attach to a lane that is about to exit.
+        """
+
+        handle = self._producers.get(self._generation)
+        if handle is None or handle.stop.is_set():
+            return False
+        thread = handle.thread
+        return bool(thread is not None and thread.is_alive())
+
     def subscribe(
         self,
         key: str,
         *,
         sink: Callable[[dict[str, Any]], None],
         on_drop: Callable[[str, dict[str, Any]], None] | None = None,
+        restart_producer: bool = True,
     ) -> bool:
         """Add *key*. False when it is already subscribed (idempotent, typed).
 
         Restarts the producer so this subscriber's first frame is a hydrate —
         see the module docstring. The restart is what makes a late join safe,
-        not an optimisation to remove.
+        not an optimisation to remove, and it stays the DEFAULT for exactly that
+        reason: the stream lane's join semantics are unchanged.
+
+        ``restart_producer=False`` is for a caller whose first frame does NOT
+        have to be a hydrate, and today there is exactly one: the office push
+        lane, whose baseline rides its own ``runtime.office.subscribe`` reply and
+        whose sink then provably discards the hydrate at that baseline. Every
+        such re-subscribe was manufacturing an ~822 KB core for a frame it
+        immediately threw away, and billing every OTHER subscriber in the room
+        for it.
+
+        The caller must also have established that it is not NARROWING what the
+        room can fold — a producer promoting rows a newly-joined subscriber
+        cannot fold is the regression the negotiation exists to prevent, and only
+        a restart re-derives the accepted set. That check belongs to the caller
+        because only it knows the declarations; what belongs HERE is the floor:
+        if no producer is actually running for the current generation, one is
+        started regardless, because a subscriber attached to nothing receives
+        nothing.
         """
 
         with self._lock:
@@ -528,6 +561,12 @@ class StreamHub:
                 buffer_limit=self._buffer_limit,
                 byte_limit=self._byte_limit,
             )
+            if not restart_producer and self._current_producer_alive_locked():
+                # Attach to the running generation. The generation counter does
+                # NOT move: bumping it is what supersedes the live producer, so
+                # a "restart-free" join that bumped it would stop the very lane
+                # it meant to keep.
+                return True
             self._generation += 1
             generation = self._generation
             # Every older producer is told to stop HERE, explicitly, rather

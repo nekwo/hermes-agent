@@ -344,6 +344,221 @@ def test_flag_on_task_terminal_reap_emits_instance_remove(set_delta_patches, iso
 
 
 # --------------------------------------------------------------------------- #
+# Chokepoint: open_chat — the pair ``persona_instance.chat_opened`` never had
+# (office fold-promotion plan §V2, 2026-08-16)
+# --------------------------------------------------------------------------- #
+def _open_chat_patches(store: PersonaInstanceStore, before: int) -> list[dict]:
+    return [
+        evt.payload
+        for _, evt in EventLog().iter_from_offset(before)
+        if evt.type == STATE_PATCHED_EVENT_TYPE
+        and evt.payload.get("entity") == "persona_instance"
+    ]
+
+
+def _log_end() -> int:
+    return max((o for o, _ in EventLog().iter_from_offset(0)), default=0)
+
+
+def test_open_chat_create_emits_an_honest_persona_refresh(
+    set_delta_patches, isolate_agent_runtime_root
+):
+    """A CREATE's roster row rides the full core, deliberately (plan D3).
+
+    The row is brand new, the launcher's generic fold refuses an upsert for a
+    missing row, and a full ``persona_instance_summary`` cannot be assumed to
+    fit the 4 KB cap (the ~18 KB figure predates residue-slimming and is
+    unmeasured). ``refresh`` is exactly what ``refresh`` means everywhere else in
+    this module — "re-fetch this actor" — so the batch demotes and the client
+    converges on one full core.
+
+    The kill-mutation is emitting an ``upsert`` here: the launcher would answer
+    ``patch_without_target`` and take a re-hydrate ON TOP of the patch.
+    """
+
+    set_delta_patches(True)
+    store = PersonaInstanceStore()
+    before = _log_end()
+    instance = store.open_chat(
+        persona_id="profile:reviewer",
+        session_id="persona_chat_open_create",
+        display_name="Reviewer",
+    )
+
+    patches = _open_chat_patches(store, before)
+    assert len(patches) == 1, patches
+    assert patches[0] == {
+        "entity": "persona_instance",
+        "id": instance.id,
+        "op": PATCH_OP_REFRESH,
+    }
+    assert "persona_instance.chat_opened" in _event_types()
+
+
+def test_open_chat_reopen_emits_the_diffed_upsert_with_the_parity_fields(
+    set_delta_patches, isolate_agent_runtime_root
+):
+    """A RE-OPEN folds as a field subset — and the subset must be COMPLETE.
+
+    ``open_chat`` writes ``mode``, ``workspace_id``, ``realm_id``,
+    ``profile_id``, ``display_name`` and the ``default_chat_session_id`` trio.
+    Every one is on the wire row, and covering ``chat_opened`` without pairing
+    them would silently drop them from every connected client.
+
+    Two independent guards protect this, and they catch different bugs: the
+    parity golden above catches a field whose DERIVATION drifts from
+    ``persona_instance_summary``, and this catches a field the store→wire map
+    simply OMITS (a parity test cannot see a field neither side projects). The
+    kill-mutation is dropping any single row from
+    ``_PERSONA_INSTANCE_STORE_TO_WIRE``.
+    """
+
+    set_delta_patches(True)
+    store = PersonaInstanceStore()
+    created = store.open_chat(
+        persona_id="profile:reviewer",
+        session_id="persona_chat_open_reopen",
+        display_name="Reviewer",
+    )
+
+    before = _log_end()
+    reopened = store.open_chat(
+        persona_id="profile:reviewer",
+        persona_instance_id=created.id,
+        session_id="persona_chat_open_reopen_second",
+        display_name="Reviewer Renamed",
+        workspace_id="ws_open_chat",
+        realm_id="realm_open_chat",
+        profile_id="reviewer_two",
+    )
+
+    patches = _open_chat_patches(store, before)
+    assert len(patches) == 1, patches
+    patch = patches[0]
+    assert patch["op"] == PATCH_OP_UPSERT
+    assert patch["id"] == created.id
+    changed = patch["changed"]
+    # Every field the bind moved, at its WIRE name and its WIRE derivation.
+    assert changed["display_name"] == "Reviewer Renamed"
+    assert changed["agent_profile_display_name"] == "Reviewer Renamed"
+    assert changed["workspace_id"] == "ws_open_chat"
+    assert changed["realm_id"] == "realm_open_chat"
+    assert changed["profile_id"] == "reviewer_two"
+    assert changed["backing_profile"] == "reviewer_two"
+    assert changed["source_profile_id"] == "reviewer_two"
+    # The session trio moves together or not at all — a patch that moved one
+    # would leave a v1 consumer reading a session the row no longer points at.
+    assert changed["default_chat_session_id"] == "persona_chat_open_reopen_second"
+    assert changed["chat_session_id"] == "persona_chat_open_reopen_second"
+    assert changed["session_id"] == "persona_chat_open_reopen_second"
+    # Serialized by the EventLog append exactly as the snapshot row serializes
+    # it, which is what byte-parity between a fold and a rebuild rests on.
+    from agent_runtime.serde import to_jsonable
+
+    assert changed["updated_at"] == to_jsonable(reopened.updated_at)
+    # A SUBSET, not the whole row: fields the bind did not touch stay off the
+    # wire, which is the difference between this and a refresh.
+    assert "skills" not in changed and "toolsets" not in changed
+
+
+def test_open_chat_never_emits_a_patchless_covered_event(
+    set_delta_patches, isolate_agent_runtime_root, monkeypatch
+):
+    """``updated_at`` always rides, and that is what makes the pair non-empty.
+
+    ``chat_head_home`` is the one tracked store field with NO wire projection.
+    A bind that moved only it would, without the unconditional ``updated_at``,
+    project an EMPTY ``changed`` → ``emit_persona_instance_patch`` returns False
+    → a COVERED ``persona_instance.chat_opened`` rides alone in an otherwise
+    coverable batch. The launcher would advance its watermark having folded
+    nothing and keep the pre-bind row forever.
+
+    Kill-mutation: drop ``"updated_at"`` from the emit call in ``open_chat``.
+    """
+
+    set_delta_patches(True)
+    store = PersonaInstanceStore()
+    created = store.open_chat(
+        persona_id="profile:reviewer",
+        session_id="persona_chat_head_only",
+        display_name="Reviewer",
+    )
+
+    # Move ONLY ``chat_head_home``: same session, same name, no scope — the one
+    # remaining tracked field, re-stamped by an authoritative process scope.
+    from agent_runtime import chat_session_scope
+
+    monkeypatch.setattr(
+        chat_session_scope,
+        "resolve_process_chat_scope",
+        lambda: SimpleNamespace(authoritative=True, head_home="X:/somewhere/else"),
+    )
+    before = _log_end()
+    store.open_chat(
+        persona_id="profile:reviewer",
+        persona_instance_id=created.id,
+        session_id="persona_chat_head_only",
+        display_name="Reviewer",
+    )
+
+    patches = _open_chat_patches(store, before)
+    assert len(patches) == 1, patches
+    assert patches[0]["op"] == PATCH_OP_UPSERT
+    # ``chat_head_home`` itself is correctly NOT on the wire (it is not a wire
+    # field); ``updated_at`` is what carries the pair.
+    assert "chat_head_home" not in patches[0]["changed"]
+    assert "updated_at" in patches[0]["changed"]
+
+
+def test_open_chat_noop_reopen_still_emits_nothing_at_all(
+    set_delta_patches, isolate_agent_runtime_root
+):
+    """The idempotence gate is UNMOVED by the new producer.
+
+    An identical re-open is an observation, not a mutation: no row rewrite, no
+    ``chat_opened``, and now also no ``state.patched``. The send path re-enters
+    this chokepoint every turn, so a patch here would put an EventLog append on
+    every turn of every chat — the cost the gate exists to prevent, re-created
+    one layer down.
+    """
+
+    set_delta_patches(True)
+    store = PersonaInstanceStore()
+    created = store.open_chat(
+        persona_id="profile:reviewer",
+        session_id="persona_chat_noop",
+        display_name="Reviewer",
+    )
+
+    before = _log_end()
+    store.open_chat(
+        persona_id="profile:reviewer",
+        persona_instance_id=created.id,
+        session_id="persona_chat_noop",
+        display_name="Reviewer",
+    )
+    assert [evt.type for _, evt in EventLog().iter_from_offset(before)] == []
+
+
+def test_open_chat_emits_no_patch_with_the_lane_off(
+    set_delta_patches, isolate_agent_runtime_root
+):
+    """Inertness, at the new chokepoint: flag off → the domain event only."""
+
+    set_delta_patches(False)
+    store = PersonaInstanceStore()
+    before = _log_end()
+    store.open_chat(
+        persona_id="profile:reviewer",
+        session_id="persona_chat_dark",
+        display_name="Reviewer",
+    )
+    types = [evt.type for _, evt in EventLog().iter_from_offset(before)]
+    assert STATE_PATCHED_EVENT_TYPE not in types
+    assert "persona_instance.chat_opened" in types
+
+
+# --------------------------------------------------------------------------- #
 # Chokepoint: task state transition → refresh
 # --------------------------------------------------------------------------- #
 def _task_model(task_id: str, state: TaskState) -> Task:

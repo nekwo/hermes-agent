@@ -488,11 +488,13 @@ def _runtime_office_subscribe(
 ) -> dict:
     """The baseline AND the registration, in one call. The push leg's keystone.
 
-    Params: ``workspace_id`` (required).
+    Params: ``workspace_id`` (required), ``fold_entities`` (optional list of
+    strings — what THIS client can fold).
 
     Result: the SAME body ``runtime.office.get`` returns, plus ``watermark``
     ``{"event_offset": N}`` — the event-log offset the baseline was read at —
-    and ``replaced``, the re-baselining receipt described below. Subsequent
+    ``fold_entities``, the accepted declaration echoed back, and ``replaced``,
+    the re-baselining receipt described below. Subsequent
     ``runtime.office.patch`` notifications carry ``base_offset`` /
     ``watermark`` from the same counter, so the client's existing ``>``-only
     sequence gate applies unchanged and a gap is a gap on either lane.
@@ -567,14 +569,43 @@ def _runtime_office_subscribe(
     holding no subscription at all — sent to the one cure (stop retrying) that
     could not work. Splitting the two reasons is what keeps replacement from
     quietly inheriting that lie under a new name.
+
+    ``fold_entities``: what THIS client can fold, not what an office subscriber
+    can fold in general
+    ---------------------------------------------------------------------------
+    The declaration used to be a SERVER-side constant
+    (``OFFICE_FOLD_ENTITIES``), which is a shape that can only ever report a
+    fact about the runtime — and that is the hole the 2026-08-16 capability
+    token exposed (plan §V4). Promotion is negotiated over the room, so a
+    launcher whose fold had been widened could never have its widened rows
+    promoted on this lane: the intersection cannot contain a token nobody told
+    the server about.
+
+    So the param is optional and FAIL-OPEN. Absent → the legacy constant, i.e.
+    today's wire for every client in the field, byte-identical. Present → this
+    subscription declares exactly what it says, unknown members included (the
+    channel has never interpreted its strings, and a server that filtered to a
+    known vocabulary would drop the NEXT token the same way). An explicitly
+    EMPTY list is honoured as empty — "I fold nothing, send me full cores" is a
+    thing a client is allowed to say and must stay distinguishable from silence.
+    A non-list is refused rather than guessed: a client sending the wrong shape
+    should learn it, not be quietly filed as legacy.
+
+    The accepted set is ECHOED on the reply, under the same always-present rule
+    the other keys follow. Without it a client cannot tell a declaration that
+    was honoured from one the runtime is too old to have read — and this whole
+    method exists because a push that arrives and is silently dropped is the
+    failure this lane keeps paying for.
     """
 
     from agent_runtime.locks import office_lock
     from agent_runtime.parity import events_watermark
     from agent_runtime.serve_office_subscriptions import (
         NO_PUSH_LANE,
+        OFFICE_FOLD_ENTITIES,
         OFFICE_SUBSCRIPTIONS,
         PUSH_LANE_DRAINING,
+        normalize_office_fold_entities,
     )
 
     workspace_id = _workspace_id_param(params)
@@ -584,6 +615,17 @@ def _runtime_office_subscribe(
             ERR_INVALID_PARAMS,
             "invalid params: workspace_id must be a non-empty string",
             {"reason": "workspace_id_required"},
+        )
+    raw_fold_entities = params.get("fold_entities")
+    fold_entities = (
+        None if raw_fold_entities is None else normalize_office_fold_entities(raw_fold_entities)
+    )
+    if raw_fold_entities is not None and fold_entities is None:
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            "invalid params: fold_entities must be a list of strings",
+            {"reason": "fold_entities_invalid", "workspace_id": workspace_id},
         )
     context = context or RpcContext()
     if context.emit is None:
@@ -612,6 +654,7 @@ def _runtime_office_subscribe(
             workspace_id=workspace_id,
             baseline_offset=baseline_offset,
             emit=context.emit,
+            fold_entities=fold_entities,
         )
 
     if not outcome.registered:
@@ -644,6 +687,14 @@ def _runtime_office_subscribe(
         {
             **projection,
             "watermark": {"event_offset": baseline_offset},
+            # The declaration this subscription was actually registered with —
+            # sorted so the answer is a value the client can compare, not an
+            # iteration order. A client that declared nothing sees the legacy
+            # constant here, which is how it learns what it is being held to
+            # without having to know the server's defaults.
+            "fold_entities": sorted(
+                fold_entities if fold_entities is not None else OFFICE_FOLD_ENTITIES
+            ),
             # Always present, never omitted on the False case — the same rule
             # the projection's own nullable keys follow. A client decoding into
             # a typed struct must not have to special-case which keys exist,

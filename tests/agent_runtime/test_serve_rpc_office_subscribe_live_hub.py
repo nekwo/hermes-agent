@@ -236,13 +236,30 @@ def _seed_office(store=None):
     return store
 
 
-def _subscribe(sent: list, *, connection_key: str = "c1", rid: str = "r1") -> dict:
+def _subscribe(
+    sent: list,
+    *,
+    connection_key: str = "c1",
+    rid: str = "r1",
+    fold_entities: list[str] | None = None,
+) -> dict:
+    """``fold_entities=None`` sends NO param at all — the un-updated client.
+
+    Absence and an explicit empty list are different declarations all the way
+    down (see ``normalize_office_fold_entities``), so this helper must not be
+    able to express one as the other. No caller here needs the explicit-empty
+    case; the fake-hub file owns it.
+    """
+
+    params: dict = {"workspace_id": WORKSPACE}
+    if fold_entities is not None:
+        params["fold_entities"] = fold_entities
     return serve_rpc.handle_request(
         {
             "jsonrpc": "2.0",
             "id": rid,
             "method": "runtime.office.subscribe",
-            "params": {"workspace_id": WORKSPACE},
+            "params": params,
         },
         serve_rpc.RpcContext(
             connection_key=connection_key, transport="socket", emit=sent.append
@@ -422,6 +439,126 @@ def test_a_real_office_write_reaches_a_default_wired_subscriber_as_a_patch(
     rows = frame["params"]["patches"]
     assert [row["id"] for row in rows] == [f"{WORKSPACE}/{ACTOR}"]
     assert rows[0]["changed"]["items"][0]["position"] == [42.0, 43.0]
+
+
+def test_a_declared_lifecycle_token_promotes_a_real_CREATE_end_to_end(live_hub):
+    """O-H1 + O-H2, against the producer ``serve.py`` actually builds.
+
+    The milestone's early half, and the first time this lane carries a gesture
+    rather than a drag. A create's batch is ``[office_actor created-upsert,
+    office.actor.upserted]`` — the domain event was already covered, so once the
+    subscriber's own declaration reaches the producer the batch is coverable and
+    the whole gesture ships as one sub-4 KB frame instead of two 822 KB cores.
+
+    Nothing is pinned: the fold set is DERIVED per producer generation from the
+    office registry, so this exercises the whole chain — the RPC param, the
+    per-key declaration, the room's intersection, the coverage gate, the
+    producer's promotion decision, and the sink. Passing a fixed
+    ``fold_entities`` here would assert about everything downstream of the one
+    seam O-H2 changed and prove nothing about it.
+
+    The paired half is the test below: the SAME create against a subscriber that
+    declares nothing must still resync, or this is green because the gate does
+    not exist.
+    """
+
+    store = _seed_office()
+    hub = live_hub()
+    sent: list[dict] = []
+    result = _settled_subscription(
+        sent,
+        hub,
+        fold_entities=sorted(OFFICE_FOLD_ENTITIES | {"office_actor_lifecycle"}),
+    )
+    assert "office_actor_lifecycle" in result["fold_entities"]
+
+    new_actor = "personainst_backend_dev_11223344"
+    store.upsert_actor(
+        WORKSPACE, _actor_payload(new_actor, position=(7.0, 8.0)), updated_by="live-create"
+    )
+
+    frame = _wait_for(
+        lambda: next((item for item in sent if item.get("method")), None),
+        what="any notification at all for a real CREATE",
+    )
+    assert frame["method"] == OFFICE_PATCH_METHOD, (
+        "a declared-lifecycle subscriber got "
+        f"{frame['method']} / {frame['params'].get('reason')} instead of a patch"
+    )
+    row = next(r for r in frame["params"]["patches"] if r["id"].endswith(new_actor))
+    assert row["op"] == "upsert"
+    assert row["created"] is True
+    # The complete row, which is what makes the client's insert-on-absent sound.
+    assert row["changed"]["items"][0]["position"] == [7.0, 8.0]
+
+
+def test_the_same_create_still_resyncs_a_subscriber_that_declares_nothing(live_hub):
+    """The anti-vacuity half, and the mixed-pair guarantee stated as a test.
+
+    An un-updated launcher declares nothing, gets the fail-open legacy constant,
+    and the create's ``created: true`` upsert is therefore NOT coverable for it —
+    so the batch demotes to a full core and this lane says ``resync``, which is
+    exactly what it does today. No regression, no simultaneous deploy.
+
+    Kill-mutation: remove the ``office_actor_lifecycle`` gate from
+    ``patch_coverage`` — this goes red with a patch notification, i.e. with the
+    very promotion V4 says would cost a fielded client a re-hydrate on top.
+    """
+
+    store = _seed_office()
+    hub = live_hub()
+    sent: list[dict] = []
+    _settled_subscription(sent, hub)
+
+    store.upsert_actor(
+        WORKSPACE,
+        _actor_payload("personainst_backend_dev_55667788", position=(7.0, 8.0)),
+        updated_by="live-create",
+    )
+
+    frame = _wait_for(
+        lambda: next((item for item in sent if item.get("method")), None),
+        what="any notification at all for a real CREATE",
+    )
+    assert frame["method"] == OFFICE_RESYNC_METHOD, frame
+    assert frame["params"]["reason"] == "full_core"
+
+
+def test_unrelated_runtime_activity_no_longer_resyncs_this_lane(live_hub):
+    """O-H4 against a REAL producer, which is the only place it can be shown.
+
+    The fake-hub file proves the scoping rule on hand-built frames. What only a
+    real producer adds is that an unrelated write genuinely produces an
+    uncovered ``delta`` — a full core — that genuinely reaches this sink, and is
+    genuinely skipped there rather than never being offered. Before O-H4 this
+    exact sequence answered with ``runtime.office.resync``, and each of those
+    cost a re-subscribe whose producer restart billed every other subscriber a
+    fresh core.
+
+    A board write is used because it is uncovered for reasons that have nothing
+    to do with any office — so a scoping bug that keyed on "was this batch
+    coverable" instead of "did it touch my workspace" would still resync here.
+
+    The absence is asserted only AFTER the frame reached the sink; measured
+    before the pump ran it would be an assertion about thread timing and would
+    pass against a sink that dropped everything.
+    """
+
+    from agent_runtime.board_store import BoardStore
+
+    _seed_office()
+    hub = live_hub(fold_entities=OFFICE_FOLD_ENTITIES)
+    sent: list[dict] = []
+    _settled_subscription(sent, hub)
+    delivered = _frames_delivered(hub)
+
+    BoardStore().add_card(workspace_id="ws_live_hub_board_noise", title="unrelated work")
+
+    _wait_for(
+        lambda: _frames_delivered(hub) > delivered,
+        what="the unrelated batch's frame to reach this subscriber's sink",
+    )
+    assert sent == [], f"unrelated runtime activity resynced the office lane: {sent}"
 
 
 def test_another_workspaces_real_write_never_reaches_this_subscriber(live_hub):
@@ -875,6 +1012,13 @@ def test_a_re_baseline_makes_every_other_subscriber_pay_a_fresh_core(live_hub):
     Measured on the peer's own delivery count rather than on ``generation``
     alone: a generation bump proves a thread was started, while the peer's count
     proves the peer was actually made to re-read a projection.
+
+    SCOPE, since O-H5: this is the DEGRADED path, and it is still worth pinning
+    because it is the one a runtime with no bound ``accepted_fold_entities``
+    probe takes — ``live_hub`` deliberately binds none here. When serve.py's
+    probe IS bound and the rejoin does not narrow the room, the restart (and
+    therefore this cost) is gone; that is the test immediately below, and the
+    two together are what say the saving is conditional rather than universal.
     """
 
     _seed_office()
@@ -898,6 +1042,64 @@ def test_a_re_baseline_makes_every_other_subscriber_pay_a_fresh_core(live_hub):
     # nothing crosses to its client. A resync here would mean the re-baseline
     # had also kicked every other client into a refetch round trip.
     assert _methods(peer) == [], peer
+
+
+def test_a_non_narrowing_re_baseline_costs_the_room_nothing(live_hub):
+    """O-H5 against a REAL producer: the second ~822 KB build is gone.
+
+    The office lane's re-subscribe restarted the shared producer to manufacture
+    a hydrate its own sink then discarded at the baseline the subscribe REPLY
+    had just carried. Every re-baseline therefore billed every other subscriber
+    a fresh full core for a frame nobody could use — and the operator's session
+    shows re-baselines happening on a backoff ladder, so the cost repeated.
+
+    With serve.py's ``accepted_fold_entities`` bound (mirrored here, as the
+    ``live_hub`` fixture mirrors ``_stream_source``) a rejoin that declares a
+    superset of the set in force attaches to the running generation instead.
+
+    The peer's silence is the real assertion and it is synchronised, not
+    guessed: the re-baselining client's own patch is awaited first, which proves
+    the lane is live and the producer really did keep running, and only then is
+    the peer's un-moved delivery count an observation.
+    """
+
+    store = _seed_office()
+    hub = live_hub()
+    OFFICE_SUBSCRIPTIONS.bind(
+        lambda: hub,
+        accepted_fold_entities=lambda: accepted_fold_entities(
+            OFFICE_SUBSCRIPTIONS.declarations()
+        ),
+    )
+    declared = sorted(OFFICE_FOLD_ENTITIES)
+    mine: list[dict] = []
+    peer: list[dict] = []
+    _settled_subscription(mine, hub, fold_entities=declared)
+    _settled_subscription(peer, hub, connection_key="c2", fold_entities=declared)
+
+    generation = hub.stats()["generation"]
+    peer_delivered = _frames_delivered(hub, "c2")
+
+    reply = _subscribe(mine, rid="r3", fold_entities=declared)["result"]
+    assert reply["replaced"] is True
+
+    # No supersession: the running producer kept producing.
+    assert hub.stats()["generation"] == generation, (
+        "a non-narrowing re-baseline restarted the producer and billed the room"
+    )
+
+    # And the lane really is live afterwards — otherwise "no restart" would be
+    # trivially satisfied by a subscription that receives nothing.
+    store.upsert_actor(
+        WORKSPACE, _actor_payload(position=(71.0, 72.0)), updated_by="after-rebaseline"
+    )
+    _await_patch(mine, "the re-baselined subscriber's own patch")
+    _await_patch(peer, "the peer's patch, which is what makes the count readable")
+
+    # The peer received the office write and NOTHING ELSE: no fresh core, no
+    # resync. Its delivery count moved by the write's frames alone.
+    assert _methods(peer) == [OFFICE_PATCH_METHOD], peer
+    assert _frames_delivered(hub, "c2") > peer_delivered
 
 
 def test_unsubscribe_stops_delivery_against_the_real_producer(live_hub):

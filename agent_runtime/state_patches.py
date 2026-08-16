@@ -118,6 +118,40 @@ _PERSONA_INSTANCE_STORE_TO_WIRE: dict[str, tuple[str, ...]] = {
     "provider": ("provider", "effective_provider", "model_is_override"),
     "api_mode": ("api_mode",),
     "reasoning_effort": ("reasoning_effort", "model_is_override", "reasoning_supported"),
+    # ── the ``open_chat`` half (office fold-promotion plan §V2, 2026-08-16) ──
+    # ``persona_instance.chat_opened`` was covered with NO paired producer: the
+    # bind writes real wire-visible state and emitted no ``state.patched`` at
+    # all, so covering the event without these rows would silently drop every
+    # field below from a connected client for the rest of its session. Each maps
+    # exactly as ``persona_instance_summary`` derives it (the golden in
+    # ``test_state_patches.py`` is the drift fence).
+    "workspace_id": ("workspace_id",),
+    "realm_id": ("realm_id",),
+    # One store field, three wire names: the summary projects ``profile_id`` (or
+    # the visibility persona's ``hermes_profile``) into all three.
+    "profile_id": ("profile_id", "backing_profile", "source_profile_id"),
+    # ``default_chat_session_id`` is the SOLE authority; ``chat_session_id`` and
+    # ``session_id`` are its read-compatible mirrors on the wire row. The store's
+    # own ``session_id`` mirror maps to the same trio, so whichever field name a
+    # chokepoint names in its diff, the client folds all three consistently — a
+    # patch that moved one and not the others would leave a v1 consumer reading a
+    # session the row no longer points at.
+    #
+    # STATED AFTER MUTATION, because the pair is deliberately redundant and a
+    # reader should not mistake that for coverage: ``open_chat`` always writes
+    # BOTH store fields from the same value, so collapsing EITHER entry to its
+    # own name alone stays green — the sibling entry still carries the trio.
+    # Neither is dead; each is the one that answers when the other's store field
+    # did not move, and a future chokepoint that writes only one is exactly the
+    # case this shape exists for.
+    "default_chat_session_id": ("default_chat_session_id", "chat_session_id", "session_id"),
+    "session_id": ("default_chat_session_id", "chat_session_id", "session_id"),
+    # Always diffable, and that is load-bearing rather than cosmetic: a bind that
+    # moved only ``chat_head_home`` (which has no wire field) would otherwise
+    # project an EMPTY ``changed`` → no patch → a covered ``chat_opened`` event
+    # riding alone in an otherwise-coverable batch, i.e. a promoted frame whose
+    # patches list omits the row that moved.
+    "updated_at": ("updated_at",),
 }
 
 
@@ -140,10 +174,18 @@ def _is_oversize_marker(value: Any) -> bool:
     )
 
 
-def _assemble(entity: str, entity_id: str, op: str, changed: dict[str, Any] | None) -> dict[str, Any]:
+def _assemble(
+    entity: str,
+    entity_id: str,
+    op: str,
+    changed: dict[str, Any] | None,
+    created: bool | None = None,
+) -> dict[str, Any]:
     payload: dict[str, Any] = {"entity": str(entity), "id": str(entity_id), "op": str(op)}
     if changed is not None:
         payload["changed"] = changed
+    if created is not None:
+        payload["created"] = bool(created)
     return payload
 
 
@@ -152,6 +194,7 @@ def build_state_patch(
     entity_id: str,
     op: str = PATCH_OP_UPSERT,
     changed: dict[str, Any] | None = None,
+    created: bool | None = None,
 ) -> dict[str, Any]:
     """Build an op-based ``state.patched`` payload, sized to fit the 4 KB cap.
 
@@ -164,17 +207,43 @@ def build_state_patch(
       ties broken by field name). If it STILL overflows (or every value is an
       oversize marker), the whole patch degrades to ``op: "refresh"`` — an
       accounted "re-fetch this actor", never a partial merge.
+
+    ``created`` is an ADDITIVE optional key (office fold-promotion plan §V4,
+    2026-08-16) meaning "this row did not exist before the write, so a fold must
+    INSERT it rather than merge onto an absent target". It is carried inside the
+    existing 4 KB accounting — the shrink loop re-measures the assembled payload
+    including it, so a create can never overflow the cap by the width of a
+    boolean. It rides only where a producer states it; ``None`` keeps the payload
+    byte-identical to before this key existed, which is what makes every fielded
+    reader's fixed key-set read unaffected.
+
+    It is deliberately NOT part of the fold itself: the launcher's office fold
+    inserts-on-absent unconditionally. The key exists so
+    :func:`~agent_runtime.patch_coverage.event_is_patch_coverable` can GATE the
+    widened op behind the ``office_actor_lifecycle`` capability token, i.e. so an
+    un-updated client is never PROMOTED a row its fold would answer with a
+    re-hydrate.
     """
 
     if op != PATCH_OP_UPSERT or not changed:
-        return _assemble(entity, entity_id, PATCH_OP_REFRESH if op == PATCH_OP_UPSERT else op, None)
+        return _assemble(
+            entity,
+            entity_id,
+            PATCH_OP_REFRESH if op == PATCH_OP_UPSERT else op,
+            None,
+            # A ``refresh`` degrade is no longer a create-shaped row: the client
+            # refetches, so telling it the row was new would be a claim about a
+            # patch that no longer carries one. ``remove`` keeps the marker,
+            # because the lifecycle gate reads the op there instead.
+            created if op != PATCH_OP_UPSERT else None,
+        )
 
     safe_changed: dict[str, Any] = {}
     for field_name, value in changed.items():
         size = _value_bytes(value)
         safe_changed[str(field_name)] = _oversize_marker(size) if size > PATCH_VALUE_BUDGET_BYTES else value
 
-    payload = _assemble(entity, entity_id, PATCH_OP_UPSERT, safe_changed)
+    payload = _assemble(entity, entity_id, PATCH_OP_UPSERT, safe_changed, created)
     while _value_bytes(payload) > EVENT_PAYLOAD_LIMIT_BYTES:
         inline = [(name, val) for name, val in safe_changed.items() if not _is_oversize_marker(val)]
         if not inline:
@@ -185,7 +254,7 @@ def build_state_patch(
             return _assemble(entity, entity_id, PATCH_OP_REFRESH, None)
         name = max(inline, key=lambda item: (_value_bytes(item[1]), item[0]))[0]
         safe_changed[name] = _oversize_marker(_value_bytes(safe_changed[name]))
-        payload = _assemble(entity, entity_id, PATCH_OP_UPSERT, safe_changed)
+        payload = _assemble(entity, entity_id, PATCH_OP_UPSERT, safe_changed, created)
     return payload
 
 
@@ -315,6 +384,7 @@ def emit_state_patch(
     entity_id: str,
     op: str = PATCH_OP_UPSERT,
     changed: dict[str, Any] | None = None,
+    created: bool | None = None,
     task_id: str | None = None,
     run_id: str | None = None,
     persona_id: str | None = None,
@@ -326,13 +396,15 @@ def emit_state_patch(
     Returns True when an entry was appended, False when the flag is off or an
     ``upsert`` carried an empty ``changed``. Log-only: this appends to the
     EventLog; the stream promotes coverable batches to v2 ``patch`` frames.
+
+    ``created`` is the additive lifecycle marker — see :func:`build_state_patch`.
     """
 
     if op == PATCH_OP_UPSERT and not changed:
         return False
     if not delta_patches_enabled(config):
         return False
-    payload = build_state_patch(entity, entity_id, op, changed)
+    payload = build_state_patch(entity, entity_id, op, changed, created)
     event_log.append(
         Event(
             ts=now(),
@@ -391,6 +463,10 @@ def _persona_instance_wire_row(instance: Any, persona: Any) -> dict[str, Any]:
     persona_provider = getattr(persona, "provider", None)
     persona_skills = list(getattr(persona, "skills", []) or [])
     effective_model = instance.model or persona_model
+    # ``persona_instance_summary`` derives all three profile names from this one
+    # value (``instance.profile_id or visibility_persona.hermes_profile``); the
+    # standin's fallback is None, mirrored here by ``getattr(persona, ...)``.
+    profile_id = instance.profile_id or getattr(persona, "hermes_profile", None)
     return {
         "steered_by": list(instance.steered_by),
         "spawned_by": instance.spawned_by,
@@ -411,6 +487,17 @@ def _persona_instance_wire_row(instance: Any, persona: Any) -> dict[str, Any]:
         "reasoning_effort": instance.reasoning_effort,
         "model_is_override": bool(instance.model or instance.provider or instance.reasoning_effort),
         "reasoning_supported": _model_supports_reasoning_effort(effective_model),
+        # The ``open_chat`` fields. Same rule as everything above: these are the
+        # WIRE names and the WIRE derivations, not the store attributes.
+        "workspace_id": instance.workspace_id,
+        "realm_id": instance.realm_id,
+        "profile_id": profile_id,
+        "backing_profile": profile_id,
+        "source_profile_id": profile_id,
+        "default_chat_session_id": instance.default_chat_session_id,
+        "chat_session_id": instance.default_chat_session_id,
+        "session_id": instance.default_chat_session_id,
+        "updated_at": instance.updated_at,
     }
 
 
@@ -618,6 +705,7 @@ def emit_office_actor_patch(
     event_log: EventLog,
     actor: Any,
     *,
+    created: bool = False,
     config: AgentRuntimeConfig | None = None,
 ) -> bool:
     """Emit an office-actor ``upsert`` carrying the actor's COMPLETE wire row.
@@ -627,17 +715,30 @@ def emit_office_actor_patch(
     from a whole payload — so a subset would be an invention of the patch lane,
     and the whole row measures 663–764 bytes against the live canvas (four
     actors, 2026-08-14), an order of magnitude inside the 3584-byte per-value
-    budget. It is also what lets the fold be a plain row replace.
+    budget. It is also what makes the fold a plain row replace — and, since the
+    2026-08-16 fold-promotion plan, what makes INSERT-on-absent safe: a client
+    that does not hold this actor can materialize it from the patch alone,
+    because there is nothing about the row the patch omits.
 
-    **Emitted ONLY for a write that changed nothing outside this actor's row.**
-    The office core section is workspace-keyed with a nested actor list, and the
-    parent row carries derived state — ``actor_count``, ``actors_truncated``,
-    ``folders``, ``archived_actor_keys``, the SURFACE's own ``revision`` and
-    ``updated_at``. A create moves ``actor_count``; a re-add of an archived key
-    rewrites the surface's resurrection ledger; an archive moves both. None of
-    those are expressible as an actor-row patch, so the chokepoint calls
-    :func:`emit_office_actor_refresh` for them instead and the batch takes the
-    honest full-core lane. See ``OfficeStore.upsert_actor``.
+    ``created=True`` marks a write whose row was ABSENT before it (a first
+    placement, or a re-add resurrecting an archived key — absent from the
+    client's list either way). It changes nothing about the fold; it is the
+    coverage gate's input, so the widened op is promoted only at a client that
+    declared ``office_actor_lifecycle``.
+
+    **What still is NOT expressible here.** The office core section is
+    workspace-keyed with a nested actor list whose parent row carries derived
+    state — ``actor_count``, ``actors_truncated``, ``archived_actor_keys``,
+    ``folders``, the SURFACE's own ``revision``/``updated_at``. The
+    2026-08-16 validation (§V1) established that under the two LIFECYCLE ops the
+    first three are exactly derivable by a client from the rows it folds, so they
+    no longer need a wire row of their own. ``folders`` and the surface
+    ``revision`` are moved only by ``update_surface``, which stays uncovered and
+    rides the full core; ``updated_at`` drift is accepted and documented there.
+    The one case that remains genuinely inexpressible is TRUNCATION — past
+    ``MAX_OFFICE_ACTORS_PROJECTED`` the projected list is a cut the client cannot
+    reproduce — and that is what :func:`emit_office_actor_refresh` is now for,
+    and all it is for.
     """
 
     if not delta_patches_enabled(config):
@@ -648,7 +749,42 @@ def emit_office_actor_patch(
         entity_id=office_actor_patch_id(actor.workspace_id, actor.actor_key),
         op=PATCH_OP_UPSERT,
         changed=project_office_actor_wire_row(actor),
+        created=True if created else None,
         persona_id=getattr(actor, "persona_id", None),
+        config=config,
+    )
+
+
+def emit_office_actor_remove(
+    event_log: EventLog,
+    workspace_id: Any,
+    actor_key: Any,
+    *,
+    config: AgentRuntimeConfig | None = None,
+) -> bool:
+    """Emit an office-actor ``remove`` — the archive half of the lifecycle pair.
+
+    Carries no ``changed`` by contract, so it is always tiny and can never hit
+    the oversize ladder. The fold splices the actor out by key, recomputes the
+    derived container counts and appends the key to its mirrored
+    ``archived_actor_keys`` ledger — the client-side derivation §V1 established,
+    which is why archiving finally has a foldable op at all.
+
+    Idempotent by construction on the client side (remove-if-present), which is
+    what lets the same row replay across the stream lane and the office push lane
+    without the two colliding.
+
+    Best-effort at its call site like every sibling emitter: a patch-lane fault
+    is a missing PROMOTION, never a failed archive.
+    """
+
+    if not delta_patches_enabled(config):
+        return False
+    return emit_state_patch(
+        event_log,
+        entity=OFFICE_ACTOR_ENTITY,
+        entity_id=office_actor_patch_id(workspace_id, actor_key),
+        op=PATCH_OP_REMOVE,
         config=config,
     )
 
@@ -660,7 +796,23 @@ def emit_office_actor_refresh(
     *,
     config: AgentRuntimeConfig | None = None,
 ) -> bool:
-    """The accounted degrade for an office write that moved the SURFACE row too.
+    """The accounted degrade for an office write the client cannot place: the
+    actor list is TRUNCATED.
+
+    **This is the only remaining meaning.** It used to carry a second, unrelated
+    one — "a SECOND row changed and this lane has no vocabulary for it" (a
+    create moved ``actor_count``, a re-add rewrote the resurrection ledger) —
+    and that conflation is retired by the 2026-08-16 fold-promotion plan (§V3):
+    those writes now emit real ``upsert``/``remove`` ops and the container state
+    is derived client-side. What survives is ``refresh``'s documented meaning
+    everywhere else in this module: *this row is not expressible as a fold,
+    re-fetch it*.
+
+    The surviving producer is ``OfficeStore._emit_actor_patch``'s
+    ``> MAX_OFFICE_ACTORS_PROJECTED`` guard. Past that bound the snapshot
+    projects a CUT of the actor list, and which actors survive the cut is not
+    client-decidable — so neither the row's presence nor the derived counts can
+    be folded, and a full core is the honest answer.
 
     ``refresh`` is not in :data:`FOLDABLE_PATCH_OPS`, so the batch carrying it
     demotes to a full core — which IS the refetch. Emitting this rather than
@@ -668,7 +820,7 @@ def emit_office_actor_refresh(
     skip would leave the paired (covered) ``office.actor.upserted`` as the only
     entry in an otherwise-coverable batch, which would ship a patch frame with an
     EMPTY ``patches`` list — the launcher would advance its watermark having
-    folded nothing and keep the pre-write surface row forever.
+    folded nothing and keep the pre-write row forever.
     """
 
     if not delta_patches_enabled(config):

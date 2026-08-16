@@ -191,6 +191,116 @@ def test_every_subscriber_starts_at_a_hydrate_even_when_it_joins_late():
         hub.stop()
 
 
+def test_a_restart_free_join_attaches_to_the_running_generation(
+):
+    """``restart_producer=False``: the join that does not bill the room a core.
+
+    The restart exists so a late joiner's first frame is a hydrate, and it stays
+    the DEFAULT for that reason. But the office push lane's baseline rides its
+    own ``runtime.office.subscribe`` reply and its sink then provably discards
+    the hydrate at that baseline — so every one of its joins was manufacturing a
+    full core to throw away and superseding the running producer to do it.
+
+    What is pinned here is both halves of "attaches": the generation does not
+    move (bumping it is what supersedes the live producer, so a restart-free
+    join that bumped would stop the very lane it meant to keep), and the newcomer
+    genuinely receives the RUNNING generation's frames rather than nothing.
+    """
+
+    gate = threading.Event()
+    factory, generations, _alive = _generational_source(6, gate)
+    hub = StreamHub(factory, buffer_limit=64)
+    early, late = _Recorder(), _Recorder()
+    try:
+        hub.subscribe("early", sink=early)
+        assert _wait_until(lambda: early.count() >= 3)
+        assert hub.stats()["generation"] == 1
+
+        assert hub.subscribe("late", sink=late, restart_producer=False) is True
+
+        # No supersession: one generation, one generator body ever built.
+        assert hub.stats()["generation"] == 1
+        assert generations["count"] == 1
+        # And the newcomer is actually being served by it — a join that attached
+        # to nothing would satisfy the counters above and receive silence, which
+        # is the failure mode this lane has already paid for once.
+        assert _wait_until(lambda: late.count() >= 1)
+        assert {frame["generation"] for frame in late.frames} == {1}
+        # The incumbent was NOT re-baselined: no second hydrate reached it.
+        assert [f["type"] for f in early.frames].count("hydrate") == 1
+    finally:
+        gate.set()
+        hub.stop()
+
+
+def test_a_restart_free_join_still_starts_a_producer_when_none_is_running():
+    """The FLOOR, and it lives in the hub rather than in its callers.
+
+    A subscriber attached to nothing receives nothing — silently, forever. The
+    caller's non-narrowing check is about whether a restart is NECESSARY; it
+    cannot be allowed to answer whether a producer EXISTS, because that state
+    changes underneath it (a re-baseline's own teardown empties the room and
+    stops the producer between the check and the join).
+
+    Both entry points are pinned: the very first subscriber, and a join that
+    arrives after the room has emptied.
+    """
+
+    gate = threading.Event()
+    factory, generations, _alive = _generational_source(4, gate)
+    hub = StreamHub(factory, buffer_limit=64)
+    first, second = _Recorder(), _Recorder()
+    try:
+        # No producer at all yet.
+        assert hub.subscribe("first", sink=first, restart_producer=False) is True
+        assert hub.stats()["generation"] == 1
+        assert _wait_until(lambda: first.count() >= 1)
+        assert first.frames[0]["type"] == "hydrate"
+
+        # The room empties, which stops the producer ...
+        hub.unsubscribe("first")
+        assert _wait_until(lambda: hub.stats()["producers_live"] == 0, timeout=10.0)
+
+        # ... so the next restart-free join must start a fresh one regardless.
+        assert hub.subscribe("second", sink=second, restart_producer=False) is True
+        assert _wait_until(lambda: second.count() >= 1)
+        assert second.frames[0]["type"] == "hydrate"
+        assert hub.stats()["generation"] == 2
+        assert generations["count"] == 2
+    finally:
+        gate.set()
+        hub.stop()
+
+
+def test_the_default_join_still_restarts_so_stream_clients_are_unchanged():
+    """The stream lane's semantics are NOT touched by O-H5.
+
+    Every other caller of ``subscribe`` — the socket stream lane included —
+    needs its first frame to be a hydrate, and the flag defaults to True so none
+    of them has to know this option exists. Pinned separately from the
+    late-joiner test above because that one asserts the BEHAVIOUR while this
+    asserts the DEFAULT: a flag whose default silently flipped would leave that
+    test green only until somebody passed the argument explicitly.
+    """
+
+    gate = threading.Event()
+    factory, generations, _alive = _generational_source(4, gate)
+    hub = StreamHub(factory, buffer_limit=64)
+    early, late = _Recorder(), _Recorder()
+    try:
+        hub.subscribe("early", sink=early)
+        assert _wait_until(lambda: early.count() >= 2)
+        hub.subscribe("late", sink=late)
+        assert _wait_until(lambda: late.count() >= 1)
+
+        assert hub.stats()["generation"] == 2
+        assert generations["count"] == 2
+        assert late.frames[0]["type"] == "hydrate"
+    finally:
+        gate.set()
+        hub.stop()
+
+
 def test_a_second_subscribe_for_the_same_key_is_refused_not_duplicated():
     gate = threading.Event()
     hub = StreamHub(_counting_source(5, gate=gate), buffer_limit=8)

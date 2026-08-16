@@ -116,7 +116,7 @@ from typing import Any, Callable
 
 from .patch_coverage import HISTORICAL_FOLD_ENTITIES
 from .serve_rpc import notification
-from .state_patches import OFFICE_ACTOR_ENTITY
+from .state_patches import OFFICE_ACTOR_ENTITY, STATE_PATCHED_EVENT_TYPE
 
 #: What an RPC office subscriber declares it can fold — the historical set PLUS
 #: ``office_actor``, and the union half of that is the whole point.
@@ -145,7 +145,48 @@ from .state_patches import OFFICE_ACTOR_ENTITY
 #: ``office_actor`` on behalf of every un-updated client in the field — see its
 #: own comment: it may only name entities every fielded client already folds.
 #: This one declares for exactly the subscriber that can keep the promise.
+#:
+#: **Since 2026-08-16 it is the FAIL-OPEN DEFAULT, not the authority.** It was
+#: the authority while it was the only answer available: the constant is
+#: SERVER-side, so it says what an office subscriber can fold in general and
+#: cannot say what the CONNECTED one can. That gap is exactly the hole the
+#: capability token opened (plan §V4) — the runtime could not learn whether this
+#: client's fold had been widened, so it could never promote a lifecycle row on
+#: this lane at all. ``runtime.office.subscribe`` now takes an optional
+#: ``fold_entities``, and this constant is what an absent one resolves to:
+#: today's behaviour for every client that has not been taught to declare.
+#: Retiring it is deferred (D5) until no fielded launcher omits the param.
 OFFICE_FOLD_ENTITIES: frozenset[str] = HISTORICAL_FOLD_ENTITIES | {OFFICE_ACTOR_ENTITY}
+
+
+def normalize_office_fold_entities(declared: Any) -> frozenset[str] | None:
+    """The trust-boundary normalizer for a subscribe's ``fold_entities`` param.
+
+    ``None`` — the key was absent — stays ``None`` all the way to
+    :meth:`OfficeSubscriptions.subscribe`, which resolves it to
+    :data:`OFFICE_FOLD_ENTITIES`. That distinction is the whole fail-open rule:
+    "said nothing" (every client in the field) must not collapse into "said
+    empty" (a client explicitly asking for full cores), which is the same
+    discipline :func:`~agent_runtime.patch_coverage.normalize_fold_entities`
+    keeps one layer down.
+
+    Degenerate MEMBERS are normalized away — non-strings, blanks, surrounding
+    whitespace — because a declaration is a set of names and a blank is not one.
+    UNKNOWN members are passed through untouched: the declaration channel has
+    never interpreted its strings, and a server that filtered to a known
+    vocabulary here would silently drop the next capability token the way this
+    one would have been dropped.
+
+    Returns ``None`` for a non-list value too; the caller refuses that at the
+    boundary rather than guessing, so a client sending the wrong shape learns it
+    instead of being quietly treated as legacy.
+    """
+
+    if not isinstance(declared, (list, tuple)):
+        return None
+    return frozenset(
+        value.strip() for value in declared if isinstance(value, str) and value.strip()
+    )
 
 #: The push. Params mirror the patch frame's own body minus its envelope, so a
 #: client's fold is byte-identical work on either lane — which is what makes
@@ -160,6 +201,69 @@ OFFICE_RESYNC_METHOD = "runtime.office.resync"
 #: Frame types that are a FULL CORE for this lane's purposes: the batch was not
 #: patch-coverable, so no office patch exists to forward.
 _FULL_CORE_FRAME_TYPES = frozenset({"hydrate", "delta"})
+
+#: The one frame type that ENUMERATES what it carried, and therefore the only
+#: one whose relevance to a given workspace is decidable (see
+#: :func:`_delta_touches_workspace`). A ``hydrate`` says only "here is
+#: everything", which is precisely the case that cannot be scoped.
+_ENUMERATED_FRAME_TYPE = "delta"
+
+
+def _delta_touches_workspace(frame: dict[str, Any], workspace_id: str, prefix: str) -> bool | None:
+    """Did this uncovered batch carry anything for ``workspace_id``?
+
+    ``True``/``False`` when the frame's ``events`` list can be read; ``None``
+    when it cannot — a THIRD answer, not a False, because a frame this function
+    cannot enumerate is exactly the case where the conservative resync is the
+    honest reply. Coercing it to "no" would silently drop a change.
+
+    Why this is answerable at all: a coalesced ``delta`` carries ``events`` —
+    one redaction-safe block per batched event, built by ``stream._delta_entity``
+    — so the frame already says what it was about. Two things count as touching
+    this workspace, and they are different facts rather than one restated:
+
+    * an ``office.*`` domain event whose payload names this ``workspace_id``
+      (the surface/actor writes that are uncovered ON PURPOSE and genuinely need
+      a refetch here);
+    * a ``state.patched`` naming an ``office_actor`` under this workspace — a
+      patch that rode in an UNCOVERABLE batch, i.e. one demoted by something
+      else in the same drain. The office row moved and this lane is not getting
+      a patch frame for it, so it must refetch.
+
+    Everything else — an agent's turn, a board write, another workspace's
+    office — moved nothing this subscriber holds.
+    """
+
+    events = frame.get("events")
+    if not isinstance(events, list):
+        return None
+    for entry in events:
+        if not isinstance(entry, dict):
+            return None
+        event = entry.get("event")
+        if not isinstance(event, dict):
+            return None
+        event_type = event.get("type")
+        if not isinstance(event_type, str):
+            return None
+        payload = event.get("payload")
+        payload = payload if isinstance(payload, dict) else {}
+        if event_type.startswith("office."):
+            # An office event that does not name its workspace is unplaceable,
+            # and unplaceable takes the conservative arm like every other
+            # ambiguity on this lane.
+            named = payload.get("workspace_id")
+            if not isinstance(named, str) or not named:
+                return None
+            if named == workspace_id:
+                return True
+            continue
+        if event_type == STATE_PATCHED_EVENT_TYPE:
+            if payload.get("entity") == OFFICE_ACTOR_ENTITY and str(
+                payload.get("id") or ""
+            ).startswith(prefix):
+                return True
+    return False
 
 #: Carries no state, so it is neither a patch nor a resync.
 _LIVENESS_FRAME_TYPES = frozenset({"heartbeat"})
@@ -243,6 +347,32 @@ def office_patch_sink(
         if event_offset is not None and event_offset <= int(baseline_offset or 0):
             return
         if frame_type != "patch":
+            # SCOPED (office fold-promotion plan O-H4, 2026-08-16). An uncovered
+            # batch used to resync EVERY office subscription runtime-wide, which
+            # meant an agent's turn, a board write or another workspace's office
+            # edit each cost this lane a full re-subscribe — and a re-subscribe
+            # restarts the shared producer, billing every OTHER subscriber a
+            # fresh ~822 KB core for a frame that carried nothing for anyone
+            # here. Background activity alone could walk the client up the
+            # 250ms→500ms→1s backoff and park it at 5 in 60s, which is the park
+            # threshold being consumed by noise instead of by defects.
+            #
+            # Only a ``delta`` is scopable, and the asymmetry is the rule rather
+            # than an optimisation: a delta ENUMERATES its batch (``events``), so
+            # its relevance is decidable; a hydrate says "here is everything" and
+            # a type this module has not been taught says nothing at all. Both
+            # keep the unconditional resync — upstream's ``full`` bit, by
+            # another name.
+            #
+            # CAVEAT for a future stream-less client: skipping is sound TODAY
+            # because the stream lane owns read-model currency and this
+            # subscriber's canvas is a projection of one workspace. A client
+            # whose only lane is this one would need the skip path to advance a
+            # bookmark before this rule could carry it alone.
+            if frame_type == _ENUMERATED_FRAME_TYPE and (
+                _delta_touches_workspace(frame, workspace_id, prefix) is False
+            ):
+                return
             # Includes the unknown-type branch on purpose — see the module
             # docstring. A resync is recoverable; a dropped change is not.
             #
@@ -262,17 +392,42 @@ def office_patch_sink(
                 )
             )
             return
-        rows = [
-            patch
-            for patch in frame.get("patches") or []
-            if isinstance(patch, dict)
-            and patch.get("entity") == OFFICE_ACTOR_ENTITY
+        rows = [patch for patch in frame.get("patches") or [] if isinstance(patch, dict)]
+        in_scope = any(
+            patch.get("entity") == OFFICE_ACTOR_ENTITY
             and str(patch.get("id") or "").startswith(prefix)
-        ]
-        if not rows:
+            for patch in rows
+        )
+        if not in_scope:
             # Addressed, not broadcast: a batch that moved another workspace's
             # actors is not this subscriber's business and costs it nothing.
+            # UNCHANGED by the completeness fix below — nothing in scope still
+            # means nothing sent.
             return
+        # THE WHOLE BATCH, not this workspace's rows (office fold-promotion plan
+        # §V6, 2026-08-16). This used to forward a workspace-FILTERED subset
+        # stamped with the FULL batch's watermark, and that combination is a
+        # silent data-loss race the moment mixed batches start promoting:
+        #
+        # The launcher folds BOTH transports into ONE `MissionReadModel` with
+        # ONE sequence and a `base == held` gate. A delete gesture's batch is
+        # `[persona_instance remove, office_actor remove]`. Under the old filter
+        # this lane forwarded only the office row while CLAIMING the full span —
+        # so if it folded first, the stream lane's frame at the same watermark
+        # was dropped as stale and the persona remove NEVER APPLIED. Silently
+        # stale roster, unrecoverable by any gate, because the watermark says
+        # the span was already applied.
+        #
+        # Forwarding whole is the cheap half of the fix (O-L2 is the per-row
+        # `seq` half). It is affordable by construction: every row is bounded by
+        # the 4 KB EventLog payload cap, and the client's fold already handles
+        # every entity — one body for both lanes — so a row it does not track is
+        # a correct no-op rather than an error. It also stops being a special
+        # case the day the launcher leaves the second producer behind (D7).
+        #
+        # The rows are NOT re-filtered by entity either: a `persona_instance`
+        # row in this batch is real state at this watermark, and dropping it
+        # while claiming the watermark is the same bug one entity over.
         emit(
             notification(
                 OFFICE_PATCH_METHOD,
@@ -361,11 +516,25 @@ class OfficeSubscriptions:
         #: whether a subscription is live; this is only the index the release
         #: path needs, and it is pruned in the same breath as the hub call.
         self._owned: dict[str, set[str]] = {}
+        #: hub key -> what THAT subscription declared it can fold. Keyed by hub
+        #: key rather than by connection because two workspaces on one socket are
+        #: two subscriptions and each is entitled to its own answer; the shared
+        #: producer intersects over all of them either way.
+        #:
+        #: A key absent from here is a subscription that declared nothing, and
+        #: :meth:`declarations` resolves it to :data:`OFFICE_FOLD_ENTITIES` —
+        #: fail-open, so a client that has never heard of the param keeps
+        #: today's wire exactly.
+        self._declared: dict[str, frozenset[str]] = {}
         #: Where a re-baseline is BILLED. Optional because this registry is
         #: process-global and reachable from a runtime that has no service log
         #: (a test, a stdio probe); ``None`` means the receipt still reaches the
         #: client on its reply, just not an operator's tail.
         self._log: Callable[[dict[str, Any]], None] | None = None
+        #: ``serve.py``'s ``_accepted_fold_entities``, when one was bound. The
+        #: room spans both lanes and only serve.py can see both tables, so this
+        #: is borrowed rather than re-derived — see :meth:`bind`.
+        self._accepted: Callable[[], Any] | None = None
 
     # ── wiring ──────────────────────────────────────────────────────────────
 
@@ -374,6 +543,7 @@ class OfficeSubscriptions:
         hub_factory: Callable[[], Any] | None,
         *,
         log: Callable[[dict[str, Any]], None] | None = None,
+        accepted_fold_entities: Callable[[], Any] | None = None,
     ) -> None:
         """Point the lane at a hub factory, and optionally at a service log.
 
@@ -382,13 +552,29 @@ class OfficeSubscriptions:
         the log it should write to belongs to whichever loop is currently
         running. Unbinding clears it, so a stopped loop's sink cannot be handed
         a line by the next one.
+
+        ``accepted_fold_entities`` is ``serve.py``'s own
+        ``_accepted_fold_entities``, and it is what makes a restart-free rejoin
+        decidable HERE. The registry knows what each office subscription
+        declared, but the room is BOTH LANES — the socket stream lane's
+        declaration table lives in a serve-loop closure and is not reachable
+        from a process-global registry. Passing the derivation in (rather than
+        re-implementing half of it) keeps one authority for what the room
+        accepts, which is the property the office lane already lost once by
+        reading only one of the two tables.
+
+        Absent — a test, a stdio probe — the lane simply keeps restarting on
+        every join, i.e. today's behaviour. A missing probe must degrade to
+        correct-and-expensive, never to cheap-and-wrong.
         """
 
         with self._lock:
             self._hub_factory = hub_factory
             self._log = log if hub_factory is not None else None
+            self._accepted = accepted_fold_entities if hub_factory is not None else None
             if hub_factory is None:
                 self._owned.clear()
+                self._declared.clear()
 
     def bound(self) -> bool:
         with self._lock:
@@ -403,8 +589,15 @@ class OfficeSubscriptions:
         workspace_id: str,
         baseline_offset: int,
         emit: Callable[[dict[str, Any]], None],
+        fold_entities: frozenset[str] | None = None,
     ) -> SubscribeOutcome:
         """Register one subscription, REPLACING this connection's existing one.
+
+        ``fold_entities`` is what THIS client says it can fold. ``None`` means it
+        said nothing and resolves to :data:`OFFICE_FOLD_ENTITIES` — see that
+        constant for why the server-side default had to stop being the
+        authority, and :func:`normalize_office_fold_entities` for why "said
+        nothing" and "said empty" must stay distinguishable this far down.
 
         A falsy outcome — rather than a raise — is reserved for the two states a
         caller must answer differently from a crash, and ``reason`` is what
@@ -423,6 +616,7 @@ class OfficeSubscriptions:
         with self._lock:
             factory = self._hub_factory
             log = self._log
+            accepted_probe = self._accepted
         if factory is None:
             return SubscribeOutcome(False, reason=NO_PUSH_LANE)
         hub = factory()
@@ -464,6 +658,41 @@ class OfficeSubscriptions:
         # inside the window the teardown opens. A caller that dropped the lock
         # here would be re-introducing exactly the unreportable window that
         # made subscribe one call in the first place.
+        # WHETHER THIS JOIN NEEDS A PRODUCER RESTART, decided BEFORE the
+        # teardown and before this subscription's own declaration is recorded
+        # (office fold-promotion plan O-H5, 2026-08-16).
+        #
+        # ``StreamHub.subscribe`` restarts by contract so a late joiner's first
+        # frame is a hydrate. This lane does not want that hydrate — the
+        # subscribe REPLY already carried the baseline, and the sink provably
+        # discards everything at or behind it — so every re-baseline was
+        # manufacturing an ~822 KB core to throw away, and billing every other
+        # subscriber in the room for it.
+        #
+        # It is only safe to skip when the join cannot NARROW what the room may
+        # promote. A running producer was built against the accepted set in
+        # force; if this joiner's declaration is a superset, the new accepted set
+        # is unchanged and every row that producer promotes is still foldable by
+        # everyone including the joiner. Narrowing without a restart would leave
+        # a producer promoting rows the room can no longer fold — the exact
+        # regression the negotiation exists to prevent.
+        #
+        # Measured against the SET IN FORCE via serve.py's own derivation, taken
+        # before this declaration is recorded so the joiner cannot answer its own
+        # question. A departed subscriber makes that reading WIDER than the
+        # running producer's true set, which makes the superset test stricter,
+        # never looser — the safe direction. Any failure to read it falls back to
+        # restarting.
+        restart_producer = True
+        if accepted_probe is not None:
+            declared = fold_entities if fold_entities is not None else OFFICE_FOLD_ENTITIES
+            try:
+                in_force = frozenset(accepted_probe())
+                producer_live = bool(hub.stats().get("producer_running"))
+            except Exception:
+                in_force, producer_live = None, False
+            if producer_live and in_force is not None and frozenset(declared) >= in_force:
+                restart_producer = False
         try:
             replaced = bool(hub.unsubscribe(key))
         except Exception:
@@ -487,7 +716,29 @@ class OfficeSubscriptions:
         # lines up and the only registration in play is this one.
         with self._lock:
             self._owned.setdefault(str(connection_key or "stdio"), set()).add(key)
-        if not hub.subscribe(key, sink=sink, on_drop=_on_drop):
+            # Recorded in the same breath and under the same lock, for the same
+            # reason: the producer this subscribe is about to start reads
+            # ``declarations()``, and a declaration written after would race the
+            # thread its own call created.
+            if fold_entities is None:
+                self._declared.pop(key, None)
+            else:
+                self._declared[key] = frozenset(fold_entities)
+        # The generation immediately before the join, so the receipt below can
+        # report what the hub ACTUALLY did rather than what was asked for. The
+        # two can differ legitimately: the teardown above empties the room when
+        # this connection was its only member, which stops the producer, and the
+        # hub's own floor then starts a fresh one however this call was flagged.
+        # A receipt that reported the REQUEST would say ``producer_restarted:
+        # false`` for a join that restarted — the kind of cost-nobody-is-billed
+        # -for this lane's receipts exist to prevent.
+        try:
+            generation_before = int(hub.stats().get("generation") or 0)
+        except Exception:
+            generation_before = -1
+        if not hub.subscribe(
+            key, sink=sink, on_drop=_on_drop, restart_producer=restart_producer
+        ):
             # ONE cause remains now that a duplicate key is impossible here: the
             # hub is stopping (``StreamHub.subscribe`` refuses once its stop
             # event is set), i.e. this call raced ``_close_socket_lane``. It is
@@ -508,6 +759,10 @@ class OfficeSubscriptions:
             return SubscribeOutcome(False, replaced=replaced, reason=PUSH_LANE_DRAINING)
         if replaced and log is not None:
             try:
+                generation_after = int(hub.stats().get("generation") or 0)
+            except Exception:
+                generation_after = generation_before
+            try:
                 log(
                     {
                         "event": "serve_office_subscription_rebaselined",
@@ -519,7 +774,15 @@ class OfficeSubscriptions:
                         # this is the whole reason the line exists. A retry loop
                         # shows up here as a repeating cost, not as a mystery in
                         # the hub's generation counter.
-                        "producer_restarted": True,
+                        #
+                        # MEASURED since O-H5, not asserted. It was the constant
+                        # ``True`` while a restart was unconditional; now a
+                        # non-narrowing rejoin attaches to the running producer
+                        # instead, and a receipt that kept saying True would be
+                        # billing the room for a core nobody built. The
+                        # generation counter is the hub's own answer, so this
+                        # cannot drift from what happened.
+                        "producer_restarted": generation_after != generation_before,
                     }
                 )
             except Exception:
@@ -533,6 +796,11 @@ class OfficeSubscriptions:
 
         owner = str(connection_key or "stdio")
         with self._lock:
+            # The declaration goes unconditionally, even when the index has no
+            # such owner: a declaration outliving its subscription would narrow
+            # (or widen) the room's intersection on behalf of a client that is
+            # no longer in it.
+            self._declared.pop(key, None)
             owned = self._owned.get(owner)
             if owned is None:
                 return
@@ -574,17 +842,29 @@ class OfficeSubscriptions:
             return False
 
     def declarations(self) -> list[frozenset[str]]:
-        """One :data:`OFFICE_FOLD_ENTITIES` per LIVE office subscription.
+        """What each LIVE office subscription declared it can fold.
 
         A list rather than a set, because the consumer (``serve.py``'s
         ``_accepted_fold_entities``) intersects a SEQUENCE of per-subscriber
         declarations, and an empty sequence is meaningfully different from one
         entry: no office subscriber at all must leave the room exactly as it
         was, contributing nothing to narrow OR to widen.
+
+        PER-CLIENT since 2026-08-16. This returned the server-side constant for
+        every subscription, which was the only answer available while nothing
+        asked the client — and it is precisely why a widened launcher could never
+        have its lifecycle rows promoted on this lane: the room's intersection
+        could not contain a token the server never heard. A subscription that
+        declared nothing still contributes :data:`OFFICE_FOLD_ENTITIES`, so a
+        room of un-updated clients intersects to exactly today's set.
         """
 
         with self._lock:
-            return [OFFICE_FOLD_ENTITIES for keys in self._owned.values() for _ in keys]
+            return [
+                self._declared.get(key, OFFICE_FOLD_ENTITIES)
+                for keys in self._owned.values()
+                for key in keys
+            ]
 
     def release(self, connection_key: str | None) -> int:
         """Drop every office subscription this connection owns. Returns a count.
@@ -599,6 +879,8 @@ class OfficeSubscriptions:
         owner = str(connection_key or "stdio")
         with self._lock:
             keys = self._owned.pop(owner, set())
+            for key in keys:
+                self._declared.pop(key, None)
             factory = self._hub_factory
         if not keys:
             return 0
