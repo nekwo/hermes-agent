@@ -1013,11 +1013,22 @@ remaining timing claims in this document as unverified until measured.
 
 Ordered by measured value, not by tidiness. Each item states what it buys and what it does **not**.
 
-1. ~~**D3 — make the `persona_instance` create foldable.**~~ **LANDED 2026-08-16** (hermes
-   `feat/persona-create-fold`, launcher `feat/persona-create-fold`). Removes ~6.5 s of the create's
-   6.94 s; a ~20x win, larger than this plan claimed rather than smaller. *Does not* fix the race, the
-   half-created agent, or the ~450 ms poll+settle floor. See §10.4 for the measurement that unblocked it
-   and the one deviation from the sketch above.
+1. ~~**D3 — make the `persona_instance` create foldable.**~~ **MERGED 2026-08-16** — hermes
+   `6cc2da693f`, launcher `5d9d23e19`. Verified on the merged tips, not on the branches:
+   `pytest tests/agent_runtime` **5328 passed / 1 skipped / exit 0** (+8); launcher
+   `test/features/mission_control` **3714 / 1 skipped / 1 failed** (+6), the failure being the
+   pre-existing education tombstone gate (R#41, not ours); and
+   `check_producer_contracts.py --hermes-root …` **exit 0**, "producer contract fixtures match Hermes".
+
+   **What that green does and does not mean.** It means the coverage classifier now promotes the create
+   batch instead of demoting it, so the ~6.5 s `build_snapshot()` should no longer be on the path.
+   It is **not** a measurement: nothing in D3 ran against a live runtime, by constraint. The ~20x figure
+   remains an inference from §10.1's breakdown plus the promotion, and the acceptance check is an
+   operator gesture — a `[MissionFold] applied … rows` receipt on an add with no
+   `resubscribe #N (push:full_core)` behind it. Until that is seen, treat this row as *built*, not *proven*.
+
+   *Does not* fix the race, the half-created agent, or the ~450 ms poll+settle floor. See **§10.5** for
+   the measurement that unblocked it and the two deviations from the sketch above.
 
 2. ~~**Log the `snapshot_build` `elapsed_ms` that is already on the wire.**~~ **LANDED 2026-08-16** —
    launcher `2eeb25c45`, hermes producer half merged the same day. **And the premise of this item, as I
@@ -1161,6 +1172,7 @@ Cited as `R#nn` from here on, to make clear they resolve to this table and not t
 | **R#10** | task | 08-14 | `runtime.agent.create` — one atomic call minting roster row, placement and chat root together. Plan A. |
 | **R#37** | incident | 08-15 | An office drag created the roster instance but never persisted the placement. The two halves came apart; the write lane emitted no receipt, so "never submitted" was indistinguishable from "submitted and refused". |
 | **R#40** | incident | 08-15 | **Data loss.** One drag archived every other actor in the workspace — `_flush` treated absence from the in-memory layout as intent to delete, while the read path is designed to hand back degraded layouts as a normal outcome. Restored via `office actor-restore`. |
+| **R#41** | defect | 08-15 | **Not ours.** The launcher's tombstone gate (`mission_control_tombstone_registry_test.dart`, "THE GATE") fails on clean `main`: tombstoned symbols reappeared in `lib/features/education/`. It is the single red test in every `test/features/mission_control` run quoted in this document. The gate is working correctly; the education lane owes either a rename or a retired registry row. |
 | **R#42** | ruling | 08-15 | Office becomes **RPC + push only**; every fallback lane is deleted once the main path is proven. Operator-stated accepted cost: *"no serve no office"*. Caching may return later as an optimisation, never as a fifth fallback. Plan C. |
 | **R#43** | task | 08-15 | Client prediction + revision reconciliation on drag. The write's own reply is the acknowledgement; notifications are for other clients' changes. |
 | **R#53** | task | 08-16 | No end-to-end correlation id — every receipt is per-lane, so causality is inferred from timestamps. Plan D. |
