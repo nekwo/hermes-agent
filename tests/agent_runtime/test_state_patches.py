@@ -360,20 +360,32 @@ def _log_end() -> int:
     return max((o for o, _ in EventLog().iter_from_offset(0)), default=0)
 
 
-def test_open_chat_create_emits_an_honest_persona_refresh(
+def test_open_chat_create_emits_a_complete_row_upsert_stamped_created(
     set_delta_patches, isolate_agent_runtime_root
 ):
-    """A CREATE's roster row rides the full core, deliberately (plan D3).
+    """SPEC INVERSION (D3, plan §10.3, 2026-08-16). This test asserted
+    ``op: refresh`` until the measurement it was waiting on was taken.
 
-    The row is brand new, the launcher's generic fold refuses an upsert for a
-    missing row, and a full ``persona_instance_summary`` cannot be assumed to
-    fit the 4 KB cap (the ~18 KB figure predates residue-slimming and is
-    unmeasured). ``refresh`` is exactly what ``refresh`` means everywhere else in
-    this module — "re-fetch this actor" — so the batch demotes and the client
-    converges on one full core.
+    Its previous docstring said the create's roster row rides the full core
+    because "a full ``persona_instance_summary`` cannot be assumed to fit the
+    4 KB cap (the ~18 KB figure predates residue-slimming and is unmeasured)".
+    That was an honest statement of an unknown, and the unknown resolved the
+    other way: measured on the operator's live roster, the largest complete row
+    is 3,012 bytes and the largest assembled payload 3,133, against a 4,096-byte
+    cap. The old assertion pinned a DEFERRAL, not a behaviour, so it changes
+    because the spec does.
 
-    The kill-mutation is emitting an ``upsert`` here: the launcher would answer
-    ``patch_without_target`` and take a re-hydrate ON TOP of the patch.
+    What the create must now emit: a COMPLETE-row ``upsert`` stamped
+    ``created: true``. Complete, because the launcher INSERTS it rather than
+    merging — a subset would build a half roster row. Stamped, because the stamp
+    is what both the coverage gate and the launcher's insert-on-absent branch
+    read.
+
+    Kill-mutations: emit ``refresh`` again (this goes red); drop the ``created``
+    stamp (the gate pair in ``test_patch_fold_negotiation`` goes red, and so
+    does the completeness assertion's sibling below); ship a SUBSET as the
+    create's ``changed`` (the ``persona_instance_summary`` key-set comparison
+    below goes red).
     """
 
     set_delta_patches(True)
@@ -387,12 +399,175 @@ def test_open_chat_create_emits_an_honest_persona_refresh(
 
     patches = _open_chat_patches(store, before)
     assert len(patches) == 1, patches
+    patch = patches[0]
+    assert patch["op"] == PATCH_OP_UPSERT
+    assert patch["id"] == instance.id
+    assert patch["created"] is True
+    # COMPLETENESS is the property that makes an insert safe, so it is asserted
+    # against the rebuild's own builder rather than against a hand-listed set:
+    # a field added to ``persona_instance_summary`` must reach the create patch
+    # in the same commit or this goes red.
+    from agent_runtime.persona_assignments import persona_instance_summary
+    from agent_runtime.serde import to_jsonable
+
+    expected = to_jsonable(persona_instance_summary(store.get(instance.id)))
+    assert patch["changed"] == expected
+    assert "persona_instance.chat_opened" in _event_types()
+
+
+def test_open_chat_create_row_fits_the_payload_cap_with_headroom(
+    set_delta_patches, isolate_agent_runtime_root
+):
+    """The measurement D3 rests on, re-taken rather than trusted.
+
+    The whole stage turns on one number — a complete persona-instance row fits
+    the 4,096-byte ``EventLog.append`` cap — and that number is a property of
+    ``persona_instance_summary``'s field list, which moves. The previous figure
+    in this lane's docstrings (~18 KB) was true when it was written and false by
+    the time it was load-bearing, and nothing was watching.
+
+    So: assert the emitted create is a real ``upsert`` (i.e. the shrink loop
+    never fired and no value was oversize-markered) and report the margin. A row
+    that outgrows the cap does not corrupt anything — ``emit_persona_instance_create``
+    degrades to ``refresh``, the pre-D3 behaviour — but it silently gives back
+    the 6.5 seconds this stage bought, and that must not happen quietly.
+
+    Kill-mutation: drop ``PATCH_VALUE_BUDGET_BYTES`` to something tiny, or add a
+    fat field to the summary row — the op degrades and this goes red.
+    """
+
+    import json
+
+    from agent_runtime.events import EVENT_PAYLOAD_LIMIT_BYTES
+    from agent_runtime.serde import to_jsonable
+
+    set_delta_patches(True)
+    store = PersonaInstanceStore()
+    before = _log_end()
+    store.open_chat(
+        persona_id="profile:reviewer",
+        session_id="persona_chat_open_create_sized",
+        display_name="Reviewer",
+    )
+
+    patch = _open_chat_patches(store, before)[0]
+    assert patch["op"] == PATCH_OP_UPSERT, "the create degraded — the row outgrew the cap"
+    assert not any(
+        isinstance(value, dict) and value.get("oversize") is True
+        for value in patch["changed"].values()
+    ), "a create may never carry an oversize marker — it would be INSERTED as the value"
+    size = len(json.dumps(to_jsonable(patch), ensure_ascii=False).encode("utf-8"))
+    assert size <= EVENT_PAYLOAD_LIMIT_BYTES, size
+
+
+def test_open_chat_create_resolves_the_backing_persona_like_the_snapshot_does(
+    set_delta_patches, isolate_agent_runtime_root
+):
+    """The create row must be byte-parity with the FULL CORE's row, and the one
+    thing that can break that silently is persona resolution.
+
+    ``snapshot.py`` builds each roster row as
+    ``persona_instance_summary(instance, personas_by_id.get(persona_id))`` — the
+    stored agent, or ``None`` for a profile instance that has none.
+    ``project_persona_instance_full_wire_row`` reproduces that with
+    ``_resolve_persona_for``. Skipping it (passing ``None`` always) LOOKS fine
+    for a ``profile:`` instance — the summary's own ``_profile_visibility_persona``
+    standin covers it — which is exactly why the other create tests here cannot
+    catch the bug: they all use ``profile:reviewer``. For an instance backed by a
+    STORED persona the standin returns ``None`` outright, and the inserted row
+    would carry ``model``/``provider``/``skills``/``toolsets`` emptied — a roster
+    row that disagrees with the very next full core.
+
+    Kill-mutation: make ``_resolve_persona_for`` return ``None``, or pass ``None``
+    to the summary — ``effective_model`` collapses to ``None`` and this goes red.
+    """
+
+    set_delta_patches(True)
+    persona = _persona("create_parity_agent")
+    AgentStore().save(persona)
+    store = PersonaInstanceStore()
+    before = _log_end()
+    instance = store.open_chat(
+        persona_id=persona.id,
+        session_id="persona_chat_open_create_backed",
+        display_name="Backed Agent",
+    )
+
+    changed = _open_chat_patches(store, before)[0]["changed"]
+    assert changed["effective_model"] == "gpt-test"
+    assert changed["effective_provider"] == "openai-codex"
+    assert changed["toolsets"] == ["file"]
+    # And the whole row equals the snapshot's own construction for this instance.
+    from agent_runtime.serde import to_jsonable
+
+    assert changed == to_jsonable(
+        persona_instance_summary(store.get(instance.id), persona)
+    )
+
+
+def test_open_chat_create_projection_is_side_effect_free(
+    set_delta_patches, isolate_agent_runtime_root
+):
+    """The create projection calls the FULL summary, so it must be proved not to
+    seed the agent store or emit a stray ``persona.updated`` into its own batch.
+
+    This is the hazard ``project_persona_instance_wire_fields``'s docstring names
+    and routes around by reproducing the derivation read-only. The create cannot
+    route around it — an insert needs the complete row and only the summary can
+    promise completeness — so the property is ASSERTED here instead of avoided.
+    A stray domain event in the batch would demote the very batch this stage
+    exists to promote, which makes it a silent 6.5-second regression rather than
+    a visible failure.
+
+    Kill-mutation: append a ``persona.updated`` from the projection path.
+    """
+
+    set_delta_patches(True)
+    store = PersonaInstanceStore()
+    store.open_chat(
+        persona_id="profile:reviewer",
+        session_id="persona_chat_open_create_effects",
+        display_name="Reviewer",
+    )
+
+    assert "persona.updated" not in _event_types()
+
+
+def test_a_create_row_that_cannot_fit_losslessly_degrades_to_refresh(
+    set_delta_patches, isolate_agent_runtime_root, monkeypatch
+):
+    """The floor: an oversize create is the PRE-D3 wire, never a corrupt insert.
+
+    ``build_state_patch``'s shrink loop is right for a subset upsert — it marks
+    the largest values ``{oversize: true, bytes: N}`` and the launcher refetches
+    those fields. For a CREATE it would be a fabrication: the launcher inserts
+    the row wholesale, so the marker would BECOME the roster row's value for that
+    field. ``emit_persona_instance_create`` therefore treats a create as
+    all-or-nothing and falls back to ``refresh``, which is exactly what this arm
+    emitted before D3 — the worst case is today's wire, not a lie.
+
+    Kill-mutation: delete the losslessness check in
+    ``emit_persona_instance_create`` — the emitted patch becomes an ``upsert``
+    carrying markers and this goes red on both assertions.
+    """
+
+    set_delta_patches(True)
+    monkeypatch.setattr("agent_runtime.state_patches.PATCH_VALUE_BUDGET_BYTES", 8)
+    store = PersonaInstanceStore()
+    before = _log_end()
+    instance = store.open_chat(
+        persona_id="profile:reviewer",
+        session_id="persona_chat_open_create_oversize",
+        display_name="Reviewer",
+    )
+
+    patches = _open_chat_patches(store, before)
+    assert len(patches) == 1, patches
     assert patches[0] == {
         "entity": "persona_instance",
         "id": instance.id,
         "op": PATCH_OP_REFRESH,
     }
-    assert "persona_instance.chat_opened" in _event_types()
 
 
 def test_open_chat_reopen_emits_the_diffed_upsert_with_the_parity_fields(

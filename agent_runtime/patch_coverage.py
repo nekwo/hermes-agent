@@ -94,6 +94,7 @@ from .state_patches import (
     OFFICE_ACTOR_ENTITY,
     PATCH_OP_REMOVE,
     PATCH_OP_UPSERT,
+    PERSONA_INSTANCE_ENTITY,
     STATE_PATCHED_EVENT_TYPE,
 )
 
@@ -122,6 +123,29 @@ from .state_patches import (
 #: A plain MOVE upsert stays coverable under bare ``office_actor``, unchanged —
 #: the token gates the two lifecycle ops, not the entity.
 OFFICE_ACTOR_LIFECYCLE_CAPABILITY = "office_actor_lifecycle"
+
+#: The SECOND capability token, and it exists for exactly the reason the first
+#: one does — a widened OP on an already-declared entity, which the per-entity
+#: vocabulary cannot express (D3, plan §10.3, 2026-08-16).
+#:
+#: ``persona_instance`` has been declared by every fielded launcher since S7-A,
+#: and every ``upsert`` under it has been a SUBSET merge onto a row the client
+#: already holds. D3 adds a complete-row ``upsert`` stamped ``created: true`` for
+#: a row the client does NOT hold, which a fielded launcher answers with
+#: ``patch_without_target`` → a full re-hydrate: the patch AND the core, strictly
+#: worse than the full core it replaced. So the create is coverable only for a
+#: client that names this token beside its entities.
+#:
+#: **The one asymmetry with the office token, and it is load-bearing.** For
+#: ``office_actor`` the launcher's fold inserts-on-absent UNCONDITIONALLY and the
+#: marker only gates coverage: every office upsert already carries the complete
+#: row, because the store has no per-field office write. ``persona_instance``
+#: upserts are subsets, so an unconditional insert-on-absent would build a roster
+#: row out of whichever three fields a steer happened to move. The launcher's
+#: generic fold therefore READS ``created`` — insert only when it is stamped,
+#: ``patch_without_target`` otherwise — which makes the stamp part of the fold
+#: contract here, not merely part of the negotiation.
+PERSONA_INSTANCE_CREATE_CAPABILITY = "persona_instance_create"
 
 #: Domain events that ride alongside their ``state.patched`` in the same
 #: coalesced batch (same chokepoint) and carry no fold state of their own — the
@@ -367,6 +391,31 @@ def state_patch_is_office_lifecycle(payload: Any) -> bool:
     return payload.get("op") == PATCH_OP_REMOVE or payload.get("created") is True
 
 
+def state_patch_is_persona_instance_create(payload: Any) -> bool:
+    """Whether a ``persona_instance`` patch is the WIDENED create-upsert (D3).
+
+    One shape only: an ``upsert`` stamped ``created: true``, carrying the
+    complete row for an instance the client does not hold. A subset upsert (no
+    ``created`` key) is NOT a create and stays coverable under bare
+    ``persona_instance``, exactly as every fielded launcher has folded it since
+    S7-A. A ``remove`` is not gated either — deleting a row a client may not hold
+    is idempotent and every fielded fold already treats a missing target as a
+    clean no-op.
+
+    Answered off the PAYLOAD rather than the entity, for the same reason its
+    office sibling is: a producer that stopped stamping ``created`` would
+    otherwise silently re-open promotion at an un-updated client through the
+    un-gated arm — and there the launcher would insert nothing and resync, which
+    is the regression this gate exists to prevent.
+    """
+
+    if not isinstance(payload, dict):
+        return False
+    if state_patch_entity(payload) != PERSONA_INSTANCE_ENTITY:
+        return False
+    return payload.get("op") == PATCH_OP_UPSERT and payload.get("created") is True
+
+
 def event_is_patch_coverable(
     event: Any, *, fold_entities: Iterable[str] | None = None
 ) -> bool:
@@ -383,7 +432,10 @@ def event_is_patch_coverable(
     (``remove``, or an ``upsert`` stamped ``created: true``) additionally
     requires the client to have declared
     :data:`OFFICE_ACTOR_LIFECYCLE_CAPABILITY` — see that constant for why a
-    third gate exists at all rather than the entity rule being enough.
+    third gate exists at all rather than the entity rule being enough. A
+    ``persona_instance`` complete-row create (``upsert`` stamped ``created:
+    true``) is gated the same way on
+    :data:`PERSONA_INSTANCE_CREATE_CAPABILITY` (D3).
 
     A covered domain event is coverable because its fold state rides in the
     paired patch — it is not entity-gated, because it carries no state to fold
@@ -403,6 +455,8 @@ def event_is_patch_coverable(
             return False
         if state_patch_is_office_lifecycle(payload):
             return OFFICE_ACTOR_LIFECYCLE_CAPABILITY in declared
+        if state_patch_is_persona_instance_create(payload):
+            return PERSONA_INSTANCE_CREATE_CAPABILITY in declared
         return True
     return event_type in COVERED_DOMAIN_EVENT_TYPES
 
