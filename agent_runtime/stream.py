@@ -32,10 +32,46 @@ STREAM_SCHEMA_VERSION = 1
 #: flag is a new-lane activation gate, not an old-shape toggle).
 STREAM_PATCH_SCHEMA_VERSION = 2
 
+logger = logging.getLogger(__name__)
+
 # Single-homed in ``agent_runtime.redaction`` — see the header there for the
 # JSON blind spot every local spelling shared. group(1) is still the full key,
 # so the ``f"{match.group(1)}=[redacted]"`` rebuild below is unchanged.
 _SECRET_ASSIGNMENT_RE = ENV_SECRET_ASSIGNMENT_RE
+
+
+def _log_snapshot_build(
+    *, reason: str, elapsed_ms: int, offset: int | None, events: int | None = None
+) -> None:
+    """Record one full ``build_snapshot()`` and what it actually cost.
+
+    **Why this is not the heartbeat's number.** The liveness envelope below
+    already ships a ``snapshot_build`` activity block, but its ``elapsed_ms``
+    is a MID-BUILD sample taken on the heartbeat cadence (5s from
+    ``harness serve``): a 6.5s build reports one sample at ~5000 and a warm
+    1.2s build reports NOTHING, because it finishes before the first
+    heartbeat is due. Neither value is the total. This line is the total,
+    taken on the build thread itself, and it is the exact number the
+    2026-08-16 performance pass spent hours reconstructing by subtraction
+    from ``events_archive/*.jsonl`` timestamps and then by profiling an
+    isolated probe copy of the runtime root.
+
+    ``offset`` anchors the cost to the watermark the resulting frame carries,
+    so a build can be tied back to the events that paid for it; ``reason``
+    names the lane that paid (``hydrate`` / ``demote`` / ``resync`` /
+    ``full_core``). A number with no anchor is barely better than no number.
+
+    Rides the ordinary ``Logger`` family, so ``hermes serve`` (mode ``gui``)
+    lands it in ``<HERMES_HOME>/logs/agent.log`` at INFO with no extra flag.
+    """
+
+    logger.info(
+        "snapshot_build reason=%s elapsed_ms=%d offset=%s events=%s",
+        reason,
+        int(elapsed_ms),
+        "unknown" if offset is None else int(offset),
+        "-" if events is None else int(events),
+    )
 
 
 def hydrate_frame(
@@ -78,7 +114,18 @@ def hydrate_frame(
     # appended after the shared build arrives as the first delta instead.
     # Requiring a newer build would make the launcher's boot hydrate wait for
     # the prewarm AND then pay a second build — strictly worse than no prewarm.
-    snap = snapshot if snapshot is not None else build_snapshot(accept_inflight=True)
+    if snapshot is not None:
+        snap = snapshot
+        build_elapsed_ms: int | None = None
+    else:
+        build_started = time.monotonic()
+        snap = build_snapshot(accept_inflight=True)
+        # NOTE what this measures: the hydrate's WAIT, which under
+        # ``accept_inflight`` may be a short ride on a build somebody else
+        # started (serve prewarms one right after ``ready``) rather than a
+        # build of its own. That is the number the client actually paid, which
+        # is the one worth logging here.
+        build_elapsed_ms = int((time.monotonic() - build_started) * 1000)
     parity = snap.get("parity") if isinstance(snap.get("parity"), dict) else {}
     watermark = parity.get("watermark") if isinstance(parity.get("watermark"), dict) else {}
     frame: dict[str, Any] = {
@@ -95,6 +142,12 @@ def hydrate_frame(
     if delta_patches:
         frame["delta_patches"] = True
         frame["fold_entities"] = sorted(normalize_fold_entities(fold_entities))
+    if build_elapsed_ms is not None:
+        _log_snapshot_build(
+            reason="hydrate",
+            elapsed_ms=build_elapsed_ms,
+            offset=(frame.get("watermark") or {}).get("event_offset"),
+        )
     return frame
 
 
@@ -282,13 +335,21 @@ class _SnapshotBuildJob:
         self.done = threading.Event()
         self.snapshot: dict[str, Any] | None = None
         self.error: BaseException | None = None
+        #: Wall time of the build itself, measured ON the build thread.
+        #: Taken here rather than around ``job.done.wait`` because that wait
+        #: polls at ``_SNAPSHOT_CANCEL_POLL_SECONDS``, which would round every
+        #: build up by as much as 100ms. Set before ``done`` so any reader that
+        #: has observed completion has also observed the number.
+        self.elapsed_ms: int | None = None
 
     def run(self) -> None:
+        started = time.monotonic()
         try:
             self.snapshot = build_snapshot()
         except BaseException as exc:  # re-raised on the stream worker
             self.error = exc
         finally:
+            self.elapsed_ms = int((time.monotonic() - started) * 1000)
             self.done.set()
 
 
@@ -297,8 +358,14 @@ def _full_core_batch_frames(
     *,
     base_offset: int,
     heartbeat_interval_seconds: float,
+    reason: str = "full_core",
 ) -> Iterator[dict[str, Any]]:
-    """Emit liveness while one uncovered batch builds its authoritative core."""
+    """Emit liveness while one uncovered batch builds its authoritative core.
+
+    ``reason`` names why this batch is paying for a full core — it is the
+    caller's classification, not something this function can re-derive, and it
+    is what makes the emitted ``snapshot_build`` line actionable.
+    """
 
     job = _SnapshotBuildJob()
     started = time.monotonic()
@@ -332,7 +399,15 @@ def _full_core_batch_frames(
         raise job.error
     if job.snapshot is None:
         raise RuntimeError("snapshot build completed without a result")
-    yield delta_batch_frame(batch, snapshot=job.snapshot)
+    frame = delta_batch_frame(batch, snapshot=job.snapshot)
+    if job.elapsed_ms is not None:
+        _log_snapshot_build(
+            reason=reason,
+            elapsed_ms=job.elapsed_ms,
+            offset=(frame.get("watermark") or {}).get("event_offset"),
+            events=len(batch),
+        )
+    yield frame
 
 
 def _batch_frames_with_liveness(
@@ -353,10 +428,16 @@ def _batch_frames_with_liveness(
     ):
         yield patch_batch_frame(batch, base_offset=base_offset)
         return
+    # Classified HERE because this is the only place that holds all three
+    # facts. `resync` is a re-baseline the client asked for; with the lane off
+    # every batch is a full core by design (not a demotion); otherwise the
+    # coverage gate rejected the batch and a foldable update just paid for a
+    # whole snapshot — the case worth grepping for.
     yield from _full_core_batch_frames(
         batch,
         base_offset=base_offset,
         heartbeat_interval_seconds=heartbeat_interval_seconds,
+        reason="resync" if resync else ("demote" if delta_patches else "full_core"),
     )
 
 
