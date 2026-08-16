@@ -1758,7 +1758,18 @@ def serve_loop(
         # on this hub pay a fresh full core. The client sees `replaced` on its
         # own reply; without this line the operator would see a retry loop only
         # as an unexplained climb in the hub's generation counter.
-        OFFICE_SUBSCRIPTIONS.bind(_ensure_stream_hub, log=_service_log)
+        #
+        # `_accepted_fold_entities` rides along because a restart-free rejoin is
+        # only safe when the joiner is not NARROWING what the room may promote,
+        # and the room is BOTH LANES — the stream lane's declaration table is
+        # this closure's, unreachable from a process-global registry. Lending
+        # the derivation keeps one authority for what the room accepts; reading
+        # only one of the two tables is the mistake this lane already made once.
+        OFFICE_SUBSCRIPTIONS.bind(
+            _ensure_stream_hub,
+            log=_service_log,
+            accepted_fold_entities=_accepted_fold_entities,
+        )
 
         def _release_subscription(connection: Any) -> None:
             """A client left. Unsubscribe it, and do NOTHING else.

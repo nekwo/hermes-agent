@@ -1012,6 +1012,13 @@ def test_a_re_baseline_makes_every_other_subscriber_pay_a_fresh_core(live_hub):
     Measured on the peer's own delivery count rather than on ``generation``
     alone: a generation bump proves a thread was started, while the peer's count
     proves the peer was actually made to re-read a projection.
+
+    SCOPE, since O-H5: this is the DEGRADED path, and it is still worth pinning
+    because it is the one a runtime with no bound ``accepted_fold_entities``
+    probe takes — ``live_hub`` deliberately binds none here. When serve.py's
+    probe IS bound and the rejoin does not narrow the room, the restart (and
+    therefore this cost) is gone; that is the test immediately below, and the
+    two together are what say the saving is conditional rather than universal.
     """
 
     _seed_office()
@@ -1035,6 +1042,64 @@ def test_a_re_baseline_makes_every_other_subscriber_pay_a_fresh_core(live_hub):
     # nothing crosses to its client. A resync here would mean the re-baseline
     # had also kicked every other client into a refetch round trip.
     assert _methods(peer) == [], peer
+
+
+def test_a_non_narrowing_re_baseline_costs_the_room_nothing(live_hub):
+    """O-H5 against a REAL producer: the second ~822 KB build is gone.
+
+    The office lane's re-subscribe restarted the shared producer to manufacture
+    a hydrate its own sink then discarded at the baseline the subscribe REPLY
+    had just carried. Every re-baseline therefore billed every other subscriber
+    a fresh full core for a frame nobody could use — and the operator's session
+    shows re-baselines happening on a backoff ladder, so the cost repeated.
+
+    With serve.py's ``accepted_fold_entities`` bound (mirrored here, as the
+    ``live_hub`` fixture mirrors ``_stream_source``) a rejoin that declares a
+    superset of the set in force attaches to the running generation instead.
+
+    The peer's silence is the real assertion and it is synchronised, not
+    guessed: the re-baselining client's own patch is awaited first, which proves
+    the lane is live and the producer really did keep running, and only then is
+    the peer's un-moved delivery count an observation.
+    """
+
+    store = _seed_office()
+    hub = live_hub()
+    OFFICE_SUBSCRIPTIONS.bind(
+        lambda: hub,
+        accepted_fold_entities=lambda: accepted_fold_entities(
+            OFFICE_SUBSCRIPTIONS.declarations()
+        ),
+    )
+    declared = sorted(OFFICE_FOLD_ENTITIES)
+    mine: list[dict] = []
+    peer: list[dict] = []
+    _settled_subscription(mine, hub, fold_entities=declared)
+    _settled_subscription(peer, hub, connection_key="c2", fold_entities=declared)
+
+    generation = hub.stats()["generation"]
+    peer_delivered = _frames_delivered(hub, "c2")
+
+    reply = _subscribe(mine, rid="r3", fold_entities=declared)["result"]
+    assert reply["replaced"] is True
+
+    # No supersession: the running producer kept producing.
+    assert hub.stats()["generation"] == generation, (
+        "a non-narrowing re-baseline restarted the producer and billed the room"
+    )
+
+    # And the lane really is live afterwards — otherwise "no restart" would be
+    # trivially satisfied by a subscription that receives nothing.
+    store.upsert_actor(
+        WORKSPACE, _actor_payload(position=(71.0, 72.0)), updated_by="after-rebaseline"
+    )
+    _await_patch(mine, "the re-baselined subscriber's own patch")
+    _await_patch(peer, "the peer's patch, which is what makes the count readable")
+
+    # The peer received the office write and NOTHING ELSE: no fresh core, no
+    # resync. Its delivery count moved by the write's frames alone.
+    assert _methods(peer) == [OFFICE_PATCH_METHOD], peer
+    assert _frames_delivered(hub, "c2") > peer_delivered
 
 
 def test_unsubscribe_stops_delivery_against_the_real_producer(live_hub):

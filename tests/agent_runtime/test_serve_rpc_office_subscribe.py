@@ -98,6 +98,14 @@ class _FakeHub:
     answers False: its stop event is set. That is a serve-loop shutdown race,
     unreachable from a test that owns its own hub, and it is the state the old
     ``already_subscribed`` arm mislabelled.
+
+    ``restart_producer`` and ``generation`` model O-H5's half of the contract,
+    and they are modelled rather than ignored for the reason the duplicate
+    refusal is: the whole point of the flag is that a join can be made NOT to
+    bump the generation, so a fake that accepted the argument and always bumped
+    anyway would make the cheap path indistinguishable from the expensive one.
+    ``producer_running`` follows the real hub's meaning — a producer exists once
+    a first subscriber has arrived, and stops when the room empties.
     """
 
     def __init__(self, *, draining: bool = False) -> None:
@@ -107,18 +115,36 @@ class _FakeHub:
         #: Every key ever handed to `subscribe`, in order, kept ONLY so a test
         #: can tell a replacement from a no-op: both leave one live key behind.
         self.subscribe_calls: list[str] = []
+        self.generation = 0
+        self.producer_running = False
+        #: What each `subscribe` was ASKED for, so a test can separate the
+        #: request from what the hub did with it.
+        self.restart_requests: list[bool] = []
 
-    def subscribe(self, key, *, sink, on_drop=None) -> bool:
+    def subscribe(self, key, *, sink, on_drop=None, restart_producer: bool = True) -> bool:
         self.subscribe_calls.append(key)
+        self.restart_requests.append(restart_producer)
         if self.draining or key in self.sinks:
             return False
         self.sinks[key] = sink
         self.drops[key] = on_drop
+        # The hub's own FLOOR: a subscriber attached to nothing receives
+        # nothing, so a restart-free join with no live producer starts one
+        # anyway.
+        if restart_producer or not self.producer_running:
+            self.generation += 1
+            self.producer_running = True
         return True
 
     def unsubscribe(self, key) -> bool:
         self.drops.pop(key, None)
-        return self.sinks.pop(key, None) is not None
+        removed = self.sinks.pop(key, None) is not None
+        if not self.sinks:
+            self.producer_running = False
+        return removed
+
+    def stats(self) -> dict:
+        return {"generation": self.generation, "producer_running": self.producer_running}
 
 
 def _patch_frame(*, base_offset: int, event_offset: int, ids: list[str]) -> dict:
@@ -850,8 +876,203 @@ def test_a_re_baseline_is_billed_to_the_service_log_not_only_to_the_client():
     assert lines[0]["connection"] == "c1"
     assert lines[0]["key"] == office_subscription_key("c1", WORKSPACE)
     # Named rather than left to be inferred from the hub's stats — this is the
-    # cost the line exists to report.
+    # cost the line exists to report. TRUE here because no
+    # ``accepted_fold_entities`` probe was bound, so the lane cannot establish
+    # that the rejoin is non-narrowing and takes the expensive-and-correct arm
+    # (O-H5's degrade rule). The cheap arm has its own tests below.
     assert lines[0]["producer_restarted"] is True
+
+
+# ── O-H5: a non-narrowing rejoin does not bill the room for a fresh core ─────
+
+
+def test_a_non_narrowing_rejoin_attaches_instead_of_restarting_the_producer():
+    """The second ~822 KB build per re-baseline, removed.
+
+    ``StreamHub.subscribe`` restarts by contract so a late joiner opens on a
+    hydrate. This lane does not want that hydrate — the subscribe REPLY carried
+    the baseline and the sink provably discards everything at or behind it — so
+    every re-baseline manufactured a full core to throw away and billed every
+    other subscriber in the room for it.
+
+    A rejoin that declares a SUPERSET of the accepted set in force cannot narrow
+    what the room may promote, so the running producer is still promoting only
+    rows everyone (including this joiner) can fold. It attaches.
+
+    Kill-mutation: always restart — the generation moves and the receipt says
+    so.
+    """
+
+    _seed_office()
+    hub = _FakeHub()
+    lines: list[dict] = []
+    OFFICE_SUBSCRIPTIONS.bind(
+        lambda: hub,
+        log=lines.append,
+        accepted_fold_entities=lambda: OFFICE_FOLD_ENTITIES,
+    )
+    context = serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+
+    _subscribe(context=context, fold_entities=sorted(OFFICE_FOLD_ENTITIES))
+    # Anti-vacuity: the counter really does move — the FIRST subscriber has no
+    # producer to attach to, so it starts one (the hub's floor).
+    assert hub.generation == 1
+    assert hub.restart_requests[-1] is True
+
+    # A SECOND connection, so the teardown below does not empty the room — an
+    # emptied room stops the producer and the hub's floor restarts it, which is
+    # correct but is not the case under test. It also shows the saving is NOT
+    # limited to rejoins: a genuinely new office subscriber does not want the
+    # hydrate either, because its baseline rode its own subscribe reply.
+    _subscribe(
+        rid="r2",
+        context=serve_rpc.RpcContext(connection_key="c2", emit=lambda _f: None),
+        fold_entities=sorted(OFFICE_FOLD_ENTITIES),
+    )
+    settled_generation = hub.generation
+    assert settled_generation == 1, "a non-narrowing second join billed the room a core"
+
+    # c1 re-baselines with the same declaration: no narrowing.
+    _subscribe(rid="r3", context=context, fold_entities=sorted(OFFICE_FOLD_ENTITIES))
+
+    assert hub.generation == settled_generation, (
+        "a non-narrowing rejoin bumped the generation and billed the room a core"
+    )
+    assert hub.restart_requests[-1] is False
+    rebaselines = [line for line in lines if line["connection"] == "c1"]
+    assert rebaselines[-1]["producer_restarted"] is False
+
+
+def test_a_narrowing_rejoin_still_restarts_the_producer():
+    """The safety half, and it is not symmetry for its own sake.
+
+    A producer built against a wider accepted set is promoting rows this joiner
+    cannot fold. Attaching to it would hand those rows to a client whose fold
+    answers with a re-hydrate — the patch AND the core, which is the regression
+    the whole negotiation exists to prevent. Only a restart re-derives the
+    accepted set, so a narrowing join must pay for one.
+
+    Kill-mutation: never restart (drop the superset test) — this goes red.
+    """
+
+    from agent_runtime.patch_coverage import HISTORICAL_FOLD_ENTITIES
+
+    _seed_office()
+    hub = _FakeHub()
+    lines: list[dict] = []
+    OFFICE_SUBSCRIPTIONS.bind(
+        lambda: hub,
+        log=lines.append,
+        accepted_fold_entities=lambda: OFFICE_FOLD_ENTITIES,
+    )
+    context = serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+
+    _subscribe(context=context, fold_entities=sorted(OFFICE_FOLD_ENTITIES))
+    _subscribe(
+        rid="r2",
+        context=serve_rpc.RpcContext(connection_key="c2", emit=lambda _f: None),
+        fold_entities=sorted(OFFICE_FOLD_ENTITIES),
+    )
+    settled_generation = hub.generation
+
+    # c1 comes back declaring LESS than the set in force.
+    _subscribe(rid="r3", context=context, fold_entities=sorted(HISTORICAL_FOLD_ENTITIES))
+
+    assert hub.generation > settled_generation
+    assert hub.restart_requests[-1] is True
+    assert [line for line in lines if line["connection"] == "c1"][-1][
+        "producer_restarted"
+    ] is True
+
+
+def test_a_first_subscriber_always_gets_a_producer():
+    """The floor, asserted from this side too.
+
+    A restart-free join with no live producer would attach a subscriber to
+    nothing, and nothing is exactly what it would then receive — the silent
+    failure this lane has already paid for once. The hub owns the floor; this
+    pins that the office registry cannot defeat it, even when its own
+    superset test says a restart is unnecessary.
+    """
+
+    _seed_office()
+    hub = _FakeHub()
+    OFFICE_SUBSCRIPTIONS.bind(
+        lambda: hub, accepted_fold_entities=lambda: OFFICE_FOLD_ENTITIES
+    )
+
+    _subscribe(
+        context=serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None),
+        fold_entities=sorted(OFFICE_FOLD_ENTITIES),
+    )
+
+    assert hub.producer_running is True
+    assert hub.generation == 1
+
+
+def test_a_rejoin_that_emptied_the_room_reports_the_restart_it_actually_caused():
+    """The receipt reports what HAPPENED, not what was asked for.
+
+    A lone subscriber's re-baseline tears its own key down first, which empties
+    the room and stops the producer; the hub's floor then starts a fresh one
+    however the call was flagged. Reporting the REQUEST would print
+    ``producer_restarted: false`` for a join that restarted — a cost nobody is
+    billed for, which is the one shape this lane's receipts exist to prevent.
+
+    Kill-mutation: log the requested flag instead of the observed generation
+    delta.
+    """
+
+    _seed_office()
+    hub = _FakeHub()
+    lines: list[dict] = []
+    OFFICE_SUBSCRIPTIONS.bind(
+        lambda: hub,
+        log=lines.append,
+        accepted_fold_entities=lambda: OFFICE_FOLD_ENTITIES,
+    )
+    context = serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+
+    _subscribe(context=context, fold_entities=sorted(OFFICE_FOLD_ENTITIES))
+    _subscribe(rid="r2", context=context, fold_entities=sorted(OFFICE_FOLD_ENTITIES))
+
+    # It ASKED not to restart — the declaration is a superset and a producer was
+    # live when the question was put ...
+    assert hub.restart_requests[-1] is False
+    # ... but the teardown emptied the room, so one really did start.
+    assert lines[-1]["producer_restarted"] is True
+
+
+def test_a_failing_accepted_probe_falls_back_to_restarting():
+    """A missing or broken probe degrades to correct-and-expensive.
+
+    The whole cheap path rests on knowing what the room accepts. If that cannot
+    be read — no serve loop bound one, or the derivation raised — the honest
+    answer is the restart this stage exists to avoid, never a guess. Both
+    absence and failure are pinned, because they arrive by different routes and
+    only one of them looks like a bug.
+    """
+
+    _seed_office()
+
+    def _explode():
+        raise RuntimeError("declaration table is mid-swap")
+
+    for probe in (None, _explode):
+        hub = _FakeHub()
+        OFFICE_SUBSCRIPTIONS.bind(lambda: hub, accepted_fold_entities=probe)
+        context = serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+        _subscribe(context=context, fold_entities=sorted(OFFICE_FOLD_ENTITIES))
+        _subscribe(
+            rid="r2",
+            context=serve_rpc.RpcContext(connection_key="c2", emit=lambda _f: None),
+            fold_entities=sorted(OFFICE_FOLD_ENTITIES),
+        )
+        generation = hub.generation
+        _subscribe(rid="r3", context=context, fold_entities=sorted(OFFICE_FOLD_ENTITIES))
+        assert hub.restart_requests[-1] is True, probe
+        assert hub.generation > generation, probe
+        OFFICE_SUBSCRIPTIONS.bind(None)
 
 
 def test_unbinding_drops_the_log_so_a_stopped_loops_sink_is_never_written_to():

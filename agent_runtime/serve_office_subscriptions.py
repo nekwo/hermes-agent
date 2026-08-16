@@ -531,6 +531,10 @@ class OfficeSubscriptions:
         #: (a test, a stdio probe); ``None`` means the receipt still reaches the
         #: client on its reply, just not an operator's tail.
         self._log: Callable[[dict[str, Any]], None] | None = None
+        #: ``serve.py``'s ``_accepted_fold_entities``, when one was bound. The
+        #: room spans both lanes and only serve.py can see both tables, so this
+        #: is borrowed rather than re-derived — see :meth:`bind`.
+        self._accepted: Callable[[], Any] | None = None
 
     # ── wiring ──────────────────────────────────────────────────────────────
 
@@ -539,6 +543,7 @@ class OfficeSubscriptions:
         hub_factory: Callable[[], Any] | None,
         *,
         log: Callable[[dict[str, Any]], None] | None = None,
+        accepted_fold_entities: Callable[[], Any] | None = None,
     ) -> None:
         """Point the lane at a hub factory, and optionally at a service log.
 
@@ -547,11 +552,26 @@ class OfficeSubscriptions:
         the log it should write to belongs to whichever loop is currently
         running. Unbinding clears it, so a stopped loop's sink cannot be handed
         a line by the next one.
+
+        ``accepted_fold_entities`` is ``serve.py``'s own
+        ``_accepted_fold_entities``, and it is what makes a restart-free rejoin
+        decidable HERE. The registry knows what each office subscription
+        declared, but the room is BOTH LANES — the socket stream lane's
+        declaration table lives in a serve-loop closure and is not reachable
+        from a process-global registry. Passing the derivation in (rather than
+        re-implementing half of it) keeps one authority for what the room
+        accepts, which is the property the office lane already lost once by
+        reading only one of the two tables.
+
+        Absent — a test, a stdio probe — the lane simply keeps restarting on
+        every join, i.e. today's behaviour. A missing probe must degrade to
+        correct-and-expensive, never to cheap-and-wrong.
         """
 
         with self._lock:
             self._hub_factory = hub_factory
             self._log = log if hub_factory is not None else None
+            self._accepted = accepted_fold_entities if hub_factory is not None else None
             if hub_factory is None:
                 self._owned.clear()
                 self._declared.clear()
@@ -596,6 +616,7 @@ class OfficeSubscriptions:
         with self._lock:
             factory = self._hub_factory
             log = self._log
+            accepted_probe = self._accepted
         if factory is None:
             return SubscribeOutcome(False, reason=NO_PUSH_LANE)
         hub = factory()
@@ -637,6 +658,41 @@ class OfficeSubscriptions:
         # inside the window the teardown opens. A caller that dropped the lock
         # here would be re-introducing exactly the unreportable window that
         # made subscribe one call in the first place.
+        # WHETHER THIS JOIN NEEDS A PRODUCER RESTART, decided BEFORE the
+        # teardown and before this subscription's own declaration is recorded
+        # (office fold-promotion plan O-H5, 2026-08-16).
+        #
+        # ``StreamHub.subscribe`` restarts by contract so a late joiner's first
+        # frame is a hydrate. This lane does not want that hydrate — the
+        # subscribe REPLY already carried the baseline, and the sink provably
+        # discards everything at or behind it — so every re-baseline was
+        # manufacturing an ~822 KB core to throw away, and billing every other
+        # subscriber in the room for it.
+        #
+        # It is only safe to skip when the join cannot NARROW what the room may
+        # promote. A running producer was built against the accepted set in
+        # force; if this joiner's declaration is a superset, the new accepted set
+        # is unchanged and every row that producer promotes is still foldable by
+        # everyone including the joiner. Narrowing without a restart would leave
+        # a producer promoting rows the room can no longer fold — the exact
+        # regression the negotiation exists to prevent.
+        #
+        # Measured against the SET IN FORCE via serve.py's own derivation, taken
+        # before this declaration is recorded so the joiner cannot answer its own
+        # question. A departed subscriber makes that reading WIDER than the
+        # running producer's true set, which makes the superset test stricter,
+        # never looser — the safe direction. Any failure to read it falls back to
+        # restarting.
+        restart_producer = True
+        if accepted_probe is not None:
+            declared = fold_entities if fold_entities is not None else OFFICE_FOLD_ENTITIES
+            try:
+                in_force = frozenset(accepted_probe())
+                producer_live = bool(hub.stats().get("producer_running"))
+            except Exception:
+                in_force, producer_live = None, False
+            if producer_live and in_force is not None and frozenset(declared) >= in_force:
+                restart_producer = False
         try:
             replaced = bool(hub.unsubscribe(key))
         except Exception:
@@ -668,7 +724,21 @@ class OfficeSubscriptions:
                 self._declared.pop(key, None)
             else:
                 self._declared[key] = frozenset(fold_entities)
-        if not hub.subscribe(key, sink=sink, on_drop=_on_drop):
+        # The generation immediately before the join, so the receipt below can
+        # report what the hub ACTUALLY did rather than what was asked for. The
+        # two can differ legitimately: the teardown above empties the room when
+        # this connection was its only member, which stops the producer, and the
+        # hub's own floor then starts a fresh one however this call was flagged.
+        # A receipt that reported the REQUEST would say ``producer_restarted:
+        # false`` for a join that restarted — the kind of cost-nobody-is-billed
+        # -for this lane's receipts exist to prevent.
+        try:
+            generation_before = int(hub.stats().get("generation") or 0)
+        except Exception:
+            generation_before = -1
+        if not hub.subscribe(
+            key, sink=sink, on_drop=_on_drop, restart_producer=restart_producer
+        ):
             # ONE cause remains now that a duplicate key is impossible here: the
             # hub is stopping (``StreamHub.subscribe`` refuses once its stop
             # event is set), i.e. this call raced ``_close_socket_lane``. It is
@@ -689,6 +759,10 @@ class OfficeSubscriptions:
             return SubscribeOutcome(False, replaced=replaced, reason=PUSH_LANE_DRAINING)
         if replaced and log is not None:
             try:
+                generation_after = int(hub.stats().get("generation") or 0)
+            except Exception:
+                generation_after = generation_before
+            try:
                 log(
                     {
                         "event": "serve_office_subscription_rebaselined",
@@ -700,7 +774,15 @@ class OfficeSubscriptions:
                         # this is the whole reason the line exists. A retry loop
                         # shows up here as a repeating cost, not as a mystery in
                         # the hub's generation counter.
-                        "producer_restarted": True,
+                        #
+                        # MEASURED since O-H5, not asserted. It was the constant
+                        # ``True`` while a restart was unconditional; now a
+                        # non-narrowing rejoin attaches to the running producer
+                        # instead, and a receipt that kept saying True would be
+                        # billing the room for a core nobody built. The
+                        # generation counter is the hub's own answer, so this
+                        # cannot drift from what happened.
+                        "producer_restarted": generation_after != generation_before,
                     }
                 )
             except Exception:
