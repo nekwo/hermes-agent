@@ -207,9 +207,33 @@ server function under test".
 
 **Goal.** No unmarked assumptions survive into AC-1.
 
-- Verify A-1 (create logic importable) by reading the
-  `harness persona instance create` handler; record the exact function
-  signature in this doc's §9 table.
+- ~~Verify A-1 (create logic importable)~~ **SETTLED 2026-08-16 — A-1 HOLDS,
+  with a caveat that moves AC-1's extraction.** The create logic is not welded
+  to argparse: it lives in `PersonaInstanceStore` methods
+  (`add_instance` `persona_assignments.py:1643`, `open_chat` `:1433`,
+  `create_operator_chat` `:1624`), and the CLI handler simply calls them —
+  `PersonaInstanceStore().add_instance(persona_id=…, placement_id=…,
+  session_id=…, display_name=…, default_display_name=…, workspace_id=…,
+  realm_id=…)` at `persona_commands.py:593-601`. **So there is no extraction
+  needed inside `persona_assignments.py`, and therefore no collision with the
+  D3 agent — the §8 resequencing risk is retired.**
+
+  **The caveat, which is the part that actually costs something.** Sitting
+  *above* those store calls, in the CLI handler, is load-bearing policy a new
+  RPC handler would silently drop by calling the store directly:
+  `safe_assignment_token`/`safe_assignment_text` normalisation and limits, the
+  `placement_id is required` validation (`:562`), `_maybe_stamp_spawned_by`
+  (`:602`), and — the one with teeth — the **honest default display name**
+  rule at `:588-592`: an omitted name falls back to the persona's own
+  configured `display_name` ("QA Agent"), *never* to the title-cased persona id
+  ("Qa") the store template would otherwise mint. That rule carries its own
+  comment explaining the operator cue it protects.
+
+  AC-1 therefore extracts **upward, not downward**: hoist that normalisation
+  and naming layer so the CLI and the RPC handler share one copy. Note this
+  collides with §6's deferral of "naming authority" — the deferral is only
+  honest if the RPC lane inherits the existing rule rather than inventing a
+  second one.
 - Verify what `--placement-id` does server-side (instance id =
   `personainst_<placementId>`? — the launcher assumes exactly that at
   `mission_control_page.dart:2507,4539`), and that the office actor key the
@@ -351,8 +375,12 @@ remain operator tools.
 
 Fork-owned files only. `serve_rpc.py`, `office_store.py`, new modules:
 UNOWNED tonight (RAN against the coordinator's list). `persona_assignments.py`
-is OWNED by the D3 agent: any A-1 extraction lands only after D3 merges, and
-the event-parity test re-bases then. Python tests: 30 s cap, no `integration`
+is OWNED by the D3 agent — but **this constraint no longer binds AC-1**: A-1
+was settled 2026-08-16 (see AC-0) and the create logic is already callable
+store methods, so the extraction AC-1 needs is *upward* into the CLI's
+normalisation/naming layer (`persona_commands.py`), not inside
+`persona_assignments.py`. The event-parity test still re-bases after D3.
+Python tests: 30 s cap, no `integration`
 marker. Never write under `X:/Eternia/.hermes/`; no casual `harness serve`.
 Additive params/replies only; `RPC_CONTRACT_VERSION` stays 1 (adding a method
 does not move it — `serve_rpc.py:119-121` READ).
@@ -367,6 +395,8 @@ does not move it — `serve_rpc.py:119-121` READ).
 | A-R4 | Settle window is a join window; in-handler emissions coalesce | READ stream.py:484-533; fold plan §10.2(a) |
 | A-R5 | Keyed stateful mint reservation precedent | READ persona_chat_mints.py:63-138 |
 | A-R6 | Create-dedup debt recorded 2026-07-09 | READ 13-write-path-intent-integrity.md:63-66 |
-| A-R7 | Operator ruling text; incident #37; ruling #42 sequence | RELAYED (not on disk; RAN exhaustive grep) |
+| A-R7 | Operator ruling text; R#37; R#42 sequence | RELAYED — now recorded in the fold plan's §10.4 register (paraphrase, not quotation) |
+| A-R9 | **A-1 HOLDS**: create logic is `PersonaInstanceStore` methods, not argparse-welded; CLI calls them directly | READ persona_assignments.py:1433,1624,1643; persona_commands.py:593-601 |
+| A-R10 | Caveat to A-R9: normalisation, `placement_id` validation, `_maybe_stamp_spawned_by` and the honest-default-display-name rule live ABOVE the store, in the CLI handler | READ persona_commands.py:560-602 |
 | A-R8 | Create demote cost 6.94 s | MEASURED-§10 |
 | A-A1 | Create logic importable with the needed signature | ASSUMPTION — AC-0 |
