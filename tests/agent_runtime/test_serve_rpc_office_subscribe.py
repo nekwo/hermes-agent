@@ -47,15 +47,23 @@ import pytest
 
 from agent_runtime import serve_rpc
 from agent_runtime.serve_office_subscriptions import (
+    OFFICE_FOLD_ENTITIES,
     OFFICE_PATCH_METHOD,
     OFFICE_RESYNC_METHOD,
     OFFICE_SUBSCRIPTIONS,
+    normalize_office_fold_entities,
     office_patch_sink,
     office_subscription_key,
 )
 
 WORKSPACE = "ws_rpc_subscribe_test"
 OTHER = "ws_somebody_else"
+
+#: "the param was not sent at all", which the fail-open rule must keep
+#: distinguishable from ``[]`` ("I fold nothing"). A default of ``None`` would
+#: have collapsed the two at the test boundary — the exact conflation the
+#: production normalizer is written to avoid.
+_ABSENT = object()
 
 
 # ── fixtures ────────────────────────────────────────────────────────────────
@@ -167,13 +175,16 @@ def _seed_office(workspace_id: str = WORKSPACE) -> None:
     )
 
 
-def _subscribe(rid="r1", workspace_id=WORKSPACE, context=None) -> dict:
+def _subscribe(rid="r1", workspace_id=WORKSPACE, context=None, fold_entities=_ABSENT) -> dict:
+    params: dict = {"workspace_id": workspace_id}
+    if fold_entities is not _ABSENT:
+        params["fold_entities"] = fold_entities
     return serve_rpc.handle_request(
         {
             "jsonrpc": "2.0",
             "id": rid,
             "method": "runtime.office.subscribe",
-            "params": {"workspace_id": workspace_id},
+            "params": params,
         },
         context,
     )
@@ -239,28 +250,75 @@ def test_another_workspaces_batch_sends_nothing_at_all():
     assert sent == []
 
 
-def test_a_mixed_batch_carries_only_this_workspaces_rows():
-    """The filter is per ROW, not per frame. A frame-level test passes against
-    a sink that forwards a mixed batch whole — which would hand the client
-    another workspace's actors to fold into its own canvas."""
+def test_a_mixed_batch_in_scope_is_forwarded_WHOLE_not_filtered():
+    """SPEC INVERSION (office fold-promotion plan §V6, 2026-08-16).
+
+    This asserted the opposite until 2026-08-16 — that a mixed batch carried
+    only this workspace's rows — on the reasoning that another workspace's
+    actors are not this subscriber's business. What that reasoning missed is the
+    WATERMARK: the notification is stamped with the FULL batch's watermark while
+    carrying a filtered subset of its rows, and the launcher folds both
+    transports into ONE read model with ONE sequence.
+
+    So the delete gesture's batch — ``[persona_instance remove, office_actor
+    remove]`` — forwarded only the office row while claiming the whole span. If
+    this lane folded first, the stream lane's frame at the same watermark was
+    dropped as stale and the persona remove NEVER APPLIED: a silently stale
+    roster, unrecoverable by any gate, because the watermark says the span was
+    applied. Latent only because nothing has ever promoted (``folded 0`` on
+    every subscribe); it arms the moment O-H3 lands, which is why this stage is
+    sequenced before it rather than after.
+
+    The scope test is now per FRAME (is anything here mine?) and the payload is
+    the whole batch. Addressed-not-broadcast survives intact — see the sibling
+    test below, where nothing in scope still sends nothing.
+    """
 
     sent, deliver = _sink()
-
-    deliver(
-        _patch_frame(
-            base_offset=10,
-            event_offset=12,
-            ids=[
-                f"{OTHER}/personainst_dev_3ebfce41",
-                f"{WORKSPACE}/personainst_qa_agent_9c8a382f",
-                f"{OTHER}/personainst_neko_f6f7a51b",
-            ],
-        )
-    )
-
-    assert [row["id"] for row in sent[0]["params"]["patches"]] == [
-        f"{WORKSPACE}/personainst_qa_agent_9c8a382f"
+    ids = [
+        f"{OTHER}/personainst_dev_3ebfce41",
+        f"{WORKSPACE}/personainst_qa_agent_9c8a382f",
+        f"{OTHER}/personainst_neko_f6f7a51b",
     ]
+
+    deliver(_patch_frame(base_offset=10, event_offset=12, ids=ids))
+
+    assert [row["id"] for row in sent[0]["params"]["patches"]] == ids
+    # The watermark it claims and the rows it carries now describe the same
+    # span, which is the whole property.
+    assert sent[0]["params"]["watermark"]["event_offset"] == 12
+    assert sent[0]["params"]["base_offset"] == 10
+
+
+def test_a_non_office_row_rides_along_when_the_batch_is_in_scope():
+    """The V6 race one entity over.
+
+    A ``persona_instance`` row in a batch this lane forwards is real state at
+    the watermark it stamps. Dropping it while claiming the watermark is exactly
+    the same bug as dropping another workspace's office row, and it is the
+    version that actually bit: the delete gesture's batch is a persona remove
+    beside an office remove.
+
+    Kill-mutation: restore the entity filter on the forwarded rows — the persona
+    row disappears from ``patches`` and this goes red while the office-only
+    assertions above stay green.
+    """
+
+    sent, deliver = _sink()
+    frame = _patch_frame(
+        base_offset=10,
+        event_offset=12,
+        ids=[f"{WORKSPACE}/personainst_qa_agent_9c8a382f", "personainst_qa_agent_9c8a382f"],
+    )
+    frame["patches"][1]["entity"] = "persona_instance"
+    frame["patches"][1]["op"] = "remove"
+    frame["patches"][1].pop("changed")
+
+    deliver(frame)
+
+    rows = sent[0]["params"]["patches"]
+    assert [row["entity"] for row in rows] == ["office_actor", "persona_instance"]
+    assert rows[1]["op"] == "remove"
 
 
 def test_a_workspace_that_merely_shares_a_prefix_is_not_matched():
@@ -457,9 +515,17 @@ def test_the_reply_carries_the_get_projection_plus_the_baseline_watermark():
     # what this test is about is that everything ELSE is byte-identical to the
     # get, so the two derivations cannot drift.
     replaced = subscribed.pop("replaced")
+    # Third additive key (2026-08-16): the accepted fold declaration. Popped for
+    # the same reason — it is subscribe's own, not part of the projection — and
+    # asserted below, because an echo nobody checks is an echo that can go
+    # silently wrong.
+    declared = subscribed.pop("fold_entities")
     assert subscribed == got
     assert isinstance(watermark["event_offset"], int)
     assert replaced is False
+    # This client declared nothing, so it is held to the fail-open legacy
+    # constant — which is what an un-updated launcher must keep getting.
+    assert declared == sorted(OFFICE_FOLD_ENTITIES)
     assert set(hub.sinks) == {office_subscription_key("c1", WORKSPACE)}
 
 
@@ -941,6 +1007,214 @@ def test_release_is_safe_for_a_connection_that_never_subscribed():
 
     assert OFFICE_SUBSCRIPTIONS.release("never-here") == 0
     assert OFFICE_SUBSCRIPTIONS.release(None) == 0
+
+
+# ── O-H2: per-client fold declarations on the office lane ───────────────────
+
+
+def test_an_absent_fold_entities_param_declares_the_legacy_constant():
+    """FAIL-OPEN, and it is the load-bearing half of the pair below.
+
+    Every launcher in the field sends this method exactly one param. If the
+    absent case resolved to the empty set, the room's INTERSECTION would zero
+    out the moment such a client subscribed — the persona-instance patch lane
+    that works today would go dark for everyone, which is the regression wearing
+    a fix's clothes that ``OFFICE_FOLD_ENTITIES``' own comment already warns
+    about one layer up.
+
+    Kill-mutation: make the registry store ``frozenset()`` for a ``None``
+    declaration.
+    """
+
+    _seed_office()
+    OFFICE_SUBSCRIPTIONS.bind(lambda: _FakeHub())
+
+    reply = _subscribe(
+        context=serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+    )["result"]
+
+    assert reply["fold_entities"] == sorted(OFFICE_FOLD_ENTITIES)
+    assert OFFICE_SUBSCRIPTIONS.declarations() == [OFFICE_FOLD_ENTITIES]
+
+
+def test_a_declared_param_is_what_the_room_intersects_over():
+    """The hole O-H2 closes (plan §V4).
+
+    The declaration was a SERVER-side constant, which can only ever report a
+    fact about the runtime — so a launcher whose fold had been widened could
+    never have its widened rows promoted here: the intersection cannot contain a
+    token nobody told the server about. Both directions are asserted on the same
+    registry, because a test that only shows the widening is green against a
+    handler that ignores the param and returns a hard-coded superset.
+
+    Kill-mutation: drop ``fold_entities`` from the ``subscribe`` call in
+    ``_runtime_office_subscribe`` — the widened case falls back to the constant
+    and the token assertion goes red.
+    """
+
+    from agent_runtime.patch_coverage import HISTORICAL_FOLD_ENTITIES, accepted_fold_entities
+
+    _seed_office()
+    OFFICE_SUBSCRIPTIONS.bind(lambda: _FakeHub())
+    widened = sorted(OFFICE_FOLD_ENTITIES | {"office_actor_lifecycle"})
+
+    reply = _subscribe(
+        context=serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None),
+        fold_entities=widened,
+    )["result"]
+
+    assert reply["fold_entities"] == widened
+    assert OFFICE_SUBSCRIPTIONS.declarations() == [frozenset(widened)]
+    # And the room really does accept the token now — which it provably could
+    # not before, whatever the client declared.
+    assert "office_actor_lifecycle" in accepted_fold_entities(
+        OFFICE_SUBSCRIPTIONS.declarations()
+    )
+
+    # NARROWING is honoured too, on the same registry: a second connection that
+    # declares less takes the room down with it, which is the intersection rule
+    # doing its job rather than a bug.
+    _subscribe(
+        rid="r2",
+        context=serve_rpc.RpcContext(connection_key="c2", emit=lambda _f: None),
+        fold_entities=sorted(HISTORICAL_FOLD_ENTITIES),
+    )
+    accepted = accepted_fold_entities(OFFICE_SUBSCRIPTIONS.declarations())
+    assert accepted == HISTORICAL_FOLD_ENTITIES
+
+
+def test_an_explicitly_empty_declaration_is_honoured_as_empty():
+    """"I fold nothing, send me full cores" is a thing a client may say.
+
+    It must stay distinguishable from silence — which resolves to the legacy
+    constant — or the fail-open default becomes un-overridable and a client with
+    a broken fold has no way to opt out of promotion.
+    """
+
+    _seed_office()
+    OFFICE_SUBSCRIPTIONS.bind(lambda: _FakeHub())
+
+    reply = _subscribe(
+        context=serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None),
+        fold_entities=[],
+    )["result"]
+
+    assert reply["fold_entities"] == []
+    assert OFFICE_SUBSCRIPTIONS.declarations() == [frozenset()]
+
+
+def test_the_normalizer_cleans_degenerate_members_and_passes_unknown_ones_through():
+    """Upstream's boundary discipline, both halves.
+
+    Degenerate MEMBERS are normalized away (blanks, whitespace, non-strings) —
+    a declaration is a set of names and a blank is not one. UNKNOWN members ride
+    through untouched: this channel has never interpreted its strings, and a
+    server that filtered to a known vocabulary would have dropped
+    ``office_actor_lifecycle`` exactly as it would drop the next token.
+    """
+
+    assert normalize_office_fold_entities(
+        ["  office_actor  ", "", "   ", 7, None, "a_token_from_the_future"]
+    ) == frozenset({"office_actor", "a_token_from_the_future"})
+    # A non-list is not a declaration; the handler refuses it rather than
+    # filing the client as legacy (asserted at the handler below).
+    assert normalize_office_fold_entities("office_actor") is None
+    assert normalize_office_fold_entities({"office_actor": True}) is None
+    assert normalize_office_fold_entities(None) is None
+
+
+def test_a_non_list_fold_entities_is_refused_rather_than_treated_as_legacy():
+    """A client sending the wrong shape should learn it.
+
+    Silently filing it as "said nothing" would give it the legacy constant and a
+    reply that echoes a declaration it never made — the class of silent
+    mislabelling this method's typed refusals exist to end.
+    """
+
+    _seed_office()
+    hub = _FakeHub()
+    OFFICE_SUBSCRIPTIONS.bind(lambda: hub)
+
+    reply = _subscribe(
+        context=serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None),
+        fold_entities="office_actor",
+    )
+
+    assert reply["error"]["data"]["reason"] == "fold_entities_invalid"
+    # Refused BEFORE anything was registered — a bad param must not leave a
+    # subscription behind.
+    assert hub.sinks == {}
+    assert OFFICE_SUBSCRIPTIONS.declarations() == []
+
+
+def test_a_re_baseline_replaces_the_declaration_it_displaced():
+    """A re-subscribe re-declares, and the OLD declaration must not survive it.
+
+    A stale declaration would keep narrowing (or widening) the room's
+    intersection on behalf of a subscription that no longer exists — the same
+    class of bookkeeping leak the ``_owned`` index is pruned against, one field
+    over.
+    """
+
+    _seed_office()
+    OFFICE_SUBSCRIPTIONS.bind(lambda: _FakeHub())
+    context = serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+
+    _subscribe(context=context, fold_entities=["office_actor", "office_actor_lifecycle"])
+    _subscribe(rid="r2", context=context, fold_entities=["incident"])
+
+    assert OFFICE_SUBSCRIPTIONS.declarations() == [frozenset({"incident"})]
+
+
+def test_releasing_a_subscription_takes_its_declaration_with_it():
+    """Both release paths — the single-workspace hand-back and the disconnect
+    sweep — must drop the declaration, or a departed client keeps voting on what
+    the room may promote."""
+
+    _seed_office()
+    _seed_office(OTHER)
+    OFFICE_SUBSCRIPTIONS.bind(lambda: _FakeHub())
+    context = serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+
+    _subscribe(context=context, fold_entities=["office_actor"])
+    _subscribe(rid="r2", workspace_id=OTHER, context=context, fold_entities=["incident"])
+    assert len(OFFICE_SUBSCRIPTIONS.declarations()) == 2
+
+    OFFICE_SUBSCRIPTIONS.release_one("c1", WORKSPACE)
+    assert OFFICE_SUBSCRIPTIONS.declarations() == [frozenset({"incident"})]
+
+    OFFICE_SUBSCRIPTIONS.release("c1")
+    assert OFFICE_SUBSCRIPTIONS.declarations() == []
+
+
+def test_the_declaration_index_does_not_outlive_its_subscriptions():
+    """FOUND BY MUTATION, and stated for what it is: a LEAK guard.
+
+    Deleting the declaration prune from ``_forget`` stayed green against every
+    assertion above, and that is not an oversight in them — it is arithmetic.
+    ``declarations()`` walks the ``_owned`` index and looks each key up, so a
+    declaration whose key has already left ``_owned`` is never visited. It
+    cannot change what the room accepts.
+
+    What it CAN do is accumulate. This registry is process-global and outlives
+    every serve loop; a connection that subscribes and releases in a loop —
+    which is precisely what a client recovering from a bad baseline does — would
+    grow a dict entry per lap forever, on a long-lived service. So the prune is
+    real work with no public surface to observe it through, and the honest test
+    is one that reads the index directly rather than one that pretends the
+    intersection can see it.
+    """
+
+    _seed_office()
+    OFFICE_SUBSCRIPTIONS.bind(lambda: _FakeHub())
+    context = serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+
+    for lap in range(3):
+        _subscribe(rid=f"r{lap}", context=context, fold_entities=["office_actor"])
+        OFFICE_SUBSCRIPTIONS.release_one("c1", WORKSPACE)
+
+    assert OFFICE_SUBSCRIPTIONS._declared == {}, OFFICE_SUBSCRIPTIONS._declared
+    assert OFFICE_SUBSCRIPTIONS.owned_keys("c1") == set()
 
 
 def test_a_dropped_subscriber_is_told_to_resync_rather_than_left_quiet():

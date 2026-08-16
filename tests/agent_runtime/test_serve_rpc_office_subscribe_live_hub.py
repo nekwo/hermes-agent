@@ -236,13 +236,30 @@ def _seed_office(store=None):
     return store
 
 
-def _subscribe(sent: list, *, connection_key: str = "c1", rid: str = "r1") -> dict:
+def _subscribe(
+    sent: list,
+    *,
+    connection_key: str = "c1",
+    rid: str = "r1",
+    fold_entities: list[str] | None = None,
+) -> dict:
+    """``fold_entities=None`` sends NO param at all — the un-updated client.
+
+    Absence and an explicit empty list are different declarations all the way
+    down (see ``normalize_office_fold_entities``), so this helper must not be
+    able to express one as the other. No caller here needs the explicit-empty
+    case; the fake-hub file owns it.
+    """
+
+    params: dict = {"workspace_id": WORKSPACE}
+    if fold_entities is not None:
+        params["fold_entities"] = fold_entities
     return serve_rpc.handle_request(
         {
             "jsonrpc": "2.0",
             "id": rid,
             "method": "runtime.office.subscribe",
-            "params": {"workspace_id": WORKSPACE},
+            "params": params,
         },
         serve_rpc.RpcContext(
             connection_key=connection_key, transport="socket", emit=sent.append
@@ -422,6 +439,89 @@ def test_a_real_office_write_reaches_a_default_wired_subscriber_as_a_patch(
     rows = frame["params"]["patches"]
     assert [row["id"] for row in rows] == [f"{WORKSPACE}/{ACTOR}"]
     assert rows[0]["changed"]["items"][0]["position"] == [42.0, 43.0]
+
+
+def test_a_declared_lifecycle_token_promotes_a_real_CREATE_end_to_end(live_hub):
+    """O-H1 + O-H2, against the producer ``serve.py`` actually builds.
+
+    The milestone's early half, and the first time this lane carries a gesture
+    rather than a drag. A create's batch is ``[office_actor created-upsert,
+    office.actor.upserted]`` — the domain event was already covered, so once the
+    subscriber's own declaration reaches the producer the batch is coverable and
+    the whole gesture ships as one sub-4 KB frame instead of two 822 KB cores.
+
+    Nothing is pinned: the fold set is DERIVED per producer generation from the
+    office registry, so this exercises the whole chain — the RPC param, the
+    per-key declaration, the room's intersection, the coverage gate, the
+    producer's promotion decision, and the sink. Passing a fixed
+    ``fold_entities`` here would assert about everything downstream of the one
+    seam O-H2 changed and prove nothing about it.
+
+    The paired half is the test below: the SAME create against a subscriber that
+    declares nothing must still resync, or this is green because the gate does
+    not exist.
+    """
+
+    store = _seed_office()
+    hub = live_hub()
+    sent: list[dict] = []
+    result = _settled_subscription(
+        sent,
+        hub,
+        fold_entities=sorted(OFFICE_FOLD_ENTITIES | {"office_actor_lifecycle"}),
+    )
+    assert "office_actor_lifecycle" in result["fold_entities"]
+
+    new_actor = "personainst_backend_dev_11223344"
+    store.upsert_actor(
+        WORKSPACE, _actor_payload(new_actor, position=(7.0, 8.0)), updated_by="live-create"
+    )
+
+    frame = _wait_for(
+        lambda: next((item for item in sent if item.get("method")), None),
+        what="any notification at all for a real CREATE",
+    )
+    assert frame["method"] == OFFICE_PATCH_METHOD, (
+        "a declared-lifecycle subscriber got "
+        f"{frame['method']} / {frame['params'].get('reason')} instead of a patch"
+    )
+    row = next(r for r in frame["params"]["patches"] if r["id"].endswith(new_actor))
+    assert row["op"] == "upsert"
+    assert row["created"] is True
+    # The complete row, which is what makes the client's insert-on-absent sound.
+    assert row["changed"]["items"][0]["position"] == [7.0, 8.0]
+
+
+def test_the_same_create_still_resyncs_a_subscriber_that_declares_nothing(live_hub):
+    """The anti-vacuity half, and the mixed-pair guarantee stated as a test.
+
+    An un-updated launcher declares nothing, gets the fail-open legacy constant,
+    and the create's ``created: true`` upsert is therefore NOT coverable for it —
+    so the batch demotes to a full core and this lane says ``resync``, which is
+    exactly what it does today. No regression, no simultaneous deploy.
+
+    Kill-mutation: remove the ``office_actor_lifecycle`` gate from
+    ``patch_coverage`` — this goes red with a patch notification, i.e. with the
+    very promotion V4 says would cost a fielded client a re-hydrate on top.
+    """
+
+    store = _seed_office()
+    hub = live_hub()
+    sent: list[dict] = []
+    _settled_subscription(sent, hub)
+
+    store.upsert_actor(
+        WORKSPACE,
+        _actor_payload("personainst_backend_dev_55667788", position=(7.0, 8.0)),
+        updated_by="live-create",
+    )
+
+    frame = _wait_for(
+        lambda: next((item for item in sent if item.get("method")), None),
+        what="any notification at all for a real CREATE",
+    )
+    assert frame["method"] == OFFICE_RESYNC_METHOD, frame
+    assert frame["params"]["reason"] == "full_core"
 
 
 def test_another_workspaces_real_write_never_reaches_this_subscriber(live_hub):
