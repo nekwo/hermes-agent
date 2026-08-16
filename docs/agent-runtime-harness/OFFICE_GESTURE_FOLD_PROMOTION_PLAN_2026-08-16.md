@@ -1021,18 +1021,41 @@ Ordered by measured value, not by tidiness. Each item states what it buys and wh
    shipped cleanly for `office_actor`. *Does not* fix the race, the half-created agent, or the ~450 ms
    poll+settle floor.
 
-2. **Log the `snapshot_build` `elapsed_ms` that is already on the wire.** **Launcher half LANDED**
-   (`2eeb25c45`) — every build-time heartbeat now writes a `[MissionBuild]` receipt through
-   `package:logging` rather than `debugPrint`, so it survives a windowed release build (R#46's defect
-   class). Two caveats worth carrying: the wire value is a **cadence sample** — how long the build had
-   been running when a heartbeat came due — never the total, and a build finishing inside one 5 s interval
-   emits none at all. And that commit's docstring points at a producer-side total
-   (`snapshot_build reason=… elapsed_ms=…` in hermes' `agent.log`) which **did not exist when it landed**;
-   hermes has only the heartbeat at `stream.py:316-327`. Either the producer half lands and the reference
-   becomes true, or the docstring is corrected. `stream.py:316-327` emits it in
-   the liveness heartbeat during every build. No consumer logs it. It is the exact number two diagnostic
-   passes spent hours bracketing by subtraction and probe measurement. Nearly free; turns the next
-   investigation into a grep.
+2. ~~**Log the `snapshot_build` `elapsed_ms` that is already on the wire.**~~ **LANDED 2026-08-16** —
+   launcher `2eeb25c45`, hermes producer half merged the same day. **And the premise of this item, as I
+   wrote it, was wrong: the number was never on the wire.** I claimed the cost was already being emitted
+   and merely needed a consumer. It was not, in three independent ways, each verified in code:
+
+   1. **The heartbeat's `elapsed_ms` is a mid-build cadence sample, not a total.** The envelope emits
+      `int((current - started) * 1000)` each time a heartbeat comes due, on `harness serve`'s 5 s
+      interval. The measured 6.3–6.6 s build therefore yields exactly **one** sample, at ~5000. It never
+      reports what the build cost.
+   2. **A build shorter than one interval emits nothing at all.** The 1.17 s warm build — half of the
+      warm/cold comparison this plan rests on — was completely invisible on the wire.
+   3. **It only ever existed on the uncovered-batch lane.** `hydrate_frame` and `delta_frame` build
+      synchronously with no liveness envelope, so the boot hydrate — a full build — had no heartbeat to
+      carry anything.
+
+   The samples are also taken from the *envelope's* clock, which starts before the build thread is
+   spawned, so a heartbeat landing near completion can report **more** than the build took. Not a total in
+   either direction.
+
+   What actually landed is a real measurement: the build times itself **on the build thread** (not around
+   the `done.wait`, whose 100 ms cancel poll would round every build up) and emits one INFO line per full
+   core to `<HERMES_HOME>/logs/agent.log`:
+
+   ```
+   snapshot_build reason=demote elapsed_ms=234 offset=780 events=4
+   ```
+
+   `reason` is the load-bearing field. `demote` and `full_core` cost identical seconds and mean opposite
+   things — a foldable update that paid for a whole snapshot, versus the flag-off wire working as
+   designed. Collapsing them would make the one grep that matters return every frame ever built. Note the
+   fold flag is **on by default** in this build, so the ordinary batch label is `demote`.
+
+   This item is the cleanest instance of the failure §10.2 names: I asserted a value was available because
+   a field with the right *name* appeared on the wire, without checking what the field measured. The
+   correction cost nothing here only because someone read the emitter before building on it.
 
 3. **`runtime.agent.create` — one call: `{persona, workspace_id, position:[x,y]}` returning the placed
    actor.** The launcher must not know that creating an agent involves a chat; that is backend mechanics
