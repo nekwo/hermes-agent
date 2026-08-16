@@ -179,6 +179,10 @@ def test_manifest_pins_fixture_bytes():
         "patch_upsert_profile.json",
         "patch_remove.json",
         "patch_office_actor.json",
+        # The office fold-promotion milestone's cross-stack pin (O-H3,
+        # 2026-08-16): the DELETE gesture as one patch frame carrying two
+        # removes at one watermark.
+        "patch_delete_gesture.json",
         "patch_coverage_manifest.json",
     }
     for name, digest in entries.items():

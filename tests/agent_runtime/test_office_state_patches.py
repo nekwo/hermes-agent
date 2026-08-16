@@ -569,17 +569,37 @@ def test_a_create_batch_is_not_coverable_for_a_legacy_declaration_but_a_drag_is(
     assert batch_is_patch_coverable(drag_batch, fold_entities=declared)
 
 
-def test_remove_and_restore_stay_uncovered(seeded_office, set_delta_patches):
-    """``office.actor.removed`` / ``.restored`` rewrite the surface ledger and
-    are deliberately NOT in the covered set. Their batches take the full core
-    with no patch-lane code at all."""
+def test_restore_stays_uncovered_and_remove_no_longer_does(
+    seeded_office, set_delta_patches
+):
+    """SPEC SPLIT (office fold-promotion plan O-H3, 2026-08-16).
 
-    declared = HISTORICAL_FOLD_ENTITIES | {OFFICE_ACTOR_ENTITY}
+    This asserted that BOTH ``office.actor.removed`` and ``.restored`` stay out
+    of the covered set. Half of that survives and half of it was the point of
+    the whole workstream, so the test splits rather than being deleted or
+    quietly relaxed — the surviving half is what stops the widening from
+    sliding one event further than it was argued for.
+
+    ``office.actor.removed`` is covered: ``_archive_actor_locked`` now emits the
+    paired ``office_actor`` remove, and the surface state the archive moves
+    (``archived_actor_keys``, the derived counts) is exactly reproducible by a
+    client folding that row.
+
+    ``office.actor.restored`` stays uncovered, and the reason is specific rather
+    than residual caution: a restore un-archives a row from a COPY the client
+    never held, so there is nothing on the wire for it to insert. It rides the
+    full core, as does ``office.surface.updated``, whose ``folders`` and surface
+    ``revision`` no actor-row patch derives.
+    """
+
+    declared = (
+        HISTORICAL_FOLD_ENTITIES | {OFFICE_ACTOR_ENTITY, OFFICE_ACTOR_LIFECYCLE_CAPABILITY}
+    )
     set_delta_patches(True)
 
     before = _log_end()
     seeded_office.remove_actor(WORKSPACE, "personainst_qa_agent_0001")
-    assert not batch_is_patch_coverable(
+    assert batch_is_patch_coverable(
         [e for _, e in EventLog().iter_from_offset(before)], fold_entities=declared
     )
 
@@ -589,8 +609,9 @@ def test_remove_and_restore_stay_uncovered(seeded_office, set_delta_patches):
         [e for _, e in EventLog().iter_from_offset(before)], fold_entities=declared
     )
 
-    assert "office.actor.removed" not in LIVE_COVERED_DOMAIN_EVENT_TYPES
+    assert "office.actor.removed" in LIVE_COVERED_DOMAIN_EVENT_TYPES
     assert "office.actor.restored" not in LIVE_COVERED_DOMAIN_EVENT_TYPES
+    assert "office.actor.conflict_resolved" not in LIVE_COVERED_DOMAIN_EVENT_TYPES
     assert "office.surface.updated" not in LIVE_COVERED_DOMAIN_EVENT_TYPES
 
 
@@ -811,6 +832,175 @@ def test_the_capability_token_is_inert_as_an_entity_name(seeded_office, set_delt
     )
     # And it is not an entity anyone emits under.
     assert OFFICE_ACTOR_LIFECYCLE_CAPABILITY != OFFICE_ACTOR_ENTITY
+
+
+# --------------------------------------------------------------------------- #
+# O-H3, THE MILESTONE: a real operator gesture ships as a patch frame
+# --------------------------------------------------------------------------- #
+#: The declaration a launcher carrying O-L1..O-L3 sends. Spelled out rather than
+#: composed from production constants: this is the wire contract the launcher is
+#: being built against in the other repo, and an assertion written as ``x == x``
+#: cannot catch either side renaming half of it.
+_WIDENED_DECLARATION = frozenset(
+    {"persona_instance", "incident", "office_actor", "office_actor_lifecycle"}
+)
+#: What every launcher in the field sends today.
+_FIELDED_DECLARATION = frozenset({"persona_instance", "incident", "office_actor"})
+
+
+def test_the_widened_declaration_is_exactly_the_launchers(
+):
+    """The cross-repo spelling, pinned on the hermes side.
+
+    O-L1 puts the token behind a single Dart constant precisely so the two lanes
+    cannot drift; this is the same fence one repo over. A misspelling here is
+    indistinguishable at runtime from a client that never declared — gestures
+    silently keep demoting, which reads as "the feature does not work" with
+    nothing in any log to say why.
+    """
+
+    assert OFFICE_ACTOR_LIFECYCLE_CAPABILITY == "office_actor_lifecycle"
+    assert OFFICE_ACTOR_LIFECYCLE_CAPABILITY in _WIDENED_DECLARATION
+    assert _FIELDED_DECLARATION < _WIDENED_DECLARATION
+
+
+def test_a_delete_gesture_batch_promotes_for_a_lifecycle_declared_client(
+    seeded_office, set_delta_patches
+):
+    """THE MILESTONE, delete half.
+
+    The live-decoded batch, reproduced through the real chokepoints:
+    ``persona_instance.retired`` → the persona ``remove`` → the office
+    ``remove`` → ``office.actor.removed``. Every one of those four was, until
+    this stage, either uncovered or unpaired, so the whole batch demoted — and
+    each demotion cost TWO ~822 KB core builds, one per producer, plus a
+    re-subscribe whose hydrate the office sink then discarded at its own
+    baseline gate.
+
+    Both directions are asserted on the SAME batch. The demotion half is not
+    politeness: it is the mixed-pair guarantee (§V4) — a fielded launcher must
+    keep getting exactly today's wire — and it is also the anti-vacuity check,
+    because a coverage test that only shows promotion is green against a
+    classifier that promotes everything.
+    """
+
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    set_delta_patches(True)
+    store = PersonaInstanceStore()
+    # A PLACEMENT-backed instance, which is what the gesture actually deletes:
+    # ``retire`` refuses the canonical persona channel by design (the queued
+    # global-singleton redesign), so a canonical row could never reproduce this
+    # batch at all.
+    instance = store.add_instance(
+        persona_id="qa", placement_id="scene_child_2", display_name="QA Agent (2)"
+    )
+    # Bind the placement to the instance so the retire's office fan-out finds it.
+    seeded_office.upsert_actor(
+        WORKSPACE,
+        _actor_payload("qa", x=1.0, y=1.0, instance=instance.id),
+    )
+
+    before = _log_end()
+    store.retire(instance.id, reason="placement removed from Mission Office")
+    batch = [e for _, e in EventLog().iter_from_offset(before)]
+
+    types = [e.type for e in batch]
+    assert "persona_instance.retired" in types, types
+    assert "office.actor.removed" in types, types
+    assert batch_is_patch_coverable(batch, fold_entities=_WIDENED_DECLARATION), types
+    # A fielded launcher keeps today's wire: the office remove is gated.
+    assert not batch_is_patch_coverable(batch, fold_entities=_FIELDED_DECLARATION)
+
+    # And the frame the widened client gets carries BOTH rows — the persona
+    # departure and the desk departure — at one watermark. That pairing is what
+    # O-H2's complete-batch forwarding exists to keep intact across the two
+    # transports.
+    rows = [
+        e.payload
+        for e in batch
+        if e.type == STATE_PATCHED_EVENT_TYPE
+    ]
+    assert [(r["entity"], r["op"]) for r in rows] == [
+        ("persona_instance", "remove"),
+        (OFFICE_ACTOR_ENTITY, "remove"),
+    ], rows
+
+
+def test_an_add_gesture_reopen_batch_promotes_and_a_create_batch_does_not(
+    seeded_office, set_delta_patches
+):
+    """THE MILESTONE, add half — and the one honest hole in it.
+
+    RE-OPEN promotes: ``chat_opened`` now has its diffed persona ``upsert``, so
+    the batch folds.
+
+    CREATE does not, deliberately (§V2 case (b), deferred D3). A brand-new
+    roster row cannot be assumed to fit the 4 KB cap and the launcher's generic
+    fold refuses an upsert for a missing row, so ``open_chat`` emits an honest
+    ``refresh`` and the batch takes one full core. The office half of the same
+    gesture still promotes, because the live timing shows the two halves land
+    ~1s apart — outside the 200ms coalescing debounce — and therefore usually in
+    separate batches.
+
+    The kill-mutation for the second half is covering creates: it would ship a
+    promoted frame whose new roster row the client cannot fold, costing it the
+    patch AND a re-hydrate.
+    """
+
+    from agent_runtime.persona_assignments import PersonaInstanceStore
+
+    set_delta_patches(True)
+    store = PersonaInstanceStore()
+
+    # CREATE: refresh → demotes even for a fully widened client.
+    before = _log_end()
+    created = store.open_chat(
+        persona_id="profile:qa",
+        session_id="persona_chat_add_gesture",
+        display_name="QA Agent",
+    )
+    create_batch = [e for _, e in EventLog().iter_from_offset(before)]
+    assert "persona_instance.chat_opened" in [e.type for e in create_batch]
+    assert not batch_is_patch_coverable(create_batch, fold_entities=_WIDENED_DECLARATION)
+
+    # RE-OPEN: a diffed upsert → promotes.
+    before = _log_end()
+    store.open_chat(
+        persona_id="profile:qa",
+        persona_instance_id=created.id,
+        session_id="persona_chat_add_gesture_two",
+        display_name="QA Agent",
+        workspace_id=WORKSPACE,
+    )
+    reopen_batch = [e for _, e in EventLog().iter_from_offset(before)]
+    assert "persona_instance.chat_opened" in [e.type for e in reopen_batch]
+    assert batch_is_patch_coverable(reopen_batch, fold_entities=_WIDENED_DECLARATION)
+    # It promotes for a FIELDED client too: nothing in a re-open is a widened
+    # office op, so no token is needed. That is the plan's "the office half of
+    # an add can fold one stage earlier" property, stated as an assertion.
+    assert batch_is_patch_coverable(reopen_batch, fold_entities=_FIELDED_DECLARATION)
+
+
+def test_the_office_half_of_an_add_promotes_in_its_own_batch(
+    seeded_office, set_delta_patches
+):
+    """The live-proven split, and why the add gesture is worth anything at all.
+
+    The operator's own log shows ``chat_opened`` and the office write landing
+    ~1s apart — outside the 200ms debounce — so the add gesture usually arrives
+    as TWO batches, and the office one has no roster row in it to demote on.
+    Asserted here as the batch a create's office half actually is.
+    """
+
+    set_delta_patches(True)
+    before = _log_end()
+    seeded_office.upsert_actor(WORKSPACE, _actor_payload("backend_dev", x=5.0, y=5.0))
+    batch = [e for _, e in EventLog().iter_from_offset(before)]
+
+    assert [e.type for e in batch] == [STATE_PATCHED_EVENT_TYPE, "office.actor.upserted"]
+    assert batch_is_patch_coverable(batch, fold_entities=_WIDENED_DECLARATION)
+    assert not batch_is_patch_coverable(batch, fold_entities=_FIELDED_DECLARATION)
 
 
 def test_surface_creation_batch_is_uncovered(isolate_agent_runtime_root, set_delta_patches):

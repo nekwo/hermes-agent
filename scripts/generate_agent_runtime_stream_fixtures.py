@@ -122,6 +122,21 @@ PINNED_ONLY_FILES = (
     # rather than generated for the same reason they are: the seeded isolated
     # root the generator builds holds no office surface.
     "patch_office_actor.json",
+    # The office fold-promotion milestone (O-H3, 2026-08-16): the DELETE
+    # gesture's coalesced batch as one patch frame — a ``persona_instance``
+    # remove beside an ``office_actor`` remove, ``coalesced_count`` 4 because
+    # the two paired domain events ride the batch and fold to nothing.
+    #
+    # It is the cross-stack pin for the shape that used to be impossible: this
+    # batch demoted to two 822 KB full cores per gesture, and the office lane
+    # answered with a resync it could not express any other way. It is also the
+    # fixture that makes the V6 race concrete — the frame carries BOTH rows at
+    # one watermark, which is exactly what the office sink must forward whole.
+    #
+    # Pinned rather than generated for the same reason its siblings are: the
+    # generator's seeded isolated root holds no office surface and no retired
+    # placement, so there is nothing there to produce this batch from.
+    "patch_delete_gesture.json",
     "patch_coverage_manifest.json",
 )
 

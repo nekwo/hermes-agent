@@ -159,20 +159,59 @@ LIVE_COVERED_DOMAIN_EVENT_TYPES: frozenset[str] = frozenset(
     {
         "persona_instance.steered",
         "persona_instance.profile_updated",
+        # The OPERATOR GESTURE half (office fold-promotion plan O-H3,
+        # 2026-08-16). Adding or deleting an agent in the Mission Office cost
+        # two full ~822 KB core builds each — one on the launcher's `harness
+        # stream` child, one on the serve hub — because each gesture's batch
+        # carried an event nobody had a pair for. These three now have one.
+        #
+        # ``persona_instance.retired``: pairs with the ``persona_instance``
+        # ``remove`` emitted two lines later at the same chokepoint. Its fold
+        # state IS the row's departure, which the patch carries.
+        #
+        # ``persona_instance.chat_opened``: pairs with ``open_chat``'s new
+        # producer — a diffed ``upsert`` on re-open, an honest ``refresh`` on
+        # create (a brand-new roster row cannot be assumed to fit the 4 KB cap;
+        # deferred D3). Covering this BEFORE that producer existed would have
+        # silently dropped ``mode``/``workspace_id``/``profile_id``/the session
+        # trio from every connected client, which is why the two land together.
+        #
+        # ``office.actor.removed``: pairs with the ``office_actor`` ``remove``
+        # ``_archive_actor_locked`` now emits inside the same lock. It was
+        # deliberately absent until 2026-08-16 and the comment here said so —
+        # an archive rewrites the surface's ``archived_actor_keys`` ledger and
+        # ``updated_at``, which an actor-row patch could not express, so
+        # covering it would have shipped a patch that folded the actor and
+        # silently dropped the surface change beside it. That reasoning was
+        # correct FOR THE WIRE AS IT STOOD. What retired it is the derivability
+        # audit (§V1), not a change in the honesty rule: the ledger's delta
+        # under the two lifecycle ops is exactly determined (archive appends the
+        # key, re-add removes it) so the client mirrors it during the fold, the
+        # counts are derived at projection and recomputed the same way, and the
+        # surface ``updated_at`` has no launcher reader at all. Nothing is
+        # dropped because nothing is left that only the surface row could say.
+        #
         # Pairs with the ``office_actor`` patch ``OfficeStore.upsert_actor``
         # emits from inside the same ``office_lock`` — same chokepoint, same
         # batch, no fold state of its own (its payload is an item count and a
         # revision the patch's own row already carries).
         #
-        # Its SIBLINGS are deliberately absent and must stay absent.
-        # ``office.actor.removed`` / ``.restored`` / ``.conflict_resolved`` and
-        # ``office.surface.*`` each rewrite the SURFACE row —
-        # ``archived_actor_keys``, ``folders``, the surface's own ``revision``
-        # and ``updated_at`` — which an actor-row patch cannot express. Leaving
-        # them uncovered is what routes their batches down the full-core lane
-        # with no new code and no new failure mode; covering one would ship a
-        # patch frame that folded an actor and silently dropped the surface
-        # change riding beside it.
+        # The REMAINING siblings are deliberately absent and must stay absent.
+        # ``office.actor.restored`` / ``.conflict_resolved`` and
+        # ``office.surface.*`` move surface state a fold genuinely cannot
+        # reproduce: ``folders`` and the surface's own ``revision`` are moved
+        # only by ``update_surface``, a restore un-archives from a copy the
+        # client never held, and a conflict resolution adopts a peer's row
+        # through a path that bypasses the upsert chokepoint. Leaving them
+        # uncovered routes their batches down the full-core lane with no new
+        # code and no new failure mode.
+        #
+        # Every entry here is gated by ``test_stream_patch.py``'s both-ways
+        # partition test: a live entry must have a registered contract, so none
+        # of the three above could be added without a producer behind it.
+        "persona_instance.retired",
+        "persona_instance.chat_opened",
+        "office.actor.removed",
         "office.actor.upserted",
     }
 )

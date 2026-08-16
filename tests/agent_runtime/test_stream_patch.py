@@ -275,6 +275,96 @@ def test_patch_fixtures_manifest_and_shape():
         assert set(patch) == keys
 
 
+def test_delete_gesture_fixture_is_the_frame_the_producer_builds():
+    """The office fold-promotion milestone's cross-stack golden (O-H3).
+
+    The launcher commits byte-identical bytes and folds them through its real
+    read-model pipeline, so this side must show the same bytes are what the
+    REAL ``patch_batch_frame`` produces for the real delete-gesture batch — not
+    merely that a hand-written file parses.
+
+    The property that makes it worth pinning at all is the pairing: ONE frame,
+    ONE watermark, BOTH removes. The persona row and the office row leave
+    together, and a client that applied only one of them at this watermark would
+    hold a roster or a canvas that disagrees with the store forever. That is
+    exactly what the office sink's old filtered forwarding did (§V6), which is
+    why this fixture carries the mixed batch rather than an office row alone.
+    """
+
+    from datetime import datetime, timezone
+
+    from agent_runtime.models import Event
+    from agent_runtime.stream import patch_batch_frame
+
+    name = "patch_delete_gesture.json"
+    entries = dict(
+        reversed(line.split("  ", 1))
+        for line in (FIXTURES / "MANIFEST.sha256").read_text(encoding="utf-8").strip().splitlines()
+    )
+    assert hashlib.sha256((FIXTURES / name).read_bytes()).hexdigest() == entries[name], (
+        f"{name} drifted from MANIFEST.sha256 (cross-stack pin)"
+    )
+    golden = json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+    assert golden["type"] == "patch"
+    assert golden["schema_version"] == 2
+    assert "core" not in golden
+    rows = golden["patches"]
+    assert [(row["entity"], row["op"]) for row in rows] == [
+        ("persona_instance", "remove"),
+        ("office_actor", "remove"),
+    ]
+    # Both rows sit inside the span the frame claims, and the office id is the
+    # workspace-scoped identity the sink's prefix match depends on.
+    assert golden["base_offset"] < rows[0]["seq"] < rows[1]["seq"]
+    assert rows[1]["seq"] <= golden["watermark"]["event_offset"]
+    assert rows[1]["id"].partition("/")[0] == "ws_office_pilot"
+    # ``coalesced_count`` is the WHOLE batch — the two paired domain events ride
+    # it and fold to nothing, which is what "covered" means.
+    assert golden["coalesced_count"] == 4
+    assert golden["coalesced_count"] > len(rows)
+
+    # The live builder, over the same rows: every key the golden carries must be
+    # one the producer still emits, or the launcher is folding a shape hermes no
+    # longer sends.
+    ts = datetime(2026, 7, 16, 12, 20, 0, tzinfo=timezone.utc)
+    batch = [
+        (
+            row["seq"],
+            Event(
+                ts=ts,
+                type="state.patched",
+                task_id=None,
+                run_id=None,
+                persona_id=None,
+                payload={"entity": row["entity"], "id": row["id"], "op": row["op"]},
+            ),
+        )
+        for row in rows
+    ]
+    live = patch_batch_frame(batch, base_offset=golden["base_offset"])
+    assert set(live) == set(golden)
+    assert [
+        {key: value for key, value in row.items() if key != "ts"} for row in live["patches"]
+    ] == [{key: value for key, value in row.items() if key != "ts"} for row in rows]
+
+    # And the classifier really does promote this batch for a widened client
+    # while refusing it for a fielded one — the fixture is the milestone's
+    # evidence, so it must not be green against a runtime that promotes nothing.
+    from agent_runtime.patch_coverage import batch_is_patch_coverable
+
+    events = [event for _, event in batch] + [
+        Event(ts=ts, type="persona_instance.retired", task_id=None, run_id=None, persona_id=None, payload={}),
+        Event(ts=ts, type="office.actor.removed", task_id=None, run_id=None, persona_id=None, payload={}),
+    ]
+    widened = frozenset(
+        {"persona_instance", "incident", "office_actor", "office_actor_lifecycle"}
+    )
+    assert batch_is_patch_coverable(events, fold_entities=widened)
+    assert not batch_is_patch_coverable(
+        events, fold_entities=frozenset({"persona_instance", "incident", "office_actor"})
+    )
+
+
 def test_coverage_manifest_agrees_with_classifier():
     """The cross-repo coverage golden (plan §S7-A, item 3): the byte-pinned
     ``patch_coverage_manifest.json`` (the launcher folds the SAME bytes) must
