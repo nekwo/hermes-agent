@@ -585,10 +585,20 @@ def _cmd_persona_instance_open_chat(args) -> int:
             # the honest fallback is the persona's OWN configured display name
             # ("QA Agent"), never the title-cased persona id ("Qa") the store
             # template fallback would otherwise mint.
+            #
+            # That rule is now ONE copy, in ``agent_runtime.agent_create``, because
+            # ``runtime.agent.create`` mints the same placements over the method
+            # lane and calling the store directly would have dropped it silently.
+            # This lane still passes the persona object it already resolved
+            # through its own richer ``_persona_by_id``, so its behaviour is
+            # unchanged; the shared function only supplies the fallback ladder.
+            from agent_runtime.agent_create import (
+                honest_default_display_name as _honest_default_display_name,
+            )
+
             explicit_display_name = safe_assignment_text(getattr(args, "display_name", None), limit=120)
-            honest_default_display_name = (
-                safe_assignment_text(getattr(persona, "display_name", None), limit=120)
-                or _display_name_for_profile(persona_id)
+            honest_default_display_name = _honest_default_display_name(
+                persona_id, persona
             )
             instance = PersonaInstanceStore().add_instance(
                 persona_id=persona_id,

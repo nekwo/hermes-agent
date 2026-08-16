@@ -909,6 +909,7 @@ def test_the_method_set_grew_and_the_contract_integer_did_not_move():
     frames = _frames(out)
 
     expected = {"contract": 1, "methods": [
+            "runtime.agent.create",
             "runtime.office.get",
             "runtime.office.subscribe",
             "runtime.office.unsubscribe",
@@ -1026,6 +1027,7 @@ def test_the_write_method_is_transport_agnostic_and_answers_on_the_socket():
             assert hello_ok["rpc"] == {
                 "contract": 1,
                 "methods": [
+                    "runtime.agent.create",
                     "runtime.office.get",
                     "runtime.office.subscribe",
                     "runtime.office.unsubscribe",
