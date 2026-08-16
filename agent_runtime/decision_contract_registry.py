@@ -311,7 +311,16 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     # envelope, not the payload. Emitted only when ``read_model.delta_patches``
     # is on — which it now SHIPS as (runtime_config.SHIPPED_DELTA_PATCHES); an
     # operator's explicit root-config ``false`` is what makes this type absent.
-    "state.patched": EventContract("state.patched", "State patched", ("entity", "id", "op"), ("changed",)),
+    #
+    # ``created`` (2026-08-16, office fold-promotion plan §V4) is the second
+    # optional key: a boolean on an ``office_actor`` ``upsert`` meaning the row
+    # was ABSENT before the write, so a fold must insert rather than merge. It is
+    # additive — the launcher's fold reads a fixed key set and ignores it — and
+    # it exists so ``patch_coverage`` can gate the widened lifecycle ops behind
+    # the ``office_actor_lifecycle`` capability token. Optional rather than
+    # summary because most patches are not lifecycle rows and a required key
+    # would make every existing emission invalid.
+    "state.patched": EventContract("state.patched", "State patched", ("entity", "id", "op"), ("changed", "created")),
     # The LIVE orphan-worktree janitor (delivery_directive.reap_orphan_worktrees,
     # two production callers: harness_doctor and the `worktree reap` CLI verb).
     # Emitted but never registered, so every destructive reap appended nothing —

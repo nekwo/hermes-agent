@@ -89,7 +89,39 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
-from .state_patches import FOLDABLE_PATCH_OPS, PATCH_OP_UPSERT, STATE_PATCHED_EVENT_TYPE
+from .state_patches import (
+    FOLDABLE_PATCH_OPS,
+    OFFICE_ACTOR_ENTITY,
+    PATCH_OP_REMOVE,
+    PATCH_OP_UPSERT,
+    STATE_PATCHED_EVENT_TYPE,
+)
+
+#: A CAPABILITY token, not an entity — and the declaration channel carries it
+#: because that channel was never anything but a set of strings
+#: (:func:`normalize_fold_entities` interprets none of them).
+#:
+#: Why a token was needed at all (office fold-promotion plan §V4, 2026-08-16).
+#: The negotiation is per-ENTITY, and the 2026-08-16 change WIDENS THE OPS of an
+#: entity that is already declared in the field: ``office_actor`` gained
+#: insert-on-absent upserts (``created: true``) and ``remove``. The entity
+#: vocabulary cannot express that. A runtime that simply started emitting the
+#: widened rows would have them PROMOTED at every fielded launcher — which
+#: declares ``office_actor`` today and whose fold answers a create with
+#: ``patch_without_target`` and a remove with ``patch_unsupported_op``, each →
+#: a full re-hydrate. That is strictly WORSE than the full core it replaced,
+#: because the client pays the patch AND the core: the exact "declares what it
+#: cannot fold" failure the negotiation exists to prevent, aimed at a client
+#: that did nothing wrong.
+#:
+#: So the widened rows are coverable only for a client that names this token
+#: beside its entities. Every mixed pair then degrades to exactly today's wire:
+#: an old client never declares it and keeps getting full cores; an old runtime
+#: sees it as an unknown string in a frozenset and ignores it.
+#:
+#: A plain MOVE upsert stays coverable under bare ``office_actor``, unchanged —
+#: the token gates the two lifecycle ops, not the entity.
+OFFICE_ACTOR_LIFECYCLE_CAPABILITY = "office_actor_lifecycle"
 
 #: Domain events that ride alongside their ``state.patched`` in the same
 #: coalesced batch (same chokepoint) and carry no fold state of their own — the
@@ -268,6 +300,34 @@ def state_patch_is_foldable(payload: Any) -> bool:
     return True
 
 
+def state_patch_is_office_lifecycle(payload: Any) -> bool:
+    """Whether an ``office_actor`` patch uses one of the two WIDENED ops.
+
+    The two are ``remove`` (the archive) and an ``upsert`` stamped
+    ``created: true`` (a first placement or a resurrection re-add — a row the
+    client does not hold, so its fold must INSERT rather than merge). Both also
+    require the client to maintain the derived container state — the recomputed
+    ``actor_count``/``actors_truncated`` and the mirrored ``archived_actor_keys``
+    ledger — which is precisely the capability
+    :data:`OFFICE_ACTOR_LIFECYCLE_CAPABILITY` names.
+
+    A plain move upsert (no ``created`` key) is NOT lifecycle: it replaces a row
+    the client already holds and moves no container state, which is what every
+    fielded launcher has folded since 2026-08-14.
+
+    Answered off the PAYLOAD rather than off the entity alone, so a producer that
+    stops stamping ``created`` cannot silently re-open the promotion at an
+    un-updated client through the un-gated arm — the paired producer test and the
+    gate test in ``test_office_state_patches.py`` hold that from both sides.
+    """
+
+    if not isinstance(payload, dict):
+        return False
+    if state_patch_entity(payload) != OFFICE_ACTOR_ENTITY:
+        return False
+    return payload.get("op") == PATCH_OP_REMOVE or payload.get("created") is True
+
+
 def event_is_patch_coverable(
     event: Any, *, fold_entities: Iterable[str] | None = None
 ) -> bool:
@@ -280,12 +340,18 @@ def event_is_patch_coverable(
     declared nothing → :data:`HISTORICAL_FOLD_ENTITIES` (see the constant: NOT
     the empty set).
 
+    An ``office_actor`` patch using one of the two WIDENED lifecycle ops
+    (``remove``, or an ``upsert`` stamped ``created: true``) additionally
+    requires the client to have declared
+    :data:`OFFICE_ACTOR_LIFECYCLE_CAPABILITY` — see that constant for why a
+    third gate exists at all rather than the entity rule being enough.
+
     A covered domain event is coverable because its fold state rides in the
     paired patch — it is not entity-gated, because it carries no state to fold
     and the launcher ignores it; the gate that matters is on the paired
     ``state.patched``, which rides the same batch. Anything else (task/assignment
     domain events, run traces, ``state.reconciled`` watchdog, board/flow writes,
-    the office SURFACE/remove/restore writes, planning.py chokepoint-less
+    the office SURFACE/restore/conflict writes, planning.py chokepoint-less
     mutations) is uncovered → the whole batch falls back to a full core."""
 
     event_type = getattr(event, "type", None)
@@ -293,7 +359,12 @@ def event_is_patch_coverable(
         payload = getattr(event, "payload", None)
         if not state_patch_is_foldable(payload):
             return False
-        return state_patch_entity(payload) in normalize_fold_entities(fold_entities)
+        declared = normalize_fold_entities(fold_entities)
+        if state_patch_entity(payload) not in declared:
+            return False
+        if state_patch_is_office_lifecycle(payload):
+            return OFFICE_ACTOR_LIFECYCLE_CAPABILITY in declared
+        return True
     return event_type in COVERED_DOMAIN_EVENT_TYPES
 
 

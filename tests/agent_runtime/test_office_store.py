@@ -330,10 +330,19 @@ def test_remove_dry_run_is_byte_identical_and_eventless():
     assert path.read_bytes() == before_bytes
     assert _office_event_count() == before_events
 
+    # The real run archives + emits. TWO events since 2026-08-16, for exactly
+    # the reason the sibling upsert test above states: an archive is now PAIRED
+    # with an ``office_actor`` ``state.patched`` (op ``remove``) from inside the
+    # same lock, so ``office.actor.removed`` can be covered without shipping a
+    # promoted frame whose office row never arrives (office fold-promotion plan
+    # §V2/O-H1). Asserted by TYPE rather than as ``+2``, matching the upsert
+    # test: a bare count goes green again if either half is replaced by an
+    # unrelated event.
     removed = store.remove_actor(ws, "dev")
     assert removed.state == "archived"
     assert not store.actor_exists(ws, "dev")
-    assert _office_event_count() == before_events + 1
+    emitted = [event.type for _, event in EventLog().iter_from_offset(0)][before_events:]
+    assert emitted == ["state.patched", "office.actor.removed"]
 
 
 def test_restore_dry_run_is_byte_identical_and_eventless():

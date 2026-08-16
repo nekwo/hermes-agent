@@ -159,7 +159,7 @@ class OfficeStore:
 
             logging.getLogger(__name__).warning("office event append failed: %s", event_type, exc_info=True)
 
-    def _emit_actor_patch(self, actor: OfficeActor, *, replaced_existing: bool, surface_rewritten: bool) -> None:
+    def _emit_actor_patch(self, actor: OfficeActor, *, created: bool) -> None:
         """Emit the S7-A ``office_actor`` patch for one actor write.
 
         Called from INSIDE ``office_lock`` and handed the in-memory actor that
@@ -184,28 +184,76 @@ class OfficeStore:
           would only turn a lock bug into a subtler one. Do not read the two
           bullets as two independent guards; there is one, and it is the lock.
 
-        ``replaced_existing`` / ``surface_rewritten`` decide upsert vs. refresh:
-        a patch describes the ACTOR row only, so a write that moved the parent
-        office row (a create bumps ``actor_count``; a re-add of an archived key
-        rewrites ``archived_actor_keys`` and the surface ``updated_at``) takes
-        the accounted degrade instead. Best-effort like ``_emit`` beside it: a
-        patch-lane fault must never take an office write down, and a missing
-        patch is a missing PROMOTION — the batch then ships the full core it
-        would have shipped before this lane existed.
+        ``created`` says the row was ABSENT before this write — a first
+        placement, or a re-add resurrecting an archived key. It rides the patch
+        as an additive marker so ``patch_coverage`` can gate the widened op
+        behind the ``office_actor_lifecycle`` capability token; the fold itself
+        inserts-on-absent either way. It replaces the old
+        ``replaced_existing``/``surface_rewritten`` pair, which existed to route
+        creates and ledger-clearing re-adds onto ``refresh`` because a patch
+        could not express the parent office row. The 2026-08-16 fold-promotion
+        plan (§V1) retired that: ``actor_count``, ``actors_truncated`` and the
+        ``archived_actor_keys`` delta under the two lifecycle ops are exactly
+        derivable by a client from the rows it folds, so they no longer need a
+        wire row and these writes no longer need to demote.
+
+        The ONE case a patch still cannot express is TRUNCATION. Past
+        ``MAX_OFFICE_ACTORS_PROJECTED`` the snapshot projects a CUT of the actor
+        list, and which actors survive the cut is not client-decidable — neither
+        the row's presence nor the derived counts can be folded — so the count is
+        taken post-write, under the lock that is already held, and a workspace
+        over the bound keeps the honest ``refresh``.
+
+        Cost of that count, named rather than discovered: ``list_actors`` is a
+        directory glob plus a JSON parse per actor, on a mutation path. It is
+        bounded by the same 200-actor projection cap it is checking, and it runs
+        under a lock that already serializes office writes — the alternative (a
+        filename glob) would count unparseable files as members, which is the
+        wrong direction for a guard whose job is to know when the projection is
+        no longer complete.
+
+        Best-effort like ``_emit`` beside it: a patch-lane fault must never take
+        an office write down, and a missing patch is a missing PROMOTION — the
+        batch then ships the full core it would have shipped before this lane
+        existed.
         """
 
         try:
+            from .snapshot import MAX_OFFICE_ACTORS_PROJECTED
             from .state_patches import emit_office_actor_patch, emit_office_actor_refresh
 
-            if replaced_existing and not surface_rewritten:
-                emit_office_actor_patch(self.event_log, actor)
-            else:
+            if len(self.list_actors(actor.workspace_id)) > MAX_OFFICE_ACTORS_PROJECTED:
                 emit_office_actor_refresh(self.event_log, actor.workspace_id, actor.actor_key)
+            else:
+                emit_office_actor_patch(self.event_log, actor, created=created)
         except Exception:
             import logging
 
             logging.getLogger(__name__).warning(
                 "office actor patch emit failed: %s", actor.actor_key, exc_info=True
+            )
+
+    def _emit_actor_remove_patch(self, actor: OfficeActor) -> None:
+        """Emit the ``office_actor`` ``remove`` for one archive.
+
+        No truncation guard, deliberately: a remove carries no ``changed`` and
+        makes no claim about the projected list's membership — it says one key
+        left, which is true under a cut as well as under a complete list. The
+        client's own truncated-base guard is what refuses the fold when its held
+        projection was already a cut.
+
+        Best-effort, like every emitter in this class.
+        """
+
+        try:
+            from .state_patches import emit_office_actor_remove
+
+            emit_office_actor_remove(self.event_log, actor.workspace_id, actor.actor_key)
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "office actor remove patch emit failed: %s", actor.actor_key, exc_info=True
             )
 
     # --- surface reads ----------------------------------------------------
@@ -392,20 +440,22 @@ class OfficeStore:
             _write_actor(actor)
             # An explicit local upsert of an archived key is operator intent to
             # re-add: clear the resurrection-guard ledger entry + archive copy
-            # so a later pull doesn't re-archive it.
-            surface_rewritten = actor_key in surface.archived_actor_keys
-            if surface_rewritten:
+            # so a later pull doesn't re-archive it. The client mirrors exactly
+            # this delta during the fold (§V1's derivation table), which is why
+            # it no longer forces the write onto the full-core lane.
+            if actor_key in surface.archived_actor_keys:
                 surface.archived_actor_keys = [k for k in surface.archived_actor_keys if k != actor_key]
                 surface.updated_at = ts
                 _write_surface(surface)
             archived_path.unlink(missing_ok=True)
             # INSIDE the lock, and from the actor object just written — see
             # _emit_actor_patch for why both halves of that are load-bearing.
-            self._emit_actor_patch(
-                actor,
-                replaced_existing=existing is not None,
-                surface_rewritten=surface_rewritten,
-            )
+            #
+            # ``created`` is ABSENCE of the live row, not absence of the key: a
+            # resurrection re-add is created=True because the row is missing from
+            # the client's list, which is the only question the fold's
+            # insert-on-absent asks.
+            self._emit_actor_patch(actor, created=existing is None)
             self._emit(
                 "office.actor.upserted",
                 workspace_id=wsid,
@@ -607,6 +657,17 @@ class OfficeStore:
             surface.archived_actor_keys = [*surface.archived_actor_keys, actor.actor_key][-ARCHIVED_LEDGER_CAP:]
             surface.updated_at = now()
             _write_surface(surface)
+        # The archive half of the lifecycle pair, INSIDE the lock and BEFORE the
+        # domain event — the same ordering ``upsert_actor`` uses, for the same
+        # monotonicity reason (see ``_emit_actor_patch``).
+        #
+        # It fires for ``emit=False`` too, and that is correct rather than an
+        # oversight: ``resolve_conflict``'s edit-vs-remove branch suppresses the
+        # DOMAIN event, but the row really did leave the office and a client that
+        # never heard so would render a desk the store no longer has. That batch
+        # demotes anyway on its own uncovered ``office.actor.conflict_resolved``,
+        # so the patch costs nothing there and is honest everywhere.
+        self._emit_actor_remove_patch(actor)
         if emit:
             self._emit(
                 "office.actor.removed",

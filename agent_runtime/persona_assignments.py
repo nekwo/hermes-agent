@@ -26,7 +26,12 @@ from .models import (
 from .persona_lifecycle import is_runtime_persona
 from .personas import profile_chat_toolsets
 from .serde import from_jsonable, to_jsonable
-from .state_patches import emit_persona_instance_patch, emit_persona_instance_remove
+from .state_patches import (
+    PATCH_OP_REFRESH,
+    emit_persona_instance_patch,
+    emit_persona_instance_remove,
+    emit_state_patch,
+)
 from .states import WorkerSessionState
 from .tool_visibility import (
     permission_state_for_persona,
@@ -1399,6 +1404,32 @@ class PersonaInstanceStore:
             raise RetiredPersonaInstanceError(instance_id, archive_path=retired_archive)
         return instance_id
 
+    #: The STORE fields ``open_chat`` may move, in one place, named.
+    #:
+    #: They were an anonymous pair of positional tuples until 2026-08-16, which
+    #: was enough while their only consumer was the idempotence test
+    #: (``before == after`` → observation, not mutation). The office
+    #: fold-promotion plan gave them a second consumer that needs the NAMES: the
+    #: paired ``state.patched`` must say WHICH fields moved, so the launcher
+    #: folds a field subset instead of taking a full core. Two parallel literal
+    #: tuples plus a third list of names is the shape that silently drifts, so
+    #: there is one authority and the tuples are built from it.
+    #:
+    #: ``chat_head_home`` is deliberately in the list even though it projects to
+    #: no wire field: it must still count as a mutation for the idempotence gate
+    #: above, and ``_PERSONA_INSTANCE_STORE_TO_WIRE`` drops it at the projection
+    #: (an unmapped store field yields itself, and it is not in the wire row).
+    _OPEN_CHAT_TRACKED_STORE_FIELDS: tuple[str, ...] = (
+        "display_name",
+        "profile_id",
+        "workspace_id",
+        "realm_id",
+        "mode",
+        "default_chat_session_id",
+        "session_id",
+        "chat_head_home",
+    )
+
     def open_chat(
         self,
         *,
@@ -1465,15 +1496,8 @@ class PersonaInstanceStore:
             # Opening another chat root must not cancel or rebind live work.
             pass
 
-        before = None if created else (
-            instance.display_name,
-            instance.profile_id,
-            instance.workspace_id,
-            instance.realm_id,
-            instance.mode,
-            instance.default_chat_session_id,
-            instance.session_id,
-            instance.chat_head_home,
+        before = None if created else tuple(
+            getattr(instance, field) for field in self._OPEN_CHAT_TRACKED_STORE_FIELDS
         )
 
         # An explicit ``display_name`` is AUTHORITATIVE — an operator naming this
@@ -1534,15 +1558,8 @@ class PersonaInstanceStore:
         scope = resolve_process_chat_scope()
         if scope.authoritative:
             instance.chat_head_home = str(scope.head_home)
-        after = (
-            instance.display_name,
-            instance.profile_id,
-            instance.workspace_id,
-            instance.realm_id,
-            instance.mode,
-            instance.default_chat_session_id,
-            instance.session_id,
-            instance.chat_head_home,
+        after = tuple(
+            getattr(instance, field) for field in self._OPEN_CHAT_TRACKED_STORE_FIELDS
         )
         if not created and before == after:
             # Idempotent re-open is an observation, not a mutation. Rewriting the
@@ -1557,6 +1574,50 @@ class PersonaInstanceStore:
         if previous_chat_head and previous_chat_head != instance.chat_head_home:
             event_payload["previous_chat_head_home"] = previous_chat_head
         updated = self.update(instance)
+        # S7-A producer: the PAIR ``persona_instance.chat_opened`` never had.
+        #
+        # Covering that event without this would be a silent data drop, not a
+        # missed optimisation: ``open_chat`` writes real wire-visible state —
+        # ``mode``, ``workspace_id``, ``realm_id``, ``profile_id``,
+        # ``display_name`` and the ``default_chat_session_id`` trio, all present
+        # in ``persona_instance_summary`` — and emitted no ``state.patched`` at
+        # all, so a promoted batch would have advanced every connected client's
+        # watermark past a row it never received.
+        #
+        # Two cases, split at ``created``:
+        #
+        # * RE-OPEN (``created=False``): the row exists on every client, so the
+        #   diffed field subset folds as a merge. ``updated_at`` always rides,
+        #   which is what keeps the pair from ever being EMPTY — a bind that
+        #   moved only ``chat_head_home`` (no wire field) would otherwise emit
+        #   nothing and leave the covered event riding alone.
+        # * CREATE (``created=True``): honest ``refresh``, so the batch demotes
+        #   to a full core. The row is NEW, the launcher's generic fold refuses
+        #   an upsert for a missing row, and a full persona-instance row cannot
+        #   be assumed to fit the 4 KB cap. A brand-new agent's roster row rides
+        #   one full core; the office half of the same gesture still promotes,
+        #   because the two halves land ~1s apart and so usually in separate
+        #   batches. Deferred D3 in the 2026-08-16 plan holds the measurement
+        #   that would make creates foldable.
+        if created:
+            emit_state_patch(
+                self.event_log,
+                entity="persona_instance",
+                entity_id=updated.id,
+                op=PATCH_OP_REFRESH,
+                persona_id=getattr(updated, "persona_id", None),
+            )
+        else:
+            moved = [
+                field
+                for field, was, is_now in zip(
+                    self._OPEN_CHAT_TRACKED_STORE_FIELDS, before or (), after
+                )
+                if was != is_now
+            ]
+            emit_persona_instance_patch(
+                self.event_log, updated, [*moved, "updated_at"]
+            )
         self._event("persona_instance.chat_opened", updated, event_payload)
         return updated
 
