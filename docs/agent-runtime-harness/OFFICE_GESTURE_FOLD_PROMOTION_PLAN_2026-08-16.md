@@ -949,3 +949,123 @@ every new receipt goes through the named log sinks, never `debugPrint`.
 | R13 | Patch rows carry per-row `seq`; delta frames enumerate their events | READ: stream.py:215,243 |
 | R14 | Sync archives route through `remove_actor` | READ: office_sync.py:261 |
 | R15 | Upstream has no wire patch protocol; derived container fields are client-computed; `{dirs, full}` scope-naming | Coordinator's 2026-08-16 upstream research (upstream/main 1f8fdc7bd8), cited file:line therein |
+
+## 10. Post-landing: what it bought, what this document got wrong, and the ordered follow-on
+
+All eight stages landed 2026-08-16 (hermes `3416603571`, launcher `8aa8c36c1`). O-L2 shipped and was
+reverted (`38cef46fe` / `6ecba85c2`) — see the correction below. Then the operator drove real gestures
+against the built runtime, which is where the numbers in this section come from.
+
+### 10.1 Measured, live, after landing
+
+| Gesture | Path | Time | Evidence |
+| --- | --- | --- | --- |
+| Delete an agent | **PROMOTED** — folds | **280–368 ms** | Event log `15:29:51.398–51.440Z` to fold `51.808`; `55.550–55.602Z` to `55.882` |
+| Create an agent (drag-drop) | DEMOTED — full core | **6.94 s** | Last event `15:30:00.305Z` to resync `~11:30:07.24` |
+| Boot flush (11 actors + surface write) | DEMOTED — full core | 5.93 s | Last event `15:29:40.547Z` to notify `~46.42` |
+
+The milestone is real: **archives promote, and the mixed batch folds** — `[MissionFold] applied 2 of 2
+rows (office_actor x1, persona_instance x1)`, the roster row and the actor row from one frame. That also
+proves the capability token, the declaration, the room intersection and the launcher fold all work end
+to end against a real runtime, not just in tests.
+
+**Where the create's 6.94 s goes** (measured on an isolated probe copy; nothing written under `.hermes`):
+
+| Segment | Cost |
+| --- | --- |
+| Producer poll wake + 200 ms settle, batch drained | 0.0–0.1 s |
+| Coverage classification (the demote decision) | ~0 (in-memory frozenset) |
+| **`build_snapshot()` full core** | **~6.3–6.6 s** |
+| Frame construction + JSON of 829,955 bytes | 0.005 s |
+| Hub fanout, sink classify, localhost notify | ms-scale |
+| 500 ms resubscribe backoff + subscribe RPC | **outside** the window (round trip ~8 ms) |
+
+The demotion is essentially the entire cost. `build_snapshot()` measures **1.17 s warm / 6.92 s cold on
+the X: drive**; live builds sit at the cold number. It is a metadata-heavy filesystem workload — 4,065
+`nt.stat`, 3,170 `nt._getfinalpathname`, 1,585 `pathlib.resolve` per build over ~2,000 files. **It is not
+a bandwidth problem.** Serialising 822 KB costs 5 ms; re-deriving it from disk costs six and a half
+seconds.
+
+### 10.2 Two claims in this document that were wrong
+
+**(a) §V2/§1 — "the two halves land ~1 s apart, outside the 200 ms coalescing debounce, so they can and
+often will land in separate batches."** False, and the mechanism is the reverse of what was assumed.
+`stream.py:484-533` drains everything available into `pending`, then **sleeps the 200 ms and drains
+again into the same `pending`** — its own comment says "one bounded sleep lets the tail join the SAME
+frame". It is a **join** window, not a splitter; with the 250 ms poll on top, effective coalescing runs
+to ~450 ms. The operator's create landed its two halves **356 ms apart** and they coalesced. The
+`persona_instance op:refresh` then sank the batch and took the perfectly foldable `office_actor
+created:true` upsert with it. The original claim rested on one observation with one-second-granularity
+timestamps — a timing bet recorded as a fact. **Acceptance criterion 2 cannot hold in the coalesced
+case.**
+
+**(b) §5 stage ordering — "O-L1/O-L2 are inert against every runtime."** True of O-L1, false of O-L2,
+which is *actively lossy* against any runtime without O-H2: its overlap dedup skips rows the filtered
+office lane never delivered, while the shared watermark has already advanced past them. Proven with a
+red probe pre-landing, then corroborated by the live runtime's own receipt — `STALE dropped:
+seq=88661934 not ahead of held 88661934 — 5 rows, 0 applied`. O-L2 is reverted; if revived it belongs
+**after** O-H2, never first.
+
+Both errors are the same shape: a claim about *ordering in time* asserted from thin evidence. Treat the
+remaining timing claims in this document as unverified until measured.
+
+### 10.3 The ordered follow-on
+
+Ordered by measured value, not by tidiness. Each item states what it buys and what it does **not**.
+
+1. **D3 — make the `persona_instance` create foldable.** Removes ~6.5 s of the create's 6.94 s; a ~20x
+   win, larger than this plan claimed rather than smaller. Prerequisites already named in §7: measure the
+   post-R2 `persona_instance_summary` row against the 3584-byte per-value budget (the ~18 KB figure at
+   `state_patches.py:30` predates residue-slimming and is **unverified**), and add create-on-absent to the
+   launcher's generic `persona_instance` fold behind a second capability token — the same V4 pattern that
+   shipped cleanly for `office_actor`. *Does not* fix the race, the half-created agent, or the ~450 ms
+   poll+settle floor.
+
+2. **Log the `snapshot_build` `elapsed_ms` that is already on the wire.** `stream.py:316-327` emits it in
+   the liveness heartbeat during every build. No consumer logs it. It is the exact number two diagnostic
+   passes spent hours bracketing by subtraction and probe measurement. Nearly free; turns the next
+   investigation into a grep.
+
+3. **`runtime.agent.create` — one call: `{persona, workspace_id, position:[x,y]}` returning the placed
+   actor.** The launcher must not know that creating an agent involves a chat; that is backend mechanics
+   leaking into the client. Kills the coalescing lottery (one call, one event, one batch, deterministic),
+   makes the half-created agent unrepresentable (incident #37), moots `_addDistinctPlacement`'s
+   no-instance-to-thread problem, and creates the timing envelope phase-level analytics needs. **Does not
+   make the create foldable** — if the unified call still emits `refresh`, the batch still demotes and the
+   6.5 s stays. Do it *for* correctness and measurability, not for speed.
+
+4. **Client prediction + revision reconciliation (§7 / task #43).** The canvas moves on release; the
+   write's own reply is the acknowledgement, so the client stops waiting on a push about its own change.
+   Independent of 1–3. Note it *masks* rather than removes: applied before D3 it would have hidden six and
+   a half seconds of real work.
+
+5. **Commit on pointer-up rather than 600 ms after the last movement.** The debounce already coalesces a
+   drag correctly; it just adds 600 ms of dead time before a round trip. Free.
+
+6. **Scoped invalidation — name what changed instead of "re-fetch everything."** Upstream's `{dirs, full}`
+   shape (R15). Turns every future uncoverable event from a cliff into a step, and stops the
+   whack-a-mole this plan is an instance of. Bigger than D3 and touches the producer contract, but it is
+   the change that makes foldability an optimisation rather than a precondition. Also fixes the boot
+   demote for free: one `office.surface.updated` currently sinks a 23-event startup batch.
+
+7. **Collapse to one transport (D7 / ruling #42).** Now a *performance* item as well as a correctness one:
+   every demoted batch is built **twice concurrently** — the serve hub's producer and the launcher's own
+   `harness stream` child — over the same ~2,000 files on the same disk. That contention is a live
+   candidate for why builds hit the cold 6.9 s rather than the warm 1.2 s.
+
+8. **End-to-end correlation id** (gesture, RPC, events, batch, frame, fold). Every receipt today is
+   per-lane; causality is inferred from timestamps. That inference **actively misled this investigation**:
+   anchoring on the launcher's flush receipt (which lags the RPC by 250–650 ms) produced a "deletes take
+   3.8 s" figure and, from it, a confident and wrong recommendation to prioritise prediction over D3. The
+   cost of no correlation id is not slow diagnosis; it is fluent, confident, wrong diagnosis.
+
+9. **The page-open write storm.** Every Mission Office open re-upserts all 11 desk actors plus a surface
+   write, off a 21-hour-old cache with five dropped predictions. Its surface write demotes the boot batch
+   every time. The same shape — the launcher inferring server state and writing off that inference —
+   caused incident #40. Unowned, and the largest un-investigated behaviour left on this surface.
+
+10. **The ~4.3 s `laneAbsent` window on every page open** (not just cold boot). A gesture inside it falls
+    back to the CLI lane and raises the fallback toast. Unowned, and untouched by items 1–9.
+
+**If only three:** D3 (removes the delay), the `elapsed_ms` log line (stops the next diagnosis costing a
+night), prediction (makes it feel instant regardless).
