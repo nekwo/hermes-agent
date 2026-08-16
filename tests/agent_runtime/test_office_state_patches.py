@@ -53,6 +53,7 @@ from agent_runtime.patch_coverage import (
     HISTORICAL_FOLD_ENTITIES,
     LIVE_COVERED_DOMAIN_EVENT_TYPES,
     OFFICE_ACTOR_LIFECYCLE_CAPABILITY,
+    PERSONA_INSTANCE_CREATE_CAPABILITY,
     batch_is_patch_coverable,
     event_is_patch_coverable,
 )
@@ -842,7 +843,17 @@ def test_the_capability_token_is_inert_as_an_entity_name(seeded_office, set_delt
 #: being built against in the other repo, and an assertion written as ``x == x``
 #: cannot catch either side renaming half of it.
 _WIDENED_DECLARATION = frozenset(
-    {"persona_instance", "incident", "office_actor", "office_actor_lifecycle"}
+    {
+        "persona_instance",
+        "incident",
+        "office_actor",
+        "office_actor_lifecycle",
+        # D3 (2026-08-16): the SECOND capability token — the complete-row
+        # ``persona_instance`` create-upsert that replaced ``open_chat``'s
+        # ``refresh``. Same reason as its sibling: a widened OP on an entity
+        # every fielded launcher already declares.
+        "persona_instance_create",
+    }
 )
 #: What every launcher in the field sends today.
 _FIELDED_DECLARATION = frozenset({"persona_instance", "incident", "office_actor"})
@@ -861,6 +872,8 @@ def test_the_widened_declaration_is_exactly_the_launchers(
 
     assert OFFICE_ACTOR_LIFECYCLE_CAPABILITY == "office_actor_lifecycle"
     assert OFFICE_ACTOR_LIFECYCLE_CAPABILITY in _WIDENED_DECLARATION
+    assert PERSONA_INSTANCE_CREATE_CAPABILITY == "persona_instance_create"
+    assert PERSONA_INSTANCE_CREATE_CAPABILITY in _WIDENED_DECLARATION
     assert _FIELDED_DECLARATION < _WIDENED_DECLARATION
 
 
@@ -927,25 +940,26 @@ def test_a_delete_gesture_batch_promotes_for_a_lifecycle_declared_client(
     ], rows
 
 
-def test_an_add_gesture_reopen_batch_promotes_and_a_create_batch_does_not(
+def test_an_add_gesture_create_and_reopen_batch_both_promote(
     seeded_office, set_delta_patches
 ):
-    """THE MILESTONE, add half — and the one honest hole in it.
+    """THE MILESTONE, add half — with D3 the hole in it is closed.
 
-    RE-OPEN promotes: ``chat_opened`` now has its diffed persona ``upsert``, so
-    the batch folds.
+    RE-OPEN promotes: ``chat_opened`` has its diffed persona ``upsert``, so the
+    batch folds, and for a FIELDED client too (nothing in a re-open is a widened
+    op).
 
-    CREATE does not, deliberately (§V2 case (b), deferred D3). A brand-new
-    roster row cannot be assumed to fit the 4 KB cap and the launcher's generic
-    fold refuses an upsert for a missing row, so ``open_chat`` emits an honest
-    ``refresh`` and the batch takes one full core. The office half of the same
-    gesture still promotes, because the live timing shows the two halves land
-    ~1s apart — outside the 200ms coalescing debounce — and therefore usually in
-    separate batches.
+    CREATE now promotes as well, for a client declaring
+    ``persona_instance_create``. This test asserted the opposite until D3, on the
+    stated grounds that "a brand-new roster row cannot be assumed to fit the 4 KB
+    cap" — an assumption that predated R2's residue slimming and was measured
+    false (worst live payload 3,133 of 4,096). SPEC INVERSION, flagged as such.
 
-    The kill-mutation for the second half is covering creates: it would ship a
-    promoted frame whose new roster row the client cannot fold, costing it the
-    patch AND a re-hydrate.
+    Both directions on the SAME batch, because a promotion assertion alone is
+    green against a classifier that promotes everything — and the demotion half
+    is the mixed-pair guarantee: a fielded launcher must keep getting today's
+    full core for a create, since its generic fold answers a create-upsert with
+    ``patch_without_target`` and re-hydrates.
     """
 
     from agent_runtime.persona_assignments import PersonaInstanceStore
@@ -953,7 +967,8 @@ def test_an_add_gesture_reopen_batch_promotes_and_a_create_batch_does_not(
     set_delta_patches(True)
     store = PersonaInstanceStore()
 
-    # CREATE: refresh → demotes even for a fully widened client.
+    # CREATE: a complete-row upsert → promotes for a token-declaring client,
+    # demotes for every launcher in the field.
     before = _log_end()
     created = store.open_chat(
         persona_id="profile:qa",
@@ -962,7 +977,8 @@ def test_an_add_gesture_reopen_batch_promotes_and_a_create_batch_does_not(
     )
     create_batch = [e for _, e in EventLog().iter_from_offset(before)]
     assert "persona_instance.chat_opened" in [e.type for e in create_batch]
-    assert not batch_is_patch_coverable(create_batch, fold_entities=_WIDENED_DECLARATION)
+    assert batch_is_patch_coverable(create_batch, fold_entities=_WIDENED_DECLARATION)
+    assert not batch_is_patch_coverable(create_batch, fold_entities=_FIELDED_DECLARATION)
 
     # RE-OPEN: a diffed upsert → promotes.
     before = _log_end()

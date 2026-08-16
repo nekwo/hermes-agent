@@ -1498,6 +1498,47 @@ def test_a_declared_param_is_what_the_room_intersects_over():
     assert accepted == HISTORICAL_FOLD_ENTITIES
 
 
+def test_the_persona_instance_create_token_rides_this_lane_too():
+    """D3's token must reach the OFFICE lane, not just the NDJSON child's argv.
+
+    The launcher folds both transports with ONE body and declares one list on
+    both channels, so a token that armed only the stream lane would leave the
+    office push lane demoting the very batch the stream lane folds — and the add
+    gesture's two halves ride different lanes. Nothing in the handler needed to
+    change for this (the channel has never interpreted its strings), which is
+    exactly why it needs an assertion: "it works because nobody filters it" is a
+    property that a future allowlist would silently take away.
+
+    Kill-mutation: filter the subscribe param to a known vocabulary — this and
+    the ``a_token_from_the_future`` normalizer test both go red.
+    """
+
+    from agent_runtime.patch_coverage import (
+        PERSONA_INSTANCE_CREATE_CAPABILITY,
+        accepted_fold_entities,
+    )
+
+    _seed_office()
+    OFFICE_SUBSCRIPTIONS.bind(lambda: _FakeHub())
+    declared = sorted(
+        OFFICE_FOLD_ENTITIES
+        | {"office_actor_lifecycle", PERSONA_INSTANCE_CREATE_CAPABILITY}
+    )
+
+    reply = _subscribe(
+        context=serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None),
+        fold_entities=declared,
+    )["result"]
+
+    assert PERSONA_INSTANCE_CREATE_CAPABILITY in reply["fold_entities"]
+    assert PERSONA_INSTANCE_CREATE_CAPABILITY in accepted_fold_entities(
+        OFFICE_SUBSCRIPTIONS.declarations()
+    )
+    # And the LEGACY default must NOT carry it: a client that says nothing is a
+    # fielded launcher whose fold refuses a create with ``patch_without_target``.
+    assert PERSONA_INSTANCE_CREATE_CAPABILITY not in OFFICE_FOLD_ENTITIES
+
+
 def test_an_explicitly_empty_declaration_is_honoured_as_empty():
     """"I fold nothing, send me full cores" is a thing a client may say.
 

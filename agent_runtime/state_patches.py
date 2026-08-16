@@ -27,9 +27,22 @@ covered field, no per-field allowlist.
 * ``remove`` — the actor left the live frame (an open-only incident closed; a
   persona instance closed / task-terminal fan-out). The launcher deletes the row.
 * ``refresh`` — the projected payload does not fit the 4 KB EventLog cap even
-  after per-field oversize marking (a full persona-instance row is ~18 KB; a goal
-  row ~80 KB). An accounted degrade, never a silent drop: the launcher re-fetches
-  that actor via checkpoint / rides the next full core.
+  after per-field oversize marking (a goal row is ~80 KB). An accounted degrade,
+  never a silent drop: the launcher re-fetches that actor via checkpoint / rides
+  the next full core.
+
+  **The "~18 KB persona-instance row" this line used to name is gone**, and the
+  correction is worth keeping because the stale figure cost a 6.5-second
+  regression a full day's ownership. R2's residue slimming evicted the
+  tool-detail payloads — ``tool_resolution`` / ``turn_tool_context`` /
+  ``permission_state`` / ``blocked_tools``, ~97% of the row's bytes — behind a
+  typed ``visibility_ref``. Measured against the operator's live roster
+  (2026-08-16, 17 instances): the largest COMPLETE row is 3,012 bytes, the
+  largest assembled ``{entity,id,op,changed,created}`` payload 3,133, and the
+  largest single value 504 — comfortably inside the 4,096-byte cap and the
+  3,584-byte per-value budget. That measurement is what unblocked D3 (the
+  create-upsert below); it is re-taken by a test rather than trusted, because a
+  field added to ``persona_instance_summary`` moves it.
 
 The ``seq``/``ts`` come from the EventLog's own envelope (the stream assigns the
 sequence; ``Event.ts`` is the timestamp) — the payload carries only the op.
@@ -86,6 +99,13 @@ PATCH_OP_REFRESH = "refresh"
 #: Ops the launcher can fold in place (a covered batch may contain only these).
 #: ``refresh`` is NOT foldable — it forces a full core / checkpoint refetch.
 FOLDABLE_PATCH_OPS: frozenset[str] = frozenset({PATCH_OP_UPSERT, PATCH_OP_REMOVE})
+
+#: The persona-instance entity class, hoisted beside :data:`OFFICE_ACTOR_ENTITY`
+#: so the emitters, the coverage gate and the launcher's ``_entitySection`` table
+#: all name it from one place. It was three string literals until D3 gave the
+#: entity a THIRD reader (the create gate in ``patch_coverage``), which is the
+#: point at which a literal starts drifting silently.
+PERSONA_INSTANCE_ENTITY = "persona_instance"
 
 # Headroom reserved for the ``{entity, id, op, changed:{...}}`` scaffold plus the
 # field keys, so a patch assembled from within-budget values still clears the
@@ -541,10 +561,124 @@ def emit_persona_instance_patch(
         return False
     return emit_state_patch(
         event_log,
-        entity="persona_instance",
+        entity=PERSONA_INSTANCE_ENTITY,
         entity_id=instance.id,
         op=PATCH_OP_UPSERT,
         changed=changed,
+        task_id=getattr(instance, "current_task_id", None),
+        run_id=getattr(instance, "active_run_id", None),
+        persona_id=getattr(instance, "persona_id", None),
+        config=config,
+    )
+
+
+def project_persona_instance_full_wire_row(instance: Any) -> dict[str, Any]:
+    """The COMPLETE persona-instance wire row — the exact row a full core holds.
+
+    This is the create half of the projection pair, and it is deliberately a
+    different mechanism from :func:`project_persona_instance_wire_fields` above.
+    That one reproduces ``persona_instance_summary``'s derived-field logic
+    field-for-field (held to it by a golden) because it only ever needs the
+    SUBSET a steer/profile write moved, and reproducing a subset read-only is
+    cheaper than building the whole row. A create has no subset: the client holds
+    no row at all, so the patch must carry every key the rebuild would, and the
+    only thing that can promise that is the rebuild's own builder. So this one
+    CALLS ``persona_instance_summary`` — the same structural-parity argument
+    :func:`project_office_actor_wire_row` makes, and the stronger of the two: a
+    field added to the summary reaches the create patch in the same commit and
+    cannot drift out of it.
+
+    The persona is resolved READ-ONLY through :func:`_resolve_persona_for`, and
+    handed to the summary rather than left for it to look up — the same resolution
+    ``snapshot.py`` performs (``personas_by_id.get(persona_id)``), so a profile
+    instance whose persona is not a stored agent resolves to ``None`` HERE too and
+    falls into the summary's own ``_profile_visibility_persona`` standin exactly
+    as the full rebuild does. Byte-parity with the core needs that fallback to
+    stay in play, not to be routed around.
+
+    ``profile_readiness`` is not threaded: ``snapshot.py`` passes it, but it feeds
+    only ``tool_resolution``'s ``profile_readiness``/``..._summary`` keys, and the
+    summary row copies none of those out — it reads ``permission_mode``,
+    ``mutation_boundary``, ``final_tool_count``, ``blocked_tools`` and
+    ``effective_toolsets``. Omitting it costs one recomputation inside
+    ``resolve_tool_visibility`` and moves no wire byte; the parity golden in
+    ``test_state_patches.py`` is what holds that claim.
+    """
+
+    from .persona_assignments import persona_instance_summary
+
+    return persona_instance_summary(instance, _resolve_persona_for(instance))
+
+
+def emit_persona_instance_create(
+    event_log: EventLog,
+    instance: Any,
+    *,
+    config: AgentRuntimeConfig | None = None,
+) -> bool:
+    """Emit the CREATE patch for a brand-new persona instance: a complete-row
+    ``upsert`` stamped ``created: true`` — or an honest ``refresh`` if that row
+    cannot be carried losslessly (D3, 2026-08-16).
+
+    Why this exists. ``open_chat``'s create arm emitted ``op: refresh``, and one
+    unfoldable row demotes its whole batch, so every Mission Office "add an
+    agent" gesture took the perfectly foldable ``office_actor created:true``
+    upsert down with it and paid a full ``build_snapshot()`` — measured at 6.3–6.6
+    s of a 6.94 s gesture (plan §10.1). The refresh was not a measurement, it was
+    a deferral: the ~18 KB figure in this module's header predates the R2
+    residue slimming that evicted the tool-detail payloads (~97% of the row)
+    behind ``visibility_ref``. Measured on the operator's live roster, 2026-08-16:
+    17 instances, worst assembled payload 3,133 bytes against the 4,096-byte cap,
+    worst single value 504 bytes against the 3,584-byte per-value budget.
+
+    Why the degrade is checked HERE rather than left to
+    :func:`build_state_patch`'s shrink loop. That loop is right for a SUBSET
+    upsert: marking one oversize value still ships a merge the launcher can apply,
+    with the marked field accounted and refetched. For a CREATE it would be a
+    lie — the launcher INSERTS this row wholesale, so a marker would become the
+    inserted row's value for that field, i.e. a fabricated roster row rather than
+    an accounted degrade. So a create is all-or-nothing: any marker, or any
+    degrade the loop already made, and the whole patch becomes the ``refresh``
+    that was the pre-D3 behaviour. That keeps the worst case exactly today's
+    wire — a full core — for a roster row that outgrows the cap, instead of a
+    silently corrupt insert.
+
+    Dark (and projection-free) unless the flag is on.
+    """
+
+    if not delta_patches_enabled(config):
+        return False
+    row = project_persona_instance_full_wire_row(instance)
+    payload = build_state_patch(
+        PERSONA_INSTANCE_ENTITY, instance.id, PATCH_OP_UPSERT, row, True
+    )
+    lossless = payload.get("op") == PATCH_OP_UPSERT and not any(
+        _is_oversize_marker(value)
+        for value in (payload.get("changed") or {}).values()
+    )
+    if not lossless:
+        logger.warning(
+            "persona-instance create patch degraded to refresh: the projected "
+            "row for %s does not fit the %d-byte payload cap losslessly — the "
+            "batch takes a full core (D3, plan §10.3)",
+            instance.id,
+            EVENT_PAYLOAD_LIMIT_BYTES,
+        )
+        return emit_state_patch(
+            event_log,
+            entity=PERSONA_INSTANCE_ENTITY,
+            entity_id=instance.id,
+            op=PATCH_OP_REFRESH,
+            persona_id=getattr(instance, "persona_id", None),
+            config=config,
+        )
+    return emit_state_patch(
+        event_log,
+        entity=PERSONA_INSTANCE_ENTITY,
+        entity_id=instance.id,
+        op=PATCH_OP_UPSERT,
+        changed=row,
+        created=True,
         task_id=getattr(instance, "current_task_id", None),
         run_id=getattr(instance, "active_run_id", None),
         persona_id=getattr(instance, "persona_id", None),
@@ -566,7 +700,7 @@ def emit_persona_instance_remove(
         return False
     return emit_state_patch(
         event_log,
-        entity="persona_instance",
+        entity=PERSONA_INSTANCE_ENTITY,
         entity_id=instance.id,
         op=PATCH_OP_REMOVE,
         task_id=getattr(instance, "current_task_id", None),

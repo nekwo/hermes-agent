@@ -1013,13 +1013,11 @@ remaining timing claims in this document as unverified until measured.
 
 Ordered by measured value, not by tidiness. Each item states what it buys and what it does **not**.
 
-1. **D3 — make the `persona_instance` create foldable.** Removes ~6.5 s of the create's 6.94 s; a ~20x
-   win, larger than this plan claimed rather than smaller. Prerequisites already named in §7: measure the
-   post-R2 `persona_instance_summary` row against the 3584-byte per-value budget (the ~18 KB figure at
-   `state_patches.py:30` predates residue-slimming and is **unverified**), and add create-on-absent to the
-   launcher's generic `persona_instance` fold behind a second capability token — the same V4 pattern that
-   shipped cleanly for `office_actor`. *Does not* fix the race, the half-created agent, or the ~450 ms
-   poll+settle floor.
+1. ~~**D3 — make the `persona_instance` create foldable.**~~ **LANDED 2026-08-16** (hermes
+   `feat/persona-create-fold`, launcher `feat/persona-create-fold`). Removes ~6.5 s of the create's
+   6.94 s; a ~20x win, larger than this plan claimed rather than smaller. *Does not* fix the race, the
+   half-created agent, or the ~450 ms poll+settle floor. See §10.4 for the measurement that unblocked it
+   and the one deviation from the sketch above.
 
 2. ~~**Log the `snapshot_build` `elapsed_ms` that is already on the wire.**~~ **LANDED 2026-08-16** —
    launcher `2eeb25c45`, hermes producer half merged the same day. **And the premise of this item, as I
@@ -1174,3 +1172,58 @@ that motivates prediction (R#43) being a correctness change rather than UX polis
 The lesson worth keeping is narrower than "write things down": a number is not a reference. Every one of
 these was cited confidently in committed prose while resolving to nothing — the documentary form of the
 same error §10.2 records twice, an assertion whose backing was never checked.
+
+---
+
+### 10.5 D3, landed — the measurement, and where it deviated from the sketch
+
+**The gate, measured.** §7's D3 entry and the `state_patches.py` header both said a full
+`persona_instance` row is "~18 KB" against the 4,096-byte `EventLog.append` cap. That figure predated
+R2's residue slimming, which evicted `tool_resolution` / `turn_tool_context` / `permission_state` /
+`blocked_tools` — ~97% of the row's bytes — behind a typed `visibility_ref`. Re-measured against the
+operator's live roster (17 instances, copied read-only into an isolated probe; nothing written under
+`.hermes`):
+
+| | bytes | budget |
+| --- | --- | --- |
+| largest complete row | 3,012 | — |
+| largest assembled `{entity,id,op,changed,created}` payload | **3,133** | 4,096 (`EVENT_PAYLOAD_LIMIT_BYTES`) |
+| largest single value (`skills`) | 504 | 3,584 (`PATCH_VALUE_BUDGET_BYTES`) |
+
+Headroom is ~960 bytes, i.e. ~24%. That is real but not unlimited, and it is a property of
+`persona_instance_summary`'s field list — which moves. So the number is re-taken by a test
+(`test_open_chat_create_row_fits_the_payload_cap_with_headroom`) rather than trusted, and the emitter
+degrades per row rather than assuming.
+
+**The one deviation from the sketch.** §10.3 described D3 as "add create-on-absent to the launcher's
+generic `persona_instance` fold behind a second capability token — the same V4 pattern that shipped
+cleanly for `office_actor`". The pattern is the same, but one detail is NOT, and it is load-bearing:
+
+* For `office_actor` the launcher's fold inserts on absent **unconditionally**, and `created` is purely
+  hermes' coverage gate (`build_state_patch`'s docstring says so). That is safe because every office
+  upsert already carries the complete row — the store has no per-field office write.
+* For `persona_instance` the upserts are **subsets** (the fields one steer/profile write moved). An
+  unconditional insert-on-absent would assemble a roster row out of whichever three fields happened to
+  move. So the launcher's generic fold **reads** `created`: insert (and REPLACE) only when it is
+  literally `true`, `patch_without_target` otherwise. The stamp is part of the fold contract here, not
+  only part of the negotiation.
+
+A second deviation, smaller: `build_state_patch`'s oversize shrink loop is correct for a subset upsert
+(mark the value, the client refetches that field) and **wrong for a create**, where the marker would
+become the inserted row's value — a fabricated roster row rather than an accounted degrade. So
+`emit_persona_instance_create` treats a create as all-or-nothing: any marker, or any degrade the loop
+already made, and the whole patch falls back to `refresh`. The worst case is therefore exactly the
+pre-D3 wire, never a corrupt insert.
+
+**Contract movement: none.** `created` was already an optional key on the `state.patched` contract
+(O-H1), so `decision_contract_hash` does not move and no generated golden changed — verified by running
+`scripts/generate_agent_runtime_stream_fixtures.py` and getting an empty diff on every frame. The one
+committed byte change is the hand-maintained `patch_coverage_manifest.json`, which gains a
+`persona_instance.create` case, mirrored byte-identically into the launcher with both `MANIFEST.sha256`
+files re-pinned and cross-checked from both sides.
+
+**What is NOT verified.** Nothing was measured against a live runtime — no `harness serve` child was
+spawned and the operator's running launcher was not disturbed, per this task's constraints. The 6.94 s →
+sub-second claim rests on §10.1's measurement of where the time goes plus the classifier now promoting
+the create batch; the live receipt (`folded ≥ 1` on an add gesture, no `resubscribe #N (push:full_core)`)
+is the operator's acceptance check, unrun.

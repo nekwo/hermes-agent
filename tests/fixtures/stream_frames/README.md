@@ -12,23 +12,20 @@ and parses them through its real decode + read-model pipeline
 split is structural, not an oversight, and the script names both halves
 (`GENERATED_FRAME_FILES` / `PINNED_ONLY_FILES`).
 
-> **OUTSTANDING CROSS-STACK COPY (2026-08-16, office fold-promotion O-H3).**
-> Two entries moved on the hermes side and the launcher's byte-identical copies
-> under `test/fixtures/harness_stream/` have **not** been updated yet, because
-> that checkout is the operator's live tree:
+> **CROSS-STACK COPY STATUS (2026-08-16).** The O-H3 wave's two entries —
+> `patch_coverage_manifest.json`'s changed bytes and the new
+> `patch_delete_gesture.json` — were mirrored into the launcher by
+> `04e5b14e6` / `cdc481040`, so that debt is settled.
 >
-> * `patch_coverage_manifest.json` — **bytes changed.** `covered_domain_events`
->   gained `persona_instance.retired`, `persona_instance.chat_opened` and
->   `office.actor.removed`; the `office.actor.create` and `office.actor.removed`
->   cases flipped from `refresh`/uncovered to `upsert`/`remove`; three cases
->   were added. The launcher pins its own copy, so it stays green while
->   silently diverging — which is precisely the drift the update rule below
->   exists to prevent.
-> * `patch_delete_gesture.json` — **new file.** Additive, so nothing goes red
->   without it; the launcher's golden fold of the milestone batch is what it is
->   for.
->
-> Copy both, update the launcher's manifest, in the change that lands O-L1..3.
+> D3 (the foldable `persona_instance` create) moves
+> `patch_coverage_manifest.json` once more: it gains a
+> `persona_instance.create` case beside `office.actor.create`. No generated
+> frame moves, because `created` was already an optional key on the
+> `state.patched` contract, so `decision_contract_hash` does not shift. The
+> launcher copy and BOTH `MANIFEST.sha256` files are updated in the same
+> cross-stack change and verified by hashing from both sides — a manifest
+> updated on one side only leaves both repos green while they disagree, which
+> is the exact drift this note exists to prevent.
 
 | File | Origin |
 | --- | --- |

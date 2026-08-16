@@ -32,6 +32,7 @@ from agent_runtime.events import EventLog
 from agent_runtime.models import Event
 from agent_runtime.patch_coverage import (
     HISTORICAL_FOLD_ENTITIES,
+    PERSONA_INSTANCE_CREATE_CAPABILITY,
     accepted_fold_entities,
     batch_is_patch_coverable,
     event_is_patch_coverable,
@@ -218,6 +219,82 @@ def test_the_op_rules_run_first_and_are_unchanged_by_the_entity_gate():
         payload={},
     )
     assert batch_is_patch_coverable([_instance_upsert(), steered], fold_entities=["persona_instance"])
+
+
+def test_a_persona_instance_create_is_gated_and_a_subset_upsert_is_not():
+    """D3's gate, both ways, on payloads that differ ONLY by the stamp.
+
+    ``persona_instance`` has been declared by every fielded launcher since S7-A,
+    and every upsert under it was a subset merge. D3 adds a complete-row upsert
+    stamped ``created: true`` for a row the client does not hold — which a
+    fielded fold answers with ``patch_without_target`` and a full re-hydrate, so
+    the client pays the patch AND the core. Hence the second capability token.
+
+    The two payloads below are byte-identical apart from ``created``, which is
+    what makes this a test of the GATE rather than of the entity rule: if the
+    gate were removed, the create becomes coverable under bare
+    ``persona_instance`` and the first assertion goes red; if the gate were
+    widened to the whole entity, the subset upsert stops being coverable and the
+    third goes red.
+    """
+
+    create = _patch_event(
+        "persona_instance", "personainst_new", PATCH_OP_UPSERT, {"display_name": "A"}
+    )
+    create.payload["created"] = True
+    subset = _instance_upsert("personainst_new")
+
+    # A fielded declaration: the create demotes, the subset still promotes.
+    assert event_is_patch_coverable(create, fold_entities=HISTORICAL_FOLD_ENTITIES) is False
+    assert (
+        event_is_patch_coverable(subset, fold_entities=HISTORICAL_FOLD_ENTITIES) is True
+    )
+    # With the token, the create promotes too.
+    widened = HISTORICAL_FOLD_ENTITIES | {PERSONA_INSTANCE_CREATE_CAPABILITY}
+    assert event_is_patch_coverable(create, fold_entities=widened) is True
+    # And the token alone is not an entity — it does not promote anything by
+    # itself, which is what keeps it inert as a set member on an old runtime.
+    assert (
+        event_is_patch_coverable(
+            create, fold_entities=frozenset({PERSONA_INSTANCE_CREATE_CAPABILITY})
+        )
+        is False
+    )
+    assert PERSONA_INSTANCE_CREATE_CAPABILITY not in HISTORICAL_FOLD_ENTITIES
+
+
+def test_a_created_false_or_absent_stamp_is_never_treated_as_a_create():
+    """The stamp is read as an identity, not as truthiness.
+
+    ``created`` is optional and additive: a producer that has no opinion omits
+    it. Treating a missing or ``False`` stamp as a create would demote every
+    subset upsert every fielded launcher folds today — a silent return to full
+    cores for the lane whose whole measured value is 486 bytes against 822,671.
+
+    Kill-mutation: change the gate's ``is True`` to a truthiness check and pass
+    ``created: 0`` / ``created: "false"``; or invert it to ``is not False``.
+    """
+
+    for stamp in (False, None, 0, "", "true"):
+        event = _instance_upsert("personainst_stamped")
+        event.payload["created"] = stamp
+        assert (
+            event_is_patch_coverable(event, fold_entities=HISTORICAL_FOLD_ENTITIES) is True
+        ), stamp
+
+
+def test_a_persona_instance_remove_is_not_create_gated():
+    """Only the create-upsert is widened; ``remove`` stays where it was.
+
+    Deleting a row a client may not hold is idempotent, and every fielded fold
+    already treats a missing target as a clean no-op rather than a resync
+    (``mission_read_model.dart``'s generic remove). Gating it would demote the
+    ``persona_instance.retired`` half of the DELETE gesture that O-H3 promoted —
+    a regression inside the stage that pays for this one.
+    """
+
+    remove = _patch_event("persona_instance", "personainst_gone", PATCH_OP_REMOVE)
+    assert event_is_patch_coverable(remove, fold_entities=HISTORICAL_FOLD_ENTITIES) is True
 
 
 def test_a_malformed_entity_demotes_rather_than_slipping_through():

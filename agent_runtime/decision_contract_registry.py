@@ -313,13 +313,21 @@ _EVENT_CONTRACTS: dict[str, EventContract] = {
     # operator's explicit root-config ``false`` is what makes this type absent.
     #
     # ``created`` (2026-08-16, office fold-promotion plan §V4) is the second
-    # optional key: a boolean on an ``office_actor`` ``upsert`` meaning the row
-    # was ABSENT before the write, so a fold must insert rather than merge. It is
-    # additive — the launcher's fold reads a fixed key set and ignores it — and
-    # it exists so ``patch_coverage`` can gate the widened lifecycle ops behind
-    # the ``office_actor_lifecycle`` capability token. Optional rather than
-    # summary because most patches are not lifecycle rows and a required key
-    # would make every existing emission invalid.
+    # optional key: a boolean on an ``upsert`` meaning the row was ABSENT before
+    # the write, so a fold must insert rather than merge. It exists so
+    # ``patch_coverage`` can gate the widened ops behind a capability token, and
+    # it now rides TWO entities:
+    #
+    # * ``office_actor`` (§V4) — the fold inserts on absent unconditionally
+    #   there, because every office upsert already carries the complete row, so
+    #   the stamp is purely the coverage gate and the launcher ignores it.
+    # * ``persona_instance`` (D3, §10.3) — here the launcher READS it: persona
+    #   upserts are subsets, so insert-on-absent must happen only for the
+    #   complete-row create, and ``patch_without_target`` must survive for
+    #   everything else. Same key, one additional reader.
+    #
+    # Optional rather than summary because most patches are not create rows and
+    # a required key would make every existing emission invalid.
     "state.patched": EventContract("state.patched", "State patched", ("entity", "id", "op"), ("changed", "created")),
     # The LIVE orphan-worktree janitor (delivery_directive.reap_orphan_worktrees,
     # two production callers: harness_doctor and the `worktree reap` CLI verb).

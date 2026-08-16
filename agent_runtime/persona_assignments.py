@@ -27,10 +27,9 @@ from .persona_lifecycle import is_runtime_persona
 from .personas import profile_chat_toolsets
 from .serde import from_jsonable, to_jsonable
 from .state_patches import (
-    PATCH_OP_REFRESH,
+    emit_persona_instance_create,
     emit_persona_instance_patch,
     emit_persona_instance_remove,
-    emit_state_patch,
 )
 from .states import WorkerSessionState
 from .tool_visibility import (
@@ -1591,22 +1590,26 @@ class PersonaInstanceStore:
         #   which is what keeps the pair from ever being EMPTY — a bind that
         #   moved only ``chat_head_home`` (no wire field) would otherwise emit
         #   nothing and leave the covered event riding alone.
-        # * CREATE (``created=True``): honest ``refresh``, so the batch demotes
-        #   to a full core. The row is NEW, the launcher's generic fold refuses
-        #   an upsert for a missing row, and a full persona-instance row cannot
-        #   be assumed to fit the 4 KB cap. A brand-new agent's roster row rides
-        #   one full core; the office half of the same gesture still promotes,
-        #   because the two halves land ~1s apart and so usually in separate
-        #   batches. Deferred D3 in the 2026-08-16 plan holds the measurement
-        #   that would make creates foldable.
+        # * CREATE (``created=True``): a COMPLETE-row ``upsert`` stamped
+        #   ``created: true``, gated behind the ``persona_instance_create``
+        #   capability token so an un-updated launcher keeps receiving today's
+        #   wire byte-for-byte (see ``emit_persona_instance_create``).
+        #
+        #   This arm emitted an ``op: refresh`` until D3 landed (plan §10.3,
+        #   2026-08-16), and that one row was the entire cost of the operator's
+        #   "add an agent" gesture: one unfoldable row demotes the whole batch,
+        #   so it took the perfectly foldable ``office_actor created:true``
+        #   upsert beside it down too and paid a full ``build_snapshot()`` —
+        #   6.3–6.6 s of a measured 6.94 s gesture. The refresh's stated
+        #   justification was that "a full persona-instance row cannot be assumed
+        #   to fit the 4 KB cap", which was an assumption, not a measurement, and
+        #   it outlived the R2 residue slimming that made it false. Measured on
+        #   the live roster: worst assembled payload 3,133 bytes of 4,096. The
+        #   emitter re-checks that per row and still degrades to ``refresh`` for
+        #   any row that does not fit LOSSLESSLY, so the pre-D3 behaviour remains
+        #   the floor rather than the norm.
         if created:
-            emit_state_patch(
-                self.event_log,
-                entity="persona_instance",
-                entity_id=updated.id,
-                op=PATCH_OP_REFRESH,
-                persona_id=getattr(updated, "persona_id", None),
-            )
+            emit_persona_instance_create(self.event_log, updated)
         else:
             moved = [
                 field
