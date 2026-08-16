@@ -164,6 +164,57 @@ def _generator_module():
     return module
 
 
+def test_committed_goldens_are_the_generators_bytes(tmp_path, monkeypatch):
+    """Run the real generator into a temp root; the committed goldens must be
+    the bytes it writes.
+
+    The shape gate below is value-blind ON PURPOSE (values churn), and that
+    blindness has a measured cost: 3ad5d6cbf2 flipped the shipped
+    ``read_model.delta_patches`` default and every golden went on carrying
+    ``false`` — hermes CI green throughout, because a value flip changes no key
+    path — while the Launcher's ``check_producer_contracts.py`` byte-compare
+    went red on every launcher push. The value-blindness is only safe when a
+    VALUE-level gate exists on the producer side, which is exactly the split
+    the response-envelope file already has
+    (``test_every_fixture_is_re_derivable_from_the_producer``).
+
+    Byte equality does not resurrect the churn problem the shape gate was
+    guarding against: the generator normalizes every volatile value before
+    writing (timestamps, pids, roots, machine-probed flags — see its module
+    docstring's reproducibility claim), so regeneration is deterministic and
+    this only reddens when the PRODUCER changes. Verified before landing:
+    three independent regenerations, identical bytes.
+    """
+
+    generator = _generator_module()
+    staged = tmp_path / "stream_frames"
+    staged.mkdir()
+    # The manifest also hashes the hand-authored pinned goldens, so stage the
+    # committed bytes for those — this gate owns the GENERATED files only.
+    for name in generator.PINNED_ONLY_FILES:
+        (staged / name).write_bytes((FIXTURES / name).read_bytes())
+    # main() rewires these itself; setting them through monkeypatch first is
+    # what guarantees they are restored for the rest of the file.
+    for key in (
+        "HERMES_HOME",
+        "HERMES_HEAD_HOME",
+        "HERMES_AGENT_RUNTIME_ROOT",
+        "LOCALAPPDATA",
+    ):
+        monkeypatch.setenv(key, str(tmp_path / "pre"))
+    monkeypatch.setattr(generator, "FIXTURE_ROOT", staged)
+
+    assert generator.main() == 0
+
+    for name in (*generator.GENERATED_FRAME_FILES, "MANIFEST.sha256"):
+        assert (staged / name).read_bytes() == (FIXTURES / name).read_bytes(), (
+            f"{name}: the committed golden is not what the generator writes "
+            f"today. Regenerate with `{REGENERATE}`, mirror the bytes into the "
+            "Launcher's test/fixtures/harness_stream/, and update BOTH "
+            "manifests — stream goldens change only in a cross-stack landing."
+        )
+
+
 def test_manifest_pins_fixture_bytes():
     manifest = (FIXTURES / "MANIFEST.sha256").read_text(encoding="utf-8")
     entries = dict(
