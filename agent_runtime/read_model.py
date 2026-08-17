@@ -88,6 +88,79 @@ def snapshot_watermark(snapshot: Any, *, override: dict | None = None) -> dict:
     return resolved
 
 
+def _read_model_scope(config: Any | None) -> Any:
+    """THE resolution scope for every ``read_model`` flag read below.
+
+    One line, one place. It is a separate helper rather than two copies of
+    ``if config is None: load…`` because the SCOPE is the thing RD-H6 is about:
+    the defect class is not "the ladder is spelled twice", it is "the same key is
+    resolved against two different files". Two copies of the load are two scopes
+    waiting to drift, even when they start out agreeing — which is exactly the
+    state HEAD was in (see :func:`read_model_enabled`).
+
+    ROOT scope, like its sibling :func:`state_patches.delta_patches_enabled`:
+    whether the snapshot cache lane runs is a property of the harness, not of
+    whichever profile the CLI bootstrap last redirected into
+    (:func:`config.harness_root_config_path` documents that redirect and the two
+    incidents it caused). An explicit ``config`` is answered AS GIVEN — that is
+    the only way to ask at another scope, and it is the caller's stated act.
+    """
+
+    if config is not None:
+        return config
+    # Imported through the module at CALL time so the loader stays patchable by
+    # name (``agent_runtime.config.load_root_runtime_config``).
+    from .config import load_root_runtime_config
+
+    return load_root_runtime_config()
+
+
+def read_model_enabled(config: Any | None = None) -> bool:
+    """THE resolver for ``read_model.enabled``. Every reader calls this.
+
+    RD-H6 item 1. The flag was answered in TWO places: ``snapshot.write_snapshot``
+    gated the cache WRITE on it, and ``_cmd_snapshot`` computed the serve-side
+    cache preference from its own copy of the same ``getattr`` ladder. Two copies
+    of one question is the exact misplacement class that kept the neighbouring
+    leaf (``read_model.delta_patches``) dark for its whole life — READ at the
+    root, WRITTEN into a profile, ``harness status`` reporting ``true`` the whole
+    time because status reads profile-aware, and the lane shipping an 822 KB
+    delta per field change where its own patch frame is 486 bytes (measured live
+    2026-08-13; see ``config.ROOT_ONLY_CONFIG_KEYS``).
+
+    Scope is :func:`_read_model_scope`'s, and ``config`` is an already-resolved
+    :class:`config.AgentRuntimeConfig` (or anything carrying a ``read_model``
+    block) for callers that hold one — so one turn resolves the config once.
+
+    A load that RAISES propagates, unchanged from both former call sites: this
+    resolver consolidates the question, it does not add a swallow.
+    """
+
+    cfg = _read_model_scope(config)
+    return bool(getattr(getattr(cfg, "read_model", None), "enabled", False))
+
+
+def prefer_cached_snapshot(config: Any | None = None) -> bool:
+    """Whether a snapshot SERVE path should hand back the cached frame.
+
+    The composite the serve entry points actually need:
+    :func:`read_model_enabled` AND ``read_model.serve_snapshot_from_db``. It
+    lives beside the resolver rather than in each caller because the two flags
+    are only ever meaningful together — ``serve_snapshot_from_db`` alone would
+    prefer a cache nothing populates, and ``enabled`` is what populates it.
+
+    Resolves the scope ONCE and hands the resolved config down, so this cannot
+    become a second scope for the same key. Feeds
+    :func:`resolve_snapshot_frame`'s ``prefer_cache``, which is the one place the
+    preference is ACTED on.
+    """
+
+    cfg = _read_model_scope(config)
+    if not read_model_enabled(cfg):
+        return False
+    return bool(getattr(getattr(cfg, "read_model", None), "serve_snapshot_from_db", True))
+
+
 def resolve_snapshot_frame(
     *,
     prefer_cache: bool,
