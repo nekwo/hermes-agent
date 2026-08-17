@@ -234,6 +234,9 @@ def test_manifest_pins_fixture_bytes():
         # 2026-08-16): the DELETE gesture as one patch frame carrying two
         # removes at one watermark.
         "patch_delete_gesture.json",
+        # The office write-verbs milestone's cross-stack pin (WV-H3,
+        # 2026-08-16): a FOLDER change as one ``office_surface`` SUBSET upsert.
+        "patch_office_surface.json",
         "patch_coverage_manifest.json",
     }
     for name, digest in entries.items():

@@ -137,6 +137,22 @@ PINNED_ONLY_FILES = (
     # generator's seeded isolated root holds no office surface and no retired
     # placement, so there is nothing there to produce this batch from.
     "patch_delete_gesture.json",
+    # The office write-verbs milestone (WV-H3, 2026-08-16): a FOLDER change as
+    # one patch frame — a single ``office_surface`` subset upsert carrying the
+    # three fields ``update_surface`` moves, ``coalesced_count`` 2 because the
+    # paired ``office.surface.updated`` rides the batch and folds to nothing.
+    #
+    # Worth pinning across both repos because this row is the one whose SHAPE
+    # the two sides could most easily disagree about without noticing: it is a
+    # SUBSET merge onto the office row, unlike its ``office_actor`` sibling's
+    # complete-row replace, so a launcher that folded it as a replace would
+    # silently drop the actor list on every folder rename and hermes would have
+    # no way to see it. The launcher folds these exact bytes through its real
+    # read model and asserts the untouched fields survive.
+    #
+    # Pinned rather than generated for the same reason its siblings are: the
+    # generator's seeded isolated root holds no office surface.
+    "patch_office_surface.json",
     "patch_coverage_manifest.json",
 )
 

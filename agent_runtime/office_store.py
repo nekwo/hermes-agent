@@ -233,6 +233,42 @@ class OfficeStore:
                 "office actor patch emit failed: %s", actor.actor_key, exc_info=True
             )
 
+    def _emit_surface_patch(self, surface: OfficeSurface) -> None:
+        """Emit the ``office_surface`` patch for one folder-taxonomy write.
+
+        Called from INSIDE ``office_lock`` and BEFORE the paired
+        ``office.surface.updated``, for the two reasons ``_emit_actor_patch``
+        gives at length: the cross-process lock is what makes EventLog order
+        agree with revision order for this surface, and the pairing is what lets
+        the coverage classifier treat the domain event as carrying no fold state
+        of its own. A patch appended after the lock admits the inversion where a
+        lower revision lands at a higher offset and the client holds the older
+        folder list with nothing downstream to notice.
+
+        No truncation guard, unlike ``_emit_actor_patch``. That guard exists
+        because past ``MAX_OFFICE_ACTORS_PROJECTED`` the snapshot ships a CUT of
+        the actor list and the derived counts stop being client-computable.
+        This row touches neither the list nor the counts — ``folders`` and the
+        surface ``revision`` are projected whole at any office size — so there
+        is no size at which it stops being expressible.
+
+        Best-effort like ``_emit`` beside it: a patch-lane fault must never take
+        a folder write down, and a missing patch is a missing PROMOTION — the
+        batch ships the full core it would have shipped before this lane
+        existed.
+        """
+
+        try:
+            from .state_patches import emit_office_surface_patch
+
+            emit_office_surface_patch(self.event_log, surface)
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "office surface patch emit failed: %s", surface.workspace_id, exc_info=True
+            )
+
     def _emit_actor_remove_patch(self, actor: OfficeActor) -> None:
         """Emit the ``office_actor`` ``remove`` for one archive.
 
@@ -307,6 +343,18 @@ class OfficeStore:
         wsid = _safe_id(workspace_id)
         if not wsid:
             raise ValueError("invalid_request")
+        # Read BEFORE the ensure below, because the ensure is what makes the
+        # answer stop being true. It decides whether this write gets an
+        # ``office_surface`` patch at all: a folder write that AUTHORED the
+        # office is a create as far as any reader is concerned, and the patch is
+        # a three-field SUBSET — a client that has never held this workspace
+        # would answer it ``patch_without_target`` and re-hydrate, paying the
+        # patch AND the core. That is not hypothetical: ``workspace_template``
+        # clones an office by calling ``ensure_surface`` and then this, and a
+        # template clone is exactly the case where no client holds the row.
+        # Creates stay full-core, which is the same ruling
+        # ``office.surface.created`` already rides.
+        surface_existed = self.surface_exists(wsid)
         if not dry_run:
             self.ensure_surface(wsid, created_by=updated_by)
         with office_lock(wsid):
@@ -332,6 +380,8 @@ class OfficeStore:
                 # surface in memory. Write nothing, emit no event.
                 return surface
             _write_surface(surface)
+            if surface_existed:
+                self._emit_surface_patch(surface)
             self._emit(
                 "office.surface.updated",
                 workspace_id=surface.workspace_id,

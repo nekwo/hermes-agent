@@ -53,12 +53,16 @@ from agent_runtime.patch_coverage import (
     HISTORICAL_FOLD_ENTITIES,
     LIVE_COVERED_DOMAIN_EVENT_TYPES,
     OFFICE_ACTOR_LIFECYCLE_CAPABILITY,
+    OFFICE_SURFACE_FOLD_CAPABILITY,
     PERSONA_INSTANCE_CREATE_CAPABILITY,
     batch_is_patch_coverable,
     event_is_patch_coverable,
 )
+from agent_runtime.serde import to_jsonable
 from agent_runtime.state_patches import (
     OFFICE_ACTOR_ENTITY,
+    OFFICE_SURFACE_ENTITY,
+    OFFICE_SURFACE_PATCH_FIELDS,
     PATCH_OP_REFRESH,
     PATCH_OP_UPSERT,
     STATE_PATCHED_EVENT_TYPE,
@@ -589,8 +593,17 @@ def test_restore_stays_uncovered_and_remove_no_longer_does(
     ``office.actor.restored`` stays uncovered, and the reason is specific rather
     than residual caution: a restore un-archives a row from a COPY the client
     never held, so there is nothing on the wire for it to insert. It rides the
-    full core, as does ``office.surface.updated``, whose ``folders`` and surface
-    ``revision`` no actor-row patch derives.
+    full core.
+
+    SECOND SPLIT (office write-verbs plan WV-H3, 2026-08-16). This also
+    asserted ``office.surface.updated`` stays out, on the reasoning that no
+    ACTOR-row patch derives ``folders`` or the surface ``revision``. That is
+    still true and is no longer the question: ``update_surface`` now emits an
+    ``office_surface`` row that carries both. So the assertion moves to the two
+    that remain — ``.restored`` and ``.conflict_resolved`` — plus
+    ``office.surface.created``, which stays uncovered because a create authors a
+    surface the client has never held. The token gate on the surviving
+    surface event is pinned in its own tests below.
     """
 
     declared = (
@@ -613,7 +626,7 @@ def test_restore_stays_uncovered_and_remove_no_longer_does(
     assert "office.actor.removed" in LIVE_COVERED_DOMAIN_EVENT_TYPES
     assert "office.actor.restored" not in LIVE_COVERED_DOMAIN_EVENT_TYPES
     assert "office.actor.conflict_resolved" not in LIVE_COVERED_DOMAIN_EVENT_TYPES
-    assert "office.surface.updated" not in LIVE_COVERED_DOMAIN_EVENT_TYPES
+    assert "office.surface.created" not in LIVE_COVERED_DOMAIN_EVENT_TYPES
 
 
 # --------------------------------------------------------------------------- #
@@ -1288,3 +1301,245 @@ def test_a_patch_emit_failure_never_takes_the_office_write_down(
     assert list(agent_item.position) == [7.5, 7.5]
     # ...and the domain event still rides, so the batch falls back to a full core.
     assert "office.actor.upserted" in [e.type for e in _drain()]
+
+
+# --------------------------------------------------------------------------- #
+# WV-H3: the SURFACE producer, its token gate, and the two writes it refuses
+# --------------------------------------------------------------------------- #
+def _surface_patches(events) -> list[dict]:
+    return [
+        e.payload
+        for e in events
+        if e.type == STATE_PATCHED_EVENT_TYPE
+        and e.payload.get("entity") == OFFICE_SURFACE_ENTITY
+    ]
+
+
+def test_a_folder_write_emits_a_subset_patch_before_its_domain_event(
+    seeded_office, set_delta_patches
+):
+    """The producer, and the ORDER, and the SUBSET — three facts in one batch.
+
+    ``changed`` is asserted as a whole dict rather than key-by-key, because the
+    thing that would be wrong is an EXTRA key: the office row also carries
+    ``actors``, the derived counts and both key ledgers, all owned by the actor
+    folds and by client-side derivation, and a producer that shipped any of them
+    here would have two writers for one field with no receipt anywhere.
+
+    The order assertion (patch strictly before the domain event) is the
+    ride-along rule the coverage classifier assumes, and the placement inside
+    ``office_lock`` is what makes EventLog order agree with revision order — see
+    ``_emit_surface_patch``'s docstring for why appending after the lock is the
+    inversion nothing downstream would notice.
+    """
+
+    set_delta_patches(True)
+    before = _log_end()
+    surface = seeded_office.update_surface(WORKSPACE, folders=["Ops", "Design"])
+
+    batch = [e for _, e in EventLog().iter_from_offset(before)]
+    types = [e.type for e in batch]
+    assert types == [STATE_PATCHED_EVENT_TYPE, "office.surface.updated"], types
+
+    payload = _surface_patches(batch)[0]
+    assert payload["entity"] == OFFICE_SURFACE_ENTITY
+    assert payload["id"] == WORKSPACE
+    assert payload["op"] == PATCH_OP_UPSERT
+    assert payload["changed"] == {
+        "folders": ["Agents", "Desks", "Ops", "Design"],
+        "revision": surface.revision,
+        "updated_at": to_jsonable(surface.updated_at),
+    }
+    # …and the folder list is the STORE's normalization, not the caller's input.
+    assert payload["changed"]["folders"] == list(
+        seeded_office.get_surface(WORKSPACE).folders
+    )
+
+
+def test_the_surface_patch_carries_exactly_what_a_full_rebuild_would(
+    seeded_office, set_delta_patches
+):
+    """FIDELITY, against the snapshot's own row builder rather than a literal.
+
+    The fold merges these three keys onto the office row the client holds, and a
+    rebuild recomputes the whole row. If the patch's values ever disagreed with
+    ``office_summary_row``'s, a folded core and a rebuilt one would render
+    different folders for the same surface and only one of them would be right.
+    """
+
+    from agent_runtime.snapshot import office_summary_row
+
+    set_delta_patches(True)
+    before = _log_end()
+    seeded_office.update_surface(WORKSPACE, folders=["Ops"])
+
+    payload = _surface_patches([e for _, e in EventLog().iter_from_offset(before)])[0]
+    rebuilt = office_summary_row(
+        seeded_office.get_surface(WORKSPACE),
+        seeded_office.list_actors(WORKSPACE),
+    )
+    for field in OFFICE_SURFACE_PATCH_FIELDS:
+        assert payload["changed"][field] == rebuilt[field], field
+
+
+def test_a_folder_write_that_AUTHORED_the_office_emits_no_patch(
+    isolate_agent_runtime_root, set_delta_patches
+):
+    """Creates stay full-core, and this is the arm that decides it.
+
+    ``update_surface`` calls ``ensure_surface``, so on an unauthored workspace it
+    is a CREATE wearing an update's name — and the patch is a three-field
+    subset, which a client that has never held this workspace answers with
+    ``patch_without_target`` and a re-hydrate: the patch AND the core, strictly
+    worse than the core alone. Not hypothetical: ``workspace_template`` clones an
+    office by calling ``ensure_surface`` and then this, and a template clone is
+    exactly the case where no client holds the row.
+
+    The witness is the patch's ABSENCE beside a domain event that did fire, so a
+    producer that emitted unconditionally cannot pass by also writing whatever
+    is probed.
+    """
+
+    set_delta_patches(True)
+    store = OfficeStore()
+    before = _log_end()
+    store.update_surface("ws_never_authored", folders=["Ops"])
+
+    batch = [e for _, e in EventLog().iter_from_offset(before)]
+    types = [e.type for e in batch]
+    assert "office.surface.created" in types, types
+    assert "office.surface.updated" in types, types
+    assert _surface_patches(batch) == [], "a create must not ship a subset merge"
+
+
+def test_a_dry_run_folder_write_emits_nothing_at_all(
+    seeded_office, set_delta_patches
+):
+    """The preview path writes no file, so it must log no row either.
+
+    A patch for a revision the store does not hold is the one shape the fold
+    cannot recover from on its own: the client would move to a revision disk
+    never reached and stay there until a full core corrected it.
+    """
+
+    set_delta_patches(True)
+    before = _log_end()
+    seeded_office.update_surface(WORKSPACE, folders=["Ops"], dry_run=True)
+
+    assert [e for _, e in EventLog().iter_from_offset(before)] == []
+
+
+def test_an_actor_write_emits_no_surface_patch(seeded_office, set_delta_patches):
+    """The other half of the ownership split, from the actor side.
+
+    A drag moves no folder and no surface revision, so a surface patch beside it
+    would be a second writer for state nothing changed — and it would drag
+    ``updated_at`` with it, which the actor fold documents as accepted drift
+    precisely because no actor write moves the surface's copy.
+    """
+
+    set_delta_patches(True)
+    before = _log_end()
+    seeded_office.upsert_actor(WORKSPACE, _actor_payload("qa", x=1.0, y=1.0))
+
+    assert _surface_patches([e for _, e in EventLog().iter_from_offset(before)]) == []
+
+
+def test_the_flag_off_emits_no_surface_patch(seeded_office, set_delta_patches):
+    """``read_model.delta_patches`` off is provably inert on this leg too."""
+
+    set_delta_patches(False)
+    before = _log_end()
+    seeded_office.update_surface(WORKSPACE, folders=["Ops"])
+
+    batch = [e for _, e in EventLog().iter_from_offset(before)]
+    assert [e.type for e in batch] == ["office.surface.updated"]
+
+
+def test_a_folder_batch_promotes_for_a_declared_client_and_demotes_for_a_legacy_one(
+    seeded_office, set_delta_patches
+):
+    """THE PAIRED GATE CHECK, both directions on the SAME batch.
+
+    A coverage assertion that only shows promotion is green against a classifier
+    that promotes everything, so both readings of one batch are asserted here.
+
+    The legacy declaration is the widest one any fielded launcher sends —
+    ``office_actor`` plus BOTH existing tokens — and it still demotes, which is
+    what makes the third token the thing that changed rather than "the office
+    got covered".
+    """
+
+    set_delta_patches(True)
+    before = _log_end()
+    seeded_office.update_surface(WORKSPACE, folders=["Ops"])
+    batch = [e for _, e in EventLog().iter_from_offset(before)]
+
+    fielded = HISTORICAL_FOLD_ENTITIES | {
+        OFFICE_ACTOR_ENTITY,
+        OFFICE_ACTOR_LIFECYCLE_CAPABILITY,
+        PERSONA_INSTANCE_CREATE_CAPABILITY,
+    }
+    assert not batch_is_patch_coverable(batch, fold_entities=fielded)
+
+    declared = fielded | {OFFICE_SURFACE_ENTITY, OFFICE_SURFACE_FOLD_CAPABILITY}
+    assert batch_is_patch_coverable(batch, fold_entities=declared)
+
+
+def test_the_entity_alone_does_not_promote_the_batch(
+    seeded_office, set_delta_patches
+):
+    """The token gates BOTH halves, and the domain event is why it has to.
+
+    A covered domain event is not entity-gated anywhere else in this classifier
+    — it carries no fold state, so the paired patch's gate is the one that
+    matters. That reasoning breaks for a NEW entity: without the token,
+    declaring ``office_surface`` alone would leave ``office.surface.updated``
+    coverable for every client that has not, and a batch of just those two would
+    ship a patch frame whose only row they answer with a re-hydrate.
+
+    Asserted per EVENT rather than per batch, so the two halves are named
+    separately instead of collapsing into one boolean.
+    """
+
+    set_delta_patches(True)
+    before = _log_end()
+    seeded_office.update_surface(WORKSPACE, folders=["Ops"])
+    batch = [e for _, e in EventLog().iter_from_offset(before)]
+
+    entity_only = HISTORICAL_FOLD_ENTITIES | {OFFICE_SURFACE_ENTITY}
+    patch_event = next(e for e in batch if e.type == STATE_PATCHED_EVENT_TYPE)
+    domain_event = next(e for e in batch if e.type == "office.surface.updated")
+
+    assert not event_is_patch_coverable(patch_event, fold_entities=entity_only)
+    assert not event_is_patch_coverable(domain_event, fold_entities=entity_only)
+
+    with_token = entity_only | {OFFICE_SURFACE_FOLD_CAPABILITY}
+    assert event_is_patch_coverable(patch_event, fold_entities=with_token)
+    assert event_is_patch_coverable(domain_event, fold_entities=with_token)
+
+
+def test_a_declaring_clients_OTHER_batches_are_unchanged_by_the_token(
+    seeded_office, set_delta_patches
+):
+    """The token widens exactly one event and one entity, and nothing else.
+
+    Declaring it must not make an uncovered office write coverable by accident —
+    ``office.actor.restored`` is the nearest neighbour and the one a sloppy
+    ``startswith("office.surface")`` or a widened family check would sweep in.
+    """
+
+    set_delta_patches(True)
+    seeded_office.remove_actor(WORKSPACE, "personainst_qa_agent_0001")
+    before = _log_end()
+    seeded_office.restore_actor(WORKSPACE, "personainst_qa_agent_0001")
+
+    declared = HISTORICAL_FOLD_ENTITIES | {
+        OFFICE_ACTOR_ENTITY,
+        OFFICE_ACTOR_LIFECYCLE_CAPABILITY,
+        OFFICE_SURFACE_ENTITY,
+        OFFICE_SURFACE_FOLD_CAPABILITY,
+    }
+    assert not batch_is_patch_coverable(
+        [e for _, e in EventLog().iter_from_offset(before)], fold_entities=declared
+    )
