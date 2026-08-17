@@ -75,29 +75,33 @@ The interaction that is NOT clean is realm sync, in two directions:
     migration for that actor AND leave the instance-keyed actor in place — again
     a double placement.
 
-    FENCED as of ``agent_runtime/office_class_key_guard.py``. Both non-launcher
-    writers now ask before writing:
+    FENCED IN THE STORE as of EG-6.6: ``OfficeStore.upsert_actor`` refuses the
+    write itself (``_guard_class_keyed_write``), so NO caller has to remember to
+    ask. Each writer keeps only its own translation of that one refusal:
 
-    - ``workspace_template._copy_office`` REFUSES the copy per-actor
+    - ``workspace_template._copy_office`` reports it per-actor
       (``office_actor_class_key_refused`` warning on the create envelope). It
-      has no escape hatch: a template apply holds no operator intent about the
-      destination.
+      never passes the override: a template apply holds no operator intent about
+      the destination.
     - ``harness office actor-upsert`` (also the launcher's save path — the
-      Flutter bridge shells out to this verb) refuses with
-      ``duplicate_conflict``. ``--persona-instance-id`` threads the binding
-      through; ``--allow-class-key`` forces the write and records the override.
+      Flutter bridge shells out to this verb) exits ``duplicate_conflict``.
+      ``--persona-instance-id`` threads the binding through;
+      ``--allow-class-key`` re-issues the write with the store's
+      ``allow_class_key`` parameter and records the override.
+    - ``runtime.office.upsert`` answers 4090 / ``class_key_collision`` and has NO
+      override, deliberately: a wire parameter is not consent.
+    - ``agent_create``'s placement leg compensates the reservation and refuses.
 
     The guard is CONDITIONAL, not a blanket ban — a class-keyed write only
     fails when the class key is archived or its item ids already belong to an
     active instance-keyed sibling. Class-keyed placements remain legal
     (``archive_actors_for_instance``: they survive instance churn by design).
 
-    Still unfenced by construction: any NEW writer that reaches
-    ``_write_actor`` without going through ``upsert_actor`` or
-    ``resolve_conflict``. ``runtime.office.upsert`` — under construction in
-    ``serve_rpc.py`` at the time of writing — calls
-    ``office_class_key_guard.class_key_collision`` before it upserts, and any
-    successor must too, or it reopens this hole from the wire.
+    The remaining door is ``_write_actor`` reached WITHOUT ``upsert_actor`` or
+    ``resolve_conflict``, and it is now enumerated rather than merely warned
+    about: ``tests/agent_runtime/test_office_class_key_one_fence.py`` pins every
+    production writer of a live actor file and its fence disposition, so a fourth
+    writer reds by enumeration instead of shipping unfenced.
 """
 
 from __future__ import annotations

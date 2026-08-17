@@ -176,13 +176,20 @@ def _cmd_office_actor_upsert(args) -> int:
     the documented escape hatch for the operator who means it (it forces the
     write and rides an ``office_actor_class_key_forced`` warning, so the
     override is on the record rather than invisible).
+
+    The fence itself is the STORE's (``OfficeStore._guard_class_keyed_write``,
+    EG-6.6). This verb holds no copy of it: it CALLS the write, translates the
+    typed refusal into the stage-42 exit taxonomy, and — on ``--allow-class-key``
+    — replays the same write with the store's own override parameter, minting the
+    warning out of the refusal the store already produced. Refuse-then-consent is
+    deliberate: it means the recorded override names the exact collision the
+    store found, and it means the flag cannot suppress a refusal nobody saw.
     """
 
+    from agent_runtime.errors import ActorsUnreadable
     from agent_runtime.office_class_key_guard import (
         CLASS_KEY_REFUSAL_CODE,
         ClassKeyedPlacementRefused,
-        class_key_collision,
-        refusal_message,
     )
 
     store = _office_store()
@@ -202,34 +209,50 @@ def _cmd_office_actor_upsert(args) -> int:
         payload = {**payload, "persona_instance_id": instance_id}
 
     warnings: list[dict] = []
-    collision = class_key_collision(store, workspace, payload)
-    if collision is not None:
-        message = refusal_message(collision)
+    dry_run = bool(getattr(args, "dry_run", False))
+
+    def _write(*, allow_class_key: bool):
+        return store.upsert_actor(
+            workspace,
+            payload,
+            updated_by=getattr(args, "updated_by", None) or "operator",
+            expect_revision=getattr(args, "expect_revision", None),
+            allow_class_key=allow_class_key,
+            dry_run=dry_run,
+        )
+
+    try:
+        actor = _write(allow_class_key=False)
+    except ActorsUnreadable as exc:
+        # The fence could not READ the actor directory it must consult, so it
+        # refused instead of answering "no conflict" from half of it. Its own
+        # code rather than ``duplicate_conflict``: nothing collided — the store
+        # declined to guess — and the cure is repairing a file, not re-shaping a
+        # payload. ``emit_harness_error`` reads an unnamed ``AgentRuntimeError``
+        # as ``internal_error``, which this is not.
+        return emit_harness_error(exc, args=args, code=exc.code, message=str(exc))
+    except ClassKeyedPlacementRefused as exc:
+        collision = exc.safe_details
         if not bool(getattr(args, "allow_class_key", False)):
             return emit_harness_error(
-                ClassKeyedPlacementRefused(message, safe_details=collision),
+                exc,
                 args=args,
                 code=CLASS_KEY_REFUSAL_CODE,
-                message=message,
+                message=str(exc),
             )
+        # Consent, on the record and derived from the refusal itself: the warning
+        # names the collision the STORE found rather than one this verb went and
+        # computed, so the two can never describe different faults.
         warnings.append(
             {
                 "code": "office_actor_class_key_forced",
                 "actor_key": collision["class_actor_key"],
-                "message": message,
+                "message": str(exc),
                 "reasons": collision["reasons"],
                 "conflicting_actor_keys": collision["conflicting_actor_keys"],
             }
         )
-
-    dry_run = bool(getattr(args, "dry_run", False))
-    actor = store.upsert_actor(
-        workspace,
-        payload,
-        updated_by=getattr(args, "updated_by", None) or "operator",
-        expect_revision=getattr(args, "expect_revision", None),
-        dry_run=dry_run,
-    )
+        actor = _write(allow_class_key=True)
     envelope = _object_envelope("office_actor", _office_actor_row(actor, full=True), warnings=warnings or None)
     if dry_run:
         envelope["dry_run"] = True

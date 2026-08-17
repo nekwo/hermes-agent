@@ -1031,15 +1031,19 @@ def _runtime_office_upsert(
 
     The class-key fence, and why it has NO override here
     ----------------------------------------------------
-    ``office_class_key_guard`` is called before the store, for the reason that
-    module gives: ``upsert_actor`` reads an explicit upsert of an ARCHIVED key
-    as operator intent to re-add and clears the resurrection ledger, so one
-    surviving class-keyed write undoes the class→instance re-key and places the
-    same agent twice. This method is the third writer through that hole and the
-    only one reachable from the network.
+    The fence is the STORE's (``OfficeStore._guard_class_keyed_write``, hoisted
+    there by EG-6.6) for the reason ``office_class_key_guard`` gives:
+    ``upsert_actor`` reads an explicit upsert of an ARCHIVED key as operator
+    intent to re-add and clears the resurrection ledger, so one surviving
+    class-keyed write undoes the class→instance re-key and places the same agent
+    twice. What this handler keeps is the TRANSLATION — a 4090 whose
+    ``data.reason`` is ``class_key_collision`` and whose message names the exit
+    this lane actually has. It holds no copy of the predicate; deleting the
+    store's fence does not leave this lane guarded.
 
-    The CLI verb beside it takes ``--allow-class-key``. This one takes no
-    equivalent, and that asymmetry is the point rather than an omission. The
+    The CLI verb beside it passes ``allow_class_key=True`` to the store on
+    ``--allow-class-key``. This one never passes it, and that asymmetry is the
+    point rather than an omission. The
     flag is consent: an operator read the refusal, typed the override, and owns
     the double placement. A wire PARAMETER is not consent — it is a constant in
     a client build, set once by whoever was debugging the day drags started
@@ -1051,7 +1055,7 @@ def _runtime_office_upsert(
     """
 
     from agent_runtime.errors import ArchiveUnreadable, StaleRevision, SyncConflict
-    from agent_runtime.office_class_key_guard import class_key_collision
+    from agent_runtime.office_class_key_guard import ClassKeyedPlacementRefused
     from agent_runtime.office_store import OfficeStore
 
     workspace_id = _workspace_id_param(params)
@@ -1115,18 +1119,30 @@ def _runtime_office_upsert(
             {"reason": "workspace_not_found", "workspace_id": workspace_id},
         )
 
-    collision = class_key_collision(store, workspace_id, actor_payload)
-    if collision is not None:
-        # Its own reason: the remedy is neither "refetch and rebase" nor "fix
-        # the payload shape" — the payload is well-formed and the client is not
-        # behind. It is "name WHICH instance you are placing". The guard's two
-        # narrow reasons ride beside it as a list rather than as the branch
-        # point, because they share that one remedy and because a client
-        # decoder switches on a single stable string.
+    try:
+        actor = store.upsert_actor(
+            workspace_id,
+            actor_payload,
+            updated_by=updated_by or "operator",
+            expect_revision=expect_revision,
+            correlation_id=correlation_id,
+        )
+    except ClassKeyedPlacementRefused as exc:
+        # The store's fence, translated. Its own reason: the remedy is neither
+        # "refetch and rebase" nor "fix the payload shape" — the payload is
+        # well-formed and the client is not behind. It is "name WHICH instance
+        # you are placing". The guard's two narrow reasons ride beside it as a
+        # list rather than as the branch point, because they share that one
+        # remedy and because a client decoder switches on a single stable string.
         #
-        # ``refusal_message`` is deliberately NOT reused: it ends by offering
-        # ``--allow-class-key``, which is a CLI flag that does not exist on this
-        # lane. Advice a caller cannot follow is worse than none.
+        # ``str(exc)`` — the shared ``refusal_message`` — is deliberately NOT
+        # reused: it ends by offering ``--allow-class-key``, which is a CLI flag
+        # that does not exist on this lane. Advice a caller cannot follow is
+        # worse than none. So the SENTENCE is this lane's and the FACTS are the
+        # store's, read off ``safe_details`` (the collision dict verbatim) rather
+        # than recomputed — recomputing them here is the second copy EG-6.6
+        # removed.
+        collision = exc.safe_details
         return err(
             rid,
             ERR_CONFLICT,
@@ -1153,15 +1169,6 @@ def _runtime_office_upsert(
                 "reasons": collision["reasons"],
                 "conflicting_actor_keys": collision["conflicting_actor_keys"],
             },
-        )
-
-    try:
-        actor = store.upsert_actor(
-            workspace_id,
-            actor_payload,
-            updated_by=updated_by or "operator",
-            expect_revision=expect_revision,
-            correlation_id=correlation_id,
         )
     except StaleRevision as exc:
         # The prediction is behind. ``data`` deliberately does NOT carry the
@@ -1199,12 +1206,19 @@ def _runtime_office_upsert(
         # repair/remove the archive copy. Retrying is safe and may well work —
         # an AV hold is transient — but the client must not paper over it by
         # writing UNGUARDED, which is what a revision of 1 would have invited.
+        #
+        # ``exc.code``, not the class constant: ``ActorsUnreadable`` subclasses
+        # this so it inherits the band and the cure SHAPE (EG-6.6 — the class-key
+        # fence refusing rather than answering "no conflict" from a directory it
+        # could only partly read), and its own code names the different FILE the
+        # operator has to repair. A hard-coded constant here would have told them
+        # to go fix the archive copy.
         return err(
             rid,
             ERR_INVALID_REQUEST,
             str(exc),
             {
-                "reason": ArchiveUnreadable.code,
+                "reason": exc.code,
                 "workspace_id": workspace_id,
             },
         )

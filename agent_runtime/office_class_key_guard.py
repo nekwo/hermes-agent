@@ -13,13 +13,31 @@ one — the same agent placed twice, duplicate ``item_id`` values on one canvas,
 and not a single conflict warning, because the two actor keys are different
 strings and every guard in the store keys on the actor key.
 
-This module is the missing predicate, and it lives OUTSIDE the store on
-purpose: the store's contract ("an explicit upsert of an archived key is intent
-to re-add") is correct for a caller that actually holds operator intent. What
-was missing is that two callers do NOT hold it — a template copy and a CLI verb
-fed a payload — and so must ask before writing. Guarding at the callers keeps
-the store's chokepoint semantics intact and keeps ``restore_actor`` (the
-sanctioned un-archive verb) working exactly as before.
+This module is the missing predicate. It is a PREDICATE and nothing else: the
+fence that spends it lives at the store's write chokepoint —
+``OfficeStore._guard_class_keyed_write`` (for ``upsert_actor``) and
+``OfficeStore._guard_class_keyed_adoption`` (for ``resolve_conflict``) — and
+every caller keeps only a transport-shaped translation of the store's typed
+refusal.
+
+That is a correction, not the original shape (Plan EG-6.6). The guard used to be
+CALLED at four writers around one store, on the reasoning that the store's
+contract ("an explicit upsert of an archived key is intent to re-add") is
+correct for a caller that actually holds operator intent while the template copy
+and the CLI verb do not. The reasoning was sound and the shape was still wrong:
+a fence at N callers is N fences, the rekey script's own docstring had to WARN
+that any new writer reaching ``_write_actor`` was unfenced by default, and the
+fifth writer would have shipped unfenced with every reply-shape test green. So
+the predicate stayed here and the decision moved into the store, where a new
+caller inherits it instead of having to remember it.
+
+The sanctioned overrides survive as EXPLICIT STORE PARAMETERS
+(``upsert_actor(allow_class_key=...)``, ``resolve_conflict(allow_class_key=...)``)
+rather than as a caller-side fence omission — the difference being that an
+override is now a value someone passed on the record, never a guard someone
+forgot to call. ``restore_actor`` (the sanctioned un-archive verb) keeps working
+exactly as before: it IS the operator's deliberate resurrection, so it is the
+one actor writer whose whole purpose is the thing the fence refuses.
 
 Only CLASS-KEYED writes are guarded — a payload with no ``persona_instance_id``.
 An instance-keyed write cannot undo the migration; it IS the migration's shape.
@@ -49,7 +67,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .errors import AgentRuntimeError
+from .errors import ActorsUnreadable, AgentRuntimeError
 
 #: Stage-42 error code for the refusal. ``duplicate_conflict`` (exit 4) rather
 #: than ``sync_conflict``: nothing is under realm-sync conflict, the write would
@@ -83,9 +101,14 @@ def is_class_keyed_payload(payload: Any) -> bool:
 def class_key_collision(store: Any, workspace_id: str, payload: dict) -> dict | None:
     """Would this class-keyed payload undo the re-key migration? ``None`` if not.
 
-    Pure read. A workspace with no office surface — the create-from-template
-    destination, the overwhelmingly common legitimate case — can never collide
-    and short-circuits before any directory scan.
+    Read-only against the store, but NOT total: it raises
+    :class:`~.errors.ActorsUnreadable` when the answer is unknowable rather than
+    answering "no" from partial knowledge (see below). Callers are the store's
+    own two fences; nothing outside the store spends this predicate.
+
+    A workspace with no office surface — the create-from-template destination,
+    the overwhelmingly common legitimate case — can never collide and
+    short-circuits before any directory scan.
     """
 
     # The store owns id normalization; re-deriving it here is exactly the drift
@@ -117,7 +140,23 @@ def class_key_collision(store: Any, workspace_id: str, payload: dict) -> dict | 
         if item_id
     }
     if incoming_items:
-        for actor in store.list_actors(workspace_id):
+        # ``scan_actors``, never ``list_actors`` (EG-1.5's chokepoint, EG-6.6's
+        # close). The list view drops files that will not decode, so a single
+        # unreadable instance-keyed sibling turned "I cannot tell" into "no
+        # conflict" — for EVERY writer through this one predicate — and the
+        # duplicate placement landed under the actor nobody could read. There is
+        # no honest partial answer here: an item id can only be proven ABSENT by
+        # reading every actor that might hold it.
+        scan = store.scan_actors(workspace_id)
+        if scan.unreadable:
+            raise ActorsUnreadable(
+                f"actors_unreadable:{workspace_id} ({scan.unreadable} of "
+                f"{len(scan.actors) + scan.unreadable} actor files) — the class-key "
+                "fence cannot prove this placement is not already held by another "
+                "actor. Repair or remove the unreadable actor file, or supply "
+                "persona_instance_id to place the instance."
+            )
+        for actor in scan.actors:
             if actor.actor_key == persona_id:
                 continue  # the class-keyed actor's own idempotent re-save
             if _normalize_persona_id(actor.persona_id) != persona_id:
