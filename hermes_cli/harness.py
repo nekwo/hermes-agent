@@ -3674,11 +3674,32 @@ def _usage_lane_detected(provider_id: str) -> bool:
     return False
 
 
+class UnknownUsageLaneError(LookupError):
+    """``_fetch_usage_lane`` was handed a provider id it has no fetcher for.
+
+    The dispatch below covers ``_USAGE_LANE_PROVIDERS`` exactly, and that tuple
+    is the ONLY producer of ids (``_detect_usage_candidates`` filters it and
+    never adds). So this is unreachable today — and it is raised rather than
+    handled precisely so it STAYS that way: a fifth provider added to the tuple
+    without its fetcher becomes a loud, named per-lane failure instead of
+    silently falling back into the upstream blanket swallow (see the docstring
+    below for why that fallback was the loaded gun EG-0.3 removed).
+
+    Carries ``provider_id`` as an attribute so ``_usage_failure_reason`` can
+    name the id without ever touching ``str(exc)``.
+    """
+
+    def __init__(self, provider_id: str) -> None:
+        self.provider_id = str(provider_id)
+        super().__init__(f"no account-usage fetcher for lane {self.provider_id!r}")
+
+
 def _fetch_usage_lane(provider_id: str):
     """Fetch the account-usage snapshot for one provider (may return None or
     raise; callers isolate failures). Nous flows through the portal-account +
     credits-snapshot path; the rest dispatch DIRECTLY to their per-provider
-    fetcher.
+    fetcher. An id outside ``_USAGE_LANE_PROVIDERS`` raises
+    ``UnknownUsageLaneError``.
 
     The direct dispatch is the point. ``agent.account_usage.fetch_account_usage``
     wraps all three shared fetchers in a blanket ``except Exception: return
@@ -3689,6 +3710,16 @@ def _fetch_usage_lane(provider_id: str):
     genuinely has nothing to say. Routing around the wrapper (the fork-boundary
     rule: route around upstream, don't patch it) lets the exception reach the
     handler that was built to name it.
+
+    EG-0.3 REAPED THE FALL-THROUGH. This function used to end with
+    ``return fetch_account_usage(provider_id)`` — dead code (EG-0.2 §3.2 proved
+    the chain closed: the tuple is filter-only, and an unknown ``--provider``
+    yields an empty candidate list that returns before dispatch) that was ALSO
+    the one surviving route back into the swallow the paragraph above routed
+    around. A typed raise is the replacement: the removal contract is a CODE row
+    on ``fetch_account_usage`` scoped to ``hermes_cli`` in
+    ``tests/agent_runtime/test_tombstone_registry.py``, so re-adding the call is
+    loud by enumeration rather than by review.
     """
     if provider_id == "nous":
         from agent.account_usage import build_nous_credits_snapshot
@@ -3708,9 +3739,7 @@ def _fetch_usage_lane(provider_id: str):
         from agent.account_usage import _fetch_openrouter_account_usage
 
         return _fetch_openrouter_account_usage(None, None)
-    from agent.account_usage import fetch_account_usage
-
-    return fetch_account_usage(provider_id)
+    raise UnknownUsageLaneError(provider_id)
 
 
 def _usage_failure_reason(exc: BaseException) -> str:
@@ -3722,8 +3751,17 @@ def _usage_failure_reason(exc: BaseException) -> str:
     rejected our credential" from "the network broke". 401/403 additionally
     earn the re-auth hint, matching the reauth-vs-connectivity discipline: only
     a confirmed auth rejection may suggest signing in again.
+
+    ``UnknownUsageLaneError`` earns the second such exemption, on the same test
+    the HTTP status passes: the fact added is the provider ID, which is the
+    dispatch key itself — already carried verbatim in this lane's ``provider``
+    field — so it leaks nothing that is not already in the envelope, and it is
+    the single fact that turns "a lane failed" into "lane X has no fetcher".
+    Read off ``exc.provider_id``, never ``str(exc)``.
     """
     name = type(exc).__name__
+    if isinstance(exc, UnknownUsageLaneError):
+        return f"usage fetch failed ({name}: {exc.provider_id})"
     status = None
     response = getattr(exc, "response", None)
     if response is not None:

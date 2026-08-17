@@ -12,6 +12,8 @@ import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import pytest
+
 from agent.account_usage import AccountUsageSnapshot, AccountUsageWindow
 from hermes_cli import harness
 
@@ -488,3 +490,137 @@ def test_usage_lane_slower_than_deadline_times_out_bounded(monkeypatch):
     # Wall clock bounded well under the slow fetch (0.5s) and far under
     # sleep × lane count (1.0s): the deadline short-circuits the hung lane.
     assert elapsed < 0.4
+
+
+# --- EG-0.3: the fall-through is REAPED, and cannot come back quietly ---------
+#
+# `_fetch_usage_lane` used to end with `return fetch_account_usage(provider_id)`
+# for any id its four arms did not match. EG-0.2 §3.2 proved that arm dead (the
+# id producer only filters a closed tuple, and an unknown `--provider` returns
+# from `_cmd_usage` before dispatch) — and also proved it dangerous: it was the
+# last route back into `agent/account_usage.py`'s blanket
+# `except Exception: return None`, i.e. the exact defect the S1 tests above
+# exist to fence. A fifth provider added to `_USAGE_LANE_PROVIDERS` without its
+# fetcher would have re-armed it silently.
+#
+# The two witnesses below are the pair Plan EG §2 row 2 specifies. They are
+# deliberately different in kind: (a) probes the REPLACEMENT (what a fifth
+# provider gets today), (b) probes the ABSENCE (nothing routes into the swallow
+# on the happy path). Either alone can pass over a partially-restored
+# fall-through.
+
+
+def _usage_stub_snapshot(provider):
+    return AccountUsageSnapshot(
+        provider=provider,
+        source="usage_api",
+        fetched_at=datetime(2026, 8, 17, 9, 0, 0, tzinfo=timezone.utc),
+        windows=(AccountUsageWindow(label="Session", used_percent=7.0),),
+    )
+
+
+def test_usage_lane_with_no_fetcher_raises_typed_failure_naming_the_provider():
+    """WITNESS (a). An id outside `_USAGE_LANE_PROVIDERS` is a LOUD typed error.
+
+    Pinned at both ends, because only the pair is honest: the raise itself (a
+    caller other than `_fetch_usage_lanes` must be able to branch on the TYPE,
+    not parse a string), and the operator-facing reason it becomes (the id has to
+    survive `_usage_failure_reason`'s class-name-only discipline, which is the
+    half a plain `ValueError` would have lost).
+
+    MUTATION (proves non-vacuity): restore
+    ``return fetch_account_usage(provider_id)`` as the terminal arm. Upstream
+    normalizes the unknown id and returns None WITHOUT raising, so nothing is
+    raised at all, the lane degrades to the unfalsifiable ``no usage data``, and
+    both halves go red. The probed field is written by the mutated path too — it
+    just writes a provably different string.
+    """
+    with pytest.raises(harness.UnknownUsageLaneError) as excinfo:
+        harness._fetch_usage_lane("nous-v2")
+    assert excinfo.value.provider_id == "nous-v2"
+
+    lanes = harness._fetch_usage_lanes(
+        ["nous-v2"], active_provider=None, timeout=5.0
+    )
+    assert len(lanes) == 1
+    lane = lanes[0]
+    assert lane["provider"] == "nous-v2"
+    assert lane["available"] is False
+    assert lane["unavailable_reason"] == (
+        "usage fetch failed (UnknownUsageLaneError: nous-v2)"
+    )
+    # The reason names the id, and nothing else from the exception: the message
+    # text ("no account-usage fetcher for lane ...") must not leak in, because
+    # the exemption granted in `_usage_failure_reason` is for `exc.provider_id`
+    # alone, not for `str(exc)`.
+    assert "no account-usage fetcher" not in lane["unavailable_reason"]
+
+
+def test_no_usage_lane_routes_through_fetch_account_usage(monkeypatch):
+    """WITNESS (b). ZERO `fetch_account_usage` calls across a FULL four-lane run.
+
+    Every per-provider fetcher is stubbed, so no network is touched and every
+    lane succeeds — which is the point: the swallow re-entry has to be absent on
+    the path that WORKS, not only on an error path. The recorder is installed on
+    `agent.account_usage`, the module `_fetch_usage_lane`'s function-local
+    imports resolve against, so a restored import binds the recorder.
+
+    MUTATION: point ANY one arm at the wrapper (e.g. make the openrouter arm
+    ``return fetch_account_usage(provider_id)``). The recorder logs the call and
+    the count assertion goes red; the lane also collapses to ``no usage data``
+    because upstream's `_fetch_openrouter_account_usage` is stubbed to a snapshot
+    the wrapper's own normalization never reaches. Removing the terminal arm's
+    id from `_USAGE_LANE_PROVIDERS` cannot make this pass vacuously either — the
+    candidate list is asserted to be all four.
+    """
+    import agent.account_usage as account_usage
+    import hermes_cli.nous_account as nous_account
+
+    swallow_calls: list[tuple] = []
+
+    def recorder(*args, **kwargs):
+        swallow_calls.append((args, kwargs))
+        return None
+
+    monkeypatch.setattr(account_usage, "fetch_account_usage", recorder)
+    monkeypatch.setattr(
+        account_usage,
+        "_fetch_codex_account_usage",
+        lambda *_a, **_k: _usage_stub_snapshot("openai-codex"),
+    )
+    monkeypatch.setattr(
+        account_usage,
+        "_fetch_anthropic_account_usage",
+        lambda *_a, **_k: _usage_stub_snapshot("anthropic"),
+    )
+    monkeypatch.setattr(
+        account_usage,
+        "_fetch_openrouter_account_usage",
+        lambda *_a, **_k: _usage_stub_snapshot("openrouter"),
+    )
+    monkeypatch.setattr(
+        account_usage,
+        "build_nous_credits_snapshot",
+        lambda _account: _usage_stub_snapshot("nous"),
+    )
+    monkeypatch.setattr(
+        nous_account,
+        "get_nous_portal_account_info",
+        lambda *_a, **_k: {"credits": 1},
+    )
+
+    candidates = list(harness._USAGE_LANE_PROVIDERS)
+    assert candidates == ["openai-codex", "anthropic", "openrouter", "nous"]
+
+    lanes = harness._fetch_usage_lanes(
+        candidates, active_provider=None, timeout=5.0
+    )
+
+    assert swallow_calls == [], (
+        "a usage lane routed back into agent.account_usage.fetch_account_usage, "
+        "whose blanket `except Exception: return None` erases the failure class "
+        f"EG-0.3 reaped this route to preserve. Calls: {swallow_calls}"
+    )
+    # Non-vacuity for the count: the run really did fetch all four lanes.
+    assert [lane["provider"] for lane in lanes] == candidates
+    assert all(lane["available"] is True for lane in lanes), lanes

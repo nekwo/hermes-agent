@@ -2855,6 +2855,45 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "current_work_assignment_id",
         "attached_task_id",
     ),
+    # -- S71 = Plan EG's EG-0.3 Class-A reap 2 — the usage-lane fall-through
+    #    (2026-08-17). Filed under the S-wave numbering because
+    #    `test_every_row_carries_a_wave_a_commit_and_a_reason` makes the `sNN`
+    #    spelling an invariant of this table; the stage id lives in the reason.
+    # --------------------------------------------------------------------
+    # `_fetch_usage_lane` ended with `return fetch_account_usage(provider_id)`
+    # after its four per-provider arms. EG-0.2 §3.2 proved it unreachable —
+    # `_USAGE_LANE_PROVIDERS` is the sole id producer and
+    # `_detect_usage_candidates` only FILTERS it, so an unknown `--provider`
+    # yields an empty candidate list that `_cmd_usage` returns on before any
+    # dispatch — and it was simultaneously the ONE surviving route back into
+    # `agent/account_usage.py`'s blanket `except Exception: return None`, the
+    # swallow the S1 direct-dispatch work exists to route around. Dead code that
+    # was also a loaded gun: adding a fifth provider to the tuple without its
+    # fetcher would have silently re-entered the swallow and rendered every
+    # failure as the unfalsifiable "no usage data". The arm now raises
+    # `UnknownUsageLaneError`, which `_usage_failure_reason` reports by class
+    # AND by id.
+    #
+    # Scoped to `hermes_cli`, NOT repo-wide: `fetch_account_usage` is an
+    # upstream-owned public entry point with live readers in `cli.py` and
+    # `gateway/slash_commands.py` (fork boundary — route around it, never delete
+    # it). What is tombstoned is this fork's harness calling it. CODE rather than
+    # IMPORT because the reaped import was function-local, and the IMPORT scanner
+    # only reads top-level bindings.
+    *rows(
+        "s71",
+        "HEAD",
+        Form.CODE,
+        "EG-0.3 Class-A reap 2 — the usage-lane fall-through into upstream's "
+        "blanket swallow: nothing "
+        "under hermes_cli may call fetch_account_usage again — the per-provider "
+        "fetchers are dispatched directly so the failure class reaches "
+        "_fetch_usage_lanes' honest per-lane handler, and an id outside "
+        "_USAGE_LANE_PROVIDERS raises UnknownUsageLaneError instead of "
+        "degrading into 'no usage data'",
+        "fetch_account_usage",
+        scope=("hermes_cli",),
+    ),
 )
 
 
