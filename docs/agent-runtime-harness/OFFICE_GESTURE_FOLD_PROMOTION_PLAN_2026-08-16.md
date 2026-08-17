@@ -1116,8 +1116,10 @@ Ordered by measured value, not by tidiness. Each item states what it buys and wh
 6. **Scoped invalidation — name what changed instead of "re-fetch everything."** Upstream's `{dirs, full}`
    shape (R15). Turns every future uncoverable event from a cliff into a step, and stops the
    whack-a-mole this plan is an instance of. Bigger than D3 and touches the producer contract, but it is
-   the change that makes foldability an optimisation rather than a precondition. Also fixes the boot
-   demote for free: one `office.surface.updated` currently sinks a 23-event startup batch.
+   the change that makes foldability an optimisation rather than a precondition. ~~Also fixes the boot
+   demote for free: one `office.surface.updated` currently sinks a 23-event startup batch.~~ —
+   **struck 2026-08-17 by Plan EG §4.8 (EG-0.2 receipts): surface events are covered since WV-H3;
+   the surviving defect is the sink DROP (EG-1.3), not a demote.**
 
 7. **Collapse to one transport (D7 / R#42).** Now a *performance* item as well as a correctness one:
    every demoted batch is built **twice** — once for the serve hub's producer and once for the launcher's
@@ -1147,8 +1149,10 @@ Ordered by measured value, not by tidiness. Each item states what it buys and wh
    populated by nothing on any gesture path. The work is minting and stamping, not plumbing.
 
 9. **The page-open write storm.** Every Mission Office open re-upserts all 11 desk actors plus a surface
-   write, off a 21-hour-old cache with five dropped predictions. Its surface write demotes the boot batch
-   every time. The same shape — the launcher inferring server state and writing off that inference —
+   write, off a 21-hour-old cache with five dropped predictions. ~~Its surface write demotes the boot batch
+   every time.~~ — **struck 2026-08-17 by Plan EG §4.8 (EG-0.2 receipts): the demote claim is stale;
+   the storm itself STANDS, and EG-0.2 §3 promotes it to the sole measured source of revision
+   divergence (12/12 REVISION MISS).** The same shape — the launcher inferring server state and writing off that inference —
    caused R#40. Unowned, and the largest un-investigated behaviour left on this surface.
 
 10. **The ~4.3 s `laneAbsent` window on every page open** (not just cold boot). A gesture inside it falls

@@ -23,9 +23,10 @@ closure can eat the win for persona-heavy batches. Second, therefore, **stage
 SI-0 is a measurement gate that can kill or reshape this plan** — the scope
 vocabulary is designed against the measured per-section cost map
 (`sections_ms` is already instrumented, `snapshot.py:281-292,694-702` READ),
-not against section names. What survives regardless: the boot demote fix (one
+not against section names. What survives regardless: ~~the boot demote fix (one
 `office.surface.updated` sinking a 23-event startup batch buys a full core
-today and an offices-scoped one after), and the structural point — foldability
+today and an offices-scoped one after), and~~ — **struck 2026-08-17 by Plan EG §4.8 (EG-0.2
+receipts): surface events are covered since WV-H3 (`patch_coverage.py:179, 254`)** — the structural point — foldability
 becomes an optimisation, not a precondition, ending the per-event
 whack-a-mole the fold-promotion plan is itself an instance of.
 
@@ -68,9 +69,12 @@ comment); `running_work` — six subsystems, sqlite + process probes;
 `profile_readiness_for_persona`. Cold/warm split 6.92 s / 1.17 s
 (MEASURED-§10); the metadata-heavy profile (4,065 stats etc.) is §10.1's.
 
-**The boot demote.** One `office.surface.updated` sinks a 23-event startup
+~~**The boot demote.** One `office.surface.updated` sinks a 23-event startup
 batch (RELAYED-§10.3 item 6; consistent with the coverage table — surface
-events are deliberately uncovered, `patch_coverage.py:199-207` READ).
+events are deliberately uncovered, `patch_coverage.py:199-207` READ).~~ —
+**struck 2026-08-17 by Plan EG §4.8 (EG-0.2 receipts): doubly stale — surface events are
+COVERED since WV-H3 (`patch_coverage.py:179, 254`), and the live defect is the sink dropping
+folder-only batches with neither patch nor resync (EG-1.3).**
 
 **What already exists of the idea.** O-H4 scoped the OFFICE lane's resync by
 reading the delta frame's `events` list (`serve_office_subscriptions.py:

@@ -69,7 +69,9 @@ occupied-chat create third, resolve-conflict last.
 ## 1. Baseline (all READ at the SHAs above unless tagged otherwise)
 
 **The write chokepoint.** All four verbs already flow through ONE launcher file,
-`mission_office_layout_controller.dart`:
+`mission_office_layout_controller.dart` — **qualified 2026-08-17 by Plan EG §4.8 (EG-0.2
+receipts): one launcher file, NOT one transport; `resolve_conflict` has no RPC method
+(RD Correction 4, EG-4.5 owns it):**
 
 - **Remove**: `_archiveActor` (`:997-1011`) — a method, not inline lines, and its own
   docstring names itself "THE seam a `runtime.office.remove` drops into", records that no
@@ -288,7 +290,9 @@ simultaneous deployment; every stage rolls back by reverting its commit.
 
 ### WV-0 — verify the assumptions (read-only, both repos + one diag-log read)
 
-- **A-1 (the boot-batch claim).** §10.3 item 6 says one `office.surface.updated` "sinks a
+- **ANSWERED 2026-08-17 by Plan EG §4.8 (EG-0.2 receipts §1.5): the boot-batch claim was
+  stale — surface events are covered since WV-H3; the live defect is the sink DROP
+  (EG-1.3). Discharged; kept for the record.** **A-1 (the boot-batch claim).** §10.3 item 6 says one `office.surface.updated` "sinks a
   23-event startup batch". Verify from the operator's diag log + event log (read-only, the
   fold plan §1's method) what a page-open batch actually carries: if it also carries other
   uncovered events (chat/session traces, `office.surface.created`), the fold half's boot win

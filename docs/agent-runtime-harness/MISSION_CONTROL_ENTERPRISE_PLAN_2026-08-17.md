@@ -614,6 +614,56 @@ still reaped. **Property:** 7, 6.
 
 ---
 
+## 8. EG-0.2 receipt outcomes (appended 2026-08-17, same day — the pricing pass ran; spec of record: `EG0_2_RECEIPTS_2026-08-17.md`)
+
+The receipts pass discharged with corrections that BIND the stages below. Implementers read
+this section as part of any stage it names.
+
+1. **EG-4.0 CLOSES AS MEASUREMENT.** Post-BW `laneAbsent` ordinary-gesture share is **0 of 5**
+   — the boot-window writes were held and delivered whole on RPC (`hold: 5 staged` →
+   `write lane: 5 rpc, 0 cli`). No hold-extension is built. **TC-3/EG-4.3 is unblocked for
+   free.** All 22 cli activations in the whole log sit on `laneAbsent` lines; cli with any
+   other reason = 0.
+2. **EG-1.3's headline is one severity HIGHER:** a folder-only batch does not promote
+   un-coalesced — it **vanishes with neither patch nor resync** (`serve_office_subscriptions.py:446-456`
+   tests `office_actor` only; the resync twin `:311-316` matches; 0 of 85 field folds carry
+   `office_surface` while a folder write landed on RPC with no fold after it). §2's stream-child
+   precondition "R0-a confirming folder-only frames arrive on the push lane" was unsatisfiable
+   as written — it is a POST-condition of EG-1.3 and is now **EG-1.3's own live acceptance
+   step** (one real folder gesture after it lands).
+3. **EG-5.1's exposure is mechanistic, not rate-driven:** 12 of 12 field `REVISION MISS`es are
+   page-open re-upserts predicting revision **1** against servers at 2–30, all
+   `lane=rpc guarded=false`. Arming the guard as specced refuses **12/12** — EG-5.1 MUST make
+   the re-upsert path spend the revision it actually holds (the read model's), not the constant,
+   or hold those writes, before the guard arms. §5's item 9 (page-open write storm) is promoted:
+   it is the SOLE measured source of revision divergence.
+4. **Class-A reaps: all three CONFIRMED DEAD, with two corrections the reap commit carries.**
+   (a) `bridge.dart` has **five** `--expect-revision` lowerings; only the three OFFICE ones
+   (:4090-4094, :4105-4109, :4130-4134) are dead — the two BOARD ones (:4009-4012, :4046-4049)
+   are LIVE (`mission_board_write.dart:166/:192`, fenced by `mission_board_projection_test.dart:347`).
+   A pattern-driven sweep breaks the board lane. (b) the `_fetch_usage_lane` fall-through drifted
+   to `hermes_cli/harness.py:3702-3704`. (c) fold-copy re-pointing: `missionOfficePatchFoldOnto`
+   is 1 file / 6 sites; `MissionReadModel.applyPatchFrame` is ~58 sites across 7 files plus the
+   parity comparator `test/support/mission_read_model_parity.dart:83` — the comparator likely
+   takes §2's honest exit (keep, rename, document) since a parity check needs a synchronous
+   same-isolate fold by construction.
+5. **Receipt-channel facts for later stages:** `patch_gap` reasons route to
+   `.../diagnostics/mission_transport/receipts.jsonl` (the diag log words the same event
+   `REFUSED gap:`) — greps against the diag log alone return false zeros; the serve-child log is
+   **office-blind across 12 MB** (zero `office`/`patch_gap`/`stream_frames`/`write lane` lines) —
+   EG-2.1's "log op + purpose at subscribe" is the missing line, and TC-0's survivor (Lane A as a
+   real child) stays unanswerable until it lands. Gap counts: 1 `patch_gap` in ~4 days, 0 post-BW.
+   Pre-BW window correction to §2: the argv arms did not CARRY the 5 staged writes — they
+   **failed** them (refused 20 times across 4 flush cycles, never retried; all 20 write refusals
+   in the log are these).
+6. **Register hygiene (§4.8) EXECUTED** same day: eight strikes/qualifications across
+   `OFFICE_GESTURE_FOLD_PROMOTION_PLAN` (:1120, :1150), `SCOPED_INVALIDATION_PLAN` (:27, :71-73),
+   `OFFICE_WRITE_VERBS_RPC_PLAN` (:70-71 qualified, :290-295 marked ANSWERED),
+   `UNIFIED_GESTURE_PREDICTION_PLAN` (:166, :243); UP `:322` kept as the incident record per the
+   receipts' own flag.
+
+---
+
 *Written 2026-08-17 as the consolidation of record. The source documents remain the specs of
 record for their adopted stages; this document owns the ordering, the reaps, the acceptance
 bar, and the three NEW stages (EG-3.1, EG-4.0, EG-6.6).*

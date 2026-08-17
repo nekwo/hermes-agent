@@ -162,8 +162,9 @@ therefore **the 220 ms and 600 ms debounces stop applying to drags entirely**. T
 changes that arrive without a gesture boundary (a rename, the migration seed, a viewport save), which is
 what they were always for.
 
-**What this retires:** the `'Moved '` string gate, the per-frame mutation stream, and — after Stage
-UP-4 proves it — the absence-means-delete branch in `_flush`.
+**What this retires:** the `'Moved '` string gate and the per-frame mutation stream. ~~and — after Stage
+UP-4 proves it — the absence-means-delete branch in `_flush`.~~ — **struck 2026-08-17 by Plan EG
+§4.8 (EG-0.2 receipts): the branch was deleted outright at launcher `7623f99cf`; nothing left to retire.**
 
 ---
 
@@ -239,8 +240,9 @@ it. Removes the cold-build second from the operator's perception without hiding 
 ### UP-4 — prove the inference is redundant, then delete it (launcher)
 
 Run both reconcilers for a period with a receipt whenever they disagree. **A disagreement is a bug in the
-intent ledger, not a reason to keep the diff.** When the log is clean on real gestures, delete the
-absence-means-delete branch. The mass-archive tripwire demotes from load-bearing safety to a backstop.
+intent ledger, not a reason to keep the diff.** ~~When the log is clean on real gestures, delete the
+absence-means-delete branch.~~ — **struck 2026-08-17 by Plan EG §4.8 (EG-0.2 receipts): already
+deleted at launcher `7623f99cf`.** The mass-archive tripwire demotes from load-bearing safety to a backstop.
 
 *Gate:* zero disagreement receipts across a real session, and the R#40 scenario replayed against the
 intent path.
