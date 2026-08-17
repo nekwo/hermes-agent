@@ -5189,6 +5189,144 @@ from hermes_cli.update_cmd import (  # noqa: F401
 # __pycache__ is per-checkout state shared by every profile.
 _BYTECODE_FINGERPRINT_FILE = ".bytecode-fingerprint"
 
+# BW-H2. The single-winner lock beside the stamp, same directory and same
+# per-checkout lifetime for the same reason.
+#
+# Why it exists. On 2026-08-17 the checkout changed under a Mission Control boot
+# and TWO children — the health probe and the serve child — reached this guard 12
+# ms apart. Each walked the whole tree and deleted ~175 ``__pycache__``
+# directories, and each then recompiled the entire import set the OTHER had just
+# deleted, writing ``.pyc`` files back over each other for the rest of the boot.
+# The guard is correct; running it N times concurrently is not, and nothing
+# serialized it.
+_BYTECODE_SWEEP_LOCK_FILE = ".bytecode-sweep.lock"
+
+#: How long a loser waits for the winner before proceeding UNSWEPT.
+#:
+#: The sweep is directory unlinks, not compilation — sub-second warm — so a wait
+#: this long means the winner is on a cold spinning-rust walk, and the loser has
+#: better things to do than block launch behind it. Fail-open is deliberate: the
+#: worst case is exactly the pre-guard behaviour for ONE process, which is the
+#: behaviour every hermes launch had before this guard existed, while the
+#: winner's restamp closes the window for every later spawn.
+_BYTECODE_SWEEP_LOCK_WAIT_SECONDS = 20.0
+
+#: A lock older than this is broken rather than honoured.
+#:
+#: A sweeper killed mid-walk (the launcher reaps orphan children; the operator
+#: closes the window) must not brick every future launch's guard. Comfortably
+#: above the wait bound so a live winner is never mistaken for a dead one.
+_BYTECODE_SWEEP_LOCK_STALE_SECONDS = 120.0
+
+#: Outcome names for the purge log line, so a multi-child boot can be read off
+#: the log instead of inferred from how many purge lines happen to appear.
+_SWEEP_OUTCOME_SWEPT = "swept"
+_SWEEP_OUTCOME_WAITED = "waited_for_winner"
+_SWEEP_OUTCOME_UNSWEPT = "proceeded_unswept"
+
+
+def _bytecode_sweep_lock_path() -> Path:
+    return PROJECT_ROOT / _BYTECODE_SWEEP_LOCK_FILE
+
+
+def _break_stale_bytecode_sweep_lock(lock_path: Path) -> bool:
+    """Remove a sweep lock old enough that its holder cannot still be alive.
+
+    Age is read off the file's own mtime rather than a pid recorded inside it: a
+    pid is only checkable on the machine that wrote it, and a checkout can be on
+    a share. Returns whether a lock was removed.
+    """
+
+    try:
+        age = _time.time() - lock_path.stat().st_mtime
+    except OSError:
+        return False
+    if age < _BYTECODE_SWEEP_LOCK_STALE_SECONDS:
+        return False
+    try:
+        lock_path.unlink()
+    except OSError:
+        # Somebody else broke it first, or the filesystem refused. Either way
+        # this process is not the one that has to care.
+        return False
+    logger.debug(
+        "Broke a stale bytecode-sweep lock (%.0fs old): %s", age, lock_path
+    )
+    return True
+
+
+#: The three answers ``_claim_bytecode_sweep_lock`` can give.
+#:
+#: ``CONTENDED`` and ``UNAVAILABLE`` must never collapse into one "no lock"
+#: answer, and the difference is the difference between a fix and a regression:
+#: contended means SOMEBODY ELSE is sweeping, so this process should not;
+#: unavailable means NOBODY can hold a lock on this filesystem (a read-only
+#: checkout root, a share with no ``O_EXCL``), so declining to sweep would leave
+#: the stale-bytecode guard permanently disabled there — strictly worse than the
+#: pre-BW-H2 behaviour of every process sweeping.
+_SWEEP_CLAIM_CLAIMED = "claimed"
+_SWEEP_CLAIM_CONTENDED = "contended"
+_SWEEP_CLAIM_UNAVAILABLE = "unavailable"
+
+
+def _claim_bytecode_sweep_lock(lock_path: Path) -> str:
+    """Try to claim the right to sweep. See the three ``_SWEEP_CLAIM_*`` answers.
+
+    ``O_EXCL`` and not a write-if-missing, exactly as ``serve_auth._mint`` does
+    it and for the same reason: two hermes processes booting against one checkout
+    is a REAL concurrency, and the loser must defer to the winner rather than
+    overwrite its claim.
+    """
+
+    try:
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+    except FileExistsError:
+        if not _break_stale_bytecode_sweep_lock(lock_path):
+            return _SWEEP_CLAIM_CONTENDED
+        try:
+            fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+        except FileExistsError:
+            # Another process claimed it in the gap after we broke the stale one.
+            return _SWEEP_CLAIM_CONTENDED
+        except OSError:
+            return _SWEEP_CLAIM_UNAVAILABLE
+    except OSError:
+        return _SWEEP_CLAIM_UNAVAILABLE
+    try:
+        os.write(fd, f"{os.getpid()}\n".encode("utf-8"))
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+    return _SWEEP_CLAIM_CLAIMED
+
+
+def _release_bytecode_sweep_lock(lock_path: Path) -> None:
+    try:
+        lock_path.unlink()
+    except OSError:
+        pass
+
+
+def _await_bytecode_sweep_winner(lock_path: Path) -> bool:
+    """Wait for the winner to release its lock. True if it did, in time.
+
+    False means the wait expired (or the lock went stale under us), and the
+    caller proceeds WITHOUT sweeping — see
+    :data:`_BYTECODE_SWEEP_LOCK_WAIT_SECONDS` for why fail-open is the right
+    direction here.
+    """
+
+    deadline = _time.monotonic() + _BYTECODE_SWEEP_LOCK_WAIT_SECONDS
+    while _time.monotonic() < deadline:
+        if not lock_path.exists():
+            return True
+        if _break_stale_bytecode_sweep_lock(lock_path):
+            return False
+        _time.sleep(0.05)
+    return not lock_path.exists()
+
 
 def _record_bytecode_fingerprint() -> None:
     """Persist the current checkout fingerprint after a bytecode sweep.
@@ -5206,6 +5344,35 @@ def _record_bytecode_fingerprint() -> None:
         tmp_path.replace(stamp_path)
     except OSError as exc:
         logger.debug("Could not record bytecode fingerprint: %s", exc)
+
+
+def _log_bytecode_sweep_outcome(
+    *,
+    outcome: str,
+    recorded: str,
+    fingerprint: str,
+    removed: int,
+    started: float,
+) -> None:
+    """The one purge line, naming what this process actually did.
+
+    Before BW-H2 this line only existed on the sweeping path, so a boot where two
+    children contended was indistinguishable from a boot where one child swept
+    twice — both looked like "two purge lines". Naming the outcome makes the
+    lock's effect readable from the log the operator already has, which is what
+    the stage's acceptance check reads.
+    """
+
+    logger.info(
+        "Checkout changed since last launch (%s -> %s): cleared %d stale "
+        "__pycache__ director%s outcome=%s swept_ms=%d",
+        recorded or "unknown",
+        fingerprint,
+        removed,
+        "y" if removed == 1 else "ies",
+        outcome,
+        int(max(0.0, _time.monotonic() - started) * 1000),
+    )
 
 
 def _sweep_stale_bytecode_if_checkout_changed() -> None:
@@ -5229,13 +5396,21 @@ def _sweep_stale_bytecode_if_checkout_changed() -> None:
 
     Never raises — a failure here must not block launch.
 
-    BW-0: the sweep now reports its own duration, both on the log line
+    BW-0: the sweep reports its own duration, both on the log line
     (``swept_ms=``) and into ``_boot_clock`` so the serve child's ``booting``
-    frame can carry it. The 2026-08-17 cold boot had TWO processes each clear
-    ~175 ``__pycache__`` directories 12 ms apart and then race each other
-    recompiling the import set they had just deleted — and the line logged no
-    duration at all, so the share of that boot's 20.4 s import tax owed to this
-    function was pure inference. It is now recorded.
+    frame can carry it. The line logged a directory count and no duration at all,
+    so the share of the 2026-08-17 boot's 20.4 s import tax owed to this function
+    was pure inference. It is now recorded.
+
+    BW-H2: exactly ONE process per checkout change does the work. That boot had
+    two children reach this guard 12 ms apart, each delete ~175 ``__pycache__``
+    directories, and each then recompile the import set the other had just
+    deleted. The loser now waits briefly on the winner's lock and proceeds
+    WITHOUT sweeping — see :data:`_BYTECODE_SWEEP_LOCK_WAIT_SECONDS` for why
+    fail-open rather than fail-closed. The outcome is named on the log line
+    (``outcome=swept`` / ``waited_for_winner`` / ``proceeded_unswept``), because
+    "how many purge lines appeared" was never a readable account of a
+    multi-child boot.
     """
     _started = _time.monotonic()
     try:
@@ -5249,17 +5424,51 @@ def _sweep_stale_bytecode_if_checkout_changed() -> None:
             recorded = ""
         if recorded == fingerprint:
             return
-        removed = _clear_bytecode_cache(PROJECT_ROOT)
-        if removed:
-            logger.info(
-                "Checkout changed since last launch (%s -> %s): cleared %d stale __pycache__ director%s in swept_ms=%d",
-                recorded or "unknown",
-                fingerprint,
-                removed,
-                "y" if removed == 1 else "ies",
-                int(max(0.0, _time.monotonic() - _started) * 1000),
+        # The fingerprint check is deliberately OUTSIDE the lock: it is two cheap
+        # file reads, and on the overwhelmingly common path (nothing changed) it
+        # returns before any process touches the lock at all. Only a genuine
+        # divergence contends.
+        lock_path = _bytecode_sweep_lock_path()
+        claim = _claim_bytecode_sweep_lock(lock_path)
+        if claim == _SWEEP_CLAIM_CONTENDED:
+            waited = _await_bytecode_sweep_winner(lock_path)
+            # Fail-open either way: the winner restamped (so a re-read would
+            # return early) or it did not (so this process proceeds on possibly
+            # stale bytecode, exactly as every launch did before this guard
+            # existed). Not sweeping is the whole point — a second full purge is
+            # what BW-H2 exists to remove.
+            _log_bytecode_sweep_outcome(
+                outcome=(
+                    _SWEEP_OUTCOME_WAITED if waited else _SWEEP_OUTCOME_UNSWEPT
+                ),
+                recorded=recorded,
+                fingerprint=fingerprint,
+                removed=0,
+                started=_started,
             )
-        _record_bytecode_fingerprint()
+            return
+        try:
+            # ``claimed`` or ``unavailable``. The second case sweeps too, and
+            # that is deliberate — see the ``_SWEEP_CLAIM_*`` constants: a
+            # filesystem nobody can lock must keep the guard, not lose it.
+            removed = _clear_bytecode_cache(PROJECT_ROOT)
+            if removed:
+                _log_bytecode_sweep_outcome(
+                    outcome=_SWEEP_OUTCOME_SWEPT,
+                    recorded=recorded,
+                    fingerprint=fingerprint,
+                    removed=removed,
+                    started=_started,
+                )
+            _record_bytecode_fingerprint()
+        finally:
+            # Released only after the restamp, so a loser that wakes up on the
+            # released lock re-reads a fingerprint that already matches. Only the
+            # process that CLAIMED releases — an ``unavailable`` claim holds
+            # nothing, and unlinking on its behalf could take out a lock a
+            # concurrent winner does hold.
+            if claim == _SWEEP_CLAIM_CLAIMED:
+                _release_bytecode_sweep_lock(lock_path)
     except Exception as exc:
         logger.debug("Stale-bytecode launch sweep failed: %s", exc)
     finally:
