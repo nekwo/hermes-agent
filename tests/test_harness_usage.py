@@ -624,3 +624,427 @@ def test_no_usage_lane_routes_through_fetch_account_usage(monkeypatch):
     # Non-vacuity for the count: the run really did fetch all four lanes.
     assert [lane["provider"] for lane in lanes] == candidates
     assert all(lane["available"] is True for lane in lanes), lanes
+
+
+# --- EG-6.1: the DETECTION half stops deleting lanes, and the envelope stops --
+# --- claiming an auth state it never observed --------------------------------
+#
+# S1 fixed the fetch half: a raised fetch is reported by class instead of
+# collapsing to "no usage data". Its two siblings survived on the same surface:
+#
+#  * `_usage_lane_detected` ended in `except Exception: return False`, and the
+#    docstring's rule is that undetected lanes are OMITTED — so a detector fault
+#    made the row VANISH from the Limits panel. Strictly worse than the defect
+#    S1 fixed: there was no row left to carry any reason at all.
+#  * `_render_account_usage_human` printed "no signed-in providers detected" on
+#    any empty lane list. That is a POSITIVE CLAIM about the operator's auth
+#    state, and it was false whenever detection or fetch had collapsed.
+#
+# Both halves are pinned as PAIRS below, because a single fixture is passed by a
+# blanket mutant in each direction ("always emit the lane" / "never print the
+# claim").
+
+
+class _DetectorExploded(RuntimeError):
+    """Injected detector fault #1 — a distinct class, deliberately."""
+
+
+class _DetectorTimedOut(TimeoutError):
+    """Injected detector fault #2."""
+
+
+@pytest.mark.parametrize("error_class", [_DetectorExploded, _DetectorTimedOut])
+def test_a_raising_detector_emits_the_lane_with_its_class(monkeypatch, error_class):
+    """Fixture (a) of the pair: detection RAISED for anthropic.
+
+    The lane is EMITTED, unavailable, naming the exception class — and the
+    healthy sibling lane is untouched, so the isolation is per lane exactly as
+    it already is on the fetch half.
+
+    MUTATION (proves non-vacuity): restore `_usage_lane_detected`'s
+    `except Exception: return False`. The anthropic lane disappears from
+    `lanes` and both the membership and the reason assertions go red.
+
+    Driven with two distinct classes so a hardcoded reason string cannot pass.
+    The injected message is token- and URL-shaped: the reason carries the class
+    NAME only.
+    """
+
+    def fake_detect(provider_id):
+        if provider_id == "anthropic":
+            raise error_class("Bearer sk-LEAKME via https://example.invalid/whoami")
+        return provider_id == "openai-codex"
+
+    monkeypatch.setattr(harness, "_resolve_active_provider_id", lambda: "openai-codex")
+    monkeypatch.setattr(harness, "_usage_lane_detected", fake_detect)
+    monkeypatch.setattr(harness, "_fetch_usage_lane", lambda p: _snapshot(p))
+
+    payload = harness.build_account_usage(timeout=5.0)
+    lanes = {lane["provider"]: lane for lane in payload["lanes"]}
+
+    assert set(lanes) == {"openai-codex", "anthropic"}
+    failed = lanes["anthropic"]
+    assert failed["available"] is False
+    assert failed["unavailable_reason"] == f"usage detection failed ({error_class.__name__})"
+    # The grammar is the fetch half's, one phase word over — NOT a second idiom.
+    assert "usage fetch failed" not in failed["unavailable_reason"]
+    assert failed["windows"] == []
+    assert failed["details"] == []
+    # Emission order is still `_USAGE_LANE_PROVIDERS` order: the failed lane
+    # holds its natural slot rather than being appended after the healthy ones.
+    assert [lane["provider"] for lane in payload["lanes"]] == [
+        "openai-codex",
+        "anthropic",
+    ]
+    # A detector fault is not an envelope-level degrade: lanes were collected.
+    assert "degraded" not in payload
+
+    serialized = repr(payload)
+    assert "sk-LEAKME" not in serialized
+    assert "https://" not in serialized
+
+
+@pytest.mark.parametrize(
+    ("provider", "module_path", "probe", "error_class"),
+    [
+        (
+            "anthropic",
+            "agent.anthropic_adapter",
+            "resolve_anthropic_token",
+            _DetectorExploded,
+        ),
+        (
+            "nous",
+            "hermes_cli.auth",
+            "get_provider_auth_state",
+            _DetectorTimedOut,
+        ),
+    ],
+)
+def test_a_raising_REAL_detector_emits_the_lane_not_nothing(
+    monkeypatch, provider, module_path, probe, error_class
+):
+    """The witness that watches the lane that RUNS.
+
+    Written second, and deliberately: the sibling tests above stub
+    `harness._usage_lane_detected`, and the mutation campaign proved that a
+    restored `except Exception: return False` INSIDE that function survives all
+    of them — the RD-L2 lesson, reproduced live. A test that replaces the seam
+    holding the defect cannot see the defect.
+
+    So this one patches the seam BELOW — the real per-provider probe
+    `_usage_lane_detected` calls — exactly the discipline the S1 tests adopted
+    when they refused to stub `_fetch_usage_lane`. `--provider` narrows the scope
+    to the one lane, so no other detector and no fetcher runs (no network).
+
+    MUTATION (proves non-vacuity): restore `_usage_lane_detected`'s
+    `except Exception: return False`. The lane is OMITTED, `lanes` is empty, and
+    the membership assertion goes red. THIS is the mutation the stage exists to
+    kill.
+
+    Two providers × two classes, through the two inline detector arms; the two
+    feeder arms are fenced by
+    `test_the_detector_feeders_raise_instead_of_answering_not_signed_in`.
+    """
+    import importlib
+
+    module = importlib.import_module(module_path)
+
+    def boom(*_a, **_k):
+        raise error_class("Bearer sk-LEAKME probing https://example.invalid")
+
+    monkeypatch.setattr(harness, "_resolve_active_provider_id", lambda: None)
+    monkeypatch.setattr(module, probe, boom)
+
+    payload = harness.build_account_usage(only_provider=provider, timeout=5.0)
+
+    assert [lane["provider"] for lane in payload["lanes"]] == [provider], (
+        "a detector that RAISED deleted its own lane — the pre-EG-6.1 defect, "
+        "strictly worse than S1's 'no usage data' because no row survives to "
+        f"carry a reason. payload={payload}"
+    )
+    lane = payload["lanes"][0]
+    assert lane["available"] is False
+    assert lane["unavailable_reason"] == (
+        f"usage detection failed ({error_class.__name__})"
+    )
+    serialized = repr(payload)
+    assert "sk-LEAKME" not in serialized
+    assert "https://" not in serialized
+
+
+def test_absent_credentials_still_omit_the_lane(monkeypatch):
+    """Fixture (b) of the pair: detection RETURNED False for anthropic.
+
+    Omission is now the EXCLUSIVE meaning of "credentials genuinely absent".
+
+    MUTATION (kill): emit a lane for every provider in `_USAGE_LANE_PROVIDERS`
+    regardless of detection (the blanket "always emit" mutant that passes
+    fixture (a)) — the membership equality goes red. The pair is what pins the
+    discriminator on the detector's RAISE-vs-False, and neither blanket mutant
+    passes both.
+    """
+    monkeypatch.setattr(harness, "_resolve_active_provider_id", lambda: "openai-codex")
+    monkeypatch.setattr(
+        harness, "_usage_lane_detected", lambda p: p == "openai-codex"
+    )
+    monkeypatch.setattr(harness, "_fetch_usage_lane", lambda p: _snapshot(p))
+
+    payload = harness.build_account_usage(timeout=5.0)
+
+    assert [lane["provider"] for lane in payload["lanes"]] == ["openai-codex"]
+    assert "degraded" not in payload
+
+
+def test_a_detector_fault_does_not_suppress_the_no_providers_claim(monkeypatch):
+    """Every detector raised: lanes are all present-and-named, so the claim
+    branch is never reached at all.
+
+    This is the third leg the two-fixture pair cannot cover: it proves the fix
+    is "emit the lane", not "stop rendering" — the operator still gets four rows
+    to read reasons off.
+    """
+
+    def fake_detect(provider_id):
+        raise _DetectorExploded("every detector is broken")
+
+    monkeypatch.setattr(harness, "_resolve_active_provider_id", lambda: None)
+    monkeypatch.setattr(harness, "_usage_lane_detected", fake_detect)
+
+    payload = harness.build_account_usage(timeout=5.0)
+    assert [lane["provider"] for lane in payload["lanes"]] == list(
+        harness._USAGE_LANE_PROVIDERS
+    )
+    assert {lane["unavailable_reason"] for lane in payload["lanes"]} == {
+        "usage detection failed (_DetectorExploded)"
+    }
+
+    harness._render_account_usage_human(payload)
+
+
+@pytest.mark.parametrize("error_class", [_DetectorExploded, _DetectorTimedOut])
+def test_a_degraded_envelope_never_prints_the_no_providers_claim(
+    monkeypatch, capsys, error_class
+):
+    """Fixture (a) of the claim pair: the whole detection SCAN collapsed.
+
+    `_detect_usage_candidates` itself raises (not one provider's detector — the
+    scan), so there are no lanes to emit and nothing is known about the
+    operator's auth state. The claim line must be ABSENT and the degrade line
+    present, naming the class.
+
+    MUTATION (proves non-vacuity): keep the old `except Exception: return
+    payload` with no stamp. `degraded` is never written, `_usage_lanes_suppressed`
+    returns None, the claim prints — and both the absence assertion and the
+    degrade-line assertion go red.
+
+    Two distinct injected classes, so the degrade line cannot be a constant.
+    """
+
+    def fake_detect(_only_provider):
+        raise error_class("Bearer sk-LEAKME scanning https://example.invalid")
+
+    monkeypatch.setattr(harness, "_resolve_active_provider_id", lambda: "openai-codex")
+    monkeypatch.setattr(harness, "_detect_usage_candidates", fake_detect)
+
+    payload = harness.build_account_usage(timeout=5.0)
+    assert payload["lanes"] == []
+    assert payload["degraded"] == {"detect": error_class.__name__}
+
+    harness._render_account_usage_human(payload)
+    out = capsys.readouterr().out
+    assert "no signed-in providers detected" not in out
+    assert f"usage lanes unavailable ({error_class.__name__})" in out
+    assert "sk-LEAKME" not in out
+    assert "https://" not in out
+
+
+def test_a_genuinely_empty_scan_still_prints_the_no_providers_claim(
+    monkeypatch, capsys
+):
+    """Fixture (b) of the claim pair: detection RAN and found none.
+
+    MUTATION (kill): drop the claim entirely, or gate it on something other than
+    the degrade (e.g. never print it) — red. The pair pins the discriminator on
+    `degraded`; a mutant that always prints fails fixture (a) and a mutant that
+    never prints fails this one.
+
+    Anti-vacuity: `degraded` is asserted ABSENT, so this fixture is provably the
+    honest-empty case and not a second copy of (a).
+    """
+    monkeypatch.setattr(harness, "_resolve_active_provider_id", lambda: None)
+    monkeypatch.setattr(harness, "_usage_lane_detected", lambda p: False)
+
+    payload = harness.build_account_usage(timeout=5.0)
+    assert payload["lanes"] == []
+    assert "degraded" not in payload
+
+    harness._render_account_usage_human(payload)
+    out = capsys.readouterr().out
+    assert "no signed-in providers detected" in out
+    assert "usage lanes unavailable" not in out
+
+
+def test_a_failed_fetch_scan_degrades_and_states_it(monkeypatch, capsys):
+    """The second lane-suppressing seam: `_fetch_usage_lanes` raises WHOLESALE
+    (not per lane — its own per-lane handler is byte-unchanged and pinned above).
+
+    MUTATION (kill): keep `payload["lanes"] = []` with no stamp — the envelope
+    reports zero lanes right after detecting two of them, the claim prints, red.
+    """
+
+    def boom(*_a, **_k):
+        raise _DetectorTimedOut("the whole fetch pool broke")
+
+    monkeypatch.setattr(harness, "_resolve_active_provider_id", lambda: None)
+    monkeypatch.setattr(
+        harness, "_usage_lane_detected", lambda p: p in {"openai-codex", "anthropic"}
+    )
+    monkeypatch.setattr(harness, "_fetch_usage_lanes", boom)
+
+    payload = harness.build_account_usage(timeout=5.0)
+    assert payload["lanes"] == []
+    assert payload["degraded"] == {"fetch": "_DetectorTimedOut"}
+
+    harness._render_account_usage_human(payload)
+    out = capsys.readouterr().out
+    assert "no signed-in providers detected" not in out
+    assert "usage lanes unavailable (_DetectorTimedOut)" in out
+
+
+def test_a_failed_active_provider_resolve_is_named_and_does_not_eat_the_claim(
+    monkeypatch, capsys
+):
+    """The third seam, and the reason `degraded` is a per-stage MAP rather than
+    one scalar: a failed `active_provider` resolve suppresses NO lanes.
+
+    So an envelope degraded only here may still carry an honest empty lane list,
+    and the claim stays legitimate — while `active_provider: null` stops meaning
+    both "none selected" and "the resolver threw".
+
+    MUTATION (kill): treat any `degraded` as lane-suppressing (drop the stage
+    filter in `_usage_lanes_suppressed`) — the claim vanishes and this goes red.
+    The reverse mutant (never stamp the resolve seam) reds the `degraded`
+    assertion. Together they pin the stage keying.
+    """
+
+    def boom():
+        raise _DetectorExploded("provider resolution broke")
+
+    monkeypatch.setattr(harness, "_resolve_active_provider_id", boom)
+    monkeypatch.setattr(harness, "_usage_lane_detected", lambda p: False)
+
+    payload = harness.build_account_usage(timeout=5.0)
+    assert payload["active_provider"] is None
+    assert payload["degraded"] == {"active_provider": "_DetectorExploded"}
+    assert payload["lanes"] == []
+
+    harness._render_account_usage_human(payload)
+    out = capsys.readouterr().out
+    # Detection ran and found none, so the claim is TRUE and must still print.
+    assert "no signed-in providers detected" in out
+    assert "usage lanes unavailable" not in out
+    # And the null active provider names its cause instead of rendering "(none)",
+    # which would itself be a claim about the operator's configuration.
+    assert "resolution failed (_DetectorExploded)" in out
+    assert "Active provider: (none)" not in out
+
+
+def test_the_serialization_fallback_envelope_names_the_failure(monkeypatch, capsys):
+    """`_emit_usage_json`'s last-resort envelope reports zero lanes at the exact
+    moment it knows the real payload could not be written.
+
+    MUTATION (kill): drop the `("serialize", exc)` argument — the fallback is
+    again an unlabeled empty envelope, indistinguishable on the wire from an
+    idle account, and the `degraded` assertion goes red.
+
+    The sibling pin `test_cmd_usage_json_branch_isolates_serialization_failure`
+    is byte-unchanged and keeps the exit-0 / valid-JSON contract.
+    """
+    monkeypatch.setattr(harness, "_resolve_active_provider_id", lambda: None)
+    monkeypatch.setattr(harness, "_usage_lane_detected", lambda p: False)
+
+    def boom(_payload):
+        raise _DetectorExploded("Bearer sk-LEAKME could not be serialized")
+
+    monkeypatch.setattr(harness, "emit_json", boom)
+
+    rc = harness._cmd_usage(SimpleNamespace(json=True, provider=None, timeout=5.0))
+    assert rc == 0
+    out = capsys.readouterr().out
+    data = json.loads(out)
+    assert data["schema"] == "hermes.account_usage/v1"
+    assert data["lanes"] == []
+    assert data["degraded"] == {"serialize": "_DetectorExploded"}
+    assert "sk-LEAKME" not in out
+
+
+def test_the_build_fallback_envelope_names_the_failure(monkeypatch, capsys):
+    """The same for `_cmd_usage`'s outermost guard.
+
+    MUTATION (kill): drop the `("build", exc)` argument — red. Defence in depth
+    (`build_account_usage` isolates internally), but this arm is the one that
+    fires when that isolation is itself broken, which is the worst moment to
+    emit a silent empty envelope.
+    """
+
+    def boom(**_kwargs):
+        raise _DetectorTimedOut("build broke")
+
+    monkeypatch.setattr(harness, "build_account_usage", boom)
+
+    rc = harness._cmd_usage(SimpleNamespace(json=True, provider=None, timeout=5.0))
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["lanes"] == []
+    assert data["degraded"] == {"build": "_DetectorTimedOut"}
+
+
+def test_the_detector_feeders_raise_instead_of_answering_not_signed_in(monkeypatch):
+    """The two OR-of-two-sources feeders had their own terminal
+    `except Exception: return False`, which would have made the lane-emission fix
+    above VACUOUS for half the providers: `_usage_lane_detected` can only raise
+    if its feeders do.
+
+    Two fixtures per feeder, because the OR is the subtlety:
+      * primary raises, secondary AFFIRMS  → True (the yes is the truth);
+      * primary raises, secondary declines → RAISE (we could not tell).
+
+    MUTATION (kill): restore either terminal `except Exception: return False` —
+    the raise fixtures go red while the True fixtures still pass, which is
+    exactly the half-fix this pair exists to catch.
+    """
+    import agent.credential_pool as credential_pool
+    import hermes_cli.auth as auth
+    import hermes_cli.runtime_provider as runtime_provider
+
+    def _pool(entries):
+        return SimpleNamespace(entries=lambda: entries)
+
+    # --- codex: OAuth status probe raises -----------------------------------
+    def status_boom():
+        raise _DetectorExploded("codex oauth status broke")
+
+    monkeypatch.setattr(auth, "get_codex_auth_status", status_boom)
+    monkeypatch.setattr(credential_pool, "load_pool", lambda _p: _pool(["entry"]))
+    assert harness._codex_usage_login_detected() is True
+
+    monkeypatch.setattr(credential_pool, "load_pool", lambda _p: _pool([]))
+    with pytest.raises(_DetectorExploded):
+        harness._codex_usage_login_detected()
+
+    # --- openrouter: pool read raises ---------------------------------------
+    def pool_boom(_provider):
+        raise _DetectorTimedOut("openrouter pool read broke")
+
+    monkeypatch.setattr(credential_pool, "load_pool", pool_boom)
+    monkeypatch.setattr(
+        runtime_provider, "resolve_runtime_provider", lambda **_k: {"api_key": "k" * 8}
+    )
+    assert harness._openrouter_usage_login_detected() is True
+
+    monkeypatch.setattr(
+        runtime_provider, "resolve_runtime_provider", lambda **_k: {"api_key": ""}
+    )
+    with pytest.raises(_DetectorTimedOut):
+        harness._openrouter_usage_login_detected()

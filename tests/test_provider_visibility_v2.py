@@ -6,6 +6,8 @@ launcher's model switcher depends on) can never be broken by a status probe.
 
 from __future__ import annotations
 
+import pytest
+
 import hermes_cli.harness as harness
 
 
@@ -309,3 +311,111 @@ def test_token_preview_refuses_short_and_non_string_values():
     assert harness._credential_token_preview(SimpleNamespace(access_token=_bearer)) is None
     assert called["n"] == 0
     assert harness._credential_token_preview(SimpleNamespace()) is None
+
+
+# --- EG-6.1: an absent block stops meaning two things ------------------------
+#
+# The four v2 blocks are failure-isolated on purpose, and that stays. What
+# changed is what the wire says afterwards. Before EG-6.1 each isolator was a
+# bare `except Exception: pass`, so "block absent" meant EITHER "this hermes is
+# too old to emit it" OR "this hermes tried and the builder threw" — and the
+# `catalog` block, whose entire reason for existing is to separate "never
+# configured" from "configured and dead", fell the client back into exactly the
+# indistinguishable rendering it was added to end.
+#
+# Three wire states now, all distinguishable: block present; block absent with
+# no `block_errors`; block absent and NAMED in `block_errors`.
+
+
+class _CatalogProbeExploded(RuntimeError):
+    """Injected fault #1. A distinct CLASS is the whole point of the pair."""
+
+
+class _CatalogProbeTimedOut(TimeoutError):
+    """Injected fault #2."""
+
+
+@pytest.mark.parametrize("error_class", [_CatalogProbeExploded, _CatalogProbeTimedOut])
+def test_a_thrown_catalog_builder_is_named_and_the_block_absent(
+    monkeypatch, error_class
+):
+    """The block drops (isolation intact) AND `block_errors` names the class.
+
+    MUTATION (proves non-vacuity): keep the silent `except Exception: pass`.
+    The `catalog`-absent half still passes — it always did — but `block_errors`
+    is never written and the naming half goes red.
+
+    Driven with TWO distinct injected classes, so a constant cannot pass: a
+    mutant that hardcodes any one class name fails the other parameter.
+
+    The injected message is deliberately token- and URL-shaped: the recorded
+    value is the class NAME only, never `str(exc)`, the same disclosure rule
+    `_credential_token_preview` and `_usage_failure_reason` follow.
+    """
+
+    def _boom() -> list:
+        raise error_class("Bearer sk-LEAKME from https://example.invalid/catalog")
+
+    monkeypatch.setattr(harness, "_provider_visibility_catalog", _boom)
+    payload = harness.build_provider_visibility()
+
+    assert "catalog" not in payload
+    assert payload["block_errors"]["catalog"] == error_class.__name__
+    # Isolation unchanged: the credential payload and the sibling blocks built.
+    assert isinstance(payload["providers"], list)
+    assert isinstance(payload.get("environment"), dict)
+
+    serialized = repr(payload)
+    assert "sk-LEAKME" not in serialized
+    assert "https://" not in serialized
+
+
+def test_a_healthy_build_has_no_block_errors_entry():
+    """The other half of the pair: nothing threw, so nothing is named.
+
+    MUTATION (kill): write `block_errors` unconditionally (seed it to `{}` when
+    the payload is created, or record a healthy sentinel per block) — red.
+    Without this test the naming test above is satisfied by an always-write
+    mutant, and "absent because old" collapses back into "absent because
+    threw".
+
+    Anti-vacuity: the four blocks are asserted PRESENT first, so this cannot
+    pass because the build produced nothing to name.
+    """
+    payload = harness.build_provider_visibility()
+    assert isinstance(payload.get("environment"), dict)
+    assert isinstance(payload.get("api_keys"), list)
+    assert isinstance(payload.get("auth_logins"), list)
+    assert isinstance(payload.get("catalog"), list)
+    assert "block_errors" not in payload
+
+
+def test_block_errors_is_keyed_per_block_not_one_flag(monkeypatch):
+    """Two blocks fail with two different classes; both are named, and the two
+    healthy blocks are untouched.
+
+    MUTATION (kill): make the record a single scalar (`payload["block_error"] =
+    class_name`) or a boolean flag — the equality goes red. One slot cannot hold
+    two classes, and a per-block map is what the console needs in order to say
+    WHICH surface it may not trust.
+    """
+
+    def _boom_environment() -> dict:
+        raise _CatalogProbeExploded("environment probe broken")
+
+    def _boom_catalog() -> list:
+        raise _CatalogProbeTimedOut("catalog probe broken")
+
+    monkeypatch.setattr(harness, "_provider_visibility_environment", _boom_environment)
+    monkeypatch.setattr(harness, "_provider_visibility_catalog", _boom_catalog)
+    payload = harness.build_provider_visibility()
+
+    assert payload["block_errors"] == {
+        "environment": "_CatalogProbeExploded",
+        "catalog": "_CatalogProbeTimedOut",
+    }
+    assert "environment" not in payload
+    assert "catalog" not in payload
+    # Not sabotaged, so still reported — the isolation is per block.
+    assert isinstance(payload.get("api_keys"), list)
+    assert isinstance(payload.get("auth_logins"), list)

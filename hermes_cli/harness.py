@@ -3387,6 +3387,38 @@ def _credential_token_preview(entry) -> Optional[str]:
         return None
 
 
+def _record_visibility_block(payload: dict, name: str, builder) -> None:
+    """Build one failure-isolated ``provider_visibility`` block, and NAME the
+    failure when the builder raises.
+
+    The isolation itself is load-bearing (a broken status probe must never break
+    the credential payload the launcher's model switcher depends on), but until
+    EG-6.1 the isolator was a bare ``except Exception: pass`` and an absent block
+    meant TWO things: "this hermes is too old to emit it" or "this hermes tried
+    and the builder threw". The `catalog` block made that worst: it exists
+    precisely to separate "never configured" from "configured and dead", so a
+    silent drop fell the client back into the indistinguishable rendering the
+    block was added to end.
+
+    So a raise records ``block_errors[name] = <ExceptionClass>`` — the class NAME
+    only, never ``str(exc)``, the same disclosure rule
+    [_usage_failure_reason] and [_credential_token_preview] follow: a status
+    probe's message can carry a resolved key, a URL or a header.
+
+    ``block_errors`` is written ONLY when something actually threw. A healthy
+    build carries no such key at all, so the three wire states stay distinct:
+    block present (built), block absent with no ``block_errors`` (old hermes /
+    never emitted), block absent and named in ``block_errors`` (this hermes
+    tried and failed).
+    """
+    try:
+        value = builder()
+    except Exception as exc:  # noqa: BLE001 — class name only, block isolated
+        payload.setdefault("block_errors", {})[name] = type(exc).__name__
+        return
+    payload[name] = value
+
+
 def _provider_visibility_catalog() -> list[dict]:
     """The `catalog` block: every CONNECTABLE provider, credential or not.
 
@@ -3451,19 +3483,13 @@ def build_provider_visibility() -> dict:
     # failure-isolated: a broken import or status probe drops the block, it
     # NEVER breaks the credential payload above (which the launcher's model
     # switcher depends on). Consumers treat an absent block as "fall back to
-    # the scrape", exactly like a v1 hermes.
-    try:
-        payload["environment"] = _provider_visibility_environment()
-    except Exception:
-        pass
-    try:
-        payload["api_keys"] = _provider_visibility_api_keys()
-    except Exception:
-        pass
-    try:
-        payload["auth_logins"] = _provider_visibility_auth_logins()
-    except Exception:
-        pass
+    # the scrape", exactly like a v1 hermes — and since EG-6.1 a block that
+    # dropped because its builder RAISED is named in `block_errors` by exception
+    # class, so absence no longer means two things. See
+    # [_record_visibility_block].
+    _record_visibility_block(payload, "environment", _provider_visibility_environment)
+    _record_visibility_block(payload, "api_keys", _provider_visibility_api_keys)
+    _record_visibility_block(payload, "auth_logins", _provider_visibility_auth_logins)
     # The `catalog` block (plan PL-1). Additive and failure-isolated exactly
     # like the three blocks above, and — deliberately — WITHOUT a schema bump.
     #
@@ -3476,10 +3502,7 @@ def build_provider_visibility() -> dict:
     # nothing branches on is a change-detector, so the additive-key path — the
     # one the plan names as preferred when a consumer pins the string — is
     # taken. `catalog` present ⇒ this hermes can name connectable providers.
-    try:
-        payload["catalog"] = _provider_visibility_catalog()
-    except Exception:
-        pass
+    _record_visibility_block(payload, "catalog", _provider_visibility_catalog)
     return payload
 
 
@@ -3616,61 +3639,90 @@ def _resolve_active_provider_id() -> Optional[str]:
 
 def _codex_usage_login_detected() -> bool:
     """Codex lane detected when the OAuth status is logged-in OR the credential
-    pool holds any openai-codex entry."""
+    pool holds any openai-codex entry.
+
+    Two independent sources OR'd together, so a raise from the FIRST is not yet
+    an answer — the pool may still say yes, and that yes is the truth. But a
+    raise that ends with no affirmative source is NOT "not signed in": it is
+    "we could not tell", and per EG-6.1 that must reach the caller as a class,
+    not as a ``False`` indistinguishable from an empty pool. So the primary
+    error is held and re-raised only if nothing affirms; a raise from the pool
+    read itself propagates directly (one lane carries one named class).
+    """
+    primary_error: Optional[BaseException] = None
     try:
         from hermes_cli.auth import get_codex_auth_status
 
         if bool((get_codex_auth_status() or {}).get("logged_in")):
             return True
-    except Exception:
-        pass
-    try:
-        from agent.credential_pool import load_pool
+    except Exception as exc:  # noqa: BLE001 — held, re-raised only if unanswered
+        primary_error = exc
+    from agent.credential_pool import load_pool
 
-        return bool(load_pool("openai-codex").entries())
-    except Exception:
-        return False
+    if load_pool("openai-codex").entries():
+        return True
+    if primary_error is not None:
+        raise primary_error
+    return False
 
 
 def _openrouter_usage_login_detected() -> bool:
     """OpenRouter lane detected when the pool holds an entry OR the runtime
-    resolver finds a usable key."""
+    resolver finds a usable key.
+
+    Same held-primary-error discipline as [_codex_usage_login_detected]: a
+    failure that leaves the question unanswered is raised, never flattened into
+    the ``False`` that would silently delete the lane.
+    """
+    primary_error: Optional[BaseException] = None
     try:
         from agent.credential_pool import load_pool
 
         if load_pool("openrouter").entries():
             return True
-    except Exception:
-        pass
-    try:
-        from hermes_cli.runtime_provider import resolve_runtime_provider
+    except Exception as exc:  # noqa: BLE001 — held, re-raised only if unanswered
+        primary_error = exc
+    from hermes_cli.runtime_provider import resolve_runtime_provider
 
-        runtime = resolve_runtime_provider(requested="openrouter")
-        return bool(str(runtime.get("api_key", "") or "").strip())
-    except Exception:
-        return False
+    runtime = resolve_runtime_provider(requested="openrouter")
+    if str(runtime.get("api_key", "") or "").strip():
+        return True
+    if primary_error is not None:
+        raise primary_error
+    return False
 
 
 def _usage_lane_detected(provider_id: str) -> bool:
     """True iff the operator is signed-in / holds credentials for ``provider_id``.
-    Only detected lanes are ever emitted (undetected providers are omitted).
-    Fail-open per provider → False."""
-    try:
-        if provider_id == "openai-codex":
-            return _codex_usage_login_detected()
-        if provider_id == "anthropic":
-            from agent.anthropic_adapter import resolve_anthropic_token
 
-            return bool((resolve_anthropic_token() or "").strip())
-        if provider_id == "openrouter":
-            return _openrouter_usage_login_detected()
-        if provider_id == "nous":
-            from hermes_cli.auth import get_provider_auth_state
+    Detection has THREE outcomes, not two, and EG-6.1 stopped collapsing two of
+    them together:
 
-            tok = (get_provider_auth_state("nous") or {}).get("access_token")
-            return bool(isinstance(tok, str) and tok.strip())
-    except Exception:
-        return False
+    * ``True``  — signed in; the lane is fetched and emitted;
+    * ``False`` — credentials genuinely absent; the lane is OMITTED (this is now
+      the exclusive meaning of an omitted lane);
+    * RAISE     — the detector could not tell. This function no longer swallows.
+      [_detect_usage_candidates] catches it per provider and the lane IS emitted,
+      unavailable, naming the exception class.
+
+    The old blanket ``except Exception: return False`` was strictly worse than
+    the S1 defect it neighbours: S1 left a row saying "no usage data", whereas a
+    swallowed detector fault made the row VANISH from the Limits panel, leaving
+    nothing to carry a reason at all.
+    """
+    if provider_id == "openai-codex":
+        return _codex_usage_login_detected()
+    if provider_id == "anthropic":
+        from agent.anthropic_adapter import resolve_anthropic_token
+
+        return bool((resolve_anthropic_token() or "").strip())
+    if provider_id == "openrouter":
+        return _openrouter_usage_login_detected()
+    if provider_id == "nous":
+        from hermes_cli.auth import get_provider_auth_state
+
+        tok = (get_provider_auth_state("nous") or {}).get("access_token")
+        return bool(isinstance(tok, str) and tok.strip())
     return False
 
 
@@ -3742,8 +3794,16 @@ def _fetch_usage_lane(provider_id: str):
     raise UnknownUsageLaneError(provider_id)
 
 
-def _usage_failure_reason(exc: BaseException) -> str:
-    """The operator-facing reason for a raised usage fetch.
+def _usage_failure_reason(exc: BaseException, *, phase: str = "fetch") -> str:
+    """The operator-facing reason for a raised usage lane, in one grammar:
+    ``usage <phase> failed (<fact>)``.
+
+    ``phase`` names WHICH half of the lane raised — ``fetch`` (the default, the
+    only phase before EG-6.1) or ``detection``. It is a caller-supplied literal,
+    never derived from the exception, so it cannot leak anything; and it is
+    deliberately the SAME function rather than a sibling, because the
+    class-name-only rule below is the whole point and a second reason-builder
+    would be a second place to forget it.
 
     CLASS NAME ONLY for everything except an HTTP status error, where the bare
     numeric status is added — a status code leaks nothing (no token, no URL, no
@@ -3761,7 +3821,7 @@ def _usage_failure_reason(exc: BaseException) -> str:
     """
     name = type(exc).__name__
     if isinstance(exc, UnknownUsageLaneError):
-        return f"usage fetch failed ({name}: {exc.provider_id})"
+        return f"usage {phase} failed ({name}: {exc.provider_id})"
     status = None
     response = getattr(exc, "response", None)
     if response is not None:
@@ -3769,9 +3829,9 @@ def _usage_failure_reason(exc: BaseException) -> str:
         if isinstance(raw, int):
             status = raw
     if status is None or name != "HTTPStatusError":
-        return f"usage fetch failed ({name})"
+        return f"usage {phase} failed ({name})"
     suffix = " — re-auth may be required" if status in (401, 403) else ""
-    return f"usage fetch failed (HTTP {status}{suffix})"
+    return f"usage {phase} failed (HTTP {status}{suffix})"
 
 
 def _serialize_usage_window(window) -> Optional[dict]:
@@ -3853,12 +3913,40 @@ def _serialize_usage_lane(provider_id: str, snapshot, *, active: bool) -> dict:
     }
 
 
-def _detect_usage_candidates(only_provider: Optional[str]) -> list[str]:
+def _usage_lane_scope(only_provider: Optional[str]) -> tuple[str, ...]:
+    """The lanes this invocation may speak about, in stable emission order —
+    ``_USAGE_LANE_PROVIDERS`` narrowed by ``--provider``. FILTER ONLY: it never
+    adds an id, which is the property [UnknownUsageLaneError] leans on."""
     providers = _USAGE_LANE_PROVIDERS
     if only_provider:
         norm = str(only_provider).strip().lower()
         providers = tuple(p for p in providers if p == norm)
-    return [p for p in providers if _usage_lane_detected(p)]
+    return providers
+
+
+def _detect_usage_candidates(
+    only_provider: Optional[str],
+) -> tuple[list[str], dict[str, str]]:
+    """``(detected, detect_failures)`` — the two-value split EG-6.1 introduced.
+
+    ``detected`` are the lanes to fetch. ``detect_failures`` maps provider id →
+    the operator-facing reason for a detector that RAISED, so
+    [build_account_usage] can emit that lane unavailable-and-named instead of
+    letting it vanish. Isolation is per provider: one broken detector never
+    suppresses another lane, which is the same guarantee
+    [_fetch_usage_lanes] already gives the fetch half.
+    """
+    detected: list[str] = []
+    failures: dict[str, str] = {}
+    for provider in _usage_lane_scope(only_provider):
+        try:
+            hit = _usage_lane_detected(provider)
+        except Exception as exc:  # noqa: BLE001 — class/status only, per lane
+            failures[provider] = _usage_failure_reason(exc, phase="detection")
+            continue
+        if hit:
+            detected.append(provider)
+    return detected, failures
 
 
 def _fetch_usage_lanes(
@@ -3908,6 +3996,63 @@ def _fetch_usage_lanes(
     return [lanes_by_provider[p] for p in candidates if p in lanes_by_provider]
 
 
+#: The degrade stages that can have EATEN LANES — the discriminator
+#: [_usage_lanes_suppressed] reads, and the ONE place that judgement is written.
+#:
+#: The full stage vocabulary is these four plus ``active_provider``, which is
+#: deliberately absent here: a failed active-provider resolution suppresses no
+#: lanes at all, so an envelope degraded only there may still carry an honest
+#: empty lane list. Every stage name is a fixed literal chosen at the raising
+#: seam, never derived from an exception, so it leaks nothing.
+_USAGE_LANE_SUPPRESSING_STAGES: tuple[str, ...] = (
+    "detect",
+    "fetch",
+    "build",
+    "serialize",
+)
+
+
+def _stamp_usage_degraded(payload: dict, stage: str, exc: BaseException) -> dict:
+    """Record ``degraded[stage] = <ExceptionClass>`` on a usage envelope.
+
+    The same ``{unit: ExceptionClass}`` shape as ``block_errors`` on the
+    provider-visibility payload (see [_record_visibility_block]) — one idiom for
+    "this builder tried and failed", on both halves of the provider surface.
+
+    Why it exists: ``lanes: []`` and ``active_provider: null`` were each carrying
+    two meanings. Empty lanes meant "no signed-in providers" OR "a seam
+    collapsed"; a null active provider meant "none selected" OR "the resolver
+    threw". The renderer's positive claim ("no signed-in providers detected") was
+    the visible lie — see [_render_account_usage_human], which now consults this
+    field before making it.
+
+    First cause wins (``setdefault``): a detector collapse routinely makes the
+    seams after it collapse too, and the FIRST class is the one that explains the
+    envelope. Class name only, never ``str(exc)``.
+    """
+    payload.setdefault("degraded", {}).setdefault(stage, type(exc).__name__)
+    return payload
+
+
+def _usage_lanes_suppressed(payload: dict) -> Optional[str]:
+    """The exception class of a degrade that SUPPRESSED lanes, or None.
+
+    Not every degrade suppresses: a failed ``active_provider`` resolution leaves
+    lane collection untouched, so an envelope degraded only there may still
+    carry a complete, honest, EMPTY lane list — and the "no signed-in providers"
+    claim is legitimate. Only the stages in [_USAGE_LANE_SUPPRESSING_STAGES] can
+    have eaten lanes.
+    """
+    degraded = payload.get("degraded")
+    if not isinstance(degraded, dict):
+        return None
+    for stage in _USAGE_LANE_SUPPRESSING_STAGES:
+        found = degraded.get(stage)
+        if found:
+            return str(found)
+    return None
+
+
 def build_account_usage(
     *,
     only_provider: Optional[str] = None,
@@ -3916,29 +4061,48 @@ def build_account_usage(
     """Build the ``hermes.account_usage/v1`` envelope: one lane per detected
     provider login (codex / anthropic / openrouter / nous), fetched concurrently
     under an overall wall-clock bound. Fail-open at every seam — worst case the
-    envelope carries empty lanes."""
-    try:
-        active_provider = _resolve_active_provider_id()
-    except Exception:
-        active_provider = None
+    envelope carries empty lanes AND a ``degraded`` map naming which seam gave
+    way (EG-6.1: fail-open, but never fail-silent)."""
     payload: dict = {
         "schema": USAGE_SCHEMA,
         "generated_at": datetime.now(timezone.utc).isoformat(),
-        "active_provider": active_provider,
+        "active_provider": None,
         "lanes": [],
     }
     try:
-        candidates = _detect_usage_candidates(only_provider)
-    except Exception:
-        return payload
-    if not candidates:
-        return payload
+        payload["active_provider"] = _resolve_active_provider_id()
+    except Exception as exc:  # noqa: BLE001 — named, not swallowed
+        _stamp_usage_degraded(payload, "active_provider", exc)
+    active_provider = payload["active_provider"]
     try:
-        payload["lanes"] = _fetch_usage_lanes(
-            candidates, active_provider=active_provider, timeout=timeout
+        candidates, detect_failures = _detect_usage_candidates(only_provider)
+    except Exception as exc:  # noqa: BLE001 — named, not swallowed
+        return _stamp_usage_degraded(payload, "detect", exc)
+    if not candidates and not detect_failures:
+        return payload
+    fetched: list[dict] = []
+    if candidates:
+        try:
+            fetched = _fetch_usage_lanes(
+                candidates, active_provider=active_provider, timeout=timeout
+            )
+        except Exception as exc:  # noqa: BLE001 — named, not swallowed
+            fetched = []
+            _stamp_usage_degraded(payload, "fetch", exc)
+    # Merge the fetched lanes with the detector-failed ones, back into the stable
+    # `_USAGE_LANE_PROVIDERS` emission order: a lane whose DETECTOR raised holds
+    # its natural slot in the Limits panel rather than being appended after the
+    # healthy ones (or, as before EG-6.1, disappearing).
+    lanes_by_provider = {lane["provider"]: lane for lane in fetched}
+    for provider, reason in detect_failures.items():
+        lanes_by_provider[provider] = _unavailable_usage_lane(
+            provider, reason, active=provider == active_provider
         )
-    except Exception:
-        payload["lanes"] = []
+    payload["lanes"] = [
+        lanes_by_provider[p]
+        for p in _usage_lane_scope(only_provider)
+        if p in lanes_by_provider
+    ]
     return payload
 
 
@@ -3951,9 +4115,25 @@ def _render_account_usage_human(payload: dict) -> None:
         render_account_usage_lines,
     )
 
-    print(f"Active provider: {payload.get('active_provider') or '(none)'}")
+    raw_degraded = payload.get("degraded")
+    degraded = raw_degraded if isinstance(raw_degraded, dict) else {}
+    active_label = payload.get("active_provider") or "(none)"
+    if degraded.get("active_provider"):
+        # "(none)" would be a claim about the operator's configuration; the
+        # resolver never got far enough to make it.
+        active_label = f"(unknown — resolution failed ({degraded['active_provider']}))"
+    print(f"Active provider: {active_label}")
     lanes = payload.get("lanes") or []
     if not lanes:
+        # THE claim this stage exists to fence. "no signed-in providers detected"
+        # is a positive assertion about the operator's auth state, and it may be
+        # printed ONLY when detection actually ran and found none. When a seam
+        # that collects lanes gave way, the truth is that we do not know — so
+        # state the degrade instead, naming the class.
+        suppressed = _usage_lanes_suppressed(payload)
+        if suppressed:
+            print(f"No account-usage lanes: usage lanes unavailable ({suppressed}).")
+            return
         print("No account-usage lanes (no signed-in providers detected).")
         return
     for lane in lanes:
@@ -3993,16 +4173,27 @@ def _parse_usage_iso(value) -> Optional[datetime]:
         return None
 
 
-def _empty_usage_envelope() -> dict:
+def _empty_usage_envelope(degraded: Optional[tuple[str, BaseException]] = None) -> dict:
     """Minimal, always-serializable ``hermes.account_usage/v1`` envelope with no
     lanes — the guaranteed fallback whenever a richer build or serialization step
-    fails."""
-    return {
+    fails.
+
+    ``degraded`` is the ``(stage, exception)`` that forced the fallback. It is
+    optional only because a caller may genuinely have no cause to name; every
+    caller that DOES have one passes it, because this envelope's empty ``lanes``
+    is otherwise the same two-meaninged absence EG-6.1 removed everywhere else —
+    and here it is emitted at the exact moment something is known to be broken.
+    """
+    payload: dict = {
         "schema": USAGE_SCHEMA,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "active_provider": None,
         "lanes": [],
     }
+    if degraded is not None:
+        stage, exc = degraded
+        _stamp_usage_degraded(payload, stage, exc)
+    return payload
 
 
 def _emit_usage_json(payload: dict) -> None:
@@ -4012,14 +4203,19 @@ def _emit_usage_json(payload: dict) -> None:
     always-valid empty envelope serialized with the stdlib ``json.dumps`` so the
     fallback does not depend on the possibly-broken ``emit_json``. If even that
     write fails there is nothing more we can do, so it is swallowed and the verb
-    still exits 0."""
+    still exits 0.
+
+    The fallback envelope carries ``degraded: {"serialize": <Class>}``: it is
+    reporting zero lanes at the exact moment it knows the real payload could not
+    be written, and a client cannot be asked to tell that apart from a genuinely
+    idle account."""
     try:
         print(emit_json(payload))
         return
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 — named on the fallback envelope
+        serialize_error: BaseException = exc
     try:
-        print(json.dumps(_empty_usage_envelope()))
+        print(json.dumps(_empty_usage_envelope(("serialize", serialize_error))))
     except Exception:
         pass
 
@@ -4032,8 +4228,8 @@ def _cmd_usage(args) -> int:
     timeout = float(getattr(args, "timeout", DEFAULT_USAGE_TIMEOUT) or DEFAULT_USAGE_TIMEOUT)
     try:
         payload = build_account_usage(only_provider=only_provider, timeout=timeout)
-    except Exception:
-        payload = _empty_usage_envelope()
+    except Exception as exc:  # noqa: BLE001 — named on the fallback envelope
+        payload = _empty_usage_envelope(("build", exc))
     if getattr(args, "json", False):
         _emit_usage_json(payload)
         return 0
