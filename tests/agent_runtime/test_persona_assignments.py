@@ -1599,6 +1599,106 @@ def test_persona_chat_history_accounting_ignores_unrelated_session_sources(isola
     assert summary["reasons"] == {"no_instance_match": 1}
 
 
+def test_persona_chat_history_separates_a_retired_instance_from_a_lost_binding(
+    isolate_agent_runtime_root,
+):
+    # HC-H2: the "projection drops" chip must count LOST data, not the residue of
+    # the operator's own first-class retires. A retire archives the row and leaves
+    # the chat session behind by design (history is never destroyed), so an
+    # undifferentiated orphan count grew by one on every retire, forever — and
+    # buried the drops that actually mean something. Three sessions, three
+    # outcomes, one archive listing telling them apart.
+    from agent_runtime.parity import ProjectionAccountant
+
+    store = PersonaInstanceStore()
+    # (a) bound to a live instance.
+    live = store.open_chat(persona_id="dev", session_id="chat_live_1")
+    # (b) bound to an instance the operator retired through the first-class verb:
+    # the row exists ONLY in the archive now, and its chat session is the residue.
+    retiring = store.add_instance(
+        persona_id="qa",
+        placement_id="scene_child_9",
+        display_name="QA (9)",
+    )
+    retired_session_id = retiring.session_id
+    assert retired_session_id
+    store.retire(retiring.id, reason="placement deleted")
+    # (c) bound to an id that exists NOWHERE — live roster or archive. This is the
+    # genuinely anomalous orphan, and it must stay counted.
+    lost_instance_id = "personainst_never_placed_c30e16a4"
+
+    accountant = ProjectionAccountant("persona_chat_history")
+    rows = persona_chat_history_summary(
+        persona_instances=[live],
+        session_db=_FakeSessionDB(
+            [
+                {"id": "chat_live_1", "title": "live", "message_count": 1},
+                {
+                    "id": retired_session_id,
+                    "source": "agent_runtime_persona_chat",
+                    "title": "retired placement chat",
+                    "model_config": {"persona_instance_id": retiring.id},
+                },
+                {
+                    "id": "chat_lost_1",
+                    "source": "agent_runtime_persona_chat",
+                    "title": "lost binding",
+                    "model_config": {"persona_instance_id": lost_instance_id},
+                },
+            ]
+        ),
+        accountant=accountant,
+    )
+
+    assert [row["session_id"] for row in rows] == ["chat_live_1"]
+    summary = accountant.summary()
+    assert summary["considered"] == 3
+    assert summary["included"] == 1
+    assert summary["dropped"] == 2
+    # The whole stage in two lines: the retire is by-design lifecycle, the lost
+    # binding is still an anomaly, and neither one absorbed the other.
+    assert summary["reasons"] == {"instance_retired": 1, "no_instance_match": 1}
+    assert summary["by_design"] == ["instance_retired"]
+    # …and the codes are not merely present in the right counts, they are on the
+    # right sessions: a mutant that swapped them keeps both tallies at 1.
+    samples = {sample["entity_id"]: sample for sample in accountant.drop_samples()}
+    assert samples[retired_session_id]["code"] == "instance_retired"
+    assert samples[retired_session_id]["by_design"] is True
+    assert samples[retired_session_id]["detail"] == retiring.id
+    assert samples["chat_lost_1"]["code"] == "no_instance_match"
+    assert samples["chat_lost_1"]["by_design"] is False
+
+
+def test_retired_persona_instance_ids_lists_only_retirement_tombstones(
+    isolate_agent_runtime_root,
+):
+    # The bulk listing HC-H2's projection reads must answer the same question the
+    # per-id tombstone probe answers, not a wider one: only ``*_retire`` batches
+    # are tombstones. A reconcile/prune archive row means something else entirely,
+    # and reading it as "retired" would classify a live-lineage id's orphaned
+    # session as by-design lifecycle.
+    from agent_runtime import paths
+    from agent_runtime.persona_assignments import retired_persona_instance_ids
+
+    store = PersonaInstanceStore()
+    retiring = store.add_instance(
+        persona_id="dev",
+        placement_id="scene_child_11",
+        display_name="Dev (11)",
+    )
+    store.retire(retiring.id, reason="placement deleted")
+    reconcile_dir = paths.persona_instances_archive_dir() / "20260809T183345Z_reconcile"
+    reconcile_dir.mkdir(parents=True, exist_ok=True)
+    (reconcile_dir / "personainst_reconciled_only.json").write_text("{}", encoding="utf-8")
+
+    ids = retired_persona_instance_ids()
+
+    assert retiring.id in ids
+    assert "personainst_reconciled_only" not in ids
+    # The store is the discoverable door to the same listing.
+    assert PersonaInstanceStore().retired_instance_ids() == ids
+
+
 def test_persona_chat_history_summary_empty_bound_chat_is_safe_placeholder(isolate_agent_runtime_root):
     store = PersonaInstanceStore()
     instance = store.open_chat(persona_id="dev", session_id="chat_empty_123")

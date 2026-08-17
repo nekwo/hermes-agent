@@ -193,19 +193,21 @@ class RetiredPersonaInstanceError(AgentRuntimeError):
         self.archive_path = archive_path
 
 
-def _retired_persona_instance_archive_path(
-    persona_instance_id: str,
-) -> Path | None:
-    """Newest explicit-retire archive row for ``persona_instance_id``.
+def _retire_archive_batches() -> list[Path]:
+    """Newest-first ``*_retire`` batch directories under the instance archive.
 
-    Only ``*_retire`` batches are tombstones. Reconcile/prune archives answer
-    different lifecycle questions and must not make a future legitimate mint
-    impossible. Exact child paths avoid treating the instance id as a glob.
+    THE selection rule for retirement tombstones, in one place: only ``*_retire``
+    batches are tombstones. Reconcile/prune archives answer different lifecycle
+    questions and must not make a future legitimate mint impossible. Both the
+    per-id probe (:func:`_retired_persona_instance_archive_path`) and the
+    whole-archive listing (:func:`retired_persona_instance_ids`) read the archive
+    through this, so a second, subtly different notion of "retired" cannot be
+    born by one of them widening its glob.
     """
     archive_root = paths.persona_instances_archive_dir()
     if not archive_root.exists():
-        return None
-    archive_dirs = sorted(
+        return []
+    return sorted(
         (
             candidate
             for candidate in archive_root.iterdir()
@@ -214,11 +216,58 @@ def _retired_persona_instance_archive_path(
         key=lambda candidate: candidate.name,
         reverse=True,
     )
-    for archive_dir in archive_dirs:
+
+
+def _retired_persona_instance_archive_path(
+    persona_instance_id: str,
+) -> Path | None:
+    """Newest explicit-retire archive row for ``persona_instance_id``.
+
+    Exact child paths avoid treating the instance id as a glob.
+    """
+    for archive_dir in _retire_archive_batches():
         candidate = archive_dir / f"{persona_instance_id}.json"
         if candidate.is_file():
             return candidate
     return None
+
+
+def retired_persona_instance_ids() -> frozenset[str]:
+    """Every instance id carrying a retirement tombstone, in ONE archive listing.
+
+    The ARCHIVE half of the retirement predicate, for readers that must answer
+    "was this id deliberately retired?" for MANY ids at once — a snapshot
+    projection walking its sessions, say. The per-id probe
+    (:meth:`PersonaInstanceStore.retired_instance_archive_path`) stays the
+    predicate of record for a single target because it also composes the LIVE
+    half (a live row always wins); a caller of this listing must supply that half
+    itself, which the projection callers do by construction — they only ask after
+    an id has already failed to resolve against the live roster they hold.
+
+    Read once and memoized by the caller for the length of its build, never
+    re-walked per row: the archive is ~one directory per retire, forever.
+
+    NEVER RAISES. The listing is filesystem I/O over a store root that is
+    routinely a flaky UNC share on this runtime; a reader that cannot see the
+    archive cannot PROVE a retirement, so it reports the empty set (every id
+    stays unresolved/anomalous — the loud, pre-fix posture) and logs.
+    """
+    ids: set[str] = set()
+    try:
+        for archive_dir in _retire_archive_batches():
+            for row in archive_dir.iterdir():
+                if row.is_file() and row.suffix == ".json":
+                    instance_id = safe_assignment_token(row.stem)
+                    if instance_id:
+                        ids.add(instance_id)
+    except OSError:
+        logging.getLogger(__name__).warning(
+            "persona-instance retirement archive listing failed; "
+            "treating every instance as NOT retired",
+            exc_info=True,
+        )
+        return frozenset()
+    return frozenset(ids)
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -1267,6 +1316,12 @@ class PersonaInstanceStore:
         instance.updated_at = now()
         self._write(instance)
         return self.get(instance.id)
+
+    def retired_instance_ids(self) -> frozenset[str]:
+        """Every retired instance id, in one archive listing — the bulk reader's
+        door to :func:`retired_persona_instance_ids` (see it for the contract and
+        for why the LIVE half of the predicate is the caller's to supply)."""
+        return retired_persona_instance_ids()
 
     def retired_instance_archive_path(
         self,

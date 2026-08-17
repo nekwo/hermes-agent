@@ -14,7 +14,12 @@ from .mission_chat_turns import (
     mission_chat_turn_records,
 )
 from .parity import ProjectionAccountant
-from .persona_assignments import persona_instance_id_for, safe_assignment_text, safe_assignment_token
+from .persona_assignments import (
+    persona_instance_id_for,
+    retired_persona_instance_ids,
+    safe_assignment_text,
+    safe_assignment_token,
+)
 from .redaction import TEXT_SECRET_ASSIGNMENT_RE
 from .redaction_mode import redaction_observe_enabled
 from .relay_policy import parse_harness_delivery_marker, parse_relay_sender_marker
@@ -337,6 +342,11 @@ def persona_chat_history_summary(
     # render the newest 50.
     candidates: list[tuple[dict[str, Any], PersonaInstance, str, str, str | None]] = []
     seen: set[str] = set()
+    # The retirement archive listing, read AT MOST ONCE per build and only when an
+    # unresolved binding actually appears: a healthy runtime with no orphans pays
+    # nothing, and a runtime with fifty orphans still pays one listing, never one
+    # per session.
+    retired_instance_ids: frozenset[str] | None = None
     for raw in sessions or []:
         if not isinstance(raw, dict):
             continue
@@ -371,7 +381,30 @@ def persona_chat_history_summary(
         )
         if instance is None:
             if accountant is not None:
-                accountant.drop("no_instance_match", entity_id=session_id)
+                # Two very different facts wear the same shape here, and only the
+                # archive tells them apart: a session whose instance the operator
+                # RETIRED through the first-class verb (normal lifecycle — the
+                # placement ended, the chat stays inspectable) versus a binding
+                # that resolves nowhere at all (lost or inconsistent data). Left
+                # undifferentiated, the first grew the "projection drops" chip by
+                # one on every retire, forever, and buried the second.
+                #
+                # The classification is declared HERE, at the emission site, per
+                # ``parity.py``'s contract — a counter that special-cased the code
+                # would be the stale reader-side allowlist that contract retired.
+                if retired_instance_ids is None:
+                    retired_instance_ids = retired_persona_instance_ids()
+                if persisted_instance_id and persisted_instance_id in retired_instance_ids:
+                    # By design: still nonzero on a perfectly healthy runtime,
+                    # purely because retiring placements is normal lifecycle.
+                    accountant.drop(
+                        "instance_retired",
+                        entity_id=session_id,
+                        detail=persisted_instance_id,
+                        by_design=True,
+                    )
+                else:
+                    accountant.drop("no_instance_match", entity_id=session_id)
             # A session id can appear in both the source and broad pools;
             # mark it seen so a drop is only accounted once.
             seen.add(session_id)
