@@ -729,6 +729,146 @@ def rebind_persona_profile(
     return envelope
 
 
+def backfill_instance_profile_ids(
+    *,
+    persona_id: str | None = None,
+    dry_run: bool = True,
+    actor: str = "operator",
+    event_log: EventLog | None = None,
+) -> dict[str, Any]:
+    """Stamp null instance projections from their persona's binding.
+
+    B-4's migration lane. Deliberately NOT part of ``rebind_persona_profile``:
+    that verb MOVES a binding and its consequence report is about a change of
+    home. This one changes no persona's binding at all — it writes down, on each
+    projection row, the profile its persona already binds.
+
+    ``dry_run=True`` (the DEFAULT, unlike the rebind verb) computes the whole
+    report and writes nothing. That default is deliberate: this operates over
+    every persona at once when ``persona_id`` is omitted, so the accident-shape
+    is "ran it before reading it".
+
+    Refusals reuse the rebind ladder rather than growing a second one:
+
+    * ``instances_busy`` — an in-flight row blocks the WHOLE operation and is
+      named. A half-stamped store is the drift this is meant to retire.
+    * ``assignment_store_unreadable`` — inherited from
+      ``_instance_rows_for_persona``, which fails CLOSED.
+
+    Rows whose persona binds nothing are reported as ``skipped`` with reason
+    ``persona_unbound``: a null persona binding stays legal forever
+    (``profile_context`` — "running without one is supported and is not an
+    error"), and inventing ``base`` for it would be exactly the silent
+    behaviour change this stage promises not to make.
+
+    Rows that already carry a ``profile_id`` are never touched, even when it
+    DISAGREES with the persona — that is real drift and belongs to
+    ``rebind_persona_profile``, which knows how to move the artifacts too.
+    Reported as ``skipped`` with reason ``already_stamped`` (or
+    ``disagrees_with_persona``) so the divergence is visible rather than
+    quietly overwritten.
+    """
+    from .config import ensure_persisted_personas, load_agent_runtime_config
+    from .store import AgentStore
+
+    log = event_log or EventLog()
+    wanted = _clean(persona_id)
+
+    personas: dict[str, Any] = {}
+    for candidate in ensure_persisted_personas(load_agent_runtime_config()):
+        cid = _clean(getattr(candidate, "id", None))
+        if cid:
+            personas[cid] = candidate
+    try:
+        for candidate in AgentStore(event_log=log).list_all():
+            cid = _clean(getattr(candidate, "id", None))
+            if cid:
+                personas[cid] = candidate
+    except Exception:  # noqa: BLE001 — config-only rosters are legitimate
+        pass
+
+    targets = [pid for pid in sorted(personas) if wanted is None or pid == wanted]
+    if wanted is not None and not targets:
+        raise PersonaProfileRebindError(
+            "persona_not_persisted",
+            f"no persona '{wanted}' to backfill",
+            details={"persona_id": wanted},
+        )
+
+    planned: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    busy: list[dict[str, Any]] = []
+
+    for pid in targets:
+        binding_profile = _clean(getattr(personas[pid], "hermes_profile", None))
+        for row in _instance_rows_for_persona(pid, event_log=log):
+            existing = _clean(row.get("profile_id"))
+            entry = {
+                "persona_instance_id": row["persona_instance_id"],
+                "persona_id": pid,
+                "mode": row.get("mode"),
+                "from": existing,
+                "to": binding_profile,
+            }
+            if row.get("busy_reason"):
+                busy.append({**entry, "busy_reason": row["busy_reason"]})
+                continue
+            if existing:
+                entry["reason"] = (
+                    "already_stamped"
+                    if binding_profile is None or existing == binding_profile
+                    else "disagrees_with_persona"
+                )
+                skipped.append(entry)
+                continue
+            if binding_profile is None:
+                entry["reason"] = "persona_unbound"
+                skipped.append(entry)
+                continue
+            planned.append(entry)
+
+    if busy:
+        raise PersonaProfileRebindError(
+            "instances_busy",
+            "cannot backfill while instances are in flight: "
+            + ", ".join(f"{row['persona_instance_id']} ({row['busy_reason']})" for row in busy),
+            details={"instances": busy},
+        )
+
+    envelope: dict[str, Any] = {
+        "actor": actor,
+        "persona_id": wanted,
+        "dry_run": bool(dry_run),
+        "changed": False,
+        "instances_planned": planned,
+        "instances_skipped": skipped,
+        "instances_stamped": [],
+        "instances_failed": [],
+    }
+
+    if dry_run:
+        envelope["next_expected"] = (
+            "no store write and no event were emitted; re-run with dry_run=False to apply"
+        )
+        return envelope
+
+    stamped: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for entry in planned:
+        moved, bad = _cascade_instance_profiles(
+            str(entry["to"]),
+            [{"persona_instance_id": entry["persona_instance_id"], "profile_id": None}],
+            event_log=log,
+        )
+        stamped.extend({**entry, **row} for row in moved)
+        failed.extend({**entry, **row} for row in bad)
+
+    envelope["changed"] = bool(stamped)
+    envelope["instances_stamped"] = stamped
+    envelope["instances_failed"] = failed
+    return envelope
+
+
 def _cascade_instance_profiles(
     target_profile: str,
     moving: list[dict[str, Any]],

@@ -4900,6 +4900,47 @@ def _guard_official_docker_root_gateway() -> None:
     sys.exit(1)
 
 
+def _emit_gateway_home_receipt(emit_diag) -> dict:
+    """Build and emit this boot's home-resolution receipt. Returns the receipt.
+
+    Split out of :func:`run_gateway` so it is testable without booting a
+    gateway — ``run_gateway`` guards a live process and cannot be called in a
+    unit test.
+    """
+    from hermes_constants import get_default_hermes_root, get_hermes_home
+
+    from hermes_cli.gateway_home_receipt import (
+        RESOLUTION_DEFAULT,
+        RESOLUTION_ENV_VAR,
+        build_gateway_home_receipt,
+        env_key_names,
+        suspicious_home_row,
+        wrapper_profiles,
+    )
+
+    home = Path(get_hermes_home())
+    receipt = build_gateway_home_receipt(
+        hermes_home=home,
+        resolution=os.environ.get(RESOLUTION_ENV_VAR) or RESOLUTION_DEFAULT,
+        env_keys=env_key_names(home / ".env"),
+    )
+    emit_diag("gateway.home_resolution", **receipt)
+    logger.info("Gateway home resolution: %s", receipt["summary"])
+
+    suspicious = suspicious_home_row(
+        receipt,
+        installed_wrapper_profiles=wrapper_profiles(
+            Path(get_default_hermes_root()) / "profiles"
+        ),
+    )
+    if suspicious is not None:
+        emit_diag("gateway.home_suspicious", **suspicious)
+        logger.warning(
+            "%s — %s", suspicious["summary"], suspicious["fix_hint"]
+        )
+    return receipt
+
+
 def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, force: bool = False):
     """Run the gateway in foreground.
 
@@ -5031,6 +5072,18 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False, fo
         stdin_is_tty=_stdin_is_tty,
         absorb_windows_console_controls=_absorb_windows_console_controls,
     )
+
+    # Which home did this boot land on, and which rung of main.py's ladder put
+    # it there? Recorded because ``argv`` above CANNOT answer it: main.py strips
+    # ``--profile`` from sys.argv after resolving it (main.py:697-699), so a
+    # flag-pinned boot and a bare one are byte-identical in the line above. On
+    # 2026-08-16 that ambiguity is exactly what made the alice-gateway history
+    # unreadable. Best-effort throughout — a receipt must never take the gateway
+    # down.
+    try:
+        _emit_gateway_home_receipt(_exit_diag)
+    except Exception:  # noqa: BLE001
+        pass
 
     def _atexit_hook() -> None:
         _exit_diag("atexit.hook", sys_exc=repr(sys.exc_info()))

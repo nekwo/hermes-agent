@@ -595,6 +595,99 @@ per stage with its evidence.
 
 ---
 
+## 9. B-0 gate results (2026-08-16, read-only)
+
+Four of six assumptions came back REFUTED or CORRECTED. The plan's design
+ruling (Option B) survives all of them; two stage descriptions did not.
+
+| Tag | Verdict | Evidence |
+| --- | --- | --- |
+| **B-A1** | **REFUTED — every named candidate, and the trap itself** | See §9.1. |
+| B-A2 | **REFUTED** | Persona-shaped launcher argv exists and passes no `--profile`: `mission_chat_history_fetch_providers.dart:150` (`harness persona chat history --session-id`), `mission_control_bridge.dart:2524` (`persona-instance detail`), and the mission-chat capability family `:3235-3771`. `grep '--profile' lib/` → zero hits. NOT a live mis-homing — all are serve-preferred and the one-shot fallback still enters `persona_profile_context` in-process — but the audit's expected "no" was wrong. |
+| B-A3 | **CONFIRMED** | All 12 `resolve_persona_profile` call sites take a PERSONA; the turn path is `persona_runtime.py:142`. `PersonaInstance.profile_id` is read only by display/backing predicates (`persona_instance_summary:2303`, `_row_is_backed`). Projection-only, as expected. |
+| B-A4 | **CORRECTED** | `runtime.agent.create` creates INSTANCES, not personas. The null factory is `persona_assignments._profile_id_for_persona_or_template` (`:2276-2280`), reached from `:1642` and `add_instance:1681`. B-4 therefore lands there and does NOT touch `agent_create.py` / `serve_rpc.py`. |
+| B-A5 | **ONE bypass, class (b)** | Import-time freezes: NONE repo-wide. Stale dicts: none. The single defect is `tools/mcp_tool.py:_build_safe_env` (`:494-545`) + `_SAFE_ENV_KEYS` (`:372-374`): passes `HOME` raw, drops `HERMES_HOME`, so an MCP child inside a persona turn resolves `<profile>/home/.hermes`. Six live profiles have a `home/` dir. Fixed in B-2. |
+| B-A6 | **REFUTED** | `gateway.py:685` omits `--profile` when `profile == "default"`; `gateway/run.py:9519,9651` respawn a bare `hermes gateway restart`; wrappers/units pin correctly only when `HERMES_HOME` is exactly `<root>/profiles/<name>`, otherwise the child re-resolves through the sticky marker and overwrites the pin at `main.py:695`. B-1.3 fences the wrapper generator; the rest is recorded, not patched (upstream / out of scope). |
+
+### 9.1 A-1: the alice-gateway break is not a HERMES_HOME failure
+
+All four candidates the scoping session named are refuted by live read-only
+evidence:
+
+- **(i) a console-issued gateway verb** — the launcher contains NO gateway verb
+  at all (`grep -n "'gateway'" lib/` → zero matches). It also cannot reap one:
+  `ServeOrphanReapPolicy` requires a literal `harness serve` token and
+  documents sparing "the `pythonw` agent-gateway (a different verb)".
+- **(ii) a second token-less gateway under base** — no base-homed gateway has
+  EVER run. `profiles/base/logs/` contains no `gateway*.log`; all 308
+  `gateway-exit-diag` rows and every `gateway.log` live under `alice` (plus a
+  retired `aliceimagecron`).
+- **(iii) a wrapper regenerated without the flag** — the installed wrapper
+  double-pins (`.cmd:4,9` and `.vbs:6,17`). But it is **not what has been
+  running the gateway**: all 13 starts since 2026-08-01 record
+  `stdin_is_tty: true` (a `wscript`-launched hidden service has no tty), from
+  three different code checkouts — `X:\Eternia\hermes-agent` ×79,
+  `%LOCALAPPDATA%\hermes\hermes-agent` ×44, and on 2026-08-16 two **Claude Code
+  agent worktrees**.
+- **(iv) the sticky marker diverting a bare run** — the marker reads `alice`,
+  so rung 3 sends a bare `gateway run` TO alice. It helps here; it cannot divert.
+
+Positively established, partially: **2 of 10 observed terminations coincide
+within seconds with a Windows shutdown** (`1074`/`6006`/`109` at 2026-08-14
+12:33 and 2026-08-15 22:53 local, against `last_heartbeat_at` of 12:32:50 and
+22:53:12 — the diag timestamps are UTC). Nothing restarts the gateway at boot,
+because it is not actually running as the installed service.
+
+**Not established:** the mechanism of the other 8. `last_heartbeat_at` is not a
+reliable death clock — two runs stopped heartbeating ~50 s after start yet
+persisted for hours — so those terminations cannot be dated from this evidence.
+
+**Consequence for this plan, stated plainly: B-1..B-5 do not fix the observed
+alice-gateway break, and must not be described as doing so.** The failure is a
+supervision gap, not a profile-resolution failure. B-1's boot receipt makes the
+next occurrence one log line instead of an inference, which is the honest
+extent of it.
+
+## 10. B-5 verification log
+
+Live re-measure of §1.2, read-only, key names only (2026-08-16):
+
+| Fact | §1.2 said | Re-measured | Agrees? |
+| --- | --- | --- | --- |
+| Personas, all bound, targets exist | 5 / yes / yes | 5 / yes / yes | yes |
+| Instances, null `profile_id` | 16 / 1 (`personainst_qa_agent_644595cc`) | 16 / 1, same id | yes |
+| `.env` keys: base / alice | 1 / 18 incl. `TELEGRAM_*` | 1 (no `TELEGRAM_*`) / 18 (has them) | yes |
+| `launcher-qa-direct` | no `.env` | no `.env` | yes |
+| `active_profile` marker | — | `alice` | new |
+| Profiles with a `home/` dir | — | 6: aliceimagecron, base, launcher-dev, neko, qa, unbounded | new (A-5 blast radius) |
+
+**Migration claim — VERIFIED, not trusted.** The dry run was replicated against
+the live root in pure stdlib (no hermes import, no write, no `harness` command):
+**planned = 1** (`personainst_qa_agent_644595cc` → `launcher-qa`), **busy = 0**,
+skipped = 15. The one candidate's target is exactly what its persona already
+binds and exactly what `persona_instance_summary` already renders, so a null
+resolves identically before and after. No silent behaviour change.
+
+| Stage | Landed | New tests | Mutants killed |
+| --- | --- | --- | --- |
+| B-1 | resolution rung recorded; typed gateway boot receipt + suspicious-home warning; wrapper-pin invariant | 17 | 10/10 |
+| B-2 | `tools/mcp_tool.py` stdio child carries the resolved home; standard stated in 2 places | 7 | 4/4 |
+| B-3 | launcher setting demoted in title, copy, docs; projection unchanged | 6 | 5/5 |
+| B-4 | creation stamps the persona's profile; dry-run-first backfill | 11 | 7/7 |
+
+**Known behaviour change (B-2):** stdio MCP children previously received no
+`HERMES_HOME` and now receive the persona's resolved home.
+`HERMES_AUTH_HOME` is deliberately NOT propagated — the head-pin
+(`profile_context.py:303-306`) keeps one operator-visible auth/SessionDB store,
+and changing it is the provider-login plan's call, not this one.
+
+**Not done:** `rebind_persona_profile` has zero callers and no CLI verb exists,
+so the B-4 backfill is likewise a library function the operator cannot yet
+invoke. No Stage C screenshot was captured (the live launcher was left
+untouched).
+
+---
+
 *Standing constraints honoured: live root `X:/Eternia/.hermes/` read-only; no
 credential value printed or copied (key names only); no `harness serve` child
 spawned; PID 21004 / port 8090 / the running launcher untouched; `dart
