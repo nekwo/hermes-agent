@@ -559,6 +559,78 @@ def test_every_covered_domain_event_is_registered_or_declared_historical():
     )
 
 
+def test_every_office_entity_the_coverage_authority_knows_is_scopable():
+    """EG-1.3 (RD-H1) second witness: authority → scope, in a different file.
+
+    The office push sink's scope test and the promotion vocabulary are two ends
+    of one contract, and they forked once already: WV-H3 taught
+    ``patch_coverage`` that ``office_surface`` may promote and left the sink's
+    private ``office_actor``-only predicate alone, so a folder-only frame was
+    dropped with neither a patch nor a resync (task #57).
+
+    The sink test one file over pins scope → DELIVERY. This pins AUTHORITY →
+    scope, and it is the half that catches the NEXT WV-H3: covering a new office
+    entity without teaching ``office_patch_scope`` reds here even though no sink
+    test for that entity exists yet. The enumeration therefore comes from
+    ``patch_coverage``'s own namespace — the constants the promotion gate itself
+    reads — never from a list this file maintains.
+
+    Neither witness subsumes the other: the RD-H1 predicate mutant reds both, and
+    the sink mutant cannot satisfy this one because it never calls the sink.
+
+    The id SHAPE is left open on purpose. ``office_actor`` addresses a row under
+    a workspace (``"<workspace_id>/<actor_key>"``) and ``office_surface``
+    addresses the office row itself (a bare workspace id), so the requirement is
+    that at least one of the two shapes places the row — not that a future entity
+    must reuse either one. What is NOT negotiable is that some shape does.
+    """
+
+    from agent_runtime import patch_coverage
+    from agent_runtime.state_patches import office_patch_scope
+
+    office_entities = {
+        value
+        for name, value in vars(patch_coverage).items()
+        if name.startswith("OFFICE_")
+        and name.endswith("_ENTITY")
+        and isinstance(value, str)
+    }
+    # Non-vacuity: the enumeration really did find the entities, so a green run
+    # cannot mean "the loop below had nothing to check".
+    assert {"office_actor", "office_surface"} <= office_entities, office_entities
+
+    workspace = "ws_office_pilot"
+    for entity in sorted(office_entities):
+        placements = {
+            "bare workspace id": office_patch_scope(
+                {"entity": entity, "id": workspace, "op": "upsert", "changed": {"a": 1}}
+            ),
+            "workspace-prefixed id": office_patch_scope(
+                {
+                    "entity": entity,
+                    "id": f"{workspace}/row_key",
+                    "op": "upsert",
+                    "changed": {"a": 1},
+                }
+            ),
+        }
+        assert workspace in placements.values(), (
+            f"{entity!r} can be promoted by patch_coverage but "
+            f"office_patch_scope places no id shape of it into a workspace, so "
+            f"the office push sink would drop its frames with neither a patch "
+            f"nor a resync — teach state_patches.office_patch_scope. Got "
+            f"{placements}"
+        )
+
+    # The negative control, so "scopable" cannot degenerate into "returns the
+    # id": a persona row is real state at its watermark and moves nothing a
+    # one-workspace office projection holds, under EITHER id shape.
+    assert office_patch_scope({"entity": "persona_instance", "id": workspace}) is None
+    assert (
+        office_patch_scope({"entity": "persona_instance", "id": f"{workspace}/x"}) is None
+    )
+
+
 # --------------------------------------------------------------------------- #
 # EG-1.2 (RD-H3): an empty patch frame can never promote
 # --------------------------------------------------------------------------- #
