@@ -9485,95 +9485,50 @@ def _copilot_acp_status() -> Dict[str, Any]:
     }
 
 
-# Explicit, hand-tuned OAuth/account provider cards. These carry the bits that
-# can't be derived from the unified provider catalog: the OAuth ``flow`` shape,
-# the per-provider ``status_fn``, the ``cli_command`` fallback, and curated
-# display order. They are the OVERRIDE BASE for ``_build_oauth_catalog()``,
-# which unions them with every accounts-tab provider in ``provider_catalog()``
-# so newly-added OAuth/external providers appear automatically (no hand edit).
-# This tuple also still includes two entries that are NOT catalog providers but
-# must show on the Accounts tab: the api-key Anthropic PKCE card and the
-# synthetic ``claude-code`` subscription row.
+# Explicit, hand-tuned OAuth/account provider cards.
+#
+# The DATA (id / name / flow / cli_command / docs_url) was hoisted 2026-08-16
+# into ``hermes_cli.provider_catalog.OAUTH_FLOW_OVERRIDES`` so surfaces that do
+# not run this FastAPI dashboard — notably the Launcher, which drives a local
+# ``hermes`` CLI — can read the same login-flow identity instead of maintaining
+# a second copy. What stays HERE is the only part that is genuinely dashboard-
+# local: the per-provider ``status_fn`` callables.
+#
+# The tuple keeps its shape and its name: it is the OVERRIDE BASE for
+# ``_build_oauth_catalog()`` (which unions it with every accounts-tab provider
+# in ``provider_catalog()``), it preserves the curated display order, and it
+# still carries the two entries that are NOT catalog providers but must show on
+# the Accounts tab (the api-key Anthropic PKCE card and the synthetic
+# ``claude-code`` subscription row).
+#
 # ``flow`` describes the OAuth shape so the modal can pick the right UI:
 # ``pkce`` = open URL + paste callback code, ``device_code`` = show code +
 # verification URL + poll, ``external`` = read-only (delegated to a third-party
 # CLI like Claude Code or Qwen).
-_OAUTH_PROVIDER_CATALOG: tuple[Dict[str, Any], ...] = (
-    {
-        "id": "nous",
-        "name": "Nous Portal",
-        "flow": "device_code",
-        "cli_command": "hermes auth add nous",
-        "docs_url": "https://portal.nousresearch.com",
-        "status_fn": None,  # dispatched via auth.get_nous_auth_status
-    },
-    {
-        "id": "openai-codex",
-        "name": "OpenAI OAuth (ChatGPT)",
-        "flow": "device_code",
-        "cli_command": "hermes auth add openai-codex",
-        "docs_url": "https://platform.openai.com/docs",
-        "status_fn": None,  # dispatched via auth.get_codex_auth_status
-    },
-    {
-        "id": "qwen-oauth",
-        "name": "Qwen (via Qwen CLI)",
-        "flow": "external",
-        "cli_command": "hermes auth add qwen-oauth",
-        "docs_url": "https://github.com/QwenLM/qwen-code",
-        "status_fn": None,  # dispatched via auth.get_qwen_auth_status
-    },
-    {
-        "id": "minimax-oauth",
-        "name": "MiniMax (OAuth)",
-        # MiniMax's flow is structurally device-code (verification URI +
-        # user code, backend polls the token endpoint) with a PKCE
-        # extension for code-binding. The dashboard renders the same UX
-        # as Nous's device-code flow; the PKCE bit is a security
-        # extension that doesn't change the operator experience.
-        "flow": "device_code",
-        "cli_command": "hermes auth add minimax-oauth",
-        "docs_url": "https://www.minimax.io",
-        "status_fn": None,  # dispatched via auth.get_minimax_oauth_auth_status
-    },
-    {
-        "id": "xai-oauth",
-        "name": "xAI Grok OAuth (SuperGrok / Premium+)",
-        # Device code is the default because it works in remote shells,
-        # containers, and desktop installs without requiring a reachable
-        # 127.0.0.1 callback.
-        "flow": "device_code",
-        "cli_command": "hermes auth add xai-oauth",
-        "docs_url": "https://hermes-agent.nousresearch.com/docs/guides/xai-grok-oauth",
-        "status_fn": None,  # dispatched via auth.get_xai_oauth_auth_status
-    },
-    {
-        "id": "copilot-acp",
-        "name": "GitHub Copilot (ACP)",
-        "flow": "external",
-        "cli_command": "copilot /login",
-        "docs_url": "https://docs.github.com/en/copilot",
-        "status_fn": _copilot_acp_status,
-    },
-    # ── Anthropic / Claude entries sit at the bottom: the API-key path
-    # first, then the subscription OAuth path (which only works with extra
-    # usage credits on top of a Claude Max plan — see disclaimer in name).
-    {
-        "id": "anthropic",
-        "name": "Anthropic API Key",
-        "flow": "pkce",
-        "cli_command": "hermes auth add anthropic",
-        "docs_url": "https://docs.claude.com/en/api/getting-started",
-        "status_fn": _anthropic_oauth_status,
-    },
-    {
-        "id": "claude-code",
-        "name": "Anthropic OAuth: Required Extra Usage Credits to Use Subscription",
-        "flow": "external",
-        "cli_command": "claude setup-token",
-        "docs_url": "https://docs.claude.com/en/docs/claude-code",
-        "status_fn": _claude_code_only_status,
-    },
+def _hoisted_oauth_flow_overrides() -> tuple[Dict[str, Any], ...]:
+    """The hoisted flow/cli/docs rows, or an empty tuple if the catalog module
+    cannot be imported. Defensive because a provider-plugin import error must
+    degrade the Accounts tab to the catalog-derived rows, never blank the whole
+    dashboard at import time."""
+    try:
+        from hermes_cli.provider_catalog import OAUTH_FLOW_OVERRIDES
+
+        return tuple(dict(row) for row in OAUTH_FLOW_OVERRIDES)
+    except Exception:
+        return ()
+
+
+_OAUTH_STATUS_FNS: Dict[str, Any] = {
+    # Providers absent from this map dispatch through the id-based fallback in
+    # ``_resolve_provider_status`` (nous, openai-codex, qwen-oauth, ...).
+    "copilot-acp": _copilot_acp_status,
+    "anthropic": _anthropic_oauth_status,
+    "claude-code": _claude_code_only_status,
+}
+
+_OAUTH_PROVIDER_CATALOG: tuple[Dict[str, Any], ...] = tuple(
+    {**dict(_row), "status_fn": _OAUTH_STATUS_FNS.get(_row["id"])}
+    for _row in _hoisted_oauth_flow_overrides()
 )
 
 
@@ -9688,14 +9643,11 @@ def _oauth_provider_disconnect_command(provider: Dict[str, Any]) -> Optional[str
     file — the two sources ``read_claude_code_credentials()`` consults. Returns
     None for providers we can't safely clear (the GUI shows a manual hint).
     """
-    if provider.get("flow") != "external":
-        return None
-    if provider.get("id") == "claude-code":
-        rm_file = "rm -f ~/.claude/.credentials.json"
-        if sys.platform == "darwin":
-            return f'security delete-generic-password -s "Claude Code-credentials" 2>/dev/null; {rm_file}'
-        return rm_file
-    return None
+    from hermes_cli.provider_catalog import disconnect_command_for
+
+    return disconnect_command_for(
+        str(provider.get("id") or ""), str(provider.get("flow") or "")
+    )
 
 
 def _oauth_provider_disconnect_hint(provider: Dict[str, Any], status: Dict[str, Any]) -> Optional[str]:
