@@ -2103,6 +2103,7 @@ def test_the_reclaim_pair_joins_the_manifest_without_moving_the_contract_version
         "runtime.agent.create",
         "runtime.office.get",
         "runtime.office.remove",
+        "runtime.office.resolve_conflict",
         "runtime.office.subscribe",
         "runtime.office.surface.update",
         "runtime.office.unsubscribe",
