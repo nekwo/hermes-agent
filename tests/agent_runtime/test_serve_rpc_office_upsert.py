@@ -913,6 +913,7 @@ def test_the_method_set_grew_and_the_contract_integer_did_not_move():
             "runtime.office.get",
             "runtime.office.remove",
             "runtime.office.subscribe",
+            "runtime.office.surface.update",
             "runtime.office.unsubscribe",
             "runtime.office.upsert",
     ]}
@@ -1032,6 +1033,7 @@ def test_the_write_method_is_transport_agnostic_and_answers_on_the_socket():
                     "runtime.office.get",
                     "runtime.office.remove",
                     "runtime.office.subscribe",
+                    "runtime.office.surface.update",
                     "runtime.office.unsubscribe",
                     "runtime.office.upsert",
                 ],
