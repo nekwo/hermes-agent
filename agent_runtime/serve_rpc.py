@@ -82,7 +82,10 @@ here), not cosmetics, and which no client can derive from the ids it already
 has. The bound is the snapshot's own ``MAX_OFFICE_ACTORS_PROJECTED``, reused
 rather than re-declared, and a truncation is ACCOUNTED (``actors_truncated``) —
 a silent cut that reads as an empty office is the failure this whole document
-is about.
+is about. So is the OTHER way the list can be short: an actor file that exists
+and will not decode is counted too (``actors_unreadable``), because the store's
+skip-and-continue used to hand this projection a shortened list that then
+computed its own truncation from the shortened length and arrived at zero.
 
 Prediction and reconciliation (decision doc, Stage 2c)
 -----------------------------------------------------
@@ -439,7 +442,12 @@ def _office_projection(workspace_id: str) -> dict | None:
         return None
 
     surface = store.get_surface(workspace_id)
-    actors = store.list_actors(workspace_id)
+    # ``scan_actors``, not ``list_actors``: the cut below is measured against the
+    # scan's own length, and a list that had already dropped its unreadable files
+    # made that subtraction answer 0 — a projection shortened by the platform,
+    # describing itself as complete.
+    scan = store.scan_actors(workspace_id)
+    actors = scan.actors
     projected = actors[:MAX_OFFICE_ACTORS_PROJECTED]
 
     items = [
@@ -479,6 +487,13 @@ def _office_projection(workspace_id: str) -> dict | None:
         # that read as a smaller office would be indistinguishable from actors
         # having been removed.
         "actors_truncated": max(0, len(actors) - len(projected)),
+        # The OTHER way this projection can be short, and the one it used to
+        # hide completely: files that exist and would not decode. Its sibling
+        # above counts a cut WE chose; this one counts rows the platform took.
+        # Additive — an old launcher ignores the key — and it rides the shared
+        # ``_office_projection``, so the subscribe baseline and ``get`` cannot
+        # disagree about how complete the office they just handed over was.
+        "actors_unreadable": scan.unreadable,
     }
 
 
@@ -930,7 +945,7 @@ def _runtime_office_upsert(
     untouched — ``harness office actor-restore``, and the CLI's own override.
     """
 
-    from agent_runtime.errors import StaleRevision, SyncConflict
+    from agent_runtime.errors import ArchiveUnreadable, StaleRevision, SyncConflict
     from agent_runtime.office_class_key_guard import class_key_collision
     from agent_runtime.office_store import OfficeStore
 
@@ -1057,6 +1072,26 @@ def _runtime_office_upsert(
             str(exc),
             {"reason": "sync_conflict", "workspace_id": workspace_id},
         )
+    except ArchiveUnreadable as exc:
+        # The archived copy of this key exists and would not decode, so the
+        # revision this write must bump is unknown. NOT a 4090: no guard refused
+        # anything and there is no prediction to rebase — the store declined to
+        # invent a base. ``-32600`` is the band this runtime already spends on
+        # "cannot serve this right now" with ``data.reason`` as the branch
+        # (``baseline_unavailable`` on the subscribe lane), and the cure is the
+        # same shape: ask again once the file is readable, or have an operator
+        # repair/remove the archive copy. Retrying is safe and may well work —
+        # an AV hold is transient — but the client must not paper over it by
+        # writing UNGUARDED, which is what a revision of 1 would have invited.
+        return err(
+            rid,
+            ERR_INVALID_REQUEST,
+            str(exc),
+            {
+                "reason": ArchiveUnreadable.code,
+                "workspace_id": workspace_id,
+            },
+        )
     except ValueError as exc:
         # Every ``invalid_request: …`` the store raises while normalizing the
         # payload — a missing persona_id, an unparseable position, a
@@ -1127,7 +1162,7 @@ def _runtime_office_remove(
     than a write that undoes it.
     """
 
-    from agent_runtime.errors import NotFound, StaleRevision
+    from agent_runtime.errors import ArchiveUnreadable, NotFound, StaleRevision
     from agent_runtime.office_store import OfficeStore
 
     workspace_id = _workspace_id_param(params)
@@ -1227,6 +1262,28 @@ def _runtime_office_remove(
                 "workspace_id": workspace_id,
                 "actor_key": actor_key,
                 "expect_revision": expect_revision,
+            },
+        )
+    except ArchiveUnreadable as exc:
+        # The already-archived (idempotent) branch: this key's archive copy is
+        # the only place its post-archive revision lives, and this ack CARRIES
+        # that revision as the token a later guarded write must present. A decode
+        # failure there is the token going missing, so the refusal is typed with
+        # the same reason the upsert leg spends — one string per condition, not
+        # one per verb.
+        #
+        # What it replaced was worse than an untyped crash: ``JSONDecodeError``
+        # is a ``ValueError``, so the bare read fell into the ``actor_invalid``
+        # arm below and told the client to FIX ITS PAYLOAD for a corrupt file on
+        # the server. The mutation test for this arm still shows ``-32602``.
+        return err(
+            rid,
+            ERR_INVALID_REQUEST,
+            str(exc),
+            {
+                "reason": ArchiveUnreadable.code,
+                "workspace_id": workspace_id,
+                "actor_key": actor_key,
             },
         )
     except ValueError as exc:

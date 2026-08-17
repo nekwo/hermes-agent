@@ -637,6 +637,54 @@ def test_an_unresolved_sync_conflict_is_a_different_reason_from_a_stale_revision
     assert _positions()[QA_INSTANCE] == [-8.0, -2.0]
 
 
+def test_a_re_add_over_an_unreadable_archive_refuses_typed_and_acks_no_revision_1():
+    """EG-1.5 / RD-H4. The guard token cannot be re-minted from nothing.
+
+    An archived key's revision is where the office's concurrency token LIVES
+    between a remove and the re-add that follows it, and ``upsert_actor`` bases
+    the new revision on it precisely so the number a peer holds stays meaningful.
+    The store used to swallow a decode failure there — ``archived = None`` → base
+    0 → **revision 1** — handing every client a token BELOW the one they already
+    had. EG-5.1 arms exactly that comparison, which is why this is hard-before
+    it: a guard is worth nothing if the server can silently rewind the number it
+    is guarding.
+
+    **Anti-vacuity.** Falling through to base 0 is the mutation. *Probed fields:*
+    the whole error frame (a mutant produces a RESULT and cannot carry
+    ``archive_unreadable`` at all) AND the absence of any actor file — the mutant
+    writes one at revision 1, which is the very ack this test's name refuses.
+    """
+
+    from agent_runtime import paths
+
+    store = _seed()
+    for _ in range(6):
+        store.upsert_actor(WORKSPACE, _actor_payload(1.0, 1.0), updated_by="seed-operator")
+    assert store.get_actor(WORKSPACE, QA_INSTANCE).revision == 7
+    store.remove_actor(WORKSPACE, QA_INSTANCE)
+    archived_path = paths.office_archived_actor_path(WORKSPACE, QA_INSTANCE)
+    archived_path.write_text("{truncated", encoding="utf-8")
+
+    reply = _upsert("readd", {"workspace_id": WORKSPACE, "actor": _actor_payload(5.0, 5.0)})
+
+    assert reply == {
+        "jsonrpc": "2.0",
+        "id": "readd",
+        "error": {
+            "code": -32600,
+            "message": f"archive_unreadable:{QA_INSTANCE} (JSONDecodeError)",
+            "data": {
+                "reason": "archive_unreadable",
+                "workspace_id": WORKSPACE,
+            },
+        },
+    }
+    # No ack, and no write behind the refusal: no revision-1 actor file, and the
+    # archive copy left as found for an operator to repair.
+    assert not paths.office_actor_path(WORKSPACE, QA_INSTANCE).exists()
+    assert archived_path.read_text(encoding="utf-8") == "{truncated"
+
+
 def test_an_unknown_workspace_is_refused_and_no_office_is_authored_for_the_typo():
     """The read leg refuses an unknown workspace so a typo cannot render as a
     blank canvas. The write leg must refuse the SAME way, and the reason it
@@ -943,6 +991,7 @@ def test_the_read_projection_grew_a_key_without_dropping_one():
         "updated_at",
         "items",
         "actors_truncated",
+        "actors_unreadable",
     }
     for item in result["items"]:
         assert set(item) == {

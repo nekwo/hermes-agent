@@ -29,13 +29,19 @@ Hard invariants this store upholds:
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, NamedTuple
 
 from hermes_time import now
 from utils import atomic_json_write
 
 from . import office_models, paths
-from .errors import AlreadyExists, NotFound, StaleRevision, SyncConflict
+from .errors import (
+    AlreadyExists,
+    ArchiveUnreadable,
+    NotFound,
+    StaleRevision,
+    SyncConflict,
+)
 from .events import EventLog
 from .locks import office_lock
 from .models import Event, OfficeActor, OfficeItem, OfficeSurface
@@ -49,6 +55,27 @@ from .serde import from_jsonable, to_jsonable
 ARCHIVED_LEDGER_CAP = 5000
 MAX_ITEMS_PER_ACTOR = 32
 MAX_FOLDERS = 64
+
+
+class ActorScan(NamedTuple):
+    """What an actor-directory scan FOUND, beside what it could not read.
+
+    The second field is the whole point. ``_read_actor_dir`` has always skipped
+    a file it could not decode and returned the rest, so every reader downstream
+    received a SHORTER list that described itself as complete — and the office
+    projection then computed ``actors_truncated`` from the already-shortened
+    list, arriving at 0. A launcher rendering that answer cannot tell a desk that
+    was removed from a desk whose file the platform would not open.
+
+    Two fields rather than a bare list because the two facts have to travel
+    TOGETHER: any seam that carried only the actors would re-open the hole at
+    that seam, which is exactly how the projection acquired it.
+    """
+
+    actors: list[OfficeActor]
+    #: How many ``*.json`` files in the scanned directories existed and did not
+    #: decode. NEVER folded into ``actors`` and never silently zero.
+    unreadable: int
 
 
 def _safe_id(value: Any) -> str | None:
@@ -401,11 +428,30 @@ class OfficeStore:
     def actor_exists(self, workspace_id: str, actor_key: str) -> bool:
         return paths.office_actor_path(workspace_id, actor_key).exists()
 
-    def list_actors(self, workspace_id: str, *, include_archived: bool = False) -> list[OfficeActor]:
-        actors = self._read_actor_dir(paths.office_actors_dir(workspace_id))
+    def scan_actors(self, workspace_id: str, *, include_archived: bool = False) -> ActorScan:
+        """Every actor this workspace HAS, plus how many files did not decode.
+
+        THE chokepoint. ``list_actors`` is the thin list view over it, so the
+        sixteen callers that only want rows keep their signature while the one
+        caller that must not lie about completeness — the office projection both
+        ``runtime.office.get`` and ``runtime.office.subscribe`` answer from — can
+        ask the fuller question. Forking those two readers is the failure this
+        shape forbids: a count that reached ``get`` and not the subscribe
+        baseline would put the two back in the silent-disagreement state
+        ``_office_projection`` was extracted to end.
+        """
+
+        scan = self._read_actor_dir(paths.office_actors_dir(workspace_id))
+        actors = scan.actors
+        unreadable = scan.unreadable
         if include_archived:
-            actors = [*actors, *self._read_actor_dir(paths.office_archive_dir(workspace_id))]
-        return sorted(actors, key=lambda a: a.actor_key)
+            archived = self._read_actor_dir(paths.office_archive_dir(workspace_id))
+            actors = [*actors, *archived.actors]
+            unreadable += archived.unreadable
+        return ActorScan(sorted(actors, key=lambda a: a.actor_key), unreadable)
+
+    def list_actors(self, workspace_id: str, *, include_archived: bool = False) -> list[OfficeActor]:
+        return self.scan_actors(workspace_id, include_archived=include_archived).actors
 
     def conflict_actor_keys(self, workspace_id: str) -> list[str]:
         conflicts_dir = paths.office_conflicts_dir(workspace_id)
@@ -461,10 +507,22 @@ class OfficeStore:
             archived_path = paths.office_archived_actor_path(wsid, actor_key)
             archived: OfficeActor | None = None
             if existing is None and archived_path.exists():
+                # REFUSED, not swallowed. This read is where the revision guard's
+                # token lives between a remove and the re-add that follows it:
+                # ``base_revision`` below takes the archived revision precisely so
+                # a re-added key carries its history forward. ``archived = None``
+                # made the base 0 and the new revision 1 — a token BELOW the one
+                # every peer and every launcher read model already holds, so the
+                # next guarded write on this key reads as a stale prediction
+                # against a server that silently rewound. A fresh start is a
+                # decision an operator makes (``actor-restore``, a deliberate
+                # re-key), never one an unreadable file makes for them.
                 try:
                     archived = from_jsonable(OfficeActor, _read_json(archived_path))
-                except Exception:
-                    archived = None
+                except Exception as exc:
+                    raise ArchiveUnreadable(
+                        f"archive_unreadable:{actor_key} ({type(exc).__name__})"
+                    ) from exc
             _check_revision(existing.revision if existing else None, expect_revision)
             ts = now()
             base_revision = existing.revision if existing else (archived.revision if archived else 0)
@@ -534,7 +592,17 @@ class OfficeStore:
                 # Idempotent: already archived → return the archived copy.
                 archived_path = paths.office_archived_actor_path(wsid, actor_key)
                 if archived_path.exists():
-                    return from_jsonable(OfficeActor, _read_json(archived_path))
+                    # Typed for the same reason the upsert's twin is: the ack
+                    # this branch returns CARRIES the revision, so a decode
+                    # failure here is the guard token going missing, not a
+                    # generic handler crash. Raising the same class means one
+                    # reason string covers the condition on both write verbs.
+                    try:
+                        return from_jsonable(OfficeActor, _read_json(archived_path))
+                    except Exception as exc:
+                        raise ArchiveUnreadable(
+                            f"archive_unreadable:{actor_key} ({type(exc).__name__})"
+                        ) from exc
                 raise NotFound(f"office_actor:{actor_key}")
             actor = self.get_actor(wsid, actor_key)
             _check_revision(actor.revision, expect_revision)
@@ -783,20 +851,28 @@ class OfficeStore:
 
     # --- prune lane (plan §4.3) --------------------------------------------
 
-    def archive_actors_for_instance(self, persona_instance_id: str, *, reason: str = "instance_reaped") -> int:
+    def archive_actors_for_instance(self, persona_instance_id: str, *, reason: str = "instance_reaped") -> dict:
         """Hermes prune-lane hook: archive every active placement bound to a
         reaped persona instance so no phantom desk file re-materializes the
         agent (NEVER a launcher-side filter — the orphan-tombstone precedent).
         Persona-id-keyed placements survive instance churn by design.
+
+        Returns ``{"archived": N, "failed": M}`` rather than a bare int. The
+        per-actor swallow KEEPS the loop — a prune must not die on one bad file,
+        and the retirement it serves is authoritative with or without the office
+        projection — but a bare ``0`` meant two opposite things: nothing matched,
+        and three matches all failed. The dict is the same shape
+        ``archive_orphaned_surface`` beside it already returns.
         """
 
         target = str(persona_instance_id or "").strip()
         if not target:
-            return 0
+            return {"archived": 0, "failed": 0}
         from .persona_assignments import canonical_persona_instance_id
 
         canonical = canonical_persona_instance_id(target) or target
         archived = 0
+        failed = 0
         for wsid in self.list_workspaces():
             for actor in self.list_actors(wsid):
                 bound = actor.persona_instance_id
@@ -808,21 +884,49 @@ class OfficeStore:
                     self.remove_actor(wsid, actor.actor_key, reason=reason, updated_by="harness")
                     archived += 1
                 except Exception:
+                    failed += 1
                     continue
-        return archived
+        return {"archived": archived, "failed": failed}
 
     # --- internal helpers ---------------------------------------------------
 
-    def _read_actor_dir(self, directory) -> list[OfficeActor]:
+    def _read_actor_dir(self, directory) -> ActorScan:
+        """One directory of actor files, COUNTING the ones that would not open.
+
+        The skip stays — a whole office must not vanish because one file is
+        mid-write or held by an AV scanner — but ``continue`` alone made the skip
+        invisible, and an invisible skip is a shortened projection that reports
+        itself complete. The count leaves with the rows.
+
+        Logged once per scan, aggregated by exception CLASS: an operator needs to
+        know whether they are looking at a share violation or a half-written JSON
+        file, and per-file lines would turn a directory of stale files into a log
+        flood on every read of the office. Class only, never the message — the
+        same disclosure rule the rest of this runtime's receipts follow.
+        """
+
         actors: list[OfficeActor] = []
         if not directory.exists():
-            return actors
-        for path in directory.glob("*.json"):
+            return ActorScan(actors, 0)
+        unreadable = 0
+        classes: dict[str, int] = {}
+        for path in sorted(directory.glob("*.json")):
             try:
                 actors.append(from_jsonable(OfficeActor, _read_json(path)))
-            except Exception:
-                continue
-        return actors
+            except Exception as exc:
+                unreadable += 1
+                name = type(exc).__name__
+                classes[name] = classes.get(name, 0) + 1
+        if classes:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "office actor files unreadable in %s: %d (%s)",
+                directory.name,
+                unreadable,
+                ", ".join(f"{name} x{count}" for name, count in sorted(classes.items())),
+            )
+        return ActorScan(actors, unreadable)
 
     def _archive_actor_locked(self, surface: OfficeSurface, actor: OfficeActor, *, reason: str, updated_by: str, emit: bool = True) -> None:
         actor.state = "archived"

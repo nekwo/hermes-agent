@@ -802,6 +802,54 @@ def test_a_readable_watermark_of_literally_zero_from_an_empty_log_still_subscrib
     assert frame["result"]["watermark"]["event_offset"] == 0
 
 
+# ── EG-1.5 / RD-H4: the baseline counts what it could not read ──────────────
+
+
+def test_the_subscribe_baseline_carries_the_unreadable_count_get_reports():
+    """THE chokepoint witness — a second, different reader of one projection.
+
+    ``actors_unreadable`` is only worth having if the subscribe BASELINE carries
+    it: a client folds patches onto the body this reply hands it, so a count that
+    reached ``runtime.office.get`` and not this reply would tell the launcher its
+    office was complete on exactly the lane where it matters most.
+
+    Both readers already share ``_office_projection``, and that is the property
+    under test. This test cannot pass if the fix forked the chokepoint —
+    patching ``get``'s path and leaving the baseline alone is the mutation, and
+    the assertion is equality between the two replies' fields, not two separate
+    literals that could drift apart with the code.
+    """
+
+    from agent_runtime import paths
+
+    _seed_office()
+    (paths.office_actors_dir(WORKSPACE) / "broken.json").write_text(
+        "{not json", encoding="utf-8"
+    )
+    hub = _FakeHub()
+    OFFICE_SUBSCRIPTIONS.bind(lambda: hub)
+
+    subscribed = _subscribe(
+        context=serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+    )["result"]
+    got = serve_rpc.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": "r2",
+            "method": "runtime.office.get",
+            "params": {"workspace_id": WORKSPACE},
+        }
+    )["result"]
+
+    assert subscribed["actors_unreadable"] == 1
+    assert subscribed["actors_unreadable"] == got["actors_unreadable"]
+    # And the readable actor still crossed: counting the loss must not become
+    # refusing the projection.
+    assert [item["item_id"] for item in subscribed["items"]] == [
+        "personainst_qa_agent_9c8a382f"
+    ]
+
+
 def test_an_unknown_workspace_is_refused_before_anything_is_registered():
     """Same 4001 ``runtime.office.get`` gives, and for the same reason. Asserted
     together with an empty hub: a subscribe that registered first and validated

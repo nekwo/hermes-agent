@@ -10,7 +10,12 @@ from __future__ import annotations
 import pytest
 
 from agent_runtime import office_models, paths
-from agent_runtime.errors import NotFound, StaleRevision, SyncConflict
+from agent_runtime.errors import (
+    ArchiveUnreadable,
+    NotFound,
+    StaleRevision,
+    SyncConflict,
+)
 from agent_runtime.events import EventLog
 from agent_runtime.office_store import OfficeStore
 from agent_runtime.snapshot import SNAPSHOT_CONTRACT_VERSION, build_snapshot
@@ -192,6 +197,119 @@ def test_restore_missing_raises():
         store.restore_actor(ws, "ghost")
 
 
+# ── EG-1.5 / RD-H4: the scan counts what it could not read ─────────────────
+
+
+@pytest.mark.parametrize("corrupt_count", [1, 2])
+def test_a_corrupt_actor_file_is_counted_not_vanished(corrupt_count, caplog):
+    """``continue`` alone made a shortened office indistinguishable from a
+    smaller one.
+
+    ``_read_actor_dir`` has always skipped an actor file it could not decode, and
+    the skip has to stay — a whole office must not vanish because one file is
+    mid-write or held by an AV scanner. What could not stay is the SILENCE: every
+    reader downstream got a shorter list that described itself as complete.
+
+    **Anti-vacuity.** Restoring the bare ``continue`` is the mutation. The count
+    is driven to TWO distinct values by this parametrize, so a mutant reporting a
+    constant matches at most one; a mutant that skips silently reports 0 and
+    matches neither. The readable actors are asserted in the same breath, which
+    is what stops the opposite over-correction (refusing the whole scan) from
+    passing.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    store.upsert_actor(ws, _actor_payload("dev"))
+    store.upsert_actor(ws, _actor_payload("qa"))
+    for index in range(corrupt_count):
+        # A file the glob finds and the decoder cannot use — the shape an
+        # interrupted write or a partially-scanned file arrives in.
+        (paths.office_actors_dir(ws) / f"broken{index}.json").write_text(
+            "{not json", encoding="utf-8"
+        )
+
+    with caplog.at_level("WARNING"):
+        scan = store.scan_actors(ws)
+
+    assert scan.unreadable == corrupt_count
+    assert [actor.actor_key for actor in scan.actors] == ["dev", "qa"]
+    # ONE line for that ONE scan, naming the exception CLASS — never one line per
+    # file (a directory of stale files would flood the log on every office read)
+    # and never the decoder's message. Read before the second scan below, which
+    # would legitimately add its own line.
+    unreadable_lines = [
+        record.getMessage()
+        for record in caplog.records
+        if "office actor files unreadable" in record.getMessage()
+    ]
+    assert len(unreadable_lines) == 1
+    assert f": {corrupt_count} (" in unreadable_lines[0]
+    assert "JSONDecodeError" in unreadable_lines[0]
+    # The list view keeps its old signature and its old answer, so the sixteen
+    # callers that only want rows are untouched by this stage.
+    assert [actor.actor_key for actor in store.list_actors(ws)] == ["dev", "qa"]
+
+
+def test_an_unreadable_archive_refuses_the_re_add_instead_of_minting_revision_1():
+    """The revision guard is only as honest as the token it spends.
+
+    ``upsert_actor`` bases a re-added key's revision on the ARCHIVED copy on
+    purpose: a key that left and came back carries its history forward, so the
+    number a peer holds stays meaningful. The swallow turned an unreadable
+    archive into ``archived = None`` → base 0 → **revision 1**, a token below the
+    one every launcher read model and every peer already holds. The next guarded
+    write then reads as a stale prediction against a server that silently
+    rewound — and RD-L2/EG-5.1 arms exactly that comparison.
+
+    **Anti-vacuity.** Falling through to base 0 is the mutation. *Probed fields:*
+    the typed refusal class, AND that the archive file is still on disk with no
+    new actor file beside it — the mutant returns an actor at revision 1 and
+    writes it, and a store that merely raised something untyped could not satisfy
+    the first probe.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    actor = store.upsert_actor(ws, _actor_payload("dev"))
+    for _ in range(6):
+        actor = store.upsert_actor(ws, _actor_payload("dev"))
+    assert actor.revision == 7
+    store.remove_actor(ws, "dev")
+    archived_path = paths.office_archived_actor_path(ws, "dev")
+    assert archived_path.exists()
+    archived_path.write_text("{truncated", encoding="utf-8")
+
+    with pytest.raises(ArchiveUnreadable):
+        store.upsert_actor(ws, _actor_payload("dev"))
+
+    # Nothing was written on the refusal path: no revision-1 actor file, and the
+    # archive copy is left exactly as found for an operator to repair.
+    assert not paths.office_actor_path(ws, "dev").exists()
+    assert archived_path.read_text(encoding="utf-8") == "{truncated"
+
+
+def test_an_already_archived_remove_over_an_unreadable_archive_refuses_typed():
+    """The idempotent remove branch reads the same token, so it refuses the same
+    way.
+
+    That branch exists to make a repeated delete gesture harmless, and its ack
+    carries the POST-archive revision — the token a later guarded write on this
+    key must present. An undecodable archive there used to surface as whatever
+    the JSON decoder happened to raise, which the RPC lane could only report as
+    an untyped handler crash. One condition, one reason string, on both verbs.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    store.upsert_actor(ws, _actor_payload("dev"))
+    store.remove_actor(ws, "dev")
+    paths.office_archived_actor_path(ws, "dev").write_text("{truncated", encoding="utf-8")
+
+    with pytest.raises(ArchiveUnreadable):
+        store.remove_actor(ws, "dev")
+
+
 # ── conflict guard ─────────────────────────────────────────────────────────
 
 
@@ -220,12 +338,45 @@ def test_archive_actors_for_instance_archives_only_instance_bound():
     store = OfficeStore()
     store.upsert_actor(ws, _actor_payload("dev"))  # persona-keyed: survives
     store.upsert_actor(ws, _actor_payload("qa", persona_instance_id="personainst_goal9_qa"))
-    count = store.archive_actors_for_instance("persona_personainst_goal9_qa")
-    assert count == 1
+    result = store.archive_actors_for_instance("persona_personainst_goal9_qa")
+    assert result == {"archived": 1, "failed": 0}
     assert store.actor_exists(ws, "dev")
     assert not store.actor_exists(ws, "personainst_goal9_qa")
     surface = store.get_surface(ws)
     assert "personainst_goal9_qa" in surface.archived_actor_keys
+
+
+def test_a_prune_that_could_not_archive_its_match_says_so_instead_of_zero(monkeypatch):
+    """``0`` used to mean two opposite things: nothing matched, and every match
+    failed.
+
+    The per-actor swallow STAYS — a prune must not die on one bad file, and the
+    persona-instance retirement it serves is authoritative with or without the
+    office projection — so the honest repair is a failure count, not a raise. The
+    archive call is made to fail directly (a share violation is what this
+    platform actually raises here) because the subject is the LOOP's accounting,
+    not any one cause of failure.
+
+    *Probed fields:* ``archived == 0`` AND ``failed == 1``, together. The old
+    bare-int return could express only the first, and that is the very same
+    answer "nothing matched" gives.
+    """
+
+    ws = _make_workspace()
+    store = OfficeStore()
+    store.upsert_actor(ws, _actor_payload("qa", persona_instance_id="personainst_goal9_qa"))
+
+    def _refuse(*_args, **_kwargs):
+        raise OSError("share violation")
+
+    monkeypatch.setattr(store, "remove_actor", _refuse)
+
+    result = store.archive_actors_for_instance("persona_personainst_goal9_qa")
+
+    assert result == {"archived": 0, "failed": 1}
+    # The loop survived the failure rather than propagating it, so the placement
+    # is still there for an operator to prune again.
+    assert store.actor_exists(ws, "personainst_goal9_qa")
 
 
 # ── snapshot projection (W-H3) ─────────────────────────────────────────────

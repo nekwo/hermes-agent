@@ -214,6 +214,48 @@ def test_an_already_archived_key_is_an_ok_and_writes_nothing():
 # ── refusals: each one writes nothing ───────────────────────────────────────
 
 
+def test_an_unreadable_archive_on_the_idempotent_arm_is_typed_not_a_crash():
+    """EG-1.5 / RD-H4, the remove half. The idempotent arm's ack CARRIES the
+    revision.
+
+    That arm exists so a repeat delete is harmless, and the number it returns is
+    the token a later guarded write on this key must present — it can only come
+    from the archive copy. An undecodable archive there used to surface as
+    whatever the JSON decoder raised — and ``JSONDecodeError`` IS a
+    ``ValueError``, so it landed in the ``actor_invalid`` arm and told the client
+    to fix its payload for a corrupt file on the server. That is worse than an
+    untyped crash: it names the wrong party.
+
+    **Anti-vacuity.** Dropping the guard reproduces exactly that, and the reply
+    comes back ``-32602`` — which is why the CODE is probed beside the reason
+    rather than just "there was an error".
+
+    Same reason string the upsert leg spends, deliberately: ONE condition gets
+    one name, not one name per verb — that is the pairing
+    ``test_serve_rpc_office_upsert.py``'s twin pins from the other side.
+    """
+
+    from agent_runtime import paths
+
+    _seed()
+    _remove("r1", {"workspace_id": WORKSPACE, "actor_key": QA_INSTANCE})
+    archived_path = paths.office_archived_actor_path(WORKSPACE, QA_INSTANCE)
+    archived_path.write_text("{truncated", encoding="utf-8")
+
+    reply = _remove("r2", {"workspace_id": WORKSPACE, "actor_key": QA_INSTANCE})
+
+    assert reply["error"]["code"] == -32600
+    assert reply["error"]["data"] == {
+        "reason": "archive_unreadable",
+        "workspace_id": WORKSPACE,
+        "actor_key": QA_INSTANCE,
+    }
+    # Nothing repaired itself behind the refusal: the corrupt archive is left for
+    # an operator, and no live actor file was resurrected in its place.
+    assert archived_path.read_text(encoding="utf-8") == "{truncated"
+    assert _live_keys() == []
+
+
 def test_an_unknown_workspace_is_refused_workspace_not_found_and_authors_nothing():
     """The upsert's ruling, reached from the archive side.
 

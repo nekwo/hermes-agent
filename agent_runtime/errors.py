@@ -61,6 +61,25 @@ class StaleRevision(AgentRuntimeError):
     """
 
 
+class ArchiveUnreadable(AgentRuntimeError):
+    """Raised when an actor's ARCHIVE copy exists but cannot be decoded.
+
+    Narrower than :class:`StoreCorrupt` on purpose, because the archive copy is
+    not merely data — it is where the revision guard's token LIVES between a
+    remove and the re-add that follows it. ``upsert_actor`` bases the new
+    revision on the archived one so a re-added key carries its history forward;
+    swallowing a decode failure there made the base 0 and the new revision 1,
+    silently handing every peer a token lower than the one they already hold.
+    A write that cannot read the number it must bump is a fault, not a fresh
+    start, and the launcher's guard is only as honest as this token.
+
+    ``code`` rides the RPC error envelope verbatim, the same way
+    :class:`WorkspaceDeleteBlocked`'s does.
+    """
+
+    code = "archive_unreadable"
+
+
 class SyncConflict(AgentRuntimeError):
     """Raised when a board card is under an unresolved realm-sync conflict, or a
     conflict-resolution verb targets a card that has none."""
