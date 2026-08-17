@@ -146,6 +146,18 @@ class ImageRevisionStore:
         """Index of the approved attempt, or ``None``."""
         return self._read_state(key)["approved"]
 
+    def latest(self, key: str) -> Path | None:
+        """Path of the most recent attempt's image, approved or not.
+
+        A pending item has no ``current()`` but is exactly what a QA surface must
+        display, so the newest attempt needs a public path — callers must not
+        reach into the on-disk layout for it.
+        """
+        state = self._read_state(key)
+        if not state["attempts"]:
+            return None
+        return self._item_dir(key) / str(state["attempts"][-1]["file"])
+
     # ------------------------------------------------------------- writing
 
     def propose(self, key: str, image_path: Path, note: str = "") -> int:

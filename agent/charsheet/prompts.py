@@ -17,6 +17,8 @@ is what stops the model drawing a face on a back view (§7.4).
 
 from __future__ import annotations
 
+import re
+
 # --- Upstream reuse (the one intentional drift surface) ---------------------
 # House policy: import upstream pieces, never copy them. `style_hint` is public
 # API of the pet prompt module; `_BACKGROUND`, `_spacing_spec`, and
@@ -95,6 +97,36 @@ CHARACTER_STATE_ACTIONS: dict[str, str] = {
         "strip, and there are no motion lines, speed trails, dust puffs, or shadows"
     ),
 }
+
+# Same token rule as `spec.parse_states`: states are CLI-definable, so a state
+# with no tuned entry above must still yield a usable row prompt.
+_STATE_TOKEN_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+
+
+def state_action_for(state: str) -> str:
+    """Action language for *state*: the tuned entry, else a contained generic loop.
+
+    ``--states`` lets the operator define states this module has never heard of
+    (``cheer:5``), and refusing them would make the advertised capability a lie.
+    The generic text names the state and keeps the same anti-failure-mode fences
+    as the tuned entries (in place, contained, no added effects). Invalid tokens
+    still raise — they could not become row keys anyway.
+    """
+    key = (state or "").strip().lower()
+    action = CHARACTER_STATE_ACTIONS.get(key)
+    if action is not None:
+        return action
+    if not _STATE_TOKEN_RE.match(key):
+        raise ValueError(
+            f"invalid character state {state!r}: expected a lowercase token "
+            "matching [a-z][a-z0-9_-]*"
+        )
+    return (
+        f"a clear, readable '{key}' action loop: the character performs the "
+        f"'{key}' motion in place with contained, repeating movement — the body "
+        "stays centered over the SAME point, and there are no motion lines, "
+        "speed trails, dust puffs, shadows, or detached effects"
+    )
 
 # Locks the generated poses to the attached reference instead of letting the
 # model re-invent the design each call.
@@ -279,19 +311,13 @@ def build_directional_row_prompt(
     identity and its camera angle both come from something the operator already
     signed off on.
     """
-    key = (state or "").strip().lower()
-    if key not in CHARACTER_STATE_ACTIONS:
-        raise ValueError(
-            f"unknown character state {state!r}: no action language for it "
-            f"(known states: {', '.join(CHARACTER_STATE_ACTIONS)})"
-        )
+    action = state_action_for(state)
     direction_key, view = _view_of(direction)
     frames = int(frame_count)
     if frames < 2:
         raise ValueError(
             f"frame_count must be at least 2 for an animation row, got {frame_count!r}"
         )
-    action = CHARACTER_STATE_ACTIONS[key]
     concept = (concept or "the character").strip()
     return (
         f"{_IDENTITY_LOCK}"

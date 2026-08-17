@@ -1,0 +1,561 @@
+"""The charsheet pixel pipeline: turnaround → direction refs → rows → sheet.
+
+Stage order is the operator's QA order (plan H §4): one wide turnaround strip is
+sliced into the authored direction references, each approved reference grounds
+that direction's animation strips, and only at compose time are the mirrored
+directions derived, registered, palette-locked, packed and validated.
+
+Three constraints are load-bearing here:
+
+* **One provider seam.** Every generation goes through :func:`_generate_image`.
+  Nothing else in the charsheet package talks to a provider, so the whole flow
+  runs offline against a fake by replacing that one function.
+* **Grounding refs carry the chroma field.** The row prompts tell the model to
+  reuse "the same flat chroma-key field as the attached reference"; a sliced
+  turnaround cutout is transparent, so it is re-composited onto flat magenta
+  before it is written (§7.3). The same treatment is applied to a re-rolled
+  single view, so every direction reference is interchangeable.
+* **Geometry is gated mechanically, identity is gated by a human.** A strip whose
+  poses touch cannot be sliced into frames, and no operator should be asked to
+  review that — such rolls are rejected and regenerated here (the pet hatch
+  retry pattern), and only strips that *can* be sliced reach QA.
+
+Composition and validation are written fresh rather than reused: upstream's
+``compose_atlas``/``validate_atlas`` are welded to the module-global ``ROW_SPECS``
+taxonomy, while a character sheet's row list is data that arrives with the spec.
+Everything below therefore loops over ``spec.rows()`` and never imports
+``ROW_SPECS``.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Iterable, Sequence
+from pathlib import Path
+
+from agent.charsheet import prompts
+from agent.charsheet.palette import DEFAULT_MAX_COLORS, build_palette, lock_to_palette
+from agent.charsheet.spec import RowSpec, SheetSpec
+
+# --- Upstream reuse (the ONE intentional drift surface) ----------------------
+# House policy: import upstream pixel machinery, never edit or copy it. The two
+# leading-underscore helpers are private to `agent.pet.generate.atlas` and are
+# imported deliberately — `_fit_to_cell` is the exact cell-fit contract the pet
+# renderer assumes and `_clear_transparent_rgb` is the residue rule the atlas
+# validator enforces, so a local copy of either would drift silently as upstream
+# retunes. `CELL_WIDTH`/`CELL_HEIGHT` come along because `_fit_to_cell` hardcodes
+# that cell geometry: a spec with a different frame size must be refused rather
+# than silently re-fitted to 192x208. Centralized in this ONE block so an
+# upstream rename breaks loudly, at import time, in a single place (plan §A-6).
+from agent.pet.generate import imagegen
+from agent.pet.generate.atlas import (
+    CELL_HEIGHT,
+    CELL_WIDTH,
+    _clear_transparent_rgb,
+    _fit_to_cell,
+    atlas_to_webp_bytes,
+    extract_strip_frames,
+    mirror_frames,
+    normalize_cells,
+    remove_background,
+)
+
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "MAGENTA",
+    "PREFIX_TURNAROUND",
+    "atlas_to_webp_bytes",
+    "build_sheet_palette",
+    "compose_draft_frames",
+    "compose_sheet",
+    "generate_direction_view",
+    "generate_row_strip",
+    "generate_turnaround",
+    "recomposite_on_magenta",
+    "row_prefix",
+    "turnaround_order",
+    "validate_sheet",
+    "view_prefix",
+]
+
+# The chroma field every generated charsheet image is drawn on and every
+# grounding reference is re-composited onto. Hot magenta is what the upstream
+# prompt language asks for and what `remove_background`'s saturated fast path is
+# tuned against.
+MAGENTA: tuple[int, int, int] = (255, 0, 255)
+
+# A non-directional state has no facing to hold, but the row prompt is built
+# around explicit view language. Front view is the neutral choice: it is the one
+# view that shows the whole character, and a fixed row is drawn once and shown
+# from whatever angle the consumer likes. Such rows are grounded on the base
+# image, not on a direction reference (see `generate_row_strip`).
+NON_DIRECTIONAL_VIEW = "s"
+
+# Attempts per row strip, last one lenient — mirrors the pet hatch loop.
+_ROW_GEN_ATTEMPTS = 3
+
+# Provider-file prefixes. Public so tests and the CLI can key off them instead of
+# duplicating the strings.
+PREFIX_TURNAROUND = "charsheet_turnaround"
+
+
+def view_prefix(direction: str) -> str:
+    """Provider-file prefix for a single-view re-roll of *direction*."""
+    return f"charsheet_view_{direction}"
+
+
+def row_prefix(key: str) -> str:
+    """Provider-file prefix for a row strip (``@`` is not filename-friendly)."""
+    return "charsheet_row_" + str(key).replace("@", "_")
+
+
+def _open_rgba(source):
+    """An RGBA image from an image or a path (paths are opened and closed)."""
+    from PIL import Image
+
+    if isinstance(source, (str, Path)):
+        with Image.open(source) as opened:
+            return opened.convert("RGBA")
+    return source.convert("RGBA")
+
+
+def _save_png(image_or_path, out: Path) -> Path:
+    """Write *image_or_path* to *out* as PNG, creating parent directories."""
+    out = Path(out)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    _open_rgba(image_or_path).save(out, format="PNG")
+    return out
+
+
+# ───────────────────────────── provider seam ─────────────────────────────
+
+
+def _generate_image(
+    prompt: str,
+    *,
+    reference_images: Sequence[Path] | None,
+    aspect_ratio: str,
+    prefix: str,
+    provider,
+) -> Path:
+    """The single provider call in the charsheet pipeline; returns one image.
+
+    Every generation in this module funnels through here, so replacing this one
+    function drives the whole staged flow offline with synthetic strips. Keep the
+    signature stable: it is the test seam.
+    """
+    images = imagegen.generate(
+        prompt,
+        n=1,
+        reference_images=[Path(ref) for ref in (reference_images or [])],
+        provider=provider,
+        prefix=prefix,
+        aspect_ratio=aspect_ratio,
+    )
+    if not images:
+        raise ValueError(f"image generation for {prefix!r} returned no image")
+    return Path(images[0])
+
+
+# ───────────────────────── grounding references ─────────────────────────
+
+
+def recomposite_on_magenta(image_or_path):
+    """The cutout over a flat magenta field — a usable grounding reference.
+
+    Slicing a turnaround leaves transparent cutouts, but the row prompt anchors
+    the backdrop to "the same flat chroma field as the attached reference". A
+    transparent reference silently removes that anchor, so the field is painted
+    back in (plan §7.3, assumption A-2).
+    """
+    from PIL import Image
+
+    cutout = _open_rgba(image_or_path)
+    field = Image.new("RGBA", cutout.size, (*MAGENTA, 255))
+    field.alpha_composite(cutout)
+    return field
+
+
+def turnaround_order(authored: Iterable[str]) -> tuple[str, ...]:
+    """*authored* sorted in turnaround convention: front view first, back last.
+
+    Derived from the compass ring in :data:`prompts.VIEW_LANGUAGE` rather than
+    written out per scheme: each direction is ranked by its ring distance from the
+    front view, so the 8-way authored set yields ``s, se, e, ne, n`` and the
+    4-way set yields ``s, e, n`` with no direction count anywhere in the code.
+    """
+    ring = list(prompts.VIEW_LANGUAGE)
+    if NON_DIRECTIONAL_VIEW not in ring:
+        raise ValueError(
+            f"prompts.VIEW_LANGUAGE has no {NON_DIRECTIONAL_VIEW!r} entry; the "
+            "turnaround order is defined relative to the front view"
+        )
+    front = ring.index(NON_DIRECTIONAL_VIEW)
+    size = len(ring)
+
+    def rank(direction: str) -> tuple[int, int]:
+        if direction not in ring:
+            raise ValueError(
+                f"unknown direction {direction!r}: no camera-view language for it "
+                f"(known directions: {', '.join(ring)})"
+            )
+        offset = abs(ring.index(direction) - front)
+        return (min(offset, size - offset), ring.index(direction))
+
+    return tuple(sorted(authored, key=rank))
+
+
+def generate_turnaround(
+    spec: SheetSpec,
+    concept: str,
+    base_image,
+    *,
+    style: str | None = "auto",
+    provider=None,
+    out_dir,
+) -> dict[str, Path]:
+    """ONE strip → one grounding reference per authored direction.
+
+    A single generation is the point: cross-call identity drift becomes
+    within-image consistency, because the model holds a character together far
+    better inside one image than across five (§7.1). The slice index → direction
+    mapping is exactly :func:`turnaround_order`, the same order the prompt numbers
+    its slots in, so a mis-slice shows up as a wrong-looking direction in QA
+    rather than as a silently mislabelled reference.
+
+    Returns ``{direction: png path}``. Slicing failures raise: a strip that
+    cannot be cut into the authored views is a failed roll, and re-rolling the
+    whole turnaround is the operator's call, not a silent salvage.
+    """
+    order = turnaround_order(spec.scheme.authored)
+    base = Path(base_image)
+    if not base.is_file():
+        raise ValueError(f"base image not found: {base}")
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    strip = _generate_image(
+        prompts.build_turnaround_prompt(concept, order, style=style),
+        reference_images=[base],
+        aspect_ratio="landscape",
+        prefix=PREFIX_TURNAROUND,
+        provider=provider,
+    )
+    cutouts = extract_strip_frames(strip, len(order), fit=False)
+    if len(cutouts) != len(order):
+        raise ValueError(
+            f"turnaround strip yielded {len(cutouts)} cutouts for {len(order)} "
+            f"authored directions ({', '.join(order)})"
+        )
+
+    refs: dict[str, Path] = {}
+    for direction, cutout in zip(order, cutouts):
+        refs[direction] = _save_png(
+            recomposite_on_magenta(cutout), out_dir / f"turnaround-{direction}.png"
+        )
+    logger.info("charsheet turnaround: %d references from one strip", len(refs))
+    return refs
+
+
+def generate_direction_view(
+    direction: str,
+    concept: str,
+    base_image,
+    *,
+    style: str | None = "auto",
+    note: str = "",
+    provider=None,
+    out,
+) -> Path:
+    """Re-roll ONE direction reference on a square canvas, with the note applied.
+
+    Grounded on the base image (not on the rejected slice — the operator rejected
+    it) and given the same key-then-magenta treatment as a turnaround slice, so a
+    re-rolled reference is interchangeable with a sliced one.
+    """
+    base = Path(base_image)
+    if not base.is_file():
+        raise ValueError(f"base image not found: {base}")
+
+    generated = _generate_image(
+        prompts.build_direction_view_prompt(concept, direction, style=style, note=note),
+        reference_images=[base],
+        aspect_ratio="square",
+        prefix=view_prefix(direction),
+        provider=provider,
+    )
+    keyed = remove_background(_open_rgba(generated))
+    return _save_png(recomposite_on_magenta(keyed), Path(out))
+
+
+def generate_row_strip(
+    row: RowSpec,
+    concept: str,
+    direction_ref,
+    *,
+    style: str | None = "auto",
+    note: str = "",
+    provider=None,
+    out,
+) -> Path:
+    """Generate one animation strip for *row*, gated on being sliceable.
+
+    *direction_ref* is the approved reference this row is grounded on: the
+    direction's turnaround view for a directional row, the base image for a fixed
+    row (which is also why a fixed row is prompted in the front view — see
+    :data:`NON_DIRECTIONAL_VIEW`).
+
+    The gate is mechanical and runs before the strip is accepted: the frames must
+    segment with clean per-pose gutters (``method="components"``, which raises
+    when poses touch). Up to :data:`_ROW_GEN_ATTEMPTS` rolls, the last one lenient
+    (``method="auto"``, never raises) so a stubborn row still yields something the
+    operator can look at and re-roll. Returns the path of the ACCEPTED strip.
+    """
+    direction = row.direction or NON_DIRECTIONAL_VIEW
+    ref = Path(direction_ref)
+    if not ref.is_file():
+        raise ValueError(f"grounding reference for row {row.key!r} not found: {ref}")
+
+    prompt = prompts.build_directional_row_prompt(
+        row.state, direction, row.frames, concept, style=style, note=note
+    )
+    last_error: Exception | None = None
+    for attempt in range(_ROW_GEN_ATTEMPTS):
+        strict = attempt < _ROW_GEN_ATTEMPTS - 1
+        try:
+            candidate = _generate_image(
+                prompt,
+                reference_images=[ref],
+                aspect_ratio="landscape",
+                prefix=row_prefix(row.key),
+                provider=provider,
+            )
+            extract_strip_frames(
+                candidate,
+                row.frames,
+                method="components" if strict else "auto",
+                fit=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - retried; the reason is reported below
+            last_error = exc
+            logger.warning(
+                "charsheet row %r attempt %d/%d rejected: %s",
+                row.key,
+                attempt + 1,
+                _ROW_GEN_ATTEMPTS,
+                exc,
+            )
+            continue
+        logger.info("charsheet row %r accepted on attempt %d", row.key, attempt + 1)
+        return _save_png(candidate, Path(out))
+
+    raise ValueError(
+        f"row {row.key!r} produced no sliceable strip in {_ROW_GEN_ATTEMPTS} "
+        f"attempts; last failure: {last_error}"
+    ) from last_error
+
+
+# ─────────────────────────── compose / validate ───────────────────────────
+
+
+def build_sheet_palette(palette_sources: Iterable, *, max_colors: int = DEFAULT_MAX_COLORS):
+    """The locked palette for a sheet, from its approved grounding references.
+
+    The references on disk carry the magenta field, so they are keyed back to
+    cutouts first: leaving the chroma in would spend palette slots on a colour
+    that must never reach a cell, and would pull every locked pixel toward
+    magenta. §7.2 specifies the *cutouts'* opaque pixels, and this is where that
+    happens — :func:`~agent.charsheet.palette.build_palette` deliberately knows
+    nothing about chroma keys.
+    """
+    cutouts = [remove_background(_open_rgba(source)) for source in palette_sources]
+    if not cutouts:
+        raise ValueError("build_sheet_palette needs at least one approved reference")
+    return build_palette(cutouts, max_colors=max_colors)
+
+
+def compose_draft_frames(
+    spec: SheetSpec,
+    strips_by_key: dict[str, Path],
+    palette_sources: list[Path],
+) -> dict[str, list]:
+    """Approved strips → registered, palette-locked cells for every sheet row.
+
+    Order matters and is fixed by the plan (§4.3):
+
+    1. Extract raw (``fit=False``) frames from each authored row's strip.
+    2. Derive every mirrored row from its SOURCE row's extracted frames, before
+       registration — a per-frame flip preserves the source row's frame order and
+       timing (it is not a strip reverse).
+    3. ``normalize_cells`` over ALL rows at once. One shared scale is the whole
+       point: a character that changes size as it turns is the failure this
+       prevents, and per-row normalization would guarantee it.
+    4. Palette-lock every cell.
+
+    Re-extraction uses ``method="auto"``: the strict geometry gate already ran at
+    generation time (a strip only became approvable by slicing), so compose must
+    be deterministic and total, not a second chance to fail.
+    """
+    frames_by_key: dict[str, list] = {}
+    for row in spec.authored_rows():
+        strip = strips_by_key.get(row.key)
+        if strip is None:
+            raise ValueError(
+                f"no strip for authored row {row.key!r}; rows present: "
+                f"{sorted(strips_by_key)}"
+            )
+        frames_by_key[row.key] = extract_strip_frames(
+            Path(strip), row.frames, method="auto", fit=False
+        )
+
+    for derived, source in spec.mirrored_rows():
+        source_frames = frames_by_key.get(source.key)
+        if source_frames is None:
+            raise ValueError(
+                f"row {derived.key!r} mirrors {source.key!r}, which has no frames"
+            )
+        frames_by_key[derived.key] = mirror_frames(source_frames)
+
+    normalized = normalize_cells(frames_by_key)
+    palette = build_sheet_palette(palette_sources)
+    return {
+        key: [lock_to_palette(cell, palette) for cell in cells]
+        for key, cells in normalized.items()
+    }
+
+
+def compose_sheet(spec: SheetSpec, cells_by_key: dict[str, list]):
+    """Pack cells into the sheet described by *spec* (RGBA, residue cleared).
+
+    Row placement is ``row.index`` from the spec, column placement is frame
+    order; a row with missing or short cell lists leaves its tail transparent
+    rather than shifting anything.
+    """
+    from PIL import Image
+
+    width, height = spec.sheet_size()
+    sheet = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    for row in spec.rows():
+        cells = cells_by_key.get(row.key) or []
+        for column, frame in enumerate(cells[: row.frames]):
+            cell = frame.convert("RGBA")
+            if cell.size != (spec.frame_w, spec.frame_h):
+                if (spec.frame_w, spec.frame_h) != (CELL_WIDTH, CELL_HEIGHT):
+                    raise ValueError(
+                        f"cell {column} of row {row.key!r} is "
+                        f"{cell.width}x{cell.height}, expected "
+                        f"{spec.frame_w}x{spec.frame_h}; only the upstream "
+                        f"{CELL_WIDTH}x{CELL_HEIGHT} cell geometry can be re-fitted"
+                    )
+                cell = _fit_to_cell(cell)
+            sheet.alpha_composite(cell, (column * spec.frame_w, row.index * spec.frame_h))
+    return _clear_transparent_rgb(sheet)
+
+
+def validate_sheet(spec: SheetSpec, image) -> dict:
+    """Geometry, occupancy, collapse and residue checks, driven by *spec*.
+
+    Returns ``{ok, width, height, errors, warnings, filled_rows}``. Errors block
+    an install (wrong size, empty sheet, sprites collapsed by a bad row, a
+    multi-pose frame that slipped the extractor, RGB residue under transparency);
+    a single blank row is a warning, because which rows are required is the
+    caller's policy, not the validator's.
+
+    The guards are upstream's ``validate_atlas`` guards generalized off
+    ``ROW_SPECS``: the collapse floor exists because ``normalize_cells`` shares
+    one scale across all rows, so one degenerate row can shrink the entire
+    character while every cell still passes a non-empty check (§A-5).
+    """
+    rgba = _open_rgba(image)
+    errors: list[str] = []
+    warnings: list[str] = []
+    expected = spec.sheet_size()
+    if rgba.size != expected:
+        errors.append(
+            f"expected {expected[0]}x{expected[1]}, got {rgba.width}x{rgba.height}"
+        )
+        return {
+            "ok": False,
+            "width": rgba.width,
+            "height": rgba.height,
+            "errors": errors,
+            "warnings": warnings,
+            "filled_rows": [],
+        }
+
+    filled_rows: list[str] = []
+    boxes_by_row: dict[str, list[tuple[int, int, int, int]]] = {}
+    for row in spec.rows():
+        row_pixels = 0
+        boxes: list[tuple[int, int, int, int]] = []
+        top = row.index * spec.frame_h
+        for column in range(row.frames):
+            left = column * spec.frame_w
+            cell = rgba.crop((left, top, left + spec.frame_w, top + spec.frame_h))
+            row_pixels += sum(cell.getchannel("A").histogram()[1:])
+            bbox = cell.getbbox()
+            if bbox is not None:
+                boxes.append(bbox)
+        if row_pixels > 0:
+            filled_rows.append(row.key)
+            boxes_by_row[row.key] = boxes
+        else:
+            warnings.append(f"row '{row.key}' has no frames")
+
+    if not filled_rows:
+        errors.append("sheet is empty — no row produced any frames")
+
+    all_widths = sorted(
+        right - left for boxes in boxes_by_row.values() for left, _t, right, _b in boxes
+    )
+    all_heights = sorted(
+        bottom - top for boxes in boxes_by_row.values() for _l, top, _r, bottom in boxes
+    )
+    global_med_w = 0
+    global_med_h = 0
+    if all_widths and all_heights:
+        global_med_w = all_widths[len(all_widths) // 2]
+        global_med_h = all_heights[len(all_heights) // 2]
+        min_h = max(56, round(spec.frame_h * 0.28))
+        if global_med_h < min_h:
+            errors.append(
+                f"sheet sprites are too small after normalization (median frame "
+                f"height {global_med_h}px, floor {min_h}px)"
+            )
+
+    for key, boxes in boxes_by_row.items():
+        if len(boxes) <= 1:
+            continue
+        widths = sorted(right - left for left, _t, right, _b in boxes)
+        heights = sorted(bottom - top for _l, top, _r, bottom in boxes)
+        med_w = max(1, widths[len(widths) // 2])
+        med_h = max(1, heights[len(heights) // 2])
+        if widths[-1] > max(med_w * 3.0, med_w + 96) and heights[-1] <= med_h * 1.6:
+            errors.append(f"row '{key}' contains a multi-pose frame outlier")
+        if global_med_w and global_med_h:
+            if med_w < max(32, round(global_med_w * 0.42)) or med_h < max(
+                40, round(global_med_h * 0.50)
+            ):
+                errors.append(
+                    f"row '{key}' appears collapsed (median {med_w}x{med_h}px, "
+                    f"sheet median {global_med_w}x{global_med_h}px)"
+                )
+
+    data = rgba.tobytes()
+    residue = sum(
+        1
+        for i in range(0, len(data), 4)
+        if data[i + 3] == 0 and (data[i] or data[i + 1] or data[i + 2])
+    )
+    if residue:
+        errors.append(f"{residue} transparent pixels retain RGB residue")
+
+    return {
+        "ok": not errors,
+        "width": rgba.width,
+        "height": rgba.height,
+        "errors": errors,
+        "warnings": warnings,
+        "filled_rows": filled_rows,
+    }
