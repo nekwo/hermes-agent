@@ -42,6 +42,7 @@ would look identical to a filter that drops everything.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -167,6 +168,49 @@ def _patch_frame(*, base_offset: int, event_offset: int, ids: list[str]) -> dict
             for entity_id in ids
         ],
         "coalesced_count": len(ids),
+    }
+
+
+#: The cross-repo goldens the launcher mirrors byte-for-byte. Read here so the
+#: folder-only frame these tests deliver cannot drift from the wire shape the
+#: producer actually builds (``test_stream_patch`` pins that half).
+_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "stream_frames"
+
+
+def _surface_golden_row() -> dict:
+    """The one ``office_surface`` row out of ``patch_office_surface.json``.
+
+    Asserts the property that made task #57 reachable rather than assuming it:
+    this entity addresses the office row ITSELF, so its id is the BARE workspace
+    id with no ``/`` — which is what the sink's old ``office_actor``-plus-slash
+    predicate failed BOTH halves of.
+    """
+
+    golden = json.loads(
+        (_FIXTURES / "patch_office_surface.json").read_text(encoding="utf-8")
+    )
+    ((row,)) = golden["patches"]
+    assert row["entity"] == "office_surface"
+    assert "/" not in row["id"]
+    return row
+
+
+def _surface_patch_frame(*, base_offset: int, event_offset: int, workspace_id: str) -> dict:
+    """A FOLDER-ONLY patch frame: one ``office_surface`` row, no actor row.
+
+    The reachable shape is every folder rename with no actor write in the same
+    ~450 ms coalescing window — a mixed batch was always forwarded whole (any
+    actor row admits the frame), which is why the drop survived so much testing.
+    """
+
+    row = _surface_golden_row()
+    return {
+        "type": "patch",
+        "schema_version": 2,
+        "base_offset": base_offset,
+        "watermark": {"event_offset": event_offset, "last_event_ts": "t"},
+        "patches": [{**row, "id": workspace_id, "seq": event_offset}],
+        "coalesced_count": 1,
     }
 
 
@@ -371,6 +415,57 @@ def test_a_workspace_that_merely_shares_a_prefix_is_not_matched():
     assert sent == []
 
 
+def test_a_folder_only_patch_frame_is_forwarded_not_dropped():
+    """RD-H1 / task #57 — the silent-gap class, closed.
+
+    ``update_surface`` emits an ``office_surface`` row whose id is the BARE
+    workspace id. The sink's scope test was a private restatement of the id
+    scheme that knew only ``office_actor`` and a slash-prefixed id, so a
+    folder-only frame failed both conjuncts and took the bare ``return``: no
+    patch AND no resync, on a lane whose own docstring says a resync is
+    recoverable and a dropped change is not. It was masked because the argv
+    ``harness stream`` child still folded the same batch for the launcher.
+
+    Kill-mutation: restore the ``office_actor``-only predicate. The mutant emits
+    NOTHING, so it cannot satisfy any probe below — the probes are all on the
+    CONTENT of a message it never constructs. A second-order mutant that emitted
+    a RESYNC instead fails them too: a resync carries a different method and no
+    ``patches`` at all.
+    """
+
+    sent, deliver = _sink()
+
+    deliver(_surface_patch_frame(base_offset=10, event_offset=12, workspace_id=WORKSPACE))
+
+    ((message,)) = sent
+    assert message["method"] == OFFICE_PATCH_METHOD
+    ((row,)) = message["params"]["patches"]
+    assert row["entity"] == "office_surface"
+    assert row["id"] == WORKSPACE
+    # The folder list crosses verbatim, and the expected value comes from the
+    # committed cross-repo golden rather than from this file.
+    assert row["changed"]["folders"] == _surface_golden_row()["changed"]["folders"]
+    assert message["params"]["watermark"]["event_offset"] == 12
+    assert message["params"]["base_offset"] == 10
+
+
+def test_another_workspaces_folder_change_sends_nothing():
+    """The other driven value — the pair is what pins the id COMPARISON.
+
+    Neither a drop-all predicate nor a forward-all one passes both this and the
+    test above: the first sends nothing where a folder change was ours, the
+    second sends something where it was not.
+
+    Kill-mutation: scope every ``office_surface`` row in regardless of its id.
+    """
+
+    sent, deliver = _sink()
+
+    deliver(_surface_patch_frame(base_offset=10, event_offset=12, workspace_id=OTHER))
+
+    assert sent == []
+
+
 def test_a_non_office_entity_never_crosses_this_lane():
     """The office lane forwards office rows. A ``persona_instance`` patch in the
     same batch is another surface's business."""
@@ -510,6 +605,13 @@ def test_a_delta_carrying_nothing_for_this_workspace_does_not_resync():
             },
             id="an office patch that rode an uncoverable batch",
         ),
+        pytest.param(
+            {
+                "type": "state.patched",
+                "payload": {"entity": "office_surface", "id": WORKSPACE, "op": "upsert"},
+            },
+            id="a folder patch that rode an uncoverable batch (RD-H1's twin)",
+        ),
     ],
 )
 def test_a_delta_that_did_touch_this_workspace_still_resyncs(event):
@@ -522,7 +624,14 @@ def test_a_delta_that_did_touch_this_workspace_still_resyncs(event):
     events alone would silently drop that, which is the one outcome worse than
     an unnecessary resync.
 
-    Kill-mutation: over-scope the skip (drop either arm of the check).
+    The third case is RD-H1's twin: the same row one ENTITY over. This arm read
+    ``office_actor`` and its slash-prefixed id only, so a bare-id
+    ``office_surface`` row failed it — saved in practice by the ``office.*`` arm
+    catching the paired domain event, which is a neighbour's accident and not an
+    invariant. Both arms now derive scope from ``office_patch_scope``.
+
+    Kill-mutation: over-scope the skip (drop either arm of the check); or, for
+    the third case, restore the ``office_actor``-only scope in the patched arm.
     """
 
     sent, deliver = _sink()
@@ -546,6 +655,15 @@ def test_a_delta_that_did_touch_this_workspace_still_resyncs(event):
                 }
             ],
             id="another workspace's office patch",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "state.patched",
+                    "payload": {"entity": "office_surface", "id": OTHER, "op": "upsert"},
+                }
+            ],
+            id="another workspace's folder patch",
         ),
         pytest.param(
             [

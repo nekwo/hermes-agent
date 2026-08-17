@@ -226,11 +226,20 @@ class OfficeStore:
                 emit_office_actor_refresh(self.event_log, actor.workspace_id, actor.actor_key)
             else:
                 emit_office_actor_patch(self.event_log, actor, created=created)
-        except Exception:
+        except Exception as exc:
             import logging
 
+            # The CLASS in the message, not only in the traceback. This swallow is
+            # one of the five paths that leave a covered domain event without its
+            # paired patch, and the stream now DEMOTES that batch to a full core
+            # (`snapshot_build reason=demote`) rather than shipping an empty patch
+            # frame. A grep-joinable class name is what makes that demote
+            # attributable instead of mysterious.
             logging.getLogger(__name__).warning(
-                "office actor patch emit failed: %s", actor.actor_key, exc_info=True
+                "office actor patch emit failed: %s error=%s",
+                actor.actor_key,
+                type(exc).__name__,
+                exc_info=True,
             )
 
     def _emit_surface_patch(self, surface: OfficeSurface) -> None:
@@ -262,11 +271,16 @@ class OfficeStore:
             from .state_patches import emit_office_surface_patch
 
             emit_office_surface_patch(self.event_log, surface)
-        except Exception:
+        except Exception as exc:
             import logging
 
+            # See ``_emit_actor_patch``: the exception class rides the message so
+            # the demote this suppression now forces is attributable.
             logging.getLogger(__name__).warning(
-                "office surface patch emit failed: %s", surface.workspace_id, exc_info=True
+                "office surface patch emit failed: %s error=%s",
+                surface.workspace_id,
+                type(exc).__name__,
+                exc_info=True,
             )
 
     def _emit_actor_remove_patch(self, actor: OfficeActor) -> None:
@@ -285,11 +299,16 @@ class OfficeStore:
             from .state_patches import emit_office_actor_remove
 
             emit_office_actor_remove(self.event_log, actor.workspace_id, actor.actor_key)
-        except Exception:
+        except Exception as exc:
             import logging
 
+            # See ``_emit_actor_patch``: the exception class rides the message so
+            # the demote this suppression now forces is attributable.
             logging.getLogger(__name__).warning(
-                "office actor remove patch emit failed: %s", actor.actor_key, exc_info=True
+                "office actor remove patch emit failed: %s error=%s",
+                actor.actor_key,
+                type(exc).__name__,
+                exc_info=True,
             )
 
     # --- surface reads ----------------------------------------------------

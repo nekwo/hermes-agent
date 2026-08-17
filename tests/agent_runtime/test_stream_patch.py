@@ -557,3 +557,246 @@ def test_every_covered_domain_event_is_registered_or_declared_historical():
     assert LIVE_COVERED_DOMAIN_EVENT_TYPES.isdisjoint(
         HISTORICAL_COVERED_DOMAIN_EVENT_TYPES
     )
+
+
+def test_every_office_entity_the_coverage_authority_knows_is_scopable():
+    """EG-1.3 (RD-H1) second witness: authority → scope, in a different file.
+
+    The office push sink's scope test and the promotion vocabulary are two ends
+    of one contract, and they forked once already: WV-H3 taught
+    ``patch_coverage`` that ``office_surface`` may promote and left the sink's
+    private ``office_actor``-only predicate alone, so a folder-only frame was
+    dropped with neither a patch nor a resync (task #57).
+
+    The sink test one file over pins scope → DELIVERY. This pins AUTHORITY →
+    scope, and it is the half that catches the NEXT WV-H3: covering a new office
+    entity without teaching ``office_patch_scope`` reds here even though no sink
+    test for that entity exists yet. The enumeration therefore comes from
+    ``patch_coverage``'s own namespace — the constants the promotion gate itself
+    reads — never from a list this file maintains.
+
+    Neither witness subsumes the other: the RD-H1 predicate mutant reds both, and
+    the sink mutant cannot satisfy this one because it never calls the sink.
+
+    The id SHAPE is left open on purpose. ``office_actor`` addresses a row under
+    a workspace (``"<workspace_id>/<actor_key>"``) and ``office_surface``
+    addresses the office row itself (a bare workspace id), so the requirement is
+    that at least one of the two shapes places the row — not that a future entity
+    must reuse either one. What is NOT negotiable is that some shape does.
+    """
+
+    from agent_runtime import patch_coverage
+    from agent_runtime.state_patches import office_patch_scope
+
+    office_entities = {
+        value
+        for name, value in vars(patch_coverage).items()
+        if name.startswith("OFFICE_")
+        and name.endswith("_ENTITY")
+        and isinstance(value, str)
+    }
+    # Non-vacuity: the enumeration really did find the entities, so a green run
+    # cannot mean "the loop below had nothing to check".
+    assert {"office_actor", "office_surface"} <= office_entities, office_entities
+
+    workspace = "ws_office_pilot"
+    for entity in sorted(office_entities):
+        placements = {
+            "bare workspace id": office_patch_scope(
+                {"entity": entity, "id": workspace, "op": "upsert", "changed": {"a": 1}}
+            ),
+            "workspace-prefixed id": office_patch_scope(
+                {
+                    "entity": entity,
+                    "id": f"{workspace}/row_key",
+                    "op": "upsert",
+                    "changed": {"a": 1},
+                }
+            ),
+        }
+        assert workspace in placements.values(), (
+            f"{entity!r} can be promoted by patch_coverage but "
+            f"office_patch_scope places no id shape of it into a workspace, so "
+            f"the office push sink would drop its frames with neither a patch "
+            f"nor a resync — teach state_patches.office_patch_scope. Got "
+            f"{placements}"
+        )
+
+    # The negative control, so "scopable" cannot degenerate into "returns the
+    # id": a persona row is real state at its watermark and moves nothing a
+    # one-workspace office projection holds, under EITHER id shape.
+    assert office_patch_scope({"entity": "persona_instance", "id": workspace}) is None
+    assert (
+        office_patch_scope({"entity": "persona_instance", "id": f"{workspace}/x"}) is None
+    )
+
+
+# --------------------------------------------------------------------------- #
+# EG-1.2 (RD-H3): an empty patch frame can never promote
+# --------------------------------------------------------------------------- #
+#: Everything the office folder write needs declared to be COVERABLE: the entity
+#: its patch names plus the token its paired domain event rides. Written out here
+#: so the demotion tests below cannot pass because coverage said no — the whole
+#: point is that coverage says YES and the frame is still not shippable.
+_SURFACE_DECLARATION = frozenset(
+    {"persona_instance", "incident", "office_actor", "office_surface", "office_surface_fold"}
+)
+
+
+def test_a_covered_domain_event_with_no_paired_patch_demotes_instead_of_an_empty_frame(
+    isolate_agent_runtime_root,
+):
+    """The batch is COVERABLE and still must not ship as a patch (§1.3).
+
+    ``office.surface.updated`` is a covered domain event: it carries no fold
+    state because its paired ``office_surface`` patch is supposed to ride the
+    same batch. Five producer paths can leave the pair out (a best-effort emit
+    that raised, ``update_surface``'s no-exception skip on a first authoring, a
+    cross-process ``delta_patches`` split), and the frame this used to build was
+    ``{"type": "patch", "patches": []}`` — the client advances its watermark
+    having folded nothing and the row is stale until an unrelated full core.
+
+    Anti-vacuity is the first assertion: the classifier really does call this
+    batch coverable, so the demotion below is the new guard's work and not the
+    coverage gate's.
+
+    Kill-mutation: promote anyway (drop ``batch_carries_patch_rows`` from the
+    promotion condition in ``_batch_frames_with_liveness``). The mutant's only
+    output for this batch IS a patch frame — there is no second frame to probe,
+    so it cannot also satisfy the type assertion.
+    """
+
+    from agent_runtime.stream import _batch_frames_with_liveness
+
+    batch = [_plain_event(4120, "office.surface.updated")]
+    assert batch_is_patch_coverable(
+        [e for _, e in batch], fold_entities=_SURFACE_DECLARATION
+    ), "anti-vacuity: this batch must be coverable, or the demotion proves nothing"
+
+    frames = list(
+        _batch_frames_with_liveness(
+            batch,
+            base_offset=4119,
+            delta_patches=True,
+            resync=False,
+            heartbeat_interval_seconds=60,
+            fold_entities=_SURFACE_DECLARATION,
+        )
+    )
+
+    ((frame,)) = frames
+    assert frame["type"] != "patch", (
+        "a batch with no state.patched row must never ship as a patch frame; "
+        f"got patches={frame.get('patches')!r}"
+    )
+    # Positively: it took the full-core lane, which IS the honest answer — state
+    # moved and this lane has no patch that can express it.
+    assert frame["type"] == "delta" and "core" in frame
+
+
+def test_a_covered_domain_event_WITH_its_paired_patch_still_promotes(
+    isolate_agent_runtime_root,
+):
+    """The discriminator, and the reason the guard is not "demote office writes".
+
+    Same domain event, same declaration — this time its paired ``office_surface``
+    row rides the batch, which is the ordinary case the lane exists for. Kills
+    the over-demoting mutant (return False from ``batch_carries_patch_rows``, or
+    demote whenever a covered domain event is present), which would take the
+    whole patch lane dark while every assertion in the sibling test above stayed
+    green.
+    """
+
+    from agent_runtime.stream import _batch_frames_with_liveness
+
+    batch = [
+        _op_event(
+            4121,
+            "office_surface",
+            "ws_office_pilot",
+            PATCH_OP_UPSERT,
+            {"folders": ["Agents", "Desks"], "revision": 3, "updated_at": "t"},
+        ),
+        _plain_event(4122, "office.surface.updated"),
+    ]
+
+    frames = list(
+        _batch_frames_with_liveness(
+            batch,
+            base_offset=4119,
+            delta_patches=True,
+            resync=False,
+            heartbeat_interval_seconds=60,
+            fold_entities=_SURFACE_DECLARATION,
+        )
+    )
+
+    ((frame,)) = frames
+    assert frame["type"] == "patch"
+    ((row,)) = frame["patches"]
+    assert row["entity"] == "office_surface" and row["id"] == "ws_office_pilot"
+    assert frame["watermark"]["event_offset"] == 4122
+
+
+def test_patch_batch_frame_refuses_an_empty_filtered_list():
+    """The builder's half of the pair — belt to the caller's braces.
+
+    Kill-mutation: drop the ``if not patches`` guard. Probed field is the raised
+    ``ValueError``; a builder that returns a frame raises nothing.
+    """
+
+    batch = [_plain_event(4130, "office.surface.updated")]
+    with pytest.raises(ValueError, match="at least one state.patched row"):
+        patch_batch_frame(batch, base_offset=4129)
+
+    # And the pre-existing empty-BATCH refusal is untouched — two distinct
+    # refusals, so neither can be mistaken for the other.
+    with pytest.raises(ValueError, match="non-empty batch"):
+        patch_batch_frame([], base_offset=4129)
+
+
+def test_the_builder_guard_catches_what_a_dropped_caller_guard_would_ship(
+    monkeypatch, isolate_agent_runtime_root
+):
+    """The PAIRING, pinned: two guards are two witnesses only if the inner one is
+    reachable when the outer one is gone.
+
+    Simulates RD-H3's caller-guard mutant directly — ``batch_carries_patch_rows``
+    forced to True at the promotion site — and asserts the builder still refuses.
+    Without this case a future edit could delete the caller guard, watch the
+    builder-unit test above stay green, and ship the empty frame anyway.
+    """
+
+    from agent_runtime import stream as st
+
+    monkeypatch.setattr(st, "batch_carries_patch_rows", lambda batch: True)
+
+    with pytest.raises(ValueError, match="at least one state.patched row"):
+        list(
+            st._batch_frames_with_liveness(
+                [_plain_event(4140, "office.surface.updated")],
+                base_offset=4139,
+                delta_patches=True,
+                resync=False,
+                heartbeat_interval_seconds=60,
+                fold_entities=_SURFACE_DECLARATION,
+            )
+        )
+
+
+def test_no_committed_patch_fixture_is_refused_by_the_new_builder_guard():
+    """Regression fence: the guard moves no golden.
+
+    Every committed ``patch*.json`` frame carries at least one row, so the
+    builder's new refusal is unreachable for all of them — which is the property
+    that lets this stage land without regenerating a cross-repo fixture.
+    """
+
+    goldens = sorted(FIXTURES.glob("patch*.json"))
+    # Non-vacuity: the glob really did find the frame fixtures.
+    assert len(goldens) >= 5, [p.name for p in goldens]
+    for path in goldens:
+        frame = json.loads(path.read_text(encoding="utf-8"))
+        if frame.get("type") != "patch":
+            continue
+        assert frame["patches"], f"{path.name} would now be unbuildable"

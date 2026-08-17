@@ -24,11 +24,24 @@ prefer it over tailing the event log a second time:
 
 What crosses, and what does not
 -------------------------------
-The sink is ADDRESSED where a frame is broadcast. It keeps only patches whose
-entity is ``office_actor`` and whose id sits under this subscription's
-workspace — which is what ``office_actor_patch_id``'s ``"<workspace_id>/"``
-prefix was built for. A batch with nothing for this workspace sends NOTHING,
-rather than a frame the client opens and discards.
+The sink is ADDRESSED where a frame is broadcast. A frame crosses when at least
+one of its rows is scoped to this subscription's workspace by
+:func:`~agent_runtime.state_patches.office_patch_scope` — the ONE authority for
+that question, living beside the id builders it reads backwards, and called by
+``_delta_touches_workspace`` here as well. A batch with nothing for this
+workspace sends NOTHING, rather than a frame the client opens and discards.
+
+That authority is single-homed because it was not, and the fork cost a silent
+drop (task #57, RD-H1). The rule used to be restated privately here as "entity
+is ``office_actor`` AND the id sits under ``"<workspace_id>/"``", which is what
+``office_actor_patch_id`` was built for and was true of every row that could
+promote — until WV-H3 (2026-08-16) let ``office_surface`` promote, whose id is
+the BARE workspace id with no slash. A folder-only batch then failed both
+conjuncts and was dropped with neither a patch nor a resync, against this
+module's own rule below that a resync is recoverable and a dropped change is
+not. Deriving the scope from the module that owns the id scheme is what makes
+the next covered office entity a compile-and-test problem rather than a silent
+one.
 
 A ``hydrate`` or ``delta`` frame means the batch was NOT patch-coverable
 (``batch_is_patch_coverable`` said no — a create moved ``actor_count``, an
@@ -117,7 +130,11 @@ from typing import Any, Callable
 
 from .patch_coverage import HISTORICAL_FOLD_ENTITIES
 from .serve_rpc import notification
-from .state_patches import OFFICE_ACTOR_ENTITY, STATE_PATCHED_EVENT_TYPE
+from .state_patches import (
+    OFFICE_ACTOR_ENTITY,
+    STATE_PATCHED_EVENT_TYPE,
+    office_patch_scope,
+)
 
 #: What an RPC office subscriber declares it can fold — the historical set PLUS
 #: ``office_actor``, and the union half of that is the whole point.
@@ -259,7 +276,7 @@ _FULL_CORE_FRAME_TYPES = frozenset({"hydrate", "delta"})
 _ENUMERATED_FRAME_TYPE = "delta"
 
 
-def _delta_touches_workspace(frame: dict[str, Any], workspace_id: str, prefix: str) -> bool | None:
+def _delta_touches_workspace(frame: dict[str, Any], workspace_id: str) -> bool | None:
     """Did this uncovered batch carry anything for ``workspace_id``?
 
     ``True``/``False`` when the frame's ``events`` list can be read; ``None``
@@ -275,10 +292,15 @@ def _delta_touches_workspace(frame: dict[str, Any], workspace_id: str, prefix: s
     * an ``office.*`` domain event whose payload names this ``workspace_id``
       (the surface/actor writes that are uncovered ON PURPOSE and genuinely need
       a refetch here);
-    * a ``state.patched`` naming an ``office_actor`` under this workspace — a
-      patch that rode in an UNCOVERABLE batch, i.e. one demoted by something
-      else in the same drain. The office row moved and this lane is not getting
-      a patch frame for it, so it must refetch.
+    * a ``state.patched`` whose office scope IS this workspace — a patch that rode
+      in an UNCOVERABLE batch, i.e. one demoted by something else in the same
+      drain. The office row moved and this lane is not getting a patch frame for
+      it, so it must refetch. Scoped by
+      :func:`~agent_runtime.state_patches.office_patch_scope`, the SAME authority
+      the patch sink below uses: this arm read ``office_actor`` only, and while it
+      happened to be saved for folder writes by the ``office.*`` arm above, "saved
+      by its neighbour" is not an invariant — the twin that was NOT saved dropped
+      the change outright (task #57).
 
     Everything else — an agent's turn, a board write, another workspace's
     office — moved nothing this subscriber holds.
@@ -309,9 +331,7 @@ def _delta_touches_workspace(frame: dict[str, Any], workspace_id: str, prefix: s
                 return True
             continue
         if event_type == STATE_PATCHED_EVENT_TYPE:
-            if payload.get("entity") == OFFICE_ACTOR_ENTITY and str(
-                payload.get("id") or ""
-            ).startswith(prefix):
+            if office_patch_scope(payload) == workspace_id:
                 return True
     return False
 
@@ -368,8 +388,6 @@ def office_patch_sink(
     is not an integration test.
     """
 
-    prefix = f"{workspace_id}/"
-
     def _deliver(frame: dict[str, Any]) -> None:
         if not isinstance(frame, dict):
             return
@@ -420,7 +438,7 @@ def office_patch_sink(
             # whose only lane is this one would need the skip path to advance a
             # bookmark before this rule could carry it alone.
             if frame_type == _ENUMERATED_FRAME_TYPE and (
-                _delta_touches_workspace(frame, workspace_id, prefix) is False
+                _delta_touches_workspace(frame, workspace_id) is False
             ):
                 return
             # Includes the unknown-type branch on purpose — see the module
@@ -443,11 +461,15 @@ def office_patch_sink(
             )
             return
         rows = [patch for patch in frame.get("patches") or [] if isinstance(patch, dict)]
-        in_scope = any(
-            patch.get("entity") == OFFICE_ACTOR_ENTITY
-            and str(patch.get("id") or "").startswith(prefix)
-            for patch in rows
-        )
+        # ONE SCOPE AUTHORITY (RD-H1 / task #57). This was a private restatement
+        # of the id scheme that knew only ``office_actor`` and its slash-prefixed
+        # id — so when WV-H3 widened what may PROMOTE to include ``office_surface``
+        # (bare workspace id, no slash), a folder-only frame failed BOTH conjuncts
+        # and took the bare ``return`` below: no patch, no resync, the change gone.
+        # ``office_patch_scope`` lives beside the id builders it reads backwards,
+        # and ``_delta_touches_workspace`` above calls the same function, so the
+        # promotion vocabulary and this lane's scope can no longer fork.
+        in_scope = any(office_patch_scope(patch) == workspace_id for patch in rows)
         if not in_scope:
             # Addressed, not broadcast: a batch that moved another workspace's
             # actors is not this subscriber's business and costs it nothing.

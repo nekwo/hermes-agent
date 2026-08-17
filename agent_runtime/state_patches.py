@@ -928,6 +928,62 @@ def emit_office_actor_remove(
 
 OFFICE_SURFACE_ENTITY = "office_surface"
 
+
+def office_patch_scope(patch: Any) -> str | None:
+    """The office workspace one ``state.patched`` row belongs to, or ``None``.
+
+    THE SCOPE AUTHORITY for the office push lane, and it lives here — beside the
+    id BUILDERS — because a scope parser is the id scheme read backwards, and the
+    two had drifted (operator task #57).
+
+    What the drift cost. ``serve_office_subscriptions.office_patch_sink`` carried
+    a private restatement of this rule that knew only ``office_actor`` and its
+    slash-prefixed id. When WV-H3 (2026-08-16) widened what may PROMOTE to
+    include ``office_surface`` — whose id is the BARE workspace id, no slash — a
+    folder-only batch became coverable, was fanned to the sink, and failed both
+    conjuncts of that private predicate: no patch, no resync, the change dropped
+    on a lane whose own docstring says "a resync is recoverable; a dropped change
+    is not". It survived only because a mixed batch (any actor row) admits the
+    whole frame under forward-whole, and because the argv ``harness stream`` child
+    still folded the same batch for the launcher.
+
+    So both readers on that lane now call THIS, and a batch the coverage authority
+    promotes is by construction either forwarded or resynced.
+
+    The two id shapes, and why one function can hold both:
+
+    * ``office_actor`` — ``"<workspace_id>/<actor_key>"``. Split on the FIRST
+      ``/`` exactly as :func:`office_actor_patch_id` joins on it (that separator
+      is the one character neither half can contain, so the split is total). An id
+      with no separator names no workspace and answers ``None`` rather than
+      guessing; this is also what keeps ``ws_pilot_2`` out of ``ws_pilot``'s
+      scope, where a naive ``startswith`` on the bare id would have leaked it.
+    * ``office_surface`` — the bare workspace id
+      (:func:`emit_office_surface_patch`), so the id IS the scope.
+
+    ``None`` for every other entity, for a malformed row, and for an office row
+    whose id cannot be placed. ``None`` is NOT "every workspace": a
+    ``persona_instance`` row is real state at its watermark but it moves nothing a
+    one-workspace office projection holds, which is why the office lane forwards
+    such a row inside an in-scope frame and never lets it put a frame in scope.
+    """
+
+    if not isinstance(patch, dict):
+        return None
+    entity = patch.get("entity")
+    entity_id = patch.get("id")
+    if not isinstance(entity_id, str) or not entity_id:
+        return None
+    if entity == OFFICE_ACTOR_ENTITY:
+        workspace_id, separator, _actor_key = entity_id.partition("/")
+        if not separator or not workspace_id:
+            return None
+        return workspace_id
+    if entity == OFFICE_SURFACE_ENTITY:
+        return entity_id
+    return None
+
+
 #: EXACTLY the office-row fields ``update_surface`` moves — the whole content of
 #: an ``office_surface`` patch, and the client's merge allowlist.
 #:

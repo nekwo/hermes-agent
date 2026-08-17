@@ -270,6 +270,38 @@ def delta_batch_frame(
     return frame
 
 
+def batch_carries_patch_rows(batch: list[tuple[int, Event]]) -> bool:
+    """Whether :func:`patch_batch_frame` would find at least one row in ``batch``.
+
+    The same filter the builder applies, asked as a predicate and deliberately
+    WITHOUT materializing the rows: the promotion gate runs on every drained
+    batch and only needs the emptiness answer, while building the list costs a
+    redaction-safe copy of every payload in it.
+
+    **Why the question exists at all.** Coverability is decided per EVENT
+    (:func:`~agent_runtime.patch_coverage.batch_is_patch_coverable` is an
+    ``all(...)`` with no "at least one patch" requirement), and a COVERED DOMAIN
+    EVENT is coverable on its own — it carries no fold state precisely because
+    its paired ``state.patched`` is supposed to ride the same batch. When the
+    pair does not arrive, the batch is still coverable, and the frame it used to
+    ship was ``{"type": "patch", "patches": [], "watermark": <batch>}``: the
+    client advances its watermark having folded NOTHING, and the row it should
+    have folded is stale until some unrelated full core happens by. There is no
+    downstream gate that can see that — the watermark says the span was applied.
+
+    Five producer-side paths re-open the missing pair, which is why the guard is
+    HERE and not in a producer: the three best-effort patch-emit swallows in
+    :class:`~agent_runtime.office_store.OfficeStore`, ``update_surface``'s
+    no-exception skip when the surface did not previously exist, and the
+    cross-process split of ``delta_patches_enabled`` (the writer and the stream
+    producer evaluate it independently, so a transient root-config fault in the
+    writer suppresses the patch while the stream happily promotes the event-only
+    batch). This predicate is the one place that sees all five.
+    """
+
+    return any(event.type == STATE_PATCHED_EVENT_TYPE for _, event in batch)
+
+
 def patch_batch_frame(
     batch: list[tuple[int, Event]], *, base_offset: int
 ) -> dict[str, Any]:
@@ -287,6 +319,16 @@ def patch_batch_frame(
     ``{seq, ts, entity, id, op, changed?}`` entries (the op-based wire contract —
     ``changed`` present only for ``upsert``); ``coalesced_count`` is the whole
     batch length (parity with :func:`delta_batch_frame`).
+
+    Refuses an EMPTY FILTERED LIST as well as an empty batch — a frame that
+    advances a watermark must carry the state that justifies it, and a batch of
+    covered domain events with no paired ``state.patched`` justifies nothing (see
+    :func:`batch_carries_patch_rows` for the five paths that produce one). Belt
+    and braces with the promotion gate in :func:`_batch_frames_with_liveness`:
+    the gate decides the honest lane, this refuses to BUILD the dishonest frame,
+    and one authority saying so at each end is cheaper than two that can
+    disagree. The caller's guard is the reachable one; this is the one that keeps
+    a future caller from re-opening the hole quietly.
     """
 
     if not batch:
@@ -297,6 +339,11 @@ def patch_batch_frame(
         for offset, event in batch
         if event.type == STATE_PATCHED_EVENT_TYPE
     ]
+    if not patches:
+        raise ValueError(
+            "patch_batch_frame requires at least one state.patched row: "
+            f"{len(batch)} events, none of them {STATE_PATCHED_EVENT_TYPE}"
+        )
     return {
         "type": "patch",
         "schema_version": STREAM_PATCH_SCHEMA_VERSION,
@@ -425,14 +472,23 @@ def _batch_frames_with_liveness(
         and batch_is_patch_coverable(
             (event for _, event in batch), fold_entities=fold_entities
         )
+        # Coverable is not the same as EXPRESSIBLE. A covered domain event with
+        # no paired `state.patched` in the batch is coverable on its own and
+        # would ship an empty `patches` list — a watermark the client advances
+        # having folded nothing. The honest answer for that batch is the core:
+        # state moved and this lane has no patch to say what. See
+        # `batch_carries_patch_rows` for the five producer paths that reach here.
+        and batch_carries_patch_rows(batch)
     ):
         yield patch_batch_frame(batch, base_offset=base_offset)
         return
     # Classified HERE because this is the only place that holds all three
     # facts. `resync` is a re-baseline the client asked for; with the lane off
-    # every batch is a full core by design (not a demotion); otherwise the
-    # coverage gate rejected the batch and a foldable update just paid for a
-    # whole snapshot — the case worth grepping for.
+    # every batch is a full core by design (not a demotion); otherwise either the
+    # coverage gate rejected the batch or it carried no patch row to express, and
+    # a foldable update just paid for a whole snapshot — the case worth grepping
+    # for. Both demote reasons bill the same `snapshot_build reason=demote`
+    # receipt, which is what makes the empty-frame paths attributable at all.
     yield from _full_core_batch_frames(
         batch,
         base_offset=base_offset,
