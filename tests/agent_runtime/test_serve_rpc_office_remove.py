@@ -35,6 +35,8 @@ What an ARCHIVE has to prove that an upsert does not:
 
 from __future__ import annotations
 
+import json
+
 from agent_runtime import serve_rpc
 from tests.agent_runtime.test_serve_rpc_office import (
     SHUTDOWN,
@@ -252,6 +254,78 @@ def test_an_unreadable_archive_on_the_idempotent_arm_is_typed_not_a_crash():
     }
     # Nothing repaired itself behind the refusal: the corrupt archive is left for
     # an operator, and no live actor file was resurrected in its place.
+    assert archived_path.read_text(encoding="utf-8") == "{truncated"
+    assert _live_keys() == []
+
+
+def test_both_lanes_refuse_the_same_unreadable_archive_naming_the_same_fault():
+    """Refusal PARITY across the two lanes, on ONE staged archive.
+
+    Both lanes run against the same undecodable archive copy in the same
+    workspace — the RPC first, then the CLI — which is only possible because
+    neither refusal writes or consumes anything. That is half the assertion.
+
+    The other half is the mapping, and the two lanes do NOT spend the same
+    string: the wire answers in JSON-RPC's ``data.reason`` (``-32600`` +
+    ``archive_unreadable``) while the CLI answers in the stage-42 exit taxonomy
+    (``archive_unreadable``, exit 7). What must be identical is the FAULT — one
+    condition, one name, one file to repair — so the code pair is pinned AS a
+    pair and a rename on either side reds here rather than quietly splitting the
+    two lanes' stories. (This is the shape
+    ``test_serve_rpc_office_resolve.py::test_both_lanes_refuse_the_same_class_keyed_adoption_naming_the_same_fault``
+    records for the class-key refusal; its docstring explains why the
+    vocabularies differ at all.)
+
+    Exit 7, not 1, is the point of the test. Until EG-4.5's follow-up
+    ``_error_code_for_exception`` had no row for ``ArchiveUnreadable``, so this
+    exact call fell through the ``AgentRuntimeError`` catch-all to
+    ``internal_error`` at exit 1: the wire named a corrupt file on the server and
+    the CLI, from the same store on the same disk, called it a harness crash.
+
+    **Mutation.** Remove the ``ArchiveUnreadable`` row from
+    ``hermes_cli/harness_support.py::_error_code_for_exception`` and the CLI half
+    comes back ``internal_error`` at exit 1 while the RPC half stays green — which
+    is why BOTH lanes are read from one fixture instead of trusting the wire test
+    above to speak for the CLI. ``actor-remove`` is the verb on purpose: it holds
+    no ``except`` arm of its own (unlike ``actor-upsert``, EG-6.6), so the mapping
+    is the only thing standing between it and ``internal_error``.
+    """
+
+    from agent_runtime import paths
+    from tests.agent_runtime.test_office_class_key_guard import _run_harness
+
+    _seed()
+    _remove("r1", {"workspace_id": WORKSPACE, "actor_key": QA_INSTANCE})
+    archived_path = paths.office_archived_actor_path(WORKSPACE, QA_INSTANCE)
+    archived_path.write_text("{truncated", encoding="utf-8")
+
+    rpc = _remove("r2", {"workspace_id": WORKSPACE, "actor_key": QA_INSTANCE})
+    cli = _run_harness(
+        "office", "actor-remove", "--workspace", WORKSPACE,
+        "--actor", QA_INSTANCE, "--json",
+    )
+
+    assert rpc["error"]["code"] == -32600, rpc
+    assert rpc["error"]["data"]["reason"] == "archive_unreadable"
+    assert cli.returncode == 7, cli.stdout + cli.stderr
+    cli_error = json.loads(cli.stdout)["error"]
+    assert cli_error["code"] == "archive_unreadable", cli.stdout
+    # The exit family is a claim about the operator's next move, so the envelope
+    # has to make the same claim: a 7 beside ``retryable: false`` would have one
+    # envelope disagreeing with itself about one fault.
+    assert cli_error["retryable"] is True, cli_error
+    # And the hint names the FILE rather than the taxonomy's default "correct
+    # your request", which is the one cure that cannot work here.
+    assert "archive" in cli_error["hint"], cli_error["hint"]
+
+    # The fault itself, identical on both lanes: the same actor key, in the same
+    # workspace, from the same undecodable copy.
+    assert rpc["error"]["data"]["actor_key"] == QA_INSTANCE
+    assert rpc["error"]["data"]["workspace_id"] == WORKSPACE
+    assert QA_INSTANCE in cli_error["message"]
+
+    # Two refusals, nothing written, and the file still there for the operator
+    # both lanes just pointed at it.
     assert archived_path.read_text(encoding="utf-8") == "{truncated"
     assert _live_keys() == []
 

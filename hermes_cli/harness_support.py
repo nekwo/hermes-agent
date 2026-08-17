@@ -27,6 +27,7 @@ from agent_runtime.cli_format import emit_json
 from agent_runtime.errors import (
     AgentRuntimeError,
     AlreadyExists,
+    ArchiveUnreadable,
     DefaultScopeReconciliationRequired,
     EventPayloadTooLarge,
     InvalidTransition,
@@ -155,6 +156,27 @@ ERROR_EXIT_CODES = {
     "install_dependency_missing": 7,
     "cancel_unavailable": 7,
     "cancel_failed": 7,
+    # A file this write DEPENDS ON would not decode, so the runtime declined to
+    # answer from a guess (EG-1.5 `archive_unreadable` — the archived copy holds
+    # the revision token an ``upsert_actor`` must bump; EG-6.6
+    # `actors_unreadable` — the class-key fence cannot see the whole actor
+    # directory it must consult). 7 and not 1, deliberately:
+    #
+    # * the 1-family is a TERMINAL verdict on the data and it shares its number
+    #   with ``internal_error``. Spending it here would name the fault correctly
+    #   in ``error.code`` and then report the exact wrong story in the exit
+    #   status — a corrupt server file still reading as "the harness crashed",
+    #   which is the half of EG-1.5's defect the CLI lane never got;
+    # * the condition is TRANSIENT and retryable in the way this family already
+    #   means (an AV hold releases; an operator repairs one file and the same
+    #   call succeeds unchanged) — the same reasoning the wire records for
+    #   spending ``-32600`` "cannot serve this right now" rather than a 4090
+    #   refusal, and the same reasoning ``cancel_unavailable`` sits here on.
+    #
+    # Two codes, one family: the family is the operator's next MOVE (retry once
+    # the file is readable), the code is WHICH file to repair.
+    "archive_unreadable": 7,
+    "actors_unreadable": 7,
     # Data integrity (1)
     "store_corrupt": 1,
     "event_payload_too_large": 1,
@@ -175,7 +197,12 @@ def emit_harness_error(exc: BaseException, *, args=None, code: str | None = None
     envelope = _error_envelope(
         error_code,
         message or _safe_error_message(exc),
-        retryable=getattr(exc, "retryable", False) or error_code in {"runtime_unavailable", "daemon_offline", "timeout"},
+        # ``archive_unreadable`` / ``actors_unreadable`` are retryable for the
+        # reason their exit family is 7: the file becomes readable again when an
+        # AV hold releases or an operator repairs it, and the identical call then
+        # succeeds. Saying ``retryable: false`` beside a 7 would have the two
+        # halves of one envelope disagree about the same fault.
+        retryable=getattr(exc, "retryable", False) or error_code in {"runtime_unavailable", "daemon_offline", "timeout", "archive_unreadable", "actors_unreadable"},
         safe_details=safe_details,
     )
     _print_stage42(envelope, args=args, default_output="json")
@@ -195,6 +222,26 @@ def _error_code_for_exception(exc: BaseException) -> str:
         return "not_found"
     if isinstance(exc, json.JSONDecodeError):
         return "invalid_payload"
+    # A file the write DEPENDS ON will not decode. Its own ``code``, not a
+    # constant and not a row in the tuple below: ``ActorsUnreadable`` subclasses
+    # ``ArchiveUnreadable`` so it inherits the exit family and the cure SHAPE
+    # (repair one file, retry the same call) while naming a DIFFERENT file —
+    # a fixed string here would tell an operator holding an undecodable ACTOR
+    # file to go and fix the archive copy. This is the same
+    # ``exc.code``-not-the-class-constant rule the three RPC write arms record
+    # (``serve_rpc.py`` — upsert, archive, resolve), so one condition keeps one
+    # name per lane instead of one name per verb.
+    #
+    # Placed ahead of the ``AgentRuntimeError`` catch-all it exists to escape:
+    # without this row ``harness office actor-remove`` / ``actor-upsert`` over an
+    # undecodable archived copy exited 1 as ``internal_error`` — a corrupt file
+    # on the server reported as a harness crash, which is precisely the
+    # names-the-wrong-party failure EG-1.5 fixed on the wire and left standing
+    # here. Verbs that catch the condition themselves (``harness_parts/office.py``
+    # actor-upsert, EG-6.6) pass ``code=`` explicitly and never reach this; this
+    # row is what covers every OTHER office write verb.
+    if isinstance(exc, ArchiveUnreadable):
+        return exc.code
     # Typed AgentRuntimeError subclasses map to their precondition/integrity codes.
     for exc_type, code in (
         (InvalidTransition, "invalid_transition"),
@@ -248,6 +295,14 @@ def _error_hint(code: str) -> str:
         "sync_secret_excluded": "Remove secrets/state from the realm sync allowlist source before retrying.",
         "sync_remote_unreachable": "Check network/git remote availability and retry.",
         "sync_auth_failed": "Provide a fresh launcher-brokered credential via --credential-file or HERMES_REALM_SYNC_CREDENTIAL.",
+        # The default hint says "retry after correcting the request", which is
+        # the one thing that cannot help here: nothing about the request is
+        # wrong. These two name the FILE instead — and they are two hints for the
+        # same reason they are two codes (errors.py: the operator's cure must not
+        # be mislabelled), because repairing the archive copy does nothing for an
+        # undecodable live actor file and vice versa.
+        "archive_unreadable": "Repair or remove the undecodable archived actor copy under store/office_archive/, then retry the same command.",
+        "actors_unreadable": "Repair or remove the undecodable actor file named in the message, or pass --persona-instance-id to place the instance, then retry.",
     }.get(code, "Inspect safe_details and retry after correcting the request.")
 
 

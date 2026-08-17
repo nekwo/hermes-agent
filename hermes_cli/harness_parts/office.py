@@ -240,8 +240,21 @@ def _cmd_office_actor_upsert(args) -> int:
         # refused instead of answering "no conflict" from half of it. Its own
         # code rather than ``duplicate_conflict``: nothing collided — the store
         # declined to guess — and the cure is repairing a file, not re-shaping a
-        # payload. ``emit_harness_error`` reads an unnamed ``AgentRuntimeError``
-        # as ``internal_error``, which this is not.
+        # payload.
+        #
+        # This arm is no longer what saves the condition from ``internal_error``:
+        # the taxonomy carries it now (``_error_code_for_exception`` maps every
+        # ``ArchiveUnreadable`` to ``exc.code``, exit family 7), which is what
+        # covers the office write verbs that have no arm of their own.
+        #
+        # Kept anyway, and NOT because it changes the answer — it does not. It is
+        # the verb-local statement at the seam that raises: the ONE write that
+        # runs the class-key fence says out loud, where the fence is called, that
+        # an unprovable answer is a hold and not a collision. Passing
+        # ``message=str(exc)`` hands over the fence's own sentence (both cures,
+        # under the 300-char safe-message bound) instead of a reconstruction, and
+        # passing ``code=exc.code`` rather than letting the mapping infer it means
+        # a divergence between the two would have to be written deliberately.
         return emit_harness_error(exc, args=args, code=exc.code, message=str(exc))
     except ClassKeyedPlacementRefused as exc:
         collision = exc.safe_details
