@@ -641,10 +641,25 @@ def _apply_profile_override() -> None:
     # still read active_profile — the user may have switched profiles via
     # `hermes profile use` and the gateway should honour that choice.
     # See issue #22502.
+    # Stamped unconditionally BEFORE any rung can answer, so the value always
+    # describes THIS process. Without the reset, a child inherits its parent's
+    # answer and the receipt reports the parent's rung — the exact confusion the
+    # receipt exists to remove.
+    os.environ["HERMES_PROFILE_RESOLUTION"] = "default"
+
     hermes_home_env = os.environ.get("HERMES_HOME", "")
     if profile_name is None and hermes_home_env:
         if Path(hermes_home_env).parent.name == "profiles":
+            # Record WHICH rung answered, additively. This early return is the
+            # one that skips the sticky marker entirely, so a child spawned from
+            # a profile-shaped env stays on that profile forever and nothing
+            # downstream could tell that apart from an explicit choice. The
+            # gateway reads this back at boot (hermes_cli/gateway_home_receipt).
+            # Spelled inline rather than imported: this pre-parse runs BEFORE any
+            # hermes module is importable, which is its entire reason to exist.
+            os.environ["HERMES_PROFILE_RESOLUTION"] = "env_profile_dir"
             return
+    resolution = "flag" if profile_name is not None else "default"
 
     # 2. If no flag, check active_profile in the hermes root.
     #
@@ -667,6 +682,7 @@ def _apply_profile_override() -> None:
                 name = active_path.read_text(encoding="utf-8").strip()
                 if name and name != "default":
                     profile_name = name
+                    resolution = "active_profile_marker"
                     consume = 0  # don't strip anything from argv
         except (UnicodeDecodeError, OSError):
             pass  # corrupted file, skip
@@ -693,6 +709,7 @@ def _apply_profile_override() -> None:
             )
             return
         os.environ["HERMES_HOME"] = hermes_home
+        os.environ["HERMES_PROFILE_RESOLUTION"] = resolution
         # Strip the flag from argv so argparse doesn't choke
         if consume > 0 and profile_index is not None:
             start = profile_index + 1  # +1 because argv is sys.argv[1:]

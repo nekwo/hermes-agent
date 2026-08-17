@@ -538,6 +538,48 @@ def _build_startup_launcher(script_path: Path) -> str:
     return "\r\n".join(lines) + "\r\n"
 
 
+class GatewayWrapperNotPinned(RuntimeError):
+    """A wrapper for a named profile would have been written without the flag."""
+
+
+def _assert_named_profile_wrapper_is_pinned(hermes_home: str, profile_arg: str) -> None:
+    """Refuse to write a single-pinned wrapper for a NAMED profile.
+
+    The wrapper is a persistence artifact: whatever it says is what every future
+    boot does, for months. ``set HERMES_HOME=<...>/profiles/<name>`` alone is a
+    SINGLE pin, and a single pin is load-bearing on ``main.py``'s rung 2 — the
+    rung that returns early and never consults the sticky ``active_profile``
+    marker. Double-pinning (env AND ``--profile <name>``) is what makes the boot
+    survive an env that has been mangled in transit.
+
+    This can genuinely fire: ``_profile_arg()`` returns ``""`` for any home that
+    is not exactly ``<default_root>/profiles/<name>``, and
+    ``update_cmd._refresh_windows_gateway_launchers`` re-renders the wrapper
+    from the UPDATING process's home. Refusing beats silently regenerating
+    today's healthy double-pinned wrapper into the vulnerable single-pinned
+    form.
+
+    Homes that are not named profiles (the default root, custom/hash roots) are
+    left alone — ``--profile`` has no name to carry there, and that is correct,
+    not a defect.
+    """
+    home = Path(hermes_home)
+    try:
+        is_named_profile = home.parent.name == "profiles" and bool(home.name)
+    except (OSError, ValueError):
+        return
+    if not is_named_profile:
+        return
+    if f"--profile {home.name}" in profile_arg:
+        return
+    raise GatewayWrapperNotPinned(
+        f"refusing to write a gateway wrapper for profile '{home.name}' whose "
+        f"argv lacks '--profile {home.name}' (profile_arg={profile_arg!r}); a "
+        "wrapper pinned only by HERMES_HOME rides main.py's early-return rung "
+        "and cannot recover from an environment mangled in transit"
+    )
+
+
 def _write_task_script() -> Path:
     """Generate and write the gateway.cmd wrapper. Return its absolute path."""
     _assert_windows()
@@ -557,6 +599,8 @@ def _write_task_script() -> Path:
     working_dir = _stable_gateway_working_dir(PROJECT_ROOT)
     hermes_home = str(Path(get_hermes_home()))
     profile_arg = _profile_arg(hermes_home)
+
+    _assert_named_profile_wrapper_is_pinned(hermes_home, profile_arg)
 
     content = _build_gateway_cmd_script(python_path, working_dir, hermes_home, profile_arg)
     script_path = get_task_script_path()
