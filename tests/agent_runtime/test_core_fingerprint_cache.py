@@ -1,0 +1,1028 @@
+"""EG-3.1 — the persisted read-model core, validated by a stat fingerprint.
+
+Nine behaviours from the plan's spec, plus HY-H1's ``model_tools`` recorder and
+BW-H1's two adopted transport-shaped tests, plus the closure-enumeration gate
+that makes Plan EG §6.1's audit surface a test instead of a paragraph.
+
+WHAT MAKES THESE NON-VACUOUS
+============================
+
+The mutant this file is written against is "always rebuild but stamp
+``core_source=cache``" — a receipt field alone can be forged by whatever writes
+it. So every case probes TWO independent things: the envelope's own answer AND
+something the mutant cannot set without doing the work. The second witness is a
+different object per case: a store fake that COUNTS its own reads (1), a value
+driven to two distinct states across the fixture so a constant matches at most
+one (2, 5, 6), an entity that is absent from the persisted core BY CONSTRUCTION
+(3), a ``sys.meta_path`` recorder the mutant's import must traverse (8).
+
+Witnesses assert ``core_source``, counts, ordering and values — never elapsed
+milliseconds. The seconds are read off EG-2.1's receipts (ruling #60).
+"""
+
+from __future__ import annotations
+
+import importlib.abc
+import json
+import logging
+import sys
+import threading
+
+import pytest
+
+from agent_runtime import core_cache, paths
+from agent_runtime.models import OfficeActor, OfficeItem, OfficeSurface
+from agent_runtime.serde import to_jsonable
+from agent_runtime.snapshot import BUILD_ROLE_CACHE, BUILD_ROLE_LED, build_snapshot
+from agent_runtime.store import WorkspaceStore
+from hermes_time import now
+from utils import atomic_json_write
+
+
+WORKSPACE_ID = "ws_fingerprint_probe"
+OFFICE_WORKSPACE = "ws_office_added_by_hand"
+
+
+# --------------------------------------------------------------------------- #
+# Harness
+# --------------------------------------------------------------------------- #
+@pytest.fixture(autouse=True)
+def fresh_cache_lane():
+    """Every case starts and ends with a process that has built nothing.
+
+    ``core_cache``'s lane state is a property of the PROCESS (it closes on the
+    first completed build), so a case that left it closed would silently turn
+    the next case's cache probe into an unconditional rebuild — passing for the
+    wrong reason.
+    """
+
+    core_cache.reset_process_state()
+    yield
+    core_cache.reset_process_state()
+
+
+@pytest.fixture(autouse=True)
+def shadow_requests(monkeypatch):
+    """Record the shadow-validation requests instead of running them.
+
+    Two reasons, both concrete. (1) The shadow build is a REAL full build on a
+    daemon thread; against a ``tmp_path`` root pytest is about to delete, a build
+    that outlives its case is a teardown race, not a test. (2) The window's whole
+    point is that a cache-hit boot ALSO walks the store — so a case measuring
+    what the SERVING path touched has to separate the two, and the separation
+    should be explicit rather than a hope about thread scheduling.
+
+    The recorder still returns True and is asserted non-empty where it matters,
+    so a landing that quietly removed the window reds instead of passing.
+    """
+
+    requests: list[str] = []
+
+    def record(cached, *, caller, build, adopt=None):
+        requests.append(caller)
+        return True
+
+    monkeypatch.setattr(core_cache, "maybe_start_shadow_validation", record)
+    return requests
+
+
+def _new_context() -> None:
+    """What a fresh serve child sees: a lane that has built nothing yet."""
+
+    core_cache.reset_process_state()
+
+
+def _seed_workspace(name: str) -> str:
+    """One durable, snapshot-visible row whose value the cases drive."""
+
+    store = WorkspaceStore()
+    item = store.create(name=name, workspace_id=WORKSPACE_ID)
+    return item.id
+
+
+def _rewrite_workspace_name(name: str) -> None:
+    """Drive the row to a new value with NO EventLog event.
+
+    Deliberately event-less. A store mutation that also appends an event would
+    let a fingerprint that watches only ``events.jsonl`` pass every case here,
+    and non-evented writers are exactly the class that made the event-offset key
+    unsound (two shipped incidents; HY-H1 constraint 3).
+    """
+
+    path = paths.workspace_path(WORKSPACE_ID)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["name"] = name
+    atomic_json_write(path, payload)
+
+
+def _served_workspace_name(core: dict) -> str | None:
+    for row in core.get("workspaces") or []:
+        if isinstance(row, dict) and row.get("id") == WORKSPACE_ID:
+            return row.get("name")
+    return None
+
+
+def _persisted_core() -> dict:
+    return json.loads(core_cache.core_path().read_text(encoding="utf-8"))
+
+
+def converge_persisted_core(*, limit: int = 4) -> int:
+    """Build until the persisted key describes the SETTLED store; return builds.
+
+    Two builds are normally needed on a virgin store and the reason is recorded
+    in ``core_cache.write_back``: the build is not a pure reader (it materializes
+    missing persona-instance rows and CREATES the chat SessionDB), and the key is
+    taken pre-build on purpose, so the first write-back describes inputs the
+    build then moved.
+
+    The bound is the point of the helper. A fingerprint that never converges
+    would mean a build perturbs its own inputs forever — the cache could never
+    hit, and every case below would pass by rebuilding. That is a loud failure
+    here rather than a silent one everywhere.
+    """
+
+    for attempt in range(1, limit + 1):
+        # Each attempt starts from NO cache, so this helper only ever asks "does
+        # a build of the settled store write a key that describes it?" — never
+        # "does a build update an existing key?", which is the SUBJECT of the
+        # write-back case below and must not be a precondition of its fixture.
+        core_cache.core_path().unlink(missing_ok=True)
+        core_cache.sidecar_path().unlink(missing_ok=True)
+        _new_context()
+        build_snapshot()
+        if core_cache.read_persisted_core().matched:
+            _new_context()
+            return attempt
+    raise AssertionError(
+        "the persisted core's fingerprint never converged: after "
+        f"{limit} builds the key still does not describe the settled store, so "
+        "a build is perturbing one of its own inputs on every pass. Find the "
+        "input (core_cache.build_input_fingerprint enumerates them) rather than "
+        "raising this bound."
+    )
+
+
+@pytest.fixture
+def seeded_cache():
+    """A workspace at ``alpha-one``, with a matching persisted core in place."""
+
+    _seed_workspace("alpha-one")
+    converge_persisted_core()
+    return WORKSPACE_ID
+
+
+class _CountingStores:
+    """Counts the build's own store reads. The mutant's tell.
+
+    Three independent readers of three different stores, wrapped in place: a
+    rebuilding mutant that stamps ``core_source=cache`` still has to walk them,
+    and the counter lives HERE, in the test, where nothing in production can set
+    it.
+    """
+
+    def __init__(self, monkeypatch):
+        self.calls: list[str] = []
+        from agent_runtime import events as events_mod
+        from agent_runtime import office_store as office_mod
+        from agent_runtime import snapshot as snapshot_mod
+        from agent_runtime import store as store_mod
+
+        real_list_all = store_mod.AgentStore.list_all
+        real_scan = office_mod.OfficeStore.scan_actors
+        real_tail = events_mod.CachedEventLog.tail
+
+        def counted_list_all(inner_self, *args, **kwargs):
+            self.calls.append("agent_store.list_all")
+            return real_list_all(inner_self, *args, **kwargs)
+
+        def counted_scan(inner_self, *args, **kwargs):
+            self.calls.append("office_store.scan_actors")
+            return real_scan(inner_self, *args, **kwargs)
+
+        def counted_tail(inner_self, *args, **kwargs):
+            self.calls.append("event_log.tail")
+            return real_tail(inner_self, *args, **kwargs)
+
+        monkeypatch.setattr(store_mod.AgentStore, "list_all", counted_list_all)
+        monkeypatch.setattr(office_mod.OfficeStore, "scan_actors", counted_scan)
+        monkeypatch.setattr(events_mod.CachedEventLog, "tail", counted_tail)
+        # The snapshot module holds its own bindings for two of the three.
+        monkeypatch.setattr(snapshot_mod, "AgentStore", store_mod.AgentStore)
+        monkeypatch.setattr(snapshot_mod, "OfficeStore", office_mod.OfficeStore)
+
+
+# --------------------------------------------------------------------------- #
+# 1. A fingerprint match serves the cache and reads no store
+# --------------------------------------------------------------------------- #
+def test_a_fingerprint_match_serves_the_cache_and_reads_no_store(
+    isolate_agent_runtime_root, seeded_cache, monkeypatch, shadow_requests
+):
+    """The stage's whole claim: validation instead of reconstruction.
+
+    *Mutation:* always rebuild but stamp ``core_source=cache``.
+    *Why it cannot pass:* the second probe is a counter that lives in this test's
+    own store wrappers. A build that runs must call them; a cache hit cannot.
+
+    The shadow-validation window is recorded rather than run (see the fixture),
+    and asserted to have been REQUESTED — so "reads no store" is a statement
+    about the path that answered the caller, not a claim that the window is off.
+    """
+
+    counters = _CountingStores(monkeypatch)
+    _new_context()
+    info: dict = {"caller": "probe"}
+    core = build_snapshot(build_info=info)
+
+    assert core["parity"]["core_source"] == core_cache.CORE_SOURCE_CACHE
+    assert info["role"] == BUILD_ROLE_CACHE
+    assert counters.calls == [], (
+        "a fingerprint-match boot read the store: "
+        f"{sorted(set(counters.calls))}. The persisted core is the answer; "
+        "walking the store as well buys nothing and costs the whole 20s."
+    )
+    assert shadow_requests == ["probe"], shadow_requests
+
+
+def test_a_cache_hit_emits_no_led_build_receipt(
+    isolate_agent_runtime_root, seeded_cache, caplog
+):
+    """A cache hit is not a build, and the log must not claim one.
+
+    EG-2.1 made a boot's build COUNT the count of ``role=led`` lines. A cache
+    hit that printed one would put the log straight back into the state where a
+    wait and a build are indistinguishable — the defect that made one build read
+    as three on the 2026-08-17 boot.
+    """
+
+    _new_context()
+    with caplog.at_level(logging.INFO, logger="agent_runtime.core_cache"), caplog.at_level(
+        logging.INFO, logger="agent_runtime.snapshot"
+    ):
+        build_snapshot(build_info={"caller": "probe"})
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert not [line for line in messages if "snapshot_build_core" in line], messages
+    assert [
+        line
+        for line in messages
+        if "snapshot_core_cache" in line and "core_source=cache" in line
+    ], messages
+
+
+# --------------------------------------------------------------------------- #
+# 2. A changed input rebuilds and serves the NEW value
+# --------------------------------------------------------------------------- #
+def test_a_changed_input_rebuilds_and_serves_the_new_value(
+    isolate_agent_runtime_root, seeded_cache
+):
+    """*Mutation:* serve the cache on mismatch.
+
+    Two driven values, so a constant matches at most one: the persisted core
+    provably holds ``alpha-one`` (it was written before the change) and the
+    served core must hold ``alpha-two``.
+    """
+
+    assert _served_workspace_name(_persisted_core()) == "alpha-one"
+    _rewrite_workspace_name("alpha-two")
+
+    _new_context()
+    info: dict = {"caller": "probe"}
+    core = build_snapshot(build_info=info)
+
+    assert core["parity"]["core_source"] == core_cache.CORE_SOURCE_REBUILT
+    assert info["role"] == BUILD_ROLE_LED
+    assert _served_workspace_name(core) == "alpha-two"
+
+
+# --------------------------------------------------------------------------- #
+# 3. An ADDED file flips the fingerprint
+# --------------------------------------------------------------------------- #
+def _write_office_by_hand(workspace_id: str) -> None:
+    """An office surface + one desk, written straight to disk. No event, no store.
+
+    The office tree is the case a NAME LIST cannot see: it is absent from the
+    serve read-cache's ``_FINGERPRINT_STORE_DIRS`` entirely, so a fingerprint
+    that stats only previously-known paths reports "nothing changed" for a whole
+    new office. Written without the store so ``events.jsonl`` — which IS on that
+    name list — does not move and rescue the mutant.
+    """
+
+    stamp = now()
+    surface = OfficeSurface(
+        workspace_id=workspace_id,
+        folders=["Ops"],
+        archived_actor_keys=[],
+        revision=1,
+        created_at=stamp,
+        updated_at=stamp,
+        updated_by="probe",
+    )
+    atomic_json_write(paths.office_surface_path(workspace_id), to_jsonable(surface))
+    actor = OfficeActor(
+        workspace_id=workspace_id,
+        actor_key="probe_desk",
+        persona_id="probe",
+        items=[
+            OfficeItem(
+                item_id="probe_desk_item",
+                persona_id="probe",
+                kind="desk",
+                position=(1.0, 2.0),
+                folder="Ops",
+            )
+        ],
+        revision=1,
+        created_at=stamp,
+        updated_at=stamp,
+        updated_by="probe",
+    )
+    atomic_json_write(
+        paths.office_actors_dir(workspace_id) / "probe_desk.json", to_jsonable(actor)
+    )
+
+
+def test_an_added_file_flips_the_fingerprint(isolate_agent_runtime_root, seeded_cache):
+    """*Mutation:* fingerprint only previously-known paths (the pre-EG-3.1 name
+    list — ``serve._FINGERPRINT_ROOT_FILES`` + ``_FINGERPRINT_STORE_DIRS``).
+
+    *Why it cannot pass:* the added entity is absent from the persisted core by
+    construction, so serving the cache serves an office that does not exist.
+    """
+
+    assert OFFICE_WORKSPACE not in (_persisted_core().get("offices") or {})
+    _write_office_by_hand(OFFICE_WORKSPACE)
+
+    _new_context()
+    core = build_snapshot(build_info={"caller": "probe"})
+
+    assert core["parity"]["core_source"] == core_cache.CORE_SOURCE_REBUILT
+    assert OFFICE_WORKSPACE in (core.get("offices") or {}), sorted(core.get("offices") or {})
+
+
+# --------------------------------------------------------------------------- #
+# 4. A SessionDB-only mutation flips the fingerprint
+# --------------------------------------------------------------------------- #
+def test_a_sessiondb_only_mutation_flips_the_fingerprint(
+    isolate_agent_runtime_root, seeded_cache
+):
+    """*Mutation:* skip the database files in the stat set.
+
+    The chat SessionDB lives under the HERMES head home, not the store root, and
+    a WAL commit that has not checkpointed leaves the main file's mtime
+    untouched — so the ``-wal``/``-shm`` siblings are the load-bearing half. The
+    mutant's fingerprint is unchanged by construction here and serves the cache,
+    convicted by the ``core_source`` probe.
+    """
+
+    from agent_runtime.chat_session_scope import chat_session_db_path
+    from hermes_state import SessionDB
+
+    before = core_cache.build_input_fingerprint()
+    SessionDB(db_path=chat_session_db_path()).create_session(
+        "probe-fingerprint-session", "test"
+    )
+    after = core_cache.build_input_fingerprint()
+    assert before is not None and after is not None
+    assert before.digest != after.digest, (
+        "a write through SessionDB's own writer did not move the fingerprint; "
+        "the database files (or their WAL siblings) are not in the stat set"
+    )
+
+    _new_context()
+    core = build_snapshot(build_info={"caller": "probe"})
+    assert core["parity"]["core_source"] == core_cache.CORE_SOURCE_REBUILT
+
+
+# --------------------------------------------------------------------------- #
+# 5. A mismatch serves LABELED stale first, authoritative after
+# --------------------------------------------------------------------------- #
+def test_a_mismatch_serves_labeled_stale_first_then_authoritative(
+    isolate_agent_runtime_root, seeded_cache, monkeypatch
+):
+    """Frame 1 while the build is GATED; frame 2 after it completes.
+
+    *Why not settable:* a mutant that blocks until the rebuild finishes cannot
+    deliver frame 1 while this test holds the gate, and a mutant that serves
+    frame 1 unlabeled fails the marker probe. The two frames also carry the two
+    driven values, so neither can be a constant.
+    """
+
+    from agent_runtime import snapshot as snapshot_mod
+    from agent_runtime.stream import stream_frames
+
+    _rewrite_workspace_name("alpha-two")
+    _new_context()
+
+    gate = threading.Event()
+    real_build = snapshot_mod._build_snapshot_uncoalesced
+
+    def gated_build(*args, **kwargs):
+        assert gate.wait(20), "the gated build was never released"
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(snapshot_mod, "_build_snapshot_uncoalesced", gated_build)
+
+    frames: list[dict] = []
+    failure: list[BaseException] = []
+
+    def drive() -> None:
+        try:
+            for frame in stream_frames(max_frames=2, poll_interval_seconds=0.01):
+                frames.append(frame)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            failure.append(exc)
+
+    worker = threading.Thread(target=drive, name="probe-stream", daemon=True)
+    worker.start()
+
+    # Bounded wait on a condition, not a fixed sleep: the assertion below is
+    # about WHAT arrived while the gate was held, so the wait must end as soon as
+    # something has (or after 10s, well inside the 30s per-test cap).
+    idle = threading.Event()
+    for _ in range(200):
+        if frames:
+            break
+        idle.wait(0.05)
+    assert frames, "no frame arrived while the rebuild was gated — nothing was painted"
+
+    stale = frames[0]
+    stale_parity = stale["core"]["parity"]
+    assert stale["type"] == "hydrate"
+    assert stale_parity["core_source"] == core_cache.CORE_SOURCE_CACHE
+    assert stale_parity["core_stale"] is True
+    assert stale_parity["freshness"]["state"] == "stale", stale_parity["freshness"]
+    assert _served_workspace_name(stale["core"]) == "alpha-one"
+
+    gate.set()
+    worker.join(20)
+    assert not failure, failure
+    assert not worker.is_alive()
+    assert len(frames) == 2, [frame.get("type") for frame in frames]
+
+    fresh_parity = frames[1]["core"]["parity"]
+    assert "core_stale" not in fresh_parity
+    assert fresh_parity["freshness"]["state"] == "fresh"
+    assert _served_workspace_name(frames[1]["core"]) == "alpha-two"
+
+
+def test_a_stale_labeled_core_is_never_live_to_the_launchers_own_predicate(
+    isolate_agent_runtime_root, seeded_cache
+):
+    """The honesty half, stated as the consumer states it.
+
+    The launcher's ``MissionSnapshotEnvelope.health()`` reads
+    ``parity.freshness.state`` and returns ``stale`` on the literal ``"stale"``
+    BEFORE it consults its own freshness window. A stale-served core therefore
+    cannot read ``live`` on a launcher pinned at today's contract, which is what
+    makes "a stale-labeled frame is never authoritative" a property of the
+    existing consumer rather than a promise about a future one.
+    """
+
+    _rewrite_workspace_name("alpha-two")
+    _new_context()
+    stale = core_cache.take_stale_first_core(caller="probe")
+    assert stale is not None
+    assert stale["parity"]["freshness"]["state"] == "stale"
+    assert stale["parity"]["core_stale"] is True
+    # One-shot per process: a resubscribe cannot re-paint an old projection.
+    assert core_cache.take_stale_first_core(caller="probe") is None
+
+
+def test_a_matching_core_is_never_painted_stale(isolate_agent_runtime_root, seeded_cache):
+    """The pessimistic lie is a lie too.
+
+    A fingerprint MATCH must go out authoritative, not labeled stale-then-
+    replaced: painting a validated projection as unvalidated would train the
+    operator to ignore the banner, which is how a fence stops being a fence.
+    """
+
+    _new_context()
+    assert core_cache.take_stale_first_core(caller="probe") is None
+
+
+# --------------------------------------------------------------------------- #
+# 6. Every build writes back
+# --------------------------------------------------------------------------- #
+def test_every_build_writes_back_not_only_the_boot_build(
+    isolate_agent_runtime_root, seeded_cache
+):
+    """Three contexts: build, mutate+rebuild, then a hit against the SECOND build.
+
+    *Mutation:* write back only on boot builds (e.g. refuse the write when a
+    sidecar already exists). The third context then either rebuilds — reddening
+    the ``core_source`` probe — or serves the FIRST build's value, reddening the
+    row probe. Either way red.
+
+    This is the half that made ``snapshot.json`` two days stale on the live
+    store: a persisted projection nothing keeps current is a projection nobody
+    can serve.
+    """
+
+    _rewrite_workspace_name("alpha-two")
+    _new_context()
+    second = build_snapshot(build_info={"caller": "probe"})
+    assert second["parity"]["core_source"] == core_cache.CORE_SOURCE_REBUILT
+    assert _served_workspace_name(_persisted_core()) == "alpha-two", (
+        "the rebuild did not write its core back, so the next process would pay "
+        "for state this one already had in hand"
+    )
+
+    _new_context()
+    third = build_snapshot(build_info={"caller": "probe"})
+    assert third["parity"]["core_source"] == core_cache.CORE_SOURCE_CACHE
+    assert _served_workspace_name(third) == "alpha-two"
+
+
+# --------------------------------------------------------------------------- #
+# 7. The equivalence golden — THE authority guard
+# --------------------------------------------------------------------------- #
+def test_the_cache_served_core_equals_the_rebuilt_core_field_for_field(
+    isolate_agent_runtime_root, seeded_cache
+):
+    """THE authority guard, and the reason an input-closure gap reds HERE.
+
+    For one fingerprint the two representations must be the same projection.
+    Everything that is allowed to differ is named in
+    ``core_cache._SHADOW_IGNORED_*`` and asserted below, so the exemption list
+    cannot be widened quietly to make a real divergence pass: a section added to
+    it is a section this golden stops guarding, and that has to be a visible
+    edit.
+    """
+
+    from agent_runtime import snapshot as snapshot_mod
+
+    _new_context()
+    cached = build_snapshot(build_info={"caller": "probe"})
+    assert cached["parity"]["core_source"] == core_cache.CORE_SOURCE_CACHE
+    rebuilt = snapshot_mod._build_snapshot_uncoalesced()
+
+    assert core_cache.compare_cores(cached, rebuilt) is None, (
+        "the cache-served core and a rebuild of the same inputs disagree on "
+        f"section {core_cache.compare_cores(cached, rebuilt)!r} — that is an "
+        "input-closure gap, and the fix is widening the fingerprint's inputs, "
+        "never trusting the cache harder"
+    )
+
+    left = to_jsonable(cached)
+    right = to_jsonable(rebuilt)
+    differing = sorted(
+        key for key in set(left) | set(right) if left.get(key) != right.get(key)
+    )
+    assert differing == ["generated_at", "parity"], differing
+    parity_differing = sorted(
+        key
+        for key in set(left["parity"]) | set(right["parity"])
+        if left["parity"].get(key) != right["parity"].get(key)
+    )
+    assert set(parity_differing) <= (
+        core_cache._SHADOW_IGNORED_PARITY_KEYS | {"watermark"}
+    ), parity_differing
+    # ``watermark`` is exempted only for the clock that says when it was READ;
+    # ``event_offset`` — two cores at different log positions — stays guarded.
+    assert left["parity"]["watermark"]["event_offset"] == (
+        right["parity"]["watermark"]["event_offset"]
+    )
+    # The exemption lists themselves, pinned. Widening one is how this golden
+    # would stop guarding a section, so it has to be a visible edit here too.
+    assert core_cache._SHADOW_IGNORED_TOP_KEYS == {
+        "generated_at",
+        "parity",
+        "runtime_paths_diagnostic",
+    }
+    assert core_cache._SHADOW_IGNORED_WATERMARK_KEYS == {"captured_at"}
+    assert core_cache._SHADOW_IGNORED_PARITY_KEYS == {
+        "build_ms",
+        "sections_ms",
+        "generated_at",
+        "projection_age_ms",
+        "core_source",
+        "core_stale",
+        "freshness",
+        "snapshot_bytes",
+    }
+
+
+# --------------------------------------------------------------------------- #
+# 8. A cache hit imports no model_tools (HY-H1 constraint 2)
+# --------------------------------------------------------------------------- #
+class _ImportRecorder(importlib.abc.MetaPathFinder):
+    """Records every attempt to IMPORT the named module. Never resolves it."""
+
+    def __init__(self, watched: str):
+        self.watched = watched
+        self.attempts: list[str] = []
+
+    def find_spec(self, fullname, path=None, target=None):  # noqa: D102
+        if fullname == self.watched or fullname.startswith(self.watched + "."):
+            self.attempts.append(fullname)
+        return None
+
+
+def test_a_cache_hit_boot_imports_no_model_tools(
+    isolate_agent_runtime_root, seeded_cache
+):
+    """The persisted core already carries the tool rows.
+
+    A cache hit that still triggered the deferred ``model_tools`` import would
+    re-buy ~1.3 s plus the ``check_fn`` discovery storm — the exact cost BW-H3
+    took off the boot path.
+
+    *Mutation:* import it anyway (an eager "just in case" warm).
+    *Why not settable:* the recorder IS ``sys.meta_path``'s first finder, and the
+    module is evicted from ``sys.modules`` below, so any import attempt must
+    traverse it. Without the eviction this test would be vacuous the moment an
+    earlier build in the same process had already imported the module — which is
+    exactly what the seeding build does.
+    """
+
+    evicted = {
+        name: module
+        for name, module in list(sys.modules.items())
+        if name == "model_tools" or name.startswith("model_tools.")
+    }
+    for name in evicted:
+        del sys.modules[name]
+    recorder = _ImportRecorder("model_tools")
+    sys.meta_path.insert(0, recorder)
+    try:
+        _new_context()
+        core = build_snapshot(build_info={"caller": "probe"})
+    finally:
+        sys.meta_path.remove(recorder)
+        sys.modules.update(evicted)
+
+    assert core["parity"]["core_source"] == core_cache.CORE_SOURCE_CACHE
+    assert recorder.attempts == [], recorder.attempts
+
+
+# --------------------------------------------------------------------------- #
+# 9. Adopted from BW-H1 unchanged
+# --------------------------------------------------------------------------- #
+def test_a_build_stamp_mismatch_demotes(
+    isolate_agent_runtime_root, seeded_cache, monkeypatch, caplog
+):
+    """*Kill:* trust a stale install's core.
+
+    Property 5: an upgrade must never be able to serve the old install's
+    projection. The inputs are byte-identical here — the ONLY thing that moved
+    is which code is running — so a cache hit would be a pure code-version lie.
+    """
+
+    monkeypatch.setattr(core_cache, "build_stamp_token", lambda: "git:deadbeef:clean")
+    _new_context()
+    with caplog.at_level(logging.INFO, logger="agent_runtime.core_cache"):
+        core = build_snapshot(build_info={"caller": "probe"})
+
+    assert core["parity"]["core_source"] == core_cache.CORE_SOURCE_REBUILT
+    assert [
+        line
+        for line in (record.getMessage() for record in caplog.records)
+        if core_cache.DEMOTE_BUILD_STAMP_MISMATCH in line
+    ], [record.getMessage() for record in caplog.records]
+
+
+def test_an_unmeasurable_build_stamp_refuses_the_cache(
+    isolate_agent_runtime_root, seeded_cache, monkeypatch
+):
+    """An install whose code cannot be identified does not get to be trusted.
+
+    The tempting alternative — treat ``unknown`` as matching ``unknown`` — reads
+    as harmless and is the whole failure: two different installs both answer
+    "unknown" and the cache crosses between them silently.
+    """
+
+    monkeypatch.setattr(core_cache, "build_stamp_token", lambda: None)
+    _new_context()
+    core = build_snapshot(build_info={"caller": "probe"})
+    assert core["parity"]["core_source"] == core_cache.CORE_SOURCE_REBUILT
+
+
+def test_a_failed_cache_write_leaves_the_build_path_byte_identical(
+    isolate_agent_runtime_root, monkeypatch, caplog
+):
+    """*Kill:* raise.
+
+    The cache is added to the path a boot waits on, so its failure mode is the
+    part that has to be boring: a write that cannot land logs and changes
+    nothing about the core that was just built, the receipt that was just
+    emitted, or the value returned.
+    """
+
+    _seed_workspace("alpha-one")
+    _new_context()
+    good = build_snapshot(build_info={"caller": "probe"})
+
+    def boom(*args, **kwargs):
+        raise OSError("the cache directory is not writable")
+
+    monkeypatch.setattr(core_cache, "atomic_json_write", boom)
+    _new_context()
+    with caplog.at_level(logging.INFO):
+        info: dict = {"caller": "probe"}
+        bad = build_snapshot(build_info=info)
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert info["role"] == BUILD_ROLE_LED
+    assert [line for line in messages if "snapshot_build_core role=led" in line], messages
+    assert [
+        line for line in messages if "snapshot_core_cache_write ok=false" in line
+    ], messages
+    assert core_cache.compare_cores(good, bad) is None, core_cache.compare_cores(good, bad)
+
+
+# --------------------------------------------------------------------------- #
+# The shadow-validation window (§6.1's third mitigation)
+# --------------------------------------------------------------------------- #
+def test_a_shadow_divergence_is_loud_named_and_adopted(
+    isolate_agent_runtime_root, seeded_cache, caplog
+):
+    """A cache-hit boot that was WRONG says so, says where, and stops being wrong.
+
+    The receipt names the differing SECTION on purpose: a boolean "the cache
+    diverged" tells an operator to distrust the cache without telling them which
+    input class to widen, and "widen the closure" is the only sanctioned
+    response.
+
+    *Kill:* log the divergence and keep serving the cache. Then the rebuilt core
+    is not written back, the lane stays open, and nothing tells the lane that
+    already painted to replace what it painted.
+    """
+
+    _new_context()
+    cached = build_snapshot(build_info={"caller": "probe"})
+    assert cached["parity"]["core_source"] == core_cache.CORE_SOURCE_CACHE
+
+    divergent = json.loads(json.dumps(to_jsonable(cached)))
+    divergent["workspaces"] = [
+        {**row, "name": "alpha-divergent"} for row in divergent["workspaces"]
+    ]
+    adopted: list[dict] = []
+
+    with caplog.at_level(logging.WARNING, logger="agent_runtime.core_cache"):
+        section = core_cache.shadow_validate(
+            cached,
+            caller="probe",
+            build=lambda: divergent,
+            adopt=adopted.append,
+        )
+
+    assert section == "workspaces"
+    assert [
+        line
+        for line in (record.getMessage() for record in caplog.records)
+        if "snapshot_core_shadow_divergence" in line and "section=workspaces" in line
+    ], [record.getMessage() for record in caplog.records]
+    assert adopted and adopted[0] is divergent
+    assert not core_cache.lane_armed(), (
+        "the lane stayed open after a divergence, so this process would keep "
+        "serving the core it just proved wrong"
+    )
+    assert _served_workspace_name(_persisted_core()) == "alpha-divergent"
+
+
+def test_the_shadow_window_runs_at_most_once_per_process(
+    isolate_agent_runtime_root, seeded_cache
+):
+    """A boot issues several builds; the validation is per PROCESS, not per hit.
+
+    One full build behind every cache hit would cost the process more than the
+    cache saved — four boot builds would buy four rebuilds.
+    """
+
+    _new_context()
+    core = build_snapshot(build_info={"caller": "probe"})
+    assert core["parity"]["core_source"] == core_cache.CORE_SOURCE_CACHE
+    assert core_cache.claim_shadow_slot() is True
+    assert core_cache.claim_shadow_slot() is False
+    assert core_cache.claim_shadow_slot() is False
+    _new_context()
+    assert core_cache.claim_shadow_slot() is True
+
+
+def test_a_shadow_build_does_not_close_the_cache_lane(
+    isolate_agent_runtime_root, seeded_cache
+):
+    """The validation is not the process's answer.
+
+    A shadow build that closed the lane would make the NEXT boot caller pay a
+    full build for the privilege of having validated the one it just avoided —
+    the hydrate, which is the caller the launcher is actually waiting on.
+    """
+
+    _new_context()
+    with core_cache.shadow_build_scope():
+        core_cache.note_full_build_completed()
+    assert core_cache.lane_armed()
+    core_cache.note_full_build_completed()
+    assert not core_cache.lane_armed()
+
+
+# --------------------------------------------------------------------------- #
+# The input closure — Plan EG §6.1's audit surface, as a gate
+# --------------------------------------------------------------------------- #
+def test_the_fingerprint_covers_every_named_input_class(isolate_agent_runtime_root):
+    """The closure is enumerable, and each class is named by its OWN authority.
+
+    §6.1 calls this stage's input closure the plan's single biggest bet, and the
+    first of its three mitigations is that the closure is derived from the
+    build's own readers rather than restated. This asserts that each of those
+    authorities actually contributes to the key — so deleting a class (or
+    letting an authority's answer silently become empty) is red here rather than
+    an unlabeled stale core in the field.
+    """
+
+    from agent.skill_utils import get_all_skills_dirs
+    from agent_runtime.chat_session_scope import chat_session_db_path
+    from agent_runtime.config import harness_root_config_path
+    from agent_runtime.running_work import running_work_store_paths
+    from hermes_cli.profiles import _get_profiles_root
+    from hermes_constants import get_config_path
+
+    _seed_workspace("alpha-one")
+    _write_office_by_hand(OFFICE_WORKSPACE)
+    fingerprint = core_cache.build_input_fingerprint()
+    assert fingerprint is not None
+    covered = set(core_cache.iter_fingerprint_paths(fingerprint))
+
+    def assert_covered(label: str, path) -> None:
+        assert str(path) in covered, (
+            f"the {label} input class is NOT in the fingerprint: {path}. A build "
+            "input that cannot flip the key is a core that can be served "
+            "unlabeled-stale as authoritative."
+        )
+
+    # 1 — the store-root subtree, including a tree no name list ever covered.
+    assert_covered("store root", paths.store_root())
+    assert_covered("store subtree (workspaces)", paths.workspace_path(WORKSPACE_ID))
+    assert_covered("store subtree (offices)", paths.office_surface_path(OFFICE_WORKSPACE))
+    assert_covered("store subtree (event log)", paths.events_path())
+    # 2 — the running_work stores, plus the WAL sibling of the one that is a DB.
+    running = running_work_store_paths()
+    assert running, "running_work_store_paths() resolved nothing to fingerprint"
+    for path in running:
+        assert_covered("running_work store", path)
+    assert_covered("running_work WAL sibling", f"{running[-1]}-wal")
+    # 3 — the chat SessionDB and its WAL siblings.
+    assert_covered("chat SessionDB", chat_session_db_path())
+    assert_covered("chat SessionDB WAL sibling", f"{chat_session_db_path()}-wal")
+    # 4 — the profile inputs agents_readiness reads.
+    assert_covered("profiles root", _get_profiles_root())
+    # 5 — both config authorities (they are different files in production).
+    assert_covered("ambient config", get_config_path())
+    assert_covered("root config", harness_root_config_path())
+    # 6 — every skill registry root the resolver would walk.
+    for root in get_all_skills_dirs():
+        assert_covered("skill registry root", root)
+    # 7 — the event-rotation lane.
+    assert_covered("event rotation manifest", paths.events_manifest_path())
+
+
+def test_the_chat_sessiondb_class_is_resolved_through_its_own_authority(
+    isolate_agent_runtime_root, monkeypatch
+):
+    """Class 3 is consulted independently, even when it usually COINCIDES with class 2.
+
+    Worth its own case because the coverage gate above cannot see it: under the
+    test harness (and on most installs) ``chat_session_db_path()`` and
+    ``running_work_store_paths()[-1]`` resolve to the SAME ``state.db`` under the
+    head home, so deleting the chat-scope class entirely left every other
+    assertion green. They are not the same question, and the divergence between
+    them is a shipped defect: a bare ``SessionDB()`` keyed the serve read cache on
+    ``HERMES_HOME/state.db`` while every chat write went to the RESOLVED chat
+    scope, freezing Chat History for the life of the serve process (defect D1,
+    ``chat-session-presence-authority.md``).
+
+    So the probe points the chat-scope authority somewhere unmistakably its own
+    and asserts the fingerprint followed it.
+    """
+
+    from agent_runtime import chat_session_scope
+
+    distinct = isolate_agent_runtime_root.parent / "chat-scope-elsewhere" / "state.db"
+    monkeypatch.setattr(chat_session_scope, "chat_session_db_path", lambda: distinct)
+    fingerprint = core_cache.build_input_fingerprint()
+    assert fingerprint is not None
+    covered = set(core_cache.iter_fingerprint_paths(fingerprint))
+    assert str(distinct) in covered, (
+        "the fingerprint did not follow chat_session_db_path(); it is watching "
+        "whichever database ambient resolution hands it, which is defect D1"
+    )
+    assert f"{distinct}-wal" in covered
+
+
+def test_the_cache_excludes_its_own_writes_from_the_fingerprint(
+    isolate_agent_runtime_root
+):
+    """The cache must not invalidate the key it just persisted.
+
+    Learned the hard way, and this is the exact shape that bit: on a store root
+    the cache's own write CREATES, an entry recorded as "absent" before the write
+    reads as "present" after it — so the write that persisted a core guaranteed
+    the next process would miss it, on every single boot. The fix is that a
+    directory contributes its path and never its existence-or-mtime, because a
+    directory's timestamp also moves for the children this fingerprint
+    deliberately excludes (``locks/``, the serve registry, staged temp files).
+
+    Nothing is built here on purpose: the ONLY filesystem change between the two
+    stat sets is the cache's own pair, so an inequality has exactly one cause.
+    """
+
+    assert not isolate_agent_runtime_root.exists(), (
+        "this case needs a virgin store root — the cache's own directory must be "
+        "the first thing written into it"
+    )
+    before = core_cache.build_input_fingerprint()
+    assert before is not None
+    assert core_cache.write_back({"parity": {"watermark": {"event_offset": 0}}}) is True
+    assert core_cache.core_path().exists()
+    after = core_cache.build_input_fingerprint()
+    assert after is not None
+    assert before.digest == after.digest, (
+        "writing the cache changed the fingerprint of the inputs, so a cache "
+        "write can never be validated by the process that reads it next"
+    )
+    # And a second, ordinary re-write of the existing pair is equally inert.
+    assert core_cache.write_back({"parity": {"watermark": {"event_offset": 1}}}) is True
+    again = core_cache.build_input_fingerprint()
+    assert again is not None and again.digest == before.digest
+
+
+def test_an_unresolvable_input_authority_refuses_the_cache(
+    isolate_agent_runtime_root, seeded_cache, monkeypatch
+):
+    """A missing answer is a REFUSAL, never a quiet "nothing changed" (ruling #45).
+
+    ``running_work_store_paths`` returns an empty tuple when it cannot resolve a
+    home. Reading that as "there is nothing to watch" is how a HUD comes to claim
+    three processes are running twenty seconds after they all exited.
+    """
+
+    from agent_runtime import running_work as running_work_mod
+
+    monkeypatch.setattr(running_work_mod, "running_work_store_paths", lambda: ())
+    assert core_cache.build_input_fingerprint() is None
+    _new_context()
+    core = build_snapshot(build_info={"caller": "probe"})
+    assert core["parity"]["core_source"] == core_cache.CORE_SOURCE_REBUILT
+
+
+def test_a_core_whose_bytes_the_sidecar_does_not_describe_is_refused(
+    isolate_agent_runtime_root, seeded_cache
+):
+    """The sidecar binds to the core's BYTES, not to its path.
+
+    A half-replaced pair, a hand-edited core, or a rollback that restored an
+    older ``core.json`` beside a newer sidecar would otherwise be
+    indistinguishable from a valid pair — and this one is refused OUTRIGHT
+    rather than served stale, because nothing here can say what an unbound core
+    contains.
+    """
+
+    tampered = _persisted_core()
+    tampered["workspaces"] = []
+    atomic_json_write(core_cache.core_path(), tampered, indent=None)
+
+    read = core_cache.read_persisted_core()
+    assert read.matched is False
+    assert read.reason == core_cache.DEMOTE_CORE_DIGEST_MISMATCH
+    assert read.core is None
+    _new_context()
+    assert core_cache.take_stale_first_core(caller="probe") is None
+
+
+# --------------------------------------------------------------------------- #
+# The projection a persisted core must not bless (RD-H4's sibling defect)
+# --------------------------------------------------------------------------- #
+def test_the_persisted_core_reports_the_actor_files_it_could_not_read(
+    isolate_agent_runtime_root
+):
+    """A persisted core must not fingerprint-bless a silently-shortened office.
+
+    ``_read_actor_dir`` skips a file it cannot decode and returns the rest, so
+    the snapshot's office row arrived already SHORTENED and computed its own
+    truncation from the shortened length — answering 0. EG-1.5 fixed that one
+    seam over in ``serve_rpc._office_projection``; this is the snapshot's copy of
+    the same defect, and it matters more here because the row is now PERSISTED:
+    a projection that under-reported its completeness would be written back as
+    fingerprint-blessed truth and served to every later boot.
+
+    *Mutation:* hand ``office_summary_row`` a bare ``list_actors`` list (or
+    hardcode ``actors_unreadable=0``).
+    """
+
+    _seed_workspace("alpha-one")
+    _write_office_by_hand(OFFICE_WORKSPACE)
+    broken = paths.office_actors_dir(OFFICE_WORKSPACE) / "shredded.json"
+    broken.write_text("{not json", encoding="utf-8")
+
+    core = build_snapshot(build_info={"caller": "probe"})
+    row = (core.get("offices") or {})[OFFICE_WORKSPACE]
+    assert row["actors_unreadable"] == 1, row
+    assert row["actor_count"] == 1, row
+
+    persisted = (_persisted_core().get("offices") or {})[OFFICE_WORKSPACE]
+    assert persisted["actors_unreadable"] == 1, (
+        "the persisted core claims more completeness than the build had, so a "
+        "cache-served boot would report a whole desk as absent rather than "
+        "unreadable"
+    )

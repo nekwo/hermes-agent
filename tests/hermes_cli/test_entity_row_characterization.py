@@ -435,9 +435,12 @@ def test_office_surface_row_key_sets_are_unchanged(fixture_store):
     assert sorted(skinny) == ["actors", "conflicts", "folders", "revision", "updated_at", "workspace_id"]
     assert sorted(full) == [
         "actor_defs",
-        # the one added key: the cap accounting
+        # the added keys: the cap accounting, and — since EG-3.1 took the
+        # snapshot's copy of RD-H4 — the other way the actor list can be short,
+        # the files the platform would not open. Both ride ``--full`` only.
         "actors",
         "actors_truncated",
+        "actors_unreadable",
         "archived_actor_keys",
         "conflict_actor_keys",
         "conflicts",

@@ -785,7 +785,12 @@ def _office_actor_unpublished(actor: Any) -> bool | None:
 #   production call site — ``read_model.resolve_snapshot_frame``, i.e. the
 #   ``harness snapshot`` CLI verb. The stream lane calls ``build_snapshot()``
 #   and never ``write_snapshot``; a ``harness snapshot`` answered from serve's
-#   20-second read cache does not write either.
+#   20-second read cache does not write either. EG-3.1 did NOT change this: the
+#   persisted read-model core serve now writes and reads is a different pair of
+#   files (``<store_root>/serve_read_model/{core,sidecar}.json``,
+#   ``agent_runtime.core_cache``), deliberately not this one — ``snapshot.json``
+#   has a consumer of its own in the launcher's cold-paint lane, and one file
+#   with two writers of different provenance could not say which produced it.
 # * The launcher has NO writer at all — it only reads the file — and a folded
 #   core never reaches it (``MissionReadModel.commitFold`` mutates memory only).
 #   The cache is also never used as a fold BASE, so it can neither corrupt nor

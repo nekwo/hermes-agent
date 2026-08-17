@@ -851,8 +851,14 @@ def _prewarm_read_model_snapshot() -> None:
     Serve is long-lived, so paying it on a daemon thread the moment the child
     is ready takes it off whichever request would otherwise have been first.
 
-    Read-only by construction: ``build_snapshot`` projects, it does not write
-    (``write_snapshot`` is the writer, and is not called here). Concurrency is
+    Since EG-3.1 this build is also the process's cache CONSULTATION and, when it
+    demotes, its write-back: ``build_snapshot`` stats every build input and either
+    loads the persisted core (~2 s, ``core_source=cache``) or rebuilds and
+    persists what it built under ``<store_root>/serve_read_model/``. So the
+    prewarm is no longer read-only — it is the fastest place in the boot to
+    discover which of the two this child is paying for. It still writes no STORE
+    state (``write_snapshot``, the ``snapshot.json`` boot-cache writer, remains
+    uninvolved), and the cache write is best-effort by contract. Concurrency is
     handled by the builder's own coalescing — a real request arriving mid-build
     joins it (hydrate) or waits and shares the next one; it never double-builds.
     Best effort by contract: a failure here surfaces on the first real request
