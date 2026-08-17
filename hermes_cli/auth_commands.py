@@ -789,6 +789,16 @@ def auth_command(args) -> None:
     if action == "reset":
         auth_reset_command(args)
         return
+    # Non-interactive verbs (fork-only module, so the shared-lineage files this
+    # dispatcher lives in stay a two-line diff against upstream).
+    if action == "set-key":
+        from hermes_cli.auth_noninteractive import auth_set_key_command
+
+        raise SystemExit(auth_set_key_command(args))
+    if action == "login":
+        from hermes_cli.auth_noninteractive import auth_login_command
+
+        raise SystemExit(auth_login_command(args))
     if action == "status":
         auth_status_command(args)
         return
