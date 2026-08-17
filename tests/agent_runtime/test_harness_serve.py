@@ -798,13 +798,18 @@ def test_the_snapshot_prewarm_starts_before_ready_is_announced():
 
 def test_no_prewarm_is_started_when_none_is_injected():
     """The loop is mechanism; the warmup is policy the entry point supplies.
-    A unit-test loop must never fire a multi-second projection build."""
+    A unit-test loop must never fire a multi-second projection build — nor, since
+    EG-3.2, import the OpenAI SDK to observe a ready frame."""
 
     frames = _run([SHUTDOWN], dispatch=lambda argv: 0)
 
     assert [f["event"] for f in frames[:2]] == ["booting", "ready"]
     thread_names = {thread.name for thread in threading.enumerate()}
+    # Both historical names: the two prewarm threads became one, and a test that
+    # only knew the old snapshot name would pass against a loop that still
+    # started the provider warmup unconditionally.
     assert "harness-serve-snapshot-prewarm" not in thread_names
+    assert "harness-serve-prewarm" not in thread_names
 
 
 def test_the_serve_entry_point_wires_the_real_prewarm_and_timeline(monkeypatch):
@@ -830,12 +835,139 @@ def test_the_serve_entry_point_wires_the_real_prewarm_and_timeline(monkeypatch):
 
     assert serve_mod._cmd_serve(_Args()) == 0
     assert captured["snapshot_prewarm"] is serve_mod._prewarm_read_model_snapshot
+    # EG-3.2's injectable-parameter contract (HC-H3): the provider warmup is
+    # policy the entry point supplies, exactly like the read-model one. Pinned
+    # here because the loop's default is OFF — a wiring that forgot it would ship
+    # a serve whose first chat turn pays the whole SDK import inline, with every
+    # loop test still green.
+    assert captured["provider_prewarm"] is serve_mod._prewarm_provider_runtime
     assert captured["boot_timeline"] is not None
     # Started at the command's first instruction: everything before it is
     # interpreter + import tax, which is what the term is supposed to mean.
     assert captured["boot_timeline"].interpreter_ms is None or (
         captured["boot_timeline"].interpreter_ms >= 0
     )
+
+
+# ── Provider prewarm follows the first build (EG-3.2 = HY-H2 = HC-H3) ───────
+
+
+def _wait_for(predicate, timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def _gated_prewarm_run(*, snapshot_raises: bool = False):
+    """Drive ``serve_loop`` to ``ready`` with the read-model prewarm GATED.
+
+    The gate is the test's, and nothing in the loop can release it — which is
+    what makes "the provider prewarm has not started" an observation rather than
+    a race (the BW-L5 never-completing-fake pattern). Returns the levers.
+    """
+
+    gate = threading.Event()
+    entered = threading.Event()
+    provider_calls: list[str] = []
+    out = io.StringIO()
+
+    def snapshot_prewarm():
+        entered.set()
+        if snapshot_raises:
+            raise RuntimeError("the build blew up")
+        assert gate.wait(10)
+
+    def provider_prewarm():
+        provider_calls.append("provider")
+
+    result: dict = {}
+
+    def run():
+        result["code"] = serve_loop(
+            iter([SHUTDOWN]),
+            out,
+            dispatch=lambda argv: 0,
+            snapshot_prewarm=snapshot_prewarm,
+            provider_prewarm=provider_prewarm,
+        )
+
+    loop = threading.Thread(target=run, name="eg32-serve-loop")
+    loop.start()
+    assert entered.wait(10)
+    return gate, provider_calls, out, loop, result
+
+
+def test_the_provider_prewarm_does_not_begin_until_the_snapshot_prewarm_returns():
+    """The first build gets the process to itself.
+
+    Two daemon threads used to race from ``ready``: the read-model build the
+    launcher's canvas waits on, and ~5-8s of provider warmup CPU (SDK import, SSL
+    context, tool registry) which under the GIL was subtracted from it. Nothing
+    the provider warmup produces is consumable before the canvas is
+    authoritative.
+
+    *Killing mutation:* restore the two parallel threads. *Probed field:* the
+    recorder's LENGTH at the gated instant — the fake the test owns cannot be
+    un-appended, and the mutant cannot release the gate. No elapsed-ms assertion
+    exists here or anywhere in this stage.
+    """
+
+    gate, provider_calls, out, loop, result = _gated_prewarm_run()
+    try:
+        # The build is provably pending: the gate is unreleased and held by us.
+        assert provider_calls == []
+        # And it stays empty — a parallel mutant would append within microseconds
+        # of ready, so this is where it dies.
+        time.sleep(0.2)
+        assert provider_calls == []
+    finally:
+        gate.set()
+    assert _wait_for(lambda: provider_calls == ["provider"])
+    loop.join(10)
+    assert not loop.is_alive()
+    assert result["code"] == 0
+    # Exactly one, on the one thread: the sequential worker must not also leave
+    # the old independent start behind.
+    assert provider_calls == ["provider"]
+
+
+def test_ready_is_emitted_before_either_prewarm_completes():
+    """The boot must not slow down to buy the ordering.
+
+    *Mutation:* join the prewarm thread before emitting ready. *Probed field:*
+    the frame order on the wire while the gate is still held — a joining mutant
+    cannot reach the emit at all, so the loop never returns and this reads no
+    ready frame.
+    """
+
+    gate, provider_calls, out, loop, result = _gated_prewarm_run()
+    try:
+        # The loop ran to completion — booting, ready, shutdown — while the
+        # read-model prewarm is still parked inside the test's gate.
+        loop.join(10)
+        assert not loop.is_alive()
+        frames = _frames(out)
+        assert [f["event"] for f in frames[:2]] == ["booting", "ready"]
+        assert frames[-1]["event"] == "shutdown"
+        assert provider_calls == []
+    finally:
+        gate.set()
+
+
+def test_a_failed_build_still_warms_the_providers():
+    """Sequential must not mean conditional. The steps are isolated, so a build
+    that raised still leaves the first chat turn warm — the property the two
+    independent threads had for free and a naive `then` would have silently
+    dropped."""
+
+    gate, provider_calls, out, loop, result = _gated_prewarm_run(snapshot_raises=True)
+    gate.set()
+    assert _wait_for(lambda: provider_calls == ["provider"])
+    loop.join(10)
+    assert result["code"] == 0
 
 
 def test_a_failing_prewarm_never_takes_the_runtime_down(monkeypatch):

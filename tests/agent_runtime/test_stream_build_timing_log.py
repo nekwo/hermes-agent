@@ -28,10 +28,21 @@ from agent_runtime.events import EventLog
 from agent_runtime.models import Event
 from agent_runtime.stream import stream_frames
 
-_LINE = re.compile(
-    r"snapshot_build reason=(?P<reason>\S+) elapsed_ms=(?P<elapsed>\d+) "
-    r"offset=(?P<offset>\S+) events=(?P<events>\S+)"
-)
+_PREFIX = "snapshot_build "
+
+#: The line is read as KEY=VALUE pairs rather than as a fixed field order,
+#: because EG-2.1 added keys to it (``waited_ms``, ``build_ms``, ``role``,
+#: ``caller``, ``generation``, and a conditional ``sections_top``) and a rigid
+#: full-match regex would make every later additive key a false failure here
+#: while telling the launcher-side parser to be equally brittle.
+_PAIR = re.compile(r"(?P<key>[a-z_]+)=(?P<value>\S+)")
+
+
+def _pairs(message: str) -> dict[str, str]:
+    return {
+        match["key"]: match["value"]
+        for match in _PAIR.finditer(message[len(_PREFIX) :])
+    }
 
 
 def _append(log: EventLog, index: int) -> None:
@@ -47,15 +58,21 @@ def _append(log: EventLog, index: int) -> None:
     )
 
 
-def _build_lines(caplog) -> list[re.Match[str]]:
-    matches = []
+def _build_lines(caplog) -> list[dict[str, str]]:
+    """Every WAIT line, parsed. Deliberately NOT the ``snapshot_build_core``
+    receipt (see ``test_snapshot_build_logging.py``): the prefix match is exact
+    so the one-per-build line cannot be counted as a caller's wait — which is
+    the very conflation EG-2.1 exists to end."""
+
+    lines = []
     for record in caplog.records:
         if record.name != "agent_runtime.stream":
             continue
-        match = _LINE.fullmatch(record.getMessage())
-        if match is not None:
-            matches.append(match)
-    return matches
+        message = record.getMessage()
+        if not message.startswith(_PREFIX):
+            continue
+        lines.append(_pairs(message))
+    return lines
 
 
 @pytest.fixture
@@ -97,7 +114,7 @@ def test_hydrate_logs_the_build_it_paid_for(
     lines = _build_lines(capture_build_log)
     assert len(lines) == 1, [record.getMessage() for record in capture_build_log.records]
     assert lines[0]["reason"] == "hydrate"
-    assert int(lines[0]["elapsed"]) >= 100
+    assert int(lines[0]["waited_ms"]) >= 100
     assert lines[0]["offset"] == str(hydrate["watermark"]["event_offset"])
 
 
@@ -130,7 +147,7 @@ def test_full_core_batch_logs_elapsed_offset_and_event_count(
     # The fold lane is on in this build, and `state.reconciled` is not
     # patch-coverable — so this is the expensive case by name.
     assert match["reason"] == "demote"
-    assert int(match["elapsed"]) >= 100
+    assert int(match["waited_ms"]) >= 100
     # The anchors that make the number usable: which watermark this build
     # produced, and how many events it was billed to.
     assert match["offset"] == str(frame["watermark"]["event_offset"])
@@ -240,7 +257,7 @@ def test_heartbeat_activity_is_sampled_on_the_cadence_not_the_build(
 
     lines = _build_lines(capture_build_log)
     assert lines, "the delta's build logged nothing"
-    assert max(int(match["elapsed"]) for match in lines) >= 500
+    assert max(int(match["waited_ms"]) for match in lines) >= 500
 
 
 def test_a_build_shorter_than_one_heartbeat_puts_nothing_on_the_wire(
@@ -270,4 +287,4 @@ def test_a_build_shorter_than_one_heartbeat_puts_nothing_on_the_wire(
     assert activities == []
     lines = _build_lines(capture_build_log)
     assert len(lines) == 1, [record.getMessage() for record in capture_build_log.records]
-    assert int(lines[0]["elapsed"]) >= 0
+    assert int(lines[0]["waited_ms"]) >= 0

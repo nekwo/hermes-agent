@@ -498,9 +498,18 @@ def _cmd_snapshot(args) -> int:
 
 def _cmd_stream(args) -> int:
     from agent_runtime.patch_coverage import parse_fold_entities_option
-    from agent_runtime.stream import stream_frames
+    from agent_runtime.stream import log_stream_attach, stream_frames
     from agent_runtime.serde import to_jsonable
 
+    # The third attachment path, named like the other two (EG-2.1). A terminal
+    # tailing the stream is a full subscriber of the same producer, and it paid
+    # for builds nobody could attribute to it: the serve child's log showed the
+    # builds and never the attachments.
+    log_stream_attach(
+        op="harness_stream",
+        purpose="cli_stream",
+        resync=bool(getattr(args, "resync", False)),
+    )
     try:
         for frame in stream_frames(
             poll_interval_seconds=float(getattr(args, "poll_interval", 0.25) or 0.25),
@@ -522,6 +531,10 @@ def _cmd_stream(args) -> int:
             # ("I fold nothing") and `parse_fold_entities_option` keeps the two
             # apart all the way down.
             fold_entities=parse_fold_entities_option(getattr(args, "fold_entities", None)),
+            # Explicit rather than defaulted: this IS the caller the default was
+            # named for, and stating it here is what keeps the default from
+            # becoming a place a second caller can hide.
+            caller="cli",
         ):
             sys.stdout.write(json.dumps(to_jsonable(frame), ensure_ascii=False, separators=(",", ":")) + "\n")
             sys.stdout.flush()

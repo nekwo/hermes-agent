@@ -857,12 +857,19 @@ def _prewarm_read_model_snapshot() -> None:
     joins it (hydrate) or waits and shares the next one; it never double-builds.
     Best effort by contract: a failure here surfaces on the first real request
     exactly as it would have without the prewarm.
+
+    ``build_info={"caller": "prewarm"}`` is what makes this build appear in the
+    log at all. It is the most expensive build of a cold boot and, until the
+    builder learned to emit its own receipt, it was the only one with no line
+    anywhere: every ``snapshot_build`` line in the boot window belonged to a
+    caller that RODE it, which is how one build came to look like three
+    (plan EG-2.1). Naming the caller here costs a dict.
     """
 
     try:
         from agent_runtime.snapshot import build_snapshot
 
-        build_snapshot()
+        build_snapshot(build_info={"caller": "prewarm"})
     except Exception:
         import logging as _logging
 
@@ -944,6 +951,7 @@ def serve_loop(
     liveness_pump_interval_seconds: float = 5.0,
     boot_timeline: Any = None,
     snapshot_prewarm: Callable[[], None] | None = None,
+    provider_prewarm: Callable[[], None] | None = None,
     root_anchor: Callable[[], Any] | None = None,
     drain_deadline_seconds: float = DEFAULT_DRAIN_DEADLINE_SECONDS,
     drain_socket_minimum_deadline_seconds: float = (
@@ -991,6 +999,14 @@ def serve_loop(
     caller supplies none. ``snapshot_prewarm`` is the post-``ready`` warmup
     policy — injected, and OFF unless the real entry point turns it on, so the
     loop's own unit tests never fire a multi-second projection build.
+
+    ``provider_prewarm`` is the chat turn's one-time costs (lazy OpenAI SDK
+    import, SSL context / CA verification, tool-definition registry) and takes
+    the SAME injection contract for the same reason — it was an unconditional
+    ``Thread.start()`` in this loop, which meant every unit test of the loop
+    imported the OpenAI SDK. It runs on the snapshot prewarm's thread, after it
+    (EG-3.2); see the comment at the thread start below for why the ordering is
+    the whole stage.
     """
 
     from agent_runtime.boot_timeline import BootTimeline
@@ -1510,10 +1526,51 @@ def serve_loop(
         # be shared: if the request wins the race it leads its own build and
         # the warmup then queues a second, redundant one behind it. Starting a
         # daemon thread costs microseconds, so ``ready`` is not delayed.
-        if snapshot_prewarm is not None:
+        #
+        # ONE thread, and the provider warmup runs on it AFTER the build (EG-3.2,
+        # two independent investigations reaching the same fix: HY-H2 = HC-H3).
+        # It used to be a second daemon thread started just after ``ready``, and
+        # under the GIL its ~5-8s of CPU — OpenAI SDK import, SSL context, and
+        # since BW-H3 the ``model_tools`` import plus the discovery/check_fn storm
+        # — was subtracted from the build the launcher's canvas is waiting on.
+        # Nothing it warms is consumable before that canvas is authoritative: its
+        # purpose is the FIRST CHAT TURN's latency, which is after.
+        #
+        # The brief's one-line version of this fix — reorder the two
+        # ``Thread.start()`` calls — was REFUSED as a no-op by both sources
+        # independently: starts issued microseconds apart schedule nothing, and
+        # the provider prewarm reached ``model_tools`` ~5s in either way.
+        #
+        # Named cost, carried rather than hidden: a chat turn sent inside the (now
+        # shorter) boot window pays the cold SDK import inline, exactly as every
+        # turn did before the prewarm existed — best effort by the prewarm's own
+        # contract. If receipts show first-turn misses, the refinement is
+        # "provider prewarm starts at first-request-enqueue OR build-completion,
+        # whichever is first", not a revert.
+        if snapshot_prewarm is not None or provider_prewarm is not None:
+
+            def _prewarm_worker() -> None:
+                # Sequential, and each step isolated: a build that raised must
+                # still leave the providers warm (HY-H2), and an injected fake
+                # that raises must not silently cancel the step after it.
+                for step in (snapshot_prewarm, provider_prewarm):
+                    if step is None:
+                        continue
+                    try:
+                        step()
+                    except Exception:
+                        try:
+                            import logging as _logging
+
+                            _logging.getLogger(__name__).debug(
+                                "serve prewarm step did not complete", exc_info=True
+                            )
+                        except Exception:
+                            pass
+
             threading.Thread(
-                target=snapshot_prewarm,
-                name="harness-serve-snapshot-prewarm",
+                target=_prewarm_worker,
+                name="harness-serve-prewarm",
                 daemon=True,
             ).start()
         frames.emit(ready_frame)
@@ -1525,22 +1582,11 @@ def serve_loop(
             )
         except Exception:
             pass
-        # Prewarm the first chat turn's one-time costs in the background:
-        # lazy OpenAI SDK import (~1.7s), shared SSL context / CA-guard
-        # verification (~0.7s), and the tool-definition module imports +
-        # registry build (~1.2s). Serve boots eagerly at Mission Control
-        # open, so this runs while the operator is still looking at the
-        # canvas — without it the FIRST message of every launcher session
-        # pays the whole warmup inline. Best-effort: failures surface on
-        # the first real turn exactly as they do today.
-        threading.Thread(
-            target=_prewarm_provider_runtime,
-            name="harness-serve-prewarm",
-            daemon=True,
-        ).start()
-        # (The read-model warmup runs on its own thread, started just before
-        # the ready frame above — it must not queue behind this one's ~3s SDK
-        # import, and it must start its build before the first request does.)
+        # (Both warmups run on the single thread started just before the ready
+        # frame above — the read-model build first, then the chat turn's one-time
+        # costs. The invariant the two-thread arrangement was written to protect
+        # is now provable rather than raced: the build cannot queue behind the
+        # ~3s SDK import, because that import has not started yet.)
         # A busy serve must never look dead. The launcher's stream watchdog
         # keys on "no frames for N seconds", and when pool workers are deep in
         # chat-turn work the infinite `stream` request's generator can starve
@@ -1747,7 +1793,12 @@ def serve_loop(
             from agent_runtime.stream import stream_frames
 
             def _generate():
-                for frame in stream_frames(fold_entities=fold_entities):
+                # ``caller="hub"``: every build this producer pays for is
+                # attributed to the SHARED lane rather than to whichever
+                # subscriber happened to trigger the restart — the serve hub is
+                # one producer for N subscribers by construction, and a build
+                # line naming a subscriber would be a lie about who pays.
+                for frame in stream_frames(fold_entities=fold_entities, caller="hub"):
                     # Byte-for-byte the frames ``harness stream`` writes: a
                     # subscriber folds the same hydrate/delta/patch/heartbeat
                     # shapes it already folds, so the socket lane introduces no
@@ -2364,6 +2415,21 @@ def serve_loop(
                         }
                     )
 
+                # ONE line per attachment, in the serve child's OWN log. The
+                # subscriber census of the 2026-08-17 boot had to be
+                # reconstructed from timestamps and still left one rider
+                # unidentified, because nothing on any attach path said so —
+                # every line in the window described a BUILD, and the builds
+                # were what the census was trying to explain (plan EG-2.1).
+                from agent_runtime.stream import log_stream_attach
+
+                log_stream_attach(
+                    op="subscribe",
+                    purpose="stream_lane",
+                    connection=key,
+                    client=getattr(connection, "client", None),
+                    fold_entities=",".join(accepted_entities) or "-",
+                )
                 # The ACK precedes the subscription, deliberately. The producer
                 # starts pushing the moment ``subscribe`` returns, so acking
                 # afterwards would let the hydrate overtake the ack — and a
@@ -2940,6 +3006,12 @@ def _cmd_serve(args) -> int:
             or DEFAULT_POOL_SIZE,
             boot_timeline=timeline,
             snapshot_prewarm=_prewarm_read_model_snapshot,
+            # The production wiring for both warmups. The provider one is
+            # injected here rather than hardcoded in the loop (EG-3.2): it is
+            # policy, it now runs BEHIND the read-model build on one thread, and
+            # a loop unit test must not import the OpenAI SDK to observe a ready
+            # frame.
+            provider_prewarm=_prewarm_provider_runtime,
             root_anchor=publish_store_root_anchor,
             drain_wakeup=_wake_reader,
             # ``os._exit``, not ``sys.exit``: after a drain TIMEOUT the

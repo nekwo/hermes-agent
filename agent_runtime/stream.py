@@ -17,7 +17,12 @@ from .patch_coverage import batch_is_patch_coverable, normalize_fold_entities
 from .redaction import ENV_SECRET_ASSIGNMENT_RE
 from .request_control import request_cancelled
 from .serde import to_jsonable
-from .snapshot import build_snapshot
+from .snapshot import (
+    BUILD_CALLER_UNKNOWN,
+    BUILD_SECTIONS_WAIT_THRESHOLD_MS,
+    build_receipt_facts,
+    build_snapshot,
+)
 from .state_patches import STATE_PATCHED_EVENT_TYPE, delta_patches_enabled
 
 STREAM_SCHEMA_VERSION = 1
@@ -40,10 +45,23 @@ logger = logging.getLogger(__name__)
 _SECRET_ASSIGNMENT_RE = ENV_SECRET_ASSIGNMENT_RE
 
 
+#: The CLI stream command is the caller a ``stream_frames`` with nothing
+#: threaded through it is: ``hermes harness stream`` on a terminal. The serve
+#: hub names itself ``hub`` explicitly (``serve.py``'s producer factory) — the
+#: default is not a guess about who is asking, it is the historical answer.
+DEFAULT_STREAM_CALLER = "cli"
+
+
 def _log_snapshot_build(
-    *, reason: str, elapsed_ms: int, offset: int | None, events: int | None = None
+    *,
+    reason: str,
+    waited_ms: int,
+    offset: int | None,
+    events: int | None = None,
+    snapshot: dict[str, Any] | None = None,
+    build_info: dict[str, Any] | None = None,
 ) -> None:
-    """Record one full ``build_snapshot()`` and what it actually cost.
+    """Record one caller's WAIT for a ``build_snapshot()`` and what it cost.
 
     **Why this is not the heartbeat's number.** The liveness envelope below
     already ships a ``snapshot_build`` activity block, but its ``elapsed_ms``
@@ -56,6 +74,19 @@ def _log_snapshot_build(
     from ``events_archive/*.jsonl`` timestamps and then by profiling an
     isolated probe copy of the runtime root.
 
+    **Why the number is now called ``waited_ms``.** It was ``elapsed_ms``, and
+    that name is what let three of these lines read as three builds on the
+    2026-08-17 boot: the value is measured around ``build_snapshot()`` at the
+    CALL SITE, and under coalescing that call may be a short ride on a build
+    somebody else led. So this line reports the caller's WAIT, and
+    ``build_ms`` — read off the parity envelope of the core it actually got —
+    reports the build underneath it. ``role``/``caller``/``generation`` say
+    which of the two happened (see
+    :data:`agent_runtime.snapshot.BUILD_ROLE_LED` and friends), and the build
+    itself has its own one-per-build receipt
+    (``snapshot_build_core``). ``elapsed_ms`` is still emitted, with the same
+    value as ``waited_ms``, for one release: a launcher in the field parses it.
+
     ``offset`` anchors the cost to the watermark the resulting frame carries,
     so a build can be tied back to the events that paid for it; ``reason``
     names the lane that paid (``hydrate`` / ``demote`` / ``resync`` /
@@ -65,13 +96,75 @@ def _log_snapshot_build(
     lands it in ``<HERMES_HOME>/logs/agent.log`` at INFO with no extra flag.
     """
 
-    logger.info(
-        "snapshot_build reason=%s elapsed_ms=%d offset=%s events=%s",
+    facts = build_receipt_facts(snapshot)
+    info = build_info if isinstance(build_info, dict) else {}
+    build_ms = facts["build_ms"]
+    if build_ms is None and isinstance(info.get("build_ms"), (int, float)):
+        build_ms = int(info["build_ms"])
+    line = (
+        "snapshot_build reason=%s waited_ms=%d elapsed_ms=%d build_ms=%s "
+        "role=%s caller=%s generation=%s offset=%s events=%s"
+    )
+    values: list[Any] = [
         reason,
-        int(elapsed_ms),
+        int(waited_ms),
+        # The deprecated twin, deliberately the SAME value rather than a second
+        # measurement — a rename that shipped two different numbers under two
+        # keys would be worse than the name it replaced.
+        int(waited_ms),
+        "unknown" if build_ms is None else int(build_ms),
+        str(info.get("role") or "unknown"),
+        str(info.get("caller") or BUILD_CALLER_UNKNOWN),
+        "-" if info.get("generation") is None else int(info["generation"]),
         "unknown" if offset is None else int(offset),
         "-" if events is None else int(events),
-    )
+    ]
+    # The section split rides a WAIT line only when the build under it was slow
+    # enough that "of what?" is the next question (HC-0). Every build carries its
+    # own split on its ``snapshot_build_core`` receipt regardless.
+    if build_ms is not None and int(build_ms) >= BUILD_SECTIONS_WAIT_THRESHOLD_MS:
+        line += " sections_top=%s"
+        values.append(facts["sections_top"])
+    logger.info(line, *values)
+
+
+def log_stream_attach(*, op: str, purpose: str, **fields: Any) -> None:
+    """ONE line per ATTACHMENT to the shared stream, at subscribe time.
+
+    Three different calls attach a reader to the same producer — the socket
+    lane's ``{"op":"subscribe"}``, the RPC office lane's
+    ``runtime.office.subscribe``, and ``hermes harness stream`` on a terminal —
+    and until this line existed the serve child's own log named NONE of them.
+    Two costs of that silence, both paid: the 2026-08-17 boot's third hydrate
+    rider could not be identified at all (the subscriber census had to be
+    reconstructed from timestamps, and one attachment stayed unattributed), and
+    a 12 MB serve-child log carried zero ``office`` lines, which made
+    "is the office push lane even attached?" unanswerable from the log the
+    operator actually has (plan §8 item 5).
+
+    ``op`` is the call as the client made it; ``purpose`` is what the attachment
+    is FOR. Both, because neither implies the other: two ops can serve one
+    purpose (the office lane and the legacy stream both fold patches) and one op
+    serves several (``subscribe`` is the boot hydrate and every resubscribe).
+
+    Single-homed here, next to the build lines a reader greps alongside it, and
+    imported function-locally by the two non-stream callers so this module's
+    projection-import weight stays off their import paths. Never raises: an
+    instrument must not be the reason a subscribe fails.
+    """
+
+    try:
+        extras = " ".join(
+            f"{key}={'-' if value is None else value}" for key, value in fields.items()
+        )
+        logger.info(
+            "stream_attach op=%s purpose=%s%s",
+            op,
+            purpose,
+            f" {extras}" if extras else "",
+        )
+    except Exception:  # pragma: no cover - observability must never fail a lane
+        pass
 
 
 def hydrate_frame(
@@ -79,6 +172,7 @@ def hydrate_frame(
     *,
     delta_patches: bool = False,
     fold_entities: Iterable[str] | None = None,
+    caller: str = DEFAULT_STREAM_CALLER,
 ) -> dict[str, Any]:
     """Build the initial warm-stream hydrate frame.
 
@@ -114,18 +208,20 @@ def hydrate_frame(
     # appended after the shared build arrives as the first delta instead.
     # Requiring a newer build would make the launcher's boot hydrate wait for
     # the prewarm AND then pay a second build — strictly worse than no prewarm.
+    build_info: dict[str, Any] = {"caller": caller}
     if snapshot is not None:
         snap = snapshot
-        build_elapsed_ms: int | None = None
+        waited_ms: int | None = None
     else:
         build_started = time.monotonic()
-        snap = build_snapshot(accept_inflight=True)
+        snap = build_snapshot(accept_inflight=True, build_info=build_info)
         # NOTE what this measures: the hydrate's WAIT, which under
         # ``accept_inflight`` may be a short ride on a build somebody else
         # started (serve prewarms one right after ``ready``) rather than a
         # build of its own. That is the number the client actually paid, which
-        # is the one worth logging here.
-        build_elapsed_ms = int((time.monotonic() - build_started) * 1000)
+        # is the one worth logging here — and ``build_info["role"]`` is what
+        # says which of the two this line is reporting.
+        waited_ms = int((time.monotonic() - build_started) * 1000)
     parity = snap.get("parity") if isinstance(snap.get("parity"), dict) else {}
     watermark = parity.get("watermark") if isinstance(parity.get("watermark"), dict) else {}
     frame: dict[str, Any] = {
@@ -142,11 +238,13 @@ def hydrate_frame(
     if delta_patches:
         frame["delta_patches"] = True
         frame["fold_entities"] = sorted(normalize_fold_entities(fold_entities))
-    if build_elapsed_ms is not None:
+    if waited_ms is not None:
         _log_snapshot_build(
             reason="hydrate",
-            elapsed_ms=build_elapsed_ms,
+            waited_ms=waited_ms,
             offset=(frame.get("watermark") or {}).get("event_offset"),
+            snapshot=snap,
+            build_info=build_info,
         )
     return frame
 
@@ -378,21 +476,26 @@ class _SnapshotBuildJob:
     ``build_snapshot``'s existing coalescing contract.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, caller: str = DEFAULT_STREAM_CALLER) -> None:
         self.done = threading.Event()
         self.snapshot: dict[str, Any] | None = None
         self.error: BaseException | None = None
-        #: Wall time of the build itself, measured ON the build thread.
-        #: Taken here rather than around ``job.done.wait`` because that wait
-        #: polls at ``_SNAPSHOT_CANCEL_POLL_SECONDS``, which would round every
-        #: build up by as much as 100ms. Set before ``done`` so any reader that
-        #: has observed completion has also observed the number.
+        #: Wall time of this job's wait for a core, measured ON the build
+        #: thread. Taken here rather than around ``job.done.wait`` because that
+        #: wait polls at ``_SNAPSHOT_CANCEL_POLL_SECONDS``, which would round
+        #: every build up by as much as 100ms. Set before ``done`` so any reader
+        #: that has observed completion has also observed the number. It is a
+        #: WAIT, not necessarily a build: the coalescer may hand this job a copy
+        #: of somebody else's build, which is what ``build_info`` records.
         self.elapsed_ms: int | None = None
+        #: Filled by the builder: role / caller / generation / build_ms. See
+        #: :func:`agent_runtime.snapshot.build_snapshot`.
+        self.build_info: dict[str, Any] = {"caller": caller}
 
     def run(self) -> None:
         started = time.monotonic()
         try:
-            self.snapshot = build_snapshot()
+            self.snapshot = build_snapshot(build_info=self.build_info)
         except BaseException as exc:  # re-raised on the stream worker
             self.error = exc
         finally:
@@ -406,15 +509,18 @@ def _full_core_batch_frames(
     base_offset: int,
     heartbeat_interval_seconds: float,
     reason: str = "full_core",
+    caller: str = DEFAULT_STREAM_CALLER,
 ) -> Iterator[dict[str, Any]]:
     """Emit liveness while one uncovered batch builds its authoritative core.
 
     ``reason`` names why this batch is paying for a full core — it is the
     caller's classification, not something this function can re-derive, and it
-    is what makes the emitted ``snapshot_build`` line actionable.
+    is what makes the emitted ``snapshot_build`` line actionable. ``caller``
+    names WHO is paying, which this function likewise cannot re-derive: the same
+    generator serves the serve hub and a terminal.
     """
 
-    job = _SnapshotBuildJob()
+    job = _SnapshotBuildJob(caller=caller)
     started = time.monotonic()
     threading.Thread(
         target=job.run,
@@ -450,9 +556,11 @@ def _full_core_batch_frames(
     if job.elapsed_ms is not None:
         _log_snapshot_build(
             reason=reason,
-            elapsed_ms=job.elapsed_ms,
+            waited_ms=job.elapsed_ms,
             offset=(frame.get("watermark") or {}).get("event_offset"),
             events=len(batch),
+            snapshot=job.snapshot,
+            build_info=job.build_info,
         )
     yield frame
 
@@ -465,6 +573,7 @@ def _batch_frames_with_liveness(
     resync: bool,
     heartbeat_interval_seconds: float,
     fold_entities: Iterable[str] | None = None,
+    caller: str = DEFAULT_STREAM_CALLER,
 ) -> Iterator[dict[str, Any]]:
     if (
         delta_patches
@@ -494,6 +603,7 @@ def _batch_frames_with_liveness(
         base_offset=base_offset,
         heartbeat_interval_seconds=heartbeat_interval_seconds,
         reason="resync" if resync else ("demote" if delta_patches else "full_core"),
+        caller=caller,
     )
 
 
@@ -506,6 +616,7 @@ def stream_frames(
     max_frames: int | None = None,
     resync: bool = False,
     fold_entities: Iterable[str] | None = None,
+    caller: str = DEFAULT_STREAM_CALLER,
 ) -> Iterator[dict[str, Any]]:
     """Yield hydrate, delta/patch, and heartbeat frames for ``hermes harness stream``.
 
@@ -544,6 +655,12 @@ def stream_frames(
     root of every Mission Control surface. Unknown now takes the resync lane
     this function already has: the first batch ships as a full core, and the
     tailer waits to learn a real tail instead of inventing one.
+
+    ``caller`` is who this generator produces for — ``hub`` for the serve hub's
+    shared producer, ``cli`` for ``hermes harness stream``. It reaches
+    ``build_snapshot``'s ``build_info`` and lands on every build/wait line this
+    generator emits, so a boot's log says WHICH attachment paid for a build
+    instead of leaving the census to be reconstructed from timestamps.
     """
 
     log = event_log or EventLog()
@@ -551,7 +668,9 @@ def stream_frames(
     declared_entities = normalize_fold_entities(fold_entities)
     resync_pending = bool(resync)
     emitted = 0
-    hydrate = hydrate_frame(delta_patches=delta_patches, fold_entities=declared_entities)
+    hydrate = hydrate_frame(
+        delta_patches=delta_patches, fold_entities=declared_entities, caller=caller
+    )
     offset = _resume_offset(hydrate)
     if offset is None:
         # Cannot resume from an unknown position. Re-baseline the client on the
@@ -591,7 +710,9 @@ def stream_frames(
             # replay. Resuming from the newly measured tail alone would silently
             # drop the span; resuming from 0 would re-render the whole log.
             rebaseline = hydrate_frame(
-                delta_patches=delta_patches, fold_entities=declared_entities
+                delta_patches=delta_patches,
+                fold_entities=declared_entities,
+                caller=caller,
             )
             offset = _resume_offset(rebaseline)
             if offset is None:
@@ -629,6 +750,7 @@ def stream_frames(
                     resync=resync_pending,
                     heartbeat_interval_seconds=heartbeat_interval_seconds,
                     fold_entities=declared_entities,
+                    caller=caller,
                 ):
                     yield frame
                     emitted += 1
@@ -657,6 +779,7 @@ def stream_frames(
                         resync=resync_pending,
                         heartbeat_interval_seconds=heartbeat_interval_seconds,
                         fold_entities=declared_entities,
+                        caller=caller,
                     ):
                         yield frame
                         emitted += 1
@@ -676,6 +799,7 @@ def stream_frames(
                 resync=resync_pending,
                 heartbeat_interval_seconds=heartbeat_interval_seconds,
                 fold_entities=declared_entities,
+                caller=caller,
             ):
                 yield frame
                 emitted += 1

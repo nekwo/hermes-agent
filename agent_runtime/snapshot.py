@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import re
 import threading
 import time
@@ -86,6 +87,8 @@ from .workspace_scope import exact_scoped_instance_ids
 #:   consequence of a refactor;
 #: * a structural (AST) gate in that same file fails if any other test states it.
 SNAPSHOT_CONTRACT_VERSION = 54
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,6 +280,155 @@ _build_coalesce_state: dict = {
 }
 
 
+#: The three roles a caller of :func:`build_snapshot` can leave in with, and the
+#: exact tokens both this module's receipt line and
+#: ``agent_runtime.stream``'s wait line print. ONE vocabulary, because the whole
+#: point of the attribution is that three log lines stop looking like three
+#: builds: ``led`` ran a build, ``rode`` shared the build that was ALREADY
+#: running (``accept_inflight``), ``shared_next`` waited and got the deep copy of
+#: the next build somebody else led. A boot's build COUNT is therefore the count
+#: of ``led`` lines — never the count of lines.
+BUILD_ROLE_LED = "led"
+BUILD_ROLE_RODE = "rode"
+BUILD_ROLE_SHARED_NEXT = "shared_next"
+
+#: A caller that named itself nothing. Kept as a token rather than an empty
+#: value so the receipt line's key is never absent — a parser reading
+#: ``caller=`` off the line must not have to tell "no such key" apart from
+#: "nobody said".
+BUILD_CALLER_UNKNOWN = "unknown"
+
+#: Sections are printed on a WAIT line only when the underlying build was slow
+#: enough for the split to be the question being asked (HC-0). The leader's own
+#: receipt always carries them: a build that took 900 ms still answers "of
+#: what?" for free, and it is one line per build, not one per caller.
+BUILD_SECTIONS_WAIT_THRESHOLD_MS = 5000
+
+
+def build_receipt_facts(snapshot: Any) -> dict[str, Any]:
+    """The attribution facts a build's receipt line carries, read off the core.
+
+    ``build_ms``, ``sections_ms`` and ``watermark.event_offset`` are already
+    computed by the build itself and shipped on the parity envelope. This reads
+    them; it does not measure anything. A second measurement of the same span
+    would be a second authority on it, and the two would drift — which is the
+    exact defect the heartbeat's mid-build ``elapsed_ms`` sample already is
+    (see ``agent_runtime.stream._log_snapshot_build``).
+
+    Single-homed here because two log lines print these facts — the leader's
+    ``snapshot_build_core`` below and the waiter's ``snapshot_build`` in the
+    stream — and a launcher-side parser reads both. Defensive by construction:
+    a caller may hold a fake or partially-built core (every unit fake does), and
+    an instrument must never be the reason a build fails.
+    """
+
+    parity = snapshot.get("parity") if isinstance(snapshot, dict) else None
+    if not isinstance(parity, dict):
+        parity = {}
+    watermark = parity.get("watermark")
+    if not isinstance(watermark, dict):
+        watermark = {}
+    raw_build_ms = parity.get("build_ms")
+    raw_offset = watermark.get("event_offset")
+    return {
+        "build_ms": int(raw_build_ms) if isinstance(raw_build_ms, (int, float)) else None,
+        "offset": int(raw_offset) if isinstance(raw_offset, (int, float)) else None,
+        "sections_top": _sections_top(parity.get("sections_ms")),
+    }
+
+
+def _sections_top(sections: Any, limit: int = 3) -> str:
+    """The ``limit`` most expensive build sections, as ``name:ms,name:ms``.
+
+    Sorted by cost descending, then by name, so consecutive boots of the same
+    shape print the same string and a diff means the shape moved.
+    """
+
+    if not isinstance(sections, dict):
+        return "-"
+    rows = [
+        (str(name), int(value))
+        for name, value in sections.items()
+        if isinstance(value, (int, float))
+    ]
+    if not rows:
+        return "-"
+    rows.sort(key=lambda row: (-row[1], row[0]))
+    return ",".join(f"{name}:{value}" for name, value in rows[:limit])
+
+
+def _log_snapshot_build_core(*, caller: str, generation: int | None, snapshot: Any) -> None:
+    """ONE line per ACTUAL build, emitted by the caller that ran it.
+
+    Every other line about a build is a WAIT (``agent_runtime.stream``'s
+    ``snapshot_build``), and until this line existed the two were
+    indistinguishable: the 2026-08-17 boot's three "concurrent builds" were one
+    build plus two riders logging their waits, and the most expensive build of
+    that boot — the serve prewarm — logged nothing at all, because nothing on
+    its path had a line to emit. Grep ``role=led`` for the build count.
+
+    Emitted on the default-store coalesced path only. An injected-store build
+    (tests, doctors, a detail-fetch catalog capture) is a fixture, not a boot,
+    and printing one line per unit test would bury the boot's own lines.
+
+    Rides the ordinary ``Logger`` family, so ``hermes serve`` lands it in
+    ``<HERMES_HOME>/logs/agent.log`` at INFO with no extra flag.
+    """
+
+    facts = build_receipt_facts(snapshot)
+    logger.info(
+        "snapshot_build_core role=%s caller=%s generation=%s build_ms=%s offset=%s sections_top=%s",
+        BUILD_ROLE_LED,
+        caller,
+        "-" if generation is None else int(generation),
+        "unknown" if facts["build_ms"] is None else int(facts["build_ms"]),
+        "unknown" if facts["offset"] is None else int(facts["offset"]),
+        facts["sections_top"],
+    )
+
+
+def _record_build_info(
+    build_info: dict | None,
+    *,
+    role: str,
+    caller: str,
+    generation: int | None,
+    snapshot: Any = None,
+) -> None:
+    """Fill the caller's ``build_info`` out-param. Never raises, never reads.
+
+    The dict belongs to the CALLER (one per caller, by construction — that is
+    what makes the role matrix in
+    ``tests/agent_runtime/test_snapshot_build_logging.py`` able to convict a
+    hardcoded role). ``build_ms`` rides along so a caller can name the cost of
+    the build it rode without re-deriving the envelope.
+    """
+
+    if build_info is None:
+        return
+    build_info["role"] = role
+    build_info["caller"] = caller
+    build_info["generation"] = generation
+    if snapshot is not None:
+        build_info["build_ms"] = build_receipt_facts(snapshot)["build_ms"]
+
+
+def _build_caller(build_info: dict | None) -> str:
+    """Who is asking, in their own words — the ONE input side of ``build_info``.
+
+    Pre-seeded by the caller (``{"caller": "hub"}``); everything else in the
+    dict is filled by the builder. Threaded rather than inferred because the
+    builder genuinely cannot know: hub, cli, prewarm and the office lane all
+    reach the same function through the same call.
+    """
+
+    if not isinstance(build_info, dict):
+        return BUILD_CALLER_UNKNOWN
+    caller = build_info.get("caller")
+    text = str(caller).strip() if caller is not None else ""
+    return text or BUILD_CALLER_UNKNOWN
+
+
 @contextmanager
 def _timed_section(sink: dict[str, int], key: str):
     """Accumulate wall time (ms) for a build section into ``sink[key]``.
@@ -301,6 +453,7 @@ def build_snapshot(
     prompt_skills_catalogs=None,
     *,
     accept_inflight: bool = False,
+    build_info: dict | None = None,
 ) -> dict:
     """Build the read-model core, coalescing concurrent builds (see above).
 
@@ -316,8 +469,19 @@ def build_snapshot(
     hydrate that arrives moments later would cost TWO sequential builds
     (strict coalescing makes the second caller wait for the first AND then
     lead its own) — worse than no prewarm at all.
+
+    ``build_info`` is one dict used in both directions, and the asymmetry is the
+    point. IN: the caller may pre-seed ``{"caller": "hub"|"cli"|"prewarm"|…}``,
+    the one fact the builder cannot derive. OUT: the builder fills ``role``
+    (:data:`BUILD_ROLE_LED` / :data:`BUILD_ROLE_RODE` /
+    :data:`BUILD_ROLE_SHARED_NEXT`), ``caller``, ``generation`` and ``build_ms``,
+    so the caller can say which of those three things happened to IT rather than
+    logging a wait that reads like a build. Pure out-param otherwise: the return
+    value and the coalesce behaviour are untouched by its presence, and a caller
+    that passes nothing gets today's function exactly.
     """
 
+    caller = _build_caller(build_info)
     custom_stores = any(
         value is not None
         for value in (
@@ -334,7 +498,7 @@ def build_snapshot(
         # A detail-fetch catalog capture likewise needs the exact build's
         # transient bodies; the shared result intentionally contains hashes
         # only, so it cannot satisfy that internal projection request.
-        return _build_snapshot_uncoalesced(
+        injected = _build_snapshot_uncoalesced(
             task_store=task_store,
             run_store=run_store,
             agent_store=agent_store,
@@ -342,6 +506,18 @@ def build_snapshot(
             event_log=event_log,
             prompt_skills_catalogs=prompt_skills_catalogs,
         )
+        # An injected-store build leads its own by definition (it never touched
+        # the coalescer), so the role is honest — but it has no generation in
+        # the default path's sequence and it emits no receipt line: see
+        # ``_log_snapshot_build_core`` for why a fixture must not print one.
+        _record_build_info(
+            build_info,
+            role=BUILD_ROLE_LED,
+            caller=caller,
+            generation=None,
+            snapshot=injected,
+        )
+        return injected
     state = _build_coalesce_state
     with _BUILD_COALESCE:
         # The first build STARTED at/after arrival is the one that satisfies
@@ -351,12 +527,27 @@ def build_snapshot(
         # only the RUNNING one: while ``running`` is true ``done`` is strictly
         # behind ``started``, so this can never hand back a finished build's
         # leftover result.
-        target = state["started"] + (0 if accept_inflight and state["running"] else 1)
+        rode_inflight = bool(accept_inflight and state["running"])
+        target = state["started"] + (0 if rode_inflight else 1)
         while True:
             if state["done"] >= target and state["result"] is not None:
                 payload = copy.deepcopy(state["result"])
                 if state["waiters"] == 0:
                     state["result"] = None
+                # Two different things end here and they are NOT the same
+                # attribution: a caller that opted into the build already
+                # running (``rode``) and a caller that waited for a build
+                # started after it arrived and got somebody else's copy of it
+                # (``shared_next``). ``rode_inflight`` is read at ARRIVAL, above,
+                # because by now the build it named has finished and the state
+                # can no longer answer which one this caller asked for.
+                _record_build_info(
+                    build_info,
+                    role=BUILD_ROLE_RODE if rode_inflight else BUILD_ROLE_SHARED_NEXT,
+                    caller=caller,
+                    generation=target,
+                    snapshot=payload,
+                )
                 return payload
             if not state["running"]:
                 state["running"] = True
@@ -369,6 +560,21 @@ def build_snapshot(
     result = None
     try:
         result = _build_snapshot_uncoalesced()
+        _record_build_info(
+            build_info,
+            role=BUILD_ROLE_LED,
+            caller=caller,
+            generation=generation,
+            snapshot=result,
+        )
+        # The build's OWN line, on the thread that paid for it, before the
+        # waiters are notified below — so the receipt for a build always
+        # precedes the wait lines of the callers that rode it, in the order an
+        # operator reads the log. A build that raised logs nothing: there is no
+        # envelope to read the cost off, and the exception is the receipt.
+        _log_snapshot_build_core(
+            caller=caller, generation=generation, snapshot=result
+        )
         return result
     finally:
         with _BUILD_COALESCE:
