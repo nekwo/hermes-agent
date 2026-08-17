@@ -277,7 +277,9 @@ def test_office_actor_patch_is_small_against_the_office_row(seeded_office, set_d
         return len(json.dumps(value, ensure_ascii=False, default=str).encode("utf-8"))
 
     surface = seeded_office.get_surface(WORKSPACE)
-    whole_office_row = office_summary_row(surface, seeded_office.list_actors(WORKSPACE))
+    whole_office_row = office_summary_row(
+        surface, seeded_office.list_actors(WORKSPACE), actors_unreadable=0
+    )
 
     assert size(patch) < EVENT_PAYLOAD_LIMIT_BYTES
     # The actor row is a fraction of the office row it sits inside, at TWO
@@ -1384,6 +1386,7 @@ def test_the_surface_patch_carries_exactly_what_a_full_rebuild_would(
     rebuilt = office_summary_row(
         seeded_office.get_surface(WORKSPACE),
         seeded_office.list_actors(WORKSPACE),
+        actors_unreadable=0,
     )
     for field in OFFICE_SURFACE_PATCH_FIELDS:
         assert payload["changed"][field] == rebuilt[field], field

@@ -105,9 +105,20 @@ def _office_surface_row(store, workspace_id: str, *, full: bool = False, surface
 
     if surface is None:
         surface = store.get_surface(workspace_id)
-    actors = store.list_actors(workspace_id)
+    # ``scan_actors``, not ``list_actors``: the row this feeds accounts BOTH ways
+    # the actor list can be short — the cut we chose and the files the platform
+    # would not open (RD-H4 / EG-1.5). The CLI tier is the other reader of the
+    # snapshot's row builder, and a reader that passed a shortened list would
+    # re-open the hole at this seam.
+    scan = store.scan_actors(workspace_id)
+    actors = scan.actors
     conflict_actor_keys = store.conflict_actor_keys(workspace_id)
-    summary = office_summary_row(surface, actors, conflict_actor_keys=conflict_actor_keys)
+    summary = office_summary_row(
+        surface,
+        actors,
+        actors_unreadable=scan.unreadable,
+        conflict_actor_keys=conflict_actor_keys,
+    )
     row = {
         "workspace_id": summary["workspace_id"],
         "folders": summary["folders"],
@@ -123,6 +134,7 @@ def _office_surface_row(store, workspace_id: str, *, full: bool = False, surface
             for projected in summary["actors"]
         ]
         row["actors_truncated"] = summary["actors_truncated"]
+        row["actors_unreadable"] = summary["actors_unreadable"]
         row["archived_actor_keys"] = summary["archived_actor_keys"]
         row["conflict_actor_keys"] = summary["conflict_actor_keys"]
     return row

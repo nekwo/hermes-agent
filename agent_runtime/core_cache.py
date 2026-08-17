@@ -1,0 +1,1116 @@
+"""The persisted read-model core, validated by a stat fingerprint (Plan EG-3.1).
+
+=============================================================================
+WHY THIS EXISTS
+=============================================================================
+
+A serve child's first read-model core costs ~20 s of filesystem metadata work,
+on EVERY boot — the build is per-process, so a warm machine pays it too
+(measured 24.2 s warm, 2026-08-17). Doc 14's own numbers say the cost is not
+bandwidth: serializing the core is ~5 ms. The 20 s IS validation, done by
+reconstruction.
+
+So make validation cost what validation costs. The core is persisted after
+every successful default-store build, together with a sidecar carrying the
+**fingerprint of every input the build read**. The next process stats those
+inputs again: match → load the core and serve it authoritative in ~2 s;
+mismatch → serve the persisted core immediately, LABELED STALE, while the full
+build runs, then replace it and write back.
+
+=============================================================================
+WHY A STAT FINGERPRINT AND NOT AN EVENT OFFSET
+=============================================================================
+
+The refused design (Plan G BW-H1) keyed validity on the event log's offset plus
+a tail replay. It stays refused, for cause:
+
+* the events section is 3 ms of a 5,485 ms build — an offset-keyed cache buys
+  almost nothing and can only go stale undetectably;
+* two shipped incidents came from writers that mutate durable state with NO
+  EventLog event (``running_work.py``'s checkpoint, ``board_sync``'s
+  materialization), so an offset key cannot see them at all;
+* a tail replay would be a SECOND validity authority beside the key, and the
+  two would drift. Property 6 (one lane per question), applied to the cache
+  itself.
+
+**The fingerprint decides validity, full stop.** There is no event-tail replay
+here and there must never be one. ``event_offset`` IS recorded in the sidecar —
+as a diagnostic, so a divergence receipt can name the log position the core was
+built at — and it is never read as an input to the match decision.
+
+=============================================================================
+THE SOUNDNESS GROUND
+=============================================================================
+
+A (path, mtime_ns, size) triple is only a change signal if every writer moves
+mtime. In this runtime every durable write goes through
+:func:`utils.atomic_json_write`, which stages a temp file and ``os.replace``s
+it into position — a rename ALWAYS moves the target's mtime, including for a
+rewrite that produces byte-identical content. That is what makes the cheap
+signal sound here specifically, and it is why the enumeration is
+DIRECTORY-LEVEL rather than a list of names: a file that did not exist at the
+last build has no previous triple to compare, so the walk has to find it.
+
+Two mtime-blind cases are covered explicitly rather than assumed:
+
+* **SQLite.** A WAL commit that has not checkpointed leaves ``state.db``'s
+  mtime untouched, so the ``-wal`` / ``-shm`` / ``-journal`` siblings are
+  fingerprinted beside it.
+* **In-place rewrites inside a directory.** Replacing an existing entry does
+  not move the CONTAINING directory's mtime on NTFS, which is why every file
+  is stat'd individually instead of trusting its parent (the same reasoning as
+  the boards-tree per-card stat pattern in ``harness_parts/serve.py``).
+
+=============================================================================
+THE INPUT CLOSURE — THE ONE THING THIS STAGE CAN GET WRONG
+=============================================================================
+
+Plan EG §6.1 names this the plan's single biggest bet: a MISSED input serves
+unlabeled stale as authoritative, which is the failure class the plan exists to
+end, inverted. Three mitigations are load-bearing, not decorative:
+
+1. **The closure is derived from the build's own readers** — every class below
+   resolves through the SAME path authority the projection reads through
+   (``paths.store_root``, ``running_work_store_paths``,
+   ``chat_session_db_path``, ``_get_profiles_root``, ``get_all_skills_dirs``).
+   No second list free to drift.
+2. **The equivalence golden** (``test_core_fingerprint_cache.py`` test 7) reds
+   a gap inside the fixture matrix: for one fingerprint the cache-served core
+   must equal the rebuilt core field-for-field.
+3. **The shadow-validation window** reds it in the field: a cache-hit boot ALSO
+   runs the full build in the background and compares; a divergence is a loud
+   receipt naming the section AND the rebuilt core is adopted.
+
+If a shadow receipt ever shows divergence, the fix is WIDENING the stat set —
+never trusting the cache harder.
+
+=============================================================================
+ONE AUTHORITY
+=============================================================================
+
+The store decides; the projection serves. A cached or stale-labeled core never
+deletes, never refuses a write, and never wins a conflict on its own say-so —
+the 2026-08-15 mass archive was a projection that had acquired store powers. A
+stale-labeled core is marked ``parity.freshness.state = "stale"``, which is the
+signal the launcher's existing stale-banner lane already reads
+(``mission_control_snapshot.dart``: ``freshnessState == 'stale'`` →
+``MissionSnapshotHealth.stale``), so a stale frame is never ``live`` and
+therefore never authoritative. No write-lane predicate is reachable from
+either field.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import logging
+import os
+import stat
+import threading
+from pathlib import Path
+from typing import Any, Callable, Iterator, NamedTuple
+
+from utils import atomic_json_write
+
+logger = logging.getLogger(__name__)
+
+#: The cache's own home under the agent-runtime store root. A DEDICATED
+#: directory rather than the existing ``snapshot.json``: that file is
+#: ``write_snapshot``'s boot cache and the launcher's cold-paint lane reads it,
+#: so two writers with different provenance would share one path and neither
+#: could say which one produced the bytes. It is also excluded from the
+#: fingerprint below — a cache whose own writes flipped its key would
+#: invalidate itself on every build.
+CORE_CACHE_DIRNAME = "serve_read_model"
+CORE_FILENAME = "core.json"
+SIDECAR_FILENAME = "sidecar.json"
+
+#: ``parity.core_source`` values.
+CORE_SOURCE_CACHE = "cache"
+CORE_SOURCE_REBUILT = "rebuilt"
+
+#: Why a persisted core was NOT served. Every one of these rides the demote
+#: receipt: "the cache did not answer" must never be a silent outcome.
+DEMOTE_ABSENT = "absent"
+DEMOTE_UNREADABLE = "unreadable"
+DEMOTE_CORE_DIGEST_MISMATCH = "core_digest_mismatch"
+DEMOTE_FINGERPRINT_UNAVAILABLE = "fingerprint_unavailable"
+DEMOTE_FINGERPRINT_MISMATCH = "fingerprint_mismatch"
+DEMOTE_BUILD_STAMP_UNKNOWN = "build_stamp_unknown"
+DEMOTE_BUILD_STAMP_MISMATCH = "build_stamp_mismatch"
+DEMOTE_CONTRACT_MISMATCH = "contract_mismatch"
+DEMOTE_RUNTIME_ROOT_MISMATCH = "runtime_root_mismatch"
+
+#: Hard bound on the store-root walk. Reaching it is NOT a partial answer: the
+#: fingerprint becomes ``None`` and the caller must treat that as "never
+#: cache". A truncated stat set is exactly a missed input.
+MAX_FINGERPRINT_ENTRIES = 200_000
+
+#: Per-root bound on the skill-registry walk. Skill packages are small trees
+#: (``<root>/<slug>/SKILL.md`` plus package files); a root that blows past this
+#: is not a skill registry, and the same refusal applies.
+MAX_SKILL_ENTRIES_PER_ROOT = 20_000
+
+#: Store-root entries that are DELIBERATELY not fingerprinted, each because it
+#: moves for reasons a read-model core does not depend on. Anything not named
+#: here is fingerprinted, so the default posture is inclusion.
+_EXCLUDED_STORE_ENTRIES = frozenset(
+    {
+        # The cache's own home (see CORE_CACHE_DIRNAME).
+        CORE_CACHE_DIRNAME,
+        # Entries appear and vanish at every serve boot/exit, and the auth token
+        # appears at first boot. The standing precedent is already recorded at
+        # ``agent_runtime/serve_registry.py`` and ``agent_runtime/serve_auth.py``
+        # and in the read-cache fingerprint's own comment block.
+        "serve_instances",
+        "serve_auth_token",
+        # Lock files are created and removed INSIDE a build; a lock in the stat
+        # set would make a build's own locking flip the key it just wrote.
+        "locks",
+        # ``write_snapshot``'s boot cache and the projector's read model are
+        # OUTPUTS of the projection, never inputs to it.
+        "snapshot.json",
+        "read_model.db",
+        "read_model.db-wal",
+        "read_model.db-shm",
+        # The drain-state file, same rule as serve_instances (named at
+        # ``dispatch_delivery.DRAIN_STATE_FILENAME``).
+        "drain_state.json",
+    }
+)
+
+#: ``atomic_json_write`` stages ``.<stem>_*.tmp`` beside its target. A staged
+#: temp file that a crash stranded is not an input; a live one belongs to a
+#: write that will move the real file anyway.
+_TMP_SUFFIX = ".tmp"
+
+#: SQLite's mtime-blind siblings. A WAL commit that has not checkpointed leaves
+#: the main database file untouched.
+_DB_SIBLINGS = ("", "-wal", "-shm", "-journal")
+
+#: A DIRECTORY contributes its PATH and nothing else — never a timestamp, never
+#: a present/absent distinction.
+#:
+#: Not an optimization; a correctness requirement, and it cost a false demote to
+#: learn. Two independent reasons, both measured on this runtime's platform:
+#:
+#: 1. **A directory's own signal is perturbed by the children this fingerprint
+#:    deliberately excludes.** The cache writes ``serve_read_model/`` INTO the
+#:    store root, so a root whose existence-or-mtime counted made the very write
+#:    that persisted a core invalidate the key it had just persisted — a
+#:    guaranteed miss on every boot. Same hole for ``locks/``, the serve
+#:    registry, and ``atomic_json_write``'s staged temp files.
+#: 2. **A directory's mtime is not a reliable add signal anyway.** Measured on
+#:    NTFS: creating a FILE inside a directory left the directory's ``mtime_ns``
+#:    unchanged, while a later ``mkdir`` moved it. So it is noise in one
+#:    direction and silence in the other — the worst combination for a change
+#:    key.
+#:
+#: Nothing is lost. The enumeration is directory-LEVEL: an added file arrives as
+#: its own new triple and a removed one takes its triple with it, so the parent's
+#: timestamp is strictly redundant with the walk that produced it. That is the
+#: same reasoning as the boards-tree per-card stat pattern in
+#: ``harness_parts/serve.py``, taken one step further.
+_DIR_MARK = -2
+
+
+class FingerprintEntry(NamedTuple):
+    path: str
+    mtime_ns: int
+    size: int
+
+
+class CoreFingerprint(NamedTuple):
+    """The sorted stat set over every build input, plus its own digest.
+
+    ``entries`` is kept (not just the digest) so a divergence investigation can
+    diff two fingerprints and name the file that moved. ``digest`` is what the
+    sidecar stores: the entry list on the live store is tens of thousands of
+    triples and the sidecar is read on the boot path.
+    """
+
+    entries: tuple[FingerprintEntry, ...]
+    digest: str
+
+    @property
+    def count(self) -> int:
+        return len(self.entries)
+
+
+def _stat_entry(path: Any) -> FingerprintEntry:
+    """One (path, mtime_ns, size) triple. An ABSENT path is a stable signal.
+
+    A missing file records ``-1/-1`` rather than being skipped: "this input does
+    not exist" is a fact the next build must be able to disagree with. Skipping
+    it would make an appearing file indistinguishable from an unchanged one.
+
+    A DIRECTORY records ``_DIR_MARK`` for both numbers — see that constant for
+    why its mtime is poison rather than signal.
+    """
+
+    text = str(path)
+    try:
+        st = os.stat(path)
+    except OSError:
+        return FingerprintEntry(text, -1, -1)
+    if stat.S_ISDIR(st.st_mode):
+        return FingerprintEntry(text, _DIR_MARK, _DIR_MARK)
+    return FingerprintEntry(text, int(st.st_mtime_ns), int(st.st_size))
+
+
+def _entry_triple(entry: os.DirEntry, is_dir: bool) -> FingerprintEntry:
+    if is_dir:
+        return FingerprintEntry(entry.path, _DIR_MARK, _DIR_MARK)
+    try:
+        st = entry.stat()
+    except OSError:
+        return FingerprintEntry(entry.path, -1, -1)
+    return FingerprintEntry(entry.path, int(st.st_mtime_ns), int(st.st_size))
+
+
+def _walk_tree(root: Path, out: list[FingerprintEntry], *, limit: int, exclude_top: frozenset[str] = frozenset()) -> bool:
+    """Enumerate ``root`` and every descendant, bounded by ``limit``.
+
+    Returns False when the bound was reached — the caller must then refuse to
+    fingerprint at all rather than serve a truncated stat set.
+
+    Every FILE contributes (path, mtime_ns, size); every DIRECTORY contributes
+    its path alone. Files individually rather than by their parent's mtime
+    because replacing an existing entry does not move the containing directory
+    on NTFS (the in-place-rewrite case the boards-tree per-card stat pattern
+    already exists for); directories by path alone for the reason at
+    :data:`_DIR_MARK`.
+
+    Symlinked directories ARE followed, and the choice is deliberate: treating
+    one as a leaf would leave everything under it outside the closure, which is
+    the failure mode that matters here. A symlink LOOP is therefore possible and
+    is handled by the bound rather than by loop detection — hitting ``limit``
+    refuses the whole fingerprint, and refusing means "never cache", which is
+    safe. Detecting the loop and continuing would not be: it would produce a
+    plausible key over an incomplete walk.
+    """
+
+    # The tree root records its PATH only, never its existence-or-not: a root
+    # that appears because the cache wrote its own directory into it (the store
+    # root's first-ever write on a virgin install) must not flip the key, and a
+    # root that genuinely gains content flips it through the content's own
+    # triples.
+    out.append(FingerprintEntry(str(root), _DIR_MARK, _DIR_MARK))
+    try:
+        top_level = sorted(os.scandir(root), key=lambda entry: entry.name)
+    except OSError:
+        # An unreadable root is itself a stable signal (recorded above). It is
+        # NOT a bound failure: a store root that does not exist yet is the
+        # ordinary cold-start shape.
+        return True
+    pending: list[os.DirEntry] = []
+    for entry in top_level:
+        if entry.name in exclude_top:
+            continue
+        pending.append(entry)
+    while pending:
+        if len(out) >= limit:
+            return False
+        entry = pending.pop()
+        name = entry.name
+        if name.endswith(_TMP_SUFFIX) and name.startswith("."):
+            continue
+        try:
+            is_dir = entry.is_dir()
+        except OSError:
+            is_dir = False
+        out.append(_entry_triple(entry, is_dir))
+        if not is_dir:
+            continue
+        try:
+            pending.extend(sorted(os.scandir(entry.path), key=lambda item: item.name))
+        except OSError:
+            continue
+    return len(out) < limit
+
+
+def _db_entries(db_path: Any, out: list[FingerprintEntry]) -> None:
+    text = str(db_path)
+    for suffix in _DB_SIBLINGS:
+        out.append(_stat_entry(text + suffix))
+
+
+def build_input_fingerprint() -> CoreFingerprint | None:
+    """The stat set over EVERY input the read-model build reads.
+
+    ``None`` means "I could not fingerprint the inputs" and every caller must
+    read it as **never cache** — not as "nothing changed". A missing answer is a
+    loud refusal here, because the alternative is serving unlabeled stale as
+    authoritative.
+
+    The seven input classes, each resolved through the authority the BUILD
+    reads through (§6.1's first mitigation — one authority, no second list):
+
+    1. the agent-runtime store root subtree — ``paths.store_root()``, walked
+       recursively so an ADDED file flips the key (offices, boards, personas,
+       assignments, the event log and its rotation manifest, prompt
+       observability, realm-sync baselines: everything the projection reads
+       from the store, without a name list to fall behind);
+    2. the ``running_work`` durable stores — ``running_work_store_paths()``, the
+       ONE authority for them (they hang off the HERMES home, not the store
+       root, and both mutate with NO event);
+    3. the chat SessionDB — ``chat_session_db_path()``, the database the CHAT
+       LANE writes, plus its WAL siblings;
+    4. the profile inputs ``agents_readiness`` reads — the profiles root and,
+       per profile, ``profile.yaml`` + ``config.yaml``, plus the sticky
+       ``active_profile`` pointer that decides which one a bare invocation
+       resolves;
+    5. the config inputs — the ambient ``get_config_path()`` and the ROOT
+       ``harness_root_config_path()`` (two authorities in production because
+       the CLI profile redirect makes them genuinely different files);
+    6. the skill registries — ``get_all_skills_dirs()`` (local profile skills,
+       the shared canonical root, configured external roots) walked per root,
+       plus the in-repo harness-skill source root the hash comparison reads;
+    7. the event-rotation lane — the manifest and the resolved LIVE slice.
+       Under the store root today, so class 1 covers them; stat'd explicitly
+       anyway because the resolution is free to move the live slice elsewhere
+       and a frozen ``events.jsonl`` entry after a rotation is exactly the
+       silent-staleness shape this whole module is against.
+    """
+
+    entries: list[FingerprintEntry] = []
+
+    # 1 — the agent-runtime store root subtree.
+    try:
+        from . import paths as _paths
+
+        root = _paths.store_root()
+    except Exception:
+        return None
+    if not _walk_tree(root, entries, limit=MAX_FINGERPRINT_ENTRIES, exclude_top=_EXCLUDED_STORE_ENTRIES):
+        logger.warning(
+            "snapshot_core_cache fingerprint refused: store root exceeded %d entries",
+            MAX_FINGERPRINT_ENTRIES,
+        )
+        return None
+
+    # 2 — the running_work durable stores.
+    try:
+        from .running_work import running_work_store_paths
+
+        store_paths = running_work_store_paths()
+    except Exception:
+        return None
+    if not store_paths:
+        # The authority could not resolve a home. "I cannot fingerprint these"
+        # is not "there is nothing to watch" — refuse.
+        return None
+    for path in store_paths:
+        _db_entries(path, entries)
+
+    # 3 — the chat SessionDB.
+    try:
+        from .chat_session_scope import chat_session_db_path
+
+        _db_entries(chat_session_db_path(), entries)
+    except Exception:
+        return None
+
+    # 4 — profile inputs + the sticky active-profile pointer.
+    try:
+        from hermes_cli.profiles import _get_default_hermes_home, _get_profiles_root
+
+        profiles_root = _get_profiles_root()
+        entries.append(_stat_entry(profiles_root))
+        entries.append(_stat_entry(_get_default_hermes_home() / "active_profile"))
+        try:
+            profile_dirs = sorted(os.scandir(profiles_root), key=lambda item: item.name)
+        except OSError:
+            profile_dirs = []
+        for entry in profile_dirs:
+            try:
+                if not entry.is_dir():
+                    continue
+            except OSError:
+                continue
+            entries.append(_stat_entry(entry.path))
+            entries.append(_stat_entry(Path(entry.path) / "profile.yaml"))
+            entries.append(_stat_entry(Path(entry.path) / "config.yaml"))
+    except Exception:
+        return None
+
+    # 5 — the two config authorities.
+    try:
+        from hermes_constants import get_config_path
+
+        from .config import harness_root_config_path
+
+        entries.append(_stat_entry(get_config_path()))
+        entries.append(_stat_entry(harness_root_config_path()))
+    except Exception:
+        return None
+
+    # 6 — the skill registries.
+    try:
+        from agent.skill_utils import get_all_skills_dirs
+
+        from .skill_install import harness_skill_source_root
+
+        roots = [*get_all_skills_dirs(), harness_skill_source_root()]
+    except Exception:
+        return None
+    seen_roots: set[str] = set()
+    for skill_root in roots:
+        key = str(skill_root)
+        if key in seen_roots:
+            continue
+        seen_roots.add(key)
+        if not _walk_tree(Path(skill_root), entries, limit=len(entries) + MAX_SKILL_ENTRIES_PER_ROOT):
+            logger.warning(
+                "snapshot_core_cache fingerprint refused: skill root %s exceeded %d entries",
+                key,
+                MAX_SKILL_ENTRIES_PER_ROOT,
+            )
+            return None
+
+    # 7 — the event-rotation lane.
+    try:
+        from . import event_rotation as _event_rotation
+
+        entries.append(_stat_entry(_event_rotation.manifest_path()))
+        entries.append(_stat_entry(_event_rotation.live_path()))
+    except Exception:
+        return None
+
+    ordered = tuple(sorted(set(entries)))
+    digest = hashlib.sha256(
+        "\n".join(f"{item.path}|{item.mtime_ns}|{item.size}" for item in ordered).encode(
+            "utf-8", "surrogatepass"
+        )
+    ).hexdigest()
+    return CoreFingerprint(ordered, digest)
+
+
+def contract_versions() -> dict[str, int]:
+    """The wire versions a persisted core was produced under.
+
+    A core written by a build whose contract has since moved is a core a
+    consumer would decode against the wrong shape. Compared as a whole dict, so
+    ADDING a version to this set is itself a demote signal for every core
+    written before it — which is the safe direction.
+    """
+
+    from .parity import PARITY_ENVELOPE_VERSION
+    from .snapshot import SNAPSHOT_CONTRACT_VERSION
+    from .stream import STREAM_SCHEMA_VERSION
+
+    return {
+        "snapshot_contract": int(SNAPSHOT_CONTRACT_VERSION),
+        "parity_envelope": int(PARITY_ENVELOPE_VERSION),
+        "stream_schema": int(STREAM_SCHEMA_VERSION),
+    }
+
+
+def build_stamp_token() -> str | None:
+    """WHICH CODE built the persisted core, or ``None`` when unmeasurable.
+
+    ``None`` refuses the cache. An install whose build cannot be measured — no
+    repo, no baked sha, a hung ``git`` — cannot prove the persisted core was
+    produced by the code now running, and property 5 says an upgrade must never
+    be able to serve the old install's core. Refusing is loud (the demote
+    receipt names ``build_stamp_unknown``) and it is the safe direction.
+
+    ``dirty`` rides the token, so a clean → dirty transition demotes. The
+    residual is stated rather than hidden: two different EDITS that both leave
+    the checkout dirty produce the same token, so on a dirty tree the stamp
+    cannot distinguish them. That window is exactly what the shadow-validation
+    comparison covers in the field, and it does not exist on any install the
+    operator ships from.
+    """
+
+    try:
+        from .build_stamp import build_stamp
+
+        stamp = build_stamp()
+    except Exception:
+        return None
+    if stamp.commit is None:
+        return None
+    return f"{stamp.source}:{stamp.commit}:{'dirty' if stamp.dirty else 'clean' if stamp.dirty is not None else 'unknown'}"
+
+
+def _cache_dir() -> Path:
+    from . import paths as _paths
+
+    return _paths.store_root() / CORE_CACHE_DIRNAME
+
+
+def core_path() -> Path:
+    return _cache_dir() / CORE_FILENAME
+
+
+def sidecar_path() -> Path:
+    return _cache_dir() / SIDECAR_FILENAME
+
+
+def _core_digest(payload: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+# --------------------------------------------------------------------------- #
+# Write-back
+# --------------------------------------------------------------------------- #
+def write_back(core: dict, *, fingerprint: CoreFingerprint | None = None) -> bool:
+    """Persist the core's WIRE form plus its sidecar. Best effort, by contract.
+
+    A failed write logs and changes NOTHING about the build that produced the
+    core — the build path is byte-identical whether this succeeds or fails,
+    which is what makes the cache safe to add to a hot path (test 9's second
+    half is the pin).
+
+    The sidecar binds to the core BYTES via ``core_sha256``, not merely to the
+    path. Two writers cannot own one file here, but a half-replaced pair, a
+    hand-edited core, or a rollback that restored an older ``core.json`` beside
+    a newer sidecar would otherwise be indistinguishable from a valid pair.
+
+    **``fingerprint`` must be the caller's PRE-build stat set.** The direction of
+    the error matters and only one direction is safe. A key stat'd AFTER the
+    build would absorb any write that landed WHILE the build ran: the core does
+    not contain that write, the key says the inputs are unchanged, and the next
+    process serves a core missing a write as authoritative — precisely the
+    failure this stage exists to prevent. A key stat'd BEFORE the build is at
+    worst OLDER than the core, which demotes the next process to a rebuild it
+    did not strictly need. ``build_snapshot`` therefore takes the stat
+    immediately before ``_build_snapshot_uncoalesced`` and threads it here;
+    computing one locally (the ``None`` default) is for callers that hold no
+    build, and it accepts that same conservative loss.
+
+    **Named consequence: a cold store converges in two builds, not one.** The
+    build is not a pure reader — ``PersonaInstanceStore.ensure_for_personas``
+    materializes missing instance rows, and the chat SessionDB is CREATED by the
+    first process that opens it. On a store where neither has happened yet, the
+    pre-build key describes inputs the build itself then changed, so the next
+    process demotes once and rebuilds; its own write-back records the settled
+    state and every later process matches. That is a property of the
+    conservative direction, not a defect — the other direction converges one
+    build sooner and can serve a lost write forever.
+
+    **Cost, named rather than discovered.** EVERY successful default-store build
+    writes here, and a live-store core is megabytes, so a serve process that
+    demotes several delta batches in a minute writes that many times. Priced and
+    accepted for this landing: the write is ~5 ms of serialize plus one fsync
+    against a build that costs seconds, and the alternative — skipping the write
+    when the persisted pair would already match — needs the FULL judgement (a
+    sidecar-only check leaves a tampered core permanently unhealed, because the
+    read path refuses it while the write path keeps declining to replace it). If
+    receipts show the churn matters, that is the refinement, gated on
+    :func:`read_persisted_core`, not a narrowing of which builds write.
+    """
+
+    from .serde import to_jsonable
+
+    try:
+        payload = to_jsonable(core)
+    except Exception:
+        logger.warning("snapshot_core_cache_write ok=false reason=serialize", exc_info=True)
+        return False
+    stamp = build_stamp_token()
+    if stamp is None:
+        logger.info("snapshot_core_cache_write ok=false reason=build_stamp_unknown")
+        return False
+    key = fingerprint if fingerprint is not None else build_input_fingerprint()
+    if key is None:
+        logger.info("snapshot_core_cache_write ok=false reason=fingerprint_unavailable")
+        return False
+    parity = payload.get("parity") if isinstance(payload.get("parity"), dict) else {}
+    watermark = parity.get("watermark") if isinstance(parity.get("watermark"), dict) else {}
+    sidecar = {
+        "fingerprint": key.digest,
+        "fingerprint_entries": key.count,
+        "build_stamp": stamp,
+        "contract_versions": contract_versions(),
+        # DIAGNOSTIC ONLY. Recorded so a divergence receipt can name the log
+        # position the core was built at. It is NEVER an input to the match
+        # decision below — see the module header on why an offset key is
+        # refused.
+        "event_offset": watermark.get("event_offset"),
+        "core_sha256": _core_digest(payload),
+        "runtime_root": str(_runtime_root_for_sidecar(parity)),
+        "generated_at": payload.get("generated_at"),
+    }
+    try:
+        atomic_json_write(core_path(), payload, indent=None, separators=(",", ":"), sort_keys=True)
+        atomic_json_write(sidecar_path(), sidecar, indent=None, sort_keys=True)
+    except Exception:
+        logger.warning("snapshot_core_cache_write ok=false reason=io", exc_info=True)
+        return False
+    logger.info(
+        "snapshot_core_cache_write ok=true inputs=%d fingerprint=%s offset=%s",
+        key.count,
+        key.digest[:12],
+        "unknown" if sidecar["event_offset"] is None else sidecar["event_offset"],
+    )
+    return True
+
+
+def _runtime_root_for_sidecar(parity: dict) -> Any:
+    identity = parity.get("runtime_root") if isinstance(parity.get("runtime_root"), dict) else {}
+    resolved = identity.get("resolved") or identity.get("path")
+    if resolved:
+        return resolved
+    try:
+        from . import paths as _paths
+
+        return _paths.store_root()
+    except Exception:
+        return ""
+
+
+# --------------------------------------------------------------------------- #
+# Read
+# --------------------------------------------------------------------------- #
+class CacheRead(NamedTuple):
+    """What the persisted pair said, and why it was or was not usable.
+
+    ``core`` is present whenever a decodable core was on disk — INCLUDING the
+    mismatch cases, because a mismatch still has something honest to serve while
+    the rebuild runs, provided it wears the stale label. ``matched`` is the only
+    field that authorizes serving it as authoritative.
+    """
+
+    core: dict | None
+    matched: bool
+    reason: str
+    fingerprint: CoreFingerprint | None
+    sidecar: dict
+
+
+def read_persisted_core(*, fingerprint: CoreFingerprint | None = None) -> CacheRead:
+    """Load the persisted pair and judge it. Never raises.
+
+    The judgement is a conjunction and each clause has its own demote reason on
+    the receipt, because "the cache did not answer" is useless to an operator
+    without WHY: bytes that do not match the sidecar, a fingerprint that moved,
+    an install that changed, a contract that moved, a root that is not this one.
+
+    The clauses are ordered CHEAPEST-FIRST, deliberately. The stat set is a walk
+    of every build input; a process with no persisted core to judge — every cold
+    CLI invocation, every test with a fresh root — must not pay for one to be
+    told there is nothing to compare it against.
+    """
+
+    try:
+        raw_sidecar = sidecar_path().read_text(encoding="utf-8")
+        raw_core = core_path().read_text(encoding="utf-8")
+    except OSError:
+        return CacheRead(None, False, DEMOTE_ABSENT, None, {})
+    try:
+        sidecar = json.loads(raw_sidecar)
+        core = json.loads(raw_core)
+    except Exception:
+        return CacheRead(None, False, DEMOTE_UNREADABLE, None, {})
+    if not isinstance(sidecar, dict) or not isinstance(core, dict):
+        return CacheRead(None, False, DEMOTE_UNREADABLE, None, {})
+    if _core_digest(core) != sidecar.get("core_sha256"):
+        # The sidecar does not describe these bytes. Refuse the core outright
+        # rather than serving it stale: an unbound core is not a projection this
+        # module produced, so nothing here can say what it contains.
+        return CacheRead(None, False, DEMOTE_CORE_DIGEST_MISMATCH, None, sidecar)
+    key = fingerprint if fingerprint is not None else build_input_fingerprint()
+    if key is None:
+        return CacheRead(core, False, DEMOTE_FINGERPRINT_UNAVAILABLE, key, sidecar)
+    stamp = build_stamp_token()
+    if stamp is None:
+        return CacheRead(core, False, DEMOTE_BUILD_STAMP_UNKNOWN, key, sidecar)
+    if sidecar.get("build_stamp") != stamp:
+        return CacheRead(core, False, DEMOTE_BUILD_STAMP_MISMATCH, key, sidecar)
+    if sidecar.get("contract_versions") != contract_versions():
+        return CacheRead(core, False, DEMOTE_CONTRACT_MISMATCH, key, sidecar)
+    try:
+        from . import paths as _paths
+
+        current_root = str(_paths.store_root())
+    except Exception:
+        current_root = None
+    recorded_root = sidecar.get("runtime_root")
+    if current_root is not None and recorded_root and str(recorded_root) != current_root:
+        return CacheRead(core, False, DEMOTE_RUNTIME_ROOT_MISMATCH, key, sidecar)
+    if sidecar.get("fingerprint") != key.digest:
+        return CacheRead(core, False, DEMOTE_FINGERPRINT_MISMATCH, key, sidecar)
+    return CacheRead(core, True, "", key, sidecar)
+
+
+# --------------------------------------------------------------------------- #
+# Labelling
+# --------------------------------------------------------------------------- #
+def label_core(core: dict, *, source: str, stale: bool) -> dict:
+    """Stamp provenance onto the core's parity envelope, in place.
+
+    ``parity`` is the frame's self-describing provenance block, and
+    ``read_model._resolved`` already stamps ``frame_source`` there for exactly
+    this reason — one location, additive, no contract bump.
+
+    ``core_source`` is emitted ONLY when a persisted core was available to
+    decide between, which is why the committed fixtures do not move: a build in
+    a root that has never held a persisted core answers no such question, and
+    stamping ``rebuilt`` there would be answering a question nobody asked, on
+    every golden. Same rule as the ``delta_patches`` hydrate marker, which is
+    absent when the lane is off precisely so the flag-off golden stays
+    byte-identical.
+
+    A stale core additionally sets ``parity.freshness.state = "stale"``. That is
+    the field the launcher's ``MissionSnapshotEnvelope`` already parses and maps
+    to ``MissionSnapshotHealth.stale``, so a stale-labeled frame can never read
+    ``live`` — it is non-authoritative by the consumer's existing predicate, not
+    by a new one.
+    """
+
+    parity = core.get("parity")
+    if not isinstance(parity, dict):
+        parity = {}
+        core["parity"] = parity
+    parity["core_source"] = str(source)
+    if stale:
+        parity["core_stale"] = True
+        freshness = parity.get("freshness")
+        if not isinstance(freshness, dict):
+            freshness = {}
+            parity["freshness"] = freshness
+        freshness["state"] = "stale"
+    else:
+        parity.pop("core_stale", None)
+        freshness = parity.get("freshness")
+        if isinstance(freshness, dict) and source == CORE_SOURCE_CACHE:
+            # The fingerprint matched, so this projection is confirmed CURRENT
+            # as of now — that, and not the original build's clock, is when its
+            # freshness window starts. The build's own time stays on the core's
+            # top-level ``generated_at``; nothing is overwritten, one anchor is
+            # refreshed. Without this a cache hit would serve a core whose
+            # 30-second freshness window expired before it was loaded.
+            from hermes_time import now as _now
+
+            from .serde import to_jsonable
+
+            freshness["generated_at"] = to_jsonable(_now())
+    return core
+
+
+# --------------------------------------------------------------------------- #
+# The process-level lane
+# --------------------------------------------------------------------------- #
+#: The cache lane is ARMED until this process has completed a full default-store
+#: build of its own. That is the honest generalization of the plan's "first build
+#: of a process": a serve boot issues several builds (prewarm, hydrate, status
+#: polls) within seconds of each other, and gating on the literal first
+#: CONSULTATION would have served the prewarm from the cache and then made the
+#: hydrate — the one the launcher is actually waiting on — pay the full build
+#: anyway, buying nothing the operator can see.
+#:
+#: Every hit re-computes the fingerprint independently, so an armed lane is
+#: never a stale-serve window: it is "this process has not yet built its own
+#: truth, and the store says the persisted one is still current".
+#:
+#: Disarming on the first completed build also means no test can accidentally be
+#: served from a cache: a fresh isolated root has no persisted core, so the
+#: first consult always demotes, and the build that follows it disarms the lane.
+_LANE = threading.local()
+_lane_lock = threading.Lock()
+_lane_armed = True
+_shadow_done = False
+_stale_served = False
+
+
+def reset_process_state() -> None:
+    """Re-arm the lane, as a fresh process would. Tests only.
+
+    Same shape and same reason as ``build_stamp.reset_build_stamp_cache``: a
+    property of the PROCESS has to be resettable for a test to be able to
+    exercise a second process's behaviour without spawning one.
+    """
+
+    global _lane_armed, _shadow_done, _stale_served
+    with _lane_lock:
+        _lane_armed = True
+        _shadow_done = False
+        _stale_served = False
+
+
+def lane_armed() -> bool:
+    with _lane_lock:
+        return _lane_armed
+
+
+def note_full_build_completed() -> None:
+    """The process now owns its own truth — the cache lane closes.
+
+    A no-op inside a shadow build: that build is a VALIDATION of the cache, not
+    the process's answer, and letting it disarm the lane would make the next
+    boot caller pay a full build for the privilege of having validated the one
+    it just avoided.
+    """
+
+    if getattr(_LANE, "shadow", False):
+        return
+    global _lane_armed
+    with _lane_lock:
+        _lane_armed = False
+
+
+class shadow_build_scope:
+    """Marks the calling thread's build as the shadow validation build."""
+
+    def __enter__(self) -> None:
+        _LANE.shadow = True
+
+    def __exit__(self, *exc: Any) -> None:
+        _LANE.shadow = False
+
+
+def _log_demote(*, caller: str, reason: str, key: CoreFingerprint | None) -> None:
+    logger.info(
+        "snapshot_core_cache core_source=%s caller=%s reason=%s inputs=%s",
+        CORE_SOURCE_REBUILT,
+        caller,
+        reason,
+        "unknown" if key is None else key.count,
+    )
+
+
+class CoreDecision(NamedTuple):
+    """What the cache lane decided, and whether there was a question at all.
+
+    ``demoted`` is the distinction that keeps the committed producer fixtures
+    byte-identical. A build in a root that has never held a persisted core
+    answers no question about provenance, so nothing is stamped; a build that
+    ran BECAUSE a persisted core was rejected answers one, and stamps
+    ``core_source=rebuilt``. See :func:`label_core`.
+    """
+
+    core: dict | None
+    demoted: bool
+    reason: str
+
+
+def consult(*, caller: str, fingerprint: CoreFingerprint | None = None) -> CoreDecision:
+    """The read half of the stage: serve the persisted core, or say why not.
+
+    Runs on the default-store path only, while the lane is armed. On a match it
+    emits its OWN receipt (``snapshot_core_cache core_source=cache``) and
+    deliberately does NOT emit ``snapshot_build_core role=led``: there was no
+    build, and a receipt claiming one would put the log back in the state EG-2.1
+    just took it out of, where a wait and a build are indistinguishable.
+
+    Every demote is logged with its reason — except ``absent``, which is the
+    ordinary cold-start shape and would otherwise print a line on every build in
+    every process that has no cache to consult.
+    """
+
+    if not lane_armed():
+        return CoreDecision(None, False, "")
+    read = read_persisted_core(fingerprint=fingerprint)
+    if not read.matched or read.core is None:
+        if read.reason != DEMOTE_ABSENT:
+            _log_demote(caller=caller, reason=read.reason, key=read.fingerprint)
+        return CoreDecision(None, read.reason != DEMOTE_ABSENT, read.reason)
+    core = label_core(read.core, source=CORE_SOURCE_CACHE, stale=False)
+    logger.info(
+        "snapshot_core_cache core_source=%s caller=%s inputs=%d fingerprint=%s offset=%s",
+        CORE_SOURCE_CACHE,
+        caller,
+        read.fingerprint.count if read.fingerprint else -1,
+        read.fingerprint.digest[:12] if read.fingerprint else "unknown",
+        read.sidecar.get("event_offset", "unknown"),
+    )
+    return CoreDecision(core, False, "")
+
+
+def take_stale_first_core(*, caller: str) -> dict | None:
+    """A persisted core to paint IMMEDIATELY, LABELED stale — or ``None``.
+
+    The mismatch half of the design: rather than showing the operator nothing
+    for the length of a full build, serve what the store last projected and say
+    out loud that it is not validated. The replacement arrives on the next frame
+    when the build completes.
+
+    One-shot per process, and only while the lane is armed, so a resubscribe
+    long after the process has built its own truth can never re-paint an old
+    projection.
+    """
+
+    global _stale_served
+    with _lane_lock:
+        if not _lane_armed or _stale_served:
+            return None
+    read = read_persisted_core()
+    if read.core is None or read.matched:
+        # Nothing to paint, or the core MATCHES — in which case the ordinary
+        # cache-hit path above will serve it authoritative and painting a stale
+        # copy first would be a lie in the pessimistic direction.
+        return None
+    with _lane_lock:
+        if _stale_served:
+            return None
+        _stale_served = True
+    logger.info(
+        "snapshot_core_cache core_source=%s stale=true caller=%s reason=%s",
+        CORE_SOURCE_CACHE,
+        caller,
+        read.reason,
+    )
+    return label_core(read.core, source=CORE_SOURCE_CACHE, stale=True)
+
+
+# --------------------------------------------------------------------------- #
+# Shadow validation
+# --------------------------------------------------------------------------- #
+#: The comparison ignores exactly the fields that describe THIS build rather
+#: than the state it projected. Everything else — every section, every row,
+#: every count — must agree, because a difference in any of them is the
+#: input-closure gap §6.1 is about.
+_SHADOW_IGNORED_PARITY_KEYS = frozenset(
+    {
+        "build_ms",
+        "sections_ms",
+        "generated_at",
+        "projection_age_ms",
+        "core_source",
+        "core_stale",
+        "freshness",
+        "snapshot_bytes",
+    }
+)
+_SHADOW_IGNORED_TOP_KEYS = frozenset({"generated_at", "parity", "runtime_paths_diagnostic"})
+
+#: ``parity.watermark`` is compared, minus the clock that says WHEN it was
+#: measured. The reason to compare it at all is ``event_offset``: two cores at
+#: different log positions ARE a divergence, and one of the most informative
+#: kinds. ``captured_at`` is the measurement's own timestamp — it moves on every
+#: read by construction, so leaving it in would make every comparison diverge and
+#: the whole window would report noise until somebody switched it off.
+_SHADOW_IGNORED_WATERMARK_KEYS = frozenset({"captured_at"})
+
+
+def compare_cores(cached: dict, rebuilt: dict) -> str | None:
+    """The first section on which a cache-served core and a rebuild disagree.
+
+    ``None`` means they agree. The NAME is the whole point of the return value:
+    a boolean divergence receipt would tell an operator the cache is wrong
+    without telling them which input class to widen.
+    """
+
+    from .serde import to_jsonable
+
+    left = to_jsonable(cached)
+    right = to_jsonable(rebuilt)
+    if not isinstance(left, dict) or not isinstance(right, dict):
+        return "core"
+    keys = sorted(set(left) | set(right))
+    for key in keys:
+        if key in _SHADOW_IGNORED_TOP_KEYS:
+            continue
+        if left.get(key) != right.get(key):
+            return key
+    left_parity = left.get("parity") if isinstance(left.get("parity"), dict) else {}
+    right_parity = right.get("parity") if isinstance(right.get("parity"), dict) else {}
+    for key in sorted(set(left_parity) | set(right_parity)):
+        if key in _SHADOW_IGNORED_PARITY_KEYS:
+            continue
+        if key == "watermark":
+            if _stripped(left_parity.get(key), _SHADOW_IGNORED_WATERMARK_KEYS) != _stripped(
+                right_parity.get(key), _SHADOW_IGNORED_WATERMARK_KEYS
+            ):
+                return "parity.watermark"
+            continue
+        if left_parity.get(key) != right_parity.get(key):
+            return f"parity.{key}"
+    return None
+
+
+def _stripped(value: Any, drop: frozenset[str]) -> Any:
+    if not isinstance(value, dict):
+        return value
+    return {key: item for key, item in value.items() if key not in drop}
+
+
+def shadow_validate(cached: dict, *, caller: str, build: Callable[[], dict], adopt: Callable[[dict], None] | None = None) -> str | None:
+    """Rebuild in full, compare against the core we just served, report.
+
+    The UP-4 pattern applied to this cache, and the mitigation that converts
+    §6.1's input-closure risk into receipts. A divergence is LOUD (a warning
+    naming the section) and the rebuilt core is ADOPTED — written back, so the
+    next boot cannot be served the divergent copy, and handed to ``adopt`` so
+    the lane that already painted can replace what it painted.
+
+    Retirement is receipts-based and is NOT this stage's call: zero divergence
+    receipts across the agreed window (TC-3's shape).
+    """
+
+    try:
+        with shadow_build_scope():
+            rebuilt = build()
+    except Exception:
+        logger.warning("snapshot_core_shadow ok=false caller=%s reason=build", caller, exc_info=True)
+        return None
+    section = compare_cores(cached, rebuilt)
+    if section is None:
+        logger.info("snapshot_core_shadow ok=true caller=%s divergence=none", caller)
+        return None
+    # ADOPTION, in the order that matters: the divergent copy stops being
+    # servable to the NEXT process first (the write-back), then this process
+    # stops serving it (the lane closes), then whoever already painted is told
+    # to replace what it painted. A receipt without adoption would leave the
+    # operator reading about a canvas that is still wrong.
+    write_back(rebuilt)
+    logger.warning(
+        "snapshot_core_shadow_divergence caller=%s section=%s — the persisted core "
+        "disagreed with a full rebuild; the rebuilt core is adopted. Widen the "
+        "fingerprint's input closure (agent_runtime/core_cache.py), never trust "
+        "the cache harder.",
+        caller,
+        section,
+    )
+    note_full_build_completed()
+    if adopt is not None:
+        try:
+            adopt(rebuilt)
+        except Exception:  # pragma: no cover - an instrument must not fail a lane
+            logger.warning("snapshot_core_shadow adopt failed", exc_info=True)
+    return section
+
+
+def claim_shadow_slot() -> bool:
+    """Take the process's ONE shadow-validation slot, or report it taken.
+
+    Once, not per cache hit: a boot issues several builds and spawning a full
+    build behind each of them would cost the process more than the cache saved —
+    four boot hits would buy four rebuilds.
+
+    Separated from the thread start so the claim is testable as a claim. A gate
+    whose only witness has to observe a background thread is a gate tested
+    through a race.
+    """
+
+    global _shadow_done
+    with _lane_lock:
+        if _shadow_done:
+            return False
+        _shadow_done = True
+    return True
+
+
+def maybe_start_shadow_validation(cached: dict, *, caller: str, build: Callable[[], dict], adopt: Callable[[dict], None] | None = None) -> bool:
+    """Start the shadow build on a daemon thread, if this process's slot is free."""
+
+    if not claim_shadow_slot():
+        return False
+    thread = threading.Thread(
+        target=lambda: shadow_validate(cached, caller=caller, build=build, adopt=adopt),
+        name="harness-core-shadow",
+        daemon=True,
+    )
+    thread.start()
+    return True
+
+
+def iter_fingerprint_paths(fingerprint: CoreFingerprint) -> Iterator[str]:
+    """Every path in a fingerprint — the §6.1 audit surface, enumerable."""
+
+    for entry in fingerprint.entries:
+        yield entry.path

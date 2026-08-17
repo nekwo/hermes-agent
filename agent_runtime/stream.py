@@ -9,7 +9,7 @@ from typing import Any
 
 from hermes_time import now
 
-from . import paths
+from . import core_cache, paths
 from .events import EventLog
 from .models import Event
 from .parity import events_watermark
@@ -668,6 +668,31 @@ def stream_frames(
     declared_entities = normalize_fold_entities(fold_entities)
     resync_pending = bool(resync)
     emitted = 0
+    # EG-3.1's mismatch half. A persisted core whose fingerprint does NOT match
+    # is not authority — but it is also not nothing, and the alternative is
+    # showing the operator an empty canvas for the length of a full build. So it
+    # goes out FIRST, wearing the stale label
+    # (``parity.freshness.state = "stale"``, the field the launcher's envelope
+    # already maps to ``MissionSnapshotHealth.stale``), and the authoritative
+    # hydrate below replaces it when the build completes.
+    #
+    # It is an ordinary ``hydrate`` frame, not a new type: the hydrate's own
+    # contract is "apply this exactly like a fresh snapshot", so a second one
+    # re-baselines a client with no new wire vocabulary. The stale frame's
+    # watermark is deliberately NOT used to seed ``offset`` — the tail is
+    # resumed from the AUTHORITATIVE frame below, so nothing between the two is
+    # skipped.
+    stale_core = core_cache.take_stale_first_core(caller=caller)
+    if stale_core is not None:
+        yield hydrate_frame(
+            snapshot=stale_core,
+            delta_patches=delta_patches,
+            fold_entities=declared_entities,
+            caller=caller,
+        )
+        emitted += 1
+        if max_frames is not None and emitted >= max_frames:
+            return
     hydrate = hydrate_frame(
         delta_patches=delta_patches, fold_entities=declared_entities, caller=caller
     )

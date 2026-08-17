@@ -19,7 +19,7 @@ from hermes_cli.profiles import available_profile_template_summaries as availabl
 from hermes_time import now
 from utils import atomic_json_write
 
-from . import paths
+from . import core_cache, paths
 from .board_store import BoardStore
 from .office_store import OfficeStore
 from .config import load_agent_runtime_config, load_root_runtime_config
@@ -292,6 +292,15 @@ BUILD_ROLE_LED = "led"
 BUILD_ROLE_RODE = "rode"
 BUILD_ROLE_SHARED_NEXT = "shared_next"
 
+#: The fourth role, added by EG-3.1: this caller ran no build and rode no
+#: build — the persisted core's fingerprint matched, so the projection was
+#: LOADED. It is a role rather than a silence for the same reason the other
+#: three are: the boot's build count is the count of ``led`` lines, and a cache
+#: hit that printed ``led`` would put the log straight back into the state where
+#: a wait and a build are indistinguishable. See
+#: :func:`agent_runtime.core_cache.first_core` for the receipt it emits instead.
+BUILD_ROLE_CACHE = "cache"
+
 #: A caller that named itself nothing. Kept as a token rather than an empty
 #: value so the receipt line's key is never absent — a parser reading
 #: ``caller=`` off the line must not have to tell "no such key" apart from
@@ -479,6 +488,15 @@ def build_snapshot(
     logging a wait that reads like a build. Pure out-param otherwise: the return
     value and the coalesce behaviour are untouched by its presence, and a caller
     that passes nothing gets today's function exactly.
+
+    **The persisted core (EG-3.1).** On the default-store path, while this
+    process has not yet completed a build of its own, the ~20 s reconstruction is
+    replaced by VALIDATION: :func:`agent_runtime.core_cache.first_core` stats
+    every build input and, when nothing moved since the persisted core was
+    written, hands that core back labeled ``core_source=cache``. Every
+    successful default-store build writes the core back. Callers see the same
+    shape either way; ``build_info["role"]`` says which happened
+    (:data:`BUILD_ROLE_CACHE`).
     """
 
     caller = _build_caller(build_info)
@@ -518,6 +536,31 @@ def build_snapshot(
             snapshot=injected,
         )
         return injected
+    # The persisted core is consulted BEFORE the coalescer, deliberately. A
+    # fingerprint check is ~50 ms of stat work with no shared state; putting it
+    # behind the build lock would serialize the cheap answer behind whatever
+    # expensive build happens to be running, which is the opposite of the point.
+    decision = core_cache.consult(caller=caller)
+    if decision.core is not None:
+        cached = decision.core
+        _record_build_info(
+            build_info,
+            role=BUILD_ROLE_CACHE,
+            caller=caller,
+            generation=None,
+            snapshot=cached,
+        )
+        # The shadow-validation window (EG-3.1): a cache-hit boot also runs the
+        # full build in the background and compares field-for-field, so an
+        # input-closure gap surfaces as a receipt in the field instead of a
+        # silently stale canvas. At most once per process, on a daemon thread,
+        # and it is marked as a shadow so completing it does not close the lane.
+        core_cache.maybe_start_shadow_validation(
+            cached,
+            caller=caller,
+            build=lambda: _build_snapshot_uncoalesced(),
+        )
+        return cached
     state = _build_coalesce_state
     with _BUILD_COALESCE:
         # The first build STARTED at/after arrival is the one that satisfies
@@ -559,7 +602,20 @@ def build_snapshot(
             state["waiters"] -= 1
     result = None
     try:
+        # PRE-build, deliberately: a stat set taken after the build would absorb
+        # any write that landed while the build ran, and the next process would
+        # then serve a core missing that write as authoritative. See
+        # ``core_cache.write_back``'s docstring for the full direction argument.
+        pre_build_fingerprint = core_cache.build_input_fingerprint()
         result = _build_snapshot_uncoalesced()
+        if decision.demoted:
+            # A persisted core WAS available and was rejected, so this core has a
+            # provenance question to answer: it is the rebuild that replaced it.
+            # A build with no persisted core to decide between stamps nothing —
+            # see ``core_cache.label_core`` for why that keeps the goldens still.
+            core_cache.label_core(
+                result, source=core_cache.CORE_SOURCE_REBUILT, stale=False
+            )
         _record_build_info(
             build_info,
             role=BUILD_ROLE_LED,
@@ -575,6 +631,20 @@ def build_snapshot(
         _log_snapshot_build_core(
             caller=caller, generation=generation, snapshot=result
         )
+        # EG-3.1's write half: EVERY successful default-store build persists the
+        # core it just produced, plus the sidecar that says which inputs it was
+        # built from. Not only boot builds — a process that built once and never
+        # wrote back would leave the NEXT process paying the full 20 s for state
+        # this one already has in hand, which is how ``snapshot.json`` came to be
+        # two days stale on the live store.
+        #
+        # Best effort by contract (a failed write logs and changes nothing here),
+        # and it happens AFTER the receipt so the build's own line is never
+        # delayed behind an I/O stall.
+        core_cache.write_back(result, fingerprint=pre_build_fingerprint)
+        # The process now owns its own truth: the cache lane closes, and every
+        # later build in this process is an ordinary build.
+        core_cache.note_full_build_completed()
         return result
     finally:
         with _BUILD_COALESCE:
@@ -1161,6 +1231,35 @@ def _parity_envelope(data, *, build_started, last_event, completeness, drop_samp
         # import order. A wire field no consumer can rely on and no test can pin
         # honestly is worse than no field.
         #
+        # 54 KEPT, THIRD TIME (EG-3.1, the persisted core, 2026-08-17) — the
+        # parity envelope gains ``core_source`` (+ ``core_stale``) and the office
+        # rows gain ``actors_unreadable``. The two-part rule recorded at
+        # "52 KEPT" answers both, and the SECOND part needs stating carefully
+        # because the fixtures are the evidence:
+        #
+        # (a) Nothing LEAVES the wire. No key, no section, no value a consumer
+        # models is removed or narrowed.
+        #
+        # (b) Neither addition is "invisible rather than merely unread".
+        # ``core_source`` is emitted ONLY when a persisted core was available to
+        # decide between (see ``core_cache.label_core``) — a build in a root that
+        # has never held one answers no such question and stamps nothing, which
+        # is why every committed producer fixture is byte-unchanged by this
+        # landing. The precedent for the shape is one file over: ``read_model``
+        # already stamps ``parity.frame_source`` under the same reasoning ("one
+        # location, additive, no contract bump"), and the ``delta_patches``
+        # hydrate marker is absent when its lane is off for exactly this
+        # golden-stability reason. ``actors_unreadable`` is a new key on an office
+        # row the Launcher parses field-by-field, alongside the
+        # ``actors_truncated`` it already ignores.
+        #
+        # The STALE label deliberately reuses an existing field rather than
+        # adding one: a stale-served core sets ``parity.freshness.state =
+        # "stale"``, which ``MissionSnapshotEnvelope`` already parses and
+        # ``health()`` already maps to ``MissionSnapshotHealth.stale``. So the
+        # honesty half of EG-3.1 needs no launcher change and no bump — an
+        # unvalidated projection reads as stale on a pinned-54 launcher today.
+        #
         # The number itself lives at module scope as
         # :data:`SNAPSHOT_CONTRACT_VERSION` so that consumers derive it instead
         # of restating it; the history above stays here, where the rulings are.
@@ -1464,6 +1563,7 @@ def office_summary_row(
     surface,
     actors,
     *,
+    actors_unreadable: int,
     conflict_actor_keys=(),
     actor_unpublished=None,
     orphaned: bool = False,
@@ -1475,6 +1575,23 @@ def office_summary_row(
     4), same reason as :func:`board_summary_row`: the ``hermes harness office``
     CLI tier rendered its own uncapped actor list. ``actors`` and
     ``conflict_actor_keys`` are the caller's already-fetched store reads.
+
+    ``actors_unreadable`` is REQUIRED, and required by keyword, because this row
+    had exactly the defect RD-H4 / EG-1.5 fixed one seam over in
+    ``serve_rpc._office_projection``: ``OfficeStore._read_actor_dir`` skips a
+    file it cannot decode and returns the rest, so ``actors`` arrives already
+    SHORTENED, and computing ``actors_truncated`` from that shortened length
+    answers 0. A launcher rendering that row cannot tell a desk that was removed
+    from a desk whose file the platform would not open. Both production callers
+    now read through the ``scan_actors`` chokepoint and state the count; a caller
+    that genuinely holds a bare list has to say ``actors_unreadable=0`` out loud
+    rather than get it by default, which is the same "never silently zero" rule
+    ``ActorScan.unreadable`` is declared under.
+
+    This matters twice over for the persisted core (EG-3.1): a core is written
+    back after every build, so a projection that under-reported its own
+    completeness would be persisted as fingerprint-blessed truth and served to
+    every later boot.
     """
 
     projected = actors[:MAX_OFFICE_ACTORS_PROJECTED]
@@ -1487,6 +1604,11 @@ def office_summary_row(
         ],
         "actor_count": len(actors),
         "actors_truncated": max(0, len(actors) - len(projected)),
+        # The OTHER way this list can be short, and the one it used to hide
+        # completely: files that exist and would not decode. Its sibling above
+        # counts a cut WE chose; this one counts rows the platform took.
+        # Additive — an old launcher ignores the key.
+        "actors_unreadable": int(actors_unreadable),
         "conflict_actor_keys": list(conflict_actor_keys),
         "archived_actor_keys": list(surface.archived_actor_keys),
         "revision": surface.revision,
@@ -1513,7 +1635,13 @@ def _offices_summary(office_store, workspaces) -> list[dict]:
             surface = office_store.get_surface(workspace_token)
         except Exception:
             continue
-        actors = office_store.list_actors(workspace_token)
+        # ``scan_actors``, not ``list_actors``: the thin list view drops the
+        # files it could not decode and the row below must not describe itself as
+        # complete when it is not. Same chokepoint the RPC office projection
+        # reads through, so ``runtime.office.get`` and the snapshot cannot
+        # disagree about how complete the office they just handed over was.
+        scan = office_store.scan_actors(workspace_token)
+        actors = scan.actors
         realm_id = realm_by_workspace.get(surface.workspace_id)
         baseline: dict[str, str] | None = None
         if realm_id:
@@ -1536,6 +1664,7 @@ def _offices_summary(office_store, workspaces) -> list[dict]:
             office_summary_row(
                 surface,
                 actors,
+                actors_unreadable=scan.unreadable,
                 conflict_actor_keys=office_store.conflict_actor_keys(workspace_token),
                 actor_unpublished=_actor_unpublished,
                 orphaned=surface.workspace_id not in workspace_ids,
