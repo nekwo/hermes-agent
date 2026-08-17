@@ -54,10 +54,17 @@ def _ensure_tool_registry_populated():
     (``serve.py``'s ``_prewarm_provider_runtime``), which is where the cost is
     supposed to live.
 
-    Measured on this checkout, warm: the harness import is 1,641 ms of a 2,150 ms
-    total pre-command import tax (BW-0's ``harness_parser_ms`` vs
-    ``interpreter_ms``). On the 2026-08-17 cold boot the log shows two children
-    each running the 54-plugin walk before either emitted its ``booting`` frame.
+    Measured with BW-0's own instrument, warm, matched A/B on this checkout —
+    three samples per side, this line eager vs deferred, medians:
+
+        interpreter_ms      2710 -> 1378   (-1332 ms, -49%)
+        harness_parser_ms   2110 ->  593
+
+    Paid by every hermes child in the system, not just boot. (An earlier pair of
+    UNMATCHED single samples read 2150 -> 1229 and is quoted in this stage's
+    commit message; the matched medians above are the number to trust.) On the
+    2026-08-17 cold boot the log shows two children each running the 54-plugin
+    walk before either emitted its ``booting`` frame.
 
     **Why an accessor and not just a function-local import at the three call
     sites.** Importing ``model_tools`` is also what POPULATES the ``registry``
