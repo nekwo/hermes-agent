@@ -167,6 +167,74 @@ def resolve_persona(persona_id: str) -> Any | None:
     return None
 
 
+#: The machine-readable branch point for "that persona names nothing".
+PERSONA_NOT_FOUND_REASON = "persona_not_found"
+
+
+def persona_not_found_message(persona_id: Any) -> str:
+    """The ONE spelling of the refusal, shared by every lane (UC-H2/UC-H4).
+
+    It names the cure, because the operator who hits this has usually typed a
+    plausible-looking id (``qa_agent`` for ``qa``) and has no way to know the
+    roster from the error alone.
+    """
+
+    return (
+        f"unknown persona: {str(persona_id or '')!r} is not in the agent roster; "
+        "run `harness agent list` to see the personas that exist, or add it "
+        "before creating an instance for it"
+    )
+
+
+def _persona_is_unknown(persona_id: str, persona: Any | None = None) -> bool:
+    """Does this create name a persona that does not exist?
+
+    Decision **D-U1**, and it is load-bearing: a ``profile:``-prefixed id is
+    deliberately NOT checked. The launcher's template/preset browser sends
+    ``profile:<token>`` ids for profiles that own no persona row at all, and
+    the CLI's ``_persona_by_id`` SYNTHESISES a persona for them on purpose
+    (``profile_persona_resolution`` returns ``None`` matches without raising).
+    Making validation uniform would break that lane silently, since nothing
+    else covers it — so the carve-out has its own witness test.
+
+    ``persona`` is the caller's already-resolved persona object. The CLI
+    resolver is a strict SUPERSET of :func:`resolve_persona` (it also handles
+    profile synthesis and instance-id spellings), so "the caller found one"
+    settles the question without a second, narrower lookup contradicting it.
+    """
+
+    if persona is not None:
+        return False
+    if str(persona_id or "").lower().startswith("profile:"):
+        return False
+    return resolve_persona(persona_id) is None
+
+
+def require_known_persona(
+    persona_id: str, persona: Any | None = None
+) -> dict[str, Any] | None:
+    """The argv lanes' shape of the same refusal, or ``None`` to proceed.
+
+    The unified lane raises :class:`AgentCreateInvalid` from
+    :func:`normalize_agent_create`; the legacy ``persona instance`` verbs print
+    an ``{"ok": false, …}`` payload and exit 2. Same predicate, same message,
+    same D-U1 carve-out — one spelling, two envelopes.
+    """
+
+    if not _persona_is_unknown(persona_id, persona):
+        return None
+    return {
+        "ok": False,
+        "error": persona_not_found_message(persona_id),
+        "reason": PERSONA_NOT_FOUND_REASON,
+        "persona_id": persona_id,
+        "next_expected": (
+            "run `harness agent list` to see the personas that exist, then "
+            "re-run with one of them"
+        ),
+    }
+
+
 def mint_placement_id(persona_id: str) -> str:
     """A server-side placement id, shaped like the launcher's own.
 
@@ -212,6 +280,9 @@ def normalize_agent_create(
     """Validate + normalise one create request. Raises :class:`AgentCreateInvalid`.
 
     Runs BEFORE any store is touched, so a refusal here provably wrote nothing.
+    That property is why the roster check (UC-H2) belongs here and not in the
+    store: until this returns, the create has left no roster row, no chat root,
+    no placement and no reservation receipt to clean up.
     """
 
     persona_raw = params.get("persona_id")
@@ -235,6 +306,18 @@ def normalize_agent_create(
             "invalid params: persona_id must be a non-empty string",
         )
     persona_id = _normalize_instance_source_persona(persona_raw)
+    # UC-H2. Syntax first, roster second, and in that order deliberately: an
+    # unusable id is a client bug with its own reason string, and re-labelling
+    # it ``persona_not_found`` would send the launcher's decoder down the wrong
+    # branch. Everything above this line is still pure string work, so this is
+    # the FIRST question asked of the world — and it is asked here, in the one
+    # function that provably runs before any store is touched, rather than in
+    # the store (``add_instance`` is also the restore/rebind chokepoint, and
+    # refusing there would need an audit of every historical row's persona id).
+    if _persona_is_unknown(persona_id, persona):
+        raise AgentCreateInvalid(
+            PERSONA_NOT_FOUND_REASON, persona_not_found_message(persona_id)
+        )
 
     workspace_raw = params.get("workspace_id")
     workspace_id = (

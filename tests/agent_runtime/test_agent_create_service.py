@@ -147,6 +147,60 @@ def test_a_replay_through_the_service_writes_nothing(qa_persona):
     assert _actors()[first["actor_key"]].revision == 1
 
 
+# ── the roster refusal, on the lane with no wire (UC-H2) ─────────────────────
+
+
+def test_the_service_itself_refuses_an_unknown_bare_persona(qa_persona):
+    """The refusal must live in the SERVICE, not in the RPC handler — otherwise
+    ``harness agent create`` and every future MCP wrapper fail open while the
+    wire lane fails closed, which is the two-spellings bug one layer up.
+
+    ANTI-VACUITY: absence probes, and the kill-mutation's whole effect is to
+    make those absences exist. See the sibling test in
+    ``test_serve_rpc_agent_create.py`` for the three-witness argument.
+    """
+
+    _seed_workspace()
+
+    outcome = perform_agent_create(
+        _params(persona_id="qa_agent", placement_id="qa_agent_svc")
+    )
+
+    assert outcome.ok is False
+    assert outcome.refusal.data["reason"] == "persona_not_found"
+    assert not paths.persona_instance_path("personainst_qa_agent_svc").exists()
+    assert _actors() == {}
+
+
+def test_a_caller_supplied_persona_object_settles_the_question(qa_persona):
+    """The CLI resolves personas through its own richer ``_persona_by_id``
+    (profile synthesis, instance-id spellings). When it hands one over, the
+    narrower :func:`resolve_persona` must not overrule it — otherwise the CLI
+    lane refuses ids it can itself resolve."""
+
+    from agent_runtime.models import AgentPersona
+
+    _seed_workspace()
+    synthesized = AgentPersona(
+        id="only_in_the_callers_hand",
+        display_name="Synthesised Agent",
+        role="profile",
+        model=None,
+        provider=None,
+        api_mode=None,
+        toolsets=[],
+        system_prompt_path="",
+    )
+
+    outcome = perform_agent_create(
+        _params(persona_id="only_in_the_callers_hand", placement_id="handed_in"),
+        persona=synthesized,
+    )
+
+    assert outcome.refusal is None
+    assert outcome.result["display_name"] == "Synthesised Agent"
+
+
 # ── the shim is a shim ───────────────────────────────────────────────────────
 
 

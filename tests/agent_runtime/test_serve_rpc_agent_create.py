@@ -124,6 +124,27 @@ def qa_persona():
     return persona
 
 
+@pytest.fixture
+def dev_persona():
+    """A SECOND roster persona, for the tests whose subject is not ``qa``."""
+
+    from agent_runtime.models import AgentPersona
+    from agent_runtime.store import AgentStore
+
+    persona = AgentPersona(
+        id="dev",
+        display_name="Dev Agent",
+        role="dev",
+        model=None,
+        provider=None,
+        api_mode=None,
+        toolsets=[],
+        system_prompt_path="",
+    )
+    AgentStore().save(persona)
+    return persona
+
+
 # ── the happy path ───────────────────────────────────────────────────────────
 
 
@@ -263,7 +284,14 @@ def test_replay_returns_the_same_reply_and_writes_nothing(qa_persona):
     assert _event_count() == events_before
 
 
-def test_reusing_a_key_for_a_different_persona_is_refused(qa_persona):
+def test_reusing_a_key_for_a_different_persona_is_refused(qa_persona, dev_persona):
+    """UC-H2 note: ``dev`` is now SEEDED rather than assumed.
+
+    The roster refusal runs before the reservation, so an unseeded ``dev``
+    would refuse ``persona_not_found`` and this test would pass for the wrong
+    reason — never reaching the scope check it exists to prove.
+    """
+
     _seed_workspace()
     _call(_params(placement_id="qa_scope"))
     reply = _call(
@@ -461,6 +489,107 @@ def test_malformed_params_are_refused_with_a_typed_reason(qa_persona, params, re
     # A validation refusal that wrote a row is worse than one that raised.
     assert set(_instances()) == before
     assert _actors() == {}
+
+
+# ── the roster refusal (UC-H2) ───────────────────────────────────────────────
+
+
+def test_an_unknown_bare_persona_is_refused_and_provably_wrote_nothing(qa_persona):
+    """The defect this stage exists to close: ``--persona qa_agent`` (there is
+    no such persona; the roster has ``qa``) minted a roster row, a chat root and
+    — on the lanes that place — an office actor, all bound to nothing.
+
+    ANTI-VACUITY. Every probe here is an ABSENCE, and the kill-mutation (delete
+    the roster branch) makes the create PROCEED, whose entire effect is to make
+    those absences exist. The mutant cannot satisfy a probe whose satisfaction
+    is defined by the mutant's own writes not happening. Three independent
+    witnesses, because one absence could be explained by a create that failed
+    for an unrelated reason:
+
+    1. no instance file — the mint did not run;
+    2. no reservation receipt for the key's digest — the create never got past
+       normalisation, which is a STRICTLY earlier point than the mint;
+    3. the event log did not grow — nothing downstream was told anything.
+
+    Witness 2 is the one that pins the ORDER. A refusal placed after the
+    reservation would still satisfy 1 and 3 while leaving a receipt that
+    poisons the key, so a client fixing its typo would be answered with its own
+    stale error forever.
+    """
+
+    import hashlib
+
+    from agent_runtime import paths
+
+    _seed_workspace()
+    before_instances = set(_instances())
+    before_events = _event_count()
+
+    reply = _call(_params(persona_id="qa_agent", placement_id="qa_agent_probe"))
+
+    assert reply["error"]["code"] == serve_rpc.ERR_INVALID_PARAMS
+    assert reply["error"]["data"]["reason"] == "persona_not_found"
+    # The message names the cure, because "qa_agent" looks plausible.
+    assert "harness agent list" in reply["error"]["message"]
+
+    assert set(_instances()) == before_instances
+    assert not paths.persona_instance_path("personainst_qa_agent_probe").exists()
+    digest = hashlib.sha256("gesture-1".encode("utf-8")).hexdigest()
+    assert not paths.agent_create_reservation_path(digest).exists()
+    assert _event_count() == before_events
+    assert _actors() == {}
+
+
+def test_a_seeded_persona_still_creates(qa_persona):
+    """The over-broad-guard witness. A guard that refused everything would make
+    the test above pass forever."""
+
+    _seed_workspace()
+    reply = _call(_params(placement_id="qa_still_works"))
+    assert reply["result"]["persona_instance_id"] == "personainst_qa_still_works"
+    # And the persona lookup that gated it is the SAME one that supplies the
+    # honest default name, so a guard consulting a different roster than the
+    # namer would show up here.
+    assert reply["result"]["display_name"] == "QA Agent"
+
+
+def test_a_profile_id_for_a_profile_that_owns_nothing_still_creates(qa_persona):
+    """Decision D-U1, with the witness the plan says it must have.
+
+    The launcher's template/preset browser sends ``profile:<token>`` ids for
+    profiles that have NO persona row — the CLI resolver synthesises one. That
+    lane had no test at all, which is exactly why making validation uniform
+    would have broken it silently.
+
+    ANTI-VACUITY. The kill-mutation is "apply the bare-id roster check to
+    ``profile:`` ids too". The probe is a durable instance FILE plus a placed
+    actor; under the mutant the create refuses and writes neither, so the
+    mutant cannot set the probed state. Note the profile token deliberately
+    matches NO persona and NO profile — ``profile:qa`` would pass even under
+    the mutant, since ``qa`` is seeded, and would prove nothing.
+    """
+
+    from agent_runtime import paths
+
+    _seed_workspace()
+    reply = _call(
+        _params(persona_id="profile:nosuchprofile", placement_id="profile_lane")
+    )
+
+    result = reply["result"]
+    assert result["persona_id"] == "profile:nosuchprofile"
+    assert paths.persona_instance_path("personainst_profile_lane").exists()
+    assert result["actor_key"] in _actors()
+
+
+def test_an_unusable_persona_id_is_still_a_SYNTAX_refusal_not_a_roster_one(qa_persona):
+    """Order matters: ``!!!`` tokenises to nothing, and the launcher's decoder
+    branches on the reason. Re-labelling it ``persona_not_found`` would send a
+    client that sent garbage down the "add the persona" path."""
+
+    _seed_workspace()
+    reply = _call(_params(persona_id="!!!", placement_id="qa_garbage"))
+    assert reply["error"]["data"]["reason"] == "persona_id_required"
 
 
 # ── event parity with the two-call flow ──────────────────────────────────────
