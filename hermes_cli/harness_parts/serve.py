@@ -857,12 +857,19 @@ def _prewarm_read_model_snapshot() -> None:
     joins it (hydrate) or waits and shares the next one; it never double-builds.
     Best effort by contract: a failure here surfaces on the first real request
     exactly as it would have without the prewarm.
+
+    ``build_info={"caller": "prewarm"}`` is what makes this build appear in the
+    log at all. It is the most expensive build of a cold boot and, until the
+    builder learned to emit its own receipt, it was the only one with no line
+    anywhere: every ``snapshot_build`` line in the boot window belonged to a
+    caller that RODE it, which is how one build came to look like three
+    (plan EG-2.1). Naming the caller here costs a dict.
     """
 
     try:
         from agent_runtime.snapshot import build_snapshot
 
-        build_snapshot()
+        build_snapshot(build_info={"caller": "prewarm"})
     except Exception:
         import logging as _logging
 
@@ -1747,7 +1754,12 @@ def serve_loop(
             from agent_runtime.stream import stream_frames
 
             def _generate():
-                for frame in stream_frames(fold_entities=fold_entities):
+                # ``caller="hub"``: every build this producer pays for is
+                # attributed to the SHARED lane rather than to whichever
+                # subscriber happened to trigger the restart — the serve hub is
+                # one producer for N subscribers by construction, and a build
+                # line naming a subscriber would be a lie about who pays.
+                for frame in stream_frames(fold_entities=fold_entities, caller="hub"):
                     # Byte-for-byte the frames ``harness stream`` writes: a
                     # subscriber folds the same hydrate/delta/patch/heartbeat
                     # shapes it already folds, so the socket lane introduces no
@@ -2364,6 +2376,21 @@ def serve_loop(
                         }
                     )
 
+                # ONE line per attachment, in the serve child's OWN log. The
+                # subscriber census of the 2026-08-17 boot had to be
+                # reconstructed from timestamps and still left one rider
+                # unidentified, because nothing on any attach path said so —
+                # every line in the window described a BUILD, and the builds
+                # were what the census was trying to explain (plan EG-2.1).
+                from agent_runtime.stream import log_stream_attach
+
+                log_stream_attach(
+                    op="subscribe",
+                    purpose="stream_lane",
+                    connection=key,
+                    client=getattr(connection, "client", None),
+                    fold_entities=",".join(accepted_entities) or "-",
+                )
                 # The ACK precedes the subscription, deliberately. The producer
                 # starts pushing the moment ``subscribe`` returns, so acking
                 # afterwards would let the hydrate overtake the ack — and a

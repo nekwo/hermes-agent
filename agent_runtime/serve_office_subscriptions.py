@@ -248,6 +248,12 @@ OFFICE_PATCH_METHOD = "runtime.office.patch"
 #: partial state would be a third lane.
 OFFICE_RESYNC_METHOD = "runtime.office.resync"
 
+#: The join. Named here as well as on `serve_rpc`'s `@method` decorator for
+#: exactly one reason: the attach line this module logs prints the op as the
+#: CLIENT called it, and a hand-typed string in a log line is how a rename ships
+#: a log that names a method nobody can call.
+OFFICE_SUBSCRIBE_METHOD = "runtime.office.subscribe"
+
 #: Frame types that are a FULL CORE for this lane's purposes: the batch was not
 #: patch-coverable, so no office patch exists to forward.
 _FULL_CORE_FRAME_TYPES = frozenset({"hydrate", "delta"})
@@ -816,11 +822,31 @@ class OfficeSubscriptions:
             # teardown it never performed.
             self._forget(connection_key, key)
             return SubscribeOutcome(False, replaced=replaced, reason=PUSH_LANE_DRAINING)
+        try:
+            generation_after = int(hub.stats().get("generation") or 0)
+        except Exception:
+            generation_after = generation_before
+        # ONE line per office ATTACHMENT, in the serve child's OWN log. The
+        # receipt below is a different lane and a different question: it rides
+        # `log` (serve's stderr, read by the supervising launcher) and only
+        # fires on a RE-baseline. Nothing wrote an attach line into the child's
+        # log at all, and the measured consequence is plan §8 item 5: 12 MB of
+        # serve-child log with ZERO office lines, which leaves "is the push lane
+        # even attached?" unanswerable from the log the operator actually has —
+        # and left the boot's third stream rider unidentifiable (EG-2.1).
+        from .stream import log_stream_attach
+
+        log_stream_attach(
+            op=OFFICE_SUBSCRIBE_METHOD,
+            purpose="office_patch",
+            connection=str(connection_key or "stdio"),
+            workspace=workspace_id,
+            baseline_offset=int(baseline_offset or 0),
+            reason=reason or SUBSCRIBE_REASON_ABSENT,
+            replaced=bool(replaced),
+            producer_restarted=generation_after != generation_before,
+        )
         if replaced and log is not None:
-            try:
-                generation_after = int(hub.stats().get("generation") or 0)
-            except Exception:
-                generation_after = generation_before
             try:
                 log(
                     {

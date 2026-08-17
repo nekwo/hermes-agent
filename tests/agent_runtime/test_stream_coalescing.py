@@ -151,9 +151,12 @@ def test_slow_full_core_build_emits_applied_watermark_heartbeats(
     real_build = stream_mod.build_snapshot
     release = threading.Event()
 
-    def slow_build():
+    def slow_build(**kwargs):
+        # ``**kwargs`` because the batch build now threads ``build_info`` — the
+        # attribution out-param (EG-2.1), which this fake neither fills nor
+        # needs: the assertion below is about heartbeats, not about roles.
         assert release.wait(10)
-        return real_build()
+        return real_build(**kwargs)
 
     monkeypatch.setattr(stream_mod, "build_snapshot", slow_build)
     _append(EventLog(), 0)
