@@ -1458,6 +1458,75 @@ def build_parser(parent_subparsers) -> None:
     pets_thumb.add_argument("--json", action="store_true")
     pets_thumb.set_defaults(func=_cmd_pets_thumb)
 
+    # Character sheets — the QA bridge for `agent.charsheet`. Deliberately a
+    # sibling of `pets`, not an extension of it: character sheets carry their row
+    # taxonomy as data and must never enter a pet read path (which infers the
+    # taxonomy from sheet height and would misread a 16-row sheet as a 9-row pet).
+    # Every verb here is a thin veneer over one CharacterDraft method; the stage
+    # machine, the pixels and the revision store all live in agent/charsheet/.
+    characters = subs.add_parser("characters", help="Mission Control character-sheet bridge (8-way sheets + QA)")
+    characters_subs = characters.add_subparsers(dest="characters_command", required=True)
+
+    characters_start = characters_subs.add_parser("start", help="Create a character draft at stage 'turnaround' (offline; generates nothing)")
+    characters_start.add_argument("--concept", required=True, help="What to draw, e.g. 'a tall knight in green enamel armour'")
+    characters_start.add_argument("--slug", default="", help="Install slug; defaults to a slugified display name")
+    characters_start.add_argument("--display-name", dest="display_name", default="", help="Human name; defaults to the concept")
+    characters_start.add_argument("--style", default="auto", help="Art-style hint passed to the prompts")
+    characters_start.add_argument("--states", default="", help="Animation states as 'idle:6,walk:8[,cheer:5:fixed]'; default = the CHAR8 states")
+    characters_start.add_argument("--directions", default="8", help="Direction scheme: 8 (five authored, three mirrored) or 4")
+    characters_start.add_argument("--base-image", dest="base_image", default="", help="Identity-anchor image; copied into the draft")
+    characters_start.add_argument("--json", action="store_true")
+    characters_start.set_defaults(func=_cmd_characters_start)
+    characters_list = characters_subs.add_parser("list", help="List character drafts and installed characters")
+    characters_list.add_argument("--json", action="store_true")
+    characters_list.set_defaults(func=_cmd_characters_list)
+    characters_status = characters_subs.add_parser("status", help="Full draft state: stage, spec, per-item QA history")
+    characters_status.add_argument("--draft", required=True, help="Draft id from `harness characters list`")
+    characters_status.add_argument("--json", action="store_true")
+    characters_status.set_defaults(func=_cmd_characters_status)
+    characters_base = characters_subs.add_parser("base", help="Set or replace the draft's base identity image")
+    characters_base.add_argument("--draft", required=True)
+    characters_base.add_argument("--image", required=True, help="Path to the identity-anchor image; copied into the draft")
+    characters_base.add_argument("--json", action="store_true")
+    characters_base.set_defaults(func=_cmd_characters_base)
+    characters_turnaround = characters_subs.add_parser("turnaround", help="Generate the authored direction references (stage 'turnaround')")
+    characters_turnaround.add_argument("--draft", required=True)
+    characters_turnaround.add_argument("--json", action="store_true")
+    characters_turnaround.set_defaults(func=_cmd_characters_turnaround)
+    characters_reroll_direction = characters_subs.add_parser("reroll-direction", help="Re-generate ONE direction reference, with an optional operator note")
+    characters_reroll_direction.add_argument("--draft", required=True)
+    characters_reroll_direction.add_argument("--direction", required=True, help="An authored direction, e.g. ne (mirrored directions are never generated)")
+    characters_reroll_direction.add_argument("--note", default="", help="Operator note appended to the prompt and stored with the attempt")
+    characters_reroll_direction.add_argument("--json", action="store_true")
+    characters_reroll_direction.set_defaults(func=_cmd_characters_reroll_direction)
+    characters_approve_direction = characters_subs.add_parser("approve-direction", help="Approve direction references; advances to stage 'rows' once all are approved")
+    characters_approve_direction.add_argument("--draft", required=True)
+    characters_approve_direction_which = characters_approve_direction.add_mutually_exclusive_group(required=True)
+    characters_approve_direction_which.add_argument("--direction", default="", help="Approve this one direction")
+    characters_approve_direction_which.add_argument("--all", dest="approve_all", action="store_true", help="Approve the latest attempt of every authored direction")
+    characters_approve_direction.add_argument("--attempt", type=int, default=-1, help="Which attempt to approve; -1 = latest (single-direction only)")
+    characters_approve_direction.add_argument("--json", action="store_true")
+    characters_approve_direction.set_defaults(func=_cmd_characters_approve_direction)
+    characters_rows = characters_subs.add_parser("rows", help="Generate the animation row strips (stage 'rows')")
+    characters_rows.add_argument("--draft", required=True)
+    characters_rows.add_argument("--only", default="", help="Restrict the run to these row keys, e.g. 'walk@e,walk@ne'")
+    characters_rows.add_argument("--json", action="store_true")
+    characters_rows.set_defaults(func=_cmd_characters_rows)
+    characters_reroll_row = characters_subs.add_parser("reroll-row", help="Re-generate ONE row strip, with an optional operator note")
+    characters_reroll_row.add_argument("--draft", required=True)
+    characters_reroll_row.add_argument("--row", required=True, help="An authored row key, e.g. walk@e")
+    characters_reroll_row.add_argument("--note", default="", help="Operator note appended to the prompt and stored with the attempt")
+    characters_reroll_row.add_argument("--json", action="store_true")
+    characters_reroll_row.set_defaults(func=_cmd_characters_reroll_row)
+    characters_compose = characters_subs.add_parser("compose", help="Compose, validate and install the sheet (stage 'rows' → 'composed')")
+    characters_compose.add_argument("--draft", required=True)
+    characters_compose.add_argument("--json", action="store_true")
+    characters_compose.set_defaults(func=_cmd_characters_compose)
+    characters_sprite = characters_subs.add_parser("sprite", help="Return an installed character spritesheet payload")
+    characters_sprite.add_argument("slug")
+    characters_sprite.add_argument("--json", action="store_true")
+    characters_sprite.set_defaults(func=_cmd_characters_sprite)
+
 
 def harness_command(args) -> int:
     print("Use `hermes harness --help`.")
@@ -2909,6 +2978,284 @@ def _pet_sprite_payload_for_launcher(pet) -> dict:
         "scale": constants.DEFAULT_SCALE,
         "stateRows": _pet_state_rows(pet.spritesheet),
     }
+
+
+# ───────────────────────── character sheets (charsheet) ─────────────────────────
+#
+# The launcher's transport for pets is a one-shot `--json` subprocess, so the
+# character QA panel's backend is the same thing: these verbs, and nothing else.
+# Each handler loads a draft and calls exactly one CharacterDraft method — the
+# stage machine refuses out-of-order calls, so there is no ordering logic here to
+# get out of sync with the backend's.
+
+
+def _characters_error(args, exc: BaseException, **extra) -> int:
+    """The pets error shape, verbatim: flat `{"ok": false, "error": …}`, exit 2.
+
+    Not `emit_harness_error`: that emits the Stage-42 envelope (`error` as a
+    nested object with a code taxonomy), and a launcher panel that already parses
+    the pets shape should not have to learn a second one for its sibling verbs.
+    """
+    data = {"ok": False, "error": str(exc)}
+    data.update(extra)
+    print(emit_json(data) if getattr(args, "json", False) else data["error"])
+    return 2
+
+
+def _characters_emit(args, data: dict, human: str) -> int:
+    print(emit_json(data) if getattr(args, "json", False) else human)
+    return 0
+
+
+# What the backend raises for a refusal the operator can act on: a wrong stage, an
+# unauthored direction, an unknown row key (ValueError); a missing draft or an
+# uninstalled slug (FileNotFoundError); an --attempt out of range (IndexError).
+# Anything else is a bug and keeps its traceback.
+_CHARACTERS_EXPECTED = (ValueError, FileNotFoundError, IndexError)
+
+
+def _characters_verb(args, call) -> int:
+    """Load `--draft`, run one backend call, emit the house payload.
+
+    *call* takes the draft and returns `(payload_dict, human_line)`. The draft id
+    and the stage AFTER the call ride on every response: a verb can advance the
+    stage, and the caller's next legal verb depends on knowing that it did.
+    """
+    from agent.charsheet.draft import CharacterDraft
+
+    draft_id = str(getattr(args, "draft", "") or "").strip()
+    try:
+        draft = CharacterDraft.load(draft_id)
+    except _CHARACTERS_EXPECTED as exc:
+        return _characters_error(args, exc, draft=draft_id)
+    try:
+        result, human = call(draft)
+    except _CHARACTERS_EXPECTED as exc:
+        return _characters_error(args, exc, draft=draft.id, stage=draft.stage)
+    data = {"ok": True, "draft": draft.id, "stage": draft.stage}
+    data.update(result)
+    return _characters_emit(args, data, human)
+
+
+def _characters_draft_summary(draft) -> dict:
+    """A list row: identity and shape, without walking the revision store."""
+    spec = draft.spec
+    return {
+        "id": draft.id,
+        "slug": draft.slug,
+        "displayName": draft.display_name,
+        "concept": draft.concept,
+        "style": draft.style,
+        "stage": draft.stage,
+        "rows": len(spec.rows()),
+        "authoredRows": len(spec.authored_rows()),
+        "directions": len(spec.scheme.order),
+        "baseImage": str(draft.base_image) if draft.base_image else "",
+        "directory": str(draft.directory),
+    }
+
+
+def _characters_installed_rows() -> list[dict]:
+    """Installed characters: one row per directory carrying a manifest."""
+    from agent.charsheet.draft import (
+        MANIFEST_FILENAME,
+        SHEET_FILENAME,
+        characters_dir,
+    )
+
+    root = characters_dir()
+    rows: list[dict] = []
+    for child in sorted(root.iterdir()) if root.is_dir() else []:
+        manifest_path = child / MANIFEST_FILENAME
+        if not manifest_path.is_file():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            manifest = {}
+        if not isinstance(manifest, dict):
+            manifest = {}
+        sheet = child / SHEET_FILENAME
+        rows.append(
+            {
+                "slug": str(manifest.get("slug", "") or child.name),
+                "displayName": str(manifest.get("displayName", "") or child.name),
+                "draftId": str(manifest.get("draftId", "")),
+                "created": str(manifest.get("created", "")),
+                "directory": str(child),
+                "sheet": str(sheet) if sheet.is_file() else "",
+                "installed": sheet.is_file(),
+            }
+        )
+    return rows
+
+
+def _cmd_characters_start(args) -> int:
+    from agent.charsheet import spec as charsheet_spec
+    from agent.charsheet.draft import CharacterDraft
+
+    states_text = str(getattr(args, "states", "") or "").strip()
+    base_text = str(getattr(args, "base_image", "") or "").strip()
+    try:
+        # An empty --states means "the CHAR8 states" — taken from CHAR8 itself
+        # rather than re-spelled as a default string, so the default has one home.
+        states = charsheet_spec.parse_states(states_text) if states_text else charsheet_spec.CHAR8.states
+        scheme = charsheet_spec.parse_directions(str(getattr(args, "directions", "8") or "8"))
+        sheet_spec = charsheet_spec.SheetSpec(states=states, scheme=scheme)
+        draft = CharacterDraft.create(
+            concept=str(getattr(args, "concept", "") or ""),
+            slug=str(getattr(args, "slug", "") or ""),
+            display_name=str(getattr(args, "display_name", "") or ""),
+            style=str(getattr(args, "style", "auto") or "auto"),
+            spec=sheet_spec,
+            # Passed to create() rather than set after it, so a draft is never
+            # observable without the anchor the operator asked it to have.
+            base_image=Path(base_text).expanduser() if base_text else None,
+        )
+    except _CHARACTERS_EXPECTED as exc:
+        return _characters_error(args, exc)
+    data = {"ok": True, "draft": draft.id, "stage": draft.stage, "summary": _characters_draft_summary(draft)}
+    return _characters_emit(
+        args,
+        data,
+        f"Draft {draft.id} ({draft.slug}) created at stage '{draft.stage}': "
+        f"{len(draft.spec.rows())} rows, {len(draft.spec.scheme.order)} directions",
+    )
+
+
+def _cmd_characters_list(args) -> int:
+    from agent.charsheet.draft import CharacterDraft
+
+    try:
+        drafts = [_characters_draft_summary(draft) for draft in CharacterDraft.list_drafts()]
+        installed = _characters_installed_rows()
+    except _CHARACTERS_EXPECTED as exc:
+        return _characters_error(args, exc)
+    data = {"ok": True, "drafts": drafts, "characters": installed}
+    lines = [f"{len(drafts)} draft(s), {len(installed)} installed character(s)"]
+    lines += [f"  draft {row['id']}  {row['slug']}  stage={row['stage']}" for row in drafts]
+    lines += [f"  installed {row['slug']}  {row['displayName']}" for row in installed]
+    return _characters_emit(args, data, "\n".join(lines))
+
+
+def _cmd_characters_status(args) -> int:
+    def call(draft):
+        status = draft.status_payload()
+        return {"status": status}, (
+            f"Draft {draft.id} ({draft.slug}) at stage '{draft.stage}'; pending "
+            f"turnaround={status['pending']['turnaround']} rows={status['pending']['rows']}"
+        )
+
+    return _characters_verb(args, call)
+
+
+def _cmd_characters_base(args) -> int:
+    # Repairs a draft started without --base-image (CS-5 finding: without this
+    # verb such a draft could never advance) and covers the base-pick flow.
+    def call(draft):
+        target = draft.set_base_image(str(getattr(args, "image", "") or "").strip())
+        return {"baseImage": str(target)}, f"Draft {draft.id}: base image set to {target}"
+
+    return _characters_verb(args, call)
+
+
+def _cmd_characters_turnaround(args) -> int:
+    def call(draft):
+        result = draft.run_turnaround()
+        directions = ", ".join(sorted(result.get("turnaround", {})))
+        return result, f"Draft {draft.id}: proposed turnaround references for {directions} (awaiting approval)"
+
+    return _characters_verb(args, call)
+
+
+def _cmd_characters_reroll_direction(args) -> int:
+    direction = str(getattr(args, "direction", "") or "").strip()
+    note = str(getattr(args, "note", "") or "")
+
+    def call(draft):
+        result = draft.reroll_direction(direction, note=note)
+        return result, (
+            f"Draft {draft.id}: direction {result['direction']} re-rolled "
+            f"(attempt {result['attempt']}, {result['attempts']} total, unapproved)"
+        )
+
+    return _characters_verb(args, call)
+
+
+def _cmd_characters_approve_direction(args) -> int:
+    approve_all = bool(getattr(args, "approve_all", False))
+    direction = str(getattr(args, "direction", "") or "").strip()
+    attempt = int(getattr(args, "attempt", -1))
+
+    def call(draft):
+        if approve_all:
+            result = draft.approve_all_directions()
+            human = (
+                f"Draft {draft.id}: approved {len(result['approved'])} direction(s); "
+                f"stage is now '{draft.stage}'"
+            )
+        else:
+            result = draft.approve_direction(direction, attempt=attempt)
+            human = (
+                f"Draft {draft.id}: approved {result['direction']} attempt "
+                f"{result['approved']}; stage is now '{draft.stage}'"
+            )
+        return result, human
+
+    return _characters_verb(args, call)
+
+
+def _cmd_characters_rows(args) -> int:
+    only_text = str(getattr(args, "only", "") or "").strip()
+    only = [part.strip() for part in only_text.split(",") if part.strip()] if only_text else None
+
+    def call(draft):
+        result = draft.run_rows(only=only)
+        return result, f"Draft {draft.id}: generated {len(result.get('rows', {}))} row strip(s)"
+
+    return _characters_verb(args, call)
+
+
+def _cmd_characters_reroll_row(args) -> int:
+    row_key = str(getattr(args, "row", "") or "").strip()
+    note = str(getattr(args, "note", "") or "")
+
+    def call(draft):
+        result = draft.reroll_row(row_key, note=note)
+        return result, (
+            f"Draft {draft.id}: row {result['row']} re-rolled "
+            f"(attempt {result['attempt']}, {result['attempts']} total, approved)"
+        )
+
+    return _characters_verb(args, call)
+
+
+def _cmd_characters_compose(args) -> int:
+    def call(draft):
+        result = draft.compose()
+        return result, (
+            f"Draft {draft.id} composed → {result['slug']} "
+            f"({result['validation']['width']}x{result['validation']['height']}) at {result['sheet']}"
+        )
+
+    return _characters_verb(args, call)
+
+
+def _cmd_characters_sprite(args) -> int:
+    from agent.charsheet import draft as charsheet_draft
+
+    slug = str(getattr(args, "slug", "") or "").strip()
+    try:
+        payload = charsheet_draft.sprite_payload(slug)
+    except _CHARACTERS_EXPECTED as exc:
+        return _characters_error(args, exc, slug=slug)
+    data = {"ok": True, "character": payload}
+    return _characters_emit(
+        args,
+        data,
+        f"{payload['slug']} ({payload['displayName']}): {len(payload['framesByRow'])} rows, "
+        f"{payload['frameW']}x{payload['frameH']} cells, revision {payload['spritesheetRevision']}",
+    )
 
 
 def _cmd_init(args) -> int:

@@ -255,6 +255,10 @@ class CharacterDraft:
         concept = str(concept or "").strip()
         if not concept:
             raise ValueError("a draft needs a concept: the character description to generate")
+        # Validate the anchor BEFORE any directory exists: a bad path must fail
+        # the start cleanly, not leave an orphan draft dir behind (CS-5 finding).
+        if base_image is not None and not Path(base_image).is_file():
+            raise ValueError(f"base image {Path(base_image)} is not an existing file")
         display = str(display_name or "").strip() or concept
         chosen_slug = slugify(slug or display)
         draft_id = f"{datetime.now(timezone.utc):%Y%m%d-%H%M%S}-{uuid.uuid4().hex[:6]}"

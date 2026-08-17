@@ -202,6 +202,16 @@ Image bytes for QA display: `status`/`reroll` responses carry file paths AND
 base64 thumbnails (bounded, e.g. ≤256px) so the launcher renders without touching
 hermes-home paths directly.
 
+**As built (CS-5 corrections to this section).** The shipped verbs are flat, not
+nested: `start`, `list`, `status`, `base` (sets/replaces the identity image —
+added when CS-5 found a draft started without `--base-image` could never
+advance), `turnaround`, `reroll-direction`, `approve-direction`, `rows`,
+`reroll-row`, `compose`, `sprite`. Errors follow **pets parity** (flat
+`{"ok": false, "error": …}`, exit 2 — not the Stage-42 envelope), because the
+launcher already parses that shape for pets. Thumbnails are NOT in v1 responses;
+payloads carry file paths (the launcher runs on the same machine as
+`HERMES_HOME`) — thumbnails are a follow-up if the panel wants them.
+
 ## 6. Stages (CS-n), each with a gate
 
 - **CS-0 Baseline + assumption kill.** Capture `harness pets sprite --json` byte-baseline
