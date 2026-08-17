@@ -561,6 +561,11 @@ def _runtime_office_subscribe(
         is precisely why it must not share a name with the case above. When the
         caller held a subscription, ``data.prior_subscription_released`` says
         so: the re-baseline's teardown already ran, so the old lane is gone too.
+    ``baseline_unavailable``
+        The event log's tail could not be read, so there is no offset to
+        baseline at. Transient like the case above, and the reason this method
+        no longer answers an unreadable log with ``0`` — see the refusal at the
+        watermark read for what a fabricated baseline costs the whole room.
 
     ``already_subscribed`` is GONE. It was the only ``ERR_CONFLICT`` this method
     raised, and its disappearance also retires a mislabel that shipped with it:
@@ -630,10 +635,12 @@ def _runtime_office_subscribe(
     from agent_runtime.locks import office_lock
     from agent_runtime.parity import events_watermark
     from agent_runtime.serve_office_subscriptions import (
+        BASELINE_UNAVAILABLE,
         NO_PUSH_LANE,
         OFFICE_FOLD_ENTITIES,
         OFFICE_SUBSCRIPTIONS,
         PUSH_LANE_DRAINING,
+        event_offset_of,
         normalize_office_fold_entities,
         normalize_office_subscribe_reason,
     )
@@ -689,10 +696,63 @@ def _runtime_office_subscribe(
                 f"unknown workspace: {workspace_id}",
                 {"reason": "workspace_not_found", "workspace_id": workspace_id},
             )
-        try:
-            baseline_offset = int(events_watermark().get("event_offset") or 0)
-        except (TypeError, ValueError):
-            baseline_offset = 0
+        # ONE reader of the watermark, asked ONE question, through the same
+        # helper the sink's baseline gate uses. ``int(… or 0)`` used to sit here
+        # and answered a DIFFERENT question: it folded an unreadable log —
+        # ``{"event_offset": None, "event_offset_error": ...}``, which
+        # ``events_watermark`` documents as a routine outcome on this platform
+        # under AV scanning — into offset 0, with no exception for the typed
+        # ``except`` to catch and the error string discarded. A subscription
+        # baselined at 0 has no gate at all, so the hub's mandatory hydrate came
+        # back as a resync and the client re-subscribed, restarting the producer
+        # for the whole room, forever.
+        #
+        # Cannot-read is now its own answer. No registration happens on this
+        # path: the reply is a transient refusal beside the other two, and the
+        # client's existing degrade ladder already holds this shape without
+        # spinning.
+        watermark = events_watermark()
+        baseline_offset = event_offset_of(watermark)
+        if baseline_offset is None:
+            # The discarded half, kept: the reply cannot carry a platform error
+            # string (a client has no use for one and it is not part of the
+            # vocabulary), but an operator watching subscribes fail needs to
+            # know WHY the log could not be read. Class only — the same
+            # disclosure rule the rest of this runtime's receipts follow — and
+            # the ``-`` sentinel rather than an absent key, because a field that
+            # appears only sometimes is one a log reader stops looking for.
+            raw_error = watermark.get("event_offset_error")
+            error_class = (
+                str(raw_error).split(":", 1)[0].strip() or "-"
+                if isinstance(raw_error, str) and raw_error.strip()
+                else "-"
+            )
+            log = OFFICE_SUBSCRIPTIONS.service_log()
+            if log is not None:
+                log(
+                    {
+                        "event": "serve_office_subscribe_refused",
+                        "reason": BASELINE_UNAVAILABLE,
+                        "workspace_id": workspace_id,
+                        "error": error_class,
+                    }
+                )
+            return err(
+                rid,
+                ERR_INVALID_REQUEST,
+                "this runtime cannot read its event log's tail; subscribe again",
+                {
+                    "reason": BASELINE_UNAVAILABLE,
+                    "workspace_id": workspace_id,
+                    # Shape parity with the registry's own refusals below: this
+                    # lane's clients branch on ``data.reason`` and decode the
+                    # rest, so a key that exists on two of three transient
+                    # refusals would have to be special-cased. Always False
+                    # here, and honestly so — the registry was never called, so
+                    # no prior subscription was displaced.
+                    "prior_subscription_released": False,
+                },
+            )
         outcome = OFFICE_SUBSCRIPTIONS.subscribe(
             connection_key=context.connection_key,
             workspace_id=workspace_id,

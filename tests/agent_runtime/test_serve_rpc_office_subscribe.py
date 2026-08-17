@@ -695,6 +695,113 @@ def test_a_runtime_with_no_push_lane_says_so_typed():
     assert sent == []
 
 
+# ── EG-1.1 / RD-H2: the baseline is read, never invented ────────────────────
+
+
+def _record_baselines(monkeypatch) -> list[int]:
+    """Every ``baseline_offset`` the registry actually registered a sink with.
+
+    The fake hub cannot answer this on its own — the baseline is baked into the
+    sink closure, not passed to ``subscribe`` — and the baseline is the whole
+    subject here, so the recorder wraps the REAL ``office_patch_sink`` rather
+    than replacing it. Test-owned by construction: the production code has to
+    call it to register anything at all.
+    """
+
+    from agent_runtime import serve_office_subscriptions as subs
+
+    seen: list[int] = []
+    real = subs.office_patch_sink
+
+    def _recording(*, workspace_id, baseline_offset, emit):
+        seen.append(baseline_offset)
+        return real(workspace_id=workspace_id, baseline_offset=baseline_offset, emit=emit)
+
+    monkeypatch.setattr(subs, "office_patch_sink", _recording)
+    return seen
+
+
+def test_an_unreadable_watermark_refuses_typed_and_registers_nothing(monkeypatch):
+    """``int(… or 0)`` minted the one value the watermark module calls maximally
+    damaging, out of the one input it documents as routine on this platform.
+
+    ``events_watermark`` answers ``{"event_offset": None, "event_offset_error":
+    ...}`` when the log cannot be stat'ed — AV scanning, a share violation — and
+    the old expression turned that into 0 with no exception raised and the error
+    string dropped. A subscription baselined at 0 has no baseline gate (the
+    sink's test is ``<= baseline``), so the hub's mandatory post-subscribe
+    hydrate came back to the client as a resync; the client re-subscribed; the
+    producer restarted; the next hydrate resynced it again — a full core per lap
+    for every subscriber in the room.
+
+    **Anti-vacuity.** Restoring ``or 0`` is the mutation, and TWO independent
+    witnesses convict it: the mutant's reply is a SUCCESS, which cannot carry a
+    refusal reason at all, and it registers a sink, which the fake hub's own
+    call record shows. Either assertion alone kills it.
+    """
+
+    _seed_office()
+    hub = _FakeHub()
+    lines: list[dict] = []
+    OFFICE_SUBSCRIPTIONS.bind(lambda: hub, log=lines.append)
+    baselines = _record_baselines(monkeypatch)
+    monkeypatch.setattr(
+        "agent_runtime.parity.events_watermark",
+        lambda **_kw: {"event_offset": None, "event_offset_error": "OSError"},
+    )
+
+    frame = _subscribe(
+        context=serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+    )
+
+    assert frame["error"]["data"]["reason"] == "baseline_unavailable"
+    assert frame["error"]["data"]["workspace_id"] == WORKSPACE
+    # Nothing was registered — not by this call and not by the registry: no key
+    # was ever offered to the hub, so there is no leaked subscriber keeping a
+    # producer alive for a client that was refused.
+    assert hub.subscribe_calls == []
+    assert hub.sinks == {}
+    assert baselines == []
+    # The discarded half, now attributable: the class, not the message.
+    assert [line["event"] for line in lines] == ["serve_office_subscribe_refused"]
+    assert lines[0]["error"] == "OSError"
+
+
+def test_a_readable_watermark_of_literally_zero_from_an_empty_log_still_subscribes(
+    monkeypatch,
+):
+    """The discriminator. An empty log is a REAL position, and 0 is its name.
+
+    Without this test the cheapest way to pass the one above is to refuse every
+    zero — which would break the first subscribe against a freshly initialised
+    runtime, i.e. exactly the case a new operator meets first. What separates the
+    honest zero from the fabricated one is not the number: it is whether
+    ``event_offset`` was present and readable at all.
+
+    *Probed field:* one registration, at baseline 0 — read off the sink the
+    registry actually built, not off the reply, so a handler that echoed 0 into
+    the reply while registering something else could not pass.
+    """
+
+    _seed_office()
+    hub = _FakeHub()
+    OFFICE_SUBSCRIPTIONS.bind(lambda: hub)
+    baselines = _record_baselines(monkeypatch)
+    monkeypatch.setattr(
+        "agent_runtime.parity.events_watermark",
+        lambda **_kw: {"event_offset": 0},
+    )
+
+    frame = _subscribe(
+        context=serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+    )
+
+    assert "error" not in frame
+    assert baselines == [0]
+    assert len(hub.subscribe_calls) == 1
+    assert frame["result"]["watermark"]["event_offset"] == 0
+
+
 def test_an_unknown_workspace_is_refused_before_anything_is_registered():
     """Same 4001 ``runtime.office.get`` gives, and for the same reason. Asserted
     together with an empty hub: a subscribe that registered first and validated
