@@ -489,7 +489,8 @@ def _runtime_office_subscribe(
     """The baseline AND the registration, in one call. The push leg's keystone.
 
     Params: ``workspace_id`` (required), ``fold_entities`` (optional list of
-    strings — what THIS client can fold).
+    strings — what THIS client can fold), ``reason`` (optional string — WHY this
+    client is subscribing).
 
     Result: the SAME body ``runtime.office.get`` returns, plus ``watermark``
     ``{"event_offset": N}`` — the event-log offset the baseline was read at —
@@ -596,6 +597,34 @@ def _runtime_office_subscribe(
     was honoured from one the runtime is too old to have read — and this whole
     method exists because a push that arrives and is silently dropped is the
     failure this lane keeps paying for.
+
+    ``reason``: the client's own resubscribe cause, so the server log can join
+    the ladder
+    ---------------------------------------------------------------------------
+    Every re-subscribe in the launcher flows through ONE door and already
+    carries an exact cause string (``start``, ``fold:fenced``,
+    ``push:full_core``, ``reconnect``, ``deferred:*``, ``fold_threw``) — and
+    that string used to die in the launcher's log. The server saw a re-baseline
+    with no way to tell a fold-fence storm from a demote storm, so separating
+    the two classes meant joining two logs on timestamps: inference, on the same
+    shape that has already misattributed this lane once.
+
+    So the param is optional, additive and INERT. It decides nothing: it is
+    stamped verbatim on the ``serve_office_subscription_rebaselined`` receipt
+    and read nowhere else. A cause the client chose is evidence, never
+    authority — a server that branched on it would be taking dispatch orders
+    from an untrusted string.
+
+    Boundary-validated rather than echoed raw, because it is written to an
+    operator's log: ≤64 chars over ``[a-z0-9_:.-]``, refused ``-32602`` with
+    ``{"reason": "reason_invalid"}`` otherwise, and refused BEFORE any store or
+    hub call so a bad param cannot cost a projection, a lock, or a producer
+    restart. See ``normalize_office_subscribe_reason`` for why a blank is a
+    refusal rather than an absence.
+
+    Absent — every client in the field today — prints
+    ``SUBSCRIBE_REASON_ABSENT`` (``-``) on the receipt, so silence is visible as
+    a value rather than as a missing key.
     """
 
     from agent_runtime.locks import office_lock
@@ -606,6 +635,7 @@ def _runtime_office_subscribe(
         OFFICE_SUBSCRIPTIONS,
         PUSH_LANE_DRAINING,
         normalize_office_fold_entities,
+        normalize_office_subscribe_reason,
     )
 
     workspace_id = _workspace_id_param(params)
@@ -626,6 +656,20 @@ def _runtime_office_subscribe(
             ERR_INVALID_PARAMS,
             "invalid params: fold_entities must be a list of strings",
             {"reason": "fold_entities_invalid", "workspace_id": workspace_id},
+        )
+    # BEFORE the office lock, the projection and the hub — a param this method
+    # only ever writes to a log must not be able to cost a producer restart on
+    # its way to being refused.
+    raw_reason = params.get("reason")
+    subscribe_reason = (
+        None if raw_reason is None else normalize_office_subscribe_reason(raw_reason)
+    )
+    if raw_reason is not None and subscribe_reason is None:
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            "invalid params: reason must be <=64 chars of [a-z0-9_:.-]",
+            {"reason": "reason_invalid", "workspace_id": workspace_id},
         )
     context = context or RpcContext()
     if context.emit is None:
@@ -655,6 +699,7 @@ def _runtime_office_subscribe(
             baseline_offset=baseline_offset,
             emit=context.emit,
             fold_entities=fold_entities,
+            reason=subscribe_reason,
         )
 
     if not outcome.registered:
