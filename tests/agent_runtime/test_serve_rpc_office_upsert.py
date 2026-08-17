@@ -911,6 +911,7 @@ def test_the_method_set_grew_and_the_contract_integer_did_not_move():
     expected = {"contract": 1, "methods": [
             "runtime.agent.create",
             "runtime.office.get",
+            "runtime.office.remove",
             "runtime.office.subscribe",
             "runtime.office.unsubscribe",
             "runtime.office.upsert",
@@ -1029,6 +1030,7 @@ def test_the_write_method_is_transport_agnostic_and_answers_on_the_socket():
                 "methods": [
                     "runtime.agent.create",
                     "runtime.office.get",
+                    "runtime.office.remove",
                     "runtime.office.subscribe",
                     "runtime.office.unsubscribe",
                     "runtime.office.upsert",

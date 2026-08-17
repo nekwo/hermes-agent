@@ -1821,6 +1821,7 @@ def test_the_reclaim_pair_joins_the_manifest_without_moving_the_contract_version
     assert serve_rpc.method_names() == [
         "runtime.agent.create",
         "runtime.office.get",
+        "runtime.office.remove",
         "runtime.office.subscribe",
         "runtime.office.unsubscribe",
         "runtime.office.upsert",
