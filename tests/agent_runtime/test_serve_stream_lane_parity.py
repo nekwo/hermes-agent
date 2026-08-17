@@ -53,6 +53,7 @@ every test that attaches the REAL producer drains it before returning — see
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import json
 import re
 import threading
@@ -61,6 +62,8 @@ from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+
+import pytest
 
 from agent_runtime import paths
 from agent_runtime.events import EventLog
@@ -97,6 +100,15 @@ SERVE_SOURCE = Path(serve_module.__file__)
 #: same Python object would not be testing the two declaration paths.
 DECLARED_FLAG = "persona_instance,incident"
 DECLARED_LIST = ["persona_instance", "incident"]
+
+#: ``stream_frames``' own defaults, READ off the real signature. The hub omits
+#: the cadence arguments, so these ARE the hub's effective cadence — and reading
+#: them beats restating them, because a restated copy would agree with itself
+#: forever after the real default moved.
+_DEFAULTS = {
+    name: parameter.default
+    for name, parameter in inspect.signature(stream_frames).parameters.items()
+}
 
 
 # ── helpers ─────────────────────────────────────────────────────────────────
@@ -229,6 +241,27 @@ def _stream_frames_from(sink: _Sink) -> list[dict]:
     """
 
     return [frame for frame in sink.frames() if frame.get("type")]
+
+
+def _read_stream_frame(connection, *, limit: int = 40) -> dict:
+    """The next STATE-BEARING stream frame on a socket connection.
+
+    Two filters, both from the contract doc rather than from convenience.
+    ``_read_until`` selects on ``event`` and the push lane's frames carry
+    ``type`` instead — that is the split a consumer is told to make. And
+    heartbeats are skipped because they are liveness only ("treat heartbeat
+    frames as liveness and offset markers only"): a baseline assertion that a
+    heartbeat could satisfy — or could displace — would be measuring the 5 s
+    cadence rather than the join.
+    """
+
+    for _ in range(limit):
+        frame = connection.read_frame()
+        if frame is None:
+            raise AssertionError("connection closed before a stream frame")
+        if frame.get("type") and frame["type"] != "heartbeat":
+            return frame
+    raise AssertionError(f"no state-bearing stream frame within {limit} frames")
 
 
 def _fake_stream(gate: threading.Event, *, blob: str = ""):
@@ -520,9 +553,16 @@ def test_the_hub_lane_delivers_the_argv_streams_frames_byte_for_byte():
             lambda: _stream_frames_from(sink) and argv_frames,
             what="both lanes to deliver their hydrate",
         )
-        # The scripted event, appended once, AFTER both baselines exist — so
-        # both lanes tail it from the same offset.
+        # The scripted sequence, appended AFTER both baselines exist so both
+        # lanes tail it from the same offset. TWO events with a gap SHORTER than
+        # the settle window, deliberately: a single append is coalescing-blind
+        # and would let a lane running a different debounce pass parity, which
+        # is exactly the divergence a shared producer built with the wrong
+        # cadence would produce. Both lanes must fold this into ONE batch of
+        # two, so the frame count and the ``coalesced_count`` are both evidence.
         _seed_events(1, start=2)
+        time.sleep(0.05)
+        _seed_events(1, start=3)
         _until(
             lambda: len(_stream_frames_from(sink)) >= 2 and len(argv_frames) >= 2,
             what="both lanes to deliver the scripted batch",
@@ -538,7 +578,7 @@ def test_the_hub_lane_delivers_the_argv_streams_frames_byte_for_byte():
     assert [frame["type"] for frame in argv_frames[:2]] == ["hydrate", "delta"]
     # The batch is the coalescing lane's, not a per-event delta — which is what
     # makes the second frame the FAT one the collapse plan's C-2 worries about.
-    assert hub_frames[1]["coalesced_count"] == argv_frames[1]["coalesced_count"] == 1
+    assert hub_frames[1]["coalesced_count"] == argv_frames[1]["coalesced_count"] == 2
 
     for index, (hub, argv) in enumerate(zip(hub_frames, argv_frames)):
         hub_bytes, argv_bytes = _canonical(hub), _canonical(argv)
@@ -548,6 +588,80 @@ def test_the_hub_lane_delivers_the_argv_streams_frames_byte_for_byte():
         )
     # Anti-vacuity: an empty or trivial corpus would satisfy the loop above.
     assert len(_canonical(hub_frames[0])) > 1000
+
+
+def test_both_lanes_ask_the_producer_for_the_same_cadence():
+    """The half a frame comparison cannot see, and the reason it cannot.
+
+    The frames above are compared over a scripted burst, and a burst is
+    coalescing-BLIND in the direction that matters: whether the two events land
+    in one batch depends on whether they were both in the log when the producer
+    polled, which a settle window of 0 usually satisfies anyway. So a hub built
+    with the wrong cadence can pass byte parity — measured, not assumed, while
+    building this stage. The cadence is therefore pinned where it is decidable:
+    at the ONE function both lanes call, with the argv side's numbers taken from
+    the REAL parser rather than restated (a restated default would agree with
+    itself forever after ``--poll-interval``'s default moved).
+
+    ``resync`` and ``max_frames`` are deliberately NOT compared: the argv lane
+    owns both as operator flags (``--resync`` is the CLI's re-baseline, the hub's
+    is a re-subscribe) and the hub has no way to be asked for either.
+    """
+
+    import argparse
+
+    from hermes_cli.harness import build_parser
+    from hermes_cli.harness_parts import runtime_commands
+
+    calls: list[dict] = []
+
+    def _record(**kwargs):
+        calls.append(kwargs)
+        return iter(())
+
+    cadence_keys = (
+        "poll_interval_seconds",
+        "heartbeat_interval_seconds",
+        "delta_debounce_seconds",
+    )
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("agent_runtime.stream.stream_frames", _record)
+
+        parser = argparse.ArgumentParser()
+        build_parser(parser.add_subparsers(dest="command"))
+        args = parser.parse_args(
+            ["harness", "stream", "--fold-entities", DECLARED_FLAG]
+        )
+        assert runtime_commands._cmd_stream(args) == 0
+        argv_call = calls[-1]
+
+        with _stdio_serve() as (pipe, sink):
+            pipe.send(
+                {"op": "subscribe", "lane": "stream", "fold_entities": DECLARED_LIST}
+            )
+            sink.wait_for("subscribed")
+            _until(
+                lambda: len(calls) > 1,
+                what="the hub's producer to build its generator",
+            )
+            pipe.send({"op": "unsubscribe"})
+            sink.wait_for("unsubscribed")
+    hub_call = calls[-1]
+
+    # Anti-vacuity: the interception really did capture the argv lane's own
+    # numbers, not an empty call it could then trivially match.
+    assert argv_call["poll_interval_seconds"] == 0.25
+    assert argv_call["heartbeat_interval_seconds"] == 5.0
+    assert argv_call["delta_debounce_seconds"] == pytest.approx(0.2)
+    assert argv_call["caller"] == "cli"
+    # The hub names itself, because a build line naming a subscriber would be a
+    # lie about who pays — and it is the one argument that SHOULD differ.
+    assert hub_call["caller"] == "hub"
+    for key in cadence_keys:
+        assert hub_call.get(key, _DEFAULTS[key]) == argv_call[key], key
+    # Same declaration, reached by the two different declaration paths.
+    assert set(hub_call["fold_entities"]) == set(argv_call["fold_entities"])
 
 
 def test_the_lanes_frames_have_the_committed_goldens_shape():
@@ -859,6 +973,93 @@ def test_a_re_subscribe_after_a_drop_re_baselines_with_a_hydrate_first():
         rejoined[0]["watermark"]["event_offset"]
         >= first["watermark"]["event_offset"]
     )
+
+
+def test_a_rejoin_beside_a_peer_that_never_left_still_gets_its_own_hydrate():
+    """The case the single-client rejoin cannot see, and the reason it cannot.
+
+    When the only subscriber leaves, the room empties, the producer stops, and
+    the next subscribe starts one — so a rejoin gets a hydrate whether or not the
+    join asked for a restart. The flag only becomes visible when somebody ELSE
+    is holding the producer alive: attaching restart-free to a running generation
+    is exactly the O-H5 shortcut, and taken by the stream lane it would hand the
+    rejoining client deltas with nothing to fold them onto.
+
+    Two real socket clients on the real producer, therefore: B never leaves, A
+    leaves and comes back, and A's first frame after the rejoin must still be a
+    complete baseline. B paying a redundant full core is the cost of that
+    guarantee and is asserted too, because a lane that spared B would be a lane
+    that skipped A's hydrate.
+    """
+
+    _seed_events(2)
+    try:
+        with running_serve() as handle:
+            with client(handle, name="a") as (first, _r1), client(
+                handle, name="b"
+            ) as (second, _r2):
+                first.send(
+                    {
+                        "op": "subscribe",
+                        "lane": "stream",
+                        "fold_entities": DECLARED_LIST,
+                    }
+                )
+                _read_until(first, "subscribed")
+                baseline = _read_stream_frame(first)
+                assert baseline["type"] == "hydrate"
+
+                second.send(
+                    {
+                        "op": "subscribe",
+                        "lane": "stream",
+                        "fold_entities": DECLARED_LIST,
+                    }
+                )
+                _read_until(second, "subscribed")
+                # One scripted event after every join, so the lane is guaranteed
+                # to carry a STATE-BEARING frame promptly whether or not the join
+                # re-baselined — which is what makes "the first one is a hydrate"
+                # a decision between two available answers rather than a wait.
+                _seed_events(1, start=30)
+                # B's join re-baselined the room, so A has a second hydrate to
+                # read past before its own leave/rejoin.
+                assert _read_stream_frame(first)["type"] == "hydrate"
+                assert _read_stream_frame(second)["type"] == "hydrate"
+
+                first.send({"op": "unsubscribe"})
+                _read_until(first, "unsubscribed")
+                # B is still attached, so the producer never stops: the floor
+                # rule cannot be what supplies A's next hydrate.
+                first.send({"op": "connections"})
+                census = _read_until(first, "socket_connections")
+                assert census["subscriptions"]["subscribers"] == 1
+
+                first.send(
+                    {
+                        "op": "subscribe",
+                        "lane": "stream",
+                        "fold_entities": DECLARED_LIST,
+                    }
+                )
+                _read_until(first, "subscribed")
+                _seed_events(1, start=31)
+                rejoined = _read_stream_frame(first)
+                assert rejoined["type"] == "hydrate"
+                assert (
+                    rejoined["watermark"]["event_offset"]
+                    >= baseline["watermark"]["event_offset"]
+                )
+                # The peer that never left paid the re-baseline, which is what
+                # proves the rejoin restarted the producer rather than attaching
+                # to the generation already in flight.
+                assert _read_stream_frame(second)["type"] == "hydrate"
+
+                first.send({"op": "unsubscribe"})
+                second.send({"op": "unsubscribe"})
+                _read_until(second, "unsubscribed")
+    finally:
+        _drain_stream_producers()
 
 
 def test_an_office_lanes_restart_free_join_does_not_suppress_a_stream_hydrate():

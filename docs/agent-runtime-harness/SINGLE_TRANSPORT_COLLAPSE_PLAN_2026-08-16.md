@@ -203,7 +203,7 @@ the cached-snapshot first paint are untouched.
 **Mixed pairs.** Server-only, additive; no client change. Alone: nothing
 observable.
 
-**LANDED 2026-08-17 (as EG-4.1).** 14 tests in
+**LANDED 2026-08-17 (as EG-4.1).** 16 tests in
 `tests/agent_runtime/test_serve_stream_lane_parity.py`; C-A1/C-A2 answered and a
 third row (C-A3) added for the parity result. Three reconciliations against HEAD
 a reader of this stage needs:
@@ -224,6 +224,28 @@ a reader of this stage needs:
    connection, because the property under test is the WRITER (one ordered queue
    per connection, shared by both lanes) and the office lane's own delivery is
    already pinned live in `test_serve_rpc_office_subscribe_live_hub.py`.
+
+**Two mutations the FIRST cut of the tests survived**, recorded because each
+marks a real limit of what a frame comparison can see, and both are now covered
+by a test of their own:
+
+* **hub cadence forked** (`delta_debounce_seconds` 0.2 → 0 on the hub's
+  `stream_frames` call): byte parity stayed GREEN. A scripted burst is
+  coalescing-blind in the direction that matters — whether two appends land in
+  one batch depends on whether both were already in the log when the producer
+  polled, which a zero settle window usually satisfies anyway. Pinned instead
+  where it is decidable, at the one function both lanes call
+  (`test_both_lanes_ask_the_producer_for_the_same_cadence`), with the argv side's
+  numbers read off the REAL parser and the hub's off `stream_frames`' own
+  signature.
+* **the stream lane joining restart-free** (`restart_producer=False` leaked onto
+  it from O-H5): the single-client rejoin stayed GREEN, because the last
+  subscriber leaving empties the room, stops the producer, and the hub's FLOOR
+  rule then starts one regardless. The flag is only observable with a peer
+  holding the generation alive, which is now
+  `test_a_rejoin_beside_a_peer_that_never_left_still_gets_its_own_hydrate` — two
+  real socket clients, the real producer, and A's rejoin reading `delta` instead
+  of `hydrate` under the mutation.
 
 **Debt found, not fixed (owner: none yet).** `StreamHub.stop()` cannot interrupt
 a generator parked inside `next()`, and the real `stream_frames` producer parks
