@@ -35,7 +35,7 @@ from hermes_time import now
 from utils import atomic_json_write
 
 from . import office_models, paths
-from .errors import NotFound, StaleRevision, SyncConflict
+from .errors import AlreadyExists, NotFound, StaleRevision, SyncConflict
 from .events import EventLog
 from .locks import office_lock
 from .models import Event, OfficeActor, OfficeItem, OfficeSurface
@@ -648,6 +648,139 @@ class OfficeStore:
             )
         return result_actor
 
+    # --- orphaned-surface exit (EG-0.1 / HC §3) ----------------------------
+
+    def workspace_resolves(self, workspace_id: str) -> bool:
+        """Does a workspace record exist for ``workspace_id``?
+
+        Derived the way :func:`snapshot._offices_summary` derives ``orphaned`` —
+        membership in ``WorkspaceStore().list_all(include_archived=True)``
+        (``snapshot.py:450``) — so this predicate and the ``orphaned_office``
+        parity warning cannot answer differently. In particular an ARCHIVED
+        workspace still resolves: its office is not an orphan and archiving it
+        would be data loss, not cleanup.
+        """
+
+        wsid = _safe_id(workspace_id)
+        if not wsid:
+            return False
+        from .store import WorkspaceStore
+
+        return wsid in {
+            getattr(w, "id", None)
+            for w in WorkspaceStore().list_all(include_archived=True)
+        }
+
+    def archive_orphaned_surface(
+        self,
+        workspace_id: str,
+        *,
+        updated_by: str = "operator",
+        dry_run: bool = False,
+    ) -> dict:
+        """Move a whole ORPHANED office surface out of the projection.
+
+        The operator's exit from the ``orphaned_office`` parity warning. Before
+        this existed, a surface whose workspace record had gone raised a HUD
+        parity-warning chip forever and the only way to clear it was deleting
+        files by hand in the live runtime root — so the honest instrument was a
+        first-class verb (the same reasoning ``office resolve-conflict`` rides,
+        and the board warning's "archive to repair" hint has had an equivalent
+        since inception; the office side had none).
+
+        REFUSES a surface whose workspace still resolves. That is the whole
+        safety property: this moves an entire surface — folders, every active
+        and archived placement, the conflict sidecars — so pointed at a LIVE
+        workspace it is a mass delete wearing a cleanup verb's name. The check
+        runs twice, once before the lock for a clean refusal and once inside it,
+        because a workspace can be re-created between the two.
+
+        Archive-never-delete, like every other removal in this store: the
+        directory is MOVED under ``paths.office_surface_archive_root()``, never
+        unlinked, so a mistaken archive is recoverable by moving it back.
+        """
+
+        wsid = _safe_id(workspace_id)
+        if not wsid:
+            raise ValueError("invalid_request")
+        if not self.surface_exists(wsid):
+            raise NotFound(f"office:{wsid}")
+        self._guard_surface_is_orphaned(wsid)
+
+        surface = self.get_surface(wsid)
+        active = self.list_actors(wsid)
+        archived = self.list_actors(wsid, include_archived=True)
+        destination = _free_surface_archive_dir(wsid)
+        result = {
+            "workspace_id": surface.workspace_id,
+            "revision": surface.revision,
+            "folders": list(surface.folders),
+            "actor_count": len(active),
+            "archived_placement_count": max(0, len(archived) - len(active)),
+            "archived_as": destination.name,
+        }
+        if dry_run:
+            # Full validation + the refusal check ran; nothing moved, no event.
+            return result
+
+        with office_lock(wsid):
+            # Re-checked under the lock: a workspace re-created (or a surface
+            # already archived by a concurrent operator) between the checks
+            # above and here must not be archived anyway.
+            if not self.surface_exists(wsid):
+                raise NotFound(f"office:{wsid}")
+            self._guard_surface_is_orphaned(wsid)
+            destination = _free_surface_archive_dir(wsid)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            paths.office_dir(wsid).rename(destination)
+            result["archived_as"] = destination.name
+            # The accounted degrade, emitted BEFORE the domain event and inside
+            # the lock, exactly like the two emitters above. ``office_surface``
+            # ``refresh`` says "this row is not expressible as a fold, re-fetch
+            # it", which is the truth: the offices row and every office_actor row
+            # under it left in one move and there is no remove-a-surface op on
+            # this wire. It is what demotes the batch to a full core — WITHOUT it
+            # the covered ``office.surface.updated`` below would be the only
+            # entry in an otherwise-coverable batch, shipping a patch frame with
+            # an EMPTY patches list: the client advances its watermark having
+            # folded nothing and keeps the archived surface, and its
+            # ``orphaned_office`` chip, forever. See
+            # ``state_patches.emit_office_surface_refresh``.
+            self._emit_surface_refresh_patch(surface.workspace_id)
+            self._emit(
+                "office.surface.updated",
+                workspace_id=surface.workspace_id,
+                change="archived",
+                revision=surface.revision,
+            )
+        return result
+
+    def _emit_surface_refresh_patch(self, workspace_id: str) -> None:
+        """Best-effort like every emitter in this class — a patch-lane fault must
+        never take the archive down, and a missing refresh is a missing DEMOTE
+        that the batch's own uncovered content still forces on any client that
+        did not declare ``office_surface``."""
+
+        try:
+            from .state_patches import emit_office_surface_refresh
+
+            emit_office_surface_refresh(self.event_log, workspace_id)
+        except Exception:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "office surface refresh patch emit failed: %s", workspace_id, exc_info=True
+            )
+
+    def _guard_surface_is_orphaned(self, workspace_id: str) -> None:
+        if self.workspace_resolves(workspace_id):
+            raise ValueError(
+                f"office surface '{workspace_id}' is NOT orphaned — its workspace "
+                "still resolves, so archiving it would move a live surface (every "
+                "actor placement included) out of the projection. Archive the "
+                "workspace itself if that is what you meant."
+            )
+
     # --- prune lane (plan §4.3) --------------------------------------------
 
     def archive_actors_for_instance(self, persona_instance_id: str, *, reason: str = "instance_reaped") -> int:
@@ -827,6 +960,25 @@ def _archive_conflict_sidecar(workspace_id: str, actor_key: str) -> None:
     dest = paths.office_conflicts_dir(workspace_id) / f"{actor_file_token(actor_key)}.resolved.json"
     atomic_json_write(dest, payload, indent=2, sort_keys=True)
     sidecar_path.unlink(missing_ok=True)
+
+
+def _free_surface_archive_dir(workspace_id: str):
+    """First unused archive slot for ``workspace_id``.
+
+    Deterministic rather than timestamped so a test can name the destination,
+    and suffixed rather than refusing so an operator who archives a re-created
+    orphan a second time is not stuck with a conflict they cannot resolve
+    without hand-moving files — which is the thing this verb exists to avoid.
+    """
+
+    base = paths.office_archived_surface_dir(workspace_id)
+    if not base.exists():
+        return base
+    for attempt in range(2, 1000):
+        candidate = base.with_name(f"{base.name}-{attempt}")
+        if not candidate.exists():
+            return candidate
+    raise AlreadyExists(f"office_archive:{workspace_id}")
 
 
 def _check_revision(current: int | None, expected: int | None) -> None:

@@ -123,7 +123,7 @@ def test_09_different_root_leases_do_not_contend(isolate_agent_runtime_root):
 
 
 def test_09a_a_failed_byte_unlock_is_reported_and_release_still_works(
-    isolate_agent_runtime_root, monkeypatch, caplog
+    isolate_agent_runtime_root, caplog
 ):
     """A swallowed unlock failure is the producer side of the stale-lock class.
 
@@ -132,28 +132,34 @@ def test_09a_a_failed_byte_unlock_is_reported_and_release_still_works(
     What changed is that the failure is no longer a bare `pass`: without a line
     naming the root, the delivery drain's `lease_busy_ownerless` on the consumer
     side has nothing to correlate against and stays a hypothesis forever.
+
+    THE UNLOCK STUB IS SCOPED (EG-0.1). Dropping it with ``monkeypatch.undo()``
+    unwound the shared per-test instance, so the second lease below was taken
+    against the OPERATOR's live runtime root — the lease file out there is the
+    physical evidence. A scoped context drops the stub and only the stub.
     """
 
     import logging
 
     from agent_runtime import persona_chat_continuity
 
-    monkeypatch.setattr(
-        persona_chat_continuity,
-        "_unlock",
-        lambda fd: (_ for _ in ()).throw(OSError("unlock refused")),
-    )
+    with pytest.MonkeyPatch.context() as broken_unlock:
+        broken_unlock.setattr(
+            persona_chat_continuity,
+            "_unlock",
+            lambda fd: (_ for _ in ()).throw(OSError("unlock refused")),
+        )
 
-    with caplog.at_level(logging.WARNING, logger=persona_chat_continuity.__name__):
-        with persona_chat_root_lease("root_unlock_fail"):
-            pass
+        with caplog.at_level(logging.WARNING, logger=persona_chat_continuity.__name__):
+            with persona_chat_root_lease("root_unlock_fail"):
+                pass
 
     warnings = [record.getMessage() for record in caplog.records if record.levelno >= logging.WARNING]
     assert any("root_unlock_fail" in message and "unlock" in message.lower() for message in warnings), warnings
 
     # Behaviour unchanged: the handle close still released the lock, so the
-    # very next acquisition of the same root succeeds.
-    monkeypatch.undo()
+    # very next acquisition of the same root succeeds — with the real `_unlock`
+    # back, because the context above has exited.
     with persona_chat_root_lease("root_unlock_fail"):
         assert True
 

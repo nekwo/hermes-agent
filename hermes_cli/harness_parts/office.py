@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+from agent_runtime.root_observability import attach_root_observability
 from agent_runtime.store import WorkspaceStore
 from hermes_cli.harness_support import (
     _load_request_json,
@@ -285,6 +286,45 @@ def _cmd_office_set_folders(args) -> int:
     )
     row = _office_surface_row(store, surface.workspace_id, surface=surface if dry_run else None)
     envelope = _object_envelope("office", row)
+    if dry_run:
+        envelope["dry_run"] = True
+    _print_stage42(envelope, args=args, default_output="json")
+    return 0
+
+
+def _cmd_office_archive_surface(args) -> int:
+    """`harness office archive-surface` — the operator's exit from an orphan.
+
+    An office surface whose workspace record has gone raises an
+    ``orphaned_office`` parity warning (``snapshot._office_parity_warnings``) on
+    every frame, and until this verb existed the only way to clear it was
+    deleting directories by hand inside the live runtime root. Board cards have
+    had an "archive to repair" route since inception; the office side had none,
+    which is how one leaked test workspace kept a HUD chip lit indefinitely.
+
+    Archive-never-delete: the surface directory is MOVED under
+    ``store/office_archive/``, so a mistake is recoverable.
+
+    The store REFUSES a surface whose workspace still resolves — pointed at a
+    live workspace this verb would move every placement on it out of the
+    projection. That refusal is an ``invalid_request`` (exit 2), not an internal
+    error: the operator named the wrong workspace.
+    """
+
+    from agent_runtime.errors import NotFound
+
+    store = _office_store()
+    workspace = _office_workspace_for(args)
+    if not workspace:
+        return emit_harness_error(ValueError("no workspace selected; pass --workspace"), args=args, code="invalid_request")
+    dry_run = bool(getattr(args, "dry_run", False))
+    try:
+        row = store.archive_orphaned_surface(workspace, dry_run=dry_run)
+    except NotFound as exc:
+        return emit_harness_error(exc, args=args, code="not_found")
+    except ValueError as exc:
+        return emit_harness_error(exc, args=args, code="invalid_request", message=str(exc))
+    envelope = attach_root_observability(_object_envelope("office_archived", row))
     if dry_run:
         envelope["dry_run"] = True
     _print_stage42(envelope, args=args, default_output="json")

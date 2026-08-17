@@ -1,3 +1,5 @@
+import os
+
 import pytest
 
 from agent_runtime import repo_context as _repo_context
@@ -9,6 +11,25 @@ _PRODUCTION_WORKTREE_BASE_DIR = _repo_context._worktree_base_dir
 _PRODUCTION_LEGACY_WORKTREE_BASE_DIR = (
     _repo_context.legacy_harness_worktree_base_dir
 )
+
+
+class _IsolationPinWitness:
+    """Holder for the teardown tripwire's witness token (EG-0.1).
+
+    A plain module-scope object rather than an attribute on a production
+    module: nothing in ``agent_runtime`` should have to grow a field so the
+    test suite can watch itself, and a synthetic attribute on
+    ``repo_context`` would sit inside the symbol sets the S20/S24 removal
+    gates enumerate.
+    """
+
+    token: object | None = None
+
+
+#: The one instance the fixture below pins. Module-scope so the pin is a real
+#: ``monkeypatch.setattr`` on a real attribute — which is what makes
+#: ``monkeypatch.undo()`` restore it to ``None`` and redden the tripwire.
+_ISOLATION_PIN_WITNESS = _IsolationPinWitness()
 
 
 @pytest.fixture
@@ -89,6 +110,55 @@ def reset_profile_runner_runtime_resolve_cache():
 
 @pytest.fixture(autouse=True)
 def isolate_agent_runtime_root(tmp_path, monkeypatch):
+    """Pin this package's runtime root into ``tmp_path`` — and PROVE, after the
+    test body, that the pin was still standing when the body finished.
+
+    =====================================================================
+    THE TEARDOWN TRIPWIRE (EG-0.1, the 2026-08-17 live-store leak)
+    =====================================================================
+
+    ``monkeypatch`` is ONE instance per test function, shared by every fixture
+    and the test body. So ``monkeypatch.undo()`` called from inside a test body
+    does not drop "the patch this test made" — it unwinds the WHOLE stack,
+    including the three pins below. Three tests did exactly that:
+
+    * ``test_office_state_patches.py:751`` — dropped the projection cap, and
+      three lines later wrote the OPERATOR's live store. The leaked actor
+      ``ws_office_patch_test`` reached revision 67, climbing once per suite run;
+    * ``test_persona_chat_continuity.py:156`` — dropped an unlock stub, then
+      took a chat-root lease against the live root (the lease file is the
+      physical evidence);
+    * ``test_mcp_admission_r2.py:327`` — dropped a deregister stub in a
+      ``finally``.
+
+    Nothing went red. ``assert_root_config_resolution_is_hermetic`` below is
+    SETUP-ONLY by design, so a mid-body unpin is invisible to it, and the tests
+    themselves only assert about their own subject. All three now use a scoped
+    ``pytest.MonkeyPatch.context()``, and this teardown is the fence that keeps
+    a fourth site from being silent (the structural no-``undo()`` gate in
+    ``test_no_midtest_monkeypatch_undo.py`` is the second, independent witness).
+
+    WHY THE WITNESS IS A SENTINEL AND NOT ``HERMES_AGENT_RUNTIME_ROOT``.
+    Comparing ``os.environ["HERMES_AGENT_RUNTIME_ROOT"]`` against ``str(root)``
+    at teardown — the obvious probe, and the one HC-H1 specified — reddens
+    legitimate tests, because re-pointing or dropping that variable inside a
+    body is a supported pattern in this package:
+
+    * ``test_profile_runner.py:535`` sets it to the literal ``"before_runtime"``
+      to prove the profile runner restores the caller's value;
+    * ``test_chat_session_scope.py:222`` (and its siblings) ``delenv`` it on
+      purpose — the fallback rung IS their subject;
+    * ``test_repo_context_observation.py:281`` re-installs the PRODUCTION
+      ``_worktree_base_dir`` through ``production_worktree_base_functions``,
+      which rules out identity-checking the two ``setattr`` pins as well.
+
+    Every one of those is a test being explicit about what it needs; a fence
+    that punished them would be re-litigated and then weakened. The sentinel
+    below is untouchable by all of them and is unwound by exactly one thing —
+    an ``undo()`` (or ``setattr(..., raising=…)``-level unwind) on the shared
+    instance, which is the defect. See the failure message for the rest.
+    """
+
     root = tmp_path / "agent-runtime"
     monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(root))
     # Structural janitor boundary: no agent-runtime test may discover the
@@ -102,7 +172,34 @@ def isolate_agent_runtime_root(tmp_path, monkeypatch):
         "legacy_harness_worktree_base_dir",
         lambda: tmp_path / "legacy-worktrees",
     )
+    # The tripwire's witness. Minted per test and never handed to the body, so
+    # a body that unwound the stack cannot restore it: the token is a fresh
+    # object this fixture owns, and re-setting it would BE un-doing the unwind.
+    token = object()
+    monkeypatch.setattr(_ISOLATION_PIN_WITNESS, "token", token)
+
     yield root
+
+    assert _ISOLATION_PIN_WITNESS.token is token, (
+        "THE SANDBOX WAS UNPINNED FROM INSIDE THIS TEST BODY. This is the "
+        "2026-08-17 live-store leak (EG-0.1 / HC-H1): `monkeypatch` is ONE "
+        "instance shared by every fixture and the test, so `monkeypatch.undo()` "
+        "in a body unwinds this fixture's HERMES_AGENT_RUNTIME_ROOT pin and the "
+        "two worktree-base pins along with whatever the test meant to drop. "
+        "Everything the body did after that point ran against the OPERATOR's "
+        "live runtime root: that is how `ws_office_patch_test` reached revision "
+        "67 in X:/Eternia/.hermes, and how a persona-chat root lease file was "
+        "taken out there.\n\n"
+        "FIX: wrap the one patch you meant to drop in a scoped context instead "
+        "of unwinding the shared stack —\n"
+        "    with pytest.MonkeyPatch.context() as patched:\n"
+        "        patched.setattr(...)\n"
+        "        ...  # the patched half of the test\n"
+        "    ...            # the unpatched half; ONLY your patch is gone\n\n"
+        "HERMES_AGENT_RUNTIME_ROOT is now "
+        f"{os.environ.get('HERMES_AGENT_RUNTIME_ROOT')!r}; this fixture pinned "
+        f"it to {str(root)!r}."
+    )
 
 
 def assert_under(path, base, *, what: str) -> None:

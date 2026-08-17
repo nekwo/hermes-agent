@@ -173,6 +173,23 @@ def office_conflict_path(workspace_id: str, actor_key: str) -> Path:
     return office_conflicts_dir(workspace_id) / f"{actor_file_token(actor_key)}.json"
 
 
+def office_surface_archive_root() -> Path:
+    """Archive-never-delete for a whole ORPHANED office surface.
+
+    A SIBLING of :func:`office_root`, not a child, and that is load-bearing:
+    ``OfficeStore.list_workspaces()`` enumerates ``office_root()``'s children by
+    the presence of ``office.json``, so an archive nested under it would still be
+    projected and still raise its ``orphaned_office`` parity warning — i.e.
+    archiving would clear nothing. NOT published to realms.
+    """
+
+    return store_root() / "office_archive"
+
+
+def office_archived_surface_dir(workspace_id: str) -> Path:
+    return office_surface_archive_root() / _safe_path_token(workspace_id)
+
+
 def office_baseline_path(realm_id: str) -> Path:
     # realm-sync baseline sidecar; NEVER synced, NEVER published
     return store_root() / "realm_sync" / _safe_path_token(realm_id) / "office_baseline.json"

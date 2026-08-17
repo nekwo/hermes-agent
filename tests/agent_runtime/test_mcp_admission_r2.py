@@ -308,8 +308,18 @@ def test_teardown_of_a_server_that_never_registered_is_clean(clean_registry):
     assert outcome.removed_tool_names == ()
 
 
-def test_teardown_failure_is_typed_and_never_raises(monkeypatch, clean_registry, warm_launcher_qa):
-    """A finished turn must never be failed by its own cleanup."""
+def test_teardown_failure_is_typed_and_never_raises(clean_registry, warm_launcher_qa):
+    """A finished turn must never be failed by its own cleanup.
+
+    THE STUB IS SCOPED (EG-0.1). The eager drop below is genuinely required —
+    ``clean_registry``'s own finalizer deregisters, and it runs BEFORE a
+    function-scoped ``monkeypatch`` would unwind, so a wedged ``deregister``
+    left in place past this block breaks teardown. What was wrong was HOW:
+    ``monkeypatch.undo()`` unwinds the SHARED per-test instance, taking the
+    package's ``isolate_agent_runtime_root`` pins with it and pointing the rest
+    of the test at the operator's live runtime root. A scoped context drops the
+    stub at exactly the same moment, on exceptions too, and touches nothing else.
+    """
 
     from tools.mcp_tool import _register_server_tools
 
@@ -318,13 +328,9 @@ def test_teardown_failure_is_typed_and_never_raises(monkeypatch, clean_registry,
     def _boom(_name):
         raise RuntimeError("registry is wedged")
 
-    monkeypatch.setattr(clean_registry, "deregister", _boom)
-    try:
+    with pytest.MonkeyPatch.context() as wedged:
+        wedged.setattr(clean_registry, "deregister", _boom)
         outcome = teardown_mcp_admission(["launcher_qa"])
-    finally:
-        # Undo eagerly: ``clean_registry``'s own finalizer deregisters, and it
-        # runs before monkeypatch unwinds.
-        monkeypatch.undo()
 
     assert not outcome.ok
     rows = outcome.failure_rows()

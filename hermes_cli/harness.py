@@ -773,6 +773,15 @@ def build_parser(parent_subparsers) -> None:
         office_resolve, controls=frozenset({"dry_run"})
     )
     office_resolve.set_defaults(func=_cmd_office_resolve_conflict)
+    office_archive_surface = office_subs.add_parser(
+        "archive-surface",
+        help="Archive an ORPHANED office surface (a surface whose workspace no longer resolves); clears its orphaned_office parity warning",
+    )
+    office_archive_surface.add_argument("--workspace", default=None)
+    _add_stage42_global_args(
+        office_archive_surface, controls=frozenset({"dry_run"})
+    )
+    office_archive_surface.set_defaults(func=_cmd_office_archive_surface)
 
     persona = subs.add_parser("persona", help="Run bounded live-token diagnostics for one persona")
     persona_subs = persona.add_subparsers(dest="persona_command")

@@ -1005,6 +1005,53 @@ def emit_office_surface_patch(
     )
 
 
+def emit_office_surface_refresh(
+    event_log: EventLog,
+    workspace_id: Any,
+    *,
+    config: AgentRuntimeConfig | None = None,
+) -> bool:
+    """The accounted degrade for an office SURFACE write no fold can express:
+    the whole surface left (``OfficeStore.archive_orphaned_surface``, EG-0.1).
+
+    Same instrument, same reason as :func:`emit_office_actor_refresh` one entity
+    up. Archiving an orphaned surface removes the ``offices`` row AND every
+    ``office_actor`` row under it in one move; ``OFFICE_SURFACE_PATCH_FIELDS`` is
+    a three-key folder subset and there is no remove-a-surface op on this wire,
+    so nothing here is expressible as a fold. ``refresh``'s documented meaning
+    applies unchanged: *this row is not expressible, re-fetch it*.
+
+    WHY THIS AND NOT A NEW DOMAIN EVENT TYPE. The archive rides the existing
+    ``office.surface.updated`` (``change="archived"``), which is a COVERED domain
+    event — it promises a folding client that an equivalent ``office_surface``
+    patch rides the same batch. Left alone that promise is a silent data loss:
+    ``batch_is_patch_coverable`` is an ``all(...)`` with no "at least one patch"
+    requirement, so a batch whose only entry is that covered event ships a patch
+    frame with an EMPTY ``patches`` list — the client advances its watermark
+    having folded nothing and keeps the archived surface, and its
+    ``orphaned_office`` chip, forever. That is verbatim the failure
+    :func:`emit_office_actor_refresh` documents for the actor lane.
+
+    Registering a NEW uncovered event type would also have worked, and was
+    rejected: it moves ``decision_contract_hash``, which is baked into the
+    committed producer-derived golden fixtures, making a tests-only stage-zero
+    landing a cross-stack fixture regeneration. This entity/op pair already
+    exists on the wire and needs no client negotiation — a client that declares
+    ``office_surface`` demotes on the ``refresh``, and one that does not demotes
+    on the domain event. Both land on the full core, which is the refetch.
+    """
+
+    if not delta_patches_enabled(config):
+        return False
+    return emit_state_patch(
+        event_log,
+        entity=OFFICE_SURFACE_ENTITY,
+        entity_id=str(workspace_id or ""),
+        op=PATCH_OP_REFRESH,
+        config=config,
+    )
+
+
 def emit_office_actor_refresh(
     event_log: EventLog,
     workspace_id: Any,

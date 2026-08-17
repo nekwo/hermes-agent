@@ -714,7 +714,7 @@ def test_a_conflict_resolution_archive_still_emits_the_remove_even_with_emit_fal
 
 
 def test_a_workspace_over_the_projection_cap_keeps_the_honest_refresh(
-    seeded_office, set_delta_patches, monkeypatch
+    seeded_office, set_delta_patches
 ):
     """The ONE meaning ``refresh`` keeps: the projected actor list is a CUT.
 
@@ -727,29 +727,36 @@ def test_a_workspace_over_the_projection_cap_keeps_the_honest_refresh(
     The cap is monkeypatched rather than seeded with 201 actors: the guard is
     the comparison, and 201 real store writes would spend the whole per-test
     budget proving a constant.
+
+    THE CAP PATCH IS SCOPED (EG-0.1). This test used to drop it with
+    ``monkeypatch.undo()``, which unwinds the SHARED per-test instance — so the
+    package's ``isolate_agent_runtime_root`` pins went with it and the second
+    half of this test wrote the operator's live store (``ws_office_patch_test``
+    at revision 67 in ``X:/Eternia/.hermes``). A scoped context drops the cap
+    and nothing else; ``set_delta_patches``'s pin now survives the block, so it
+    is not re-applied below.
     """
 
     set_delta_patches(True)
     # Two live actors from the fixture; a cap of 1 puts the store over it.
-    monkeypatch.setattr(
-        "agent_runtime.snapshot.MAX_OFFICE_ACTORS_PROJECTED", 1, raising=True
-    )
+    with pytest.MonkeyPatch.context() as capped:
+        capped.setattr(
+            "agent_runtime.snapshot.MAX_OFFICE_ACTORS_PROJECTED", 1, raising=True
+        )
 
-    before = _log_end()
-    seeded_office.upsert_actor(WORKSPACE, _actor_payload("qa", x=4.0, y=4.0))
-    patch = [
-        e.payload
-        for _, e in EventLog().iter_from_offset(before)
-        if e.type == STATE_PATCHED_EVENT_TYPE
-    ][0]
-    assert patch["op"] == PATCH_OP_REFRESH, patch
-    assert "changed" not in patch
-    assert "created" not in patch
+        before = _log_end()
+        seeded_office.upsert_actor(WORKSPACE, _actor_payload("qa", x=4.0, y=4.0))
+        patch = [
+            e.payload
+            for _, e in EventLog().iter_from_offset(before)
+            if e.type == STATE_PATCHED_EVENT_TYPE
+        ][0]
+        assert patch["op"] == PATCH_OP_REFRESH, patch
+        assert "changed" not in patch
+        assert "created" not in patch
 
     # Anti-vacuity: under the real cap the SAME write is a foldable upsert, so
     # this cannot be green because the lane went dark.
-    monkeypatch.undo()
-    set_delta_patches(True)
     before = _log_end()
     seeded_office.upsert_actor(WORKSPACE, _actor_payload("qa", x=5.0, y=5.0))
     patch = [
