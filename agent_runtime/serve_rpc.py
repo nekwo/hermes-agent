@@ -116,8 +116,11 @@ launcher's item decoder gates on required-key PRESENCE
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
 
 # The method-surface contract. Bump ONLY when an existing method's request or
 # result shape changes incompatibly; adding a method does not move it.
@@ -358,6 +361,95 @@ def _workspace_id_param(params: dict) -> str | None:
     if not isinstance(raw, str):
         return None
     return raw.strip() or None
+
+
+#: The one ``data.reason`` every write verb spends for a malformed gesture token,
+#: so a client decoder branches on a single stable string across all four.
+CORRELATION_ID_INVALID_REASON = "correlation_id_invalid"
+
+
+class _CorrelationIdRefused(Exception):
+    """A gesture token that failed boundary validation, carrying its message."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message)
+        self.message = message
+
+
+def _correlation_id_param(params: dict) -> str | None:
+    """The gesture's correlation token off ``params``, or ``None`` when absent.
+
+    THE boundary for EG-2.3's id (Plan D §V1/§V2). Absent is the normal case and
+    means "no gesture behind this write" — every downstream payload then stays
+    byte-identical to what it was before this key existed, which is what makes the
+    whole change additive.
+
+    A PRESENT-but-illegal token is REFUSED rather than dropped, and that asymmetry
+    against :func:`state_patches.normalize_correlation_id`'s silent drop is
+    deliberate: this lane has a reply channel, so a client that sent free text
+    where a generated token belongs gets told so instead of quietly diagnosing
+    with an id the server discarded. Nothing is sanitized — a repaired id would
+    print a value neither side used, which is worse than no id at all.
+
+    Raises :class:`_CorrelationIdRefused`; every caller translates it to the same
+    ``-32602`` / :data:`CORRELATION_ID_INVALID_REASON` pair.
+    """
+
+    from agent_runtime.state_patches import (
+        CORRELATION_ID_MAX_LEN,
+        normalize_correlation_id,
+    )
+
+    raw = params.get("correlation_id")
+    if raw is None:
+        return None
+    if not isinstance(raw, str):
+        raise _CorrelationIdRefused(
+            "invalid params: correlation_id must be a string or omitted"
+        )
+    token = normalize_correlation_id(raw)
+    if token is None:
+        raise _CorrelationIdRefused(
+            "invalid params: correlation_id must be a generated token of at most "
+            f"{CORRELATION_ID_MAX_LEN} characters from [A-Za-z0-9_.:-]"
+        )
+    return token
+
+
+def log_office_write(
+    *, op: str, correlation_id: str | None, **fields: Any
+) -> None:
+    """ONE line per office WRITE, in the serve child's own log (EG-2.3 / CI-2).
+
+    The hermes half of the two-log join. Before this line existed the serve
+    child's log named no office write at all — plan §8 item 5 measured 12 MB with
+    zero ``office`` lines — so "which RPC produced this launcher update" could
+    only be answered by anchoring on the launcher's flush receipt, and that
+    anchoring is exactly what produced the confidently wrong "deletes take 3.8 s"
+    diagnosis (Plan D's opening).
+
+    Shaped like ``stream.log_stream_attach`` on purpose — ``key=value`` after a
+    leading event word, ``-`` for an absent value — because an operator greps the
+    two together and a second format would make the join a parse instead of a
+    grep. ``corr=-`` rather than an omitted key: a write with no gesture behind
+    it is a FACT worth reading, and an omitted key is indistinguishable from an
+    old build.
+
+    Never raises: an instrument must not be the reason a write fails.
+    """
+
+    try:
+        extras = " ".join(
+            f"{key}={'-' if value is None else value}" for key, value in fields.items()
+        )
+        logger.info(
+            "office_write op=%s corr=%s%s",
+            op,
+            correlation_id or "-",
+            f" {extras}" if extras else "",
+        )
+    except Exception:  # pragma: no cover - observability must never fail a lane
+        pass
 
 
 @method("runtime.office.get")
@@ -898,8 +990,21 @@ def _runtime_office_upsert(
     (optional int) and ``updated_by`` (optional string, defaults to the argv
     lane's own ``operator``).
 
-    Result: ``{"actor_key", "revision"}``. See the module docstring for why it
-    is those two and not the actor.
+    Result: ``{"actor_key", "revision"}``, plus ``correlation_id`` echoed back
+    when the caller sent one. See the module docstring for why the ack is those
+    two facts and not the actor.
+
+    ``correlation_id`` (optional string, EG-2.3) is the CALLER's gesture token:
+    a generated ``[A-Za-z0-9_.:-]`` id of at most 64 characters, minted once per
+    operator gesture and threaded into every event this write appends, so the
+    launcher receipt and the serve-child ``office_write`` line join on one grep
+    instead of on timestamps. Absent is normal and keeps every payload
+    byte-identical; present-but-illegal is REFUSED
+    (``data.reason: correlation_id_invalid``) rather than sanitized. It is NOT
+    the idempotency key (a replay reuses that by design) and NOT ``issued_at``
+    (an ordering basis); a retry of the same gesture carries the SAME token,
+    which is the truth and is what makes a retry visible as two receipts under
+    one id.
 
     Why this method REFUSES an unknown workspace instead of authoring one
     ---------------------------------------------------------------------
@@ -991,6 +1096,16 @@ def _runtime_office_upsert(
             {"reason": "updated_by_invalid"},
         )
 
+    try:
+        correlation_id = _correlation_id_param(params)
+    except _CorrelationIdRefused as refused:
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            refused.message,
+            {"reason": CORRELATION_ID_INVALID_REASON, "workspace_id": workspace_id},
+        )
+
     store = OfficeStore()
     if not store.surface_exists(workspace_id):
         return err(
@@ -1046,6 +1161,7 @@ def _runtime_office_upsert(
             actor_payload,
             updated_by=updated_by or "operator",
             expect_revision=expect_revision,
+            correlation_id=correlation_id,
         )
     except StaleRevision as exc:
         # The prediction is behind. ``data`` deliberately does NOT carry the
@@ -1105,8 +1221,22 @@ def _runtime_office_upsert(
             {"reason": "actor_invalid", "workspace_id": workspace_id},
         )
 
+    log_office_write(
+        op="runtime.office.upsert",
+        correlation_id=correlation_id,
+        workspace=workspace_id,
+        actor_key=actor.actor_key,
+        revision=actor.revision,
+    )
     # Light, and both fields are things the caller could not have computed.
-    return ok(rid, {"actor_key": actor.actor_key, "revision": actor.revision})
+    # ``correlation_id`` rides only when the caller sent one — the ECHO is what
+    # lets the launcher's reply receipt name the token without trusting its own
+    # memory of what it sent, and its absence keeps every pre-EG-2.3 reply
+    # byte-identical.
+    result: dict[str, Any] = {"actor_key": actor.actor_key, "revision": actor.revision}
+    if correlation_id is not None:
+        result["correlation_id"] = correlation_id
+    return ok(rid, result)
 
 
 @method("runtime.office.remove")
@@ -1117,7 +1247,8 @@ def _runtime_office_remove(
 
     Params: ``workspace_id`` (required), ``actor_key`` (required string),
     ``expect_revision`` (optional int), ``updated_by`` and ``reason`` (optional
-    strings, both defaulting to the argv lane's own ``operator``).
+    strings, both defaulting to the argv lane's own ``operator``), and
+    ``correlation_id`` (optional gesture token — see ``runtime.office.upsert``).
 
     Result: ``{"actor_key", "revision", "state"}`` — the store's POST-archive
     revision, not the one the caller was holding. ``_archive_actor_locked``
@@ -1217,6 +1348,16 @@ def _runtime_office_remove(
             {"reason": "reason_invalid"},
         )
 
+    try:
+        correlation_id = _correlation_id_param(params)
+    except _CorrelationIdRefused as refused:
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            refused.message,
+            {"reason": CORRELATION_ID_INVALID_REASON, "workspace_id": workspace_id},
+        )
+
     store = OfficeStore()
     if not store.surface_exists(workspace_id):
         return err(
@@ -1233,6 +1374,7 @@ def _runtime_office_remove(
             reason=reason or "operator",
             updated_by=updated_by or "operator",
             expect_revision=expect_revision,
+            correlation_id=correlation_id,
         )
     except NotFound:
         # Its OWN reason, distinct from ``workspace_not_found``: the office is
@@ -1294,14 +1436,22 @@ def _runtime_office_remove(
             {"reason": "actor_invalid", "workspace_id": workspace_id},
         )
 
-    return ok(
-        rid,
-        {
-            "actor_key": actor.actor_key,
-            "revision": actor.revision,
-            "state": actor.state,
-        },
+    log_office_write(
+        op="runtime.office.remove",
+        correlation_id=correlation_id,
+        workspace=workspace_id,
+        actor_key=actor.actor_key,
+        revision=actor.revision,
+        state=actor.state,
     )
+    result: dict[str, Any] = {
+        "actor_key": actor.actor_key,
+        "revision": actor.revision,
+        "state": actor.state,
+    }
+    if correlation_id is not None:
+        result["correlation_id"] = correlation_id
+    return ok(rid, result)
 
 
 @method("runtime.office.surface.update")
@@ -1312,7 +1462,8 @@ def _runtime_office_surface_update(
 
     Params: ``workspace_id`` (required), ``folders`` (required list of strings),
     ``expect_revision`` (optional int), ``updated_by`` (optional string,
-    defaulting to the argv lane's own ``operator``).
+    defaulting to the argv lane's own ``operator``), and ``correlation_id``
+    (optional gesture token — see ``runtime.office.upsert``).
 
     Result: ``{"workspace_id", "folders", "revision"}`` — the folder list AS THE
     STORE NORMALIZED IT, and the post-write surface revision.
@@ -1412,6 +1563,16 @@ def _runtime_office_surface_update(
             {"reason": "updated_by_invalid"},
         )
 
+    try:
+        correlation_id = _correlation_id_param(params)
+    except _CorrelationIdRefused as refused:
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            refused.message,
+            {"reason": CORRELATION_ID_INVALID_REASON, "workspace_id": workspace_id},
+        )
+
     store = OfficeStore()
     if not store.surface_exists(workspace_id):
         return err(
@@ -1427,6 +1588,7 @@ def _runtime_office_surface_update(
             folders=folders,
             updated_by=updated_by or "operator",
             expect_revision=expect_revision,
+            correlation_id=correlation_id,
         )
     except StaleRevision as exc:
         # ``data`` deliberately carries NO current revision — the same rule both
@@ -1453,14 +1615,21 @@ def _runtime_office_surface_update(
             {"reason": "folders_invalid", "workspace_id": workspace_id},
         )
 
-    return ok(
-        rid,
-        {
-            "workspace_id": surface.workspace_id,
-            "folders": list(surface.folders),
-            "revision": surface.revision,
-        },
+    log_office_write(
+        op="runtime.office.surface.update",
+        correlation_id=correlation_id,
+        workspace=workspace_id,
+        folders=len(surface.folders),
+        revision=surface.revision,
     )
+    result: dict[str, Any] = {
+        "workspace_id": surface.workspace_id,
+        "folders": list(surface.folders),
+        "revision": surface.revision,
+    }
+    if correlation_id is not None:
+        result["correlation_id"] = correlation_id
+    return ok(rid, result)
 
 
 @method("runtime.office.resolve_conflict")
@@ -1471,7 +1640,8 @@ def _runtime_office_resolve_conflict(
 
     Params: ``workspace_id`` and ``actor_key`` (required strings), ``take``
     (required, ``"local"`` or ``"remote"``), ``updated_by`` (optional string,
-    defaulting to the argv lane's own ``operator``).
+    defaulting to the argv lane's own ``operator``), and ``correlation_id``
+    (optional gesture token — see ``runtime.office.upsert``).
 
     Result: ``{"actor_key", "take", "state", "revision"?}``. ``revision`` is
     present iff the resolution left an ACTOR behind; its absence is the
@@ -1598,6 +1768,16 @@ def _runtime_office_resolve_conflict(
             {"reason": "updated_by_invalid"},
         )
 
+    try:
+        correlation_id = _correlation_id_param(params)
+    except _CorrelationIdRefused as refused:
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            refused.message,
+            {"reason": CORRELATION_ID_INVALID_REASON, "workspace_id": workspace_id},
+        )
+
     store = OfficeStore()
     if not store.surface_exists(workspace_id):
         return err(
@@ -1613,6 +1793,7 @@ def _runtime_office_resolve_conflict(
             actor_key,
             take=take,
             updated_by=updated_by or "operator",
+            correlation_id=correlation_id,
         )
     except ClassKeyedPlacementRefused as exc:
         details = dict(getattr(exc, "safe_details", None) or {})
@@ -1711,16 +1892,40 @@ def _runtime_office_resolve_conflict(
         # a refusal, because the operator's conflict really is resolved — and
         # the missing key is what tells the client not to keep guarding a row
         # that no longer exists.
-        return ok(rid, {"actor_key": actor_key, "take": take, "state": "archived"})
-    return ok(
-        rid,
-        {
-            "actor_key": actor.actor_key,
+        log_office_write(
+            op="runtime.office.resolve_conflict",
+            correlation_id=correlation_id,
+            workspace=workspace_id,
+            actor_key=actor_key,
+            take=take,
+            state="archived",
+        )
+        tombstone: dict[str, Any] = {
+            "actor_key": actor_key,
             "take": take,
-            "state": actor.state,
-            "revision": actor.revision,
-        },
+            "state": "archived",
+        }
+        if correlation_id is not None:
+            tombstone["correlation_id"] = correlation_id
+        return ok(rid, tombstone)
+    log_office_write(
+        op="runtime.office.resolve_conflict",
+        correlation_id=correlation_id,
+        workspace=workspace_id,
+        actor_key=actor.actor_key,
+        take=take,
+        state=actor.state,
+        revision=actor.revision,
     )
+    result: dict[str, Any] = {
+        "actor_key": actor.actor_key,
+        "take": take,
+        "state": actor.state,
+        "revision": actor.revision,
+    }
+    if correlation_id is not None:
+        result["correlation_id"] = correlation_id
+    return ok(rid, result)
 
 
 # ── runtime.agent.create ─────────────────────────────────────────────────────

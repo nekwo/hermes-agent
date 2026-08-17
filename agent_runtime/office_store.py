@@ -177,16 +177,38 @@ class OfficeStore:
 
     # --- event emission (single chokepoint) ------------------------------
 
-    def _emit(self, event_type: str, **payload: Any) -> None:
+    def _emit(self, event_type: str, correlation_id: str | None = None, **payload: Any) -> None:
+        """Append one office DOMAIN event.
+
+        ``correlation_id`` (EG-2.3 / Plan D §V2) is the gesture token, threaded
+        from the write boundary. It is a plain payload key, so the delta lane
+        lifts it to ``entity.correlation_id`` for free and the office
+        notification forwards it verbatim — no wire change on either lane.
+        Positional-or-keyword rather than keyword-only because ``**payload``
+        would otherwise swallow it; ``None`` is filtered out by the comprehension
+        below exactly as every other absent field is, which is what keeps a
+        gestureless event byte-identical to before this key existed.
+        """
+
         try:
+            # Function-local like every other ``state_patches`` reach in this
+            # class, so the patch module's import weight stays off the store's
+            # own import path.
+            from .state_patches import CORRELATION_ID_KEY, normalize_correlation_id
+
             body = {key: value for key, value in payload.items() if value is not None}
+            token = normalize_correlation_id(correlation_id)
+            if token is not None:
+                body[CORRELATION_ID_KEY] = token
             self.event_log.append(Event(now(), event_type, None, None, None, body))
         except Exception:
             import logging
 
             logging.getLogger(__name__).warning("office event append failed: %s", event_type, exc_info=True)
 
-    def _emit_actor_patch(self, actor: OfficeActor, *, created: bool) -> None:
+    def _emit_actor_patch(
+        self, actor: OfficeActor, *, created: bool, correlation_id: str | None = None
+    ) -> None:
         """Emit the S7-A ``office_actor`` patch for one actor write.
 
         Called from INSIDE ``office_lock`` and handed the in-memory actor that
@@ -250,9 +272,16 @@ class OfficeStore:
             from .state_patches import emit_office_actor_patch, emit_office_actor_refresh
 
             if len(self.list_actors(actor.workspace_id)) > MAX_OFFICE_ACTORS_PROJECTED:
-                emit_office_actor_refresh(self.event_log, actor.workspace_id, actor.actor_key)
+                emit_office_actor_refresh(
+                    self.event_log,
+                    actor.workspace_id,
+                    actor.actor_key,
+                    correlation_id=correlation_id,
+                )
             else:
-                emit_office_actor_patch(self.event_log, actor, created=created)
+                emit_office_actor_patch(
+                    self.event_log, actor, created=created, correlation_id=correlation_id
+                )
         except Exception as exc:
             import logging
 
@@ -269,7 +298,9 @@ class OfficeStore:
                 exc_info=True,
             )
 
-    def _emit_surface_patch(self, surface: OfficeSurface) -> None:
+    def _emit_surface_patch(
+        self, surface: OfficeSurface, *, correlation_id: str | None = None
+    ) -> None:
         """Emit the ``office_surface`` patch for one folder-taxonomy write.
 
         Called from INSIDE ``office_lock`` and BEFORE the paired
@@ -297,7 +328,9 @@ class OfficeStore:
         try:
             from .state_patches import emit_office_surface_patch
 
-            emit_office_surface_patch(self.event_log, surface)
+            emit_office_surface_patch(
+                self.event_log, surface, correlation_id=correlation_id
+            )
         except Exception as exc:
             import logging
 
@@ -310,7 +343,9 @@ class OfficeStore:
                 exc_info=True,
             )
 
-    def _emit_actor_remove_patch(self, actor: OfficeActor) -> None:
+    def _emit_actor_remove_patch(
+        self, actor: OfficeActor, *, correlation_id: str | None = None
+    ) -> None:
         """Emit the ``office_actor`` ``remove`` for one archive.
 
         No truncation guard, deliberately: a remove carries no ``changed`` and
@@ -325,7 +360,12 @@ class OfficeStore:
         try:
             from .state_patches import emit_office_actor_remove
 
-            emit_office_actor_remove(self.event_log, actor.workspace_id, actor.actor_key)
+            emit_office_actor_remove(
+                self.event_log,
+                actor.workspace_id,
+                actor.actor_key,
+                correlation_id=correlation_id,
+            )
         except Exception as exc:
             import logging
 
@@ -384,6 +424,7 @@ class OfficeStore:
         folders: list[str] | None = None,
         updated_by: str = "operator",
         expect_revision: int | None = None,
+        correlation_id: str | None = None,
         dry_run: bool = False,
     ) -> OfficeSurface:
         wsid = _safe_id(workspace_id)
@@ -427,9 +468,10 @@ class OfficeStore:
                 return surface
             _write_surface(surface)
             if surface_existed:
-                self._emit_surface_patch(surface)
+                self._emit_surface_patch(surface, correlation_id=correlation_id)
             self._emit(
                 "office.surface.updated",
+                correlation_id,
                 workspace_id=surface.workspace_id,
                 change=",".join(change) or "saved",
                 revision=surface.revision,
@@ -497,6 +539,7 @@ class OfficeStore:
         *,
         updated_by: str = "operator",
         expect_revision: int | None = None,
+        correlation_id: str | None = None,
         dry_run: bool = False,
     ) -> OfficeActor:
         wsid = _safe_id(workspace_id)
@@ -582,9 +625,12 @@ class OfficeStore:
             # resurrection re-add is created=True because the row is missing from
             # the client's list, which is the only question the fold's
             # insert-on-absent asks.
-            self._emit_actor_patch(actor, created=existing is None)
+            self._emit_actor_patch(
+                actor, created=existing is None, correlation_id=correlation_id
+            )
             self._emit(
                 "office.actor.upserted",
+                correlation_id,
                 workspace_id=wsid,
                 actor_key=actor_key,
                 persona_id=persona_id,
@@ -601,6 +647,7 @@ class OfficeStore:
         reason: str = "operator",
         updated_by: str = "operator",
         expect_revision: int | None = None,
+        correlation_id: str | None = None,
         dry_run: bool = False,
     ) -> OfficeActor:
         wsid = _safe_id(workspace_id)
@@ -635,11 +682,19 @@ class OfficeStore:
                 actor.updated_by = _safe_actor_ref(updated_by)
                 return actor
             surface = self.ensure_surface(wsid, created_by=updated_by)
-            self._archive_actor_locked(surface, actor, reason=reason, updated_by=updated_by)
+            self._archive_actor_locked(
+                surface, actor, reason=reason, updated_by=updated_by, correlation_id=correlation_id
+            )
         return from_jsonable(OfficeActor, _read_json(paths.office_archived_actor_path(wsid, actor_key)))
 
     def restore_actor(
-        self, workspace_id: str, actor_key: str, *, updated_by: str = "operator", dry_run: bool = False
+        self,
+        workspace_id: str,
+        actor_key: str,
+        *,
+        updated_by: str = "operator",
+        correlation_id: str | None = None,
+        dry_run: bool = False,
     ) -> OfficeActor:
         wsid = _safe_id(workspace_id)
         if not wsid:
@@ -664,7 +719,12 @@ class OfficeStore:
                 surface.archived_actor_keys = [k for k in surface.archived_actor_keys if k != actor_key]
                 surface.updated_at = now()
                 _write_surface(surface)
-            self._emit("office.actor.restored", workspace_id=wsid, actor_key=actor_key)
+            self._emit(
+                "office.actor.restored",
+                correlation_id,
+                workspace_id=wsid,
+                actor_key=actor_key,
+            )
         return self.get_actor(wsid, actor_key)
 
     def resolve_conflict(
@@ -675,6 +735,7 @@ class OfficeStore:
         take: str,
         updated_by: str = "operator",
         allow_class_key: bool = False,
+        correlation_id: str | None = None,
         dry_run: bool = False,
     ) -> OfficeActor | None:
         """Resolve a realm-sync conflict sidecar for an actor. ``take=local``
@@ -719,7 +780,14 @@ class OfficeStore:
                     actor = self.get_actor(wsid, actor_key)
                     if not dry_run:
                         surface = self.ensure_surface(wsid, created_by=updated_by)
-                        self._archive_actor_locked(surface, actor, reason="remote_removed", updated_by=updated_by, emit=False)
+                        self._archive_actor_locked(
+                            surface,
+                            actor,
+                            reason="remote_removed",
+                            updated_by=updated_by,
+                            emit=False,
+                            correlation_id=correlation_id,
+                        )
             if dry_run:
                 # take value + sidecar existence validated; return the would-be
                 # resolved actor in memory. Leave the sidecar in place and emit
@@ -728,6 +796,7 @@ class OfficeStore:
             _archive_conflict_sidecar(wsid, actor_key)
             self._emit(
                 "office.actor.conflict_resolved",
+                correlation_id,
                 workspace_id=wsid,
                 actor_key=actor_key,
                 take=take,
@@ -947,7 +1016,16 @@ class OfficeStore:
             )
         return ActorScan(actors, unreadable)
 
-    def _archive_actor_locked(self, surface: OfficeSurface, actor: OfficeActor, *, reason: str, updated_by: str, emit: bool = True) -> None:
+    def _archive_actor_locked(
+        self,
+        surface: OfficeSurface,
+        actor: OfficeActor,
+        *,
+        reason: str,
+        updated_by: str,
+        emit: bool = True,
+        correlation_id: str | None = None,
+    ) -> None:
         actor.state = "archived"
         actor.revision += 1
         actor.updated_at = now()
@@ -973,10 +1051,11 @@ class OfficeStore:
         # never heard so would render a desk the store no longer has. That batch
         # demotes anyway on its own uncovered ``office.actor.conflict_resolved``,
         # so the patch costs nothing there and is honest everywhere.
-        self._emit_actor_remove_patch(actor)
+        self._emit_actor_remove_patch(actor, correlation_id=correlation_id)
         if emit:
             self._emit(
                 "office.actor.removed",
+                correlation_id,
                 workspace_id=actor.workspace_id,
                 actor_key=actor.actor_key,
                 reason=reason,

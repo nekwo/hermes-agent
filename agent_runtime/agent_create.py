@@ -842,8 +842,24 @@ def perform_agent_create(
                 )
 
             try:
+                # CI-4's FREE half (EG-2.3): this method already reserved
+                # ``correlation_id`` from birth and already echoes it on the
+                # result, so the only hop it was missing is the one the office
+                # store now takes — the placement's domain event and its paired
+                # patch row. With this kwarg a create's OFFICE half joins the
+                # same token as an ordinary drag, and the named partial-coverage
+                # window (Plan D §V3) shrinks to the roster half alone. The 38
+                # argv capability lanes stay deferred.
+                #
+                # The token is re-normalized inside the store: this method's own
+                # parser admits up to 200 characters, which is looser than the
+                # payload cap, so a long id degrades to "no id" rather than
+                # riding the wire.
                 actor = store.upsert_actor(
-                    request.workspace_id, payload, updated_by=updated_by
+                    request.workspace_id,
+                    payload,
+                    updated_by=updated_by,
+                    correlation_id=request.correlation_id,
                 )
             except (StaleRevision, SyncConflict, ValueError) as exc:
                 data = compensate_failed_placement(

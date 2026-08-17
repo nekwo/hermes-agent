@@ -71,6 +71,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Iterable
 
 from hermes_time import now
@@ -175,6 +176,52 @@ _PERSONA_INSTANCE_STORE_TO_WIRE: dict[str, tuple[str, ...]] = {
 }
 
 
+#: The end-to-end correlation key (Plan D / EG-2.3). ONE name, reused from the
+#: slot ``stream._delta_entity`` already surfaces — so a producer that places it
+#: into an event payload rides BOTH frame kinds with zero wire changes: the delta
+#: lane lifts it to ``entity.correlation_id`` (``stream.py:319``) and the patch
+#: lane spreads the whole payload into the row (``stream.py:436``).
+CORRELATION_ID_KEY = "correlation_id"
+
+#: Boundary cap, mirroring the idempotency-key cap discipline
+#: (``persona_chat_mints``). A correlation id is a GENERATED token, never
+#: operator text, so 64 characters is generous rather than tight.
+CORRELATION_ID_MAX_LEN = 64
+
+#: The token charset. Deliberately narrow — the id is minted by a client
+#: (`g-<lane>-<micros>-<rand4>`), so anything outside this is either a bug or an
+#: attempt to smuggle free text through a diagnostic field. Refused at the RPC
+#: boundary and dropped here; never sanitized into a different token, because a
+#: repaired id would print a value neither side used.
+_CORRELATION_ID_RE = re.compile(r"^[A-Za-z0-9_.:\-]+$")
+
+
+def normalize_correlation_id(value: Any) -> str | None:
+    """``value`` as a legal correlation token, or ``None``.
+
+    THE payload-side fence. Every producer path funnels through here, so an
+    illegal token can never reach an event payload no matter which caller
+    threaded it: the RPC boundary REFUSES a bad id out loud (a client bug is
+    worth a refusal), and this drops it silently for the in-process callers that
+    have no channel to be told on (``agent_create``'s own 200-char validator is
+    looser than this cap, so its tokens are re-checked here rather than trusted).
+
+    ``None`` in, ``None`` out — which is what keeps every payload without a
+    gesture behind it byte-identical to before this key existed.
+    """
+
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return None
+    token = value.strip()
+    if not token or len(token) > CORRELATION_ID_MAX_LEN:
+        return None
+    if not _CORRELATION_ID_RE.match(token):
+        return None
+    return token
+
+
 def _value_bytes(value: Any) -> int:
     """Serialized byte size of ``value`` under the exact encoding
     :meth:`EventLog.append` measures the payload with."""
@@ -200,12 +247,15 @@ def _assemble(
     op: str,
     changed: dict[str, Any] | None,
     created: bool | None = None,
+    correlation_id: str | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {"entity": str(entity), "id": str(entity_id), "op": str(op)}
     if changed is not None:
         payload["changed"] = changed
     if created is not None:
         payload["created"] = bool(created)
+    if correlation_id is not None:
+        payload[CORRELATION_ID_KEY] = str(correlation_id)
     return payload
 
 
@@ -215,6 +265,7 @@ def build_state_patch(
     op: str = PATCH_OP_UPSERT,
     changed: dict[str, Any] | None = None,
     created: bool | None = None,
+    correlation_id: str | None = None,
 ) -> dict[str, Any]:
     """Build an op-based ``state.patched`` payload, sized to fit the 4 KB cap.
 
@@ -243,6 +294,19 @@ def build_state_patch(
     widened op behind the ``office_actor_lifecycle`` capability token, i.e. so an
     un-updated client is never PROMOTED a row its fold would answer with a
     re-hydrate.
+
+    ``correlation_id`` is the SECOND additive optional key, on exactly the
+    ``created`` pattern and for the same reason it can be (EG-2.3 / Plan D §V2):
+    a payload key past required-field validation is free, and absent-when-unset
+    keeps every existing payload byte-identical. It is carried INSIDE the shrink
+    loop's accounting below, so a gesture token can never overflow the cap by the
+    width of a 64-character string — the loop re-measures the assembled payload
+    with it present and marks one more value if it has to.
+
+    Note the ``refresh`` degrades keep the id. A refresh says *this row is not
+    expressible, re-fetch it*, and "which gesture caused the re-fetch" is the
+    single most valuable thing to know about a demote, so the id is the one key a
+    degrade must not drop.
     """
 
     if op != PATCH_OP_UPSERT or not changed:
@@ -256,6 +320,7 @@ def build_state_patch(
             # patch that no longer carries one. ``remove`` keeps the marker,
             # because the lifecycle gate reads the op there instead.
             created if op != PATCH_OP_UPSERT else None,
+            correlation_id,
         )
 
     safe_changed: dict[str, Any] = {}
@@ -263,7 +328,7 @@ def build_state_patch(
         size = _value_bytes(value)
         safe_changed[str(field_name)] = _oversize_marker(size) if size > PATCH_VALUE_BUDGET_BYTES else value
 
-    payload = _assemble(entity, entity_id, PATCH_OP_UPSERT, safe_changed, created)
+    payload = _assemble(entity, entity_id, PATCH_OP_UPSERT, safe_changed, created, correlation_id)
     while _value_bytes(payload) > EVENT_PAYLOAD_LIMIT_BYTES:
         inline = [(name, val) for name, val in safe_changed.items() if not _is_oversize_marker(val)]
         if not inline:
@@ -271,10 +336,10 @@ def build_state_patch(
             # whole patch to an accounted ``refresh`` (the launcher re-fetches this
             # actor via checkpoint) rather than ship a marker-only merge it cannot
             # fold with fidelity.
-            return _assemble(entity, entity_id, PATCH_OP_REFRESH, None)
+            return _assemble(entity, entity_id, PATCH_OP_REFRESH, None, None, correlation_id)
         name = max(inline, key=lambda item: (_value_bytes(item[1]), item[0]))[0]
         safe_changed[name] = _oversize_marker(_value_bytes(safe_changed[name]))
-        payload = _assemble(entity, entity_id, PATCH_OP_UPSERT, safe_changed, created)
+        payload = _assemble(entity, entity_id, PATCH_OP_UPSERT, safe_changed, created, correlation_id)
     return payload
 
 
@@ -405,6 +470,7 @@ def emit_state_patch(
     op: str = PATCH_OP_UPSERT,
     changed: dict[str, Any] | None = None,
     created: bool | None = None,
+    correlation_id: str | None = None,
     task_id: str | None = None,
     run_id: str | None = None,
     persona_id: str | None = None,
@@ -418,13 +484,17 @@ def emit_state_patch(
     EventLog; the stream promotes coverable batches to v2 ``patch`` frames.
 
     ``created`` is the additive lifecycle marker — see :func:`build_state_patch`.
+    ``correlation_id`` is the gesture token, normalized HERE so no caller can put
+    an illegal one on the wire (see :func:`normalize_correlation_id`).
     """
 
     if op == PATCH_OP_UPSERT and not changed:
         return False
     if not delta_patches_enabled(config):
         return False
-    payload = build_state_patch(entity, entity_id, op, changed, created)
+    payload = build_state_patch(
+        entity, entity_id, op, changed, created, normalize_correlation_id(correlation_id)
+    )
     event_log.append(
         Event(
             ts=now(),
@@ -840,6 +910,7 @@ def emit_office_actor_patch(
     actor: Any,
     *,
     created: bool = False,
+    correlation_id: str | None = None,
     config: AgentRuntimeConfig | None = None,
 ) -> bool:
     """Emit an office-actor ``upsert`` carrying the actor's COMPLETE wire row.
@@ -887,6 +958,7 @@ def emit_office_actor_patch(
         op=PATCH_OP_UPSERT,
         changed=project_office_actor_wire_row(actor),
         created=True if created else None,
+        correlation_id=correlation_id,
         persona_id=getattr(actor, "persona_id", None),
         config=config,
     )
@@ -897,6 +969,7 @@ def emit_office_actor_remove(
     workspace_id: Any,
     actor_key: Any,
     *,
+    correlation_id: str | None = None,
     config: AgentRuntimeConfig | None = None,
 ) -> bool:
     """Emit an office-actor ``remove`` — the archive half of the lifecycle pair.
@@ -922,6 +995,7 @@ def emit_office_actor_remove(
         entity=OFFICE_ACTOR_ENTITY,
         entity_id=office_actor_patch_id(workspace_id, actor_key),
         op=PATCH_OP_REMOVE,
+        correlation_id=correlation_id,
         config=config,
     )
 
@@ -1000,6 +1074,7 @@ def emit_office_surface_patch(
     event_log: EventLog,
     surface: Any,
     *,
+    correlation_id: str | None = None,
     config: AgentRuntimeConfig | None = None,
 ) -> bool:
     """Emit an ``office_surface`` ``upsert`` — the folder-taxonomy write's row.
@@ -1057,6 +1132,7 @@ def emit_office_surface_patch(
             "revision": getattr(surface, "revision", None),
             "updated_at": to_jsonable(getattr(surface, "updated_at", None)),
         },
+        correlation_id=correlation_id,
         config=config,
     )
 
@@ -1065,6 +1141,7 @@ def emit_office_surface_refresh(
     event_log: EventLog,
     workspace_id: Any,
     *,
+    correlation_id: str | None = None,
     config: AgentRuntimeConfig | None = None,
 ) -> bool:
     """The accounted degrade for an office SURFACE write no fold can express:
@@ -1104,6 +1181,7 @@ def emit_office_surface_refresh(
         entity=OFFICE_SURFACE_ENTITY,
         entity_id=str(workspace_id or ""),
         op=PATCH_OP_REFRESH,
+        correlation_id=correlation_id,
         config=config,
     )
 
@@ -1113,6 +1191,7 @@ def emit_office_actor_refresh(
     workspace_id: Any,
     actor_key: Any,
     *,
+    correlation_id: str | None = None,
     config: AgentRuntimeConfig | None = None,
 ) -> bool:
     """The accounted degrade for an office write the client cannot place: the
@@ -1149,6 +1228,7 @@ def emit_office_actor_refresh(
         entity=OFFICE_ACTOR_ENTITY,
         entity_id=office_actor_patch_id(workspace_id, actor_key),
         op=PATCH_OP_REFRESH,
+        correlation_id=correlation_id,
         config=config,
     )
 
