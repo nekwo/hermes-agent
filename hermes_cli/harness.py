@@ -2995,6 +2995,55 @@ def _credential_health(entry) -> dict:
     }
 
 
+#: How many trailing characters of a credential a preview may show. Matches the
+#: dashboard's existing rule (`web_server.py::_truncate_token`), deliberately
+#: SHORTER than its 6 because this payload is consumed by a GUI that only needs
+#: to tell two keys apart, not to identify one out of context.
+_TOKEN_PREVIEW_CHARS = 4
+
+
+def _credential_token_preview(entry) -> Optional[str]:
+    """``…abcd`` — the last few characters of a pooled credential, or None.
+
+    This is the ONLY function in the provider-visibility payload that reads a
+    credential value, and it is written so that no input can make it emit more
+    than [_TOKEN_PREVIEW_CHARS] characters:
+
+    * a value shorter than 2× the preview length yields None rather than a
+      short secret rendered nearly whole — a 6-character key must not become
+      its own preview;
+    * a non-string (the Entra-ID bearer *callable*, for instance) yields None
+      and is NEVER invoked;
+    * every failure path yields None.
+
+    A preview is not a fallback for an absent value: absence is None, and the
+    client renders "no preview" rather than an empty-looking secret.
+    """
+    try:
+        raw = getattr(entry, "access_token", None)
+        if not isinstance(raw, str):
+            return None
+        value = raw.strip()
+        if len(value) < _TOKEN_PREVIEW_CHARS * 2:
+            return None
+        return f"…{value[-_TOKEN_PREVIEW_CHARS:]}"
+    except Exception:
+        return None
+
+
+def _provider_visibility_catalog() -> list[dict]:
+    """The `catalog` block: every CONNECTABLE provider, credential or not.
+
+    Failure-isolated by its caller like every other v2 block. See
+    `hermes_cli.provider_catalog.provider_login_catalog` for why this exists —
+    in one line: without it a client cannot distinguish "never configured" from
+    "configured and dead", because both render as an absence of usable models.
+    """
+    from hermes_cli.provider_catalog import provider_login_catalog
+
+    return provider_login_catalog()
+
+
 def build_provider_visibility() -> dict:
     """Typed, machine-readable snapshot of every credential pool — the contract
     the Launcher's provider/model surfaces consume instead of scraping the
@@ -3027,6 +3076,11 @@ def build_provider_visibility() -> dict:
                     "source": _display_source(entry.source),
                     "selected": current is not None and entry.id == current.id,
                     "health": _credential_health(entry),
+                    # Last-4 only, matching the dashboard's existing preview
+                    # rule. Enough to tell two keys apart in a UI; never enough
+                    # to use. See _credential_token_preview for why this is the
+                    # only shape allowed anywhere near this payload.
+                    "token_preview": _credential_token_preview(entry),
                 }
             )
         providers_out.append({"id": provider, "credentials": credentials})
@@ -3052,6 +3106,22 @@ def build_provider_visibility() -> dict:
         pass
     try:
         payload["auth_logins"] = _provider_visibility_auth_logins()
+    except Exception:
+        pass
+    # The `catalog` block (plan PL-1). Additive and failure-isolated exactly
+    # like the three blocks above, and — deliberately — WITHOUT a schema bump.
+    #
+    # Decided out loud at PL-1: the schema string stays
+    # `hermes.provider_visibility/v2`. Every consumer feature-detects blocks
+    # rather than reading the version (the Launcher decides "v2" by the
+    # presence of `environment`, and never reads `schema` at all), so a bump
+    # buys no consumer behaviour; meanwhile the string IS pinned by tests, one
+    # of which was left stale and red by the v1→v2 bump. A version string
+    # nothing branches on is a change-detector, so the additive-key path — the
+    # one the plan names as preferred when a consumer pins the string — is
+    # taken. `catalog` present ⇒ this hermes can name connectable providers.
+    try:
+        payload["catalog"] = _provider_visibility_catalog()
     except Exception:
         pass
     return payload
@@ -3251,16 +3321,63 @@ def _usage_lane_detected(provider_id: str) -> bool:
 def _fetch_usage_lane(provider_id: str):
     """Fetch the account-usage snapshot for one provider (may return None or
     raise; callers isolate failures). Nous flows through the portal-account +
-    credits-snapshot path; the rest through the shared usage-API fetcher."""
+    credits-snapshot path; the rest dispatch DIRECTLY to their per-provider
+    fetcher.
+
+    The direct dispatch is the point. ``agent.account_usage.fetch_account_usage``
+    wraps all three shared fetchers in a blanket ``except Exception: return
+    None`` (upstream-owned, `:884-902` — this module must not modify it), which
+    erases the failure CLASS before ``_fetch_usage_lanes``' honest per-lane
+    handler can report it. The None then serializes as the unfalsifiable
+    ``no usage data``: a swallowed 401 rendered exactly like a provider that
+    genuinely has nothing to say. Routing around the wrapper (the fork-boundary
+    rule: route around upstream, don't patch it) lets the exception reach the
+    handler that was built to name it.
+    """
     if provider_id == "nous":
         from agent.account_usage import build_nous_credits_snapshot
         from hermes_cli.nous_account import get_nous_portal_account_info
 
         account = get_nous_portal_account_info(force_fresh=True)
         return build_nous_credits_snapshot(account)
+    if provider_id == "openai-codex":
+        from agent.account_usage import _fetch_codex_account_usage
+
+        return _fetch_codex_account_usage()
+    if provider_id == "anthropic":
+        from agent.account_usage import _fetch_anthropic_account_usage
+
+        return _fetch_anthropic_account_usage()
+    if provider_id == "openrouter":
+        from agent.account_usage import _fetch_openrouter_account_usage
+
+        return _fetch_openrouter_account_usage(None, None)
     from agent.account_usage import fetch_account_usage
 
     return fetch_account_usage(provider_id)
+
+
+def _usage_failure_reason(exc: BaseException) -> str:
+    """The operator-facing reason for a raised usage fetch.
+
+    CLASS NAME ONLY for everything except an HTTP status error, where the bare
+    numeric status is added — a status code leaks nothing (no token, no URL, no
+    exception message), and it is the single fact that separates "the provider
+    rejected our credential" from "the network broke". 401/403 additionally
+    earn the re-auth hint, matching the reauth-vs-connectivity discipline: only
+    a confirmed auth rejection may suggest signing in again.
+    """
+    name = type(exc).__name__
+    status = None
+    response = getattr(exc, "response", None)
+    if response is not None:
+        raw = getattr(response, "status_code", None)
+        if isinstance(raw, int):
+            status = raw
+    if status is None or name != "HTTPStatusError":
+        return f"usage fetch failed ({name})"
+    suffix = " — re-auth may be required" if status in (401, 403) else ""
+    return f"usage fetch failed (HTTP {status}{suffix})"
 
 
 def _serialize_usage_window(window) -> Optional[dict]:
@@ -3311,8 +3428,15 @@ def _unavailable_usage_lane(provider_id: str, reason: str, *, active: bool) -> d
 
 
 def _serialize_usage_lane(provider_id: str, snapshot, *, active: bool) -> dict:
-    """Serialize an AccountUsageSnapshot (or None) into a lane dict. A None
-    snapshot on a detected login lane is emitted as ``no usage data``."""
+    """Serialize an AccountUsageSnapshot (or None) into a lane dict.
+
+    A None snapshot on a detected login lane is emitted as ``no usage data``,
+    which since the direct-dispatch change in [_fetch_usage_lane] means exactly
+    ONE thing: the fetcher DECLINED — it returned without raising, e.g. no token
+    resolved, or the provider exposes no usage surface. It no longer means
+    "anything broke": a fetcher that raises now reaches
+    [_fetch_usage_lanes]' handler and is reported by class or HTTP status.
+    """
     if snapshot is None:
         return _unavailable_usage_lane(provider_id, "no usage data", active=active)
     return {
@@ -3372,10 +3496,10 @@ def _fetch_usage_lanes(
                 lanes_by_provider[provider_id] = _unavailable_usage_lane(
                     provider_id, "usage fetch failed (TimeoutError)", active=active
                 )
-            except Exception as exc:  # noqa: BLE001 — class name only, fail-open
+            except Exception as exc:  # noqa: BLE001 — class/status only, fail-open
                 lanes_by_provider[provider_id] = _unavailable_usage_lane(
                     provider_id,
-                    f"usage fetch failed ({type(exc).__name__})",
+                    _usage_failure_reason(exc),
                     active=active,
                 )
             else:

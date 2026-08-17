@@ -68,7 +68,10 @@ def test_dead_credential_is_surfaced_not_hidden():
 
 def test_build_provider_visibility_shape():
     payload = build_provider_visibility()
-    assert payload["schema"] == "hermes.provider_visibility/v1"
+    # Stale since the v1→v2 bump (this pin was left red on main and nobody saw
+    # it — which is exactly why PL-1 declined to bump the string again for the
+    # additive `catalog` block; see build_provider_visibility).
+    assert payload["schema"] == "hermes.provider_visibility/v2"
     assert isinstance(payload["providers"], list)
     for provider in payload["providers"]:
         assert provider["id"]

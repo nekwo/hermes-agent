@@ -66,3 +66,246 @@ def test_v2_blocks_are_failure_isolated(monkeypatch):
     assert isinstance(payload["providers"], list)
     # auth_logins was not sabotaged and still reports.
     assert isinstance(payload.get("auth_logins"), list)
+
+
+# --- PL-1: the `catalog` block — what you COULD connect ----------------------
+#
+# The defect this block exists to kill: a roster built from credentials-present
+# + logins-present can render "this key is dead" but cannot render "you could
+# connect this", so a never-configured provider and a dead one both show up as
+# an absence of usable models. Nothing else in the payload can answer it.
+
+
+class _Entry:
+    """One pooled credential. Attribute-only — `build_provider_visibility`
+    reads it through getattr, never by type."""
+
+    def __init__(self, label: str, token: str):
+        self.id = f"cred-{label}"
+        self.label = label
+        self.auth_type = "api_key"
+        self.source = f"env:{label}"
+        self.access_token = token
+        self.last_status = None
+
+
+class _Pool:
+    def __init__(self, entries):
+        self._entries = entries
+
+    def entries(self):
+        return self._entries
+
+    def peek(self):
+        return None
+
+
+def _plant_credential(monkeypatch, provider: str, entry) -> None:
+    """Give exactly ONE provider a pooled credential.
+
+    The pytest sandbox points HERMES_HOME at an empty tempdir, so without this
+    every pool is empty and any assertion that loops over credential rows is
+    silently vacuous. Planting for one provider only is what lets the
+    never-configured assertions below be about a real difference rather than
+    about an empty payload.
+    """
+    import agent.credential_pool as pool_mod
+
+    def _load_pool(pid):
+        return _Pool([entry] if pid == provider else [])
+
+    monkeypatch.setattr(pool_mod, "load_pool", _load_pool)
+
+
+def _catalog_rows() -> dict:
+    payload = harness.build_provider_visibility()
+    catalog = payload.get("catalog")
+    assert isinstance(catalog, list), "the catalog block must be present"
+    return {row["id"]: row for row in catalog}
+
+
+def test_catalog_lists_a_provider_with_no_credentials(monkeypatch):
+    """The whole point: a provider with NO credential is still nameable.
+
+    Exactly one provider (`openrouter`) is given a credential; `fireworks` —
+    an ordinary api_key provider — is given none. Both must appear in
+    `catalog`; only openrouter may appear in `providers`.
+
+    MUTATION (kill): derive the catalog from the credentialed set (e.g. filter
+    `provider_login_catalog()` by `payload["providers"]`) — `fireworks`
+    disappears and this goes red.
+
+    Anti-vacuity: the probed field is membership of `catalog`, which the
+    mutated path also writes — it just writes a strictly smaller set. And the
+    fact that `fireworks` is credential-less is ASSERTED here, not assumed, so
+    the test cannot pass because the environment happened to have no
+    credentials at all (which is the pytest sandbox's default, and is exactly
+    how this assertion would have gone vacuous).
+    """
+    _plant_credential(monkeypatch, "openrouter", _Entry("OPENROUTER_API_KEY", "x" * 20))
+
+    payload = harness.build_provider_visibility()
+    credentialed = {row["id"] for row in payload["providers"]}
+    catalog = {row["id"] for row in payload["catalog"]}
+
+    assert credentialed == {"openrouter"}, credentialed
+    assert "fireworks" not in credentialed
+    assert "fireworks" in catalog
+    assert "openrouter" in catalog
+
+
+def test_catalog_row_shape_and_models_dev_mapping():
+    rows = _catalog_rows()
+    for row in rows.values():
+        assert isinstance(row["id"], str) and row["id"]
+        assert isinstance(row["name"], str) and row["name"]
+        assert isinstance(row["flows"], list) and row["flows"]
+        assert row["key_var"] is None or isinstance(row["key_var"], str)
+        assert isinstance(row["models_dev_id"], str) and row["models_dev_id"]
+
+    # The mapping the Launcher used to hardcode now lives server-side.
+    # MUTATION (kill): make `models_dev_id_for` return the slug unconditionally.
+    assert rows["openai-codex"]["models_dev_id"] == "openai"
+    assert rows["opencode-zen"]["models_dev_id"] == "opencode"
+    assert rows["qwen-oauth"]["models_dev_id"] == "alibaba"
+    # A lane that is its own catalog id stays its own catalog id.
+    assert rows["openrouter"]["models_dev_id"] == "openrouter"
+
+
+def test_catalog_names_the_external_owner_disconnect_command():
+    """External-tool-owned credentials get the documented command, never a
+    silent delete. MUTATION (kill): return None from `disconnect_command_for`
+    — red."""
+    rows = _catalog_rows()
+    assert rows["claude-code"]["disconnect_command"]
+    assert "claude" in rows["claude-code"]["disconnect_command"]
+    # A hermes-managed lane must NOT advertise an external disconnect command
+    # (that would send the operator to a shell for something Settings owns).
+    assert rows["openrouter"]["disconnect_command"] is None
+
+
+def test_catalog_failure_is_isolated(monkeypatch):
+    """A raising catalog builder drops its block and nothing else.
+
+    MUTATION (kill): let the exception escape `build_provider_visibility` —
+    the call raises and this goes red.
+    """
+
+    def _boom() -> list:
+        raise RuntimeError("catalog builder broken")
+
+    monkeypatch.setattr(harness, "_provider_visibility_catalog", _boom)
+    payload = harness.build_provider_visibility()
+    assert "catalog" not in payload
+    assert isinstance(payload["providers"], list)
+    assert isinstance(payload.get("environment"), dict)
+
+
+def test_v2_consumers_see_an_unchanged_payload_minus_catalog(monkeypatch):
+    """Additive means additive: strip the new keys and the v2 payload is what
+    it always was.
+
+    MUTATION (kill): rename any pre-existing field (e.g. `auth_type` →
+    `authType`) or add a new one (e.g. `access_token`) to a credential row —
+    red.
+
+    Anti-vacuity: the pytest sandbox's HERMES_HOME is an empty tempdir, so
+    `providers` is EMPTY by default and a bare loop over credential rows would
+    assert nothing at all. A credential is planted and the row count asserted
+    before the shape is checked.
+    """
+    _plant_credential(monkeypatch, "openrouter", _Entry("OPENROUTER_API_KEY", "x" * 20))
+
+    payload = harness.build_provider_visibility()
+    assert payload["schema"] == "hermes.provider_visibility/v2"
+    assert set(payload) - {"catalog"} == {
+        "schema",
+        "providers",
+        "environment",
+        "api_keys",
+        "auth_logins",
+    }
+    rows = [
+        credential
+        for provider in payload["providers"]
+        for credential in provider["credentials"]
+    ]
+    assert len(rows) == 1, "no credential row was inspected — the shape check would be vacuous"
+    for provider in payload["providers"]:
+        assert set(provider) == {"id", "credentials"}
+    for credential in rows:
+        assert set(credential) - {"token_preview"} == {
+            "index",
+            "label",
+            "auth_type",
+            "source",
+            "selected",
+            "health",
+        }
+
+
+def test_no_credential_value_appears_in_the_payload(monkeypatch):
+    """The secrecy gate. A seeded sentinel secret must not survive
+    serialization anywhere — not in a credential row, not in the catalog, not
+    in the environment block.
+
+    MUTATION (kill): emit `access_token` on a credential row, or widen
+    `_TOKEN_PREVIEW_CHARS` past the sentinel's length — red.
+
+    Anti-vacuity: the sentinel is planted on a REAL pooled credential that the
+    builder walks (verified by asserting the row for it is emitted at all), so
+    "not found" cannot mean "nothing was searched".
+    """
+    import json as _json
+
+    sentinel = "SENTINEL-DO-NOT-EMIT-abcdefghijklmnop"
+    _plant_credential(monkeypatch, "openrouter", _Entry("SENTINEL_KEY", sentinel))
+
+    payload = harness.build_provider_visibility()
+    rendered = _json.dumps(payload)
+
+    # The sentinel credential really was walked.
+    labels = {
+        credential["label"]
+        for provider in payload["providers"]
+        for credential in provider["credentials"]
+    }
+    assert "SENTINEL_KEY" in labels
+
+    assert sentinel not in rendered
+    # The preview is present, and is ONLY the tail.
+    previews = {
+        credential["token_preview"]
+        for provider in payload["providers"]
+        for credential in provider["credentials"]
+    }
+    assert "…mnop" in previews
+    for preview in previews:
+        if preview is None:
+            continue
+        assert len(preview) <= 5, preview
+
+
+def test_token_preview_refuses_short_and_non_string_values():
+    """A short key must not become its own preview, and the Entra-ID bearer
+    CALLABLE must never be invoked.
+
+    MUTATION (kill): drop the length floor (`"…c123"` appears for a 5-char
+    key) or the isinstance check (the callable is called) — red.
+    """
+    from types import SimpleNamespace
+
+    called = {"n": 0}
+
+    def _bearer():
+        called["n"] += 1
+        return "minted-token"
+
+    assert harness._credential_token_preview(SimpleNamespace(access_token="abc")) is None
+    assert (
+        harness._credential_token_preview(SimpleNamespace(access_token="abcdefgh"))
+        == "…efgh"
+    )
+    assert harness._credential_token_preview(SimpleNamespace(access_token=_bearer)) is None
+    assert called["n"] == 0
+    assert harness._credential_token_preview(SimpleNamespace()) is None
