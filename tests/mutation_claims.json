@@ -1,6 +1,81 @@
 {
   "claims": [
     {
+      "id": "rdh6-read-model-flag-resolves-profile-aware",
+      "path": "agent_runtime/read_model.py",
+      "symbol": "_read_model_scope",
+      "operator": "config-scope-swap",
+      "find": "    from .config import load_root_runtime_config\n\n    return load_root_runtime_config()",
+      "replace": "    from .config import load_agent_runtime_config\n\n    return load_agent_runtime_config()",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_read_model_enabled_resolver.py::test_the_two_snapshot_entry_points_answer_the_flag_identically"
+      ]
+    },
+    {
+      "id": "rdh6-cli-roster-read-unwrapped",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_cli_create_persona",
+      "operator": "remove-typed-fault-wrap",
+      "find": "    try:\n        return _persona_by_id(load_agent_runtime_config(), persona_id)\n    except Exception as exc:  # noqa: BLE001 — re-raised as the typed fault\n        raise PersonaRosterUnavailable(str(exc)) from exc",
+      "replace": "    return _persona_by_id(load_agent_runtime_config(), persona_id)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_agent_create_verb.py::test_an_unreadable_roster_is_a_typed_refusal_not_a_traceback"
+      ]
+    },
+    {
+      "id": "rdh6-cli-roster-fault-degrades-to-no-persona",
+      "path": "hermes_cli/harness_parts/persona_commands.py",
+      "symbol": "_cli_create_persona",
+      "operator": "degrade-fault-to-absence",
+      "find": "    except Exception as exc:  # noqa: BLE001 — re-raised as the typed fault\n        raise PersonaRosterUnavailable(str(exc)) from exc",
+      "replace": "    except Exception:  # noqa: BLE001 — re-raised as the typed fault\n        return None",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_agent_create_verb.py::test_a_roster_read_that_faults_once_refuses_instead_of_renaming_the_agent"
+      ]
+    },
+    {
+      "id": "rdh6-roster-fault-wears-a-bad-ids-costume",
+      "path": "agent_runtime/agent_create.py",
+      "symbol": "roster_unavailable_outcome",
+      "operator": "collapse-refusal-reason",
+      "find": "        persona_roster_unavailable_message(cause),\n        {\"reason\": PERSONA_ROSTER_UNAVAILABLE_REASON},",
+      "replace": "        persona_not_found_message(cause),\n        {\"reason\": PERSONA_NOT_FOUND_REASON},",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_agent_create_verb.py::test_both_create_lanes_name_the_same_roster_fault"
+      ]
+    },
+    {
+      "id": "rdh6-rpc-create-hands-over-a-synthesised-persona",
+      "path": "agent_runtime/serve_rpc.py",
+      "symbol": "_runtime_agent_create",
+      "operator": "bypass-roster-check-with-object",
+      "find": "    outcome = perform_agent_create(params)",
+      "replace": "    outcome = perform_agent_create(params, persona=object())",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_persona_roster_bypass_contract.py::test_every_persona_carrying_call_site_is_declared"
+      ]
+    },
+    {
       "id": "stage42-work-list-refuses-cursor",
       "path": "hermes_cli/harness.py",
       "symbol": "build_parser/work_list",

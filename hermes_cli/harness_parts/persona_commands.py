@@ -395,6 +395,37 @@ def _cmd_persona_assignment_task_id_migration(args) -> int:
 _AGENT_CREATE_EXIT_CODES = {-32602: 2, 4001: 3, 4090: 4, -32000: 1}
 
 
+def _cli_create_persona(persona_id: str):
+    """The CLI's richer persona resolution, with the RPC lane's typed fault.
+
+    RD-H6 item 2. ``_persona_by_id`` reads the roster through
+    ``ensure_persisted_personas`` — the exact call ``agent_create.persona_roster``
+    wraps into :class:`PersonaRosterUnavailable`, but UNWRAPPED here, and the
+    config load above it is unwrapped too. So a config this process could not
+    read left ``harness agent create`` printing a traceback where
+    ``runtime.agent.create`` answered a typed ``persona_roster_unavailable``
+    refusal naming the runtime as the subject. The fault was identical; only the
+    rendering differed, and the argv one blamed nothing and named no cure.
+
+    ``except Exception`` deliberately mirrors :func:`persona_roster`'s own net,
+    for the same reason it has one: the roster read reaches YAML parsing, the
+    filesystem and the persona store, and enumerating that fault surface here
+    would leave the un-enumerated remainder tracebacking — which is the defect.
+    It is narrow in SCOPE instead: exactly the roster read, nothing after it.
+    A bad id is NOT caught here — ``_persona_by_id`` answers ``None`` for that,
+    and the service's ``persona_not_found`` refusal is the one that must answer
+    it (collapsing the two would send an operator hunting a typo that does not
+    exist, which is the distinction :class:`PersonaRosterUnavailable` exists for).
+    """
+
+    from agent_runtime.agent_create import PersonaRosterUnavailable
+
+    try:
+        return _persona_by_id(load_agent_runtime_config(), persona_id)
+    except Exception as exc:  # noqa: BLE001 — re-raised as the typed fault
+        raise PersonaRosterUnavailable(str(exc)) from exc
+
+
 def _cmd_agent_create(args) -> int:
     """`harness agent create` — one call places an agent.
 
@@ -417,9 +448,12 @@ def _cmd_agent_create(args) -> int:
     roster-only door; this one is the placement door.
     """
 
-    from agent_runtime.agent_create import perform_agent_create
+    from agent_runtime.agent_create import (
+        PersonaRosterUnavailable,
+        perform_agent_create,
+        roster_unavailable_outcome,
+    )
 
-    cfg = load_agent_runtime_config()
     try:
         persona_id = _normalize_cli_persona_or_template_id(args.persona_id)
     except ValueError as exc:
@@ -459,9 +493,18 @@ def _cmd_agent_create(args) -> int:
         if value is not None:
             params[key] = value
 
-    outcome = perform_agent_create(
-        params, persona=_persona_by_id(cfg, persona_id)
-    )
+    # RD-H6 item 2. The CLI resolves its own richer persona object BEFORE the
+    # service runs, so the service's typed roster refusal cannot cover this read
+    # — and unwrapped it tracebacked where `runtime.agent.create` answered
+    # `persona_roster_unavailable`. Same fault, same reason, both lanes; the
+    # refusal falls through to the ONE rendering arm below, so it also inherits
+    # the same exit code and the same root-observability envelope.
+    try:
+        persona = _cli_create_persona(persona_id)
+    except PersonaRosterUnavailable as exc:
+        outcome = roster_unavailable_outcome(exc)
+    else:
+        outcome = perform_agent_create(params, persona=persona)
 
     if outcome.refusal is not None:
         refusal = outcome.refusal

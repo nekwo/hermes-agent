@@ -246,6 +246,182 @@ def test_an_unknown_persona_refuses_before_any_write(
     assert set(_actors()) == before
 
 
+# ── the roster FAULT, on both lanes (RD-H6 item 2) ───────────────────────────
+#
+# A roster fault answered the two create lanes differently. The RPC lane passes
+# no pre-resolved persona, so the service's own strict read (``persona_roster``)
+# wrapped the fault into a typed ``persona_roster_unavailable`` refusal naming
+# the RUNTIME as the subject. The CLI resolves its richer persona object FIRST,
+# through ``_persona_by_id`` -> ``ensure_persisted_personas`` — the same call,
+# unwrapped — so an unreadable roster tracebacked out of the verb. One fault,
+# two renderings, and the argv one named no cure.
+
+
+@pytest.fixture
+def corrupt_roster(qa_persona):
+    """A roster the runtime cannot READ — a REAL fault, not a patched one.
+
+    ``AgentStore.list_all`` catches only ``NotFound`` (an archive move racing a
+    ``glob``); a file that is not JSON raises out of it. So one unparseable
+    persona file is a genuine roster-read fault, and — this is why the fixture is
+    a file rather than a monkeypatch — it is the SAME fault on both lanes by
+    construction, reached through each lane's own resolver. A patched loader
+    could be installed on one lane's binding and miss the other's, which would
+    make the parity test below assert agreement it had arranged.
+    """
+
+    path = paths.agents_dir() / "broken_persona.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{ this file is not json", encoding="utf-8")
+    return path
+
+
+def test_an_unreadable_roster_is_a_typed_refusal_not_a_traceback(
+    corrupt_roster, seeded_workspace, capsys
+):
+    """ANTI-VACUITY, and the probes are chosen against the ACTUAL mutant.
+
+    MEASURED MUTATION: unwrap the roster read (drop the ``except`` and let
+    ``_persona_by_id`` raise). ``args.func(args)`` then raises
+    ``json.JSONDecodeError`` out of the dispatch, so ``code`` is never bound and
+    ``data`` never parses — the mutant cannot satisfy ANY assertion here, and it
+    fails at the dispatch line rather than at a probe.
+
+    ``reason`` is the load-bearing probe, not "was it refused". SECOND MEASURED
+    MUTATION: have the typed refusal spend ``persona_not_found``'s reason and
+    message instead. It still refuses, still exits 2, still writes nothing and
+    still prints no traceback — every other probe here is satisfied — while
+    blaming the operator's id for a runtime fault and sending them to `harness
+    agent list` to look for a typo that does not exist. That is the collapse
+    ``PersonaRosterUnavailable`` exists to prevent, and the reason string plus
+    the two negative prose probes are the only things that catch it.
+    """
+
+    import hashlib
+
+    before = set(_actors())
+
+    code, data = _create(
+        capsys, "--idempotency-key", "verb-roster-fault", "--placement-id", "qa_fault"
+    )
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert data["ok"] is False
+    assert data["reason"] == "persona_roster_unavailable"
+    # The subject is the runtime, never the id — the operator must not be sent
+    # hunting a typo that does not exist.
+    assert "not in the agent roster" not in data["error"]
+    assert "harness agent list" not in data["error"]
+    # No traceback ANYWHERE, on either stream. Both are asserted because a
+    # partially-caught fault could print one and still exit cleanly.
+    assert "Traceback" not in captured.err
+    assert "Traceback" not in captured.out
+
+    # A refusal before the service is still a refusal that wrote nothing.
+    assert not paths.persona_instance_path("personainst_qa_fault").exists()
+    digest = hashlib.sha256("verb-roster-fault".encode("utf-8")).hexdigest()
+    assert not paths.agent_create_reservation_path(digest).exists()
+    assert set(_actors()) == before
+
+
+def test_both_create_lanes_name_the_same_roster_fault(
+    corrupt_roster, seeded_workspace, capsys
+):
+    """Parity means the SAME token, compared for equality rather than eyeballed.
+
+    The RPC lane's own typed-refusal witness
+    (``tests/agent_runtime/test_agent_create_service.py``'s
+    ``test_an_unreadable_roster_is_its_own_reason_not_persona_not_found``) stays
+    byte-unchanged; this is the cross-lane half it cannot express. Both the
+    machine-readable reason AND the operator prose are compared, because a fix
+    that shared only the reason would still hand the two lanes different
+    sentences for one fault — and the prose is what an operator acts on.
+    """
+
+    from agent_runtime import serve_rpc
+
+    _, cli = _create(
+        capsys, "--idempotency-key", "verb-parity-fault", "--placement-id", "qa_pf_cli"
+    )
+    rpc = serve_rpc.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": "rf1",
+            "method": "runtime.agent.create",
+            "params": {
+                "persona_id": "qa",
+                "workspace_id": WORKSPACE,
+                "position": [3.5, -1.25],
+                "idempotency_key": "rpc-parity-fault",
+                "placement_id": "qa_pf_rpc",
+            },
+        }
+    )["error"]
+
+    assert cli["reason"] == rpc["data"]["reason"] == "persona_roster_unavailable"
+    assert cli["error"] == rpc["message"]
+    # And the code the CLI's exit-code table was keyed on is the RPC lane's, so
+    # the two lanes cannot drift on severity either.
+    assert _AGENT_CREATE_EXIT_CODES_FOR_TEST()[rpc["code"]] == 2
+
+
+def _AGENT_CREATE_EXIT_CODES_FOR_TEST() -> dict:
+    """Read the verb's own table rather than re-spelling it here."""
+
+    from hermes_cli import harness
+
+    return harness._AGENT_CREATE_EXIT_CODES
+
+
+def test_a_roster_read_that_faults_once_refuses_instead_of_renaming_the_agent(
+    qa_persona, seeded_workspace, capsys, monkeypatch
+):
+    """The witness for RAISING rather than degrading to ``persona=None``.
+
+    MEASURED: catching the CLI's roster fault and returning ``None`` SURVIVES
+    both tests above — with no pre-resolved persona the service's own strict read
+    raises and produces the identical typed refusal, so on a DURABLE fault the
+    two are indistinguishable. The honest scope of that survival is one call:
+    they differ only when the roster read faults ONCE (a config being rewritten
+    under the process) and then succeeds.
+
+    That difference is not cosmetic. Under the degrade, the create PROCEEDS with
+    no persona object, so ``display_name`` falls back off the id — "Qa" where the
+    persona's configured name is "QA Agent" — and the wrong name is written into
+    a DURABLE roster row and a placement. A silent rename on a durable write is
+    strictly worse than a refusal the operator can re-run, which is why the
+    resolver raises. The probes are the refusal AND the absence of the instance
+    file; the mutant sets both the other way.
+    """
+
+    from agent_runtime.store import AgentStore
+
+    real_list_all = AgentStore.list_all
+    calls = {"n": 0}
+
+    def _fault_once(self):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("roster directory vanished mid-read")
+        return real_list_all(self)
+
+    monkeypatch.setattr(AgentStore, "list_all", _fault_once)
+
+    code, data = _create(
+        capsys, "--idempotency-key", "verb-transient", "--placement-id", "qa_transient"
+    )
+
+    assert code == 2
+    assert data["reason"] == "persona_roster_unavailable"
+    assert not paths.persona_instance_path("personainst_qa_transient").exists()
+    # The second read really would have succeeded — otherwise this test would
+    # pass against a permanently broken roster and prove nothing about the
+    # one-shot case.
+    assert calls["n"] == 1
+    assert AgentStore().list_all()
+
+
 def test_the_verb_refuses_a_missing_workspace_before_any_write(qa_persona, capsys):
     """ANTI-VACUITY, stated precisely rather than ritually.
 
