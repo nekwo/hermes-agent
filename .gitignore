@@ -158,6 +158,12 @@ docs/superpowers/*
 # (launch-time stale-bytecode sweep). Runtime state, never a code change.
 .bytecode-fingerprint
 .bytecode-fingerprint.tmp
+# The single-winner lock beside it (BW-H2): when a checkout change is detected,
+# ONE process sweeps and the rest defer to it instead of each paying a full purge
+# plus a recompile race. Held for the duration of one sweep and unlinked; a
+# crashed sweeper leaves it behind until the next launch breaks it as stale, so it
+# must not read as a local edit to `hermes update`'s untracked autostash.
+.bytecode-sweep.lock
 
 # Installer-written method stamp in the managed checkout root (scripts/install.sh).
 # Runtime metadata only — never a code change. Ignore so `git status` stays clean

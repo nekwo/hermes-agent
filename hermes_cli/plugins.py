@@ -41,6 +41,7 @@ import logging
 import os
 import sys
 import threading
+import time
 import types
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -1339,7 +1340,16 @@ class PluginManager:
             raise
 
     def _discover_and_load_inner(self) -> None:
-        """The actual discovery sweep — see :meth:`discover_and_load`."""
+        """The actual discovery sweep — see :meth:`discover_and_load`.
+
+        BW-0: the completion line reports how long the sweep took. Two full
+        54-plugin passes showed up in the 2026-08-17 cold boot's log (one per
+        concurrently-spawned child, both on the import path, both before either
+        child emitted its ``booting`` frame) and neither said what it cost — so
+        the share of that boot's import tax owed to discovery could only be
+        bracketed from the timestamps of the first and last registration lines.
+        """
+        _started = time.monotonic()
         manifests: List[PluginManifest] = []
 
         # 1. Bundled plugins (<repo>/plugins/<name>/)
@@ -1494,9 +1504,10 @@ class PluginManager:
 
         if manifests:
             logger.info(
-                "Plugin discovery complete: %d found, %d enabled",
+                "Plugin discovery complete: %d found, %d enabled, elapsed_ms=%d",
                 len(self._plugins),
                 sum(1 for p in self._plugins.values() if p.enabled),
+                int(max(0.0, time.monotonic() - _started) * 1000),
             )
 
     # -----------------------------------------------------------------------

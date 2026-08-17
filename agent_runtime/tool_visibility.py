@@ -8,7 +8,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-from model_tools import get_toolset_for_tool
 from tools.registry import registry
 
 from .chat_lane_toolsets import ChatLaneDrop, chat_lane_drop_rows
@@ -34,6 +33,70 @@ from .profile_readiness import declared_mcp_server_names, profile_readiness_for_
 from .tool_turn_history import load_tool_turn_history
 
 TOOL_VISIBILITY_SCHEMA_VERSION = 2
+
+
+def _ensure_tool_registry_populated():
+    """Import ``model_tools`` on first use and hand back its toolset lookup.
+
+    **BW-H3: this used to be a module-scope ``from model_tools import
+    get_toolset_for_tool``, and that one line was the most expensive statement in
+    a hermes boot.**
+
+    ``model_tools`` is not a passive module. Its module scope runs
+    ``discover_builtin_tools()`` — importing every module under ``tools/`` — and
+    then ``discover_plugins()``, a walk over 54 plugin manifests. And this module
+    is reachable at import time from ``hermes_cli.harness``, which
+    ``hermes_cli.main`` imports while assembling the top-level argument parser. So
+    EVERY ``hermes`` invocation paid a full builtin-tool import plus a full plugin
+    discovery walk before it had even parsed its own argv: `hermes --version`, the
+    launcher's health-probe child, and the serve child — which then pays the same
+    tool warmup AGAIN, deliberately, on a background thread after ``ready``
+    (``serve.py``'s ``_prewarm_provider_runtime``), which is where the cost is
+    supposed to live.
+
+    Measured with BW-0's own instrument, warm, matched A/B on this checkout —
+    three samples per side, this line eager vs deferred, medians:
+
+        interpreter_ms      2710 -> 1378   (-1332 ms, -49%)
+        harness_parser_ms   2110 ->  593
+
+    Paid by every hermes child in the system, not just boot. (An earlier pair of
+    UNMATCHED single samples read 2150 -> 1229 and is quoted in this stage's
+    commit message; the matched medians above are the number to trust.) On the
+    2026-08-17 cold boot the log shows two children each running the 54-plugin
+    walk before either emitted its ``booting`` frame.
+
+    **Why an accessor and not just a function-local import at the three call
+    sites.** Importing ``model_tools`` is also what POPULATES the ``registry``
+    singleton this module imported at line 12. A reader that touched
+    ``registry.get_all_tool_names()`` without going through here first would read
+    an EMPTY registry and answer "this persona has no tools" — a silent wrong
+    answer, not an error. Routing every registry read in this module through one
+    accessor makes that impossible to get wrong by accident; see
+    :func:`_cached_tool_names_for_toolsets`, which calls it before touching the
+    registry at all.
+
+    Deferring is safe because ``discover_plugins()`` is idempotent and every other
+    consumer in the tree already calls it defensively (``tools_config.py``,
+    ``plugins_cmd.py``, ``cli.py``, the gateway). This moves an import; it does
+    not invent a lifecycle.
+    """
+
+    from model_tools import get_toolset_for_tool as _lookup
+
+    return _lookup
+
+
+def get_toolset_for_tool(name: str) -> str | None:
+    """The toolset a tool belongs to.
+
+    Kept as a module attribute with the name it had when it was a re-exported
+    import, so the three call sites below and anything that patched
+    ``tool_visibility.get_toolset_for_tool`` are unaffected — the only change is
+    WHEN ``model_tools`` gets imported.
+    """
+
+    return _ensure_tool_registry_populated()(name)
 
 
 @lru_cache(maxsize=1)
@@ -456,11 +519,18 @@ def _cached_profile_readiness_for_visibility(
 
 @lru_cache(maxsize=128)
 def _cached_tool_names_for_toolsets(toolsets: tuple[str, ...], blocked_tool_names: tuple[str, ...]) -> tuple[str, ...]:
+    # FIRST, before touching the registry: importing ``model_tools`` is what
+    # registers the builtin tools INTO the singleton imported at module scope, and
+    # since BW-H3 that import is deferred. Reading ``get_all_tool_names()`` ahead
+    # of it would return an empty list and this function would answer "no tools"
+    # — memoised, for the process's lifetime, with no error anywhere. See
+    # :func:`_ensure_tool_registry_populated`.
+    toolset_for = _ensure_tool_registry_populated()
     blocked = set(blocked_tool_names)
     names = [
         name
         for name in registry.get_all_tool_names()
-        if name not in blocked and str(get_toolset_for_tool(name) or "") in set(toolsets)
+        if name not in blocked and str(toolset_for(name) or "") in set(toolsets)
     ]
     return tuple(sorted(names))
 

@@ -14,6 +14,96 @@
         "-q",
         "tests/hermes_cli/test_harness_cli.py::test_every_stage42_global_flag_is_honored"
       ]
+    },
+    {
+      "id": "bw0-import-segment-becomes-a-constant",
+      "path": "hermes_cli/_boot_clock.py",
+      "symbol": "import_tax_segments/main_import_ms",
+      "operator": "stamp-a-plausible-constant",
+      "find": "        segments[\"main_import_ms\"] = _ms(MAIN_IMPORT_COMPLETED - MAIN_IMPORT_STARTED)",
+      "replace": "        segments[\"main_import_ms\"] = 0",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_boot_clock_segments.py"
+      ]
+    },
+    {
+      "id": "bw0-unmeasured-segment-fabricates-zero",
+      "path": "hermes_cli/_boot_clock.py",
+      "symbol": "import_tax_segments/absence",
+      "operator": "absence-becomes-zero",
+      "find": "    if BYTECODE_SWEEP_MS is not None:\n        segments[\"bytecode_sweep_ms\"] = int(BYTECODE_SWEEP_MS)",
+      "replace": "    segments[\"bytecode_sweep_ms\"] = int(BYTECODE_SWEEP_MS or 0)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_boot_clock_segments.py"
+      ]
+    },
+    {
+      "id": "bwh2-bytecode-sweep-loses-its-single-winner-lock",
+      "path": "hermes_cli/main.py",
+      "symbol": "_sweep_stale_bytecode_if_checkout_changed/claim",
+      "operator": "remove-mutual-exclusion",
+      "find": "        claim = _claim_bytecode_sweep_lock(lock_path)",
+      "replace": "        claim = _SWEEP_CLAIM_CLAIMED",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_bytecode_sweep_lock.py"
+      ]
+    },
+    {
+      "id": "bwh2-unlockable-checkout-loses-the-stale-bytecode-guard",
+      "path": "hermes_cli/main.py",
+      "symbol": "_claim_bytecode_sweep_lock/unavailable",
+      "operator": "collapse-unavailable-onto-contended",
+      "find": "    except OSError:\n        return _SWEEP_CLAIM_UNAVAILABLE\n    try:\n        os.write(fd, f\"{os.getpid()}\\n\".encode(\"utf-8\"))",
+      "replace": "    except OSError:\n        return _SWEEP_CLAIM_CONTENDED\n    try:\n        os.write(fd, f\"{os.getpid()}\\n\".encode(\"utf-8\"))",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/hermes_cli/test_bytecode_sweep_lock.py"
+      ]
+    },
+    {
+      "id": "bwh3-deferred-model-tools-import-returns-to-module-scope",
+      "path": "agent_runtime/tool_visibility.py",
+      "symbol": "module scope/model_tools",
+      "operator": "restore-eager-import",
+      "find": "from tools.registry import registry\n\nfrom .chat_lane_toolsets import ChatLaneDrop, chat_lane_drop_rows",
+      "replace": "from model_tools import get_toolset_for_tool as _eager_lookup\nfrom tools.registry import registry\n\nfrom .chat_lane_toolsets import ChatLaneDrop, chat_lane_drop_rows",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_tool_visibility_import_deferral.py"
+      ]
+    },
+    {
+      "id": "bwh3-registry-read-before-the-deferred-import-populates-it",
+      "path": "agent_runtime/tool_visibility.py",
+      "symbol": "_cached_tool_names_for_toolsets/ordering",
+      "operator": "drop-the-population-barrier",
+      "find": "    toolset_for = _ensure_tool_registry_populated()\n    blocked = set(blocked_tool_names)",
+      "replace": "    toolset_for = get_toolset_for_tool\n    blocked = set(blocked_tool_names)",
+      "test": [
+        "{python}",
+        "-m",
+        "pytest",
+        "-q",
+        "tests/agent_runtime/test_tool_visibility_import_deferral.py"
+      ]
     }
   ]
 }
