@@ -1099,3 +1099,128 @@ def test_an_office_lanes_restart_free_join_does_not_suppress_a_stream_hydrate():
     finally:
         gate.set()
         hub.stop(join_timeout=2.0)
+
+
+# ── TC-1's debt: the producer thread must not outlive its test ───────────────
+
+
+def test_the_real_stream_source_releases_its_thread_inside_the_park():
+    """THE production fix for TC-1's "Debt found, not fixed".
+
+    The REAL producer, at PRODUCTION cadences, reached the only way that proves
+    anything: a real ``serve_loop`` with no injected ``stream_source_factory``,
+    so ``_stream_source`` builds ``stream_frames`` exactly as a served runtime
+    does — a 250ms tail poll that YIELDS only on a frame, so a quiet lane
+    surfaces once per 5s heartbeat.
+
+    ``StreamHub.stop()`` cannot interrupt a generator parked inside ``next()``,
+    and the hub ALREADY re-checks its stop event the instant ``next()`` returns
+    — which is why a stop check wrapped around the ``yield`` in
+    ``_stream_source`` buys nothing, and why this test measures the THREAD and
+    not the flag. Measured, both spellings left the producer alive ~3s past the
+    serve's exit: identical to no fix. The fix binds the hub's per-generation
+    stop event to ``request_control``'s cancellation seam, which the tail loop's
+    bounded sleep already probes every 100ms, so the generator returns
+    cooperatively at its own next safe point.
+
+    *Probed field:* the producer THREAD is gone, promptly, with NO event appended
+    to wake it. ``_drain_stream_producers``'s trick is deliberately not used
+    here: it would supply exactly the frame whose absence is the subject.
+
+    *Mutation:* drop the ``request_cancel_scope`` binding in ``_stream_source``
+    and the thread is still alive when this assertion's deadline expires — and
+    again when the autouse conftest tripwire looks, one fixture later.
+    """
+
+    assert not _live_producer_threads(), "a producer leaked in from an earlier test"
+
+    with _stdio_serve() as (pipe, sink):
+        pipe.send({"op": "subscribe", "lane": "stream"})
+        assert sink.wait_for("subscribed")["lane"] == "stream"
+        # The REAL producer is running and has served its hydrate, so it is now
+        # inside the tail poll — the park this test is about.
+        _until(lambda: _live_producer_threads(), what="the real producer to start")
+        _until(
+            lambda: [f for f in _stream_frames_from(sink) if f["type"] == "hydrate"],
+            what="the real producer's hydrate",
+        )
+        pipe.send({"op": "unsubscribe"})
+        sink.wait_for("unsubscribed")
+
+        # An empty room sets the stop event. Without the seam the generator learns
+        # that only when it next yields (up to the 5s heartbeat); with it, the
+        # tail loop's own 100ms cancellation probe sees it. 2s is deliberately
+        # BELOW the heartbeat, so passing cannot mean "we waited out the park".
+        _until(
+            lambda: not _live_producer_threads(),
+            what="the abandoned producer to release its thread",
+            timeout=2.0,
+        )
+
+
+def test_the_serve_producer_still_takes_the_hubs_stop_event():
+    """The wiring, pinned separately, because losing it FAILS QUIET.
+
+    The hub passes the stop event only to a factory whose signature accepts one
+    (``serve_stream_hub._accepts_stop_argument``) and calls it with no argument
+    otherwise — a deliberate design, and the reason a ``_stream_source`` that
+    dropped its parameter would not raise anything: the seam would simply never
+    be bound again. The source is the witness for the same reason the dispatcher
+    scrape above is one: this is a claim about a closure no test can reach.
+    """
+
+    source = SERVE_SOURCE.read_text(encoding="utf-8")
+    assert "def _stream_source(stop" in source, (
+        "`_stream_source` no longer accepts the hub's per-generation stop event. "
+        "The hub probes BY SIGNATURE and silently falls back to a no-argument "
+        "call, so nothing raises — the producer just goes back to being "
+        "uninterruptible between frames (TC-1)."
+    )
+    assert "request_cancel_scope(generation_stop)" in source, (
+        "`_stream_source` no longer binds the stop event to `request_control`'s "
+        "cancellation seam. That binding is the ONLY thing that shortens the park "
+        "inside `next()`: the hub's own post-`next()` check already covers "
+        "everything a stop check around the `yield` would."
+    )
+
+
+def test_the_producer_teardown_tripwire_is_still_installed():
+    """The general fence must still exist, or this file's drain is alone again.
+
+    The two are a pair by design: ``_drain_stream_producers`` above is ONE file
+    being careful about its own producers, and the autouse fixture in
+    ``tests/agent_runtime/conftest.py`` is what catches the next author who
+    attaches the real producer and does not know to. If the fixture is deleted,
+    that trade stops being true and the deletion should cost a red test rather
+    than nothing — the shape EG-0.1's
+    ``test_no_midtest_monkeypatch_undo.py::test_the_teardown_tripwire_is_still_installed``
+    records for the pin tripwire.
+    """
+
+    from tests.agent_runtime import conftest as package_conftest
+
+    assert hasattr(package_conftest, "no_serve_stream_producer_outlives_the_test"), (
+        "the serve-stream producer tripwire (EG-4.1 / TC-1) is gone. It is the "
+        "general half of this file's `_drain_stream_producers`: a producer parked "
+        "in `next()` past its test outlives `isolate_agent_runtime_root`'s pin "
+        "and reads the OPERATOR's live store. Restore it, or state why the "
+        "per-file drain is now enough."
+    )
+    source = Path(package_conftest.__file__).read_text(encoding="utf-8")
+    assert "_live_stream_producer_names() - before" in source, (
+        "the producer tripwire no longer diffs the live producer threads against "
+        "the ones running at setup; a tripwire that stopped probing is worse than "
+        "none, because the fence still looks staffed"
+    )
+    # The fence must be finalized BEFORE the sandbox is unpinned, or its own
+    # grace period becomes the leak window it exists to close. Declaring the root
+    # fixture is what orders it, so that dependency IS the guarantee.
+    assert (
+        "def no_serve_stream_producer_outlives_the_test(isolate_agent_runtime_root)"
+        in source
+    ), (
+        "the producer tripwire no longer declares `isolate_agent_runtime_root`, "
+        "so pytest is free to finalize it AFTER the root pin is unwound — and "
+        "every millisecond it then spends waiting for a producer is spent against "
+        "the operator's live runtime root"
+    )

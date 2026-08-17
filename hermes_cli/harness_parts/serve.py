@@ -1884,8 +1884,47 @@ def serve_loop(
             except (TypeError, ValueError):
                 stream_factory_takes_fold_entities = False
 
-        def _stream_source() -> Any:
-            """The shared subscription producer. One per serve, never per client."""
+        def _stream_source(stop: Any = None) -> Any:
+            """The shared subscription producer. One per serve, never per client.
+
+            Takes the hub's per-GENERATION stop event (the hub probes for it by
+            signature — ``serve_stream_hub._accepts_stop_argument``) and hands it
+            to the runtime's own cancellation seam, which is what makes an
+            abandoned generation stop before its next frame instead of after it.
+
+            WHY THE SEAM AND NOT A CHECK BETWEEN FRAMES. Checking ``stop`` around
+            the ``yield`` here buys NOTHING, and measuring it is the only way to
+            know that: ``StreamHub._produce`` already tests ``_should_stop``
+            immediately after every ``next()``, so a wrapper that tested the same
+            flag at the same moment would be a second copy of a check that had
+            already been made. Measured on the real producer at production
+            cadences, both spellings left the producer thread alive for 3.08s past
+            ``hub.stop(join_timeout=2.0)`` — identical to no fix at all. A fence
+            that changes nothing while looking staffed is worse than an absent
+            one.
+
+            The park is INSIDE ``next()``: ``stream_frames`` polls its event tail
+            every 250ms and only YIELDS on a frame, so a quiet lane surfaces once
+            per 5s heartbeat and nothing outside can interrupt the gap. The one
+            thing that can is ``request_control``, the seam that module exists for
+            — "the read-only ``harness stream`` handler is infinite and must
+            release its worker when its consumer disconnects", which is this
+            situation exactly, one caller over. Bound to the stop event, every
+            ``request_cancelled()`` probe inside the tail loop (its bounded sleep
+            slices at 100ms, and the snapshot-build wait beside it) becomes a
+            probe of THIS generation's liveness, and the generator returns
+            cooperatively at its own next safe point. Same measurement,
+            afterwards: ``hub.stop()`` returns with zero producers alive.
+
+            The ``stop`` default keeps the factory callable with no argument (a
+            direct caller, and the hub itself if the probe ever stops matching),
+            in which case the scope is bound to an event nobody sets and the
+            behaviour is exactly what it was.
+
+            An INJECTED ``stream_source_factory`` is deliberately not handed the
+            event: its arity contract is the fold-set one negotiated above, and a
+            test fake owns its own lifecycle by construction.
+            """
 
             fold_entities = _accepted_fold_entities()
             if stream_source_factory is not None:
@@ -1894,21 +1933,35 @@ def serve_loop(
                     if stream_factory_takes_fold_entities
                     else stream_source_factory()
                 )
+            from agent_runtime.request_control import request_cancel_scope
             from agent_runtime.serde import to_jsonable
             from agent_runtime.stream import stream_frames
 
+            # Never-set stand-in for the no-argument call, so the body below has
+            # ONE shape rather than a scoped and an unscoped variant to keep in
+            # step.
+            generation_stop = stop if stop is not None else threading.Event()
+
             def _generate():
-                # ``caller="hub"``: every build this producer pays for is
-                # attributed to the SHARED lane rather than to whichever
-                # subscriber happened to trigger the restart — the serve hub is
-                # one producer for N subscribers by construction, and a build
-                # line naming a subscriber would be a lie about who pays.
-                for frame in stream_frames(fold_entities=fold_entities, caller="hub"):
-                    # Byte-for-byte the frames ``harness stream`` writes: a
-                    # subscriber folds the same hydrate/delta/patch/heartbeat
-                    # shapes it already folds, so the socket lane introduces no
-                    # second stream contract to keep in sync.
-                    yield to_jsonable(frame)
+                # The scope is entered on the PRODUCER thread — this body runs
+                # there, and a fresh thread starts with an empty context, so
+                # nothing of serve's own dispatch is being overwritten and the
+                # reset on close lands in the same context that set it.
+                with request_cancel_scope(generation_stop):
+                    # ``caller="hub"``: every build this producer pays for is
+                    # attributed to the SHARED lane rather than to whichever
+                    # subscriber happened to trigger the restart — the serve hub
+                    # is one producer for N subscribers by construction, and a
+                    # build line naming a subscriber would be a lie about who
+                    # pays.
+                    for frame in stream_frames(
+                        fold_entities=fold_entities, caller="hub"
+                    ):
+                        # Byte-for-byte the frames ``harness stream`` writes: a
+                        # subscriber folds the same hydrate/delta/patch/heartbeat
+                        # shapes it already folds, so the socket lane introduces
+                        # no second stream contract to keep in sync.
+                        yield to_jsonable(frame)
 
             return _generate()
 

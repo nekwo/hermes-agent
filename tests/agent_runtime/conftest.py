@@ -1,4 +1,6 @@
 import os
+import threading
+import time
 
 import pytest
 
@@ -199,6 +201,117 @@ def isolate_agent_runtime_root(tmp_path, monkeypatch):
         "HERMES_AGENT_RUNTIME_ROOT is now "
         f"{os.environ.get('HERMES_AGENT_RUNTIME_ROOT')!r}; this fixture pinned "
         f"it to {str(root)!r}."
+    )
+
+
+#: Producer threads the hub names per generation (``serve_stream_hub.subscribe``).
+_STREAM_PRODUCER_THREAD_PREFIX = "serve-stream-producer-"
+
+#: How long the tripwire below will wait for a producer to finish winding down.
+#: Bounded, and spent INSIDE the still-pinned sandbox, which is the whole reason
+#: it is not a weakening: see the fixture's docstring.
+_STREAM_PRODUCER_GRACE_SECONDS = 2.0
+_STREAM_PRODUCER_POLL_SECONDS = 0.02
+
+
+def _live_stream_producer_names() -> set:
+    return {
+        thread.name
+        for thread in threading.enumerate()
+        if thread.name.startswith(_STREAM_PRODUCER_THREAD_PREFIX) and thread.is_alive()
+    }
+
+
+@pytest.fixture(autouse=True)
+def no_serve_stream_producer_outlives_the_test(isolate_agent_runtime_root):
+    """Fail LOUDLY when a ``serve-stream-producer-*`` thread survives a test body.
+
+    =====================================================================
+    THE PRODUCER TRIPWIRE (EG-4.1 / TC-1, the 2026-08-17 leak by thread)
+    =====================================================================
+
+    Same leak class as EG-0.1 above, reached by a route that tripwire cannot
+    see: it watches the PINS, and this one walks out on a THREAD.
+
+    ``StreamHub.stop()`` cannot interrupt a generator parked inside ``next()``
+    (its own module docstring says so, and CPython refuses ``close()`` on an
+    executing generator anyway). The real producer —
+    ``hermes_cli/harness_parts/serve.py::_stream_source`` over
+    ``stream_frames`` — polls its event tail every 250ms and only YIELDS on a
+    frame, so on a quiet lane it surfaces once per 5s heartbeat. A test that
+    attaches the REAL producer through ``serve_loop`` could therefore return
+    while a daemon producer thread was still parked; the fixture above then
+    unwound ``HERMES_AGENT_RUNTIME_ROOT``, and that producer's next EventLog
+    read resolved against the OPERATOR's live store. Observed while building
+    EG-4.1 as a ``producer_error:JSONDecodeError`` — the producer reading a
+    foreign event log mid-line — and recorded as debt in
+    ``docs/agent-runtime-harness/SINGLE_TRANSPORT_COLLAPSE_PLAN_2026-08-16.md``
+    (TC-1, "Debt found, not fixed"). Read-only today, by luck rather than by
+    design: nothing about the route made it a read.
+
+    ``test_serve_stream_lane_parity.py`` drains its own producers and asserts the
+    drain (``_drain_stream_producers``). That is one file being careful. This is
+    the fence for the next author, who will not know to.
+
+    WHY IT SHOULD NEVER FIRE. ``_stream_source`` now binds the hub's
+    per-generation stop event to ``request_control``'s cancellation seam, so an
+    abandoned generation returns at its own next safe point (~100ms) instead of
+    at its next frame (~5s) — measured, ``hub.stop()`` comes back with zero
+    producers alive. This fixture is what turns a regression in that into a red
+    test instead of another silent write to the live root.
+
+    WHY THE GRACE PERIOD IS NOT A WEAKENING. The claim being enforced is not
+    "the thread was gone by the body's last line" — it is "the thread was gone
+    before the sandbox was unpinned", because the unpinning is what makes a
+    surviving read dangerous. This fixture DECLARES ``isolate_agent_runtime_root``,
+    so it is set up after it and finalized before it: every millisecond of the
+    wait below is spent with the root pin, both worktree-base pins and the
+    ``HERMES_HOME`` pin still standing. A producer that exits inside the grace
+    never had an unpinned moment to read in. One that does not exit inside it
+    would have leaked, and is named.
+
+    Only threads that appeared DURING this test are reported. A producer already
+    running at setup belongs to whatever started it — reporting it here would
+    turn one leak into a red mark on every test that ran afterwards, which is how
+    a fence gets deleted for noise.
+    """
+
+    before = _live_stream_producer_names()
+
+    yield
+
+    leaked = _live_stream_producer_names() - before
+    if not leaked:
+        return
+    deadline = time.monotonic() + _STREAM_PRODUCER_GRACE_SECONDS
+    while leaked and time.monotonic() < deadline:
+        time.sleep(_STREAM_PRODUCER_POLL_SECONDS)
+        leaked = _live_stream_producer_names() - before
+    assert not leaked, (
+        "A SERVE STREAM PRODUCER THREAD OUTLIVED THIS TEST: "
+        f"{sorted(leaked)} still alive {_STREAM_PRODUCER_GRACE_SECONDS}s after "
+        "the body finished. This is the 2026-08-17 live-store leak by THREAD "
+        "(EG-4.1 / TC-1), the sibling of the teardown tripwire above: in a "
+        "moment this fixture returns, `isolate_agent_runtime_root` unwinds "
+        "`HERMES_AGENT_RUNTIME_ROOT`, and that producer's next EventLog read "
+        "resolves against the OPERATOR's live runtime root in X:/Eternia/.hermes "
+        "— which is how a `producer_error:JSONDecodeError` from a foreign event "
+        "log was seen in the first place. `StreamHub.stop()` cannot interrupt a "
+        "generator parked in `next()`, so stopping the hub is not by itself "
+        "enough.\n\n"
+        "FIX, in order of preference:\n"
+        "  1. Make the SOURCE stop-aware. `serve.py`'s `_stream_source` binds "
+        "the hub's per-generation stop event to `request_control`'s cancellation "
+        "seam so the tail loop abandons within ~100ms; if you injected your own "
+        "`stream_source_factory`, take the stop event and honour it the same way "
+        "(`test_serve_rpc_office_subscribe_live_hub.py::live_hub` is the shape).\n"
+        "  2. Drain before returning: append one event to wake the parked "
+        "generator, then wait for the thread to exit — "
+        "`test_serve_stream_lane_parity.py::_drain_stream_producers`.\n"
+        "  3. Shorten the cadences. A producer built at "
+        "`heartbeat_interval_seconds=5.0` (the production default) is parked for "
+        "up to five seconds between frames and nothing outside it can say "
+        "otherwise."
     )
 
 

@@ -586,10 +586,15 @@ def _staggered_source(alive: set, exits: list):
     """Uninterruptible producers whose parks get SHORTER with each generation.
 
     Two things have to be true at once for this to test the join and nothing
-    else. The producers must be genuinely uninterruptible between frames —
-    which is the real ``_stream_source``, since it takes no stop event and can
-    only notice anything when it next yields — and the NEWEST one must not be
-    the slowest.
+    else. The producers must be genuinely uninterruptible between frames — which
+    is what ``stop()`` has to cope with in the general case, and what the real
+    ``_stream_source`` USED to be: it now takes the per-generation stop event and
+    binds it to ``request_control``'s cancellation seam (EG-4.1 / TC-1), so it
+    abandons its park within ~100ms. That fix is a property of one source, not of
+    the hub, and the hub must still join a source that has no such seam — an
+    injected factory, or a future producer over a blocking client library. Hence
+    these deliberately deaf generators. And the NEWEST one must not be the
+    slowest.
 
     That second point is the whole design. With every generation sleeping the
     same 0.4s, joining only the newest still waited 0.4s, and the older ones
