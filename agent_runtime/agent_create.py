@@ -201,6 +201,21 @@ def _persona_is_unknown(persona_id: str, persona: Any | None = None) -> bool:
     resolver is a strict SUPERSET of :func:`resolve_persona` (it also handles
     profile synthesis and instance-id spellings), so "the caller found one"
     settles the question without a second, narrower lookup contradicting it.
+
+    KNOWN SHARP EDGE, recorded rather than silently accepted.
+    :func:`resolve_persona` returns ``None`` for BOTH "no such persona" and
+    "this process could not load the config at all" — it swallows every
+    exception on purpose, because its original job was only to supply a display
+    name and a miss there is harmless. It is no longer only that: a config the
+    runtime cannot read now turns EVERY bare-id create into
+    ``persona_not_found``, with a message that blames the operator's id. Before
+    UC-H2 the same fault degraded quietly to a title-cased display name.
+
+    Left as-is deliberately — failing closed when the roster is unknown is the
+    defensible half of the trade, and separating the two cases means changing
+    ``resolve_persona``'s contract for its other caller, which is its own
+    change with its own tests. But this is the most likely way this stage
+    misbehaves in the field, and the cure is to distinguish the two ``None``s.
     """
 
     if persona is not None:
