@@ -310,6 +310,39 @@ def test_a_malformed_position_is_one_refusal_not_an_argparse_traceback(
     assert data["reason"] == "position_invalid"
 
 
+def test_the_human_output_path_prints_rather_than_raising(
+    qa_persona, seeded_workspace, capsys
+):
+    """Every other test passes ``--json``. The default path is a separate
+    format string over the same dict, and an unguarded key there would be a
+    KeyError an operator meets and no test does."""
+
+    code = _dispatch(
+        [
+            "harness", "agent", "create",
+            "--persona", "qa",
+            "--workspace", WORKSPACE,
+            "--pos", "1", "2",
+            "--placement-id", "qa_human",
+        ]
+    )
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "personainst_qa_human" in out
+
+    # And the refusal's human path, which formats a different dict.
+    code = _dispatch(
+        [
+            "harness", "agent", "create",
+            "--persona", "qa_agent",
+            "--workspace", WORKSPACE,
+            "--pos", "1", "2",
+        ]
+    )
+    assert code == 2
+    assert "harness agent list" in capsys.readouterr().out
+
+
 # ── the verb exists on the parser at all ─────────────────────────────────────
 
 
