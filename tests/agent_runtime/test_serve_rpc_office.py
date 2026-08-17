@@ -152,6 +152,11 @@ EXPECTED_RESULT_KEYS = {
     "updated_at",
     "items",
     "actors_truncated",
+    # EG-1.5: the second way this projection can be short. ``actors_truncated``
+    # counts a cut the runtime CHOSE; this one counts actor files that exist and
+    # would not decode, which the store's skip-and-continue used to hide — and
+    # which made the sibling above compute 0 from an already-shortened list.
+    "actors_unreadable",
 }
 EXPECTED_ITEM_KEYS = {
     "item_id",
@@ -200,6 +205,7 @@ def test_the_office_method_answers_one_workspace_with_the_canvas_projection():
     assert result["revision"] == surface.revision
     assert result["updated_at"].endswith("Z")
     assert result["actors_truncated"] == 0
+    assert result["actors_unreadable"] == 0
 
     # Flattened across actors, in ``list_actors`` order (actor_key ascending),
     # file order within an actor. Deterministic on purpose: a client that

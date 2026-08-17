@@ -354,13 +354,21 @@ def office_subscription_key(connection_key: str | None, workspace_id: str) -> st
     return f"rpc:office:{connection_key or 'stdio'}:{workspace_id}"
 
 
-def _event_offset_of(watermark: Any) -> int | None:
-    """The frame's post-batch offset, or None when it carries none.
+def event_offset_of(watermark: Any) -> int | None:
+    """The offset a watermark block carries, or None when it carries none.
 
     None is a THIRD answer, not a zero. A frame we cannot place must not be
     silently dropped by the baseline gate — an unplaceable frame is exactly the
     case where a resync is the honest reply, and coercing it to 0 would make it
     look like ancient history and drop it.
+
+    PUBLIC, and asked of ``parity.events_watermark()``'s block as well as of a
+    frame's (``serve_rpc._runtime_office_subscribe``). "What position does this
+    watermark state?" is ONE question, and it now has one answer: the subscribe
+    handler used to ask it a second way (``int(… or 0)``) and got the opposite
+    one, folding an unreadable log into the head of the log. The three absences
+    — no block, an explicit ``None`` from a failed stat, an unparseable value —
+    are all "no position", and none of them is 0.
     """
 
     if not isinstance(watermark, dict):
@@ -395,7 +403,7 @@ def office_patch_sink(
         if frame_type in _LIVENESS_FRAME_TYPES:
             return
         watermark = frame.get("watermark") or {}
-        event_offset = _event_offset_of(watermark)
+        event_offset = event_offset_of(watermark)
         # THE BASELINE GATE RUNS BEFORE THE TYPE BRANCH, and that ordering is
         # the whole rule rather than a detail.
         #
@@ -566,6 +574,22 @@ NO_PUSH_LANE = "push_lane_unavailable"
 #: to reconnect and subscribe again, never to assume this runtime cannot push.
 PUSH_LANE_DRAINING = "push_lane_draining"
 
+#: The event log's tail could not be read, so there is no offset to baseline a
+#: subscription at. The THIRD member of this vocabulary, and transient for the
+#: same reason ``PUSH_LANE_DRAINING`` is: the cure is to ask again once the log
+#: is readable, never to conclude this runtime cannot push.
+#:
+#: It exists because the handler used to answer this state with ``0`` — the one
+#: value ``parity.events_watermark`` documents as maximally damaging, because
+#: every reader takes it for a real position. A baseline of 0 disables the
+#: sink's own ``<=`` gate, so the hub's mandatory post-subscribe hydrate is
+#: forwarded as a resync, the client re-subscribes, the producer restarts, and
+#: the next hydrate resyncs it again — the loop the baseline-before-type
+#: ordering in :func:`office_patch_sink` exists to end, at a full core per lap
+#: for every subscriber in the room. Refusing costs one reply; guessing costs
+#: the room.
+BASELINE_UNAVAILABLE = "baseline_unavailable"
+
 
 class OfficeSubscriptions:
     """Which connections are subscribed to which workspaces, and the teardown.
@@ -651,6 +675,23 @@ class OfficeSubscriptions:
     def bound(self) -> bool:
         with self._lock:
             return self._hub_factory is not None
+
+    def service_log(self) -> Callable[[dict[str, Any]], None] | None:
+        """The running serve loop's log sink, or None when nothing is bound.
+
+        Exposed for the ONE refusal the handler decides before it ever reaches
+        :meth:`subscribe` — an unreadable event log (:data:`BASELINE_UNAVAILABLE`).
+        The registry writes its own receipts from inside the lock, but a refusal
+        that never gets that far still has to be attributable: an operator seeing
+        clients fail to subscribe needs the platform error class that caused it,
+        and that class is discarded by the time the reply is on the wire.
+
+        Read through the lock, and cleared by ``bind(None)`` like ``_log``
+        itself, so a stopped loop's sink can never be handed a line.
+        """
+
+        with self._lock:
+            return self._log
 
     # ── the lane ────────────────────────────────────────────────────────────
 

@@ -82,7 +82,10 @@ here), not cosmetics, and which no client can derive from the ids it already
 has. The bound is the snapshot's own ``MAX_OFFICE_ACTORS_PROJECTED``, reused
 rather than re-declared, and a truncation is ACCOUNTED (``actors_truncated``) —
 a silent cut that reads as an empty office is the failure this whole document
-is about.
+is about. So is the OTHER way the list can be short: an actor file that exists
+and will not decode is counted too (``actors_unreadable``), because the store's
+skip-and-continue used to hand this projection a shortened list that then
+computed its own truncation from the shortened length and arrived at zero.
 
 Prediction and reconciliation (decision doc, Stage 2c)
 -----------------------------------------------------
@@ -439,7 +442,12 @@ def _office_projection(workspace_id: str) -> dict | None:
         return None
 
     surface = store.get_surface(workspace_id)
-    actors = store.list_actors(workspace_id)
+    # ``scan_actors``, not ``list_actors``: the cut below is measured against the
+    # scan's own length, and a list that had already dropped its unreadable files
+    # made that subtraction answer 0 — a projection shortened by the platform,
+    # describing itself as complete.
+    scan = store.scan_actors(workspace_id)
+    actors = scan.actors
     projected = actors[:MAX_OFFICE_ACTORS_PROJECTED]
 
     items = [
@@ -479,6 +487,13 @@ def _office_projection(workspace_id: str) -> dict | None:
         # that read as a smaller office would be indistinguishable from actors
         # having been removed.
         "actors_truncated": max(0, len(actors) - len(projected)),
+        # The OTHER way this projection can be short, and the one it used to
+        # hide completely: files that exist and would not decode. Its sibling
+        # above counts a cut WE chose; this one counts rows the platform took.
+        # Additive — an old launcher ignores the key — and it rides the shared
+        # ``_office_projection``, so the subscribe baseline and ``get`` cannot
+        # disagree about how complete the office they just handed over was.
+        "actors_unreadable": scan.unreadable,
     }
 
 
@@ -561,6 +576,11 @@ def _runtime_office_subscribe(
         is precisely why it must not share a name with the case above. When the
         caller held a subscription, ``data.prior_subscription_released`` says
         so: the re-baseline's teardown already ran, so the old lane is gone too.
+    ``baseline_unavailable``
+        The event log's tail could not be read, so there is no offset to
+        baseline at. Transient like the case above, and the reason this method
+        no longer answers an unreadable log with ``0`` — see the refusal at the
+        watermark read for what a fabricated baseline costs the whole room.
 
     ``already_subscribed`` is GONE. It was the only ``ERR_CONFLICT`` this method
     raised, and its disappearance also retires a mislabel that shipped with it:
@@ -630,10 +650,12 @@ def _runtime_office_subscribe(
     from agent_runtime.locks import office_lock
     from agent_runtime.parity import events_watermark
     from agent_runtime.serve_office_subscriptions import (
+        BASELINE_UNAVAILABLE,
         NO_PUSH_LANE,
         OFFICE_FOLD_ENTITIES,
         OFFICE_SUBSCRIPTIONS,
         PUSH_LANE_DRAINING,
+        event_offset_of,
         normalize_office_fold_entities,
         normalize_office_subscribe_reason,
     )
@@ -689,10 +711,63 @@ def _runtime_office_subscribe(
                 f"unknown workspace: {workspace_id}",
                 {"reason": "workspace_not_found", "workspace_id": workspace_id},
             )
-        try:
-            baseline_offset = int(events_watermark().get("event_offset") or 0)
-        except (TypeError, ValueError):
-            baseline_offset = 0
+        # ONE reader of the watermark, asked ONE question, through the same
+        # helper the sink's baseline gate uses. ``int(… or 0)`` used to sit here
+        # and answered a DIFFERENT question: it folded an unreadable log —
+        # ``{"event_offset": None, "event_offset_error": ...}``, which
+        # ``events_watermark`` documents as a routine outcome on this platform
+        # under AV scanning — into offset 0, with no exception for the typed
+        # ``except`` to catch and the error string discarded. A subscription
+        # baselined at 0 has no gate at all, so the hub's mandatory hydrate came
+        # back as a resync and the client re-subscribed, restarting the producer
+        # for the whole room, forever.
+        #
+        # Cannot-read is now its own answer. No registration happens on this
+        # path: the reply is a transient refusal beside the other two, and the
+        # client's existing degrade ladder already holds this shape without
+        # spinning.
+        watermark = events_watermark()
+        baseline_offset = event_offset_of(watermark)
+        if baseline_offset is None:
+            # The discarded half, kept: the reply cannot carry a platform error
+            # string (a client has no use for one and it is not part of the
+            # vocabulary), but an operator watching subscribes fail needs to
+            # know WHY the log could not be read. Class only — the same
+            # disclosure rule the rest of this runtime's receipts follow — and
+            # the ``-`` sentinel rather than an absent key, because a field that
+            # appears only sometimes is one a log reader stops looking for.
+            raw_error = watermark.get("event_offset_error")
+            error_class = (
+                str(raw_error).split(":", 1)[0].strip() or "-"
+                if isinstance(raw_error, str) and raw_error.strip()
+                else "-"
+            )
+            log = OFFICE_SUBSCRIPTIONS.service_log()
+            if log is not None:
+                log(
+                    {
+                        "event": "serve_office_subscribe_refused",
+                        "reason": BASELINE_UNAVAILABLE,
+                        "workspace_id": workspace_id,
+                        "error": error_class,
+                    }
+                )
+            return err(
+                rid,
+                ERR_INVALID_REQUEST,
+                "this runtime cannot read its event log's tail; subscribe again",
+                {
+                    "reason": BASELINE_UNAVAILABLE,
+                    "workspace_id": workspace_id,
+                    # Shape parity with the registry's own refusals below: this
+                    # lane's clients branch on ``data.reason`` and decode the
+                    # rest, so a key that exists on two of three transient
+                    # refusals would have to be special-cased. Always False
+                    # here, and honestly so — the registry was never called, so
+                    # no prior subscription was displaced.
+                    "prior_subscription_released": False,
+                },
+            )
         outcome = OFFICE_SUBSCRIPTIONS.subscribe(
             connection_key=context.connection_key,
             workspace_id=workspace_id,
@@ -870,7 +945,7 @@ def _runtime_office_upsert(
     untouched — ``harness office actor-restore``, and the CLI's own override.
     """
 
-    from agent_runtime.errors import StaleRevision, SyncConflict
+    from agent_runtime.errors import ArchiveUnreadable, StaleRevision, SyncConflict
     from agent_runtime.office_class_key_guard import class_key_collision
     from agent_runtime.office_store import OfficeStore
 
@@ -997,6 +1072,26 @@ def _runtime_office_upsert(
             str(exc),
             {"reason": "sync_conflict", "workspace_id": workspace_id},
         )
+    except ArchiveUnreadable as exc:
+        # The archived copy of this key exists and would not decode, so the
+        # revision this write must bump is unknown. NOT a 4090: no guard refused
+        # anything and there is no prediction to rebase — the store declined to
+        # invent a base. ``-32600`` is the band this runtime already spends on
+        # "cannot serve this right now" with ``data.reason`` as the branch
+        # (``baseline_unavailable`` on the subscribe lane), and the cure is the
+        # same shape: ask again once the file is readable, or have an operator
+        # repair/remove the archive copy. Retrying is safe and may well work —
+        # an AV hold is transient — but the client must not paper over it by
+        # writing UNGUARDED, which is what a revision of 1 would have invited.
+        return err(
+            rid,
+            ERR_INVALID_REQUEST,
+            str(exc),
+            {
+                "reason": ArchiveUnreadable.code,
+                "workspace_id": workspace_id,
+            },
+        )
     except ValueError as exc:
         # Every ``invalid_request: …`` the store raises while normalizing the
         # payload — a missing persona_id, an unparseable position, a
@@ -1067,7 +1162,7 @@ def _runtime_office_remove(
     than a write that undoes it.
     """
 
-    from agent_runtime.errors import NotFound, StaleRevision
+    from agent_runtime.errors import ArchiveUnreadable, NotFound, StaleRevision
     from agent_runtime.office_store import OfficeStore
 
     workspace_id = _workspace_id_param(params)
@@ -1167,6 +1262,28 @@ def _runtime_office_remove(
                 "workspace_id": workspace_id,
                 "actor_key": actor_key,
                 "expect_revision": expect_revision,
+            },
+        )
+    except ArchiveUnreadable as exc:
+        # The already-archived (idempotent) branch: this key's archive copy is
+        # the only place its post-archive revision lives, and this ack CARRIES
+        # that revision as the token a later guarded write must present. A decode
+        # failure there is the token going missing, so the refusal is typed with
+        # the same reason the upsert leg spends — one string per condition, not
+        # one per verb.
+        #
+        # What it replaced was worse than an untyped crash: ``JSONDecodeError``
+        # is a ``ValueError``, so the bare read fell into the ``actor_invalid``
+        # arm below and told the client to FIX ITS PAYLOAD for a corrupt file on
+        # the server. The mutation test for this arm still shows ``-32602``.
+        return err(
+            rid,
+            ERR_INVALID_REQUEST,
+            str(exc),
+            {
+                "reason": ArchiveUnreadable.code,
+                "workspace_id": workspace_id,
+                "actor_key": actor_key,
             },
         )
     except ValueError as exc:
