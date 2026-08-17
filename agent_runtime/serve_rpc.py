@@ -972,41 +972,6 @@ def _runtime_office_upsert(
 # ── runtime.agent.create ─────────────────────────────────────────────────────
 
 
-def _agent_create_failure(
-    reservation, *, instance_id: str, failure: dict[str, Any]
-) -> dict[str, Any]:
-    """Compensate a failed placement and return the ``data`` block for the reply.
-
-    Order matters and is the same order the whole method uses: undo the write
-    that DID land before answering, so the client's failure and the store agree.
-    ``rolled_back`` is the field a client branches on and it is never optimistic
-    — a compensation that raised reports ``false`` and names the instance that
-    survived, because the alternative (claiming a rollback that did not happen)
-    is the half-state this method exists to abolish, now with a lie on top.
-    """
-
-    from agent_runtime.persona_assignments import PersonaInstanceStore
-
-    try:
-        PersonaInstanceStore().retire(
-            instance_id,
-            reason="runtime.agent.create placement failed",
-            requested_by="runtime.agent.create",
-        )
-    except Exception as exc:  # noqa: BLE001 - every retire refusal lands here
-        reservation.mark_rollback_failed(
-            failure, rollback_error=f"{type(exc).__name__}: {exc}"
-        )
-        return {
-            **failure,
-            "rolled_back": False,
-            "persona_instance_id": instance_id,
-            "rollback_error": f"{type(exc).__name__}: {exc}",
-        }
-    reservation.mark_rolled_back(failure)
-    return {**failure, "rolled_back": True}
-
-
 @method("runtime.agent.create")
 def _runtime_agent_create(
     rid: Any, params: dict, context: RpcContext | None = None
@@ -1027,250 +992,27 @@ def _runtime_agent_create(
     purpose, so the launcher's existing prediction and ``expect_revision``
     bookkeeping keeps working with no new decoder.
 
-    Why the launcher must stop making two calls
-    -------------------------------------------
-    Today a palette drop awaits ``persona.instance.create`` on the argv lane and
-    then, ≥600 ms later, flushes ``runtime.office.upsert`` on this one. Two
-    transports, two independent failures, no join — and BOTH half-states are
-    reachable: an instance whose placement never lands (R#37), and a placement
-    naming an instance the runtime never minted, which the office store accepts
-    because it validates payload shape and class keys, not instance existence.
-    Here the two writes happen inside one handler milliseconds apart, so the
-    stream producer's 200 ms settle joins them into one batch by construction
-    rather than by luck.
+    UC-H1 — this is a TRANSLATION SHIM and nothing else
+    ---------------------------------------------------
+    The sequence (reserve → mint → place → compensate/resume) lives in
+    ``agent_create.perform_agent_create``, which is the same function
+    ``harness agent create`` calls with no serve in the picture. Everything
+    below is JSON-RPC envelope work: the reply dict and every ``data.reason``
+    string come out of the service unchanged, because the launcher's
+    ``missionAgentCreateReasonFrom`` decoder is the fielded consumer that pins
+    them. If a refusal string ever needs to change, it changes in the service —
+    a second spelling here would be the copy the hoist exists to abolish.
 
-    The durable ORDER is instance-first, and that is not arbitrary. A placement
-    written first would BE the second half-state for as long as the mint took,
-    and the launcher's codec refuses on principle to derive a binding for an
-    actor that has none — so a crash there leaves an actor nothing can ever
-    thread. Instance-first's failure mode is a roster row with no desk, which is
-    both visible and retireable, and which the compensation below removes.
-
-    What it deliberately does NOT do
-    --------------------------------
-    It does not make the create foldable and it is not a speed change; the batch
-    carries exactly the events the two-call flow carries, which is what lets it
-    inherit D3's foldable ``persona_instance`` create for free instead of
-    colliding with it. It also does not move naming authority: an explicit
-    ``display_name`` from the client still wins (decision D-A1), and an omitted
-    one falls back through the ONE shared rule the argv lane uses
-    (``agent_create.honest_default_display_name``) rather than through the store
-    template, which would mint "Qa" where the operator expects "QA Agent".
+    Note the deliberate absence of a ``try``: ``KeyboardInterrupt`` and every
+    other ``BaseException`` must keep propagating exactly as they did inline,
+    since the crash-between-the-two-writes property is asserted by letting one
+    escape.
     """
 
-    import time
+    from agent_runtime.agent_create import perform_agent_create
 
-    from agent_runtime.agent_create import (
-        AgentCreateInvalid,
-        normalize_agent_create,
-        placement_actor_payload,
-    )
-    from agent_runtime.agent_create_reservations import (
-        STATE_DONE,
-        STATE_INSTANCE_MINTED,
-        STATE_ROLLED_BACK,
-        AgentCreateReservationError,
-        reserve_agent_create,
-    )
-    from agent_runtime.errors import StaleRevision, SyncConflict
-    from agent_runtime.office_class_key_guard import class_key_collision
-    from agent_runtime.office_store import OfficeStore
-    from agent_runtime.persona_assignments import (
-        PersonaInstanceStore,
-        RetiredPersonaInstanceError,
-    )
-
-    started = time.monotonic()
-
-    try:
-        request = normalize_agent_create(params)
-    except AgentCreateInvalid as exc:
-        return err(rid, ERR_INVALID_PARAMS, str(exc), {"reason": exc.reason})
-
-    store = OfficeStore()
-    # Before the reservation, and before any store write: an unknown workspace
-    # is the ONE refusal that must leave no receipt behind, or a client fixing a
-    # typo would be answered with its own stale error under the same key. Mirrors
-    # ``runtime.office.upsert``'s refusal to lazily author a surface for a typo.
-    if not store.surface_exists(request.workspace_id):
-        return err(
-            rid,
-            ERR_NOT_FOUND,
-            f"unknown workspace: {request.workspace_id}",
-            {"reason": "workspace_not_found", "workspace_id": request.workspace_id},
-        )
-
-    try:
-        with reserve_agent_create(
-            idempotency_key=request.idempotency_key,
-            persona_id=request.persona_id,
-            workspace_id=request.workspace_id,
-        ) as reservation:
-            record = reservation.record
-
-            if record.state == STATE_DONE:
-                # The same reply, and provably no second write: the actor's
-                # revision in the recorded result is the witness.
-                return ok(rid, {**record.result, "idempotent_replay": True})
-            if record.state == STATE_ROLLED_BACK:
-                # D-A3: the placement id is burned by the retirement tombstone,
-                # so this key can never complete. Say so again rather than
-                # inventing a different placement the client did not predict.
-                return err(
-                    rid,
-                    ERR_CONFLICT,
-                    "this create was already attempted and rolled back; "
-                    "retry as a new gesture with a new idempotency_key",
-                    {**record.failure, "rolled_back": True, "idempotent_replay": True},
-                )
-
-            instance_ms = 0
-            if record.state == STATE_INSTANCE_MINTED:
-                # Resume: the mint already happened (or its compensation could
-                # not). Re-minting here is the duplicate-agent bug the whole
-                # ledger exists to prevent.
-                from dataclasses import replace as _replace
-
-                request = _replace(
-                    request, placement_id=record.placement_id or request.placement_id
-                )
-                try:
-                    instance = PersonaInstanceStore().get(
-                        record.persona_instance_id or request.persona_instance_id
-                    )
-                except Exception as exc:  # noqa: BLE001
-                    return err(
-                        rid,
-                        ERR_NOT_FOUND,
-                        f"reserved instance is gone: {exc}",
-                        {
-                            "reason": "reserved_instance_missing",
-                            "persona_instance_id": record.persona_instance_id,
-                        },
-                    )
-            else:
-                mint_started = time.monotonic()
-                try:
-                    instance = PersonaInstanceStore().add_instance(
-                        persona_id=request.persona_id,
-                        placement_id=request.placement_id,
-                        display_name=request.display_name,
-                        default_display_name=request.default_display_name,
-                        workspace_id=request.workspace_id,
-                        realm_id=request.realm_id,
-                    )
-                except RetiredPersonaInstanceError as exc:
-                    return err(
-                        rid,
-                        ERR_CONFLICT,
-                        str(exc),
-                        {
-                            "reason": "instance_retired",
-                            "placement_id": request.placement_id,
-                        },
-                    )
-                except ValueError as exc:
-                    return err(
-                        rid,
-                        ERR_INVALID_PARAMS,
-                        str(exc),
-                        {
-                            "reason": "instance_invalid",
-                            "placement_id": request.placement_id,
-                        },
-                    )
-                # The argv lane's own provenance stamp, matched so the two lanes
-                # cannot be told apart by the row they leave. No coordinator can
-                # reach this transport, so the source is always the operator.
-                instance.spawned_by = "operator"
-                instance = PersonaInstanceStore().update(instance)
-                instance_ms = int((time.monotonic() - mint_started) * 1000)
-                reservation.mark_instance_minted(
-                    persona_instance_id=instance.id,
-                    placement_id=request.placement_id,
-                )
-
-            placement_started = time.monotonic()
-            payload = placement_actor_payload(
-                request, display_name=instance.display_name
-            )
-            # Instance-keyed by construction, so this guard can never fire from
-            # this method. Run anyway: it is the fence the office lane's third
-            # writer needed, and a defence that is only correct "by construction"
-            # is one refactor away from being absent.
-            collision = class_key_collision(store, request.workspace_id, payload)
-            if collision is not None:
-                data = _agent_create_failure(
-                    reservation,
-                    instance_id=instance.id,
-                    failure={
-                        "reason": "placement_failed",
-                        "phase": "placement",
-                        "placement_reason": "class_key_collision",
-                        "workspace_id": request.workspace_id,
-                    },
-                )
-                return err(rid, ERR_CONFLICT, "class-keyed placement refused", data)
-
-            try:
-                actor = store.upsert_actor(
-                    request.workspace_id, payload, updated_by="operator"
-                )
-            except (StaleRevision, SyncConflict, ValueError) as exc:
-                data = _agent_create_failure(
-                    reservation,
-                    instance_id=instance.id,
-                    failure={
-                        "reason": "placement_failed",
-                        "phase": "placement",
-                        "placement_reason": type(exc).__name__,
-                        "workspace_id": request.workspace_id,
-                    },
-                )
-                return err(rid, ERR_CONFLICT, str(exc), data)
-            except Exception as exc:  # noqa: BLE001
-                # An unexpected store fault is still a placement that did not
-                # land, and the roster row must not survive it. handle_request's
-                # boundary would have turned this into a -32000 with the instance
-                # stranded — which is R#37 with a nicer error code.
-                data = _agent_create_failure(
-                    reservation,
-                    instance_id=instance.id,
-                    failure={
-                        "reason": "placement_failed",
-                        "phase": "placement",
-                        "placement_reason": type(exc).__name__,
-                        "workspace_id": request.workspace_id,
-                    },
-                )
-                return err(rid, ERR_HANDLER_FAILED, str(exc), data)
-
-            placement_ms = int((time.monotonic() - placement_started) * 1000)
-            result: dict[str, Any] = {
-                "persona_instance_id": instance.id,
-                "persona_id": instance.persona_id,
-                "placement_id": request.placement_id,
-                "display_name": instance.display_name,
-                "default_chat_session_id": instance.default_chat_session_id,
-                "actor_key": actor.actor_key,
-                "revision": actor.revision,
-                "workspace_id": request.workspace_id,
-                "phases": {
-                    "instance_ms": instance_ms,
-                    "placement_ms": placement_ms,
-                    "total_ms": int((time.monotonic() - started) * 1000),
-                },
-            }
-            if request.correlation_id:
-                result["correlation_id"] = request.correlation_id
-            reservation.mark_done(result)
-            return ok(rid, {**result, "idempotent_replay": False})
-    except AgentCreateReservationError as exc:
-        return err(
-            rid,
-            ERR_CONFLICT
-            if exc.code in {"idempotency_conflict", "create_lock_unavailable"}
-            else ERR_HANDLER_FAILED,
-            str(exc),
-            {"reason": exc.code},
-        )
+    outcome = perform_agent_create(params)
+    if outcome.refusal is not None:
+        refusal = outcome.refusal
+        return err(rid, refusal.code, refusal.message, refusal.data)
+    return ok(rid, outcome.result)
