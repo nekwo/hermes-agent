@@ -21,12 +21,17 @@ Contract:
   it never reports a fabricated zero.
 - Every value is additive protocol surface: consumers that predate a phase
   ignore unknown keys.
+- ``annotate`` carries stamps this class cannot derive itself — the SEGMENTS of
+  ``interpreter_ms``, which only the CLI entry point can see (boot-window plan
+  BW-0; the anchors live in ``hermes_cli._boot_clock``). They ride the same
+  additive block, and they obey the same absence rule.
 """
 
 from __future__ import annotations
 
 import os
 import time
+from collections.abc import Mapping
 from typing import Any
 
 
@@ -54,17 +59,51 @@ def _process_start_monotonic() -> float | None:
 class BootTimeline:
     """Ordered, append-only wall-time attribution of ONE process boot."""
 
-    __slots__ = ("_started", "_last", "_phases", "_process_start")
+    __slots__ = ("_started", "_last", "_phases", "_process_start", "_annotations")
 
     def __init__(self, *, process_start_monotonic: float | None = None) -> None:
         self._started = time.monotonic()
         self._last = self._started
         self._phases: list[tuple[str, int]] = []
+        self._annotations: dict[str, Any] = {}
         self._process_start = (
             process_start_monotonic
             if process_start_monotonic is not None
             else _process_start_monotonic()
         )
+
+    @property
+    def process_start_monotonic(self) -> float | None:
+        """This process's creation on the monotonic clock, or None if unknown.
+
+        Exposed so a caller can derive the SEGMENTS of ``interpreter_ms`` from
+        the same anchor this class measures the whole against — a segment
+        computed off a different anchor would not sum.
+        """
+
+        return self._process_start
+
+    @property
+    def started_monotonic(self) -> float:
+        """When this timeline started — i.e. the command's own first instruction."""
+
+        return self._started
+
+    def annotate(self, segments: Mapping[str, Any]) -> None:
+        """Merge externally-derived, additive stamps into this timeline's block.
+
+        For values the timeline cannot observe: the caller's own import-tax
+        segments (BW-0), which are bounded by instants that happened before this
+        object existed. Merges rather than replaces, and a key the caller does
+        not have is simply not passed — absence still means "not measured".
+
+        A PHASE always wins over an annotation of the same name (see
+        :meth:`stamps`): phases are this timeline's own measurements and an
+        annotation must never be able to overwrite one.
+        """
+
+        for key, value in segments.items():
+            self._annotations[str(key)] = value
 
     @property
     def interpreter_ms(self) -> int | None:
@@ -112,12 +151,20 @@ class BootTimeline:
         return merged
 
     def stamps(self) -> dict[str, Any]:
-        """The additive frame block: phases + interpreter + totals."""
+        """The additive frame block: phases + interpreter + segments + totals.
+
+        Ordering is deliberate: the annotated segments sit immediately after
+        ``interpreter_ms`` because they decompose it, so the log line reads as
+        the whole followed by its parts followed by everything after it.
+        """
 
         block: dict[str, Any] = {}
         interpreter = self.interpreter_ms
         if interpreter is not None:
             block["interpreter_ms"] = interpreter
+        block.update(self._annotations)
+        # Phases last of the two, so a name collision resolves to this
+        # timeline's own measurement rather than to an injected annotation.
         block.update(self.phases())
         block["elapsed_ms"] = self.elapsed_ms()
         block["total_ms"] = self.total_ms()

@@ -902,6 +902,37 @@ def _prewarm_provider_runtime() -> None:
         pass
 
 
+def _annotate_import_tax(timeline: Any) -> None:
+    """Decompose ``interpreter_ms`` into named segments on the boot block (BW-0).
+
+    ``interpreter_ms`` is one number covering process creation → this command's
+    first instruction, and on the 2026-08-17 cold boot it was 20,421 ms against a
+    warm baseline of ~2,000 ms — 18.4 s of unattributed cold-boot cost, next to
+    1,437 ms of post-``booting`` work attributed phase by phase. The anchors that
+    split it can only be read where they were taken (``hermes_cli._boot_clock``,
+    written by ``main.py``), so the derivation happens here and rides the frame
+    the launcher already parses.
+
+    Never raises and never fabricates: a segment whose endpoints were not both
+    observed is simply absent, exactly as ``interpreter_ms`` itself is absent on
+    a platform that will not report a process creation time. A boot that reached
+    this loop without going through ``main()`` (every ``serve_loop`` unit test)
+    annotates whatever subset its anchors support, which is additive and inert.
+    """
+
+    try:
+        from hermes_cli import _boot_clock
+
+        timeline.annotate(
+            _boot_clock.import_tax_segments(
+                process_start=timeline.process_start_monotonic,
+                dispatch_reached=timeline.started_monotonic,
+            )
+        )
+    except Exception:  # pragma: no cover - observability must never fail a boot
+        pass
+
+
 def serve_loop(
     reader: TextIO,
     writer: TextIO,
@@ -965,6 +996,7 @@ def serve_loop(
     from agent_runtime.boot_timeline import BootTimeline
 
     timeline = boot_timeline if boot_timeline is not None else BootTimeline()
+    _annotate_import_tax(timeline)
     frames = _FrameWriter(writer)
     # Emitted before ANY heavy boot work (the agent_runtime import, root
     # config load, registry init, and the pre-ready orphan sweep below): a

@@ -100,6 +100,51 @@ def test_a_process_start_in_the_future_is_refused(monkeypatch):
     assert module._process_start_monotonic() is None
 
 
+def test_annotations_ride_the_block_between_the_interpreter_term_and_the_phases():
+    """BW-0: externally-derived segments are additive and ordered to read.
+
+    The block is consumed as a log line and as a launcher receipt field, and the
+    segments only make sense read immediately after the whole they decompose.
+    """
+
+    timeline = BootTimeline(process_start_monotonic=time.monotonic() - 1.0)
+    timeline.annotate({"main_import_ms": 3500, "dispatch_ms": 18500})
+    timeline.mark("chat_registry_ms")
+
+    stamps = timeline.stamps()
+
+    assert stamps["main_import_ms"] == 3500
+    assert stamps["dispatch_ms"] == 18500
+    keys = list(stamps)
+    assert keys.index("interpreter_ms") < keys.index("main_import_ms")
+    assert keys.index("dispatch_ms") < keys.index("chat_registry_ms")
+    assert keys[-2:] == ["elapsed_ms", "total_ms"]
+
+
+def test_an_annotation_can_never_overwrite_a_measured_phase():
+    """The precedence rule, pinned.
+
+    Anti-vacuity. *Mutation:* merge the annotations AFTER the phases (a one-line
+    reordering in ``stamps()`` that looks like a tidy-up). *Probed field:* the
+    value of a key that BOTH a real ``mark()`` and an annotation wrote — the
+    phase's own measurement must win, because a phase is this timeline's
+    first-hand measurement and an annotation is a derivation handed in by a
+    caller. Deliberately asserted against the measured value's PROVENANCE (a
+    sub-second real interval) rather than an exact number: the annotation's
+    sentinel is 999999, so the two can never be confused on a machine of any
+    speed, and no timing threshold is being asserted.
+    """
+
+    timeline = BootTimeline(process_start_monotonic=time.monotonic())
+    timeline.mark("dispatch_ms")
+    timeline.annotate({"dispatch_ms": 999999})
+
+    stamps = timeline.stamps()
+
+    assert stamps["dispatch_ms"] == timeline.phases()["dispatch_ms"]
+    assert stamps["dispatch_ms"] != 999999
+
+
 def test_log_line_renders_every_stamp_as_one_greppable_line():
     timeline = BootTimeline(process_start_monotonic=time.monotonic() - 0.5)
     timeline.mark("imports_ms")

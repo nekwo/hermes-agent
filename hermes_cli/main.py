@@ -70,6 +70,23 @@ from hermes_cli._subprocess_compat import suppress_platform_ver_console
 
 suppress_platform_ver_console()
 
+# The FIRST of the four anchors that split this process's import tax into named
+# segments (boot-window plan BW-0). ``_boot_clock`` is stdlib-only by contract,
+# precisely so that reading the clock is not itself part of what the clock
+# measures; see the module header for why the split had to exist before any of
+# the boot optimisations could claim a number.
+#
+# It sits here rather than at the very top of the file because the two imports
+# above it are load-bearing in a way an instrument must not disturb:
+# ``hermes_bootstrap`` has to be the first import (UTF-8 stdio on Windows) and
+# ``suppress_platform_ver_console`` has to run before anything touches
+# ``platform.uname()``. Both are small, and both are accounted for — they land
+# in ``interpreter_boot_ms`` with the interpreter's own startup rather than in
+# ``main_import_ms``.
+from hermes_cli import _boot_clock as _boot_clock
+
+_boot_clock.mark_main_import_started()
+
 import os
 import sys
 
@@ -5211,7 +5228,16 @@ def _sweep_stale_bytecode_if_checkout_changed() -> None:
     the bytecode cache once when they diverge.
 
     Never raises — a failure here must not block launch.
+
+    BW-0: the sweep now reports its own duration, both on the log line
+    (``swept_ms=``) and into ``_boot_clock`` so the serve child's ``booting``
+    frame can carry it. The 2026-08-17 cold boot had TWO processes each clear
+    ~175 ``__pycache__`` directories 12 ms apart and then race each other
+    recompiling the import set they had just deleted — and the line logged no
+    duration at all, so the share of that boot's 20.4 s import tax owed to this
+    function was pure inference. It is now recorded.
     """
+    _started = _time.monotonic()
     try:
         fingerprint = _read_git_revision_fingerprint(PROJECT_ROOT)
         if not fingerprint:
@@ -5226,15 +5252,24 @@ def _sweep_stale_bytecode_if_checkout_changed() -> None:
         removed = _clear_bytecode_cache(PROJECT_ROOT)
         if removed:
             logger.info(
-                "Checkout changed since last launch (%s -> %s): cleared %d stale __pycache__ director%s",
+                "Checkout changed since last launch (%s -> %s): cleared %d stale __pycache__ director%s in swept_ms=%d",
                 recorded or "unknown",
                 fingerprint,
                 removed,
                 "y" if removed == 1 else "ies",
+                int(max(0.0, _time.monotonic() - _started) * 1000),
             )
         _record_bytecode_fingerprint()
     except Exception as exc:
         logger.debug("Stale-bytecode launch sweep failed: %s", exc)
+    finally:
+        # Recorded even on the early returns and the exception path: "the sweep
+        # decided in 4 ms that it had nothing to do" is exactly as much an
+        # answer as "the sweep took 9 s", and a key that appears only on the
+        # expensive path would make every cheap boot look unmeasured.
+        _boot_clock.record_bytecode_sweep_ms(
+            int(max(0.0, _time.monotonic() - _started) * 1000)
+        )
 
 
 def _web_ui_build_needed(web_dir: Path) -> bool:
@@ -11171,6 +11206,12 @@ def cmd_claw(args):
 
 def main():
     """Main entry point for hermes CLI."""
+    # The THIRD anchor (BW-0). Everything from here to the command's own entry
+    # point is ``dispatch_ms``: the bytecode sweep, the venv self-heal, and the
+    # top-level argparse build — which imports ``hermes_cli.harness``, and with
+    # it the whole of ``agent_runtime`` and a full plugin-discovery walk.
+    _boot_clock.mark_main_entered()
+
     # Cosmetic: make the process show up as 'hermes' instead of 'python3.11'
     # in ps/top/htop.  Non-fatal — just a nicer UX.
     _set_process_title()
@@ -11224,12 +11265,26 @@ def main():
 
     # harness command — experimental Agent Runtime Harness
     # =========================================================================
+    #
+    # BW-0: timed, because this block is the single most expensive statement
+    # between ``main()`` and any harness command's own entry point. Importing
+    # ``hermes_cli.harness`` pulls in the whole of ``agent_runtime``, and through
+    # ``agent_runtime.tool_visibility``'s module-scope ``model_tools`` import it
+    # also runs a full builtin-tool + plugin discovery walk — measured 2.2 s
+    # WARM in this checkout, and it is paid by every ``hermes`` invocation,
+    # including ``--version`` and the launcher's health-probe child. The 2026-08-17
+    # cold receipt could only say "interpreter_ms=20421"; this names the share.
+    _harness_parser_started = _time.monotonic()
     try:
         from hermes_cli.harness import build_parser as _build_harness_parser
         _build_harness_parser(subparsers)
     except Exception as exc:
         # Keep core CLI resilient if experimental harness import breaks.
         logger.debug("Harness parser registration failed: %s", exc)
+    finally:
+        _boot_clock.record_harness_parser_ms(
+            int(max(0.0, _time.monotonic() - _harness_parser_started) * 1000)
+        )
 
     # =========================================================================
     # model command  (parser built in hermes_cli/subcommands/model.py)
@@ -12579,6 +12634,15 @@ def main():
             sys.exit(rc)
     else:
         parser.print_help()
+
+
+# The SECOND anchor (BW-0): the last statement of this module's scope. The span
+# from ``mark_main_import_started`` above to here is this file's own ~450
+# module-scope imports, which is the one segment of the cold-boot import tax
+# that no earlier instrument could see — ``interpreter_ms`` bundled it with the
+# interpreter's startup AND with everything ``main()`` does before the command
+# runs, as one 20-second number.
+_boot_clock.mark_main_import_completed()
 
 
 if __name__ == "__main__":

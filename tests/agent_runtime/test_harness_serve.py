@@ -617,6 +617,93 @@ def test_booting_frame_carries_the_interpreter_stamp():
     assert 3900 <= booting["boot"]["interpreter_ms"] <= 4300
 
 
+# BW-0: ``interpreter_ms`` alone was one opaque 20-second number on the
+# 2026-08-17 cold boot. These two cases pin that the loop puts its NAMED SEGMENTS
+# on the same frame, derived from the CLI's own anchors and from the same
+# process-creation anchor ``interpreter_ms`` uses.
+
+
+def test_booting_frame_carries_the_named_segments_of_the_interpreter_stamp(monkeypatch):
+    """The segments are the exact spans between the injected anchors.
+
+    Anti-vacuity. *Mutation:* stamp ``main_import_ms: 0`` (or any constant)
+    unconditionally. *Probed fields:* the three segment VALUES, each computed in
+    this test from two instants the production code never sees — the injected
+    ``process_start_monotonic`` and the three ``_boot_clock`` anchors this test
+    writes. *Why the mutation cannot also set them:* a constant cannot equal
+    three different derived spans, and the sibling case below re-derives them
+    from a second, disjoint set of anchors.
+    """
+
+    from agent_runtime.boot_timeline import BootTimeline
+    from hermes_cli import _boot_clock
+
+    now = time.monotonic()
+    process_start = now - 30.0
+    monkeypatch.setattr(_boot_clock, "MAIN_IMPORT_STARTED", process_start + 2.5)
+    monkeypatch.setattr(_boot_clock, "MAIN_IMPORT_COMPLETED", process_start + 6.0)
+    monkeypatch.setattr(_boot_clock, "MAIN_ENTERED", process_start + 6.125)
+    monkeypatch.setattr(_boot_clock, "BYTECODE_SWEEP_MS", 913)
+    monkeypatch.setattr(_boot_clock, "HARNESS_PARSER_MS", 2211)
+
+    timeline = BootTimeline(process_start_monotonic=process_start)
+    dispatch_reached = timeline.started_monotonic
+    frames = _run([SHUTDOWN], dispatch=lambda argv: 0, boot_timeline=timeline)
+
+    boot = frames[0]["boot"]
+    assert boot["interpreter_boot_ms"] == 2500
+    assert boot["main_import_ms"] == 3500
+    assert boot["dispatch_ms"] == int(
+        (dispatch_reached - (process_start + 6.125)) * 1000
+    )
+    assert boot["bytecode_sweep_ms"] == 913
+    assert boot["harness_parser_ms"] == 2211
+    # The parts decompose the whole they sit beside — that is the point of the
+    # split, and it only holds if every segment is measured off the SAME
+    # process-creation anchor ``interpreter_ms`` is.
+    assert boot["main_import_ms"] <= boot["interpreter_ms"]
+    assert (
+        boot["interpreter_boot_ms"] + boot["main_import_ms"] + boot["dispatch_ms"]
+        <= boot["interpreter_ms"]
+    )
+
+
+def test_an_unmeasured_segment_is_absent_from_the_booting_frame(monkeypatch):
+    """Anti-vacuity's other half: absence, not a fabricated zero.
+
+    *Mutation:* have the annotation fill in 0 for anchors it could not read.
+    *Probed field:* key membership on the emitted frame. A process that never
+    went through ``main()`` — which is every ``serve_loop`` unit test, and any
+    embedding of the loop — has no module anchors, and the frame must say so by
+    omission. ``interpreter_ms`` itself keeps the same contract for the psutil
+    anchor, so this is the existing rule applied to the new keys, not a new one.
+    """
+
+    from agent_runtime.boot_timeline import BootTimeline
+    from hermes_cli import _boot_clock
+
+    monkeypatch.setattr(_boot_clock, "MAIN_IMPORT_STARTED", None)
+    monkeypatch.setattr(_boot_clock, "MAIN_IMPORT_COMPLETED", None)
+    monkeypatch.setattr(_boot_clock, "MAIN_ENTERED", None)
+    monkeypatch.setattr(_boot_clock, "BYTECODE_SWEEP_MS", None)
+    monkeypatch.setattr(_boot_clock, "HARNESS_PARSER_MS", None)
+
+    timeline = BootTimeline(process_start_monotonic=time.monotonic() - 1.0)
+    frames = _run([SHUTDOWN], dispatch=lambda argv: 0, boot_timeline=timeline)
+
+    boot = frames[0]["boot"]
+    for key in (
+        "interpreter_boot_ms",
+        "main_import_ms",
+        "dispatch_ms",
+        "bytecode_sweep_ms",
+        "harness_parser_ms",
+    ):
+        assert key not in boot, key
+    # The pre-existing stamps are untouched by the absence.
+    assert boot["interpreter_ms"] >= 900
+
+
 def test_ready_frame_attributes_every_boot_phase():
     from agent_runtime.boot_timeline import BootTimeline
 
