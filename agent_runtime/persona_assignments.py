@@ -2274,9 +2274,45 @@ def _normalize_instance_source_persona(persona_or_template_id: str) -> str:
 
 
 def _profile_id_for_persona_or_template(persona_or_template_id: str) -> str | None:
+    """The profile an instance projection should be stamped with at creation.
+
+    B-4. This function used to answer ``None`` for every id that was not a
+    synthetic ``profile:<name>`` channel — which is to say, for every real
+    persona. That is the factory that mints null ``profile_id`` projections: the
+    live store carries one (``personainst_qa_agent_644595cc``, persona ``qa``,
+    whose persona binds ``launcher-qa``).
+
+    Now it resolves through the persona's own ``hermes_profile``, so a new
+    instance is stamped EXPLICITLY with the same profile its persona already
+    binds.
+
+    NOT a resolution change. ``profile_id`` on an instance is a PROJECTION, and
+    A-3 verified that nothing on the turn path reads it: every one of
+    ``resolve_persona_profile``'s call sites takes a PERSONA, and the run path
+    (``persona_runtime.py:142``) takes the persona binding. The one consumer
+    that displays it (``persona_instance_summary``) already falls back with
+    ``instance.profile_id or persona.hermes_profile``, so the rendered value is
+    identical before and after. What changes is that the row now STATES the fact
+    instead of leaving a reader to re-derive it.
+
+    Unresolvable personas still yield ``None`` — a null binding remains
+    supported and is not an error.
+    """
     raw = str(persona_or_template_id or "").strip()
     if raw.lower().startswith("profile:"):
         return safe_assignment_token(raw.split(":", 1)[1]) or None
+    if not raw:
+        return None
+    try:
+        from .config import ensure_persisted_personas, load_agent_runtime_config
+
+        for candidate in ensure_persisted_personas(load_agent_runtime_config()):
+            if safe_assignment_token(getattr(candidate, "id", None)) == safe_assignment_token(raw):
+                return safe_assignment_token(getattr(candidate, "hermes_profile", None)) or None
+    except Exception:
+        # A store/config read failure must never block minting an instance.
+        # Falling back to None reproduces exactly the previous behaviour.
+        return None
     return None
 
 
