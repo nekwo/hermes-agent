@@ -519,6 +519,7 @@ def test_the_envelope_itself_is_validated_with_upstreams_codes():
     assert unknown["error"]["data"]["methods"] == [
         "runtime.agent.create",
         "runtime.office.get",
+        "runtime.office.remove",
         "runtime.office.subscribe",
         "runtime.office.unsubscribe",
         "runtime.office.upsert",
@@ -662,6 +663,7 @@ def test_stdio_learns_the_method_set_from_ready_and_can_re_ask_version():
         "methods": [
             "runtime.agent.create",
             "runtime.office.get",
+            "runtime.office.remove",
             "runtime.office.subscribe",
             "runtime.office.unsubscribe",
             "runtime.office.upsert",
@@ -707,6 +709,7 @@ def test_the_method_surface_is_transport_agnostic_and_answers_on_the_socket():
                 "methods": [
                     "runtime.agent.create",
                     "runtime.office.get",
+                    "runtime.office.remove",
                     "runtime.office.subscribe",
                     "runtime.office.unsubscribe",
                     "runtime.office.upsert",

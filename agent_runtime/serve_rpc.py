@@ -969,6 +969,179 @@ def _runtime_office_upsert(
     return ok(rid, {"actor_key": actor.actor_key, "revision": actor.revision})
 
 
+@method("runtime.office.remove")
+def _runtime_office_remove(
+    rid: Any, params: dict, context: RpcContext | None = None
+) -> dict:
+    """ONE actor placement, ARCHIVED — the delete gesture's write leg.
+
+    Params: ``workspace_id`` (required), ``actor_key`` (required string),
+    ``expect_revision`` (optional int), ``updated_by`` and ``reason`` (optional
+    strings, both defaulting to the argv lane's own ``operator``).
+
+    Result: ``{"actor_key", "revision", "state"}`` — the store's POST-archive
+    revision, not the one the caller was holding. ``_archive_actor_locked``
+    bumps the number on its way out and an archived key carries it forward
+    through a restore, so the +1 is the token a later guarded write on this key
+    must present. Returning the pre-archive number would hand the client a
+    guard token that is already one behind.
+
+    ``state`` is on the ack even though it is a constant. The alternative reads
+    ``{actor_key, revision}`` exactly like the upsert's ack and means the
+    opposite thing, and a client decoder that crossed the two would settle a
+    deletion with a placement's ack. One word makes the two frames
+    self-describing.
+
+    Why this REFUSES an unknown workspace before the store
+    ------------------------------------------------------
+    Same ruling as ``runtime.office.upsert``'s, reached from the other side.
+    ``remove_actor`` on an unauthored workspace raises ``NotFound`` about the
+    ACTOR — which is true but useless, because it names the wrong thing: the
+    client's cure for "this workspace has no office" is not "resend a different
+    key". Checking ``surface_exists`` first means the read leg and both write
+    legs spend one reason string on one condition, and a typo answers the same
+    way whichever verb hit it.
+
+    Why an already-archived key is an OK and not a 4001
+    ---------------------------------------------------
+    ``OfficeStore.remove_actor`` is idempotent on purpose: an already-archived
+    key returns the archived copy and writes nothing. That is the honest answer
+    for this lane too. The launcher's flush re-names a key it has already
+    deleted whenever a later save recomputes the same vacated set, and turning
+    the second attempt into an error would make an operator's single deletion
+    report a failure it did not have — with a rollback behind it that puts the
+    actor back on the canvas. Nothing was written either way; the state the
+    caller asked for is the state the store is in.
+
+    NO class-key fence, and that is not an omission
+    -----------------------------------------------
+    ``office_class_key_guard`` exists because an upsert of an archived key is
+    read as intent to RE-ADD and clears the resurrection ledger. An archive
+    moves in the other direction — it cannot resurrect anything, and a
+    class-keyed archive is the class→instance migration's own mechanism rather
+    than a write that undoes it.
+    """
+
+    from agent_runtime.errors import NotFound, StaleRevision
+    from agent_runtime.office_store import OfficeStore
+
+    workspace_id = _workspace_id_param(params)
+    if workspace_id is None:
+        # The same reason string every office method spends on this, on
+        # purpose: one client branch covers it whatever the verb was.
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            "invalid params: workspace_id must be a non-empty string",
+            {"reason": "workspace_id_required"},
+        )
+
+    raw_key = params.get("actor_key")
+    actor_key = raw_key.strip() if isinstance(raw_key, str) else ""
+    if not actor_key:
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            "invalid params: actor_key must be a non-empty string",
+            {"reason": "actor_key_required"},
+        )
+
+    expect_revision = params.get("expect_revision")
+    # ``bool`` is an ``int`` in Python and ``True`` would silently mean revision
+    # 1 — a wrong guard is worse than no guard, so the type check is explicit.
+    if expect_revision is not None and (
+        isinstance(expect_revision, bool) or not isinstance(expect_revision, int)
+    ):
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            "invalid params: expect_revision must be an integer or omitted",
+            {"reason": "expect_revision_invalid"},
+        )
+
+    updated_by = params.get("updated_by")
+    if updated_by is not None and not isinstance(updated_by, str):
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            "invalid params: updated_by must be a string or omitted",
+            {"reason": "updated_by_invalid"},
+        )
+
+    reason = params.get("reason")
+    if reason is not None and not isinstance(reason, str):
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            "invalid params: reason must be a string or omitted",
+            {"reason": "reason_invalid"},
+        )
+
+    store = OfficeStore()
+    if not store.surface_exists(workspace_id):
+        return err(
+            rid,
+            ERR_NOT_FOUND,
+            f"unknown workspace: {workspace_id}",
+            {"reason": "workspace_not_found", "workspace_id": workspace_id},
+        )
+
+    try:
+        actor = store.remove_actor(
+            workspace_id,
+            actor_key,
+            reason=reason or "operator",
+            updated_by=updated_by or "operator",
+            expect_revision=expect_revision,
+        )
+    except NotFound:
+        # Its OWN reason, distinct from ``workspace_not_found``: the office is
+        # there and this key is not in it, which is a different client story
+        # (a stale key, or a key the store canonicalized differently) with a
+        # different cure (refetch the projection, not re-author the office).
+        return err(
+            rid,
+            ERR_NOT_FOUND,
+            f"unknown actor: {actor_key}",
+            {
+                "reason": "actor_not_found",
+                "workspace_id": workspace_id,
+                "actor_key": actor_key,
+            },
+        )
+    except StaleRevision as exc:
+        # ``data`` deliberately carries NO current revision — the same rule the
+        # upsert follows, and for the same reason: handing back the number
+        # invites a retry with it, which is the lost update the guard refused.
+        return err(
+            rid,
+            ERR_CONFLICT,
+            str(exc),
+            {
+                "reason": "stale_revision",
+                "workspace_id": workspace_id,
+                "actor_key": actor_key,
+                "expect_revision": expect_revision,
+            },
+        )
+    except ValueError as exc:
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            str(exc),
+            {"reason": "actor_invalid", "workspace_id": workspace_id},
+        )
+
+    return ok(
+        rid,
+        {
+            "actor_key": actor.actor_key,
+            "revision": actor.revision,
+            "state": actor.state,
+        },
+    )
+
+
 # ── runtime.agent.create ─────────────────────────────────────────────────────
 
 
