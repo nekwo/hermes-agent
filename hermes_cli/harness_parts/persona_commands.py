@@ -400,9 +400,11 @@ def _cmd_agent_create(args) -> int:
 
     The unified door the operator asked for: it calls
     ``agent_create.perform_agent_create``, which is the SAME function
-    ``runtime.agent.create`` answers with, so the reply dict a script reads
-    here is byte-for-byte the reply dict it would read off the wire. That is
-    the point — a lane switch must not be a behaviour change.
+    ``runtime.agent.create`` answers with, so every RESULT field a script reads
+    here is the field it would read off the wire. That is the point — a lane
+    switch must not be a behaviour change. Two keys are envelope-only and have
+    no wire counterpart: ``ok`` (the exit status) and ``resolution`` (the
+    root-observability block every ``--json`` harness verb stamps).
 
     It works with no ``harness serve`` running: every lock in the path (the
     reservation lock, the persona-instance lock, the office lock) is a
