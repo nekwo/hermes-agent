@@ -201,10 +201,18 @@ def _seed_office(workspace_id: str = WORKSPACE) -> None:
     )
 
 
-def _subscribe(rid="r1", workspace_id=WORKSPACE, context=None, fold_entities=_ABSENT) -> dict:
+def _subscribe(
+    rid="r1",
+    workspace_id=WORKSPACE,
+    context=None,
+    fold_entities=_ABSENT,
+    reason=_ABSENT,
+) -> dict:
     params: dict = {"workspace_id": workspace_id}
     if fold_entities is not _ABSENT:
         params["fold_entities"] = fold_entities
+    if reason is not _ABSENT:
+        params["reason"] = reason
     return serve_rpc.handle_request(
         {
             "jsonrpc": "2.0",
@@ -1829,3 +1837,166 @@ def test_the_reclaim_pair_joins_the_manifest_without_moving_the_contract_version
     ]
     assert serve_rpc.RPC_CONTRACT_VERSION == 1
     assert serve_rpc.manifest()["contract"] == 1
+
+
+# ── FC-H1: the subscribe carries its cause, so the server log can join the
+# ladder ────────────────────────────────────────────────────────────────────
+
+
+def test_a_resubscribe_cause_reaches_the_service_log_verbatim():
+    """The one fact the re-baseline receipt could never derive.
+
+    Every re-subscribe in the launcher flows through ONE door and already knows
+    exactly why it is happening (``fold:fenced``, ``push:full_core``, ...). That
+    string used to die in the launcher's log: the server saw N re-baselines and
+    could not tell a fold-fence storm from a demote storm, so splitting the
+    classes meant joining two logs on timestamps — the same adjacency inference
+    that had already misattributed this lane once.
+
+    TWO DIFFERENT causes are driven through the same code, and that is the
+    anti-vacuity design rather than duplication. The probed field is the
+    receipt's ``reason``; a mutant that stamps a constant — or stamps the
+    workspace, or the key — can match at most ONE of the two, and the expected
+    value originates in this test's own input, so there is no constant the
+    implementation could hold that satisfies both.
+    """
+
+    for cause in ("fold:fenced", "push:full_core"):
+        _seed_office()
+        hub = _FakeHub()
+        lines: list[dict] = []
+        OFFICE_SUBSCRIPTIONS.bind(lambda: hub, log=lines.append)
+        context = serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+
+        _subscribe(context=context, reason="start")
+        # Fixture control, and the pinned rule this must not break: the FIRST
+        # subscribe still writes nothing at all, cause or no cause.
+        assert lines == []
+
+        reply = _subscribe(rid="r2", context=context, reason=cause)
+
+        assert "error" not in reply
+        assert len(lines) == 1
+        assert lines[0]["event"] == "serve_office_subscription_rebaselined"
+        assert lines[0]["reason"] == cause
+        OFFICE_SUBSCRIPTIONS.bind(None)
+
+
+def test_a_subscribe_with_no_cause_prints_the_sentinel_not_a_missing_key():
+    """Silence has to be a VALUE on the line, not a hole in it.
+
+    Every launcher in the field today omits the param. If the key were omitted
+    with it, an operator reading the log could not tell "this client is too old
+    to say" from "this line predates the field" — and a key that appears only
+    sometimes is one a reader learns to stop looking for. The sentinel is also
+    the third driven value the mutation table needs: no constant equals
+    ``fold:fenced``, ``push:full_core`` AND ``-``.
+    """
+
+    _seed_office()
+    hub = _FakeHub()
+    lines: list[dict] = []
+    OFFICE_SUBSCRIPTIONS.bind(lambda: hub, log=lines.append)
+    context = serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+
+    _subscribe(context=context)
+    _subscribe(rid="r2", context=context)
+
+    assert len(lines) == 1
+    assert "reason" in lines[0]
+    assert lines[0]["reason"] == "-"
+
+
+def test_a_cause_off_the_charset_is_refused_before_any_store_or_hub_call():
+    """A param this method only ever logs must not be able to cost a producer.
+
+    Order is the assertion. The workspace is deliberately NOT seeded: if the
+    reason check ran after the projection, this would answer
+    ``workspace_not_found`` instead — so the refusal reason itself proves the
+    check sits ahead of the office lock, the store read and the hub.
+
+    The charset is boundary discipline, not decoration: this string is written
+    verbatim into an operator's service log on a path a confused client takes
+    repeatedly, so a newline in it would forge a log line and an unbounded one
+    is a free write primitive into that tail.
+    """
+
+    hub = _FakeHub()
+    OFFICE_SUBSCRIPTIONS.bind(lambda: hub)
+    context = serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+
+    for bad in (
+        "Fold:Fenced",  # uppercase
+        "fold fenced",  # whitespace
+        "fold\nfenced",  # the forged-line case
+        "",  # blank: absence is already expressible by omission
+        "x" * 65,  # one over the bound
+        17,  # not a string at all
+        ["fold:fenced"],
+    ):
+        reply = _subscribe(context=context, reason=bad)
+        assert reply["error"]["code"] == -32602, bad
+        assert reply["error"]["data"]["reason"] == "reason_invalid", bad
+
+    # Nothing was registered on the way to any of those refusals.
+    assert hub.subscribe_calls == []
+    assert OFFICE_SUBSCRIPTIONS.owned_keys("c1") == set()
+
+
+def test_the_cause_is_accepted_at_exactly_the_limit_and_kept_verbatim():
+    """The bound is ``<=64``, and the value is not repaired on its way through.
+
+    Both halves matter. An off-by-one that refused 64 would reject a legal
+    token; a normalizer that stripped or lower-cased would make the two logs
+    agree about a string neither side actually used, which is exactly what the
+    verbatim rule exists to prevent.
+    """
+
+    from agent_runtime.serve_office_subscriptions import (
+        SUBSCRIBE_REASON_MAX_CHARS,
+        normalize_office_subscribe_reason,
+    )
+
+    assert SUBSCRIBE_REASON_MAX_CHARS == 64
+    at_limit = "d" * 64
+    assert normalize_office_subscribe_reason(at_limit) == at_limit
+    assert normalize_office_subscribe_reason("d" * 65) is None
+    # Every character class the launcher's own cause strings already use.
+    for token in ("start", "fold:fenced", "push:full_core", "deferred:re-subscribe", "v1.2"):
+        assert normalize_office_subscribe_reason(token) == token
+
+
+def test_an_unknown_param_is_still_ignored_so_a_new_launcher_never_refuses():
+    """A-1, verified rather than assumed — the precondition FC-H1 rests on.
+
+    The mixed pair that matters is a NEW launcher against an OLD runtime: it
+    will send ``reason`` to a handler that has never heard of it. That degrades
+    to "the cause is dropped" only if the handler reads known keys and ignores
+    the rest; if it validated its param set, the same launcher would be REFUSED
+    a subscription entirely and the office would go dark on every old runtime.
+
+    The property is tested from this side because it is the one that is
+    testable: an unknown key here stands in for ``reason`` there.
+    """
+
+    _seed_office()
+    hub = _FakeHub()
+    OFFICE_SUBSCRIPTIONS.bind(lambda: hub)
+    context = serve_rpc.RpcContext(connection_key="c1", emit=lambda _f: None)
+
+    reply = serve_rpc.handle_request(
+        {
+            "jsonrpc": "2.0",
+            "id": "r1",
+            "method": "runtime.office.subscribe",
+            "params": {
+                "workspace_id": WORKSPACE,
+                "a_param_from_two_versions_hence": {"nested": True},
+            },
+        },
+        context,
+    )
+
+    assert "error" not in reply
+    assert reply["result"]["watermark"]["event_offset"] >= 0
+    assert hub.subscribe_calls == [office_subscription_key("c1", WORKSPACE)]

@@ -110,6 +110,7 @@ indistinguishable from a fault.
 
 from __future__ import annotations
 
+import re
 import threading
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -187,6 +188,55 @@ def normalize_office_fold_entities(declared: Any) -> frozenset[str] | None:
     return frozenset(
         value.strip() for value in declared if isinstance(value, str) and value.strip()
     )
+
+
+#: What a subscribe receipt prints when the client sent no ``reason``. A
+#: SENTINEL rather than an omitted key, for the same reason ``replaced`` is
+#: always present on the reply: a field that appears only sometimes is one an
+#: operator learns to stop reading, and "this client is too old to say" and
+#: "this client said nothing" must both be visible as a fact rather than as a
+#: gap in the line.
+SUBSCRIBE_REASON_ABSENT = "-"
+
+#: The cause is a LOG TOKEN, not free text. The launcher's own resubscribe
+#: chokepoint already mints exactly this shape (``start``, ``fold:fenced``,
+#: ``push:full_core``, ``reconnect``, ``deferred:*``, ``fold_threw``), so the
+#: charset is the one those causes live in and nothing more.
+SUBSCRIBE_REASON_MAX_CHARS = 64
+_SUBSCRIBE_REASON_RE = re.compile(r"^[a-z0-9_:.-]{1,%d}$" % SUBSCRIBE_REASON_MAX_CHARS)
+
+
+def normalize_office_subscribe_reason(declared: Any) -> str | None:
+    """The trust-boundary normalizer for a subscribe's ``reason`` param.
+
+    Same two-value shape as :func:`normalize_office_fold_entities`, and read the
+    same way by the caller: ``None`` means REFUSE. The caller has already
+    established the key was present, so there is no "absent" case to encode here
+    — absence never reaches this function.
+
+    The value is taken VERBATIM or not at all. No stripping, no lowercasing, no
+    truncation: the whole point of the param is that the token on the server
+    receipt is the token the launcher printed in its own ladder, and a server
+    that silently repaired a value would make the two logs agree about a string
+    neither side actually used. A client sending the wrong shape learns it.
+
+    Bounded and charset-restricted because this string is written to the service
+    log on a path a confused client takes repeatedly (Plan D covert-channel
+    discipline V1): an unbounded echo is a free write primitive into an
+    operator's tail, and a newline in it would forge a log line. ``[a-z0-9_:.-]``
+    excludes whitespace, quotes and control bytes by construction, so there is
+    nothing left to escape.
+
+    A blank or all-whitespace value is REFUSED rather than treated as absent.
+    Absence is already expressible — omit the key — so a client that sends an
+    empty cause has a bug in its cause plumbing, and quietly filing it as
+    "said nothing" would hide exactly the thing this param exists to reveal.
+    """
+
+    if not isinstance(declared, str):
+        return None
+    return declared if _SUBSCRIBE_REASON_RE.match(declared) else None
+
 
 #: The push. Params mirror the patch frame's own body minus its envelope, so a
 #: client's fold is byte-identical work on either lane — which is what makes
@@ -590,6 +640,7 @@ class OfficeSubscriptions:
         baseline_offset: int,
         emit: Callable[[dict[str, Any]], None],
         fold_entities: frozenset[str] | None = None,
+        reason: str | None = None,
     ) -> SubscribeOutcome:
         """Register one subscription, REPLACING this connection's existing one.
 
@@ -598,6 +649,14 @@ class OfficeSubscriptions:
         constant for why the server-side default had to stop being the
         authority, and :func:`normalize_office_fold_entities` for why "said
         nothing" and "said empty" must stay distinguishable this far down.
+
+        ``reason`` is WHY this client is subscribing — its own resubscribe cause,
+        already boundary-validated by the handler. It is carried for exactly one
+        purpose: to be stamped on the re-baseline receipt, so an operator reading
+        the service log can tell a ``fold:fenced`` ladder from a
+        ``push:full_core`` one WITHOUT joining two logs on timestamps. It
+        influences no decision here and must not: a cause the client chose is
+        evidence, never authority.
 
         A falsy outcome — rather than a raise — is reserved for the two states a
         caller must answer differently from a crash, and ``reason`` is what
@@ -770,6 +829,17 @@ class OfficeSubscriptions:
                         "workspace_id": workspace_id,
                         "key": key,
                         "baseline_offset": int(baseline_offset or 0),
+                        # WHY the client came back, in the client's own words —
+                        # the one fact this line could never derive. Without it
+                        # a re-baseline storm is a count with no class, and
+                        # separating "the fold fenced" from "the batch demoted
+                        # to a full core" meant joining this log to the
+                        # launcher's on timestamps, which is the attribution
+                        # failure shape that made the ladder unreadable in the
+                        # first place. Verbatim: the handler validated the
+                        # charset, and repairing it here would print a token
+                        # neither side used.
+                        "reason": reason or SUBSCRIBE_REASON_ABSENT,
                         # Named on the line rather than left to be inferred:
                         # this is the whole reason the line exists. A retry loop
                         # shows up here as a repeating cost, not as a mystery in
