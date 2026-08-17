@@ -146,6 +146,15 @@ LANE_CONTRACT_ALLOWLIST = {
         "not move it. Nothing on the snapshot frame reads it and it never "
         "reaches `parity.contract_version`."
     ),
+    ("serve.py", "OPS_CONTRACT_VERSION"): (
+        "the serve dispatcher's OP-SURFACE contract (EG-4.1), published under "
+        "`ops` on `ready`/`hello_ok`/`version` beside — never inside — the "
+        "method manifest. It versions the shape of the ops advertisement "
+        "itself ({contract, transport, ops, subscribe_lanes}); adding an op "
+        "deliberately does not move it, and nothing on the snapshot frame "
+        "reads it. Lives in hermes_cli/harness_parts/serve.py, where the "
+        "dispatcher lives."
+    ),
     ("serve_socket.py", "HELLO_CONTRACT_VERSION"): (
         "the socket HELLO HANDSHAKE contract, stamped on every `server_hello` "
         "(serve_socket.py:913, :1093) and folded into the HMAC proof preimage "
@@ -154,6 +163,17 @@ LANE_CONTRACT_ALLOWLIST = {
         "concern that is settled before any snapshot is ever sent, and one that "
         "must be able to move without restamping contract_hash."
     ),
+}
+
+#: Where each lane-exempt module LIVES, repo-relative parent. The exemption is
+#: keyed on the basename (that is what ``restatements`` receives), so the gate
+#: must also know the one location that basename is allowed to mean — otherwise
+#: a newcomer with the same name anywhere in the scanned roots would inherit an
+#: exemption it was never reasoned about. Witnessed by the lookalike test.
+LANE_CONTRACT_MODULE_HOMES = {
+    "serve_rpc.py": "agent_runtime",
+    "serve.py": "hermes_cli/harness_parts",
+    "serve_socket.py": "agent_runtime",
 }
 
 #: Integer literals bound to a contract-version name that are NOT restatements,
@@ -566,7 +586,22 @@ def test_each_lane_contract_is_witnessed_as_an_INDEPENDENT_contract():
 
     root = _repo_root()
     for (filename, symbol), reason in LANE_CONTRACT_ALLOWLIST.items():
-        module = root / "agent_runtime" / filename
+        # An entry's module may live in any scanned root (OPS_CONTRACT_VERSION
+        # lives with the dispatcher in hermes_cli/harness_parts, not in
+        # agent_runtime), and `restatements` keys on the BARE name — so resolve
+        # through the same scan the gate reads, and demand the name is unique
+        # across it: a second module with the same basename would let this
+        # exemption cover a file it was never written for.
+        candidates = [
+            Path(path) for path in _scanned_modules() if Path(path).name == filename
+        ]
+        assert candidates, f"lane allowlist names {filename}, which no longer exists"
+        assert len(candidates) == 1, (
+            f"lane allowlist key {filename!r} is ambiguous across the scanned "
+            f"roots: {sorted(str(c) for c in candidates)} — bare-name keying "
+            "requires uniqueness"
+        )
+        module = candidates[0]
         assert module.is_file(), f"lane allowlist names {filename}, which no longer exists"
 
         source = module.read_text(encoding="utf-8")
@@ -622,8 +657,16 @@ def test_a_lane_exemption_cannot_be_claimed_by_a_lookalike_basename():
             "The lane exemption is keyed on the basename, so every one of them "
             "is exempt. Make the key a path, or rename the newcomer."
         )
-        assert Path(paths[0]).parent.name == "agent_runtime", (
-            f"the only {filename} is at {paths[0]}, not in agent_runtime/"
+        home = LANE_CONTRACT_MODULE_HOMES.get(filename)
+        assert home is not None, (
+            f"{filename} has a lane exemption but no declared home in "
+            "LANE_CONTRACT_MODULE_HOMES — declare where the exempt module lives"
+        )
+        parent = Path(paths[0]).parent.as_posix()
+        assert parent.endswith(home), (
+            f"the only {filename} is at {paths[0]}, not under {home}/ — either "
+            "the module moved (update its declared home with the reasoning) or "
+            "a lookalike replaced it"
         )
 
 

@@ -68,19 +68,19 @@ def test_cmd_snapshot_reports_a_cache_miss_instead_of_printing_nothing(
 ):
     """The end-to-end regression: flags on, read model empty, non-empty output."""
 
-    import agent_runtime.snapshot as snapshot_mod
     import hermes_cli.harness as harness
+    from agent_runtime.read_model import ReadModel
 
-    cfg = AgentRuntimeConfig(read_model=ReadModelConfig(enabled=False, serve_snapshot_from_db=True))
-    # enabled=False on the WRITE side keeps the read model unpopulated while the
-    # serve side is told to prefer it — exactly the un-migrated-database shape.
-    monkeypatch.setattr(snapshot_mod, "load_root_runtime_config", lambda: cfg)
-    monkeypatch.setattr(
-        "agent_runtime.config.load_root_runtime_config",
-        lambda: AgentRuntimeConfig(
-            read_model=ReadModelConfig(enabled=True, serve_snapshot_from_db=True)
-        ),
-    )
+    # One config, one scope: since RD-H6's resolver swap reached write_snapshot
+    # (2026-08-17) the old construction — write-side OFF, serve-side ON via two
+    # patched loaders — is impossible BY DESIGN; the config can no longer
+    # disagree with itself. The un-migrated-database shape is still real, so it
+    # is constructed honestly instead: flags ON at the one scope, and the
+    # projector's apply is a no-op (a db that exists but was never populated —
+    # corrupt, foreign-schema, or pre-migration).
+    cfg = AgentRuntimeConfig(read_model=ReadModelConfig(enabled=True, serve_snapshot_from_db=True))
+    monkeypatch.setattr("agent_runtime.config.load_root_runtime_config", lambda: cfg)
+    monkeypatch.setattr(ReadModel, "apply_full_rebuild", lambda self, snapshot: None)
 
     assert harness._cmd_snapshot(Namespace(json=True)) == 0
 

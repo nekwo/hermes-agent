@@ -492,7 +492,10 @@ def test_the_advertisement_grew_and_no_contract_integer_moved():
     assert serve_rpc.RPC_CONTRACT_VERSION == 1
     assert STREAM_SCHEMA_VERSION == 1
     assert STREAM_PATCH_SCHEMA_VERSION == 2
-    assert SNAPSHOT_CONTRACT_VERSION == 54
+    # Floor, not a pin: the authority file owns the exact value; this stage only
+    # records that the contract had reached 54 when the lane landed, a
+    # historical fact that stays true across every future bump.
+    assert SNAPSHOT_CONTRACT_VERSION >= 54
     # The method lane's own advertisement is untouched by this stage: the ops
     # ride BESIDE it, they do not join it. A future edit that merged the two
     # would break every client that folds ``rpc.methods`` as the method set.
