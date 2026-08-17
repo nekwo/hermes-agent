@@ -2089,9 +2089,9 @@ def write_snapshot(snapshot: dict | None = None) -> dict:
         sort_keys=True,
     )
     _sweep_stale_snapshot_tmp_files()
-    cfg = load_root_runtime_config()
-    read_model_cfg = getattr(cfg, "read_model", None)
-    if bool(getattr(read_model_cfg, "enabled", False)):
+    from .read_model import read_model_enabled
+
+    if read_model_enabled():
         from .read_model import ReadModel
 
         # Watermark derivation lives in ``read_model.snapshot_watermark`` — this

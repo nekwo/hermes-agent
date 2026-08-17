@@ -183,11 +183,9 @@ SANCTIONED_READERS = {
     ("agent_runtime/read_model.py", "read_model_enabled"),
 }
 
-PENDING_SWAP_READERS = {
-    # EG-3.1 owns snapshot.py; swap this call site to ``read_model_enabled()``
-    # and delete this row.
-    ("agent_runtime/snapshot.py", "write_snapshot"),
-}
+PENDING_SWAP_READERS: set[tuple[str, str]] = set()
+# The snapshot.py write_snapshot row was retired 2026-08-17: the call site now
+# rides ``read_model_enabled()`` (the EG-6.3 follow-up, landed after EG-3.1).
 
 SCANNED_PACKAGES = ("agent_runtime", "hermes_cli")
 
