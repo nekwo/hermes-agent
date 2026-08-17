@@ -1297,6 +1297,31 @@ def build_parser(parent_subparsers) -> None:
     _add_stage42_global_args(agent_list, controls=frozenset({"sort"}))
     agent_list.set_defaults(func=_cmd_agent_list)
 
+    # UC-H3: the ONE unified create door for scripts, cron and operators. It
+    # calls `agent_create.perform_agent_create` — the exact function
+    # `runtime.agent.create` answers with — so a roster row, a chat root and an
+    # office placement land together or not at all. `persona instance create`
+    # deliberately stays the roster-only / serve-absent recovery door: it mints
+    # no placement, which is its feature, not its bug.
+    agent_create = agent_subs.add_parser(
+        "create",
+        help="Place an agent: roster row, chat root and office placement in ONE atomic call",
+    )
+    agent_create.add_argument("--persona", dest="persona_id", required=True, help="Roster persona id (or profile:<token>); an unknown id is refused before any write")
+    agent_create.add_argument("--workspace", dest="workspace_id", required=True, help="Mission Control workspace the placement lands in; must already exist")
+    agent_create.add_argument("--pos", dest="pos", nargs=2, metavar=("X", "Y"), required=True, help="Canvas position for the placement")
+    agent_create.add_argument("--display-name", default=None, help="Authoritative name; omitted falls back to the persona's configured display name")
+    agent_create.add_argument("--placement-id", default=None, help="Scene itemId to predict the actor key from; omitted mints one server-side")
+    agent_create.add_argument("--realm-id", dest="realm_id", default=None)
+    agent_create.add_argument("--folder", default=None, help="Office folder for the placement (default: Agents)")
+    # A re-run is a NEW gesture unless the caller says otherwise — the same rule
+    # the launcher applies by stamping micros into every key. A script that
+    # wants resume-on-retry passes its own stable key.
+    agent_create.add_argument("--idempotency-key", dest="idempotency_key", default=None, help="Stable retry key; omitted mints a fresh cli-<uuid4> so a re-run is a new gesture")
+    agent_create.add_argument("--correlation-id", dest="correlation_id", default=None)
+    agent_create.add_argument("--json", action="store_true")
+    agent_create.set_defaults(func=_cmd_agent_create)
+
     agent_set_profile = agent_subs.add_parser(
         "set-profile",
         help="Rebind an agent to a different Hermes profile (the ONE door; cascades every instance projection)",

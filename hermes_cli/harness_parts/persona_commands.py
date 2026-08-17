@@ -384,11 +384,121 @@ def _cmd_persona_assignment_task_id_migration(args) -> int:
     return 0 if data["ok"] else 2
 
 
+#: UC-H3. The JSON-RPC error-code family, mapped to the harness exit-code
+#: taxonomy (2 = bad request, 3 = missing, 4 = conflict, 1 = internal). Keyed on
+#: the CODE rather than the reason on purpose: the code family is what the
+#: service guarantees, while reasons are added freely and an unmapped one must
+#: not silently become exit 0. Note `persona_not_found` therefore exits 2, not
+#: the 3 that `ERROR_EXIT_CODES` gives that spelling — it arrives under
+#: ERR_INVALID_PARAMS because it is refused by the request normaliser, and the
+#: two lanes agreeing about WHY beats either agreeing with a different table.
+_AGENT_CREATE_EXIT_CODES = {-32602: 2, 4001: 3, 4090: 4, -32000: 1}
+
+
+def _cmd_agent_create(args) -> int:
+    """`harness agent create` — one call places an agent.
+
+    The unified door the operator asked for: it calls
+    ``agent_create.perform_agent_create``, which is the SAME function
+    ``runtime.agent.create`` answers with, so every RESULT field a script reads
+    here is the field it would read off the wire. That is the point — a lane
+    switch must not be a behaviour change. Two keys are envelope-only and have
+    no wire counterpart: ``ok`` (the exit status) and ``resolution`` (the
+    root-observability block every ``--json`` harness verb stamps).
+
+    It works with no ``harness serve`` running: every lock in the path (the
+    reservation lock, the persona-instance lock, the office lock) is a
+    cross-process FILE lock, and the argv fallback lanes already write beside a
+    live serve today.
+
+    Why this and not `persona instance create --add-instance`: that verb never
+    writes a placement (R#37's shape — there is no office write anywhere in the
+    handler), so it leaves a roster row with no desk. It stays as the
+    roster-only door; this one is the placement door.
+    """
+
+    from agent_runtime.agent_create import perform_agent_create
+
+    cfg = load_agent_runtime_config()
+    try:
+        persona_id = _normalize_cli_persona_or_template_id(args.persona_id)
+    except ValueError as exc:
+        data = {"ok": False, "reason": "persona_id_required", "error": str(exc)}
+        print(emit_json(data) if args.json else data["error"])
+        return 2
+
+    position = list(getattr(args, "pos", None) or [])
+    if len(position) == 2:
+        # argparse hands these over as strings; the service refuses anything
+        # non-finite, so a bad value stays ONE refusal rather than an
+        # argparse traceback here and a typed error there.
+        try:
+            position = [float(position[0]), float(position[1])]
+        except (TypeError, ValueError):
+            pass
+
+    params = {
+        "persona_id": persona_id,
+        "workspace_id": getattr(args, "workspace_id", None),
+        "position": position,
+        "idempotency_key": (
+            safe_assignment_text(getattr(args, "idempotency_key", None), limit=240)
+            or f"cli-{uuid.uuid4().hex}"
+        ),
+    }
+    for key, value in (
+        ("display_name", getattr(args, "display_name", None)),
+        ("placement_id", getattr(args, "placement_id", None)),
+        ("realm_id", getattr(args, "realm_id", None)),
+        ("folder", getattr(args, "folder", None)),
+        ("correlation_id", getattr(args, "correlation_id", None)),
+    ):
+        # Omitted stays OMITTED rather than becoming an explicit ``None``: the
+        # service distinguishes "no placement_id, mint one" from "a placement
+        # id that will not tokenise, refuse".
+        if value is not None:
+            params[key] = value
+
+    outcome = perform_agent_create(
+        params, persona=_persona_by_id(cfg, persona_id)
+    )
+
+    if outcome.refusal is not None:
+        refusal = outcome.refusal
+        # Root-observability: a create that answered out of the WRONG runtime
+        # root refuses just as plausibly as one that answered out of the right
+        # one — `persona_not_found` against an empty roster is exactly the
+        # well-formed-wrong-answer class the resolution block exists for.
+        data = attach_root_observability({
+            "ok": False,
+            "error": refusal.message,
+            **refusal.data,
+            "next_expected": (
+                "fix the named field and re-run; a refused create wrote nothing "
+                "unless it says rolled_back: false"
+            ),
+        })
+        print(emit_json(data) if args.json else data["error"])
+        return _AGENT_CREATE_EXIT_CODES.get(refusal.code, 1)
+
+    data = attach_root_observability({"ok": True, **outcome.result})
+    print(
+        emit_json(data)
+        if args.json
+        else (
+            f"placed {data['persona_instance_id']} as {data['actor_key']} "
+            f"on chat {data['default_chat_session_id']}"
+        )
+    )
+    return 0
+
+
 def _cmd_persona_instance_create(args) -> int:
     # Function-local: this file is exec'd into harness.py's globals, so a
     # module-level import here would need a matching harness.py import or it
     # is a NameError on a LIVE turn. The turn-outcome vocabulary is owned by
     # agent_runtime.mission_chat_outcome; nothing re-spells its values.
+    from agent_runtime.agent_create import require_known_persona
     from agent_runtime.mission_chat_outcome import ChatErrorKind
     display_name = safe_assignment_text(getattr(args, "display_name", None), limit=120)
     kill_active = bool(getattr(args, "kill_active", False))
@@ -412,6 +522,21 @@ def _cmd_persona_instance_create(args) -> int:
             print(emit_json(data) if args.json else data["status"])
             return 2
         coordinator_scope = auth.scope
+    # UC-H4. Until now this handler minted a roster row and a chat root for any
+    # id that TOKENISED — `--persona qa_agent` against a roster of
+    # base/backend_dev/dev/neko_supervisor/qa produced durable artifacts bound
+    # to nothing, and `_persona_by_id` returning None went unchecked three
+    # lines above. Fail-open becomes fail-closed for that class only; the
+    # `profile:` carve-out (D-U1) and every roster-sourced caller are
+    # untouched, and the refusal is the SAME spelling the unified lane uses.
+    #
+    # Asked AFTER the coordinator gate on purpose: an unauthorised actor should
+    # be told it is unauthorised, not handed a roster probe. Both refusals are
+    # still before any store write.
+    refusal = require_known_persona(persona_id, persona)
+    if refusal is not None:
+        print(emit_json(refusal) if args.json else refusal["error"])
+        return 2
     if display_name:
         try:
             if add_instance:
@@ -562,6 +687,18 @@ def _cmd_persona_instance_open_chat(args) -> int:
             if not placement_id:
                 data = {"ok": False, "error": "placement_id is required when add_instance is true"}
                 print(emit_json(data) if args.json else data["error"])
+                return 2
+            # UC-H4, scoped to --add-instance ONLY. The other branches of this
+            # verb REBIND an instance that already exists (and the recorded
+            # 2026-07-25 recovery replayed ten of them out of the event log);
+            # they mint nothing, so a roster check there would refuse a repair
+            # for a persona whose config row went away — the exact workflow the
+            # refusal must not break. Minting is the thing being fenced.
+            from agent_runtime.agent_create import require_known_persona
+
+            refusal = require_known_persona(persona_id, persona)
+            if refusal is not None:
+                print(emit_json(refusal) if args.json else refusal["error"])
                 return 2
             try:
                 # Local import: this file is exec'd into harness.py globals, and
