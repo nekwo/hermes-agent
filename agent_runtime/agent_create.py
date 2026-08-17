@@ -138,6 +138,45 @@ def honest_default_display_name(persona_id: str, persona: Any | None = None) -> 
     return _display_name_for_template(str(persona_id or ""))
 
 
+class PersonaRosterUnavailable(RuntimeError):
+    """The agent roster could not be READ. A runtime fault, not a bad id.
+
+    The distinction exists because UC-H2 made the roster load-bearing. Before
+    it, a config this process could not read degraded quietly to a title-cased
+    display name and nothing else noticed. After it, the same fault would have
+    turned EVERY bare-id create on EVERY lane into ``persona_not_found`` — an
+    error that names the operator's id as the problem when the id was fine and
+    the runtime is the problem. An operator reading that would go looking for a
+    typo that does not exist.
+
+    So the two are separated at the source. "The roster says this persona does
+    not exist" is a refusal the caller can act on; "the roster could not be
+    read" is a fault the caller cannot act on, and it gets its own reason.
+    Neither degrades to the other, and neither degrades to silence — which is
+    the standing rule that a missing answer is a LOUD error, never a quiet
+    guess.
+    """
+
+
+def persona_roster() -> list[Any]:
+    """Every persisted persona, or raise :class:`PersonaRosterUnavailable`.
+
+    The STRICT half of the lookup. An EMPTY list is a real answer — a runtime
+    that genuinely has no personas — and is distinct from a raise. That
+    distinction matters more than it looks: UC-0 measured a hermetic root's
+    default roster as empty, so "no personas" is a reachable state, not an
+    impossible one, and a create against it should be refused rather than
+    excused.
+    """
+
+    try:
+        from .config import ensure_persisted_personas, load_agent_runtime_config
+
+        return list(ensure_persisted_personas(load_agent_runtime_config()))
+    except Exception as exc:  # noqa: BLE001 — re-raised as a typed fault below
+        raise PersonaRosterUnavailable(str(exc)) from exc
+
+
 def resolve_persona(persona_id: str) -> Any | None:
     """The persisted persona for *persona_id*, or ``None``.
 
@@ -151,10 +190,8 @@ def resolve_persona(persona_id: str) -> Any | None:
     """
 
     try:
-        from .config import ensure_persisted_personas, load_agent_runtime_config
-
-        personas = list(ensure_persisted_personas(load_agent_runtime_config()))
-    except Exception:
+        personas = persona_roster()
+    except PersonaRosterUnavailable:
         return None
     raw = str(persona_id or "").strip()
     token = safe_assignment_token(raw)
@@ -169,6 +206,29 @@ def resolve_persona(persona_id: str) -> Any | None:
 
 #: The machine-readable branch point for "that persona names nothing".
 PERSONA_NOT_FOUND_REASON = "persona_not_found"
+
+#: The machine-readable branch point for "the roster could not be read at all".
+#:
+#: A SEPARATE reason rather than a flavour of the one above, because the two
+#: need opposite responses: ``persona_not_found`` means the caller should send a
+#: different id, and this one means the caller should send the SAME id once the
+#: runtime is healthy. Collapsing them would send an operator hunting a typo
+#: that does not exist — and would send a client's retry logic the wrong way.
+PERSONA_ROSTER_UNAVAILABLE_REASON = "persona_roster_unavailable"
+
+
+def persona_roster_unavailable_message(cause: Any = None) -> str:
+    """The ONE spelling of the roster-fault refusal, shared by every lane.
+
+    Names the runtime as the subject, never the id — the id was fine.
+    """
+
+    detail = str(cause or "").strip()
+    return (
+        "the agent roster could not be read, so this create was refused "
+        "before touching any store; the persona id is not the problem"
+        + (f" ({detail})" if detail else "")
+    )
 
 
 def persona_not_found_message(persona_id: Any) -> str:
@@ -202,27 +262,29 @@ def _persona_is_unknown(persona_id: str, persona: Any | None = None) -> bool:
     profile synthesis and instance-id spellings), so "the caller found one"
     settles the question without a second, narrower lookup contradicting it.
 
-    KNOWN SHARP EDGE, recorded rather than silently accepted.
-    :func:`resolve_persona` returns ``None`` for BOTH "no such persona" and
-    "this process could not load the config at all" — it swallows every
-    exception on purpose, because its original job was only to supply a display
-    name and a miss there is harmless. It is no longer only that: a config the
-    runtime cannot read now turns EVERY bare-id create into
-    ``persona_not_found``, with a message that blames the operator's id. Before
-    UC-H2 the same fault degraded quietly to a title-cased display name.
+    Asks :func:`persona_roster` rather than :func:`resolve_persona`, and the
+    difference is the whole point. ``resolve_persona`` answers ``None`` for BOTH
+    "no such persona" and "this process could not read the config" — correct for
+    its original job (a display-name fallback, where either miss is harmless)
+    and WRONG here, where the answer decides whether a durable write is refused.
+    Routed through the forgiving lookup, an unreadable config would refuse every
+    bare-id create on every lane with a message blaming the operator's id.
 
-    Left as-is deliberately — failing closed when the roster is unknown is the
-    defensible half of the trade, and separating the two cases means changing
-    ``resolve_persona``'s contract for its other caller, which is its own
-    change with its own tests. But this is the most likely way this stage
-    misbehaves in the field, and the cure is to distinguish the two ``None``s.
+    So this raises :class:`PersonaRosterUnavailable` instead of returning
+    ``True``. A fault the caller cannot act on must not wear the costume of a
+    refusal the caller can.
     """
 
     if persona is not None:
         return False
     if str(persona_id or "").lower().startswith("profile:"):
         return False
-    return resolve_persona(persona_id) is None
+    raw = str(persona_id or "").strip()
+    token = safe_assignment_token(raw)
+    personas = persona_roster()  # raises PersonaRosterUnavailable
+    return not any(
+        getattr(persona_row, "id", None) in (raw, token) for persona_row in personas
+    )
 
 
 def require_known_persona(
@@ -236,7 +298,20 @@ def require_known_persona(
     same D-U1 carve-out — one spelling, two envelopes.
     """
 
-    if not _persona_is_unknown(persona_id, persona):
+    try:
+        unknown = _persona_is_unknown(persona_id, persona)
+    except PersonaRosterUnavailable as exc:
+        return {
+            "ok": False,
+            "error": persona_roster_unavailable_message(exc),
+            "reason": PERSONA_ROSTER_UNAVAILABLE_REASON,
+            "persona_id": persona_id,
+            "next_expected": (
+                "run `harness doctor` to find why the agent roster cannot be "
+                "read, then re-run — the persona id is not the problem"
+            ),
+        }
+    if not unknown:
         return None
     return {
         "ok": False,
@@ -329,7 +404,16 @@ def normalize_agent_create(
     # function that provably runs before any store is touched, rather than in
     # the store (``add_instance`` is also the restore/rebind chokepoint, and
     # refusing there would need an audit of every historical row's persona id).
-    if _persona_is_unknown(persona_id, persona):
+    try:
+        persona_unknown = _persona_is_unknown(persona_id, persona)
+    except PersonaRosterUnavailable as exc:
+        # A fault, not a bad id — and it keeps its own reason all the way to the
+        # client so a decoder can tell "fix your id" from "fix your runtime".
+        raise AgentCreateInvalid(
+            PERSONA_ROSTER_UNAVAILABLE_REASON,
+            persona_roster_unavailable_message(exc),
+        ) from exc
+    if persona_unknown:
         raise AgentCreateInvalid(
             PERSONA_NOT_FOUND_REASON, persona_not_found_message(persona_id)
         )

@@ -254,3 +254,78 @@ def test_the_services_error_codes_are_serve_rpcs_error_codes():
     assert agent_create.ERR_HANDLER_FAILED == serve_rpc.ERR_HANDLER_FAILED
     assert agent_create.ERR_NOT_FOUND == serve_rpc.ERR_NOT_FOUND
     assert agent_create.ERR_CONFLICT == serve_rpc.ERR_CONFLICT
+
+
+# ── the roster fault is not the roster's answer (reviewer addition) ──────────
+#
+# UC-H2 made the roster load-bearing: before it, a config this process could not
+# read degraded quietly to a title-cased display name. After it, routing that
+# fault through the same ``None`` as "no such persona" would have refused EVERY
+# bare-id create on EVERY lane with a message blaming the operator's id.
+#
+# ANTI-VACUITY. Each test probes the ``reason`` STRING, and the two tests demand
+# DIFFERENT values from the same call shape — a mutant that collapses the two
+# branches (either direction) can satisfy at most one of them. Probing "was the
+# create refused?" alone would pass under the collapse, which is exactly the
+# vacuous witness this file's other tests were careful to avoid.
+
+
+def test_an_unreadable_roster_is_its_own_reason_not_persona_not_found(
+    monkeypatch, qa_persona
+):
+    """A runtime fault must not wear a bad id's costume."""
+
+    from agent_runtime import agent_create
+
+    # Patched at the CONFIG loader, not at ``persona_roster`` — so the real
+    # wrapping runs and the test proves the typed fault is actually minted
+    # rather than assuming it. Patching the wrapper would have tested nothing
+    # but the wrapper's absence.
+    from agent_runtime import config as runtime_config
+
+    def _explode(*args, **kwargs):
+        raise OSError("config file is locked by another process")
+
+    monkeypatch.setattr(runtime_config, "load_agent_runtime_config", _explode)
+
+    with pytest.raises(agent_create.AgentCreateInvalid) as caught:
+        agent_create.normalize_agent_create(
+            {
+                "persona_id": "qa",
+                "workspace_id": "ws_probe",
+                "position": [0.0, 0.0],
+                "idempotency_key": "k-roster-fault",
+            }
+        )
+
+    assert caught.value.reason == agent_create.PERSONA_ROSTER_UNAVAILABLE_REASON
+    assert caught.value.reason != agent_create.PERSONA_NOT_FOUND_REASON
+    # The message must not send the operator hunting a typo.
+    assert "not in the agent roster" not in str(caught.value)
+
+
+def test_an_empty_roster_that_LOADED_still_refuses_as_persona_not_found(
+    monkeypatch, qa_persona
+):
+    """An empty roster is a real answer, and keeps the actionable reason.
+
+    The counterpart to the test above: this is what stops the fix from being a
+    blanket excuse that reopens the hole UC-H2 closed.
+    """
+
+    from agent_runtime import agent_create
+
+    monkeypatch.setattr(agent_create, "persona_roster", lambda: [])
+
+    with pytest.raises(agent_create.AgentCreateInvalid) as caught:
+        agent_create.normalize_agent_create(
+            {
+                "persona_id": "qa",
+                "workspace_id": "ws_probe",
+                "position": [0.0, 0.0],
+                "idempotency_key": "k-empty-roster",
+            }
+        )
+
+    assert caught.value.reason == agent_create.PERSONA_NOT_FOUND_REASON
+    assert caught.value.reason != agent_create.PERSONA_ROSTER_UNAVAILABLE_REASON
