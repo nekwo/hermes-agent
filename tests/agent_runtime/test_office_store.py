@@ -386,7 +386,13 @@ def test_set_folders_dry_run_is_byte_identical_and_eventless():
     updated = store.update_surface(ws, folders=["West Wing"])
     assert "West Wing" in updated.folders
     assert surface_path.read_bytes() != before_bytes
-    assert _office_event_count() == before_events + 1
+    # TWO events, not one, since WV-H3 (2026-08-16): the ``office_surface``
+    # ``state.patched`` row rides inside the lock beside its domain event, which
+    # is what lets a folder-change batch be promoted instead of demoting the
+    # whole thing to a full core. The DRY RUN's count above is the assertion
+    # this test is about, and it is unchanged — a preview that logged either of
+    # them would be claiming a revision the store does not hold.
+    assert _office_event_count() == before_events + 2
 
 
 def test_resolve_conflict_dry_run_leaves_sidecar_and_is_eventless():

@@ -7,7 +7,7 @@ and parses them through its real decode + read-model pipeline
 
 ## Which files are generated, and which are hand-maintained
 
-`MANIFEST.sha256` pins **eleven** files, but
+`MANIFEST.sha256` pins **twelve** files, but
 `scripts/generate_agent_runtime_stream_fixtures.py` writes only **five**. The
 split is structural, not an oversight, and the script names both halves
 (`GENERATED_FRAME_FILES` / `PINNED_ONLY_FILES`).
@@ -26,6 +26,17 @@ split is structural, not an oversight, and the script names both halves
 > cross-stack change and verified by hashing from both sides — a manifest
 > updated on one side only leaves both repos green while they disagree, which
 > is the exact drift this note exists to prevent.
+>
+> WV-H3 (the foldable office SURFACE write, 2026-08-16) adds
+> `patch_office_surface.json` and moves `patch_coverage_manifest.json` again:
+> `office.surface.updated` joins `covered_domain_events`, the old
+> `office.surface.write` case becomes a foldable `office_surface` upsert with a
+> bundled frame, and an `office.surface.created` case records the half that
+> stays uncovered. Both `MANIFEST.sha256` files move in the same cross-stack
+> change, and the ORDER moves with them — the new file sits between
+> `patch_delete_gesture.json` and `patch_coverage_manifest.json`, because
+> `tool/test_quality/check_producer_contracts.py` compares manifest line order
+> BEFORE bytes.
 
 | File | Origin |
 | --- | --- |
@@ -33,9 +44,10 @@ split is structural, not an oversight, and the script names both halves
 | `hydrate_running_work_owner.json` | **Generated.** A second hydrate frame, taken after the same isolated root is seeded with one persona instance and two background delegations — one spawned from that instance's chat root, one from a plain CLI session. It is the cross-repo pin for `running_work.rows[].owner`, and it exists because the launcher's Activity surface **groups by owner**: a null owner does not make work late, it makes it invisible. Both halves are golden — the owned row names its agent, the unowned row ships an **empty** owner rather than a guess. `pid` / `elapsed_seconds` are normalized (this run's process and wall clock); `status` / `pid_verified` deliberately are **not** — the seed clears the spawn baseline so every platform agrees on `unknown` / `false`. |
 | `patch.json`, `patch_upsert_profile.json`, `patch_remove.json` | **Hand-maintained.** S6 v2 field-patch frames carrying real wall-clock stamps (`2026-07-17T04:22:55.149761Z`, not the generator's `FIXED_TIME`) and hand-chosen `base_offset`/`seq` pairs demonstrating specific fold semantics over entities the seeded root does not contain. `patch_remove.json` is additionally **un-emittable today**: it is the `incident.closed` remove fold, and S65 de-registered that event with its last writer (`agent_runtime/patch_coverage.py` keeps it in `HISTORICAL_COVERED_DOMAIN_EVENT_TYPES` so an old replayed batch still classifies the way the launcher folded it). Regenerating it would mean resurrecting a retired lane. |
 | `patch_delete_gesture.json` | **Hand-maintained.** The office fold-promotion milestone (O-H3, 2026-08-16): the DELETE gesture's coalesced batch as one patch frame — a `persona_instance` remove beside an `office_actor` remove, `coalesced_count` 4 because the two paired domain events ride the batch and fold to nothing. Pinned rather than generated for its siblings' reason (the seeded isolated root has no office surface and no retired placement), and it carries the MIXED batch on purpose: one frame, one watermark, both removes, which is the pairing the office sink's old filtered forwarding broke. |
+| `patch_office_surface.json` | **Hand-maintained.** The office write-verbs milestone (WV-H3, 2026-08-16): a FOLDER change as one patch frame — a single `office_surface` **subset** upsert carrying the three fields `update_surface` moves, `coalesced_count` 2 because the paired `office.surface.updated` rides the batch and folds to nothing. Worth a cross-repo pin because it is the row whose shape the two sides could most easily disagree about in silence: it MERGES onto the office row, unlike its `office_actor` sibling's complete-row replace, so a launcher folding it as a replace would drop the actor list on every folder rename with nothing on the producer side able to see it. |
 | `patch_coverage_manifest.json` | **Hand-maintained.** Not a frame at all — the S7-A coverage table. |
 
-The hand-maintained four are validated by **shape + live-classifier agreement**
+The hand-maintained ones are validated by **shape + live-classifier agreement**
 (`test_stream_patch.py`), not by byte-regeneration. Editing one is a hand edit
 under the update rule below; the generator only hashes them.
 

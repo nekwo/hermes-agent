@@ -365,6 +365,118 @@ def test_delete_gesture_fixture_is_the_frame_the_producer_builds():
     )
 
 
+def test_office_surface_fixture_is_the_frame_the_producer_builds():
+    """The office write-verbs milestone's cross-stack golden (WV-H3).
+
+    The launcher commits byte-identical bytes and folds them through its real
+    read-model pipeline, so this side must show the same bytes are what the REAL
+    ``patch_batch_frame`` produces for the real folder-change batch.
+
+    The property worth pinning is the SUBSET. Its ``office_actor`` sibling ships
+    a complete row and the launcher REPLACES; this one ships exactly the three
+    fields ``update_surface`` moves and the launcher MERGES. A frame carrying a
+    fourth key would be a producer quietly taking ownership of state the actor
+    folds maintain — so the key set is asserted as an equality against the
+    producer's own constant, not as a containment.
+
+    And the token gate is asserted on this batch in BOTH directions, because a
+    coverage assertion that only shows promotion is green against a classifier
+    that promotes everything.
+    """
+
+    from datetime import datetime, timezone
+
+    from agent_runtime.models import Event
+    from agent_runtime.patch_coverage import (
+        OFFICE_SURFACE_FOLD_CAPABILITY,
+        batch_is_patch_coverable,
+    )
+    from agent_runtime.state_patches import (
+        OFFICE_SURFACE_ENTITY,
+        OFFICE_SURFACE_PATCH_FIELDS,
+    )
+    from agent_runtime.stream import patch_batch_frame
+
+    name = "patch_office_surface.json"
+    entries = dict(
+        reversed(line.split("  ", 1))
+        for line in (FIXTURES / "MANIFEST.sha256").read_text(encoding="utf-8").strip().splitlines()
+    )
+    assert hashlib.sha256((FIXTURES / name).read_bytes()).hexdigest() == entries[name], (
+        f"{name} drifted from MANIFEST.sha256 (cross-stack pin)"
+    )
+    golden = json.loads((FIXTURES / name).read_text(encoding="utf-8"))
+    assert golden["type"] == "patch"
+    assert golden["schema_version"] == 2
+    assert "core" not in golden
+    ((row,)) = golden["patches"]
+    assert (row["entity"], row["op"]) == (OFFICE_SURFACE_ENTITY, "upsert")
+    # The id is the BARE workspace, not the actor fold's ``workspace/key``
+    # composite: a workspace is unique on its own, and a composite here would
+    # address a row the launcher's office section does not have.
+    assert row["id"] == "ws_office_pilot"
+    assert set(row["changed"]) == set(OFFICE_SURFACE_PATCH_FIELDS)
+    assert golden["base_offset"] < row["seq"] <= golden["watermark"]["event_offset"]
+    # The paired domain event rides the batch and folds to nothing — which is
+    # what "covered" means, and why the count exceeds the row.
+    assert golden["coalesced_count"] == 2
+    assert golden["coalesced_count"] > len(golden["patches"])
+
+    ts = datetime(2026, 7, 16, 12, 20, 0, tzinfo=timezone.utc)
+    payload = {
+        "entity": row["entity"],
+        "id": row["id"],
+        "op": row["op"],
+        "changed": row["changed"],
+    }
+    batch = [
+        (
+            row["seq"],
+            Event(
+                ts=ts,
+                type="state.patched",
+                task_id=None,
+                run_id=None,
+                persona_id=None,
+                payload=payload,
+            ),
+        )
+    ]
+    live = patch_batch_frame(batch, base_offset=golden["base_offset"])
+    assert set(live) == set(golden)
+    assert [
+        {key: value for key, value in entry.items() if key != "ts"}
+        for entry in live["patches"]
+    ] == [{key: value for key, value in entry.items() if key != "ts"} for entry in golden["patches"]]
+
+    events = [event for _, event in batch] + [
+        Event(
+            ts=ts,
+            type="office.surface.updated",
+            task_id=None,
+            run_id=None,
+            persona_id=None,
+            payload={},
+        )
+    ]
+    # The widest declaration any FIELDED launcher sends still demotes: the token
+    # is what changed, not "the office got covered".
+    fielded = frozenset(
+        {
+            "persona_instance",
+            "incident",
+            "office_actor",
+            "office_actor_lifecycle",
+            "persona_instance_create",
+        }
+    )
+    assert not batch_is_patch_coverable(events, fold_entities=fielded)
+    assert batch_is_patch_coverable(
+        events,
+        fold_entities=fielded | {OFFICE_SURFACE_ENTITY, OFFICE_SURFACE_FOLD_CAPABILITY},
+    )
+
+
 def test_coverage_manifest_agrees_with_classifier():
     """The cross-repo coverage golden (plan §S7-A, item 3): the byte-pinned
     ``patch_coverage_manifest.json`` (the launcher folds the SAME bytes) must

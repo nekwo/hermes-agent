@@ -1142,6 +1142,165 @@ def _runtime_office_remove(
     )
 
 
+@method("runtime.office.surface.update")
+def _runtime_office_surface_update(
+    rid: Any, params: dict, context: RpcContext | None = None
+) -> dict:
+    """The FOLDER TAXONOMY of one office surface, rewritten.
+
+    Params: ``workspace_id`` (required), ``folders`` (required list of strings),
+    ``expect_revision`` (optional int), ``updated_by`` (optional string,
+    defaulting to the argv lane's own ``operator``).
+
+    Result: ``{"workspace_id", "folders", "revision"}`` — the folder list AS THE
+    STORE NORMALIZED IT, and the post-write surface revision.
+
+    ``folders`` is a LIST on this lane, deliberately
+    -----------------------------------------------
+    The capability lane joins the folders with commas onto one argv string
+    because argv has no other shape. That encoding is an ARGV ARTIFACT and it is
+    lossy in a way nobody has tripped over yet only because folder names happen
+    not to contain commas — ``_safe_folder`` collapses whitespace and truncates
+    at 80 chars but keeps every comma it is given, so ``"Design, Ops"`` splits
+    into two folders on the way through. A typed lane must not copy an
+    encoding's accidents, so the list stays a list and
+    ``OfficeStore.update_surface`` receives exactly what the operator arranged.
+
+    Why the ECHO is the load-bearing half of the reply
+    --------------------------------------------------
+    ``_normalize_folders`` is not identity: it always prepends
+    ``DEFAULT_FOLDERS``, drops duplicates and blanks, and stops at
+    ``MAX_FOLDERS``. The launcher's flush has, until this method existed, copied
+    its OWN desired list into ``serverFolders`` on accept — so any normalization
+    difference left the two permanently disagreeing and the folder branch
+    re-firing on every subsequent flush, one write per flush forever. Echoing
+    the store's canonical list is what closes that loop, which is why the reply
+    carries the whole list rather than the light ``{revision}`` ack the actor
+    verbs answer with. It is small by construction (≤64 names ≤80 chars).
+
+    Why this REFUSES an unknown workspace instead of authoring one
+    --------------------------------------------------------------
+    Same ruling as ``runtime.office.upsert``'s, and it bites harder here.
+    ``update_surface`` calls ``ensure_surface`` unconditionally on its non-dry
+    path, so on this lane a typo'd ``workspace_id`` would not merely write to
+    the wrong place — it would AUTHOR a whole office, emit
+    ``office.surface.created``, and leave it on disk forever, while the read leg
+    (``runtime.office.get``) answers the same typo with ``workspace_not_found``.
+    A pair where the read refuses what the write invents is incoherent, and the
+    write is the worse half. The lazy-create path stays where a human can see
+    what they made: the argv lane.
+
+    No class-key fence and no reservation, for the same reasons the archive
+    records: this moves no actor rows, and it is one store call under one
+    ``office_lock`` guarded by ``expect_revision``, so a transport retry
+    converges.
+    """
+
+    from agent_runtime.errors import StaleRevision
+    from agent_runtime.office_store import OfficeStore
+
+    workspace_id = _workspace_id_param(params)
+    if workspace_id is None:
+        # The same reason string every office method spends on this, on
+        # purpose: one client branch covers it whatever the verb was.
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            "invalid params: workspace_id must be a non-empty string",
+            {"reason": "workspace_id_required"},
+        )
+
+    folders = params.get("folders")
+    # Checked HERE rather than left to the store, because the store does not
+    # refuse: ``_normalize_folders`` answers a non-list with the DEFAULT list,
+    # so a client that sent a string would silently have its taxonomy reset to
+    # ``("Agents", "Desks")`` and be acked. A per-element string check rides the
+    # same reason: ``_safe_folder`` stringifies whatever it is handed, so a
+    # number would be written as ``"3"`` and echoed back as a folder the
+    # operator never named.
+    if not isinstance(folders, list) or not all(
+        isinstance(name, str) for name in folders
+    ):
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            "invalid params: folders must be a list of strings",
+            {"reason": "folders_invalid", "workspace_id": workspace_id},
+        )
+
+    expect_revision = params.get("expect_revision")
+    # ``bool`` is an ``int`` in Python and ``True`` would silently mean revision
+    # 1 — a wrong guard is worse than no guard, so the type check is explicit.
+    if expect_revision is not None and (
+        isinstance(expect_revision, bool) or not isinstance(expect_revision, int)
+    ):
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            "invalid params: expect_revision must be an integer or omitted",
+            {"reason": "expect_revision_invalid"},
+        )
+
+    updated_by = params.get("updated_by")
+    if updated_by is not None and not isinstance(updated_by, str):
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            "invalid params: updated_by must be a string or omitted",
+            {"reason": "updated_by_invalid"},
+        )
+
+    store = OfficeStore()
+    if not store.surface_exists(workspace_id):
+        return err(
+            rid,
+            ERR_NOT_FOUND,
+            f"unknown workspace: {workspace_id}",
+            {"reason": "workspace_not_found", "workspace_id": workspace_id},
+        )
+
+    try:
+        surface = store.update_surface(
+            workspace_id,
+            folders=folders,
+            updated_by=updated_by or "operator",
+            expect_revision=expect_revision,
+        )
+    except StaleRevision as exc:
+        # ``data`` deliberately carries NO current revision — the same rule both
+        # actor verbs follow, and for the same reason: handing back the number
+        # invites a retry with it, which is the lost update the guard refused.
+        return err(
+            rid,
+            ERR_CONFLICT,
+            str(exc),
+            {
+                "reason": "stale_revision",
+                "workspace_id": workspace_id,
+                "expect_revision": expect_revision,
+            },
+        )
+    except ValueError as exc:
+        # The store's own ``invalid_request`` sentence rides ``message``; one
+        # reason, because the client's response to every one of them is the
+        # same — fix the payload, it is a launcher bug.
+        return err(
+            rid,
+            ERR_INVALID_PARAMS,
+            str(exc),
+            {"reason": "folders_invalid", "workspace_id": workspace_id},
+        )
+
+    return ok(
+        rid,
+        {
+            "workspace_id": surface.workspace_id,
+            "folders": list(surface.folders),
+            "revision": surface.revision,
+        },
+    )
+
+
 # ── runtime.agent.create ─────────────────────────────────────────────────────
 
 

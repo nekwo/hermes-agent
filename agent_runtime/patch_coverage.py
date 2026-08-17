@@ -92,6 +92,7 @@ from typing import Any, Iterable
 from .state_patches import (
     FOLDABLE_PATCH_OPS,
     OFFICE_ACTOR_ENTITY,
+    OFFICE_SURFACE_ENTITY,
     PATCH_OP_REMOVE,
     PATCH_OP_UPSERT,
     PERSONA_INSTANCE_ENTITY,
@@ -146,6 +147,36 @@ OFFICE_ACTOR_LIFECYCLE_CAPABILITY = "office_actor_lifecycle"
 #: ``patch_without_target`` otherwise — which makes the stamp part of the fold
 #: contract here, not merely part of the negotiation.
 PERSONA_INSTANCE_CREATE_CAPABILITY = "persona_instance_create"
+
+#: The THIRD capability token, and the first one that gates a DOMAIN EVENT
+#: rather than a widened op (WV-H3, office write-verbs plan §2.3, 2026-08-16).
+#:
+#: ``office_surface`` is a NEW entity name, so the per-entity vocabulary could
+#: express the patch row on its own — a client that never declares it is never
+#: sent one. What the vocabulary CANNOT express is the other half of this
+#: change: ``office.surface.updated`` joins
+#: :data:`LIVE_COVERED_DOMAIN_EVENT_TYPES`, and covered domain events are not
+#: entity-gated at all (see :func:`event_is_patch_coverable` — they carry no
+#: fold state, so the gate that matters is on the paired patch). Adding it
+#: un-gated would make every batch carrying a folder write coverable for a
+#: client that has never heard of ``office_surface``: it would receive a patch
+#: frame whose ONLY row it answers with ``patch_unknown_entity`` → a full
+#: re-hydrate, the patch AND the core. Strictly worse than the full core it
+#: replaced, aimed at a client that did nothing wrong — the exact failure the
+#: other two tokens exist to prevent.
+#:
+#: So both halves ride this token: the event is coverable only when it is
+#: declared, and the patch row is gated on it too. Gating the row is
+#: belt-and-braces (a client declaring the entity but not the token would
+#: simply demote on the event), and it is kept because the two must move
+#: together — a client that folds this row and does not accept the event's
+#: coverage has said something incoherent, and one gate saying so is cheaper
+#: than two that can disagree.
+#:
+#: Every mixed pair degrades to exactly today's wire: an old client never
+#: declares it and keeps getting full cores; an old runtime sees it as an
+#: unknown string in a frozenset and ignores it.
+OFFICE_SURFACE_FOLD_CAPABILITY = "office_surface_fold"
 
 #: Domain events that ride alongside their ``state.patched`` in the same
 #: coalesced batch (same chokepoint) and carry no fold state of their own — the
@@ -220,25 +251,66 @@ LIVE_COVERED_DOMAIN_EVENT_TYPES: frozenset[str] = frozenset(
         # batch, no fold state of its own (its payload is an item count and a
         # revision the patch's own row already carries).
         #
+        # ``office.surface.updated``: pairs with the ``office_surface`` patch
+        # ``update_surface`` now emits inside the same lock (WV-H3,
+        # 2026-08-16). It is the one entry here that is TOKEN-GATED — see
+        # :data:`OFFICE_SURFACE_FOLD_CAPABILITY` and
+        # :data:`TOKEN_GATED_DOMAIN_EVENT_TYPES` — because a covered domain
+        # event is otherwise not entity-gated at all, and un-gating this one
+        # would promote a batch at a client with no ``office_surface`` fold.
+        #
+        # It was in the "must stay absent" list below until 2026-08-16, on the
+        # reasoning that ``folders`` and the surface's own ``revision`` are
+        # moved only by ``update_surface`` and a fold could not reproduce them.
+        # That reasoning was correct FOR THE WIRE AS IT STOOD — there was no
+        # row carrying them. What retires it is a producer, not a change in the
+        # honesty rule: the §V1 derivability audit run over this write finds
+        # exactly three moved fields and the new patch carries all three
+        # verbatim, so nothing is left that only the demoted core could say.
+        # What made it worth building is that "rare operator action" was wrong:
+        # the write fires on every folder change AND on page open, so one
+        # uncoverable event was demoting the whole boot batch.
+        #
         # The REMAINING siblings are deliberately absent and must stay absent.
         # ``office.actor.restored`` / ``.conflict_resolved`` and
-        # ``office.surface.*`` move surface state a fold genuinely cannot
-        # reproduce: ``folders`` and the surface's own ``revision`` are moved
-        # only by ``update_surface``, a restore un-archives from a copy the
-        # client never held, and a conflict resolution adopts a peer's row
-        # through a path that bypasses the upsert chokepoint. Leaving them
-        # uncovered routes their batches down the full-core lane with no new
-        # code and no new failure mode.
+        # ``office.surface.created`` move surface state a fold genuinely cannot
+        # reproduce: a create authors a surface the client has never held (and
+        # is emitted by lazy ``ensure_surface`` from inside other writes, so
+        # covering it would need a pairing audit of every one of them), a
+        # restore un-archives from a copy the client never held, and a conflict
+        # resolution adopts a peer's row through a path that bypasses the
+        # upsert chokepoint. Leaving them uncovered routes their batches down
+        # the full-core lane with no new code and no new failure mode.
         #
         # Every entry here is gated by ``test_stream_patch.py``'s both-ways
         # partition test: a live entry must have a registered contract, so none
-        # of the three above could be added without a producer behind it.
+        # of the four above could be added without a producer behind it.
         "persona_instance.retired",
         "persona_instance.chat_opened",
         "office.actor.removed",
         "office.actor.upserted",
+        "office.surface.updated",
     }
 )
+
+#: Covered domain events whose coverage additionally requires a CAPABILITY
+#: TOKEN in the client's declaration.
+#:
+#: Empty until 2026-08-16, and the reason it has to exist is structural: a
+#: covered domain event is not entity-gated (it carries no fold state, so the
+#: gate that matters is on the paired ``state.patched``). That is true for every
+#: entry that pairs with a patch on an entity the client ALREADY declares — the
+#: patch's own gate covers both. It stops being true for a patch on a NEW
+#: entity: the paired event would be coverable at a client that cannot fold the
+#: row beside it, and a batch of just the two would ship a frame answered with a
+#: re-hydrate.
+#:
+#: So an event paired with a newly-introduced entity rides that entity's token
+#: here. Read this table as "the event is only free-riding once the client has
+#: said it can carry the paired row".
+TOKEN_GATED_DOMAIN_EVENT_TYPES: dict[str, str] = {
+    "office.surface.updated": OFFICE_SURFACE_FOLD_CAPABILITY,
+}
 
 COVERED_DOMAIN_EVENT_TYPES: frozenset[str] = (
     LIVE_COVERED_DOMAIN_EVENT_TYPES | HISTORICAL_COVERED_DOMAIN_EVENT_TYPES
@@ -437,12 +509,22 @@ def event_is_patch_coverable(
     true``) is gated the same way on
     :data:`PERSONA_INSTANCE_CREATE_CAPABILITY` (D3).
 
+    An ``office_surface`` patch — the folder-taxonomy subset-merge — requires
+    :data:`OFFICE_SURFACE_FOLD_CAPABILITY`, whose constant explains why a NEW
+    entity needs a token at all when the entity vocabulary could have expressed
+    it: the token's real job is the paired DOMAIN EVENT, and the two must move
+    together.
+
     A covered domain event is coverable because its fold state rides in the
     paired patch — it is not entity-gated, because it carries no state to fold
     and the launcher ignores it; the gate that matters is on the paired
-    ``state.patched``, which rides the same batch. Anything else (task/assignment
-    domain events, run traces, ``state.reconciled`` watchdog, board/flow writes,
-    the office SURFACE/restore/conflict writes, planning.py chokepoint-less
+    ``state.patched``, which rides the same batch. The exception is
+    :data:`TOKEN_GATED_DOMAIN_EVENT_TYPES`, whose entries pair with a patch on
+    an entity a fielded client may not fold at all — there the event carries the
+    same token as its pair, or an undeclared client would be promoted a batch it
+    answers with a re-hydrate. Anything else (task/assignment domain events, run
+    traces, ``state.reconciled`` watchdog, board/flow writes, the office
+    surface-CREATE/restore/conflict writes, planning.py chokepoint-less
     mutations) is uncovered → the whole batch falls back to a full core."""
 
     event_type = getattr(event, "type", None)
@@ -457,8 +539,16 @@ def event_is_patch_coverable(
             return OFFICE_ACTOR_LIFECYCLE_CAPABILITY in declared
         if state_patch_is_persona_instance_create(payload):
             return PERSONA_INSTANCE_CREATE_CAPABILITY in declared
+        if state_patch_entity(payload) == OFFICE_SURFACE_ENTITY:
+            return OFFICE_SURFACE_FOLD_CAPABILITY in declared
         return True
-    return event_type in COVERED_DOMAIN_EVENT_TYPES
+    if event_type in COVERED_DOMAIN_EVENT_TYPES:
+        # Most covered events free-ride on the paired patch's gate. The ones in
+        # this table cannot, because their pair names an entity a fielded
+        # client may not fold — see the constant.
+        token = TOKEN_GATED_DOMAIN_EVENT_TYPES.get(event_type)
+        return token is None or token in normalize_fold_entities(fold_entities)
+    return False
 
 
 def batch_is_patch_coverable(

@@ -867,8 +867,11 @@ def emit_office_actor_patch(
     2026-08-16 validation (§V1) established that under the two LIFECYCLE ops the
     first three are exactly derivable by a client from the rows it folds, so they
     no longer need a wire row of their own. ``folders`` and the surface
-    ``revision`` are moved only by ``update_surface``, which stays uncovered and
-    rides the full core; ``updated_at`` drift is accepted and documented there.
+    ``revision`` are moved only by ``update_surface``, which has carried its own
+    :func:`emit_office_surface_patch` row since 2026-08-16 (WV-H3) — so those
+    two are no longer un-expressible either, they are simply somebody else's
+    row; ``updated_at`` drift under an ACTOR write is still accepted and
+    documented, because no actor write moves the surface's copy of it.
     The one case that remains genuinely inexpressible is TRUNCATION — past
     ``MAX_OFFICE_ACTORS_PROJECTED`` the projected list is a cut the client cannot
     reproduce — and that is what :func:`emit_office_actor_refresh` is now for,
@@ -919,6 +922,85 @@ def emit_office_actor_remove(
         entity=OFFICE_ACTOR_ENTITY,
         entity_id=office_actor_patch_id(workspace_id, actor_key),
         op=PATCH_OP_REMOVE,
+        config=config,
+    )
+
+
+OFFICE_SURFACE_ENTITY = "office_surface"
+
+#: EXACTLY the office-row fields ``update_surface`` moves — the whole content of
+#: an ``office_surface`` patch, and the client's merge allowlist.
+#:
+#: Named here rather than written inline so the producer and the derivability
+#: argument in :func:`emit_office_surface_patch` cannot drift apart, and so a
+#: future field addition is a visible edit to a constant rather than a quiet
+#: extra key in a dict literal. The launcher mirrors this set and RESYNCS on
+#: anything outside it, which is what makes widening it a cross-stack change
+#: needing its own capability token.
+OFFICE_SURFACE_PATCH_FIELDS: tuple[str, ...] = ("folders", "revision", "updated_at")
+
+
+def emit_office_surface_patch(
+    event_log: EventLog,
+    surface: Any,
+    *,
+    config: AgentRuntimeConfig | None = None,
+) -> bool:
+    """Emit an ``office_surface`` ``upsert`` — the folder-taxonomy write's row.
+
+    A SUBSET merge, like ``persona_instance``'s and unlike its ``office_actor``
+    sibling's complete-row replace. The reason is the shape of what it patches:
+    ``office_actor`` addresses a row the store rewrites whole, so a replace is
+    faithful; this addresses the office row itself, which also carries the
+    actor list, the derived ``actor_count``/``actors_truncated``, and the
+    ``conflict_actor_keys``/``archived_actor_keys`` ledgers. Those belong to the
+    ACTOR lifecycle folds and to the client-side derivation §V1 established, and
+    a complete-row patch from here would clobber every one of them on a folder
+    rename.
+
+    So this carries :data:`OFFICE_SURFACE_PATCH_FIELDS` and nothing else, and
+    the launcher merges exactly those three keys.
+
+    Why this write can be covered at all
+    ------------------------------------
+    The §V1 derivability standard: an event is coverable only when nothing is
+    left that ONLY the demoted full core could say. ``update_surface`` moves
+    three things — ``folders``, the surface's own ``revision``, and
+    ``updated_at`` — and this row carries all three verbatim. It moves no actor
+    row, no count, and neither key ledger (``_normalize_folders`` and the
+    revision bump are the entire mutation; ``office_store.update_surface``
+    touches nothing else). Nothing is dropped because nothing is left over.
+
+    Tiny by construction, so the oversize ladder is unreachable in practice:
+    ``folders`` is at most ``MAX_FOLDERS`` (64) names of at most 80 characters
+    (``office_store._safe_folder``), an order of magnitude inside the 3584-byte
+    per-value budget. If it ever were not, :func:`build_state_patch`'s existing
+    accounting degrades the whole patch to ``refresh`` and the batch demotes as
+    it does today — an honest re-fetch, never a partial merge onto an office row
+    whose folder list the client would then hold half of.
+
+    NOT emitted from ``ensure_surface``. A create authors a surface the client
+    has never held, and this subset is not a whole office row — a fold would
+    answer it ``patch_without_target`` and re-hydrate, which is strictly worse
+    than the full core a create already takes. ``office.surface.created``
+    therefore stays uncovered, deliberately.
+
+    Best-effort at its call site like every sibling emitter: a patch-lane fault
+    is a missing PROMOTION, never a failed folder write.
+    """
+
+    if not delta_patches_enabled(config):
+        return False
+    return emit_state_patch(
+        event_log,
+        entity=OFFICE_SURFACE_ENTITY,
+        entity_id=str(getattr(surface, "workspace_id", "") or ""),
+        op=PATCH_OP_UPSERT,
+        changed={
+            "folders": list(getattr(surface, "folders", []) or []),
+            "revision": getattr(surface, "revision", None),
+            "updated_at": to_jsonable(getattr(surface, "updated_at", None)),
+        },
         config=config,
     )
 
