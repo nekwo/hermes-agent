@@ -288,6 +288,58 @@ Rules:
 Negotiation makes a new entity possible; it does not enable one. The producer
 still emits `state.patched` only for the entities its chokepoints already cover.
 
+## How a consumer learns the push lane exists (TC-1 / C-1)
+
+A consumer must never unilaterally move onto the serve hub's push lane: a
+runtime that predates it answers a `subscribe` with the argv lane's
+`invalid_request`, and a runtime that HAS it can still refuse a particular
+subscribe (`unsupported_lane`, `draining`, `already_subscribed`). A probe
+therefore cannot tell "too old" from "refused this one", which is why detection
+rides an advertisement instead.
+
+`harness serve` advertises its op lane on the frames it already sends — `ready`
+(stdio), `hello_ok` (socket), and the re-askable `version` reply — beside the
+`rpc` block the method lane uses:
+
+```json
+"ops": {
+  "contract": 1,
+  "transport": "stdio",
+  "ops": ["cancel","connections","drain","ping","shutdown","stacks",
+          "subscribe","unsubscribe","version"],
+  "subscribe_lanes": ["stream"]
+}
+```
+
+Rules, all the same as the `rpc` manifest's:
+
+- **A set plus an integer.** The set grows when an op is added — a client only
+  ever sends an op it FOUND — and `contract` moves only when an existing op's
+  shape changes incompatibly. Adding an op does not move it.
+- **The gate is `subscribe_lanes`, not `ops`.** `"subscribe" in ops` says the op
+  is dispatched; `"stream" in subscribe_lanes` says THIS lane is carried. A
+  consumer gates on the lane.
+- **Answered per transport, and it differs.** `shutdown` is the stdio owner's
+  verb and is refused on the socket, so the socket's set omits it. The block
+  names the `transport` it describes so a cached copy cannot be mis-applied.
+- **A runtime that predates the advertisement carries no `ops` key at all.**
+  That reads as "ops undiscoverable" — keep the existing lane — not as a
+  failure.
+- `hello` is deliberately absent: it is the socket's first line, consumed before
+  the op dispatcher exists, and its own contract is advertised as
+  `hello_contract` on `server_hello`.
+
+The frames a hub subscriber receives are the frames `harness stream` writes.
+That is a contract test, not a claim:
+`tests/agent_runtime/test_serve_stream_lane_parity.py` runs both lanes
+concurrently over one seeded root and one scripted event sequence and compares
+the delivered frames after removing volatile stamps with the stream goldens' own
+normalizer. One caveat it records rather than hides: the two lanes' LINE bytes
+differ in whitespace (`harness stream` writes compact separators, the serve
+child's frame writer writes json's defaults), so parity is a property of the
+decoded frame — which is what this document already tells a consumer to work
+with.
+
 ## Consumer guidance
 
 - Start by applying the `hydrate` frame's `core` as the complete Mission Control snapshot.

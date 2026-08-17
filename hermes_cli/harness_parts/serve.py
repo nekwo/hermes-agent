@@ -24,6 +24,10 @@ Protocol (NDJSON, one frame per line):
              (``{"token_file":"present"|"minted"|"error:<reason>"}`` — the
              posture, NEVER the token itself), and ``"instance"`` (this
              serve's registry entry under ``<store_root>/serve_instances/``).
+             It also carries the two CAPABILITY advertisements — ``"rpc"``
+             (``serve_rpc.manifest()``) and ``"ops"``
+             (:func:`ops_manifest`) — so a client learns the method set AND the
+             op set from the greeting it already reads, instead of probing.
 - request:   ``{"id":"req-7","argv":["harness","status","--json"]}``
 - reply:     ``{"id":"req-7","event":"line","line":…}`` × N then
              ``{"id":"req-7","event":"exit","code":0}``
@@ -40,7 +44,9 @@ Protocol (NDJSON, one frame per line):
              — the SAME stamp the ready frame carried, re-askable at any
              time. A durable service outlives the install it was started
              from; this is how a client proves it is not talking to last
-             week's code.
+             week's code. Both advertisements (``"rpc"`` and ``"ops"``) are
+             restated here, and ``"ops"`` is answered for the transport the
+             ask arrived on.
 - drain:     ``{"op":"drain"[,"deadline_seconds":30][,"force":true]}`` → stop
              accepting new requests (each is answered
              ``{"id":…,"event":"draining",…}`` and a terminal ``exit`` frame
@@ -187,6 +193,13 @@ because the socket lane is injected and OFF unless ``_cmd_serve`` turns it on.
              left for the client to assume. A malformed declaration is refused
              with ``{"event":"subscribe_denied","reason":"invalid_fold_entities"}``
              instead of being silently read as absent.
+             The frames a subscriber receives are the argv stream's frames,
+             not a second contract: byte parity against
+             ``harness stream --fold-entities …`` over one seeded root and one
+             scripted event sequence is a contract test
+             (``tests/agent_runtime/test_serve_stream_lane_parity.py``).
+             Whether THIS runtime carries the lane is answerable before
+             subscribing — see ``"ops"`` / :func:`ops_manifest`.
 - connections: ``{"op":"connections"}`` → ``{"event":"socket_connections",…}``
              (count, and per client: name, build, subscribed, connected_at,
              frames and bytes pushed). The same block rides the ``version``
@@ -215,6 +228,87 @@ from typing import Any, Callable, TextIO
 
 SERVE_SCHEMA_VERSION = 1
 DEFAULT_POOL_SIZE = 4
+
+# ── The OP lane's advertisement (TC-1/C-1) ───────────────────────────────────
+#
+# The METHOD lane has been discoverable since ``serve_rpc.manifest()`` started
+# riding ``ready``/``hello_ok``/``version`` under ``"rpc"``: a client reads the
+# greeting it already reads and learns which methods exist. The OP lane — the
+# ``{"op":…}`` verbs this file dispatches, ``subscribe`` among them — was NOT
+# discoverable at all, so a client could only learn whether this runtime carries
+# the push lane by sending a subscribe and interpreting whatever came back. That
+# is a probe, and a probe cannot distinguish "this runtime is too old" from "this
+# runtime refused THIS subscribe" (`unsupported_lane`, `draining`,
+# `already_subscribed` are all real answers a live lane gives).
+#
+# So the ops advertise themselves, under ``"ops"``, beside ``"rpc"``, following
+# the method lane's discipline verbatim rather than minting a second scheme:
+#
+#   * a SET plus an integer. The set grows when an op is added — a client only
+#     ever sends an op it FOUND — and the integer moves only when an existing
+#     op's shape changes incompatibly. Adding ``subscribe`` to the advertisement
+#     does not move ``SERVE_SCHEMA_VERSION``, ``RPC_CONTRACT_VERSION``, or this
+#     module's own integer, exactly as the eighth RPC method did not move the
+#     method lane's;
+#   * a runtime that predates the advertisement carries no ``"ops"`` key, which
+#     reads as "ops undiscoverable, probe if you must" rather than as a failure;
+#   * PER TRANSPORT, because the answer genuinely differs. ``shutdown`` is the
+#     stdio owner's verb and is refused on the socket
+#     (``op_not_available_on_socket``), so advertising it to a socket client
+#     would be a false all-clear of the exact kind the build stamp beside it
+#     exists to retire. The block names the transport it describes so a client
+#     that cached it cannot mis-apply it to the other lane.
+#
+# ``hello`` is deliberately absent from both sets. It is the socket's FIRST line
+# and is consumed by ``serve_socket`` before this dispatcher ever sees a frame;
+# reaching the dispatcher means it is a SECOND hello, which is answered
+# ``unexpected_hello``. Its contract is already advertised — ``hello_contract``
+# on ``server_hello`` and restated on ``hello_ok``.
+OPS_CONTRACT_VERSION = 1
+
+#: Ops this dispatcher answers on EVERY transport.
+OPS_EVERY_TRANSPORT: tuple[str, ...] = (
+    "cancel",
+    "connections",
+    "drain",
+    "ping",
+    "stacks",
+    "subscribe",
+    "unsubscribe",
+    "version",
+)
+
+#: Ops only the process that owns this runtime's stdin may use. See the
+#: ``shutdown`` refusal in ``_handle_message``.
+OPS_STDIO_ONLY: tuple[str, ...] = ("shutdown",)
+
+#: The push lanes ``{"op":"subscribe","lane":…}`` accepts. ONE today, and the
+#: value EG-4.2's launcher gate reads: the argv stream stays the backstop until
+#: a runtime says this word, because the launcher must never unilaterally switch
+#: onto a lane the runtime it is attached to does not carry.
+SUBSCRIBE_LANES: tuple[str, ...] = ("stream",)
+
+
+def ops_manifest(*, transport: str) -> dict[str, Any]:
+    """What this runtime's OP lane offers *transport*, for the greeting frames.
+
+    Rides ``ready`` (stdio), ``hello_ok`` (socket) and the re-askable ``version``
+    reply — the same three frames ``serve_rpc.manifest()`` rides, for the same
+    reason: a durable service outlives the install it was started from, so "does
+    the thing I am attached to carry the push lane" must be answerable at any
+    time and not only from a greeting a client read hours ago.
+    """
+
+    ops = set(OPS_EVERY_TRANSPORT)
+    if transport == "stdio":
+        ops |= set(OPS_STDIO_ONLY)
+    return {
+        "contract": OPS_CONTRACT_VERSION,
+        "transport": transport,
+        "ops": sorted(ops),
+        "subscribe_lanes": sorted(SUBSCRIBE_LANES),
+    }
+
 
 # ── Drain ────────────────────────────────────────────────────────────────────
 #
@@ -1512,6 +1606,11 @@ def serve_loop(
             # lane carries no ``rpc`` key at all — which reads as "argv only"
             # rather than as a failure.
             "rpc": serve_rpc.manifest(),
+            # The OP lane's half of the same promise (TC-1/C-1). ``ready`` is
+            # stdio's greeting, so this is where a stdio client learns that
+            # ``{"op":"subscribe","lane":"stream"}`` is carried here rather than
+            # having to send one and read the answer's tea leaves.
+            "ops": ops_manifest(transport="stdio"),
         }
         if orphaned_repaired:
             ready_frame["orphaned_turns_repaired"] = len(orphaned_repaired)
@@ -1994,6 +2093,9 @@ def serve_loop(
                 # asking ``version`` — one extra round trip on every connect,
                 # for something the handshake it already performs can carry.
                 "rpc": serve_rpc.manifest(),
+                # Same argument, the OP lane's half — and the one place the two
+                # advertisements differ, because ``shutdown`` is refused here.
+                "ops": ops_manifest(transport="socket"),
             }
 
         def _connections_frame() -> dict[str, Any]:
@@ -2306,6 +2408,12 @@ def serve_loop(
                         # any time, not only at the greeting a client may have
                         # read hours ago.
                         "rpc": serve_rpc.manifest(),
+                        # Re-askable for the same reason, and honest about the
+                        # transport it just came over: ``shutdown`` is in the
+                        # stdio answer and out of the socket one.
+                        "ops": ops_manifest(
+                            transport="stdio" if connection is None else "socket"
+                        ),
                     }
                 )
                 return None

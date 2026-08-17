@@ -203,6 +203,64 @@ the cached-snapshot first paint are untouched.
 **Mixed pairs.** Server-only, additive; no client change. Alone: nothing
 observable.
 
+**LANDED 2026-08-17 (as EG-4.1).** 16 tests in
+`tests/agent_runtime/test_serve_stream_lane_parity.py`; C-A1/C-A2 answered and a
+third row (C-A3) added for the parity result. Three reconciliations against HEAD
+a reader of this stage needs:
+
+1. **No fixture was minted.** The parity comparison needs volatile stamps
+   removed; it imports the stream goldens' OWN normalizer
+   (`scripts/generate_agent_runtime_stream_fixtures.py:_normalize`) rather than
+   writing a fixture or growing a second normalizer, and reads
+   `tests/fixtures/stream_frames/hydrate.json` as the shape witness. `MANIFEST.sha256`
+   does not move, so §8's cross-stack copy discipline is not engaged at all.
+2. **"Byte parity" is a claim about the FRAME, not the line.** See C-A3.
+3. **The two lanes must run CONCURRENTLY to be comparable.** A hydrate's
+   watermark is the log's tail at build time, so a sequential comparison
+   compares two different tails and could only be normalized into agreement.
+   Both lanes attach, both hydrate, then ONE scripted append is tailed by both.
+   The C-2 sandwich is the same shape with the fat frames in the middle: the
+   spec's "office patches" are stood in for by method-lane calls on the same
+   connection, because the property under test is the WRITER (one ordered queue
+   per connection, shared by both lanes) and the office lane's own delivery is
+   already pinned live in `test_serve_rpc_office_subscribe_live_hub.py`.
+
+**Two mutations the FIRST cut of the tests survived**, recorded because each
+marks a real limit of what a frame comparison can see, and both are now covered
+by a test of their own:
+
+* **hub cadence forked** (`delta_debounce_seconds` 0.2 → 0 on the hub's
+  `stream_frames` call): byte parity stayed GREEN. A scripted burst is
+  coalescing-blind in the direction that matters — whether two appends land in
+  one batch depends on whether both were already in the log when the producer
+  polled, which a zero settle window usually satisfies anyway. Pinned instead
+  where it is decidable, at the one function both lanes call
+  (`test_both_lanes_ask_the_producer_for_the_same_cadence`), with the argv side's
+  numbers read off the REAL parser and the hub's off `stream_frames`' own
+  signature.
+* **the stream lane joining restart-free** (`restart_producer=False` leaked onto
+  it from O-H5): the single-client rejoin stayed GREEN, because the last
+  subscriber leaving empties the room, stops the producer, and the hub's FLOOR
+  rule then starts one regardless. The flag is only observable with a peer
+  holding the generation alive, which is now
+  `test_a_rejoin_beside_a_peer_that_never_left_still_gets_its_own_hydrate` — two
+  real socket clients, the real producer, and A's rejoin reading `delta` instead
+  of `hydrate` under the mutation.
+
+**Debt found, not fixed (owner: none yet).** `StreamHub.stop()` cannot interrupt
+a generator parked inside `next()`, and the real `stream_frames` producer parks
+up to a heartbeat (5 s) between frames — so a test that attaches the REAL
+producer through `serve_loop` can leave a producer thread alive past
+`isolate_agent_runtime_root`'s teardown, at which point its next read resolves
+against the OPERATOR's live store. Observed while building this stage (a
+`producer_error:JSONDecodeError` from reading a foreign event log mid-line). The
+new tests drain their producers explicitly and assert the drain
+(`_drain_stream_producers`), but nothing fences the next author: the general fix
+is either a conftest tripwire on surviving `serve-stream-producer-*` threads or a
+stop-event-aware source in `serve.py`'s `_stream_source` (the shape
+`test_serve_rpc_office_subscribe_live_hub.py`'s `live_hub` fixture already
+mirrors).
+
 ### TC-2 — launcher: subscribe the hub lane behind a gate; argv becomes the backstop
 
 **Goal.** The main path finished, per the ruling's first clause (RELAYED).
@@ -325,5 +383,6 @@ or a probe root, never a fresh boot). Commit explicit paths.
 | C-R7 | O-L2 shipped lossy, reverted; live STALE receipt | MEASURED-§10 / §10.2(b) |
 | C-R8 | Slow-backstop cutover precedent | READ DECISION_push_and_rpc_2026-08-13.md:165-169 |
 | C-R9 | Ruling #42 text + "no serve no office" unrecorded anywhere | RAN exhaustive search; RELAYED quotes |
-| C-A1 | Op advertisement on ready/version | ASSUMPTION — TC-1 |
-| C-A2 | Single ordered per-connection writer; fat-frame delay only | ASSUMPTION — TC-1 |
+| C-A1 | Op advertisement on ready/version | **ANSWERED 2026-08-17 (TC-1 = EG-4.1): it did NOT exist and was ADDED.** `ready`/`hello_ok`/`version` now carry `"ops"` beside `"rpc"` — `{contract, transport, ops[], subscribe_lanes[]}` (`serve.py:ops_manifest`). The gate EG-4.2 reads is `subscribe_lanes` containing `stream`, not the op name. Per-transport because `shutdown` is refused on the socket. No contract integer moved (the eighth RPC method's precedent). |
+| C-A2 | Single ordered per-connection writer; fat-frame delay only | **ANSWERED 2026-08-17 (TC-1 = EG-4.1): TRUE, and tested.** Both lanes funnel into one writer per connection (`_FrameWriter` on stdio, `connection.emit` on the socket), each holding one lock, so a fat frame delays and never splices. A stream subscriber dropped for backpressure does NOT take the method lane on the same connection with it, and the drop's numbers are exact. Head-of-line blocking is therefore a LATENCY question only, deliberately unmeasured here (TC-1 witnesses count frames, bytes and ordering — never elapsed ms). |
+| C-A3 | Byte parity, hub lane vs argv `harness stream` | **ANSWERED 2026-08-17 (TC-1 = EG-4.1): TRUE at the FRAME, with one drift recorded.** Both lanes run concurrently over one seeded root + one scripted event sequence; hydrate and the demoted full-core batch are byte-identical after the stream goldens' own normalizer. The LINE bytes differ in whitespace — `harness stream` writes `separators=(",",":")`, `_FrameWriter.emit` writes json's defaults — so "byte parity" in §TC-1 must be read as a claim about the decoded frame. Not fixed: changing either encoder would move bytes on a lane in the field for no consumer's benefit (the contract already says parse per line, branch on `type`). |
