@@ -539,9 +539,24 @@ class OfficeStore:
         *,
         updated_by: str = "operator",
         expect_revision: int | None = None,
+        allow_class_key: bool = False,
         correlation_id: str | None = None,
         dry_run: bool = False,
     ) -> OfficeActor:
+        """Write ONE actor placement, creating the surface if it does not exist.
+
+        ``allow_class_key`` is the sanctioned override for the class→instance
+        re-key fence below (``_guard_class_keyed_write``). It is a STORE
+        parameter and not a caller-side fence omission on purpose (EG-6.6): an
+        override has to be a value someone passed on the record, because the
+        alternative — a caller that simply does not call the guard — is
+        indistinguishable from a caller that forgot, which is how this fence
+        came to exist at four call sites around one store. Only ``harness office
+        actor-upsert --allow-class-key`` passes it; the wire lane deliberately
+        has no equivalent (a parameter is not consent — see
+        ``serve_rpc._runtime_office_upsert``).
+        """
+
         wsid = _safe_id(workspace_id)
         if not wsid:
             raise ValueError("invalid_request")
@@ -562,6 +577,12 @@ class OfficeStore:
         if not dry_run:
             self.ensure_surface(wsid, created_by=updated_by)
         with office_lock(wsid):
+            # THE class-key fence, first and inside the lock (EG-6.6). First
+            # because that is the precedence the four caller-side copies had —
+            # they all ran before any store call — and inside the lock because
+            # the predicate reads the ledger and the live actor set, which a
+            # concurrent writer can move between a caller's read and this write.
+            self._guard_class_keyed_write(wsid, payload, allow_class_key=allow_class_key)
             self._guard_no_conflict(wsid, actor_key)
             existing: OfficeActor | None = None
             if self.actor_exists(wsid, actor_key):
@@ -696,6 +717,19 @@ class OfficeStore:
         correlation_id: str | None = None,
         dry_run: bool = False,
     ) -> OfficeActor:
+        """Un-archive one actor placement — ``harness office actor-restore``.
+
+        The third and last production writer of a live actor file, and the one
+        with NO class-key fence — which is a disposition, not an omission
+        (EG-6.6's enumeration witness names it as such). Restoring an archived
+        class key IS the deliberate resurrection the fence refuses on every other
+        path: it takes no payload to be wrong about, writes back exactly the
+        bytes the archive holds, and is the very exit
+        ``office_class_key_guard.refusal_message`` tells the operator to take.
+        Fencing the sanctioned override against itself would leave the refusal
+        pointing at a dead end.
+        """
+
         wsid = _safe_id(workspace_id)
         if not wsid:
             raise ValueError("invalid_request")
@@ -1065,22 +1099,64 @@ class OfficeStore:
         if paths.office_conflict_path(workspace_id, actor_key).exists():
             raise SyncConflict(f"actor_conflict:{actor_key}")
 
+    def _guard_class_keyed_write(self, workspace_id: str, payload: dict[str, Any], *, allow_class_key: bool) -> None:
+        """THE class-key fence for ``upsert_actor`` — one fence, at the store.
+
+        Hoisted here from its four callers (Plan EG-6.6). It used to be called
+        at ``serve_rpc._runtime_office_upsert``, ``agent_create``'s placement
+        leg, ``harness office actor-upsert`` and ``workspace_template``'s copy —
+        four copies of one decision around one store, which is why
+        ``scripts/office_actor_rekey_to_instance.py`` had to WARN that a new
+        writer reaching ``upsert_actor`` was unfenced by default. It was: the
+        fifth caller would have shipped with the hole and every reply-shape test
+        green, because a caller-side fence is invisible in the store's own
+        contract.
+
+        What the callers keep is a TRANSLATION of the refusal below into their
+        transport's taxonomy (a 4090 with ``data.reason``, a stage-42
+        ``duplicate_conflict`` exit, a copy warning, a compensated create
+        failure) — never a second copy of the decision. The predicate itself
+        still lives in ``office_class_key_guard``, one derivation authority.
+
+        The refusal MESSAGE is the shared ``refusal_message`` verbatim, because
+        three of those translations assert on it and because the operator-facing
+        exits it names (send the binding, ``actor-restore``,
+        ``--allow-class-key``) are the same three from every lane that has them.
+
+        Fires on ``dry_run`` too. A preview whose whole job is to show what the
+        real run would do must show the refusal, or the operator learns about it
+        only from the write.
+        """
+
+        if allow_class_key:
+            return
+        from .office_class_key_guard import (
+            ClassKeyedPlacementRefused,
+            class_key_collision,
+            refusal_message,
+        )
+
+        collision = class_key_collision(self, workspace_id, payload)
+        if collision is None:
+            return
+        raise ClassKeyedPlacementRefused(refusal_message(collision), safe_details=collision)
+
     def _guard_class_keyed_adoption(self, workspace_id: str, actor: OfficeActor, *, allow_class_key: bool) -> None:
         """The class-key fence for ``resolve_conflict(take="remote")``.
 
         That branch writes a PEER's actor with ``_write_actor`` DIRECTLY,
-        bypassing ``upsert_actor`` and therefore every class-key guard the other
-        writers call. So it can put an archived CLASS key back on disk as
-        ACTIVE beside its instance-keyed sibling — the same double placement the
-        re-key migration exists to remove, reached through the one door the fence
-        did not cover.
+        bypassing ``upsert_actor`` and therefore its fence. So it can put an
+        archived CLASS key back on disk as ACTIVE beside its instance-keyed
+        sibling — the same double placement the re-key migration exists to
+        remove, reached through the one door the fence did not cover.
 
-        The fence lives in the store rather than at the CLI (where
-        ``actor-upsert``'s does) because the hazard is intrinsic to THIS METHOD,
-        not to any one caller: the payload is peer-authored and never passes
-        ``upsert_actor``'s chokepoint, so a future second caller would reopen the
-        hole by default. ``upsert_actor``'s guard is at its callers for the
-        opposite reason — its payload IS the caller's intent.
+        The SECOND of the store's two class-key fences, and it stays separate
+        from ``_guard_class_keyed_write`` rather than merging into it: this one's
+        input is a deserialized peer RECORD (whose ``actor_key`` is authoritative
+        and whose spelling never met ``_normalize_persona_id``), not a caller's
+        payload, and its refusal names a different exit (``--take local``). One
+        predicate, two typed entrances — which is the shape that let this method
+        be fenced at all, since its payload never passes ``upsert_actor``.
 
         Refuses, rather than silently re-keying the incoming actor onto the
         instance binding: that would rewrite what the peer published into a
@@ -1121,8 +1197,9 @@ class OfficeStore:
         )
         if collision is None:
             return
-        # ``refusal_message`` is left untouched (three other writers assert on
-        # it); the resolve-specific exit gets appended, because "--take local" is
+        # The shared ``refusal_message`` is left untouched (the upsert fence
+        # raises it verbatim and three lanes assert on it); the
+        # resolve-specific exit gets appended, because "--take local" is
         # the answer an operator under conflict pressure actually needs and the
         # shared message cannot know to offer it.
         raise ClassKeyedPlacementRefused(

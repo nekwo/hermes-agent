@@ -701,7 +701,7 @@ def perform_agent_create(
         reserve_agent_create,
     )
     from .errors import StaleRevision, SyncConflict
-    from .office_class_key_guard import class_key_collision
+    from .office_class_key_guard import ClassKeyedPlacementRefused
     from .office_store import OfficeStore
     from .persona_assignments import (
         PersonaInstanceStore,
@@ -821,26 +821,6 @@ def perform_agent_create(
             payload = placement_actor_payload(
                 request, display_name=instance.display_name
             )
-            # Instance-keyed by construction, so this guard can never fire from
-            # this sequence. Run anyway: it is the fence the office lane's third
-            # writer needed, and a defence that is only correct "by construction"
-            # is one refactor away from being absent.
-            collision = class_key_collision(store, request.workspace_id, payload)
-            if collision is not None:
-                data = compensate_failed_placement(
-                    reservation,
-                    instance_id=instance.id,
-                    failure={
-                        "reason": "placement_failed",
-                        "phase": "placement",
-                        "placement_reason": "class_key_collision",
-                        "workspace_id": request.workspace_id,
-                    },
-                )
-                return _refused(
-                    ERR_CONFLICT, "class-keyed placement refused", data
-                )
-
             try:
                 # CI-4's FREE half (EG-2.3): this method already reserved
                 # ``correlation_id`` from birth and already echoes it on the
@@ -861,6 +841,34 @@ def perform_agent_create(
                     updated_by=updated_by,
                     correlation_id=request.correlation_id,
                 )
+            except ClassKeyedPlacementRefused as exc:
+                # ``placement_actor_payload`` is instance-keyed by construction,
+                # so the store's class-key fence can never fire from this
+                # sequence AS IT STANDS — and a defence that is only correct "by
+                # construction" is one refactor away from being absent, so this
+                # arm exists and is tested by injecting the payload shape that
+                # refactor would produce (EG-6.6). It is a compensated refusal
+                # like every other placement failure: the roster row this method
+                # just minted must not outlive the placement it was minted for.
+                #
+                # ``placement_reason`` keeps the string it has always spent, and
+                # the fence's own evidence rides beside it: a refusal that does
+                # not name the actor it collided with is one nobody can act on,
+                # and this lane had been dropping exactly that.
+                data = compensate_failed_placement(
+                    reservation,
+                    instance_id=instance.id,
+                    failure={
+                        "reason": "placement_failed",
+                        "phase": "placement",
+                        "placement_reason": "class_key_collision",
+                        "workspace_id": request.workspace_id,
+                        "reasons": exc.safe_details["reasons"],
+                        "class_actor_key": exc.safe_details["class_actor_key"],
+                        "conflicting_actor_keys": exc.safe_details["conflicting_actor_keys"],
+                    },
+                )
+                return _refused(ERR_CONFLICT, "class-keyed placement refused", data)
             except (StaleRevision, SyncConflict, ValueError) as exc:
                 data = compensate_failed_placement(
                     reservation,

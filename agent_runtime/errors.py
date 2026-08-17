@@ -80,6 +80,30 @@ class ArchiveUnreadable(AgentRuntimeError):
     code = "archive_unreadable"
 
 
+class ActorsUnreadable(ArchiveUnreadable):
+    """Raised when the class-key fence cannot see the WHOLE actor directory.
+
+    The fence's ``duplicate_item_placement`` half answers "does a live sibling
+    already hold one of these item ids?", and it answered that from
+    ``list_actors``, which drops undecodable files on the floor
+    (``OfficeStore._read_actor_dir`` counts them and moves on). So ONE
+    unreadable instance-keyed actor file made the honest answer "unknown" while
+    the fence read it as "no" — for every writer at once — and the class-keyed
+    write it was built to refuse landed beside the sibling nobody could decode.
+    Exactly the identical-sibling-nobody-can-find defect, reached through the
+    fence itself.
+
+    A guard that cannot see its evidence REFUSES. Subclasses
+    :class:`ArchiveUnreadable` so every translation arm that already learned the
+    "a file the write depends on will not decode" condition covers this one
+    without a new branch, and carries its OWN ``code`` so the operator's cure
+    (repair or remove the unreadable ACTOR file, not the archive copy) is not
+    mislabelled.
+    """
+
+    code = "actors_unreadable"
+
+
 class SyncConflict(AgentRuntimeError):
     """Raised when a board card is under an unresolved realm-sync conflict, or a
     conflict-resolution verb targets a card that has none."""

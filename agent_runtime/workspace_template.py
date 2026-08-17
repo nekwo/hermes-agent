@@ -24,8 +24,10 @@ Office actor copies carry the source's ``persona_instance_id`` through, so a
 bound source placement copies as a bound placement. A source placement with NO
 binding produces a CLASS-KEYED write, which is refused per-actor
 (``office_actor_class_key_refused``) when the destination already holds the
-same persona under an instance key or has that class key archived — see
-``office_class_key_guard``. Copying class-keyed actors into a workspace with no
+same persona under an instance key or has that class key archived. The refusal is
+the STORE's (``OfficeStore._guard_class_keyed_write``, EG-6.6) and this module
+only translates it into a copy warning — see ``office_class_key_guard``. Copying
+class-keyed actors into a workspace with no
 office of its own is the normal path and stays untouched.
 """
 
@@ -77,7 +79,7 @@ def _copy_office(
     copied: dict[str, int],
     warnings: list[dict[str, Any]],
 ) -> None:
-    from .office_class_key_guard import class_key_collision, refusal_message
+    from .office_class_key_guard import ClassKeyedPlacementRefused
     from .office_store import OfficeStore
 
     store = OfficeStore()
@@ -124,26 +126,29 @@ def _copy_office(
                 for item in actor.items
             ],
         }
-        # REFUSE, never warn-and-proceed: a template apply holds no operator
-        # intent about THIS destination, so it cannot be the caller that
-        # decides an archived class key should come back. There is no escape
-        # hatch here (unlike the CLI) for the same reason — nobody is in the
-        # loop at copy time to take responsibility for the double placement.
-        collision = class_key_collision(store, dest_workspace_id, payload)
-        if collision is not None:
+        try:
+            store.upsert_actor(dest_workspace_id, payload, updated_by=updated_by)
+            copied["office_actors"] += 1
+        except ClassKeyedPlacementRefused as exc:
+            # REFUSED by the store's fence, and this lane never asks it to stand
+            # down: a template apply holds no operator intent about THIS
+            # destination, so it cannot be the caller that decides an archived
+            # class key should come back. ``allow_class_key`` is never passed here
+            # (unlike the CLI) for the same reason — nobody is in the loop at copy
+            # time to take responsibility for the double placement.
+            #
+            # A named WARNING and not a raise: one hostile actor must not abort a
+            # whole template. The remaining actors still copy, and the create
+            # envelope carries what the template could not do.
             warnings.append(
                 {
                     "code": "office_actor_class_key_refused",
                     "actor_key": actor.actor_key,
-                    "message": refusal_message(collision),
-                    "reasons": collision["reasons"],
-                    "conflicting_actor_keys": collision["conflicting_actor_keys"],
+                    "message": str(exc),
+                    "reasons": exc.safe_details["reasons"],
+                    "conflicting_actor_keys": exc.safe_details["conflicting_actor_keys"],
                 }
             )
-            continue
-        try:
-            store.upsert_actor(dest_workspace_id, payload, updated_by=updated_by)
-            copied["office_actors"] += 1
         except Exception as exc:  # noqa: BLE001
             warnings.append(
                 {

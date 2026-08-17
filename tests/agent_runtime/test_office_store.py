@@ -179,11 +179,28 @@ def test_remove_records_ledger_and_blocks_nothing_else():
 
 
 def test_upsert_after_archive_clears_ledger():
+    """The store's re-add contract, now behind the class-key fence's consent.
+
+    "An explicit upsert of an archived key is intent to re-add, so clear the
+    resurrection ledger" is still the contract — but since EG-6.6 the fence that
+    used to sit at four callers sits in ``upsert_actor`` itself, and a CLASS-keyed
+    re-add of an archived key is the exact write it refuses
+    (``resurrects_archived_class_key``). Every production caller already refused
+    this before the hoist; what changed is that the store no longer takes the
+    intent on faith from whoever called it.
+
+    So the intent is spelled: ``allow_class_key=True`` is the sanctioned override
+    (``harness office actor-upsert --allow-class-key``, and the reason
+    ``restore_actor`` exists). The refusal WITHOUT it is pinned in
+    ``test_office_class_key_one_fence.py``; what this test still owns is that
+    consent really does clear the ledger and the archive copy.
+    """
+
     ws = _make_workspace()
     store = OfficeStore()
     store.upsert_actor(ws, _actor_payload("dev"))
     store.remove_actor(ws, "dev")
-    readded = store.upsert_actor(ws, _actor_payload("dev"))
+    readded = store.upsert_actor(ws, _actor_payload("dev"), allow_class_key=True)
     assert readded.state == "active"
     surface = store.get_surface(ws)
     assert "dev" not in surface.archived_actor_keys
@@ -267,6 +284,12 @@ def test_an_unreadable_archive_refuses_the_re_add_instead_of_minting_revision_1(
     new actor file beside it — the mutant returns an actor at revision 1 and
     writes it, and a store that merely raised something untyped could not satisfy
     the first probe.
+
+    ``allow_class_key=True`` on the re-add is not incidental: since EG-6.6 the
+    class-key fence runs FIRST inside ``upsert_actor``, so consent is what gets
+    this write as far as the archive read at all — and the point of the test is
+    that consenting to the resurrection does NOT also consent to inventing the
+    revision token. Two fences, two decisions.
     """
 
     ws = _make_workspace()
@@ -281,7 +304,7 @@ def test_an_unreadable_archive_refuses_the_re_add_instead_of_minting_revision_1(
     archived_path.write_text("{truncated", encoding="utf-8")
 
     with pytest.raises(ArchiveUnreadable):
-        store.upsert_actor(ws, _actor_payload("dev"))
+        store.upsert_actor(ws, _actor_payload("dev"), allow_class_key=True)
 
     # Nothing was written on the refusal path: no revision-1 actor file, and the
     # archive copy is left exactly as found for an operator to repair.
