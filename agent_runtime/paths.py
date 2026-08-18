@@ -173,6 +173,25 @@ def office_conflict_path(workspace_id: str, actor_key: str) -> Path:
     return office_conflicts_dir(workspace_id) / f"{actor_file_token(actor_key)}.json"
 
 
+#: The ORPHANED-SURFACE graveyard's top-level directory name.
+#:
+#: Promoted out of :func:`office_surface_archive_root`'s body for exactly the
+#: reason :data:`DELETED_ARCHIVE_DIRNAME` was, and under the same rule: the
+#: read-model cache's fingerprint denylist
+#: (``core_cache._EXCLUDED_STORE_ENTRIES``) excludes this tree from the store-root
+#: walk, so a second module's correctness now depends on agreeing with this one,
+#: and a name in that position is IMPORTED there rather than re-typed.
+#:
+#: **Do not confuse it with :func:`office_archive_dir`**, whose name is one
+#: underscore away and whose tree is a different thing entirely: that one is
+#: ``office/<ws>/archive/``, per-workspace, holding archived ACTOR placements,
+#: and it is READ by ``OfficeStore`` (``_read_actor_dir`` on the actor-listing
+#: seam, ``office_archived_actor_path`` on the archived-actor lookups). It is a
+#: projection INPUT and stays inside the fingerprint. This constant names only the
+#: store-root sibling below.
+OFFICE_ARCHIVE_DIRNAME = "office_archive"
+
+
 def office_surface_archive_root() -> Path:
     """Archive-never-delete for a whole ORPHANED office surface.
 
@@ -183,7 +202,7 @@ def office_surface_archive_root() -> Path:
     archiving would clear nothing. NOT published to realms.
     """
 
-    return store_root() / "office_archive"
+    return store_root() / OFFICE_ARCHIVE_DIRNAME
 
 
 def office_archived_surface_dir(workspace_id: str) -> Path:
@@ -259,14 +278,19 @@ def snapshot_path() -> Path:
 
 #: The per-task compaction graveyard's top-level directory name.
 #:
-#: Promoted out of :func:`deleted_archive_dir`'s body — and alone among this
-#: module's inline names — because another module has to NAME it: the read-model
-#: cache's fingerprint denylist (``core_cache._EXCLUDED_STORE_ENTRIES``) excludes
-#: this tree from the store-root walk, and that set's governing rule is that a
-#: name its owner spells as a constant is IMPORTED there, never re-typed. That
-#: rule is not style: the set shipped with a hand-typed ``"drain_state.json"``
-#: against a writer that said ``dispatch_delivery_drain.json``, so the exclusion
-#: named a file that had never existed while the real one sat inside the key.
+#: Promoted out of :func:`deleted_archive_dir`'s body because another module has
+#: to NAME it: the read-model cache's fingerprint denylist
+#: (``core_cache._EXCLUDED_STORE_ENTRIES``) excludes this tree from the store-root
+#: walk, and that set's governing rule is that a name its owner spells as a
+#: constant is IMPORTED there, never re-typed. That rule is not style: the set
+#: shipped with a hand-typed ``"drain_state.json"`` against a writer that said
+#: ``dispatch_delivery_drain.json``, so the exclusion named a file that had never
+#: existed while the real one sat inside the key.
+#:
+#: It was the FIRST of this module's inline names to be promoted and was for one
+#: stage the only one; :data:`OFFICE_ARCHIVE_DIRNAME` followed it out for the same
+#: reason and by this same rule, so the criterion below is what to read, not the
+#: count.
 #:
 #: The siblings here (``locks``, ``snapshot.json``, …) stay inline deliberately:
 #: promoting a constant is worth it when a second module's correctness depends on

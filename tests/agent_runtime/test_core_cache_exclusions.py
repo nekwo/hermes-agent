@@ -51,6 +51,8 @@ from agent_runtime import (
     serve_registry,
     serve_socket,
 )
+from agent_runtime.office_store import OfficeStore
+from agent_runtime.store import WorkspaceStore
 
 
 # --------------------------------------------------------------------------- #
@@ -620,4 +622,311 @@ def test_the_persisted_entries_shrink_with_the_closure(
         "closure the digest was taken over; a file describing a WIDER set both "
         "costs the bytes P12 removed and would name paths on a demote that were "
         "never inputs."
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 5. H2 — the ORPHANED-SURFACE graveyard is outside the closure
+# --------------------------------------------------------------------------- #
+#
+# ``office_archive/`` is the store-root sibling that
+# ``OfficeStore.archive_orphaned_surface`` RENAMES a whole orphaned office
+# surface into, driven by ``harness office archive-surface``. Its argument is the
+# ordinary one and NOT the graveyard's above: the runtime WRITES this tree (B1
+# wrote into it on the operator's live root on 2026-08-18) and the projection
+# does not read it — ``OfficeStore.list_workspaces()`` enumerates
+# ``office_root()``'s children, and this tree is deliberately a SIBLING of
+# ``office_root()`` so that archiving actually stops the projection seeing the
+# surface. It also grows without bound against ``MAX_FINGERPRINT_ENTRIES``: the
+# destination helper appends ``-2``, ``-3`` … slots rather than refusing.
+#
+# THE NEAR NAME IS THE WHOLE RISK, so it gets its own case below.
+# ``paths.office_archive_dir(ws)`` is ``office/<ws>/archive/`` — per-workspace,
+# holding archived ACTOR placements, READ by the store on the actor-listing seam
+# and by every archived-actor lookup. It is a projection INPUT and must stay in
+# the walk. One underscore separates the two names and excluding the wrong one is
+# a MISSED INPUT, the failure direction this module calls the worst.
+#
+# NOTHING HERE ASSERTS A DURATION (the standing rule): these cases assert
+# membership, counts and the digest.
+#
+# WHAT THESE CASES DELIBERATELY DO NOT CLAIM: that archiving stops flipping the
+# key. It does not, and it should not — the surface is MOVED OUT of
+# ``office/<ws>/``, which is fingerprinted, so the gesture itself is a real input
+# change and flips the key exactly once. What leaves the closure is the
+# graveyard's CONTINUING contribution, which is what the two cases below split
+# between them: its entries, and any churn inside it afterwards.
+def _orphaned_surface(workspace_id: str = "ws_h2_probe") -> str:
+    """Drive the REAL archive verb; return the workspace id it archived.
+
+    Every step is the runtime's own: a real workspace, a real office surface with
+    a real actor placement, the workspace record removed so the surface is
+    genuinely orphaned (which is ``archive_orphaned_surface``'s precondition —
+    it REFUSES a surface whose workspace still resolves), then the store's own
+    move. No directory is created by hand.
+    """
+
+    store = WorkspaceStore()
+    item = store.create(name="H2 archive probe", workspace_id=workspace_id)
+    store.set_active(item.id)
+    office = OfficeStore()
+    office.ensure_surface(item.id)
+    office.upsert_actor(
+        item.id,
+        {
+            "persona_id": "dev",
+            "items": [
+                {
+                    "item_id": "dev",
+                    "persona_id": "dev",
+                    "kind": "agent",
+                    "position": [1.5, 2.0],
+                    "folder": "Agents",
+                }
+            ],
+        },
+    )
+    paths.workspace_path(item.id).unlink()
+    assert not office.workspace_resolves(item.id), (
+        "the fixture did not orphan the surface, so the archive verb below would "
+        "refuse and this case would drive nothing"
+    )
+    office.archive_orphaned_surface(item.id)
+    return item.id
+
+
+def _archived_surface_root():
+    """The one archived slot the fixture produced, asserted to be exactly one."""
+
+    root = paths.office_surface_archive_root()
+    slots = sorted(entry for entry in root.iterdir() if entry.is_dir())
+    assert len(slots) == 1, (
+        f"the fixture produced {len(slots)} archived surfaces, not the one it "
+        "claims, so the assertions below are about an unknown tree"
+    )
+    return slots[0]
+
+
+def test_the_real_archive_verbs_output_is_absent_from_the_stat_set(
+    isolate_agent_runtime_root,
+):
+    """The writer runs, and NOTHING it wrote is in the fingerprint's stat set.
+
+    Membership rather than a count, because the archive gesture legitimately
+    moves entries OUT of ``office/<ws>/`` at the same time — a count taken across
+    it would net two real changes against each other and could pass while the
+    graveyard was still being stat'd.
+
+    The second half is the non-vacuity guard: a walk that had stopped seeing the
+    store entirely would satisfy the first assertion perfectly, so the same stat
+    set must still contain the ordinary store file this fixture wrote.
+
+    *Kill:* remove ``OFFICE_ARCHIVE_DIRNAME`` from ``_EXCLUDED_STORE_ENTRIES``.
+    The archived ``office.json`` and the actor file re-enter and this reds.
+    """
+
+    root = isolate_agent_runtime_root
+    _orphaned_surface()
+    # Written AFTER the verb: it is a stub, not a decodable workspace record, and
+    # ``WorkspaceStore`` reads the whole directory when the fixture above creates
+    # its own. Its only job is to be an ordinary store file the walk must see.
+    (root / "workspaces").mkdir(parents=True, exist_ok=True)
+    (root / "workspaces" / "ws_alpha.json").write_text("{}", encoding="utf-8")
+
+    archived = _archived_surface_root()
+    assert (archived / "office.json").exists(), (
+        "the archive verb did not land the surface file, so this case would "
+        "assert the absence of something that was never written"
+    )
+
+    key = core_cache.build_input_fingerprint()
+    assert key is not None, "the fingerprint refused, so nothing here is measurable"
+    graveyard = str(paths.office_surface_archive_root())
+    offenders = [entry.path for entry in key.entries if entry.path.startswith(graveyard)]
+    assert offenders == [], (
+        "the orphaned-surface graveyard is inside the read-model cache's input "
+        f"closure ({len(offenders)} entries, e.g. {offenders[:2]}). The runtime "
+        "writes this tree on every `harness office archive-surface`, it grows "
+        "without bound against MAX_FINGERPRINT_ENTRIES on re-archives, and no "
+        "projection reads it — list_workspaces() enumerates office_root(), whose "
+        "SIBLING this deliberately is."
+    )
+    assert any("ws_alpha.json" in entry.path for entry in key.entries), (
+        "the stat set does not contain the ordinary store file this fixture "
+        "wrote, so its emptiness — not the exclusion — would satisfy the "
+        "assertion above"
+    )
+
+
+def test_churn_inside_the_archived_surface_does_not_move_the_digest(
+    isolate_agent_runtime_root,
+):
+    """The half a membership check is structurally blind to.
+
+    A walk that had stopped LISTING the graveyard but still stat'd it would pass
+    the case above and fail here. This is also the property that matters in the
+    field: after the move settles, the tree must contribute nothing FURTHER — an
+    operator poking at a recovered surface, or a second archive landing beside
+    the first, must not disturb the key.
+
+    *Kill:* the same removal of ``OFFICE_ARCHIVE_DIRNAME``. The count is
+    unchanged across an in-place rewrite either way, so only the digest moves and
+    a count-only gate would stay green.
+    """
+
+    root = isolate_agent_runtime_root
+    (root / "workspaces").mkdir(parents=True, exist_ok=True)
+    _orphaned_surface()
+    victim = _archived_surface_root() / "office.json"
+    assert victim.exists()
+
+    before = core_cache.build_input_fingerprint()
+    assert before is not None
+
+    # Longer body so SIZE moves as well as mtime — a coarse mtime granularity
+    # would otherwise let this probe measure nothing.
+    victim.write_text(
+        '{"probe":"rewritten","padding":"xxxxxxxxxxxxxxxx"}', encoding="utf-8"
+    )
+    (_archived_surface_root() / "recovered_note.json").write_text(
+        "{}", encoding="utf-8"
+    )
+    after = core_cache.build_input_fingerprint()
+    assert after is not None
+
+    assert after.digest == before.digest, (
+        "rewriting a file inside an archived office surface — and adding one "
+        "beside it — moved the read-model cache's input digest, so the graveyard "
+        "is still being stat'd. Half an exclusion costs the full walk and still "
+        "invalidates the key."
+    )
+
+
+def test_the_per_workspace_actor_archive_is_STILL_in_the_closure(
+    isolate_agent_runtime_root,
+):
+    """THE NEAR-NAME TRAP, pinned. One underscore, and the opposite answer.
+
+    ``paths.office_archive_dir(ws)`` — ``office/<ws>/archive/`` — holds archived
+    ACTOR placements and is READ by ``OfficeStore``: ``_read_actor_dir`` on the
+    actor-listing seam (``scan_actors(include_archived=True)``), and
+    ``office_archived_actor_path`` on the archived-actor lookups that
+    ``upsert_actor`` / ``remove_actor`` / ``restore_actor`` and the class-key
+    fence ride. It is a projection INPUT and must be fingerprinted.
+
+    *Kill:* collapse the two trees — point ``paths.office_archive_dir`` at
+    ``office_surface_archive_root() / ws`` instead of ``office_dir(ws)/archive``.
+    That is the exact confusion this case exists for: the archived actor copies
+    land inside the excluded tree, they stop being stat'd, and a change to a real
+    projection input can then be served stale. This reds; every other case in
+    this section stays green, which is why it cannot be stood in for.
+    """
+
+    root = isolate_agent_runtime_root
+    (root / "workspaces").mkdir(parents=True, exist_ok=True)
+    before = core_cache.build_input_fingerprint()
+    assert before is not None
+
+    archive = paths.office_archive_dir("ws_near_name")
+    assert not archive.exists(), "the fixture's near-name tree already existed"
+    archive.mkdir(parents=True, exist_ok=True)
+    (archive / "dev.json").write_text("{}", encoding="utf-8")
+    after = core_cache.build_input_fingerprint()
+    assert after is not None
+
+    added = after.count - before.count
+    assert added >= 2, (
+        "the per-workspace archived-actor tree "
+        f"({archive}) added {added} entries rather than at least its own "
+        "directory plus its file, so a tree the OfficeStore genuinely reads has "
+        "left the fingerprint closure. That is a missed input — a change to an "
+        "archived actor could then be served from a stale core — and it is the "
+        "way to get this exclusion exactly backwards."
+    )
+    assert paths.office_archive_dir("ws_near_name").name not in (
+        core_cache._EXCLUDED_STORE_ENTRIES
+    ), (
+        "the per-workspace archive directory's own name is in the exclusion set, "
+        "so any store-root entry that happens to share it would silently leave "
+        "the closure too"
+    )
+
+
+def test_only_the_TOP_LEVEL_office_archive_is_excluded(
+    isolate_agent_runtime_root,
+):
+    """``exclude_top`` is top-level by contract, and the comment must not overclaim.
+
+    The argument written at the constant is about the ONE graveyard at the store
+    root — the only place ``paths.office_surface_archive_root()`` can put it. A
+    directory that merely shares the name, nested inside a real store subtree, is
+    somebody else's data and is fingerprinted in full.
+
+    *Kill:* implement the exclusion as a name filter inside the recursive walk
+    (skip any entry whose ``name`` is in the exclusion set, at every depth)
+    rather than as ``_walk_tree``'s top-level ``exclude_top``. The nested tree
+    then vanishes from the closure too and this reds.
+    """
+
+    root = isolate_agent_runtime_root
+    (root / "workspaces").mkdir(parents=True, exist_ok=True)
+    before = core_cache.build_input_fingerprint()
+    assert before is not None
+
+    nested = root / "workspaces" / paths.OFFICE_ARCHIVE_DIRNAME
+    nested.mkdir(parents=True, exist_ok=True)
+    (nested / "kept.json").write_text("{}", encoding="utf-8")
+    after = core_cache.build_input_fingerprint()
+    assert after is not None
+
+    assert after.count == before.count + 2, (
+        "a directory named "
+        f"{paths.OFFICE_ARCHIVE_DIRNAME!r} NESTED under another store subtree "
+        f"did not contribute its own entry plus its file ({before.count} -> "
+        f"{after.count}). The exclusion is keyed to the store root's own "
+        "top-level entries; implementing it as a name filter at every depth "
+        "would silently drop unrelated data out of the closure, which is a "
+        "missed input — the failure direction this module calls the worst one."
+    )
+
+
+def test_the_excluded_name_is_the_one_the_surface_archive_helper_produces(
+    isolate_agent_runtime_root,
+):
+    """The set and the directory's producer are ONE vocabulary, not two copies.
+
+    Same question the graveyard's constants case asks, aimed at the name that
+    actually decides whether this walk skips anything: does the set contain the
+    name ``paths.office_surface_archive_root()`` RESOLVES TO? A constant nobody's
+    path helper uses would look correct and skip nothing.
+
+    The third assertion is the near-name separation stated as a fact rather than
+    left to the prose: the two helpers must resolve to different directories, so
+    that excluding one can never mean excluding the other.
+
+    *Kill:* re-spell the literal ``"office_archive"`` in ``core_cache``'s set
+    beside the import instead of importing it, then change
+    ``paths.OFFICE_ARCHIVE_DIRNAME``'s VALUE. The hand-spelled copy stops
+    tracking its owner and this reds — which is the whole reason a name with a
+    cross-module reader is promoted to a constant rather than typed twice.
+    """
+
+    produced = paths.office_surface_archive_root().name
+    assert produced in core_cache._EXCLUDED_STORE_ENTRIES, (
+        f"paths.office_surface_archive_root() resolves to a directory named "
+        f"{produced!r} and core_cache._EXCLUDED_STORE_ENTRIES does not name it, "
+        "so the walk still stats every archived office surface. This is the "
+        "MCF-2 shape: an exclusion that agrees with a restated list rather than "
+        "with the code that produces the directory."
+    )
+    assert produced == paths.OFFICE_ARCHIVE_DIRNAME, (
+        "the path helper stopped using its own constant, so the constant and the "
+        "directory can now drift apart while both look correct in isolation"
+    )
+    assert paths.office_archive_dir("ws_near_name") != (
+        paths.office_surface_archive_root()
+    ), (
+        "the per-workspace actor archive and the orphaned-surface graveyard "
+        "resolve to the SAME directory, so the exclusion above now covers a tree "
+        "the OfficeStore reads"
     )

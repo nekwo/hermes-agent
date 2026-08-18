@@ -188,7 +188,7 @@ from typing import Any, Callable, Iterator, NamedTuple
 from utils import atomic_json_write
 
 from .dispatch_delivery import DRAIN_STATE_FILENAME
-from .paths import DELETED_ARCHIVE_DIRNAME
+from .paths import DELETED_ARCHIVE_DIRNAME, OFFICE_ARCHIVE_DIRNAME
 from .serve_auth import SERVE_AUTH_TOKEN_FILENAME
 from .serve_registry import SERVE_INSTANCES_DIRNAME
 from .serve_socket import SOCKET_LOCK_FILENAME, SOCKET_OWNER_FILENAME
@@ -343,6 +343,13 @@ MAX_SKILL_ENTRIES_PER_ROOT = 20_000
 #: promoted to ``paths.DELETED_ARCHIVE_DIRNAME`` and imported, rather than
 #: re-typed here. That is the precedent for the two that remain; they were left
 #: deliberately (out of MC-8's ruled scope), not overlooked.
+#:
+#: H2's ``office_archive`` addition did not extend it either, and was RE-COUNTED
+#: rather than assumed: same class again, promoted to
+#: ``paths.OFFICE_ARCHIVE_DIRNAME`` and imported, so the literals below are still
+#: ``locks`` + ``snapshot.json`` + the ``read_model.db`` trio — FIVE, unchanged.
+#: The count is restated on every addition because this paragraph exists to be
+#: counted against the set, and it has been wrong once already.
 _EXCLUDED_STORE_ENTRIES = frozenset(
     {
         # The cache's own home (see CORE_CACHE_DIRNAME).
@@ -371,10 +378,14 @@ _EXCLUDED_STORE_ENTRIES = frozenset(
         # The delivery drain's telemetry mirror: a 60-second oscillator that no
         # projection reads. Same rule as the serve registry.
         DRAIN_STATE_FILENAME,
-        # The per-task compaction graveyard. THE ONE EXCLUSION HERE THAT IS NOT
-        # "the runtime rewrites it" — see the block below, which is the argument
-        # rather than a note about it.
+        # The per-task compaction graveyard. NOT justified by "the runtime
+        # rewrites it" — see the first block below, which is the argument rather
+        # than a note about it.
         DELETED_ARCHIVE_DIRNAME,
+        # The orphaned-office-surface graveyard. The runtime DOES write this one,
+        # which is why its argument is a different (and easier) one — see the
+        # second block below.
+        OFFICE_ARCHIVE_DIRNAME,
     }
 )
 
@@ -458,13 +469,99 @@ _EXCLUDED_STORE_ENTRIES = frozenset(
 #: second doctor section, a census) changes nothing here and should not be read
 #: as re-admitting the tree.
 
+#: WHY ``office_archive/`` IS EXCLUDED — A DIFFERENT, AND EASIER, ARGUMENT.
+#:
+#: ``deleted_archive/`` above needed a reader-set claim because nothing writes it
+#: any more. This one is the opposite shape and is settled by the ordinary rule
+#: the rest of the set runs on: **the runtime WRITES this tree, and the projection
+#: does not read it.** ``paths.office_surface_archive_root()`` is
+#: ``store_root()/office_archive`` — the destination
+#: ``office_store.archive_orphaned_surface`` RENAMES a whole orphaned office
+#: surface into, via ``office_store._free_surface_archive_dir``, driven by the
+#: operator verb ``harness office archive-surface``
+#: (``hermes_cli/harness_parts/office.py::_cmd_office_archive_surface``). It grows
+#: without bound against :data:`MAX_FINGERPRINT_ENTRIES` — the destination helper
+#: appends ``-2``, ``-3`` … suffixes so a re-archived orphan lands beside the
+#: previous one rather than refusing — which is the same unbounded-growth
+#: objection the graveyard block raises, on a tree that is still being written.
+#:
+#: **THE NEAR-NAME TRAP, FIRST, because getting it wrong inverts the argument.**
+#: ``paths.office_archive_dir(workspace_id)`` is ``office/<ws>/archive/``: a
+#: DIFFERENT tree, per-workspace, holding archived ACTOR placements, and READ by
+#: ``OfficeStore`` — ``_read_actor_dir`` on the actor-listing seam
+#: (``scan_actors(include_archived=True)``), and ``office_archived_actor_path`` on
+#: the archived-actor lookups that ``upsert_actor`` / ``remove_actor`` /
+#: ``restore_actor`` and the class-key fence depend on. That tree is a projection
+#: INPUT and **stays in the walk**. Only the store root's own ``office_archive``
+#: entry is excluded, which is exactly what ``exclude_top`` filters and what the
+#: nesting note below pins.
+#:
+#: **THE GREP THAT ESTABLISHES IT** (re-run it; do not trust this transcript)::
+#:
+#:     grep -rn "office_archive" agent_runtime/ hermes_cli/ | grep -v tests
+#:     grep -rn "office_surface_archive_root\|office_archived_surface_dir" \
+#:         agent_runtime/ hermes_cli/ | grep -v tests
+#:
+#: 2026-08-18. Every hit, and which of the two trees it names:
+#:
+#: THIS tree (``store/office_archive/``) — one writer chain and no reader:
+#:   * ``paths.OFFICE_ARCHIVE_DIRNAME`` / ``paths.office_surface_archive_root`` /
+#:     ``paths.office_archived_surface_dir`` — the name and its two helpers;
+#:   * ``office_store._free_surface_archive_dir`` — the ONLY code that touches the
+#:     tree at all: it ``.exists()``-probes for a free slot and returns the
+#:     destination. A probe belonging to the writer, not a reader of content;
+#:   * ``office_store.archive_orphaned_surface`` — the WRITER
+#:     (``paths.office_dir(wsid).rename(destination)``), plus its docstring naming
+#:     the helper, plus its ``AlreadyExists("office_archive:<ws>")`` — an error
+#:     TOKEN, not a path;
+#:   * ``hermes_cli/harness.py``'s four ``office_archive_surface`` lines — an
+#:     argparse local variable holding the ``archive-surface`` subparser; no path;
+#:   * ``hermes_cli/harness_parts/office.py`` — ``_cmd_office_archive_surface``
+#:     (the verb), its docstring, and the ``"office_archived"`` envelope kind, a
+#:     wire event name;
+#:   * this comment.
+#: THE NEAR NAME (``office/<ws>/archive/``), all genuine readers/writers of the
+#: per-workspace actor archive, none of them this tree:
+#:   * ``paths.office_archive_dir`` / ``paths.office_archived_actor_path``;
+#:   * ``office_store`` at the actor-listing scan, the two archived-actor
+#:     existence+revision lookups, ``remove_actor``'s archived read-back,
+#:     ``restore_actor``'s source path, and ``_archive_actor_locked``'s write.
+#:
+#: **NOTHING PROJECTS IT.** ``snapshot._offices_summary`` reads through
+#: ``OfficeStore.list_workspaces()``, which enumerates ``office_root()``'s
+#: children by the presence of ``office.json`` — and
+#: ``office_surface_archive_root()`` is deliberately a SIBLING of ``office_root()``
+#: rather than a child, precisely so an archived surface stops being projected
+#: (its own docstring records that as the load-bearing reason). A tree the
+#: projection is designed not to see is not an input to it. There is no restore
+#: verb either: recovery is an operator moving the directory back by hand, which
+#: is a store change the walk sees on the ``office/`` side when it happens.
+#:
+#: **THE CLAIM IS REPO-SCOPED** (C14), covering ``agent_runtime/`` and
+#: ``hermes_cli/`` — the same scope, and the same reasoning, as the block above.
+#:
+#: **THE HALF THIS DOES NOT RETIRE, STATED SO NOBODY READS IT AS A BUG.** The
+#: archive gesture MOVES the surface OUT of ``office/<ws>/``, which IS
+#: fingerprinted, so the gesture itself still flips the key exactly once. That is
+#: a real input change and it should flip the key. What leaves the closure here is
+#: the graveyard's CONTINUING contribution: its size, its walk cost, its unbounded
+#: growth, and any churn inside it after the move.
+#:
+#: **WHAT WOULD MAKE THIS WRONG, AND THE OBLIGATION THAT FOLLOWS.** If a future
+#: projection section reads archived surfaces — an "archived offices" block, an
+#: operator restore lane that projects what is recoverable — this tree becomes a
+#: build input and a stale core could be served across a change to it. **Whoever
+#: adds that reader must remove this exclusion in the SAME commit.**
+
 #: Exclusions are keyed to TOP-LEVEL names only — ``_walk_tree``'s ``exclude_top``
 #: filters the store root's own entries and nothing deeper — so a directory that
-#: happens to be called ``deleted_archive`` NESTED inside another store subtree
-#: still contributes in full. That is the correct reading of every argument above
-#: (they are all about the one graveyard at the store root, which is the only
-#: place ``paths.deleted_archive_dir()`` can put it) and it is pinned by test, so
-#: the comment cannot quietly grow into a claim about the name everywhere.
+#: happens to be called ``deleted_archive`` or ``office_archive`` NESTED inside
+#: another store subtree still contributes in full. That is the correct reading of
+#: every argument above (they are all about the one graveyard each at the store
+#: root, which is the only place ``paths.deleted_archive_dir()`` and
+#: ``paths.office_surface_archive_root()`` can put theirs) and both are pinned by
+#: test, so the comment cannot quietly grow into a claim about the names
+#: everywhere.
 
 #: ``atomic_json_write`` stages ``.<stem>_*.tmp`` beside its target. A staged
 #: temp file that a crash stranded is not an input; a live one belongs to a
@@ -912,13 +1009,16 @@ def build_input_fingerprint() -> CoreFingerprint | None:
        assignments, the event log and its rotation manifest, prompt
        observability, realm-sync baselines: everything the projection reads
        from the store, without a name list to fall behind). That "without a name
-       list" is the class's design and it now has ONE stated exception, which is
+       list" is the class's design and it now has TWO stated exceptions, which is
        why the sentence no longer stands alone: ``deleted_archive/`` is excluded
-       because the PROJECTION has no reader for it, and the full argument —
-       including the ``harness_doctor`` reader that does exist and why it does
-       not re-admit the tree — is written at ``_EXCLUDED_STORE_ENTRIES``. An
-       exception with a reason at the constant is not the failure mode the
-       sentence warns about; an unargued name list is. NOT pinned:
+       because the PROJECTION has no reader for it (the full argument — including
+       the ``harness_doctor`` reader that does exist and why it does not re-admit
+       the tree — is written at ``_EXCLUDED_STORE_ENTRIES``), and the orphaned-
+       surface graveyard ``office_archive/`` is excluded because the runtime
+       writes it, without bound, and the projection is deliberately built not to
+       see it. Both arguments live at that constant. An exception with a reason at
+       the constant is not the failure mode the sentence warns about; an unargued
+       name list is. NOT pinned:
        ``resolve_runtime`` reads ``HERMES_AGENT_RUNTIME_ROOT`` and then the ROOT
        config, neither of which follows the profile home — measured unchanged
        across a persona flip on both the same thread and another one;
