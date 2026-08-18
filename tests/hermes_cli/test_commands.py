@@ -1,9 +1,17 @@
 """Tests for the central command registry and autocomplete."""
 
 import logging
+from types import SimpleNamespace
 
+import pytest
 from prompt_toolkit.completion import CompleteEvent
 from prompt_toolkit.document import Document
+
+# The known-defect registry, reached the way this suite reaches its other
+# package conftests (`from tests.<pkg> import conftest as ...`). The xfail
+# reason below is READ from it rather than restated, so the fence and the
+# terminal report stay one account of one defect.
+from tests.hermes_cli import conftest as package_conftest
 
 import hermes_cli.commands as commands_module
 from hermes_cli.commands import (
@@ -279,8 +287,21 @@ class TestSlackNativeSlashes:
         assert not (clamped & set(_SLACK_RESERVED_COMMANDS))
         assert not (clamped & set(_SLACK_VIA_HERMES_ONLY))
 
+    @pytest.mark.xfail(
+        strict=True,
+        reason=package_conftest.TELEGRAM_PARITY_DEFECT_REASON,
+    )
     def test_telegram_parity(self):
         """Every Telegram bot command must be registerable on Slack too.
+
+        FENCED, NOT FIXED (ML-16 / B20(iv)). This has been red since the
+        registry outgrew Slack's 50-slash cap; closing it is product curation
+        and an owner call, so the defect stays. What could not stay is the
+        permanent red: a file that can never be green has no red left to spend
+        on a regression, and the canonical per-file runner's red definition
+        could never be all-green while it stood. ``strict=True`` is the half
+        that keeps this honest — the day parity actually holds this XPASSes and
+        goes red, and someone must delete the mark and the conftest row.
 
         This catches the old behavior where Slack users couldn't invoke
         commands like /btw natively. If a future command surfaces on
@@ -308,6 +329,72 @@ class TestSlackNativeSlashes:
         assert not missing, (
             f"commands on Telegram but missing from Slack native slashes: {sorted(missing)}"
         )
+
+
+class TestKnownDefectFence:
+    """The fence around ``test_telegram_parity`` must not become a burial.
+
+    Two things have to hold together, and they fail in opposite directions:
+    the mark must be STRICT (or the defect could be silently fixed, or worse,
+    silently "fixed" by a mutant, with nobody told), and the conftest banner
+    must still fire for an XFAILED node (or fencing the defect would have
+    retired the only place it is explained).
+    """
+
+    def test_the_parity_defect_is_fenced_strict(self):
+        marks = [
+            mark
+            for mark in TestSlackNativeSlashes.test_telegram_parity.pytestmark
+            if mark.name == "xfail"
+        ]
+        assert len(marks) == 1
+        assert marks[0].kwargs["strict"] is True
+        # Single-sourced, not restated: the mark carries the conftest's text.
+        assert (
+            marks[0].kwargs["reason"]
+            is package_conftest.TELEGRAM_PARITY_DEFECT_REASON
+        )
+
+    def test_an_xfailed_known_defect_still_reaches_the_banner(self, monkeypatch):
+        """An xfail is reported as ``skipped`` + ``wasxfail``, never ``failed``.
+
+        The pre-ML-16 classifier matched ``failed`` only, so adding the mark
+        would have made the KNOWN DEFECTS section stop printing — the defect
+        fenced AND unexplained.
+        """
+        recorded: list[str] = []
+        monkeypatch.setattr(package_conftest, "_KNOWN_DEFECT_FAILURES", recorded)
+        node = (
+            "tests/hermes_cli/test_commands.py"
+            "::TestSlackNativeSlashes::test_telegram_parity"
+        )
+
+        package_conftest.pytest_runtest_logreport(
+            SimpleNamespace(
+                when="call", outcome="skipped", nodeid=node, wasxfail="reason"
+            )
+        )
+        assert recorded == [node]
+
+        # A strict XPASS arrives as `failed` with no `wasxfail` — the day the
+        # defect is really gone, the banner must name it so the row is deleted.
+        package_conftest.pytest_runtest_logreport(
+            SimpleNamespace(when="call", outcome="failed", nodeid=node)
+        )
+        assert recorded == [node, node]
+
+        # Control: an ordinary pass in the same file is not a defect report.
+        package_conftest.pytest_runtest_logreport(
+            SimpleNamespace(
+                when="call",
+                outcome="passed",
+                nodeid=(
+                    "tests/hermes_cli/test_commands.py"
+                    "::TestSlackAppManifest::test_btw_is_in_manifest"
+                ),
+            )
+        )
+        assert recorded == [node, node]
 
 
 class TestSlackAppManifest:

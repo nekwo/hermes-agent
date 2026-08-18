@@ -825,22 +825,43 @@ _STALE_ENV_GAP_ENTRIES: list[str] = []
 # direction, so it does not outlive the fix. The two remaining reds in that
 # file have a different, independent cause and are registered in
 # _ENV_GAP_SKIPS above with a live probe.
+#: The one-line reason the ``xfail`` mark on ``test_telegram_parity`` carries.
+#: The mark IMPORTS this name (``tests/hermes_cli/test_commands.py``) rather
+#: than restating it, so the fence and the report cannot drift apart into two
+#: accounts of one defect — the register-rot shape C25 is about.
+TELEGRAM_PARITY_DEFECT_REASON = (
+    "KNOWN DEFECT (owner call, not an environment gap): Slack's 50-slash app "
+    "cap drops '/platform', a canonical gateway command with no native Slack "
+    "slot, so Telegram/Slack parity cannot hold until an owner either pins it "
+    "a slot (something else loses one) or declares it _SLACK_VIA_HERMES_ONLY. "
+    "strict=True: the day parity holds, this XPASSes and reds — delete the "
+    "mark and this row. Full account: _KNOWN_DEFECTS in "
+    "tests/hermes_cli/conftest.py."
+)
+
 _KNOWN_DEFECTS: dict[str, str] = {
     "test_commands.py": (
         "KNOWN DEFECT — NOT an environment gap. Slack allows an app only 50\n"
         "  slash commands, and the registry no longer fits: 'platform' is a\n"
         "  gateway command on Telegram/Discord/CLI with NO native Slack slash,\n"
-        "  so test_telegram_parity fails. It is the only CANONICAL casualty:\n"
-        "  every other name the cap drops is an alias whose canonical spelling\n"
-        "  either still holds a native slot or is already a deliberate\n"
-        "  _SLACK_VIA_HERMES_ONLY entry. (The exact casualty set depends on\n"
-        "  which plugins are installed — the WARNING below names them.)\n"
+        "  so test_telegram_parity cannot pass. It is the only CANONICAL\n"
+        "  casualty: every other name the cap drops is an alias whose\n"
+        "  canonical spelling either still holds a native slot or is already a\n"
+        "  deliberate _SLACK_VIA_HERMES_ONLY entry. (The exact casualty set\n"
+        "  depends on which plugins are installed — the WARNING names them.)\n"
         "  The silence half of this finding is FIXED: the clamp is accounted\n"
         "  for at the one branch that performs it, slack_native_slashes() logs\n"
         "  every dropped name at WARNING, `hermes slack manifest` prints them\n"
         "  to stderr, and slack_clamped_slashes() returns the same list\n"
         "  (hermes_cli/commands.py). Visibility is not parity, though — naming\n"
-        "  the casualty does not give /platform a slot, so this red STAYS.\n"
+        "  the casualty does not give /platform a slot, so the DEFECT STAYS.\n"
+        "  It is now fenced as xfail(strict=True) rather than left as a\n"
+        "  permanent red (ML-16 / B20(iv)): a file that can never be green has\n"
+        "  no red left to spend on a REGRESSION, and the canonical per-file\n"
+        "  runner's red definition could never be all-green while it stood.\n"
+        "  strict is what keeps the fence honest — the day parity actually\n"
+        "  holds, the test XPASSes and reds, and someone must come delete the\n"
+        "  mark and this row. Fenced is not fixed.\n"
         "  Closing it means either pinning 'platform' a native slot (something\n"
         "  else then loses one) or declaring it Slack-via-/hermes in\n"
         "  _SLACK_VIA_HERMES_ONLY. Which commands get a native slot is product\n"
@@ -854,12 +875,23 @@ _KNOWN_DEFECT_FAILURES: list[str] = []
 
 
 def pytest_runtest_logreport(report):  # noqa: D401 — pytest hook
-    """Record stale env-gap passes, and failures of the known-defect tests."""
+    """Record stale env-gap passes, and the known-defect tests' outcomes.
+
+    The known-defect test is ``xfail(strict=True)``, so its ordinary outcome is
+    ``skipped`` with ``wasxfail`` set — NOT ``failed``. Matching on ``failed``
+    alone would have silenced this banner the moment the mark landed, which is
+    exactly the hazard fencing a defect creates: the fence must not also
+    retire the report. The ``failed`` arm still earns its place, because a
+    strict XPASS arrives as ``failed`` with no ``wasxfail`` — and that is the
+    day someone must read the row and delete it.
+    """
     if report.when != "call":
         return
     file_name = report.nodeid.split("::", 1)[0].rsplit("/", 1)[-1]
 
-    if report.outcome == "failed" and file_name in _KNOWN_DEFECTS:
+    if file_name in _KNOWN_DEFECTS and (
+        report.outcome == "failed" or hasattr(report, "wasxfail")
+    ):
         _KNOWN_DEFECT_FAILURES.append(report.nodeid)
         return
 
@@ -876,7 +908,9 @@ def pytest_runtest_logreport(report):  # noqa: D401 — pytest hook
 def pytest_terminal_summary(terminalreporter):  # noqa: D401 — pytest hook
     """Surface stale registry rows, and explain the deliberate reds."""
     if _KNOWN_DEFECT_FAILURES:
-        terminalreporter.write_sep("=", "KNOWN DEFECTS — deliberately not fenced")
+        terminalreporter.write_sep(
+            "=", "KNOWN DEFECTS — fenced xfail(strict), still open"
+        )
         seen: set[str] = set()
         for nodeid in sorted(set(_KNOWN_DEFECT_FAILURES)):
             file_name = nodeid.split("::", 1)[0].rsplit("/", 1)[-1]
