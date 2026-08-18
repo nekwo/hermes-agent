@@ -58,8 +58,22 @@ ALLOWLIST = {
 }
 
 # Directories that never count (tests may build fixture configs freely).
+#
+# ``.claude`` (ML-14 / B20(iii)): agent worktrees are created under
+# ``.claude/worktrees/<branch>/``, and each one is a FULL COPY of this repo. A
+# walk that descends there does not merely get slower — it reports the copies'
+# ``gateway/config.py`` etc. as violations (the ALLOWLIST is keyed on the
+# relative path from the repo root, which a copy's path does not match), and
+# every repo-wide grep run beside it returns N copies of every hit. On
+# 2026-08-18 that was 13 live worktrees: this guard was red for a fortnight and
+# the tree contained fourteen copies of itself. The operator has since pruned
+# them, so the exclusion is preventative — which is exactly why it carries a
+# DRIVEN witness below (``test_the_walk_does_not_descend_into_a_repo_copy``)
+# rather than resting on a red that only appears when worktrees happen to
+# exist. A guard that can only be checked when the hazard is present is not
+# checked.
 EXCLUDED_DIR_PARTS = {
-    "tests", ".venv", ".git", ".worktrees", "node_modules", "website",
+    "tests", ".venv", ".git", ".worktrees", ".claude", "node_modules", "website",
     "docs", "scripts", "examples", "apps",
 }
 
@@ -82,13 +96,17 @@ SAFE_LOAD_RE = re.compile(r"\bsafe_load\s*\(")
 CONFIG_YAML_RE = re.compile(r"""["']config\.yaml["']""")
 
 
-def _iter_source_files():
+def _iter_source_files(root: Path = REPO_ROOT):
     # os.walk with in-place ``dirnames`` pruning rather than ``rglob`` + a
     # post-filter: the post-filter still paid to enumerate every excluded
     # subtree. Pruning a directory name here is exactly equivalent to the old
     # "any part of the relative path is excluded" test, because a pruned
     # directory can contribute no descendants.
-    for dirpath, dirnames, filenames in os.walk(REPO_ROOT):
+    #
+    # ``root`` is a parameter so the pruning rules can be DRIVEN on a synthetic
+    # tree instead of only being observable when this checkout happens to
+    # contain the hazard. Production callers pass nothing.
+    for dirpath, dirnames, filenames in os.walk(root):
         here = Path(dirpath)
         dirnames[:] = [
             name
@@ -100,12 +118,12 @@ def _iter_source_files():
             if not name.endswith(".py"):
                 continue
             path = here / name
-            yield path.relative_to(REPO_ROOT), path
+            yield path.relative_to(root), path
 
 
-def test_no_raw_config_yaml_reads_outside_owner_modules():
+def _offenders(root: Path = REPO_ROOT) -> list[str]:
     offenders: list[str] = []
-    for rel, path in _iter_source_files():
+    for rel, path in _iter_source_files(root):
         rel_str = str(rel).replace("\\", "/")
         if rel_str in ALLOWLIST:
             continue
@@ -125,6 +143,16 @@ def test_no_raw_config_yaml_reads_outside_owner_modules():
                 continue
             if any(abs(i - j) <= PROXIMITY for j in cfg_lines):
                 offenders.append(f"{rel_str}:{i + 1}: {stripped}")
+    return offenders
+
+
+#: A raw read the guard must report: a ``safe_load`` within ``PROXIMITY`` lines
+#: of a ``"config.yaml"`` reference, in a file no allowlist entry covers.
+_RAW_READ_SOURCE = 'import yaml\n\nyaml.safe_load(open("config.yaml"))\n'
+
+
+def test_no_raw_config_yaml_reads_outside_owner_modules():
+    offenders = _offenders()
 
     assert not offenders, (
         "Raw yaml.safe_load of config.yaml outside allowlisted owner modules.\n"
@@ -133,6 +161,40 @@ def test_no_raw_config_yaml_reads_outside_owner_modules():
         "round-trips and raw-file diagnostics must use "
         "hermes_cli.config.read_user_config_raw().\nOffenders:\n  "
         + "\n  ".join(offenders)
+    )
+
+
+def test_the_walk_does_not_descend_into_a_repo_copy(tmp_path):
+    """``.claude/worktrees/<branch>/`` is a FULL COPY of this repo (B20(iii)).
+
+    Driven on a synthetic tree rather than on this checkout, because the hazard
+    is intermittent: worktrees exist while agents are running and are pruned
+    afterwards, so a witness that waited for the real thing would be a check
+    that passes for the wrong reason most of the time — and it passed for the
+    wrong reason for the fortnight this guard was red.
+
+    Both directions in one case. The copy's file is invisible; the identical
+    file OUTSIDE the excluded directory is reported. Without the control, an
+    exclusion set that had swallowed the whole walk would look like a fix.
+    """
+
+    copy = tmp_path / ".claude" / "worktrees" / "wave-2" / "gateway"
+    copy.mkdir(parents=True)
+    (copy / "config.py").write_text(_RAW_READ_SOURCE, encoding="utf-8")
+
+    first_party = tmp_path / "some_package"
+    first_party.mkdir()
+    (first_party / "reader.py").write_text(_RAW_READ_SOURCE, encoding="utf-8")
+
+    offenders = _offenders(tmp_path)
+
+    assert [entry.split(":")[0] for entry in offenders] == [
+        "some_package/reader.py"
+    ], (
+        "the walk reported a different offender set than expected. If it "
+        "contains a path under `.claude/`, the exclusion is gone and every "
+        "repo-wide scan is again reading this repository's own copies of "
+        f"itself. Offenders: {offenders}"
     )
 
 

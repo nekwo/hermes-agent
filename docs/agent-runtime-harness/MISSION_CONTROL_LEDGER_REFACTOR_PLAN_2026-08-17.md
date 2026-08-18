@@ -279,6 +279,19 @@ Recommended dispatch interleave: hermes lane ML-1 → ML-4 → ML-7 → ML-10 �
    point — but classifies only `hermes update` as forbidden, so a backend spawn passes straight
    through it today.
 
+   > **CLOSED 2026-08-18 (ML-14 / B20(i)).** The arm now lives in that chokepoint: an argv
+   > resolving to `hermes` / `python -m hermes_cli.main` / `hermes_cli/main.py` and carrying a
+   > `gateway|serve|dashboard` subcommand is refused, behind the same
+   > `live_system_guard_bypass` escape as the other arms, with
+   > `tests/test_live_system_guard_self_test.py` carrying the eight blocked shapes and two
+   > pass-through controls. The out-of-tree `$HOME/.hermes/pytest_live_guard.py` is no longer
+   > what stands between a run and a live backend — it is a second copy of a fence the suite now
+   > owns. What the escape does NOT do is scope itself to this arm: a test that needs a real
+   > child drops the os.kill and systemctl guards along with it (escalated, not fixed).
+   > Measured while landing it: `hermes` resolves on this workstation to
+   > `X:\Eternia\.hermes\venvs\hermes-agent\Scripts\hermes.EXE`, so the hole was reachable,
+   > not theoretical.
+
    **Measured baseline, 2026-08-18** (`tests/hermes_cli`, per-file, `-j 6`, 842.5s):
    **565 files, 4016 tests passed, 3 files red.** None of the red files is a `test_web_server_*`
    or `test_web_ui_build.py` file — F3's 41 are green per-file, which is the half of F3 this run
@@ -288,8 +301,8 @@ Recommended dispatch interleave: hermes lane ML-1 → ML-4 → ML-7 → ML-10 �
    | File | Why it is red |
    |---|---|
    | `test_commands.py::TestSlackNativeSlashes::test_telegram_parity` | Registered KNOWN DEFECT in `tests/hermes_cli/conftest.py`, deliberately not fenced: Slack's 50-slash-command cap drops `platform`. It is printed at every run and reds the file at every run. |
-   | `test_config_read_guard.py` | Its `EXCLUDED_DIR_PARTS` excludes `.worktrees` but not `.claude`, so the repo-wide scan walks the 13 live worktrees under `.claude/worktrees/` and reports THEIR copies of `gateway/config.py` etc. as violations. |
-   | `test_dashboard_tui_backcompat.py` | Red only under the F5 guard above, which refused its backend spawn. Unguarded it passes — by starting a hermes dashboard. That is the leak, not the fix. |
+   | `test_config_read_guard.py` | Its `EXCLUDED_DIR_PARTS` excludes `.worktrees` but not `.claude`, so the repo-wide scan walks the 13 live worktrees under `.claude/worktrees/` and reports THEIR copies of `gateway/config.py` etc. as violations. **FIXED 2026-08-18 (ML-14 / B20(iii)):** `.claude` is excluded. The operator had pruned the worktrees by then, so the fix is preventative and carries a DRIVEN witness on a synthetic tree — a red that only appears while worktrees exist is a check you cannot run when you need it. |
+   | `test_dashboard_tui_backcompat.py` | Red only under the F5 guard above, which refused its backend spawn. Unguarded it passes — by starting a hermes dashboard. That is the leak, not the fix. **FIXED 2026-08-18 (ML-14 / B20(i)):** the claim was about argparse, so it now parses the same argv through the same `build_dashboard_parser` the CLI wires in and spawns nothing. Its `--status` had been scanning the operator's real process table on every run. A tree-wide AST scan for the same shape found two more (`test_gateway_service.py`'s `gateway --help` pair, converted the same way) and the two `test_serve_socket_child_e2e.py` tests, which genuinely need a real child and now say so at the marker. |
 
    Launcher: full `flutter test` of the owned feature directory at minimum, full suite at merge
    checkpoints; C16 was caught by the FULL-DIR run and by nothing else — that is this rule
@@ -297,13 +310,20 @@ Recommended dispatch interleave: hermes lane ML-1 → ML-4 → ML-7 → ML-10 �
 2. **Quote plan exceptions verbatim into briefs (G2).** A brief written stricter than the plan stopped a stage mid-run. Every ML brief that touches a fence quotes the fence's exception text as written, never paraphrased tighter.
 3. **Fence hashes are read at dispatch time (G3), never inherited from the brief.** WV-L6 is changing `office/` while this plan is being read; ML-9 and every launcher stage re-hash at dispatch. Stage entries above are complete except fence hashes and pubspec hashes, which the dispatcher appends.
 4. **Merged combinations are untested until the seam is run (G5).** After every merge: the merged-seam run, both repos if the merge crossed the wire contract. G1 is how the exposure arrived even with per-branch green.
-5. **Launcher tree procedure (F6):** the not-mine dirty pubspec downgrade breaks widget-test compilation; every launcher implementer runs the hash-verified backup → checkout → `pub get` → `test --no-pub` → byte-exact restore procedure, and commits with explicit paths so the pubspec never rides along.
+5. **Launcher tree procedure (F6) — RETIRED 2026-08-18 by operator ruling.** The stale pubspec pair that made this necessary was dropped; launcher agents now run `flutter test` (and `flutter analyze`, per §4.5) against the tree AS-IS and never touch pubspecs. The procedure below is kept as history, not as instruction — do not run it, and do not write it into a brief. *(Was: the not-mine dirty pubspec downgrade breaks widget-test compilation; every launcher implementer runs the hash-verified backup → checkout → `pub get` → `test --no-pub` → byte-exact restore procedure, and commits with explicit paths so the pubspec never rides along.)* The one half that OUTLIVES the retirement is the commit discipline it happened to carry: explicit-path commits, so nothing not-yours rides along. That is item 7's rule and this repo's standing practice, independent of F6.
 6. **Witness law (task #60, RD preamble):** witnesses assert counts, ordering, and typed reasons — never elapsed-ms; every gate above carries one killing mutation and states why the mutant cannot also satisfy the probe; two-driven-values on any probed field a constant could fake.
 7. **Permission boundaries:** no writes under `X:/Eternia/.hermes/` ever (live root is read-only evidence); `dart format` forbidden; operator-blocked operations (G4's class) are escalated, not retried.
 
 ---
 
 ## 4.5 amendment (ML-2) — F6 covers `flutter analyze`, not just tests
+
+> **RETIRED 2026-08-18 with F6 itself** (operator ruling; see §4 item 5). The dirty pubspec pair
+> this section reasons about is gone, so there is no backup/restore window for `flutter analyze`
+> to run inside — it runs against the tree as-is like everything else. Kept because the *finding*
+> outlives the procedure: a cheap signal can fail in the RESOLVER rather than in the tool, and an
+> error that names neither is how an implementer loses an hour. Read it as a diagnosis to
+> recognise, not a procedure to follow.
 
 **The rule.** §4 item 5's F6 launcher-tree procedure applies to **`flutter analyze` as well as
 `flutter test`**. Read every "widget-test compilation" in that item as "any command that resolves
