@@ -343,3 +343,103 @@ def test_owner_removal_refuses_when_child_backlinks_cannot_all_be_seen(
     assert excinfo.value.code == "persona_instances_unreadable"
     assert str(corrupt_count) in str(excinfo.value)
     assert _instance_row_bytes() == before
+
+
+# --- site 3: the session-uniqueness guard and the cycle validator ---------
+
+
+@pytest.mark.parametrize("corrupt_count", [1, 2])
+def test_session_ownership_guard_refuses_rather_than_answering_unowned(
+    isolate_agent_runtime_root, corrupt_count
+):
+    """A uniqueness guard's ``False`` is only as good as its enumeration.
+
+    An owner this loop cannot see makes the guard answer "unowned" and a second
+    binding lands on a session that already had one.
+    """
+
+    store = PersonaInstanceStore()
+    instance = _instance("owner_a")
+    _corrupt_instance_rows(corrupt_count)
+
+    with pytest.raises(PersonaInstancesUnreadable) as excinfo:
+        store._session_owned_by_other_instance("chat-session-x", instance.id)
+
+    assert excinfo.value.code == "persona_instances_unreadable"
+    assert str(corrupt_count) in str(excinfo.value)
+
+
+def test_session_ownership_guard_still_detects_a_real_owner(isolate_agent_runtime_root):
+    """Clean store: the guard still answers the question it exists for."""
+
+    store = PersonaInstanceStore()
+    first = _instance("owner_first")
+    second = _instance("owner_second", display_name="Second")
+    session_id = PersonaInstanceStore().get(first.id).default_chat_session_id
+    assert session_id, "the fixture must give the first instance a chat pointer"
+
+    assert store._session_owned_by_other_instance(session_id, second.id) is True
+    assert store._session_owned_by_other_instance(session_id, first.id) is False
+
+
+@pytest.mark.parametrize("corrupt_count", [1, 2])
+def test_steering_cycle_check_refuses_when_an_ancestor_will_not_decode(
+    isolate_agent_runtime_root, corrupt_count
+):
+    """The walk ADMITS by exhausting the frontier, so every node it cannot open
+    is a subgraph it silently declares cycle-free.
+
+    The corrupted rows are placed on the ancestor path itself: the parent's
+    ``steered_by`` names them, so the walk genuinely reaches a node it cannot
+    read rather than merely coexisting with one.
+    """
+
+    store = PersonaInstanceStore()
+    parent = _instance("cycle_parent")
+    child = _instance("cycle_child", display_name="Child")
+
+    corrupt_names = _corrupt_instance_rows(corrupt_count)
+    corrupt_ids = [Path(name).stem for name in corrupt_names]
+
+    # Point the parent at the unreadable ancestors, writing the row directly so
+    # the steer write path's own guards do not reject the reference we need.
+    parent_path = paths.persona_instance_path(parent.id)
+    raw = json.loads(parent_path.read_text(encoding="utf-8"))
+    raw["steered_by"] = corrupt_ids
+    parent_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(PersonaInstancesUnreadable) as excinfo:
+        store._validate_no_steering_cycle(child.id, parent.id)
+
+    assert excinfo.value.code == "persona_instances_unreadable"
+    assert str(corrupt_count) in str(excinfo.value)
+
+
+def test_steering_cycle_check_still_admits_and_still_rejects_on_a_clean_store(
+    isolate_agent_runtime_root,
+):
+    """Both answers survive: an absent ancestor is not the unreadable case.
+
+    ``get`` re-raises ``FileNotFoundError`` for an id with no row, which really
+    does end the walk — nothing is reachable through a node that is not there —
+    so a dangling reference must NOT be converted into a refusal.
+    """
+
+    store = PersonaInstanceStore()
+    parent = _instance("clean_parent")
+    child = _instance("clean_child", display_name="Child")
+
+    # Admits a legitimate edge.
+    store._validate_no_steering_cycle(child.id, parent.id)
+
+    # A dangling ancestor id is stripped by the repair, not refused here.
+    parent_path = paths.persona_instance_path(parent.id)
+    raw = json.loads(parent_path.read_text(encoding="utf-8"))
+    raw["steered_by"] = ["personainst_never_existed"]
+    parent_path.write_text(json.dumps(raw), encoding="utf-8")
+    store._validate_no_steering_cycle(child.id, parent.id)
+
+    # A real cycle is still rejected.
+    store.steer(parent.id, parent_instance_id=child.id)
+    with pytest.raises(ValueError, match="cycle"):
+        store._validate_no_steering_cycle(child.id, parent.id)

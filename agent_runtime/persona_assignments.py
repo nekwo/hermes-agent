@@ -1235,7 +1235,18 @@ class PersonaInstanceStore:
         # is reachable from the new parent (a real cycle); a diamond (two parents
         # sharing an ancestor) is fine, so we track a visited set separately from
         # the cycle test rather than raising on any re-visit.
+        #
+        # The walk ADMITS the edge by exhausting the frontier without finding
+        # the child, so every node it fails to open is a subgraph it silently
+        # declares cycle-free. A row that will not decode therefore hides any
+        # cycle BEHIND it and the edge is admitted into a graph that now has one.
+        # An ABSENT ancestor is not that condition: ``get`` re-raises
+        # ``FileNotFoundError`` for an id with no row, which is a dangling
+        # reference the steering repair exists to strip, and it really does end
+        # the walk — nothing is reachable through a node that is not there. A row
+        # that EXISTS and will not decode is the unknowable case, and it refuses.
         visited: set[str] = set()
+        unreadable = 0
         frontier = _dedupe_tokens([parent_instance_id])
         while frontier:
             cursor = frontier.pop()
@@ -1246,9 +1257,18 @@ class PersonaInstanceStore:
             visited.add(cursor)
             try:
                 parent = self.get(cursor)
+            except FileNotFoundError:
+                continue
             except Exception:
+                unreadable += 1
                 continue
             frontier.extend(_dedupe_tokens(list(parent.steered_by)))
+        if unreadable:
+            raise PersonaInstancesUnreadable(
+                f"cannot prove the steering edge {parent_instance_id} -> {persona_instance_id} "
+                f"is acyclic: {unreadable} ancestor row(s) will not decode; "
+                "repair or remove them before steering"
+            )
 
     def get(self, persona_instance_id: str) -> PersonaInstance:
         path = paths.persona_instance_path(persona_instance_id)
@@ -1914,7 +1934,23 @@ class PersonaInstanceStore:
         )
 
     def _session_owned_by_other_instance(self, session_id: str, instance_id: str) -> bool:
-        for instance in self.list_all():
+        """Is this chat session already the default of a DIFFERENT instance?
+
+        A uniqueness guard, so it answers by searching, so its negative is worth
+        exactly what its enumeration is worth: an instance row that will not
+        decode is an owner this loop cannot see, the guard answers ``False``, and
+        a second binding lands on a session that already had one — the class-key
+        fence's blind spot, one subsystem over. Refuses rather than answering
+        ``False`` it cannot support.
+        """
+        scan = self.scan_all()
+        if scan.unreadable:
+            raise PersonaInstancesUnreadable(
+                f"cannot establish sole ownership of chat session {session_id}: "
+                f"{scan.unreadable} persona instance row(s) will not decode; "
+                "repair or remove them before binding"
+            )
+        for instance in scan.instances:
             if instance.id != instance_id and instance.default_chat_session_id == session_id:
                 return True
         return False
