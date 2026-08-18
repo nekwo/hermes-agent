@@ -6,6 +6,13 @@
 > `origin/main`, which was two merges stale when the worktree was cut; RAN `git reset --hard
 > main`). Launcher read at `X:/Unreal Engine/Engine/Launcher/EterniaLauncher` (files READ,
 > no hash pinned — no launcher change ships in this plan).
+>
+> **Contract authority (2026-08-18, C5).** The sheet contract — row keys, direction
+> tokens, row order, cell size, roster — lives ONLY in EterniaLauncher
+> `docs/spatial/CHARACTER_8WAY_SPRITE_FORMAT_SPEC_2026-08-17.md`. Hermes conforms to
+> it and does not restate it; where this document used to carry a second copy of
+> those facts, it now points. What stays here is what is hermes-specific: the
+> packaging boundary, the revision store, the QA gate, the CLI verbs, the prompts.
 
 **Evidence tags** (the family's discipline): **READ** (file:line inspected this session) ·
 **RAN** (command executed this session) · **RELAYED** (operator statement) · **INFERRED**
@@ -91,21 +98,27 @@ hermes"*; implementation by Opus subagents whose work is checked to production g
 
 New module `agent/charsheet/spec.py`:
 
+**The tokens, the row keys and the row order are NOT defined here** — they are the
+launcher's, and the authority is its spec, §A (layout), §C (candidate chains) and §D
+(`directionSectors` derivation). What this section defines is the SHAPE that carries
+them:
+
 - `StateSpec(name, frames, directional)` — e.g. `("walk", 8, True)`, `("idle", 6, True)`.
-- `DirectionScheme(order, authored, mirrored)` — `order` is the canonical compass list the
-  sheet iterates (`("n","ne","e","se","s","sw","w","nw")` for 8-way); `authored` the
-  generated subset (`("n","ne","e","se","s")`); `mirrored` a `{derived: source}` map
-  (`{"nw":"ne","w":"e","sw":"se"}`). **The count is `len(order)` — nothing tests for 8.**
-  4-way is `order=("n","e","s","w"), authored=("n","e","s"), mirrored={"w":"e"}`. Petdex
-  is expressible as the 2-direction case (`running` × right/left, left ← right) — proof of
-  shape, not a migration; pets stay on their own path untouched.
-- `SheetSpec(states, scheme, frame_w=192, frame_h=208)` with `rows()` → ordered
+  State names are `[a-z][a-z0-9_]*`: `-` is **reserved**, because it is the row key's
+  state/direction separator and the launcher splits on the LAST one.
+- `DirectionScheme(order, authored, mirrored)` — `order` is the sheet's ROW order,
+  `authored` the generated subset, `mirrored` a `{derived: source}` map. Every direction
+  in `order` must be authored or mirrored, and every token must be one of the eight the
+  launcher deriver reads (`spec.DIRECTION_TOKENS`). **The count is `len(order)` —
+  nothing tests for 8.** Petdex is expressible as the 2-direction case (`running` ×
+  right/left, left ← right) — proof of shape, not a migration; pets stay on their own
+  path untouched.
+- `SheetSpec(states, scheme, frame_w, frame_h)` with `rows()` → ordered
   `RowSpec(index, state, direction, frames, key)` — state-major, directions in `order`;
-  non-directional states contribute one row with `direction=None`. Row key: `"walk@ne"`,
-  or bare `"jump"` when non-directional.
-- Default spec `CHAR8`: `idle:6` + `walk:8`, both directional, 8-way → 16 rows, sheet
-  1536×3328. States are CLI-overridable (`--states idle:6,walk:8,cheer:5:fixed` —
-  `:fixed` = non-directional).
+  non-directional states contribute one row with `direction=None`.
+- Default spec `CHAR8`: `idle` + `walk`, both directional, 8-way. States are
+  CLI-overridable — the `--states` grammar is `name:frames[:fixed]`, comma-separated,
+  where `:fixed` marks a non-directional state that contributes exactly one row.
 
 ## 3. Module boundaries — what is reusable for Eternia Studio
 
@@ -126,7 +139,7 @@ opaque strings, each item a list of *attempts* (image file + optional operator n
 timestamp) with at most one *approved* attempt. Verbs: `propose(key, image, note="")`,
 `approve(key, attempt=-1)`, `reject(key, attempt)`, `current(key)`, `pending()`,
 `history(key)`. Writes are atomic (tmp + `os.replace`); state is one JSON per item.
-Charsheet uses keys `turnaround@n` / `row@walk@e`; Eternia Studio can mount the same
+Charsheet uses keys `turnaround@n` / `row@walk-e`; Eternia Studio can mount the same
 store over any image set with its own keys. No `agent_runtime` import, no charsheet
 import, stdlib + Pillow only.
 
@@ -147,7 +160,9 @@ $HERMES_HOME/characters/
 ├── .drafts/<draft-id>/
 │   ├── draft.json          # schema:1, slug, concept, style, stage, spec, base ref
 │   ├── base.png            # the identity anchor image
-│   ├── revisions/…         # ImageRevisionStore root (turnaround@* and row@* items)
+│   ├── revisions/…         # ImageRevisionStore root (turnaround@<dir> and
+│   │                       #   row@<state>-<dir> items — the leading `<kind>@` is the
+│   │                       #   STORE's item-kind separator, not the sheet's)
 │   └── strips/…            # raw provider strips (kept for deterministic re-extraction)
 └── <slug>/
     ├── character.json      # manifest: §5 payload minus base64, plus spec
@@ -169,7 +184,7 @@ out-of-order calls with a stated reason (`{"ok": false, "error": …, "stage": �
    language, geometry auto-retry kept from the pet flow (touching poses / multi-pose
    frames are rejected mechanically — no human should QA obviously-broken slices;
    `orchestrate.py:245-265` pattern READ). Strips land in the revision store as
-   `row@<state>@<dir>`; re-roll with note per row. Non-directional states ground on the
+   `row@<state>-<dir>`; re-roll with note per row. Non-directional states ground on the
    base. Mirrored directions are NOT generated and NOT QA items — they are derived at
    compose.
 3. **Stage `composed`.** Extract frames from every approved strip, mirror-derive per
@@ -189,14 +204,16 @@ Under the existing fork-owned `harness` parser (`harness.py:1438-1459` pattern R
 - `characters status --draft <id>` — full draft state incl. revision items + stage.
 - `characters turnaround generate|reroll --direction ne [--note …]|approve
   [--direction …|--all]`.
-- `characters rows generate [--only walk@e]|reroll --row walk@e [--note …]`.
+- `characters rows generate [--only walk-e]|reroll --row walk-e [--note …]`.
 - `characters compose --draft <id>` — installs; `characters list`.
 - `characters sprite <slug> --json` — payload with the SAME field names/meanings as pets
   (`spritesheetBase64, spritesheetRevision, frameW, frameH, framesByRow, loopMs=1100,
   scale, mime`) **plus** `directions` (the scheme, incl. authored/mirrored), `states`,
   and `rows: [{row, state, direction, frames, key}]`; `stateRows` = flat row-key list so
   the Dart pattern of index-mapping still applies. No `framesPerState` cap semantics —
-  characters are per-row only (§1 read-side cap).
+  characters are per-row only (§1 read-side cap). The FIELD LIST is hermes-specific
+  packaging and belongs here; the row keys and the `stateRows` order inside it do not —
+  those follow the launcher spec.
 
 Image bytes for QA display: `status`/`reroll` responses carry file paths AND
 base64 thumbnails (bounded, e.g. ≤256px) so the launcher renders without touching
@@ -241,6 +258,10 @@ payloads carry file paths (the launcher runs on the same machine as
 - **CS-6 Proof pass (session-owner, not subagents).** Open the synthetic sheet, confirm
   row placement matches the manifest, confirm mirrored ≠ duplicated (arrows must point
   the other way); a real provider hatch if credentials are available this session.
+  The launcher now ships its own synthetic in `tool/spatial/placeholder_character/`,
+  but it is not a substitute: it emits a finished atlas + sidecar for the CONSUMER
+  side, where the fake provider here drives the extractor, the geometry gate, the
+  mirror derivation and the palette lock — the pipeline's INPUT side. Keep both.
 - **CS-7 Tests, written after the code works.** `tests/agent/test_charsheet_*.py` +
   CLI tests beside the pets ones; every test proven red by breaking the covered line,
   then green on restore, with the failure recorded in the PR/commit message. House rules
@@ -320,3 +341,41 @@ imagegen.py (full), prompts.py (full), store.py (head), harness.py (pets region)
 petdex_client.dart (payload+transport regions), pet-sprite.tsx (grep), pyproject.toml
 (packaging), AGENTS.md (full), locks.py (head), paths.py (head),
 test_harness_pets_cli.py (head).
+
+## 12. C5 conformance (2026-08-18)
+
+The launcher's 8-way work (its C1–C4) made the consumer real, and it reads sheets through
+`AvatarSpriteSheet._deriveDirectionSectors`. Hermes had drifted from it in three ways, all
+now closed; the authority for every fact below is the launcher spec named in the header.
+
+- **Row keys are hyphenated.** `row_key` emits `<state>-<direction>` (`walk-ne`), not
+  `<state>@<direction>`. The deriver splits on the last hyphen, so `@`-keyed rows covered
+  zero sectors and every 8-way sheet would have degraded to two-way at runtime — silently,
+  with no error and no log.
+- **Row order is front-first, authored-first.** `EIGHT_WAY.order` is
+  `s se e ne n nw w sw` (authored `s se e ne n`) and `FOUR_WAY.order` is `s e n w`
+  (authored `s e n`). Two consequences, both wanted: row 0 of `CHAR8` is `idle-s`, so the
+  launcher's degenerate row-0 fallback reads front-facing; and the authored prefix is
+  exactly the order `pipeline.turnaround_order` already produced out of the
+  `prompts.VIEW_LANGUAGE` ring, so the prompt lane did not move. Row order is deliberately
+  NOT the θ order of the direction tokens — the launcher addresses rows by NAME.
+- **`-` is reserved in state names.** `_STATE_NAME_RE` is `[a-z][a-z0-9_]*` and
+  `parse_states` refuses a hyphen by name. Closed by construction: with the launcher
+  splitting on the LAST hyphen, allowing `spin-kick` would make row parsing depend on
+  which tokens happen to be in the direction table on any given day.
+- **`spec.DIRECTION_TOKENS`** is the eight-token vocabulary, exported from the package
+  barrel, and `DirectionScheme.__post_init__` rejects any `order` entry outside it. The
+  check runs LAST so every pre-existing validation keeps its own message.
+- **Mirror baking stays, as a tolerated divergence.** The launcher spec asks for authored
+  rows only; hermes-composed sheets still bake the mirrored rows at compose time. The
+  runtime is indifferent — every candidate chain tries the exact row before its mirror,
+  and the deriver mirror-closes either way — so the only cost is decoded RAM (~+60% per
+  sheet). Retiring it is a `compose --authored-only` flag and ~20 tests, and it deletes
+  CS-4's shipped pixel-equality gate; the right time to spend that is when the launcher's
+  RAM-cap decision lands, not before.
+- **Nothing to migrate.** `$HERMES_HOME/characters/` does not exist on the build box:
+  no installed sheets, no drafts, no revision-store keys in the field. The rename is
+  therefore a code change only.
+- **Revision-store keys are unchanged.** They still read `row@walk-e` / `turnaround@n`:
+  the leading `<kind>@` is the STORE's item-kind separator, the store never parses keys,
+  and `_KEY_RE` already admitted the hyphen. Do not "fix" it to match the sheet.
