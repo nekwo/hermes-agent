@@ -30,7 +30,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import List, Optional, Tuple
+from typing import Callable, Iterable, Iterator, List, Mapping, Optional, Protocol, Tuple
 
 from agent.skill_utils import is_excluded_skill_path
 
@@ -1377,6 +1377,141 @@ def _mark_profile_personas_orphaned(profile_name: str) -> None:
         readiness.update({"orphaned": True, "orphaned_profile": profile_name})
         persona.readiness = readiness
         store.save(persona)
+
+
+# ── The process table, read through one seam ────────────────────────────────
+#
+# ``_profile_bound_backend_pids`` decides which processes get terminated, so
+# the OS process table is its INPUT.  Reading that table inline made the
+# function answerable only against whatever happened to be running on the
+# machine, and made every test that reaches profile-delete walk the live table:
+# measured 2026-08-18 on this workstation, 448 processes and ~4.2s per scan,
+# three scans in ``tests/hermes_cli/test_profiles.py`` alone.  That is what
+# made ``tests/hermes_cli`` unrunnable as a directory (ledger row F1).
+#
+# The lister below is the ONE injection point.  Production reads the live table
+# through ``_PsutilProcessLister``; a test installs its own and has thereby
+# replaced the whole input — there is no second path around it.  This is a
+# seam, not a behaviour change: every filter the function applied before
+# (current user only, backend subcommands only, never self or an ancestor,
+# ``--profile``/``-p``/``HERMES_HOME`` binding) still applies, to the same
+# facts, in the same order.
+
+
+@dataclass(frozen=True)
+class _ProcessFacts:
+    """The per-process view ``_profile_bound_backend_pids`` actually reads.
+
+    ``read_environ`` stays a callable rather than an already-materialized
+    mapping because the environment read is the expensive, refusable half: it
+    is consulted only for a process whose argv did not already answer the
+    binding question.  Materializing it for every process would turn a rare
+    read into a per-process one, so the laziness is part of the behaviour.
+    """
+
+    pid: int
+    username: Optional[str]
+    cmdline: Tuple[str, ...]
+    read_environ: Optional[Callable[[], Mapping[str, str]]] = None
+
+    def environ(self) -> Mapping[str, str]:
+        """This process's environment, or ``{}`` when there is no reader.
+
+        May raise: a live reader can refuse (``AccessDenied``) even for a
+        same-user process.  The caller treats a refusal exactly as it treats
+        an empty environment — no binding signal — and says so at that site.
+        """
+        if self.read_environ is None:
+            return {}
+        return self.read_environ() or {}
+
+
+@dataclass(frozen=True)
+class _ProcessTable:
+    """One reading of the process table, as this module consumes it.
+
+    Identity travels WITH the rows on purpose: "which pid am I", "who are my
+    ancestors" and "which user am I" are answers about the same table, and a
+    caller that got its rows from a fake while asking the live machine who it
+    is would be filtering driven rows through undriven facts.
+    """
+
+    self_pid: int
+    ancestor_pids: frozenset
+    current_username: Optional[str]
+    processes: Iterable[_ProcessFacts]
+
+
+class _ProcessLister(Protocol):
+    """Where ``_profile_bound_backend_pids`` gets its processes."""
+
+    def read(self) -> Optional[_ProcessTable]:
+        """One reading, or ``None`` when the table cannot be inspected at all."""
+        ...
+
+
+class _PsutilProcessLister:
+    """The production lister: the live OS process table, via ``psutil``."""
+
+    def read(self) -> Optional[_ProcessTable]:
+        try:
+            import psutil  # type: ignore
+        except Exception:
+            # No inspector on this machine.  The caller answers "no bound
+            # backends" — unchanged from before this seam existed.
+            return None
+
+        self_pid = os.getpid()
+
+        # Never terminate ourselves or a parent (e.g. `hermes -p <canon>
+        # profile delete` runs under the very profile it's deleting).
+        ancestors: set[int] = set()
+        try:
+            parent = psutil.Process(self_pid).parent()
+            while parent is not None:
+                ancestors.add(parent.pid)
+                parent = parent.parent()
+        except Exception:
+            pass
+
+        try:
+            current_username: Optional[str] = psutil.Process(self_pid).username()
+        except Exception:
+            current_username = None
+
+        return _ProcessTable(
+            self_pid=self_pid,
+            ancestor_pids=frozenset(ancestors),
+            current_username=current_username,
+            processes=self._iter_processes(psutil),
+        )
+
+    @staticmethod
+    def _iter_processes(psutil) -> Iterator[_ProcessFacts]:
+        """Yield lazily: the caller stops reading as soon as it has its answer."""
+        for proc in psutil.process_iter(["pid", "name", "username", "cmdline"]):
+            try:
+                info = proc.info
+                pid = info.get("pid")
+                if pid is None:
+                    continue
+                yield _ProcessFacts(
+                    pid=pid,
+                    username=info.get("username"),
+                    cmdline=tuple(info.get("cmdline") or ()),
+                    read_environ=proc.environ,
+                )
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+            except Exception:
+                continue
+
+
+# The lister the profile-delete path reads.  Module-level and singular on
+# purpose: replacing this name replaces the entire process-table input.
+_PROCESS_LISTER: "_ProcessLister" = _PsutilProcessLister()
+
+
 def _profile_bound_backend_pids(canon: str, profile_dir: Path) -> list[int]:
     """PIDs of running Hermes *backends* bound to this profile.
 
@@ -1392,12 +1527,15 @@ def _profile_bound_backend_pids(canon: str, profile_dir: Path) -> list[int]:
 
     Best-effort and tightly scoped: current-user processes only, backend
     subcommands only (never an interactive ``chat``/``tui``), and never this
-    process or its ancestors.  Returns an empty list if ``psutil`` can't
-    inspect anything.
+    process or its ancestors.  Returns an empty list if the process table
+    can't be inspected at all.
+
+    Reads its processes from ``_PROCESS_LISTER`` — see the seam above.  The
+    filters below are the whole of this function's policy; the lister supplies
+    facts and decides nothing.
     """
-    try:
-        import psutil  # type: ignore
-    except Exception:
+    table = _PROCESS_LISTER.read()
+    if table is None:
         return []
 
     try:
@@ -1407,34 +1545,22 @@ def _profile_bound_backend_pids(canon: str, profile_dir: Path) -> list[int]:
 
     # Never terminate ourselves or a parent (e.g. `hermes -p <canon> profile
     # delete` runs under the very profile it's deleting).
-    skip: set[int] = {os.getpid()}
-    try:
-        parent = psutil.Process(os.getpid()).parent()
-        while parent is not None:
-            skip.add(parent.pid)
-            parent = parent.parent()
-    except Exception:
-        pass
-
-    try:
-        current_user = psutil.Process(os.getpid()).username()
-    except Exception:
-        current_user = None
+    skip: set[int] = {table.self_pid} | set(table.ancestor_pids)
+    current_user = table.current_username
 
     backend_tokens = {"serve", "dashboard", "gateway"}
     hermes_markers = ("hermes_cli.main", "hermes-gateway", "tui_gateway")
     pids: list[int] = []
 
-    for proc in psutil.process_iter(["pid", "name", "username", "cmdline"]):
+    for proc in table.processes:
         try:
-            info = proc.info
-            pid = info.get("pid")
-            if pid is None or pid in skip:
+            pid = proc.pid
+            if pid in skip:
                 continue
-            if current_user is not None and info.get("username") != current_user:
+            if current_user is not None and proc.username != current_user:
                 continue
 
-            argv = info.get("cmdline") or []
+            argv = list(proc.cmdline)
             if not argv:
                 continue
 
@@ -1481,9 +1607,10 @@ def _profile_bound_backend_pids(canon: str, profile_dir: Path) -> list[int]:
 
             if bound:
                 pids.append(pid)
-        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-            continue
         except Exception:
+            # A row that cannot be read is not a match.  The psutil-specific
+            # spellings of "this process went away" are caught by the lister,
+            # at the boundary that knows them.
             continue
 
     return pids

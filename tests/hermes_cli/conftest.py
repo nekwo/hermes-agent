@@ -63,6 +63,61 @@ def _suppress_concurrent_hermes_gate(request, monkeypatch):
     )
 
 
+class _EmptyProcessTable:
+    """A process-table lister that reports a machine running nothing.
+
+    The hermetic default for this directory. It answers the same shape the
+    production lister answers, so the code under test takes its normal path
+    and simply finds no candidates — as opposed to ``None``, which is the
+    typed "no inspector available at all" arm and would exercise a different
+    branch.
+    """
+
+    def __init__(self) -> None:
+        self.reads = 0
+
+    def read(self):
+        from hermes_cli import profiles
+
+        self.reads += 1
+        return profiles._ProcessTable(
+            self_pid=os.getpid(),
+            ancestor_pids=frozenset(),
+            current_username=None,
+            processes=(),
+        )
+
+
+@pytest.fixture(autouse=True)
+def _no_live_process_table(monkeypatch):
+    """No test in this directory reads this machine's real process table.
+
+    ``hermes profile delete`` scans for backends bound to the profile being
+    deleted, and the production lister walks every process on the box (and,
+    for candidates, reads their environment). Measured on this workstation
+    2026-08-18: 448 processes, ~4.2s per scan, three scans in
+    ``test_profiles.py`` alone — which is what made ``tests/hermes_cli`` time
+    out as a directory (ledger row F1). The live table is also not a fact any
+    test can drive: what it holds depends on what the developer happens to be
+    running, so a test that reads it is asking a question with no defined
+    answer.
+
+    Tests that are ABOUT the scan install their own lister on top of this one
+    (``monkeypatch.setattr(profiles, "_PROCESS_LISTER", ...)``) and drive the
+    rows they mean to filter.
+
+    ``raising`` is left at its default of True deliberately: if the seam is
+    ever renamed, this fixture must fail loudly rather than silently stop
+    guarding — a guard that can quietly become a no-op is how the hole
+    reopens.
+    """
+    try:
+        from hermes_cli import profiles
+    except Exception:
+        return
+    monkeypatch.setattr(profiles, "_PROCESS_LISTER", _EmptyProcessTable())
+
+
 # ── Pre-existing environment-gap fence (2026-07-30) ─────────────────────────
 #
 # `python -m pytest tests/hermes_cli` on this Windows 10 workstation reports

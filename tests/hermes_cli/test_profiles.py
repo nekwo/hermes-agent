@@ -358,7 +358,15 @@ class TestDeleteProfile:
 
 
     def test_backend_scan_only_matches_this_profile(self, profile_env, monkeypatch):
-        """The backend PID scan binds by --profile selector and skips self."""
+        """The backend PID scan binds by --profile selector and skips self.
+
+        Drives the PRODUCTION lister (``_PsutilProcessLister``) against a fake
+        ``psutil`` module, so this is the pin on the adapter half: that psutil's
+        rows are translated into the facts the filter reads. The filter half is
+        pinned separately in ``TestProcessListerSeam``, which drives the facts
+        directly. Neither test can stand in for the other — one of them would
+        survive the adapter being rewritten to read nothing.
+        """
         create_profile("coder", no_alias=True)
         profile_dir = get_profile_dir("coder")
 
@@ -396,9 +404,213 @@ class TestDeleteProfile:
             ZombieProcess=Exception,
         )
         monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+        # The directory's hermetic default reports an empty machine; this test
+        # is about the psutil-backed lister, so it puts that one back — over
+        # the fake module above, never over the real process table.
+        monkeypatch.setattr(
+            profiles, "_PROCESS_LISTER", profiles._PsutilProcessLister()
+        )
 
         pids = profiles._profile_bound_backend_pids("coder", profile_dir)
         assert pids == [101]
+
+
+# ===================================================================
+# TestProcessListerSeam
+# ===================================================================
+
+class _DrivenProcessLister:
+    """A process table the test writes, in place of the machine's.
+
+    Counts its reads so a test can pin "the discovery read the table once",
+    which is also what convicts a mutant that reads it twice or not at all.
+    """
+
+    def __init__(self, table):
+        self._table = table
+        self.reads = 0
+
+    def read(self):
+        self.reads += 1
+        return self._table
+
+
+class _RealEnumeratorRecorder:
+    """Stands in for ``psutil.process_iter`` and refuses to enumerate.
+
+    Counting alone would let a mutant walk the live table and still pass on
+    a machine that happens to be running nothing interesting; raising makes
+    the bypass fatal wherever it happens.
+    """
+
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, *args, **kwargs):
+        self.calls += 1
+        raise AssertionError(
+            "_profile_bound_backend_pids reached the live process table"
+        )
+
+
+class TestProcessListerSeam:
+    """Profile-bound pid discovery reads the injected lister, never the box.
+
+    The scan decides which processes get terminated, so its input is the OS
+    process table — a fact no test can drive, and one that cost ~4.2s and 448
+    rows to read on the workstation this was measured on (ledger row F1).
+    These tests drive the table instead, which is the only way the
+    ancestor/user/binding filters below are observable at all.
+    """
+
+    def _facts(self, pid, argv, username="me", environ=None):
+        return profiles._ProcessFacts(
+            pid=pid,
+            username=username,
+            cmdline=tuple(argv),
+            read_environ=(lambda: environ) if environ is not None else None,
+        )
+
+    def test_returns_the_driven_rows_the_real_predicate_admits(
+        self, profile_env, monkeypatch
+    ):
+        """Two distinct driven tables; each answer is that table's, filtered."""
+        import psutil
+
+        recorder = _RealEnumeratorRecorder()
+        monkeypatch.setattr(psutil, "process_iter", recorder)
+
+        create_profile("coder", no_alias=True)
+        profile_dir = get_profile_dir("coder")
+
+        # ── Driven table one ────────────────────────────────────────────
+        first = profiles._ProcessTable(
+            self_pid=4242,
+            ancestor_pids=frozenset({4343}),
+            current_username="me",
+            processes=[
+                # Backend bound by selector → matched.
+                self._facts(
+                    101,
+                    ["python", "-m", "hermes_cli.main", "--profile", "coder", "serve"],
+                ),
+                # Interactive chat for coder → not a backend subcommand.
+                self._facts(
+                    102,
+                    ["python", "-m", "hermes_cli.main", "--profile", "coder", "chat"],
+                ),
+                # Backend for another profile.
+                self._facts(
+                    103,
+                    ["python", "-m", "hermes_cli.main", "--profile", "other", "serve"],
+                ),
+            ],
+        )
+        lister = _DrivenProcessLister(first)
+        monkeypatch.setattr(profiles, "_PROCESS_LISTER", lister)
+
+        assert profiles._profile_bound_backend_pids("coder", profile_dir) == [101]
+        assert lister.reads == 1
+
+        # ── Driven table two: different pids, different admit set ───────
+        second = profiles._ProcessTable(
+            self_pid=901,
+            ancestor_pids=frozenset({902}),
+            current_username="me",
+            processes=[
+                # `--profile=` spelling → matched.
+                self._facts(201, ["hermes", "--profile=coder", "dashboard"]),
+                # Bound by HERMES_HOME rather than argv → matched.
+                self._facts(
+                    202,
+                    ["hermes", "gateway"],
+                    environ={"HERMES_HOME": str(profile_dir)},
+                ),
+                # Same command, another user → skipped.
+                self._facts(
+                    203,
+                    ["hermes", "--profile=coder", "serve"],
+                    username="someone-else",
+                ),
+                # This very process, and an ancestor of it → never killed.
+                self._facts(901, ["hermes", "--profile=coder", "serve"]),
+                self._facts(902, ["hermes", "--profile=coder", "serve"]),
+            ],
+        )
+        second_lister = _DrivenProcessLister(second)
+        monkeypatch.setattr(profiles, "_PROCESS_LISTER", second_lister)
+
+        assert profiles._profile_bound_backend_pids("coder", profile_dir) == [201, 202]
+        assert second_lister.reads == 1
+
+        # The live enumerator was never reached, in either drive.
+        assert recorder.calls == 0
+
+    def test_an_environment_that_refuses_to_be_read_is_not_a_binding(
+        self, profile_env, monkeypatch
+    ):
+        """A refusing ``environ()`` reads as "no signal", not as a match."""
+        import psutil
+
+        recorder = _RealEnumeratorRecorder()
+        monkeypatch.setattr(psutil, "process_iter", recorder)
+
+        create_profile("coder", no_alias=True)
+        profile_dir = get_profile_dir("coder")
+
+        def _refuse():
+            raise PermissionError("access denied")
+
+        table = profiles._ProcessTable(
+            self_pid=7,
+            ancestor_pids=frozenset(),
+            current_username="me",
+            processes=[
+                profiles._ProcessFacts(
+                    pid=301,
+                    username="me",
+                    cmdline=("hermes", "serve"),
+                    read_environ=_refuse,
+                ),
+                self._facts(
+                    302,
+                    ["hermes", "serve"],
+                    environ={"HERMES_HOME": str(profile_dir)},
+                ),
+            ],
+        )
+        monkeypatch.setattr(profiles, "_PROCESS_LISTER", _DrivenProcessLister(table))
+
+        assert profiles._profile_bound_backend_pids("coder", profile_dir) == [302]
+        assert recorder.calls == 0
+
+    def test_no_inspector_at_all_answers_empty(self, profile_env, monkeypatch):
+        """``read() -> None`` is the typed "cannot inspect" arm, still ``[]``."""
+        create_profile("coder", no_alias=True)
+        profile_dir = get_profile_dir("coder")
+
+        class _NoInspector:
+            def read(self):
+                return None
+
+        monkeypatch.setattr(profiles, "_PROCESS_LISTER", _NoInspector())
+        assert profiles._profile_bound_backend_pids("coder", profile_dir) == []
+
+    def test_delete_does_not_read_the_live_process_table(
+        self, profile_env, monkeypatch
+    ):
+        """The whole point of F1: profile delete never walks the machine."""
+        import psutil
+
+        recorder = _RealEnumeratorRecorder()
+        monkeypatch.setattr(psutil, "process_iter", recorder)
+
+        profile_dir = create_profile("coder", no_alias=True)
+        with patch("hermes_cli.profiles._cleanup_gateway_service"):
+            delete_profile("coder", yes=True)
+
+        assert not profile_dir.is_dir()
+        assert recorder.calls == 0
 
 
 # ===================================================================
