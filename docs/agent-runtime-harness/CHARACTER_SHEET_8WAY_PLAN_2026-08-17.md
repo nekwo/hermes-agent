@@ -59,7 +59,7 @@ hermes"*; implementation by Opus subagents whose work is checked to production g
    `compose_atlas` (`:1052-1068`), `validate_atlas` (`:1078-1183`), and the orchestrator's
    row loop (`orchestrate.py:229-316` READ). Everything else in the pixel pipeline is
    row-agnostic. The trap: `constants.state_rows_for_grid` (`constants.py:147-156` READ)
-   *infers* taxonomy from sheet height (≥9 rows → Codex, else legacy) — a 16-row character
+   *infers* taxonomy from sheet height (≥9 rows → Codex, else legacy) — a 10-row character
    sheet pushed through any pet read path would be silently misread as a 9-row pet.
    Character sheets therefore carry their row list explicitly and **never** flow through
    pet readers.
@@ -106,16 +106,18 @@ them:
 - `StateSpec(name, frames, directional)` — e.g. `("walk", 8, True)`, `("idle", 6, True)`.
   State names are `[a-z][a-z0-9_]*`: `-` is **reserved**, because it is the row key's
   state/direction separator and the launcher splits on the LAST one.
-- `DirectionScheme(order, authored, mirrored)` — `order` is the sheet's ROW order,
-  `authored` the generated subset, `mirrored` a `{derived: source}` map. Every direction
+- `DirectionScheme(order, authored, mirrored)` — `order` is the direction vocabulary the
+  CONSUMER resolves, `authored` the generated subset and (since H1) the sheet's ROW
+  order, `mirrored` a `{derived: source}` map. Every direction
   in `order` must be authored or mirrored, and every token must be one of the eight the
   launcher deriver reads (`spec.DIRECTION_TOKENS`). **The count is `len(order)` —
   nothing tests for 8.** Petdex is expressible as the 2-direction case (`running` ×
   right/left, left ← right) — proof of shape, not a migration; pets stay on their own
   path untouched.
 - `SheetSpec(states, scheme, frame_w, frame_h)` with `rows()` → ordered
-  `RowSpec(index, state, direction, frames, key)` — state-major, directions in `order`;
-  non-directional states contribute one row with `direction=None`.
+  `RowSpec(index, state, direction, frames, key)` — state-major, the AUTHORED directions
+  in `authored` order (H1; it was every direction in `order`); non-directional states
+  contribute one row with `direction=None`.
 - Default spec `CHAR8`: `idle` + `walk`, both directional, 8-way. States are
   CLI-overridable — the `--states` grammar is `name:frames[:fixed]`, comma-separated,
   where `:fixed` marks a non-directional state that contributes exactly one row.
@@ -185,10 +187,11 @@ out-of-order calls with a stated reason (`{"ok": false, "error": …, "stage": �
    frames are rejected mechanically — no human should QA obviously-broken slices;
    `orchestrate.py:245-265` pattern READ). Strips land in the revision store as
    `row@<state>-<dir>`; re-roll with note per row. Non-directional states ground on the
-   base. Mirrored directions are NOT generated and NOT QA items — they are derived at
-   compose.
-3. **Stage `composed`.** Extract frames from every approved strip, mirror-derive per
-   `scheme.mirrored`, `normalize_cells` across ALL rows at once (one shared scale — the
+   base. Mirrored directions are NOT generated and NOT QA items — and since H1 they are
+   not composed either: the consumer flips an authored row at draw time.
+3. **Stage `composed`.** Extract frames from every approved strip (H1: no mirror-derive
+   step — the sheet is the authored rows), `normalize_cells` across ALL rows at once
+   (one shared scale — the
    character must not change size as it turns), palette-lock every cell (§7.2), compose
    per spec, validate per spec, write `sheet.webp` + `character.json`.
 
@@ -210,7 +213,8 @@ Under the existing fork-owned `harness` parser (`harness.py:1438-1459` pattern R
   (`spritesheetBase64, spritesheetRevision, frameW, frameH, framesByRow, loopMs=1100,
   scale, mime`) **plus** `directions` (the scheme, incl. authored/mirrored), `states`,
   and `rows: [{row, state, direction, frames, key}]`; `stateRows` = flat row-key list so
-  the Dart pattern of index-mapping still applies. No `framesPerState` cap semantics —
+  the Dart pattern of index-mapping still applies. Since H1 those three row-carrying
+  fields describe the AUTHORED rows only — ten of them for CHAR8. No `framesPerState` cap semantics —
   characters are per-row only (§1 read-side cap). The FIELD LIST is hermes-specific
   packaging and belongs here; the row keys and the `stateRows` order inside it do not —
   those follow the launcher spec.
@@ -251,17 +255,19 @@ payloads carry file paths (the launcher runs on the same machine as
   injection seam (a fake provider returning deterministic synthetic strips — arrow glyphs
   per direction — drives everything offline). *Gate:* fake-provider run produces a
   validated 16-row sheet + manifest; mirrored rows verified pixel-equal to
-  `mirror_frames(source)` in-script.
+  `mirror_frames(source)` in-script. **(H1: the sheet is 10 rows and that pixel-equality
+  gate is the one deleted — see "As built" below.)**
 - **CS-5 CLI verbs + payload.** §5 wired in `harness.py` (fork-owned; pets code paths
   untouched). *Gate:* full flow driven headless through the CLI with the fake provider;
   `pets sprite --json` byte-identical to the CS-0 baseline.
 - **CS-6 Proof pass (session-owner, not subagents).** Open the synthetic sheet, confirm
   row placement matches the manifest, confirm mirrored ≠ duplicated (arrows must point
-  the other way); a real provider hatch if credentials are available this session.
+  the other way — **H1: retired with the baked rows**); a real provider hatch if
+  credentials are available this session.
   The launcher now ships its own synthetic in `tool/spatial/placeholder_character/`,
   but it is not a substitute: it emits a finished atlas + sidecar for the CONSUMER
   side, where the fake provider here drives the extractor, the geometry gate, the
-  mirror derivation and the palette lock — the pipeline's INPUT side. Keep both.
+  geometry gate and the palette lock — the pipeline's INPUT side. Keep both.
 - **CS-7 Tests, written after the code works.** `tests/agent/test_charsheet_*.py` +
   CLI tests beside the pets ones; every test proven red by breaking the covered line,
   then green on restore, with the failure recorded in the PR/commit message. House rules
@@ -319,7 +325,8 @@ house test rules, and the §5 payload contract.
   strip (worst case: near-duplicate side views). Mitigation is the QA gate itself +
   per-direction re-roll; if rerolls dominate, switch authored views to 5 independent
   square generations grounded on base (same store shape, one flag in pipeline).
-- **A-5 (global scale coupling):** `normalize_cells` computes one global K over 16 rows —
+- **A-5 (global scale coupling):** `normalize_cells` computes one global K over every row
+  (16 as written; 10 for CHAR8 since H1) —
   one degenerate row could shrink the whole character. The spec-driven validator keeps
   upstream's collapse guards per row; a failed row re-enters QA rather than shipping.
 - **A-6 (private-helper drift):** upstream rename of `_fit_to_cell` /
@@ -366,16 +373,52 @@ now closed; the authority for every fact below is the launcher spec named in the
 - **`spec.DIRECTION_TOKENS`** is the eight-token vocabulary, exported from the package
   barrel, and `DirectionScheme.__post_init__` rejects any `order` entry outside it. The
   check runs LAST so every pre-existing validation keeps its own message.
-- **Mirror baking stays, as a tolerated divergence.** The launcher spec asks for authored
-  rows only; hermes-composed sheets still bake the mirrored rows at compose time. The
-  runtime is indifferent — every candidate chain tries the exact row before its mirror,
-  and the deriver mirror-closes either way — so the only cost is decoded RAM (~+60% per
-  sheet). Retiring it is a `compose --authored-only` flag and ~20 tests, and it deletes
-  CS-4's shipped pixel-equality gate; the right time to spend that is when the launcher's
-  RAM-cap decision lands, not before.
+- **Mirror baking stayed, as a tolerated divergence — RETIRED at H1** (the launcher's
+  RAM-cap decision landed; see "As built" below). What C5 recorded, for the record: the
+  launcher spec asks for authored rows only; hermes-composed sheets still baked the
+  mirrored rows at compose time. The runtime was indifferent — every candidate chain
+  tries the exact row before its mirror, and the deriver mirror-closes either way — so
+  the only cost was decoded RAM (~+60% per sheet). Retiring it deletes CS-4's shipped
+  pixel-equality gate; the right time to spend that is when the launcher's RAM-cap
+  decision lands, not before.
 - **Nothing to migrate.** `$HERMES_HOME/characters/` does not exist on the build box:
   no installed sheets, no drafts, no revision-store keys in the field. The rename is
   therefore a code change only.
 - **Revision-store keys are unchanged.** They still read `row@walk-e` / `turnaround@n`:
   the leading `<kind>@` is the STORE's item-kind separator, the store never parses keys,
   and `_KEY_RE` already admitted the hyphen. Do not "fix" it to match the sheet.
+
+### As built — H1: authored-only since `d870fbbd44` (2026-08-18)
+
+The C5 tolerated mirror-baking divergence above is **retired**. Owner ruling, launcher
+ADR 0024 (`Launcher_Brain/30 — Decisions/0024 — 8-way character sheets — serving lane,
+memory budget, mirror baking.md`) decision 3 = B: hermes emits authored-only rows, one
+format, and the CS-4 pixel-equality mirror gate is DELETED rather than moved. Option C
+(a `--authored-only` compose flag, both shapes alive) was considered and ruled out —
+there is no flag, no parameter and no legacy path.
+
+- **`SheetSpec.rows()` is state-major over `scheme.authored`.** CHAR8 is **10 rows at
+  1536x2080**, where it was 16 rows at 1536x3328; row 0 is still `idle-s`. Decoded cost
+  12.19 MiB against 19.50 MiB baked — the +60% ADR 0024 priced, and the reason decision
+  2-C's byte budget fits ~7 characters instead of ~4.
+- **`compose_draft_frames` has no mirror step**, and `agent/charsheet/` no longer calls
+  `mirror_frames` anywhere (it left the upstream import block with it). `normalize_cells`
+  still runs over every row at once, so the one shared scale is unchanged in effect: a
+  horizontal flip preserves every bounding box that scale is derived from.
+- **`sprite_payload`** carries the authored rows only in `framesByRow` / `stateRows` /
+  `rows`. `directions` (order/authored/mirrored) and `spritesheetRevision`
+  (`mtime_ns:size`) are unchanged. The launcher reads its sector count off the row NAMES
+  and mirror-closes the set (`AvatarSpriteSheet._deriveDirectionSectors`), so an
+  authored-only sheet still resolves all eight sectors with no launcher change.
+- **`authored_rows()` now delegates to `rows()`** (every composed row is authored; two
+  separately filtered lists is how they drift apart), and **`mirrored_rows()` returns
+  `(derived key, source row)`** — a derived direction has no row to hand back, and left
+  as written it would have returned `[]` forever.
+- **Nothing to migrate, again.** `$HERMES_HOME/characters/` is still empty on the build
+  box. Sheets composed before H1 stay readable either way: the launcher tries the exact
+  row before its mirror, and the backend sidecar validator checks geometry, not
+  authoredness.
+- **Where the old shape still appears in this plan**, it is the build log of the stages
+  that produced it and is marked in place rather than rewritten: §6's CS-4 gate (the
+  "validated 16-row sheet", whose pixel-equality check is the deleted gate), §6's CS-6
+  mirror-derivation proof, and §10's A-5 global-K figure.
