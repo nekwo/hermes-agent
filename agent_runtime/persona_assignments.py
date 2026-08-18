@@ -245,6 +245,10 @@ class PersonaInstanceRetireError(AgentRuntimeError):
       never archive a working agent.
     - ``assignment_active`` — an active persona assignment is bound to the
       instance; complete/close it first.
+    - ``assignments_unknowable`` — one or more assignment rows will not decode,
+      so ``assignment_active``'s NEGATIVE cannot be established. A guard that
+      cannot see its evidence refuses rather than reading "could not search" as
+      "searched and found none"; ``detail`` carries the count and the scope.
     """
 
     def __init__(
@@ -1347,7 +1351,29 @@ class PersonaInstanceStore:
                 },
             )
 
-        active_assignment_ids = self._active_assignment_ids_for_instance(instance.id)
+        assignment_scan = self._scan_active_assignments_for_instance(instance.id)
+        if assignment_scan.unreadable:
+            # The guard below answers "is a live assignment bound to this
+            # instance?" by SEARCHING the assignment store, so its negative is
+            # only as good as its enumeration: an unreadable row answers "none
+            # active" and the retire proceeds to orphan exactly the assignment
+            # the guard exists to protect. A guard that cannot see its evidence
+            # refuses.
+            raise PersonaInstanceRetireError(
+                "assignments_unknowable",
+                (
+                    f"{instance.id}: {assignment_scan.unreadable} persona assignment row(s) "
+                    "will not decode, so 'no active assignment' cannot be established; "
+                    "repair or remove them before retiring"
+                ),
+                persona_instance_id=instance.id,
+                detail={
+                    "reason": PERSONA_ROWS_UNREADABLE,
+                    "scope": "persona_assignments",
+                    "unreadable": assignment_scan.unreadable,
+                },
+            )
+        active_assignment_ids = assignment_scan.assignment_ids
         if active_assignment_ids:
             raise PersonaInstanceRetireError(
                 "assignment_active",
@@ -1397,19 +1423,33 @@ class PersonaInstanceStore:
             "archive_dir": str(archive_dir),
         }
 
-    def _active_assignment_ids_for_instance(self, instance_id: str) -> list[str]:
-        """Ids of active persona assignments bound to this instance (guard input
-        for :meth:`retire`). A retire must never orphan a live assignment."""
-        try:
-            assignments = PersonaAssignmentStore(event_log=self.event_log).list_all()
-        except Exception:
-            return []
-        return [
-            assignment.id
-            for assignment in assignments
-            if assignment.persona_instance_id == instance_id
-            and assignment.state in ACTIVE_ASSIGNMENT_STATES
-        ]
+    def _scan_active_assignments_for_instance(self, instance_id: str) -> ActiveAssignmentScan:
+        """Ids of active persona assignments bound to this instance, beside how
+        many assignment rows could not be read at all (guard input for
+        :meth:`retire`). A retire must never orphan a live assignment.
+
+        The count travels because the ids alone cannot express the difference
+        between "searched the store and found none" and "could not search the
+        store" — and this guard's whole job is a negative answer.
+
+        NO blanket ``except Exception: return []`` any more. That arm made the
+        guard doubly fail-open: on top of the lister silently dropping rows it
+        could not decode, a store-wide failure was converted into the same
+        confident "none active" the clean path returns, which is C16's defect
+        exactly — one arm reusing another arm's sentence for a condition it does
+        not describe. A fault now travels as a fault, and :meth:`retire` turns it
+        into a typed refusal that names it.
+        """
+        scan = PersonaAssignmentStore(event_log=self.event_log).scan_all()
+        return ActiveAssignmentScan(
+            assignment_ids=[
+                assignment.id
+                for assignment in scan.assignments
+                if assignment.persona_instance_id == instance_id
+                and assignment.state in ACTIVE_ASSIGNMENT_STATES
+            ],
+            unreadable=scan.unreadable,
+        )
 
     def _archive_instance_row(self, instance: PersonaInstance, archive_dir) -> Any:
         """Move the instance's row file into ``archive_dir`` (archive-never-delete).

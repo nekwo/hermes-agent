@@ -223,3 +223,91 @@ def test_steering_repair_still_strips_a_genuinely_dangling_parent(
     assert result["refused"] is None
     assert result["repaired_count"] == 1
     assert PersonaInstanceStore().get(child.id).steered_by == []
+
+
+# --- site 2: the retire guard -------------------------------------------
+
+
+@pytest.mark.parametrize("corrupt_count", [1, 2])
+def test_retire_refuses_typed_when_an_assignment_row_will_not_decode(
+    isolate_agent_runtime_root, corrupt_count
+):
+    """The guard's own docstring: a retire must never orphan a live assignment.
+
+    It answers by SEARCHING, so its negative is worth what its enumeration is
+    worth. An unreadable assignment row made it answer "none active" and the
+    retire proceeded.
+    """
+
+    store = PersonaInstanceStore()
+    instance = _instance("retire_me")
+    _corrupt_assignment_rows(corrupt_count)
+
+    with pytest.raises(PersonaInstanceRetireError) as excinfo:
+        store.retire(instance.id, reason="placement deleted")
+
+    error = excinfo.value
+    assert error.code == "assignments_unknowable"
+    assert error.detail["unreadable"] == corrupt_count
+    assert error.detail["reason"] == PERSONA_ROWS_UNREADABLE
+    assert error.detail["scope"] == "persona_assignments"
+
+    # The retire did not happen: the row is still live and was never archived.
+    assert paths.persona_instance_path(instance.id).exists()
+    archive_root = paths.persona_instances_archive_dir()
+    assert not list(archive_root.glob("*_retire/*.json")) if archive_root.exists() else True
+
+
+def test_retire_still_refuses_a_genuinely_active_assignment(isolate_agent_runtime_root):
+    """The pre-existing guard is intact and keeps its OWN word.
+
+    C16: the new refusal must not have swallowed the old one. ``assignment_active``
+    and ``assignments_unknowable`` describe different conditions — "I looked and
+    found one" versus "I could not look" — and an operator acts differently on
+    each, so they may never collapse into one sentence.
+    """
+
+    store = PersonaInstanceStore()
+    instance = _instance("retire_blocked")
+    _seed_assignment("dev", persona_instance_id=instance.id, state="queued")
+
+    with pytest.raises(PersonaInstanceRetireError) as excinfo:
+        store.retire(instance.id, reason="placement deleted")
+
+    assert excinfo.value.code == "assignment_active"
+    assert paths.persona_instance_path(instance.id).exists()
+
+
+def test_retire_succeeds_on_a_clean_store(isolate_agent_runtime_root):
+    """The fence is not a disabled verb."""
+
+    store = PersonaInstanceStore()
+    instance = _instance("retire_clean")
+    result = store.retire(instance.id, reason="placement deleted")
+    assert result["persona_instance_id"] == instance.id
+    assert not paths.persona_instance_path(instance.id).exists()
+
+
+def test_a_store_wide_assignment_fault_no_longer_reads_as_none_active(
+    isolate_agent_runtime_root, monkeypatch
+):
+    """The blanket ``except Exception: return []`` is gone.
+
+    It made the guard DOUBLY fail-open: on top of the lister dropping rows it
+    could not decode, any store-wide failure was converted into the same
+    confident "none active" the clean path returns. A fault now travels as a
+    fault instead of borrowing the success arm's sentence.
+    """
+
+    store = PersonaInstanceStore()
+    instance = _instance("retire_faulted")
+
+    def _explode(self):
+        raise OSError("the assignments directory is unreadable")
+
+    monkeypatch.setattr(PersonaAssignmentStore, "scan_all", _explode)
+
+    with pytest.raises(OSError):
+        store.retire(instance.id, reason="placement deleted")
+
+    assert paths.persona_instance_path(instance.id).exists()
