@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from utils import atomic_json_write
 
@@ -197,6 +197,16 @@ class OfficePullSummary:
     #: word: nothing here was judged, so nothing here may be reported as kept,
     #: adopted, or archived.
     unknowable: list[dict[str, Any]] = None  # type: ignore[assignment]
+    #: How many PULLED actor files existed in the subtree and would not decode,
+    #: across every office directory in this pull. Never folded into any other
+    #: count and never silently zero: a remote row this side could not read is
+    #: the one input that is indistinguishable from "the peer deleted it".
+    unreadable_remote: int = 0
+    #: The delete-shaped decisions this pull declined to take because the remote
+    #: office they would have been derived from was not fully readable. Each row
+    #: names the workspace and actor key so the desk that was NOT archived is a
+    #: fact the operator can read, not an inference from a missing count.
+    delete_fenced: list[dict[str, Any]] = None  # type: ignore[assignment]
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -208,29 +218,61 @@ class OfficePullSummary:
             "workspaces": list(self.workspaces or []),
             "refused": list(self.refused or []),
             "unknowable": list(self.unknowable or []),
+            "unreadable_remote": self.unreadable_remote,
+            "delete_fenced": list(self.delete_fenced or []),
         }
 
 
-def _read_remote_office(office_dir: Path) -> tuple[OfficeSurface | None, dict[str, OfficeActor]]:
+class RemoteOffice(NamedTuple):
+    """One pulled office directory as it could actually be READ.
+
+    ``unreadable`` travels with the rows for the same reason ``ActorScan``'s
+    does, and here the stake is a deletion rather than a wrong number: the pull
+    derives "the peer removed this desk" from a key being ABSENT from
+    ``actors``. A file that arrived intact and merely would not decode lands in
+    exactly that absence — so a reader holding only the dict would archive the
+    member's own placement on the strength of a parse error.
+    """
+
+    surface: OfficeSurface | None
+    actors: dict[str, OfficeActor]
+    unreadable: int
+    #: The surface file existed and would not decode — distinct from "this
+    #: directory has no surface", which is what ``surface is None`` alone says.
+    surface_unreadable: bool = False
+
+
+def _read_remote_office(office_dir: Path) -> RemoteOffice:
     surface_path = office_dir / "office.json"
     surface: OfficeSurface | None = None
+    surface_unreadable = False
     if surface_path.exists():
         try:
             surface = from_jsonable(OfficeSurface, _read_json(surface_path))
         except Exception:
             surface = None
+            surface_unreadable = True
     actors: dict[str, OfficeActor] = {}
+    unreadable = 0
     actors_dir = office_dir / "actors"
     if actors_dir.exists():
         for actor_path in sorted(actors_dir.glob("*.json")):
             try:
                 actor = from_jsonable(OfficeActor, _read_json(actor_path))
             except Exception:
+                # COUNTED, not dropped. See ``RemoteOffice``: this absence is
+                # the pull's delete signal, so it may not be silent.
+                unreadable += 1
                 continue
             # Payload is truth; the filename is routing only (plan §4.3).
             if actor.actor_key:
                 actors[actor.actor_key] = actor
-    return surface, actors
+    return RemoteOffice(
+        surface=surface,
+        actors=actors,
+        unreadable=unreadable,
+        surface_unreadable=surface_unreadable,
+    )
 
 
 def _write_conflict_sidecar(
@@ -269,16 +311,29 @@ def apply_office_pull(realm_id: str, subtree: Path, *, event_log: EventLog | Non
 
     store = OfficeStore(event_log=event_log)
     baseline = read_office_baseline(realm_id)
-    summary = OfficePullSummary(workspaces=[], refused=[], unknowable=[])
+    summary = OfficePullSummary(workspaces=[], refused=[], unknowable=[], delete_fenced=[])
     office_root = subtree / "store" / "office"
     if not office_root.exists():
         return summary
 
     for office_dir in sorted(p for p in office_root.iterdir() if p.is_dir()):
-        remote_surface, remote_actors = _read_remote_office(office_dir)
+        remote = _read_remote_office(office_dir)
+        remote_surface, remote_actors = remote.surface, remote.actors
+        summary.unreadable_remote += remote.unreadable
         if remote_surface is None:
+            if remote.surface_unreadable:
+                # A directory whose surface will not decode names no workspace,
+                # so nothing here can be attributed — but it is a real remote
+                # office this pull did not apply, and the count says so.
+                summary.unreadable_remote += 1
             continue
         workspace_id = remote_surface.workspace_id
+        # Whether the REMOTE half was fully readable decides one thing only, and
+        # decides it for this workspace alone: whether an absent key may be read
+        # as the peer having removed the desk. Every other decision below is
+        # driven by rows that DID decode, so fencing them too would freeze a
+        # whole office over one bad file — the bystander rule again.
+        deletes_fenced = remote.unreadable > 0
         # The LOCAL half has to be knowable before any decision is taken about
         # it. ``scan_actors`` rather than ``list_actors``: an actor whose file
         # will not decode is dropped by the thin view, reaches the classifier
@@ -369,6 +424,21 @@ def apply_office_pull(realm_id: str, subtree: Path, *, event_log: EventLog | Non
                     summary.adopted += 1
                 continue
             if decision.action == PullAction.ARCHIVE_LOCAL:
+                if deletes_fenced:
+                    # THE delete-shaped decision, and the one this pull has not
+                    # earned: "remote_removed" is inferred from the key being
+                    # absent from a remote map we know to be short. Hold the
+                    # desk, name it, and leave the baseline alone so a repaired
+                    # pull can still converge it.
+                    summary.delete_fenced.append(
+                        {
+                            "workspace_id": workspace_id,
+                            "actor_key": actor_key,
+                            "reason": "unreadable_remote",
+                            "unreadable_remote": remote.unreadable,
+                        }
+                    )
+                    continue
                 try:
                     store.remove_actor(workspace_id, actor_key, reason="remote_removed", updated_by="realm_sync")
                     summary.archived += 1

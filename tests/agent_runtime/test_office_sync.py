@@ -448,3 +448,105 @@ def test_a_workspace_with_an_unreadable_actor_file_converges_nothing_on_pull(tmp
         # The unreadable file is left exactly as found, for an operator to repair.
         assert paths.office_actor_path(ws, "dev").read_text(encoding="utf-8") == "{truncated"
         assert not paths.office_conflict_path(ws, "dev").exists()
+
+
+# ── ML-8b/2: an unreadable PULLED actor cannot read as a peer delete ───────
+
+
+def _blind_pulled_actor(subtree, ws: str, actor_key: str):
+    """Corrupt one actor file inside the PULLED subtree. The peer published it
+    intact; this side cannot decode it — which is the state the pull's decision
+    table used to receive as "the peer removed this desk"."""
+
+    path = subtree / "store" / "office" / ws / "actors" / f"{office_models.actor_file_token(actor_key)}.json"
+    assert path.exists(), path
+    path.write_text("{truncated", encoding="utf-8")
+    return path
+
+
+def test_an_unreadable_pulled_actor_cannot_read_as_a_peer_delete(tmp_path):
+    """THE pull-read witness.
+
+    *Probed:* ``unreadable_remote`` on the summary (driven 1 then 2), that no
+    delete-shaped decision was taken for those keys (the ``delete_fenced``
+    recorder names each one), and that the desks are still there afterwards.
+
+    *Mutation:* restore the bare ``continue`` in ``_read_remote_office`` (drop
+    ``unreadable += 1``). The summary then lacks the count the fixture drives,
+    the fence never engages, and both desks are archived on the strength of a
+    parse error.
+    """
+
+    realm_id, ws = _make_realm_workspace()
+    subtree = tmp_path / "subtree"
+    _write_remote_office(
+        subtree,
+        ws,
+        [_remote_actor(ws, "dev"), _remote_actor(ws, "edu_tutor"), _remote_actor(ws, "qa_lead")],
+    )
+    adopted = apply_office_pull(realm_id, subtree)
+    assert adopted.adopted == 3 and adopted.unreadable_remote == 0
+
+    store = OfficeStore()
+    for driven, keys in ((1, ["dev"]), (2, ["dev", "edu_tutor"])):
+        for key in keys:
+            _blind_pulled_actor(subtree, ws, key)
+        summary = apply_office_pull(realm_id, subtree)
+        assert summary.unreadable_remote == driven, summary.as_dict()
+        assert summary.archived == 0, summary.as_dict()
+        assert summary.delete_fenced == [
+            {
+                "workspace_id": ws,
+                "actor_key": key,
+                "reason": "unreadable_remote",
+                "unreadable_remote": driven,
+            }
+            for key in sorted(keys)
+        ], summary.as_dict()
+        for key in keys:
+            assert store.actor_exists(ws, key), key
+            assert key not in store.get_surface(ws).archived_actor_keys
+        # The held desk keeps its baseline row, so a repaired remote still
+        # converges it rather than arriving as a fresh adopt.
+        assert f"{ws}:actor:dev" in read_office_baseline(realm_id)
+    # The bystander that WAS readable and unchanged is untouched throughout.
+    assert store.actor_exists(ws, "qa_lead")
+
+
+def test_a_readable_remote_removal_still_archives_beside_a_fenced_one(tmp_path):
+    """The discriminator that stops the fence from becoming "never archive".
+
+    A remote office that reads COMPLETELY still propagates its removals — the
+    absence means what it says there. Neither fence-everywhere nor fence-nowhere
+    passes this test together with the one above.
+    """
+
+    realm_id, ws = _make_realm_workspace()
+    subtree = tmp_path / "subtree"
+    _write_remote_office(subtree, ws, [_remote_actor(ws, "dev"), _remote_actor(ws, "edu_tutor")])
+    apply_office_pull(realm_id, subtree)
+
+    # Peer genuinely removed edu_tutor; every remaining file decodes.
+    _write_remote_office(subtree, ws, [_remote_actor(ws, "dev")])
+    summary = apply_office_pull(realm_id, subtree)
+    assert summary.unreadable_remote == 0
+    assert summary.delete_fenced == []
+    assert summary.archived == 1
+    assert not OfficeStore().actor_exists(ws, "edu_tutor")
+
+
+def test_an_unreadable_remote_surface_is_counted_not_skipped(tmp_path):
+    """The other half of the same read. A directory whose ``office.json`` will
+    not decode names no workspace, so nothing in it can be attributed — but it
+    is a real remote office this pull did not apply, and the count says so
+    instead of the directory vanishing."""
+
+    realm_id, ws = _make_realm_workspace()
+    subtree = tmp_path / "subtree"
+    _write_remote_office(subtree, ws, [_remote_actor(ws, "dev")])
+    (subtree / "store" / "office" / ws / "office.json").write_text("{truncated", encoding="utf-8")
+
+    summary = apply_office_pull(realm_id, subtree)
+    assert summary.unreadable_remote == 1, summary.as_dict()
+    assert summary.workspaces == []
+    assert summary.adopted == 0
