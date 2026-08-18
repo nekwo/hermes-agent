@@ -42,6 +42,15 @@ What a RESOLVE has to prove that neither actor verb does:
    two code vocabularies are different by design (the CLI's stage-42 exit
    taxonomy vs. JSON-RPC's ``data.reason``) and that test pins the MAPPING
    rather than pretending they are one string, so a rename on either side reds.
+
+6. **The gesture token, on this verb.** EG-2.3's ``correlation_id`` is pinned per
+   verb in ``test_correlation_id.py``, but that suite's "every write verb" group
+   predates this one and names three — upsert, remove, surface.update. Resolve
+   was the fourth write verb to reach the wire and arrived after it, so its
+   accept/carry/echo lived undefended in the canonical suite (ML-1). The group at
+   the end of this file closes that: the echo (both arms, since the tombstone
+   builds its own result dict), the CARRY into the store, the absent-key shape a
+   pre-token client still reads, and the boundary refusal.
 """
 
 from __future__ import annotations
@@ -828,6 +837,281 @@ def test_a_non_string_updated_by_is_refused_rather_than_stringified():
     assert reply["error"]["code"] == -32602
     assert reply["error"]["data"]["reason"] == "updated_by_invalid"
     assert _sidecar_exists()
+
+
+# ── the gesture token: echoed, carried, refused ─────────────────────────────
+
+#: Two tokens in the shape the launcher mints (``g-<lane>-<micros>-<rand4>``),
+#: distinct because every echo probe below is driven with BOTH. A handler that
+#: echoed a constant — or echoed whatever token its last write happened to carry
+#: — satisfies a one-token assertion, and that mutant is what this group exists
+#: to convict.
+GESTURE = "g-office-1755400000123456-a1b2"
+GESTURE_SECOND = "g-office-1755400000987654-c3d4"
+
+
+def _conflict_resolved_tokens(workspace_id: str = WORKSPACE) -> list[str | None]:
+    """The token on each ``office.actor.conflict_resolved`` event, in order.
+
+    Read through a fresh ``EventLog`` rather than a seed store's handle, for the
+    reason the sibling correlation suite records: the RPC handlers construct
+    their own ``OfficeStore``, so a seed store's log handle names a different
+    reader of the same file and would only happen to agree. Filtered by
+    workspace so a test driving two offices reads each one's own history.
+    """
+
+    from agent_runtime.events import EventLog
+
+    return [
+        event.payload.get("correlation_id")
+        for _, event in EventLog().iter_from_offset(0)
+        if event.type == "office.actor.conflict_resolved"
+        and event.payload.get("workspace_id") == workspace_id
+    ]
+
+
+def test_the_resolve_ack_echoes_the_callers_correlation_id():
+    """The ack names the token the WRITE carried, not the one the client
+    remembers sending — the difference between "we think we sent this" and "the
+    server wrote this", which is the whole point of echoing it at all.
+
+    Driven with TWO distinct tokens across two calls, one per ``take`` side: a
+    handler that echoed a constant, or the token of whatever it wrote last,
+    passes a single-token probe. Whole frames, because the key has to land
+    BESIDE the existing ack — a client reading ``revision`` as its next guard
+    token must find it unchanged.
+    """
+
+    _seed()
+    _seed_conflict()
+
+    local = _resolve(
+        "r-corr-local",
+        {
+            "workspace_id": WORKSPACE,
+            "actor_key": QA_INSTANCE,
+            "take": "local",
+            "correlation_id": GESTURE,
+        },
+    )
+
+    assert local == {
+        "jsonrpc": "2.0",
+        "id": "r-corr-local",
+        "result": {
+            "actor_key": QA_INSTANCE,
+            "take": "local",
+            "state": "active",
+            "revision": 2,
+            "correlation_id": GESTURE,
+        },
+    }
+
+    # A SECOND gesture on the same row: the first call consumed the sidecar, so
+    # this is a new conflict, resolved the other way, under a new token.
+    _seed_conflict()
+    remote = _resolve(
+        "r-corr-remote",
+        {
+            "workspace_id": WORKSPACE,
+            "actor_key": QA_INSTANCE,
+            "take": "remote",
+            "correlation_id": GESTURE_SECOND,
+        },
+    )
+
+    assert remote == {
+        "jsonrpc": "2.0",
+        "id": "r-corr-remote",
+        "result": {
+            "actor_key": QA_INSTANCE,
+            "take": "remote",
+            "state": "active",
+            "revision": 8,
+            "correlation_id": GESTURE_SECOND,
+        },
+    }
+
+
+def test_the_token_the_ack_echoes_is_the_token_the_store_recorded():
+    """The JOIN, which neither half proves alone.
+
+    The echo above reads a handler LOCAL; this reads what was actually threaded
+    into ``OfficeStore.resolve_conflict`` and emitted on
+    ``office.actor.conflict_resolved``. Drop the ``correlation_id=`` argument at
+    the store call and every echo assertion in this file still passes while the
+    event lane — the one a diagnostician greps — goes silent for this verb, which
+    is precisely the "both halves right, the join untested" shape.
+
+    Asserted as an ORDERED list of two distinct tokens: a constant cannot match
+    it, and neither can a carry that survives on only one of the two arms.
+    """
+
+    _seed()
+    _seed_conflict()
+    first = _resolve(
+        "r-carry-local",
+        {
+            "workspace_id": WORKSPACE,
+            "actor_key": QA_INSTANCE,
+            "take": "local",
+            "correlation_id": GESTURE,
+        },
+    )
+    assert "error" not in first, first
+
+    _seed_conflict()
+    second = _resolve(
+        "r-carry-remote",
+        {
+            "workspace_id": WORKSPACE,
+            "actor_key": QA_INSTANCE,
+            "take": "remote",
+            "correlation_id": GESTURE_SECOND,
+        },
+    )
+    assert "error" not in second, second
+
+    assert _conflict_resolved_tokens() == [GESTURE, GESTURE_SECOND]
+
+
+def test_a_resolve_with_no_gesture_behind_it_omits_the_key_entirely():
+    """The fence that keeps the token additive: a client that never learned this
+    key reads exactly the frame it always did.
+
+    Asserted as a whole frame AND by key absence, because an always-echo handler
+    — one stamping ``correlation_id: null`` or an empty string — satisfies "the
+    token is right when present" while putting a null in front of every existing
+    decoder. The store side is pinned the same way: no gesture, no key on the
+    event either.
+    """
+
+    _seed()
+    _seed_conflict()
+
+    reply = _resolve(
+        "r-corr-absent",
+        {"workspace_id": WORKSPACE, "actor_key": QA_INSTANCE, "take": "local"},
+    )
+
+    assert reply == {
+        "jsonrpc": "2.0",
+        "id": "r-corr-absent",
+        "result": {
+            "actor_key": QA_INSTANCE,
+            "take": "local",
+            "state": "active",
+            "revision": 2,
+        },
+    }
+    assert "correlation_id" not in reply["result"]
+    assert _conflict_resolved_tokens() == [None]
+
+
+def test_a_malformed_correlation_id_is_refused_before_the_store_is_touched(monkeypatch):
+    """``-32602`` with THE shared reason, and the store never opened.
+
+    Two malformed shapes, because they arrive from different bugs and must land
+    on one client branch: a NON-STRING (a client that sent its own id object
+    where a token belongs) and an OVER-LONG token — ``CORRELATION_ID_MAX_LEN``
+    plus one otherwise-legal character, so what is read here is the LENGTH fence
+    rather than the character class.
+
+    Refused rather than sanitized, which is this lane's asymmetry against
+    ``normalize_correlation_id``'s silent drop: a repaired id would print a value
+    neither side used. "Before the store" is asserted the way the ``take``
+    refusal asserts it — both store entry points poisoned — so a handler that
+    validated the token after opening the workspace comes back ``-32000``
+    instead; and the conflict is still there for the client that fixes its
+    payload.
+    """
+
+    from agent_runtime import office_store as office_store_module
+    from agent_runtime.state_patches import CORRELATION_ID_MAX_LEN
+
+    _seed()
+    _seed_conflict()
+    before = _actor_bytes()
+
+    def _refuse(*_args, **_kwargs):
+        raise AssertionError(
+            "the store was touched before correlation_id was validated"
+        )
+
+    monkeypatch.setattr(office_store_module.OfficeStore, "surface_exists", _refuse)
+    monkeypatch.setattr(office_store_module.OfficeStore, "resolve_conflict", _refuse)
+
+    for rid, token in (
+        ("r-corr-typed", 12345),
+        ("r-corr-long", "g" * (CORRELATION_ID_MAX_LEN + 1)),
+    ):
+        reply = _resolve(
+            rid,
+            {
+                "workspace_id": WORKSPACE,
+                "actor_key": QA_INSTANCE,
+                "take": "local",
+                "correlation_id": token,
+            },
+        )
+
+        assert reply["error"]["code"] == -32602, reply
+        assert reply["error"]["data"] == {
+            "reason": serve_rpc.CORRELATION_ID_INVALID_REASON,
+            "workspace_id": WORKSPACE,
+        }
+        # The spelling as well as the constant: the launcher branches on this
+        # literal string, so a renamed VALUE behind the constant reds here.
+        assert reply["error"]["data"]["reason"] == "correlation_id_invalid"
+
+    assert _actor_bytes() == before
+    assert _sidecar_exists()
+
+
+def test_the_tombstone_arm_carries_the_token_and_the_store_shows_the_archive():
+    """The OTHER echo site. The edit-vs-remove arm builds its own result dict, so
+    it is a second place the key can be forgotten — and one no assertion about
+    the actor arm can see.
+
+    Two workspaces, two tokens, for the reason the echo test gives. Each frame is
+    asserted WHOLE, so the token has to land beside ``state: "archived"`` without
+    a ``revision`` key arriving with it: the absence is what tells the client to
+    stop guarding a row that no longer exists. The store read-back is what makes
+    this a tombstone rather than a shape — the row really is archived, and the
+    store's own event carries the same token the ack echoed.
+    """
+
+    for rid, workspace, token in (
+        ("r-tomb-corr", WORKSPACE, GESTURE),
+        ("r-tomb-corr-second", f"{WORKSPACE}_second", GESTURE_SECOND),
+    ):
+        _seed(workspace)
+        _seed_conflict(workspace, remote_key=None)
+
+        reply = _resolve(
+            rid,
+            {
+                "workspace_id": workspace,
+                "actor_key": QA_INSTANCE,
+                "take": "remote",
+                "correlation_id": token,
+            },
+        )
+
+        assert reply == {
+            "jsonrpc": "2.0",
+            "id": rid,
+            "result": {
+                "actor_key": QA_INSTANCE,
+                "take": "remote",
+                "state": "archived",
+                "correlation_id": token,
+            },
+        }
+        assert "revision" not in reply["result"]
+        assert _live_keys(workspace) == []
+        assert QA_INSTANCE in _store().get_surface(workspace).archived_actor_keys
+        assert _conflict_resolved_tokens(workspace) == [token]
 
 
 # ── coverage, deliberately unmoved ──────────────────────────────────────────
