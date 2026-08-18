@@ -552,3 +552,63 @@ def test_the_ticket_readout_states_what_it_could_not_read(
     assert {record["clarify_token"] for record in records} == {token}
     # The thin view keeps its signature for every caller that only wants rows.
     assert [record["clarify_token"] for record in store.list_tickets()] == [token]
+
+
+# --- site 5: the workspace-delete cascade --------------------------------
+
+
+@pytest.mark.parametrize("corrupt_count", [1, 2])
+def test_workspace_delete_refuses_when_a_board_cannot_be_attributed(
+    isolate_agent_runtime_root, corrupt_count
+):
+    """The cascade's ENUMERATION is its delete list.
+
+    It deletes by matching ``board.workspace_id``, so a board it cannot decode is
+    a board it cannot attribute — it silently survives a workspace that no longer
+    exists, and no later delete can re-reach it because the row that named it is
+    gone. Refused BEFORE the office subtree is removed, so the store is left
+    exactly as found.
+    """
+
+    from agent_runtime.board_store import BoardStore
+    from agent_runtime.store import WorkspaceStore
+
+    workspace = WorkspaceStore().create(name="ML-15 cascade")
+    BoardStore().ensure_default_board(workspace.id)
+
+    boards_root = paths.boards_root()
+    for index in range(corrupt_count):
+        board_dir = boards_root / f"board_corrupt_{index}"
+        board_dir.mkdir(parents=True, exist_ok=True)
+        (board_dir / "board.json").write_text("{ not a board", encoding="utf-8")
+
+    office_dir = paths.office_dir(workspace.id)
+    office_existed = office_dir.exists()
+
+    with pytest.raises(WorkspaceDeleteBlocked) as excinfo:
+        WorkspaceStore().delete(workspace.id)
+
+    assert excinfo.value.code == "workspace_boards_unreadable"
+    assert excinfo.value.safe_details["unreadable"] == corrupt_count
+    assert excinfo.value.safe_details["workspace_id"] == workspace.id
+
+    # NOTHING of the cascade ran: the workspace row, its office subtree, and its
+    # boards are all exactly as they were.
+    assert paths.workspace_path(workspace.id).exists()
+    assert office_dir.exists() == office_existed
+    assert [b.board_id for b in BoardStore().list_for_workspace(workspace.id)]
+
+
+def test_workspace_delete_still_cascades_on_a_clean_store(isolate_agent_runtime_root):
+    """The fence is not a disabled verb: a readable store still cascades."""
+
+    from agent_runtime.board_store import BoardStore
+    from agent_runtime.store import WorkspaceStore
+
+    workspace = WorkspaceStore().create(name="ML-15 clean cascade")
+    board = BoardStore().ensure_default_board(workspace.id)
+
+    WorkspaceStore().delete(workspace.id)
+
+    assert not paths.workspace_path(workspace.id).exists()
+    assert not paths.board_dir(board.board_id).exists()

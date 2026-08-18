@@ -346,9 +346,36 @@ class WorkspaceStore:
         from .board_store import BoardStore
         from .locks import board_lock, office_lock
 
+        # THE CASCADE'S ENUMERATION IS ITS DELETE LIST, so it is refused whole
+        # rather than run short. ``list_all`` drops a board whose ``board.json``
+        # will not decode, and the loop below deletes by MATCHING
+        # ``board.workspace_id`` — a board it cannot decode is a board it cannot
+        # attribute, so it silently survives a workspace that no longer exists.
+        # That is worse than either outcome the operator chose between: an orphan
+        # directory owned by a deleted workspace, which no workspace-scoped verb
+        # will list again and no later delete can re-reach, because the row that
+        # named it is gone.
+        #
+        # Refused BEFORE the office subtree is removed — before the cascade takes
+        # its first irreversible step — so the store is left exactly as found. A
+        # half-done cascade is worse than a refused one: the refusal is repairable
+        # by fixing one file; the half-done state is not repairable at all once
+        # the workspace row is unlinked.
+        board_scan = BoardStore(event_log=self.event_log).scan_all()
+        if board_scan.unreadable:
+            raise WorkspaceDeleteBlocked(
+                "workspace_boards_unreadable",
+                (
+                    f"{board_scan.unreadable} board definition(s) will not decode, so the "
+                    "cascade cannot tell which boards this workspace owns; repair or "
+                    "remove them before deleting the workspace."
+                ),
+                safe_details={"unreadable": board_scan.unreadable, "workspace_id": item.id},
+            )
+
         with office_lock(item.id):
             shutil.rmtree(paths.office_dir(item.id), ignore_errors=True)
-        for board in BoardStore(event_log=self.event_log).list_all():
+        for board in board_scan.boards:
             if board.workspace_id != item.id:
                 continue
             with board_lock(board.board_id):
