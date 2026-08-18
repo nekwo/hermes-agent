@@ -36,6 +36,88 @@ DEFAULT_FOLDERS = ("Agents", "Desks")
 _HASH_EXCLUDE = frozenset({"revision", "created_at", "updated_at", "updated_by"})
 
 
+#: Why an office surface's workspace does not resolve. The discrimination lives
+#: in a FIELD; the parity warning's ``code`` stays ``orphaned_office`` for every
+#: one of them, because the code is what a census greps and what the launcher's
+#: ``warningCodes`` reads, and splitting one condition into three tokens would
+#: silently zero every existing count of it.
+#:
+#: ``UNKNOWN`` is not optional and not a fallback for laziness — see
+#: :func:`classify_orphaned_office_workspace` for the two shapes that reach it.
+ORPHANED_OFFICE_WORKSPACE_DELETED = "workspace_deleted"
+ORPHANED_OFFICE_WORKSPACE_NEVER_RECORDED = "workspace_never_recorded"
+ORPHANED_OFFICE_REASON_UNKNOWN = "unknown"
+
+
+def classify_orphaned_office_workspace(
+    workspace_id: str,
+    *,
+    deleted_ledgers,
+    ledger_cap: int,
+) -> str:
+    """WHICH KIND of orphan an office surface is, decided from the realm ledgers.
+
+    The warning this feeds was worded "which no longer resolves" for every
+    orphan — a sentence that PRESUMES the workspace once did. The live field case
+    that exposed it had never had a workspace record at all: 135 events for the
+    id, one ``office.surface.created`` and 67 actor upserts, and zero
+    ``workspace.created`` / ``deleted`` / ``archived``. An operator told "no
+    longer resolves" goes looking for the deletion that removed it, and there was
+    none.
+
+    ``deleted_ledgers`` is every realm's ``deleted_workspace_ids`` — the bounded
+    resurrection-guard ledger ``store.WorkspaceStore.delete`` appends to, capped
+    at ``ledger_cap`` (``store.DELETED_WORKSPACE_LEDGER_CAP``) with the OLDEST
+    entries falling off first. Passed as data rather than read here so this stays
+    a pure function this module can own, and so the caller derives it from the
+    realm list the projection has ALREADY read — never a second enumeration free
+    to disagree with the one that decided ``orphaned`` in the first place.
+
+    THE RULE, STATED BECAUSE A NEGATIVE HERE IS WEAKER THAN A POSITIVE:
+
+    * a hit in any ledger is a TOMBSTONE — proof, and the answer is
+      ``workspace_deleted``;
+    * a MISS is not proof of the opposite, so it only becomes
+      ``workspace_never_recorded`` when nothing about the ledgers makes the
+      negative unprovable. Two things can:
+
+      - **the cap.** A ledger AT ``ledger_cap`` has been evicting its oldest
+        entries, so the id may have been recorded and fallen off. Answer
+        ``unknown``: an id that dropped off a full ledger is not "never
+        recorded", and must not claim to be.
+      - **no ledgers at all.** With no realms on the store there is no ledger
+        that could have recorded anything, so a miss carries no information
+        whatever. That is ``unknown`` too — the C16 rule applied here: an arm
+        that cannot compute its answer says so in its own words rather than
+        borrowing the confident sentence next to it.
+
+    NAMED RESIDUAL — the one shape a ledger answer cannot see, stated rather than
+    left for the next reader to discover. ``WorkspaceStore.delete`` appends the
+    tombstone under ``if realm is not None``, so a workspace deleted while bound
+    to NO realm — or to a realm row that had already gone — is deleted with no
+    ledger entry written anywhere, and would read here as
+    ``workspace_never_recorded``. That window is narrow rather than theoretical
+    for exactly one reason: the same cascade ``rmtree``s the office subtree, so a
+    deleted workspace normally leaves no surface to warn about at all. An orphan
+    that survives a delete needs that removal to have failed, which makes it the
+    rarer half of an already-rare case. Widening this beyond the ledgers means
+    reading the event log per orphan inside the build, which is a cost no warning
+    in the parity section currently pays.
+    """
+
+    wsid = str(workspace_id or "").strip()
+    ledgers = [list(ledger or []) for ledger in (deleted_ledgers or [])]
+    if wsid:
+        for ledger in ledgers:
+            if any(str(entry or "").strip() == wsid for entry in ledger):
+                return ORPHANED_OFFICE_WORKSPACE_DELETED
+    if not ledgers:
+        return ORPHANED_OFFICE_REASON_UNKNOWN
+    if any(len(ledger) >= int(ledger_cap) for ledger in ledgers):
+        return ORPHANED_OFFICE_REASON_UNKNOWN
+    return ORPHANED_OFFICE_WORKSPACE_NEVER_RECORDED
+
+
 def default_surface(workspace_id: str, *, created_at, updated_by: str = "operator") -> OfficeSurface:
     """Deterministic default surface for a workspace.
 

@@ -49,7 +49,13 @@ from agent_runtime.state_patches import (
     PATCH_OP_REFRESH,
     STATE_PATCHED_EVENT_TYPE,
 )
-from agent_runtime.store import WorkspaceStore
+from agent_runtime.office_models import (
+    ORPHANED_OFFICE_REASON_UNKNOWN,
+    ORPHANED_OFFICE_WORKSPACE_DELETED,
+    ORPHANED_OFFICE_WORKSPACE_NEVER_RECORDED,
+    classify_orphaned_office_workspace,
+)
+from agent_runtime.store import DELETED_WORKSPACE_LEDGER_CAP, RealmStore, WorkspaceStore
 
 
 GHOST = "ws_ghost_office"
@@ -85,14 +91,40 @@ def _seed_orphan(workspace_id: str = GHOST) -> OfficeStore:
 def _offices() -> list[dict]:
     # ``.offices``: the projection now carries the rows AND the count of
     # workspaces whose surface would not decode (ML-8b/3).
+    #
+    # The realm list is passed exactly as ``build_snapshot`` passes it — it is
+    # what lets an orphaned row say WHICH KIND of orphan it is. Omitting it here
+    # would leave every case below reading ``unknown``, and the reason gates
+    # would be measuring the fixture rather than the classifier.
     return _offices_summary(
-        OfficeStore(), WorkspaceStore().list_all(include_archived=True)
+        OfficeStore(),
+        WorkspaceStore().list_all(include_archived=True),
+        RealmStore().list_all(include_archived=True),
     ).offices
 
 
+def _warnings(code: str = "orphaned_office") -> list[dict]:
+    return [w for w in _office_parity_warnings({"offices": _offices()}) if w["code"] == code]
+
+
 def _warning_ids(code: str = "orphaned_office") -> list[str]:
-    warnings = _office_parity_warnings({"offices": _offices()})
-    return [w["entity_id"] for w in warnings if w["code"] == code]
+    return [w["entity_id"] for w in _warnings(code)]
+
+
+def _tombstone(workspace_id: str, *, realm_name: str = "Ledger Realm"):
+    """A realm whose delete ledger already holds ``workspace_id``.
+
+    Written directly rather than by driving ``WorkspaceStore.delete``, because
+    that cascade ``rmtree``s the office subtree — driving it would destroy the
+    very surface under test. This reproduces the state that ACTUALLY reaches the
+    classifier in the field: a tombstone in the ledger beside a surface the
+    cascade did not manage to remove.
+    """
+
+    realm = RealmStore().create(name=realm_name)
+    realm.deleted_workspace_ids = [workspace_id]
+    RealmStore().save(realm, emit_event=False)
+    return realm
 
 
 def _run_verb(*argv: str) -> int:
@@ -379,3 +411,256 @@ def test_the_envelope_says_which_root_answered(capsys):
 
     assert "resolution" in row
     assert row["resolution"].get("error_kind") is None
+
+
+# --------------------------------------------------------------------------- #
+# MC-8 / P10 — the warning says WHICH KIND of orphan it is
+# --------------------------------------------------------------------------- #
+#
+# Every orphan used to be worded "which no longer resolves", a sentence that
+# PRESUMES the workspace once did. The live field case had never had a workspace
+# record at all — 135 events for the id, zero ``workspace.created``/``deleted`` —
+# so the operator was told to look for a deletion that had not happened.
+#
+# The distinction is decided from the realm ``deleted_workspace_ids`` ledgers,
+# and the reason is derived beside ``orphaned`` (in ``_offices_summary``) rather
+# than recomputed at the warning, so the flag and its explanation cannot come
+# from two different readings of the store.
+
+
+def test_a_deleted_workspace_reads_workspace_deleted():
+    """A tombstone in a realm ledger is PROOF, and the wording follows it.
+
+    *Kill:* collapse the detail map to one wording for every reason (make
+    ``_ORPHANED_OFFICE_DETAIL`` return the never-recorded sentence for all three
+    keys). The reason field still reads ``workspace_deleted`` — which is why the
+    DETAIL is asserted here too, and why this case reds while the classifier
+    itself is untouched.
+    """
+
+    _seed_orphan()
+    _tombstone(GHOST)
+
+    warning = next(w for w in _warnings() if w["entity_id"] == GHOST)
+    assert warning["reason"] == ORPHANED_OFFICE_WORKSPACE_DELETED, (
+        "an id sitting in a realm's deleted_workspace_ids ledger is a recorded "
+        "deletion, and the warning must say so rather than leaving the operator "
+        "to guess whether a workspace ever existed"
+    )
+    # Asserted against LITERAL discriminating phrases, not against the module's
+    # own detail map: reading the map would make this pass under exactly the
+    # mutation it is written to catch, since a collapsed map returns the same
+    # string for every key.
+    assert "was deleted" in warning["detail"], (
+        "the reason is typed but the sentence beside it does not follow it, so "
+        "the operator still reads one wording for two different situations"
+    )
+    assert "ever created" not in warning["detail"], (
+        "the deleted case is being described with the never-recorded sentence"
+    )
+
+
+def test_a_never_recorded_workspace_reads_workspace_never_recorded():
+    """The live field case: an office minted for an id no record ever named.
+
+    Run as its own case against its own mutation rather than sharing the one
+    above: two arms of a discrimination are two claims, and a single kill that
+    reds "some case" proves neither of them individually (C30).
+
+    *Kill:* the same detail-map collapse, asserted from THIS side — make every
+    reason render the DELETED sentence. The reason field still reads
+    ``workspace_never_recorded`` and the detail assertion reds.
+    """
+
+    _seed_orphan()
+    # A realm EXISTS with an empty ledger: that is what makes the negative
+    # meaningful. With no realms at all the honest answer is ``unknown``, which
+    # the case below pins.
+    RealmStore().create(name="Empty Ledger Realm")
+
+    warning = next(w for w in _warnings() if w["entity_id"] == GHOST)
+    assert warning["reason"] == ORPHANED_OFFICE_WORKSPACE_NEVER_RECORDED, (
+        "no realm ledger holds this id and none of them is at the cap, so the "
+        "honest reading is that no workspace record was ever created — the "
+        "measured shape of the ws_office_patch_test leak"
+    )
+    assert "ever created" in warning["detail"], (
+        "the reason is typed but the sentence beside it still describes a "
+        "deletion, which is the wording this whole arm exists to stop"
+    )
+    assert "was deleted" not in warning["detail"], (
+        "the never-recorded case is being described as a deletion — the exact "
+        "sentence that sent the operator hunting a deletion that never happened"
+    )
+
+
+def test_a_full_ledger_reads_unknown_rather_than_claiming_never_recorded():
+    """The cap is not lied about — an evicted id is not a "never".
+
+    ``deleted_workspace_ids`` is bounded at ``DELETED_WORKSPACE_LEDGER_CAP`` with
+    the OLDEST entries falling off first. A ledger sitting AT the cap has been
+    evicting, so a miss against it proves nothing at all, and answering
+    ``workspace_never_recorded`` there would be a confident sentence built on a
+    truncated list — the same shape as a lister that drops rows it could not read
+    and reports the remainder as complete.
+
+    *Kill:* delete the cap arm from ``classify_orphaned_office_workspace`` (the
+    ``any(len(ledger) >= ledger_cap …)`` branch). The full ledger then reads
+    ``workspace_never_recorded`` and this reds, while both cases above stay green
+    — which is what makes this a claim of its own rather than a restatement.
+    """
+
+    _seed_orphan()
+    realm = RealmStore().create(name="Full Ledger Realm")
+    realm.deleted_workspace_ids = [f"ws_evicted_{i:04d}" for i in range(DELETED_WORKSPACE_LEDGER_CAP)]
+    RealmStore().save(realm, emit_event=False)
+    assert GHOST not in realm.deleted_workspace_ids, "the fixture put the id IN the ledger"
+
+    warning = next(w for w in _warnings() if w["entity_id"] == GHOST)
+    assert warning["reason"] == ORPHANED_OFFICE_REASON_UNKNOWN, (
+        f"a realm ledger at its {DELETED_WORKSPACE_LEDGER_CAP}-entry cap has "
+        "been dropping its oldest entries, so this id may have been recorded and "
+        "evicted. Reporting 'never recorded' from a list that is known to be "
+        "incomplete states as fact something the store cannot support."
+    )
+
+
+def test_no_realms_at_all_reads_unknown():
+    """Nothing could have recorded anything, so a miss carries no information.
+
+    The C16 rule at this site: an arm that cannot compute its answer says so in
+    its own words instead of borrowing the confident sentence next to it.
+
+    *Kill:* drop the ``if not ledgers`` arm so an empty ledger set falls through
+    to ``workspace_never_recorded``. This reds and the never-recorded case above
+    stays green, because that one deliberately creates a realm.
+    """
+
+    _seed_orphan()
+    assert not RealmStore().list_all(include_archived=True), "the fixture created a realm"
+
+    warning = next(w for w in _warnings() if w["entity_id"] == GHOST)
+    assert warning["reason"] == ORPHANED_OFFICE_REASON_UNKNOWN, (
+        "with no realms on the store there is no ledger that could have recorded "
+        "a deletion, so 'never recorded' would be inferred from the absence of "
+        "any evidence either way"
+    )
+
+
+def test_the_warning_code_token_does_not_carry_the_reason():
+    """One token, discrimination in a FIELD.
+
+    ``code`` is what a census greps and what the launcher's ``warningCodes``
+    reads. Splitting this condition into ``orphaned_office_workspace_deleted`` /
+    ``…_never_recorded`` would silently zero every existing count of it and break
+    the chip without any consumer erroring.
+
+    *Kill:* rename the emitted code to carry the reason
+    (``f"orphaned_office_{reason}"``). This reds, and so does the parity-warning
+    catalog's producibility gate — two independent witnesses for the same rule.
+    """
+
+    _seed_orphan()
+    _tombstone(GHOST)
+    second = "ws_ghost_two"
+    _seed_orphan(second)
+
+    codes = {w["code"] for w in _office_parity_warnings({"offices": _offices()})}
+    assert "orphaned_office" in codes, (
+        "the orphaned-office warning no longer spells the code every census and "
+        "the launcher's parity chip look for"
+    )
+    # Only GHOST is tombstoned, so the two orphans classify DIFFERENTLY under the
+    # one shared code — which is a sharper statement of the rule than two rows
+    # agreeing would have been.
+    reasons = {w["entity_id"]: w["reason"] for w in _warnings()}
+    assert reasons == {
+        GHOST: ORPHANED_OFFICE_WORKSPACE_DELETED,
+        second: ORPHANED_OFFICE_WORKSPACE_NEVER_RECORDED,
+    }, (
+        "two orphans in one projection did not each get their own reason under "
+        "the one shared code — the discrimination has to live in the field, per "
+        "row, and it has to be computed per row rather than once for the frame"
+    )
+    assert not any(code.startswith("orphaned_office_") for code in codes), (
+        f"a reason leaked into the code token: {sorted(codes)}. A consumer "
+        "counting 'orphaned_office' silently reads zero the day that ships."
+    )
+
+
+def test_a_resolving_workspace_produces_no_warning_and_no_reason():
+    """Archived included — ``workspace_resolves``' own doctrine.
+
+    An archived workspace still resolves: its office is not an orphan, and
+    archiving it would be data loss rather than cleanup. The row must also carry
+    NO reason, because a reason on a non-orphan is a sentence looking for a
+    warning to attach itself to.
+
+    *Kill:* make ``_offices_summary`` second-guess its caller and filter archived
+    rows out of the workspace set it was handed
+    (``{w.id for w in workspaces if not w.archived}``). The archived workspace's
+    office becomes an orphan, gains a reason, and this reds. Aimed INSIDE the
+    projection deliberately: this case drives ``_offices_summary`` with a set
+    that already includes archived workspaces, so a mutation of ``build_snapshot``'s
+    call site could not reach it — the caller's own ``include_archived=True`` is
+    pinned by the store-predicate equivalence case above.
+    """
+
+    live = WorkspaceStore().create(name="Still Here")
+    archived = WorkspaceStore().create(name="Archived But Real")
+    WorkspaceStore().archive(archived.id)
+    store = OfficeStore()
+    store.ensure_surface(live.id)
+    store.ensure_surface(archived.id)
+
+    rows = {row["workspace_id"]: row for row in _offices()}
+    for wsid, label in ((live.id, "live"), (archived.id, "archived")):
+        assert rows[wsid]["orphaned"] is False, f"the {label} workspace's office reads as an orphan"
+        assert rows[wsid]["orphan_reason"] is None, (
+            f"the {label} workspace's office is not an orphan yet carries an "
+            f"orphan reason ({rows[wsid]['orphan_reason']!r})"
+        )
+    assert _warning_ids() == [], (
+        "a workspace that still resolves raised an orphaned_office warning; for "
+        "the archived one that would send the operator to archive-surface, which "
+        "moves a whole live office out of the projection"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# The classifier as a pure function — the rule, without a store in the way
+# --------------------------------------------------------------------------- #
+def test_the_classifier_is_a_pure_rule_over_the_ledgers():
+    """Every arm of the rule, driven directly, including the ones a fixture
+    cannot cheaply reach (a hit in the SECOND realm's ledger; a whitespace-padded
+    ledger entry; an empty id).
+
+    These are not restatements of the cases above: those prove the projection
+    ASKS this question, this proves the answer is right at every branch. A
+    classifier tested only through the projection is one whose branches are
+    exercised by whatever fixtures happened to be written.
+    """
+
+    call = classify_orphaned_office_workspace
+    cap = DELETED_WORKSPACE_LEDGER_CAP
+
+    assert call("ws_a", deleted_ledgers=[["ws_a"]], ledger_cap=cap) == ORPHANED_OFFICE_WORKSPACE_DELETED
+    assert call("ws_a", deleted_ledgers=[[], ["ws_a"]], ledger_cap=cap) == ORPHANED_OFFICE_WORKSPACE_DELETED, (
+        "only the first realm's ledger is being consulted"
+    )
+    assert call("ws_a", deleted_ledgers=[["  ws_a  "]], ledger_cap=cap) == ORPHANED_OFFICE_WORKSPACE_DELETED, (
+        "a padded ledger entry is the same id and must match"
+    )
+    assert call("ws_a", deleted_ledgers=[["ws_b"]], ledger_cap=cap) == ORPHANED_OFFICE_WORKSPACE_NEVER_RECORDED
+    assert call("ws_a", deleted_ledgers=[[]], ledger_cap=cap) == ORPHANED_OFFICE_WORKSPACE_NEVER_RECORDED, (
+        "a realm with an empty ledger is evidence: it exists and recorded nothing"
+    )
+    assert call("ws_a", deleted_ledgers=[], ledger_cap=cap) == ORPHANED_OFFICE_REASON_UNKNOWN
+    assert call("ws_a", deleted_ledgers=[["ws_b"] * cap], ledger_cap=cap) == ORPHANED_OFFICE_REASON_UNKNOWN
+    assert call("ws_a", deleted_ledgers=[[], ["ws_b"] * cap], ledger_cap=cap) == ORPHANED_OFFICE_REASON_UNKNOWN, (
+        "one full ledger anywhere makes the negative unprovable, even beside an "
+        "under-cap one"
+    )
+    assert call("", deleted_ledgers=[["ws_a"]], ledger_cap=cap) == ORPHANED_OFFICE_WORKSPACE_NEVER_RECORDED, (
+        "an empty id must not match a ledger entry by accident"
+    )

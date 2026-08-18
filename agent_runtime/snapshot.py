@@ -28,6 +28,11 @@ from .decision_contract_registry import CONTRACT_SCHEMA_VERSION, contract_hash
 from .events import CachedEventLog, event_summary_missing
 from .migrations import effective_config_summary, migration_status
 from .models import looks_like_persona_instance_id
+from .office_models import (
+    ORPHANED_OFFICE_REASON_UNKNOWN,
+    ORPHANED_OFFICE_WORKSPACE_DELETED,
+    ORPHANED_OFFICE_WORKSPACE_NEVER_RECORDED,
+)
 from .operator_channels import operator_channel_summary
 from .persona_assignments import (
     ACTIVE_ASSIGNMENT_STATES,
@@ -807,7 +812,7 @@ def _build_snapshot_in_runtime_scope(
     with _timed_section(_sections_ms, "boards_offices"):
         boards_projection = _boards_summary(BoardStore(event_log=event_log), workspaces)
         boards_section = _keyed(boards_projection.boards, "board_id")
-        offices_projection = _offices_summary(OfficeStore(event_log=event_log), workspaces)
+        offices_projection = _offices_summary(OfficeStore(event_log=event_log), workspaces, realms)
         offices_section = _keyed(offices_projection.offices, "workspace_id")
     running_work_accountant = ProjectionAccountant("running_work")
     with _timed_section(_sections_ms, "running_work"):
@@ -1613,6 +1618,7 @@ def office_summary_row(
     conflict_actor_keys=(),
     actor_unpublished=None,
     orphaned: bool = False,
+    orphan_reason: str | None = None,
 ) -> dict:
     """ONE Mission Office surface projection row — the single authority for the
     actor projection bound and its truncation accounting.
@@ -1659,9 +1665,18 @@ def office_summary_row(
         "archived_actor_keys": list(surface.archived_actor_keys),
         "revision": surface.revision,
         "updated_at": to_jsonable(surface.updated_at),
-        # A surface whose workspace no longer resolves is accounted, never
+        # A surface whose workspace does not resolve is accounted, never
         # silently hidden — parity warning below.
         "orphaned": orphaned,
+        # WHICH KIND of orphan, from ``office_models``' typed vocabulary, or
+        # ``None`` when the surface is not orphaned at all. It rides the ROW
+        # rather than being recomputed at the warning because ``orphaned`` is
+        # decided here, from one workspace enumeration, and ``workspace_resolves``
+        # exists precisely so this predicate and the ``orphaned_office`` warning
+        # "cannot answer differently". A reason derived at the warning would be a
+        # second derivation with its own inputs — free to drift from the flag it
+        # is supposed to be explaining. Additive: an old launcher ignores the key.
+        "orphan_reason": orphan_reason,
     }
 
 
@@ -1685,14 +1700,30 @@ class OfficesProjection(NamedTuple):
     unreadable: int
 
 
-def _offices_summary(office_store, workspaces) -> OfficesProjection:
+def _offices_summary(office_store, workspaces, realms=()) -> OfficesProjection:
     """Mission Office projection rows, keyed by workspace_id. Local reads only:
     conflict state from local sidecar files, ``unpublished`` from the local
-    realm-sync baseline sidecar (a pure file read — Decision 7 posture)."""
+    realm-sync baseline sidecar (a pure file read — Decision 7 posture).
 
+    ``realms`` are the realm rows the caller has ALREADY read, supplied only so
+    an orphaned row can say WHICH KIND of orphan it is (their bounded
+    ``deleted_workspace_ids`` ledgers are the discriminator). Nothing here reads
+    the realm store: a second enumeration would be free to disagree with the
+    workspace set that decided ``orphaned`` on the line above it, which is the
+    exact divergence ``OfficeStore.workspace_resolves``' docstring exists to
+    forbid. Defaulted so the CLI tier's callers are unaffected — with no realms
+    the classifier answers ``unknown``, which is the honest reading of "no ledger
+    could have recorded anything", not a silent downgrade.
+    """
+
+    from .office_models import classify_orphaned_office_workspace
     from .office_sync import read_office_baseline
+    from .store import DELETED_WORKSPACE_LEDGER_CAP
 
     workspace_ids = {getattr(w, "id", None) for w in workspaces}
+    deleted_ledgers = [
+        list(getattr(realm, "deleted_workspace_ids", None) or []) for realm in (realms or ())
+    ]
     realm_by_workspace = {getattr(w, "id", None): getattr(w, "realm_id", None) for w in workspaces}
     baselines: dict[str, dict[str, str]] = {}
     offices: list[dict] = []
@@ -1731,6 +1762,7 @@ def _offices_summary(office_store, workspaces) -> OfficesProjection:
 
             return baseline.get(f"{surface.workspace_id}:actor:{actor.actor_key}") != office_content_hash(actor)
 
+        orphaned = surface.workspace_id not in workspace_ids
         offices.append(
             office_summary_row(
                 surface,
@@ -1738,23 +1770,67 @@ def _offices_summary(office_store, workspaces) -> OfficesProjection:
                 actors_unreadable=scan.unreadable,
                 conflict_actor_keys=office_store.conflict_actor_keys(workspace_token),
                 actor_unpublished=_actor_unpublished,
-                orphaned=surface.workspace_id not in workspace_ids,
+                orphaned=orphaned,
+                orphan_reason=(
+                    classify_orphaned_office_workspace(
+                        surface.workspace_id,
+                        deleted_ledgers=deleted_ledgers,
+                        ledger_cap=DELETED_WORKSPACE_LEDGER_CAP,
+                    )
+                    if orphaned
+                    else None
+                ),
             )
         )
     return OfficesProjection(offices=offices, unreadable=unreadable)
+
+
+#: Detail wording per orphan reason. One sentence each, and each says something
+#: an operator can ACT on differently — the whole reason the reason exists. The
+#: old single wording ("which no longer resolves") presumed a deletion for every
+#: orphan and sent the reader hunting one that, in the live field case, had never
+#: happened.
+_ORPHANED_OFFICE_DETAIL = {
+    ORPHANED_OFFICE_WORKSPACE_DELETED: (
+        "its workspace record was deleted (a realm still holds the tombstone)"
+    ),
+    ORPHANED_OFFICE_WORKSPACE_NEVER_RECORDED: (
+        "no workspace record was ever created for it"
+    ),
+    ORPHANED_OFFICE_REASON_UNKNOWN: (
+        "the realm deletion ledgers cannot say whether it was deleted or never recorded"
+    ),
+}
 
 
 def _office_parity_warnings(data) -> list[dict]:
     warnings: list[dict] = []
     for office in _rows(data.get("offices")):
         if office.get("orphaned"):
+            # The row decided BOTH ``orphaned`` and its reason, from one
+            # workspace enumeration. A row from an older core (or a caller that
+            # built the row without realms) carries no reason; ``unknown`` is the
+            # honest reading of that, and it is the one value here that never
+            # claims to know something.
+            reason = str(office.get("orphan_reason") or "").strip() or ORPHANED_OFFICE_REASON_UNKNOWN
+            explanation = _ORPHANED_OFFICE_DETAIL.get(
+                reason, _ORPHANED_OFFICE_DETAIL[ORPHANED_OFFICE_REASON_UNKNOWN]
+            )
             warnings.append(
                 {
+                    # UNCHANGED, deliberately. The code is what a census greps
+                    # and what the launcher's ``warningCodes`` reads; carrying
+                    # the reason in the token (``orphaned_office_deleted``, …)
+                    # would zero every existing count of this condition. One
+                    # token, discrimination in a FIELD.
                     "code": "orphaned_office",
                     "entity_id": office.get("workspace_id"),
+                    "reason": reason,
                     "detail": (
-                        f"office surface points at workspace '{office.get('workspace_id')}' "
-                        "which no longer resolves"
+                        f"office surface points at workspace '{office.get('workspace_id')}', "
+                        f"which no workspace record resolves: {explanation}. Archive it "
+                        "with `harness office archive-surface --workspace "
+                        f"{office.get('workspace_id')}`"
                     ),
                 }
             )
