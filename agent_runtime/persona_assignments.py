@@ -7,13 +7,13 @@ import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from hermes_time import now
 from utils import atomic_json_write
 
 from . import paths
-from .errors import AgentRuntimeError
+from .errors import AgentRuntimeError, PersonaInstancesUnreadable
 from .events import EventLog
 from .models import (
     PERSONA_INSTANCE_ID_PREFIX,
@@ -48,6 +48,91 @@ _CHAT_MODES = frozenset({"chat", "free_floating"})
 # Typed reasons carried on ``persona_instance.chat_binding_cleared``.
 _BINDING_REPAIR_REASON = "session_missing_from_session_db"
 CHAT_BINDING_CLEARED_REASON_DELETED = "chat_deleted"
+
+#: The one word the persona lane spends when an arm cannot READ the rows it was
+#: asked to decide about. Minted in exactly ONE place
+#: (:meth:`PersonaScanRefusal.for_scan`) so no arm can quietly reuse another
+#: arm's sentence for a condition it does not describe (C16).
+PERSONA_ROWS_UNREADABLE = "persona_rows_unreadable"
+
+
+class PersonaInstanceScan(NamedTuple):
+    """What a persona-instance scan FOUND, beside what it could not read.
+
+    The second field is the whole point, and it is the same law
+    :class:`~.office_store.ActorScan` states one subsystem over: the two facts
+    have to travel TOGETHER, because any seam that carries only the rows
+    re-opens the hole at that seam.
+
+    ``PersonaInstanceStore.list_all`` has always skipped a file it could not
+    decode and returned the rest, so every reader downstream received a SHORTER
+    world that described itself as complete. For a projection that is a wrong
+    number. For the arms that DECIDE on it, it is a delete: the steering repair
+    computes ``live_ids`` from this list and strips every child edge pointing at
+    a row that is merely unreadable, and the retire path's backlink release
+    claims to have released EVERY child while never having seen one of them.
+    """
+
+    instances: list[PersonaInstance]
+    #: How many ``*.json`` rows in the instances directory existed and did not
+    #: decode. NEVER folded into ``instances`` and never silently zero.
+    unreadable: int
+
+
+class PersonaAssignmentScan(NamedTuple):
+    """What a persona-assignment scan FOUND, beside what it could not read.
+
+    The assignment twin of :class:`PersonaInstanceScan`. The retire guard
+    (:meth:`PersonaInstanceStore._scan_active_assignments_for_instance`) is the
+    reader that makes this a fault rather than a wrong number: its own docstring
+    says a retire must never orphan a live assignment, and it answered that
+    question from this list.
+    """
+
+    assignments: list[PersonaAssignment]
+    #: How many ``*.json`` rows in the assignments directory existed and did not
+    #: decode. NEVER folded into ``assignments`` and never silently zero.
+    unreadable: int
+
+
+class ActiveAssignmentScan(NamedTuple):
+    """The retire guard's answer, and whether it could actually look.
+
+    ``assignment_ids`` empty means one of two opposite things — "searched and
+    found none" or "could not search" — and the guard acts on the negative, so
+    the second field is what keeps those two apart.
+    """
+
+    assignment_ids: list[str]
+    unreadable: int
+
+
+class PersonaScanRefusal(NamedTuple):
+    """One persona-lane arm refusing rather than deciding on a short list.
+
+    Returned (never raised) by the REPORT-shaped arms — the repair sweeps, whose
+    contract is already "here is what I did and what I held". The raising arms
+    carry the same fact as a typed error instead; both spell the reason with
+    :data:`PERSONA_ROWS_UNREADABLE`, minted below, so the operator reads one
+    word for one condition however it reached them.
+    """
+
+    scope: str
+    unreadable: int
+    reason: str = PERSONA_ROWS_UNREADABLE
+
+    @classmethod
+    def for_scan(cls, scope: str, unreadable: int) -> "PersonaScanRefusal | None":
+        """THE mint. ``None`` means the world was fully readable — so an arm can
+        neither report a refusal it did not earn nor default-construct one that
+        swallows the count."""
+
+        if not unreadable:
+            return None
+        return cls(scope=scope, unreadable=int(unreadable))
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"scope": self.scope, "reason": self.reason, "unreadable": self.unreadable}
 
 
 def _session_presence_probe(session_db: Any | None = None) -> tuple[Any | None, str | None]:
@@ -1750,17 +1835,31 @@ class PersonaInstanceStore:
     # be stamped ``mode="task_bound"`` from a worker row, and the only writer of
     # ``PersonaInstance.active_worker_session_id`` (a field that went with them).
 
-    def list_all(self) -> list[PersonaInstance]:
+    def scan_all(self) -> PersonaInstanceScan:
+        """Every instance this root HAS, plus how many rows did not decode.
+
+        THE chokepoint. ``list_all`` is the thin list view over it, so the many
+        callers that only want rows keep their signature while the ones that
+        must not describe a short answer as complete — the steering repair, the
+        backlink release, the session-uniqueness guard — can ask the fuller
+        question. Forking those readers is the failure this shape forbids.
+        """
+
         directory = paths.persona_instances_dir()
         if not directory.exists():
-            return []
+            return PersonaInstanceScan([], 0)
         instances: list[PersonaInstance] = []
+        unreadable = 0
         for path in sorted(directory.glob("*.json")):
             try:
                 instances.append(from_jsonable(PersonaInstance, json.loads(path.read_text(encoding="utf-8"))))
             except Exception:
+                unreadable += 1
                 continue
-        return sorted(instances, key=lambda item: item.id)
+        return PersonaInstanceScan(sorted(instances, key=lambda item: item.id), unreadable)
+
+    def list_all(self) -> list[PersonaInstance]:
+        return self.scan_all().instances
 
     def ensure_for_personas(self, personas: list[AgentPersona]) -> list[PersonaInstance]:
         """Materialize an instance for every configured persona and settle any
@@ -1901,17 +2000,30 @@ class PersonaAssignmentStore:
         self._write(assignment)
         return self.get(assignment.id)
 
-    def list_all(self) -> list[PersonaAssignment]:
+    def scan_all(self) -> PersonaAssignmentScan:
+        """Every assignment this root HAS, plus how many rows did not decode.
+
+        THE chokepoint, the assignment twin of
+        :meth:`PersonaInstanceStore.scan_all`. ``list_all`` is the thin list
+        view over it; the retire guard — which must never orphan a live
+        assignment — asks the fuller question.
+        """
+
         directory = paths.persona_assignments_dir()
         if not directory.exists():
-            return []
+            return PersonaAssignmentScan([], 0)
         assignments: list[PersonaAssignment] = []
+        unreadable = 0
         for path in sorted(directory.glob("*.json")):
             try:
                 assignments.append(from_jsonable(PersonaAssignment, json.loads(path.read_text(encoding="utf-8"))))
             except Exception:
+                unreadable += 1
                 continue
-        return sorted(assignments, key=lambda item: item.created_at)
+        return PersonaAssignmentScan(sorted(assignments, key=lambda item: item.created_at), unreadable)
+
+    def list_all(self) -> list[PersonaAssignment]:
+        return self.scan_all().assignments
 
     def list_for_persona(self, persona_id: str) -> list[PersonaAssignment]:
         normalized = safe_assignment_token(persona_id)

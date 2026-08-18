@@ -124,6 +124,27 @@ class CardsUnreadable(ArchiveUnreadable):
     code = "cards_unreadable"
 
 
+class PersonaInstancesUnreadable(ArchiveUnreadable):
+    """Raised when a persona-lane write cannot see the WHOLE instance directory.
+
+    The persona twin of :class:`ActorsUnreadable`, and the third subsystem to
+    reach the same defect through its own guard. ``PersonaInstanceStore.list_all``
+    drops a row file it cannot decode, and the arms that DECIDE on that list are
+    writers: the steering repair derives ``live_ids`` from it and strips every
+    child edge naming a row that is merely unreadable — a delete-shaped write
+    produced by a parse error — and the backlink release promises to have
+    released EVERY child reference before an owner is archived, a completeness
+    claim the short list cannot support.
+
+    A write that cannot read the rows it decides against REFUSES. Reads are
+    untouched: the store still lists, and the count travels beside the rows
+    (:class:`~.persona_assignments.PersonaInstanceScan`) so a projection can
+    state it rather than describe a short answer as complete.
+    """
+
+    code = "persona_instances_unreadable"
+
+
 class SyncConflict(AgentRuntimeError):
     """Raised when a board card is under an unresolved realm-sync conflict, or a
     conflict-resolution verb targets a card that has none."""
