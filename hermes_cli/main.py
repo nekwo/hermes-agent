@@ -6774,6 +6774,78 @@ def _try_redownload_electron_dist(project_root: Path, env: dict) -> bool:
     return _redownload_electron_dist(project_root, env, mirror=_ELECTRON_FALLBACK_MIRROR)
 
 
+# ── The desktop build-lock sweep reads the process table through ONE seam ───
+#
+# Same shape, and the same reason, as ``hermes_cli.profiles``' lister
+# (ML-7 / R-c): ``_stop_desktop_processes_locking_build`` TERMINATES what it
+# finds, so the OS process table is its input — and reading that table inline
+# made every test reaching ``cmd_gui`` walk this machine's real processes. That
+# is a question with no defined answer: what the table holds depends on what
+# the developer happens to be running.
+#
+# It reuses that module's ``_ProcessLister`` protocol, ``_ProcessTable`` and
+# ``_ProcessFacts`` on purpose — one seam, one row type, one thing to keep
+# honest. The COLUMNS differ (``exe`` here, cmdline/environ there), which is
+# why the row's fields are optional; it is not a reason for a second row type.
+
+
+class _PsutilDesktopProcessLister:
+    """The production lister for the build-lock sweep: the live table.
+
+    Satisfies ``hermes_cli.profiles._ProcessLister``. Imports of the shared
+    types are function-local because this module's import cost is measured
+    (see ``_boot_clock``) and the sweep is a Windows-only, rebuild-time path.
+    """
+
+    def read(self):
+        try:
+            import psutil  # type: ignore
+        except Exception:
+            # No inspector on this machine — the typed "cannot look" arm.
+            return None
+        from hermes_cli.profiles import _ProcessTable
+
+        return _ProcessTable(
+            self_pid=os.getpid(),
+            # This sweep walks no ancestor chain and filters by no user: its
+            # whole discriminator is "does this exe live inside THIS build's
+            # release tree". Empty means "not collected"; nothing reads them.
+            ancestor_pids=frozenset(),
+            current_username=None,
+            processes=self._iter_processes(psutil),
+        )
+
+    @staticmethod
+    def _iter_processes(psutil):
+        """Yield lazily: the caller filters rows as they arrive."""
+        from hermes_cli.profiles import _ProcessFacts
+
+        try:
+            rows = psutil.process_iter(["pid", "exe"])
+        except Exception:
+            return
+        for proc in rows:
+            try:
+                info = proc.info
+                pid = info.get("pid")
+                if pid is None:
+                    continue
+                yield _ProcessFacts(
+                    pid=pid, exe=info.get("exe"), inspector_handle=proc
+                )
+            except Exception:
+                continue
+
+
+#: The lister the build-lock sweep reads. Module-level and singular on purpose:
+#: replacing this name replaces the entire process-table input.
+_DESKTOP_PROCESS_LISTER = _PsutilDesktopProcessLister()
+
+#: How long the sweep waits for terminated processes to release their file
+#: locks before killing them — the ``timeout=5`` ``psutil.wait_procs`` had.
+_DESKTOP_LOCK_RELEASE_TIMEOUT = 5.0
+
+
 def _stop_desktop_processes_locking_build(desktop_dir: Path) -> list[int]:
     """Terminate any running desktop app executing from this build's ``release``
     dir so a rebuild can replace its (otherwise locked) executable.
@@ -6790,12 +6862,15 @@ def _stop_desktop_processes_locking_build(desktop_dir: Path) -> list[int]:
     this desktop's ``release`` tree are stopped — a packaged install elsewhere or
     an unrelated "Hermes" process is never touched. Best-effort: never raises.
     Returns the PIDs we asked to stop.
+
+    Reads its rows from ``_DESKTOP_PROCESS_LISTER`` — see the seam above. Every
+    filter is unchanged (win32 only, release dir must exist, never this process,
+    exe must resolve INSIDE the release tree); only where the rows come from
+    moved. Termination goes through each row's ``inspector_handle`` rather than
+    re-resolving its pid, because between the walk and the act a pid can belong
+    to something else.
     """
     if sys.platform != "win32":
-        return []
-    try:
-        import psutil
-    except Exception:
         return []
     try:
         release_dir = (desktop_dir / "release").resolve()
@@ -6804,46 +6879,55 @@ def _stop_desktop_processes_locking_build(desktop_dir: Path) -> list[int]:
     if not release_dir.is_dir():
         return []
 
-    me = os.getpid()
-    victims = []
-    try:
-        proc_iter = psutil.process_iter(["pid", "exe"])
-    except Exception:
+    table = _DESKTOP_PROCESS_LISTER.read()
+    if table is None:
+        # No inspector: this build cannot name a single locker. Unchanged from
+        # before the seam — the rebuild proceeds and fails loudly on the locked
+        # file if one is actually held (see the escalation note in ML-16).
         return []
-    for proc in proc_iter:
-        try:
-            info = proc.info
-        except Exception:
-            continue
-        pid = info.get("pid")
-        exe = info.get("exe")
-        if not exe or pid is None or pid == me:
+
+    me = table.self_pid
+    victims = []
+    for row in table.processes:
+        exe = row.exe
+        if not exe or row.pid == me:
             continue
         try:
             exe_path = Path(exe).resolve()
         except (OSError, ValueError):
             continue
         if release_dir in exe_path.parents:
-            victims.append(proc)
+            victims.append(row)
 
     stopped: list[int] = []
-    for proc in victims:
+    for row in victims:
+        handle = row.inspector_handle
+        if handle is None:
+            continue
         try:
-            proc.terminate()
-            stopped.append(int(proc.pid))
+            handle.terminate()
+            stopped.append(int(row.pid))
         except Exception:
             continue
     if stopped:
-        # Wait for the handles (and thus the file locks) to actually release.
-        try:
-            _, alive = psutil.wait_procs(victims, timeout=5)
-            for proc in alive:
+        # Wait for the handles (and thus the file locks) to actually release,
+        # then kill whatever still holds one. ``psutil.wait_procs`` used to do
+        # this; it is a convenience wrapper over ``Process.wait``, so waiting on
+        # the rows directly keeps the entire sweep inside the injected table —
+        # same total budget, same kill escalation, and no module-level psutil
+        # reference left for a mutant to reach around the seam through.
+        deadline = _time.monotonic() + _DESKTOP_LOCK_RELEASE_TIMEOUT
+        for row in victims:
+            handle = row.inspector_handle
+            if handle is None:
+                continue
+            try:
+                handle.wait(timeout=max(deadline - _time.monotonic(), 0.0))
+            except Exception:
                 try:
-                    proc.kill()
+                    handle.kill()
                 except Exception:
                     continue
-        except Exception:
-            pass
     return stopped
 
 

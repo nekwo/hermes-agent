@@ -102,11 +102,19 @@ def _no_live_process_table(monkeypatch):
     running, so a test that reads it is asking a question with no defined
     answer.
 
-    Tests that are ABOUT the scan install their own lister on top of this one
+    The desktop build-lock sweep (``hermes_cli.main._DESKTOP_PROCESS_LISTER``,
+    reached from ``cmd_gui``) is the SECOND consumer of the same seam and is
+    defaulted here too rather than in a fixture of its own — one place that
+    answers "does any test in this directory touch the live process table",
+    because two places is how one of them silently stops covering a call site
+    (measured: ``test_gui_command.py`` walked the real table once per run,
+    ledger row B20(vi)).
+
+    Tests that are ABOUT a scan install their own lister on top of this one
     (``monkeypatch.setattr(profiles, "_PROCESS_LISTER", ...)``) and drive the
     rows they mean to filter.
 
-    ``raising`` is left at its default of True deliberately: if the seam is
+    ``raising`` is left at its default of True deliberately: if either seam is
     ever renamed, this fixture must fail loudly rather than silently stop
     guarding — a guard that can quietly become a no-op is how the hole
     reopens.
@@ -116,6 +124,11 @@ def _no_live_process_table(monkeypatch):
     except Exception:
         return
     monkeypatch.setattr(profiles, "_PROCESS_LISTER", _EmptyProcessTable())
+    try:
+        from hermes_cli import main as _cli_main
+    except Exception:
+        return
+    monkeypatch.setattr(_cli_main, "_DESKTOP_PROCESS_LISTER", _EmptyProcessTable())
 
 
 # ── Pre-existing environment-gap fence (2026-07-30) ─────────────────────────

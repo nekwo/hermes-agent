@@ -1436,19 +1436,36 @@ def _mark_profile_personas_orphaned(profile_name: str) -> None:
 
 @dataclass(frozen=True)
 class _ProcessFacts:
-    """The per-process view ``_profile_bound_backend_pids`` actually reads.
+    """The per-process view this module's process consumers actually read.
 
     ``read_environ`` stays a callable rather than an already-materialized
     mapping because the environment read is the expensive, refusable half: it
     is consulted only for a process whose argv did not already answer the
     binding question.  Materializing it for every process would turn a rare
     read into a per-process one, so the laziness is part of the behaviour.
+
+    Fields are optional because different consumers need different columns and
+    a lister only pays for the ones its caller reads — ``psutil.process_iter``
+    is priced per requested attribute.  Profile-delete asks for
+    username/cmdline/environ; the desktop build-lock sweep
+    (``hermes_cli.main._stop_desktop_processes_locking_build``) asks for
+    ``exe``.  One row type, one lister protocol, one table — a second
+    per-process view would be a second seam to keep honest.
+
+    ``inspector_handle`` is the inspector's OWN object for this row, carried so
+    a caller that must ACT on the process (terminate/kill/wait) does not have
+    to re-resolve the pid afterwards.  Re-resolving is how pid-recycle bugs are
+    born: between the walk and the act, the number can belong to something
+    else.  It is ``None`` for a lister that has no such object to offer, and a
+    reading caller never touches it.
     """
 
     pid: int
-    username: Optional[str]
-    cmdline: Tuple[str, ...]
+    username: Optional[str] = None
+    cmdline: Tuple[str, ...] = ()
     read_environ: Optional[Callable[[], Mapping[str, str]]] = None
+    exe: Optional[str] = None
+    inspector_handle: Optional[object] = None
 
     def environ(self) -> Mapping[str, str]:
         """This process's environment, or ``{}`` when there is no reader.
