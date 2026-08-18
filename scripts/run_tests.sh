@@ -30,6 +30,28 @@
 # separator required. The explicit '--' form still works and stacks with
 # bare flags. Positional path arguments override the default discovery
 # root (tests/).
+#
+# ── Running tests/hermes_cli (and why through here) ─────────────────────────
+#
+#   scripts/run_tests.sh tests/hermes_cli -j 6
+#
+# This script is THE checkpoint runner for that directory, and a red is
+# defined as "any FILE red under it". Running `pytest tests/hermes_cli`
+# directly asks a different question: 568 files then share one interpreter,
+# and ~41 failures appear in test_web_server_* / test_web_ui_build.py that are
+# green when each file is run alone (ledger row F3). That is module-level
+# state leaking across files — the exact thing per-file spawning exists to
+# prevent — so it is a fact about the interpreter, not a defect in those
+# tests, and it is not being chased (ML-7 / operator ruling R-e, 2026-08-18).
+#
+# If this script refuses with "no virtualenv with pytest found", it means
+# every candidate venv either does not exist or has no pytest INSTALLED —
+# an empty `.venv/` directory counts as the former. Point it at a real one:
+#
+#   HERMES_PYTHON=/c/Python312/python.exe scripts/run_tests.sh tests/hermes_cli
+#
+# Refusing is deliberate; a venv without pytest reports "0 tests passed",
+# which reads green at a glance.
 
 set -euo pipefail
 

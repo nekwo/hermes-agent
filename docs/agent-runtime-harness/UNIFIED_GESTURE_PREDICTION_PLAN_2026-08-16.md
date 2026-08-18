@@ -89,6 +89,20 @@ rewrite — so the field has been dead since it was born.
 > narrow grep; anything that would have deleted `interactionMode` on that basis would have
 > broken the scene-health probe.
 
+> **AMENDMENT (ML-7, 2026-08-18) — the two readers named above no longer exist, and the line
+> cites went stale one day after they were written.** ML-9 arm (b) (`8d3a3828e`) removed the
+> probe's `interactionMode` field and Scene Health's `mode` line. Note what did NOT happen:
+> both FILES are alive — `mission_office_render_probe.dart` carries a comment where the field
+> was, saying why it is not coming back. It is the two cited LINES that are gone, which is
+> exactly the failure C25 names: a `file:line` citation goes on reading as verified long after
+> the code at it has moved or died, and nothing about the citation announces that.
+> The claim that survives is authority-shaped rather than location-shaped: **no reader of
+> `interactionMode` outside `MissionOfficeGame`** — the field is declared and copied by
+> `MissionOfficeRenderModel`, and read for a behavioural decision only by the game. Verified
+> by repo-wide grep at read time, which is the only form of this claim that can be re-checked
+> without trusting this document. C14's rule above is unchanged, and is what makes the check
+> possible at all.
+
 > **CORRECTION, same day.** This section first said the dead field *is* the root cause. That does not
 > hold, and the operator was right to push back with *"the drag used to work fine, I used to be dragging
 > around."* Re-reading the chain: the mount re-applies on `!identical(oldWidget.model, widget.model)`
@@ -331,7 +345,7 @@ current behaviour is source-read plus two operator observations.
 
 | # | Fact | How established |
 | --- | --- | --- |
-| U-1 | ~~`interactionMode` has exactly one reference — its own setter~~ **FALSE — corrected C14, see §1.** It has repo-wide readers at `mission_office_render_probe.dart:46` and `mission_office_scene_health.dart:170`; it lacks a *behavioural* consumer, not all consumers | READ `mission_office_game.dart:199-201`; the original `rg interactionMode` was **file-scoped** and could not have found them — RAN repo-wide 2026-08-17 |
+| U-1 | ~~`interactionMode` has exactly one reference — its own setter~~ **FALSE as written; corrected twice, and now stated as an authority rather than a location.** C14 (2026-08-17): the original grep was file-scoped, so it could not have found the repo-wide readers whose absence it concluded. ML-9 arm (b) then removed those readers. What stands: **no reader of `interactionMode` outside `MissionOfficeGame`** — `MissionOfficeRenderModel` declares and copies the field; only the game reads it for a behavioural decision. | **A repo-wide grep at read time is the authority.** Line numbers are deliberately absent: this row carried two (`mission_office_render_probe.dart`, `mission_office_scene_health.dart`), and `8d3a3828e` deleted the code at both the next day, leaving the row pointing at nothing while still reading as verified. Per C25, cite the symbol and the grep, never the line. |
 | U-2 | `_handlePanUpdate` streams a mutation per pointer move | READ `mission_office_mount.dart:233-247` |
 | U-3 | The mount's during-drag path is unchanged by the 2026-08-16 commit-on-release work | RAN `git diff 2eeb25c45..HEAD -- mission_office_mount.dart` — only `onMoveSceneItemEnd` and `_handlePanEnd` moved |
 | U-4 | The 220 ms debounce is gated on a display-string prefix | READ `mission_control_page.dart:3689` |

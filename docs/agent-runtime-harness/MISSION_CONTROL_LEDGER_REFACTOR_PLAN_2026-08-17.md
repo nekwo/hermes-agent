@@ -240,7 +240,60 @@ Recommended dispatch interleave: hermes lane ML-1 → ML-4 → ML-7 → ML-10 �
 
 ## 4. Verification — the run's process rules, adopted
 
-1. **Full suite at every checkpoint (G1).** Hermes: the full suite under the canonical runner — until ML-7's R-e ruling lands, that is the **per-file runner** for `tests/hermes_cli` (F3 is a fact about the interpreter, not the tests), full directories elsewhere; three regressions reached main last run on targeted runs alone. Launcher: full `flutter test` of the owned feature directory at minimum, full suite at merge checkpoints; C16 was caught by the FULL-DIR run and by nothing else — that is this rule earning its keep on the launcher side.
+1. **Full suite at every checkpoint (G1) — and ONE runner defines what "full" means.**
+
+   **Hermes: `scripts/run_tests.sh` IS the checkpoint runner.** Not a `tests/hermes_cli`
+   workaround, not one option among several — the canonical runner, for every directory.
+   `scripts/run_tests_parallel.py` is its engine: one freshly-spawned `python -m pytest <file>`
+   per test file, bounded parallelism, hermetic environment (`env -i` plus `TZ=UTC`,
+   `LANG=C.UTF-8`, `PYTHONHASHSEED=0`). **A red is any FILE red under this runner.** That
+   definition is adopted deliberately, because it is the only one that is stable: a
+   whole-directory single-interpreter `pytest` run answers a different question, and answers it
+   differently depending on collection order.
+
+   **F3 is a fact about the interpreter, not a defect in the tests.** The 41
+   `test_web_server_*` / `test_web_ui_build.py` failures the ledger recorded appear only when
+   those files share one interpreter; each file is green on its own. Module-level state leaking
+   across files is precisely what per-file spawning exists to prevent, so under the canonical
+   runner those failures do not exist — and re-deriving them requires deliberately running the
+   directory a way this project does not run tests. **Per ML-7's R-e ruling, no isolation
+   investment is made**: the cross-file pollution is not chased down, because the boundary that
+   would have to hold for chasing it to matter is one this project already draws elsewhere.
+   Recorded so no future reader re-opens it as a bug.
+
+   **Invocation:** `scripts/run_tests.sh tests/hermes_cli -j 6` (bare pytest flags pass through;
+   positional paths override the discovery root). The script probes `.venv`, `venv`, then
+   `~/.hermes/hermes-agent/venv` for a python that has pytest **installed**, and refuses when
+   none qualifies rather than reporting a green zero-test run; `HERMES_PYTHON=<python-with-pytest>`
+   is the documented override. On this workstation the checkout's `.venv/` is an EMPTY directory,
+   so the override is the working invocation here (verified 2026-08-18).
+
+   **F5's class is a runner concern, not a test-author one.** A `tests/hermes_cli` run leaked a
+   live `hermes gateway run --profile alice` once. `run_tests.sh` already forwards a
+   `$HOME/.hermes/pytest_live_guard.py` plugin when present; a run that matters should carry a
+   guard that makes spawning a hermes backend fatal to the test attempting it, so the escape is
+   reported as a finding instead of surviving the run. ML-7 ran with such a guard and it fired
+   **once**, on `tests/hermes_cli/test_dashboard_tui_backcompat.py`, which spawns
+   `python -m hermes_cli.main dashboard --no-open --tui`. The root `tests/conftest.py` already
+   owns the chokepoint this belongs at — its live-system guard wraps every `subprocess` entry
+   point — but classifies only `hermes update` as forbidden, so a backend spawn passes straight
+   through it today.
+
+   **Measured baseline, 2026-08-18** (`tests/hermes_cli`, per-file, `-j 6`, 842.5s):
+   **565 files, 4016 tests passed, 3 files red.** None of the red files is a `test_web_server_*`
+   or `test_web_ui_build.py` file — F3's 41 are green per-file, which is the half of F3 this run
+   establishes first-hand. The three reds, none of them ML-7's and none fixed here (recording is
+   the scope):
+
+   | File | Why it is red |
+   |---|---|
+   | `test_commands.py::TestSlackNativeSlashes::test_telegram_parity` | Registered KNOWN DEFECT in `tests/hermes_cli/conftest.py`, deliberately not fenced: Slack's 50-slash-command cap drops `platform`. It is printed at every run and reds the file at every run. |
+   | `test_config_read_guard.py` | Its `EXCLUDED_DIR_PARTS` excludes `.worktrees` but not `.claude`, so the repo-wide scan walks the 13 live worktrees under `.claude/worktrees/` and reports THEIR copies of `gateway/config.py` etc. as violations. |
+   | `test_dashboard_tui_backcompat.py` | Red only under the F5 guard above, which refused its backend spawn. Unguarded it passes — by starting a hermes dashboard. That is the leak, not the fix. |
+
+   Launcher: full `flutter test` of the owned feature directory at minimum, full suite at merge
+   checkpoints; C16 was caught by the FULL-DIR run and by nothing else — that is this rule
+   earning its keep on the launcher side.
 2. **Quote plan exceptions verbatim into briefs (G2).** A brief written stricter than the plan stopped a stage mid-run. Every ML brief that touches a fence quotes the fence's exception text as written, never paraphrased tighter.
 3. **Fence hashes are read at dispatch time (G3), never inherited from the brief.** WV-L6 is changing `office/` while this plan is being read; ML-9 and every launcher stage re-hash at dispatch. Stage entries above are complete except fence hashes and pubspec hashes, which the dispatcher appends.
 4. **Merged combinations are untested until the seam is run (G5).** After every merge: the merged-seam run, both repos if the merge crossed the wire contract. G1 is how the exposure arrived even with per-branch green.
