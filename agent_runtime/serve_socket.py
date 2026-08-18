@@ -98,12 +98,25 @@ Fingerprint exclusion (load-bearing)
 
 ``serve_socket.lock`` and ``serve_socket.owner.json`` MUST NOT be added to any
 freshness fingerprint — not serve's ``_FINGERPRINT_ROOT_FILES`` /
-``_FINGERPRINT_STORE_DIRS``, not ``stream._scope_fingerprint``. They appear at
+``_FINGERPRINT_STORE_DIRS``, not ``stream._scope_fingerprint``, and they MUST BE
+PRESENT in ``core_cache._EXCLUDED_STORE_ENTRIES``. They appear at
 the first socket boot and vanish on every clean exit, which inside a
 fingerprint would cold the read-model cache exactly when a fresh runtime is
 warming up and make the stream emit ``state.reconciled`` on every restart. Same
 standing precedent as ``dispatch_delivery.DRAIN_STATE_FILENAME``,
 ``serve_auth.SERVE_AUTH_TOKEN_FILENAME``, and ``serve_instances/``.
+
+The sentence above names TWO obligations because there are two fingerprint
+designs in this runtime with OPPOSITE defaults, and one doctrine written for the
+first silently fails to bind the second. Serve's read-cache key and
+``stream._scope_fingerprint`` are ALLOWLISTS — a file nobody enumerates is
+already out, so "do not add these" is satisfied by inaction.
+``core_cache.build_input_fingerprint`` is a DENYLIST walk of the whole store
+root — everything not named in ``_EXCLUDED_STORE_ENTRIES`` is IN, so the same
+words there require an action, and until 2026-08-18 nobody had taken it: both
+files sat inside the read-model core's key and cost it a hit on every boot. A
+new store-root writer has to satisfy both halves; naming only the allowlists is
+how this one was missed.
 
 Root as INPUT
 -------------

@@ -68,6 +68,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
 
+from utils import atomic_json_write
+
 logger = logging.getLogger(__name__)
 
 __all__ = [
@@ -587,6 +589,19 @@ def _write_drain_state(path: Path | None, *, live: bool) -> bool:
     Accounting must not be able to kill the drain, so a failure here is a debug
     line and nothing else — the same contract serve's own best-effort wrappers
     hold.
+
+    **Staged through ``atomic_json_write``, and the staging NAME is the reason.**
+    The hand-rolled temp+replace this replaced staged ``path.with_suffix(".tmp")``
+    — for this file, ``dispatch_delivery_drain.tmp``. The read-model cache's walk
+    (``core_cache.build_input_fingerprint``) skips a staged temp only in the
+    ``.<stem>_*.tmp`` shape ``atomic_json_write`` produces, so this mirror's
+    transient was a store-root entry that appeared and vanished under any walk
+    unlucky enough to land mid-write: a file whose PRESENCE flipped the key, on a
+    60-second cadence, in a directory the cache is keyed on. The mirror's own
+    target is excluded by name (``core_cache._EXCLUDED_STORE_ENTRIES`` imports
+    :data:`DRAIN_STATE_FILENAME`); routing the staging through the one atomic-write
+    authority is what makes the transient excluded too, rather than adding a
+    second name to that set for a file that only exists for microseconds.
     """
 
     if path is None:
@@ -596,10 +611,7 @@ def _write_drain_state(path: Path | None, *, live: bool) -> bool:
         payload["live"] = bool(live)
         payload["pid"] = os.getpid()
         payload["written_at"] = time.time()
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
-        os.replace(str(tmp), str(path))
+        atomic_json_write(path, payload, indent=None, sort_keys=True)
         return True
     except Exception:
         logger.debug("delivery drain state mirror write failed", exc_info=True)

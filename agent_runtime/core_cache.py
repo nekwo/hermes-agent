@@ -179,6 +179,11 @@ from typing import Any, Callable, Iterator, NamedTuple
 
 from utils import atomic_json_write
 
+from .dispatch_delivery import DRAIN_STATE_FILENAME
+from .serve_auth import SERVE_AUTH_TOKEN_FILENAME
+from .serve_registry import SERVE_INSTANCES_DIRNAME
+from .serve_socket import SOCKET_LOCK_FILENAME, SOCKET_OWNER_FILENAME
+
 logger = logging.getLogger(__name__)
 
 #: The cache's own home under the agent-runtime store root. A DEDICATED
@@ -261,6 +266,41 @@ MAX_SKILL_ENTRIES_PER_ROOT = 20_000
 #: Store-root entries that are DELIBERATELY not fingerprinted, each because it
 #: moves for reasons a read-model core does not depend on. Anything not named
 #: here is fingerprinted, so the default posture is inclusion.
+#:
+#: **A name its writer owns as a constant is IMPORTED here, never spelled.**
+#: That is not a style tightening; hand-spelling is the defect this set shipped
+#: with. ``"drain_state.json"`` sat in it annotated "per
+#: ``dispatch_delivery.DRAIN_STATE_FILENAME``" while that constant read
+#: ``dispatch_delivery_drain.json`` — so the exclusion named a file that has
+#: never existed, and the real drain mirror, rewritten every
+#: ``dispatch_delivery.DRAIN_MIRROR_HEARTBEAT_SECONDS`` for the life of a serve,
+#: stayed INSIDE the key. A comment naming a constant is not a reference to it;
+#: an import is, and it is the only form the compiler checks.
+#:
+#: ``serve_socket``'s own module doctrine (its "Fingerprint exclusion" section)
+#: already required both socket files to be out of every freshness fingerprint,
+#: and cited the same standing precedent this set is built on. It enumerated the
+#: ALLOWLIST fingerprints — serve's ``_FINGERPRINT_ROOT_FILES`` /
+#: ``_FINGERPRINT_STORE_DIRS`` and ``stream._scope_fingerprint`` — and this walk
+#: is a DENYLIST, so "not added" was true there and violated here. Two
+#: fingerprint designs with opposite defaults need the doctrine written on both;
+#: that paragraph now names this constant too.
+#:
+#: Measured consequence of the two holes together (2026-08-18): every serve boot
+#: rewrote ``serve_socket.owner.json`` and the drain rewrote its mirror within
+#: seconds of boot, so no boot's key could describe the store the NEXT boot
+#: stat'd. The lane demoted ``fingerprint_mismatch`` on every same-commit boot
+#: from the day it shipped.
+#:
+#: RESIDUAL, stated rather than discovered later. Four names below are still
+#: literals because no writer module owns them as a constant: ``locks`` and
+#: ``snapshot.json`` are spelled inline inside their own path helpers in
+#: ``agent_runtime.paths``, and the ``read_model.db`` trio is a CONFIGURABLE
+#: default (``runtime_config``'s ``read_model.db_filename``) — an install that
+#: renames it re-opens exactly the hole this comment block is about, one config
+#: key away. Both are the same class as the drain defect and neither is fixed
+#: here; the gate below can only prove the names a WRITER produces, so it cannot
+#: see them either.
 _EXCLUDED_STORE_ENTRIES = frozenset(
     {
         # The cache's own home (see CORE_CACHE_DIRNAME).
@@ -269,8 +309,14 @@ _EXCLUDED_STORE_ENTRIES = frozenset(
         # appears at first boot. The standing precedent is already recorded at
         # ``agent_runtime/serve_registry.py`` and ``agent_runtime/serve_auth.py``
         # and in the read-cache fingerprint's own comment block.
-        "serve_instances",
-        "serve_auth_token",
+        SERVE_INSTANCES_DIRNAME,
+        SERVE_AUTH_TOKEN_FILENAME,
+        # The socket owner sidecar and the lock that elects it. Rewritten at
+        # every socket boot and removed on every clean exit — the serve
+        # registry's shape exactly, refused for the same reason, and required to
+        # be refused by ``serve_socket``'s own doctrine.
+        SOCKET_LOCK_FILENAME,
+        SOCKET_OWNER_FILENAME,
         # Lock files are created and removed INSIDE a build; a lock in the stat
         # set would make a build's own locking flip the key it just wrote.
         "locks",
@@ -280,9 +326,9 @@ _EXCLUDED_STORE_ENTRIES = frozenset(
         "read_model.db",
         "read_model.db-wal",
         "read_model.db-shm",
-        # The drain-state file, same rule as serve_instances (named at
-        # ``dispatch_delivery.DRAIN_STATE_FILENAME``).
-        "drain_state.json",
+        # The delivery drain's telemetry mirror: a 60-second oscillator that no
+        # projection reads. Same rule as the serve registry.
+        DRAIN_STATE_FILENAME,
     }
 )
 
