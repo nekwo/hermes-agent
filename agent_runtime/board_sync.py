@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 from utils import atomic_json_write
 
@@ -119,6 +119,14 @@ class BoardPullSummary:
     #: abort a pull. Prose (title / description / checklist) is never
     #: portability-scanned — see ``sync_admission``.
     refused: list[dict[str, str]] = None  # type: ignore[assignment]
+    #: How many PULLED card files existed in the subtree and would not decode,
+    #: across every board directory in this pull. Never folded into any other
+    #: count and never silently zero: a remote row this side could not read is
+    #: the one input indistinguishable from "the peer deleted it".
+    unreadable_remote: int = 0
+    #: The delete-shaped decisions this pull declined to take because the remote
+    #: board they would have been derived from was not fully readable.
+    delete_fenced: list[dict[str, Any]] = None  # type: ignore[assignment]
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -129,27 +137,55 @@ class BoardPullSummary:
             "conflicts": self.conflicts,
             "boards": list(self.boards or []),
             "refused": list(self.refused or []),
+            "unreadable_remote": self.unreadable_remote,
+            "delete_fenced": list(self.delete_fenced or []),
         }
 
 
-def _read_remote_board(board_dir: Path) -> tuple[Board | None, dict[str, BoardCard]]:
+class RemoteBoard(NamedTuple):
+    """One pulled board directory as it could actually be READ.
+
+    ``RemoteOffice``'s twin, same stake: the pull derives "the peer removed this
+    card" from a card id being ABSENT from ``cards``, so a file that arrived
+    intact and merely would not decode lands in exactly that absence — and a
+    reader holding only the dict archives the member's own card on the strength
+    of a parse error.
+    """
+
+    board: Board | None
+    cards: dict[str, BoardCard]
+    unreadable: int
+    #: The board def existed and would not decode — distinct from "this
+    #: directory has no board def", which is what ``board is None`` alone says.
+    board_unreadable: bool = False
+
+
+def _read_remote_board(board_dir: Path) -> RemoteBoard:
     def_path = board_dir / "board.json"
     board: Board | None = None
+    board_unreadable = False
     if def_path.exists():
         try:
             board = from_jsonable(Board, _read_json(def_path))
         except Exception:
             board = None
+            board_unreadable = True
     cards: dict[str, BoardCard] = {}
+    unreadable = 0
     cards_dir = board_dir / "cards"
     if cards_dir.exists():
         for card_path in sorted(cards_dir.glob("*.json")):
             try:
                 card = from_jsonable(BoardCard, _read_json(card_path))
             except Exception:
+                # COUNTED, not dropped. See ``RemoteBoard``: this absence is the
+                # pull's delete signal, so it may not be silent.
+                unreadable += 1
                 continue
             cards[card.card_id] = card
-    return board, cards
+    return RemoteBoard(
+        board=board, cards=cards, unreadable=unreadable, board_unreadable=board_unreadable
+    )
 
 
 def _write_conflict_sidecar(board_id: str, card_id: str, *, kind: str, remote_card: BoardCard | None, local_hash: str | None, remote_hash: str | None) -> None:
@@ -180,16 +216,28 @@ def apply_board_pull(realm_id: str, subtree: Path, *, event_log: EventLog | None
 
     store = BoardStore(event_log=event_log)
     baseline = read_board_baseline(realm_id)
-    summary = BoardPullSummary(boards=[], refused=[])
+    summary = BoardPullSummary(boards=[], refused=[], delete_fenced=[])
     boards_root = subtree / "store" / "boards"
     if not boards_root.exists():
         return summary
 
     for board_dir in sorted(p for p in boards_root.iterdir() if p.is_dir()):
-        remote_board, remote_cards = _read_remote_board(board_dir)
+        remote = _read_remote_board(board_dir)
+        remote_board, remote_cards = remote.board, remote.cards
+        summary.unreadable_remote += remote.unreadable
         if remote_board is None:
+            if remote.board_unreadable:
+                # A directory whose board def will not decode names no board, so
+                # nothing here can be attributed — but it is a real remote board
+                # this pull did not apply, and the count says so.
+                summary.unreadable_remote += 1
             continue
         board_id = remote_board.board_id
+        # Whether the REMOTE half was fully readable decides one thing only, and
+        # for this board alone: whether an absent card id may be read as the peer
+        # having removed the card. Every other decision below is driven by rows
+        # that DID decode.
+        deletes_fenced = remote.unreadable > 0
         # Admission scan (defect (b), 2026-07-25): board files are excluded from
         # the generic pull loop, so ``_assert_no_secret_artifacts`` never saw
         # them. A board def that will not pass the door refuses WHOLE (its cards
@@ -256,6 +304,21 @@ def apply_board_pull(realm_id: str, subtree: Path, *, event_log: EventLog | None
                     summary.adopted += 1
                 continue
             if decision.action == BoardPullAction.ARCHIVE_LOCAL:
+                if deletes_fenced:
+                    # THE delete-shaped decision, and the one this pull has not
+                    # earned: "remote_removed" is inferred from the id being
+                    # absent from a remote map we know to be short. Hold the
+                    # card, name it, and leave the baseline alone so a repaired
+                    # pull can still converge it.
+                    summary.delete_fenced.append(
+                        {
+                            "board_id": board_id,
+                            "card_id": card_id,
+                            "reason": "unreadable_remote",
+                            "unreadable_remote": remote.unreadable,
+                        }
+                    )
+                    continue
                 try:
                     store.archive_card(card_id, board_id=board_id, reason="remote_removed")
                     summary.archived += 1

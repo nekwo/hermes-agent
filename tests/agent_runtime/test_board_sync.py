@@ -345,3 +345,102 @@ def test_boards_summary_omits_unpublished_flag_without_realm():
     board_row = next(r for r in rows if r["board_id"] == board_id)
     assert "unpublished" not in board_row
     assert all("unpublished" not in c for c in board_row["cards"])
+
+
+# ── ML-8b/5: an unreadable PULLED card cannot read as a peer delete ────────
+
+
+def _blind_pulled_card(subtree: Path, board_id: str, card_id: str) -> Path:
+    path = subtree / "store" / "boards" / board_id / "cards" / f"{card_id}.json"
+    assert path.exists(), path
+    path.write_text("{truncated", encoding="utf-8")
+    return path
+
+
+def test_an_unreadable_pulled_card_cannot_read_as_a_peer_delete(tmp_path):
+    """The board twin of the office pull-read witness.
+
+    *Probed:* ``unreadable_remote`` on the summary (driven 1 then 2), that no
+    delete-shaped decision was taken for those ids (the ``delete_fenced``
+    recorder names each), and that the cards are still active afterwards.
+
+    *Mutation:* restore the bare ``continue`` in ``_read_remote_board``. The
+    count the fixture drives never reaches the summary, the fence never engages,
+    and the cards are archived on the strength of a parse error.
+    """
+
+    realm_id, ws = _make_realm_workspace()
+    store = BoardStore()
+    cards = [store.add_card(workspace_id=ws, title=f"card {i}") for i in range(3)]
+    board_id = board_models.default_board_id(ws)
+    update_board_baseline_after_sync(realm_id, [board_id])
+    subtree = _remote_subtree(
+        tmp_path, store.get(board_id), [store.get_card(c.card_id) for c in cards]
+    )
+
+    for driven in (1, 2):
+        _blind_pulled_card(subtree, board_id, cards[driven - 1].card_id)
+        summary = apply_board_pull(realm_id, subtree)
+        assert summary.unreadable_remote == driven, summary.as_dict()
+        assert summary.archived == 0, summary.as_dict()
+        # Compared as a SET of ids: the pull iterates the card-id union in
+        # sorted order, so creation order is not the guarantee here — membership
+        # is. Asserting the list verbatim passed or failed on uuid luck.
+        assert sorted(summary.delete_fenced, key=lambda row: row["card_id"]) == sorted(
+            (
+                {
+                    "board_id": board_id,
+                    "card_id": cards[i].card_id,
+                    "reason": "unreadable_remote",
+                    "unreadable_remote": driven,
+                }
+                for i in range(driven)
+            ),
+            key=lambda row: row["card_id"],
+        ), summary.as_dict()
+        active = {c.card_id for c in store.list_cards(board_id)}
+        for i in range(driven):
+            assert cards[i].card_id in active
+            assert cards[i].card_id not in store.get(board_id).archived_card_ids
+        # The held card keeps its baseline row, so a repaired remote converges
+        # rather than arriving as a fresh adopt.
+        assert f"{board_id}:card:{cards[0].card_id}" in read_board_baseline(realm_id)
+
+
+def test_a_readable_remote_card_removal_still_archives_beside_a_fenced_one(tmp_path):
+    """The discriminator that stops the fence from becoming "never archive": a
+    remote board that reads COMPLETELY still propagates its removals."""
+
+    realm_id, ws = _make_realm_workspace()
+    store = BoardStore()
+    keep = store.add_card(workspace_id=ws, title="Keep")
+    drop = store.add_card(workspace_id=ws, title="Drop")
+    board_id = board_models.default_board_id(ws)
+    update_board_baseline_after_sync(realm_id, [board_id])
+
+    subtree = _remote_subtree(tmp_path, store.get(board_id), [store.get_card(keep.card_id)])
+    summary = apply_board_pull(realm_id, subtree)
+    assert summary.unreadable_remote == 0
+    assert summary.delete_fenced == []
+    assert summary.archived == 1
+    assert drop.card_id in store.get(board_id).archived_card_ids
+
+
+def test_an_unreadable_remote_board_def_is_counted_not_skipped(tmp_path):
+    """A directory whose ``board.json`` will not decode names no board, so
+    nothing in it can be attributed — but it is a real remote board this pull
+    did not apply, and the count says so instead of the directory vanishing."""
+
+    realm_id, ws = _make_realm_workspace()
+    store = BoardStore()
+    card = store.add_card(workspace_id=ws, title="One")
+    board_id = board_models.default_board_id(ws)
+    subtree = _remote_subtree(tmp_path, store.get(board_id), [store.get_card(card.card_id)])
+    (subtree / "store" / "boards" / board_id / "board.json").write_text(
+        "{truncated", encoding="utf-8"
+    )
+
+    summary = apply_board_pull(realm_id, subtree)
+    assert summary.unreadable_remote == 1, summary.as_dict()
+    assert summary.boards == []
+    assert summary.adopted == 0
