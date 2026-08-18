@@ -108,6 +108,62 @@ signal the launcher's existing stale-banner lane already reads
 ``MissionSnapshotHealth.stale``), so a stale frame is never ``live`` and
 therefore never authoritative. No write-lane predicate is reachable from
 either field.
+
+=============================================================================
+THE RECEIPT CHANNEL TABLE (ML-14 / C22)
+=============================================================================
+
+Every receipt this lane emits rides ONE channel — this module's logger,
+``agent_runtime.core_cache`` — and each line leads with a FAMILY token, then an
+event token or ``key=value`` field. That is what makes a receipt countable: a
+census greps the tokens, never the prose after them, and the prose is then free
+to say whatever an operator needs to read.
+
+**What this table retires is not a missing receipt, it is a missing index.**
+Three vocabularies word themselves ``reason=`` on this one logger — the demote
+reasons (``DEMOTE_*``), the write refusals, and ML-10's typed bound refusal —
+and two spellings COLLIDE ACROSS TWO EVENTS: ``reason=fingerprint_unavailable``
+and ``reason=build_stamp_unknown`` are emitted by the WRITE lane
+(``snapshot_core_cache_write ok=false``) and by the READ lane's demote
+(``snapshot_core_cache core_source=rebuilt``) alike. Grepping a reason without
+its family token counts two different facts as one — the launcher-side class
+ML-6 retired, where one refusal was worded ``patch_gap:`` on one channel and
+``REFUSED gap:`` on the other and a census MEASURED a false zero. The family
+token is the discriminator, which is why it leads every row below.
+
+A "second channel" here means a surface OTHER than this logger that carries the
+same fact. There is exactly one: the snapshot's own ``parity`` envelope, which
+:func:`label_core` stamps. It is named per row rather than assumed.
+
+| receipt (grep this) | second channel | what to grep there |
+|---|---|---|
+| ``snapshot_core_cache fingerprint_refused`` (WARNING) | none | fields ``reason=entries_exceeded`` ``scope=store_root``/``skill_root`` ``bound=`` ``root=``. The scope is load-bearing: the two bounds are different numbers over different trees |
+| ``snapshot_core_cache never_converged`` (WARNING) | none | ``builds=`` then ``diff_scope=`` ``changed=`` ``diff=`` LAST (paths may contain spaces). **CENSUS RULE (C22(i)): read ``diff_scope=`` or the count over-reports.** ``every_pass`` = the inputs oscillate, i.e. self-perturbation, the A2 defect worth acting on; ``last_pair`` = a store that is simply moving, where the receipt is true (the cache IS buying nothing) but names no defect; ``none`` with ``diff=diff_unavailable`` and ``diff_reason=no_entries``/``digest_without_entry_delta`` = the diff could not be computed and says so in its own words |
+| ``snapshot_core_cache core_source=cache`` (INFO) | the snapshot payload | ``parity.core_source == "cache"`` — SAME spelling, no split. The line also carries ``caller=`` ``inputs=`` ``fingerprint=`` ``offset=``, none of which reach the payload |
+| ``snapshot_core_cache core_source=cache stale=true`` (INFO) | the snapshot payload | ``parity.core_stale == true`` AND ``parity.freshness.state == "stale"`` — the field the launcher's ``MissionSnapshotEnvelope`` already maps to ``MissionSnapshotHealth.stale``. RESIDUAL SPLIT, named rather than fixed: the log says ``stale=true``, the payload says ``parity.core_stale``/``parity.freshness.state``, and the payload spelling is a consumer contract that predates this lane |
+| ``snapshot_core_cache core_source=rebuilt`` (INFO, ``_log_demote``) | the snapshot payload, PARTIALLY | ``parity.core_source == "rebuilt"`` carries THAT the cache was demoted; the ``reason=`` never leaves this logger, and ``CoreDecision.reason`` is read by no caller today. So a field census of WHY a cache demoted has exactly one source: this line. Reasons ``unreadable`` ``core_digest_mismatch`` ``fingerprint_unavailable`` ``fingerprint_mismatch`` ``build_stamp_unknown`` ``build_stamp_mismatch`` ``contract_mismatch`` ``runtime_root_mismatch``. ``absent`` is deliberately NOT logged (the ordinary cold start would print a line on every build in every process), so its only trace is the ABSENCE of a line and a census must not read "no demote line" as "no demote" |
+| ``snapshot_core_cache_write ok=true`` (INFO) | none | ``inputs=`` ``fingerprint=`` ``offset=`` |
+| ``snapshot_core_cache_write ok=false`` (INFO/WARNING) | none | reasons ``serialize`` ``build_stamp_unknown`` ``fingerprint_unavailable`` ``io``. **COLLISION:** ``build_stamp_unknown`` and ``fingerprint_unavailable`` are ALSO demote reasons on the row above. Grep the family token with them, never the reason alone |
+| ``snapshot_core_shadow ok=true`` (INFO) | none | ``caller=`` ``divergence=none`` — the shadow build agreed with the cache |
+| ``snapshot_core_shadow ok=false`` (WARNING) | none | ``caller=`` ``reason=build`` — the shadow build itself raised |
+| ``snapshot_core_shadow_divergence`` (WARNING) | none | ``caller=`` ``section=`` (the first section that disagreed). Its own family token rather than a field on the row above, because retiring the shadow lane is keyed on counting exactly this |
+| ``snapshot_core_shadow adopt failed`` (WARNING) | none | **NO EVENT TOKEN — the one uncountable line in this lane.** It is prose after the family token, so a census can only grep the sentence. Named here rather than quietly renamed: the rename is a one-line change with a consumer question attached, and this row is the record that it is owed |
+
+Adding a receipt here means adding a ROW here.
+``tests/agent_runtime/test_core_cache_channel_table.py`` drives both directions
+— a token no row names, and a row naming a token no writer emits, each turn it
+red — and separately drives the writers to prove the rendered line really
+carries the spelling this table tells a census to grep.
+
+**Scope.** This table covers the core-cache lane, which is the vocabulary C22
+names. Three other things in ``agent_runtime`` are called receipts and are NOT
+in it, deliberately, because they are different artifacts on different channels
+rather than log lines: ``persona_chat_mints``' mint receipts (durable JSON files
+under ``persona_chat_mint_receipt_path``), ``profile_runner``'s
+``CHAT_COMPACTION_RECEIPT_KIND`` (a structured event payload) and
+``snapshot.build_receipt_facts`` (a facts dict folded into the frame). Each
+would need its own table keyed on its own channel; naming them here is what
+stops this one from being read as the whole census.
 """
 
 from __future__ import annotations
