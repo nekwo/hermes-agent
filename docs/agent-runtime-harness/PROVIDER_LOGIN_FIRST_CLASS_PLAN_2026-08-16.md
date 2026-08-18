@@ -7,6 +7,23 @@
 > Informed by upstream's Electron desktop app, read from
 > `upstream/main:apps/desktop/` — judged, not transcribed (§2.1).
 
+> **AS-SHIPPED CORRECTION (ML-2, 2026-08-17). "v3" never shipped; read every
+> `v3` below as the `catalog` block on `hermes.provider_visibility/v2`.**
+> PL-1 landed the catalog **additively on the v2 schema string**: the payload
+> still reads `"schema": "hermes.provider_visibility/v2"`
+> (`hermes_cli/harness.py:3476`, RAN 2026-08-17), and `catalog` is one more
+> failure-isolated block beside `environment` / `api_keys` / `auth_logins`
+> (`_provider_visibility_catalog`, `harness.py:3422`). Clients **feature-detect
+> the block by its presence**, never by a schema version
+> (`harness.py:3497`: "Every consumer feature-detects blocks"). This was not a
+> retreat from the plan — it is §7 risk 5's own preferred option, taken as that
+> risk instructed ("keep the string stable with an additive `catalog` key
+> (preferred if any consumer pins it)"), because consumers did pin `/v2`.
+> The three `v2` schema assertions in `tests/test_provider_visibility_v2.py`
+> (`:16,:65,:222`) and `tests/cli/test_harness_providers.py:74` are the gate
+> that keeps it that way. Sentences below are corrected in place; the stage
+> names (PL-1, PL-3, PL-6) and every non-schema design decision stand.
+
 **Evidence tags used throughout:**
 
 - **READ** — file:line inspected this session (fork HEAD, upstream/main ref,
@@ -35,8 +52,9 @@ non-interactive login verbs — `hermes auth add` is a TTY flow
 `auth_commands.py:164-435`), while the non-interactive machinery that upstream
 Desktop drives (session-based start/poll device-code, PKCE submit) sits in our
 fork's `hermes_cli/web_server.py:9714-10850` welded to FastAPI. The plan:
-extend the visibility contract additively (v2→v3 catalog block, one authority
-for provider identity, flows, and models.dev mapping), add two small
+extend the visibility contract additively (a `catalog` block added to the
+existing `provider_visibility/v2`, one authority for provider identity, flows,
+and models.dev mapping), add two small
 non-interactive CLI verbs that route through the EXISTING choke points with
 secrets never in argv, and wire the existing launcher tiles/picker to them.
 Settings owns credential actions; the console owns consequences. Nothing gets
@@ -151,8 +169,8 @@ absence-of-usable-models in the dropdown's connected half.
 - **U-1 Backend-authoritative provider identity.** Desktop's Keys tab groups
   by the backend's `provider_label`/`provider` from the unified catalog —
   "the SAME provider identity `hermes model` uses. This is authoritative"
-  (READ upstream `providers-settings.tsx:60-80`). Take it: the v3 catalog
-  block (PL-1) makes hermes the one authority for lane identity, display
+  (READ upstream `providers-settings.tsx:60-80`). Take it: the `catalog`
+  block (PL-1, additive on v2) makes hermes the one authority for lane identity, display
   name, auth flows, key-var name, AND the models.dev catalog id — which
   deletes the launcher's hand-verified alias map.
 - **U-2 Session-based, poll-driven OAuth with the secret never touching the
@@ -230,7 +248,7 @@ absence-of-usable-models in the dropdown's connected half.
 ## 3. Target architecture (one paragraph)
 
 Hermes stays the only credential store and becomes the only provider-identity
-authority: `provider_visibility/v3` adds an additive `catalog` block naming
+authority: `provider_visibility/v2` gains an additive `catalog` block naming
 every connectable provider (id, display name, supported flows, key-var,
 models.dev id, docs URL, external-owner disconnect command), so the launcher
 can render never-configured lanes and delete its alias hardcode. Two new
@@ -251,19 +269,19 @@ parallel representations (API-key summary, alias map) are deleted.
 ## 4. The named states
 
 The contract every surface renders from — each state has a detection
-predicate on existing typed data (plus the v3 catalog), and no two states may
+predicate on existing typed data (plus the `catalog` block), and no two states may
 share copy:
 
 | # | State | Predicate (snapshot terms) | Roster copy / affordance |
 |---|---|---|---|
-| N1 | Never configured | in v3 `catalog`, no credentials, no login | "Not connected" · **Connect** |
+| N1 | Never configured | in the `catalog` block, no credentials, no login | "Not connected" · **Connect** |
 | N2 | Configured, auth-failed (the silent-401) | credential present, `issueState == authFailed`, code 401/403 | "Re-auth required — {health.message}" · **Sign in again** (+ Remove) |
 | N3 | Expired / dead OAuth | `issueState == dead`, or OAuth login `logged_in == false` with a prior refresh | "Session expired" · **Sign in again** |
 | N4 | Rate-limited / exhausted | `issueState == rateLimited|exhausted`, `retryAt` | "Rate-limited — retry {countdown}" · **Reset status** (auth reset), no sign-in nag (U-4) |
 | N5 | Network-down / probe degraded | `probeFailure != null` or source ≠ typedV2 | degradation note verbatim; NO per-provider verdicts (U-4: connectivity is not reauth) |
 | N6 | Hermes absent / not installed | existing `_HermesRuntimeGate` states | install panel (unchanged) |
-| N7 | Healthy | healthy credential or logged-in OAuth | "Connected" · kind badges · token/key preview (v3) · Remove |
-| N8 | External-tool-owned | v3 `disconnect_command != null` | "Managed by {tool}" · shows the documented command, never a silent delete (U-6) |
+| N7 | Healthy | healthy credential or logged-in OAuth | "Connected" · kind badges · token/key preview · Remove |
+| N8 | External-tool-owned | `catalog` `disconnect_command != null` | "Managed by {tool}" · shows the documented command, never a silent delete (U-6) |
 
 ## 5. Stages
 
@@ -307,16 +325,16 @@ share copy:
 
 **Does NOT do.** Touch anything. Output: §10 table updated, A-tags resolved.
 
-### PL-1 — hermes: `provider_visibility/v3` catalog block
+### PL-1 — hermes: `provider_visibility` catalog block (landed additively on v2)
 
 **Change surface.** `hermes_cli/harness.py:2973-3033`: add a failure-isolated
 `catalog` block beside `environment`/`api_keys`/`auth_logins` — one entry per
 `provider_catalog()` descriptor (+ OAuth overrides per A-5): `{id, name,
 flows: ["api_key"|"device_code"|"pkce"|"external"], key_var, models_dev_id,
-docs_url, disconnect_command|null}`. Schema string moves to
-`hermes.provider_visibility/v3`; every v2 block is byte-compatible (additive
-only — the launcher's v2 parser must keep working unchanged against v3
-output, exactly how v1→v2 was handled, READ
+docs_url, disconnect_command|null}`. **The schema string does NOT move** (as shipped, per §7 risk 5's preferred
+option): it stays `hermes.provider_visibility/v2` and the block is purely
+additive, so the launcher's existing parser keeps working unchanged and
+detects the catalog by presence, exactly how v1→v2 was handled, READ
 `mission_control_hermes_visibility.dart:30-49`). `models_dev_id` is the
 server-side home for the mapping currently hardcoded in the launcher
 (`openaicodex→openai`, `opencodezen→opencode`, `xaioauth→xai`,
@@ -325,7 +343,7 @@ that map, then it drifts with the fork, not the launcher. Also add
 `token_preview` (last-4, matching `web_server.py`'s existing preview rule) to
 each credential row.
 
-**Tests** (`tests/test_provider_visibility_v2.py` grows a v3 section):
+**Tests** (`tests/test_provider_visibility_v2.py` grows a `catalog` section):
 - `catalog block lists a provider with no credentials` — kill-mutation:
   derive catalog from the credentialed set (the exact bug this plan exists
   to prevent).
@@ -380,7 +398,7 @@ each credential row.
 **Does NOT do.** Any launcher change; any change to interactive `auth add`
 (operators keep their TTY flow); PKCE.
 
-### PL-3 — launcher: parse v3, lanes for the never-configured, delete the alias map
+### PL-3 — launcher: parse the catalog, lanes for the never-configured, delete the alias map
 
 **Change surface.** `mission_control_hermes_visibility.dart`:
 - Parse the `catalog` block into `HermesProviderDescriptor` on the snapshot
@@ -396,15 +414,16 @@ each credential row.
 Collision note: this file is the parallel agent's likely landing zone for
 the silent-401 interim fix — REBASE on their landed shape (A-4). If their
 fix already forces failing lanes into `laneCatalogIds`/sections, this stage
-inherits it; the v3 path supersedes the MECHANISM (identity from the server)
+inherits it; the catalog path supersedes the MECHANISM (identity from the server)
 but must preserve their pinned BEHAVIOR (failing lane visible with reason).
 
 **Tests** (`mission_control_hermes_visibility_test.dart` +
 `mission_agent_model_switcher_view_model_test.dart`):
-- `v3 payload yields an N1 lane for a provider with no credentials` — kill:
+- `catalog payload yields an N1 lane for a provider with no credentials` — kill:
   build lanes from credentials/logins only.
-- `v2 payload (no catalog) yields today's lanes exactly` — kill: make v3
-  parsing mandatory.
+- `v2 payload (no catalog) yields today's lanes exactly` — kill: make catalog
+  parsing mandatory. This is the feature-detection pin: absence of the block is
+  a supported state, not an error.
 - `alias map unused when models_dev_id present` — kill: keep consulting the
   map first (drift risk this stage exists to remove).
 - Switcher: `N1 lane renders as an unconnected section distinct from N2`
@@ -486,11 +505,29 @@ auth-failed` — kill: show "no usage data".
 
 Grep-gated worklist, doc-03 discipline (retirement is a worklist, not a
 same-day delete):
-- `hermesCatalogAliasFor` + its test rows — gate: zero v2-fallback receipts
-  across N operator sessions (v3 hermes everywhere).
+- `hermesCatalogAliasFor` + its test rows — gate: zero alias-fallback
+  receipts across N operator sessions (catalog-carrying hermes everywhere).
+
+  **Counting rule (C17, binding).** The census counts **DISTINCT lane ids per
+  `session_start` bucket** in `receipts.jsonl` — never raw
+  `catalog_alias_fallback` lines. The probe re-runs on every Settings refresh,
+  so raw lines over-report: one operator toggling Settings ten times mints ten
+  lines for one unmigrated lane, and a gate reading line counts would refuse a
+  retirement that the distinct-lane count clears. Bucket by `session_start`,
+  de-duplicate lane ids within the bucket, then require zero across the agreed
+  window.
+
+  **The observable that made this gate satisfiable** is the launcher's
+  `catalogAliasFallback` receipt kind, landed `ee9aed396` (ML-3):
+  `MissionTransportReceiptKind.catalogAliasFallback`
+  (`mission_transport_receipt.dart:286`), written at
+  `mission_control_hermes_visibility.dart:1032`, and documented as minted once
+  per probe per lane — which is exactly why the count must collapse repeats
+  rather than sum them. Before it, this gate named a receipt that did not
+  exist and could never have been discharged.
 - `_HermesApiKeySummary` (`hermes_install_panel.dart:2168-2199`) and the
   snapshot's `configuredApiKeys`/`missingApiKeyCount` surface — key state
-  becomes a per-lane fact (v3 `key_var` + credential presence); gate: the
+  becomes a per-lane fact (`catalog` `key_var` + credential presence); gate: the
   tile renders it.
 - `parseHermesAuthList` text fallback — gate: fleet hermes ≥ v2 everywhere
   (it is the LAST resort for pre-typed hermes; do not delete early).
@@ -543,12 +580,15 @@ same-day delete):
    fix widened `laneCatalogIds` to include failing lanes, nothing here is
    redundant — this plan replaces the identity mechanism and adds the verbs;
    their behavioral pins become PL-3's regression tests.
-5. **Schema-bump blast radius.** Renaming the schema string to v3 might trip
-   a consumer that string-matches `/v2` exactly (RAN grep found the string
-   in `skills_inventory.py` and tests). PL-1 must grep-audit every
-   `provider_visibility` consumer and either keep the string stable with an
-   additive `catalog` key (preferred if any consumer pins it) or bump all
-   consumers in the same change. Decide at PL-1, out loud.
+5. **Schema-bump blast radius.** *(RESOLVED as shipped — ML-2.)* Renaming the
+   schema string to v3 might trip a consumer that string-matches `/v2` exactly
+   (RAN grep found the string in `skills_inventory.py` and tests). PL-1 must
+   grep-audit every `provider_visibility` consumer and either keep the string
+   stable with an additive `catalog` key (preferred if any consumer pins it) or
+   bump all consumers in the same change. Decide at PL-1, out loud.
+   **Decided: the string stayed `/v2` and the catalog landed additively** —
+   consumers did pin it, so the preferred option was the taken one. This risk
+   is the reason no "v3" exists anywhere in the tree.
 6. **What this pass could not answer:** A-1, A-2, A-3, A-5, A-6 — all PL-0
    items by name.
 
@@ -561,7 +601,7 @@ PL-5 Limits copy rule. Ordering ruling proposed: their interim fixes land
 first (small, live-defect); PL-3/PL-5 rebase on them and convert their pins
 into regression tests. Nothing in this plan makes their fixes wasted work —
 the fixes' TESTS survive; only the identity-mapping mechanism is later
-superseded by v3 (PL-6 gates the removal).
+superseded by the catalog block (PL-6 gates the removal).
 
 Constraints: never write under `X:/Eternia/.hermes/` (live root, read-only);
 never print/copy/rotate a credential value; no `harness serve` children from
@@ -575,7 +615,7 @@ commits to `main`.
   — needs a `submit`-style second leg; the lane is healthy today and keeps
   the terminal path.
 - OAuth expiry PRE-warning (N3 before it happens, from `expires_at`) — needs
-  v3 to carry expiry, cheap follow-on to PL-1, but no surface asks for it
+  the catalog to carry expiry, cheap follow-on to PL-1, but no surface asks for it
   yet.
 - First-run "no provider at all" full-screen experience — the N1 roster +
   submit gate cover the workflow; revisit only if operators still get lost.

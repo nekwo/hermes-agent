@@ -96,10 +96,16 @@ Protocol (NDJSON, one frame per line):
              A RUNNING read-only ``harness stream`` is cooperatively cancelled
              and releases its pool worker; it is the sole running exception.
 - errors:    ``{"id":…,"event":"error","error":"invalid_request"|…,"detail":…}``
-- method:    ``{"jsonrpc":"2.0","id":…,"method":"runtime.office.get"|
-             "runtime.office.upsert",
+- method:    ``{"jsonrpc":"2.0","id":…,"method":"runtime.office.get"|…,
              "params":{…}}`` → ``{"jsonrpc":"2.0","id":…,"result":{…}}`` or
              ``{"jsonrpc":"2.0","id":…,"error":{"code":…,"message":…,"data":…}}``.
+
+             The method name above is ONE example, deliberately not a list:
+             the ``@method`` registry in ``agent_runtime/serve_rpc.py`` is the
+             authority for the advertised set (currently eight). This block
+             used to name ``get`` | ``upsert`` and stayed at two while the
+             registry grew — a docstring that copies a register starts lying
+             the first time the register moves, and nothing reports it.
 
              The CALL half (``agent_runtime/serve_rpc.py``), mirroring
              ``tui_gateway``'s JSON-RPC 2.0 shape and its error codes rather

@@ -86,6 +86,12 @@ the receipts name. (d) `office.actor.restore` is NOT dead (operator recovery lan
 the 2026-08-15 mass archive); `runtime.office.resolve_conflict` NEVER landed (exactly 7 RPC
 methods) — both scouts' disagreement resolved (RD §0 Correction 4, SCOUT-H §4); carried in
 the keep-list and EG-4.5 respectively.
+**[SUPERSEDED BY THE TREE, ML-2 2026-08-17.** The `resolve_conflict` half is now stale, not
+wrong-when-written: EG-4.5 shipped it in `32a392364b`. The handler is
+`agent_runtime/serve_rpc.py:1649`, and the registry holds **eight** `@method` registrations,
+not seven (RAN `grep -n '@method' agent_runtime/serve_rpc.py` → `:455,592,920,981,1256,1471,1649`
+office verbs + `:1948` `runtime.agent.create`). Read "NEVER landed" as "had not landed when
+this plan was consolidated". See §6's path-shorthand note.**
 
 **Phase order and why.** Stop active damage → close silent-loss holes → attribution &
 recovery → the fingerprint core → lane collapse + reaps → multi-writer safety →
@@ -513,7 +519,18 @@ still reaped. **Property:** 7, 6.
 5. **EG-2.1 before EG-3.3** (the fourth build's trigger becomes a recorded fact before the
    fix claims it — the one honest divergence between HY and HC, resolved by ordering) and
    **before EG-3.2's acceptance run** (the A/B is read off its receipts).
-6. **File collision map** (rebase-level; never land while an unmerged branch holds the file):
+6. **File collision map** (rebase-level; never land while an unmerged branch holds the file).
+   **Path-shorthand note (ML-2, 2026-08-17) — read this before using the bare filenames
+   below.** They are collision keys, not locations, and two of them mislocate real handlers:
+   bare `serve.py` means `hermes_cli/harness_parts/serve.py` (the NDJSON transport/argv lane —
+   `_runtime_state_fingerprint` lives there), and bare `office.py` means the office store's
+   module. **Neither hosts the JSON-RPC method handlers.** Those live in
+   `agent_runtime/serve_rpc.py`, which is where the `@method` registry is and therefore the
+   authority for the advertised set (eight as of this note). In particular
+   `runtime.office.resolve_conflict` — which §0(d) above still calls unlanded — is
+   `agent_runtime/serve_rpc.py:1649`, shipped by EG-4.5 in `32a392364b`. A reader who takes
+   `serve.py` as "where office RPC lives" will grep the wrong file and conclude the verb is
+   missing, which is exactly the error §0(d) now carries:
    `mission_office_layout_controller.dart` — EG-4.0, EG-5.1, EG-5.2, EG-5.3 in that order;
    `serve.py` — EG-2.1/EG-3.1/EG-3.2 are textual neighbors of FC-H1's home; the office
    subscribe-lane files — EG-2.2/EG-3.3 vs any FC follow-up; `snapshot.py` — EG-2.1's

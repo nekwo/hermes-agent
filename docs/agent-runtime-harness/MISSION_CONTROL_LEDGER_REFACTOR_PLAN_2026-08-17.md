@@ -247,3 +247,37 @@ Recommended dispatch interleave: hermes lane ML-1 → ML-4 → ML-7 → ML-10 �
 5. **Launcher tree procedure (F6):** the not-mine dirty pubspec downgrade breaks widget-test compilation; every launcher implementer runs the hash-verified backup → checkout → `pub get` → `test --no-pub` → byte-exact restore procedure, and commits with explicit paths so the pubspec never rides along.
 6. **Witness law (task #60, RD preamble):** witnesses assert counts, ordering, and typed reasons — never elapsed-ms; every gate above carries one killing mutation and states why the mutant cannot also satisfy the probe; two-driven-values on any probed field a constant could fake.
 7. **Permission boundaries:** no writes under `X:/Eternia/.hermes/` ever (live root is read-only evidence); `dart format` forbidden; operator-blocked operations (G4's class) are escalated, not retried.
+
+---
+
+## 4.5 amendment (ML-2) — F6 covers `flutter analyze`, not just tests
+
+**The rule.** §4 item 5's F6 launcher-tree procedure applies to **`flutter analyze` as well as
+`flutter test`**. Read every "widget-test compilation" in that item as "any command that resolves
+the package graph".
+
+**Why it had to be said.** F6 was written as a *test* procedure, so an implementer reasonably
+reads `flutter analyze` as exempt — it is a static check, it runs in seconds, it looks like the
+cheap signal you are allowed to reach for mid-implementation. It is not exempt. The not-mine dirty
+`pubspec.yaml` downgrades the analyzer pin (`analyzer: ^13.0.0` → `^9.0.0`, alongside
+`flutter_riverpod ^3.4.2` → `^3.2.1` and `riverpod_annotation ^4.0.6` → `^4.0.2`; READ
+`git diff -- pubspec.yaml` in the launcher, 2026-08-17), and `flutter analyze` performs version
+solving **before it emits its first lint**. So it fails in the resolver, not the analyzer: the
+implementer gets a dependency-resolution error where they expected either lints or silence, and
+nothing in that error names the dirty pubspec as the cause. **Found by ML-5** while running the
+cheap signal the implementation discipline explicitly encourages — which is exactly why this
+belongs in §4 and not in one stage's notes: the discipline sends every implementer straight into
+it.
+
+**How to apply.** Any launcher stage that runs `flutter analyze` runs it *inside* the same
+hash-verified backup → checkout → `pub get` → run → byte-exact restore window as the tests, and
+still commits with explicit paths so the pubspec never rides along. Analyze and test share one
+window; do not open two. A resolution failure from either command is a signal to check the
+pubspec's dirty state first, before believing anything it says about the code.
+
+**R-a (doc-drift test) — DECLINED.** ML-2's optional hardening was a test asserting these
+documents do not drift from the tree; not taken, because a doc-drift gate keyed to counts and
+line numbers rots faster than the prose it guards and would have to be maintained by the same
+sweep it replaces — the corrections above instead name the *authority* (the `@method` registry,
+a repo-wide grep) so the documents stop carrying copies that can drift at all. Recorded as
+declined rather than silently skipped; revisit only if a third register-drift sweep is commissioned.

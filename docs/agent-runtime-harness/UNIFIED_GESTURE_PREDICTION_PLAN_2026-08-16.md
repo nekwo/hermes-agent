@@ -70,6 +70,25 @@ fact. The enum exists (`mission_office_render_model.dart:155`), the setter exist
 did. `git log -S interactionMode` returns exactly one commit — `b2f815cd8`, the 2026-06-28 renderer
 rewrite — so the field has been dead since it was born.
 
+> **CORRECTION C14 (ML-2, 2026-08-17) — the DEAD FIELD claim is false, and the grep above is why.**
+> The grep that produced it is scoped to a single file
+> (`rg interactionMode lib/features/mission_control/office/mission_office_game.dart`), so it could
+> only ever have found the setter. Re-run repo-wide, `interactionMode` **has readers**:
+> `mission_office_render_probe.dart:46` (`interactionMode: model.interactionMode` — the probe
+> lifts it off the render model) and `mission_office_scene_health.dart:170`
+> (`_ProbeLine(label: 'mode', value: probe.interactionMode.name)` — it is rendered into the
+> scene-health readout). Both RAN repo-wide 2026-08-17. The field is plumbed to a diagnostic
+> surface; what it lacks is a *behavioural* consumer, which is a different and much weaker
+> statement than "nothing reads it".
+>
+> **The rule this establishes: dead-symbol claims are repo-scoped or they are nothing.** A
+> file-scoped `rg` cannot answer "is this dead" — it can only answer "is this used *here*",
+> and the two answers differ exactly when the symbol crosses a file boundary, which is the
+> only case where deadness is interesting. Any future retirement gated on a symbol being dead
+> must cite a repo-wide grep or it is not evidence. UP-1's deletion scope was drawn from the
+> narrow grep; anything that would have deleted `interactionMode` on that basis would have
+> broken the scene-health probe.
+
 > **CORRECTION, same day.** This section first said the dead field *is* the root cause. That does not
 > hold, and the operator was right to push back with *"the drag used to work fine, I used to be dragging
 > around."* Re-reading the chain: the mount re-applies on `!identical(oldWidget.model, widget.model)`
@@ -312,7 +331,7 @@ current behaviour is source-read plus two operator observations.
 
 | # | Fact | How established |
 | --- | --- | --- |
-| U-1 | `interactionMode` has exactly one reference — its own setter | READ `mission_office_game.dart:199-201`; RAN `rg interactionMode` |
+| U-1 | ~~`interactionMode` has exactly one reference — its own setter~~ **FALSE — corrected C14, see §1.** It has repo-wide readers at `mission_office_render_probe.dart:46` and `mission_office_scene_health.dart:170`; it lacks a *behavioural* consumer, not all consumers | READ `mission_office_game.dart:199-201`; the original `rg interactionMode` was **file-scoped** and could not have found them — RAN repo-wide 2026-08-17 |
 | U-2 | `_handlePanUpdate` streams a mutation per pointer move | READ `mission_office_mount.dart:233-247` |
 | U-3 | The mount's during-drag path is unchanged by the 2026-08-16 commit-on-release work | RAN `git diff 2eeb25c45..HEAD -- mission_office_mount.dart` — only `onMoveSceneItemEnd` and `_handlePanEnd` moved |
 | U-4 | The 220 ms debounce is gated on a display-string prefix | READ `mission_control_page.dart:3689` |

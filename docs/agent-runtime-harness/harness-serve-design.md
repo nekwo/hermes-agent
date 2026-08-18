@@ -108,9 +108,16 @@ supports — so the first typed method carries its own manifest. JSON-RPC 2.0
 framing mirroring upstream's `tui_gateway`, answered on stdio and socket alike,
 beside the argv lane rather than replacing it.
 
-`{"rpc":{"contract":1,"methods":["runtime.office.get","runtime.office.subscribe","runtime.office.unsubscribe","runtime.office.upsert"]}}`
-rides `ready` (stdio's greeting), `hello_ok` (the socket's), and the re-askable
-`version` reply. It is **a set plus an integer**: the integer moves when a
+`{"rpc":{"contract":1,"methods":["runtime.office.get", …]}}` rides `ready`
+(stdio's greeting), `hello_ok` (the socket's), and the re-askable `version`
+reply. **The method list is elided on purpose.** The `@method` registry in
+`agent_runtime/serve_rpc.py` is the authority for the advertised set — read it
+rather than this document. It is currently **eight**. This sentence used to
+enumerate the first four and stayed at four while the set grew, which is the
+precise failure mode eliding it prevents: a document that hardcodes a register
+starts lying the first time the register moves, and nothing reports it.
+
+It is **a set plus an integer**: the integer moves when a
 method's shape changes incompatibly, the set grows when a method is added — so
 methods are adoptable one at a time. A runtime predating the lane has no `rpc`
 key, which reads as "argv only", and a client must degrade rather than error on
