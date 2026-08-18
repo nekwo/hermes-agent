@@ -406,12 +406,17 @@ def test_the_pin_covers_every_production_call_site_there_is():
     )
 
 
-#: An upper bound on this repo's own Python files, ~3x today's count (4,283 on
-#: 2026-08-18). Not a performance budget — a SCOPE assertion, and the only kind
-#: ruling #60 allows: a count. A walk that readmitted the virtualenv would report
-#: over ten thousand and trip this long before anyone waited on a timeout to
-#: tell them.
-_MOST_PYTHON_FILES_THIS_REPO_COULD_OWN = 12_000
+#: NO COUNT BOUND HERE, deliberately, and the reason is worth more than the
+#: assertion would have been. The first draft asserted ``len(sources) < 12_000``
+#: as a "scope" check. Measured against its own mutant it was WORTHLESS: the
+#: filesystem walk this replaced returns 10,112, comfortably under that bound, so
+#: the assertion passed just as happily on the defect it was written to catch. A
+#: check that cannot fail for the right reason is not a check, and a magic bound
+#: that has to be re-tuned as the repo grows is a maintenance trap on top. The
+#: scope is carried instead by two assertions that DO discriminate and that both
+#: red under the revert-to-walk mutation: the planted git-ignored probe must not
+#: appear, and no virtualenv path may. The 7,121 -> 1,292 file-open count is a
+#: measurement for the record, not a threshold to defend.
 
 #: Where the probe below goes: ignored by the repo's OWN committed `.gitignore`
 #: (line 34, ``.pytest_cache/``), at the root, and — critically — OUTSIDE
@@ -464,10 +469,6 @@ def test_the_inventory_asks_only_about_code_this_repo_owns():
         assert not any(".venv" in name for name in sources), (
             f"virtualenv paths are back in scope: "
             f"{[n for n in sources if '.venv' in n][:3]}"
-        )
-        assert len(sources) < _MOST_PYTHON_FILES_THIS_REPO_COULD_OWN, (
-            f"the inventory scope holds {len(sources)} Python files; that is not "
-            "a repo, that is a filesystem walk"
         )
         # And the gate itself is unmoved by the plant — the property that
         # actually matters to a reader of a failure message.
