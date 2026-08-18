@@ -198,8 +198,8 @@ def test_entries_from_another_write_back_refuse_to_be_diffed(
     # refusal above is a decision rather than this reader never answering.
     assert core_cache.write_back(_core(1), fingerprint=current) is True
     rebound, ok = core_cache._persisted_entries(expect_digest=_sidecar()["fingerprint"])
-    assert ok == "" and rebound == current.entries
-    assert stale_path not in {entry.path for entry in rebound or ()}
+    assert ok == "" and rebound is not None and rebound.entries == current.entries
+    assert stale_path not in {entry.path for entry in rebound.entries}
 
 
 # --------------------------------------------------------------------------- #

@@ -1574,6 +1574,224 @@ def test_a_never_converged_receipt_that_cannot_diff_says_so_in_its_own_words(
 
 
 # --------------------------------------------------------------------------- #
+# The streak survives a process boundary (MC-3 / P4 arm 3, finding A2)
+# --------------------------------------------------------------------------- #
+# The receipt above fired on the FOURTH consecutive disagreeing write-back of ONE
+# process. Measured: boots write back once (07:59, 08:04) or twice (05:33 — gen 1
+# prewarm-led, gen 2 hub-led, streak 1). So it was unreachable on every boot
+# shape there is, and the 05:33 pair — which IS the self-perturbation it was
+# written to expose — could never be reported. A process boundary is not a
+# convergence event.
+#
+# WHAT MAKES THESE NON-VACUOUS. The mutant is "fire more readily", so the two
+# cases that must stay SILENT carry as much weight as the one that must speak: a
+# legitimate non-agreement (an upgrade) must not seed, and a store that settles
+# must both stay quiet and drop what it was holding. Each firing case drives the
+# receipt to an exact BUILD COUNT and an exact PATH, neither of which a mutant
+# that simply lowered the bound can produce.
+
+_BOOT_CORE = {"parity": {"watermark": {"event_offset": 0}}}
+
+
+def _boot_keys(root, *, passes: int) -> tuple[list, str, str]:
+    """One key per simulated boot, with exactly ONE runtime-owned input moving."""
+
+    stable = str(root / "workspaces" / "ws_stable.json")
+    moving = str(root / "dispatch_delivery_drain.json")
+    keys = [
+        _fake_key([(stable, 11, 12), (moving, index, index)]) for index in range(passes)
+    ]
+    return keys, moving, stable
+
+
+def _reboot() -> None:
+    """What the next serve child sees: no memory, and the pair still on disk."""
+
+    core_cache.reset_process_state()
+
+
+def test_a_store_that_never_converges_across_boots_reaches_the_receipt(
+    isolate_agent_runtime_root, monkeypatch, caplog
+):
+    """A2: the count continues across the boundary, so the boot shape can fire it.
+
+    A baseline write-back establishes the pair, then each simulated boot
+    disagrees with the one before it. With the threshold left at the measured
+    virgin-root convergence — 3, deliberately NOT moved — the receipt appears on
+    the third disagreeing boot instead of never.
+
+    The per-boot count is the discriminator: a mutant that seeded eagerly, or
+    that lowered the bound, fires on a different boot than this pins.
+
+    *Kill:* restore the per-process early return. No boot ever has anything to
+    disagree with, every streak is zero, and the receipt never appears.
+    """
+
+    monkeypatch.setattr(core_cache, "build_stamp_token", lambda: "probe:mc3:clean")
+    keys, _moving, _stable = _boot_keys(isolate_agent_runtime_root, passes=4)
+
+    counts: list[int] = []
+    with caplog.at_level(logging.WARNING, logger="agent_runtime.core_cache"):
+        for key in keys:
+            _reboot()
+            assert core_cache.write_back(_BOOT_CORE, fingerprint=key) is True
+            counts.append(len(_receipt_lines(caplog, core_cache.RECEIPT_NEVER_CONVERGED)))
+
+    assert counts == [0, 0, 0, 1], (
+        "the receipt did not appear on exactly the boot the bound names "
+        f"(NEVER_CONVERGED_BUILDS={core_cache.NEVER_CONVERGED_BUILDS}); the "
+        f"baseline boot plus three disagreeing boots produced {counts}"
+    )
+
+
+def test_the_cross_boot_receipt_counts_the_streak_and_names_the_moving_input(
+    isolate_agent_runtime_root, monkeypatch, caplog
+):
+    """Two claims, two kills: the count is right AND the paths are right.
+
+    ``builds=`` is the fact that says the lane has been buying nothing since
+    before this process started; the paths are the fact an operator can act on.
+    A seed that carried only the digest would produce the first and not the
+    second, which is precisely why they are asserted apart.
+
+    The scope must read ``last_pair`` and NOT ``every_pass``: the streak began in
+    an earlier process, so no intersection over its whole length was ever
+    observed here, and C22(i) reserves ``every_pass`` for measured
+    self-perturbation. Claiming it from one observed pass would inflate the arm
+    an operator is meant to act on.
+
+    *Kill A:* the per-process early return — no receipt at all. *Kill B:* seed
+    the digest but not the entries — ``builds=3`` still lands and the diff
+    collapses to ``diff_scope=none diff_reason=no_entries diff=diff_unavailable``,
+    naming nothing.
+    """
+
+    monkeypatch.setattr(core_cache, "build_stamp_token", lambda: "probe:mc3:clean")
+    keys, moving, stable = _boot_keys(isolate_agent_runtime_root, passes=4)
+
+    with caplog.at_level(logging.WARNING, logger="agent_runtime.core_cache"):
+        for key in keys:
+            _reboot()
+            assert core_cache.write_back(_BOOT_CORE, fingerprint=key) is True
+
+    lines = _receipt_lines(caplog, core_cache.RECEIPT_NEVER_CONVERGED)
+    assert len(lines) == 1, lines
+    line = lines[0]
+    assert f"builds={core_cache.NEVER_CONVERGED_BUILDS}" in line, line
+    assert moving in line, (
+        f"the cross-boot receipt named no path, so the streak carried a digest "
+        f"and nothing an operator could go widen the closure over: {line}"
+    )
+    assert stable not in line, (
+        f"the receipt named an input that never moved: {line}"
+    )
+    assert f"diff_scope={core_cache.DIFF_SCOPE_LAST_PAIR}" in line, line
+    assert core_cache.DIFF_SCOPE_EVERY_PASS not in line, (
+        "a streak that began in an earlier process claimed an intersection over "
+        f"passes this one never observed: {line}"
+    )
+
+
+def test_a_legitimate_non_agreement_does_not_seed_the_streak(
+    isolate_agent_runtime_root, monkeypatch, caplog
+):
+    """An upgrade is not an oscillation, and must not be reported as one.
+
+    A ``build_stamp_mismatch`` says the operator upgraded; a ``contract_mismatch``
+    says the schema moved. Neither is evidence about whether the store settles,
+    and a receipt fired on them would be a WARNING at an operator with a
+    perfectly healthy install — the expensive direction of error for a
+    diagnostic whose whole value is that it speaks only when something is wrong.
+
+    The second half of the case is the anti-vacuity proof: the IDENTICAL key
+    sequence, run under one unchanging stamp, does fire. So the silence above is
+    a decision about the reason, not a fixture that could never have reached the
+    receipt.
+
+    *Kill:* seed on any demote reason.
+    """
+
+    stamp = {"value": "probe:mc3:v0"}
+    monkeypatch.setattr(core_cache, "build_stamp_token", lambda: stamp["value"])
+    keys, _moving, _stable = _boot_keys(isolate_agent_runtime_root, passes=4)
+
+    with caplog.at_level(logging.WARNING, logger="agent_runtime.core_cache"):
+        for index, key in enumerate(keys):
+            _reboot()
+            # Every boot runs a DIFFERENT build than the pair it finds, so every
+            # persisted pair fails on ``build_stamp`` before the digest is ever
+            # compared.
+            stamp["value"] = f"probe:mc3:v{index}"
+            assert core_cache.write_back(_BOOT_CORE, fingerprint=key) is True
+
+    assert _receipt_lines(caplog, core_cache.RECEIPT_NEVER_CONVERGED) == [], (
+        "a run of ordinary upgrades was reported as a store that never "
+        "converges, which fires a warning at a healthy install"
+    )
+
+    caplog.clear()
+    stamp["value"] = "probe:mc3:steady"
+    core_cache.core_path().unlink(missing_ok=True)
+    core_cache.sidecar_path().unlink(missing_ok=True)
+    core_cache.entries_path().unlink(missing_ok=True)
+    with caplog.at_level(logging.WARNING, logger="agent_runtime.core_cache"):
+        for key in keys:
+            _reboot()
+            assert core_cache.write_back(_BOOT_CORE, fingerprint=key) is True
+
+    assert len(_receipt_lines(caplog, core_cache.RECEIPT_NEVER_CONVERGED)) == 1, (
+        "the same key sequence under one steady build stamp did NOT fire, so the "
+        "silence above proves nothing about the reason the seed refused"
+    )
+
+
+def test_a_settled_lane_says_nothing_and_holds_no_stat_set(
+    isolate_agent_runtime_root, monkeypatch, caplog
+):
+    """The retention rule survives the seed: a settled process holds nothing.
+
+    An entry list on a live store is tens of thousands of triples. It is kept
+    only while a streak is LIVE, and dropped the moment two write-backs agree —
+    a seeded streak inherits that discipline rather than being an exception to
+    it, which is the difference between a diagnostic and a leak.
+
+    The drive reaches the agreement branch with something actually retained: a
+    disagreeing write-back first (so the module IS holding a stat set), then the
+    same key again. A case that agreed from the start would pass while holding
+    nothing for the wrong reason.
+
+    *Kill:* retain the entries unconditionally through the agreement branch.
+    """
+
+    monkeypatch.setattr(core_cache, "build_stamp_token", lambda: "probe:mc3:clean")
+    keys, _moving, _stable = _boot_keys(isolate_agent_runtime_root, passes=2)
+
+    _reboot()
+    assert core_cache.write_back(_BOOT_CORE, fingerprint=keys[0]) is True
+
+    _reboot()
+    with caplog.at_level(logging.WARNING, logger="agent_runtime.core_cache"):
+        # Disagrees with the previous boot: the streak is live and the stat set
+        # is being held.
+        assert core_cache.write_back(_BOOT_CORE, fingerprint=keys[1]) is True
+        assert core_cache._streak_entries, (
+            "the fixture never reached a live streak, so the drop below would be "
+            "true of a module that had nothing to drop"
+        )
+        # ...and now it settles.
+        assert core_cache.write_back(_BOOT_CORE, fingerprint=keys[1]) is True
+
+    assert core_cache._streak_entries == (), (
+        "a settled lane is still holding the stat set of a streak that ended, so "
+        "every healthy process now carries a second copy of the fingerprint for "
+        "a diagnostic that is not going to fire"
+    )
+    assert _receipt_lines(caplog, core_cache.RECEIPT_NEVER_CONVERGED) == [], (
+        "a lane that settled was reported as never converging"
+    )
+
+
+# --------------------------------------------------------------------------- #
 # One consult per boot, not one per rider (MC-1 / P5)
 # --------------------------------------------------------------------------- #
 def _count_lane_work(monkeypatch) -> tuple[list[str], list[str]]:

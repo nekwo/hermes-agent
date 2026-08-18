@@ -1140,30 +1140,39 @@ def write_back(core: dict, *, fingerprint: CoreFingerprint | None = None) -> boo
         "runtime_root": str(_runtime_root_for_sidecar(parity)),
         "generated_at": payload.get("generated_at"),
     }
+    # BEFORE the writes, because the pair on disk is about to become this
+    # process's own and the previous boot's answer would be unrecoverable after.
+    # A process boundary is not a convergence event — see
+    # :func:`_capture_boot_streak_seed`.
+    _capture_boot_streak_seed(key)
     try:
         atomic_json_write(core_path(), payload, indent=None, separators=(",", ":"), sort_keys=True)
         atomic_json_write(sidecar_path(), sidecar, indent=None, sort_keys=True)
     except Exception:
         logger.warning("snapshot_core_cache_write ok=false reason=io", exc_info=True)
         return False
-    # AFTER the pair, and OUTSIDE its try, on purpose. ``write_back``'s contract
-    # is that a failed write changes NOTHING about the build, and the pair is
-    # what the cache is FOR: the entries are a diagnostic that makes a later miss
-    # diffable. Letting a diagnostic's failure retract a landed cache would trade
-    # the thing this module exists for against the thing that explains it. So the
-    # entries write reports itself and the write-back still succeeds.
-    _write_entries(key)
     logger.info(
         "snapshot_core_cache_write ok=true inputs=%d fingerprint=%s offset=%s",
         key.count,
         key.digest[:12],
         "unknown" if sidecar["event_offset"] is None else sidecar["event_offset"],
     )
-    _note_written_key(key)
+    # The convergence authority runs BEFORE the entries write and hands it the
+    # number, rather than the entries write deriving one of its own: the streak
+    # is ``_note_written_key``'s to decide, and a second site computing it from
+    # the same seed would be two rules for one question (property 6).
+    streak = _note_written_key(key)
+    # LAST, and OUTSIDE the pair's ``try``, on purpose. ``write_back``'s contract
+    # is that a failed write changes NOTHING about the build, and the pair is
+    # what the cache is FOR: the entries are a diagnostic that makes a later miss
+    # diffable. Letting a diagnostic's failure retract a landed cache would trade
+    # the thing this module exists for against the thing that explains it. So the
+    # entries write reports itself and the write-back still succeeds.
+    _write_entries(key, streak=streak)
     return True
 
 
-def _write_entries(key: CoreFingerprint) -> bool:
+def _write_entries(key: CoreFingerprint, *, streak: int = 0) -> bool:
     """Persist the stat set beside the pair. BEST EFFORT — never fails a write-back.
 
     The SAME atomic writer as the pair (``utils.atomic_json_write``, compact
@@ -1187,6 +1196,14 @@ def _write_entries(key: CoreFingerprint) -> bool:
             entries_path(),
             {
                 "fingerprint": key.digest,
+                # The convergence streak this write-back left standing, so the
+                # NEXT process can carry it instead of restarting from zero.
+                # It rides here rather than on the sidecar for two reasons: the
+                # sidecar is read by every consult on the boot path and must stay
+                # the cheap half of the judgement, and this file already IS "what
+                # this write-back knew" — the streak is that, not a property of
+                # the cached core. See :func:`_capture_boot_streak_seed`.
+                "streak": int(streak),
                 "entries": [[entry.path, entry.mtime_ns, entry.size] for entry in key.entries],
             },
             indent=None,
@@ -1253,6 +1270,14 @@ NEVER_CONVERGED_BUILDS = 3
 #: count beside them, so the cap can never make a large drift read as a small one.
 _NEVER_CONVERGED_DIFF_PATHS = 5
 
+class _StreakSeed(NamedTuple):
+    """The previous write-back's answer, carried across a process boundary."""
+
+    digest: str
+    entries: tuple[FingerprintEntry, ...]
+    streak: int
+
+
 _convergence_lock = threading.Lock()
 _last_written_digest: str | None = None
 _streak_entries: tuple[FingerprintEntry, ...] = ()
@@ -1260,13 +1285,24 @@ _streak_length = 0
 _streak_last_diff: tuple[str, ...] | None = None
 _streak_common_diff: frozenset[str] | None = None
 _never_converged_reported = False
+_boot_streak_seed: _StreakSeed | None = None
+_boot_streak_seed_taken = False
+#: True when the streak this process is continuing began in an EARLIER one, so
+#: some of its passes were never observed here. It exists to stop the receipt
+#: over-claiming — see :func:`_note_written_key`.
+_streak_seeded = False
 
 
 def _reset_convergence_state() -> None:
-    """Forget this process's convergence history, as a fresh process would."""
+    """Forget this process's convergence history, as a fresh process would.
+
+    The seed is forgotten too, and it must be: a capture surviving into the next
+    case would seed that case's streak from a store pytest has already deleted.
+    """
 
     global _last_written_digest, _streak_entries, _streak_length
     global _streak_last_diff, _streak_common_diff, _never_converged_reported
+    global _boot_streak_seed, _boot_streak_seed_taken, _streak_seeded
     with _convergence_lock:
         _last_written_digest = None
         _streak_entries = ()
@@ -1274,6 +1310,9 @@ def _reset_convergence_state() -> None:
         _streak_last_diff = None
         _streak_common_diff = None
         _never_converged_reported = False
+        _boot_streak_seed = None
+        _boot_streak_seed_taken = False
+        _streak_seeded = False
 
 
 def _changed_paths(
@@ -1294,8 +1333,81 @@ def _changed_paths(
     )
 
 
-def _note_written_key(key: CoreFingerprint) -> None:
+def _capture_boot_streak_seed(key: CoreFingerprint) -> None:
+    """Carry the PREVIOUS write-back's answer across the process boundary (A2).
+
+    WHY THIS EXISTS, measured. ``_note_written_key`` used to return early on the
+    first write-back of a process, so the receipt fired on the FOURTH consecutive
+    disagreeing write-back of ONE process. Boots write back once or twice: the
+    receipt was unreachable on every boot shape there is, and the 2026-08-18
+    05:33 pair (``9772c7720bef`` → ``d525e554be44``) — which IS the
+    self-perturbation the receipt was written to expose — could never be
+    reported. A process boundary is not a convergence event, and treating it as
+    one is what made the diagnostic dead on arrival.
+
+    **SEED ONLY ON A FINGERPRINT DISAGREEMENT.** This is the correctness point,
+    and it is not optional. A ``build_stamp_mismatch`` (the operator upgraded), a
+    ``contract_mismatch`` (the schema moved), a ``runtime_root_mismatch`` (a
+    different store) and a ``home_mismatch`` (a different question) are all
+    LEGITIMATE non-agreements that say nothing whatever about convergence.
+    Seeding on those would make a routine upgrade look like an oscillating store
+    and fire a WARNING receipt at an operator with a healthy install — the
+    expensive direction of error for a diagnostic whose whole value is that it
+    only speaks when something is wrong. The judgement is asked of
+    :func:`_sidecar_answers_a_different_question`, the read lane's own authority,
+    so the two can never drift.
+
+    **Cost, priced.** The sidecar is tiny and is always read. The entries file is
+    megabytes and is read ONLY when the digests actually disagree — a converged
+    boot, which is every healthy one, pays one small read and stops.
+    """
+
+    global _boot_streak_seed, _boot_streak_seed_taken
+
+    with _convergence_lock:
+        if _boot_streak_seed_taken or _last_written_digest is not None:
+            return
+        _boot_streak_seed_taken = True
+    seed = _persisted_streak_seed(key)
+    with _convergence_lock:
+        _boot_streak_seed = seed
+
+
+def _persisted_streak_seed(key: CoreFingerprint) -> _StreakSeed | None:
+    """The persisted pair read as "what the last write-back concluded"."""
+
+    try:
+        sidecar = json.loads(sidecar_path().read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(sidecar, dict):
+        return None
+    recorded_digest = sidecar.get("fingerprint")
+    if not isinstance(recorded_digest, str) or not recorded_digest:
+        return None
+    if recorded_digest == key.digest:
+        # The boots AGREE. Seeded with no entries and no streak on purpose: the
+        # agreement branch below drops both anyway, and reading megabytes of
+        # triples to discard them is exactly the cost a healthy boot must not pay.
+        return _StreakSeed(recorded_digest, (), 0)
+    if _sidecar_answers_a_different_question(sidecar):
+        return None
+    persisted, _unavailable = _persisted_entries(expect_digest=recorded_digest)
+    if persisted is None:
+        # The disagreement is real and seeds the streak; only the PATHS are
+        # missing, and the receipt says so in its own words rather than
+        # pretending the streak did not happen.
+        return _StreakSeed(recorded_digest, (), 0)
+    return _StreakSeed(recorded_digest, persisted.entries, persisted.streak)
+
+
+def _note_written_key(key: CoreFingerprint) -> int:
     """Record what this write-back persisted, and report a lane that never settles.
+
+    Returns the streak length this write-back leaves standing (``0`` when the
+    lane settled), which ``write_back`` hands to the entries file so the NEXT
+    process can continue it. This function stays the ONE authority for that
+    number; the file only records what it decided.
 
     Called on SUCCESSFUL write-backs only: a write that did not land is already a
     receipt of its own (``snapshot_core_cache_write ok=false``) and a key that was
@@ -1304,23 +1416,36 @@ def _note_written_key(key: CoreFingerprint) -> None:
 
     global _last_written_digest, _streak_entries, _streak_length
     global _streak_last_diff, _streak_common_diff, _never_converged_reported
+    global _streak_seeded
 
     with _convergence_lock:
         previous_digest = _last_written_digest
         previous_entries = _streak_entries
+        if previous_digest is None:
+            seed = _boot_streak_seed
+            if seed is not None:
+                # The first write-back of a process has nothing IN MEMORY to
+                # agree with — but the previous boot left its answer on disk, and
+                # that is what a store which never converges ACROSS boots
+                # disagrees with. Continuing the count is the whole of A2's fix.
+                previous_digest = seed.digest
+                previous_entries = seed.entries
+                _streak_length = seed.streak
+                _streak_seeded = seed.streak > 0
         _last_written_digest = key.digest
         if previous_digest is None:
-            # The first write-back of a process has nothing to agree with, and
-            # "one build" is never evidence of non-convergence.
-            return
+            # Nothing persisted and nothing in memory: "one build" is never
+            # evidence of non-convergence.
+            return 0
         if previous_digest == key.digest:
-            # Settled: two consecutive builds wrote the same key, so the store
-            # the next process stats is the store this one described.
+            # Settled: two consecutive write-backs wrote the same key, so the
+            # store the next process stats is the store this one described.
             _streak_entries = ()
             _streak_length = 0
             _streak_last_diff = None
             _streak_common_diff = None
-            return
+            _streak_seeded = False
+            return 0
         _streak_length += 1
         _streak_entries = key.entries
         if previous_entries and key.entries:
@@ -1331,16 +1456,25 @@ def _note_written_key(key: CoreFingerprint) -> None:
                 if _streak_common_diff is None
                 else _streak_common_diff & frozenset(changed)
             )
+        streak = _streak_length
         if _streak_length < NEVER_CONVERGED_BUILDS or _never_converged_reported:
-            return
+            return streak
         # Once per process. The receipt names an input to go widen the closure
         # over; repeating it every build afterwards would bury that under its own
         # noise without adding a fact.
         _never_converged_reported = True
         builds = _streak_length
-        common = _streak_common_diff
+        # ``every_pass`` claims a path differed on EVERY pass of the streak, and
+        # a SEEDED streak began before this process did — the intersection here
+        # spans only the passes observed here. Claiming it anyway would push a
+        # cross-boot streak into the arm C22(i) reserves for self-perturbation,
+        # inflating exactly the count an operator is meant to act on. A seeded
+        # streak reports ``last_pair``, which is the strongest true thing it can
+        # say about a diff it did not watch accumulate.
+        common = None if _streak_seeded else _streak_common_diff
         last = _streak_last_diff
     _receipt_never_converged(builds=builds, common=common, last=last)
+    return streak
 
 
 def _receipt_never_converged(
@@ -1403,10 +1537,24 @@ def _diff_unavailable_detail(reason: str) -> str:
     )
 
 
-def _persisted_entries(*, expect_digest: Any) -> tuple[tuple[FingerprintEntry, ...] | None, str]:
+class PersistedEntries(NamedTuple):
+    """What a write-back recorded beside its digest: the stat set, and the streak.
+
+    Both are read together because they are read from one file in one parse. The
+    streak is what lets a never-converged run survive a process boundary — see
+    :func:`_capture_boot_streak_seed` — and it is recorded by the write-back
+    rather than recomputed by the reader, so there is exactly one rule for the
+    number.
+    """
+
+    entries: tuple[FingerprintEntry, ...]
+    streak: int
+
+
+def _persisted_entries(*, expect_digest: Any) -> tuple[PersistedEntries | None, str]:
     """The stat set behind a persisted digest, or a TYPED reason it is unusable.
 
-    Returns ``(entries, "")`` on success and ``(None, <diff_reason>)`` otherwise.
+    Returns ``(record, "")`` on success and ``(None, <diff_reason>)`` otherwise.
     Never raises: a diagnostic that could take down the lane it explains is worse
     than no diagnostic.
 
@@ -1441,7 +1589,14 @@ def _persisted_entries(*, expect_digest: Any) -> tuple[tuple[FingerprintEntry, .
             entries.append(FingerprintEntry(str(path), int(mtime_ns), int(size)))
         except (TypeError, ValueError):
             return None, DIFF_UNAVAILABLE_NO_ENTRIES
-    return tuple(entries), ""
+    try:
+        # Absent on every entries file written before the streak was persisted,
+        # which is a legitimate shape and not a refusal: it means "this
+        # write-back recorded no streak", i.e. zero.
+        streak = int(payload.get("streak") or 0)
+    except (TypeError, ValueError):
+        streak = 0
+    return PersistedEntries(tuple(entries), streak), ""
 
 
 def _runtime_root_for_sidecar(parity: dict) -> Any:
@@ -1539,13 +1694,47 @@ def _judge_persisted_pair(
     key = fingerprint if fingerprint is not None else build_input_fingerprint()
     if key is None:
         return CacheRead(core, False, DEMOTE_FINGERPRINT_UNAVAILABLE, key, sidecar)
+    different_question = _sidecar_answers_a_different_question(sidecar)
+    if different_question:
+        return CacheRead(core, False, different_question, key, sidecar)
+    if sidecar.get("fingerprint") != key.digest:
+        return CacheRead(core, False, DEMOTE_FINGERPRINT_MISMATCH, key, sidecar)
+    return CacheRead(core, True, "", key, sidecar)
+
+
+def _sidecar_answers_a_different_question(sidecar: dict) -> str:
+    """The demote reason for "this pair is not comparable", or ``""``.
+
+    Every clause here asks the same thing in a different dimension: is the
+    persisted pair about the same CODE, the same CONTRACT, the same ROOT and the
+    same HOME as the process judging it? None of them is about whether the store
+    moved — that is the digest compare, and it is the only clause left outside.
+
+    **Its own function because it has two callers and must never grow a second
+    rule.** :func:`_judge_persisted_pair` asks it to demote; the cross-process
+    convergence seed (:func:`_capture_boot_streak_seed`) asks it to decide whether
+    a disagreement is EVIDENCE of non-convergence or an ordinary upgrade. A
+    hand-copied second cascade there would drift from this one and the drift
+    would surface as a WARNING receipt fired at an operator with a healthy
+    install — the expensive direction.
+
+    Clause ORDER is preserved from the conjunction it was lifted out of, and the
+    ordering is load-bearing rather than incidental: each is a string compare
+    against something already in hand, and the home clause sits BEFORE the digest
+    compare (at the call site) because behind it the case it exists for is
+    unreachable — a pair written under another home has a different digest by
+    construction, so it would be swallowed as a generic ``fingerprint_mismatch``
+    and the operator would read "the store moved" for something that is not about
+    the store at all.
+    """
+
     stamp = build_stamp_token()
     if stamp is None:
-        return CacheRead(core, False, DEMOTE_BUILD_STAMP_UNKNOWN, key, sidecar)
+        return DEMOTE_BUILD_STAMP_UNKNOWN
     if sidecar.get("build_stamp") != stamp:
-        return CacheRead(core, False, DEMOTE_BUILD_STAMP_MISMATCH, key, sidecar)
+        return DEMOTE_BUILD_STAMP_MISMATCH
     if sidecar.get("contract_versions") != contract_versions():
-        return CacheRead(core, False, DEMOTE_CONTRACT_MISMATCH, key, sidecar)
+        return DEMOTE_CONTRACT_MISMATCH
     try:
         from . import paths as _paths
 
@@ -1554,26 +1743,15 @@ def _judge_persisted_pair(
         current_root = None
     recorded_root = sidecar.get("runtime_root")
     if current_root is not None and recorded_root and str(recorded_root) != current_root:
-        return CacheRead(core, False, DEMOTE_RUNTIME_ROOT_MISMATCH, key, sidecar)
-    # BEFORE the digest compare, deliberately, and beside the runtime-root clause
-    # it is a twin of: both ask "is this pair even about the same question", and
-    # both are a string compare against something already in hand, which is what
-    # the cheapest-first ordering above is ordered on. Behind the digest compare
-    # this clause would be unreachable in the case it exists for — a pair written
-    # under another home has a different digest by construction, so it would be
-    # swallowed as a generic ``fingerprint_mismatch`` and the operator would read
-    # "the store moved" for something that is not about the store at all.
-    #
-    # ABSENT MUST NOT DEMOTE. Every sidecar written before this stage carries no
+        return DEMOTE_RUNTIME_ROOT_MISMATCH
+    # ABSENT MUST NOT DEMOTE. Every sidecar written before MC-2 carries no
     # ``fingerprint_home``, and treating absent as mismatch would demote every
-    # install a SECOND time for no information — once for the closure change this
-    # stage already forces, then again for a field it could not have written.
+    # install a SECOND time for no information — once for the closure change that
+    # stage already forced, then again for a field it could not have written.
     recorded_home = sidecar.get("fingerprint_home")
     if recorded_home and str(recorded_home) != str(resolved_fingerprint_home()[0]):
-        return CacheRead(core, False, DEMOTE_HOME_MISMATCH, key, sidecar)
-    if sidecar.get("fingerprint") != key.digest:
-        return CacheRead(core, False, DEMOTE_FINGERPRINT_MISMATCH, key, sidecar)
-    return CacheRead(core, True, "", key, sidecar)
+        return DEMOTE_HOME_MISMATCH
+    return ""
 
 
 # --------------------------------------------------------------------------- #
@@ -1866,7 +2044,7 @@ def _demote_diff_detail(key: CoreFingerprint | None, sidecar: dict | None) -> st
     )
     if persisted is None:
         return _diff_unavailable_detail(unavailable)
-    changed = _changed_paths(persisted, key.entries)
+    changed = _changed_paths(persisted.entries, key.entries)
     if not changed:
         # The digests disagreed and no triple did. Nothing here can be named, and
         # borrowing the ``last_pair`` sentence for it would report a measurement
