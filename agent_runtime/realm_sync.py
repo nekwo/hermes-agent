@@ -9,7 +9,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import yaml
 
@@ -250,6 +250,7 @@ def publish_realm_sync(
         result = _sync_result(realm, "publish", "dry_run", artifacts, repo=repo, git=git, changed=False)
         result["persona_projection"] = _persona_projection_row(projection, resolved.bound_profiles)
         result["profile_files"] = _profile_files_row(artifacts, profile_files_withheld)
+        result["office_sync"] = {"refused": list(resolved.office_refused or [])}
         return result
 
     subtree = _realm_subtree(repo, realm.id)
@@ -325,9 +326,10 @@ def publish_realm_sync(
         for artifact in artifacts
         if artifact.kind in ("office", "office_actor")
     })
+    office_baseline: dict[str, Any] = {"recorded": [], "refused": []}
     if published_office_workspaces:
         try:
-            update_office_baseline_after_sync(realm.id, published_office_workspaces)
+            office_baseline = update_office_baseline_after_sync(realm.id, published_office_workspaces).as_dict()
         except Exception:  # noqa: BLE001 — baseline is best-effort; never fail publish
             pass
     # Persona definitions: same baseline discipline as boards/office, so my own
@@ -351,6 +353,16 @@ def publish_realm_sync(
     result = _sync_result(realm, "publish", "published", artifacts, repo=repo, git=git_after, changed=changed)
     result["persona_projection"] = _persona_projection_row(projection, resolved.bound_profiles)
     result["profile_files"] = _profile_files_row(artifacts, profile_files_withheld)
+    # Additive publish accounting for the office family: which workspaces did
+    # not travel at all and why, and which of the ones that did got their
+    # baseline recorded. A workspace that publishes nothing because a file would
+    # not decode is a fact the operator must be able to READ — the alternative,
+    # a quiet partial publish, is what turns one quarantined file here into desk
+    # removals on every peer.
+    result["office_sync"] = {
+        "refused": list(resolved.office_refused or []),
+        "baseline": office_baseline,
+    }
     if warnings:
         result["warnings"] = warnings
     _write_sync_sidecar(realm, repo=repo, git=git_after, skills_drift=_held_skill_packages_for_realm(realm), artifacts=artifacts)
@@ -594,6 +606,12 @@ class _ResolvedPublish:
     projection: Any
     profile_files_withheld: list[dict[str, str]]
     bound_profiles: list[str]
+    #: Office workspaces this pass would not publish because their actor
+    #: directory did not fully read. Same discipline as ``profile_files_withheld``
+    #: one field up: a family that could not travel is a typed row, never a
+    #: silent omission — and here silence would have published a partial office
+    #: that every peer reads as desk removals.
+    office_refused: list[dict[str, Any]] = ()  # type: ignore[assignment]
 
 
 def resolve_realm_sync_artifacts(realm_id: str) -> list[RealmSyncArtifact]:
@@ -609,12 +627,18 @@ def _resolve_artifacts_with_projection(realm_id: str) -> _ResolvedPublish:
     artifacts.extend(_skill_artifacts(realm))
     artifacts.extend(_workspace_realm_artifacts(realm, workspaces))
     artifacts.extend(_board_artifacts(workspaces))
-    artifacts.extend(_office_artifacts(workspaces))
+    # ONE office pass: the artifacts, the persona ids those placements require,
+    # and the workspaces that would not publish at all, resolved together so the
+    # three cannot disagree about which offices are in this publish.
+    office_scan = _office_publish_scan(workspaces)
+    artifacts.extend(office_scan.artifacts)
     # Personas referenced by synced office placements travel with the office
     # (plan §5): an office-only persona must be materializable on pull. The
     # wanted set was workspace.agent_ids only, which would sync a placement
     # referencing a persona the member cannot resolve.
-    required_persona_ids = _required_realm_persona_ids(workspaces)
+    required_persona_ids = _required_realm_persona_ids(
+        workspaces, office_persona_ids=office_scan.persona_ids
+    )
     selected_persona_ids = (
         list(realm.agent_selection or [])
         if getattr(realm, "agent_publish_mode", "workspace") == "selected"
@@ -653,6 +677,7 @@ def _resolve_artifacts_with_projection(realm_id: str) -> _ResolvedPublish:
         projection=projection,
         profile_files_withheld=profile_files_withheld,
         bound_profiles=sorted(bound_profiles),
+        office_refused=office_scan.refused,
     )
 
 
@@ -673,21 +698,30 @@ def _workspaces_for_realm(realm: Realm) -> list[Workspace]:
     ]
 
 
-def _required_realm_persona_ids(workspaces: list[Workspace]) -> list[str]:
+def _required_realm_persona_ids(
+    workspaces: list[Workspace], *, office_persona_ids: list[str] | None = None
+) -> list[str]:
     """Persona definitions required by synchronized references.
 
     These rows are pinned regardless of the explicit Realm selection: a
     pulled workspace roster or Office placement must never reference a persona
     definition the same publish deliberately omitted.
+
+    ``office_persona_ids`` is passed by the publish resolver so this answer and
+    the office ARTIFACTS come from the same scan; recomputing it here would let
+    a workspace refused for unreadable actors still pin its personas.
     """
     workspace_ids = [
         persona_id
         for workspace in workspaces
         for persona_id in (workspace.agent_ids or [])
     ]
-    return list(
-        dict.fromkeys([*workspace_ids, *_office_wanted_persona_ids(workspaces)])
+    office_ids = (
+        list(office_persona_ids)
+        if office_persona_ids is not None
+        else _office_wanted_persona_ids(workspaces)
     )
+    return list(dict.fromkeys([*workspace_ids, *office_ids]))
 
 
 def realm_agent_selection_state(realm_id: str) -> dict[str, Any]:
@@ -978,7 +1012,23 @@ def _any_store_drift(store_drift: dict[str, dict[str, int]]) -> bool:
     return any(count for family in store_drift.values() for count in family.values())
 
 
-def _office_artifacts(workspaces: list[Workspace]) -> list[RealmSyncArtifact]:
+class OfficePublishScan(NamedTuple):
+    """What ONE pass over the office store says this realm publishes.
+
+    Three facts, resolved together on purpose. The artifacts and the persona ids
+    the placements REQUIRE used to be two independent walks of the same
+    directories, and a workspace excluded from one but not the other publishes a
+    placement whose persona definition never travelled. ``refused`` is the third
+    because it is the reason the other two are short — a shortened answer that
+    does not carry its own shortfall is the defect this stage retires.
+    """
+
+    artifacts: list[RealmSyncArtifact]
+    persona_ids: list[str]
+    refused: list[dict[str, Any]]
+
+
+def _office_publish_scan(workspaces: list[Workspace]) -> OfficePublishScan:
     """Mission Office artifact family: office.json + active actor files for
     surfaces whose workspace belongs to this realm. ``archive/``,
     ``conflicts/`` and the never-synced baseline are all excluded (only
@@ -986,19 +1036,48 @@ def _office_artifacts(workspaces: list[Workspace]) -> list[RealmSyncArtifact]:
     subtree wholesale (see ``publish_realm_sync``), so actor removals/archives
     propagate as absences; pull applies the per-actor 3-way baseline merge via
     ``office_sync.apply_office_pull``.
+
+    A workspace whose actor directory does not fully read publishes NOTHING and
+    is refused typed instead. That is the whole point of the scan: publish
+    copies actor FILES verbatim, so the undecodable one travels, and "removals
+    propagate as absences" then turns every peer's pull into a desk removal for
+    an actor whose file merely would not open here. Dropping the workspace from
+    the subtree is safe where dropping one actor is not — a pull only classifies
+    the office directories the subtree actually contains.
     """
 
     from .office_store import OfficeStore
+    from .office_sync import OfficeSyncRefusal
 
     workspace_ids = {ws.id for ws in workspaces}
     store = OfficeStore()
     artifacts: list[RealmSyncArtifact] = []
+    persona_ids: list[str] = []
+    refused: list[dict[str, Any]] = []
     for workspace_token in store.list_workspaces():
         try:
             surface = store.get_surface(workspace_token)
-        except Exception:
+        except Exception as exc:  # noqa: BLE001 — accounted, never silent
+            # Cannot be realm-filtered: the workspace id lives INSIDE the file
+            # that would not parse, so this row names the store token and is
+            # reported to whoever publishes. Silence here published an empty
+            # office for a surface that exists.
+            refused.append(
+                {
+                    "workspace_id": str(workspace_token),
+                    "reason": "surface_unreadable",
+                    "error": type(exc).__name__,
+                }
+            )
             continue
         if surface.workspace_id not in workspace_ids:
+            continue
+        # ``scan_actors``, not ``list_actors``: the thin view answers "these are
+        # the actors" for a directory it only partly read.
+        scan = store.scan_actors(workspace_token)
+        refusal = OfficeSyncRefusal.for_scan(surface.workspace_id, scan)
+        if refusal is not None:
+            refused.append(refusal.as_dict())
             continue
         ws_token = _safe_token(workspace_token)
         surface_path = paths.office_surface_path(workspace_token)
@@ -1022,29 +1101,28 @@ def _office_artifacts(workspaces: list[Workspace]) -> list[RealmSyncArtifact]:
                         destination=actor_path,
                     )
                 )
-    return artifacts
+        for actor in scan.actors:
+            if actor.persona_id and actor.persona_id not in persona_ids:
+                persona_ids.append(actor.persona_id)
+    return OfficePublishScan(artifacts=artifacts, persona_ids=persona_ids, refused=refused)
+
+
+def _office_artifacts(workspaces: list[Workspace]) -> list[RealmSyncArtifact]:
+    """Thin view over :func:`_office_publish_scan` for callers that only want
+    the artifact rows."""
+
+    return _office_publish_scan(workspaces).artifacts
 
 
 def _office_wanted_persona_ids(workspaces: list[Workspace]) -> list[str]:
     """Persona ids referenced by office placements in this realm's workspaces
-    (plan §5's one-line union — office-only personas travel with the office)."""
+    (plan §5's one-line union — office-only personas travel with the office).
 
-    from .office_store import OfficeStore
+    Thin view over :func:`_office_publish_scan`, so a workspace whose office is
+    refused never contributes a persona id: the placement that would have needed
+    it is not travelling either."""
 
-    workspace_ids = {ws.id for ws in workspaces}
-    store = OfficeStore()
-    persona_ids: list[str] = []
-    for workspace_token in store.list_workspaces():
-        try:
-            surface = store.get_surface(workspace_token)
-        except Exception:
-            continue
-        if surface.workspace_id not in workspace_ids:
-            continue
-        for actor in store.list_actors(workspace_token):
-            if actor.persona_id and actor.persona_id not in persona_ids:
-                persona_ids.append(actor.persona_id)
-    return persona_ids
+    return _office_publish_scan(workspaces).persona_ids
 
 
 def _published_profile_file_hashes(artifacts: list[RealmSyncArtifact]) -> dict[str, str]:

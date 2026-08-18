@@ -259,3 +259,192 @@ def test_office_wanted_persona_union():
 def test_generic_pull_loop_never_touches_office_paths():
     assert _destination_for_sync_path("store/office/ws1/office.json") is None
     assert _destination_for_sync_path("store/office/ws1/actors/dev.json") is None
+
+
+# ── ML-8b/1: the sync arms refuse rather than decide on a short list ───────
+#
+# ``OfficeStore._read_actor_dir`` skips a file it cannot decode. Publish copies
+# actor FILES verbatim, so the undecodable one travels, and "removals propagate
+# as absences" then turns every peer's pull into a desk removal for an actor
+# whose file merely would not open here. These witnesses drive the count with
+# TWO distinct values so a constant-1 (or constant-0) arm cannot fake them.
+
+
+def _blind_one_actor(ws: str, actor_key: str):
+    """Make one live actor file undecodable — an AV quarantine stub, a
+    half-flushed write, a disk error. The row is still THERE; it just cannot be
+    read, which is the state ``list_actors`` reports as "absent"."""
+
+    path = paths.office_actor_path(ws, actor_key)
+    assert path.exists()
+    path.write_text("{truncated", encoding="utf-8")
+    return path
+
+
+def _office_relative_paths(realm_id: str) -> list[str]:
+    return [
+        a.relative_path
+        for a in resolve_realm_sync_artifacts(realm_id)
+        if a.kind in ("office", "office_actor")
+    ]
+
+
+def _resolve_office_refusals(realm_id: str) -> list[dict]:
+    from agent_runtime.realm_sync import _resolve_artifacts_with_projection
+
+    return list(_resolve_artifacts_with_projection(realm_id).office_refused)
+
+
+def test_a_workspace_with_an_unreadable_actor_file_refuses_realm_publish_typed():
+    """THE publish-side witness.
+
+    *Probed:* the typed reason and its COUNT (driven 1 then 2), that the
+    workspace contributes ZERO published office artifacts, and that the baseline
+    recorder was called and carried no key for that workspace.
+
+    *Mutation:* swap the arms back to the thin ``list_actors`` view
+    (``ActorScan(store.list_actors(ws), 0)``). The mutant cannot mint a reason
+    from a count it never took, and it publishes the workspace's artifacts —
+    the recorder convicts it on both.
+    """
+
+    from agent_runtime import office_sync
+    from agent_runtime.office_sync import SYNC_UNKNOWABLE
+
+    realm_id, ws = _make_realm_workspace()
+    store = OfficeStore()
+    store.upsert_actor(ws, _payload("dev"))
+    store.upsert_actor(ws, _payload("edu_tutor"))
+    store.upsert_actor(ws, _payload("qa_lead"))
+    # Readable state first: this workspace really does publish, so the refusal
+    # below is a change of answer and not a fixture that never published.
+    assert f"store/office/{ws}/actors/dev.json" in _office_relative_paths(realm_id)
+
+    for driven, keys in ((1, ["dev"]), (2, ["dev", "edu_tutor"])):
+        for key in keys:
+            _blind_one_actor(ws, key)
+
+        refused = _resolve_office_refusals(realm_id)
+        assert [row["workspace_id"] for row in refused] == [ws], refused
+        assert refused[0]["reason"] == SYNC_UNKNOWABLE
+        assert refused[0]["unreadable"] == driven, refused
+
+        # Zero publish writes for this workspace: no artifact rows at all.
+        assert _office_relative_paths(realm_id) == [], driven
+
+        # ... and the baseline arm records nothing for it either. The recorder
+        # proves the write HAPPENED and simply carried no key for this
+        # workspace — an absence caused by a refusal, not by a crash.
+        handed: list[dict[str, str]] = []
+        original = office_sync.write_office_baseline
+
+        def _recording_write(realm, entries, _o=original, _h=handed):
+            _h.append(dict(entries))
+            _o(realm, entries)
+
+        office_sync.write_office_baseline = _recording_write
+        try:
+            summary = update_office_baseline_after_sync(realm_id, [ws])
+        finally:
+            office_sync.write_office_baseline = original
+        assert len(handed) == 1, handed
+        assert [k for k in handed[0] if k.startswith(f"{ws}:")] == [], handed
+        assert summary.recorded == []
+        assert summary.refused == [
+            {"workspace_id": ws, "reason": SYNC_UNKNOWABLE, "unreadable": driven}
+        ]
+
+
+def test_a_readable_workspace_still_publishes_beside_a_refused_one():
+    """The scope boundary: the refusal is per-workspace, never global.
+
+    An arm that froze the whole realm on one bad file would be a worse failure
+    than the one being prevented, and would get deleted. Neither
+    refuse-everywhere nor refuse-nowhere passes this pair with the witness above.
+    """
+
+    realm_id, ws = _make_realm_workspace()
+    other = WorkspaceStore().create(name="WS2", realm_id=realm_id)
+    realm = RealmStore().get(realm_id)
+    realm.workspace_ids.append(other.id)
+    RealmStore().save(realm)
+
+    store = OfficeStore()
+    store.upsert_actor(ws, _payload("dev"))
+    store.upsert_actor(other.id, _payload("edu_tutor"))
+    _blind_one_actor(ws, "dev")
+
+    published = _office_relative_paths(realm_id)
+    assert f"store/office/{other.id}/actors/edu_tutor.json" in published
+    assert not any(p.startswith(f"store/office/{ws}/") for p in published), published
+
+    summary = update_office_baseline_after_sync(realm_id, [ws, other.id])
+    assert summary.recorded == [other.id]
+    assert [row["workspace_id"] for row in summary.refused] == [ws]
+    baseline = read_office_baseline(realm_id)
+    assert f"{other.id}:actor:edu_tutor" in baseline
+    assert not any(k.startswith(f"{ws}:") for k in baseline)
+
+
+def test_a_refused_workspace_pins_no_persona_definitions():
+    """One scan, one answer. The persona ids a publish PINS and the office
+    artifacts it writes used to be two independent walks; a workspace excluded
+    from one but not the other pins a definition for a placement that is not
+    travelling."""
+
+    realm_id, ws = _make_realm_workspace()
+    store = OfficeStore()
+    store.upsert_actor(ws, _payload("edu_tutor"))
+    workspaces = [WorkspaceStore().get(ws)]
+    assert "edu_tutor" in _office_wanted_persona_ids(workspaces)
+
+    _blind_one_actor(ws, "edu_tutor")
+    # All three answers have to move TOGETHER or the coherence claim is empty:
+    # the workspace is refused, so neither its artifacts nor its persona pins
+    # travel. Asserting only the empty persona list would pass under the
+    # ``list_actors`` mutant as well — that loses the row either way.
+    assert [row["workspace_id"] for row in _resolve_office_refusals(realm_id)] == [ws]
+    assert _office_wanted_persona_ids(workspaces) == []
+    assert _office_relative_paths(realm_id) == []
+
+
+def test_a_workspace_with_an_unreadable_actor_file_converges_nothing_on_pull(tmp_path):
+    """THE compare-arm witness: the local half has to be knowable BEFORE the
+    three-way classifier reads a missing local row as a local delete.
+
+    *Probed:* the typed ``unknowable`` row and its driven count (1 then 2), and
+    that the pull took no decision at all for that workspace — the remote actor
+    is neither adopted nor is the local one archived.
+
+    *Mutation:* restore ``store.list_actors(workspace_id)`` for the local read.
+    The mutant classifies ``dev`` as locally absent, adopts the remote copy over
+    the file it could not read, and reports it as adopted — the counts red.
+    """
+
+    from agent_runtime.office_sync import SYNC_UNKNOWABLE
+
+    realm_id, ws = _make_realm_workspace()
+    store = OfficeStore()
+    store.upsert_actor(ws, _payload("dev"))
+    store.upsert_actor(ws, _payload("edu_tutor"))
+    subtree = tmp_path / "subtree"
+    _write_remote_office(subtree, ws, [_remote_actor(ws, "dev", x=9.0)])
+
+    for driven, keys in ((1, ["dev"]), (2, ["dev", "edu_tutor"])):
+        for key in keys:
+            _blind_one_actor(ws, key)
+        summary = apply_office_pull(realm_id, subtree)
+        assert summary.unknowable == [
+            {"workspace_id": ws, "reason": SYNC_UNKNOWABLE, "unreadable": driven}
+        ], summary.as_dict()
+        assert summary.workspaces == []
+        assert (
+            summary.adopted,
+            summary.converged,
+            summary.kept_local,
+            summary.archived,
+            summary.conflicts,
+        ) == (0, 0, 0, 0, 0), summary.as_dict()
+        # The unreadable file is left exactly as found, for an operator to repair.
+        assert paths.office_actor_path(ws, "dev").read_text(encoding="utf-8") == "{truncated"
+        assert not paths.office_conflict_path(ws, "dev").exists()

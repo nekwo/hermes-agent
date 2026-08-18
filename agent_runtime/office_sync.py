@@ -27,9 +27,78 @@ from utils import atomic_json_write
 from . import office_models, paths
 from .events import EventLog
 from .models import OfficeActor, OfficeSurface
-from .office_store import OfficeStore, _read_json
+from .office_store import ActorScan, OfficeStore, _read_json
 from .serde import from_jsonable, to_jsonable
 from .sync_merge import PullAction, classify_three_way_pull
+
+#: The one word every office sync arm spends when it cannot READ the world it
+#: was asked to decide about. Minted in exactly ONE place
+#: (:meth:`OfficeSyncRefusal.for_scan`) so no arm can quietly reuse another
+#: arm's sentence for a condition it does not describe.
+SYNC_UNKNOWABLE = "sync_unknowable"
+
+
+@dataclass(frozen=True, slots=True)
+class OfficeSyncRefusal:
+    """One workspace's sync arm refusing rather than deciding on a short list.
+
+    ``OfficeStore._read_actor_dir`` skips a file it cannot decode and returns
+    the rest, so every arm reading ``list_actors`` received a SHORTER world that
+    described itself as complete. For a reader that is a wrong number; for these
+    two arms it is worse, because both of them are writers:
+
+    * publish copies the actor FILES verbatim, so the undecodable file travels —
+      and every peer's :func:`apply_office_pull` then finds an actor key present
+      locally, absent from the remote map it could decode, and ARCHIVES it. One
+      quarantined file on one member's disk becomes a desk removal on every
+      other member's.
+    * the pull's compare arm reads the LOCAL actors to classify; an actor whose
+      file will not decode arrives as "locally absent", which is exactly the
+      input the three-way classifier reads as a local delete.
+
+    So the arm refuses this workspace and says how many rows it could not read.
+    Per-workspace, never global: unreadability in one office says nothing about
+    the next one, and a refusal that froze the whole realm would be a worse
+    failure than the one being prevented — the bystander rule the class-key
+    fence already spends (``test_an_unreadable_sibling_does_not_refuse_the_
+    writes_it_cannot_be_about``).
+    """
+
+    workspace_id: str
+    unreadable: int
+    reason: str = SYNC_UNKNOWABLE
+
+    @classmethod
+    def for_scan(cls, workspace_id: str, scan: ActorScan) -> "OfficeSyncRefusal | None":
+        """THE mint. ``None`` means the world was fully readable — so an arm can
+        neither report a refusal it did not earn nor default-construct one that
+        swallows the count."""
+
+        if not scan.unreadable:
+            return None
+        return cls(workspace_id=workspace_id, unreadable=scan.unreadable)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "workspace_id": self.workspace_id,
+            "reason": self.reason,
+            "unreadable": self.unreadable,
+        }
+
+
+@dataclass(slots=True)
+class OfficeBaselineSummary:
+    """What the publish-side baseline arm actually recorded, and what it would
+    not. Returned rather than logged because the caller publishes on it."""
+
+    recorded: list[str] = None  # type: ignore[assignment]
+    refused: list[dict[str, Any]] = None  # type: ignore[assignment]
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "recorded": list(self.recorded or []),
+            "refused": list(self.refused or []),
+        }
 
 
 # --- baseline sidecar (never synced, never published) --------------------
@@ -67,22 +136,44 @@ def _surface_key(workspace_id: str) -> str:
 # --- publish baseline update ---------------------------------------------
 
 
-def update_office_baseline_after_sync(realm_id: str, workspace_ids: list[str]) -> None:
+def update_office_baseline_after_sync(realm_id: str, workspace_ids: list[str]) -> OfficeBaselineSummary:
     """Record H for every surface + active actor of the given workspaces as the
-    new baseline (called after a successful publish OR pull)."""
+    new baseline (called after a successful publish OR pull).
+
+    A workspace whose actor directory does not fully READ is REFUSED here rather
+    than recorded short. The baseline is the answer to "what did I last
+    publish"; writing it from a list that silently lost a row states that the
+    row was never published, and the very next pull reads that absence as the
+    peer having deleted the desk. The strip-then-rewrite is therefore
+    per-workspace: a refused workspace keeps the rows it already had, so the
+    refusal costs the operator a stale baseline (repairable) instead of a wiped
+    one (a delete-shaped lie).
+    """
 
     store = OfficeStore()
     baseline = read_office_baseline(realm_id)
-    prefixes = tuple(f"{workspace_id}:" for workspace_id in workspace_ids)
-    baseline = {k: v for k, v in baseline.items() if not k.startswith(prefixes)}
+    summary = OfficeBaselineSummary(recorded=[], refused=[])
     for workspace_id in workspace_ids:
-        if not store.surface_exists(workspace_id):
+        exists = store.surface_exists(workspace_id)
+        # ``scan_actors``, not ``list_actors``: the thin list view drops the
+        # files it could not decode, which is precisely the fact this arm has to
+        # know before it writes a completeness claim.
+        scan = store.scan_actors(workspace_id) if exists else ActorScan([], 0)
+        refusal = OfficeSyncRefusal.for_scan(workspace_id, scan)
+        if refusal is not None:
+            summary.refused.append(refusal.as_dict())
+            continue
+        prefix = f"{workspace_id}:"
+        baseline = {k: v for k, v in baseline.items() if not k.startswith(prefix)}
+        if not exists:
             continue
         surface = store.get_surface(workspace_id)
         baseline[_surface_key(workspace_id)] = office_models.office_content_hash(surface)
-        for actor in store.list_actors(workspace_id):
+        for actor in scan.actors:
             baseline[_actor_key(workspace_id, actor.actor_key)] = office_models.office_content_hash(actor)
+        summary.recorded.append(workspace_id)
     write_office_baseline(realm_id, baseline)
+    return summary
 
 
 # --- pull application ------------------------------------------------------
@@ -100,6 +191,12 @@ class OfficePullSummary:
     #: machine-shaped WIRING value — a ``backing_profile`` holding an absolute
     #: path, say). Per-entity isolation: one bad actor never aborts a pull.
     refused: list[dict[str, str]] = None  # type: ignore[assignment]
+    #: Workspaces whose LOCAL actor directory would not fully read, so the
+    #: compare arm declined to classify them at all. A different fact from
+    #: ``refused`` (the door turned that content away) and it keeps its own
+    #: word: nothing here was judged, so nothing here may be reported as kept,
+    #: adopted, or archived.
+    unknowable: list[dict[str, Any]] = None  # type: ignore[assignment]
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -110,6 +207,7 @@ class OfficePullSummary:
             "conflicts": self.conflicts,
             "workspaces": list(self.workspaces or []),
             "refused": list(self.refused or []),
+            "unknowable": list(self.unknowable or []),
         }
 
 
@@ -171,7 +269,7 @@ def apply_office_pull(realm_id: str, subtree: Path, *, event_log: EventLog | Non
 
     store = OfficeStore(event_log=event_log)
     baseline = read_office_baseline(realm_id)
-    summary = OfficePullSummary(workspaces=[], refused=[])
+    summary = OfficePullSummary(workspaces=[], refused=[], unknowable=[])
     office_root = subtree / "store" / "office"
     if not office_root.exists():
         return summary
@@ -181,6 +279,17 @@ def apply_office_pull(realm_id: str, subtree: Path, *, event_log: EventLog | Non
         if remote_surface is None:
             continue
         workspace_id = remote_surface.workspace_id
+        # The LOCAL half has to be knowable before any decision is taken about
+        # it. ``scan_actors`` rather than ``list_actors``: an actor whose file
+        # will not decode is dropped by the thin view, reaches the classifier
+        # below as ``local_hash=None``, and is then indistinguishable from an
+        # actor the member deleted — so the pull would either adopt over it or
+        # archive it. Refuse the workspace, keep the count, judge nothing.
+        local_scan = store.scan_actors(workspace_id) if store.surface_exists(workspace_id) else ActorScan([], 0)
+        unknowable = OfficeSyncRefusal.for_scan(workspace_id, local_scan)
+        if unknowable is not None:
+            summary.unknowable.append(unknowable.as_dict())
+            continue
         # Admission scan (defect (b), 2026-07-25): office files are excluded from
         # the generic pull loop, so ``_assert_no_secret_artifacts`` never saw
         # them. A surface that will not pass the door refuses WHOLE; a single bad
@@ -207,7 +316,10 @@ def apply_office_pull(realm_id: str, subtree: Path, *, event_log: EventLog | Non
         archived_keys: set[str] = set()
         if local_surface is not None:
             archived_keys = set(local_surface.archived_actor_keys)
-            for actor in store.list_actors(workspace_id):
+            # The scan taken above, not a second read: one authority for "what
+            # this workspace locally HAS", so the completeness the gate checked
+            # and the rows the merge classifies cannot come apart.
+            for actor in local_scan.actors:
                 local_actors[actor.actor_key] = actor
 
         # Surface def: file-granular merge (keep-local-wins on both-changed for
