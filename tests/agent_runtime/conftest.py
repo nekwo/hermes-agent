@@ -104,6 +104,27 @@ def reset_profile_runner_runtime_resolve_cache():
 
 
 @pytest.fixture(autouse=True)
+def reset_core_cache_fingerprint_home():
+    """Keep the core cache's captured HOME from crossing test boundaries.
+
+    ``core_cache.resolved_fingerprint_home`` is captured ONCE per process on
+    purpose — that is what makes the input closure independent of the
+    ``HERMES_HOME`` a persona scope exports mid-build. The per-test environment
+    sandbox moves ``HERMES_HOME`` between cases, so without this a capture taken
+    in case 1 would answer case 2 through a directory pytest has already deleted:
+    a fingerprint that is stable for the wrong reason, and a cache that could
+    "hit" across two unrelated roots. Process-global state gets a process-global
+    reset — the same argument as the memo above.
+    """
+
+    from agent_runtime.core_cache import reset_fingerprint_home
+
+    reset_fingerprint_home()
+    yield
+    reset_fingerprint_home()
+
+
+@pytest.fixture(autouse=True)
 def isolate_agent_runtime_root(tmp_path, monkeypatch):
     """Pin this package's runtime root into ``tmp_path``.
 

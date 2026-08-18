@@ -75,7 +75,11 @@ end, inverted. Three mitigations are load-bearing, not decorative:
    resolves through the SAME path authority the projection reads through
    (``paths.store_root``, ``running_work_store_paths``,
    ``chat_session_db_path``, ``_get_profiles_root``, ``get_all_skills_dirs``).
-   No second list free to drift.
+   No second list free to drift. Those authorities are asked under a home this
+   process resolved ONCE (:func:`resolved_fingerprint_home`) rather than under
+   the ambient ``HERMES_HOME`` the build itself exports per persona — see that
+   constant for why "one resolution" and not merely "the head home" is what
+   makes the closure a function of the store.
 2. **The equivalence golden** (``test_core_fingerprint_cache.py`` test 7) reds
    a gap inside the fixture matrix: for one fingerprint the cache-served core
    must equal the rebuilt core field-for-field.
@@ -176,6 +180,7 @@ import logging
 import os
 import stat
 import threading
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable, Iterator, NamedTuple
 
@@ -591,6 +596,119 @@ def _receipt_fingerprint_refused(*, scope: str, root: Any, bound: int) -> None:
     )
 
 
+# --------------------------------------------------------------------------- #
+# The home this process fingerprints through (MC-2 / P3)
+# --------------------------------------------------------------------------- #
+#: Resolved ONCE per process, then pinned for the length of every walk.
+#:
+#: WHAT IT FIXES. Four of the seven classes below bottom out in
+#: ``hermes_constants.get_hermes_home()``, whose ladder is the context-local
+#: override → ``os.environ["HERMES_HOME"]`` → the platform default. The BUILD
+#: ITSELF exports that variable: the ``agents_readiness`` section runs
+#: ``profile_readiness.profile_readiness_for_persona`` inside
+#: ``profile_context.persona_profile_context``, which sets the context-local
+#: override AND writes ``os.environ["HERMES_HOME"]`` process-globally for the
+#: length of a per-persona scope. A consult on ANOTHER THREAD — a one-shot
+#: hydrate, a status probe, the hub — therefore computed its closure over
+#: whichever profile happened to be exported at that instant. Measured in the
+#: field 2026-08-18: ``inputs=24344`` and ``inputs=23107`` from ONE process, over
+#: ONE store, thirteen seconds apart. A non-filesystem input inside the closure,
+#: which is the thing §6.1's bet says must not exist.
+#:
+#: WHY "RESOLVE THROUGH THE HEAD" IS NOT ON ITS OWN THE FIX. This is the whole
+#: soundness argument, so it lives here rather than in a commit message.
+#: :func:`hermes_constants.get_hermes_head_home` FALLS BACK to
+#: ``get_hermes_home()`` whenever no head authority is present — and under an
+#: active persona override that fallback IS the override. Worse, the authority it
+#: consults first is a ContextVar, and ContextVars do not cross a thread
+#: boundary: the head ``persona_profile_context`` records is invisible to the
+#: very thread the divergence was measured on, so there the head degenerates to
+#: the flipped ambient home. Resolving through the head is NECESSARY and NOT
+#: SUFFICIENT. What makes the closure pure is taking that resolution ONCE — at
+#: the first fingerprint of the process, which on every real lane is the boot
+#: consult, before any persona scope in this process can have run — and pinning
+#: it for every walk afterwards.
+#:
+#: THE RESIDUAL, named rather than discovered later. A process whose FIRST
+#: fingerprint is taken while a persona scope is already live captures that
+#: scope's home and pins it. That is not silent: ``write_back`` records
+#: ``fingerprint_home`` in the sidecar and a later boot judging against it
+#: demotes ``home_mismatch`` (see the channel table), which is exactly the field
+#: signal that a capture was taken too late.
+_fingerprint_home_lock = threading.Lock()
+_fingerprint_home: tuple[Path, bool] | None = None
+
+
+def resolved_fingerprint_home() -> tuple[Path, bool]:
+    """``(home, authoritative)`` for this process — captured once, then frozen.
+
+    ``authoritative`` is :func:`hermes_constants.hermes_head_home_is_authoritative`
+    as it read AT CAPTURE TIME. ``False`` means the head had degenerated to the
+    ambient resolution, so the recorded home is only as good as the moment it was
+    taken. That is a fact a demote should be able to name, which is why it is
+    persisted beside the home instead of dropped.
+    """
+
+    global _fingerprint_home
+    with _fingerprint_home_lock:
+        if _fingerprint_home is None:
+            from hermes_constants import (
+                get_hermes_head_home,
+                hermes_head_home_is_authoritative,
+            )
+
+            _fingerprint_home = (
+                Path(get_hermes_head_home()),
+                bool(hermes_head_home_is_authoritative()),
+            )
+        return _fingerprint_home
+
+
+def reset_fingerprint_home() -> None:
+    """Forget the captured home, as a fresh process would. Tests only.
+
+    Its own function rather than only a line inside
+    :func:`reset_process_state` because the per-test environment sandbox moves
+    ``HERMES_HOME`` between cases, and a capture frozen from case 1 would answer
+    case 2 with a directory pytest has already deleted — a fingerprint that is
+    stable for the wrong reason. The ``tests/agent_runtime`` conftest drops it
+    autouse, the same way it drops the profile-runner resolve memo.
+    """
+
+    global _fingerprint_home
+    with _fingerprint_home_lock:
+        _fingerprint_home = None
+
+
+@contextmanager
+def _pinned_to_fingerprint_home() -> Iterator[None]:
+    """Resolve inside this block through the captured home, not the ambient one.
+
+    The mechanism is :func:`hermes_constants.set_hermes_home_override` — the same
+    context-local override ``persona_profile_context`` installs, applied in the
+    opposite direction and only for the length of a stat. Deliberately NOT a
+    hand-composed ``home / "config.yaml"`` at each site: every class below keeps
+    resolving through its OWN path authority, which is §6.1's first mitigation
+    ("no second list free to drift") and is precisely the property a second copy
+    of a path rule would give up. The override is context-local by construction,
+    so pinning the walking thread cannot perturb a persona turn running beside
+    it.
+
+    Applied PER CLASS rather than around the whole walk, so each class states why
+    it needs the pin and each is independently falsifiable: dropping the pin from
+    one class reds that class's witness alone.
+    """
+
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    home, _authoritative = resolved_fingerprint_home()
+    token = set_hermes_home_override(home)
+    try:
+        yield
+    finally:
+        reset_hermes_home_override(token)
+
+
 def build_input_fingerprint() -> CoreFingerprint | None:
     """The stat set over EVERY input the read-model build reads.
 
@@ -600,33 +718,50 @@ def build_input_fingerprint() -> CoreFingerprint | None:
     authoritative.
 
     The seven input classes, each resolved through the authority the BUILD
-    reads through (§6.1's first mitigation — one authority, no second list):
+    reads through (§6.1's first mitigation — one authority, no second list).
+    Four of them resolve HOME-RELATIVE and are therefore taken under
+    :func:`_pinned_to_fingerprint_home`, so the answer is a function of the
+    store and of the home this process resolved once, never of the
+    ``HERMES_HOME`` the build itself exports mid-walk. Which classes are pinned
+    and which are not is part of the specification, so it is stated per class
+    rather than left to be re-derived:
 
     1. the agent-runtime store root subtree — ``paths.store_root()``, walked
        recursively so an ADDED file flips the key (offices, boards, personas,
        assignments, the event log and its rotation manifest, prompt
        observability, realm-sync baselines: everything the projection reads
-       from the store, without a name list to fall behind);
+       from the store, without a name list to fall behind). NOT pinned:
+       ``resolve_runtime`` reads ``HERMES_AGENT_RUNTIME_ROOT`` and then the ROOT
+       config, neither of which follows the profile home — measured unchanged
+       across a persona flip on both the same thread and another one;
     2. the ``running_work`` durable stores — ``running_work_store_paths()``, the
        ONE authority for them (they hang off the HERMES home, not the store
-       root, and both mutate with NO event);
+       root, and both mutate with NO event). PINNED;
     3. the chat SessionDB — ``chat_session_db_path()``, the database the CHAT
-       LANE writes, plus its WAL siblings;
+       LANE writes, plus its WAL siblings. PINNED;
     4. the profile inputs ``agents_readiness`` reads — the profiles root and,
        per profile, ``profile.yaml`` + ``config.yaml``, plus the sticky
        ``active_profile`` pointer that decides which one a bare invocation
-       resolves;
-    5. the config inputs — the ambient ``get_config_path()`` and the ROOT
-       ``harness_root_config_path()`` (two authorities in production because
-       the CLI profile redirect makes them genuinely different files);
+       resolves. NOT pinned: ``_get_profiles_root`` anchors to
+       ``get_default_hermes_root()``, which maps ``<root>/profiles/<name>`` back
+       to ``<root>``, so a profile flip resolves the SAME directory — measured;
+    5. the config inputs — ``get_config_path()``, taken PINNED (it is literally
+       ``get_hermes_home() / "config.yaml"``, so a persona scope swaps the file
+       being stat'd), and the ROOT ``harness_root_config_path()`` left ambient
+       because it anchors to the hermes root like class 4. Two authorities in
+       production because the CLI profile redirect makes them genuinely
+       different files;
     6. the skill registries — ``get_all_skills_dirs()`` (local profile skills,
        the shared canonical root, configured external roots) walked per root,
-       plus the in-repo harness-skill source root the hash comparison reads;
+       plus the in-repo harness-skill source root the hash comparison reads.
+       PINNED, and this is the class the measured 1,237-entry divergence came
+       from: index 0 is the AMBIENT home's ``skills/``;
     7. the event-rotation lane — the manifest and the resolved LIVE slice.
        Under the store root today, so class 1 covers them; stat'd explicitly
        anyway because the resolution is free to move the live slice elsewhere
        and a frozen ``events.jsonl`` entry after a rotation is exactly the
-       silent-staleness shape this whole module is against.
+       silent-staleness shape this whole module is against. NOT pinned: both
+       resolve off the store root.
     """
 
     entries: list[FingerprintEntry] = []
@@ -650,7 +785,17 @@ def build_input_fingerprint() -> CoreFingerprint | None:
     try:
         from .running_work import running_work_store_paths
 
-        store_paths = running_work_store_paths()
+        # PINNED. ``running_work._head_home`` already asks the head authority,
+        # and its docstring names this very incident class ("ambient
+        # get_hermes_home() is not an option either: it is flipped
+        # process-globally for the duration of a persona turn"). That is true and
+        # still not enough HERE: the authority it consults is a ContextVar, so on
+        # a thread that is not the one running the persona scope the recording is
+        # invisible and the head degenerates to the flipped ambient home.
+        # Measured with a scope held on another thread: the stores resolved to
+        # the OTHER profile's ``processes.json`` and ``state.db``.
+        with _pinned_to_fingerprint_home():
+            store_paths = running_work_store_paths()
     except Exception:
         return None
     if not store_paths:
@@ -664,7 +809,15 @@ def build_input_fingerprint() -> CoreFingerprint | None:
     try:
         from .chat_session_scope import chat_session_db_path
 
-        _db_entries(chat_session_db_path(), entries)
+        # PINNED, for the same cross-thread reason as class 2: the scope ladder
+        # asks ``hermes_head_home_is_authoritative()`` first — a ContextVar read
+        # — and when no rung answers it bottoms out in the ambient home. Measured
+        # with a scope held on another thread: the SessionDB resolved to the
+        # OTHER profile's ``state.db``, which is a whole different chat history
+        # inside the key.
+        with _pinned_to_fingerprint_home():
+            chat_db = chat_session_db_path()
+        _db_entries(chat_db, entries)
     except Exception:
         return None
 
@@ -697,7 +850,21 @@ def build_input_fingerprint() -> CoreFingerprint | None:
 
         from .config import harness_root_config_path
 
-        entries.append(_stat_entry(get_config_path()))
+        # PINNED: ``get_config_path()`` is ``get_hermes_home() / "config.yaml"``,
+        # so a persona scope swaps the file being stat'd.
+        #
+        # NAMED RESIDUAL, measured rather than assumed. In the standard profile
+        # layout this stat is REDUNDANT with class 4, which already enumerates
+        # every ``<profiles>/<name>/config.yaml``, so unpinning it alone does not
+        # move the digest there and no witness in this repo can kill it on its
+        # own. It is pinned anyway, because a closure's specification must not
+        # rest on one class accidentally covering another. The digest-visible
+        # half of this class's exposure is SECOND-ORDER and lands in class 6:
+        # ``agent.skill_utils.get_external_skills_dirs()`` reads this very file
+        # to decide which external skill roots exist.
+        with _pinned_to_fingerprint_home():
+            entries.append(_stat_entry(get_config_path()))
+        # NOT pinned: anchored to the hermes ROOT, like class 4.
         entries.append(_stat_entry(harness_root_config_path()))
     except Exception:
         return None
@@ -708,7 +875,19 @@ def build_input_fingerprint() -> CoreFingerprint | None:
 
         from .skill_install import harness_skill_source_root
 
-        roots = [*get_all_skills_dirs(), harness_skill_source_root()]
+        # PINNED, and this is the class the measured 1,237-entry divergence came
+        # from. ``get_all_skills_dirs()`` puts ``get_skills_dir()`` — the AMBIENT
+        # home's ``skills/`` — at index 0, so a walk taken while a persona scope
+        # is exported enumerates ANOTHER PROFILE'S ENTIRE SKILLS TREE. The
+        # external roots behind it are read out of the ambient ``config.yaml``
+        # (class 5's file), so they flip with it.
+        #
+        # The pin is what keeps ``agent/skill_utils.py`` — upstream-owned — out
+        # of this change: the resolver stays byte-identical and answers for the
+        # home this process resolved, instead of core_cache growing a second copy
+        # of its "local, then shared, then external, deduped" rule.
+        with _pinned_to_fingerprint_home():
+            roots = [*get_all_skills_dirs(), harness_skill_source_root()]
     except Exception:
         return None
     seen_roots: set[str] = set()
@@ -878,9 +1057,21 @@ def write_back(core: dict, *, fingerprint: CoreFingerprint | None = None) -> boo
         return False
     parity = payload.get("parity") if isinstance(payload.get("parity"), dict) else {}
     watermark = parity.get("watermark") if isinstance(parity.get("watermark"), dict) else {}
+    fingerprint_home, home_authoritative = resolved_fingerprint_home()
     sidecar = {
         "fingerprint": key.digest,
         "fingerprint_entries": key.count,
+        # WHICH QUESTION this key answers, not just what it answered. A digest is
+        # only comparable between two processes that resolved the same home; a
+        # pair written under one and judged under another is a DIFFERENT closure,
+        # and ``_judge_persisted_pair`` demotes it as ``home_mismatch`` rather
+        # than letting it wear the generic ``fingerprint_mismatch``. The
+        # authoritative flag rides beside it because an unauthoritative head is a
+        # fact a demote should be able to name — it means the home was the
+        # ambient resolution at capture time, so it is only as good as the moment
+        # it was taken.
+        "fingerprint_home": str(fingerprint_home),
+        "fingerprint_home_authoritative": home_authoritative,
         "build_stamp": stamp,
         "contract_versions": contract_versions(),
         # DIAGNOSTIC ONLY. Recorded so a divergence receipt can name the log
@@ -1420,7 +1611,9 @@ def reset_process_state() -> None:
     is reset here too — a case that left a streak behind would hand the next case
     a process that had already half-declared non-convergence. So is the boot
     lane's shared consult: a memo surviving into the next case would answer it
-    with the previous case's store.
+    with the previous case's store. So is the captured fingerprint home (MC-2):
+    a capture surviving into the next case would resolve its closure through the
+    previous case's home, which the sandbox has already deleted.
     """
 
     global _lane_armed, _shadow_done, _stale_served
@@ -1430,6 +1623,7 @@ def reset_process_state() -> None:
         _stale_served = False
     _reset_convergence_state()
     _drop_consult_memo()
+    reset_fingerprint_home()
 
 
 def lane_armed() -> bool:
