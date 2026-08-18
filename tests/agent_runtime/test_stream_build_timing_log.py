@@ -27,6 +27,7 @@ import agent_runtime.stream as stream_mod
 from agent_runtime.events import EventLog
 from agent_runtime.models import Event
 from agent_runtime.stream import stream_frames
+from tests.agent_runtime.stream_liveness_helpers import drain_boot_liveness
 
 _PREFIX = "snapshot_build "
 
@@ -239,7 +240,13 @@ def test_heartbeat_activity_is_sampled_on_the_cadence_not_the_build(
         delta_debounce_seconds=0.01,
         max_frames=60,
     )
-    assert next(frames)["type"] == "hydrate"
+    # Past the BOOT build's own liveness (MC-4 / P6). ``_slow_build`` slows
+    # EVERY build in the process, including the boot's, which now heartbeats
+    # on this same 0.1s cadence. This is the only case in the file that can
+    # see them — the other four run at 60s, which is also why the committed
+    # frame goldens are unaffected. Dropped rather than measured, so
+    # ``activities[0]`` below is still the DELTA build's first sample.
+    assert drain_boot_liveness(frames)["type"] == "hydrate"
     capture_build_log.clear()
 
     log = EventLog()

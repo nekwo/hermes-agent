@@ -36,6 +36,7 @@ import pytest
 
 from agent_runtime import core_cache
 from agent_runtime.stream import stream_frames
+from tests.agent_runtime.stream_liveness_helpers import drain_boot_liveness
 
 #: A marker the real builder can never produce, so "the stale frame arrived" is
 #: never confusable with "the authoritative build happened to look like this".
@@ -166,10 +167,12 @@ def test_a_room_with_no_painter_does_not_even_ask_for_the_stale_core(
         "an office-only room consumed the boot's stale core; the painting lane "
         f"behind it gets nothing (asked by: {spy.callers})"
     )
-    # The budget was NOT the reason: two frames of room, and the first is
-    # already authoritative.
-    assert frames[0]["type"] == "hydrate"
-    assert not _is_stale_frame(frames[0])
+    # The budget was NOT the reason: two frames of room, and the first CORE
+    # frame is already authoritative. Read past the boot build's own liveness,
+    # which at this 0.05s cadence precedes the hydrate (MC-4 arm 2).
+    first_core = drain_boot_liveness(frames)
+    assert first_core["type"] == "hydrate"
+    assert not _is_stale_frame(first_core)
 
 
 # --------------------------------------------------------------------------- #

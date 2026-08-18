@@ -12,6 +12,7 @@ import importlib.util
 from types import SimpleNamespace
 
 from agent_runtime.events import EventLog
+from tests.agent_runtime.stream_liveness_helpers import drain_boot_liveness
 
 
 def test_blueprint_save_command_is_removed_with_stage_graph():
@@ -130,7 +131,10 @@ def test_stream_backstop_reconciles_eventless_write():
     realm = RealmStore().create(name="Ghost Realm")
 
     frames = stream_frames(poll_interval_seconds=0.01, heartbeat_interval_seconds=0.05)
-    assert next(frames)["type"] == "hydrate"
+    # Past the boot build's own liveness (MC-4 / P6): at a sub-second cadence
+    # the boot build heartbeats before its hydrate. Identified by the activity
+    # block, never by position.
+    assert drain_boot_liveness(frames)["type"] == "hydrate"
 
     # Simulate the violation: flip the active pointer with a RAW file write —
     # no store, no event, offset unchanged.
@@ -231,7 +235,10 @@ def test_eventless_write_coincident_with_evented_batch_still_converges():
     RealmStore().set_active(realm_a.id)
 
     frames = stream_frames(poll_interval_seconds=0.01, heartbeat_interval_seconds=0.05)
-    assert next(frames)["type"] == "hydrate"
+    # Past the boot build's own liveness (MC-4 / P6): at a sub-second cadence
+    # the boot build heartbeats before its hydrate. Identified by the activity
+    # block, never by position.
+    assert drain_boot_liveness(frames)["type"] == "hydrate"
 
     # Evented mutation AND a raw rule-violating write land in the same window.
     RealmStore().set_active(realm_b.id)
@@ -261,7 +268,10 @@ def test_stream_backstop_stays_quiet_without_mutations():
     from agent_runtime.stream import stream_frames
 
     frames = stream_frames(poll_interval_seconds=0.01, heartbeat_interval_seconds=0.03)
-    assert next(frames)["type"] == "hydrate"
+    # Past the boot build's own liveness (MC-4 / P6): at a sub-second cadence
+    # the boot build heartbeats before its hydrate. Identified by the activity
+    # block, never by position.
+    assert drain_boot_liveness(frames)["type"] == "hydrate"
     kinds = {next(frames)["type"] for _ in range(3)}
     frames.close()
     assert kinds == {"heartbeat"}

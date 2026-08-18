@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import agent_runtime.stream as stream_mod
+from tests.agent_runtime.stream_liveness_helpers import drain_boot_liveness
 from agent_runtime.events import EventLog
 from agent_runtime.models import Event
 from agent_runtime.stream import stream_frames
@@ -145,7 +146,12 @@ def test_slow_full_core_build_emits_applied_watermark_heartbeats(
         heartbeat_interval_seconds=0.02,
         delta_debounce_seconds=0,
     )
-    hydrate = next(frames)
+    # Past the boot build's own liveness (MC-4 / P6): at this 0.02s cadence the
+    # boot build heartbeats before its hydrate, and taking ``next(frames)`` as
+    # the hydrate made this case ORDER-DEPENDENT — green alone on a warm build
+    # that beat the interval, red in a batch run where it did not.
+    hydrate = drain_boot_liveness(frames)
+    assert hydrate["type"] == "hydrate", hydrate["type"]
     applied_offset = hydrate["watermark"]["event_offset"]
 
     real_build = stream_mod.build_snapshot

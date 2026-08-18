@@ -490,7 +490,24 @@ class _SnapshotBuildJob:
     ``build_snapshot``'s existing coalescing contract.
     """
 
-    def __init__(self, *, caller: str = DEFAULT_STREAM_CALLER) -> None:
+    def __init__(
+        self,
+        *,
+        caller: str = DEFAULT_STREAM_CALLER,
+        accept_inflight: bool = False,
+    ) -> None:
+        #: Whether this job may RIDE a build that is already running rather than
+        #: waiting for the next one. Load-bearing for exactly one caller and
+        #: default-off for every other, which is why it is a field rather than a
+        #: constant: the boot hydrate is the one place ``build_snapshot`` names
+        #: as safe for it (its frame carries its own watermark and the tail
+        #: resumes from exactly that offset, so nothing is lost — see that
+        #: function's own argument). Moving the boot build onto this job WITHOUT
+        #: carrying the flag would have made every boot pay a second full build
+        #: behind the serve's prewarm, silently: the receipt would still say
+        #: ``reason=hydrate`` and only a second ``role=led`` line per boot would
+        #: have shown it.
+        self.accept_inflight = bool(accept_inflight)
         self.done = threading.Event()
         self.snapshot: dict[str, Any] | None = None
         self.error: BaseException | None = None
@@ -509,12 +526,75 @@ class _SnapshotBuildJob:
     def run(self) -> None:
         started = time.monotonic()
         try:
-            self.snapshot = build_snapshot(build_info=self.build_info)
+            self.snapshot = build_snapshot(
+                accept_inflight=self.accept_inflight, build_info=self.build_info
+            )
         except BaseException as exc:  # re-raised on the stream worker
             self.error = exc
         finally:
             self.elapsed_ms = int((time.monotonic() - started) * 1000)
             self.done.set()
+
+
+def _build_with_liveness(
+    job: _SnapshotBuildJob,
+    *,
+    heartbeat_offset: int | None,
+    heartbeat_interval_seconds: float,
+    emit_liveness: bool = True,
+) -> Iterator[dict[str, Any]]:
+    """Run ``job`` on a daemon worker, yielding liveness until it finishes.
+
+    Shared by the two lanes that pay for a full core inside a stream: the boot
+    hydrate and an uncovered batch. It owns exactly what the two have in common
+    and nothing either of them decides — the worker, the
+    ``_SNAPSHOT_CANCEL_POLL_SECONDS`` wait, the ``request_cancelled`` probe, the
+    heartbeat cadence, and the ``snapshot_build`` activity block. Which FRAME
+    the finished build becomes and which receipt it bills stay at each call
+    site, because those are the parts that differ and folding them in would
+    have needed a discriminator argument per difference — a helper shaped like
+    a switch, which is how one loop becomes two loops wearing one name.
+
+    ``heartbeat_offset`` is the watermark to advertise, and the two callers
+    answer it differently on purpose. A batch build keeps the last APPLIED
+    offset: advertising the drained batch's future offset would make the
+    launcher infer a missed delta and start a second hydrate while this build is
+    perfectly healthy. A BOOT build has no applied core at all, so its honest
+    answer is ``None`` — ``heartbeat_frame``'s own contract, "liveness without a
+    position … must not be stamped ``0``", which every watermark-gated reader
+    would take as a real cursor at the head of the log.
+
+    Returns EARLY on cancellation, leaving ``job.done`` unset; callers re-probe
+    ``request_cancelled()`` before touching the result, exactly as they must
+    after any generator that can return without finishing.
+
+    ``emit_liveness=False`` still runs and waits for the build — it only
+    suppresses the frames. See ``_is_one_shot``.
+    """
+
+    started = time.monotonic()
+    threading.Thread(
+        target=job.run,
+        name="harness-stream-snapshot",
+        daemon=True,
+    ).start()
+    heartbeat_interval = max(0.05, float(heartbeat_interval_seconds or 0.05))
+    next_heartbeat = started + heartbeat_interval
+    while not job.done.wait(_SNAPSHOT_CANCEL_POLL_SECONDS):
+        if request_cancelled():
+            return
+        current = time.monotonic()
+        if current >= next_heartbeat:
+            if emit_liveness:
+                yield heartbeat_frame(
+                    offset=heartbeat_offset,
+                    activity={
+                        "kind": "snapshot_build",
+                        "state": "busy",
+                        "elapsed_ms": int((current - started) * 1000),
+                    },
+                )
+            next_heartbeat = current + heartbeat_interval
 
 
 def _full_core_batch_frames(
@@ -535,31 +615,13 @@ def _full_core_batch_frames(
     """
 
     job = _SnapshotBuildJob(caller=caller)
-    started = time.monotonic()
-    threading.Thread(
-        target=job.run,
-        name="harness-stream-snapshot",
-        daemon=True,
-    ).start()
-    heartbeat_interval = max(0.05, float(heartbeat_interval_seconds or 0.05))
-    next_heartbeat = started + heartbeat_interval
-    while not job.done.wait(_SNAPSHOT_CANCEL_POLL_SECONDS):
-        if request_cancelled():
-            return
-        current = time.monotonic()
-        if current >= next_heartbeat:
-            # Keep the watermark at the last APPLIED core. Advertising the
-            # drained batch's future offset here would make the launcher infer a
-            # missed delta and start a second hydrate while this build is healthy.
-            yield heartbeat_frame(
-                offset=base_offset,
-                activity={
-                    "kind": "snapshot_build",
-                    "state": "busy",
-                    "elapsed_ms": int((current - started) * 1000),
-                },
-            )
-            next_heartbeat = current + heartbeat_interval
+    # Keep the watermark at the last APPLIED core — see ``_build_with_liveness``
+    # for why this caller answers ``heartbeat_offset`` differently from the boot.
+    yield from _build_with_liveness(
+        job,
+        heartbeat_offset=base_offset,
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
+    )
     if request_cancelled():
         return
     if job.error is not None:
@@ -743,9 +805,74 @@ def stream_frames(
         emitted += 1
         if max_frames is not None and emitted >= max_frames:
             return
+    # The boot's authoritative core, built with the stream SAYING SO while it
+    # runs (MC-4 / P6, evidence A-x2). This used to be a bare synchronous
+    # ``hydrate_frame()``: on 2026-08-18 that build took 29,560 ms and the lane
+    # emitted nothing for the whole of it, so the launcher's watchdog fired
+    # ``stream_teardown cause=liveness_deadline`` 0.67 s before the frame
+    # arrived, and the finished core was delivered to a retired request and
+    # discarded with no receipt. A batch build has heartbeat through its build
+    # since ``_full_core_batch_frames`` shipped; the BOOT build — the longest one
+    # any consumer ever waits on — was the one lane that stayed silent.
+    #
+    # ``accept_inflight=True`` is carried deliberately and is the whole reason
+    # the job grew the flag: ``hydrate_frame``'s own build sets it (the serve
+    # prewarms a build right after ``ready``, and this frame is allowed to ride
+    # it because its watermark comes from the snapshot itself and the tail below
+    # resumes from exactly that offset). A job without it would make every boot
+    # wait for the prewarm and THEN pay a second full build.
+    boot_job = _SnapshotBuildJob(caller=caller, accept_inflight=True)
+    for liveness in _build_with_liveness(
+        boot_job,
+        # No applied core exists yet, so there is no position to advertise. See
+        # ``heartbeat_frame``: liveness without a position must not be stamped 0.
+        heartbeat_offset=None,
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
+        # A one-shot is answered with a CORE or with nothing — see
+        # ``_is_one_shot``. Suppressed rather than merely uncounted so the
+        # frames a one-shot consumer sees stay exactly what it asked for.
+        emit_liveness=not _is_one_shot(max_frames),
+    ):
+        # NOT counted toward ``emitted``, and this is the deliberate half of the
+        # ``max_frames`` decision. These frames are emitted while the FIRST
+        # content frame is still being built, so counting them would let a
+        # budget be spent before any core existed — a ``--max-frames 1`` request
+        # returning a heartbeat and no core. That is not hypothetical for the
+        # consumer: the launcher's forced-refresh lane
+        # (``mission_control_bridge.dart::_loadSnapshotFromStreamHydrate``, read
+        # 2026-08-18) scans stdout for a ``type == "hydrate"`` line and silently
+        # returns null when it finds none, so the refresh would no-op with no
+        # receipt. The budget counts CONTENT; the tail loop's own heartbeats
+        # below still count, because by then a core has been delivered and the
+        # consumer is being kept alive rather than kept waiting.
+        yield liveness
+    if request_cancelled():
+        return
+    if boot_job.error is not None:
+        raise boot_job.error
+    if boot_job.snapshot is None:
+        raise RuntimeError("snapshot build completed without a result")
     hydrate = hydrate_frame(
-        delta_patches=delta_patches, fold_entities=declared_entities, caller=caller
+        snapshot=boot_job.snapshot,
+        delta_patches=delta_patches,
+        fold_entities=declared_entities,
+        caller=caller,
     )
+    if boot_job.elapsed_ms is not None:
+        # The receipt ``hydrate_frame`` would have billed itself, billed here
+        # because the build moved out from under it. Byte-shaped identically —
+        # same reason, same fields, same order — and ``waited_ms`` comes from the
+        # job's own measurement, taken ON the build thread: measuring around the
+        # wait here would round every build up by as much as one
+        # ``_SNAPSHOT_CANCEL_POLL_SECONDS``, which is the exact reason
+        # ``_SnapshotBuildJob.elapsed_ms`` exists.
+        _log_snapshot_build(
+            reason="hydrate",
+            waited_ms=boot_job.elapsed_ms,
+            offset=(hydrate.get("watermark") or {}).get("event_offset"),
+            snapshot=boot_job.snapshot,
+            build_info=boot_job.build_info,
+        )
     offset = _resume_offset(hydrate)
     if offset is None:
         # Cannot resume from an unknown position. Re-baseline the client on the

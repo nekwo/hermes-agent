@@ -8,6 +8,7 @@ from hermes_time import now
 from agent_runtime.events import EventLog
 from agent_runtime.models import Event
 from agent_runtime.stream import delta_frame, hydrate_frame, stream_frames
+from tests.agent_runtime.stream_liveness_helpers import drain_boot_liveness
 
 
 def test_hydrate_frame_carries_snapshot_contract(isolate_agent_runtime_root):
@@ -54,8 +55,7 @@ def test_heartbeat_frame_carries_no_daemon_block(isolate_agent_runtime_root):
     frames = stream_frames(
         poll_interval_seconds=0.01, heartbeat_interval_seconds=0.01, max_frames=2
     )
-    first = next(frames)
-    assert first["type"] == "hydrate"
+    assert drain_boot_liveness(frames)["type"] == "hydrate"
 
     second = next(frames)
     assert second["type"] == "heartbeat"
@@ -135,7 +135,7 @@ def test_unknown_watermark_does_not_replay_the_log_as_fresh_activity(
     frames = stream_frames(
         poll_interval_seconds=0.01, heartbeat_interval_seconds=0.01, max_frames=3
     )
-    first = next(frames)
+    first = drain_boot_liveness(frames)
     assert first["type"] == "hydrate"
     assert first["watermark"]["event_offset"] is None
 
@@ -146,6 +146,11 @@ def test_unknown_watermark_does_not_replay_the_log_as_fresh_activity(
         assert frame["type"] == "heartbeat", frame["type"]
         # Liveness without a position — not a cursor at the head of the log.
         assert frame["watermark"]["event_offset"] is None
+        # The UNREADABLE-TAIL heartbeat, not the boot build's: this case is
+        # about the tailer refusing to invent a cursor, and the boot lane's
+        # liveness carries an activity block that would make it a different
+        # claim wearing the same shape.
+        assert "activity" not in frame, frame["activity"]
 
 
 def test_recovered_watermark_re_baselines_instead_of_replaying_or_gapping(
