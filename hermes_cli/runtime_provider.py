@@ -575,11 +575,28 @@ def resolve_requested_provider(requested: Optional[str] = None) -> str:
     return "auto"
 
 
+def _select_pool_entry(pool, *, persist_pool_rotation: bool):
+    """The one place resolution decides whether a selection may write.
+
+    ``persist_pool_rotation`` is threaded from :func:`resolve_runtime_provider`
+    down to every pool selection it can reach, so a caller cannot half-suppress
+    the write by hitting a different branch of the resolver. It is True for real
+    runtime consumers — round-robin's cursor IS the persisted priority order —
+    and False only for the readiness/visibility probe, which is a read (see
+    :func:`probe_runtime_provider`).
+    """
+    if persist_pool_rotation:
+        return pool.select()
+    return pool.select_without_persisting_rotation()
+
+
 def _try_resolve_from_custom_pool(
     base_url: str,
     provider_label: str,
     api_mode_override: Optional[str] = None,
     provider_name: Optional[str] = None,
+    *,
+    persist_pool_rotation: bool = True,
 ) -> Optional[Dict[str, Any]]:
     """Check if a credential pool exists for a custom endpoint and return a runtime dict if so."""
     pool_key = get_custom_provider_pool_key(base_url, provider_name=provider_name)
@@ -589,7 +606,7 @@ def _try_resolve_from_custom_pool(
         pool = load_pool(pool_key)
         if not pool.has_credentials():
             return None
-        entry = pool.select()
+        entry = _select_pool_entry(pool, persist_pool_rotation=persist_pool_rotation)
         if entry is None:
             return None
         pool_api_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
@@ -1006,6 +1023,7 @@ def _resolve_named_custom_runtime(
     requested_provider: str,
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
+    persist_pool_rotation: bool = True,
 ) -> Optional[Dict[str, Any]]:
     # Bare `provider="custom"` with an explicit base_url (e.g. propagated
     # from a `model_aliases:` direct-alias resolution) — build a runtime
@@ -1029,7 +1047,12 @@ def _resolve_named_custom_runtime(
         # Check credential pool first — mirrors the named-custom-provider path
         # so bare `provider: custom` with a configured custom_providers entry
         # also gets its api_key from the pool instead of env var fallbacks.
-        pool_result = _try_resolve_from_custom_pool(base_url, "custom", None)
+        pool_result = _try_resolve_from_custom_pool(
+            base_url,
+            "custom",
+            None,
+            persist_pool_rotation=persist_pool_rotation,
+        )
         if pool_result:
             pool_result["source"] = "direct-alias"
             return pool_result
@@ -1070,7 +1093,7 @@ def _resolve_named_custom_runtime(
         return None
 
     # Check if a credential pool exists for this custom endpoint
-    pool_result = _try_resolve_from_custom_pool(base_url, "custom", custom_provider.get("api_mode"), provider_name=custom_provider.get("name"))
+    pool_result = _try_resolve_from_custom_pool(base_url, "custom", custom_provider.get("api_mode"), provider_name=custom_provider.get("name"), persist_pool_rotation=persist_pool_rotation)
     if pool_result:
         # Propagate the model name even when using pooled credentials —
         # the pool doesn't know about the custom_providers model field.
@@ -1138,6 +1161,7 @@ def _resolve_openrouter_runtime(
     requested_provider: str,
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
+    persist_pool_rotation: bool = True,
 ) -> Dict[str, Any]:
     model_cfg = _get_model_config()
     cfg_base_url = model_cfg.get("base_url") if isinstance(model_cfg.get("base_url"), str) else ""
@@ -1255,6 +1279,7 @@ def _resolve_openrouter_runtime(
         pool_result = _try_resolve_from_custom_pool(
             base_url, effective_provider, _parse_api_mode(model_cfg.get("api_mode")),
             provider_name=requested_provider if requested_norm != "custom" else None,
+            persist_pool_rotation=persist_pool_rotation,
         )
         if pool_result:
             return pool_result
@@ -1612,8 +1637,17 @@ def resolve_runtime_provider(
     explicit_api_key: Optional[str] = None,
     explicit_base_url: Optional[str] = None,
     target_model: Optional[str] = None,
+    persist_pool_rotation: bool = True,
 ) -> Dict[str, Any]:
     """Resolve runtime provider credentials for agent execution.
+
+    persist_pool_rotation: True for every real consumer — a credential pool on
+    ``round_robin`` keeps its cursor in the persisted priority order, so a
+    selection that does not write hands the next caller the same entry. Pass
+    False ONLY from a read that discards the result; prefer the named entry
+    point :func:`probe_runtime_provider` over passing this by hand, so the
+    non-persisting choice is a decision someone made rather than a default
+    somebody inherited.
 
     target_model: Optional override for model_cfg.get("default") when
     computing provider-specific api_mode (e.g. OpenCode Zen/Go where different
@@ -1728,6 +1762,7 @@ def resolve_runtime_provider(
         requested_provider=requested_provider,
         explicit_api_key=explicit_api_key,
         explicit_base_url=explicit_base_url,
+        persist_pool_rotation=persist_pool_rotation,
     )
     if custom_runtime:
         custom_runtime["requested_provider"] = requested_provider
@@ -1766,6 +1801,7 @@ def resolve_runtime_provider(
                     requested_provider=requested_provider,
                     explicit_api_key=explicit_api_key,
                     explicit_base_url=explicit_base_url,
+                    persist_pool_rotation=persist_pool_rotation,
                 )
                 runtime["requested_provider"] = requested_provider
                 return runtime
@@ -1812,7 +1848,7 @@ def resolve_runtime_provider(
     except Exception:
         pool = None
     if pool and pool.has_credentials():
-        entry = pool.select()
+        entry = _select_pool_entry(pool, persist_pool_rotation=persist_pool_rotation)
         pool_api_key = ""
         if entry is not None:
             pool_api_key = (
@@ -2208,9 +2244,39 @@ def resolve_runtime_provider(
         requested_provider=requested_provider,
         explicit_api_key=explicit_api_key,
         explicit_base_url=explicit_base_url,
+        persist_pool_rotation=persist_pool_rotation,
     )
     runtime["requested_provider"] = requested_provider
     return runtime
+
+
+def probe_runtime_provider(
+    *,
+    requested: Optional[str] = None,
+    target_model: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Resolve credentials to LEARN whether they resolve — never to spend them.
+
+    Identical resolution to :func:`resolve_runtime_provider` (same providers,
+    same order, same typed failures), with one difference: a credential-pool
+    selection made here does not write the rotation cursor back to the
+    credential store.
+
+    This exists as a named function rather than a keyword at the call site on
+    purpose. A read that rewrites the credential store is the same class of
+    defect as a projection that records provider health while building: the
+    snapshot's readiness pass reads ``auth.json`` and is NOT allowed to move it,
+    because the file sits outside the build's declared input closure — a moved
+    ``auth.json`` on an otherwise-quiescent store is served as a false cache HIT
+    (MCF-16). Callers that intend to USE the credential must keep calling
+    :func:`resolve_runtime_provider`; the persisting default is the correct one
+    for them, and round-robin genuinely needs the write-back.
+    """
+    return resolve_runtime_provider(
+        requested=requested,
+        target_model=target_model,
+        persist_pool_rotation=False,
+    )
 
 
 def format_runtime_provider_error(error: Exception) -> str:

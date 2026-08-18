@@ -1600,6 +1600,41 @@ class CredentialPool:
                 self._unmatched_rotation_streak = 0
             return entry
 
+    def select_without_persisting_rotation(self) -> Optional[PooledCredential]:
+        """``select()`` for a READ — rotates in memory, never writes the cursor.
+
+        Readiness / visibility passes resolve a credential only to learn whether
+        one resolves at all; they throw the entry away. Under
+        ``STRATEGY_ROUND_ROBIN`` the plain ``select()`` rewrites the whole
+        credential store to advance the cursor, which makes a pure read perturb
+        an input the snapshot build reads but does not declare (MCF-16). This
+        entry point performs the IDENTICAL selection — including the in-memory
+        rotation, so a caller holding one pool still sees successive entries and
+        the strategy is not silently degraded to "always the first" — and skips
+        only the write-back.
+
+        What it deliberately does NOT suppress: cooldown expiry clears and token
+        refreshes reached through ``_available_entries``. Those carry a REAL
+        credential/state change, so their write is honest and must still land —
+        the defect being retired here is a write with nothing to write.
+
+        Two shapes considered and NOT taken, so the next reader knows why:
+        making ``_save_auth_store`` change-only (compare payload minus
+        ``updated_at``) would retire this class for every caller, but it moves
+        the credential write boundary and belongs in its own change with its own
+        mutation evidence; adding ``auth.json`` to the fingerprint closure is
+        wrong until one of those lands, and even then needs a FIELD-SELECTIVE
+        digest that excludes ``updated_at`` — a parsed digest, not a stat mask,
+        because unlike a frameless WAL (which is genuinely content-free)
+        ``auth.json``'s bytes change on every write, so masking mtime/size or
+        hashing the whole file still flips.
+        """
+        with self._lock:
+            entry = self._select_unlocked(persist_rotation=False)
+            if entry is not None:
+                self._unmatched_rotation_streak = 0
+            return entry
+
     def _available_entries(self, *, clear_expired: bool = False, refresh: bool = False) -> List[PooledCredential]:
         """Return entries not currently in exhaustion cooldown.
 
@@ -1745,7 +1780,12 @@ class CredentialPool:
         self._last_no_entries_log_at = now
         logger.info("credential pool: no available entries (all exhausted or empty)")
 
-    def _select_unlocked(self, *, refresh: bool = True) -> Optional[PooledCredential]:
+    def _select_unlocked(
+        self,
+        *,
+        refresh: bool = True,
+        persist_rotation: bool = True,
+    ) -> Optional[PooledCredential]:
         available = self._available_entries(clear_expired=True, refresh=refresh)
         if not available:
             self._current_id = None
@@ -1775,7 +1815,20 @@ class CredentialPool:
             rotated = [candidate for candidate in self._entries if candidate.id != entry.id]
             rotated.append(replace(entry, priority=len(self._entries) - 1))
             self._entries = [replace(candidate, priority=idx) for idx, candidate in enumerate(rotated)]
-            self._persist()
+            # The ONLY write on this path, and the only one that carries no
+            # credential change: round-robin's cursor lives in the persisted
+            # priority order, so a real consumer must write it back or the next
+            # ``load_pool()`` (which re-reads from disk every call) hands out the
+            # same entry forever. A readiness/visibility PROBE is a read: it
+            # discards the pool object, so the write buys nothing and costs the
+            # snapshot fingerprint a moving input it never declared (MCF-16 —
+            # ``_save_auth_store`` stamps ``updated_at`` unconditionally, so two
+            # logically identical writes still produce different bytes, and
+            # ``auth.json`` is read by the build's readiness pass while sitting
+            # OUTSIDE its input closure ⇒ a credential change on an otherwise
+            # quiescent store is served as a false cache HIT).
+            if persist_rotation:
+                self._persist()
             self._current_id = entry.id
             return self._current_unlocked() or entry
 

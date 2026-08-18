@@ -4,7 +4,7 @@ from typing import Any
 
 from hermes_cli.auth import AuthError
 from hermes_cli.runtime_environment import missing_runtime_packages_for
-from hermes_cli.runtime_provider import resolve_runtime_provider
+from hermes_cli.runtime_provider import probe_runtime_provider, resolve_runtime_provider
 
 from .machine_roots import (
     contains_path_tokens,
@@ -261,8 +261,21 @@ def _provider_issue(persona) -> tuple[str, str] | None:
 
 
 def _compute_provider_issue(resolver, provider, model) -> tuple[str, str] | None:
-    if resolver is _RUNTIME_PROVIDER_RESOLVER and provider == "openai-codex":
-        return _pooled_provider_issue(provider)
+    if resolver is _RUNTIME_PROVIDER_RESOLVER:
+        if provider == "openai-codex":
+            return _pooled_provider_issue(provider)
+        # Readiness is a READ: the resolved runtime dict is discarded below —
+        # only whether it RAISED is used. The plain resolver would nevertheless
+        # advance a round-robin credential pool and rewrite the whole credential
+        # store to persist the cursor, so an unattended build moves
+        # ``auth.json`` with no credential change. That file is read by this
+        # very pass and is NOT in the snapshot's declared input closure, so the
+        # moved bytes buy a false cache HIT rather than a rebuild (MCF-16) —
+        # the same class as the codex branch above, which already refuses to
+        # refresh during a snapshot. Route through the named non-persisting
+        # entry point; a monkeypatched resolver stands in for the whole
+        # function and is called as supplied.
+        resolver = probe_runtime_provider
     try:
         resolver(requested=provider, target_model=model)
     except AuthError as exc:
