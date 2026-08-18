@@ -1877,6 +1877,36 @@ def serve_loop(
             declarations.extend(OFFICE_SUBSCRIPTIONS.declarations())
             return accepted_fold_entities(declarations)
 
+        def _room_wants_stale_first() -> bool:
+            """Does anybody attached to the shared producer PAINT a whole core?
+
+            Same room as ``_accepted_fold_entities`` above — both lanes, read at
+            producer-build time — and deliberately the OPPOSITE operator, which
+            is the sentence worth keeping. Intersection is right there because a
+            PROMOTION must be safe for everyone fanned the frame: one subscriber
+            that cannot fold ``office_actor`` makes the promotion wrong for the
+            room. Union is right here because the stale-first hydrate is an EXTRA
+            frame that a non-painting subscriber merely ignores: the office sink
+            discards every row that is not an ``office_actor`` under its own
+            workspace, so a stale core costs it a discard and costs the painting
+            subscriber beside it the whole point of EG-3.1. One painter is enough;
+            a room of office-only sinks answers False, and the boot's single
+            stale core stays available for the argv lane the launcher is actually
+            on (measured 2026-08-18: the office subscribe attaches 0.1–0.2s
+            first, and under the old process-global one-shot it won two boots in
+            three and threw the paint away).
+
+            The predicate is membership in ``stream_fold_entities``, not its
+            values: that table is the socket STREAM lane's, one entry per
+            subscribed connection, and a stream subscriber is by construction a
+            consumer of whole hydrate/delta frames. The office registry's
+            subscribers contribute False — the union over an empty set of
+            painters is False — which is why they are not read here at all.
+            """
+
+            with lane_lock:
+                return bool(stream_fold_entities)
+
         #: Does an INJECTED source factory want the negotiated fold set? Answered
         #: once, by signature — never by calling it and catching ``TypeError``,
         #: which would swallow a TypeError raised INSIDE a zero-arg factory and
@@ -1933,6 +1963,13 @@ def serve_loop(
             """
 
             fold_entities = _accepted_fold_entities()
+            # Derived HERE, beside the fold set, for the same reason and with the
+            # same lifetime: ``StreamHub.subscribe`` restarts the producer, so
+            # every join re-derives it. That restart is what makes the boot work
+            # under the office-first ordering — the first generation is built for
+            # an office-only room and takes nothing, and the painting subscriber's
+            # own join builds the generation that does take it.
+            wants_stale_first = _room_wants_stale_first()
             if stream_source_factory is not None:
                 return (
                     stream_source_factory(fold_entities)
@@ -1961,7 +1998,9 @@ def serve_loop(
                     # build line naming a subscriber would be a lie about who
                     # pays.
                     for frame in stream_frames(
-                        fold_entities=fold_entities, caller="hub"
+                        fold_entities=fold_entities,
+                        caller="hub",
+                        wants_stale_first=wants_stale_first,
                     ):
                         # Byte-for-byte the frames ``harness stream`` writes: a
                         # subscriber folds the same hydrate/delta/patch/heartbeat

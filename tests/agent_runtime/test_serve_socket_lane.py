@@ -1570,6 +1570,159 @@ def test_a_subscriber_that_declares_nothing_is_told_the_historical_set():
         gate.set()
 
 
+# ── who the boot's ONE stale-first core is produced for (MC-4 / P6) ─────────
+#
+# The room derivation lives in a ``serve_loop`` closure
+# (``_room_wants_stale_first``), so these run the REAL loop and the REAL
+# subscribe paths. What they do NOT run is the real producer: ``_stream_source``
+# imports ``stream_frames`` from ``agent_runtime.stream`` at call time, so a
+# recorder installed there intercepts the argument the closure computed without
+# any of these cases paying for a snapshot build.
+#
+# Asserted at the producer's ARGUMENT rather than at a delivered frame, for the
+# same reason ``test_an_rpc_office_subscriber_declares_into_the_shared_producer``
+# above asserts at the factory: the office sink discards a stale hydrate either
+# way, so a frame-shaped assertion stays green against exactly the producer that
+# shipped — the one that TOOK the boot's stale core and threw it away.
+
+
+def _recording_stream_frames(monkeypatch, gate: threading.Event) -> list[dict]:
+    """Intercept the hub's real ``stream_frames`` and record its kwargs."""
+
+    from agent_runtime import stream as stream_module
+
+    recorded: list[dict] = []
+
+    def _recorder(**kwargs):
+        recorded.append(dict(kwargs))
+
+        def _generate():
+            yield {"type": "hydrate", "watermark": {"event_offset": 0}}
+            while not gate.is_set():
+                time.sleep(0.005)
+                yield {"type": "heartbeat", "watermark": {"event_offset": 0}}
+
+        return _generate()
+
+    monkeypatch.setattr(stream_module, "stream_frames", _recorder)
+    return recorded
+
+
+def test_an_office_only_room_does_not_ask_the_producer_for_a_stale_paint(monkeypatch):
+    """A-x1's measured defect, at the seam that decides it.
+
+    The RPC office subscribe attaches 0.1-0.2s before the launcher asks for
+    anything, and it is what starts the hub producer. Under the process-global
+    one-shot that producer consumed the boot's single stale core and
+    ``office_patch_sink`` discarded it — two boots in three on 2026-08-18. A
+    room of office-only sinks must answer False so the paint survives for the
+    lane that shows it to somebody.
+    """
+
+    gate = threading.Event()
+    recorded = _recording_stream_frames(monkeypatch, gate)
+    try:
+        with running_serve() as handle:
+            assert handle.ready["socket"]["outcome"] == "listening"
+            with _rpc_office_subscription("ws_stale_none", connection_key="rpc-1"):
+                deadline = time.monotonic() + WAIT
+                while not recorded and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert recorded, "the office subscribe never built a producer"
+                assert recorded[0]["caller"] == "hub"
+                assert recorded[0]["wants_stale_first"] is False, recorded[0]
+    finally:
+        gate.set()
+
+
+def test_a_stream_subscriber_joining_AFTER_the_office_lane_still_gets_the_paint(
+    monkeypatch,
+):
+    """The attach ORDER the field actually produces, and the harder half.
+
+    Office first, painter second — the ordering that lost on 2026-08-18. The
+    producer the office subscribe built takes nothing; the painting subscriber's
+    own join restarts it (``StreamHub.subscribe`` does, by contract) and THAT
+    generation is built for a room with a painter in it. Its own case, separate
+    from the reverse order below: they are two claims about two orderings and
+    one of them used to be the only one that worked.
+    """
+
+    gate = threading.Event()
+    recorded = _recording_stream_frames(monkeypatch, gate)
+    try:
+        with running_serve() as handle:
+            with _rpc_office_subscription("ws_stale_late", connection_key="rpc-1"):
+                deadline = time.monotonic() + WAIT
+                while not recorded and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert recorded, "the office subscribe never built a producer"
+                # Anti-vacuity: the FIRST generation really did answer False, so
+                # the True below is the painter's join and not a constant.
+                assert recorded[0]["wants_stale_first"] is False
+
+                with client(handle, name="painter") as (connection, _reply):
+                    connection.send({"op": "subscribe", "lane": "stream"})
+                    _read_until(connection, "subscribed")
+                    deadline = time.monotonic() + WAIT
+                    while len(recorded) < 2 and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    assert len(recorded) >= 2, (
+                        "the painting subscribe did not restart the producer, so "
+                        "no generation was ever built for a room that paints"
+                    )
+                    assert recorded[-1]["wants_stale_first"] is True, recorded[-1]
+    finally:
+        gate.set()
+
+
+def test_a_stream_subscriber_joining_BEFORE_the_office_lane_gets_the_paint(monkeypatch):
+    """The reverse order, asserted separately (C30).
+
+    Painter first: the very first generation is built for a room that paints, so
+    the stale core goes out without waiting for a restart. The office subscribe
+    behind it must not narrow that back — the operator is union, not
+    intersection, and one painter in the room is enough.
+
+    HOW the office join leaves it alone is worth naming, because it is not the
+    restart this file's other case relies on: the office declaration is a
+    SUPERSET of the accepted set in force, so ``OfficeSubscriptions.subscribe``
+    takes its restart-free rejoin (O-H5) and the painter's generation is never
+    replaced at all. Measured here, not assumed — the assertion is over EVERY
+    generation recorded, so it holds whether the join restarts or not, and a
+    change to that rejoin rule cannot silently turn this case vacuous.
+    """
+
+    gate = threading.Event()
+    recorded = _recording_stream_frames(monkeypatch, gate)
+    try:
+        with running_serve() as handle:
+            with client(handle, name="painter") as (connection, _reply):
+                connection.send({"op": "subscribe", "lane": "stream"})
+                _read_until(connection, "subscribed")
+                deadline = time.monotonic() + WAIT
+                while not recorded and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert recorded, "the stream subscribe never built a producer"
+                assert recorded[0]["wants_stale_first"] is True, recorded[0]
+                built_for_painter = len(recorded)
+
+                with _rpc_office_subscription("ws_stale_early", connection_key="rpc-2"):
+                    # Bounded settle: if the join DOES restart, the new
+                    # generation must be recorded before the assertion reads it.
+                    deadline = time.monotonic() + 1.0
+                    while len(recorded) == built_for_painter and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                    assert all(
+                        entry["wants_stale_first"] is True for entry in recorded
+                    ), (
+                        "an office sink in a room that already had a painter "
+                        f"narrowed it back to False; the operator is a union: {recorded}"
+                    )
+    finally:
+        gate.set()
+
+
 def test_a_malformed_fold_declaration_is_refused_instead_of_read_as_absent():
     """Reading a malformed declaration as absence would WIDEN a client that
     meant to narrow — handing it patches it cannot fold, which is precisely the

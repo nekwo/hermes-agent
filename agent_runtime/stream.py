@@ -465,6 +465,20 @@ _DELTA_BATCH_CAP = 256
 _SNAPSHOT_CANCEL_POLL_SECONDS = 0.1
 
 
+def _is_one_shot(max_frames: int | None) -> bool:
+    """Is this request's whole budget one frame?
+
+    Its own predicate because two different boot-lane decisions turn on it and
+    they must not drift apart: the stale-first core is refused for a one-shot,
+    and the boot build's liveness heartbeats must not consume its budget. Both
+    exist so that ``harness stream --max-frames 1`` — the launcher's forced-
+    refresh lane — always answers with an AUTHORITATIVE core, never with a stale
+    one and never with a heartbeat carrying nothing.
+    """
+
+    return max_frames is not None and int(max_frames) <= 1
+
+
 class _SnapshotBuildJob:
     """Finite daemon build used by the stream's liveness envelope.
 
@@ -617,6 +631,7 @@ def stream_frames(
     resync: bool = False,
     fold_entities: Iterable[str] | None = None,
     caller: str = DEFAULT_STREAM_CALLER,
+    wants_stale_first: bool = False,
 ) -> Iterator[dict[str, Any]]:
     """Yield hydrate, delta/patch, and heartbeat frames for ``hermes harness stream``.
 
@@ -661,6 +676,24 @@ def stream_frames(
     ``build_snapshot``'s ``build_info`` and lands on every build/wait line this
     generator emits, so a boot's log says WHICH attachment paid for a build
     instead of leaving the census to be reconstructed from timestamps.
+
+    ``wants_stale_first`` is whether anyone this generator feeds will PAINT the
+    boot's one stale-labelled core (EG-3.1's mismatch half, MC-4 / P6). It is a
+    property of the ROOM, which is why it is stated by the caller and cannot be
+    re-derived here: the serve hub is one producer for N subscribers, and the
+    subscriber that attaches FIRST at boot is the RPC office lane, whose
+    ``office_patch_sink`` discards every row that is not an ``office_actor``.
+    Measured 2026-08-18: two boots in three handed the stale paint to that sink
+    and the launcher watched an empty canvas for the length of a full build.
+    ``serve.py::_room_wants_stale_first`` derives the hub's answer from its two
+    subscriber tables at producer-build time; ``_cmd_stream`` states ``True``
+    because the argv lane exists to feed a painting consumer. The default is
+    ``False`` — the SAFE direction, and deliberately so: a caller that has not
+    said it paints gets exactly the pre-EG-3.1 wire (one authoritative hydrate),
+    whereas a ``True`` default would let a third, non-painting caller silently
+    eat the boot's single stale core again. ``test_stream_stale_first_routing``
+    pins by AST that both production call sites state it rather than inheriting
+    it.
     """
 
     log = event_log or EventLog()
@@ -682,7 +715,24 @@ def stream_frames(
     # watermark is deliberately NOT used to seed ``offset`` — the tail is
     # resumed from the AUTHORITATIVE frame below, so nothing between the two is
     # skipped.
-    stale_core = core_cache.take_stale_first_core(caller=caller)
+    #
+    # TWO conditions, and they are different questions. ``wants_stale_first``
+    # asks whether anybody in this generator's room paints (see the parameter).
+    # ``_is_one_shot`` asks whether this request has room for a second frame at
+    # all: the stale frame is yielded at the HEAD and the budget check below
+    # returns immediately after it, so a one-shot that took the stale core would
+    # answer with a core that is by definition NOT authoritative — and the
+    # launcher's forced-refresh lane
+    # (``mission_control_bridge.dart::_loadSnapshotFromStreamHydrate``, read
+    # 2026-08-18) scans that stdout for a ``type == "hydrate"`` line and applies
+    # whatever it finds through ``applyForcedSnapshot``, i.e. PAST its own
+    # sequence gate. Refusing here is what keeps "force a refresh" from meaning
+    # "re-paint the projection you were already unhappy with".
+    stale_core = (
+        core_cache.take_stale_first_core(caller=caller)
+        if wants_stale_first and not _is_one_shot(max_frames)
+        else None
+    )
     if stale_core is not None:
         yield hydrate_frame(
             snapshot=stale_core,

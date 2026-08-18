@@ -1149,7 +1149,16 @@ def test_a_mismatch_serves_labeled_stale_first_then_authoritative(
 
     def drive() -> None:
         try:
-            for frame in stream_frames(max_frames=2, poll_interval_seconds=0.01):
+            for frame in stream_frames(
+                max_frames=2,
+                poll_interval_seconds=0.01,
+                # MC-4 / P6: the stale paint goes to a room that PAINTS, and
+                # this probe is standing in for one. Without the declaration the
+                # generator serves only the authoritative hydrate — which is the
+                # whole point of the parameter, and is asserted directly by
+                # ``test_stream_stale_first_routing``.
+                wants_stale_first=True,
+            ):
                 frames.append(frame)
         except BaseException as exc:  # pragma: no cover - surfaced below
             failure.append(exc)
@@ -1206,8 +1215,67 @@ def test_a_stale_labeled_core_is_never_live_to_the_launchers_own_predicate(
     assert stale is not None
     assert stale["parity"]["freshness"]["state"] == "stale"
     assert stale["parity"]["core_stale"] is True
-    # One-shot per process: a resubscribe cannot re-paint an old projection.
-    assert core_cache.take_stale_first_core(caller="probe") is None
+
+
+def test_a_second_subscriber_of_the_same_boot_is_still_served_the_stale_core(
+    isolate_agent_runtime_root, seeded_cache
+):
+    """MC-4 / P6: the one-shot is the SUBSCRIBER's, not the PROCESS's.
+
+    ``_stale_served`` was a module global, and that turned EG-3.1's stale paint
+    from a delivery into a race. A boot runs TWO ``stream_frames`` generators —
+    the hub producer, which the RPC office subscribe starts 0.1-0.2s before the
+    launcher asks for anything, and the launcher's own argv stream — and the
+    first to arrive consumed the process's single allowance. Measured
+    2026-08-18: it went to ``caller=hub`` on two boots of three, where
+    ``office_patch_sink`` discards every row that is not an ``office_actor``, so
+    the one paint the design exists to deliver was thrown away and the operator
+    watched an empty canvas for a whole build.
+
+    The second asker inside the boot window is what the old flag refused and the
+    launcher usually is. Its own case, and its own killing mutation
+    (reintroduce the flag), because "the first asker is served" and "the second
+    asker is served" are two claims.
+    """
+
+    _rewrite_workspace_name("alpha-two")
+    _new_context()
+
+    first = core_cache.take_stale_first_core(caller="hub")
+    assert first is not None, "the boot's FIRST asker was not served — wrong path"
+    second = core_cache.take_stale_first_core(caller="cli")
+    assert second is not None, (
+        "the second subscriber of the boot was refused the stale paint; the "
+        "process-global one-shot is back and the office sink wins the race again"
+    )
+    assert second["parity"]["core_stale"] is True
+    assert second["parity"]["freshness"]["state"] == "stale"
+    assert _served_workspace_name(second) == "alpha-one"
+
+
+def test_the_disarmed_lane_serves_no_stale_core_to_anyone(
+    isolate_agent_runtime_root, seeded_cache
+):
+    """The bound that makes the per-subscriber one-shot sound.
+
+    Dropping the process flag would be unsafe if nothing else bounded a
+    re-paint: a resubscribe hours into a session would re-paint a projection the
+    process had long since superseded. What bounds it is the ARMED LANE, and its
+    window is the BOOT — it closes at ``note_full_build_completed``, the moment
+    this process owns its own truth. Asserted separately from the case above
+    because a per-subscriber one-shot written WITHOUT the armed check would pass
+    that one and fail this one, which is exactly the mutation.
+    """
+
+    _rewrite_workspace_name("alpha-two")
+    _new_context()
+    assert core_cache.take_stale_first_core(caller="hub") is not None
+
+    core_cache.note_full_build_completed()
+
+    assert core_cache.lane_armed() is False
+    assert core_cache.take_stale_first_core(caller="cli") is None
+    assert core_cache.take_stale_first_core(caller="hub") is None
 
 
 def test_a_matching_core_is_never_painted_stale(isolate_agent_runtime_root, seeded_cache):

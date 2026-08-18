@@ -537,6 +537,14 @@ def _cmd_stream(args) -> int:
             # named for, and stating it here is what keeps the default from
             # becoming a place a second caller can hide.
             caller="cli",
+            # The argv lane exists to feed a consumer that PAINTS — the
+            # launcher's read model, or an operator's terminal. Unconditionally
+            # True: whether this particular request has ROOM for a stale frame
+            # ahead of the authoritative one is a budget question, and
+            # ``stream_frames`` owns it (``_is_one_shot``) so the rule holds for
+            # every caller rather than only for the one that happens to parse
+            # ``--max-frames``.
+            wants_stale_first=True,
         ):
             sys.stdout.write(json.dumps(to_jsonable(frame), ensure_ascii=False, separators=(",", ":")) + "\n")
             sys.stdout.flush()

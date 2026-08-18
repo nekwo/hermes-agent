@@ -1887,7 +1887,6 @@ _LANE = threading.local()
 _lane_lock = threading.Lock()
 _lane_armed = True
 _shadow_done = False
-_stale_served = False
 
 
 # --------------------------------------------------------------------------- #
@@ -2027,11 +2026,10 @@ def reset_process_state() -> None:
     previous case's home, which the sandbox has already deleted.
     """
 
-    global _lane_armed, _shadow_done, _stale_served
+    global _lane_armed, _shadow_done
     with _lane_lock:
         _lane_armed = True
         _shadow_done = False
-        _stale_served = False
     _reset_convergence_state()
     _drop_consult_memo()
     reset_fingerprint_home()
@@ -2228,14 +2226,33 @@ def take_stale_first_core(*, caller: str) -> dict | None:
     out loud that it is not validated. The replacement arrives on the next frame
     when the build completes.
 
-    One-shot per process, and only while the lane is armed, so a resubscribe
-    long after the process has built its own truth can never re-paint an old
-    projection.
+    **The one-shot is the SUBSCRIBER's, not the process's (MC-4 / P6).** It used
+    to be a module-global ``_stale_served``, and that made the stale paint a race
+    rather than a delivery: a boot starts TWO ``stream_frames`` generators — the
+    hub producer, which the office ``runtime.office.subscribe`` attaches 0.1–0.2s
+    before the launcher asks for anything, and the launcher's own argv stream —
+    and whichever reached this function first consumed the process's single
+    allowance. Measured 2026-08-18: it went to ``caller=hub`` on two of three
+    boots, where ``serve_office_subscriptions.office_patch_sink`` discards every
+    row that is not an ``office_actor`` — i.e. the one stale paint the design
+    exists to deliver was thrown away, and the operator watched an empty canvas
+    for the length of a full build. The rule is now stated where the room is
+    known (``stream_frames``' ``wants_stale_first``, derived at producer-build
+    time by ``serve.py::_room_wants_stale_first``), and the one-shot is
+    structural: :func:`agent_runtime.stream.stream_frames` asks this ONCE, at its
+    head, before its tail loop.
+
+    **What still bounds it, and why that bound is the sound one.** Only while the
+    lane is armed. The lane disarms at :func:`note_full_build_completed`, so the
+    window is the BOOT — the span in which this process has not yet built its own
+    truth — not the session. A resubscribe long after that can never re-paint an
+    old projection, which is the property the process-global flag was reaching
+    for and got by over-tightening: it also refused the SECOND generator of a
+    boot, which is the one the launcher is usually on.
     """
 
-    global _stale_served
     with _lane_lock:
-        if not _lane_armed or _stale_served:
+        if not _lane_armed:
             return None
     # The same shared judgement the riders will get. This read is FIRST in the
     # boot, so on the ordinary shape it is the one that pays for the walk and
@@ -2246,10 +2263,6 @@ def take_stale_first_core(*, caller: str) -> dict | None:
         # cache-hit path above will serve it authoritative and painting a stale
         # copy first would be a lie in the pessimistic direction.
         return None
-    with _lane_lock:
-        if _stale_served:
-            return None
-        _stale_served = True
     logger.info(
         "snapshot_core_cache core_source=%s stale=true caller=%s reason=%s",
         CORE_SOURCE_CACHE,
