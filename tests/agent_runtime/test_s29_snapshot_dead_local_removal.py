@@ -86,11 +86,19 @@ KEPT_LIVE_LOCALS = ()
 #: The five names S27 hand-verified as this module's external surface. A FLOOR
 #: under the derived root set below, never the root set itself — see
 #: ``_external_surface_of_snapshot``.
+#:
+#: H2 (MCF-27) moved one entry rather than removing it. ``status.py`` used to
+#: import ``_default_persona_session_db`` and bind the handle it returns without
+#: ever closing it; it now imports ``persona_session_db_scope``, which owns the
+#: acquisition AND its release for both call sites. So the acquisition helper is
+#: still live — the scope calls it — but it is no longer part of this module's
+#: EXTERNAL surface, and leaving it in this floor would have asserted a consumer
+#: that no longer exists. The floor tracks the surface; it does not preserve it.
 VERIFIED_EXTERNAL_SURFACE = (
     "build_snapshot",
     "write_snapshot",
     "_parity_envelope",
-    "_default_persona_session_db",
+    "persona_session_db_scope",
     "persona_instance_detail_for_id",
 )
 

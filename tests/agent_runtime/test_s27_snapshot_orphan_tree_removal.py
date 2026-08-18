@@ -9,8 +9,10 @@ snapshot-local copies of ``_run_summary`` / ``_event_display_*``.
 
 The island is verified caller-free from the module's REAL external surface,
 which is exactly five names (``build_snapshot``, ``write_snapshot``,
-``_parity_envelope``, ``_default_persona_session_db``,
-``persona_instance_detail_for_id``). A plain text grep does NOT prove this: nine
+``_parity_envelope``, ``persona_session_db_scope`` — the S27 name here was
+``_default_persona_session_db``, until H2 gave the acquisition an owning scope
+and ``status.py`` moved to it — and ``persona_instance_detail_for_id``). A plain
+text grep does NOT prove this: nine
 of the removed names collide with same-named private helpers in OTHER modules
 (``observability._run_summary`` / ``._event_display_kind`` /
 ``._event_display_title`` / ``._event_display_projection``,
@@ -142,11 +144,20 @@ REMOVED_SNAPSHOT_IMPORTS = (
 #: The five names this file verified as external at S27. They are a FLOOR
 #: (asserted on its own below), never the root set itself — see
 #: ``_external_surface_of_snapshot``.
+#:
+#: THE CONSUMER LEFT, and the floor's own assertion message asks for that to be
+#: said here rather than patched silently. H2 (MCF-27) gave the chat SessionDB
+#: acquisition an owner: ``status.py`` used to import
+#: ``_default_persona_session_db`` and bind the handle without ever closing it,
+#: and now imports ``persona_session_db_scope``, which acquires AND releases for
+#: both call sites. ``_default_persona_session_db`` is still live — the scope
+#: calls it — so it stays reachable from the walk below; it is simply no longer
+#: part of this module's EXTERNAL surface, and the scope that replaced it is.
 VERIFIED_EXTERNAL_SURFACE = (
     "build_snapshot",
     "write_snapshot",
     "_parity_envelope",
-    "_default_persona_session_db",
+    "persona_session_db_scope",
     "persona_instance_detail_for_id",
 )
 

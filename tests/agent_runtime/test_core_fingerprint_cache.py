@@ -962,12 +962,20 @@ def test_two_write_backs_across_a_wal_flip_record_the_same_row(
 def _close_every_connection_to(db_path) -> int:
     """What the serve PROCESS EXITING does to one database: drop every handle.
 
-    Closing the fixture's own holder is not enough, and why is a finding rather
-    than a detail: ``snapshot._build_snapshot_uncoalesced`` opens the chat
-    SessionDB (``snapshot._default_persona_session_db``) and never closes it, so
-    every full build leaves a live connection behind. Measured here — after a
-    converge, the holder's close leaves the WAL on disk because the build's
-    handle is still open.
+    Closing the fixture's own holder is not enough, and the reason is the fixture
+    itself: this file's live shape holds a RAW ``sqlite3`` connection open for the
+    life of the case, exactly as a serve holds the SessionDB for the life of the
+    process, and the siblings exist only while some connection does.
+
+    HISTORY, kept because it is the finding this helper was born from: the
+    snapshot build used to open the chat SessionDB
+    (``snapshot._default_persona_session_db``) and never close it, so every full
+    build left a live connection behind here too. H2 gave that acquisition an
+    owner (``snapshot.persona_session_db_scope``) and the build now releases what
+    it opens — see ``test_a_led_build_leaves_the_chat_database_at_rest`` below,
+    which pins it from the WAL side. The scan stays because the fixture's own
+    holder still has to be closed, and because a future leaker would be caught by
+    a count that is greater than the one connection this file opens.
 
     In the field those handles die with the serve child, which IS the clean exit
     this case reproduces. So the honest in-process equivalent closes them
@@ -1113,6 +1121,84 @@ def test_the_next_boots_own_open_recreates_the_wal_and_the_key_still_matches(
             )
         finally:
             next_boot.close()
+
+
+def test_a_led_build_leaves_the_chat_database_at_rest(isolate_agent_runtime_root):
+    """H2 / MCF-27 from the WAL side: the build's release, and the key after it.
+
+    The two cases above are about a mask over a WAL that is coming and going. This
+    one is about WHY it was coming and going mid-session: the build opened the
+    chat SessionDB and kept it, so the sidecar a led build wrote recorded the WAL
+    PRESENT, while the next process — after a clean exit deleted it — stat'd it
+    absent. H2 gave the acquisition an owner, so a quiescent build now leaves the
+    database exactly as it found it.
+
+    THE FIXTURE IS WAL ON DISK BEFORE ANYTHING IS MEASURED, and that is the
+    non-vacuity guard rather than a detail. On a ``journal_mode=DELETE`` database
+    there is no ``-wal`` for a leaked handle to hold open, so the central
+    assertion would be green on the defect. The first block therefore proves the
+    mode is live — a held connection DOES lay a ``-wal`` down — before the block
+    that requires the build not to leave one.
+
+    *Kill:* delete the ``session_db.close()`` arm from
+    ``snapshot.persona_session_db_scope``. The build's handle stays open, the WAL
+    it created is still on disk when the build returns, and this reds.
+
+    *Not* killed by reverting MC-3b's ``_wal_without_frames_is_content_free``, and
+    that is worth stating rather than leaving as a silent gap: with the release in
+    place the WAL is absent at the pre-build stat AND absent at the consult, so
+    the masked distinction is never reached here. The dependency runs the other
+    way — the release is only key-NEUTRAL because that collapse landed, and the
+    two cases above are what hold that half. What this case adds is that the
+    build no longer DEPENDS on the mask for the quiescent shape.
+    """
+
+    from agent_runtime.chat_session_scope import chat_session_db_path
+    from hermes_state import SessionDB
+
+    db_path = chat_session_db_path()
+    wal = f"{db_path}-wal"
+    SessionDB(db_path=db_path).close()
+
+    holder = sqlite3.connect(str(db_path))
+    try:
+        mode = holder.execute("PRAGMA journal_mode=WAL").fetchone()
+        assert mode and str(mode[0]).lower() == "wal", (
+            f"could not put the fixture database into WAL mode (got {mode!r}); "
+            "without it a leaked build handle would leave no -wal and the "
+            "assertion below would pass on the defect"
+        )
+        holder.execute("CREATE TABLE IF NOT EXISTS h2_wal_probe (id INTEGER)")
+        holder.commit()
+        assert os.path.exists(wal), (
+            "no -wal sibling exists while a connection is held, so this fixture "
+            "is not reproducing the shape a leaked handle would hold open"
+        )
+    finally:
+        holder.close()
+
+    assert not os.path.exists(wal), (
+        "closing every connection did not take the WAL away, so 'the build left "
+        "one behind' would be unmeasurable below"
+    )
+
+    _seed_workspace("alpha-one")
+    converge_persisted_core()
+
+    assert not os.path.exists(wal), (
+        "a led build left the chat database's -wal sibling on disk, so the build "
+        "is still holding the connection it opened. That handle is what kept the "
+        "WAL present mid-session, which is what made the sidecar's key depend on "
+        "WHICH build in the process wrote it last (MCF-15/MCF-27)."
+    )
+
+    _new_context()
+    read = core_cache.read_persisted_core()
+    assert read.matched, (
+        "a quiescent build that released its own chat connection wrote a key the "
+        f"very next consult refused ({read.reason!r}): the release is minting a "
+        "miss instead of removing one"
+    )
 
 
 # --------------------------------------------------------------------------- #

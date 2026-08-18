@@ -24,21 +24,25 @@ from .migrations import effective_config_summary
 from .runtime_instances import GoalRuntimeInstanceStore, runtime_instances_summary
 from .states import RunState
 from .store import ACTIVE_RUN_STATES, AgentStore, IncidentStore, RunStore
-from .snapshot import _default_persona_session_db, _parity_envelope
+from .snapshot import _parity_envelope, persona_session_db_scope
 from .resolution import runtime_resolution_scope
 
 
 def build_status(run_store: RunStore | None = None, incident_store: IncidentStore | None = None, agent_store: AgentStore | None = None, event_log: EventLog | None = None) -> dict:
-    with runtime_resolution_scope():
+    # Owns the chat SessionDB for the life of the status build and closes it —
+    # the second of the two call sites MCF-27 named; see
+    # ``snapshot.persona_session_db_scope`` for why the release is key-neutral.
+    with runtime_resolution_scope(), persona_session_db_scope() as session_db:
         return _build_status_in_runtime_scope(
             run_store=run_store,
             incident_store=incident_store,
             agent_store=agent_store,
             event_log=event_log,
+            session_db=session_db,
         )
 
 
-def _build_status_in_runtime_scope(run_store: RunStore | None = None, incident_store: IncidentStore | None = None, agent_store: AgentStore | None = None, event_log: EventLog | None = None) -> dict:
+def _build_status_in_runtime_scope(run_store: RunStore | None = None, incident_store: IncidentStore | None = None, agent_store: AgentStore | None = None, event_log: EventLog | None = None, *, session_db) -> dict:
     _build_started = time.perf_counter()
     run_store = run_store or RunStore()
     incident_store = incident_store or IncidentStore()
@@ -146,7 +150,6 @@ def _build_status_in_runtime_scope(run_store: RunStore | None = None, incident_s
         data["delivery_drain"] = delivery_drain_status()
     except Exception:
         data["delivery_drain"] = {"live": False, "source": "absent"}
-    session_db = _default_persona_session_db()
     assignments = PersonaAssignmentStore(event_log=event_log).list_all()
     history_accountant = ProjectionAccountant("persona_chat_history")
     trace_accountant = ProjectionAccountant("persona_chat_trace")

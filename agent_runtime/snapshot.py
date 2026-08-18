@@ -684,7 +684,12 @@ def _build_snapshot_uncoalesced(
     event_log=None,
     prompt_skills_catalogs=None,
 ) -> dict:
-    with runtime_resolution_scope():
+    # The chat SessionDB is acquired HERE, by the build's outermost frame, so
+    # that one owner opens it and the same owner closes it (MCF-27). It sits
+    # INSIDE ``runtime_resolution_scope`` because the acquisition resolves its
+    # scope from the runtime this build resolved, exactly as it did when the
+    # binding lived in the section below.
+    with runtime_resolution_scope(), persona_session_db_scope() as session_db:
         return _build_snapshot_in_runtime_scope(
             task_store=task_store,
             run_store=run_store,
@@ -692,6 +697,7 @@ def _build_snapshot_uncoalesced(
             incident_store=incident_store,
             event_log=event_log,
             prompt_skills_catalogs=prompt_skills_catalogs,
+            session_db=session_db,
         )
 
 
@@ -702,6 +708,8 @@ def _build_snapshot_in_runtime_scope(
     incident_store=None,
     event_log=None,
     prompt_skills_catalogs=None,
+    *,
+    session_db,
 ) -> dict:
     _build_started = time.perf_counter()
     _sections_ms: dict[str, int] = {}
@@ -792,7 +800,6 @@ def _build_snapshot_in_runtime_scope(
         ),
     ]
     persona_assignments = PersonaAssignmentStore(event_log=event_log).list_all()
-    session_db = _default_persona_session_db()
     migration = migration_status()
     # Hoisted out of the ``data`` literal so their cost is attributable in
     # ``sections_ms`` (both were profiled hot: prompt_observability ~5s, the
@@ -2255,6 +2262,47 @@ def _default_persona_session_db():
     from .chat_session_scope import open_chat_session_db
 
     return open_chat_session_db()
+
+
+@contextmanager
+def persona_session_db_scope():
+    """Acquire the projection's chat ``SessionDB`` and CLOSE it on the way out.
+
+    MCF-27: every led build used to bind ``_default_persona_session_db()`` into a
+    local and drop it, so a serve accumulated one live SQLite connection per
+    build for its whole life. That was not merely untidy — it is why the chat
+    ``-wal`` was present mid-session at all, and therefore why "which build in
+    this process wrote the sidecar last" decided whether the NEXT boot's core
+    cache could hit (MCF-15). Two call sites shared the acquisition
+    (``_build_snapshot_uncoalesced`` and ``status.build_status``), so ownership
+    became a scope rather than a close bolted onto each of them.
+
+    ``open_chat_session_db`` answers **None by contract** when the database is
+    unavailable, and every consumer of this handle types it ``Any | None``. So the
+    None arm is explicit here: ``contextlib.closing`` over a bare ``None`` raises
+    ``TypeError`` at exit and would turn an unavailable chat store — an ordinary,
+    already-handled state — into a failed build.
+
+    **Why closing here cannot poison the key the build is about to be stored
+    under.** ``build_snapshot`` stats the input fingerprint BEFORE it calls the
+    builder (``core_cache.write_back``'s docstring owns that direction argument),
+    so the key is already captured when this scope exits. And the close is
+    key-NEUTRAL only because MC-3b's ``core_cache._wal_without_frames_is_content_free``
+    landed: ``SessionDB.close`` drains the token queue and attempts a TRUNCATE
+    checkpoint, and SQLite unlinks the WAL when the last connection goes — so an
+    absent WAL and a frameless present one must key identically, which is exactly
+    what that collapse guarantees. Reverting it would make this close mint a miss.
+    """
+
+    session_db = _default_persona_session_db()
+    try:
+        yield session_db
+    finally:
+        if session_db is not None:
+            try:
+                session_db.close()
+            except Exception:  # noqa: BLE001 — a build must not fail on release
+                logger.debug("closing the projection chat SessionDB failed", exc_info=True)
 
 
 def _agent_tool_detail(agent) -> dict:
