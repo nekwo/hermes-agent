@@ -325,7 +325,7 @@ def test_boards_summary_rows_carry_unpublished_flag_when_realm_bound():
     update_board_baseline_after_sync(realm_id, [board_id])  # synced card + board published
     drifted = store.add_card(workspace_id=ws, title="Not yet published")  # no baseline
 
-    rows = _boards_summary(store, _realm_workspaces(realm_id))
+    rows = _boards_summary(store, _realm_workspaces(realm_id)).boards
     board_row = next(r for r in rows if r["board_id"] == board_id)
     assert board_row["unpublished"] is False  # board def matches baseline
     by_id = {c["card_id"]: c for c in board_row["cards"]}
@@ -341,7 +341,7 @@ def test_boards_summary_omits_unpublished_flag_without_realm():
     store.add_card(workspace_id=ws.id, title="Local card")
     board_id = board_models.default_board_id(ws.id)
 
-    rows = _boards_summary(store, [ws])
+    rows = _boards_summary(store, [ws]).boards
     board_row = next(r for r in rows if r["board_id"] == board_id)
     assert "unpublished" not in board_row
     assert all("unpublished" not in c for c in board_row["cards"])

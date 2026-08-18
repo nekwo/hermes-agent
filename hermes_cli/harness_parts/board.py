@@ -83,8 +83,12 @@ def _board_row(store, board, *, full: bool = False) -> dict:
 
     from agent_runtime.snapshot import board_summary_row
 
-    cards = store.list_cards(board.board_id)
-    summary = board_summary_row(board, cards)
+    # ``scan_cards``, not ``list_cards``: the CLI row states the same
+    # completeness the wire row does, so the two cannot disagree about how much
+    # of the board they just rendered.
+    scan = store.scan_cards(board.board_id)
+    cards = scan.cards
+    summary = board_summary_row(board, cards, cards_unreadable=scan.unreadable)
     row = {
         "id": summary["board_id"],
         "workspace_id": summary["workspace_id"],

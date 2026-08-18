@@ -251,6 +251,7 @@ def publish_realm_sync(
         result["persona_projection"] = _persona_projection_row(projection, resolved.bound_profiles)
         result["profile_files"] = _profile_files_row(artifacts, profile_files_withheld)
         result["office_sync"] = {"refused": list(resolved.office_refused or [])}
+        result["board_sync"] = {"refused": list(resolved.board_refused or [])}
         return result
 
     subtree = _realm_subtree(repo, realm.id)
@@ -363,6 +364,7 @@ def publish_realm_sync(
         "refused": list(resolved.office_refused or []),
         "baseline": office_baseline,
     }
+    result["board_sync"] = {"refused": list(resolved.board_refused or [])}
     if warnings:
         result["warnings"] = warnings
     _write_sync_sidecar(realm, repo=repo, git=git_after, skills_drift=_held_skill_packages_for_realm(realm), artifacts=artifacts)
@@ -612,6 +614,8 @@ class _ResolvedPublish:
     #: silent omission — and here silence would have published a partial office
     #: that every peer reads as desk removals.
     office_refused: list[dict[str, Any]] = ()  # type: ignore[assignment]
+    #: The board family's twin of the field above, same discipline.
+    board_refused: list[dict[str, Any]] = ()  # type: ignore[assignment]
 
 
 def resolve_realm_sync_artifacts(realm_id: str) -> list[RealmSyncArtifact]:
@@ -626,7 +630,8 @@ def _resolve_artifacts_with_projection(realm_id: str) -> _ResolvedPublish:
     artifacts: list[RealmSyncArtifact] = []
     artifacts.extend(_skill_artifacts(realm))
     artifacts.extend(_workspace_realm_artifacts(realm, workspaces))
-    artifacts.extend(_board_artifacts(workspaces))
+    board_scan = _board_publish_scan(workspaces)
+    artifacts.extend(board_scan.artifacts)
     # ONE office pass: the artifacts, the persona ids those placements require,
     # and the workspaces that would not publish at all, resolved together so the
     # three cannot disagree about which offices are in this publish.
@@ -678,6 +683,7 @@ def _resolve_artifacts_with_projection(realm_id: str) -> _ResolvedPublish:
         profile_files_withheld=profile_files_withheld,
         bound_profiles=sorted(bound_profiles),
         office_refused=office_scan.refused,
+        board_refused=board_scan.refused,
     )
 
 
@@ -913,13 +919,28 @@ def _workspace_realm_artifacts(realm: Realm, workspaces: list[Workspace]) -> lis
     return [item for item in artifacts if item.source.exists()]
 
 
-def _board_artifacts(workspaces: list[Workspace]) -> list[RealmSyncArtifact]:
+class BoardPublishScan(NamedTuple):
+    """What ONE pass over the board store says this realm publishes, and what
+    it refused. ``OfficePublishScan``'s twin, for the same defect."""
+
+    artifacts: list[RealmSyncArtifact]
+    refused: list[dict[str, Any]]
+
+
+def _board_publish_scan(workspaces: list[Workspace]) -> BoardPublishScan:
     """Mission Board artifact family: board.json + active card files for boards
     whose workspace belongs to this realm. ``archive/``, ``conflicts/``,
     ``idempotency/`` and the never-synced baseline are all excluded (only
     ``board.json`` and ``cards/`` are walked). Publish replaces the realm subtree
     wholesale (see ``publish_realm_sync``), so card removals/archives propagate
     as absences; pull applies per-card LWW via ``board_sync.apply_board_pull``.
+
+    A board whose card directory does not fully read publishes NOTHING and is
+    refused typed instead — the office arm's reasoning, unchanged: publish
+    copies card FILES verbatim, absences ARE removals, so a card that merely
+    would not decode here becomes a card archived on every peer. Dropping the
+    whole board from the subtree is safe where dropping one card is not, because
+    a pull only classifies the board directories the subtree contains.
     """
 
     from .board_store import BoardStore
@@ -927,8 +948,31 @@ def _board_artifacts(workspaces: list[Workspace]) -> list[RealmSyncArtifact]:
     workspace_ids = {ws.id for ws in workspaces}
     store = BoardStore()
     artifacts: list[RealmSyncArtifact] = []
-    for board in store.list_all():
+    refused: list[dict[str, Any]] = []
+    board_scan = store.scan_all()
+    if board_scan.unreadable:
+        # Cannot be realm-filtered or even named: the board id and its workspace
+        # both live inside the file that would not parse. Counted anyway —
+        # silence here published a realm that quietly lacked a board.
+        refused.append(
+            {
+                "board_id": None,
+                "reason": "board_unreadable",
+                "unreadable": board_scan.unreadable,
+            }
+        )
+    for board in board_scan.boards:
         if board.workspace_id not in workspace_ids:
+            continue
+        card_scan = store.scan_cards(board.board_id)
+        if card_scan.unreadable:
+            refused.append(
+                {
+                    "board_id": board.board_id,
+                    "reason": "sync_unknowable",
+                    "unreadable": card_scan.unreadable,
+                }
+            )
             continue
         board_token = _safe_token(board.board_id)
         def_path = paths.board_def_path(board.board_id)
@@ -952,7 +996,14 @@ def _board_artifacts(workspaces: list[Workspace]) -> list[RealmSyncArtifact]:
                         destination=card_path,
                     )
                 )
-    return artifacts
+    return BoardPublishScan(artifacts=artifacts, refused=refused)
+
+
+def _board_artifacts(workspaces: list[Workspace]) -> list[RealmSyncArtifact]:
+    """Thin view over :func:`_board_publish_scan` for callers that only want the
+    artifact rows."""
+
+    return _board_publish_scan(workspaces).artifacts
 
 
 def _board_store_drift(realm_id: str, workspaces: list[Workspace]) -> dict[str, int]:

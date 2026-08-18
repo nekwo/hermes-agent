@@ -261,3 +261,159 @@ def test_resolve_conflict_take_local_clears_sidecar():
     assert "board.card.conflict_resolved" in _event_types()
     # mutation works again
     store.edit_card(card.card_id, title="ok now")
+
+
+# ── ML-8b/4: the board lister's two classes, split ────────────────────────
+#
+# ``_scan_card_dir`` skips a card file it cannot decode. Two different things
+# read that short list: the order-key ALLOCATOR (a writer — class (i), refuses
+# typed) and the projection (a reader — class (ii), the count travels).
+
+
+def _blind_card(board_id: str, card_id: str):
+    path = paths.board_card_path(board_id, card_id)
+    assert path.exists(), path
+    path.write_text("{truncated", encoding="utf-8")
+    return path
+
+
+def _seeded_board(n: int = 3):
+    """A workspace + default board carrying ``n`` cards in one column."""
+
+    from agent_runtime.errors import CardsUnreadable  # noqa: F401 — import proof
+
+    ws = _make_workspace("Boards")
+    store = BoardStore()
+    board = store.ensure_default_board(ws)
+    cards = [store.add_card(board_id=board.board_id, title=f"card {i}") for i in range(n)]
+    return store, board.board_id, cards
+
+
+def test_an_unreadable_card_file_refuses_order_key_allocation_typed():
+    """THE board write-guard witness (class (i)).
+
+    Every order-key decision — append, move-between, column rebalance — is
+    computed from the active-card list: the neighbour keys it brackets between
+    and the keys a rebalance rewrites wholesale. A card the platform will not
+    open is a card the allocator places ON TOP of.
+
+    *Probed:* the typed code, the count carried in the refusal (driven 1 then
+    2), and that NO new card file was written (the directory census is the
+    recorder).
+
+    *Mutation:* drop the guard from ``_ordering_cards`` (return the scan's cards
+    unconditionally). The allocation lands, a new card file appears, and both
+    probes red.
+    """
+
+    from agent_runtime.errors import CardsUnreadable
+
+    store, board_id, cards = _seeded_board(3)
+    cards_dir = paths.board_cards_dir(board_id)
+
+    for driven in (1, 2):
+        _blind_card(board_id, cards[driven - 1].card_id)
+        before = sorted(p.name for p in cards_dir.glob("*.json"))
+
+        with pytest.raises(CardsUnreadable) as refused:
+            store.add_card(board_id=board_id, title="appended")
+        assert refused.value.code == "cards_unreadable"
+        assert f"unreadable={driven}" in str(refused.value), str(refused.value)
+
+        # A move allocates against the same column and refuses identically.
+        with pytest.raises(CardsUnreadable):
+            store.move_card(cards[2].card_id, board_id=board_id, column_id="col_active")
+
+        assert sorted(p.name for p in cards_dir.glob("*.json")) == before, (
+            "the allocator wrote a card while it could not see the column"
+        )
+        # The unreadable file is left exactly as found, for an operator to repair.
+        assert _blind_card.__name__  # helper kept honest
+        assert paths.board_card_path(board_id, cards[0].card_id).read_text(
+            encoding="utf-8"
+        ) == "{truncated"
+
+
+def test_a_readable_board_still_allocates_beside_an_unreadable_one():
+    """The scope boundary. A refusal that fired on any unreadable card anywhere
+    would freeze every board in the root — a worse failure than the one being
+    prevented."""
+
+    from agent_runtime.errors import CardsUnreadable
+
+    store, blinded_board, cards = _seeded_board(2)
+    other_ws = _make_workspace("Boards Two")
+    other = store.ensure_default_board(other_ws)
+    _blind_card(blinded_board, cards[0].card_id)
+
+    with pytest.raises(CardsUnreadable):
+        store.add_card(board_id=blinded_board, title="nope")
+    added = store.add_card(board_id=other.board_id, title="fine")
+    assert added.order_key
+
+
+def test_the_board_projection_states_how_many_rows_it_could_not_read():
+    """THE board projection witness (class (ii)): the counts TRAVEL.
+
+    *Probed:* the row's ``cards_unreadable`` and the core's
+    ``boards_unreadable``, each driven with two distinct values, while the
+    readable rows still project.
+
+    *Mutation:* drop the ``unreadable += 1`` accumulators in ``_scan_card_dir``
+    / ``scan_all``. Constant zero cannot match two driven counts.
+    """
+
+    store, board_id, cards = _seeded_board(3)
+    clean = build_snapshot()
+    assert clean["boards"][board_id]["cards_unreadable"] == 0
+    assert clean["boards_unreadable"] == 0
+    assert clean["boards"][board_id]["active_card_count"] == 3
+
+    for driven in (1, 2):
+        _blind_card(board_id, cards[driven - 1].card_id)
+        snapshot = build_snapshot()
+        row = snapshot["boards"][board_id]
+        assert row["cards_unreadable"] == driven, row["cards_unreadable"]
+        # The rows that DID decode are still projected — the count is not
+        # bought by dropping the board.
+        assert row["active_card_count"] == 3 - driven
+
+    # And a board whose own def will not decode is counted, not vanished.
+    for driven, extra_ws in ((1, "Extra One"), (2, "Extra Two")):
+        ws = _make_workspace(extra_ws)
+        extra = store.ensure_default_board(ws)
+        paths.board_def_path(extra.board_id).write_text("{truncated", encoding="utf-8")
+        snapshot = build_snapshot()
+        assert snapshot["boards_unreadable"] == driven, snapshot["boards_unreadable"]
+        assert board_id in snapshot["boards"]
+
+
+def test_a_board_with_an_unreadable_card_file_refuses_realm_publish_typed():
+    """The board twin of the office publish refusal: publish copies card FILES
+    verbatim and absences ARE removals, so a card that merely would not decode
+    here becomes a card archived on every peer."""
+
+    from agent_runtime.realm_sync import _resolve_artifacts_with_projection
+    from agent_runtime.store import RealmStore
+
+    realm = RealmStore().create(name="Realm")
+    ws = WorkspaceStore().create(name="WS", realm_id=realm.id)
+    realm = RealmStore().get(realm.id)
+    realm.workspace_ids.append(ws.id)
+    RealmStore().save(realm)
+    store = BoardStore()
+    board = store.ensure_default_board(ws.id)
+    card = store.add_card(board_id=board.board_id, title="travels")
+
+    def _board_paths() -> list[str]:
+        resolved = _resolve_artifacts_with_projection(realm.id)
+        return [a.relative_path for a in resolved.artifacts if a.kind in ("board", "board_card")]
+
+    assert any(p.endswith(f"cards/{card.card_id}.json") for p in _board_paths()), _board_paths()
+
+    _blind_card(board.board_id, card.card_id)
+    resolved = _resolve_artifacts_with_projection(realm.id)
+    assert list(resolved.board_refused) == [
+        {"board_id": board.board_id, "reason": "sync_unknowable", "unreadable": 1}
+    ], resolved.board_refused
+    assert [a.relative_path for a in resolved.artifacts if a.kind in ("board", "board_card")] == []

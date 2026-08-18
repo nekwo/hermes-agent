@@ -798,10 +798,8 @@ def _build_snapshot_in_runtime_scope(
             skill_resolver=skill_resolver,
         )
     with _timed_section(_sections_ms, "boards_offices"):
-        boards_section = _keyed(
-            _boards_summary(BoardStore(event_log=event_log), workspaces),
-            "board_id",
-        )
+        boards_projection = _boards_summary(BoardStore(event_log=event_log), workspaces)
+        boards_section = _keyed(boards_projection.boards, "board_id")
         offices_projection = _offices_summary(OfficeStore(event_log=event_log), workspaces)
         offices_section = _keyed(offices_projection.offices, "workspace_id")
     running_work_accountant = ProjectionAccountant("running_work")
@@ -848,6 +846,11 @@ def _build_snapshot_in_runtime_scope(
         # snapshot path (conflict state comes from local sidecar files, never a
         # git call). Cards carry planning state only.
         "boards": boards_section,
+        # Whole boards the build could not read: ``board.json`` exists and does
+        # not decode, so no row above could be built for it. Sibling to each
+        # row's ``cards_unreadable`` (rows the platform took INSIDE a board) and
+        # twin of ``offices_unreadable``. Additive, and never silently zero.
+        "boards_unreadable": boards_projection.unreadable,
         # Mission Office projection: surface defs + bounded actor rows, keyed by
         # workspace. Local reads only — conflict state comes from local sidecar
         # files and the `unpublished` honesty flag from the local baseline
@@ -1410,6 +1413,7 @@ def board_summary_row(
     board,
     cards,
     *,
+    cards_unreadable: int,
     card_unpublished=None,
     board_unpublished: bool | None = None,
     orphaned: bool = False,
@@ -1426,6 +1430,14 @@ def board_summary_row(
     ``card_unpublished`` is the caller-owned per-card baseline probe; a caller
     with no realm baseline passes ``None`` and the per-card flag is omitted
     entirely, exactly as the un-extracted loop did.
+
+    ``cards_unreadable`` is REQUIRED, and required by keyword, for the reason
+    ``office_summary_row``'s twin is: ``_scan_card_dir`` skips a file it cannot
+    decode, so ``cards`` arrives already SHORTENED and ``cards_truncated``
+    computed from that shortened length answers 0. A caller that genuinely holds
+    a bare list has to say ``cards_unreadable=0`` out loud rather than get it by
+    default — the same "never silently zero" rule ``CardScan.unreadable`` is
+    declared under.
     """
 
     projected = cards[:MAX_BOARD_CARDS_PROJECTED]
@@ -1445,6 +1457,11 @@ def board_summary_row(
         ],
         "active_card_count": len(cards),
         "cards_truncated": max(0, len(cards) - len(projected)),
+        # The OTHER way this list can be short, and the one it used to hide
+        # completely: files that exist and would not decode. Its sibling above
+        # counts a cut WE chose; this one counts rows the platform took.
+        # Additive — an old launcher ignores the key.
+        "cards_unreadable": int(cards_unreadable),
         "conflict_card_ids": _board_conflict_card_ids(board.board_id),
         "archived_card_ids": list(board.archived_card_ids),
         # A board whose workspace no longer resolves is accounted, never
@@ -1458,7 +1475,17 @@ def board_summary_row(
     return row
 
 
-def _boards_summary(board_store, workspaces) -> list[dict]:
+class BoardsProjection(NamedTuple):
+    """The board rows this snapshot BUILT, beside how many whole boards it
+    could not build a row for. ``OfficesProjection``'s twin, same law."""
+
+    boards: list[dict]
+    #: Board directories whose ``board.json`` would not decode. Additive on the
+    #: wire as ``boards_unreadable`` — an old launcher ignores the key.
+    unreadable: int
+
+
+def _boards_summary(board_store, workspaces) -> BoardsProjection:
     """Mission Board projection rows, keyed by board_id. Local reads only:
     conflict card ids from local sidecar files, ``unpublished`` (per board and
     per card) from the local realm-sync baseline sidecar — a pure file read, the
@@ -1471,8 +1498,13 @@ def _boards_summary(board_store, workspaces) -> list[dict]:
     realm_by_workspace = {getattr(w, "id", None): getattr(w, "realm_id", None) for w in workspaces}
     baselines: dict[str, dict[str, str]] = {}
     boards: list[dict] = []
-    for board in board_store.list_all():
-        cards = board_store.list_cards(board.board_id)  # active, (order_key, card_id) sorted
+    board_scan = board_store.scan_all()
+    for board in board_scan.boards:
+        # ``scan_cards``, not ``list_cards``: the thin list view drops the files
+        # it could not decode and the row below must not describe itself as
+        # complete when it is not.
+        card_scan = board_store.scan_cards(board.board_id)
+        cards = card_scan.cards  # active, (order_key, card_id) sorted
         realm_id = realm_by_workspace.get(board.workspace_id)
         baseline: dict[str, str] | None = None
         if realm_id:
@@ -1497,12 +1529,13 @@ def _boards_summary(board_store, workspaces) -> list[dict]:
             board_summary_row(
                 board,
                 cards,
+                cards_unreadable=card_scan.unreadable,
                 card_unpublished=_card_unpublished,
                 board_unpublished=board_unpublished,
                 orphaned=board.workspace_id not in workspace_ids,
             )
         )
-    return boards
+    return BoardsProjection(boards=boards, unreadable=board_scan.unreadable)
 
 
 def _board_parity_warnings(data) -> list[dict]:

@@ -104,6 +104,26 @@ class ActorsUnreadable(ArchiveUnreadable):
     code = "actors_unreadable"
 
 
+class CardsUnreadable(ArchiveUnreadable):
+    """Raised when a board's order-key allocation cannot see the WHOLE column.
+
+    The board twin of :class:`ActorsUnreadable`, and the same defect reached
+    through a different guard. ``_list_active_cards`` drops a card file it
+    cannot decode, and every order-key decision is computed from that list: the
+    neighbour keys an insert brackets between, and the keys a column rebalance
+    rewrites wholesale. A card the platform would not open is therefore a card
+    the allocator places on top of, and a rebalance reassigns every key in the
+    column around a row it never saw — so the invisible card's key lands in an
+    order nothing agrees on, and the corruption is written, not merely read.
+
+    A write that cannot read the evidence it allocates against REFUSES. Reads
+    are untouched: the board still lists, and the count travels beside the rows
+    (``CardScan``) so the projection can state it.
+    """
+
+    code = "cards_unreadable"
+
+
 class SyncConflict(AgentRuntimeError):
     """Raised when a board card is under an unresolved realm-sync conflict, or a
     conflict-resolution verb targets a card that has none."""

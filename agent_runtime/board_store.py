@@ -19,13 +19,13 @@ from __future__ import annotations
 
 import re
 import uuid
-from typing import Any
+from typing import Any, NamedTuple
 
 from hermes_time import now
 from utils import atomic_json_write
 
 from . import board_models, board_order, paths
-from .errors import AlreadyExists, NotFound, StaleRevision, SyncConflict
+from .errors import AlreadyExists, CardsUnreadable, NotFound, StaleRevision, SyncConflict
 from .events import EventLog
 from .locks import board_lock
 from .models import Board, BoardCard, BoardColumn, Event
@@ -33,6 +33,36 @@ from .serde import from_jsonable, to_jsonable
 
 # Bounded projection / ledger caps (honest accounting, never silent).
 ARCHIVED_LEDGER_CAP = 5000
+
+
+class BoardScan(NamedTuple):
+    """The boards a scan FOUND, beside how many board files it could not read.
+
+    ``OfficeStore.ActorScan``'s law, applied to the board family: the two facts
+    have to travel together, because any seam that carries only the list
+    re-opens the hole at that seam. A board whose ``board.json`` will not decode
+    is absent from ``list_all`` — and ``list_all`` is what realm publish walks
+    to decide which boards travel and what the snapshot projects.
+    """
+
+    boards: list[Board]
+    #: Board directories whose ``board.json`` existed and did not decode. NEVER
+    #: folded into ``boards`` and never silently zero.
+    unreadable: int
+
+
+class CardScan(NamedTuple):
+    """The cards a scan FOUND, beside how many card files it could not read.
+
+    The count is load-bearing in two different ways, which is why it may not be
+    dropped at either seam: a READER that renders the short list under-reports
+    the column, and the order-key ALLOCATOR that reads it computes neighbour
+    keys against rows it cannot see (see :class:`~agent_runtime.errors.
+    CardsUnreadable`).
+    """
+
+    cards: list[BoardCard]
+    unreadable: int
 
 
 def _safe_id(value: Any) -> str | None:
@@ -112,11 +142,20 @@ class BoardStore:
     def exists(self, board_id: str) -> bool:
         return paths.board_def_path(board_id).exists()
 
-    def list_all(self, *, include_archived: bool = True) -> list[Board]:
+    def scan_all(self, *, include_archived: bool = True) -> BoardScan:
+        """Every board this root HAS, plus how many board files did not decode.
+
+        THE chokepoint. ``list_all`` is the thin list view over it, so the many
+        callers that only want rows keep their signature while the ones that
+        must not describe a short answer as complete — the snapshot projection
+        and the realm-publish artifact set — can ask the fuller question.
+        """
+
         root = paths.boards_root()
         boards: list[Board] = []
+        unreadable = 0
         if not root.exists():
-            return boards
+            return BoardScan([], 0)
         for child in sorted(root.iterdir()):
             def_path = child / "board.json"
             if not def_path.exists():
@@ -124,8 +163,12 @@ class BoardStore:
             try:
                 boards.append(from_jsonable(Board, _read_json(def_path)))
             except Exception:
+                unreadable += 1
                 continue
-        return sorted(boards, key=lambda b: b.board_id)
+        return BoardScan(sorted(boards, key=lambda b: b.board_id), unreadable)
+
+    def list_all(self, *, include_archived: bool = True) -> list[Board]:
+        return self.scan_all(include_archived=include_archived).boards
 
     def list_for_workspace(self, workspace_id: str, *, include_archived: bool = True) -> list[Board]:
         wanted = _safe_id(workspace_id)
@@ -228,11 +271,25 @@ class BoardStore:
             raise NotFound(f"card:{card_id}")
         return from_jsonable(BoardCard, _read_json(path))
 
-    def list_cards(self, board_id: str, *, include_archived: bool = False) -> list[BoardCard]:
-        cards = self._list_active_cards(board_id)
+    def scan_cards(self, board_id: str, *, include_archived: bool = False) -> CardScan:
+        """Every card this board HAS, plus how many card files did not decode.
+
+        THE read chokepoint; ``list_cards`` is the thin list view over it. The
+        projection asks the fuller question so a rendered board cannot describe
+        a column the platform partly ate as complete.
+        """
+
+        scan = self._scan_active_cards(board_id)
+        cards = scan.cards
+        unreadable = scan.unreadable
         if include_archived:
-            cards = [*cards, *self._list_archived_cards(board_id)]
-        return _sort_cards(cards)
+            archived = self._scan_archived_cards(board_id)
+            cards = [*cards, *archived.cards]
+            unreadable += archived.unreadable
+        return CardScan(_sort_cards(cards), unreadable)
+
+    def list_cards(self, board_id: str, *, include_archived: bool = False) -> list[BoardCard]:
+        return self.scan_cards(board_id, include_archived=include_archived).cards
 
     # --- card writes ------------------------------------------------------
 
@@ -501,29 +558,48 @@ class BoardStore:
             return self.ensure_default_board(workspace_id, created_by=created_by)
         raise ValueError("invalid_request")
 
-    def _list_active_cards(self, board_id: str) -> list[BoardCard]:
-        cards_dir = paths.board_cards_dir(board_id)
+    def _scan_card_dir(self, directory) -> CardScan:
         cards: list[BoardCard] = []
-        if not cards_dir.exists():
-            return cards
-        for path in cards_dir.glob("*.json"):
+        unreadable = 0
+        if not directory.exists():
+            return CardScan([], 0)
+        for path in directory.glob("*.json"):
             try:
                 cards.append(from_jsonable(BoardCard, _read_json(path)))
             except Exception:
+                unreadable += 1
                 continue
-        return cards
+        return CardScan(cards, unreadable)
+
+    def _scan_active_cards(self, board_id: str) -> CardScan:
+        return self._scan_card_dir(paths.board_cards_dir(board_id))
+
+    def _scan_archived_cards(self, board_id: str) -> CardScan:
+        return self._scan_card_dir(paths.board_archive_dir(board_id))
+
+    def _list_active_cards(self, board_id: str) -> list[BoardCard]:
+        return self._scan_active_cards(board_id).cards
 
     def _list_archived_cards(self, board_id: str) -> list[BoardCard]:
-        archive_dir = paths.board_archive_dir(board_id)
-        cards: list[BoardCard] = []
-        if not archive_dir.exists():
-            return cards
-        for path in archive_dir.glob("*.json"):
-            try:
-                cards.append(from_jsonable(BoardCard, _read_json(path)))
-            except Exception:
-                continue
-        return cards
+        return self._scan_archived_cards(board_id).cards
+
+    def _ordering_cards(self, board_id: str) -> list[BoardCard]:
+        """THE read every order-key decision goes through, and the one place
+        that refuses.
+
+        One chokepoint rather than a guard on each of the three allocators: two
+        sufficient mechanisms answering the same question is how a fix survives
+        its own sabotage and stops being a check. Every caller below allocates
+        or rewrites keys, so none of them may proceed on a column it cannot
+        fully see.
+        """
+
+        scan = self._scan_active_cards(board_id)
+        if scan.unreadable:
+            raise CardsUnreadable(
+                f"cards_unreadable board={board_id} unreadable={scan.unreadable}"
+            )
+        return scan.cards
 
     def _archive_card_locked(self, board: Board, card: BoardCard, *, reason: str, updated_by: str, emit: bool = True) -> None:
         card.state = "archived"
@@ -547,13 +623,13 @@ class BoardStore:
             )
 
     def _next_order_key(self, board_id: str, column_id: str) -> str:
-        cards = _sort_cards([c for c in self._list_active_cards(board_id) if c.column_id == column_id])
+        cards = _sort_cards([c for c in self._ordering_cards(board_id) if c.column_id == column_id])
         last = cards[-1].order_key if cards else None
         return board_order.allocate_between(last, None)
 
     def _allocate_order_key(self, board_id: str, column_id: str, *, before: str | None, after: str | None, exclude_card_id: str | None) -> str:
         column_cards = _sort_cards(
-            [c for c in self._list_active_cards(board_id) if c.column_id == column_id and c.card_id != exclude_card_id]
+            [c for c in self._ordering_cards(board_id) if c.column_id == column_id and c.card_id != exclude_card_id]
         )
         keys = [c.order_key for c in column_cards]
         # ``after`` = the card the moved card should sit immediately AFTER (its
@@ -580,12 +656,12 @@ class BoardStore:
             # append at the end (one loud sweep, deterministic keys).
             self._rebalance_column(board_id, column_id, exclude_card_id=exclude_card_id)
             fresh = _sort_cards(
-                [c for c in self._list_active_cards(board_id) if c.column_id == column_id and c.card_id != exclude_card_id]
+                [c for c in self._ordering_cards(board_id) if c.column_id == column_id and c.card_id != exclude_card_id]
             )
             return board_order.allocate_between(fresh[-1].order_key if fresh else None, None)
 
     def _rebalance_column(self, board_id: str, column_id: str, *, exclude_card_id: str | None = None) -> None:
-        column_cards = _sort_cards([c for c in self._list_active_cards(board_id) if c.column_id == column_id])
+        column_cards = _sort_cards([c for c in self._ordering_cards(board_id) if c.column_id == column_id])
         if not column_cards:
             return
         keys = board_order.rebalance(len(column_cards))
