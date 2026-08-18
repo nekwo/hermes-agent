@@ -54,8 +54,10 @@ last build has no previous triple to compare, so the walk has to find it.
 Two mtime-blind cases are covered explicitly rather than assumed:
 
 * **SQLite.** A WAL commit that has not checkpointed leaves ``state.db``'s
-  mtime untouched, so the ``-wal`` / ``-shm`` / ``-journal`` siblings are
-  fingerprinted beside it.
+  mtime untouched, so the ``-wal`` and ``-journal`` siblings are fingerprinted
+  beside it — the WAL under a mask that stops READING the database from looking
+  like writing it. See :data:`_DB_SIBLINGS` for the mask, its ground, and what
+  it deliberately does not cover.
 * **In-place rewrites inside a directory.** Replacing an existing entry does
   not move the CONTAINING directory's mtime on NTFS, which is why every file
   is stat'd individually instead of trusting its parent (the same reasoning as
@@ -338,8 +340,51 @@ _EXCLUDED_STORE_ENTRIES = frozenset(
 _TMP_SUFFIX = ".tmp"
 
 #: SQLite's mtime-blind siblings. A WAL commit that has not checkpointed leaves
-#: the main database file untouched.
-_DB_SIBLINGS = ("", "-wal", "-shm", "-journal")
+#: the main database file untouched, so the journal files are stat'd beside it.
+#:
+#: ``-shm`` IS NOT HERE, and the ``-wal`` entry wears a mask. Both are the same
+#: correction: the build OPENS these databases, and an open is not a write.
+#:
+#: What was measured (2026-08-18, live root and reproduced in the fixture): with
+#: a connection held, opening the SessionDB a second time moves ``-wal``'s mtime
+#: while leaving it at SIZE 0 — the closing connection checkpoints, so the file
+#: is re-created empty at open time — and rewrites ``-shm``. Both moved DURING
+#: the boot build that was reading them. The key is taken pre-build by design, so
+#: the build's own read guaranteed the next process a ``fingerprint_mismatch``:
+#: the cache could not converge inside one process, let alone across two.
+#:
+#: THE MASK, and why each half is sound:
+#:
+#: * ``-shm`` carries no content signal at all. SQLite documents it as a
+#:   non-persistent shared-memory index, rebuilt from the WAL by whichever
+#:   process opens the database, and deleted when the last connection closes. Its
+#:   mtime is an open-time artefact of a READER. Anything it could indicate is
+#:   already carried by ``-wal`` (the frames it indexes) or by the main file (the
+#:   checkpoint that retired them). ``stream._scope_fingerprint`` — the other
+#:   fingerprint in this runtime that stats these siblings — has always used
+#:   ``("", "-wal", "-journal")``, so dropping it here CONVERGES the two
+#:   conventions rather than forking them.
+#: * ``-wal`` is keyed on ``(path, size, mtime_ns if size > 0 else 0)``. A
+#:   zero-length WAL holds no frames — there is nothing in it for the projection
+#:   to read, and its mtime says only when some process last opened or
+#:   checkpointed the database. The instant an uncheckpointed commit lands the
+#:   file is non-empty, and the mtime counts again in full: the WAL-commit signal
+#:   EG-3.1 requires is untouched for every state the signal can actually be in.
+#:   Absent (``-1``) and present-but-empty (``0``) stay distinguishable, because
+#:   the mask moves the mtime and never the size.
+#:
+#: WHAT THE MASK DOES NOT COVER, stated rather than discovered later. A
+#: checkpoint that truncates the WAL to zero AFTER writing its frames into
+#: ``state.db`` leaves a zero-length WAL whose mtime this ignores — but that
+#: checkpoint moved ``state.db``'s own mtime and size, and the main file is the
+#: FIRST entry in this tuple, so the change is carried there. The uncovered case
+#: would be a commit that is both invisible in the main file and invisible in the
+#: WAL's size, which SQLite's own durability rules do not admit.
+_DB_SIBLINGS = ("", "-wal", "-journal")
+
+#: The sibling whose mtime is masked while it is empty. Named rather than
+#: spelled at the call site so the mask and the enumeration cannot drift.
+_WAL_SIBLING = "-wal"
 
 #: A DIRECTORY contributes its PATH and nothing else — never a timestamp, never
 #: a present/absent distinction.
@@ -488,10 +533,30 @@ def _walk_tree(root: Path, out: list[FingerprintEntry], *, limit: int, exclude_t
     return len(out) < limit
 
 
+def _empty_wal_is_content_free(entry: FingerprintEntry) -> FingerprintEntry:
+    """Drop a ZERO-LENGTH WAL's mtime; keep everything else exactly as stat'd.
+
+    The one line where "the build reads this database" stops being spelled the
+    same way as "somebody wrote to this database". See :data:`_DB_SIBLINGS` for
+    the ground under the mask.
+
+    ``size`` is never touched, so absent (``-1``) and present-but-empty (``0``)
+    remain different facts — the same rule :func:`_stat_entry` follows for a
+    missing file.
+    """
+
+    if entry.size > 0:
+        return entry
+    return FingerprintEntry(entry.path, 0, entry.size)
+
+
 def _db_entries(db_path: Any, out: list[FingerprintEntry]) -> None:
     text = str(db_path)
     for suffix in _DB_SIBLINGS:
-        out.append(_stat_entry(text + suffix))
+        entry = _stat_entry(text + suffix)
+        if suffix == _WAL_SIBLING:
+            entry = _empty_wal_is_content_free(entry)
+        out.append(entry)
 
 
 def _receipt_fingerprint_refused(*, scope: str, root: Any, bound: int) -> None:

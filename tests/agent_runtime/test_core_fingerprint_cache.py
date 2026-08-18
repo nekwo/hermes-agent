@@ -22,10 +22,13 @@ milliseconds. The seconds are read off EG-2.1's receipts (ruling #60).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import importlib.abc
 import json
 import logging
+import os
+import sqlite3
 import sys
 import threading
 
@@ -370,8 +373,8 @@ def test_a_sessiondb_only_mutation_flips_the_fingerprint(
 
     The chat SessionDB lives under the HERMES head home, not the store root, and
     a WAL commit that has not checkpointed leaves the main file's mtime
-    untouched — so the ``-wal``/``-shm`` siblings are the load-bearing half. The
-    mutant's fingerprint is unchanged by construction here and serves the cache,
+    untouched — so the ``-wal`` sibling is the load-bearing half. The mutant's
+    fingerprint is unchanged by construction here and serves the cache,
     convicted by the ``core_source`` probe.
     """
 
@@ -392,6 +395,262 @@ def test_a_sessiondb_only_mutation_flips_the_fingerprint(
     _new_context()
     core = build_snapshot(build_info={"caller": "probe"})
     assert core["parity"]["core_source"] == core_cache.CORE_SOURCE_REBUILT
+
+
+# --------------------------------------------------------------------------- #
+# 4b. Reading the SessionDB is not writing it (MC-1 / P2)
+# --------------------------------------------------------------------------- #
+def _db_key(db_path) -> tuple:
+    """Exactly what ``build_input_fingerprint`` records for one database."""
+
+    out: list = []
+    core_cache._db_entries(db_path, out)
+    return tuple(out)
+
+
+def _write(path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+
+
+def _set_mtime_ns(path, mtime_ns: int) -> None:
+    """Move an mtime EXACTLY, with no sleep and no clock-granularity hazard.
+
+    NTFS timestamps advance in ~15.6 ms ticks here, so two writes inside one
+    tick are indistinguishable — a fingerprint case that drives mtime by doing
+    work fast enough would be measuring the tick, not the rule.
+    """
+
+    os.utime(path, ns=(mtime_ns, mtime_ns))
+
+
+def test_an_empty_wals_mtime_is_not_a_change_signal(isolate_agent_runtime_root, tmp_path):
+    """A zero-length WAL holds no frames, so its clock says nothing about content.
+
+    SQLite re-creates the WAL empty when a connection opens, stamping it with the
+    open time. Keyed on that mtime, the build's own READ of a database becomes
+    indistinguishable from somebody's WRITE to it — and since the key is taken
+    pre-build by design, the build guaranteed the next process a mismatch.
+    """
+
+    db = tmp_path / "probe" / "state.db"
+    _write(db, b"main")
+    _write(db.parent / "state.db-wal", b"")
+    before = _db_key(db)
+    _set_mtime_ns(db.parent / "state.db-wal", 1_700_000_000_000_000_000)
+    after = _db_key(db)
+    assert after == before, (
+        "an empty WAL's mtime moved the database's fingerprint entries, so every "
+        f"open of this database invalidates the key it was read under: {before} "
+        f"-> {after}"
+    )
+
+
+def test_a_non_empty_wal_still_carries_its_commit_signal(
+    isolate_agent_runtime_root, tmp_path
+):
+    """The mask must not weaken the thing the siblings are stat'd FOR.
+
+    An uncheckpointed commit leaves the main file's mtime untouched and lives
+    only in the WAL. The instant the WAL is non-empty its mtime counts again in
+    full — otherwise this change would trade a boot-time miss for a served core
+    that is missing a committed write, which is the failure class inverted.
+    """
+
+    db = tmp_path / "probe" / "state.db"
+    _write(db, b"main")
+    wal = db.parent / "state.db-wal"
+    _write(wal, b"one uncheckpointed frame")
+    before = _db_key(db)
+    _set_mtime_ns(wal, 1_700_000_000_000_000_000)
+    after = _db_key(db)
+    assert after != before, (
+        "a NON-EMPTY WAL's mtime no longer moves the fingerprint — an "
+        "uncheckpointed commit is now invisible to the key, and a core missing "
+        "that write can be served as authoritative"
+    )
+
+
+def test_an_absent_wal_and_an_empty_one_stay_different_facts(
+    isolate_agent_runtime_root, tmp_path
+):
+    """The mask moves the mtime and never the size, so absence stays visible.
+
+    ``_stat_entry`` records a missing input as ``-1/-1`` precisely so an
+    appearing file is not indistinguishable from an unchanged one. A mask that
+    flattened both to zero would have re-opened that hole for the WAL.
+    """
+
+    db = tmp_path / "probe" / "state.db"
+    _write(db, b"main")
+    absent = _db_key(db)
+    _write(db.parent / "state.db-wal", b"")
+    empty = _db_key(db)
+    assert absent != empty, (
+        "a WAL that appeared did not move the fingerprint; the mask flattened "
+        "the size as well as the mtime"
+    )
+
+
+def test_the_shm_sibling_is_outside_the_closure(isolate_agent_runtime_root, tmp_path):
+    """``-shm`` is a reader's scratch index, not a record of anything.
+
+    SQLite rebuilds it from the WAL on open and unlinks it when the last
+    connection closes. Everything it could indicate is already carried by the
+    WAL's frames or by the main file's checkpoint, and the sibling fingerprint
+    next door (``stream._scope_fingerprint``) has always omitted it.
+    """
+
+    db = tmp_path / "probe" / "state.db"
+    _write(db, b"main")
+    before = _db_key(db)
+    _write(db.parent / "state.db-shm", b"a rebuilt shared-memory index")
+    appeared = _db_key(db)
+    assert appeared == before, (
+        f"the -shm sibling entered the fingerprint: {before} -> {appeared}"
+    )
+    _set_mtime_ns(db.parent / "state.db-shm", 1_700_000_000_000_000_000)
+    assert _db_key(db) == before, "the -shm sibling's mtime entered the fingerprint"
+
+
+@contextlib.contextmanager
+def _sessiondb_in_the_live_shape():
+    """The chat SessionDB as the LIVE root has it: on-disk WAL, connection held.
+
+    Three steps, each load-bearing:
+
+    * force ``journal_mode=WAL`` through a RAW connection. ``hermes_state``
+      refuses to ENABLE WAL on this SQLite (3.45.3 carries the WAL-reset
+      corruption bug, so it falls back to ``journal_mode=DELETE``) but
+      deliberately does not downgrade a database that is already WAL on disk.
+      Without this the case would be VACUOUS — a DELETE-mode database has no
+      ``-wal`` at all, and a mask is trivially green when there is no file to
+      mask;
+    * hold the connection. The siblings exist only while a connection does — the
+      last one to close checkpoints and unlinks them. That is why the live root
+      has them (a serve holds the SessionDB for its life) and why a test that
+      opens and closes never sees one;
+    * one WARM-UP open, because the first open under the new journal mode also
+      grows the main file with one-time schema work — a genuine input change,
+      and not the one under test.
+
+    Measured after warm-up: every further open moves ``-wal``'s mtime and
+    nothing else, at size 0. That is exactly the self-perturbation P2 removes.
+    """
+
+    from agent_runtime.chat_session_scope import chat_session_db_path
+    from hermes_state import SessionDB
+
+    db_path = chat_session_db_path()
+    SessionDB(db_path=db_path).close()
+    holder = sqlite3.connect(str(db_path))
+    try:
+        mode = holder.execute("PRAGMA journal_mode=WAL").fetchone()
+        assert mode and str(mode[0]).lower() == "wal", (
+            f"could not put the fixture SessionDB into WAL mode (got {mode!r}); "
+            "these cases cannot measure the mask without it"
+        )
+        holder.execute("CREATE TABLE IF NOT EXISTS mc1_wal_probe (id INTEGER)")
+        holder.commit()
+        SessionDB(db_path=db_path).close()
+        assert os.path.exists(f"{db_path}-wal"), (
+            "no -wal sibling exists while a connection is held, so this fixture "
+            "is not reproducing the live shape and nothing below would be tested"
+        )
+        yield db_path
+    finally:
+        holder.close()
+
+
+def _open_the_sessiondb(db_path) -> None:
+    """What the build does to this database: open it, read, close."""
+
+    from hermes_state import SessionDB
+
+    handle = SessionDB(db_path=db_path)
+    handle.list_gateway_sessions()
+    handle.close()
+
+
+def test_the_builds_own_sessiondb_open_does_not_move_the_key(
+    isolate_agent_runtime_root,
+):
+    """The production shape, driven through SessionDB's own connection factory.
+
+    The unit cases above pin the mask; this one pins that the mask covers what
+    the RUNTIME actually does — the measured 2026-08-18 fact that ``-wal`` moved
+    during the boot build that was reading it.
+    """
+
+    with _sessiondb_in_the_live_shape() as db_path:
+        wal = f"{db_path}-wal"
+        before_key = core_cache.build_input_fingerprint()
+        assert before_key is not None
+        before_wal = os.stat(wal).st_mtime_ns
+        _open_the_sessiondb(db_path)
+        after_wal = os.stat(wal)
+        after_key = core_cache.build_input_fingerprint()
+        assert after_key is not None
+
+        # Non-vacuity FIRST: if the open did not disturb the sibling, the
+        # equality below would be true for want of anything to be true about.
+        assert after_wal.st_mtime_ns != before_wal, (
+            "opening the SessionDB did not move -wal's mtime, so this case "
+            "measured nothing — the fixture is not in the live shape"
+        )
+        assert after_wal.st_size == 0, (
+            f"-wal is {after_wal.st_size} bytes after a read-only open; this "
+            "case is about the EMPTY-WAL artefact and a non-empty one is "
+            "legitimately keyed"
+        )
+        assert after_key.digest == before_key.digest, (
+            "reading the SessionDB moved the read-model cache's key, so the "
+            "build perturbs its own inputs and no process can ever be served "
+            "the core the previous one persisted"
+        )
+
+
+def test_a_persisted_key_survives_the_next_process_opening_the_database(
+    isolate_agent_runtime_root,
+):
+    """A2's cross-boot half: the key must outlive the next boot's own first read.
+
+    This is the field failure in one line. Boot 1 settles and persists a key.
+    Boot 2 starts, its build opens the chat SessionDB — and under the old
+    keying that open moved ``-wal`` and invalidated boot 1's key before boot 2
+    ever asked whether it matched. No boot could be served the core the previous
+    boot had just written.
+
+    Written as "settle, then open, then judge" rather than as a convergence
+    COUNT because the count cannot see this: the fixture's ``build_snapshot``
+    does not open the chat SessionDB at all (measured — a build leaves ``-wal``
+    untouched here), so a convergence-bound assertion would be green with or
+    without the mask. The open is therefore driven explicitly, through
+    SessionDB's own factory, exactly as the live build reaches it.
+    """
+
+    with _sessiondb_in_the_live_shape() as db_path:
+        _seed_workspace("alpha-one")
+        converge_persisted_core()
+        assert core_cache.read_persisted_core().matched, (
+            "the fixture did not settle, so nothing below is about the open"
+        )
+        wal = f"{db_path}-wal"
+        before = os.stat(wal).st_mtime_ns
+        _new_context()
+        _open_the_sessiondb(db_path)
+        after = os.stat(wal).st_mtime_ns
+
+        assert after != before, (
+            "the SessionDB open did not disturb -wal, so this case measured "
+            "nothing — the fixture is not in the live shape"
+        )
+        read = core_cache.read_persisted_core()
+        assert read.matched, (
+            "the persisted key stopped matching because the NEXT process opened "
+            f"the database it was keyed over (demote reason: {read.reason!r}). "
+            "The build perturbs its own inputs, so the cache can never hit."
+        )
 
 
 # --------------------------------------------------------------------------- #
