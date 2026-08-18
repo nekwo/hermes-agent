@@ -300,3 +300,276 @@ def test_the_entries_file_is_outside_the_key_it_is_written_beside(
         "writing the cache changed the fingerprint of the inputs, so a cache "
         "write can never be validated by the process that reads it next"
     )
+
+
+# =========================================================================== #
+# MC-3 / P4 arm 2 — the demote line names the paths, LAST, with its caveat
+# =========================================================================== #
+# ``_log_demote`` emitted ``core_source=rebuilt caller=… reason=… inputs=…`` and
+# nothing else; only ``never_converged`` carried a ``diff=``, and it cannot fire
+# on any boot shape (A2). So the one line the operator DOES see on every boot was
+# the one that said least.
+#
+# WHAT MAKES THESE NON-VACUOUS. "A diff is present" and "the diff is RIGHT" are
+# two claims, so they get two kills. Every case drives a value the tail must have
+# COMPUTED — a path the fixture moved, a count that differs from the capped
+# sample, an ordering that only holds if the field is genuinely last — and pairs
+# it with a discriminator: the paths that did NOT move must not appear, and the
+# demote reasons that are not "an input moved" must not grow a tail at all.
+
+
+def _demote_lines(caplog) -> list[str]:
+    return [line for line in _lines(caplog) if "core_source=rebuilt" in line]
+
+
+def _plant_entries(digest: str, rows: list[tuple[str, int, int]]) -> dict:
+    """A persisted generation the TEST owns, plus the sidecar that binds to it."""
+
+    core_cache.entries_path().parent.mkdir(parents=True, exist_ok=True)
+    atomic_json_write(
+        core_cache.entries_path(),
+        {"fingerprint": digest, "entries": [[path, mtime, size] for path, mtime, size in rows]},
+        indent=None,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return {"fingerprint": digest}
+
+
+def _diff_paths(line: str) -> list[str]:
+    return line.split("diff=", 1)[1].split(",")
+
+
+def test_a_fingerprint_miss_names_the_input_that_moved(
+    isolate_agent_runtime_root, caplog
+):
+    """A1-b, end to end and through the real walk: the miss becomes actionable.
+
+    A pair is persisted, EXACTLY ONE input is added, and a fresh process state
+    consults — the boot shape, minus the process boundary. The line the operator
+    reads must name that file.
+
+    The directory is created BEFORE the first walk on purpose, so the single
+    filesystem change between the two stat sets is the file itself: a directory
+    contributes its path and never its mtime, so nothing else can move.
+
+    *Kill A:* log without the diff tail — a receipt that carries no path cannot
+    name one. *Kill B:* name a hard-coded path instead of the computed diff —
+    the tail is present, ``changed=`` still counts, and the driven path is
+    absent. Two kills, because a present diff and a CORRECT diff are two claims.
+    """
+
+    root = isolate_agent_runtime_root
+    (root / "workspaces").mkdir(parents=True)
+    stable = root / "workspaces" / "ws_that_never_moves.json"
+    stable.write_text("{}", encoding="utf-8")
+
+    before = core_cache.build_input_fingerprint()
+    assert before is not None
+    assert core_cache.write_back(_core(0), fingerprint=before) is True
+
+    moved = root / "workspaces" / "ws_that_moved.json"
+    moved.write_text("{}", encoding="utf-8")
+
+    core_cache.reset_process_state()
+    with caplog.at_level(logging.INFO, logger="agent_runtime.core_cache"):
+        decision = core_cache.consult(caller="probe")
+
+    assert decision.core is None and decision.demoted, (
+        "the fixture did not produce a demote, so nothing below is about a miss"
+    )
+    lines = _demote_lines(caplog)
+    assert len(lines) == 1, lines
+    line = lines[0]
+    assert f"reason={core_cache.DEMOTE_FINGERPRINT_MISMATCH}" in line, line
+    assert f"diff_scope={core_cache.DIFF_SCOPE_LAST_PAIR}" in line, line
+    assert str(moved) in line, (
+        "the demote did not name the one input the fixture moved, which is the "
+        f"whole point of the tail: {line}"
+    )
+    assert str(stable) not in line, (
+        "the demote named an input that did not move, so it is reporting the "
+        f"stat set rather than the diff: {line}"
+    )
+    assert "changed=1" in line, line
+
+
+def test_changed_counts_the_drift_and_the_sample_is_capped_beneath_it(
+    isolate_agent_runtime_root, caplog
+):
+    """``changed=`` is the COUNT; ``diff=`` is a bounded sample of it.
+
+    The cap exists so one line cannot become a store dump, and the count exists
+    so the cap can never make a large drift read as a small one. That is only
+    true if they are computed from different things — which is exactly what a
+    single drive cannot prove, so two drifts are driven: one beneath the cap and
+    one above it.
+
+    *Kill:* emit ``changed=len(sample)``. The under-cap arm still passes (3 is 3),
+    and the over-cap arm reds — which is why both arms are here.
+    """
+
+    root = isolate_agent_runtime_root
+    cap = core_cache._NEVER_CONVERGED_DIFF_PATHS
+    base = [(str(root / "workspaces" / f"ws_{index}.json"), 10, 10) for index in range(12)]
+
+    for moving in (3, cap + 2):
+        sidecar = _plant_entries("persisted-digest", base)
+        key = _key(
+            [
+                (path, mtime + 1, size) if index < moving else (path, mtime, size)
+                for index, (path, mtime, size) in enumerate(base)
+            ]
+        )
+        caplog.clear()
+        with caplog.at_level(logging.INFO, logger="agent_runtime.core_cache"):
+            core_cache._log_demote(
+                caller="probe",
+                reason=core_cache.DEMOTE_FINGERPRINT_MISMATCH,
+                key=key,
+                sidecar=sidecar,
+            )
+
+        line = _demote_lines(caplog)[0]
+        assert f"changed={moving}" in line, (
+            f"{moving} inputs moved and the line says otherwise: {line}"
+        )
+        assert len(_diff_paths(line)) == min(moving, cap), (
+            f"the sample is not bounded by the cap ({cap}): {line}"
+        )
+
+
+def test_the_diff_is_the_last_field_on_the_line(isolate_agent_runtime_root, caplog):
+    """Nothing may be field-parsed after ``diff=``, so nothing may follow it.
+
+    A path can contain spaces and the list is variable-length, so a parser that
+    met another ``key=value`` after the diff would read part of a filename as a
+    field — the same rule ``_receipt_never_converged`` already follows, and the
+    reason the tail could be approved as additive at all.
+
+    The assertion is on the rendered STRING's tail rather than on field presence,
+    because "present" is exactly what an ordering bug leaves intact.
+
+    *Kill:* move ``inputs=`` after the tail. Every field is still on the line and
+    the ending is no longer the diff.
+    """
+
+    root = isolate_agent_runtime_root
+    base = [(str(root / "workspaces" / "ws_a.json"), 10, 10)]
+    sidecar = _plant_entries("persisted-digest", base)
+    key = _key([(str(root / "workspaces" / "ws_a.json"), 11, 10)])
+
+    with caplog.at_level(logging.INFO, logger="agent_runtime.core_cache"):
+        core_cache._log_demote(
+            caller="probe",
+            reason=core_cache.DEMOTE_FINGERPRINT_MISMATCH,
+            key=key,
+            sidecar=sidecar,
+        )
+
+    line = _demote_lines(caplog)[0]
+    assert line.endswith(f"diff={base[0][0]}"), (
+        f"something is field-parseable after the variable-length diff list: {line}"
+    )
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        core_cache.DEMOTE_BUILD_STAMP_MISMATCH,
+        core_cache.DEMOTE_CONTRACT_MISMATCH,
+        core_cache.DEMOTE_RUNTIME_ROOT_MISMATCH,
+        core_cache.DEMOTE_HOME_MISMATCH,
+    ],
+)
+def test_only_a_fingerprint_miss_grows_a_tail(
+    isolate_agent_runtime_root, caplog, reason
+):
+    """A diff on the other reasons would be a measurement of the wrong thing.
+
+    ``build_stamp_mismatch`` says the operator upgraded; ``contract_mismatch``
+    says the schema moved; ``runtime_root_mismatch`` and ``home_mismatch`` say
+    the pair answers a different question entirely. None of them is "an input
+    moved", and a diff attached to one would name every file the upgrade touched
+    and read to a census as store churn.
+
+    The same fixture that produces NO tail here is proven to produce one — the
+    last block drives ``fingerprint_mismatch`` over the identical inputs — so the
+    silence is a decision rather than a fixture that could never have diffed.
+
+    *Kill:* compute the diff for every demote reason.
+    """
+
+    root = isolate_agent_runtime_root
+    base = [(str(root / "workspaces" / "ws_a.json"), 10, 10)]
+    sidecar = _plant_entries("persisted-digest", base)
+    key = _key([(str(root / "workspaces" / "ws_a.json"), 11, 10)])
+
+    with caplog.at_level(logging.INFO, logger="agent_runtime.core_cache"):
+        core_cache._log_demote(caller="probe", reason=reason, key=key, sidecar=sidecar)
+
+    quiet = _demote_lines(caplog)[0]
+    assert f"reason={reason}" in quiet, quiet
+    assert "changed=" not in quiet, quiet
+    assert "diff=" not in quiet, (
+        f"a demote that is not about an input moving grew an input diff: {quiet}"
+    )
+
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="agent_runtime.core_cache"):
+        core_cache._log_demote(
+            caller="probe",
+            reason=core_cache.DEMOTE_FINGERPRINT_MISMATCH,
+            key=key,
+            sidecar=sidecar,
+        )
+    assert "diff=" in _demote_lines(caplog)[0], (
+        "the fixture cannot produce a tail at all, so the silence above proves "
+        "nothing about which reason grows one"
+    )
+
+
+def test_a_matched_consult_reads_no_entries_at_all(
+    isolate_agent_runtime_root, monkeypatch
+):
+    """The hit path — every boot the cache works on — must pay nothing for this.
+
+    The entries file is 3.4 MiB on the operator's store. Reading it to decide
+    that nothing needs explaining would make the diagnostic a tax on the very
+    outcome it is not about.
+
+    The counter lives HERE, wrapping the path helper, where nothing in
+    ``core_cache`` can set it — the ``_CountingStores`` pattern. Both consult
+    shapes are driven, because they reach the judgement by different routes (the
+    shared armed-window read, and the handed-in-key read) and only one of them
+    would catch an eager read planted in the other.
+
+    *Kill:* read the entries eagerly in ``_judge_persisted_pair``. The counter
+    reads 1 on both shapes.
+    """
+
+    key = core_cache.build_input_fingerprint()
+    assert key is not None
+    assert core_cache.write_back(_core(0), fingerprint=key) is True
+
+    touches: list[str] = []
+    real_entries_path = core_cache.entries_path
+
+    def counted_entries_path():
+        touches.append("entries")
+        return real_entries_path()
+
+    monkeypatch.setattr(core_cache, "entries_path", counted_entries_path)
+
+    for handed_in in (key, None):
+        core_cache.reset_process_state()
+        touches.clear()
+        decision = core_cache.consult(caller="probe", fingerprint=handed_in)
+        assert decision.core is not None and not decision.demoted, (
+            "the fixture did not produce a cache HIT, so a zero read count below "
+            f"would only mean the path was never taken (handed_in={handed_in is not None})"
+        )
+        assert touches == [], (
+            "a matched consult touched the entries file, so every hitting boot "
+            f"now pays for a diagnostic about misses: {touches}"
+        )

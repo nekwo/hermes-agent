@@ -147,7 +147,7 @@ same fact. There is exactly one: the snapshot's own ``parity`` envelope, which
 | ``snapshot_core_cache never_converged`` (WARNING) | none | ``builds=`` then ``diff_scope=`` ``changed=`` ``diff=`` LAST (paths may contain spaces). **CENSUS RULE (C22(i)): read ``diff_scope=`` or the count over-reports.** ``every_pass`` = the inputs oscillate, i.e. self-perturbation, the A2 defect worth acting on; ``last_pair`` = a store that is simply moving, where the receipt is true (the cache IS buying nothing) but names no defect; ``none`` with ``diff=diff_unavailable`` and ``diff_reason=no_entries``/``digest_without_entry_delta`` = the diff could not be computed and says so in its own words |
 | ``snapshot_core_cache core_source=cache`` (INFO) | the snapshot payload | ``parity.core_source == "cache"`` — SAME spelling, no split. The line also carries ``caller=`` ``inputs=`` ``fingerprint=`` ``offset=``, none of which reach the payload |
 | ``snapshot_core_cache core_source=cache stale=true`` (INFO) | the snapshot payload | ``parity.core_stale == true`` AND ``parity.freshness.state == "stale"`` — the field the launcher's ``MissionSnapshotEnvelope`` already maps to ``MissionSnapshotHealth.stale``. RESIDUAL SPLIT, named rather than fixed: the log says ``stale=true``, the payload says ``parity.core_stale``/``parity.freshness.state``, and the payload spelling is a consumer contract that predates this lane |
-| ``snapshot_core_cache core_source=rebuilt`` (INFO, ``_log_demote``) | the snapshot payload, PARTIALLY | ``parity.core_source == "rebuilt"`` carries THAT the cache was demoted; the ``reason=`` never leaves this logger, and ``CoreDecision.reason`` is read by no caller today. So a field census of WHY a cache demoted has exactly one source: this line. Reasons ``unreadable`` ``core_digest_mismatch`` ``fingerprint_unavailable`` ``fingerprint_mismatch`` ``build_stamp_unknown`` ``build_stamp_mismatch`` ``contract_mismatch`` ``runtime_root_mismatch`` ``home_mismatch``. **CENSUS RULE (MC-2): ``home_mismatch`` is not an ordinary miss.** The other reasons say the STORE moved, the install changed, or the pair is unbound — all facts about the thing being cached. This one says the persisted pair was keyed under a different Hermes home than the reading process resolved, i.e. the two runs asked different QUESTIONS, and it is emitted INSTEAD of ``fingerprint_mismatch`` so the distinction is countable rather than inferred. On a multi-home install (an operator who really does run two roots) it is ordinary. On a SINGLE-PROFILE operator boot it is evidence that a persona scope was live while a build stat'd — the capture in ``core_cache.resolved_fingerprint_home`` was taken too late — which is a defect to go fix, not noise to tune out. A pair carrying no ``sidecar.fingerprint_home`` at all (every one written before MC-2) is skipped rather than demoted, so this reason can never fire for an install that simply predates the field. ``absent`` is deliberately NOT logged (the ordinary cold start would print a line on every build in every process), so its only trace is the ABSENCE of a line and a census must not read "no demote line" as "no demote" |
+| ``snapshot_core_cache core_source=rebuilt`` (INFO, ``_log_demote``) | the snapshot payload, PARTIALLY | ``parity.core_source == "rebuilt"`` carries THAT the cache was demoted; the ``reason=`` never leaves this logger, and ``CoreDecision.reason`` is read by no caller today. So a field census of WHY a cache demoted has exactly one source: this line. Reasons ``unreadable`` ``core_digest_mismatch`` ``fingerprint_unavailable`` ``fingerprint_mismatch`` ``build_stamp_unknown`` ``build_stamp_mismatch`` ``contract_mismatch`` ``runtime_root_mismatch`` ``home_mismatch``. **CENSUS RULE (MC-2): ``home_mismatch`` is not an ordinary miss.** The other reasons say the STORE moved, the install changed, or the pair is unbound — all facts about the thing being cached. This one says the persisted pair was keyed under a different Hermes home than the reading process resolved, i.e. the two runs asked different QUESTIONS, and it is emitted INSTEAD of ``fingerprint_mismatch`` so the distinction is countable rather than inferred. On a multi-home install (an operator who really does run two roots) it is ordinary. On a SINGLE-PROFILE operator boot it is evidence that a persona scope was live while a build stat'd — the capture in ``core_cache.resolved_fingerprint_home`` was taken too late — which is a defect to go fix, not noise to tune out. A pair carrying no ``sidecar.fingerprint_home`` at all (every one written before MC-2) is skipped rather than demoted, so this reason can never fire for an install that simply predates the field. ``absent`` is deliberately NOT logged (the ordinary cold start would print a line on every build in every process), so its only trace is the ABSENCE of a line and a census must not read "no demote line" as "no demote". **CENSUS RULE (MC-3): ``fingerprint_mismatch`` ALONE grows a tail**, and the tail is ``changed=`` then ``diff=`` LAST (paths may contain spaces, so nothing can be field-parsed after it; the tail is additive, so an existing ``reason=`` grep is unaffected). No other reason carries one, deliberately: a diff on a ``build_stamp_mismatch`` would name every file the operator's upgrade touched and read as store churn. **The scope is ``last_pair`` BY CONSTRUCTION and that caveat is the row's most important sentence:** a demote diff is the delta since the LAST WRITE-BACK, so on a busy store it legitimately names files that are simply moving, and the receipt is TRUE without naming a defect. It is self-perturbation evidence — the A1-b/A2 class worth acting on — ONLY when the named paths are ones the runtime itself writes (``dispatch_delivery_drain.json``, ``serve_socket.owner.json``, ``state.db-wal``, ``serve_socket.lock``); when they are store paths the operator's own writes touched, the miss is legitimate and the cache is working as designed. An arm that could not compute the diff says so in its own words rather than emitting an empty list, which would read as "we looked and nothing moved": ``diff_scope=none changed=0 diff_reason=`` ``no_entries`` (nothing persisted yet, or an install predating MC-3) / ``entries_unbound`` (the entries on disk belong to another write-back — see the ``entries=false`` row) / ``digest_without_entry_delta`` (the digests disagreed and no triple did), then ``diff=diff_unavailable`` |
 | ``snapshot_core_cache_write ok=true`` (INFO) | none | ``inputs=`` ``fingerprint=`` ``offset=`` |
 | ``snapshot_core_cache_write ok=false`` (INFO/WARNING) | none | reasons ``serialize`` ``build_stamp_unknown`` ``fingerprint_unavailable`` ``io``. **COLLISION:** ``build_stamp_unknown`` and ``fingerprint_unavailable`` are ALSO demote reasons on the row above. Grep the family token with them, never the reason alone |
 | ``snapshot_core_cache_write entries=false`` (WARNING) | none | ``reason=entries_io``. **NOT a write refusal, and deliberately not spelled ``ok=false``:** the core and sidecar LANDED and the cache is usable; only the stat set that makes a later miss diffable did not. A census that folded this into ``ok=false`` would count a successful cache write as a failed one. Its consequence is countable on the OTHER lane rather than inferred: the entries file left behind is bound to an older digest, so the next fingerprint demote reports ``diff_reason=entries_unbound`` |
@@ -1842,13 +1842,81 @@ class shadow_build_scope:
         _LANE.shadow = False
 
 
-def _log_demote(*, caller: str, reason: str, key: CoreFingerprint | None) -> None:
+def _demote_diff_detail(key: CoreFingerprint | None, sidecar: dict | None) -> str:
+    """WHICH inputs moved between the persisted write-back and this walk.
+
+    **The scope is ``last_pair`` by construction, and that is a census caveat, not
+    a detail.** This is the delta since the LAST WRITE-BACK, so on a store that is
+    simply busy it legitimately names files that are simply moving. It is
+    self-perturbation evidence — the A1-b/A2 defect worth acting on — only when
+    the named paths are ones the RUNTIME ITSELF writes. The channel table row
+    carries the reading rule; the token on the line is the honest scope rather
+    than a new one invented to flatter the diagnostic.
+
+    Every arm that cannot answer says so in its OWN words through
+    :func:`_diff_unavailable_detail`, never by returning an empty diff — an empty
+    ``diff=`` reads to a census exactly like "we looked and nothing moved", which
+    is C16's lesson and is the one way this receipt could mislead.
+    """
+
+    if key is None or not key.entries:
+        return _diff_unavailable_detail(DIFF_UNAVAILABLE_NO_ENTRIES)
+    persisted, unavailable = _persisted_entries(
+        expect_digest=(sidecar or {}).get("fingerprint")
+    )
+    if persisted is None:
+        return _diff_unavailable_detail(unavailable)
+    changed = _changed_paths(persisted, key.entries)
+    if not changed:
+        # The digests disagreed and no triple did. Nothing here can be named, and
+        # borrowing the ``last_pair`` sentence for it would report a measurement
+        # that was never taken.
+        return _diff_unavailable_detail(DIFF_UNAVAILABLE_NO_ENTRY_DELTA)
+    return _diff_detail(DIFF_SCOPE_LAST_PAIR, list(changed))
+
+
+def _log_demote(
+    *, caller: str, reason: str, key: CoreFingerprint | None, sidecar: dict | None = None
+) -> None:
+    """The demote receipt — and, on a fingerprint miss ONLY, what moved (A1-b).
+
+    Before this, a read-miss said ``reason=fingerprint_mismatch inputs=23107``
+    and nothing else, so the operator saw the same line on every same-commit boot
+    with nothing to act on, and no process — not the serve, not a read-only
+    investigation — could name the file that moved. The absence was the finding.
+
+    TWO things keep the tail honest, and both are load-bearing:
+
+    * **It is computed LAZILY and only for ``fingerprint_mismatch``.** The hit
+      path pays nothing — it never reaches here — and the other demote reasons
+      are not "an input moved": a diff on a ``build_stamp_mismatch`` would name
+      every file the operator's upgrade touched and read to a census as store
+      churn, which is a measurement that would be true of the wrong thing.
+    * **``diff=`` goes LAST on the line**, after ``changed=``, for the reason
+      already written at :func:`_receipt_never_converged`: it is a
+      variable-length list and a path may contain spaces, so nothing can be
+      field-parsed after it. The tail is purely ADDITIVE — an existing
+      ``reason=`` grep is unaffected, which is what made this approvable as a
+      change to production log text.
+
+    The diff is worded by :func:`_changed_paths` and :func:`_diff_detail`, the
+    never-converged receipt's own helpers, so the two receipts spell ONE
+    vocabulary and are told apart by their family/event token exactly as the C22
+    table teaches — never by two spellings of one fact.
+    """
+
+    detail = (
+        " " + _demote_diff_detail(key, sidecar)
+        if reason == DEMOTE_FINGERPRINT_MISMATCH
+        else ""
+    )
     logger.info(
-        "snapshot_core_cache core_source=%s caller=%s reason=%s inputs=%s",
+        "snapshot_core_cache core_source=%s caller=%s reason=%s inputs=%s%s",
         CORE_SOURCE_REBUILT,
         caller,
         reason,
         "unknown" if key is None else key.count,
+        detail,
     )
 
 
@@ -1896,7 +1964,17 @@ def consult(*, caller: str, fingerprint: CoreFingerprint | None = None) -> CoreD
     )
     if not read.matched or read.core is None:
         if read.reason != DEMOTE_ABSENT:
-            _log_demote(caller=caller, reason=read.reason, key=read.fingerprint)
+            # The sidecar rides along so a fingerprint miss can be diffed against
+            # the entries THAT pair persisted — the binding rule at
+            # ``entries_path``. Handing the judgement's own sidecar rather than
+            # re-reading one is what keeps the diff about the generation that was
+            # actually judged.
+            _log_demote(
+                caller=caller,
+                reason=read.reason,
+                key=read.fingerprint,
+                sidecar=read.sidecar,
+            )
         return CoreDecision(None, read.reason != DEMOTE_ABSENT, read.reason)
     core = label_core(read.core, source=CORE_SOURCE_CACHE, stale=False)
     logger.info(
