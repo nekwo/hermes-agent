@@ -467,6 +467,127 @@ _HERMES_BEHAVIORAL_VARS = frozenset({
 })
 
 
+# ── The tree-wide no-undo tripwire (ML-14 / C21, EG-0.1) ───────────────────
+#
+# Every autouse guard in this file installs itself through ``monkeypatch`` —
+# ONE MonkeyPatch instance per test function, shared by every fixture that
+# requests it AND by the test body. Its ``undo()`` takes no argument and
+# unwinds the ENTIRE stack; it cannot drop "the patch I made". So a body that
+# calls ``monkeypatch.undo()`` to drop its own stub also takes down
+# ``_hermetic_environment`` (HERMES_HOME redirected to a tempdir, every
+# credential-shaped env var blanked), ``_kanban_write_guard``,
+# ``_live_system_guard``, ``_audio_playback_guard``,
+# ``_neutralize_webbrowser`` and ``_neutralize_macos_keychain_creds`` — plus,
+# under ``tests/agent_runtime``, that package's ``HERMES_AGENT_RUNTIME_ROOT``
+# and worktree-base pins. Everything the test does after that line runs
+# against the OPERATOR's live root with their real credentials.
+#
+# Not hypothetical. On 2026-08-17 (EG-0.1 / HC-H1) five sites did it and the
+# damage was found in the live tree: the leaked actor ``ws_office_patch_test``
+# sat at revision 67 in X:/Eternia/.hermes and climbed once per suite run, and
+# a persona-chat root lease file was taken out there.
+#
+# TWO WITNESSES, DIFFERENT MECHANISMS. This fixture is the BEHAVIOURAL one:
+#
+#   1. structural — ``tests/agent_runtime/test_no_midtest_monkeypatch_undo.py``
+#      AST-walks the whole tree and reddens in review, naming file and line. It
+#      sees only the spellings a walker can resolve.
+#   2. behavioural — this fixture. It watches a sentinel minted per test and
+#      never handed to the body, so an unwind reddens the exact test that
+#      performed it, whatever spelling it used: an alias, a callback, a
+#      ``getattr``.
+#
+# Witness 2 used to live in ``tests/agent_runtime/conftest.py`` and covered
+# that package alone while witness 1 covered the tree — a gap that file stated
+# rather than closed (ML-4). It is closed here, by hoisting the tripwire to
+# where the pins it protects actually live. The package-local copy is RETIRED
+# rather than kept alongside: it watched the same event through the same
+# mechanism, so two copies produce two teardown errors for one defect, not two
+# facts.
+#
+# WHY A SENTINEL AND NOT A PROBE OF THE PINS THEMSELVES. Comparing
+# ``os.environ["HERMES_HOME"]`` against the tempdir at teardown — the obvious
+# probe — reddens legitimate tests: re-pointing or dropping a pinned variable
+# inside a body is a supported pattern (a test whose SUBJECT is the fallback
+# rung must ``delenv`` it; ``test_profile_runner.py`` sets
+# ``HERMES_AGENT_RUNTIME_ROOT`` to a literal to prove the runner restores the
+# caller's value). Every one of those is a test being explicit about what it
+# needs, and a fence that punished them would be re-litigated and then
+# weakened. The sentinel is untouchable by all of them and is unwound by
+# exactly one thing: an ``undo()`` on the shared instance, which is the defect.
+
+
+class _SharedMonkeypatchWitness:
+    """Holder for the tree-wide teardown tripwire's witness token.
+
+    A module-scope object in this conftest rather than an attribute on a
+    production module: nothing under ``agent_runtime``/``hermes_cli`` should
+    have to grow a field so the test suite can watch itself.
+    """
+
+    token: object | None = None
+
+
+#: The one instance the fixture below pins. Module-scope so the pin is a real
+#: ``monkeypatch.setattr`` on a real attribute — which is what makes
+#: ``monkeypatch.undo()`` restore it to ``None`` and redden the tripwire.
+_SHARED_MONKEYPATCH_WITNESS = _SharedMonkeypatchWitness()
+
+#: The typed head of the tripwire's failure. Named so the gate
+#: (``tests/test_conftest_pin_tripwire.py``) can match on it instead of on
+#: prose that is free to be rewritten.
+SHARED_MONKEYPATCH_UNWOUND_MESSAGE = (
+    "THE SHARED MONKEYPATCH WAS UNWOUND FROM INSIDE THIS TEST"
+)
+
+
+@pytest.fixture(autouse=True)
+def _shared_monkeypatch_pin_tripwire(monkeypatch):
+    """PROVE, after every test body in the tree, that the autouse pins held.
+
+    Declared FIRST among this file's autouse fixtures on purpose: setup order
+    is declaration order, teardown is its reverse, so this assertion runs after
+    every other guard's teardown and therefore covers the widest window. It
+    still runs before ``monkeypatch``'s own unwind, because this fixture
+    requests ``monkeypatch`` and a fixture is torn down before what it depends
+    on.
+
+    See the block comment above for the incident and for why the witness is a
+    sentinel rather than a probe of the pins themselves.
+    """
+
+    # Minted per test and never handed to the body, so a body that unwound the
+    # stack cannot restore it: the token is a fresh object this fixture owns,
+    # and re-setting it would BE un-doing the unwind.
+    token = object()
+    monkeypatch.setattr(_SHARED_MONKEYPATCH_WITNESS, "token", token)
+
+    yield
+
+    assert _SHARED_MONKEYPATCH_WITNESS.token is token, (
+        f"{SHARED_MONKEYPATCH_UNWOUND_MESSAGE}. `monkeypatch` is ONE instance "
+        "shared by every fixture and the test body, and `undo()` takes no "
+        "argument — it drops EVERYTHING. So this test also unwound the autouse "
+        "guards in tests/conftest.py: HERMES_HOME is no longer the per-test "
+        "tempdir, every credential-shaped env var this suite blanks is back, "
+        "the kanban write guard, the live-system guard and the audio guard are "
+        "all off — and under tests/agent_runtime the HERMES_AGENT_RUNTIME_ROOT "
+        "and worktree-base pins are down too. Everything the body did after "
+        "that point ran against the OPERATOR's live root with their real "
+        "credentials: that is the 2026-08-17 leak (EG-0.1) that left "
+        "`ws_office_patch_test` at revision 67 in X:/Eternia/.hermes and took a "
+        "persona-chat root lease out there.\n\n"
+        "FIX: wrap the one patch you meant to drop in a scoped context instead "
+        "of unwinding the shared stack —\n"
+        "    with pytest.MonkeyPatch.context() as patched:\n"
+        "        patched.setattr(...)\n"
+        "        ...  # the patched half of the test\n"
+        "    ...            # the unpatched half; ONLY your patch is gone\n\n"
+        "HERMES_HOME is now "
+        f"{os.environ.get('HERMES_HOME')!r}."
+    )
+
+
 @pytest.fixture(autouse=True)
 def _reset_snapshot_catalog_memos():
     """The snapshot core's TTL memos (installed-skill catalog, profile
@@ -1300,6 +1421,82 @@ def _live_system_guard(request, monkeypatch):
                     return True
         return False
 
+    # ── Backend-spawn arm (ML-14 / B20(i)) ─────────────────────────────
+    #
+    # The arms above stop a test SIGNALLING or SERVICE-MUTATING the operator's
+    # live backend. They do not stop a test STARTING one, and that hole was
+    # load-bearing: ``hermes gateway run`` / ``hermes serve`` /
+    # ``hermes dashboard`` (and the ``python -m hermes_cli.main …`` spelling the
+    # desktop app uses) each boot a real backend against whatever root the
+    # environment resolves to, publish the machine-global root anchor, bind a
+    # port, and outlive the test — a live process the suite never asked for and
+    # nothing here would ever notice. The launcher runs against that same live
+    # runtime on this workstation, so the blast radius is another program's
+    # state, not just a slow test.
+    #
+    # ONE CHOKEPOINT: this classifier lives beside the systemctl / process-killer
+    # / ``hermes update`` arms, in the same ``_check_subprocess_cmd`` that every
+    # spawn primitive (run/Popen/call/check_*/getoutput/os.system/os.popen/
+    # pty.spawn/asyncio.create_subprocess_*) already funnels through. A
+    # directory-local fixture would have been a second fence over a subset of
+    # the same primitives.
+    #
+    # It scans EVERY non-flag token after the entry point rather than only the
+    # first, because ``hermes harness serve`` and ``hermes --profile x gateway
+    # run`` both put the subcommand past position 1 and flag arity is unknowable
+    # here. That deliberately over-refuses (a hermes invocation carrying a bare
+    # positional spelled ``gateway``/``serve``/``dashboard``): the cost of a
+    # false refusal is a red test and a one-line marker, the cost of a false
+    # pass is a live backend on the operator's machine.
+    _BACKEND_SUBCOMMANDS = ("gateway", "serve", "dashboard")
+    _HERMES_ENTRYPOINT_BASENAMES = ("hermes", "hermes.exe")
+
+    def _cmd_tokens(cmd) -> list:
+        # argv lists are tokenized by construction; only strings need shlex,
+        # which on Windows would otherwise eat the backslashes in a path.
+        if isinstance(cmd, (list, tuple)):
+            raw = [str(token) for token in cmd]
+        else:
+            cmd_str = _cmd_to_string(cmd)
+            try:
+                raw = _shlex.split(cmd_str)
+            except ValueError:
+                raw = cmd_str.split()
+        # A wrapper's argument is itself a whole command: ``["bash", "-c",
+        # "hermes gateway run"]`` arrives as THREE elements, the last of which
+        # is the command. Split on whitespace (not shlex — it would eat the
+        # backslashes in a Windows path) so the entry point inside it is
+        # reachable. Splitting cannot invent an entry point: a path containing
+        # spaces still ends in its own basename.
+        tokens = []
+        for token in raw:
+            tokens.extend(token.split())
+        return tokens
+
+    def _backend_spawn_subcommand(cmd):
+        """Which backend subcommand this argv would START, or ``None``."""
+        tokens = _cmd_tokens(cmd)
+        entry = None
+        for index, token in enumerate(tokens):
+            normalized = str(token).replace("\\", "/").lower()
+            if normalized.rsplit("/", 1)[-1] in _HERMES_ENTRYPOINT_BASENAMES:
+                entry = index
+                break
+            if normalized == "hermes_cli.main" or normalized.endswith(
+                "hermes_cli/main.py"
+            ):
+                entry = index
+                break
+        if entry is None:
+            return None
+        for token in tokens[entry + 1:]:
+            text = str(token)
+            if text.startswith("-"):
+                continue
+            if text.lower() in _BACKEND_SUBCOMMANDS:
+                return text.lower()
+        return None
+
     def _check_subprocess_cmd(name, cmd):
         if _is_blocked_systemctl(cmd):
             raise RuntimeError(
@@ -1351,6 +1548,21 @@ def _live_system_guard(request, monkeypatch):
                 "@pytest.mark.live_system_guard_bypass if genuinely "
                 "needed (e.g. an integration test testing the update "
                 "flow against a dedicated throwaway repo)."
+            )
+        backend = _backend_spawn_subcommand(cmd)
+        if backend is not None:
+            raise RuntimeError(
+                f"tests/conftest.py live-system guard: blocked "
+                f"subprocess.{name}({cmd!r}) — this command would START a "
+                f"hermes backend (`{backend}`). A real backend boot resolves "
+                "its own runtime root, publishes the machine-global root "
+                "anchor, binds a port and outlives the test; on this "
+                "workstation the launcher runs against that same live runtime. "
+                "Drive the code in-process (build the parser, call the handler, "
+                "fake the transport) instead of spawning the CLI, or mark with "
+                "@pytest.mark.live_system_guard_bypass if the claim genuinely "
+                "needs a real child — and say in a comment WHAT it spawns and "
+                "how the child's root is sandboxed."
             )
 
     def _wrap_subprocess(name, real):

@@ -128,6 +128,24 @@ def _connect(env: dict[str, str], *args: str) -> tuple[int, dict | None, str]:
     return completed.returncode, payload, stdout + (completed.stderr or "")
 
 
+#: Both tests below SPAWN a real backend (``python -m hermes_cli.main harness
+#: serve --ndjson``, plus the ``harness serve connect`` CLI verb in
+#: :func:`_connect`), so they are refused by the root conftest's backend-spawn
+#: arm (ML-14 / B20(i)) unless they say so. They say so here rather than being
+#: converted, because the spawn IS the claim in both cases: the whole file
+#: exists to prove that the verb an operator types finds the service and that a
+#: drain asked from OUTSIDE is observed to completion — neither is answerable
+#: in-process (see the module docstring). The child's roots are sandboxed by
+#: :func:`_sandbox_env` — HERMES_AGENT_RUNTIME_ROOT, HERMES_HOME, LOCALAPPDATA,
+#: HOME and USERPROFILE all land in ``tmp_path`` — which is what keeps a real
+#: boot from publishing the machine-global root anchor, and it is the reason
+#: this bypass is narrow rather than a hole. The marker drops the whole
+#: live-system guard for these two tests, not just this arm; that granularity
+#: is the guard's, not this file's.
+_REAL_CHILD_SPAWN = pytest.mark.live_system_guard_bypass
+
+
+@_REAL_CHILD_SPAWN
 @pytest.mark.timeout(E2E_TEST_TIMEOUT_SECONDS)
 def test_probe_then_drain_over_the_socket_against_a_real_serve_child(tmp_path):
     env = _sandbox_env(tmp_path)
@@ -261,6 +279,7 @@ def _raw_socket_exchange(port: int, answer_for) -> tuple[dict | None, list[dict]
             pass
 
 
+@_REAL_CHILD_SPAWN
 @pytest.mark.timeout(E2E_TEST_TIMEOUT_SECONDS)
 def test_the_challenge_response_handshake_against_a_real_serve_child(tmp_path):
     """F1, end to end, against a process this test actually spawned.

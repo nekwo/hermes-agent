@@ -39,28 +39,33 @@ a SCOPED context, which unwinds precisely one block's patches:
 TWO WITNESSES, DIFFERENT MECHANISMS
 =============================================================================
 
-1. The **behavioural** one: ``isolate_agent_runtime_root``'s teardown tripwire.
-   It watches a sentinel the fixture minted per test, so an unwind reddens the
-   exact test that performed it, whatever spelling it used — including spellings
-   this file's walker cannot see (``undo`` reached through an alias, a callback,
-   ``getattr``).
+1. The **behavioural** one: the ROOT conftest's autouse
+   ``_shared_monkeypatch_pin_tripwire``. It watches a sentinel that fixture
+   minted per test, so an unwind reddens the exact test that performed it,
+   whatever spelling it used — including spellings this file's walker cannot see
+   (``undo`` reached through an alias, a callback, ``getattr``).
 2. The **structural** one: this file. It reddens in review, before the suite is
    ever run against a live root, and it names the file and line.
 
 Neither subsumes the other, which is why both ship.
 
-**But they no longer ship over the same tree.** Since the ML-4 widening below,
-witness 2 covers all of ``tests/`` while witness 1 — ``_ISOLATION_PIN_WITNESS``
-in ``tests/agent_runtime/conftest.py`` — remains this package's alone (verified:
-that sentinel appears in exactly two files, that conftest and this one). So
-OUTSIDE ``tests/agent_runtime`` the fence is structural-only, and the spellings
-witness 1 exists to catch — ``undo`` reached through an alias, a callback,
-``getattr`` — are uncaught there. That is a stated gap, not an oversight:
-closing it means hoisting a tripwire of the same shape into the ROOT
-``tests/conftest.py`` beside the pins listed under THE WIDENING, which is its
-own change with its own blast radius (every test in the tree gains a teardown
-assertion) and is NOT ML-4's. Recorded here so the trade is visible to whoever
-reads this file next, instead of being inferred from a scope mismatch.
+**And since 2026-08-18 they ship over the same tree.** The ML-4 widening below
+took witness 2 to all of ``tests/`` while witness 1 lived in
+``tests/agent_runtime/conftest.py`` and covered this package alone — so outside
+this package the fence was structural-only, and exactly the spellings witness 1
+exists to catch were uncaught there. That gap was stated here rather than closed
+because closing it meant hoisting the tripwire into the ROOT ``tests/conftest.py``
+beside the pins listed under THE WIDENING, with its own blast radius (every test
+in the tree gains a teardown assertion), which was not ML-4's change.
+
+ML-14 / C21 made that hoist. The tripwire now lives in ``tests/conftest.py`` as
+``_shared_monkeypatch_pin_tripwire``, declared first among that file's autouse
+fixtures so it tears down last, and the package-local copy is RETIRED — it
+watched the same event through the same mechanism, so keeping both would have
+produced two teardown errors for one defect rather than two facts. The scope
+mismatch is gone: both witnesses now police ``tests/``.
+:func:`test_the_teardown_tripwire_is_still_installed` pins that the behavioural
+half still exists, and where.
 
 =============================================================================
 THE SHAPE, AND WHY THERE IS NO ALLOWLIST
@@ -448,19 +453,37 @@ def test_the_teardown_tripwire_is_still_installed():
     spellings the walker can see, the fixture catches the ones it cannot. If the
     tripwire is deleted, that trade stops being true and the deletion should
     cost a red test rather than nothing.
+
+    It is the ROOT conftest that is probed, not this package's: ML-14 / C21
+    hoisted the tripwire there so it covers the tree this gate covers. Probing
+    the package-local copy would now pass on a tree where the behavioural
+    witness had been deleted everywhere else.
     """
 
-    from tests.agent_runtime import conftest as package_conftest
+    from tests import conftest as root_conftest
 
-    assert hasattr(package_conftest, "_ISOLATION_PIN_WITNESS"), (
-        "isolate_agent_runtime_root's teardown tripwire (EG-0.1) is gone. It is "
+    assert hasattr(root_conftest, "_SHARED_MONKEYPATCH_WITNESS"), (
+        "the root conftest's teardown tripwire (EG-0.1 / C21) is gone. It is "
         "the behavioural half of this fence — it catches an unwind reached "
         "through an alias, a callback or getattr, which this file's AST walker "
         "cannot see. Restore it, or state why the structural gate is now enough."
     )
-    source = Path(package_conftest.__file__).read_text(encoding="utf-8")
-    assert "_ISOLATION_PIN_WITNESS.token is token" in source, (
+    source = Path(root_conftest.__file__).read_text(encoding="utf-8")
+    assert "_SHARED_MONKEYPATCH_WITNESS.token is token" in source, (
         "the tripwire's assertion no longer compares the per-test witness token; "
         "a tripwire that stopped probing is worse than none, because the fence "
         "still looks staffed"
+    )
+    marker = getattr(
+        root_conftest._shared_monkeypatch_pin_tripwire,
+        "_fixture_function_marker",
+        None,
+    ) or getattr(
+        root_conftest._shared_monkeypatch_pin_tripwire,
+        "_pytestfixturefunction",
+        None,
+    )
+    assert marker is not None and marker.autouse, (
+        "the tripwire is no longer autouse — it would then fire only for tests "
+        "that request it by name, which is none of them"
     )

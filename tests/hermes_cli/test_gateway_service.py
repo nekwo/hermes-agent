@@ -1,5 +1,6 @@
 """Tests for gateway service management helpers."""
 
+import argparse
 import os
 import subprocess
 from pathlib import Path
@@ -17,6 +18,25 @@ from gateway.restart import (
     GATEWAY_FATAL_CONFIG_EXIT_CODE,
     GATEWAY_SERVICE_RESTART_EXIT_CODE,
 )
+from hermes_cli.subcommands.gateway import build_gateway_parser
+
+
+def _gateway_parser() -> argparse.ArgumentParser:
+    """A parser carrying the REAL ``gateway`` subcommand tree.
+
+    Built by the same factory ``hermes_cli.main`` wires in, so a parse here is
+    the parse the CLI would do. The handlers are stubs: argparse only stores
+    them on the namespace and nothing in this file dispatches.
+    """
+    parser = argparse.ArgumentParser(prog="hermes")
+    subparsers = parser.add_subparsers(dest="command")
+    build_gateway_parser(
+        subparsers,
+        cmd_gateway=lambda _args: None,
+        cmd_proxy=lambda _args: None,
+        cmd_gateway_enroll=lambda _args: None,
+    )
+    return parser
 
 
 class TestUserSystemdPrivateSocketPreflight:
@@ -1279,31 +1299,23 @@ class TestMigrateLegacyCommand:
     """Tests for the `hermes gateway migrate-legacy` subcommand dispatch."""
 
     def test_migrate_legacy_subparser_accepts_dry_run_and_yes(self):
-        """Verify the argparse subparser is registered and parses flags."""
-        import hermes_cli.main as cli_main
+        """Verify the argparse subparser is registered and parses flags.
 
-        parser = cli_main.build_parser() if hasattr(cli_main, "build_parser") else None
-        # Fall back to calling main's setup helper if direct access isn't exposed
-        # The key thing: the subparser must exist. We verify by constructing
-        # a namespace through argparse directly — but if build_parser isn't
-        # public, just confirm that `hermes gateway --help` shows it.
-        import subprocess
-        import sys
-
-        project_root = cli_main.PROJECT_ROOT if hasattr(cli_main, "PROJECT_ROOT") else None
-        if project_root is None:
-            import hermes_cli.gateway as gw
-            project_root = gw.PROJECT_ROOT
-
-        result = subprocess.run(
-            [sys.executable, "-m", "hermes_cli.main", "gateway", "--help"],
-            cwd=str(project_root),
-            capture_output=True,
-            text=True,
-            timeout=15,
+        Parsed in-process through the same factory the CLI wires in. It used to
+        spawn ``python -m hermes_cli.main gateway --help`` and grep the help
+        text — which never checked what this test's own name claims (that the
+        flags PARSE), cost a 15s-budget subprocess, and is refused outright by
+        the backend-spawn arm added to the live-system guard in ML-14 / B20(i):
+        an argv naming a backend subcommand is classified on the subcommand, not
+        on whether ``--help`` happens to make argparse exit first.
+        """
+        args = _gateway_parser().parse_args(
+            ["gateway", "migrate-legacy", "--dry-run", "--yes"]
         )
-        assert result.returncode == 0
-        assert "migrate-legacy" in result.stdout
+
+        assert args.gateway_command == "migrate-legacy"
+        assert args.dry_run is True
+        assert args.yes is True
 
     def test_gateway_command_migrate_legacy_dispatches(
         self, tmp_path, monkeypatch, capsys
@@ -1330,19 +1342,16 @@ class TestMigrateLegacyCommand:
 
 class TestGatewayStatusParser:
     def test_gateway_status_subparser_accepts_full_flag(self):
-        import subprocess
-        import sys
+        """``-l`` must reach ``status`` as ``--full``.
 
-        result = subprocess.run(
-            [sys.executable, "-m", "hermes_cli.main", "gateway", "status", "-l", "--help"],
-            cwd=str(gateway_cli.PROJECT_ROOT),
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
+        In-process for the same reason as the migrate-legacy case above: the
+        claim is about argparse, and the old form paid a subprocess whose
+        ``--help`` exit was the only thing keeping it from starting a gateway.
+        """
+        args = _gateway_parser().parse_args(["gateway", "status", "-l"])
 
-        assert result.returncode == 0
-        assert "unrecognized arguments" not in result.stderr
+        assert args.gateway_command == "status"
+        assert args.full is True
 
 
     def test_migrate_legacy_on_unsupported_platform_prints_message(
