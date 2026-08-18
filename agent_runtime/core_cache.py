@@ -147,7 +147,7 @@ same fact. There is exactly one: the snapshot's own ``parity`` envelope, which
 | ``snapshot_core_cache never_converged`` (WARNING) | none | ``builds=`` then ``diff_scope=`` ``changed=`` ``diff=`` LAST (paths may contain spaces). **CENSUS RULE (C22(i)): read ``diff_scope=`` or the count over-reports.** ``every_pass`` = the inputs oscillate, i.e. self-perturbation, the A2 defect worth acting on; ``last_pair`` = a store that is simply moving, where the receipt is true (the cache IS buying nothing) but names no defect; ``none`` with ``diff=diff_unavailable`` and ``diff_reason=no_entries``/``digest_without_entry_delta`` = the diff could not be computed and says so in its own words |
 | ``snapshot_core_cache core_source=cache`` (INFO) | the snapshot payload | ``parity.core_source == "cache"`` — SAME spelling, no split. The line also carries ``caller=`` ``inputs=`` ``fingerprint=`` ``offset=``, none of which reach the payload |
 | ``snapshot_core_cache core_source=cache stale=true`` (INFO) | the snapshot payload | ``parity.core_stale == true`` AND ``parity.freshness.state == "stale"`` — the field the launcher's ``MissionSnapshotEnvelope`` already maps to ``MissionSnapshotHealth.stale``. RESIDUAL SPLIT, named rather than fixed: the log says ``stale=true``, the payload says ``parity.core_stale``/``parity.freshness.state``, and the payload spelling is a consumer contract that predates this lane |
-| ``snapshot_core_cache core_source=rebuilt`` (INFO, ``_log_demote``) | the snapshot payload, PARTIALLY | ``parity.core_source == "rebuilt"`` carries THAT the cache was demoted; the ``reason=`` never leaves this logger, and ``CoreDecision.reason`` is read by no caller today. So a field census of WHY a cache demoted has exactly one source: this line. Reasons ``unreadable`` ``core_digest_mismatch`` ``fingerprint_unavailable`` ``fingerprint_mismatch`` ``build_stamp_unknown`` ``build_stamp_mismatch`` ``contract_mismatch`` ``runtime_root_mismatch``. ``absent`` is deliberately NOT logged (the ordinary cold start would print a line on every build in every process), so its only trace is the ABSENCE of a line and a census must not read "no demote line" as "no demote" |
+| ``snapshot_core_cache core_source=rebuilt`` (INFO, ``_log_demote``) | the snapshot payload, PARTIALLY | ``parity.core_source == "rebuilt"`` carries THAT the cache was demoted; the ``reason=`` never leaves this logger, and ``CoreDecision.reason`` is read by no caller today. So a field census of WHY a cache demoted has exactly one source: this line. Reasons ``unreadable`` ``core_digest_mismatch`` ``fingerprint_unavailable`` ``fingerprint_mismatch`` ``build_stamp_unknown`` ``build_stamp_mismatch`` ``contract_mismatch`` ``runtime_root_mismatch`` ``home_mismatch``. **CENSUS RULE (MC-2): ``home_mismatch`` is not an ordinary miss.** The other reasons say the STORE moved, the install changed, or the pair is unbound — all facts about the thing being cached. This one says the persisted pair was keyed under a different Hermes home than the reading process resolved, i.e. the two runs asked different QUESTIONS, and it is emitted INSTEAD of ``fingerprint_mismatch`` so the distinction is countable rather than inferred. On a multi-home install (an operator who really does run two roots) it is ordinary. On a SINGLE-PROFILE operator boot it is evidence that a persona scope was live while a build stat'd — the capture in ``core_cache.resolved_fingerprint_home`` was taken too late — which is a defect to go fix, not noise to tune out. A pair carrying no ``sidecar.fingerprint_home`` at all (every one written before MC-2) is skipped rather than demoted, so this reason can never fire for an install that simply predates the field. ``absent`` is deliberately NOT logged (the ordinary cold start would print a line on every build in every process), so its only trace is the ABSENCE of a line and a census must not read "no demote line" as "no demote" |
 | ``snapshot_core_cache_write ok=true`` (INFO) | none | ``inputs=`` ``fingerprint=`` ``offset=`` |
 | ``snapshot_core_cache_write ok=false`` (INFO/WARNING) | none | reasons ``serialize`` ``build_stamp_unknown`` ``fingerprint_unavailable`` ``io``. **COLLISION:** ``build_stamp_unknown`` and ``fingerprint_unavailable`` are ALSO demote reasons on the row above. Grep the family token with them, never the reason alone |
 | ``snapshot_core_shadow ok=true`` (INFO) | none | ``caller=`` ``divergence=none`` — the shadow build agreed with the cache |
@@ -219,6 +219,12 @@ DEMOTE_BUILD_STAMP_UNKNOWN = "build_stamp_unknown"
 DEMOTE_BUILD_STAMP_MISMATCH = "build_stamp_mismatch"
 DEMOTE_CONTRACT_MISMATCH = "contract_mismatch"
 DEMOTE_RUNTIME_ROOT_MISMATCH = "runtime_root_mismatch"
+#: The persisted pair was keyed under a DIFFERENT home than this process
+#: resolved, so its digest answers a different QUESTION — it is not evidence that
+#: the store moved. Its own reason because the two demand opposite responses: an
+#: ordinary ``fingerprint_mismatch`` says go look at the store, and this says go
+#: look at who asked. See the channel table row for what it means to a census.
+DEMOTE_HOME_MISMATCH = "home_mismatch"
 
 # --------------------------------------------------------------------------- #
 # The receipt vocabulary (ML-10)
@@ -1392,6 +1398,22 @@ def _judge_persisted_pair(
     recorded_root = sidecar.get("runtime_root")
     if current_root is not None and recorded_root and str(recorded_root) != current_root:
         return CacheRead(core, False, DEMOTE_RUNTIME_ROOT_MISMATCH, key, sidecar)
+    # BEFORE the digest compare, deliberately, and beside the runtime-root clause
+    # it is a twin of: both ask "is this pair even about the same question", and
+    # both are a string compare against something already in hand, which is what
+    # the cheapest-first ordering above is ordered on. Behind the digest compare
+    # this clause would be unreachable in the case it exists for — a pair written
+    # under another home has a different digest by construction, so it would be
+    # swallowed as a generic ``fingerprint_mismatch`` and the operator would read
+    # "the store moved" for something that is not about the store at all.
+    #
+    # ABSENT MUST NOT DEMOTE. Every sidecar written before this stage carries no
+    # ``fingerprint_home``, and treating absent as mismatch would demote every
+    # install a SECOND time for no information — once for the closure change this
+    # stage already forces, then again for a field it could not have written.
+    recorded_home = sidecar.get("fingerprint_home")
+    if recorded_home and str(recorded_home) != str(resolved_fingerprint_home()[0]):
+        return CacheRead(core, False, DEMOTE_HOME_MISMATCH, key, sidecar)
     if sidecar.get("fingerprint") != key.digest:
         return CacheRead(core, False, DEMOTE_FINGERPRINT_MISMATCH, key, sidecar)
     return CacheRead(core, True, "", key, sidecar)

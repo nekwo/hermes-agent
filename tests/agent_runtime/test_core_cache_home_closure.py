@@ -46,6 +46,7 @@ stands in for the other:
 from __future__ import annotations
 
 import json
+import logging
 import threading
 from pathlib import Path
 from types import SimpleNamespace
@@ -456,3 +457,152 @@ def test_the_sidecar_records_whether_the_head_was_authoritative(
         "the sidecar's record of WHERE the home came from disagrees with "
         f"hermes_head_home_is_authoritative() (expected {explicit})"
     )
+
+
+# --------------------------------------------------------------------------- #
+# 5. A cache judged under a DIFFERENT home says so (MC-2 arm 2)
+# --------------------------------------------------------------------------- #
+_DROP = object()
+
+
+def _persist_pair(monkeypatch, **overrides):
+    """Write a real pair, then edit the sidecar into the shape under test.
+
+    The pair is produced by ``write_back`` rather than hand-built, so the
+    ``core_sha256`` binding and every other clause of the conjunction are
+    genuinely satisfied and the case can only be decided by the clause it is
+    about.
+    """
+
+    monkeypatch.setattr(core_cache, "build_stamp_token", lambda: "probe:stamp:clean")
+    key = core_cache.build_input_fingerprint()
+    assert key is not None
+    assert core_cache.write_back({}, fingerprint=key) is True
+
+    path = core_cache.sidecar_path()
+    sidecar = json.loads(path.read_text(encoding="utf-8"))
+    for name, value in overrides.items():
+        if value is _DROP:
+            sidecar.pop(name, None)
+        else:
+            sidecar[name] = value
+    path.write_text(json.dumps(sidecar, sort_keys=True), encoding="utf-8")
+    return key
+
+
+def _demote_lines(caplog) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("snapshot_core_cache core_source=rebuilt")
+    ]
+
+
+def _fields(line: str) -> set[str]:
+    """The line's whitespace-separated ``key=value`` fields.
+
+    Fields, not substrings, and it took a killing mutation to learn why: a
+    demote that returned ``"home_mismatch_typo"`` renders
+    ``reason=home_mismatch_typo``, in which ``"reason=home_mismatch" in line`` is
+    still True. A census greps tokens; so does this.
+    """
+
+    return set(line.split())
+
+
+def test_a_pair_keyed_under_another_home_demotes_as_itself(two_profiles, monkeypatch):
+    """(i) The typed demote fires, on a pair whose DIGEST still matches.
+
+    Everything else about this pair is valid — same store root, same stamp, same
+    contract, same digest — so ``matched`` would be True without this clause. The
+    only thing wrong with it is that it answers a different question.
+    """
+
+    key = _persist_pair(monkeypatch, fingerprint_home=str(two_profiles.other))
+
+    read = core_cache.read_persisted_core(fingerprint=key)
+
+    assert read.matched is False, (
+        "a core keyed under another Hermes home was served as authoritative: its "
+        "closure covered a different profile's skills, config and SessionDB"
+    )
+    assert read.reason == core_cache.DEMOTE_HOME_MISMATCH, read.reason
+
+
+def test_the_home_demote_fires_INSTEAD_of_the_generic_one(
+    two_profiles, monkeypatch, caplog
+):
+    """(ii) Placement is the claim, so the pair is driven to trip BOTH clauses.
+
+    The digest is wrong AND the home is wrong. Ordered as written, the operator
+    is told which of the two facts is the real one; ordered behind the digest
+    compare, this pair is indistinguishable from a store that simply moved —
+    which is the state A1-b filed, where a miss names nothing actionable.
+    """
+
+    _persist_pair(
+        monkeypatch,
+        fingerprint_home=str(two_profiles.other),
+        fingerprint="0" * 64,
+    )
+
+    with caplog.at_level(logging.INFO, logger="agent_runtime.core_cache"):
+        decision = core_cache.consult(caller="probe")
+
+    assert decision.core is None and decision.demoted is True
+    lines = _demote_lines(caplog)
+    assert len(lines) == 1, lines
+    line = lines[0]
+    assert f"reason={core_cache.DEMOTE_HOME_MISMATCH}" in _fields(line), line
+    assert f"reason={core_cache.DEMOTE_FINGERPRINT_MISMATCH}" not in line, (
+        "the home mismatch was swallowed as a generic fingerprint mismatch, so "
+        "the operator reads 'the store moved' for something that is not about "
+        f"the store: {line}"
+    )
+
+
+def test_a_sidecar_written_before_this_stage_is_not_demoted_for_it(
+    two_profiles, monkeypatch
+):
+    """(iii) Absent is not mismatch.
+
+    Every pair persisted before MC-2 carries no home at all. Treating that as a
+    disagreement would demote every install a SECOND time — once for the closure
+    change this stage already forces, and again for a field it could not have
+    written — for no information whatsoever.
+    """
+
+    key = _persist_pair(monkeypatch, fingerprint_home=_DROP)
+
+    read = core_cache.read_persisted_core(fingerprint=key)
+
+    assert read.matched is True, (
+        "a legacy sidecar with no fingerprint_home was demoted "
+        f"({read.reason!r}); absent must not read as mismatch"
+    )
+
+
+def test_the_rendered_line_carries_the_spelling_the_table_tells_you_to_grep(
+    two_profiles, monkeypatch, caplog
+):
+    """(iv) The TEXT, not the constant.
+
+    The channel table tells a census to grep ``reason=home_mismatch`` on the
+    ``snapshot_core_cache core_source=rebuilt`` family. Direction 1 of
+    ``test_core_cache_channel_table.py`` reads the CONSTANTS, so a demote that
+    returned a hand-worded string instead of ``DEMOTE_HOME_MISMATCH`` would
+    satisfy it while emitting a token no row names. This case is the one that
+    catches that, which is why it asserts the rendered text against the constant
+    rather than against a literal of its own.
+    """
+
+    _persist_pair(monkeypatch, fingerprint_home=str(two_profiles.other))
+
+    with caplog.at_level(logging.INFO, logger="agent_runtime.core_cache"):
+        core_cache.consult(caller="probe")
+
+    lines = _demote_lines(caplog)
+    assert len(lines) == 1, lines
+    fields = _fields(lines[0])
+    assert f"reason={core_cache.DEMOTE_HOME_MISMATCH}" in fields, lines[0]
+    assert "caller=probe" in fields, lines[0]
