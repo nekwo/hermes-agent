@@ -150,6 +150,7 @@ same fact. There is exactly one: the snapshot's own ``parity`` envelope, which
 | ``snapshot_core_cache core_source=rebuilt`` (INFO, ``_log_demote``) | the snapshot payload, PARTIALLY | ``parity.core_source == "rebuilt"`` carries THAT the cache was demoted; the ``reason=`` never leaves this logger, and ``CoreDecision.reason`` is read by no caller today. So a field census of WHY a cache demoted has exactly one source: this line. Reasons ``unreadable`` ``core_digest_mismatch`` ``fingerprint_unavailable`` ``fingerprint_mismatch`` ``build_stamp_unknown`` ``build_stamp_mismatch`` ``contract_mismatch`` ``runtime_root_mismatch`` ``home_mismatch``. **CENSUS RULE (MC-2): ``home_mismatch`` is not an ordinary miss.** The other reasons say the STORE moved, the install changed, or the pair is unbound — all facts about the thing being cached. This one says the persisted pair was keyed under a different Hermes home than the reading process resolved, i.e. the two runs asked different QUESTIONS, and it is emitted INSTEAD of ``fingerprint_mismatch`` so the distinction is countable rather than inferred. On a multi-home install (an operator who really does run two roots) it is ordinary. On a SINGLE-PROFILE operator boot it is evidence that a persona scope was live while a build stat'd — the capture in ``core_cache.resolved_fingerprint_home`` was taken too late — which is a defect to go fix, not noise to tune out. A pair carrying no ``sidecar.fingerprint_home`` at all (every one written before MC-2) is skipped rather than demoted, so this reason can never fire for an install that simply predates the field. ``absent`` is deliberately NOT logged (the ordinary cold start would print a line on every build in every process), so its only trace is the ABSENCE of a line and a census must not read "no demote line" as "no demote" |
 | ``snapshot_core_cache_write ok=true`` (INFO) | none | ``inputs=`` ``fingerprint=`` ``offset=`` |
 | ``snapshot_core_cache_write ok=false`` (INFO/WARNING) | none | reasons ``serialize`` ``build_stamp_unknown`` ``fingerprint_unavailable`` ``io``. **COLLISION:** ``build_stamp_unknown`` and ``fingerprint_unavailable`` are ALSO demote reasons on the row above. Grep the family token with them, never the reason alone |
+| ``snapshot_core_cache_write entries=false`` (WARNING) | none | ``reason=entries_io``. **NOT a write refusal, and deliberately not spelled ``ok=false``:** the core and sidecar LANDED and the cache is usable; only the stat set that makes a later miss diffable did not. A census that folded this into ``ok=false`` would count a successful cache write as a failed one. Its consequence is countable on the OTHER lane rather than inferred: the entries file left behind is bound to an older digest, so the next fingerprint demote reports ``diff_reason=entries_unbound`` |
 | ``snapshot_core_shadow ok=true`` (INFO) | none | ``caller=`` ``divergence=none`` — the shadow build agreed with the cache |
 | ``snapshot_core_shadow ok=false`` (WARNING) | none | ``caller=`` ``reason=build`` — the shadow build itself raised |
 | ``snapshot_core_shadow_divergence`` (WARNING) | none | ``caller=`` ``section=`` (the first section that disagreed). Its own family token rather than a field on the row above, because retiring the shadow lane is keyed on counting exactly this |
@@ -203,6 +204,12 @@ logger = logging.getLogger(__name__)
 CORE_CACHE_DIRNAME = "serve_read_model"
 CORE_FILENAME = "core.json"
 SIDECAR_FILENAME = "sidecar.json"
+#: The stat set the sidecar's digest SUMMARISES, kept beside it so a divergence
+#: is diffable at all. Its own file rather than a field on the sidecar: the
+#: sidecar is read on the boot path by every consult, and folding megabytes of
+#: triples into it would make the cheap half of the judgement pay for the
+#: diagnostic half. See :func:`entries_path` for the measured size.
+ENTRIES_FILENAME = "entries.json"
 
 #: ``parity.core_source`` values.
 CORE_SOURCE_CACHE = "cache"
@@ -265,6 +272,16 @@ DIFF_SCOPE_NONE = "none"
 DIFF_UNAVAILABLE = "diff_unavailable"
 DIFF_UNAVAILABLE_NO_ENTRIES = "no_entries"
 DIFF_UNAVAILABLE_NO_ENTRY_DELTA = "digest_without_entry_delta"
+#: The persisted entries exist but belong to a DIFFERENT write-back than the
+#: sidecar being judged — see :func:`entries_path` for the binding rule. Its own
+#: reason rather than ``no_entries`` because the two ask for opposite responses:
+#: ``no_entries`` says the diagnostic has not been written yet (an install that
+#: predates this stage, or a cold pair) and resolves itself on the next
+#: write-back, while this one says the THREE files in the cache directory
+#: disagree about which generation they describe, which is the shape a failed
+#: entries write (``reason=entries_io``) leaves behind. Diffing across that
+#: boundary would name paths from a generation nobody asked about, so it refuses.
+DIFF_UNAVAILABLE_ENTRIES_UNBOUND = "entries_unbound"
 
 #: Hard bound on the store-root walk. Reaching it is NOT a partial answer: the
 #: fingerprint becomes ``None`` and the caller must treat that as "never
@@ -990,6 +1007,40 @@ def sidecar_path() -> Path:
     return _cache_dir() / SIDECAR_FILENAME
 
 
+def entries_path() -> Path:
+    """The stat set behind the sidecar's digest, so a miss can name a path.
+
+    **The binding rule.** The payload is
+    ``{"fingerprint": <digest>, "entries": [[path, mtime_ns, size], …]}`` and the
+    digest is what makes the file usable: three files in one directory written by
+    three ``os.replace`` calls are three separate generations if any of them
+    fails, so a reader that trusted position over provenance would diff the
+    CURRENT store against SOME EARLIER store and name paths from a generation
+    nobody asked about. A reader compares ``entries.fingerprint`` against the
+    sidecar's and refuses (``diff_reason=entries_unbound``) when they differ —
+    the same rule ``core_sha256`` already applies between the sidecar and the
+    core, one file further out.
+
+    **SIZE, PRICED RATHER THAN DISCOVERED** (the C-7 class). Measured
+    2026-08-18 by walking the operator's live ``agent-runtime`` tree read-only
+    and serialising this exact payload: **22,286 entries → 3,539,812 bytes
+    (3.38 MiB)**, i.e. **159 bytes per entry** against a mean path of 127
+    characters. Projected at the 23,107-entry key the field logs: **~3.5 MiB**.
+
+    That measurement also settles the format question P4 left open, in the
+    opposite direction to the guess. JSON is not the cost: a compact
+    ``path|mtime|size`` text form would spend ~153 bytes per entry against JSON's
+    159 — a ~4 % saving — because the PATHS dominate and backslash escaping adds
+    only ~10 bytes to each. A second, text-shaped atomic writer (which does not
+    exist today) would therefore buy nothing worth its own authority. The lever
+    that actually moves this number is the SIZE OF THE CLOSURE, not its encoding:
+    18,804 of the field's 23,107 entries are ``deleted_archive/``, which no
+    projection reads and which P12 removes.
+    """
+
+    return _cache_dir() / ENTRIES_FILENAME
+
+
 def _core_digest(payload: Any) -> str:
     return hashlib.sha256(
         json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -1095,6 +1146,13 @@ def write_back(core: dict, *, fingerprint: CoreFingerprint | None = None) -> boo
     except Exception:
         logger.warning("snapshot_core_cache_write ok=false reason=io", exc_info=True)
         return False
+    # AFTER the pair, and OUTSIDE its try, on purpose. ``write_back``'s contract
+    # is that a failed write changes NOTHING about the build, and the pair is
+    # what the cache is FOR: the entries are a diagnostic that makes a later miss
+    # diffable. Letting a diagnostic's failure retract a landed cache would trade
+    # the thing this module exists for against the thing that explains it. So the
+    # entries write reports itself and the write-back still succeeds.
+    _write_entries(key)
     logger.info(
         "snapshot_core_cache_write ok=true inputs=%d fingerprint=%s offset=%s",
         key.count,
@@ -1102,6 +1160,50 @@ def write_back(core: dict, *, fingerprint: CoreFingerprint | None = None) -> boo
         "unknown" if sidecar["event_offset"] is None else sidecar["event_offset"],
     )
     _note_written_key(key)
+    return True
+
+
+def _write_entries(key: CoreFingerprint) -> bool:
+    """Persist the stat set beside the pair. BEST EFFORT — never fails a write-back.
+
+    The SAME atomic writer as the pair (``utils.atomic_json_write``, compact
+    separators), because one atomic-write authority is the rule this module
+    already follows and a second staging convention in one directory is how a
+    half-written generation gets read as a whole one.
+
+    Bound to the digest it describes rather than to its position beside the
+    sidecar — see :func:`entries_path` for why that binding is the whole point of
+    the file.
+
+    A failure is receipted on the write lane's own family with its own field
+    shape: ``entries=false`` rather than ``ok=false``, because ``ok=false`` is
+    documented to mean the pair did not land and this is exactly the case where
+    it DID. Reusing it would tell a census a cache write refused when a cache
+    write succeeded.
+    """
+
+    try:
+        atomic_json_write(
+            entries_path(),
+            {
+                "fingerprint": key.digest,
+                "entries": [[entry.path, entry.mtime_ns, entry.size] for entry in key.entries],
+            },
+            indent=None,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    except Exception:
+        logger.warning(
+            "snapshot_core_cache_write entries=false reason=entries_io — the core "
+            "and its sidecar LANDED and the cache is usable; only the stat set "
+            "that would let a later miss name the file that moved did not. The "
+            "stale entries file left behind is bound to an older digest, so a "
+            "demote reads diff_reason=entries_unbound rather than diffing across "
+            "two generations.",
+            exc_info=True,
+        )
+        return False
     return True
 
 
@@ -1255,19 +1357,13 @@ def _receipt_never_converged(
     """
 
     if last is None:
-        detail = (
-            f"diff_scope={DIFF_SCOPE_NONE} changed=0 "
-            f"diff_reason={DIFF_UNAVAILABLE_NO_ENTRIES} diff={DIFF_UNAVAILABLE}"
-        )
+        detail = _diff_unavailable_detail(DIFF_UNAVAILABLE_NO_ENTRIES)
     elif common:
         detail = _diff_detail(DIFF_SCOPE_EVERY_PASS, sorted(common))
     elif last:
         detail = _diff_detail(DIFF_SCOPE_LAST_PAIR, list(last))
     else:
-        detail = (
-            f"diff_scope={DIFF_SCOPE_NONE} changed=0 "
-            f"diff_reason={DIFF_UNAVAILABLE_NO_ENTRY_DELTA} diff={DIFF_UNAVAILABLE}"
-        )
+        detail = _diff_unavailable_detail(DIFF_UNAVAILABLE_NO_ENTRY_DELTA)
     logger.warning(
         "snapshot_core_cache %s builds=%d %s — %d consecutive write-backs each "
         "wrote a key that disagreed with the one before it, so no process can "
@@ -1285,6 +1381,67 @@ def _diff_detail(scope: str, paths: list[str]) -> str:
     return "diff_scope={} changed={} diff={}".format(
         scope, len(paths), ",".join(paths[:_NEVER_CONVERGED_DIFF_PATHS])
     )
+
+
+def _diff_unavailable_detail(reason: str) -> str:
+    """The one spelling for "a diff was owed here and could not be computed".
+
+    Its own function so the two receipts that can owe a diff — the never-converged
+    warning and the fingerprint demote — word the refusal IDENTICALLY. Two
+    hand-written copies of a census instruction is the C22 defect itself, one
+    level down: a census greps ``diff_reason=`` and a second spelling measures a
+    false zero on whichever copy it did not know about.
+
+    ``changed=0`` rides along rather than being omitted, so the field set is the
+    same on every arm and a parser never has to branch on presence. ``diff=`` is
+    LAST here for the same reason it is last on a computed diff.
+    """
+
+    return (
+        f"diff_scope={DIFF_SCOPE_NONE} changed=0 "
+        f"diff_reason={reason} diff={DIFF_UNAVAILABLE}"
+    )
+
+
+def _persisted_entries(*, expect_digest: Any) -> tuple[tuple[FingerprintEntry, ...] | None, str]:
+    """The stat set behind a persisted digest, or a TYPED reason it is unusable.
+
+    Returns ``(entries, "")`` on success and ``(None, <diff_reason>)`` otherwise.
+    Never raises: a diagnostic that could take down the lane it explains is worse
+    than no diagnostic.
+
+    ``expect_digest`` is the SIDECAR's fingerprint, and the comparison is the
+    binding rule :func:`entries_path` documents. It is a required keyword rather
+    than an optional check, because "read the entries" and "read the entries that
+    belong to this pair" are different operations and only one of them is sound —
+    an optional check is one call site away from being the unsound one.
+    """
+
+    try:
+        raw = entries_path().read_text(encoding="utf-8")
+    except OSError:
+        return None, DIFF_UNAVAILABLE_NO_ENTRIES
+    try:
+        payload = json.loads(raw)
+    except Exception:
+        return None, DIFF_UNAVAILABLE_NO_ENTRIES
+    if not isinstance(payload, dict):
+        return None, DIFF_UNAVAILABLE_NO_ENTRIES
+    rows = payload.get("entries")
+    if not isinstance(rows, list):
+        return None, DIFF_UNAVAILABLE_NO_ENTRIES
+    if not expect_digest or payload.get("fingerprint") != expect_digest:
+        return None, DIFF_UNAVAILABLE_ENTRIES_UNBOUND
+    entries: list[FingerprintEntry] = []
+    for row in rows:
+        if not isinstance(row, list) or len(row) != 3:
+            return None, DIFF_UNAVAILABLE_NO_ENTRIES
+        path, mtime_ns, size = row
+        try:
+            entries.append(FingerprintEntry(str(path), int(mtime_ns), int(size)))
+        except (TypeError, ValueError):
+            return None, DIFF_UNAVAILABLE_NO_ENTRIES
+    return tuple(entries), ""
 
 
 def _runtime_root_for_sidecar(parity: dict) -> Any:
