@@ -1,4 +1,4 @@
-"""THE structural gate: no test under ``tests/agent_runtime/`` calls ``.undo()``.
+"""THE structural gate: no test under ``tests/`` calls ``.undo()``.
 
 =============================================================================
 WHY THIS FILE EXISTS
@@ -13,6 +13,9 @@ This package's autouse ``isolate_agent_runtime_root``
 the two worktree bases through that same instance. So a body that calls
 ``monkeypatch.undo()`` to drop its own stub silently unpins the sandbox, and
 everything it does afterwards runs against the OPERATOR's live runtime root.
+
+And that pin is not this package's alone — see THE WIDENING below. The ROOT
+``tests/conftest.py`` installs the same shape for EVERY test in the tree.
 
 That is not hypothetical. Three sites did it, and on 2026-08-17 the damage was
 found in the live tree (EG-0.1 / HC-H1):
@@ -46,6 +49,19 @@ TWO WITNESSES, DIFFERENT MECHANISMS
 
 Neither subsumes the other, which is why both ship.
 
+**But they no longer ship over the same tree.** Since the ML-4 widening below,
+witness 2 covers all of ``tests/`` while witness 1 — ``_ISOLATION_PIN_WITNESS``
+in ``tests/agent_runtime/conftest.py`` — remains this package's alone (verified:
+that sentinel appears in exactly two files, that conftest and this one). So
+OUTSIDE ``tests/agent_runtime`` the fence is structural-only, and the spellings
+witness 1 exists to catch — ``undo`` reached through an alias, a callback,
+``getattr`` — are uncaught there. That is a stated gap, not an oversight:
+closing it means hoisting a tripwire of the same shape into the ROOT
+``tests/conftest.py`` beside the pins listed under THE WIDENING, which is its
+own change with its own blast radius (every test in the tree gains a teardown
+assertion) and is NOT ML-4's. Recorded here so the trade is visible to whoever
+reads this file next, instead of being inferred from a scope mismatch.
+
 =============================================================================
 THE SHAPE, AND WHY THERE IS NO ALLOWLIST
 =============================================================================
@@ -72,6 +88,67 @@ The detector flags **every** ``<expr>.undo()`` call, not only receivers spelled
   exemption dict absorbs one entry at a time. Note that a scoped
   ``MonkeyPatch.context()`` needs no ``undo()`` call at all, so the pressure to
   widen is close to zero by construction.
+
+=============================================================================
+THE WIDENING: tests/agent_runtime -> tests (2026-08-17, ML-4)
+=============================================================================
+
+This gate shipped scoped to ``tests/agent_runtime`` with this stated reason:
+
+    Other packages call ``undo()`` too (``tests/cron``, ``tests/hermes_cli``,
+    ``tests/plugins``, ``tests/tools``) and are out of scope on purpose — they
+    have no runtime-root pin to unwind, and widening the gate to them without
+    reading each site would be a claim this file has not checked.
+
+The second half was right and is what this stage discharged: all five sites
+were read, then converted. **The first half was wrong**, and reading is how
+that surfaced. Those packages DO have a runtime-root pin to unwind — it is
+just not this package's. The ROOT ``tests/conftest.py`` installs, autouse,
+through the same shared per-test instance, for every test in the tree:
+
+* ``_hermetic_environment`` (``:489``) — redirects ``HERMES_HOME`` to a
+  per-test tempdir AND ``delenv``s every credential-shaped variable;
+* ``_kanban_write_guard`` (``:682``) — a FAIL-CLOSED guard refusing kanban
+  writes that resolve under the real ``~/.hermes``;
+* ``_live_system_guard`` (``:1098``) — blocks real ``os.kill`` / systemctl /
+  gateway-pid scans;
+* ``_audio_playback_guard`` (``:1466``), ``_neutralize_webbrowser`` (``:596``),
+  ``_neutralize_macos_keychain_creds`` (``:626``).
+
+So a mid-test ``undo()`` ANYWHERE under ``tests/`` re-exposes the operator's
+real ``~/.hermes`` and real credentials for the remainder of that test — the
+EG-0.1 damage class exactly, with a wider blast radius than the one this file
+was built for. The gate is scoped to the pin, and the pin is tree-wide.
+
+Per-directory reasons, one line each, per the no-allowlist policy above. Each
+names the site that was converted to get there (the conversions are the
+admission price; the gate keeps them converted):
+
+* ``tests/cron`` — ``test_cron_profile_isolation.py:66`` undid, then reloaded
+  ``cron.jobs`` to re-anchor it. Converted to a context inside the ``try``,
+  with the restoring reload left in the ``finally`` so it still runs when an
+  assertion fails.
+* ``tests/hermes_cli`` — ``test_plugins.py:215`` undid to drop a sweep stub and
+  then RE-``setenv``'d ``HERMES_HOME`` on the next line, because the undo had
+  taken that pin down too. That re-setenv is the collateral damage, visible in
+  the source. Converted to a context around the stub; the repair line is gone.
+* ``tests/plugins`` — two sites. ``memory/test_holographic_store.py:199`` undid
+  so a sibling write could reach the REAL ``_rebuild_bank``;
+  ``platforms/photon/test_sidecar_paths.py:137`` undid in a ``finally`` before
+  restoring reloads. Both converted to contexts.
+* ``tests/tools`` — ``test_lazy_deps_venv_barrier.py:142`` undid DELIBERATELY,
+  to probe the real ``_venv_pip_install`` past an autouse stub of it. Converted
+  at the fixture instead of in the body: the stub now honours
+  ``@pytest.mark.real_venv_pip`` (the house idiom, cf. ``real_concurrent_gate``
+  / ``real_agent_prewarm``), so the probe is never inside the stub's scope
+  rather than escaping it mid-test. Its own ``subprocess.run`` failer keeps
+  "no real pip" true for that test.
+* **every other directory under ``tests/``** — zero sites at widening time
+  (the AST detector, run over the whole tree, reported exactly the five above).
+  They are in scope pre-emptively: the pins listed above are the root
+  conftest's, so the hazard does not depend on which directory a future
+  ``undo()`` lands in, and a gate that has to be widened again per directory
+  is one that will be late every time.
 """
 
 from __future__ import annotations
@@ -83,13 +160,13 @@ from pathlib import Path
 import pytest
 
 
-#: The tree this gate polices. Scoped to this package because the autouse
-#: root-isolation fixture that makes the defect dangerous is this package's.
-#: Other packages call ``undo()`` too (``tests/cron``, ``tests/hermes_cli``,
-#: ``tests/plugins``, ``tests/tools``) and are out of scope on purpose — they
-#: have no runtime-root pin to unwind, and widening the gate to them without
-#: reading each site would be a claim this file has not checked.
-SCANNED_ROOT = "tests/agent_runtime"
+#: The tree this gate polices: the WHOLE test tree, since 2026-08-17 (ML-4).
+#: The pin that makes the defect dangerous is the root ``tests/conftest.py``'s,
+#: not this package's, so the scope follows the pin. The five sites that lived
+#: outside the old ``tests/agent_runtime`` scope were read and converted first;
+#: THE WIDENING in the module docstring records each one's reason, which is the
+#: no-allowlist policy's price of admission.
+SCANNED_ROOT = "tests"
 
 #: Cheap prefilter token. SOUND by construction, not by luck: the detector only
 #: ever reports an ``ast.Attribute`` whose ``attr`` is exactly ``"undo"``, and
@@ -173,8 +250,12 @@ def _scan() -> dict[str, ast.Module | None]:
 # --------------------------------------------------------------------------- #
 # The scan is paid HERE, at import
 # --------------------------------------------------------------------------- #
-# Measured on the tree this landed against: 321 files read, 8 of them past the
-# prefilter and parsed, ~50 ms total — nowhere near the 30 s per-test cap. The
+# Measured on the tree the ML-4 widening landed against: 2,981 files read, 47
+# of them past the prefilter and parsed, ~0.6 s total. That is ~12x the scoped
+# scan's ~50 ms (321 files, 8 parsed) and still two orders off the 30 s
+# per-test cap — the widening's whole cost, paid once per session, stated
+# rather than assumed. Note what the prefilter is buying: 47 of 2,981 files
+# parse, so the walk is dominated by reading bytes, not by ast.parse. The
 # warm is still taken at module scope, for the reason
 # test_snapshot_contract_version_authority.py records the hard way: three tests
 # share this walk, WHICH one pays is decided by collection order, and
@@ -204,7 +285,7 @@ def test_the_shared_scan_is_paid_at_import():
 # --------------------------------------------------------------------------- #
 # The gate
 # --------------------------------------------------------------------------- #
-def test_no_test_in_this_package_unwinds_the_shared_monkeypatch():
+def test_no_test_in_the_tree_unwinds_the_shared_monkeypatch():
     """THE GATE. See the module docstring for the incident it fences."""
 
     offenders: list[str] = []
@@ -218,11 +299,14 @@ def test_no_test_in_this_package_unwinds_the_shared_monkeypatch():
         "these unwind the SHARED per-test MonkeyPatch instance:\n  "
         + "\n  ".join(offenders)
         + "\n\n`monkeypatch` is one instance per test, shared with every fixture, "
-        "and `undo()` takes no argument — it drops EVERYTHING, including this "
-        "package's autouse `isolate_agent_runtime_root` pins. Whatever the test "
-        "does after that line runs against the OPERATOR's live runtime root: "
-        "that is the 2026-08-17 leak (EG-0.1) that left `ws_office_patch_test` at "
-        "revision 67 in X:/Eternia/.hermes.\n\n"
+        "and `undo()` takes no argument — it drops EVERYTHING. Under "
+        "tests/agent_runtime that includes the autouse `isolate_agent_runtime_root` "
+        "pins; ANYWHERE under tests/ it includes the root conftest's autouse "
+        "`_hermetic_environment` (HERMES_HOME redirected to a tempdir, every "
+        "credential env var blanked) and `_kanban_write_guard`. Whatever the test "
+        "does after that line runs against the OPERATOR's live root with its real "
+        "credentials: that is the 2026-08-17 leak (EG-0.1) that left "
+        "`ws_office_patch_test` at revision 67 in X:/Eternia/.hermes.\n\n"
         "Use a scoped context, which drops exactly one block's patches:\n"
         "    with pytest.MonkeyPatch.context() as patched:\n"
         "        patched.setattr(...)\n"
@@ -238,7 +322,7 @@ def test_the_gate_scanned_a_real_tree():
     """A walker that found nothing passes the gate above forever."""
 
     scanned = _scanned()
-    assert len(scanned) > 250, (
+    assert len(scanned) > 2000, (
         f"only {len(scanned)} modules under {SCANNED_ROOT} were looked at — the "
         "walker is misrooted"
     )
@@ -251,6 +335,27 @@ def test_the_gate_scanned_a_real_tree():
         "test_mcp_admission_r2.py",
     ):
         assert expected in names, f"{expected} is not in the scanned set"
+
+    # THE WIDENING's own anti-misrooting witness, and the reason the count
+    # above cannot carry this alone: a walker that silently fell back to
+    # ``tests/agent_runtime`` would still find all three names above — all
+    # three live there — and a bare count floor only ever proves "many files",
+    # never "the right files". These are the five converted sites, one per
+    # newly admitted directory, matched on RELATIVE PATH so a same-named file
+    # somewhere else cannot stand in for one of them.
+    root = _repo_root()
+    relative = {Path(p).relative_to(root).as_posix() for p in scanned}
+    for expected_path in (
+        "tests/cron/test_cron_profile_isolation.py",
+        "tests/hermes_cli/test_plugins.py",
+        "tests/plugins/memory/test_holographic_store.py",
+        "tests/plugins/platforms/photon/test_sidecar_paths.py",
+        "tests/tools/test_lazy_deps_venv_barrier.py",
+    ):
+        assert expected_path in relative, (
+            f"{expected_path} is not in the scanned set — the ML-4 widening to "
+            f"{SCANNED_ROOT!r} is not actually reaching that directory"
+        )
 
 
 @pytest.mark.parametrize(

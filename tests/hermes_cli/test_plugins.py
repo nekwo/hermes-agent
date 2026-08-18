@@ -206,14 +206,18 @@ class TestPluginDiscovery:
         def _boom(self_inner):
             raise RuntimeError("sweep failed")
 
-        monkeypatch.setattr(PluginManager, "_discover_and_load_inner", _boom)
-        with pytest.raises(RuntimeError, match="sweep failed"):
-            mgr.discover_and_load()
-        assert mgr._discovered is False, "failed sweep was cached as discovered"
+        # SCOPED (EG-0.1 / ML-4). Only the boom stub comes down at the end of
+        # this block. The old spelling was ``monkeypatch.undo()``, which took
+        # the HERMES_HOME pin above down with it — the collateral damage is
+        # visible in the history of this very test, which had to re-``setenv``
+        # the same value on the next line to keep working.
+        with pytest.MonkeyPatch.context() as patched:
+            patched.setattr(PluginManager, "_discover_and_load_inner", _boom)
+            with pytest.raises(RuntimeError, match="sweep failed"):
+                mgr.discover_and_load()
+            assert mgr._discovered is False, "failed sweep was cached as discovered"
 
         # A later call (with discovery healthy again) must do the real scan.
-        monkeypatch.undo()
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_test"))
         mgr.discover_and_load()
         assert mgr._discovered is True
         non_bundled = {

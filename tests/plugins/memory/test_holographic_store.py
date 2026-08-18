@@ -183,20 +183,30 @@ class TestConcurrency:
         assert len(facts) == n_threads * n_facts
         assert MemoryStore._shared == {}
 
-    def test_failed_write_does_not_pin_write_lock(self, db_path, monkeypatch):
+    def test_failed_write_does_not_pin_write_lock(self, db_path):
         """A write that raises mid-method must not leave an open transaction
         holding the SQLite write lock (autocommit isolation_level=None)."""
         broken = MemoryStore(db_path)
         sibling = MemoryStore(db_path)
         try:
-            monkeypatch.setattr(
-                MemoryStore,
-                "_rebuild_bank",
-                lambda self, category: (_ for _ in ()).throw(RuntimeError("boom")),
-            )
-            with pytest.raises(RuntimeError, match="boom"):
-                broken.add_fact("write that fails after the INSERT")
-            monkeypatch.undo()
+            # SCOPED (EG-0.1 / ML-4). The throwing ``_rebuild_bank`` must be
+            # gone before the sibling write below, which needs the REAL rebuild
+            # to run — that is the whole point of the second half. The old
+            # spelling reached that state with ``monkeypatch.undo()``, which
+            # unwinds the SHARED per-test instance: it also dropped the root
+            # conftest's ``_hermetic_environment`` pins (HERMES_HOME redirected
+            # to a tempdir, credential env vars blanked). Nothing below is
+            # env-bound, so that was safe by accident rather than by
+            # construction — which is precisely the accident this stage stops
+            # relying on.
+            with pytest.MonkeyPatch.context() as patched:
+                patched.setattr(
+                    MemoryStore,
+                    "_rebuild_bank",
+                    lambda self, category: (_ for _ in ()).throw(RuntimeError("boom")),
+                )
+                with pytest.raises(RuntimeError, match="boom"):
+                    broken.add_fact("write that fails after the INSERT")
 
             # No dangling transaction: the connection reports autocommit state
             # and the sibling can write immediately.

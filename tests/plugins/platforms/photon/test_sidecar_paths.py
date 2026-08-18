@@ -101,7 +101,7 @@ def test_dir_writable_probe(tmp_path) -> None:
         ro.chmod(0o755)
 
 
-def test_adapter_import_does_not_resolve_sidecar_dir(monkeypatch) -> None:
+def test_adapter_import_does_not_resolve_sidecar_dir() -> None:
     """Importing the adapter must not probe the filesystem or mirror files.
 
     resolve_sidecar_dir() touch/unlink-probes the source tree and may copy
@@ -117,23 +117,29 @@ def test_adapter_import_does_not_resolve_sidecar_dir(monkeypatch) -> None:
     def _boom(*args, **kwargs):  # pragma: no cover - failure path
         raise AssertionError("resolve_sidecar_dir called at import time")
 
-    monkeypatch.setattr(sidecar_paths, "resolve_sidecar_dir", _boom)
     try:
-        importlib.reload(photon_adapter)
-        importlib.reload(photon_cli)
-        # Nothing resolved yet.
-        assert photon_adapter._SIDECAR_DIR is None
-        assert photon_cli._SIDECAR_DIR is None
-        # First real use resolves (and would call resolve_sidecar_dir).
-        with pytest.raises(AssertionError, match="import time"):
-            photon_adapter._sidecar_dir()
-        # A monkeypatched _SIDECAR_DIR (the pattern existing tests use) is
-        # honored without touching the resolver.
-        monkeypatch.setattr(photon_adapter, "_SIDECAR_DIR", Path("/tmp/x"))
-        assert photon_adapter._sidecar_dir() == Path("/tmp/x")
-        assert photon_adapter._npm_error_log() == Path("/tmp/x/.photon-npm-error.log")
+        # SCOPED (EG-0.1 / ML-4). The resolver stub has to be gone before the
+        # restoring reloads in the ``finally`` — otherwise they re-import
+        # against ``_boom`` — and those reloads must still run when an
+        # assertion above fails. So the context sits INSIDE the try and the
+        # reloads stay in the finally, where a mid-test ``monkeypatch.undo()``
+        # used to sit unwinding the whole shared instance.
+        with pytest.MonkeyPatch.context() as patched:
+            patched.setattr(sidecar_paths, "resolve_sidecar_dir", _boom)
+            importlib.reload(photon_adapter)
+            importlib.reload(photon_cli)
+            # Nothing resolved yet.
+            assert photon_adapter._SIDECAR_DIR is None
+            assert photon_cli._SIDECAR_DIR is None
+            # First real use resolves (and would call resolve_sidecar_dir).
+            with pytest.raises(AssertionError, match="import time"):
+                photon_adapter._sidecar_dir()
+            # A monkeypatched _SIDECAR_DIR (the pattern existing tests use) is
+            # honored without touching the resolver.
+            patched.setattr(photon_adapter, "_SIDECAR_DIR", Path("/tmp/x"))
+            assert photon_adapter._sidecar_dir() == Path("/tmp/x")
+            assert photon_adapter._npm_error_log() == Path("/tmp/x/.photon-npm-error.log")
     finally:
         # Restore real bindings for any later test importing these modules.
-        monkeypatch.undo()
         importlib.reload(photon_adapter)
         importlib.reload(photon_cli)

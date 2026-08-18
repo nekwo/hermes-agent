@@ -4,6 +4,12 @@ The rule these hold: a live turn must never mutate the venv it is running in.
 Every test proves the refusal happens WITHOUT running pip — the fixture always
 declares a genuinely-absent distribution, so a barrier that stopped working
 would reach the real installer rather than quietly pass.
+
+Two instruments enforce that, and the second exists because the first cannot
+cover the last line of defence: the autouse ``_no_real_pip`` stub replaces
+``lazy_deps._venv_pip_install`` for every test, and the one test that probes
+that function itself opts out with ``@pytest.mark.real_venv_pip`` while
+stubbing ``subprocess.run`` instead. See ``_no_real_pip``'s docstring.
 """
 
 from __future__ import annotations
@@ -26,11 +32,26 @@ def absent_feature(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_real_pip(monkeypatch):
-    """Any install that escapes the barrier fails the test loudly."""
+def _no_real_pip(request, monkeypatch):
+    """Any install that escapes the barrier fails the test loudly.
+
+    The one test that must call the REAL ``_venv_pip_install`` — the last line
+    of defence cannot be probed through a stub of itself — opts out with
+    ``@pytest.mark.real_venv_pip``, the house idiom for exactly this
+    (cf. ``real_concurrent_gate``, ``real_agent_prewarm``). Opting out AT THE
+    FIXTURE is what keeps that probe outside this stub's scope; the spelling it
+    replaces was a mid-test ``monkeypatch.undo()``, which drops the whole
+    shared per-test instance rather than this one patch (EG-0.1 / ML-4).
+
+    Opting out does not un-guard that test: it installs its own
+    ``subprocess.run`` failer, so a real pip invocation still fails it loudly.
+    """
 
     def _explode(*args, **kwargs):
         raise AssertionError("a venv install escaped the barrier and reached pip")
+
+    if request.node.get_closest_marker("real_venv_pip"):
+        return _explode
 
     monkeypatch.setattr(lazy_deps, "_venv_pip_install", _explode)
     return _explode
@@ -136,10 +157,13 @@ def test_barrier_is_released_when_the_scope_raises():
     assert lazy_deps.venv_install_denial() is None
 
 
+@pytest.mark.real_venv_pip  # this probe needs the REAL _venv_pip_install
 def test_venv_scoped_pip_install_is_refused_at_the_last_line_of_defence(monkeypatch):
     # _venv_pip_install is the ladder every path converges on; a future caller
-    # that skips ensure()/install_specs() must still be refused.
-    monkeypatch.undo()  # drop the _no_real_pip stub for this one probe
+    # that skips ensure()/install_specs() must still be refused. The marker
+    # above means the _no_real_pip stub is never installed for this test, so
+    # the probe runs against the real function instead of un-stubbing mid-test;
+    # the subprocess.run failer below is what keeps "no real pip" true here.
     monkeypatch.setattr(
         lazy_deps.subprocess,
         "run",
