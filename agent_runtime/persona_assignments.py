@@ -685,8 +685,30 @@ class PersonaInstanceStore:
         it preserves every live parent and all child context, rewrites the
         ``spawned_by`` mirror, and emits the ordinary steering event when
         applied. Dry-run is side-effect free.
+
+        REFUSES, whole, when any instance row will not decode. ``live_ids`` is
+        this repair's entire notion of what exists, and it is derived by
+        SUBTRACTION: a parent id absent from it is stripped from its child as
+        dangling. An unreadable row is absent from it for a reason that has
+        nothing to do with the parent being gone — so under the short list every
+        child edge naming that row is destroyed, and the strip is a delete-shaped
+        write minted out of a parse error. There is no partial answer available
+        here the way there is for a per-workspace office publish: one unreadable
+        row poisons the membership question for EVERY child at once, because the
+        set is what the predicate tests against. So the refusal is the whole
+        sweep, it writes nothing, and it says how many rows it could not read.
         """
-        instances = self.list_all()
+        scan = self.scan_all()
+        refusal = PersonaScanRefusal.for_scan("persona_instances", scan.unreadable)
+        if refusal is not None:
+            return {
+                "applied": False,
+                "dry_run": not apply,
+                "refused": refusal.as_dict(),
+                "repaired": [],
+                "repaired_count": 0,
+            }
+        instances = scan.instances
         live_ids = {instance.id for instance in instances}
         repairs: list[dict[str, Any]] = []
         for instance in instances:
@@ -724,6 +746,10 @@ class PersonaInstanceStore:
         return {
             "applied": bool(apply),
             "dry_run": not apply,
+            # Additive and uniform across both arms, so a consumer reads one
+            # shape: ``None`` is the positive statement "the whole store was
+            # readable", never the absence of an answer.
+            "refused": None,
             "repaired": repairs,
             "repaired_count": len(repairs),
         }
