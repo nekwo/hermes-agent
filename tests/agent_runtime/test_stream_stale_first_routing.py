@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import ast
 import pathlib
+import subprocess
 
 import pytest
 
@@ -297,23 +298,84 @@ def test_every_production_stream_frames_call_states_wants_stale_first(
         )
 
 
-def test_the_pin_covers_every_production_call_site_there_is():
-    """The pin above is only as good as its inventory.
+def _repo_python_sources() -> list[str]:
+    """Every Python file THIS REPO owns, as repo-relative posix paths.
 
-    A THIRD production caller would inherit the default silently and the
-    parametrized case above would never know. So the inventory is derived here
-    rather than declared: every ``stream_frames`` call outside ``tests/`` and
-    outside the module that defines it must be one of the two named sites.
+    **Asked of git, not of the filesystem, and that is the correctness argument
+    rather than a speed one.** The inventory below means "every production
+    ``stream_frames`` caller in this codebase". A ``pathlib.rglob`` cannot
+    express that: it returned 10,112 files here, 5,802 of them third-party code
+    inside ``.venv-ci/`` (~51 MiB), and the gate opened and AST-parsed 7,121 of
+    them on every run. Two consequences, both measured on 2026-08-18:
+
+    * a vendored package that happens to define anything named ``stream_frames``
+      would red this gate for a reason nobody here owns, and the failure message
+      would send the reader hunting a caller they cannot edit;
+    * a virtualenv is not a stable tree — it can be written while it is read —
+      and the full checkpoint HUNG inside this walk, blocked on opening a file
+      under ``.venv-ci``. A gate whose outcome depends on the environment's
+      build artefacts is load-dependent by construction.
+
+    ``--cached --others --exclude-standard`` is "tracked, plus untracked files
+    git would not ignore". Both halves are load-bearing. Tracked alone would go
+    quietly VACUOUS in the exact window an author is adding a new production
+    caller that has not been ``git add``-ed yet — the gate would report success
+    on a set missing the very file it exists to catch. ``--others`` closes that;
+    ``--exclude-standard`` is what removes the vendored trees.
+
+    **Why this is not the hand-typed-denylist defect (MCF-2).** ``_EXCLUDED_STORE_ENTRIES``
+    named a file that did not exist while the real ones stayed in the closure,
+    because a hand-typed list has no relationship to what the writers actually
+    produce. This list has exactly one authority — ``.gitignore`` — and it is the
+    same authority the repository already uses to decide what is its own code.
+    When a NEW vendored directory appears the outcome is visible either way: if
+    it is ignored it never enters this scope, and if it is not, it appears in
+    ``git status`` as untracked noise that someone has to answer for. A denylist
+    would instead admit it silently, which is the failure mode being avoided.
+
+    A git failure is raised, never swallowed. A fallback to the filesystem walk
+    would restore precisely the behaviour this replaced, at the moment nobody was
+    watching.
     """
 
-    sites: set[tuple[str, str]] = set()
-    for path in _REPO_ROOT.rglob("*.py"):
-        relative = path.relative_to(_REPO_ROOT).as_posix()
-        if relative.startswith("tests/") or relative.endswith("agent_runtime/stream.py"):
+    result = subprocess.run(
+        ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z", "--", "*.py"],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert result.returncode == 0, (
+        "git could not enumerate this repo's Python sources, so the inventory "
+        f"below would be asserted over an unknown set: {result.stderr!r}"
+    )
+    names = sorted({name for name in result.stdout.split("\0") if name})
+    assert names, "git listed no Python files at all; the scope is empty, not clean"
+    return names
+
+
+#: The inventory's own scope rules, applied AFTER git has answered what this
+#: repo owns. ``tests/`` drives the generator freely by design, and the module
+#: that DEFINES ``stream_frames`` names it on every internal reference.
+def _in_production_scope(relative: str) -> bool:
+    return not relative.startswith("tests/") and not relative.endswith(
+        "agent_runtime/stream.py"
+    )
+
+
+def _stream_frames_caller_files() -> set[str]:
+    sites: set[str] = set()
+    for relative in _repo_python_sources():
+        if not _in_production_scope(relative):
             continue
+        path = _REPO_ROOT / relative
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
-        except (SyntaxError, UnicodeDecodeError):  # pragma: no cover - not our files
+        except (SyntaxError, UnicodeDecodeError, OSError):
+            # A file this repo owns that will not parse is not this gate's
+            # business — but it is also not silently "no callers": every such
+            # file is one git tracks, so a syntax error in it is already a louder
+            # failure somewhere else in the suite.
             continue
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
@@ -321,11 +383,96 @@ def test_the_pin_covers_every_production_call_site_there_is():
             func = node.func
             name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
             if name == "stream_frames":
-                sites.add((relative, "?"))
+                sites.add(relative)
+    return sites
 
-    assert {relative for relative, _ in sites} == {
+
+def test_the_pin_covers_every_production_call_site_there_is():
+    """The pin above is only as good as its inventory.
+
+    A THIRD production caller would inherit the default silently and the
+    parametrized case above would never know. So the inventory is derived rather
+    than declared: every ``stream_frames`` call this repo owns, outside
+    ``tests/`` and outside the module that defines it, must be one of the two
+    named sites.
+    """
+
+    assert _stream_frames_caller_files() == {
         relative for relative, _ in _PRODUCTION_CALL_SITES
     }, (
         "the set of production stream_frames callers moved; add the new one to "
-        f"_PRODUCTION_CALL_SITES so it is pinned too. Found: {sorted(sites)}"
+        f"_PRODUCTION_CALL_SITES so it is pinned too. Found: "
+        f"{sorted(_stream_frames_caller_files())}"
     )
+
+
+#: An upper bound on this repo's own Python files, ~3x today's count (4,283 on
+#: 2026-08-18). Not a performance budget — a SCOPE assertion, and the only kind
+#: ruling #60 allows: a count. A walk that readmitted the virtualenv would report
+#: over ten thousand and trip this long before anyone waited on a timeout to
+#: tell them.
+_MOST_PYTHON_FILES_THIS_REPO_COULD_OWN = 12_000
+
+#: Where the probe below goes: ignored by the repo's OWN committed `.gitignore`
+#: (line 34, ``.pytest_cache/``), at the root, and — critically — OUTSIDE
+#: ``tests/``. A probe under ``tests/`` would be excluded twice and the case
+#: would pass without ever exercising the rule it claims to pin.
+_IGNORED_PROBE = pathlib.Path(".pytest_cache") / "mc4_scope_probe.py"
+
+
+def test_the_inventory_asks_only_about_code_this_repo_owns():
+    """The scope rule, as its own claim and its own kill (C30).
+
+    A matching call inside a vendored or otherwise git-ignored tree must not
+    enter the inventory. Proven by PLANTING one: a file git ignores, outside
+    ``tests/``, calling ``stream_frames`` — exactly what a package in
+    ``.venv-ci`` would look like to a filesystem walk. The inventory must not
+    see it, and the gate above must stay green with it in place.
+
+    Without this case the scope is only asserted by the absence of a failure,
+    which is not an assertion at all.
+    """
+
+    probe = _REPO_ROOT / _IGNORED_PROBE
+    ignored = subprocess.run(
+        ["git", "check-ignore", "-q", _IGNORED_PROBE.as_posix()],
+        cwd=_REPO_ROOT,
+        capture_output=True,
+        encoding="utf-8",
+        check=False,
+    )
+    assert ignored.returncode == 0, (
+        f"{_IGNORED_PROBE.as_posix()} is no longer git-ignored, so planting a "
+        "file there would not stand in for a vendored tree — this case has "
+        "stopped testing what it says it tests"
+    )
+
+    probe.parent.mkdir(parents=True, exist_ok=True)
+    probe.write_text(
+        "def vendored_thing():\n"
+        "    return stream_frames(caller='vendored')\n",
+        encoding="utf-8",
+        newline="",
+    )
+    try:
+        sources = _repo_python_sources()
+        assert _IGNORED_PROBE.as_posix() not in sources, (
+            "a git-ignored file entered the inventory's scope; a vendored "
+            "package calling anything named stream_frames would red this gate "
+            "for a reason this repo does not own"
+        )
+        assert not any(".venv" in name for name in sources), (
+            f"virtualenv paths are back in scope: "
+            f"{[n for n in sources if '.venv' in n][:3]}"
+        )
+        assert len(sources) < _MOST_PYTHON_FILES_THIS_REPO_COULD_OWN, (
+            f"the inventory scope holds {len(sources)} Python files; that is not "
+            "a repo, that is a filesystem walk"
+        )
+        # And the gate itself is unmoved by the plant — the property that
+        # actually matters to a reader of a failure message.
+        assert _stream_frames_caller_files() == {
+            relative for relative, _ in _PRODUCTION_CALL_SITES
+        }
+    finally:
+        probe.unlink(missing_ok=True)

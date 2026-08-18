@@ -63,6 +63,7 @@ for longer than that; the 30s per-test cap is never approached.
 
 from __future__ import annotations
 
+import threading
 import time
 
 import pytest
@@ -133,6 +134,26 @@ def _clean_registry():
 #: which is a real declaration meaning "this producer was told nothing".
 _DERIVE = object()
 
+#: ``id(hub)`` -> the frame TYPES the current producer generation has yielded.
+#:
+#: The instrument ``_settled_subscription`` needs and did not have. It waited on
+#: ``frames_delivered >= 1`` — a proxy for "the mandatory re-hydrate has landed"
+#: that was exact only while the hydrate was necessarily the FIRST frame a
+#: generation produced. MC-4 arm 2 ended that: the boot build now emits liveness
+#: heartbeats on the cadence while it runs, and this fixture runs at 0.25 s, so a
+#: boot build slower than that delivers a heartbeat first. The office sink turns
+#: a heartbeat into no notification at all, so the settle returned, the test
+#: wrote to the store while the producer was STILL BUILDING, and the write was
+#: absorbed into the boot hydrate — arriving as one ``runtime.office.resync``
+#: instead of the ``runtime.office.patch`` the case was waiting for. Measured
+#: 2026-08-18 by holding the boot build: peer methods were ``[]`` at settle and
+#: ``['runtime.office.resync']`` at the deadline and three seconds past it, so
+#: the patch was never going to come and a longer deadline would not have helped.
+#:
+#: The honest fix is to synchronise on the EVENT rather than on a count that
+#: used to imply it, which is what this records.
+_PRODUCED_FRAME_TYPES: dict[int, list[str]] = {}
+
 
 @pytest.fixture
 def live_hub():
@@ -159,12 +180,19 @@ def live_hub():
         from agent_runtime.serde import to_jsonable
         from agent_runtime.stream import stream_frames
 
+        produced: list[str] = []
+
         def _source(stop):
             declared = (
                 accepted_fold_entities(OFFICE_SUBSCRIPTIONS.declarations())
                 if fold_entities is _DERIVE
                 else fold_entities
             )
+            # Recorded per GENERATION, because that is the unit ``_settled_subscription``
+            # counts in: ``StreamHub.subscribe`` restarts the producer, so this
+            # list must describe the generation whose frames the joining
+            # subscriber will actually receive.
+            produced.clear()
             for frame in stream_frames(
                 poll_interval_seconds=0.02,
                 heartbeat_interval_seconds=0.25,
@@ -173,9 +201,11 @@ def live_hub():
             ):
                 if stop.is_set():
                     return
+                produced.append(str(frame.get("type") or ""))
                 yield to_jsonable(frame)
 
         hub = StreamHub(_source)
+        _PRODUCED_FRAME_TYPES[id(hub)] = produced
         hubs.append(hub)
         OFFICE_SUBSCRIPTIONS.bind(lambda: hub)
         return hub
@@ -314,11 +344,37 @@ def _settled_subscription(sent: list, hub: StreamHub, **kwargs) -> dict:
     reply = _subscribe(sent, **kwargs)
     assert "error" not in reply, reply
     _wait_for(
-        lambda: _frames_delivered(hub, kwargs.get("connection_key", "c1")) >= 1,
+        lambda: _boot_hydrate_delivered(hub, kwargs.get("connection_key", "c1")),
         what="the hub's re-baselining hydrate to reach the sink",
     )
     del sent[:]
     return reply["result"]
+
+
+def _boot_hydrate_delivered(hub: StreamHub, connection_key: str) -> bool:
+    """Has this generation's boot HYDRATE reached the sink — not just a frame?
+
+    Two conditions, and both are needed. The producer must have YIELDED the
+    hydrate (otherwise a write made after this returns can still be absorbed
+    into a boot build that has not finished, and it will arrive as a resync
+    rather than as the patch the caller is about to wait for), and the pump must
+    have DELIVERED it (otherwise ``del sent[:]`` clears a list the sink has not
+    written yet — the race ``_frames_delivered`` was chosen over
+    ``frames_produced`` to avoid in the first place).
+
+    The delivery half is exact rather than approximate because the pump is FIFO
+    and this generation's frames are the first this key receives: the hydrate's
+    1-based position in ``produced`` is precisely the delivered count that means
+    "the sink has run for it".
+    """
+
+    produced = _PRODUCED_FRAME_TYPES.get(id(hub), [])
+    # Snapshot once: the producer thread appends to this list concurrently, and
+    # membership-then-index on two different reads could disagree.
+    frames = list(produced)
+    if "hydrate" not in frames:
+        return False
+    return _frames_delivered(hub, connection_key) >= frames.index("hydrate") + 1
 
 
 def _methods(sent: list) -> list[str]:
@@ -1136,6 +1192,72 @@ def test_unsubscribe_stops_delivery_against_the_real_producer(live_hub):
 
     _await_patch(peer, "the peer's patch, which is what makes the silence readable")
     assert mine == [], f"a released subscriber was still being pushed to: {mine}"
+
+
+def test_a_slow_boot_build_does_not_swallow_the_write_into_its_hydrate(
+    live_hub, monkeypatch
+):
+    """The race MC-4 arm 2 opened in this file, pinned so it cannot reopen.
+
+    The boot build emits liveness on the cadence while it runs (0.25 s here), and
+    the office sink turns a heartbeat into NO notification. A settle that waited
+    for "some frame was delivered" therefore returned while the producer was
+    still building; the test's write then landed BEFORE the hydrate was built,
+    was absorbed into it, and reached the sink as one ``runtime.office.resync``
+    instead of a ``runtime.office.patch``. Measured: peer methods ``[]`` at
+    settle, ``['runtime.office.resync']`` at the deadline AND three seconds past
+    it — so the patch was never coming and widening the deadline would have
+    fixed nothing.
+
+    Held on a ``threading.Event``, released once the producer has demonstrably
+    emitted boot liveness. No sleep sizes this: the release is driven by the
+    evidence that the scenario under test has actually occurred, so a build that
+    finished too fast to produce a heartbeat cannot make this pass vacuously.
+    """
+
+    import agent_runtime.stream as stream_mod
+
+    gate = threading.Event()
+    real_build = stream_mod.build_snapshot
+
+    def _held(*args, **kwargs):
+        assert gate.wait(_DEADLINE_SECONDS * 2), "the held boot build was never released"
+        return real_build(*args, **kwargs)
+
+    monkeypatch.setattr(stream_mod, "build_snapshot", _held)
+
+    store = _seed_office()
+    hub = live_hub(fold_entities=OFFICE_FOLD_ENTITIES)
+    sent: list[dict] = []
+
+    releaser = threading.Thread(
+        target=lambda: (
+            _wait_for(
+                lambda: "heartbeat" in _PRODUCED_FRAME_TYPES.get(id(hub), []),
+                what="the boot build to emit liveness while it is held",
+            ),
+            gate.set(),
+        ),
+        name="boot-build-releaser",
+        daemon=True,
+    )
+    releaser.start()
+
+    _settled_subscription(sent, hub)
+    releaser.join(_DEADLINE_SECONDS)
+
+    # Anti-vacuity: the scenario really did occur — liveness preceded the hydrate
+    # in this generation, which is the ordering that broke the old settle.
+    frames = _PRODUCED_FRAME_TYPES[id(hub)]
+    assert "hydrate" in frames, frames
+    assert frames.index("heartbeat") < frames.index("hydrate"), frames
+
+    store.upsert_actor(
+        WORKSPACE, _actor_payload(position=(81.0, 82.0)), updated_by="after-slow-boot"
+    )
+
+    frame = _await_patch(sent, "a patch, not a resync swallowed by the boot build")
+    assert frame["params"]["patches"][0]["changed"]["items"][0]["position"] == [81.0, 82.0]
 
 
 def test_unsubscribe_then_subscribe_starts_a_lane_that_actually_carries(live_hub):
