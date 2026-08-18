@@ -37,8 +37,9 @@ from agent.pet.generate.prompts import (
 # Camera-view phrasing per compass direction, walking the compass RING. The ring
 # order is load-bearing: `pipeline.turnaround_order` ranks each direction by its
 # ring distance from the front view, so shuffling this dict silently reorders
-# every turnaround. It is NOT `spec.DirectionScheme.order`, which is sheet ROW
-# order (front-first, authored-first) and deliberately differs. Convention,
+# every turnaround. It is NOT `spec.DirectionScheme.order`, which is the sheet's
+# direction order (front-first, authored-first, and only its authored prefix
+# becomes rows) and deliberately differs. Convention,
 # fixed here and relied on by every other charsheet module: "s" is the character facing the viewer,
 # "n" is the character seen from behind, "e"/"w" are clean profiles, diagonals
 # are three-quarter views. "the viewer's right/left" (never the character's) is
@@ -240,7 +241,8 @@ def build_turnaround_prompt(
     *directions* is the authored subset in the order the strip is drawn (and
     therefore the order :func:`extract_strip_frames` will slice it back out) —
     turnaround convention is front to back, ``("s", "se", "e", "ne", "n")``.
-    The mirrored directions are never asked for; they are derived at compose.
+    The mirrored directions are never asked for and never composed either — the
+    consumer flips an authored row at draw time (ruling 3-B).
     """
     if not directions:
         raise ValueError("cannot build a turnaround prompt for zero directions")

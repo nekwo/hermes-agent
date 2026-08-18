@@ -2,8 +2,10 @@
 
 Stage order is the operator's QA order (plan H §4): one wide turnaround strip is
 sliced into the authored direction references, each approved reference grounds
-that direction's animation strips, and only at compose time are the mirrored
-directions derived, registered, palette-locked, packed and validated.
+that direction's animation strips, and at compose time those strips are
+registered, palette-locked, packed and validated. Nothing is mirrored on the way:
+a sheet carries the authored directions only (launcher ADR 0024 ruling 3-B) and
+the consumer flips the other three at draw time.
 
 Three constraints are load-bearing here:
 
@@ -55,7 +57,6 @@ from agent.pet.generate.atlas import (
     _fit_to_cell,
     atlas_to_webp_bytes,
     extract_strip_frames,
-    mirror_frames,
     normalize_cells,
     remove_background,
 )
@@ -389,14 +390,16 @@ def compose_draft_frames(
 
     Order matters and is fixed by the plan (§4.3):
 
-    1. Extract raw (``fit=False``) frames from each authored row's strip.
-    2. Derive every mirrored row from its SOURCE row's extracted frames, before
-       registration — a per-frame flip preserves the source row's frame order and
-       timing (it is not a strip reverse).
-    3. ``normalize_cells`` over ALL rows at once. One shared scale is the whole
+    1. Extract raw (``fit=False``) frames from each row's strip. Every row is an
+       authored one — mirrored directions are never composed (ruling 3-B), so
+       there is no derive step here and no ``mirror_frames`` call anywhere in
+       this package; the consumer flips them at draw time.
+    2. ``normalize_cells`` over ALL rows at once. One shared scale is the whole
        point: a character that changes size as it turns is the failure this
-       prevents, and per-row normalization would guarantee it.
-    4. Palette-lock every cell.
+       prevents, and per-row normalization would guarantee it. Dropping the
+       mirrored rows does not move that scale — a horizontal flip preserves
+       every bounding box it measures.
+    3. Palette-lock every cell.
 
     Re-extraction uses ``method="auto"``: the strict geometry gate already ran at
     generation time (a strip only became approvable by slicing), so compose must
@@ -413,14 +416,6 @@ def compose_draft_frames(
         frames_by_key[row.key] = extract_strip_frames(
             Path(strip), row.frames, method="auto", fit=False
         )
-
-    for derived, source in spec.mirrored_rows():
-        source_frames = frames_by_key.get(source.key)
-        if source_frames is None:
-            raise ValueError(
-                f"row {derived.key!r} mirrors {source.key!r}, which has no frames"
-            )
-        frames_by_key[derived.key] = mirror_frames(source_frames)
 
     normalized = normalize_cells(frames_by_key)
     palette = build_sheet_palette(palette_sources)

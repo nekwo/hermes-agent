@@ -33,7 +33,7 @@ from agent.charsheet.draft import (
     turnaround_item,
 )
 from agent.charsheet.revisions import ImageRevisionStore
-from agent.charsheet.spec import CHAR8, FOUR_WAY, SheetSpec, StateSpec
+from agent.charsheet.spec import CHAR8, EIGHT_WAY, FOUR_WAY, SheetSpec, StateSpec
 
 pytest.importorskip("PIL")
 
@@ -387,11 +387,11 @@ def test_a_row_key_the_sheet_does_not_author_is_refused(fake, base, bad):
 
 
 def test_a_mirrored_row_cannot_be_generated(fake, base):
+    """`walk-w` is FOUR_WAY's flip of `walk-e`: not drawn, and since 3-B not a row."""
     draft = run_to_rows(base)
-    derived, _source = SPEC.mirrored_rows()[0]
 
     with pytest.raises(ValueError, match="not an authored row"):
-        draft.reroll_row(derived.key)
+        draft.reroll_row("walk-w")
 
 
 # ────────────────────────────── compose / install ──────────────────────────────
@@ -513,10 +513,9 @@ def test_status_reports_what_has_not_been_generated_yet(draft):
 
 def test_status_only_lists_authored_rows_as_qa_items(draft):
     status = draft.status_payload()
-    derived = {row.key for row, _source in SPEC.mirrored_rows()}
 
     assert set(status["rows"]) == {row.key for row in SPEC.authored_rows()}
-    assert set(status["rows"]) & derived == set()
+    assert set(status["rows"]) & {"idle-w", "walk-w"} == set()
 
 
 def test_the_draft_on_disk_is_the_truth_across_instances(fake, base):
@@ -678,3 +677,53 @@ def test_sprite_payload_state_rows_are_hyphen_keyed_and_front_first(installed):
     assert all("@" not in key for key in payload["framesByRow"])
     assert payload["stateRows"] == [row["key"] for row in payload["rows"]]
     assert payload["directions"]["order"][0] == "s"
+
+
+def test_sprite_payload_state_rows_are_authored_only_and_front_first(installed):
+    """Ruling 3-B where the launcher reads it: the rows, and the pixels behind them.
+
+    The installed spec is FOUR_WAY (authored `s, e, n`, `w` flipped from `e`), so
+    a mirror-baking compose would ship eight rows and every `-w` key would be in
+    `stateRows`. The row list is transcribed here rather than derived from `SPEC`,
+    and it is checked against the DECODED sheet height as well, because a payload
+    that merely under-reports its rows would be a worse bug than a baked sheet.
+    """
+    payload = sprite_payload(installed["slug"])
+
+    assert payload["stateRows"] == [
+        "idle-s", "idle-e", "idle-n", "walk-s", "walk-e", "walk-n",
+    ]
+    assert set(payload["framesByRow"]) == set(payload["stateRows"])
+    assert [row["row"] for row in payload["rows"]] == [0, 1, 2, 3, 4, 5]
+    assert not any(key.endswith("-w") for key in payload["stateRows"])
+    assert "w" in payload["directions"]["mirrored"]
+
+    with Image.open(characters_dir() / installed["slug"] / SHEET_FILENAME) as opened:
+        assert opened.size[1] == len(payload["stateRows"]) * payload["frameH"]
+
+
+def test_directions_mirrored_still_names_the_three_runtime_flips(installed):
+    """The map outlives the baked rows, because the CONSUMER does the flipping now.
+
+    The launcher derives its sector count from the row NAMES —
+    `AvatarSpriteSheet._deriveDirectionSectors` mirror-closes the set it collects
+    — so an authored-only sheet resolves all eight sectors without this map. The
+    map is metadata for whoever authors a sheet (Studio): it names the three
+    directions no artist is ever asked to draw. Dropping it along with the baked
+    rows would have been the easy over-reach.
+    """
+    payload = sprite_payload(installed["slug"])
+
+    assert payload["directions"] == {
+        "order": ["s", "e", "n", "w"],
+        "authored": ["s", "e", "n"],
+        "mirrored": {"w": "e"},
+    }
+    # CHAR8's three, transcribed from the launcher SPEC section A.1
+    # (`CharacterFacingSector.mirrored`: e<->w, se<->sw, ne<->nw).
+    assert EIGHT_WAY.mirrored == {"nw": "ne", "w": "e", "sw": "se"}
+    assert {row.key for row in CHAR8.rows()} & {
+        f"{state}-{direction}"
+        for state in ("idle", "walk")
+        for direction in ("nw", "w", "sw")
+    } == set()

@@ -9,6 +9,16 @@ So the taxonomy lives in a :class:`SheetSpec` that travels with the sheet, and
 the direction count is always ``len(scheme.order)``. Nothing here (and nothing
 downstream) may branch on the literal 8.
 
+A sheet composes the AUTHORED directions only; the mirrored ones are never baked
+into it (launcher ADR 0024 ruling 3-B, 2026-08-18 — until then hermes baked them
+and every sheet cost ~60% more decoded RAM). :meth:`SheetSpec.rows` is therefore
+state-major over ``scheme.authored``, so ``CHAR8`` is ten rows and 1536x2080.
+The derived directions live on as scheme knowledge (``scheme.mirrored``,
+:meth:`SheetSpec.mirrored_rows`) that the CONSUMER flips at draw time: the
+launcher's candidate chains try the exact row and then its mirror, and
+``_deriveDirectionSectors`` mirror-closes its coverage set, so an authored-only
+sheet still resolves all eight sectors.
+
 Pure stdlib on purpose: this module is the one piece of the charsheet package
 that the CLI, the payload builder, and the tests all touch, and it must import
 with no Pillow, no ``agent_runtime`` (not in the shipped wheel — see the plan's
@@ -78,11 +88,14 @@ class StateSpec:
 class DirectionScheme:
     """Which compass directions a sheet carries, and which are mirror-derived.
 
-    ``order`` is the canonical iteration order (also the row order within a
-    state), ``authored`` the subset actually generated, and ``mirrored`` maps
-    each derived direction to the authored direction it is a horizontal flip
-    of. Every direction in ``order`` must be exactly one of the two, so a sheet
-    can never contain a row with no way to produce it.
+    ``order`` is the full direction vocabulary the sheet can be addressed in and
+    the canonical iteration order. ``authored`` is the subset actually generated
+    and — since ruling 3-B — the subset that becomes ROWS, in ``authored``
+    order. ``mirrored`` maps each derived direction to the authored direction it
+    is a horizontal flip of; a derived direction has no row of its own and is
+    produced by the consumer at draw time. Every direction in ``order`` must be
+    exactly one of the two, so no direction is displayable with no way to
+    produce it.
     """
 
     order: tuple[str, ...]
@@ -161,16 +174,18 @@ class DirectionScheme:
         return self.mirrored.get(direction)
 
 
-# Row order is front-first, authored-first, for two reasons. (1) Row 0 of the
-# default character sheet is then ``idle-s``, so the launcher's degenerate
+# Direction order is front-first, authored-first, for two reasons. (1) Row 0 of
+# the default character sheet is then ``idle-s``, so the launcher's degenerate
 # ``clipFor`` fallback — which lands on row 0 when nothing else matches —
 # reads front-facing rather than side-on (launcher spec section G, risk 7).
 # (2) The authored directions lead, in the same front-to-back walk that
-# ``pipeline.turnaround_order`` ranks out of ``prompts.VIEW_LANGUAGE``, so each
-# state block reads 'drawn rows, then derived rows' and the authored prefix is
-# exactly the launcher's ``s, se, e, ne, n``. This is deliberately NOT the theta
-# order of ``DIRECTION_TOKENS``; it does not need to be, because rows are
-# addressed by name.
+# ``pipeline.turnaround_order`` ranks out of ``prompts.VIEW_LANGUAGE``, so the
+# rows a directional state contributes ARE the launcher's ``s, se, e, ne, n`` in
+# that order, and the prompt lane and the row lane can never disagree. Since
+# ruling 3-B the mirrored tail of ``order`` (``nw, w, sw``) contributes no rows
+# at all; it stays because it is the vocabulary the CONSUMER resolves. This is
+# deliberately NOT the theta order of ``DIRECTION_TOKENS``; it does not need to
+# be, because rows are addressed by name.
 EIGHT_WAY = DirectionScheme(
     order=("s", "se", "e", "ne", "n", "nw", "w", "sw"),
     authored=("s", "se", "e", "ne", "n"),
@@ -202,7 +217,7 @@ class RowSpec:
 
 @dataclass(frozen=True)
 class SheetSpec:
-    """A full sheet layout: states x directions, in row order, plus geometry."""
+    """A sheet layout: states x AUTHORED directions, in row order, plus geometry."""
 
     states: tuple[StateSpec, ...]
     scheme: DirectionScheme
@@ -233,11 +248,16 @@ class SheetSpec:
             )
 
     def rows(self) -> list[RowSpec]:
-        """Every row in composed order: state-major, directions in scheme order."""
+        """Every composed row: state-major, AUTHORED directions in scheme order.
+
+        The mirrored directions are absent by construction — no sheet this
+        package composes contains them (ruling 3-B). ``CHAR8`` is therefore ten
+        rows at 1536x2080, not sixteen at 1536x3328.
+        """
         rows: list[RowSpec] = []
         for state in self.states:
             directions: tuple[str | None, ...]
-            directions = self.scheme.order if state.directional else (None,)
+            directions = self.scheme.authored if state.directional else (None,)
             for direction in directions:
                 rows.append(
                     RowSpec(
@@ -260,25 +280,44 @@ class SheetSpec:
         return (columns * self.frame_w, len(rows) * self.frame_h)
 
     def authored_rows(self) -> list[RowSpec]:
-        """Rows a generator must actually draw (non-directional or authored view)."""
-        authored = set(self.scheme.authored)
-        return [
-            row
-            for row in self.rows()
-            if row.direction is None or row.direction in authored
-        ]
+        """Rows a generator must actually draw — since ruling 3-B, every row.
 
-    def mirrored_rows(self) -> list[tuple[RowSpec, RowSpec]]:
-        """``(derived, source)`` pairs — each derived row and the row it flips."""
-        by_key = {row.key: row for row in self.rows()}
-        pairs: list[tuple[RowSpec, RowSpec]] = []
-        for row in self.rows():
-            if row.direction is None:
+        Kept because it is the question the draft/QA lane and the CLI's
+        ``authoredRows`` field actually ask ("which rows must I draw?"), but
+        DELEGATED rather than re-derived: a second, separately filtered row list
+        is precisely how two row lists would drift apart again the next time
+        someone edits :meth:`rows`.
+        """
+        return self.rows()
+
+    def mirrored_rows(self) -> list[tuple[str, RowSpec]]:
+        """``(derived key, source row)`` — the flips the CONSUMER draws.
+
+        The derived half is a KEY, not a :class:`RowSpec`, and that is exactly
+        what ruling 3-B means: the sheet composes authored rows only, so a
+        mirrored direction has no row — it has a NAME the runtime resolves by
+        flipping the composed source row (launcher SPEC section C: every
+        candidate chain tries the exact row, then its mirror). Returning a
+        ``RowSpec`` would mean inventing an ``index`` into a sheet that does not
+        contain it.
+
+        Ordered by ``scheme.order`` within each directional state, so the pairs
+        are stable however the mirror map was written down.
+        """
+        pairs: list[tuple[str, RowSpec]] = []
+        for state in self.states:
+            if not state.directional:
                 continue
-            source_direction = self.scheme.source_of(row.direction)
-            if source_direction is None:
-                continue
-            pairs.append((row, by_key[row_key(row.state, source_direction)]))
+            for direction in self.scheme.order:
+                source_direction = self.scheme.source_of(direction)
+                if source_direction is None:
+                    continue
+                pairs.append(
+                    (
+                        row_key(state.name, direction),
+                        self.row_by_key(row_key(state.name, source_direction)),
+                    )
+                )
         return pairs
 
     def row_by_key(self, key: str) -> RowSpec:

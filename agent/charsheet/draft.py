@@ -397,7 +397,7 @@ class CharacterDraft:
             raise ValueError(
                 f"direction {direction!r} is not authored for this sheet "
                 f"(authored: {', '.join(authored)}); mirrored directions are "
-                "derived at compose and are never QA items"
+                "never drawn and never composed, so they are never QA items"
             )
         return direction
 
@@ -833,9 +833,15 @@ def sprite_payload(slug: str) -> dict:
 
     Field names and meanings match the pet sprite payload where they overlap, so
     the Dart client's parse path is unchanged; the additions (``directions``,
-    ``states``, ``rows``) are what let a consumer read a 16-row sheet without
-    inferring the taxonomy from its height — the pet inference trap (§0.4). There
-    is no ``framesPerState``: character rows carry true per-row counts only.
+    ``states``, ``rows``) are what let a consumer read a directional sheet
+    without inferring the taxonomy from its height — the pet inference trap
+    (§0.4). There is no ``framesPerState``: character rows carry true per-row
+    counts only.
+
+    ``framesByRow``, ``stateRows`` and ``rows`` describe the AUTHORED rows only
+    (ten of them for ``CHAR8``), because since ruling 3-B those are the only
+    rows in the sheet. ``directions.mirrored`` still names the flips the consumer
+    derives: the launcher needs the SECTORS, and the row names carry them.
 
     Row keys and the ``stateRows`` order follow the launcher spec (EterniaLauncher
     ``docs/spatial/CHARACTER_8WAY_SPRITE_FORMAT_SPEC_2026-08-17.md``): a directional

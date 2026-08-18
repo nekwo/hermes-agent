@@ -4,8 +4,7 @@
 package funnels through it, so replacing it with a deterministic draftsman runs
 the whole flow with no network. The fixture draws a constant-size ring with a
 direction arrow and a per-frame tick inside it — constant bbox so the validator's
-collapse guards measure the pipeline rather than the fixture, and an asymmetric
-tick so a mirrored row is provably *flipped* rather than duplicated.
+collapse guards measure the pipeline rather than the fixture.
 
 The spec under test is deliberately small (two states, 4-way) — the point is that
 the same code paths carry any scheme, so the cheap one is the honest one to run.
@@ -17,8 +16,7 @@ import pytest
 
 from agent.charsheet import palette as palette_mod
 from agent.charsheet import pipeline
-from agent.charsheet.spec import EIGHT_WAY, FOUR_WAY, SheetSpec, StateSpec
-from agent.pet.generate.atlas import mirror_frames
+from agent.charsheet.spec import CHAR8, EIGHT_WAY, FOUR_WAY, SheetSpec, StateSpec
 
 pytest.importorskip("PIL")
 
@@ -243,41 +241,73 @@ def test_compose_refuses_a_spec_row_with_no_strip(strips, refs):
         pipeline.compose_draft_frames(SPEC, partial, list(refs.values()))
 
 
-# ─────────────────────────────── mirroring ───────────────────────────────
+# ──────────────────── mirrored rows: neither drawn nor baked ────────────────────
 
-
-def test_every_mirrored_row_is_the_pixel_exact_flip_of_its_source_row(sheet, cells):
-    pairs = SPEC.mirrored_rows()
-    assert pairs, "the spec under test must have mirrored rows"
-
-    for derived, source in pairs:
-        expected = mirror_frames(cells[source.key])
-        for column in range(derived.frames):
-            assert cell_of(sheet, derived.key, column).tobytes() == expected[column].tobytes()
-
-
-def test_a_mirrored_row_is_not_a_copy_of_its_source_row(sheet):
-    for derived, source in SPEC.mirrored_rows():
-        assert (
-            cell_of(sheet, derived.key).tobytes() != cell_of(sheet, source.key).tobytes()
-        ), f"{derived.key} is identical to {source.key} — mirroring degenerated into copying"
-
-
-def test_mirroring_preserves_frame_order_rather_than_reversing_the_strip(sheet, cells):
-    derived, source = SPEC.mirrored_rows()[-1]
-    assert derived.frames >= 3
-
-    flipped = mirror_frames(cells[source.key])
-    assert cell_of(sheet, derived.key, 0).tobytes() == flipped[0].tobytes()
-    assert cell_of(sheet, derived.key, 0).tobytes() != flipped[-1].tobytes()
+# Transcribed, not derived from the spec under test: `SPEC` is FOUR_WAY, whose one
+# mirrored direction is w <- e, so these are the two row names a mirror-baking
+# compose would produce. Reading them out of `SPEC.mirrored_rows()` would make the
+# test follow the module under test into whatever it does next.
+DERIVED_KEYS = ("idle-w", "walk-w")
 
 
 def test_mirrored_rows_are_never_generated(built):
-    generated = {call["prefix"] for call in built["calls"]}
-    mirrored_keys = {derived.key for derived, _source in SPEC.mirrored_rows()}
+    """A mirrored direction is neither GENERATED nor COMPOSED (ruling 3-B).
 
-    assert generated & {pipeline.row_prefix(key) for key in mirrored_keys} == set()
-    assert generated >= {pipeline.row_prefix(row.key) for row in SPEC.authored_rows()}
+    The first half held before H1 and the second did not: compose derived every
+    mirrored row through `mirror_frames` and packed it into the sheet, which is
+    the +60% decoded RAM the ADR priced. "We never asked the model for it" is
+    exactly the half that stayed true while the sheet grew, so both halves are
+    asserted here.
+    """
+    generated = {call["prefix"] for call in built["calls"]}
+    cells = built["cells"]
+
+    assert generated & {pipeline.row_prefix(key) for key in DERIVED_KEYS} == set()
+    assert generated >= {pipeline.row_prefix(row.key) for row in SPEC.rows()}
+    assert set(cells) & set(DERIVED_KEYS) == set()
+    assert set(cells) == {row.key for row in SPEC.rows()}
+    assert built["sheet"].size[1] == len(SPEC.rows()) * SPEC.frame_h == 6 * SPEC.frame_h
+
+
+def test_char8_composes_ten_authored_rows_at_1536x2080():
+    """The default sheet's geometry, in the numbers the memory budget was set from.
+
+    ADR 0024 decision 2-C priced a character sheet at 12.8 MB decoded — that is
+    1536 x 2080 x 4 bytes, and it is only true while the sheet is authored-only:
+    baking the three mirrored directions back in makes CHAR8 sixteen rows,
+    1536 x 3328, 20.4 MB. Every literal here is transcribed from the ADR and the
+    launcher SPEC rather than computed from the spec object.
+    """
+    keys = [row.key for row in CHAR8.rows()]
+
+    assert keys == [
+        "idle-s", "idle-se", "idle-e", "idle-ne", "idle-n",
+        "walk-s", "walk-se", "walk-e", "walk-ne", "walk-n",
+    ]
+    assert len(keys) == 10
+    assert CHAR8.sheet_size() == (1536, 2080)
+    assert not any(key.endswith(("-sw", "-w", "-nw")) for key in keys)
+
+    cells = {
+        row.key: [
+            Image.new("RGBA", (CHAR8.frame_w, CHAR8.frame_h), (20 + 20 * row.index, 60, 90, 255))
+            for _column in range(row.frames)
+        ]
+        for row in CHAR8.rows()
+    }
+    sheet = pipeline.compose_sheet(CHAR8, cells)
+    report = pipeline.validate_sheet(CHAR8, sheet)
+
+    assert sheet.size == (1536, 2080)
+    for row in CHAR8.rows():
+        assert sheet.getpixel((0, row.index * CHAR8.frame_h)) == (
+            20 + 20 * row.index,
+            60,
+            90,
+            255,
+        )
+    assert report["ok"] is True
+    assert report["filled_rows"] == keys
 
 
 # ────────────────────────────── validation ──────────────────────────────

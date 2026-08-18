@@ -108,14 +108,14 @@ def test_scheme_keeps_its_own_copy_of_the_mirror_map():
 
 
 @pytest.mark.parametrize("scheme", SCHEMES)
-def test_rows_are_state_major_with_directions_in_scheme_order(scheme):
+def test_rows_are_state_major_with_the_authored_directions_in_scheme_order(scheme):
     states = (StateSpec("idle", 4, True), StateSpec("cheer", 3, False), StateSpec("walk", 6, True))
     spec = spec_for(scheme, states)
 
     expected = [
         (state.name, direction)
         for state in states
-        for direction in (scheme.order if state.directional else (None,))
+        for direction in (scheme.authored if state.directional else (None,))
     ]
     assert [(row.state, row.direction) for row in spec.rows()] == expected
 
@@ -139,12 +139,12 @@ def test_a_non_directional_state_contributes_exactly_one_bare_keyed_row(scheme):
 
 
 @pytest.mark.parametrize("scheme", SCHEMES)
-def test_row_count_follows_the_direction_count_of_each_state(scheme):
+def test_row_count_follows_the_authored_direction_count_of_each_state(scheme):
     states = (StateSpec("idle", 2, True), StateSpec("cheer", 2, False))
     spec = spec_for(scheme, states)
 
     assert len(spec.rows()) == sum(
-        len(scheme.order) if state.directional else 1 for state in states
+        len(scheme.authored) if state.directional else 1 for state in states
     )
 
 
@@ -169,39 +169,52 @@ def test_row_by_key_rejects_a_key_the_sheet_does_not_have():
 def test_authored_rows_are_exactly_the_rows_a_generator_must_draw(scheme):
     spec = spec_for(scheme, (StateSpec("walk", 3, True), StateSpec("cheer", 2, False)))
 
-    assert spec.authored_rows() == [
-        row
-        for row in spec.rows()
-        if row.direction is None or row.direction in scheme.authored
-    ]
+    # Since ruling 3-B every composed row IS an authored row, so the two lists
+    # are one list — and `authored_rows` delegates rather than re-filtering, so
+    # they cannot drift apart the next time `rows` is edited.
+    assert spec.authored_rows() == spec.rows()
     assert len(spec.authored_rows()) == len(scheme.authored) + 1
+    assert all(
+        row.direction is None or row.direction in scheme.authored
+        for row in spec.rows()
+    )
 
 
 @pytest.mark.parametrize("scheme", SCHEMES)
-def test_mirrored_row_pairs_cover_every_derived_row_and_point_at_a_drawn_one(scheme):
+def test_a_mirrored_pair_names_a_row_the_sheet_lacks_and_a_row_it_has(scheme):
+    """The derived half is a KEY: since 3-B no sheet carries that row.
+
+    The pair is what the CONSUMER needs — "flip this composed row to draw that
+    name" — and it is the only place the mirror map is still projected onto row
+    names now that nothing composes them.
+    """
     spec = spec_for(scheme, (StateSpec("walk", 3, True), StateSpec("cheer", 2, False)))
-    authored_keys = {row.key for row in spec.authored_rows()}
+    row_keys = {row.key for row in spec.rows()}
     pairs = spec.mirrored_rows()
 
-    assert [derived.key for derived, _source in pairs] == [
-        row.key for row in spec.rows() if row.direction in scheme.mirrored
+    assert [key for key, _source in pairs] == [
+        f"walk-{direction}" for direction in scheme.order if direction in scheme.mirrored
     ]
     assert len(pairs) == len(scheme.mirrored)  # one directional state in this spec
-    for derived, source in pairs:
-        assert source.key in authored_keys
-        assert source.state == derived.state
-        assert source.direction == scheme.source_of(derived.direction)
-        assert source.frames == derived.frames
+    for derived_key, source in pairs:
+        assert derived_key not in row_keys
+        assert source.key in row_keys
+        state, separator, direction = derived_key.rpartition("-")
+        assert (state, separator) == (source.state, "-")
+        assert scheme.source_of(direction) == source.direction
+        assert source.frames == 3
 
 
 @pytest.mark.parametrize("scheme", SCHEMES)
-def test_authored_and_mirrored_rows_partition_the_sheet(scheme):
+def test_no_mirrored_direction_ever_becomes_a_row(scheme):
+    """Ruling 3-B in one assertion: the sheet is the authored rows, and no others."""
     spec = spec_for(scheme)
-    authored = [row.key for row in spec.authored_rows()]
-    derived = [row.key for row, _source in spec.mirrored_rows()]
+    on_the_sheet = {row.direction for row in spec.rows()}
 
-    assert sorted(authored + derived) == sorted(row.key for row in spec.rows())
-    assert set(authored) & set(derived) == set()
+    assert on_the_sheet == set(scheme.authored)
+    assert on_the_sheet & set(scheme.mirrored) == set()
+    assert [row.key for row in spec.rows()] == [row.key for row in spec.authored_rows()]
+    assert len(spec.rows()) == len(spec.states) * len(scheme.authored)
 
 
 # ─────────────────────────────── sheet size ───────────────────────────────
@@ -233,12 +246,15 @@ def test_a_shorter_state_does_not_shrink_the_sheet_width():
     assert with_short.sheet_size()[1] - one_state.sheet_size()[1] == DEFAULT_FRAME_H
 
 
-def test_adding_a_directional_state_adds_one_row_per_direction():
+def test_adding_a_directional_state_adds_one_row_per_authored_direction():
     before = spec_for(FOUR_WAY, (StateSpec("walk", 3, True),))
     after = spec_for(FOUR_WAY, (StateSpec("walk", 3, True), StateSpec("idle", 3, True)))
 
-    assert len(after.rows()) - len(before.rows()) == len(FOUR_WAY.order)
-    assert after.sheet_size()[1] - before.sheet_size()[1] == len(FOUR_WAY.order) * DEFAULT_FRAME_H
+    assert len(after.rows()) - len(before.rows()) == len(FOUR_WAY.authored)
+    assert (
+        after.sheet_size()[1] - before.sheet_size()[1]
+        == len(FOUR_WAY.authored) * DEFAULT_FRAME_H
+    )
 
 
 def test_sheet_size_scales_with_a_custom_cell_geometry():
@@ -247,13 +263,15 @@ def test_sheet_size_scales_with_a_custom_cell_geometry():
     assert spec.sheet_size() == (3 * 64, len(spec.rows()) * 32)
 
 
-def test_four_way_and_eight_way_differ_only_by_their_direction_count():
+def test_four_way_and_eight_way_differ_only_by_their_authored_direction_count():
     states = (StateSpec("walk", 5, True),)
     four = spec_for(FOUR_WAY, states)
     eight = spec_for(EIGHT_WAY, states)
 
     assert four.sheet_size()[0] == eight.sheet_size()[0]
-    assert eight.sheet_size()[1] / four.sheet_size()[1] == len(EIGHT_WAY.order) / len(FOUR_WAY.order)
+    assert eight.sheet_size()[1] / four.sheet_size()[1] == len(EIGHT_WAY.authored) / len(
+        FOUR_WAY.authored
+    )
 
 
 # ──────────────────────────── spec validation ────────────────────────────
@@ -262,7 +280,7 @@ def test_four_way_and_eight_way_differ_only_by_their_direction_count():
 def test_default_char8_sheet_is_all_directional_states_in_eight_way():
     assert CHAR8.scheme is EIGHT_WAY
     assert all(state.directional for state in CHAR8.states)
-    assert len(CHAR8.rows()) == len(CHAR8.states) * len(EIGHT_WAY.order)
+    assert len(CHAR8.rows()) == len(CHAR8.states) * len(EIGHT_WAY.authored)
     assert (CHAR8.frame_w, CHAR8.frame_h) == (DEFAULT_FRAME_W, DEFAULT_FRAME_H)
 
 
@@ -347,8 +365,8 @@ def test_parsed_states_build_a_valid_sheet_in_either_scheme():
 
     for scheme in SCHEMES:
         spec = SheetSpec(states=states, scheme=scheme)
-        assert len(spec.rows()) == 2 * len(scheme.order) + 1
-        assert len(spec.authored_rows()) == 2 * len(scheme.authored) + 1
+        assert len(spec.rows()) == 2 * len(scheme.authored) + 1
+        assert spec.authored_rows() == spec.rows()
         assert len(spec.mirrored_rows()) == 2 * len(scheme.mirrored)
 
 
@@ -427,7 +445,7 @@ def test_char8_row_zero_is_the_front_facing_idle():
 
     assert keys[0] == "idle-s"
     assert keys[:5] == ["idle-s", "idle-se", "idle-e", "idle-ne", "idle-n"]
-    assert keys[8] == "walk-s"
+    assert keys[5] == "walk-s"  # five rows per directional state since ruling 3-B
     assert EIGHT_WAY.authored == ("s", "se", "e", "ne", "n")
     assert FOUR_WAY.order == ("s", "e", "n", "w")
 
