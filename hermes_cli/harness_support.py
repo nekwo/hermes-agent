@@ -39,6 +39,7 @@ from agent_runtime.errors import (
     StoreCorrupt,
     SyncConflict,
     WorkspaceDeleteBlocked,
+    WorkspaceUnresolved,
 )
 from agent_runtime.persona_chat_continuity import PERSONA_CHAT_SESSION_SOURCE
 from agent_runtime.realm_sync import RealmSyncError
@@ -85,6 +86,11 @@ ERROR_EXIT_CODES = {
     "not_found": 3,
     "realm_not_found": 3,
     "workspace_not_found": 3,
+    # An office write named a workspace no RECORD resolves (OfficeStore
+    # .ensure_surface refusing to author a surface for it). Family 3 beside
+    # workspace_not_found on purpose: same operator cure, same exit, one
+    # spelling per lane rather than a second vocabulary for one contract.
+    "workspace_unresolved": 3,
     "goal_not_found": 3,
     "run_not_found": 3,
     "lane_not_found": 3,
@@ -192,6 +198,8 @@ def emit_harness_error(exc: BaseException, *, args=None, code: str | None = None
         safe_details.update(exc.safe_details)
     if isinstance(exc, WorkspaceDeleteBlocked):
         safe_details.update(exc.safe_details)
+    if isinstance(exc, WorkspaceUnresolved):
+        safe_details.update(exc.safe_details)
     if isinstance(exc, DefaultScopeReconciliationRequired):
         safe_details.update(exc.safe_details)
     envelope = _error_envelope(
@@ -241,6 +249,15 @@ def _error_code_for_exception(exc: BaseException) -> str:
     # actor-upsert, EG-6.6) pass ``code=`` explicitly and never reach this; this
     # row is what covers every OTHER office write verb.
     if isinstance(exc, ArchiveUnreadable):
+        return exc.code
+    # An office write naming a workspace no record resolves. Its own ``exc.code``
+    # under the same rule as the row above, and placed AHEAD of the
+    # ``AgentRuntimeError`` catch-all for the same reason that row was: without
+    # it, an operator refusal exits 1 as ``internal_error``, and a refusal is not
+    # a harness crash. Exit family 3 (``ERROR_EXIT_CODES``) so it lands beside
+    # ``workspace_not_found`` — the RPC office arms' spelling for the neighbouring
+    # condition — and no existing client branch has to learn a new exit.
+    if isinstance(exc, WorkspaceUnresolved):
         return exc.code
     # Typed AgentRuntimeError subclasses map to their precondition/integrity codes.
     for exc_type, code in (

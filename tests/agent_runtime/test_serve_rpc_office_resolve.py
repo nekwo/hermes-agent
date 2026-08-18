@@ -58,6 +58,7 @@ from __future__ import annotations
 import json
 
 from agent_runtime import serve_rpc
+from tests.agent_runtime.office_seed import seed_workspace_record
 from tests.agent_runtime.test_serve_rpc_office import (
     SHUTDOWN,
     _reply,
@@ -121,6 +122,7 @@ def _seed(workspace_id: str = WORKSPACE):
     """
 
     store = _store()
+    seed_workspace_record(workspace_id)
     store.ensure_surface(workspace_id, created_by="seed")
     store.upsert_actor(workspace_id, _actor_payload(), updated_by="seed-operator")
     store.upsert_actor(workspace_id, _actor_payload(), updated_by="seed-operator")

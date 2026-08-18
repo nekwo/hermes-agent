@@ -31,6 +31,7 @@ import json
 import pytest
 
 from agent_runtime import serve_rpc
+from tests.agent_runtime.office_seed import seed_workspace_record
 from tests.agent_runtime.test_serve_rpc_office import (
     SHUTDOWN,
     _argv,
@@ -56,6 +57,7 @@ def _seed_workspace(workspace_id: str = WORKSPACE):
     from agent_runtime.office_store import OfficeStore
 
     store = OfficeStore()
+    seed_workspace_record(workspace_id)
     store.ensure_surface(workspace_id, created_by="seed")
     return store
 

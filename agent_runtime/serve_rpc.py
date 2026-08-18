@@ -1008,16 +1008,28 @@ def _runtime_office_upsert(
 
     Why this method REFUSES an unknown workspace instead of authoring one
     ---------------------------------------------------------------------
-    ``OfficeStore.upsert_actor`` calls ``ensure_surface`` and would happily
-    lazily create the office, which is right for the CLI: a human typed
-    ``--workspace`` and can see what they made. This lane's caller is the same
-    program that just called ``runtime.office.get``, which REFUSES an unknown
-    workspace so a typo cannot render as a blank canvas. A pair where the read
-    refuses a typo and the write silently authors a whole new office for it is
-    incoherent, and the write side is the worse half — a mis-rendered canvas is
-    repainted on the next poll, a mis-authored one is on disk forever. So the
-    existence check happens HERE, before the store's own lazy create, and the
-    surface-authoring path stays where it already works: the argv lane.
+    ``OfficeStore.upsert_actor`` calls ``ensure_surface``, which used to lazily
+    create the office for ANY id. This lane's caller is the same program that
+    just called ``runtime.office.get``, which REFUSES an unknown workspace so a
+    typo cannot render as a blank canvas. A pair where the read refuses a typo
+    and the write silently authors a whole new office for it is incoherent, and
+    the write side is the worse half — a mis-rendered canvas is repainted on the
+    next poll, a mis-authored one is on disk forever. So the existence check
+    happens HERE, before the store's own create.
+
+    **Amended MC-8 / P10.** This paragraph used to continue "…which is right for
+    the CLI: a human typed ``--workspace`` and can see what they made", leaving
+    the surface-authoring path on the argv lane. That reasoning is retired: the
+    lazy create is how a leaked test context minted a LIVE office for a workspace
+    that never existed, so ``ensure_surface`` now refuses typed
+    (``WorkspaceUnresolved``) on every lane when no workspace RECORD resolves the
+    id. The two guards ask different questions and both still earn their place —
+    this one asks whether a SURFACE exists, so an unknown workspace reads as
+    ``workspace_not_found`` rather than as an empty office; the store's asks
+    whether a workspace RECORD does. Because this check runs first and refuses
+    whenever the surface is absent, ``WorkspaceUnresolved`` is NOT REACHABLE
+    through this arm. A handler for it here would be a catch that can never fire,
+    so there deliberately is none.
 
     Concurrency is the store's, not a second scheme
     -----------------------------------------------

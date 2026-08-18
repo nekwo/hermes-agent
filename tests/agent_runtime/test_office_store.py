@@ -15,6 +15,7 @@ from agent_runtime.errors import (
     NotFound,
     StaleRevision,
     SyncConflict,
+    WorkspaceUnresolved,
 )
 from agent_runtime.events import EventLog
 from agent_runtime.office_store import OfficeStore
@@ -593,3 +594,209 @@ def test_resolve_conflict_dry_run_leaves_sidecar_and_is_eventless():
     assert resolved is not None
     assert not sidecar.exists()
     assert _office_event_count() == before_events + 1
+
+
+# --------------------------------------------------------------------------- #
+# MC-8 / P10 — an office is not minted for a workspace no record resolves
+# --------------------------------------------------------------------------- #
+#
+# ``ensure_surface`` authored a default surface for ANY id that passed
+# ``_safe_id``. The measured consequence (EG-0.1): a leaked test context minted a
+# LIVE office in the operator's runtime root — 135 events, a ``revision 67``
+# actor file — for a workspace id no verb ever authorised. The parity warning
+# describes that afterwards; these cases are the door.
+
+
+def test_ensure_surface_refuses_an_id_no_workspace_record_resolves():
+    """Refused, and refused BEFORE anything happened.
+
+    Three separate claims, because "it refused" and "it refused before doing
+    anything" are different statements and only the second makes it safe:
+
+    *Kills, one per claim (C30):*
+
+    * A — restore the lazy mint (delete the ``workspace_resolves`` guard): the
+      ``pytest.raises`` reds, because nothing refuses at all;
+    * B — raise AFTER ``_write_surface``: the raises still passes and the
+      DIRECTORY assertion reds;
+    * C — raise after ``self._emit``: the raises and the directory both pass and
+      the EVENT assertion reds.
+    """
+
+    store = OfficeStore()
+    before = _event_types()
+
+    with pytest.raises(WorkspaceUnresolved) as excinfo:
+        store.ensure_surface("ws_nope")
+
+    assert excinfo.value.code == "workspace_unresolved", (
+        "the refusal carries no machine reason, so every envelope that maps it "
+        "falls back to internal_error — an operator refusal reported as a crash"
+    )
+    assert excinfo.value.safe_details.get("workspace_id") == "ws_nope", (
+        "the refusal does not name the id it refused, so an operator holding a "
+        "typo cannot tell which of their ids was rejected"
+    )
+    assert not paths.office_dir("ws_nope").exists(), (
+        "the refusal left an office directory on disk. A refused write that "
+        "still authored the surface is the defect wearing an exception."
+    )
+    assert _event_types() == before, (
+        "the refusal emitted an event. An office.surface.created for a surface "
+        "that does not exist is worse than the silent mint it replaced: every "
+        "watermark-gated consumer folds a create for a workspace nobody has."
+    )
+
+
+def test_a_resolving_workspace_is_unaffected_archived_included():
+    """The refusal must not touch the ordinary path, and archived still resolves.
+
+    An archived workspace is a REAL record. Its office is not an orphan and
+    refusing it would break the surface of a workspace the operator can restore.
+
+    *Kill:* derive the predicate with ``list_all()`` instead of
+    ``list_all(include_archived=True)`` in ``workspace_resolves``. The live case
+    stays green and the archived one reds — which is why both are driven here
+    rather than only the obvious one.
+    """
+
+    live = _make_workspace("Live Workspace")
+    archived = WorkspaceStore().create(name="Archived Workspace")
+    WorkspaceStore().archive(archived.id)
+
+    store = OfficeStore()
+    assert store.ensure_surface(live).workspace_id == live
+    assert store.ensure_surface(archived.id).workspace_id == archived.id, (
+        "an ARCHIVED workspace stopped resolving, so its office can no longer be "
+        "authored or read; archiving is the reversible path and this makes it "
+        "quietly destructive"
+    )
+
+
+def test_an_existing_surface_is_still_returned_after_its_workspace_disappears():
+    """THE MUTATION MOST LIKELY TO BE MISSED, and the one that breaks the live store.
+
+    The refusal guards CREATION, never reading. An office whose workspace record
+    has since gone must still be returned: the projection, the ``orphaned_office``
+    parity warning and ``archive_orphaned_surface`` all read through
+    ``ensure_surface``, and that verb's entire precondition is
+    ``workspace_resolves() is False``. A refusal placed above the
+    ``surface_exists`` short-circuit would make the live orphan UNARCHIVABLE by
+    the one verb that exists to archive it — the operator's only exit, closed by
+    the fix meant to protect them.
+
+    *Kill:* move the ``workspace_resolves`` refusal above the ``surface_exists``
+    short-circuit. This reds; the refusal case above stays green, which is
+    exactly why it cannot stand in for this one.
+    """
+
+    ws = _make_workspace("Doomed Workspace")
+    store = OfficeStore()
+    store.ensure_surface(ws)
+    store.upsert_actor(ws, _actor_payload("dev"))
+    paths.workspace_path(ws).unlink()
+    assert not store.workspace_resolves(ws), "the fixture did not orphan the office"
+
+    surface = store.ensure_surface(ws)
+    assert surface.workspace_id == ws, (
+        "an EXISTING office surface stopped being readable once its workspace "
+        "record went away, so an operator cannot project, warn about or archive "
+        "the orphan they already have"
+    )
+    assert store.archive_orphaned_surface(ws, dry_run=True)["workspace_id"] == ws, (
+        "the archive verb — whose precondition is that the workspace does NOT "
+        "resolve — can no longer preview the surface it exists to move"
+    )
+
+
+def test_the_template_clone_is_unaffected_because_it_creates_the_record_first():
+    """The one caller worth reading rather than assuming.
+
+    ``workspace_template._copy_office`` calls ``ensure_surface`` on the
+    DESTINATION, so a clone into a workspace whose record did not yet exist would
+    now refuse. It does not: the CLI create verb creates the workspace record and
+    only then copies content ("Office/board content copies AFTER the workspace
+    exists", ``hermes_cli/harness.py``). Both directions are driven so the pin
+    states the behaviour rather than only the happy half.
+
+    *Kill:* the ordering change this depends on — copy into a destination whose
+    record does not exist yet. That is the second half below, and it is asserted
+    as a REFUSAL rather than left undefined, so a future caller that clones
+    before creating gets a named failure instead of a silent orphan.
+    """
+
+    from agent_runtime.workspace_template import copy_workspace_content
+
+    source = _make_workspace("Template Source")
+    OfficeStore().upsert_actor(source, _actor_payload("dev"))
+
+    dest = WorkspaceStore().create(name="Template Destination")
+    outcome = copy_workspace_content(source, dest.id, scopes=("office",))
+    assert outcome["copied"]["office_actors"] >= 1, outcome
+    assert OfficeStore().surface_exists(dest.id)
+
+    with pytest.raises(WorkspaceUnresolved):
+        copy_workspace_content(source, "ws_unrecorded_destination", scopes=("office",))
+    assert not paths.office_dir("ws_unrecorded_destination").exists(), (
+        "a clone into an unrecorded destination authored the office anyway"
+    )
+
+
+def test_the_refusal_reaches_the_operator_typed_and_not_as_an_internal_error():
+    """What an operator actually sees, on the lane that can actually reach this.
+
+    WHERE IT SURFACES, established rather than assumed. The RPC office arms
+    (``runtime.office.upsert`` / ``…surface_update``) CANNOT reach this refusal:
+    each pre-checks ``store.surface_exists`` and returns ``ERR_NOT_FOUND`` with
+    ``reason=workspace_not_found`` before the store is asked to author anything.
+    A ``WorkspaceUnresolved`` handler on those arms would be a catch that can
+    never fire, so none was added — an always-green production branch is the same
+    defect as an always-green test. The reachable lane is the CLI/argv one, and
+    that is what this pins.
+
+    Two claims, two kills:
+
+    * the verb PROPAGATES the refusal to the harness dispatch boundary — it is
+      not swallowed and not converted to a generic failure. ``hermes_cli.main``
+      forks every exception out of a ``harness`` command into
+      ``emit_harness_error`` rather than letting a traceback be the response, so
+      reaching that boundary is what makes the envelope below the operator's
+      view. *Kill:* wrap the store call in ``except Exception: return 1`` in
+      ``harness_parts/office.py`` — the raises reds;
+    * the taxonomy renders it TYPED. *Kill:* delete the ``WorkspaceUnresolved``
+      row from ``_error_code_for_exception``. The exception is an
+      ``AgentRuntimeError``, so it falls through to the catch-all and the
+      envelope reads ``internal_error`` at exit 1 — an operator refusal reported
+      as a harness crash, which is the exact defect that row's neighbour
+      (``ArchiveUnreadable``) was added to fix. Both assertions below red.
+    """
+
+    import argparse
+    import json as _json
+
+    from hermes_cli.harness import build_parser
+    from hermes_cli.harness_support import ERROR_EXIT_CODES, emit_harness_error
+
+    parser = argparse.ArgumentParser()
+    build_parser(parser.add_subparsers(dest="command"))
+    args = parser.parse_args([
+        "harness", "office", "actor-upsert",
+        "--workspace", "ws_typo_here",
+        "--actor-json", _json.dumps(
+            {"persona_id": "qa", "items": [{"item_id": "qa", "kind": "agent", "position": [1, 1]}]}
+        ),
+        "--json",
+    ])
+
+    with pytest.raises(WorkspaceUnresolved) as excinfo:
+        args.func(args)
+
+    exit_code = emit_harness_error(excinfo.value, args=args)
+    assert exit_code == ERROR_EXIT_CODES["workspace_unresolved"] == 3, (
+        f"the refusal exits {exit_code}. Without its taxonomy row it falls to "
+        "the AgentRuntimeError catch-all and exits 1 as internal_error — a "
+        "refusal an operator caused, reported as a harness crash."
+    )
+    assert not paths.office_dir("ws_typo_here").exists(), (
+        "the CLI write authored the office it was refusing"
+    )

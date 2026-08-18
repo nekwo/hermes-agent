@@ -41,6 +41,7 @@ from .errors import (
     NotFound,
     StaleRevision,
     SyncConflict,
+    WorkspaceUnresolved,
 )
 from .events import EventLog
 from .locks import office_lock
@@ -402,13 +403,57 @@ class OfficeStore:
 
         Idempotent: if the surface already exists it is returned unchanged (no
         event). Two machines calling this converge on identical semantic
-        content (fixed folders + timestamp-excluded content hash)."""
+        content (fixed folders + timestamp-excluded content hash).
+
+        REFUSES typed (:class:`~.errors.WorkspaceUnresolved`) when no workspace
+        record resolves the id. Until MC-8 this authored a surface for ANY id
+        that passed ``_safe_id``, which is how a leaked test context minted a
+        LIVE office — 135 events and a ``revision 67`` actor file — for a
+        workspace that never existed. The parity warning could describe that
+        afterwards; this is the door.
+
+        THE ORDER IS THE CONTRACT, and each step is placed against a specific
+        failure:
+
+        1. ``_safe_id`` FIRST — an unusable id is a caller error, not a question
+           about store state, and asking the store about it would be asking a
+           question with no meaning.
+        2. the ``surface_exists`` short-circuit SECOND, i.e. **the refusal guards
+           CREATION and never reading**. An office whose workspace record has
+           since disappeared must still be returned: the projection, the parity
+           warning and the archive verb all read through here, so refusing an
+           existing orphan would break every path the operator has for cleaning
+           one up — including ``archive_orphaned_surface``, whose entire
+           precondition is ``workspace_resolves() is False``. Putting the refusal
+           above this line would make the live orphan unarchivable by the verb
+           that exists to archive it.
+        3. the refusal THIRD — before ``office_lock`` and before any write. The
+           same discipline ``store.WorkspaceStore.delete``'s cascade follows:
+           refused before the first irreversible step, so a refused call leaves
+           the store exactly as it found it. Nothing is created, no lock is
+           taken, no event is emitted — which is what makes "it refused" and "it
+           refused before doing anything" one statement here instead of two.
+        """
 
         wsid = _safe_id(workspace_id)
         if not wsid:
             raise ValueError("invalid_request")
         if self.surface_exists(wsid):
             return self.get_surface(wsid)
+        if not self.workspace_resolves(wsid):
+            # ``workspace_resolves`` is the SHARED predicate — the one
+            # ``archive_orphaned_surface`` refuses on, derived from the same
+            # membership the ``orphaned_office`` parity warning uses — so the
+            # door and the diagnostic cannot answer differently about one id.
+            # Archived workspaces resolve, deliberately: an archived workspace is
+            # a real record and its office is not an orphan.
+            raise WorkspaceUnresolved(
+                f"no workspace record resolves '{wsid}', so an office surface "
+                "will not be authored for it; create the workspace first, or if "
+                "the id is expected to arrive by realm sync, pull the realm "
+                "before placing into it",
+                safe_details={"workspace_id": wsid},
+            )
         with office_lock(wsid):
             if self.surface_exists(wsid):
                 return self.get_surface(wsid)

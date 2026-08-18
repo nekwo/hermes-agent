@@ -56,6 +56,7 @@ from agent_runtime.serve_office_subscriptions import (
     office_patch_sink,
     office_subscription_key,
 )
+from tests.agent_runtime.office_seed import seed_workspace_record
 
 WORKSPACE = "ws_rpc_subscribe_test"
 OTHER = "ws_somebody_else"
@@ -225,6 +226,7 @@ def _seed_office(workspace_id: str = WORKSPACE) -> None:
     from agent_runtime.office_store import OfficeStore
 
     store = OfficeStore()
+    seed_workspace_record(workspace_id)
     store.ensure_surface(workspace_id, created_by="seed")
     store.upsert_actor(
         workspace_id,

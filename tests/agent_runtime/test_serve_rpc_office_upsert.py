@@ -28,6 +28,7 @@ from __future__ import annotations
 import json
 
 from agent_runtime import serve_rpc
+from tests.agent_runtime.office_seed import seed_workspace_record
 from tests.agent_runtime.test_serve_rpc_office import (
     SHUTDOWN,
     _argv,
@@ -89,6 +90,7 @@ def _seed(workspace_id: str = WORKSPACE):
     """One instance-bound actor at revision 1, in an authored office."""
 
     store = _store()
+    seed_workspace_record(workspace_id)
     store.ensure_surface(workspace_id, created_by="seed")
     store.upsert_actor(workspace_id, _actor_payload(-8.0, -2.0), updated_by="seed-operator")
     return store
@@ -150,6 +152,7 @@ def test_the_acked_actor_key_is_canonical_and_is_not_what_the_client_sent():
     typed — is what the read projection reports and what a later remove needs.
     """
 
+    seed_workspace_record(WORKSPACE)
     _store().ensure_surface(WORKSPACE, created_by="seed")
 
     reply = _upsert(
@@ -369,6 +372,7 @@ def test_the_binding_survives_the_round_trip_onto_the_read_projection():
     that stored the raw token instead of the canonical one would still ack a
     canonical key (the store re-reads) while the projection disagreed."""
 
+    seed_workspace_record(WORKSPACE)
     _store().ensure_surface(WORKSPACE, created_by="seed")
     _upsert(
         "w",
@@ -508,6 +512,7 @@ def test_expect_revision_cannot_guard_a_create_and_says_so_rather_than_writing()
     every create refused and would look like a conflict storm.
     """
 
+    seed_workspace_record(WORKSPACE)
     _store().ensure_surface(WORKSPACE, created_by="seed")
 
     reply = _upsert(

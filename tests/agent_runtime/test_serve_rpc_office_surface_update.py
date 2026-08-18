@@ -30,6 +30,7 @@ What a SURFACE write has to prove that neither actor verb does:
 from __future__ import annotations
 
 from agent_runtime import serve_rpc
+from tests.agent_runtime.office_seed import seed_workspace_record
 from tests.agent_runtime.test_serve_rpc_office import (
     SHUTDOWN,
     _reply,
@@ -61,6 +62,7 @@ def _seed(workspace_id: str = WORKSPACE):
     """
 
     store = _store()
+    seed_workspace_record(workspace_id)
     store.ensure_surface(workspace_id, created_by="seed")
     store.update_surface(workspace_id, folders=["Design"], updated_by="seed-operator")
     surface = store.get_surface(workspace_id)

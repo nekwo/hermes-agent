@@ -79,6 +79,7 @@ from agent_runtime.serve_office_subscriptions import (
     office_subscription_key,
 )
 from agent_runtime.serve_stream_hub import StreamHub
+from tests.agent_runtime.office_seed import seed_workspace_record
 
 WORKSPACE = "ws_live_hub_test"
 ACTOR = "personainst_qa_agent_9c8a382f"
@@ -261,6 +262,7 @@ def _seed_office(store=None):
     """A real surface with one real actor, through the real store."""
 
     store = store or _store()
+    seed_workspace_record(WORKSPACE)
     store.ensure_surface(WORKSPACE, created_by="seed")
     store.upsert_actor(WORKSPACE, _actor_payload(), updated_by="seed")
     return store
@@ -633,6 +635,7 @@ def test_another_workspaces_real_write_never_reaches_this_subscriber(live_hub):
     """
 
     store = _seed_office()
+    seed_workspace_record(OTHER_WORKSPACE)
     store.ensure_surface(OTHER_WORKSPACE, created_by="seed")
     store.upsert_actor(OTHER_WORKSPACE, _actor_payload(OTHER_ACTOR), updated_by="seed")
 

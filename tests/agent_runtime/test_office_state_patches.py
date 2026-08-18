@@ -68,6 +68,7 @@ from agent_runtime.state_patches import (
     STATE_PATCHED_EVENT_TYPE,
     office_actor_patch_id,
 )
+from tests.agent_runtime.office_seed import seed_workspace_record
 
 WORKSPACE = "ws_office_patch_test"
 
@@ -130,6 +131,7 @@ def seeded_office(isolate_agent_runtime_root):
     """
 
     store = OfficeStore()
+    seed_workspace_record(WORKSPACE)
     store.ensure_surface(WORKSPACE, created_by="seed")
     store.upsert_actor(WORKSPACE, _actor_payload("qa", x=-8.0, y=-2.0))
     store.upsert_actor(WORKSPACE, _actor_payload("qa", x=-7.0, y=-2.0))
@@ -1049,6 +1051,12 @@ def test_surface_creation_batch_is_uncovered(isolate_agent_runtime_root, set_del
     declared = HISTORICAL_FOLD_ENTITIES | {OFFICE_ACTOR_ENTITY}
     set_delta_patches(True)
     store = OfficeStore()
+    # The workspace RECORD, and only the record: the office must NOT exist,
+    # because authoring it is the event this case is about. Since MC-8/P10 a
+    # write cannot author an office for an id no record resolves, so the
+    # record is now the precondition of the authoring path rather than
+    # something the write invents on the way past.
+    seed_workspace_record("ws_brand_new")
     before = _log_end()
     store.upsert_actor("ws_brand_new", _actor_payload("qa", x=0.0, y=0.0))
     batch = [e for _, e in EventLog().iter_from_offset(before)]
@@ -1412,6 +1420,9 @@ def test_a_folder_write_that_AUTHORED_the_office_emits_no_patch(
 
     set_delta_patches(True)
     store = OfficeStore()
+    # Record only -- the office is still unauthored, which is the whole
+    # subject. See the sibling case above for why the record is needed now.
+    seed_workspace_record("ws_never_authored")
     before = _log_end()
     store.update_surface("ws_never_authored", folders=["Ops"])
 

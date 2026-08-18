@@ -171,3 +171,44 @@ class WorkspaceDeleteBlocked(AgentRuntimeError):
         super().__init__(message)
         self.code = code
         self.safe_details = dict(safe_details or {})
+
+
+class WorkspaceUnresolved(AgentRuntimeError):
+    """Raised when an office write would AUTHOR a surface for an unresolvable id.
+
+    ``OfficeStore.ensure_surface`` lazily created a default surface for ANY id
+    that passed ``_safe_id``, with no existence check at all. The measured
+    consequence (2026-08-17 / EG-0.1): a leaked test context minted a whole live
+    office in the operator's runtime root — one ``office.surface.created``, 67
+    actor upserts and a ``revision 67`` actor file — for a workspace id no verb
+    ever authorised and no ``workspace.created`` event ever named. The parity
+    warning could report the wreckage afterwards; nothing refused it at the door.
+
+    THE ACCEPTED CONSEQUENCE, stated so a field report of it is not read as a
+    regression: a machine whose workspace record has not synced yet now gets a
+    VISIBLE typed refusal instead of silently minting an orphan. That is the
+    ruling's intent, not a side effect of it.
+
+    Scoped to CREATION. An existing surface whose workspace record has since gone
+    is still read, projected and archivable — see ``ensure_surface``'s ordering
+    note. Refusing reads would break every projection of an orphan the operator
+    is trying to clean up.
+
+    Homed here beside ``WorkspaceDeleteBlocked`` / ``StaleRevision`` /
+    ``RuntimeRootMismatch``, with the same ``code`` + ``safe_details`` shape, so
+    CLI and RPC envelopes carry a machine reason verbatim through the mapping
+    they already have. B23(v) is the recorded hazard this avoids: two exception
+    vocabularies for one contract, noticed only when a third site copies the
+    wrong one.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "workspace_unresolved",
+        safe_details: dict | None = None,
+    ):
+        super().__init__(message)
+        self.code = code
+        self.safe_details = dict(safe_details or {})

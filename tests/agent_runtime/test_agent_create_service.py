@@ -20,6 +20,7 @@ import pytest
 # real implementation and the service a dead copy.
 from agent_runtime import paths
 from agent_runtime.agent_create import perform_agent_create
+from tests.agent_runtime.office_seed import seed_workspace_record
 
 WORKSPACE = "ws_agent_create_service"
 
@@ -28,6 +29,7 @@ def _seed_workspace(workspace_id: str = WORKSPACE):
     from agent_runtime.office_store import OfficeStore
 
     store = OfficeStore()
+    seed_workspace_record(workspace_id)
     store.ensure_surface(workspace_id, created_by="seed")
     return store
 

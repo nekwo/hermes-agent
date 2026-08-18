@@ -20,6 +20,7 @@ import json
 import pytest
 
 from scripts.office_actor_rekey_to_instance import main
+from tests.agent_runtime.office_seed import seed_workspace_record
 
 WORKSPACE = "ws_rekey_test"
 
@@ -56,6 +57,7 @@ def _seed_desk_first(store) -> None:
     actors: desk first in file order, agent second."""
 
     _instance_file("personainst_backend_dev_agent_29fdd71a")
+    seed_workspace_record(WORKSPACE)
     store.ensure_surface(WORKSPACE, created_by="seed")
     store.upsert_actor(
         WORKSPACE,
@@ -171,6 +173,7 @@ def test_an_actor_that_does_not_fit_the_pattern_is_skipped_and_named(items, expe
     choose between them. Both are REPORTED and left alone."""
 
     store = _store()
+    seed_workspace_record(WORKSPACE)
     store.ensure_surface(WORKSPACE, created_by="seed")
     store.upsert_actor(WORKSPACE, {"persona_id": "lonely", "items": items})
     before = _office_tree()
@@ -191,6 +194,7 @@ def test_an_unresolvable_instance_is_refused_and_the_exit_code_says_so(capsys):
     reap, and the actor would be unreachable by both keys."""
 
     store = _store()
+    seed_workspace_record(WORKSPACE)
     store.ensure_surface(WORKSPACE, created_by="seed")
     store.upsert_actor(
         WORKSPACE,
@@ -219,6 +223,7 @@ def test_the_agent_first_ordering_is_handled_the_same_as_desk_first(capsys):
 
     _instance_file("personainst_qa_agent_9c8a382f")
     store = _store()
+    seed_workspace_record(WORKSPACE)
     store.ensure_surface(WORKSPACE, created_by="seed")
     store.upsert_actor(
         WORKSPACE,
@@ -245,6 +250,7 @@ def test_a_deskless_actor_rekeys_too():
 
     _instance_file("personainst_dev_agent_8f685ad1")
     store = _store()
+    seed_workspace_record(WORKSPACE)
     store.ensure_surface(WORKSPACE, created_by="seed")
     store.upsert_actor(
         WORKSPACE,
@@ -327,6 +333,7 @@ def test_an_instance_bound_actor_is_left_alone_even_if_its_item_points_elsewhere
     _instance_file("personainst_dev_agent_3ebfce41")
     _instance_file("personainst_dev_agent_8f685ad1")
     store = _store()
+    seed_workspace_record(WORKSPACE)
     store.ensure_surface(WORKSPACE, created_by="seed")
     store.upsert_actor(
         WORKSPACE,

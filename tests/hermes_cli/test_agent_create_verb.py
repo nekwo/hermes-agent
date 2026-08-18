@@ -18,6 +18,7 @@ import json
 import pytest
 
 from agent_runtime import paths
+from tests.agent_runtime.office_seed import seed_workspace_record
 
 WORKSPACE = "ws_agent_create_verb"
 
@@ -68,6 +69,7 @@ def qa_persona():
 def seeded_workspace():
     from agent_runtime.office_store import OfficeStore
 
+    seed_workspace_record(WORKSPACE)
     store = OfficeStore()
     store.ensure_surface(WORKSPACE, created_by="seed")
     return store
@@ -460,6 +462,11 @@ def test_the_verb_refuses_a_missing_workspace_before_any_write(qa_persona, capsy
     digest = hashlib.sha256("verb-nows".encode("utf-8")).hexdigest()
     assert not paths.agent_create_reservation_path(digest).exists()
 
+    # The retry half needs BOTH halves of the precondition the refusal names:
+    # a workspace record (MC-8/P10 -- ensure_surface refuses without one) and
+    # then the surface the verb's own guard checks for. Seeding only the
+    # surface used to be possible and is exactly the hole that closed.
+    seed_workspace_record("ws_never_authored")
     OfficeStore().ensure_surface("ws_never_authored", created_by="seed")
     code, retry = _create(
         capsys, "--idempotency-key", "verb-nows", "--placement-id", "qa_nows",

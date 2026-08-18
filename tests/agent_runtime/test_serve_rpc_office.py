@@ -25,6 +25,7 @@ import io
 import json
 
 from agent_runtime import serve_rpc
+from tests.agent_runtime.office_seed import seed_workspace_record
 from hermes_cli.harness_parts.serve import serve_loop
 
 SHUTDOWN = json.dumps({"op": "shutdown"}) + "\n"
@@ -47,6 +48,7 @@ def _seed_office(workspace_id: str = WORKSPACE):
     from agent_runtime.office_store import OfficeStore
 
     store = OfficeStore()
+    seed_workspace_record(workspace_id)
     store.ensure_surface(workspace_id, created_by="seed")
     store.upsert_actor(
         workspace_id,

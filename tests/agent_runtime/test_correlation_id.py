@@ -55,6 +55,7 @@ from agent_runtime.state_patches import (
     normalize_correlation_id,
 )
 from tests.agent_runtime.test_serve_rpc_office import SHUTDOWN, _reply, _rpc, _run
+from tests.agent_runtime.office_seed import seed_workspace_record
 
 WORKSPACE = "ws_corr_test"
 
@@ -92,6 +93,7 @@ def _actor_payload(x: float, y: float) -> dict:
 
 def _seed():
     store = _store()
+    seed_workspace_record(WORKSPACE)
     store.ensure_surface(WORKSPACE, created_by="seed")
     store.upsert_actor(WORKSPACE, _actor_payload(-8.0, -2.0), updated_by="seed-operator")
     return store

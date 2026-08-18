@@ -56,6 +56,10 @@ from agent_runtime.office_models import (
     classify_orphaned_office_workspace,
 )
 from agent_runtime.store import DELETED_WORKSPACE_LEDGER_CAP, RealmStore, WorkspaceStore
+from tests.agent_runtime.office_seed import (
+    seed_workspace_record,
+    unlink_workspace_record,
+)
 
 
 GHOST = "ws_ghost_office"
@@ -80,11 +84,30 @@ def _actor_payload(persona_id: str = "qa") -> dict:
 
 
 def _seed_orphan(workspace_id: str = GHOST) -> OfficeStore:
-    """A surface with a real placement and NO workspace record behind it."""
+    """A surface with a real placement and NO workspace record behind it.
 
+    Built record-first and then UNLINKED, because MC-8 / P10 shut the door this
+    fixture used to walk through: ``ensure_surface`` refuses an id no workspace
+    record resolves, so the old "call it on a bare string" seed is now exactly
+    the thing under test and cannot be the thing that builds the fixture.
+
+    The replacement is also the more faithful model. An orphan does not arise in
+    the field from an office authored out of nothing — that path is closed now —
+    but from a workspace record that went away while its office stayed, which is
+    literally what these two steps do. ``WorkspaceStore.delete`` is deliberately
+    NOT used: its cascade ``rmtree``s the office subtree, so driving it would
+    destroy the surface this file exists to examine.
+    """
+
+    seed_workspace_record(workspace_id)
     store = OfficeStore()
     store.ensure_surface(workspace_id)
     store.upsert_actor(workspace_id, _actor_payload())
+    unlink_workspace_record(workspace_id)
+    assert not store.workspace_resolves(workspace_id), (
+        "the fixture left a resolvable workspace record behind, so nothing below "
+        "is testing an orphan"
+    )
     return store
 
 
