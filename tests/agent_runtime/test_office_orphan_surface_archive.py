@@ -83,9 +83,11 @@ def _seed_orphan(workspace_id: str = GHOST) -> OfficeStore:
 
 
 def _offices() -> list[dict]:
+    # ``.offices``: the projection now carries the rows AND the count of
+    # workspaces whose surface would not decode (ML-8b/3).
     return _offices_summary(
         OfficeStore(), WorkspaceStore().list_all(include_archived=True)
-    )
+    ).offices
 
 
 def _warning_ids(code: str = "orphaned_office") -> list[str]:

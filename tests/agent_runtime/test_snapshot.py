@@ -102,3 +102,60 @@ def test_running_work_reports_its_own_completeness_and_timing(
     completeness = snapshot["parity"]["completeness"]["running_work"]
     assert set(completeness) >= {"considered", "included", "dropped", "reasons", "by_design"}
     assert "running_work" in snapshot["parity"]["sections_ms"]
+
+
+# ── ML-8b/3: a workspace with an unreadable surface is counted, not vanished ──
+
+
+def _blind_surface(workspace_id: str):
+    """Make one office surface file undecodable. The office is still THERE; the
+    build just cannot open it — which ``_offices_summary`` used to report by
+    omitting the whole workspace, a state indistinguishable from "this workspace
+    has no office"."""
+
+    path = paths.office_surface_path(workspace_id)
+    assert path.exists(), path
+    path.write_text("{truncated", encoding="utf-8")
+    return path
+
+
+def test_a_workspace_with_an_unreadable_surface_is_counted_in_the_core(
+    isolate_agent_runtime_root,
+) -> None:
+    """*Probed:* ``offices_unreadable`` equals the DRIVEN count (1 then 2) and
+    the readable workspaces still list their rows.
+
+    *Mutation:* restore the silent ``continue`` in ``_offices_summary``. A
+    constant zero cannot match two driven counts, and the second probe stops the
+    mutant from "fixing" it by dropping every office instead.
+    """
+
+    from agent_runtime.office_store import OfficeStore
+    from agent_runtime.store import WorkspaceStore
+
+    workspaces = [WorkspaceStore().create(name=f"WS{i}") for i in range(3)]
+    store = OfficeStore()
+    for workspace in workspaces:
+        store.ensure_surface(workspace.id)
+        store.upsert_actor(
+            workspace.id,
+            {
+                "persona_id": "dev",
+                "items": [{"item_id": "dev", "kind": "agent", "position": [1.0, 2.0]}],
+            },
+        )
+
+    clean = build_snapshot()
+    assert clean["offices_unreadable"] == 0
+    assert set(clean["offices"]) == {w.id for w in workspaces}
+
+    for driven in (1, 2):
+        _blind_surface(workspaces[driven - 1].id)
+        snapshot = build_snapshot()
+        assert snapshot["offices_unreadable"] == driven, snapshot["offices_unreadable"]
+        # The survivors are still projected — the count is not bought by
+        # dropping everything.
+        survivors = {w.id for w in workspaces[driven:]}
+        assert set(snapshot["offices"]) == survivors, sorted(snapshot["offices"])
+        for workspace_id in survivors:
+            assert snapshot["offices"][workspace_id]["actor_count"] == 1

@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 # The snapshot roster does not render per-profile model/provider settings. Use
 # the metadata-only catalog so a cold build does not parse every config.yaml.
@@ -801,10 +802,8 @@ def _build_snapshot_in_runtime_scope(
             _boards_summary(BoardStore(event_log=event_log), workspaces),
             "board_id",
         )
-        offices_section = _keyed(
-            _offices_summary(OfficeStore(event_log=event_log), workspaces),
-            "workspace_id",
-        )
+        offices_projection = _offices_summary(OfficeStore(event_log=event_log), workspaces)
+        offices_section = _keyed(offices_projection.offices, "workspace_id")
     running_work_accountant = ProjectionAccountant("running_work")
     with _timed_section(_sections_ms, "running_work"):
         running_work_section = build_running_work(running_work_accountant)
@@ -854,6 +853,13 @@ def _build_snapshot_in_runtime_scope(
         # files and the `unpublished` honesty flag from the local baseline
         # sidecar; NEVER a git call in the snapshot path.
         "offices": offices_section,
+        # How many workspaces have an office the build could not read AT ALL —
+        # the surface file exists and would not decode, so no row above could be
+        # built for it. Sibling in spirit to each row's ``actors_unreadable``:
+        # that one counts rows the platform took INSIDE an office, this one
+        # counts whole offices it took. Additive — an old launcher ignores it —
+        # and never silently zero, which is the only reason the key exists.
+        "offices_unreadable": offices_projection.unreadable,
         # Unified background-work projection: terminal processes, subagent
         # delegations, in-flight chat turns, MCP servers, cron jobs — one row
         # vocabulary across six subsystems, durable-first so a cold CLI lane
@@ -1619,7 +1625,27 @@ def office_summary_row(
     }
 
 
-def _offices_summary(office_store, workspaces) -> list[dict]:
+class OfficesProjection(NamedTuple):
+    """The office rows this snapshot BUILT, beside how many whole workspaces it
+    could not build a row for.
+
+    Same two-fields-or-nothing law as ``ActorScan`` one layer down, and for the
+    same reason: ``_offices_summary`` skipped a workspace whose ``get_surface``
+    threw, so that office simply was not in the snapshot — indistinguishable
+    from a workspace that has no office at all. ``actors_unreadable`` made the
+    count honest INSIDE a row (EG-1.5); the row that never existed was the gap
+    left over. It matters twice for the persisted core: a core is written back
+    after every build, so an under-reported projection is persisted as
+    fingerprint-blessed truth and served to every later boot.
+    """
+
+    offices: list[dict]
+    #: Workspaces whose office surface would not decode. Additive on the wire as
+    #: ``offices_unreadable`` — an old launcher ignores the key.
+    unreadable: int
+
+
+def _offices_summary(office_store, workspaces) -> OfficesProjection:
     """Mission Office projection rows, keyed by workspace_id. Local reads only:
     conflict state from local sidecar files, ``unpublished`` from the local
     realm-sync baseline sidecar (a pure file read — Decision 7 posture)."""
@@ -1630,10 +1656,15 @@ def _offices_summary(office_store, workspaces) -> list[dict]:
     realm_by_workspace = {getattr(w, "id", None): getattr(w, "realm_id", None) for w in workspaces}
     baselines: dict[str, dict[str, str]] = {}
     offices: list[dict] = []
+    unreadable = 0
     for workspace_token in office_store.list_workspaces():
         try:
             surface = office_store.get_surface(workspace_token)
         except Exception:
+            # COUNTED, never vanished. The workspace id lives inside the file
+            # that would not parse, so no row can be built for it — but its
+            # absence from ``offices`` may not be the only trace it leaves.
+            unreadable += 1
             continue
         # ``scan_actors``, not ``list_actors``: the thin list view drops the
         # files it could not decode and the row below must not describe itself as
@@ -1670,7 +1701,7 @@ def _offices_summary(office_store, workspaces) -> list[dict]:
                 orphaned=surface.workspace_id not in workspace_ids,
             )
         )
-    return offices
+    return OfficesProjection(offices=offices, unreadable=unreadable)
 
 
 def _office_parity_warnings(data) -> list[dict]:
