@@ -36,6 +36,7 @@ single exclusion reds exactly the case whose writer produced it — a file-level
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 from typing import Iterator
 
@@ -208,6 +209,7 @@ def test_the_exclusion_set_agrees_with_the_constants_its_writers_own(
         "serve_socket.SOCKET_OWNER_FILENAME": serve_socket.SOCKET_OWNER_FILENAME,
         "serve_auth.SERVE_AUTH_TOKEN_FILENAME": serve_auth.SERVE_AUTH_TOKEN_FILENAME,
         "serve_registry.SERVE_INSTANCES_DIRNAME": serve_registry.SERVE_INSTANCES_DIRNAME,
+        "paths.DELETED_ARCHIVE_DIRNAME": paths.DELETED_ARCHIVE_DIRNAME,
     }
     missing = sorted(
         f"{symbol} ({value!r})"
@@ -349,4 +351,273 @@ def test_the_drain_mirrors_staging_file_is_invisible_to_the_walk(
         "exclusion set for a file that exists for microseconds. (The digest "
         "assertion above is the behaviour; this one names the cause, and both "
         "die to the same mutation.)"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# 4. MC-8 / P12 — the compaction graveyard is outside the closure
+# --------------------------------------------------------------------------- #
+#
+# ``deleted_archive/`` is the ONE exclusion in the set that is not justified by
+# "the runtime rewrites it". It is excluded because the PROJECTION has no reader
+# for it — a claim about a reader set, which is exactly the kind of claim that
+# rots — so the argument is written at the constant and these cases are what make
+# the argument checkable. Measured on the live root before landing: 18,804 of
+# 23,107 entries, ~81 % of every walk and of every ``entries.json`` write-back.
+#
+# NOTHING HERE ASSERTS A DURATION. P12's whole value is a time saving and a
+# timing assertion over a synthetic tree of tens of files would measure the
+# machine (the standing rule; a witness asserts counts, ordering or typed
+# reasons). These cases assert the COUNT and the DIGEST, which is the fact that
+# causes the saving and the only one a small fixture can prove.
+#
+# THE FIXTURE TAKES ITS BASELINE BEFORE THE GRAVEYARD EXISTS, deliberately. A
+# baseline taken with ``deleted_archive/`` already on disk would survive the most
+# plausible half-fix there is — skip RECURSION into the tree but keep recording
+# the directory's own triple — because the directory entry is a constant and
+# additions beneath it are the only thing left to see. Creating the whole tree
+# after the baseline makes that mutant visible as an off-by-one.
+def _graveyard_batch(root, *, batches: int = 3, per_batch: int = 4) -> int:
+    """Write a realistic compaction graveyard; return how many files landed."""
+
+    written = 0
+    for batch in range(batches):
+        batch_dir = root / paths.DELETED_ARCHIVE_DIRNAME / f"batch_{batch:03d}"
+        batch_dir.mkdir(parents=True, exist_ok=True)
+        (batch_dir / "manifest.json").write_text(
+            '{"archived_tasks":[]}', encoding="utf-8"
+        )
+        written += 1
+        for item in range(per_batch):
+            (batch_dir / f"task_{item}.jsonl").write_text(
+                '{"type":"probe"}\n', encoding="utf-8"
+            )
+            written += 1
+    return written
+
+
+def test_the_compaction_graveyard_does_not_enter_the_fingerprint_count(
+    isolate_agent_runtime_root,
+):
+    """Adding the graveyard moves the entry count by EXACTLY ZERO.
+
+    The second half is what stops this reading as a win when it is not: a store
+    root that contributes nothing at all would satisfy the first assertion
+    perfectly. So the same fixture then writes ONE file outside the graveyard and
+    requires the count to move by exactly one — the walk is still watching the
+    store, it is just no longer watching the graveyard.
+
+    *Kills, one per claim:*
+
+    * drop ``DELETED_ARCHIVE_DIRNAME`` from ``_EXCLUDED_STORE_ENTRIES`` — the
+      graveyard's 15 files plus its 4 directories re-enter and the first
+      assertion reds on the count;
+    * widen the exclusion to swallow a real store subtree (exclude
+      ``"workspaces"`` as well) — the graveyard claim still passes and the
+      second assertion reds, which is the over-broad-exclusion direction a
+      count-of-zero cannot distinguish on its own.
+    """
+
+    root = isolate_agent_runtime_root
+    (root / "workspaces").mkdir(parents=True, exist_ok=True)
+    (root / "workspaces" / "ws_alpha.json").write_text("{}", encoding="utf-8")
+
+    before = core_cache.build_input_fingerprint()
+    assert before is not None, "the fingerprint refused before the graveyard was written"
+    assert not (root / paths.DELETED_ARCHIVE_DIRNAME).exists(), (
+        "the graveyard already existed when the baseline was taken, so a mutant "
+        "that keeps the directory entry and skips only its contents would pass"
+    )
+
+    files = _graveyard_batch(root)
+    assert files == 15, f"the fixture wrote {files} graveyard files, not the 15 it claims"
+    with_graveyard = core_cache.build_input_fingerprint()
+    assert with_graveyard is not None
+
+    assert with_graveyard.count == before.count, (
+        f"{files} files and 4 directories under "
+        f"{paths.DELETED_ARCHIVE_DIRNAME}/ moved the fingerprint's entry count "
+        f"({before.count} -> {with_graveyard.count}). On the operator's live root "
+        "that tree is 18,804 of 23,107 entries — 81 % of every walk, paid four to "
+        "five times per boot and again on every entries.json write-back — for a "
+        "graveyard no projection reads and no current code writes."
+    )
+
+    (root / "workspaces" / "ws_beta.json").write_text("{}", encoding="utf-8")
+    with_real_input = core_cache.build_input_fingerprint()
+    assert with_real_input is not None
+    assert with_real_input.count == before.count + 1, (
+        "one added workspace file did not move the entry count by exactly one "
+        f"({before.count} -> {with_real_input.count}), so the exclusion above is "
+        "not 'the graveyard left the closure' — it is a walk that stopped seeing "
+        "the store. An over-broad exclusion reads identically to a correct one "
+        "from the graveyard's side alone, which is why this assertion exists."
+    )
+
+
+def test_rewriting_a_graveyard_file_does_not_move_the_digest(
+    isolate_agent_runtime_root,
+):
+    """A change the COUNT can never see, which is the point of a second case.
+
+    Rewriting a file in place changes its mtime and its size and leaves the entry
+    count identical, so this is the half of the exclusion a count-shaped witness
+    is structurally blind to: a walk that had stopped counting the graveyard but
+    still stat'd it would pass the case above and fail here.
+
+    *Kill:* drop ``DELETED_ARCHIVE_DIRNAME`` from ``_EXCLUDED_STORE_ENTRIES``.
+    The count is unchanged across the rewrite either way; only the digest moves,
+    so this reds while a count-only gate stays green.
+    """
+
+    root = isolate_agent_runtime_root
+    (root / "workspaces").mkdir(parents=True, exist_ok=True)
+    _graveyard_batch(root, batches=1, per_batch=2)
+    victim = root / paths.DELETED_ARCHIVE_DIRNAME / "batch_000" / "task_0.jsonl"
+    assert victim.exists()
+
+    before = core_cache.build_input_fingerprint()
+    assert before is not None
+
+    # A longer body, so SIZE moves as well as mtime — a filesystem whose mtime
+    # granularity is coarse would otherwise let this probe measure nothing.
+    victim.write_text('{"type":"probe","rewritten":true,"padding":"xxxxxxxx"}\n', encoding="utf-8")
+    after = core_cache.build_input_fingerprint()
+    assert after is not None
+
+    assert after.count == before.count, (
+        "the fixture added or removed an entry, so this case is no longer the "
+        "count-blind probe it claims to be"
+    )
+    assert after.digest == before.digest, (
+        "rewriting a file inside the compaction graveyard moved the read-model "
+        "cache's input digest, so the graveyard is still being stat'd even though "
+        "it is not being counted. Half an exclusion costs the full walk and still "
+        "invalidates the key."
+    )
+
+
+def test_only_the_TOP_LEVEL_graveyard_is_excluded(
+    isolate_agent_runtime_root,
+):
+    """``exclude_top`` is top-level by contract, and the comment must not overclaim.
+
+    The argument written at the constant is about the ONE graveyard at the store
+    root — the only place ``paths.deleted_archive_dir()`` can put it. A directory
+    that merely shares the name, nested inside a real store subtree, is somebody
+    else's data and is fingerprinted in full.
+
+    *Kill:* implement the exclusion as a name filter inside the recursive walk
+    (skip any entry whose ``name`` is in the exclusion set, at every depth)
+    rather than as ``_walk_tree``'s top-level ``exclude_top``. The nested tree
+    then vanishes from the closure too and this reds.
+    """
+
+    root = isolate_agent_runtime_root
+    (root / "workspaces").mkdir(parents=True, exist_ok=True)
+    before = core_cache.build_input_fingerprint()
+    assert before is not None
+
+    nested = root / "workspaces" / paths.DELETED_ARCHIVE_DIRNAME
+    nested.mkdir(parents=True, exist_ok=True)
+    (nested / "kept.json").write_text("{}", encoding="utf-8")
+    after = core_cache.build_input_fingerprint()
+    assert after is not None
+
+    assert after.count == before.count + 2, (
+        "a directory named "
+        f"{paths.DELETED_ARCHIVE_DIRNAME!r} NESTED under another store subtree "
+        f"did not contribute its own entry plus its file ({before.count} -> "
+        f"{after.count}). The exclusion is keyed to the store root's own top-level "
+        "entries; implementing it as a name filter at every depth would silently "
+        "drop unrelated data out of the closure, which is a missed input — the "
+        "failure direction this module calls the worst one."
+    )
+
+
+def test_the_excluded_name_is_the_one_the_path_helper_actually_produces(
+    isolate_agent_runtime_root,
+):
+    """The set and the directory's producer are ONE vocabulary, not two copies.
+
+    The neighbouring constants case proves the exclusion agrees with the declared
+    constant. This one goes one step further out and asks the question that
+    actually decides whether the walk skips anything: does the set contain the
+    name of the directory ``paths.deleted_archive_dir()`` RESOLVES TO? A constant
+    nobody's path helper uses would satisfy the other case and skip nothing here.
+
+    *Kill:* re-spell the literal ``"deleted_archive"`` in ``core_cache``'s set
+    beside the import instead of importing it, then change
+    ``paths.DELETED_ARCHIVE_DIRNAME``'s VALUE. The hand-spelled copy stops
+    tracking its owner and both this case and the constants case red — which is
+    the whole reason a name with a cross-module reader is promoted to a constant
+    rather than typed twice.
+    """
+
+    produced = paths.deleted_archive_dir().name
+    assert produced in core_cache._EXCLUDED_STORE_ENTRIES, (
+        f"paths.deleted_archive_dir() resolves to a directory named {produced!r} "
+        "and core_cache._EXCLUDED_STORE_ENTRIES does not name it, so the walk "
+        "still stats the whole compaction graveyard. This is the MCF-2 shape: an "
+        "exclusion that agrees with a restated list rather than with the code "
+        "that produces the file."
+    )
+    assert produced == paths.DELETED_ARCHIVE_DIRNAME, (
+        "the path helper stopped using its own constant, so the constant and the "
+        "directory can now drift apart while both look correct in isolation"
+    )
+
+
+def test_the_persisted_entries_shrink_with_the_closure(
+    isolate_agent_runtime_root, monkeypatch
+):
+    """MC-3's ``entries.json`` carries no graveyard path — the two stay joined.
+
+    ``_write_entries`` persists ``key.entries``, i.e. the fingerprint's own stat
+    set, so today this property holds BY CONSTRUCTION rather than by a second
+    decision. That is stated plainly instead of dressed up: the gate's job is not
+    to discover a bug, it is to PIN the join, because the alternative shape — a
+    diagnostic writer that re-walks the store for itself — is a plausible
+    refactor that would silently restore ~81 % of the write-back MCF-20 measured
+    at ~3.4 MiB per led build.
+
+    *Kill:* have ``_write_entries`` persist a freshly re-walked store instead of
+    the key it was handed (``_walk_tree(paths.store_root(), fresh, limit=...)``
+    with no ``exclude_top``). Every triple the fingerprint excluded comes back
+    into the file and this reds, while the fingerprint's own digest — and every
+    other case in this file — stays green.
+    """
+
+    root = isolate_agent_runtime_root
+    (root / "workspaces").mkdir(parents=True, exist_ok=True)
+    (root / "workspaces" / "ws_alpha.json").write_text("{}", encoding="utf-8")
+    _graveyard_batch(root)
+
+    monkeypatch.setattr(core_cache, "build_stamp_token", lambda: "probe:mc8:clean")
+    core_cache.reset_process_state()
+    try:
+        key = core_cache.build_input_fingerprint()
+        assert key is not None
+        assert core_cache.write_back({"parity": {}}, fingerprint=key) is True
+
+        payload = json.loads(core_cache.entries_path().read_text(encoding="utf-8"))
+    finally:
+        core_cache.reset_process_state()
+
+    persisted = [str(row[0]) for row in payload["entries"]]
+    assert persisted, "the entries file carried no rows, so this gate proved nothing"
+    assert any("ws_alpha.json" in path for path in persisted), (
+        "the entries file does not contain the ordinary store file this fixture "
+        "wrote, so its emptiness — not the exclusion — would satisfy the "
+        "assertion below"
+    )
+
+    marker = f"{os.sep}{paths.DELETED_ARCHIVE_DIRNAME}{os.sep}"
+    leaked = sorted(path for path in persisted if marker in path)
+    assert not leaked, (
+        f"{len(leaked)} compaction-graveyard paths reached the persisted stat "
+        f"set, e.g. {leaked[0]!r}. The diagnostic is meant to describe the "
+        "closure the digest was taken over; a file describing a WIDER set both "
+        "costs the bytes P12 removed and would name paths on a demote that were "
+        "never inputs."
     )

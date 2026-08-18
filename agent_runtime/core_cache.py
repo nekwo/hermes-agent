@@ -188,6 +188,7 @@ from typing import Any, Callable, Iterator, NamedTuple
 from utils import atomic_json_write
 
 from .dispatch_delivery import DRAIN_STATE_FILENAME
+from .paths import DELETED_ARCHIVE_DIRNAME
 from .serve_auth import SERVE_AUTH_TOKEN_FILENAME
 from .serve_registry import SERVE_INSTANCES_DIRNAME
 from .serve_socket import SOCKET_LOCK_FILENAME, SOCKET_OWNER_FILENAME
@@ -322,7 +323,7 @@ MAX_SKILL_ENTRIES_PER_ROOT = 20_000
 #: stat'd. The lane demoted ``fingerprint_mismatch`` on every same-commit boot
 #: from the day it shipped.
 #:
-#: RESIDUAL, stated rather than discovered later. Four names below are still
+#: RESIDUAL, stated rather than discovered later. FIVE names below are still
 #: literals because no writer module owns them as a constant: ``locks`` and
 #: ``snapshot.json`` are spelled inline inside their own path helpers in
 #: ``agent_runtime.paths``, and the ``read_model.db`` trio is a CONFIGURABLE
@@ -331,6 +332,17 @@ MAX_SKILL_ENTRIES_PER_ROOT = 20_000
 #: key away. Both are the same class as the drain defect and neither is fixed
 #: here; the gate below can only prove the names a WRITER produces, so it cannot
 #: see them either.
+#:
+#: (That count read "Four" until MC-8 and was simply wrong — ``locks`` plus
+#: ``snapshot.json`` plus a trio is five. Corrected in passing rather than left,
+#: because a residual paragraph exists to be counted against the set and one that
+#: miscounts invites the reader to conclude a name has already been dealt with.)
+#:
+#: MC-8's ``deleted_archive`` addition did NOT extend that residual: it was the
+#: same class — a name spelled inline in ``agent_runtime.paths`` — and was
+#: promoted to ``paths.DELETED_ARCHIVE_DIRNAME`` and imported, rather than
+#: re-typed here. That is the precedent for the two that remain; they were left
+#: deliberately (out of MC-8's ruled scope), not overlooked.
 _EXCLUDED_STORE_ENTRIES = frozenset(
     {
         # The cache's own home (see CORE_CACHE_DIRNAME).
@@ -359,8 +371,100 @@ _EXCLUDED_STORE_ENTRIES = frozenset(
         # The delivery drain's telemetry mirror: a 60-second oscillator that no
         # projection reads. Same rule as the serve registry.
         DRAIN_STATE_FILENAME,
+        # The per-task compaction graveyard. THE ONE EXCLUSION HERE THAT IS NOT
+        # "the runtime rewrites it" — see the block below, which is the argument
+        # rather than a note about it.
+        DELETED_ARCHIVE_DIRNAME,
     }
 )
+
+#: WHY ``deleted_archive/`` IS EXCLUDED, WRITTEN WHERE THE EXCLUSION LIVES.
+#:
+#: Every other name above earns its place the same way: the RUNTIME rewrites it
+#: on a boot or a timer, so keeping it would guarantee a mismatch. This one is
+#: different in kind and therefore has to carry its own argument — it is excluded
+#: because **the projection does not read it**, which is a claim about the reader
+#: set, and a claim about a reader set rots the moment someone adds a reader.
+#: Stating it here, at the constant, is the whole of the P12 ruling; the audit
+#: that comes after this one is meant to find this paragraph and be able to
+#: re-run it.
+#:
+#: **THE GREP THAT ESTABLISHES IT** (re-run it; do not trust this transcript)::
+#:
+#:     grep -rn "deleted_archive" agent_runtime/ hermes_cli/ | grep -v tests
+#:
+#: 2026-08-18, five hits, and every one is accounted for:
+#:   * ``paths.DELETED_ARCHIVE_DIRNAME`` / ``paths.deleted_archive_dir`` — the
+#:     name and its helper;
+#:   * ``paths.events_archive_dir``'s docstring — distinguishing prose only;
+#:   * ``event_rotation``'s module docstring — prose only;
+#:   * ``migrations.py``'s ``archive_batches`` counter — counts batch dirs for a
+#:     migration STATUS payload; a reader, and not the projection;
+#:   * ``events.py::_archived_event_slices`` — a genuine READER of
+#:     ``deleted_archive/*/manifest.json``. See the exception below.
+#:
+#: **THE CLAIM IS REPO-SCOPED** (C14: a dead-symbol/no-reader claim from a
+#: narrower grep is a claim about that scope and nothing more). It covers
+#: ``agent_runtime/`` and ``hermes_cli/`` — this repo's own runtime and CLI. It
+#: says nothing about a consumer outside this repo, and does not need to: the
+#: fingerprint is an input closure for a build that lives HERE.
+#:
+#: **THE EXCEPTION, NAMED RATHER THAN OMITTED** (MCF-12 — the correction that had
+#: to be made before this landed, because P12 was first written as "zero
+#: readers" and that is false). The chain is::
+#:
+#:     harness_doctor.py::_event_log_report
+#:         -> events.py::event_log_health
+#:             -> events.py::_archived_event_slices
+#:                 -> reads deleted_archive/*/manifest.json
+#:
+#: So the harness doctor DOES read these manifests, and a comment claiming "no
+#: readers" would be found false by the next audit, which would then reasonably
+#: conclude this exclusion is wrong. **It is not wrong, and the reason is the
+#: word "projection".** This walk is the input closure of the READ-MODEL BUILD
+#: (``snapshot.py``) — it exists to answer "may a previously-built core be served
+#: as authoritative". ``harness_doctor`` is a separate, operator-invoked
+#: diagnostic that builds no core and consults no cache; a file it reads is not
+#: thereby an input to the projection, any more than a log file is. Fingerprinting
+#: a tree because SOME code in the repo reads it would grow the closure without
+#: bound and is exactly the "denylist by hand" instinct this module already paid
+#: for once.
+#:
+#: **NO CURRENT CODE WRITES IT** — stronger than the ruling required, so it is
+#: recorded. ``deleted_archive_dir()`` has exactly ONE non-doc caller in the
+#: repo, and it is the reader above; the two archivers that used to fill the tree
+#: (``archive_task_events`` / ``compact_archived_task_events``) were retired at
+#: S54 along with their private helpers, as the tombstone comment above
+#: ``_archived_event_slices`` records. What sits under ``deleted_archive/`` on a
+#: live root is therefore a graveyard of a retired feature: immutable, and not
+#: merely unread but unwritten. An immutable tree contributes a constant to every
+#: key it appears in, which is the clearest possible statement that its 18,804
+#: stat calls buy nothing.
+#:
+#: **WHAT IT COSTS TODAY, MEASURED** (2026-08-18, the operator's live root):
+#: 18,804 of the store's 23,107 fingerprint entries — 81 % — are under this one
+#: directory. That is ~250 ms of every ~300 ms warm walk, paid 4-5 times per boot
+#: (once per rider consult plus the leader's pre-build key), and since MC-3 it is
+#: also ~81 % of every ``entries.json`` write-back (~3.4 MiB -> ~0.7 MiB). It is
+#: additionally the only part of the closure that GROWS without bound against
+#: ``MAX_FINGERPRINT_ENTRIES``, which would eventually turn a cost into a refusal.
+#:
+#: **WHAT WOULD MAKE THIS WRONG, AND THE OBLIGATION THAT FOLLOWS.** If a future
+#: projection section reads compaction batches — a snapshot block that surfaces
+#: archived-task history, say — then this tree becomes a build input and a stale
+#: core could be served across a change to it. **Whoever adds that reader must
+#: remove this exclusion in the SAME commit**, and take the walk cost knowingly.
+#: The reverse obligation is lighter but real: a new NON-projection reader (a
+#: second doctor section, a census) changes nothing here and should not be read
+#: as re-admitting the tree.
+
+#: Exclusions are keyed to TOP-LEVEL names only — ``_walk_tree``'s ``exclude_top``
+#: filters the store root's own entries and nothing deeper — so a directory that
+#: happens to be called ``deleted_archive`` NESTED inside another store subtree
+#: still contributes in full. That is the correct reading of every argument above
+#: (they are all about the one graveyard at the store root, which is the only
+#: place ``paths.deleted_archive_dir()`` can put it) and it is pinned by test, so
+#: the comment cannot quietly grow into a claim about the name everywhere.
 
 #: ``atomic_json_write`` stages ``.<stem>_*.tmp`` beside its target. A staged
 #: temp file that a crash stranded is not an input; a live one belongs to a
@@ -807,7 +911,14 @@ def build_input_fingerprint() -> CoreFingerprint | None:
        recursively so an ADDED file flips the key (offices, boards, personas,
        assignments, the event log and its rotation manifest, prompt
        observability, realm-sync baselines: everything the projection reads
-       from the store, without a name list to fall behind). NOT pinned:
+       from the store, without a name list to fall behind). That "without a name
+       list" is the class's design and it now has ONE stated exception, which is
+       why the sentence no longer stands alone: ``deleted_archive/`` is excluded
+       because the PROJECTION has no reader for it, and the full argument —
+       including the ``harness_doctor`` reader that does exist and why it does
+       not re-admit the tree — is written at ``_EXCLUDED_STORE_ENTRIES``. An
+       exception with a reason at the constant is not the failure mode the
+       sentence warns about; an unargued name list is. NOT pinned:
        ``resolve_runtime`` reads ``HERMES_AGENT_RUNTIME_ROOT`` and then the ROOT
        config, neither of which follows the profile home — measured unchanged
        across a persona flip on both the same thread and another one;
@@ -1088,8 +1199,15 @@ def entries_path() -> Path:
     only ~10 bytes to each. A second, text-shaped atomic writer (which does not
     exist today) would therefore buy nothing worth its own authority. The lever
     that actually moves this number is the SIZE OF THE CLOSURE, not its encoding:
-    18,804 of the field's 23,107 entries are ``deleted_archive/``, which no
-    projection reads and which P12 removes.
+    18,804 of the field's 23,107 entries were ``deleted_archive/``, which no
+    projection reads.
+
+    **That is now done** (MC-8 / P12): the graveyard is excluded from the walk at
+    ``_EXCLUDED_STORE_ENTRIES``, where the reader argument is written. The
+    measurement above was taken BEFORE it, and is left standing because it is what
+    justified the exclusion; read it as the pre-P12 number. Expected after: ~4,300
+    entries and ~0.7 MiB here, with the same ~159 bytes per entry — the per-entry
+    cost was never the lever and did not move.
     """
 
     return _cache_dir() / ENTRIES_FILENAME

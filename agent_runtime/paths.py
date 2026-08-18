@@ -257,8 +257,26 @@ def snapshot_path() -> Path:
     return store_root() / "snapshot.json"
 
 
+#: The per-task compaction graveyard's top-level directory name.
+#:
+#: Promoted out of :func:`deleted_archive_dir`'s body — and alone among this
+#: module's inline names — because another module has to NAME it: the read-model
+#: cache's fingerprint denylist (``core_cache._EXCLUDED_STORE_ENTRIES``) excludes
+#: this tree from the store-root walk, and that set's governing rule is that a
+#: name its owner spells as a constant is IMPORTED there, never re-typed. That
+#: rule is not style: the set shipped with a hand-typed ``"drain_state.json"``
+#: against a writer that said ``dispatch_delivery_drain.json``, so the exclusion
+#: named a file that had never existed while the real one sat inside the key.
+#:
+#: The siblings here (``locks``, ``snapshot.json``, …) stay inline deliberately:
+#: promoting a constant is worth it when a second module's correctness depends on
+#: agreeing with this one, and is otherwise noise. Anything that gains a
+#: cross-module reader should follow this one out.
+DELETED_ARCHIVE_DIRNAME = "deleted_archive"
+
+
 def deleted_archive_dir() -> Path:
-    return store_root() / "deleted_archive"
+    return store_root() / DELETED_ARCHIVE_DIRNAME
 
 
 def prompt_observability_dir() -> Path:
