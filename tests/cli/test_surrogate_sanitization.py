@@ -6,6 +6,8 @@ editors like Google Docs, OR from byte-level reasoning models (xiaomi/mimo,
 kimi, glm) emitting lone halves in reasoning output.
 """
 import json
+import socket
+
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -14,6 +16,124 @@ from run_agent import (
     _sanitize_messages_surrogates,
     _sanitize_structure_surrogates,
 )
+
+# The endpoint the agent-construction test points at. Named once so the fake
+# below and the assertion that convicts it cannot drift apart.
+MODEL_BASE_URL = "http://localhost:1234/v1"
+MODEL_ENDPOINT_PORT = 1234
+
+
+class _OfflineModelEndpoint:
+    """The model endpoint, faked one layer above the socket.
+
+    Constructing a real ``AIAgent`` resolves the model's context length by
+    probing the endpoint — an Ollama ``/api/show`` POST and, when that fails,
+    a probe-down ladder. Against a ``base_url`` nothing answers, each probe
+    blocks until its own timeout: this file took 32.7s and died on the 30s
+    per-test cap (ledger row F2). None of that is what these tests are about;
+    they are about surrogate sanitization.
+
+    So the fake sits at httpx's transport — the layer that owns "how do I
+    reach the network" — and answers 404, which is what a server that is not
+    Ollama says. The production code still builds its client, sends its
+    request and reads the response; only the socket never happens. Mocking
+    the probe functions themselves would have worked too, and would have been
+    wrong: it would pin this test to today's call graph and stop telling us
+    anything about whether construction reaches the network.
+
+    ``connect_attempts`` is the witness, and it is deliberately a DIFFERENT
+    layer from the fake: the socket boundary records anything dialled at the
+    endpoint's port. If the transport fake ever stops covering a path, the
+    probe reaches the socket and the count says so — which is how "this test
+    does not touch the network" fails out loud instead of just getting slow
+    again. Sockets to anywhere else (asyncio's self-pipe, for one) are passed
+    straight through: a blanket ban breaks the interpreter's own plumbing.
+    """
+
+    def __init__(self):
+        self.connect_attempts = []
+
+    def install(self, monkeypatch):
+        import httpx
+        import requests
+        from requests.adapters import HTTPAdapter
+
+        def _no_server_here(request):
+            return httpx.Response(404, json={"error": "offline in tests"})
+
+        # Construction probes the endpoint through BOTH http stacks — httpx for
+        # the Ollama/LM-Studio/llama.cpp/vLLM detection ladder, `requests` for
+        # `fetch_endpoint_model_metadata`'s /models fetch. Faking one and not
+        # the other is how the timeout survives at reduced volume, so each gets
+        # its own transport: httpx's MockTransport, and requests' HTTPAdapter,
+        # which IS requests' transport.
+        def _offline_adapter_send(adapter_self, request, **kwargs):
+            response = requests.Response()
+            response.status_code = 404
+            response.url = request.url
+            response.request = request
+            response._content = b'{"error": "offline in tests"}'
+            return response
+
+        monkeypatch.setattr(HTTPAdapter, "send", _offline_adapter_send)
+
+        class _OfflineClient(httpx.Client):
+            """A real ``httpx.Client`` whose transport answers locally.
+
+            A subclass rather than a factory function on purpose: the OpenAI
+            SDK subclasses ``httpx.Client`` for its own default client, and a
+            function cannot be subclassed — swapping one in fails deep inside
+            client construction with an error that names neither httpx nor
+            this test.
+            """
+
+            def __init__(self, *args, **kwargs):
+                kwargs["transport"] = httpx.MockTransport(_no_server_here)
+                super().__init__(*args, **kwargs)
+
+        monkeypatch.setattr(httpx, "Client", _OfflineClient)
+
+        real_connect = socket.socket.connect
+        real_create_connection = socket.create_connection
+
+        def _is_the_endpoint(address):
+            return (
+                isinstance(address, tuple)
+                and len(address) >= 2
+                and address[1] == MODEL_ENDPOINT_PORT
+            )
+
+        def _refuse(address):
+            self.connect_attempts.append(address)
+            raise ConnectionRefusedError(
+                f"the model endpoint is offline in this test (dialled {address!r})"
+            )
+
+        def _connect(sock, address, *args, **kwargs):
+            if _is_the_endpoint(address):
+                _refuse(address)
+            return real_connect(sock, address, *args, **kwargs)
+
+        def _create_connection(address, *args, **kwargs):
+            if _is_the_endpoint(address):
+                _refuse(address)
+            return real_create_connection(address, *args, **kwargs)
+
+        monkeypatch.setattr(socket.socket, "connect", _connect)
+        monkeypatch.setattr(socket, "create_connection", _create_connection)
+
+
+@pytest.fixture(autouse=True)
+def offline_model_endpoint(monkeypatch):
+    """Autouse so it cannot be forgotten; requestable so it can be asserted on.
+
+    The pure sanitization tests never dial anything, so the fixture costs them
+    nothing — but the next test that constructs an agent inherits the fence
+    instead of re-discovering the 30s timeout.
+    """
+    endpoint = _OfflineModelEndpoint()
+    endpoint.install(monkeypatch)
+    return endpoint
 
 
 class TestSanitizeSurrogates:
@@ -192,7 +312,9 @@ class TestRunConversationSurrogateSanitization:
     @patch("run_agent.AIAgent._build_system_prompt")
     @patch("run_agent.AIAgent._interruptible_streaming_api_call")
     @patch("run_agent.AIAgent._interruptible_api_call")
-    def test_user_message_surrogates_sanitized(self, mock_api, mock_stream, mock_sys):
+    def test_user_message_surrogates_sanitized(
+        self, mock_api, mock_stream, mock_sys, offline_model_endpoint
+    ):
         """Surrogates in user_message are stripped before API call."""
         from run_agent import AIAgent
 
@@ -204,7 +326,15 @@ class TestRunConversationSurrogateSanitization:
         mock_choice.message.tool_calls = None
         mock_choice.message.refusal = None
         mock_choice.finish_reason = "stop"
+        # Every reasoning field the extractor looks at has to be spelled out:
+        # an unset attribute on a MagicMock is not absent, it is a truthy
+        # MagicMock, and the extractor joins those into a string. Left unset,
+        # the turn errors and the loop retries to its iteration ceiling — which
+        # the 30s network timeout used to hide, because this test never got
+        # this far.
         mock_choice.message.reasoning_content = None
+        mock_choice.message.reasoning = None
+        mock_choice.message.reasoning_details = None
 
         mock_response = MagicMock()
         mock_response.choices = [mock_choice]
@@ -215,7 +345,7 @@ class TestRunConversationSurrogateSanitization:
         mock_stream.return_value = mock_response
         mock_api.return_value = mock_response
 
-        agent = AIAgent(model="test/model", api_key="test-key", base_url="http://localhost:1234/v1", quiet_mode=True, skip_memory=True, skip_context_files=True)
+        agent = AIAgent(model="test/model", api_key="test-key", base_url=MODEL_BASE_URL, quiet_mode=True, skip_memory=True, skip_context_files=True)
         agent.client = MagicMock()
 
         # Pass a message with surrogates
@@ -225,7 +355,17 @@ class TestRunConversationSurrogateSanitization:
         )
 
         # The message stored in history should have surrogates replaced
+        checked = 0
         for msg in result.get("messages", []):
             if msg.get("role") == "user":
+                checked += 1
                 assert "\udce2" not in msg["content"], "Surrogate leaked into stored message"
                 assert "\ufffd" in msg["content"], "Replacement char not in stored message"
+
+        # The sanitization claim above is only worth anything if a user message
+        # was actually stored to check \u2014 an empty loop asserts nothing.
+        assert checked == 1, f"expected one stored user message, saw {checked}"
+
+        # ...and none of it went near the network. Zero, not "few": construction
+        # dialling the endpoint is exactly what timed this file out.
+        assert offline_model_endpoint.connect_attempts == []
