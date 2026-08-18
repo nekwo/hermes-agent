@@ -392,26 +392,34 @@ _TMP_SUFFIX = ".tmp"
 #:   fingerprint in this runtime that stats these siblings — has always used
 #:   ``("", "-wal", "-journal")``, so dropping it here CONVERGES the two
 #:   conventions rather than forking them.
-#: * ``-wal`` is keyed on ``(path, size, mtime_ns if size > 0 else 0)``. A
-#:   zero-length WAL holds no frames — there is nothing in it for the projection
-#:   to read, and its mtime says only when some process last opened or
-#:   checkpointed the database. The instant an uncheckpointed commit lands the
-#:   file is non-empty, and the mtime counts again in full: the WAL-commit signal
-#:   EG-3.1 requires is untouched for every state the signal can actually be in.
-#:   Absent (``-1``) and present-but-empty (``0``) stay distinguishable, because
-#:   the mask moves the mtime and never the size.
+#: * ``-wal`` is keyed on ``(path, 0, 0)`` in EVERY state that holds no frames —
+#:   absent and present-at-zero-length alike — and on its full stat'd triple the
+#:   instant a frame lands. A frameless WAL holds nothing for the projection to
+#:   read, and neither its mtime nor its existence says anything about content:
+#:   both are artefacts of when some process last opened or closed the database.
+#:   The instant an uncheckpointed commit lands the file is non-empty and the
+#:   full triple counts again, so the WAL-commit signal EG-3.1 requires is
+#:   untouched for every state the signal can actually be in. See
+#:   :func:`_wal_without_frames_is_content_free` for why absence and emptiness
+#:   are ONE fact rather than two — the half that took a second field
+#:   investigation to see, after the first mask deliberately kept them apart.
 #:
 #: WHAT THE MASK DOES NOT COVER, stated rather than discovered later. A
 #: checkpoint that truncates the WAL to zero AFTER writing its frames into
-#: ``state.db`` leaves a zero-length WAL whose mtime this ignores — but that
-#: checkpoint moved ``state.db``'s own mtime and size, and the main file is the
-#: FIRST entry in this tuple, so the change is carried there. The uncovered case
-#: would be a commit that is both invisible in the main file and invisible in the
-#: WAL's size, which SQLite's own durability rules do not admit.
+#: ``state.db`` leaves a zero-length WAL whose mtime this ignores — and a clean
+#: last-close, which checkpoints and then UNLINKS the file, leaves no WAL at all.
+#: Both are invisible here and both are carried anyway: the checkpoint moved
+#: ``state.db``'s own mtime and size, and the main file is the FIRST entry in
+#: this tuple. The uncovered case would be a commit that is invisible in the main
+#: file AND invisible in the WAL's size, which SQLite's own durability rules do
+#: not admit.
 _DB_SIBLINGS = ("", "-wal", "-journal")
 
-#: The sibling whose mtime is masked while it is empty. Named rather than
-#: spelled at the call site so the mask and the enumeration cannot drift.
+#: The sibling that is masked while it holds no frames. Named rather than
+#: spelled at the call site so the mask and the enumeration cannot drift, and
+#: named for the SIBLING rather than for the state so that widening the mask to
+#: another suffix takes a deliberate edit here — the main file's absence and
+#: ``-journal``'s absence are real information and must stay keyed.
 _WAL_SIBLING = "-wal"
 
 #: A DIRECTORY contributes its PATH and nothing else — never a timestamp, never
@@ -561,21 +569,67 @@ def _walk_tree(root: Path, out: list[FingerprintEntry], *, limit: int, exclude_t
     return len(out) < limit
 
 
-def _empty_wal_is_content_free(entry: FingerprintEntry) -> FingerprintEntry:
-    """Drop a ZERO-LENGTH WAL's mtime; keep everything else exactly as stat'd.
+def _wal_without_frames_is_content_free(entry: FingerprintEntry) -> FingerprintEntry:
+    """A WAL with no frames keys as ``(path, 0, 0)`` — ABSENT OR EMPTY, one triple.
 
     The one line where "the build reads this database" stops being spelled the
     same way as "somebody wrote to this database". See :data:`_DB_SIBLINGS` for
     the ground under the mask.
 
-    ``size`` is never touched, so absent (``-1``) and present-but-empty (``0``)
-    remain different facts — the same rule :func:`_stat_entry` follows for a
-    missing file.
+    WHY ABSENT AND EMPTY ARE ONE FACT
+    =================================
+
+    SQLite deletes the WAL when the last connection closes cleanly, and
+    re-creates it at zero length on the next open. So a quiescent database
+    alternates between "no ``-wal`` on disk" and "a zero-length ``-wal`` on
+    disk" for reasons that are entirely about CONNECTION LIFETIME and never
+    about content: both states say *no uncheckpointed frames*, which is the only
+    thing this sibling is stat'd to tell us. Keying them apart records the
+    lifecycle of a reader as if it were a write.
+
+    This does NOT generalise, and the distinction it drops is real everywhere
+    else. :func:`_stat_entry` records a missing input as ``-1/-1`` precisely so
+    that a file which APPEARS is not indistinguishable from one that never
+    moved — an appearing config, an appearing store row, an appearing skill
+    package are all content events. The WAL is the one input whose appearance is
+    definitionally content-free, because it appears EMPTY: the appearance and
+    the emptiness are the same open() call. The moment it carries a frame its
+    size is non-zero and it is keyed like anything else, so the general rule is
+    suspended only over the exact state in which it says nothing.
+
+    (A DIRECTORY at this path — ``_DIR_MARK``, not a state SQLite can produce —
+    collapses here too. A database whose WAL path is a directory cannot be
+    opened at all, and would fail loudly at the open long before a stale key
+    could matter.)
+
+    WHAT THE FIELD SHOWED, AND THE CONSEQUENCE THAT WILL BE FORGOTTEN
+    ================================================================
+
+    Measured on the operator's machine, 2026-08-18: two boots recorded the SAME
+    events offset and the SAME entry count, and the second demoted
+    ``fingerprint_mismatch`` anyway. ``state.db-wal``'s NTFS creation time was
+    4.15 s AFTER the consult that missed — boot A's clean exit had deleted it,
+    boot B had not yet opened the database — while the sidecar, written
+    mid-session by a later build, held it present-and-empty. One entry flipped;
+    nothing else in the closure moved.
+
+    The structural consequence is worse than the flip: **which of the two states
+    the sidecar records depends on which build in the process wrote LAST.** A
+    boot whose only build is the boot build writes a consult-time key (WAL
+    absent, because the database has not been opened yet) and the next boot can
+    match. Any later led build — the launcher's hydrate, any ``forceFresh``
+    gesture — writes a mid-session key (WAL present) and the next boot is a
+    GUARANTEED miss. That is deterministic given the build history, not a race.
+
+    Perverse corollary, stated because it will mislead the first person who
+    tests this: **a hard-killed serve leaves the WAL behind and converges; a
+    clean exit deletes it and misses.** Under this mask neither shape is keyed
+    differently from the other, which is the point.
     """
 
     if entry.size > 0:
         return entry
-    return FingerprintEntry(entry.path, 0, entry.size)
+    return FingerprintEntry(entry.path, 0, 0)
 
 
 def _db_entries(db_path: Any, out: list[FingerprintEntry]) -> None:
@@ -583,7 +637,7 @@ def _db_entries(db_path: Any, out: list[FingerprintEntry]) -> None:
     for suffix in _DB_SIBLINGS:
         entry = _stat_entry(text + suffix)
         if suffix == _WAL_SIBLING:
-            entry = _empty_wal_is_content_free(entry)
+            entry = _wal_without_frames_is_content_free(entry)
         out.append(entry)
 
 

@@ -23,6 +23,7 @@ milliseconds. The seconds are read off EG-2.1's receipts (ruling #60).
 from __future__ import annotations
 
 import contextlib
+import gc
 import hashlib
 import importlib.abc
 import json
@@ -31,6 +32,7 @@ import os
 import sqlite3
 import sys
 import threading
+from typing import NamedTuple
 
 import pytest
 
@@ -471,14 +473,27 @@ def test_a_non_empty_wal_still_carries_its_commit_signal(
     )
 
 
-def test_an_absent_wal_and_an_empty_one_stay_different_facts(
+def test_an_absent_wal_and_an_empty_one_are_one_fact(
     isolate_agent_runtime_root, tmp_path
 ):
-    """The mask moves the mtime and never the size, so absence stays visible.
+    """MC-3b: a WAL that appears EMPTY has not, as far as content goes, appeared.
 
-    ``_stat_entry`` records a missing input as ``-1/-1`` precisely so an
-    appearing file is not indistinguishable from an unchanged one. A mask that
-    flattened both to zero would have re-opened that hole for the WAL.
+    This case asserts the OPPOSITE of the one MC-1 left here, and the reversal
+    is the whole of MC-3b. MC-1 kept absence and emptiness apart on the general
+    rule ``_stat_entry`` follows — an appearing file must stay distinguishable
+    from an unchanged one — which is right for every input that carries content
+    and wrong for this one sibling. SQLite deletes the WAL on a clean last-close
+    and re-creates it at zero length on the next open, so the two states are one
+    fact (*no uncheckpointed frames*) reached by two connection lifetimes.
+
+    Keyed apart, they made a quiescent store miss across a boot boundary:
+    measured 2026-08-18, ``state.db-wal``'s creation time landed 4.15 s AFTER
+    the consult that demoted ``fingerprint_mismatch`` at an unchanged events
+    offset and an unchanged entry count — one entry flipped and nothing else in
+    the closure moved.
+
+    *Kill:* restore the distinction — pass ``entry.size`` through instead of
+    zeroing it, which is MC-1's line verbatim — and this reds.
     """
 
     db = tmp_path / "probe" / "state.db"
@@ -486,9 +501,63 @@ def test_an_absent_wal_and_an_empty_one_stay_different_facts(
     absent = _db_key(db)
     _write(db.parent / "state.db-wal", b"")
     empty = _db_key(db)
-    assert absent != empty, (
-        "a WAL that appeared did not move the fingerprint; the mask flattened "
-        "the size as well as the mtime"
+    assert absent == empty, (
+        "an absent WAL and a zero-length one are still keyed apart, so a clean "
+        f"exit that deletes the file demotes the next boot for free: {absent} "
+        f"-> {empty}"
+    )
+
+
+def test_the_collapse_does_not_reach_the_main_database_file(
+    isolate_agent_runtime_root, tmp_path
+):
+    """A database that APPEARED is a content event, empty or not.
+
+    The mask is over a state of one sibling, not over the tuple. The main file
+    coming into existence is the store gaining a database — the exact thing
+    ``_stat_entry``'s ``-1/-1`` rule exists to keep visible — and it is driven
+    here at ZERO length on purpose, because a non-empty file would flip the key
+    on its size alone and the case would pass without the absence rule.
+
+    *Kill:* apply the mask to every sibling instead of ``_WAL_SIBLING`` → the
+    absent main file and the empty one both key ``(path, 0, 0)`` and this reds.
+    """
+
+    db = tmp_path / "probe" / "state.db"
+    db.parent.mkdir(parents=True, exist_ok=True)
+    absent = _db_key(db)
+    _write(db, b"")
+    appeared = _db_key(db)
+    assert appeared != absent, (
+        "an empty database file appearing did not move the fingerprint, so the "
+        "frameless-WAL collapse has spread to an input whose absence is real "
+        f"information: {absent} -> {appeared}"
+    )
+
+
+def test_the_collapse_does_not_reach_the_journal_sibling(
+    isolate_agent_runtime_root, tmp_path
+):
+    """``-journal`` is the OTHER mtime-blind sibling, and it keeps its full rule.
+
+    A rollback journal exists only while a transaction is open; unlike the WAL
+    it is not re-created by an ordinary open, so its appearance is not a
+    lifecycle artefact and nothing licenses collapsing it. Driven at zero length
+    for the same reason as the case above.
+
+    *Kill:* the same widened mask → this reds beside it, which is what proves
+    the widening was caught as a class rather than at one path.
+    """
+
+    db = tmp_path / "probe" / "state.db"
+    _write(db, b"main")
+    before = _db_key(db)
+    _write(db.parent / "state.db-journal", b"")
+    appeared = _db_key(db)
+    assert appeared != before, (
+        "an appearing rollback journal did not move the fingerprint, so the "
+        f"collapse is keyed on the database rather than on the WAL: {before} "
+        f"-> {appeared}"
     )
 
 
@@ -511,6 +580,20 @@ def test_the_shm_sibling_is_outside_the_closure(isolate_agent_runtime_root, tmp_
     )
     _set_mtime_ns(db.parent / "state.db-shm", 1_700_000_000_000_000_000)
     assert _db_key(db) == before, "the -shm sibling's mtime entered the fingerprint"
+
+
+class _LiveSessionDB(NamedTuple):
+    """The database path plus the connection that is keeping its WAL on disk.
+
+    The holder is EXPOSED rather than owned privately by the context manager
+    because the serve's clean exit — closing the last connection, which
+    checkpoints and unlinks the siblings — is itself a case below. A case that
+    could not close it would have to delete the file by hand and call that the
+    boot shape.
+    """
+
+    path: object
+    holder: sqlite3.Connection
 
 
 @contextlib.contextmanager
@@ -557,8 +640,11 @@ def _sessiondb_in_the_live_shape():
             "no -wal sibling exists while a connection is held, so this fixture "
             "is not reproducing the live shape and nothing below would be tested"
         )
-        yield db_path
+        yield _LiveSessionDB(db_path, holder)
     finally:
+        # Idempotent on purpose: the cases that reproduce a clean serve exit
+        # close the holder themselves, and this one still has to run for the
+        # cases that do not.
         holder.close()
 
 
@@ -582,7 +668,8 @@ def test_the_builds_own_sessiondb_open_does_not_move_the_key(
     during the boot build that was reading it.
     """
 
-    with _sessiondb_in_the_live_shape() as db_path:
+    with _sessiondb_in_the_live_shape() as live:
+        db_path = live.path
         wal = f"{db_path}-wal"
         before_key = core_cache.build_input_fingerprint()
         assert before_key is not None
@@ -629,7 +716,8 @@ def test_a_persisted_key_survives_the_next_process_opening_the_database(
     SessionDB's own factory, exactly as the live build reaches it.
     """
 
-    with _sessiondb_in_the_live_shape() as db_path:
+    with _sessiondb_in_the_live_shape() as live:
+        db_path = live.path
         _seed_workspace("alpha-one")
         converge_persisted_core()
         assert core_cache.read_persisted_core().matched, (
@@ -651,6 +739,380 @@ def test_a_persisted_key_survives_the_next_process_opening_the_database(
             f"the database it was keyed over (demote reason: {read.reason!r}). "
             "The build perturbs its own inputs, so the cache can never hit."
         )
+
+
+# --------------------------------------------------------------------------- #
+# 4c. The WAL's presence is a connection lifetime, not a change (MC-3b / MCF-15)
+# --------------------------------------------------------------------------- #
+# 4b above pins the mask at the triple. These pin it where the field failure
+# lives: the PERSISTED key, judged by a process that did not write it. The
+# operator's boot shape is the reverse-order case — a sidecar written mid-session
+# (WAL present) read by a boot that has not opened the database yet (WAL absent).
+def _chat_wal_path() -> str:
+    """The ``-wal`` sibling of the database class 3 of the closure stats."""
+
+    from agent_runtime.chat_session_scope import chat_session_db_path
+
+    return f"{chat_session_db_path()}-wal"
+
+
+def _write_wal(wal: str, payload: bytes) -> None:
+    with open(wal, "wb") as handle:
+        handle.write(payload)
+
+
+def _wal_is_in_the_closure(wal: str) -> bool:
+    """Non-vacuity: a match says nothing if the path is not keyed at all."""
+
+    key = core_cache.build_input_fingerprint()
+    assert key is not None, "the fingerprint refused, so nothing below is measurable"
+    return wal in {entry.path for entry in key.entries}
+
+
+def test_a_key_written_with_no_wal_matches_once_the_next_boot_creates_one(
+    isolate_agent_runtime_root, seeded_cache
+):
+    """Boot 1 keyed before any open; boot 2 opens the database and asks.
+
+    The sidecar was written while the WAL did not exist — which is what a boot
+    whose only build is the boot build records, since the key is taken pre-build
+    and the database has not been opened yet. Then the next process opens it and
+    SQLite lays down an empty WAL. Nothing in the store changed; the cache must
+    still hit.
+
+    *Kill:* restore MC-1's distinction (``entry.size`` passed through) → the
+    appearing file flips the key and this reds.
+    """
+
+    wal = _chat_wal_path()
+    assert not os.path.exists(wal), (
+        "the fixture already carries a -wal sibling, so this case cannot start "
+        "from the absent state it is about"
+    )
+    assert _wal_is_in_the_closure(wal), (
+        "the chat SessionDB's -wal path is not in the fingerprint's entries at "
+        "all, so a match below would be true for want of anything to be true of"
+    )
+
+    _write_wal(wal, b"")
+    _new_context()
+    read = core_cache.read_persisted_core()
+    assert read.matched, (
+        "a boot's own SessionDB open — which creates an EMPTY WAL and writes "
+        "nothing — demoted the previous boot's key "
+        f"(reason: {read.reason!r}), so no clean boot can ever be served"
+    )
+
+
+def test_a_key_written_with_an_empty_wal_matches_once_it_is_gone(
+    isolate_agent_runtime_root, seeded_cache
+):
+    """The operator's actual boot shape, in the order it happens.
+
+    A serve that led a build mid-session recorded the WAL present-and-empty
+    (its own connection was holding it). It then exits cleanly, SQLite unlinks
+    the file, and the next boot consults BEFORE opening the database — measured
+    at ~4 s of daylight between the consult and the open on every boot observed.
+
+    The deletion is done by hand here so the rule is stated without SQLite in
+    the way; that the clean exit really does delete the file is not assumed —
+    it is driven through a real connection in the round-trip case below.
+
+    *Kill:* the same restored distinction → reds, and it must red HERE as well
+    as in the case above: the two orders are two facts, and one of them is the
+    one the field hits.
+    """
+
+    wal = _chat_wal_path()
+    _write_wal(wal, b"")
+    _new_context()
+    converge_persisted_core()
+    assert _wal_is_in_the_closure(wal), (
+        "the chat SessionDB's -wal path is not in the fingerprint's entries at "
+        "all, so a match below would be true for want of anything to be true of"
+    )
+    assert core_cache.read_persisted_core().matched, (
+        "the fixture did not settle with the WAL present, so nothing below is "
+        "about the WAL disappearing"
+    )
+
+    os.remove(wal)
+    _new_context()
+    read = core_cache.read_persisted_core()
+    assert read.matched, (
+        "the previous serve's clean exit deleting an EMPTY WAL demoted the key "
+        f"it had just written (reason: {read.reason!r}) — the perverse shape "
+        "where a hard-killed serve converges and a clean one misses"
+    )
+
+
+def test_a_wal_that_holds_a_frame_still_demotes(
+    isolate_agent_runtime_root, seeded_cache
+):
+    """The assertion that proves a STATE was masked and not a FILE.
+
+    An uncheckpointed commit lives only in the WAL and leaves the main file's
+    mtime untouched. If the collapse reached a WAL with frames in it, a served
+    core would be missing a committed write and stamped authoritative — the
+    failure class this module exists to end, inverted.
+
+    *Kill:* collapse on any size rather than on emptiness (e.g. widen the guard
+    so only a huge WAL keys normally) → the frame becomes invisible and this
+    reds while the two cases above stay green, which is what makes it the
+    assertion about the STATE.
+    """
+
+    wal = _chat_wal_path()
+    assert _wal_is_in_the_closure(wal), (
+        "the chat SessionDB's -wal path is not in the fingerprint's entries at "
+        "all, so a demote below could not be attributed to the WAL"
+    )
+
+    _write_wal(wal, b"one uncheckpointed frame")
+    _new_context()
+    read = core_cache.read_persisted_core()
+    assert (read.matched, read.reason) == (
+        False,
+        core_cache.DEMOTE_FINGERPRINT_MISMATCH,
+    ), (
+        "a WAL carrying an uncheckpointed frame did not demote on the "
+        f"fingerprint (matched={read.matched}, reason={read.reason!r}), so a "
+        "core built before that commit can be served as authoritative"
+    )
+
+
+def _recorded_wal_row(wal: str) -> list:
+    """Write back the current key and read back the row it persisted for ``wal``.
+
+    Through :func:`core_cache.write_back` rather than by calling the entries
+    writer directly, because the question is what the WRITE-BACK PATH records —
+    a diff computed from anything else is a diff no field miss will ever see.
+    """
+
+    key = core_cache.build_input_fingerprint()
+    assert key is not None, "the fingerprint refused, so nothing here is measurable"
+    assert core_cache.write_back(_persisted_core(), fingerprint=key) is True
+    payload = json.loads(core_cache.entries_path().read_text(encoding="utf-8"))
+    rows = [row for row in payload["entries"] if row[0] == wal]
+    assert len(rows) == 1, (
+        f"the -wal sibling appears {len(rows)} times in the persisted stat set; "
+        "the closure enumerates it exactly once"
+    )
+    return rows[0]
+
+
+def test_the_persisted_stat_set_records_the_collapsed_triple(
+    isolate_agent_runtime_root, seeded_cache
+):
+    """MC-3's ``entries.json`` records the MASKED triple, not a fresh stat.
+
+    The entries file is what a later miss diffs to name the path that moved. If
+    the mask lived only in the digest, that diff would name ``state.db-wal`` as
+    a mover on a boot where the key says it did not move — an instrument
+    accusing the input this fix just exonerated.
+
+    *Kill:* have the entries writer re-stat each path instead of persisting
+    ``key.entries`` → the absent WAL comes back ``-1/-1`` and this reds.
+    """
+
+    wal = _chat_wal_path()
+    assert not os.path.exists(wal), (
+        "the fixture already carries a -wal sibling, so the absent state this "
+        "case is about cannot be driven"
+    )
+
+    assert _recorded_wal_row(wal) == [wal, 0, 0], (
+        "the stat set persisted for a boot with no WAL is not the collapsed "
+        "triple, so a later diff reads the mask's own state as a change"
+    )
+
+
+def test_two_write_backs_across_a_wal_flip_record_the_same_row(
+    isolate_agent_runtime_root, seeded_cache
+):
+    """The flip must be invisible in the FILE as well as in the digest.
+
+    Same two states, one write-back each, judged as the diff would judge them:
+    a row that changed is a path the miss line would name. This is the half that
+    keeps MC-3's instrument and MC-3b's mask telling the same story.
+
+    *Kill:* either the raw-stat entries writer above, or MC-1's restored
+    distinction — both make the two write-backs disagree about a file that
+    holds nothing either time.
+    """
+
+    wal = _chat_wal_path()
+    assert not os.path.exists(wal), (
+        "the fixture already carries a -wal sibling, so the absent half of this "
+        "case cannot be driven"
+    )
+
+    absent_row = _recorded_wal_row(wal)
+    _write_wal(wal, b"")
+    _new_context()
+    empty_row = _recorded_wal_row(wal)
+
+    assert empty_row == absent_row, (
+        "two write-backs over the same content recorded different rows for the "
+        f"WAL ({absent_row} vs {empty_row}), so a miss can name it as a mover "
+        "when it is not one"
+    )
+
+
+def _close_every_connection_to(db_path) -> int:
+    """What the serve PROCESS EXITING does to one database: drop every handle.
+
+    Closing the fixture's own holder is not enough, and why is a finding rather
+    than a detail: ``snapshot._build_snapshot_uncoalesced`` opens the chat
+    SessionDB (``snapshot._default_persona_session_db``) and never closes it, so
+    every full build leaves a live connection behind. Measured here — after a
+    converge, the holder's close leaves the WAL on disk because the build's
+    handle is still open.
+
+    In the field those handles die with the serve child, which IS the clean exit
+    this case reproduces. So the honest in-process equivalent closes them
+    explicitly and returns the count, rather than leaning on a collection pass
+    to do it invisibly.
+    """
+
+    wanted = os.path.normcase(os.path.abspath(str(db_path)))
+    closed = 0
+    for obj in gc.get_objects():
+        if not isinstance(obj, sqlite3.Connection):
+            continue
+        try:
+            files = [row[2] for row in obj.execute("PRAGMA database_list").fetchall()]
+        except Exception:  # noqa: BLE001 — already closed, or not usable here
+            continue
+        if not any(
+            file and os.path.normcase(os.path.abspath(file)) == wanted for file in files
+        ):
+            continue
+        try:
+            obj.close()
+        except Exception:  # noqa: BLE001
+            continue
+        closed += 1
+    return closed
+
+
+def test_a_clean_serve_exit_deleting_the_wal_leaves_the_key_matching(
+    isolate_agent_runtime_root,
+):
+    """The serve lifecycle end to end, driven through real connections.
+
+    Every step is the runtime's own: a database that is WAL on disk, connections
+    held for the life of the serve, a settled cache written while they are held,
+    and then the last of them closing — which is where SQLite checkpoints and
+    unlinks the siblings. No file is deleted by hand anywhere in this case.
+
+    Three guards keep it from measuring something else: at least one connection
+    must actually have been open (or "the exit" closed nothing), the WAL must
+    still be at zero length when the cache settles (frames would be a legitimate
+    change), and the main database file must not move across the close (a
+    checkpoint writing frames back would be a legitimate change too, carried by
+    the main entry exactly as :data:`core_cache._DB_SIBLINGS` says).
+
+    *Kill:* restore MC-1's distinction → the deletion flips the key and this
+    reds.
+    """
+
+    with _sessiondb_in_the_live_shape() as live:
+        wal = f"{live.path}-wal"
+        _seed_workspace("alpha-one")
+        converge_persisted_core()
+        assert core_cache.read_persisted_core().matched, (
+            "the fixture did not settle, so nothing below is about the exit"
+        )
+        assert os.stat(wal).st_size == 0, (
+            "the settle left frames in the WAL, so the close below will "
+            "checkpoint them into the main file and this case would be "
+            "measuring that write rather than the mask"
+        )
+        main_before = os.stat(live.path)
+
+        assert _close_every_connection_to(live.path) >= 1, (
+            "no connection to the database was open, so this case did not "
+            "reproduce a serve holding it across a session"
+        )
+
+        assert not os.path.exists(wal), (
+            "closing every connection did not delete the WAL, so this case is "
+            "not reproducing the clean-exit shape it claims to"
+        )
+        main_after = os.stat(live.path)
+        assert (main_after.st_mtime_ns, main_after.st_size) == (
+            main_before.st_mtime_ns,
+            main_before.st_size,
+        ), (
+            "the clean close moved the main database file, so a demote below "
+            "would be the checkpoint's doing and not the WAL's disappearance"
+        )
+
+        _new_context()
+        read = core_cache.read_persisted_core()
+        assert read.matched, (
+            "a clean serve exit demoted the key that same serve had written "
+            f"(reason: {read.reason!r}): the cache is disarmed by the runtime "
+            "shutting down tidily"
+        )
+
+
+def test_the_next_boots_own_open_recreates_the_wal_and_the_key_still_matches(
+    isolate_agent_runtime_root,
+):
+    """The other half of the round trip: keyed at rest, judged after the open.
+
+    The same lifecycle continued one step, and the ORDER is the whole case. The
+    key is written while the database sits closed and WAL-less — which is what a
+    boot whose only build is the boot build records, since the key is taken
+    before the build opens anything — and only THEN does the next boot open the
+    database, at which point SQLite lays the WAL back down at zero length. The
+    connection is HELD, as a serve holds it, because an open-and-close would
+    take the file away again and round-trip the flip out of the case.
+
+    Written this way after a mutation run caught the obvious shape being
+    vacuous: settling with the WAL present and consulting with it present again
+    matches under any keying at all.
+
+    *Kill:* the restored distinction → reds, and it reds at a DIFFERENT edge
+    from the case above (re-creation rather than deletion).
+    """
+
+    with _sessiondb_in_the_live_shape() as live:
+        wal = f"{live.path}-wal"
+        _seed_workspace("alpha-one")
+        converge_persisted_core()
+        assert _close_every_connection_to(live.path) >= 1
+        assert not os.path.exists(wal), (
+            "the clean close left the WAL behind, so the key below would be "
+            "written over the same state the reopen produces and this case "
+            "would measure nothing"
+        )
+
+        # The at-rest key: no WAL on disk, nothing open, written by the process
+        # that is about to exit.
+        _new_context()
+        at_rest = core_cache.build_input_fingerprint()
+        assert at_rest is not None
+        assert core_cache.write_back(_persisted_core(), fingerprint=at_rest) is True
+
+        next_boot = sqlite3.connect(str(live.path))
+        try:
+            next_boot.execute("SELECT count(*) FROM sqlite_master").fetchone()
+            assert os.path.exists(wal) and os.stat(wal).st_size == 0, (
+                "the next boot's open did not lay down an empty WAL, so this "
+                "case measured nothing — the database is not WAL on disk"
+            )
+
+            _new_context()
+            read = core_cache.read_persisted_core()
+            assert read.matched, (
+                "the WAL coming back — empty, holding nothing, created by an "
+                f"open that wrote nothing — demoted the key ({read.reason!r})"
+            )
+        finally:
+            next_boot.close()
 
 
 # --------------------------------------------------------------------------- #
