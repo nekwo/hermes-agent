@@ -933,11 +933,14 @@ class PersonaInstanceStore:
         the store to complete; proceeding costs a dangling edge nobody can
         reconstruct.
 
-        THE chokepoint for this fact, deliberately placed here rather than in
-        each caller: both write paths that remove an owner (:meth:`retire` via
-        :meth:`_archive_instance_row`, and :meth:`_delete`) reach it, and it runs
-        BEFORE either one moves or unlinks a file, so a refusal leaves the store
-        exactly as it found it.
+        THE chokepoint for this fact. The one write path that removes an owner
+        (:meth:`retire`, via :meth:`_archive_instance_row`) reaches it, and it
+        runs BEFORE that path moves the file, so a refusal leaves the store
+        exactly as it found it. It stays a chokepoint rather than an inline step
+        inside that caller because the NEXT owner-removing path must arrive here
+        too: the unlinking ``_delete`` that used to be the second caller was
+        reaped at ML-16 with zero callers repo-wide, and whatever replaces it
+        must not re-derive this rule.
         """
         scan = self.scan_all()
         if scan.unreadable:
@@ -2031,14 +2034,6 @@ class PersonaInstanceStore:
                 instance.last_heartbeat_at = None
                 self.update(instance)
         return self.list_all()
-
-    def _delete(self, instance: PersonaInstance) -> bool:
-        path = paths.persona_instance_path(instance.id)
-        if not path.exists():
-            return False
-        self._release_parent_references(instance.id)
-        path.unlink()
-        return True
 
     def _has_live_binding(self, instance: PersonaInstance) -> bool:
         # S56 removed the worker arm: the store it read is gone and no instance
