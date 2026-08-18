@@ -1047,10 +1047,14 @@ def test_a_rebuild_cannot_drop_a_pointer_minted_while_it_scanned(
 
     concurrent: list[str] = []
     fired: list[bool] = []
-    real_iter = PersonaChatClarifyTicketStore._iter_records
+    # ML-15 moved the rebuild's read to ``scan_records`` — the chokepoint that
+    # carries the unreadable count beside the rows — so the interception point
+    # moves with it. Patching ``_iter_records`` here would no longer be reached
+    # by the rebuild, and this test would pass while exercising nothing.
+    real_scan = PersonaChatClarifyTicketStore.scan_records
 
     def scan_then_let_a_mint_land(self):
-        records = list(real_iter(self))
+        records, unreadable = real_scan(self)
         if not fired:
             # Guard set BEFORE the nested mint: that mint scans too (sweep, and
             # its own rebuild), and re-entering here would recurse forever.
@@ -1058,13 +1062,13 @@ def test_a_rebuild_cannot_drop_a_pointer_minted_while_it_scanned(
             # The concurrent turn: it mints, and records its own pointer, while
             # the rebuild above is holding a scan that predates it.
             concurrent.append(_clarify_ticket(PersonaChatClarifyTicketStore()))
-        return iter(records)
+        return records, unreadable
 
-    PersonaChatClarifyTicketStore._iter_records = scan_then_let_a_mint_land
+    PersonaChatClarifyTicketStore.scan_records = scan_then_let_a_mint_land
     try:
         assert PersonaChatClarifyTicketStore()._rebuild_index() is True
     finally:
-        PersonaChatClarifyTicketStore._iter_records = real_iter
+        PersonaChatClarifyTicketStore.scan_records = real_scan
 
     minted = concurrent[0]
     tokens = [entry["clarify_token"] for entry in store._index_entries(_CLARIFY_ROOT)]

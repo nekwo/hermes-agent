@@ -443,3 +443,112 @@ def test_steering_cycle_check_still_admits_and_still_rejects_on_a_clean_store(
     store.steer(parent.id, parent_instance_id=child.id)
     with pytest.raises(ValueError, match="cycle"):
         store._validate_no_steering_cycle(child.id, parent.id)
+
+
+# --- site 4: the clarify-ticket index completeness claim ------------------
+
+
+_CLARIFY_ROOT = "persona_chat_personainst_dev_abcdef123456"
+
+
+def _clarify_ticket(store, **overrides) -> str:
+    values = {
+        "chat_session_id": _CLARIFY_ROOT,
+        "persona_instance_id": "personainst_dev",
+        "persona_id": "dev",
+        "asked_by_client_message_id": "agent-relay-aaaaaaaaaaaa",
+    }
+    values.update(overrides)
+    token = store.mint(**values)
+    assert token
+    return token
+
+
+def _corrupt_ticket_files(store, count: int) -> None:
+    root = store._root_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    for index in range(count):
+        (root / f"deadbeef{index}.json").write_text("{ truncated", encoding="utf-8")
+
+
+@pytest.mark.parametrize("corrupt_count", [1, 2])
+def test_the_ticket_index_refuses_to_claim_completeness_it_does_not_have(
+    isolate_agent_runtime_root, corrupt_count
+):
+    """The marker means "the index may be trusted as complete", and it is
+    PERMANENT — once written, the full-scan fallback is never taken again.
+
+    So a ticket skipped during the rebuild is not skipped once, it is skipped
+    forever. Since the skip is usually a transient hold on a file that reads fine
+    a second later, the old behaviour punched a permanent hole with a momentary
+    failure.
+    """
+
+    from agent_runtime.persona_chat_continuity import PersonaChatClarifyTicketStore
+
+    store = PersonaChatClarifyTicketStore()
+    _corrupt_ticket_files(store, corrupt_count)
+
+    assert store._rebuild_index() is False
+    # The completeness CLAIM is the artifact that must not exist. Its absence is
+    # what keeps every later lookup on the correct-by-construction full scan.
+    assert not store._index_state_path().exists()
+    assert store._ensure_index() is False
+
+
+def test_the_ticket_lookup_still_answers_while_the_index_is_refused(
+    isolate_agent_runtime_root,
+):
+    """Refusing the claim must not break the feature.
+
+    ``_ensure_index`` returning ``False`` is a contract this module already
+    had — the caller falls back to the full scan, which reads the store directly.
+    An unreadable neighbour therefore costs performance, never an answer, and
+    that is the whole reason this fix can be a refusal rather than a repair.
+    """
+
+    from agent_runtime.persona_chat_continuity import PersonaChatClarifyTicketStore
+
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+    _corrupt_ticket_files(store, 1)
+
+    found = store.open_ticket_for_session(_CLARIFY_ROOT)
+    assert found is not None and found["clarify_token"] == token
+
+
+def test_the_ticket_index_is_still_built_on_a_clean_store(isolate_agent_runtime_root):
+    """The fence is not a disabled index."""
+
+    from agent_runtime.persona_chat_continuity import PersonaChatClarifyTicketStore
+
+    store = PersonaChatClarifyTicketStore()
+    _clarify_ticket(store)
+    assert store._rebuild_index() is True
+    assert store._index_state_path().exists()
+
+
+@pytest.mark.parametrize("corrupt_count", [1, 2])
+def test_the_ticket_readout_states_what_it_could_not_read(
+    isolate_agent_runtime_root, corrupt_count
+):
+    """Projection class: the count TRAVELS.
+
+    The adoption metric is computed over the whole store, and the site that
+    builds it says why: "an adoption ratio that moved because the operator asked
+    to see fewer rows would be a lying metric". A file that drops out of the scan
+    moves the denominator exactly that way without anyone having asked.
+    """
+
+    from agent_runtime.persona_chat_continuity import PersonaChatClarifyTicketStore
+
+    store = PersonaChatClarifyTicketStore()
+    token = _clarify_ticket(store)
+    _corrupt_ticket_files(store, corrupt_count)
+
+    records, unreadable = store.scan_tickets()
+    assert unreadable == corrupt_count
+    # Membership, not position: the readable ticket is still listed.
+    assert {record["clarify_token"] for record in records} == {token}
+    # The thin view keeps its signature for every caller that only wants rows.
+    assert [record["clarify_token"] for record in store.list_tickets()] == [token]

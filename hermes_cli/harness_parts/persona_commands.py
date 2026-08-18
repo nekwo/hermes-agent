@@ -3825,9 +3825,9 @@ def _cmd_mission_chat_clarify_tickets(args) -> int:
     now = time.time()
     ttl_seconds = float(CLARIFY_TICKET_TTL_SECONDS)
     try:
-        records = store.list_tickets()
+        records, unreadable = store.scan_tickets()
     except OSError:
-        records = []
+        records, unreadable = [], 0
     wanted_session = safe_assignment_text(getattr(args, "session_id", None), limit=240)
     wanted_state = safe_assignment_token(getattr(args, "state", None))
     rows = [_clarify_ticket_row(record, now=now, ttl_seconds=ttl_seconds) for record in records]
@@ -3870,6 +3870,13 @@ def _cmd_mission_chat_clarify_tickets(args) -> int:
             "binding_enabled": bool(mission_chat_clarify_token_binding()),
             "ttl_seconds": ttl_seconds,
             "total": len(rows),
+            # Additive, and it belongs beside ``total`` because it is the same
+            # question: how many tickets is this readout actually about. A file
+            # that would not decode is missing from every count above, including
+            # the denominator of the adoption ratio the block below tells the
+            # operator to watch. Stating it is the difference between a metric
+            # that is narrower than the store and one that lies about it.
+            "unreadable": unreadable,
             "states": states,
             "bound_via": bound_via,
             "expired": expired,

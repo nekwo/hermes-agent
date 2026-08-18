@@ -1368,10 +1368,32 @@ class PersonaChatClarifyTicketStore:
         Runs once per store (on the first mint or lookup after this code
         arrives, and again after any crash that left no marker). The marker is
         written LAST so a partial rebuild is simply redone rather than trusted.
+
+        REFUSES TO CLAIM COMPLETENESS when any ticket file will not decode. The
+        marker this method writes is not a cache entry, it is the sentence "the
+        index may be trusted as complete" (:meth:`_ensure_index`), and it is
+        PERMANENT — once written, every later lookup answers from the index and
+        the full-scan fallback is never taken again. So a ticket skipped during
+        the rebuild is not skipped once, it is skipped forever: the tokenless
+        settlement stops finding it, the turn that would have closed it opens a
+        second ticket for the same question, and no later pass can recover it
+        because nothing will ever rebuild again. Since the skip is usually a
+        transient hold on a file that reads fine a second later, that is a
+        permanent hole punched by a momentary failure.
+
+        Returning ``False`` is not a new failure mode — it is the one this
+        method already has, and its contract is exactly right here: the caller
+        falls back to the full scan, which reads the store directly and is
+        correct by construction. The store keeps working, unindexed, until the
+        unreadable file is repaired or removed; correctness never depended on
+        the index existing.
         """
 
+        records, unreadable = self.scan_records()
+        if unreadable:
+            return False
         by_session: dict[str, list[dict[str, Any]]] = {}
-        for record in self._iter_records():
+        for record in records:
             if record.get("state") != CLARIFY_TICKET_OPEN:
                 continue
             root = str(record.get("chat_session_id") or "")
@@ -1704,9 +1726,23 @@ class PersonaChatClarifyTicketStore:
         operator read, not the per-turn lookup, and it is the one caller that
         legitimately wants the whole store."""
 
-        records = list(self._iter_records())
+        return self.scan_tickets()[0]
+
+    def scan_tickets(self) -> tuple[list[dict[str, Any]], int]:
+        """:meth:`list_tickets`, plus how many ticket files would not decode.
+
+        The count travels because this readout's whole point is a RATIO. The
+        adoption metric is computed over the entire store — the site that builds
+        it says so, and says why: "an adoption ratio that moved because the
+        operator asked to see fewer rows would be a lying metric". A file that
+        silently drops out of the scan moves the denominator in exactly the way
+        that comment forbids, and does it without the operator having asked for
+        anything. So the readout states it instead of absorbing it.
+        """
+
+        records, unreadable = self.scan_records()
         records.sort(key=lambda record: float(record.get("created_at") or 0.0), reverse=True)
-        return records
+        return records, unreadable
 
     def sweep(self, *, ttl_seconds: float = CLARIFY_TICKET_TTL_SECONDS) -> int:
         """Prune ticket files older than *ttl_seconds*. Returns the count.
@@ -1786,19 +1822,44 @@ class PersonaChatClarifyTicketStore:
             except OSError:
                 continue
 
-    def _iter_records(self) -> Iterator[dict[str, Any]]:
+    def scan_records(self) -> tuple[list[dict[str, Any]], int]:
+        """Every ticket record on disk, beside how many files did not decode.
+
+        THE chokepoint. :meth:`_iter_records` is the thin view over it, so the
+        callers that only want records keep their shape while the two that must
+        not describe a short answer as complete can ask the fuller question:
+        :meth:`_rebuild_index`, which mints a COMPLETENESS CLAIM from this scan,
+        and the operator readout, whose adoption ratio is computed over the whole
+        store.
+
+        This is the same law :meth:`_read_index` already states for the index
+        file — UNREADABLE IS NOT EMPTY — applied to the ticket files themselves.
+        The failure it counts is usually the ordinary Windows one that method
+        documents: an AV or indexer holding a file for the instant we touch it,
+        which is transient, so the file it hid is very likely readable a second
+        later. That is precisely why it must not be silently absorbed into a
+        permanent claim.
+        """
+
         root = self._root_dir()
         try:
             entries = sorted(root.glob("*.json"))
         except OSError:
-            return
+            return [], 0
+        records: list[dict[str, Any]] = []
+        unreadable = 0
         for entry in entries:
             try:
                 record = json.loads(entry.read_text(encoding="utf-8"))
             except Exception:
+                unreadable += 1
                 continue
             if isinstance(record, dict) and record.get("clarify_token"):
-                yield record
+                records.append(record)
+        return records, unreadable
+
+    def _iter_records(self) -> Iterator[dict[str, Any]]:
+        yield from self.scan_records()[0]
 
 
 #: Keys accepted inside ``_dispatched_from``. An allow-list rather than a
