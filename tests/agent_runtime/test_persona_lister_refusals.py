@@ -311,3 +311,35 @@ def test_a_store_wide_assignment_fault_no_longer_reads_as_none_active(
         store.retire(instance.id, reason="placement deleted")
 
     assert paths.persona_instance_path(instance.id).exists()
+
+
+# --- site 2b: the backlink release (a different fact, its own chokepoint) --
+
+
+@pytest.mark.parametrize("corrupt_count", [1, 2])
+def test_owner_removal_refuses_when_child_backlinks_cannot_all_be_seen(
+    isolate_agent_runtime_root, corrupt_count
+):
+    """"Transactionally release EVERY child backlink" is a completeness promise.
+
+    A child whose row will not decode keeps a backlink to an id that is about to
+    stop resolving, and nothing downstream will ever revisit it — the owner is
+    gone, so no later sweep can rediscover what the edge pointed at.
+
+    A DIFFERENT fact from the retire guard's (which is about assignments), so it
+    is fenced at its own single chokepoint and proved on its own.
+    """
+
+    store = PersonaInstanceStore()
+    parent = _instance("owner_parent")
+    child = _instance("owner_child", display_name="Child")
+    store.steer(child.id, parent_instance_id=parent.id)
+    _corrupt_instance_rows(corrupt_count)
+
+    before = _instance_row_bytes()
+    with pytest.raises(PersonaInstancesUnreadable) as excinfo:
+        store._release_parent_references(parent.id)
+
+    assert excinfo.value.code == "persona_instances_unreadable"
+    assert str(corrupt_count) in str(excinfo.value)
+    assert _instance_row_bytes() == before

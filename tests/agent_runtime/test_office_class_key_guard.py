@@ -53,12 +53,41 @@ def _run_harness(*args: str) -> subprocess.CompletedProcess:
     )
 
 
-def _instance_file(persona_instance_id: str = INSTANCE) -> None:
-    from agent_runtime import paths
+def _instance_file(persona_instance_id: str = INSTANCE, *, persona_id: str = "backend_dev") -> None:
+    """A REAL persona-instance row for the migration to find.
 
+    This used to write ``{"id": ...}`` — enough for the migration script, which
+    only checks that the file EXISTS, but not a row any production writer can
+    produce: ``PersonaInstanceStore._write`` always serializes a whole
+    ``PersonaInstance``. The stub therefore sat in the store as a row that JSON
+    -decodes and then fails model construction, which every reader silently
+    skipped.
+
+    ML-15 made that visible: the persona-lane write arms now refuse when a row
+    will not decode, so a fixture carrying an undecodable row started failing a
+    rollback that has nothing to do with what these tests are about. Writing the
+    row the way the store writes it removes an unreality from the fixture rather
+    than working around the fence — the migration still finds the file, and the
+    guard's subject (class-keyed placement refusal) is untouched.
+    """
+
+    from agent_runtime import paths
+    from agent_runtime.models import PersonaInstance
+    from agent_runtime.serde import to_jsonable
+    from agent_runtime.states import WorkerSessionState
+
+    instance = PersonaInstance(
+        id=persona_instance_id,
+        persona_id=persona_id,
+        role=persona_id,
+        display_name=persona_id.replace("_", " ").title(),
+        profile_id=persona_id,
+        runtime_root="runtime",
+        state=WorkerSessionState.IDLE,
+    )
     path = paths.persona_instance_path(persona_instance_id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"id": persona_instance_id}), encoding="utf-8")
+    path.write_text(json.dumps(to_jsonable(instance)), encoding="utf-8")
 
 
 def _items(persona_id: str, *, agent_item_id: str | None = None) -> list[dict]:

@@ -922,9 +922,32 @@ class PersonaInstanceStore:
         }
 
     def _release_parent_references(self, parent_instance_id: str) -> list[str]:
-        """Transactionally release every child backlink before owner removal."""
+        """Transactionally release every child backlink before owner removal.
+
+        REFUSES when any instance row will not decode, because "every" is the
+        whole promise. This runs immediately before the owner's row leaves the
+        live directory; a child whose file could not be read keeps a backlink to
+        an id that is about to stop resolving, and nothing downstream will ever
+        revisit it — the owner is gone, so no later sweep can rediscover what the
+        edge pointed at. Refusing costs the operator a retire they must repair
+        the store to complete; proceeding costs a dangling edge nobody can
+        reconstruct.
+
+        THE chokepoint for this fact, deliberately placed here rather than in
+        each caller: both write paths that remove an owner (:meth:`retire` via
+        :meth:`_archive_instance_row`, and :meth:`_delete`) reach it, and it runs
+        BEFORE either one moves or unlinks a file, so a refusal leaves the store
+        exactly as it found it.
+        """
+        scan = self.scan_all()
+        if scan.unreadable:
+            raise PersonaInstancesUnreadable(
+                f"cannot release child backlinks for {parent_instance_id}: "
+                f"{scan.unreadable} persona instance row(s) will not decode; "
+                "repair or remove them before removing an owner"
+            )
         released: list[str] = []
-        for child in self.list_all():
+        for child in scan.instances:
             if child.id == parent_instance_id or parent_instance_id not in child.steered_by:
                 continue
             kept = [parent for parent in child.steered_by if parent != parent_instance_id]
