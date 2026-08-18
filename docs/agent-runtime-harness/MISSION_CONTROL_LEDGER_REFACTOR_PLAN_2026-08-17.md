@@ -281,3 +281,105 @@ line numbers rots faster than the prose it guards and would have to be maintaine
 sweep it replaces — the corrections above instead name the *authority* (the `@method` registry,
 a repo-wide grep) so the documents stop carrying copies that can drift at all. Recorded as
 declined rather than silently skipped; revisit only if a third register-drift sweep is commissioned.
+
+---
+
+## ML-8a census — every silently-skipping lister in `agent_runtime`
+
+Read-only pass (RD-0 pattern), executed 2026-08-17 against hermes `671c8d2c84`.
+Every `file:line` in the tables below is **at that base SHA**; where ML-8b then
+moved a site, the post-stage line is given in parentheses beside it.
+**Method, and the correction it forced:** the plan's §1 inventory was re-derived
+by walking every `.py` under `agent_runtime/` with an AST-shaped scan for a
+handler whose body begins `continue` (bare `except Exception:` **and** the
+narrower spellings the inventory did not look for). That found **71 sites**
+against the inventory's 19. Restricted to bare `except Exception:` — the
+inventory's own scope — it found **26**, so the verified inventory was **short
+by seven**: `board_sync.py:262`, `office_sync.py:263`, `office_store.py:1008`,
+`persona_assignments.py:1999`, `dispatch_delivery.py:1089`, `flow_graph.py:506`,
+`snapshot.py:2037`. Four of those seven turn out to be the model answer (they
+already count what they skip), which is why they matter: they are the shape the
+class-(i) and class-(ii) rows below are being moved toward.
+
+C14's rule applies to every claim in this table: each consumer named was read at
+this SHA, and the classification is a claim about a READER, not about the
+`continue` itself. A lister is only class (i) because something DECIDES on its
+answer.
+
+**The three classes.** (i) **authority-input** — a gate, writer, or sync arm
+reads the shortened answer, so the fix is a typed refusal. (ii) **projection** —
+a reader renders it, so the fix is that the count TRAVELS (the `ActorScan`
+pattern). (iii) **benign** — documented why, at the site.
+
+### Class (i) — authority-input
+
+| Site | Symbol | The authority that decides on the short answer | Status |
+|---|---|---|---|
+| `office_sync.py:83` (now `:161`) | `update_office_baseline_after_sync` | The publish-side baseline writer. A missing actor's hash records the row as never-published, and the next pull reads that absence as a peer delete. | **FIXED** — `sync_unknowable`, per workspace |
+| `office_sync.py:210` (now `:343`) | `apply_office_pull` local read | The 3-way classifier: an unreadable local actor arrives as `local_hash=None`, i.e. a local delete. Mutant proof: it reports `adopted: 1`, having written the remote copy over the file it could not read. | **FIXED** — same refusal |
+| `realm_sync.py:999`, `:1040`, `:1044` | `_office_artifacts` / `_office_wanted_persona_ids` | Publish scope. Two independent walks of the same directories decided *which offices travel* and *which persona definitions are pinned*; publish copies actor FILES verbatim, so an undecodable one travelled and every peer archived that desk. | **FIXED** — one `_office_publish_scan`, typed refusal |
+| `office_sync.py:130` (now `:245`) | `_read_remote_office` | The pull's delete signal IS a key's absence from this dict. | **FIXED** — `unreadable_remote` + per-workspace delete fence |
+| `board_sync.py:149` | `_read_remote_board` | Exact twin of the row above, in the module the office lane was lifted from. | **FIXED** — same shape |
+| `board_store.py:512` | `_list_active_cards` → `_next_order_key` / `_allocate_order_key` / `_rebalance_column` | Order-key ALLOCATION. The neighbour keys an insert brackets between, and the keys a rebalance rewrites wholesale, were computed from a column missing whatever would not decode — so the allocator places on top of the invisible card. Corruption written, not merely read. | **FIXED** — one `_ordering_cards` chokepoint, `CardsUnreadable` |
+| `board_store.py:126` | `list_all` → `realm_sync._board_artifacts` | Publish scope, the board twin of the office row. Also `store.py:351`'s workspace-delete cascade, which skips the directory it cannot name (an orphan board survives the delete). | **FIXED** for publish (`_board_publish_scan`); the delete cascade is NOT — see follow-ups |
+| `persona_assignments.py:1761` | `PersonaInstanceStore.list_all` → `:604` steering repair | `live_ids` is computed from the short list, and every child edge pointing at a row that would not decode is **stripped as dangling**. A delete-shaped write derived from a parse error. | **NOT FIXED — stated cut** |
+| `persona_assignments.py:1761` | `…list_all` → `:1743` `_session_owned_by_other_instance` | A uniqueness guard answering "is this session already owned?" from a short list answers **no**, and a second binding lands — the class-key fence's blind spot, one subsystem over. | **NOT FIXED — stated cut** |
+| `persona_assignments.py:1761` | `…list_all` → `:741`, `:812` | Chat-binding repair and parent-backlink release; both write on the short answer. | **NOT FIXED — stated cut** |
+| `persona_assignments.py:1912` | `PersonaAssignmentStore.list_all` → `:1293` `_active_assignment_ids_for_instance` | The RETIRE guard, whose own docstring says "a retire must never orphan a live assignment". An undecodable assignment file answers "none active" and the retire proceeds. Doubly fail-open: `:1293` also wraps the call in `except Exception: return []`. | **NOT FIXED — stated cut** |
+| `persona_assignments.py:1111` | `_validate_no_steering_cycle` | The DAG walk stops at a node it cannot read, so a cycle BEHIND that node is not detected and the edge is admitted. | **NOT FIXED — stated cut** |
+| `persona_chat_continuity.py:1798` | `_iter_records` → `_rebuild_index` (`:1365`), `_scan_open_ticket_for_session` (`:1679`) | The index rebuild drops the ticket permanently; the open-ticket guard answers "none open" and a second clarify ticket is minted. | **NOT FIXED — stated cut** |
+
+**The cut, stated.** Everything above the persona rows is the office/board sync
+and projection lane ML-8b names, and is fixed. The `persona_assignments` /
+`persona_chat_continuity` rows are class (i) on the same evidence standard, and
+they are NOT in this stage's commits. Two reasons, both boundary-shaped rather
+than budget-shaped: (1) each of them changes operator-visible behaviour in a
+different subsystem — a retire that starts refusing, a steering repair that
+starts holding — which is a ruling about the persona lane, not about sync;
+(2) the steering-repair row is a **delete-shaped write** and deserves the same
+fence-plus-discriminator pair the office arm got, not a bolted-on guard. Filed
+as the top escalation out of this stage. `store.py:351` (workspace-delete
+cascade over `list_all`) is the same call: now that `scan_all` exists the fix is
+small, but "what should deleting a workspace do when a board file will not
+decode" is a ruling.
+
+### Class (ii) — projection: the count must travel
+
+| Site | Symbol | What renders it | Status |
+|---|---|---|---|
+| `snapshot.py:1636` | `_offices_summary` | The core's `offices` map; a whole workspace vanished. | **FIXED** — `offices_unreadable` (additive) |
+| `board_store.py:126` | `list_all` → `_boards_summary` | The core's `boards` map; a whole board vanished. | **FIXED** — `boards_unreadable` (additive) |
+| `board_store.py:512`/`:524` | `list_cards` → `board_summary_row` | Each board row's card list, which computed `cards_truncated` from the already-shortened length and answered 0 — the exact defect `actors_unreadable` fixed one seam over. | **FIXED** — `cards_unreadable`, required by keyword |
+| `events.py:506` | `_archived_event_slices` → `event_log_health` | `archived_event_slices`, `archived_event_rows`, and the derived `index_health` verdict. An unreadable manifest under-reports the archive and can flip `index_health`. | **NOT FIXED — follow-up** |
+| `runtime_instances.py:44` | `GoalRuntimeInstanceStore.list_all` → `status.py:58` lanes | The status wire's `runtime_instances` block. | **NOT FIXED — follow-up** |
+| `prompt_observability.py:1517` | `load_latest_prompt_observability_contexts` | Four readers (`:1090`, `:1420`, `:1473`, `:1627`). Notably the same FILE already counts unreadability correctly at `:1284` (`unreadable += 1`) and `:1461` (`index_misses += 1`) — the loader is the one arm in the family that does not. | **NOT FIXED — follow-up** |
+| `snapshot.py:2037` | `_event_summary_warnings` | A WARNING generator failing closed to "no warning": `event_summary_missing` throwing yields `missing=False`, so the parity warning is suppressed by the error it should report. | **NOT FIXED — follow-up** |
+| `flow_graph.py:506` | `reconcile_departed_agents` | The row is stamped `ok=True, changed=False, steered_by=[]` — reported as a completed strip — when the instance merely would not read. No write is taken (fail-safe), but the REPORT is wrong; it wants an `unresolvable` reason rather than the success arm's sentence (C16). | **NOT FIXED — follow-up** |
+
+Cut for class (ii): five follow-ups, each one field on one row, none in the sync
+lane this stage owns and none delete-shaped. Listing them rather than landing
+them keeps ML-8's commits revertable per site.
+
+### Class (iii) — benign, and the four that are already the model
+
+| Site | Why it is benign | At-site documentation |
+|---|---|---|
+| `dispatch_store.py:993`, `:1002` | The `continue` means "not disproof of ownership", which is the correct conservative answer for a PID probe that failed. | **Yes** — `# Unreadable probe, or a genuine match — either way not disproof.` |
+| `serde.py:63` | Not a lister: the `continue` IS the union-coercion dispatch, trying the next member type. | **No** — reads like a swallow; wants one line saying it is control flow |
+| `mission_chat_turns.py:1267` | Inbound payload sanitation, not a file read: an element with no integer `seq` cannot be ordered, so it has no position to occupy. | **No** — wants one line |
+| `realm_sync.py:1074` (now `:1203`) | `_published_profile_file_hashes`: a missing hash makes the pull HOLD that file rather than adopt it. Fails toward the operator, not toward a delete. | **No** — wants one line |
+| `office_store.py:1008` | **Model answer.** `failed += 1`, and the count is returned. | Yes |
+| `persona_assignments.py:1999` | **Model answer.** `held.append({... "reason": f"unreadable:{type(exc).__name__}"})`. | Yes |
+| `dispatch_delivery.py:1089` | **Model answer.** `_telemetry.record_bounce(event_key, "unclaimed", repr(exc))`. | Yes |
+| `prompt_observability.py:1284`, `:1461` | **Model answer.** `unreadable += 1` / `receipt["index_misses"] += 1`. | Yes |
+
+### Out of class, found on the way
+
+`office_sync.py:263` and `board_sync.py:262` are not silently-skipping listers —
+they are swallowed WRITE failures: `remove_actor` / `archive_card` raising is
+caught with `pass`, the summary's `archived` is not incremented, and then the
+baseline row is popped anyway. So a failed archive is recorded as though it
+succeeded, and the next pull sees convergence. Different defect class, real,
+unfixed, recorded here so the next reader does not have to re-find it. (ML-8b's
+delete fence sits ABOVE both arms, so the fenced path no longer reaches them —
+which narrows the exposure without closing it.)
