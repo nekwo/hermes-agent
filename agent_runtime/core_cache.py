@@ -84,6 +84,17 @@ end, inverted. Three mitigations are load-bearing, not decorative:
 If a shadow receipt ever shows divergence, the fix is WIDENING the stat set —
 never trusting the cache harder.
 
+Two more receipts (ML-10) cover the ways this lane can fail QUIETLY rather than
+wrongly, both on the same channel and countable by the same census:
+
+* ``fingerprint_refused`` — a walk hit its entry bound, so the fingerprint is
+  refused and the cache is off for this install. Unchanged as a decision; it was
+  previously a WARNING sentence that did not even name the tree.
+* ``never_converged`` — this process's consecutive write-backs never agreed, so
+  no later process can be served the cache at all. It names the oscillating
+  input paths, because the sanctioned response is again to widen the closure
+  over a NAMED input.
+
 =============================================================================
 ONE AUTHORITY
 =============================================================================
@@ -140,6 +151,46 @@ DEMOTE_BUILD_STAMP_UNKNOWN = "build_stamp_unknown"
 DEMOTE_BUILD_STAMP_MISMATCH = "build_stamp_mismatch"
 DEMOTE_CONTRACT_MISMATCH = "contract_mismatch"
 DEMOTE_RUNTIME_ROOT_MISMATCH = "runtime_root_mismatch"
+
+# --------------------------------------------------------------------------- #
+# The receipt vocabulary (ML-10)
+# --------------------------------------------------------------------------- #
+#: Every receipt this module emits rides ONE channel — this module's logger, in
+#: the ``snapshot_core_cache`` / ``snapshot_core_shadow`` family — and each one
+#: leads with an EVENT TOKEN in the first field after that prefix, exactly as
+#: ``snapshot_core_shadow_divergence`` already does. That is what makes a receipt
+#: countable: a census greps the token, never the prose after it, and the prose
+#: is then free to say whatever an operator needs to read.
+#:
+#: The two tokens below are ML-10's. They exist because the facts they carry used
+#: to be either a bare WARNING sentence (the bound refusal, which never named
+#: WHICH root blew the bound) or nothing at all (a cache that never converges,
+#: which was silent by construction — the process just kept buying nothing).
+RECEIPT_FINGERPRINT_REFUSED = "fingerprint_refused"
+RECEIPT_NEVER_CONVERGED = "never_converged"
+
+#: The typed reason on a bound refusal, plus which walk refused. ``scope``
+#: matters because the two bounds are different numbers over different trees, and
+#: an operator handed only a count cannot tell which tree to go look at.
+REFUSAL_ENTRIES_EXCEEDED = "entries_exceeded"
+REFUSAL_SCOPE_STORE_ROOT = "store_root"
+REFUSAL_SCOPE_SKILL_ROOT = "skill_root"
+
+#: The never-converged receipt's diff arms. ``every_pass`` names the paths that
+#: differed on EVERY pass of the streak — the oscillating inputs, which is the
+#: fact worth acting on; ``last_pair`` is the honest fallback when no path
+#: differed on all of them (a store that is simply moving, which reads
+#: differently and must not borrow the oscillation sentence).
+#:
+#: The two ``diff_unavailable`` reasons are C16's lesson applied here: an arm that
+#: could not compute the diff says SO, in its own words. Silently reusing another
+#: arm's sentence is how a fail-quiet default gets read as a measurement.
+DIFF_SCOPE_EVERY_PASS = "every_pass"
+DIFF_SCOPE_LAST_PAIR = "last_pair"
+DIFF_SCOPE_NONE = "none"
+DIFF_UNAVAILABLE = "diff_unavailable"
+DIFF_UNAVAILABLE_NO_ENTRIES = "no_entries"
+DIFF_UNAVAILABLE_NO_ENTRY_DELTA = "digest_without_entry_delta"
 
 #: Hard bound on the store-root walk. Reaching it is NOT a partial answer: the
 #: fingerprint becomes ``None`` and the caller must treat that as "never
@@ -288,6 +339,12 @@ def _walk_tree(root: Path, out: list[FingerprintEntry], *, limit: int, exclude_t
     refuses the whole fingerprint, and refusing means "never cache", which is
     safe. Detecting the loop and continuing would not be: it would produce a
     plausible key over an incomplete walk.
+
+    That doctrine is UNCHANGED by ML-10 and is kept deliberately (A5). What
+    changed is only that the caller's refusal now leaves a countable receipt
+    naming the tree — :func:`_receipt_fingerprint_refused` — so a loop that
+    disables the cache for a whole install is a census row rather than one
+    WARNING sentence somebody has to already be reading.
     """
 
     # The tree root records its PATH only, never its existence-or-not: a root
@@ -333,6 +390,38 @@ def _db_entries(db_path: Any, out: list[FingerprintEntry]) -> None:
     text = str(db_path)
     for suffix in _DB_SIBLINGS:
         out.append(_stat_entry(text + suffix))
+
+
+def _receipt_fingerprint_refused(*, scope: str, root: Any, bound: int) -> None:
+    """The countable artifact for a walk that hit its entry bound (A4).
+
+    A bound refusal disables the cache for the whole install — every boot pays
+    the full build, forever, and the only thing that said so was a WARNING
+    sentence that did not even name which store root blew the bound. This is the
+    same fact on the same channel the shadow lane reports divergence on, in the
+    shape a census can count: ``reason`` types it, ``scope`` says WHICH walk
+    refused (the two bounds are different numbers over different trees),
+    ``root`` names the tree to go look at, ``bound`` says what it was measured
+    against.
+
+    **The refusal itself is untouched and stays untouched.** Reaching a bound
+    still makes the fingerprint ``None``, and ``None`` still means never cache —
+    see :func:`build_input_fingerprint`. This function adds a receipt and decides
+    nothing.
+    """
+
+    logger.warning(
+        "snapshot_core_cache %s reason=%s scope=%s bound=%d root=%s — the walk "
+        "hit its bound, so the stat set would have been truncated; the "
+        "fingerprint is refused outright and nothing may be served from the "
+        "cache until the tree named here shrinks or the bound is re-measured. A "
+        "truncated stat set is exactly a missed input.",
+        RECEIPT_FINGERPRINT_REFUSED,
+        REFUSAL_ENTRIES_EXCEEDED,
+        scope,
+        bound,
+        root,
+    )
 
 
 def build_input_fingerprint() -> CoreFingerprint | None:
@@ -383,9 +472,10 @@ def build_input_fingerprint() -> CoreFingerprint | None:
     except Exception:
         return None
     if not _walk_tree(root, entries, limit=MAX_FINGERPRINT_ENTRIES, exclude_top=_EXCLUDED_STORE_ENTRIES):
-        logger.warning(
-            "snapshot_core_cache fingerprint refused: store root exceeded %d entries",
-            MAX_FINGERPRINT_ENTRIES,
+        _receipt_fingerprint_refused(
+            scope=REFUSAL_SCOPE_STORE_ROOT,
+            root=root,
+            bound=MAX_FINGERPRINT_ENTRIES,
         )
         return None
 
@@ -461,10 +551,10 @@ def build_input_fingerprint() -> CoreFingerprint | None:
             continue
         seen_roots.add(key)
         if not _walk_tree(Path(skill_root), entries, limit=len(entries) + MAX_SKILL_ENTRIES_PER_ROOT):
-            logger.warning(
-                "snapshot_core_cache fingerprint refused: skill root %s exceeded %d entries",
-                key,
-                MAX_SKILL_ENTRIES_PER_ROOT,
+            _receipt_fingerprint_refused(
+                scope=REFUSAL_SCOPE_SKILL_ROOT,
+                root=key,
+                bound=MAX_SKILL_ENTRIES_PER_ROOT,
             )
             return None
 
@@ -647,7 +737,190 @@ def write_back(core: dict, *, fingerprint: CoreFingerprint | None = None) -> boo
         key.digest[:12],
         "unknown" if sidecar["event_offset"] is None else sidecar["event_offset"],
     )
+    _note_written_key(key)
     return True
+
+
+# --------------------------------------------------------------------------- #
+# Convergence — whether this process's cache is buying anything (ML-10 / A2)
+# --------------------------------------------------------------------------- #
+# The cache can fail in a way that costs nothing and says nothing: if some input
+# moves on EVERY build, no key a build writes can ever describe the store the
+# next build stats, so every process demotes, every process rebuilds, and the
+# whole lane silently buys nothing forever. Nothing above detects that — a
+# demote is individually legitimate, and the write-back that follows it looks
+# exactly like a healthy one.
+#
+# The measurement is free, because both halves already exist: every build hands
+# ``write_back`` the key it would persist, so a process can simply notice that
+# its own consecutive write-backs never agree. Past ``NEVER_CONVERGED_BUILDS``
+# it says so and NAMES the paths, because the sanctioned response to this — the
+# same one the shadow lane's divergence receipt asks for — is to widen the stat
+# set's closure over a named input, never to trust the cache harder.
+#
+# WHAT IS RETAINED, AND WHY IT IS NOT A STAT SET PER PROCESS. The digest of the
+# last key written is kept always (a string). The last key's ENTRIES are kept
+# only while a streak is live and dropped the moment two write-backs agree, so a
+# settled process — which is every healthy one — holds no second stat set for a
+# diagnostic that is not going to fire. On a live store an entry list is tens of
+# thousands of triples; that is worth one branch to not retain.
+#
+# This block decides NOTHING. It reads the key the build already computed, and
+# every write-back returns exactly what it returned before.
+
+#: How many consecutive write-backs may disagree with the one before them before
+#: the cache says out loud that it is buying nothing.
+#:
+#: THREE, and it is the measured virgin-root convergence rather than a round
+#: number. A cold store legitimately fails to settle for a build or two — the
+#: build is not a pure reader (``PersonaInstanceStore.ensure_for_personas``
+#: materializes instance rows; the chat SessionDB is CREATED by the first process
+#: that opens it), and the key is taken pre-build on purpose, so the first
+#: write-back describes inputs the build then moved. ``write_back``'s own
+#: docstring names that consequence, and the test helper
+#: ``converge_persisted_core`` measures it. A bound at the measured convergence
+#: is the one number that cannot fire on the healthy shape and does fire on the
+#: pathological one, where the disagreement never ends.
+NEVER_CONVERGED_BUILDS = 3
+
+#: How many oscillating paths the receipt names. ``changed=`` carries the full
+#: count beside them, so the cap can never make a large drift read as a small one.
+_NEVER_CONVERGED_DIFF_PATHS = 5
+
+_convergence_lock = threading.Lock()
+_last_written_digest: str | None = None
+_streak_entries: tuple[FingerprintEntry, ...] = ()
+_streak_length = 0
+_streak_last_diff: tuple[str, ...] | None = None
+_streak_common_diff: frozenset[str] | None = None
+_never_converged_reported = False
+
+
+def _reset_convergence_state() -> None:
+    """Forget this process's convergence history, as a fresh process would."""
+
+    global _last_written_digest, _streak_entries, _streak_length
+    global _streak_last_diff, _streak_common_diff, _never_converged_reported
+    with _convergence_lock:
+        _last_written_digest = None
+        _streak_entries = ()
+        _streak_length = 0
+        _streak_last_diff = None
+        _streak_common_diff = None
+        _never_converged_reported = False
+
+
+def _changed_paths(
+    before: tuple[FingerprintEntry, ...], after: tuple[FingerprintEntry, ...]
+) -> tuple[str, ...]:
+    """Every PATH whose triple differs between two stat sets.
+
+    By path rather than by triple: a file whose mtime moved would otherwise be
+    named twice (its old triple and its new one) and read as two inputs. An added
+    or removed path differs too — its triple is absent on one side — which is the
+    same rule ``_stat_entry`` follows for a missing file.
+    """
+
+    left = {entry.path: (entry.mtime_ns, entry.size) for entry in before}
+    right = {entry.path: (entry.mtime_ns, entry.size) for entry in after}
+    return tuple(
+        sorted(path for path in set(left) | set(right) if left.get(path) != right.get(path))
+    )
+
+
+def _note_written_key(key: CoreFingerprint) -> None:
+    """Record what this write-back persisted, and report a lane that never settles.
+
+    Called on SUCCESSFUL write-backs only: a write that did not land is already a
+    receipt of its own (``snapshot_core_cache_write ok=false``) and a key that was
+    never persisted is not a key any later process could have agreed with.
+    """
+
+    global _last_written_digest, _streak_entries, _streak_length
+    global _streak_last_diff, _streak_common_diff, _never_converged_reported
+
+    with _convergence_lock:
+        previous_digest = _last_written_digest
+        previous_entries = _streak_entries
+        _last_written_digest = key.digest
+        if previous_digest is None:
+            # The first write-back of a process has nothing to agree with, and
+            # "one build" is never evidence of non-convergence.
+            return
+        if previous_digest == key.digest:
+            # Settled: two consecutive builds wrote the same key, so the store
+            # the next process stats is the store this one described.
+            _streak_entries = ()
+            _streak_length = 0
+            _streak_last_diff = None
+            _streak_common_diff = None
+            return
+        _streak_length += 1
+        _streak_entries = key.entries
+        if previous_entries and key.entries:
+            changed = _changed_paths(previous_entries, key.entries)
+            _streak_last_diff = changed
+            _streak_common_diff = (
+                frozenset(changed)
+                if _streak_common_diff is None
+                else _streak_common_diff & frozenset(changed)
+            )
+        if _streak_length < NEVER_CONVERGED_BUILDS or _never_converged_reported:
+            return
+        # Once per process. The receipt names an input to go widen the closure
+        # over; repeating it every build afterwards would bury that under its own
+        # noise without adding a fact.
+        _never_converged_reported = True
+        builds = _streak_length
+        common = _streak_common_diff
+        last = _streak_last_diff
+    _receipt_never_converged(builds=builds, common=common, last=last)
+
+
+def _receipt_never_converged(
+    *, builds: int, common: frozenset[str] | None, last: tuple[str, ...] | None
+) -> None:
+    """The A2 receipt: this process's cache has never agreed with itself.
+
+    Rides the same channel and the same ``snapshot_core_cache`` family as the
+    shadow lane's divergence receipt, and asks for the same response: widen the
+    input closure over the paths named here.
+
+    ``diff=`` goes LAST on purpose — it is a variable-length list and a path may
+    contain spaces, so anything after it could not be field-parsed.
+    """
+
+    if last is None:
+        detail = (
+            f"diff_scope={DIFF_SCOPE_NONE} changed=0 "
+            f"diff_reason={DIFF_UNAVAILABLE_NO_ENTRIES} diff={DIFF_UNAVAILABLE}"
+        )
+    elif common:
+        detail = _diff_detail(DIFF_SCOPE_EVERY_PASS, sorted(common))
+    elif last:
+        detail = _diff_detail(DIFF_SCOPE_LAST_PAIR, list(last))
+    else:
+        detail = (
+            f"diff_scope={DIFF_SCOPE_NONE} changed=0 "
+            f"diff_reason={DIFF_UNAVAILABLE_NO_ENTRY_DELTA} diff={DIFF_UNAVAILABLE}"
+        )
+    logger.warning(
+        "snapshot_core_cache %s builds=%d %s — %d consecutive write-backs each "
+        "wrote a key that disagreed with the one before it, so no process can "
+        "ever be served this cache: it is costing a write per build and buying "
+        "nothing. Widen the fingerprint's input closure over the paths named "
+        "here (agent_runtime/core_cache.py), never trust the cache harder.",
+        RECEIPT_NEVER_CONVERGED,
+        builds,
+        detail,
+        builds,
+    )
+
+
+def _diff_detail(scope: str, paths: list[str]) -> str:
+    return "diff_scope={} changed={} diff={}".format(
+        scope, len(paths), ",".join(paths[:_NEVER_CONVERGED_DIFF_PATHS])
+    )
 
 
 def _runtime_root_for_sidecar(parity: dict) -> Any:
@@ -823,6 +1096,10 @@ def reset_process_state() -> None:
     Same shape and same reason as ``build_stamp.reset_build_stamp_cache``: a
     property of the PROCESS has to be resettable for a test to be able to
     exercise a second process's behaviour without spawning one.
+
+    The convergence history (ML-10) is process state by the same definition and
+    is reset here too — a case that left a streak behind would hand the next case
+    a process that had already half-declared non-convergence.
     """
 
     global _lane_armed, _shadow_done, _stale_served
@@ -830,6 +1107,7 @@ def reset_process_state() -> None:
         _lane_armed = True
         _shadow_done = False
         _stale_served = False
+    _reset_convergence_state()
 
 
 def lane_armed() -> bool:

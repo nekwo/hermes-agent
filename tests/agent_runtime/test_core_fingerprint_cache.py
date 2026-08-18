@@ -22,6 +22,7 @@ milliseconds. The seconds are read off EG-2.1's receipts (ruling #60).
 
 from __future__ import annotations
 
+import hashlib
 import importlib.abc
 import json
 import logging
@@ -1026,3 +1027,288 @@ def test_the_persisted_core_reports_the_actor_files_it_could_not_read(
         "cache-served boot would report a whole desk as absent rather than "
         "unreadable"
     )
+
+
+# --------------------------------------------------------------------------- #
+# ML-10 — the refusals and the non-convergence become RECEIPTS
+# --------------------------------------------------------------------------- #
+#
+# The two ways this lane fails QUIETLY rather than wrongly. Neither changes a
+# decision: a bound refusal still means never-cache, and a process whose keys
+# never settle still demotes exactly as often as before. What changes is that
+# both are now countable on the same channel the shadow lane reports divergence
+# on, so "the cache is off for this install" and "the cache is buying nothing"
+# stop being invisible to a census.
+#
+# WHAT MAKES THESE NON-VACUOUS. Every case drives a value the receipt must have
+# COMPUTED — a store root, a skill root, an oscillating path — twice, with two
+# distinct values, so a constant satisfies at most one of them; and each pairs
+# that with a discriminator the mutant cannot also pass (the stable paths that
+# must NOT be named; the exact build count at which the receipt appears; the
+# converging store that must stay silent).
+
+
+def _receipt_lines(caplog, token: str) -> list[str]:
+    return [
+        line
+        for line in (record.getMessage() for record in caplog.records)
+        if f"snapshot_core_cache {token}" in line
+    ]
+
+
+def _fake_key(entries: list[tuple[str, int, int]]) -> core_cache.CoreFingerprint:
+    """A stat set the TEST owns, so a case can drive an input that oscillates.
+
+    The digest is computed here rather than borrowed from
+    ``build_input_fingerprint`` on purpose: the module only ever compares digests
+    for equality, and a test that reused production's formula would pass just as
+    happily if that formula stopped depending on the entries at all.
+    """
+
+    ordered = tuple(
+        sorted(core_cache.FingerprintEntry(path, mtime, size) for path, mtime, size in entries)
+    )
+    digest = hashlib.sha256(repr(ordered).encode("utf-8")).hexdigest()
+    return core_cache.CoreFingerprint(ordered, digest)
+
+
+def test_an_entry_bound_refusal_is_receipted_not_just_warned(
+    tmp_path, monkeypatch, caplog
+):
+    """A bound refusal turns the cache OFF for a whole install. It says which one.
+
+    Reaching the walk bound is not a partial answer — the fingerprint becomes
+    ``None`` and every caller must read that as never-cache — so an install that
+    trips it pays the full ~20 s build on every boot forever. The only thing that
+    reported it was a WARNING sentence carrying a NUMBER and no root, which an
+    operator can read only if they are already reading, and which a census cannot
+    count at all.
+
+    Two distinct store roots are driven so a receipt that named a constant (or
+    named the bound instead of the tree) satisfies at most one of them.
+
+    *Kill:* restore the bare ``logger.warning`` — it never carried a root, so no
+    receipt exists that carries the driven one.
+    """
+
+    monkeypatch.setattr(core_cache, "MAX_FINGERPRINT_ENTRIES", 3)
+    receipts: list[str] = []
+    for name in ("root-alpha", "root-beta"):
+        root = tmp_path / name / "agent-runtime"
+        (root / "workspaces").mkdir(parents=True)
+        for index in range(6):
+            (root / "workspaces" / f"ws_{index}.json").write_text("{}", encoding="utf-8")
+        monkeypatch.setenv("HERMES_AGENT_RUNTIME_ROOT", str(root))
+        assert str(paths.store_root()) == str(root)
+
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger="agent_runtime.core_cache"):
+            refused = core_cache.build_input_fingerprint()
+
+        assert refused is None, (
+            "the refusal semantics moved: reaching the bound must still refuse "
+            "the whole fingerprint, which is what makes 'never cache' safe"
+        )
+        lines = _receipt_lines(caplog, core_cache.RECEIPT_FINGERPRINT_REFUSED)
+        assert len(lines) == 1, lines
+        assert f"root={root}" in lines[0], lines[0]
+        assert f"reason={core_cache.REFUSAL_ENTRIES_EXCEEDED}" in lines[0], lines[0]
+        assert f"scope={core_cache.REFUSAL_SCOPE_STORE_ROOT}" in lines[0], lines[0]
+        assert "bound=3" in lines[0], lines[0]
+        receipts.append(lines[0])
+
+    assert receipts[0] != receipts[1], (
+        "both roots produced the same receipt, so the root on it is a constant "
+        "and names nothing"
+    )
+
+
+def test_a_skill_root_bound_refusal_names_the_SKILL_root(
+    isolate_agent_runtime_root, tmp_path, monkeypatch, caplog
+):
+    """The second bound is a different number over a different tree — and says so.
+
+    A skill root that blows its per-root bound is not a skill registry, and the
+    refusal is the same never-cache refusal. But an operator handed only "a bound
+    was exceeded" cannot tell whether to go look at a store root of hundreds of
+    thousands of files or at one mis-configured external skills directory. The
+    scope and the root are the fix, and this case pins that the receipt names the
+    tree that actually refused rather than the one the other arm names.
+    """
+
+    from agent import skill_utils
+
+    skill_root = tmp_path / "not-a-skill-registry"
+    skill_root.mkdir()
+    for index in range(6):
+        (skill_root / f"pack_{index}.md").write_text("x", encoding="utf-8")
+    monkeypatch.setattr(skill_utils, "get_all_skills_dirs", lambda: [skill_root])
+    monkeypatch.setattr(core_cache, "MAX_SKILL_ENTRIES_PER_ROOT", 3)
+
+    with caplog.at_level(logging.WARNING, logger="agent_runtime.core_cache"):
+        assert core_cache.build_input_fingerprint() is None
+
+    lines = _receipt_lines(caplog, core_cache.RECEIPT_FINGERPRINT_REFUSED)
+    assert len(lines) == 1, lines
+    assert f"scope={core_cache.REFUSAL_SCOPE_SKILL_ROOT}" in lines[0], lines[0]
+    assert f"root={skill_root}" in lines[0], lines[0]
+    assert "bound=3" in lines[0], lines[0]
+    assert str(paths.store_root()) not in lines[0], (
+        "the skill-root refusal named the STORE root, so the receipt's root is "
+        "whatever the first arm happened to have rather than the tree that "
+        "refused"
+    )
+
+
+@pytest.mark.parametrize(
+    "oscillating_name",
+    ["persona_instances/inst_probe.json", "chat_scope/state.db-wal"],
+)
+def test_an_input_that_oscillates_every_build_is_named(
+    isolate_agent_runtime_root, monkeypatch, caplog, oscillating_name
+):
+    """A cache that can never converge is silent by construction. This ends that.
+
+    The shape is the one ``write_back`` already names: the build is not a pure
+    reader, so an input the build itself rewrites on every pass makes the
+    pre-build key describe a store that no longer exists by the time the build
+    ends — and the NEXT build's key disagrees again, forever. Every process then
+    demotes, every process rebuilds, and the lane costs a write per build while
+    buying nothing. Nothing above notices: each demote is individually
+    legitimate.
+
+    The oscillating path is driven with two distinct values (the parametrization)
+    and the receipt must NAME it, which a receipt that only counts cannot do. The
+    stable paths in the same stat set must NOT be named — a mutant that dumps the
+    whole key instead of the diff passes the naming probe and fails this one.
+
+    *Kill 1:* drop the diff-naming. The mutant cannot name a path it never
+    computed. *Kill 2:* drop the emission. There is no receipt at all. *Kill 3:*
+    emit on every mismatch (bound of 1) or never (bound past the drive) — the
+    per-build count below pins the exact build the receipt appears on.
+    """
+
+    monkeypatch.setattr(core_cache, "build_stamp_token", lambda: "probe:ml10:clean")
+    root = isolate_agent_runtime_root
+    moving = str(root / oscillating_name)
+    stable = [
+        (str(root / "workspaces" / "ws_stable.json"), 11, 12),
+        (str(root / "events.jsonl"), 21, 22),
+    ]
+    core = {"parity": {"watermark": {"event_offset": 0}}}
+
+    counts: list[int] = []
+    with caplog.at_level(logging.WARNING, logger="agent_runtime.core_cache"):
+        for pass_no in range(1, core_cache.NEVER_CONVERGED_BUILDS + 2):
+            key = _fake_key([*stable, (moving, pass_no, pass_no)])
+            assert core_cache.write_back(core, fingerprint=key) is True
+            counts.append(len(_receipt_lines(caplog, core_cache.RECEIPT_NEVER_CONVERGED)))
+
+    assert counts == [0, 0, 0, 1], (
+        "the receipt did not appear on exactly the build the bound names "
+        f"(NEVER_CONVERGED_BUILDS={core_cache.NEVER_CONVERGED_BUILDS}); counts "
+        f"per write-back were {counts}"
+    )
+    line = _receipt_lines(caplog, core_cache.RECEIPT_NEVER_CONVERGED)[0]
+    assert f"builds={core_cache.NEVER_CONVERGED_BUILDS}" in line, line
+    assert f"diff_scope={core_cache.DIFF_SCOPE_EVERY_PASS}" in line, line
+    assert "changed=1" in line, line
+    assert moving in line, line
+    for path, _mtime, _size in stable:
+        assert path not in line, (
+            "the receipt named an input that never moved, so it is reporting the "
+            f"stat set rather than the diff: {line}"
+        )
+
+
+def test_a_settling_store_emits_no_never_converged_receipt(
+    isolate_agent_runtime_root, monkeypatch, caplog
+):
+    """The no-change case: a cache that converges says NOTHING.
+
+    This is the discriminator the always-emit mutant dies on, and it is also the
+    reason the bound is the measured virgin-root convergence rather than 1: a
+    cold store legitimately disagrees with itself ONCE (the build materializes
+    persona-instance rows and creates the chat SessionDB, which the pre-build key
+    could not have described), and a receipt that fired there would be crying
+    wolf on every fresh install.
+    """
+
+    monkeypatch.setattr(core_cache, "build_stamp_token", lambda: "probe:ml10:clean")
+    root = isolate_agent_runtime_root
+    cold = _fake_key([(str(root / "workspaces" / "ws_stable.json"), 11, 12)])
+    settled = _fake_key(
+        [
+            (str(root / "workspaces" / "ws_stable.json"), 11, 12),
+            (str(root / "chat_scope" / "state.db"), 31, 32),
+        ]
+    )
+    core = {"parity": {"watermark": {"event_offset": 0}}}
+
+    with caplog.at_level(logging.WARNING, logger="agent_runtime.core_cache"):
+        for key in (cold, settled, settled, settled, settled, settled):
+            assert core_cache.write_back(core, fingerprint=key) is True
+
+    assert _receipt_lines(caplog, core_cache.RECEIPT_NEVER_CONVERGED) == [], (
+        "a store that settled after the ONE disagreement a cold build owes was "
+        "reported as never converging"
+    )
+
+
+def test_a_real_build_that_settles_emits_no_never_converged_receipt(
+    isolate_agent_runtime_root, caplog
+):
+    """The same no-change case, driven by real builds instead of driven keys.
+
+    The unit case above proves the counter; this proves the NUMBER against the
+    thing it was measured on. Four consecutive real builds in one process: the
+    virgin store disagrees with itself early (that is ``write_back``'s named
+    consequence) and then settles, so the bound must not be reached. If this ever
+    reds, the receipt is telling the truth and the finding is a real
+    non-converging input — widen the closure; do not raise the bound.
+    """
+
+    _seed_workspace("alpha-one")
+    _new_context()
+    with caplog.at_level(logging.INFO, logger="agent_runtime.core_cache"):
+        for _ in range(core_cache.NEVER_CONVERGED_BUILDS + 1):
+            build_snapshot(build_info={"caller": "probe"})
+
+    # The silence is only evidence if the drive REACHED the counter: every one of
+    # those builds has to have persisted a key for the streak to have had
+    # anything to disagree about. A build that stopped writing back would
+    # otherwise make this case pass by doing nothing.
+    writes = [
+        line
+        for line in (record.getMessage() for record in caplog.records)
+        if "snapshot_core_cache_write ok=true" in line
+    ]
+    assert len(writes) == core_cache.NEVER_CONVERGED_BUILDS + 1, writes
+    assert _receipt_lines(caplog, core_cache.RECEIPT_NEVER_CONVERGED) == []
+
+
+def test_a_never_converged_receipt_that_cannot_diff_says_so_in_its_own_words(
+    isolate_agent_runtime_root, monkeypatch, caplog
+):
+    """C16's lesson: the arm that cannot answer must not borrow another's sentence.
+
+    A key whose entries are unavailable still disagrees — the digests differ —
+    but nothing can be named from it. Reporting that as an empty diff, or reusing
+    the oscillation wording with nothing after ``diff=``, would read to a census
+    exactly like "we looked and nothing moved". It is typed instead.
+    """
+
+    monkeypatch.setattr(core_cache, "build_stamp_token", lambda: "probe:ml10:clean")
+    core = {"parity": {"watermark": {"event_offset": 0}}}
+
+    with caplog.at_level(logging.WARNING, logger="agent_runtime.core_cache"):
+        for pass_no in range(1, core_cache.NEVER_CONVERGED_BUILDS + 2):
+            entryless = core_cache.CoreFingerprint((), f"digest-without-entries-{pass_no}")
+            assert core_cache.write_back(core, fingerprint=entryless) is True
+
+    lines = _receipt_lines(caplog, core_cache.RECEIPT_NEVER_CONVERGED)
+    assert len(lines) == 1, lines
+    assert f"diff={core_cache.DIFF_UNAVAILABLE}" in lines[0], lines[0]
+    assert f"diff_reason={core_cache.DIFF_UNAVAILABLE_NO_ENTRIES}" in lines[0], lines[0]
+    assert f"diff_scope={core_cache.DIFF_SCOPE_NONE}" in lines[0], lines[0]
+    assert core_cache.DIFF_SCOPE_EVERY_PASS not in lines[0], lines[0]
