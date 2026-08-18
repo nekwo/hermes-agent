@@ -1571,3 +1571,200 @@ def test_a_never_converged_receipt_that_cannot_diff_says_so_in_its_own_words(
     assert f"diff_reason={core_cache.DIFF_UNAVAILABLE_NO_ENTRIES}" in lines[0], lines[0]
     assert f"diff_scope={core_cache.DIFF_SCOPE_NONE}" in lines[0], lines[0]
     assert core_cache.DIFF_SCOPE_EVERY_PASS not in lines[0], lines[0]
+
+
+# --------------------------------------------------------------------------- #
+# One consult per boot, not one per rider (MC-1 / P5)
+# --------------------------------------------------------------------------- #
+def _count_lane_work(monkeypatch) -> tuple[list[str], list[str]]:
+    """Count the two expensive halves of a consult, from OUTSIDE production.
+
+    The walk and the pair read are counted where nothing in ``core_cache`` can
+    set the counter — the ``_CountingStores`` pattern at the top of this file. A
+    landing that claimed to share a consult while still walking per rider cannot
+    forge these numbers.
+    """
+
+    walks: list[str] = []
+    reads: list[str] = []
+    real_walk = core_cache.build_input_fingerprint
+    real_read = core_cache._read_pair
+
+    def counted_walk():
+        walks.append("walk")
+        return real_walk()
+
+    def counted_read():
+        reads.append("read")
+        return real_read()
+
+    monkeypatch.setattr(core_cache, "build_input_fingerprint", counted_walk)
+    monkeypatch.setattr(core_cache, "_read_pair", counted_read)
+    return walks, reads
+
+
+def test_a_boots_riders_share_one_walk_and_one_core_read(
+    isolate_agent_runtime_root, seeded_cache, monkeypatch, shadow_requests
+):
+    """The boot asks one question, so it walks the store once.
+
+    A serve boot's shape: the stream's stale-first read, then the prewarm, hub
+    and cli riders' consults. Four askers, one moment, one answer — measured at
+    ~300-355 ms per walk on the operator's drive, all of it on the boot's
+    critical path and all of it identical.
+    """
+
+    walks, reads = _count_lane_work(monkeypatch)
+    _new_context()
+
+    # Frame 0: the stream lane's stale-first probe. The key MATCHES here, so it
+    # declines to paint a stale copy — and pays for the walk the riders reuse.
+    assert core_cache.take_stale_first_core(caller="hub") is None
+    for caller in ("prewarm", "hub", "cli"):
+        decision = core_cache.consult(caller=caller)
+        assert decision.core is not None, (
+            f"the {caller} rider was not served the cache, so this case is "
+            "counting the wrong path"
+        )
+
+    assert len(walks) == 1, (
+        f"a four-asker boot walked the store {len(walks)} times; the riders are "
+        "each re-deciding a question the boot had already answered"
+    )
+    assert len(reads) == 1, (
+        f"a four-asker boot read the persisted pair {len(reads)} times"
+    )
+
+
+def test_every_rider_still_emits_its_own_receipt(
+    isolate_agent_runtime_root, seeded_cache, monkeypatch, caplog, shadow_requests
+):
+    """Sharing the computation must not merge the ACCOUNT of it.
+
+    EG-2.1's receipts are the instrument this lane's acceptance is measured
+    with, and the census unit is per caller. A boot that walked once but logged
+    once would make three riders indistinguishable from one.
+    """
+
+    _count_lane_work(monkeypatch)
+    _new_context()
+    with caplog.at_level(logging.INFO, logger="agent_runtime.core_cache"):
+        for caller in ("prewarm", "hub", "cli"):
+            assert core_cache.consult(caller=caller).core is not None
+
+    hits = [
+        line
+        for line in _receipt_lines(caplog, f"core_source={core_cache.CORE_SOURCE_CACHE}")
+        if "stale=true" not in line
+    ]
+    assert len(hits) == 3, f"expected one hit receipt per rider, got: {hits}"
+    for caller in ("prewarm", "hub", "cli"):
+        assert any(f"caller={caller}" in line for line in hits), (
+            f"no receipt names the {caller} rider: {hits}"
+        )
+
+
+def test_each_rider_is_handed_its_own_core(
+    isolate_agent_runtime_root, seeded_cache, monkeypatch, shadow_requests
+):
+    """Shared judgement, private payload.
+
+    ``label_core`` stamps provenance IN PLACE. One shared dict would let the
+    third rider's label — and its refreshed freshness anchor — land on the core
+    the first rider had already handed to its frame. The build coalescer
+    deep-copies its result for exactly this reason.
+    """
+
+    _count_lane_work(monkeypatch)
+    _new_context()
+    first = core_cache.consult(caller="prewarm").core
+    second = core_cache.consult(caller="hub").core
+    assert first is not None and second is not None
+    assert first is not second, (
+        "two riders were handed the SAME core object; one rider's in-place "
+        "provenance stamp can now reach another rider's already-emitted frame"
+    )
+    first["workspaces"] = []
+    assert second.get("workspaces") != [], (
+        "mutating one rider's core changed another rider's core"
+    )
+
+
+def test_a_rewritten_persisted_pair_invalidates_the_shared_consult(
+    isolate_agent_runtime_root, seeded_cache, monkeypatch, shadow_requests
+):
+    """The window is bounded by the pair's own stat triples, not by hope.
+
+    A write-back — this process's or another's — moves both files through
+    ``atomic_json_write``, and a rename always moves mtime. The next asker must
+    therefore see the NEW core, not an answer computed over the old one.
+    """
+
+    _count_lane_work(monkeypatch)
+    _new_context()
+    served = core_cache.consult(caller="prewarm").core
+    assert served is not None
+    assert _served_workspace_name(served) == "alpha-one"
+
+    replacement = _persisted_core()
+    for row in replacement.get("workspaces") or []:
+        if isinstance(row, dict) and row.get("id") == WORKSPACE_ID:
+            row["name"] = "alpha-two"
+    assert core_cache.write_back(replacement) is True
+
+    again = core_cache.consult(caller="hub").core
+    assert again is not None
+    assert _served_workspace_name(again) == "alpha-two", (
+        "the second consult answered from a memo the persisted pair had already "
+        "moved out from under; the window is not bounded by the pair's stats"
+    )
+
+
+def test_the_build_leader_reuses_the_consults_key_instead_of_rewalking(
+    isolate_agent_runtime_root, seeded_cache, monkeypatch, shadow_requests
+):
+    """The fifth walk of a boot was the leader restating its own consult.
+
+    The pre-build key must stay PRE-build — ``write_back``'s direction argument
+    — and the consult's key already is: it was taken before this build started.
+    Reusing it can only make the key OLDER, which costs the next process a
+    rebuild it did not strictly need, never a served core missing a write.
+    """
+
+    walks, _ = _count_lane_work(monkeypatch)
+    _rewrite_workspace_name("alpha-two")
+    _new_context()
+
+    core = build_snapshot(build_info={"caller": "prewarm"})
+    assert core["parity"]["core_source"] == core_cache.CORE_SOURCE_REBUILT, (
+        "this case needs the MISS path, where a leader actually builds"
+    )
+    assert len(walks) == 1, (
+        f"the boot walked the store {len(walks)} times: the leader took its own "
+        "stat set milliseconds after its consult had taken one over the same "
+        "store"
+    )
+
+
+def test_a_disarmed_lane_takes_its_own_key(
+    isolate_agent_runtime_root, seeded_cache, monkeypatch, shadow_requests
+):
+    """The window closes with the lane, and later builds are ordinary builds.
+
+    A memo that outlived the boot would let the process's SECOND build persist a
+    key describing the store as it was before its FIRST build ran — the unsafe
+    direction, and the one thing this sharing must never do.
+    """
+
+    _new_context()
+    assert core_cache.consult(caller="prewarm").core is not None
+    core_cache.note_full_build_completed()
+    assert core_cache.lane_armed() is False
+
+    walks, _ = _count_lane_work(monkeypatch)
+    key = core_cache.pre_build_fingerprint()
+    assert key is not None
+    assert len(walks) == 1, (
+        "a build after the lane disarmed answered from the boot's memo instead "
+        "of stat'ing the store it is about to describe"
+    )

@@ -607,7 +607,14 @@ def build_snapshot(
         # any write that landed while the build ran, and the next process would
         # then serve a core missing that write as authoritative. See
         # ``core_cache.write_back``'s docstring for the full direction argument.
-        pre_build_fingerprint = core_cache.build_input_fingerprint()
+        #
+        # ``pre_build_fingerprint`` rather than a second ``build_input_fingerprint``
+        # call: this leader's own consult walked the same store milliseconds ago,
+        # and reusing that key stays on the safe side of the direction above (an
+        # OLDER key can only cost the next process a rebuild). It falls through to
+        # a full walk whenever no consult stands — a cold store, a disarmed lane,
+        # or a persisted pair that moved since.
+        pre_build_fingerprint = core_cache.pre_build_fingerprint()
         result = _build_snapshot_uncoalesced()
         if decision.demoted:
             # A persisted core WAS available and was rejected, so this core has a

@@ -1134,13 +1134,42 @@ def read_persisted_core(*, fingerprint: CoreFingerprint | None = None) -> CacheR
     of every build input; a process with no persisted core to judge — every cold
     CLI invocation, every test with a fresh root — must not pay for one to be
     told there is nothing to compare it against.
+
+    **This primitive is never memoised.** Every call reads the pair and, unless
+    handed a key, walks the store. The boot lane's shared answer lives behind
+    :func:`_armed_window_read`, reached only through :func:`consult` and
+    :func:`take_stale_first_core`; a caller that asks this function directly is
+    asking for a fresh judgement and gets one.
+    """
+
+    pair = _read_pair()
+    if pair is None:
+        return CacheRead(None, False, DEMOTE_ABSENT, None, {})
+    return _judge_persisted_pair(pair[0], pair[1], fingerprint=fingerprint)
+
+
+def _read_pair() -> tuple[str, str] | None:
+    """The persisted BYTES, or ``None`` when there is no pair to judge.
+
+    Its own function so the boot lane can count and memoise the READ separately
+    from the judgement — and so a witness can prove one read happened rather than
+    inferring it from a duration.
     """
 
     try:
-        raw_sidecar = sidecar_path().read_text(encoding="utf-8")
-        raw_core = core_path().read_text(encoding="utf-8")
+        return (
+            sidecar_path().read_text(encoding="utf-8"),
+            core_path().read_text(encoding="utf-8"),
+        )
     except OSError:
-        return CacheRead(None, False, DEMOTE_ABSENT, None, {})
+        return None
+
+
+def _judge_persisted_pair(
+    raw_sidecar: str, raw_core: str, *, fingerprint: CoreFingerprint | None
+) -> CacheRead:
+    """The conjunction above, over bytes that have already been read."""
+
     try:
         sidecar = json.loads(raw_sidecar)
         core = json.loads(raw_core)
@@ -1243,9 +1272,11 @@ def label_core(core: dict, *, source: str, stale: bool) -> dict:
 #: hydrate — the one the launcher is actually waiting on — pay the full build
 #: anyway, buying nothing the operator can see.
 #:
-#: Every hit re-computes the fingerprint independently, so an armed lane is
-#: never a stale-serve window: it is "this process has not yet built its own
-#: truth, and the store says the persisted one is still current".
+#: An armed lane is never a stale-serve window: it is "this process has not yet
+#: built its own truth, and the store says the persisted one is still current".
+#: The fingerprint behind that answer is computed ONCE per armed window rather
+#: than once per asker — see :data:`_consult_memo` for the window, its
+#: invalidation, and what the sharing does and does not widen.
 #:
 #: Disarming on the first completed build also means no test can accidentally be
 #: served from a cache: a fresh isolated root has no persisted core, so the
@@ -1257,6 +1288,127 @@ _shadow_done = False
 _stale_served = False
 
 
+# --------------------------------------------------------------------------- #
+# One consult per boot, not one per rider (MC-1 / P5)
+# --------------------------------------------------------------------------- #
+#: A serve boot asks this lane the SAME question four times within about a
+#: second: the stream's stale-first read, then the prewarm, hub and cli riders'
+#: consults, and then the build leader's pre-build key — five full store walks
+#: (measured ~300–355 ms each warm on the operator's drive), four core reads and
+#: four digests, all describing one moment. The count is identical on the HIT
+#: path, where the answer is by definition the same for every asker.
+#:
+#: They are one question, so they get one answer. The memo holds the
+#: ``CacheRead`` the first asker computed, keyed on the STAT TRIPLES of the
+#: persisted pair itself, and is dropped when the lane disarms — that is, the
+#: moment this process owns its own truth.
+#:
+#: WHAT THIS DOES NOT CHANGE. A hit still means the fingerprint matched the
+#: sidecar; a demote still carries its own reason and its own receipt per caller.
+#: Only the number of times the identical computation runs moves.
+#:
+#: WHAT IT DOES WIDEN, said plainly. The validity of one asker's answer now
+#: extends to the other askers in the same window instead of each re-deciding.
+#: If a write lands mid-window, a later rider is served the answer computed
+#: before it, where today it would have walked again and demoted. Three things
+#: bound that, and they are the reason this is sound rather than merely cheap:
+#:
+#: 1. the window is a BOOT — it ends at the first completed full build of the
+#:    process, which is the same instant the lane closes;
+#: 2. the askers were already disagreeing, which is worse. Today rider 1 can be
+#:    served the cache while rider 2 walks, misses and pays a full build, on one
+#:    store, in one process, seconds apart — the divergence the 2026-08-18
+#:    investigation recorded as A1-c. One answer per window retires it;
+#: 3. the shadow-validation window is UNTOUCHED. A cache-hit boot still runs the
+#:    full build in the background and compares field-for-field, so a write this
+#:    memo absorbed surfaces as a divergence receipt and the rebuilt core is
+#:    adopted. That mitigation is load-bearing here, not decorative.
+#:
+#: The stat pair is re-taken on every ask (two stats), so a write-back — this
+#: lane's own or another process's — invalidates the memo immediately: the pair
+#: is written through ``atomic_json_write``, and a rename always moves mtime.
+#:
+#: The lock is held ACROSS the computation, deliberately. Riders arrive within
+#: milliseconds of each other; a lock released before the walk would let all of
+#: them start their own and the memo would record the last one to finish, buying
+#: nothing. Blocking is the mechanism, not a side effect. Nothing inside the
+#: computed region takes :data:`_lane_lock`, and no holder of the lane lock takes
+#: this one — the two never nest.
+class _ConsultMemo(NamedTuple):
+    stamp: tuple[FingerprintEntry, FingerprintEntry]
+    raw_core: str
+    read: CacheRead
+
+
+_memo_lock = threading.Lock()
+_consult_memo: _ConsultMemo | None = None
+
+
+def _pair_stamp() -> tuple[FingerprintEntry, FingerprintEntry]:
+    """Two stats over the persisted pair — the memo's whole invalidation rule."""
+
+    return (_stat_entry(sidecar_path()), _stat_entry(core_path()))
+
+
+def _drop_consult_memo() -> None:
+    global _consult_memo
+    with _memo_lock:
+        _consult_memo = None
+
+
+def _armed_window_read() -> CacheRead:
+    """The boot lane's shared judgement: computed once, answered many times.
+
+    Every caller gets its OWN decoded core, re-parsed from the memoised bytes.
+    The build coalescer already deep-copies its result for exactly this reason:
+    :func:`label_core` stamps provenance IN PLACE, so one shared dict would let
+    the third rider's label land on the first rider's already-emitted frame.
+    """
+
+    global _consult_memo
+    stamp = _pair_stamp()
+    with _memo_lock:
+        memo = _consult_memo
+        if memo is not None and memo.stamp == stamp:
+            return memo.read._replace(core=json.loads(memo.raw_core))
+        pair = _read_pair()
+        if pair is None:
+            _consult_memo = None
+            return CacheRead(None, False, DEMOTE_ABSENT, None, {})
+        read = _judge_persisted_pair(pair[0], pair[1], fingerprint=None)
+        # A judgement that produced no core has nothing to re-parse and nothing
+        # worth holding: the pair is unreadable or unbound, and the next asker
+        # should see that for itself rather than inherit a refusal.
+        _consult_memo = (
+            _ConsultMemo(stamp, pair[1], read) if read.core is not None else None
+        )
+        return read
+
+
+def pre_build_fingerprint() -> CoreFingerprint | None:
+    """The key a build persists — the consult's, when the consult still stands.
+
+    The leader used to take a SECOND full walk here, milliseconds after its own
+    consult had taken one over the same store. Reusing the consult's key keeps
+    the direction ``write_back`` requires: a key stat'd BEFORE the build is at
+    worst OLDER than the core it describes, which can only cost the next process
+    a rebuild it did not strictly need. The unsafe direction — a key stat'd after
+    the build, absorbing a write the core does not contain — is not reachable
+    from here, because the memo is filled before the build starts and dropped
+    when it completes.
+
+    Falls through to a full walk whenever there is no standing consult: a cold
+    store (nothing to consult), a disarmed lane (every later build in the
+    process), or a pair that moved since.
+    """
+
+    with _memo_lock:
+        memo = _consult_memo
+    if memo is not None and memo.read.fingerprint is not None and memo.stamp == _pair_stamp():
+        return memo.read.fingerprint
+    return build_input_fingerprint()
+
+
 def reset_process_state() -> None:
     """Re-arm the lane, as a fresh process would. Tests only.
 
@@ -1266,7 +1418,9 @@ def reset_process_state() -> None:
 
     The convergence history (ML-10) is process state by the same definition and
     is reset here too — a case that left a streak behind would hand the next case
-    a process that had already half-declared non-convergence.
+    a process that had already half-declared non-convergence. So is the boot
+    lane's shared consult: a memo surviving into the next case would answer it
+    with the previous case's store.
     """
 
     global _lane_armed, _shadow_done, _stale_served
@@ -1275,6 +1429,7 @@ def reset_process_state() -> None:
         _shadow_done = False
         _stale_served = False
     _reset_convergence_state()
+    _drop_consult_memo()
 
 
 def lane_armed() -> bool:
@@ -1289,6 +1444,11 @@ def note_full_build_completed() -> None:
     the process's answer, and letting it disarm the lane would make the next
     boot caller pay a full build for the privilege of having validated the one
     it just avoided.
+
+    The armed window's shared consult ends here with the lane. Dropped OUTSIDE
+    the lane lock on purpose: the memo lock is taken while judging, and judging
+    never takes the lane lock, so the two locks must never nest in the other
+    order either.
     """
 
     if getattr(_LANE, "shadow", False):
@@ -1296,6 +1456,7 @@ def note_full_build_completed() -> None:
     global _lane_armed
     with _lane_lock:
         _lane_armed = False
+    _drop_consult_memo()
 
 
 class shadow_build_scope:
@@ -1345,11 +1506,21 @@ def consult(*, caller: str, fingerprint: CoreFingerprint | None = None) -> CoreD
     Every demote is logged with its reason — except ``absent``, which is the
     ordinary cold-start shape and would otherwise print a line on every build in
     every process that has no cache to consult.
+
+    The riders of one boot share ONE judgement (:data:`_consult_memo`) and each
+    still emits its OWN receipt: the log stays a per-caller account of what each
+    asker was told, while the store is walked once. A caller that hands in its
+    own ``fingerprint`` is answered from that key alone and never touches the
+    shared window.
     """
 
     if not lane_armed():
         return CoreDecision(None, False, "")
-    read = read_persisted_core(fingerprint=fingerprint)
+    read = (
+        _armed_window_read()
+        if fingerprint is None
+        else read_persisted_core(fingerprint=fingerprint)
+    )
     if not read.matched or read.core is None:
         if read.reason != DEMOTE_ABSENT:
             _log_demote(caller=caller, reason=read.reason, key=read.fingerprint)
@@ -1383,7 +1554,10 @@ def take_stale_first_core(*, caller: str) -> dict | None:
     with _lane_lock:
         if not _lane_armed or _stale_served:
             return None
-    read = read_persisted_core()
+    # The same shared judgement the riders will get. This read is FIRST in the
+    # boot, so on the ordinary shape it is the one that pays for the walk and
+    # every consult behind it is answered for free.
+    read = _armed_window_read()
     if read.core is None or read.matched:
         # Nothing to paint, or the core MATCHES — in which case the ordinary
         # cache-hit path above will serve it authoritative and painting a stale
