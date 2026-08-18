@@ -195,7 +195,7 @@ def start_draft(capsys, *extra):
         (["approve-direction", "--draft", "d", "--all"], "approve-direction"),
         (["approve-direction", "--draft", "d", "--direction", "ne"], "approve-direction"),
         (["rows", "--draft", "d"], "rows"),
-        (["reroll-row", "--draft", "d", "--row", "walk@e"], "reroll-row"),
+        (["reroll-row", "--draft", "d", "--row", "walk-e"], "reroll-row"),
         (["compose", "--draft", "d"], "compose"),
         (["sprite", "arrow-knight"], "sprite"),
     ],
@@ -304,17 +304,17 @@ def test_a_reroll_and_a_row_reroll_are_reachable_through_the_cli(fake, base_imag
     assert rerolled["note"] == "taller plume"
 
     run(["harness", "characters", "approve-direction", "--draft", draft_id, "--all", "--json"], capsys)
-    run(["harness", "characters", "rows", "--draft", draft_id, "--only", "walk@e", "--json"], capsys)
+    run(["harness", "characters", "rows", "--draft", draft_id, "--only", "walk-e", "--json"], capsys)
 
     code, row = run(
         [
             "harness", "characters", "reroll-row", "--draft", draft_id,
-            "--row", "walk@e", "--note", "tighter step", "--json",
+            "--row", "walk-e", "--note", "tighter step", "--json",
         ],
         capsys,
     )
     assert (code, row["ok"], row["approved"]) == (0, True, True)
-    assert row["row"] == "walk@e"
+    assert row["row"] == "walk-e"
     assert row["attempts"] == 2
 
 
@@ -500,3 +500,27 @@ def test_the_pets_sprite_payload_still_carries_the_keys_the_launcher_reads(tmp_p
     }
     assert payload["pet"]["slug"] == "milo"
     assert base64.standard_b64decode(payload["pet"]["spritesheetBase64"]).startswith(b"\x89PNG")
+def test_start_refuses_a_hyphenated_state_name(fake, capsys):
+    """The row-key separator is refused at the CLI door, in the pets error shape.
+
+    A hyphen in a state name would put a second separator into every row key of
+    that state, and the launcher splits on the LAST one — so the refusal has to
+    happen before a draft directory exists, not at compose time.
+    """
+    code, payload = run(
+        [
+            "harness", "characters", "start",
+            "--concept", "x",
+            "--states", "idle:6,spin-kick:4",
+            "--json",
+        ],
+        capsys,
+    )
+
+    assert code == 2
+    assert payload["ok"] is False
+    assert "may not contain '-'" in payload["error"]
+    assert not isinstance(payload["error"], dict)
+
+    code, listed = run(["harness", "characters", "list", "--json"], capsys)
+    assert listed["drafts"] == []

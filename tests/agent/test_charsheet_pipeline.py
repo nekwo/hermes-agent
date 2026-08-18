@@ -174,7 +174,7 @@ def built(tmp_path_factory, base_image):
                 row,
                 "an arrow knight",
                 reference,
-                out=root / "strips" / f"{row.key.replace('@', '-')}.png",
+                out=root / "strips" / f"{row.key}.png",
             )
         cells = pipeline.compose_draft_frames(SPEC, strips, list(refs.values()))
         sheet = pipeline.compose_sheet(SPEC, cells)
@@ -229,7 +229,7 @@ def test_every_authored_row_lands_at_its_spec_row_index(sheet, cells):
 
 
 def test_a_short_row_leaves_its_trailing_columns_empty(sheet):
-    short = SPEC.row_by_key("idle@e")
+    short = SPEC.row_by_key("idle-e")
 
     assert short.frames < SPEC.columns()
     for column in range(short.frames, SPEC.columns()):
@@ -237,9 +237,9 @@ def test_a_short_row_leaves_its_trailing_columns_empty(sheet):
 
 
 def test_compose_refuses_a_spec_row_with_no_strip(strips, refs):
-    partial = {key: path for key, path in strips.items() if key != "walk@e"}
+    partial = {key: path for key, path in strips.items() if key != "walk-e"}
 
-    with pytest.raises(ValueError, match="no strip for authored row 'walk@e'"):
+    with pytest.raises(ValueError, match="no strip for authored row 'walk-e'"):
         pipeline.compose_draft_frames(SPEC, partial, list(refs.values()))
 
 
@@ -304,7 +304,7 @@ def test_a_wrong_size_image_fails_geometry_before_anything_else(sheet):
 
 
 def test_one_missing_row_is_a_warning_not_an_error(cells):
-    dropped = "walk@n"
+    dropped = "walk-n"
     partial = pipeline.compose_sheet(SPEC, {k: v for k, v in cells.items() if k != dropped})
 
     report = pipeline.validate_sheet(SPEC, partial)
@@ -450,7 +450,7 @@ def test_a_direction_reroll_is_one_square_generation_carrying_the_note(fake, bas
 
 
 def test_a_back_facing_row_prompt_keeps_the_no_face_clause(fake, refs, tmp_path):
-    row = SPEC.row_by_key("walk@n")
+    row = SPEC.row_by_key("walk-n")
     pipeline.generate_row_strip(
         row, "an arrow knight", refs["n"], note="heavier stride", out=tmp_path / "n.png"
     )
@@ -467,7 +467,7 @@ def test_a_back_facing_row_prompt_keeps_the_no_face_clause(fake, refs, tmp_path)
 def test_a_row_whose_poses_touch_is_re_rolled_rather_than_accepted(monkeypatch, refs, tmp_path, base_image):
     provider = FakeProvider(SPEC, tmp_path / "retry", mode="touching-once")
     monkeypatch.setattr(pipeline, "_generate_image", provider)
-    row = SPEC.row_by_key("walk@e")
+    row = SPEC.row_by_key("walk-e")
 
     accepted = pipeline.generate_row_strip(
         row, "an arrow knight", refs["e"], out=tmp_path / "walk-e.png"
@@ -480,7 +480,7 @@ def test_a_row_whose_poses_touch_is_re_rolled_rather_than_accepted(monkeypatch, 
 def test_a_row_that_never_becomes_sliceable_fails_loudly(monkeypatch, refs, tmp_path):
     provider = FakeProvider(SPEC, tmp_path / "blank", mode="blank")
     monkeypatch.setattr(pipeline, "_generate_image", provider)
-    row = SPEC.row_by_key("walk@e")
+    row = SPEC.row_by_key("walk-e")
 
     with pytest.raises(ValueError, match="produced no sliceable strip"):
         pipeline.generate_row_strip(row, "x", refs["e"], out=tmp_path / "walk-e.png")
@@ -490,9 +490,9 @@ def test_a_row_that_never_becomes_sliceable_fails_loudly(monkeypatch, refs, tmp_
 
 
 def test_a_row_needs_an_existing_grounding_reference(fake, tmp_path):
-    with pytest.raises(ValueError, match="grounding reference for row 'walk@e' not found"):
+    with pytest.raises(ValueError, match="grounding reference for row 'walk-e' not found"):
         pipeline.generate_row_strip(
-            SPEC.row_by_key("walk@e"), "x", tmp_path / "gone.png", out=tmp_path / "o.png"
+            SPEC.row_by_key("walk-e"), "x", tmp_path / "gone.png", out=tmp_path / "o.png"
         )
 
     assert fake.calls == []

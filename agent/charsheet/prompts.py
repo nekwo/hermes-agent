@@ -34,9 +34,12 @@ from agent.pet.generate.prompts import (
     style_hint,
 )
 
-# Camera-view phrasing per compass direction, in canonical compass order (the
-# same order `spec.DirectionScheme` iterates). Convention, fixed here and relied
-# on by every other charsheet module: "s" is the character facing the viewer,
+# Camera-view phrasing per compass direction, walking the compass RING. The ring
+# order is load-bearing: `pipeline.turnaround_order` ranks each direction by its
+# ring distance from the front view, so shuffling this dict silently reorders
+# every turnaround. It is NOT `spec.DirectionScheme.order`, which is sheet ROW
+# order (front-first, authored-first) and deliberately differs. Convention,
+# fixed here and relied on by every other charsheet module: "s" is the character facing the viewer,
 # "n" is the character seen from behind, "e"/"w" are clean profiles, diagonals
 # are three-quarter views. "the viewer's right/left" (never the character's) is
 # used throughout so the mirror map ("w" <- "e", "nw" <- "ne", "sw" <- "se")

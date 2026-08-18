@@ -4,7 +4,7 @@ An :class:`ImageRevisionStore` holds *items* keyed by opaque strings.  Each item
 is an append-only list of *attempts* (an image file, an operator note, a
 timestamp) with at most one *approved* attempt.  The store never opens, decodes
 or interprets the images — bytes are copied verbatim — and it never parses the
-keys.  Charsheet mounts it with keys like ``turnaround@n`` / ``row@walk@e``;
+keys.  Charsheet mounts it with keys like ``turnaround@n`` / ``row@walk-e``;
 Eternia Studio can mount the same store over any image set with its own keys.
 Nothing in this module knows what a character, a sheet or a direction is.
 

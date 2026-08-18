@@ -213,12 +213,17 @@ def turnaround_item(direction: str) -> str:
 
 
 def row_item(key: str) -> str:
-    """Revision-store key for a row strip (``row@walk@e``)."""
+    """Revision-store key for a row strip (``row@walk-e``).
+
+    The leading ``row@`` is the store's ITEM-KIND separator — it is not the
+    sheet's row-key separator, which is the hyphen. Both live in one string on
+    purpose: the store never parses keys, so the two namespaces cannot collide.
+    """
     return f"row@{key}"
 
 
 def _strip_filename(key: str, attempt: int) -> str:
-    return f"{key.replace('@', '-')}-{attempt}.png"
+    return f"{key}-{attempt}.png"
 
 
 # ─────────────────────────────── the draft ───────────────────────────────
@@ -528,7 +533,7 @@ class CharacterDraft:
         the mechanical gate already ran, so what is left is a visual judgement the
         operator makes from the status payload.
 
-        *only* restricts the run to the given row keys (``["walk@e"]``).
+        *only* restricts the run to the given row keys (``["walk-e"]``).
         """
         self._require_stage("run_rows", "rows")
         spec = self.spec
@@ -831,6 +836,10 @@ def sprite_payload(slug: str) -> dict:
     ``states``, ``rows``) are what let a consumer read a 16-row sheet without
     inferring the taxonomy from its height — the pet inference trap (§0.4). There
     is no ``framesPerState``: character rows carry true per-row counts only.
+
+    Row keys and the ``stateRows`` order follow the launcher spec (EterniaLauncher
+    ``docs/spatial/CHARACTER_8WAY_SPRITE_FORMAT_SPEC_2026-08-17.md``): a directional
+    row is ``<state>-<direction>``, and row 0 is the front-facing idle.
     """
     safe = _safe_segment(slugify(slug))
     directory = characters_dir() / safe

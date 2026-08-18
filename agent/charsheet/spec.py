@@ -14,9 +14,16 @@ that the CLI, the payload builder, and the tests all touch, and it must import
 with no Pillow, no ``agent_runtime`` (not in the shipped wheel — see the plan's
 §0.3 packaging boundary), and no ``agent.pet`` coupling.
 
-Row identity is the string key ``"<state>@<direction>"`` for directional rows
-and the bare state name otherwise; ``@`` is therefore reserved and rejected in
+Row identity is the string key ``"<state>-<direction>"`` for directional rows
+and the bare state name otherwise; ``-`` is therefore reserved and rejected in
 state names.
+
+The separator, the direction tokens and the row vocabulary are not ours to
+choose. The contract authority is the launcher spec — EterniaLauncher
+``docs/spatial/CHARACTER_8WAY_SPRITE_FORMAT_SPEC_2026-08-17.md``, sections A, C
+and D — whose ``AvatarSpriteSheet._deriveDirectionSectors`` splits every row
+name on its LAST hyphen and matches the tail against the eight direction
+tokens. Hermes conforms to that document rather than restating it.
 """
 
 from __future__ import annotations
@@ -37,8 +44,22 @@ DEFAULT_FRAME_H = 208
 # strip; the pet atlas caps at eight columns for the same reason.
 MAX_FRAMES_PER_ROW = 8
 
-# Lowercase token: state names become row keys, filenames, and JSON keys.
-_STATE_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
+# The launcher's ``CharacterFacingSector`` vocabulary, in that enum's theta
+# order. ``AvatarSpriteSheet._deriveDirectionSectors`` (launcher
+# ``packages/eternia_spatial/lib/src/cosmetics/avatar_sprite_resolver.dart``)
+# splits a row name on its LAST hyphen and matches the tail against exactly
+# these eight tokens; a tail outside the set contributes nothing to the sheet's
+# derived sector count, so an unknown token would silently downgrade a sheet.
+# Row ORDER is NOT required to be this theta order — the launcher addresses
+# rows by NAME — which is why ``DirectionScheme.order`` below is free to be the
+# authoring order instead.
+DIRECTION_TOKENS: tuple[str, ...] = ("e", "se", "s", "sw", "w", "nw", "n", "ne")
+
+# Lowercase token: state names become row keys, filenames, and JSON keys. ``-``
+# is excluded on purpose — it is the row-key separator (see the module
+# docstring), and a hyphenated state name would hand the launcher's deriver a
+# last segment it never meant to parse.
+_STATE_NAME_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 # Marker suffix in ``--states`` meaning "this state is not directional".
 _FIXED_MARKER = "fixed"
@@ -116,6 +137,17 @@ class DirectionScheme:
                 "order must be authored or mirrored"
             )
 
+        # Last, so that every other failure keeps its own message: the tokens
+        # themselves must be ones the launcher deriver can read.
+        unknown_tokens = [
+            direction for direction in self.order if direction not in DIRECTION_TOKENS
+        ]
+        if unknown_tokens:
+            raise ValueError(
+                f"unknown direction token(s) {unknown_tokens}; the launcher "
+                "deriver only reads e se s sw w nw n ne"
+            )
+
         # Defensive copy: the field is a plain dict for the CLI/JSON round-trip,
         # so freezing the dataclass alone would not stop a caller mutating the
         # mapping they passed in out from under a constructed scheme.
@@ -129,15 +161,25 @@ class DirectionScheme:
         return self.mirrored.get(direction)
 
 
+# Row order is front-first, authored-first, for two reasons. (1) Row 0 of the
+# default character sheet is then ``idle-s``, so the launcher's degenerate
+# ``clipFor`` fallback — which lands on row 0 when nothing else matches —
+# reads front-facing rather than side-on (launcher spec section G, risk 7).
+# (2) The authored directions lead, in the same front-to-back walk that
+# ``pipeline.turnaround_order`` ranks out of ``prompts.VIEW_LANGUAGE``, so each
+# state block reads 'drawn rows, then derived rows' and the authored prefix is
+# exactly the launcher's ``s, se, e, ne, n``. This is deliberately NOT the theta
+# order of ``DIRECTION_TOKENS``; it does not need to be, because rows are
+# addressed by name.
 EIGHT_WAY = DirectionScheme(
-    order=("n", "ne", "e", "se", "s", "sw", "w", "nw"),
-    authored=("n", "ne", "e", "se", "s"),
+    order=("s", "se", "e", "ne", "n", "nw", "w", "sw"),
+    authored=("s", "se", "e", "ne", "n"),
     mirrored={"nw": "ne", "w": "e", "sw": "se"},
 )
 
 FOUR_WAY = DirectionScheme(
-    order=("n", "e", "s", "w"),
-    authored=("n", "e", "s"),
+    order=("s", "e", "n", "w"),
+    authored=("s", "e", "n"),
     mirrored={"w": "e"},
 )
 
@@ -178,7 +220,7 @@ class SheetSpec:
             if not _STATE_NAME_RE.match(state.name):
                 raise ValueError(
                     f"invalid state name {state.name!r}: expected a lowercase "
-                    "token matching [a-z][a-z0-9_-]*"
+                    "token matching [a-z][a-z0-9_]*"
                 )
             if not 1 <= state.frames <= MAX_FRAMES_PER_ROW:
                 raise ValueError(
@@ -247,8 +289,8 @@ class SheetSpec:
 
 
 def row_key(state: str, direction: str | None) -> str:
-    """``"walk@ne"`` for a directional row, ``"cheer"`` when non-directional."""
-    return state if direction is None else f"{state}@{direction}"
+    """``"walk-ne"`` for a directional row, ``"cheer"`` when non-directional."""
+    return state if direction is None else f"{state}-{direction}"
 
 
 CHAR8 = SheetSpec(
@@ -286,15 +328,15 @@ def parse_states(text: str) -> tuple[StateSpec, ...]:
                 )
             directional = False
 
-        if "@" in name:
+        if "-" in name:
             raise ValueError(
-                f"state name {name!r} may not contain '@': it separates state "
+                f"state name {name!r} may not contain '-': it separates state "
                 "from direction in row keys"
             )
         if not _STATE_NAME_RE.match(name):
             raise ValueError(
                 f"invalid state name {name!r} in {entry!r}: expected a "
-                "lowercase token matching [a-z][a-z0-9_-]*"
+                "lowercase token matching [a-z][a-z0-9_]*"
             )
         if name in seen:
             raise ValueError(f"duplicate state {name!r} in {text!r}")

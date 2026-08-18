@@ -220,7 +220,7 @@ def test_stages_are_declared_in_qa_order(draft):
     "verb",
     [
         lambda d: d.run_rows(),
-        lambda d: d.reroll_row("walk@e"),
+        lambda d: d.reroll_row("walk-e"),
         lambda d: d.compose(),
     ],
 )
@@ -254,7 +254,7 @@ def test_a_turnaround_verb_is_refused_once_the_stage_has_advanced(fake, base, ve
     "verb",
     [
         lambda d: d.run_rows(),
-        lambda d: d.reroll_row("walk@e"),
+        lambda d: d.reroll_row("walk-e"),
         lambda d: d.compose(),
         lambda d: d.run_turnaround(),
     ],
@@ -358,25 +358,25 @@ def test_every_accepted_row_strip_is_proposed_and_approved(fake, base):
 def test_a_directional_row_is_grounded_on_its_approved_direction_reference(fake, base):
     draft = run_to_rows(base)
 
-    result = draft.run_rows(only=["walk@e"])
+    result = draft.run_rows(only=["walk-e"])
 
-    assert list(result["rows"]) == ["walk@e"]
-    assert result["rows"]["walk@e"]["reference"] == str(draft.store.current(turnaround_item("e")))
+    assert list(result["rows"]) == ["walk-e"]
+    assert result["rows"]["walk-e"]["reference"] == str(draft.store.current(turnaround_item("e")))
 
 
 def test_re_rolling_a_row_keeps_it_approved_and_records_the_note(fake, base):
     draft = run_to_rows(base)
-    draft.run_rows(only=["walk@e"])
+    draft.run_rows(only=["walk-e"])
 
-    result = draft.reroll_row("walk@e", note="tighter step")
+    result = draft.reroll_row("walk-e", note="tighter step")
 
     assert result["approved"] is True
     assert result["attempts"] == 2
-    assert draft.store.approved_index(row_item("walk@e")) == 1
-    assert draft.store.history(row_item("walk@e"))[-1]["note"] == "tighter step"
+    assert draft.store.approved_index(row_item("walk-e")) == 1
+    assert draft.store.history(row_item("walk-e"))[-1]["note"] == "tighter step"
 
 
-@pytest.mark.parametrize("bad", ["walk@nope", "fly@e", "walk", ""])
+@pytest.mark.parametrize("bad", ["walk-nope", "fly-e", "walk", ""])
 def test_a_row_key_the_sheet_does_not_author_is_refused(fake, base, bad):
     draft = run_to_rows(base)
 
@@ -399,8 +399,8 @@ def test_a_mirrored_row_cannot_be_generated(fake, base):
 
 def test_compose_refuses_while_any_authored_row_lacks_an_approved_strip(fake, base):
     draft = run_to_rows(base)
-    draft.run_rows(only=["walk@e"])
-    missing = [row.key for row in SPEC.authored_rows() if row.key != "walk@e"]
+    draft.run_rows(only=["walk-e"])
+    missing = [row.key for row in SPEC.authored_rows() if row.key != "walk-e"]
 
     with pytest.raises(ValueError) as excinfo:
         draft.compose()
@@ -529,8 +529,8 @@ def test_the_draft_on_disk_is_the_truth_across_instances(fake, base):
     assert reloaded.spec == SPEC
     assert reloaded.directory == draft.directory
 
-    reloaded.run_rows(only=["walk@e"])
-    assert draft.store.current(row_item("walk@e")) is not None
+    reloaded.run_rows(only=["walk-e"])
+    assert draft.store.current(row_item("walk-e")) is not None
 
 
 def test_list_drafts_skips_directories_that_hold_no_draft(draft):
@@ -663,3 +663,18 @@ def test_an_installed_character_without_its_sheet_is_reported_separately(home):
 
     with pytest.raises(FileNotFoundError, match="has no sheet"):
         sprite_payload("ghost")
+def test_sprite_payload_state_rows_are_hyphen_keyed_and_front_first(installed):
+    """The payload the launcher actually receives, at the join.
+
+    Everything above proves the spec objects; this proves the JSON. The launcher
+    reads ``stateRows`` and hands each entry to
+    ``AvatarSpriteSheet._deriveDirectionSectors``, so the hyphen separator and
+    the front-first row order have to survive compose, install and serialisation
+    — not merely hold in ``SheetSpec.rows()``.
+    """
+    payload = sprite_payload(installed["slug"])
+
+    assert payload["stateRows"][0] == "idle-s"
+    assert all("@" not in key for key in payload["framesByRow"])
+    assert payload["stateRows"] == [row["key"] for row in payload["rows"]]
+    assert payload["directions"]["order"][0] == "s"

@@ -106,8 +106,13 @@ def view_prefix(direction: str) -> str:
 
 
 def row_prefix(key: str) -> str:
-    """Provider-file prefix for a row strip (``@`` is not filename-friendly)."""
-    return "charsheet_row_" + str(key).replace("@", "_")
+    """Provider-file prefix for a row strip (``charsheet_row_walk-e``).
+
+    Row keys are filename-safe by construction: the state half is
+    ``[a-z][a-z0-9_]*`` and the separator is a hyphen, so the key travels into
+    a provider filename verbatim.
+    """
+    return "charsheet_row_" + str(key)
 
 
 def _open_rgba(source):

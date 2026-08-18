@@ -15,6 +15,7 @@ from agent.charsheet.spec import (
     CHAR8,
     DEFAULT_FRAME_H,
     DEFAULT_FRAME_W,
+    DIRECTION_TOKENS,
     EIGHT_WAY,
     FOUR_WAY,
     MAX_FRAMES_PER_ROW,
@@ -152,13 +153,13 @@ def test_row_keys_carry_state_and_direction(scheme):
     spec = spec_for(scheme, (StateSpec("walk", 3, True),))
 
     for row in spec.rows():
-        assert row.key == f"walk@{row.direction}" == row_key(row.state, row.direction)
+        assert row.key == f"walk-{row.direction}" == row_key(row.state, row.direction)
         assert spec.row_by_key(row.key) == row
 
 
 def test_row_by_key_rejects_a_key_the_sheet_does_not_have():
     with pytest.raises(ValueError, match="no such row key"):
-        CHAR8.row_by_key("walk@up")
+        CHAR8.row_by_key("walk-up")
 
 
 # ───────────────────────── authored vs mirrored rows ─────────────────────────
@@ -272,6 +273,7 @@ def test_default_char8_sheet_is_all_directional_states_in_eight_way():
         ((StateSpec("walk", 2, True), StateSpec("walk", 3, True)), "duplicate state names"),
         ((StateSpec("Walk", 2, True),), "invalid state name"),
         ((StateSpec("walk@e", 2, True),), "invalid state name"),
+        ((StateSpec("spin-kick", 2, True),), "invalid state name"),
         ((StateSpec("walk", 0, True),), "expected 1.."),
         ((StateSpec("walk", MAX_FRAMES_PER_ROW + 1, True),), "expected 1.."),
     ],
@@ -301,7 +303,7 @@ def test_parse_states_reads_frames_and_the_fixed_marker():
 
 
 def test_parse_states_round_trips_its_own_rendering():
-    original = parse_states("idle:6,walk:8,cheer:5:fixed,jump-2:3")
+    original = parse_states("idle:6,walk:8,cheer:5:fixed,jump_2:3")
     rendered = ",".join(
         f"{s.name}:{s.frames}" + ("" if s.directional else ":fixed") for s in original
     )
@@ -325,7 +327,8 @@ def test_parse_states_accepts_the_default_sheet_rendered_back():
         ("idle", "malformed state entry"),
         ("idle:6:fixed:extra", "malformed state entry"),
         ("idle:6:loose", "unknown state flag"),
-        ("idle@e:6", "may not contain '@'"),
+        ("idle@e:6", "invalid state name"),
+        ("idle-e:6", "may not contain '-'"),
         ("Idle:6", "invalid state name"),
         ("2idle:6", "invalid state name"),
         ("idle:6,idle:8", "duplicate state"),
@@ -367,3 +370,82 @@ def test_parse_directions_maps_a_count_to_a_closed_scheme():
 def test_parse_directions_rejects_an_unknown_scheme(text):
     with pytest.raises(ValueError, match="unknown direction scheme"):
         parse_directions(text)
+# ────────────────── the launcher row-key contract (C5) ──────────────────
+
+
+def test_row_keys_are_the_launcher_deriver_vocabulary():
+    """Every row key is one the launcher's sector deriver can actually read.
+
+    The consumer is ``AvatarSpriteSheet._deriveDirectionSectors`` in the
+    EterniaLauncher package ``eternia_spatial``
+    (``lib/src/cosmetics/avatar_sprite_resolver.dart``): it splits a row name on
+    its LAST hyphen and looks the tail up in an eight-token direction table. A
+    key spelled with any other separator therefore contributes ZERO covered
+    sectors and an 8-way sheet silently degrades to two-way at runtime — no
+    error, no log, just a character that only ever faces east or west.
+
+    The token tuple below is transcribed from the launcher spec
+    (``docs/spatial/CHARACTER_8WAY_SPRITE_FORMAT_SPEC_2026-08-17.md``, §D), NOT
+    imported from the module under test; the equality against
+    ``DIRECTION_TOKENS`` is what makes a drift in that constant fail HERE rather
+    than in the launcher.
+    """
+    launcher_tokens = ("e", "se", "s", "sw", "w", "nw", "n", "ne")
+    assert tuple(DIRECTION_TOKENS) == launcher_tokens
+
+    states = (
+        StateSpec("idle", 6, True),
+        StateSpec("walk", 8, True),
+        StateSpec("cheer", 5, False),
+    )
+    for scheme in (EIGHT_WAY, FOUR_WAY):
+        spec = spec_for(scheme, states)
+        directional = [row for row in spec.rows() if row.direction is not None]
+        assert directional, "the fixture must actually carry directional rows"
+
+        for row in spec.rows():
+            if row.direction is None:
+                assert "-" not in row.key
+                continue
+            assert row.key.count("@") == 0
+            state, sep, token = row.key.rpartition("-")
+            assert sep == "-"
+            assert state == row.state
+            assert token == row.direction
+            assert token in launcher_tokens
+
+
+def test_char8_row_zero_is_the_front_facing_idle():
+    """Row 0 is ``idle-s``, because the launcher's last-resort clip lands there.
+
+    ``AvatarSpriteSheet.clipFor`` falls through to row 0 when nothing in a
+    candidate chain matches, so row 0 decides what a degenerate lookup looks
+    like on screen. Front-facing is the only defensible answer (launcher spec
+    §G, risk 7), and it is a property of the ROW ORDER, not of any one sheet.
+    """
+    keys = [row.key for row in CHAR8.rows()]
+
+    assert keys[0] == "idle-s"
+    assert keys[:5] == ["idle-s", "idle-se", "idle-e", "idle-ne", "idle-n"]
+    assert keys[8] == "walk-s"
+    assert EIGHT_WAY.authored == ("s", "se", "e", "ne", "n")
+    assert FOUR_WAY.order == ("s", "e", "n", "w")
+
+
+def test_a_state_name_may_not_carry_a_hyphen():
+    """The hyphen belongs to the row key, so no state name may spend one.
+
+    Closed by construction rather than by vocabulary: because the launcher
+    splits on the LAST hyphen of every row, a state like ``spin-kick`` would
+    make row parsing depend on which tokens happen to be in the direction table
+    today. Rejecting the character outright keeps the contract decidable, and
+    keeps ``<key>-<attempt>.png`` strip filenames unambiguous.
+    """
+    with pytest.raises(ValueError, match="may not contain '-'"):
+        parse_states("walk-e:8")
+
+    with pytest.raises(ValueError, match="invalid state name"):
+        SheetSpec(states=(StateSpec("spin-kick", 2, True),), scheme=FOUR_WAY)
+
+    with pytest.raises(ValueError, match="unknown direction token"):
+        DirectionScheme(order=("s", "up"), authored=("s", "up"))
