@@ -34,6 +34,42 @@ from typing import Callable, Iterable, Iterator, List, Mapping, Optional, Protoc
 
 from agent.skill_utils import is_excluded_skill_path
 
+
+class ProcessTableUnreadable(Exception):
+    """Raised when this machine cannot be asked which processes are running.
+
+    The factual half of the delete refusal: ``_PROCESS_LISTER.read()`` answered
+    ``None``, which means there is no inspector at all (no ``psutil``, or it
+    would not import).  That is emphatically NOT "no backends are bound" — that
+    answer is an *empty list read off a table that existed*.  Conflating the
+    two is what let profile delete ``rmtree`` a directory a live backend was
+    still writing into: an unknowable writer set read exactly like a
+    known-empty one, and the caller could not tell which it had.
+
+    ``code`` rides any envelope that carries this outward, the same way
+    ``agent_runtime.errors.ArchiveUnreadable``'s does.
+    """
+
+    code = "process_table_unreadable"
+
+
+class ProfileDeleteBlocked(Exception):
+    """Raised when ``delete_profile`` refuses, before its first irreversible step.
+
+    ``code`` is the typed machine reason (today only
+    ``process_table_unreadable``); ``safe_details`` carries operator-safe hints
+    only, never profile content.  Mirrors
+    ``agent_runtime.errors.WorkspaceDeleteBlocked``, which is the same shape for
+    the same reason: a delete that cannot establish its precondition refuses
+    with a name the caller can branch on, not a bare string it must match on.
+    """
+
+    def __init__(self, code: str, message: str, *, safe_details: Optional[dict] = None):
+        super().__init__(message)
+        self.code = code
+        self.safe_details = dict(safe_details or {})
+
+
 _PROFILE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 # Directories bootstrapped inside every new profile
@@ -1512,7 +1548,12 @@ class _PsutilProcessLister:
 _PROCESS_LISTER: "_ProcessLister" = _PsutilProcessLister()
 
 
-def _profile_bound_backend_pids(canon: str, profile_dir: Path) -> list[int]:
+def _profile_bound_backend_pids(
+    canon: str,
+    profile_dir: Path,
+    *,
+    table: Optional["_ProcessTable"] = None,
+) -> list[int]:
     """PIDs of running Hermes *backends* bound to this profile.
 
     The ``gateway.pid`` file only tracks the messaging gateway.  A Desktop app
@@ -1525,18 +1566,36 @@ def _profile_bound_backend_pids(canon: str, profile_dir: Path) -> list[int]:
     by a ``--profile <canon>`` / ``-p <canon>`` selector or by a ``HERMES_HOME``
     that resolves to ``profile_dir``.
 
-    Best-effort and tightly scoped: current-user processes only, backend
-    subcommands only (never an interactive ``chat``/``tui``), and never this
-    process or its ancestors.  Returns an empty list if the process table
-    can't be inspected at all.
+    Tightly scoped: current-user processes only, backend subcommands only
+    (never an interactive ``chat``/``tui``), and never this process or its
+    ancestors.  An empty list therefore means "the table was read and nothing
+    in it is bound to this profile" — a *fact*.
 
-    Reads its processes from ``_PROCESS_LISTER`` — see the seam above.  The
-    filters below are the whole of this function's policy; the lister supplies
-    facts and decides nothing.
+    Raises :class:`ProcessTableUnreadable` when there is no inspector at all.
+    It used to answer ``[]`` there, which is the same answer as "nothing is
+    bound" and let the caller ``rmtree`` past a writer it simply could not see.
+    An unknowable writer set is not an empty one, and only the caller can
+    decide what to do about not knowing.
+
+    Reads its processes from ``_PROCESS_LISTER`` — see the seam above — unless
+    the caller already read one and passes it as ``table``.  The delete path
+    does exactly that: it reads the table BEFORE its first irreversible step so
+    it can refuse there, and hands that same reading down here.  Nothing is
+    staled by the hand-off — ``_ProcessTable.processes`` enumerates lazily, so
+    the rows are still the machine's rows at the moment this function walks
+    them; only "which pid am I / who are my ancestors / who am I" are captured
+    early, and those do not change within one delete.
+
+    The filters below are the whole of this function's policy; the lister
+    supplies facts and decides nothing.
     """
-    table = _PROCESS_LISTER.read()
     if table is None:
-        return []
+        table = _PROCESS_LISTER.read()
+        if table is None:
+            raise ProcessTableUnreadable(
+                "no process inspector on this machine: the set of Hermes "
+                f"backends writing into profile '{canon}' is unknowable"
+            )
 
     try:
         resolved_dir = profile_dir.resolve()
@@ -1616,7 +1675,12 @@ def _profile_bound_backend_pids(canon: str, profile_dir: Path) -> list[int]:
     return pids
 
 
-def _stop_profile_backends(canon: str, profile_dir: Path) -> None:
+def _stop_profile_backends(
+    canon: str,
+    profile_dir: Path,
+    *,
+    table: Optional["_ProcessTable"] = None,
+) -> None:
     """Terminate any Desktop-spawned / stray backends bound to this profile.
 
     Complements ``_stop_gateway_process`` (which only knows ``gateway.pid``):
@@ -1624,8 +1688,13 @@ def _stop_profile_backends(canon: str, profile_dir: Path) -> None:
     under the profile dir while ``rmtree`` walks it, so the final ``rmdir``
     fails with ``ENOTEMPTY`` and the delete doesn't converge.  Best-effort:
     any failure is reported and swallowed so it never makes delete worse.
+
+    ``table`` is the reading the caller already took (see ``delete_profile``);
+    without one this reads its own and inherits
+    :class:`ProcessTableUnreadable`, which is a refusal, not a failure to
+    swallow — the caller decides.
     """
-    pids = _profile_bound_backend_pids(canon, profile_dir)
+    pids = _profile_bound_backend_pids(canon, profile_dir, table=table)
     if not pids:
         return
 
@@ -1687,11 +1756,25 @@ def _rmtree_with_retry(profile_dir: Path, onexc_handler) -> None:
         raise last_exc
 
 
-def delete_profile(name: str, yes: bool = False) -> Path:
+def delete_profile(
+    name: str,
+    yes: bool = False,
+    *,
+    force_unverified_writers: bool = False,
+) -> Path:
     """Delete a profile, its wrapper script, and its gateway service.
 
     Stops the gateway if running. Disables systemd/launchd service first
     to prevent auto-restart.
+
+    Refuses with :class:`ProfileDeleteBlocked` (``process_table_unreadable``)
+    when this machine has no process inspector, because then it cannot tell
+    whether a Hermes backend is still writing into the directory it is about to
+    remove — and "cannot tell" is not "nobody is".  The refusal lands before the
+    first irreversible step (the service teardown below), so a refused delete
+    leaves the profile exactly as it found it.  ``force_unverified_writers``
+    overrides that: a deliberate operator act, billed on stdout, never a
+    default.
 
     Returns the path that was removed.
     """
@@ -1707,6 +1790,41 @@ def delete_profile(name: str, yes: bool = False) -> Path:
     profile_dir = get_profile_dir(canon)
     if not profile_dir.is_dir():
         raise FileNotFoundError(f"Profile '{canon}' does not exist.")
+
+    # Who is writing into this profile?  Read the process table HERE, before
+    # anything below is irreversible, because a delete that cannot answer that
+    # question must refuse rather than guess: `rmtree` on a directory a live
+    # backend still holds is the ENOTEMPTY (and, pre-fix, the resurrected tree)
+    # `_stop_profile_backends` exists to prevent, and "no inspector" reads
+    # identically to "nobody is bound" once it has been flattened to a list.
+    # The reading travels down to the stop step so the machine is asked exactly
+    # once; its rows enumerate lazily, so that step still sees the processes
+    # alive at the moment it runs.
+    process_table = _PROCESS_LISTER.read()
+    if process_table is None:
+        if not force_unverified_writers:
+            raise ProfileDeleteBlocked(
+                "process_table_unreadable",
+                f"Refusing to delete profile '{canon}': this machine has no "
+                "process inspector, so Hermes cannot check whether a Hermes "
+                "backend (serve / dashboard / gateway) is still writing into "
+                f"{profile_dir}. Deleting blind can leave the directory "
+                "half-removed while a live writer recreates files under it.\n"
+                "  Fix it:   install psutil (pip install psutil), then retry — "
+                "any bound backend is found and stopped first.\n"
+                "  Or force: hermes profile delete "
+                f"{canon} --force-unverified-writers",
+                safe_details={
+                    "profile": canon,
+                    "override_flag": "--force-unverified-writers",
+                },
+            )
+        print(
+            "⚠ --force-unverified-writers: deleting without checking for "
+            "backends bound to this profile (no process inspector on this "
+            "machine). A live writer can leave files behind."
+        )
+
     # Show what will be deleted
     model, provider = _read_config_model(profile_dir)
     gw_running = _check_gateway_running(profile_dir)
@@ -1767,8 +1885,10 @@ def delete_profile(name: str, yes: bool = False) -> Path:
     # serve/dashboard processes the gateway.pid file never names). They hold
     # the profile's SQLite connection open and keep writing files, which makes
     # the rmtree below fail with ENOTEMPTY and — before the ensure_hermes_home
-    # guard — resurrected the deleted tree.
-    _stop_profile_backends(canon, profile_dir)
+    # guard — resurrected the deleted tree.  ``process_table`` is None only on
+    # the forced path above, where by construction there is nothing to ask.
+    if process_table is not None:
+        _stop_profile_backends(canon, profile_dir, table=process_table)
 
     # 3. Remove wrapper script
     if has_wrapper:

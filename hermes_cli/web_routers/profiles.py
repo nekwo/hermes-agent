@@ -633,10 +633,21 @@ async def rename_profile_endpoint(name: str, body: ProfileRename):
 async def delete_profile_endpoint(name: str):
     """Delete a profile. The dashboard collects the user's confirmation in
     its own dialog before this request, so we always pass ``yes=True`` to
-    skip the CLI's interactive prompt."""
+    skip the CLI's interactive prompt.
+
+    A typed delete refusal is a 409, not a 500: nothing was touched and nothing
+    crashed, so it must not be logged as an exception or reported to the
+    dashboard as a server fault. There is deliberately no override parameter —
+    forcing a delete past an unknowable writer set is a decision an operator
+    makes at a terminal, not one a dashboard button makes for them.
+    """
     from hermes_cli import profiles as profiles_mod
     try:
         path = profiles_mod.delete_profile(name, yes=True)
+    except profiles_mod.ProfileDeleteBlocked as e:
+        raise HTTPException(
+            status_code=409, detail={"code": e.code, "message": str(e)}
+        )
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:

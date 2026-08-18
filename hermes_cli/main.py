@@ -9486,6 +9486,7 @@ def cmd_profile(args):
         list_profiles,
         create_profile,
         delete_profile,
+        ProfileDeleteBlocked,
         seed_profile_skills,
         set_active_profile,
         get_active_profile_name,
@@ -9691,7 +9692,18 @@ def cmd_profile(args):
         name = args.profile_name
         yes = getattr(args, "yes", False)
         try:
-            delete_profile(name, yes=yes)
+            delete_profile(
+                name,
+                yes=yes,
+                force_unverified_writers=getattr(
+                    args, "force_unverified_writers", False
+                ),
+            )
+        except ProfileDeleteBlocked as e:
+            # A refusal, not a crash: nothing was touched, and the message
+            # names both the fix and the deliberate override.
+            print(f"Refused [{e.code}]: {e}")
+            sys.exit(1)
         except (ValueError, FileNotFoundError) as e:
             print(f"Error: {e}")
             sys.exit(1)

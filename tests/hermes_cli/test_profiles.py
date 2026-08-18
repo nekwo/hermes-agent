@@ -435,6 +435,18 @@ class _DrivenProcessLister:
         return self._table
 
 
+class _NoInspectorLister:
+    """A machine with no way to enumerate processes at all.
+
+    ``read() -> None`` is the seam's typed "there is no inspector" arm — what
+    a box without ``psutil`` actually produces. Distinct from an empty
+    ``_ProcessTable``, which is a table that WAS read and holds nothing.
+    """
+
+    def read(self):
+        return None
+
+
 class _RealEnumeratorRecorder:
     """Stands in for ``psutil.process_iter`` and refuses to enumerate.
 
@@ -584,17 +596,44 @@ class TestProcessListerSeam:
         assert profiles._profile_bound_backend_pids("coder", profile_dir) == [302]
         assert recorder.calls == 0
 
-    def test_no_inspector_at_all_answers_empty(self, profile_env, monkeypatch):
-        """``read() -> None`` is the typed "cannot inspect" arm, still ``[]``."""
+    def test_no_inspector_at_all_refuses_instead_of_answering_empty(
+        self, profile_env, monkeypatch
+    ):
+        """``read() -> None`` raises; it must not read as "nothing is bound".
+
+        The two answers were the same list before ML-16, so no caller could
+        branch on the difference — the whole defect in one line.
+        """
         create_profile("coder", no_alias=True)
         profile_dir = get_profile_dir("coder")
 
-        class _NoInspector:
-            def read(self):
-                return None
+        monkeypatch.setattr(profiles, "_PROCESS_LISTER", _NoInspectorLister())
+        with pytest.raises(profiles.ProcessTableUnreadable) as excinfo:
+            profiles._profile_bound_backend_pids("coder", profile_dir)
+        assert excinfo.value.code == "process_table_unreadable"
 
-        monkeypatch.setattr(profiles, "_PROCESS_LISTER", _NoInspector())
-        assert profiles._profile_bound_backend_pids("coder", profile_dir) == []
+    def test_a_handed_down_table_is_not_re_read(self, profile_env, monkeypatch):
+        """The delete path reads once and passes the reading down.
+
+        A lister that would raise proves the hand-off is real: if the function
+        re-read the seam instead of using its argument, this would refuse.
+        """
+        create_profile("coder", no_alias=True)
+        profile_dir = get_profile_dir("coder")
+
+        monkeypatch.setattr(profiles, "_PROCESS_LISTER", _NoInspectorLister())
+        handed_down = profiles._ProcessTable(
+            self_pid=os.getpid(),
+            ancestor_pids=frozenset(),
+            current_username=None,
+            processes=(),
+        )
+        assert (
+            profiles._profile_bound_backend_pids(
+                "coder", profile_dir, table=handed_down
+            )
+            == []
+        )
 
     def test_delete_does_not_read_the_live_process_table(
         self, profile_env, monkeypatch
@@ -611,6 +650,129 @@ class TestProcessListerSeam:
 
         assert not profile_dir.is_dir()
         assert recorder.calls == 0
+
+
+# ===================================================================
+# TestDeleteRefusesUnknowableWriters
+# ===================================================================
+
+class TestDeleteRefusesUnknowableWriters:
+    """Profile delete refuses when it cannot see who is writing.
+
+    ``_stop_profile_backends`` exists because a live ``serve``/``dashboard``
+    keeps writing into the profile dir while ``rmtree`` walks it. When the
+    process table cannot be read at all, that scan cannot do its job — and the
+    old answer (``[]``) was indistinguishable from "nothing is bound", so the
+    delete proceeded into exactly the case the scan was added to prevent.
+    """
+
+    def test_no_inspector_refuses_before_the_first_irreversible_step(
+        self, profile_env, monkeypatch
+    ):
+        profile_dir = create_profile("coder", no_alias=True)
+        before = sorted(p.name for p in profile_dir.iterdir())
+        assert before, "fixture must leave something to lose"
+
+        monkeypatch.setattr(profiles, "_PROCESS_LISTER", _NoInspectorLister())
+
+        with patch("hermes_cli.profiles._cleanup_gateway_service") as cleanup:
+            with pytest.raises(profiles.ProfileDeleteBlocked) as excinfo:
+                delete_profile("coder", yes=True)
+
+        assert excinfo.value.code == "process_table_unreadable"
+        assert excinfo.value.safe_details["override_flag"] == (
+            "--force-unverified-writers"
+        )
+        # Nothing was touched: not the directory, and not the service teardown
+        # that runs first inside delete_profile. Refusing late would still lose
+        # the gateway service, so the ORDER is part of the claim.
+        assert profile_dir.is_dir()
+        assert sorted(p.name for p in profile_dir.iterdir()) == before
+        assert cleanup.call_count == 0
+
+    def test_the_override_proceeds_and_is_billed_on_stdout(
+        self, profile_env, monkeypatch, capsys
+    ):
+        profile_dir = create_profile("coder", no_alias=True)
+        monkeypatch.setattr(profiles, "_PROCESS_LISTER", _NoInspectorLister())
+
+        with patch("hermes_cli.profiles._cleanup_gateway_service"):
+            delete_profile("coder", yes=True, force_unverified_writers=True)
+
+        assert not profile_dir.is_dir()
+        # A conscious operator act says so out loud — a silent forced delete
+        # would be the fail-quiet behaviour again, just spelled differently.
+        assert "--force-unverified-writers" in capsys.readouterr().out
+
+    def test_a_readable_table_deletes_exactly_as_before(
+        self, profile_env, monkeypatch
+    ):
+        """Regression pin: a real (driven) table with nothing bound proceeds."""
+        profile_dir = create_profile("coder", no_alias=True)
+        lister = _DrivenProcessLister(
+            profiles._ProcessTable(
+                self_pid=os.getpid(),
+                ancestor_pids=frozenset(),
+                current_username=None,
+                processes=(),
+            )
+        )
+        monkeypatch.setattr(profiles, "_PROCESS_LISTER", lister)
+
+        with patch("hermes_cli.profiles._cleanup_gateway_service"):
+            delete_profile("coder", yes=True)
+
+        assert not profile_dir.is_dir()
+        # ONE read for the whole delete: the pre-flight reading is the one the
+        # stop step uses. Two reads would mean the refusal gate and the scan
+        # can disagree about the same machine.
+        assert lister.reads == 1
+
+    def test_the_delete_parser_defaults_to_refusing(self):
+        """The override is a flag an operator types, never a default."""
+        import argparse
+
+        from hermes_cli.subcommands.profile import build_profile_parser
+
+        parser = argparse.ArgumentParser()
+        sub = parser.add_subparsers(dest="command")
+        build_profile_parser(sub, cmd_profile=lambda *a, **kw: None)
+
+        assert (
+            parser.parse_args(["profile", "delete", "coder"])
+            .force_unverified_writers
+            is False
+        )
+        assert (
+            parser.parse_args(
+                ["profile", "delete", "coder", "--force-unverified-writers"]
+            ).force_unverified_writers
+            is True
+        )
+
+    def test_the_dashboard_endpoint_reports_a_refusal_as_a_conflict(
+        self, monkeypatch
+    ):
+        """A refusal is a 409, not a logged 500 — nothing crashed."""
+        pytest.importorskip("fastapi")
+        import asyncio
+
+        from fastapi import HTTPException
+
+        from hermes_cli.web_routers import profiles as web_profiles
+
+        def _refuse(*_a, **_kw):
+            raise profiles.ProfileDeleteBlocked(
+                "process_table_unreadable", "no inspector"
+            )
+
+        monkeypatch.setattr(profiles, "delete_profile", _refuse)
+
+        with pytest.raises(HTTPException) as excinfo:
+            asyncio.run(web_profiles.delete_profile_endpoint("coder"))
+
+        assert excinfo.value.status_code == 409
+        assert excinfo.value.detail["code"] == "process_table_unreadable"
 
 
 # ===================================================================
