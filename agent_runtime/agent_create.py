@@ -555,10 +555,6 @@ class AgentCreateOutcome:
     result: dict[str, Any] | None = None
     refusal: AgentCreateRefusal | None = None
 
-    @property
-    def ok(self) -> bool:
-        return self.refusal is None
-
 
 def _refused(code: int, message: Any, data: dict[str, Any]) -> AgentCreateOutcome:
     return AgentCreateOutcome(

@@ -1291,15 +1291,6 @@ def _persisted_persona_instance_id(raw: dict[str, Any]) -> str | None:
     )
 
 
-def _persona_chat_creation_sort_key(row: dict[str, Any]) -> tuple[bool, str, str]:
-    created_at = _iso_timestamp(row.get("created_at"))
-    return (
-        created_at is not None,
-        created_at or "",
-        safe_assignment_text(row.get("session_id"), limit=200),
-    )
-
-
 def _persona_chat_candidate_sort_key(
     candidate: tuple[dict[str, Any], PersonaInstance, str, str, str | None]
 ) -> tuple[bool, str, str]:

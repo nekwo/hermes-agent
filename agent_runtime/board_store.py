@@ -569,12 +569,6 @@ class BoardStore:
     def _scan_archived_cards(self, board_id: str) -> CardScan:
         return self._scan_card_dir(paths.board_archive_dir(board_id))
 
-    def _list_active_cards(self, board_id: str) -> list[BoardCard]:
-        return self._scan_active_cards(board_id).cards
-
-    def _list_archived_cards(self, board_id: str) -> list[BoardCard]:
-        return self._scan_archived_cards(board_id).cards
-
     def _ordering_cards(self, board_id: str) -> list[BoardCard]:
         """THE read every order-key decision goes through, and the one place
         that refuses.

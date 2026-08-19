@@ -2811,18 +2811,6 @@ def _model_input_observability(*, agent, request: AgentRunRequest) -> dict[str, 
     }
 
 
-#: Typed reasons the wire copy of this turn's user row could not be read. Each
-#: one degrades the record to the COMPOSED text and says so — the record must
-#: never present a composition as a wire capture (that blind spot is F1).
-WIRE_USER_MESSAGE_UNAVAILABLE_REASONS: tuple[str, ...] = (
-    "no_message_list",
-    "no_turn_index",
-    "index_out_of_range",
-    "row_not_a_user_row",
-    "content_not_text",
-)
-
-
 def _current_turn_user_row(agent: Any) -> tuple[dict[str, Any] | None, str | None]:
     """This turn's user row as the agent actually holds it, or a typed reason.
 
@@ -2853,8 +2841,10 @@ def _wire_user_message(*, agent: Any, request: AgentRunRequest) -> tuple[str, di
 
     Returns ``(text, receipt)``. ``receipt["source"]`` is ``agent_wire`` when the
     text was read off the agent's own current-turn row and ``request_composed``
-    when it could not be (with ``receipt["unavailable_reason"]`` naming which of
-    :data:`WIRE_USER_MESSAGE_UNAVAILABLE_REASONS` applied).
+    when it could not be (with ``receipt["unavailable_reason"]`` naming which
+    of the five typed reasons ``_current_turn_user_row`` returns applied —
+    that function is the vocabulary's only producer, so it is also its only
+    authority).
 
     ``bounded`` is the alarm this exists to raise: the composed and wire sizes
     differ, so something between composition and the wire rewrote the turn. On

@@ -388,7 +388,7 @@ def test_config_persona_skills_remove_is_explicit(tmp_path):
     assert personas["qa"].skills == ["retained-skill"]
 
 
-def test_neko_supervisor_uses_configured_head_agent_profile_when_not_explicit(tmp_path):
+def test_neko_supervisor_does_not_inherit_head_agent_profile(tmp_path):
     p = tmp_path / "config.yaml"
     p.write_text(
         "agent_runtime:\n"

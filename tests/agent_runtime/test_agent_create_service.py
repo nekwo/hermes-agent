@@ -93,7 +93,7 @@ def test_the_service_places_an_agent_with_no_rpc_layer_involved(qa_persona):
     outcome = perform_agent_create(_params(placement_id="qa_service"))
 
     assert outcome.refusal is None
-    assert outcome.ok is True
+    assert outcome.refusal is None
     result = outcome.result
     assert result["persona_instance_id"] == "personainst_qa_service"
     assert result["idempotent_replay"] is False
@@ -125,7 +125,7 @@ def test_the_service_refuses_a_bad_position_without_a_reply_envelope(qa_persona)
 
     outcome = perform_agent_create(_params(position="3,4", placement_id="qa_badpos"))
 
-    assert outcome.ok is False
+    assert outcome.refusal is not None
     assert outcome.result is None
     assert outcome.refusal.data["reason"] == "position_invalid"
     assert not paths.persona_instance_path("personainst_qa_badpos").exists()
@@ -168,7 +168,7 @@ def test_the_service_itself_refuses_an_unknown_bare_persona(qa_persona):
         _params(persona_id="qa_agent", placement_id="qa_agent_svc")
     )
 
-    assert outcome.ok is False
+    assert outcome.refusal is not None
     assert outcome.refusal.data["reason"] == "persona_not_found"
     assert not paths.persona_instance_path("personainst_qa_agent_svc").exists()
     assert _actors() == {}

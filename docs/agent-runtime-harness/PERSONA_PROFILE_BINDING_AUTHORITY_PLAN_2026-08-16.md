@@ -681,9 +681,12 @@ resolves identically before and after. No silent behaviour change.
 (`profile_context.py:303-306`) keeps one operator-visible auth/SessionDB store,
 and changing it is the provider-login plan's call, not this one.
 
-**Not done:** `rebind_persona_profile` has zero callers and no CLI verb exists,
-so the B-4 backfill is likewise a library function the operator cannot yet
-invoke. No Stage C screenshot was captured (the live launcher was left
+**Not done:** the B-4 backfill (`backfill_instance_profile_ids`) is a library
+function the operator cannot yet invoke — no CLI verb reaches it.
+(Superseded 2026-08-19: this paragraph also said `rebind_persona_profile` had
+zero callers. It has one — `harness agent set-profile`
+(`hermes_cli/harness.py:2769`) — and has had since the verb landed. Its sibling
+`backfill_instance_profile_ids` is the one still unwired.) No Stage C screenshot was captured (the live launcher was left
 untouched).
 
 ---

@@ -23,7 +23,7 @@ remove the curated operator/agent summaries.
 ## Current state (verified)
 
 - A running goal staffs each blueprint slot with a **task-bound persona instance** = a
-  `WorkerSession` carrying `task_id` + `session_id` ([worker_sessions.py](../worker_sessions.py)).
+  `WorkerSession` carrying `task_id` + `session_id` (`agent_runtime/worker_sessions.py`, deleted with the worker-session lane).
   So **one goal → many agent chats** (dev, qa, backend, …), each its own session.
 - A chat/session record already carries a nullable `goal_id`/`task_id`
   (Launcher `mission_control_snapshot.dart:~436`). The goal lives on the chat

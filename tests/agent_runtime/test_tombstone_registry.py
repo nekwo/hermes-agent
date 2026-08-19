@@ -2992,6 +2992,110 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "_office_artifacts",
         scope=("agent_runtime.realm_sync",),
     ),
+    # -- S72 stage HB-2 — vocabularies that enforced nothing. -------------
+    # Four roll-up constants (a frozenset / a tuple over constants that are
+    # each ALREADY used at their own site) with zero executable readers between
+    # them. A set that names a vocabulary but is consulted by no branch does
+    # not make the vocabulary closed — it makes a second place to forget.
+    # `PLAN_ACTIONS` proved the point: it listed a FIFTH action,
+    # `refuse_ambiguous_source`, that nothing in either repo had ever
+    # constructed (an AST walk finds `PromotionPlan(...)` only inside
+    # `skill_promotion.py`, and every site spells `refuse_invalid`), so the
+    # constant claiming to pin the vocabulary was itself the only thing
+    # asserting a value outside it.
+    *rows(
+        "s72",
+        "HEAD",
+        Form.CODE,
+        "dead-code audit pass 2 HB-2 — roll-up vocabularies with no reader; "
+        "the authority for each vocabulary is its production construction "
+        "sites, which are the things a branch can actually disagree with",
+        "PLAN_ACTIONS",
+        "PROMOTION_BLOCK_REASONS",
+        "WIRE_USER_MESSAGE_UNAVAILABLE_REASONS",
+        "DISPATCH_SESSION_REASONS",
+        "refuse_ambiguous_source",
+    ),
+    # -- S72 stage HB-3 — one spelling per question. ----------------------
+    # `personas.MOTHBALLED_ROLES` was a THIRD spelling of a fact
+    # `persona_lifecycle.MOTHBALLED_ROLE_TOKENS` already owns and
+    # `is_runtime_persona` already reads — while `personas.py` imported the two
+    # live sets and used neither (the repo's single genuinely unused import).
+    # `chat_live_log_root` was a wrapper around `capture_chat_live_log_root`
+    # that added a lock-read fast path and nothing else.
+    # `McpAdmissionOutcome.registered_tool_names` was write-only: constructed
+    # from `box["tools"]`, carried on a frozen dataclass, read by no one.
+    # `AgentCreateOutcome.ok` was asked only by tests; production spells the
+    # same question `outcome.refusal is not None`, and two spellings of one
+    # predicate is how they drift.
+    # NOTE the SHAPE, learned the hard way on 2026-08-19: an ATTR row's text
+    # must be a BARE attribute name and its scope the owning module. Written as
+    # `"personas.MOTHBALLED_ROLES"` under `scope=_AR` the assertion becomes
+    # `hasattr(agent_runtime, "personas.MOTHBALLED_ROLES")`, which is False for
+    # every tree that ever existed — a row that passes because it asks an
+    # impossible question. It survived a full registry run green and was caught
+    # only by re-adding the symbol and watching the row NOT go red. CLASS_ATTR
+    # is the form that takes the dotted `module.Class.attr` spelling; ATTR is
+    # not.
+    *rows(
+        "s72",
+        "HEAD",
+        Form.ATTR,
+        "dead-code audit pass 2 HB-3 — a THIRD spelling of the retired-role "
+        "fact `persona_lifecycle.MOTHBALLED_ROLE_TOKENS` already owns and "
+        "`is_runtime_persona` already reads",
+        "MOTHBALLED_ROLES",
+        scope=("agent_runtime.personas",),
+    ),
+    *rows(
+        "s72",
+        "HEAD",
+        Form.ATTR,
+        "dead-code audit pass 2 HB-3 — a wrapper around "
+        "`capture_chat_live_log_root` that added a lock-read fast path and no "
+        "answer of its own; one capture authority per mirror root",
+        "chat_live_log_root",
+        scope=("agent_runtime.chat_live_log",),
+    ),
+    *rows(
+        "s72",
+        "HEAD",
+        Form.CLASS_ATTR,
+        "dead-code audit pass 2 HB-3 — a write-only outcome field and a "
+        "test-only predicate with a production twin",
+        "mcp_admission.McpAdmissionOutcome.registered_tool_names",
+        "agent_create.AgentCreateOutcome.ok",
+        scope=_AR,
+    ),
+    # -- S72 stage HB-4 — orphans from ML-8's chokepoint. -----------------
+    # `_list_active_cards` / `_list_archived_cards` lost their callers when
+    # `_ordering_cards` became THE read every order-key decision goes through.
+    # Rowed despite being private because their resurrection is precisely the
+    # defect `CardsUnreadable` exists to prevent: they return `.cards` from a
+    # scan and DROP the scan's unreadable count, so an allocator computing
+    # order keys from one of them cannot see the card it must not overwrite.
+    *rows(
+        "s72",
+        "HEAD",
+        Form.CODE,
+        "dead-code audit pass 2 HB-4 — the pre-ML-8 card reads that discard "
+        "the unreadable count; `_ordering_cards` is the one read that refuses, "
+        "and a re-grown silent lister re-opens the order-key corruption "
+        "CardsUnreadable was raised to stop",
+        "_list_active_cards",
+        "_list_archived_cards",
+        scope=("agent_runtime.board_store",),
+    ),
+    *rows(
+        "s72",
+        "HEAD",
+        Form.PATH,
+        "dead-code audit pass 2 HB-4 — a line-count exception for a file that "
+        "has been under the bar for a wave: it cited 3,170 lines against a "
+        "snapshot.py of 2,621, and of the four seams it named as the split "
+        "plan only `_parity_envelope` still exists",
+        "agent_runtime/docs/snapshot_line_count_exception.md",
+    ),
 )
 
 

@@ -121,7 +121,6 @@ __all__ = [
     "capture_chat_live_log_root",
     "chat_live_log_failures",
     "chat_live_log_path",
-    "chat_live_log_root",
     "chat_live_log_stats",
     "ensure_chat_live_log",
     "mirrored_persona_chat_append",
@@ -203,15 +202,6 @@ def capture_chat_live_log_root(*, session_db: Any = None, head_home: Any = None)
             _captured_root = candidate / CHAT_LIVE_LOG_DIRNAME
             _captured_source = source
         return _captured_root
-
-
-def chat_live_log_root() -> Path | None:
-    """The captured mirror directory, capturing it now if nothing has yet."""
-
-    with _state_lock:
-        if _captured_root is not None:
-            return _captured_root
-    return capture_chat_live_log_root()
 
 
 def chat_live_log_path(session_id: Any, *, session_db: Any = None) -> Path | None:

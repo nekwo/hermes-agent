@@ -90,16 +90,6 @@ BLOCK_INSTALLER_OWNED_EDITED = "installer_owned_edited"
 BLOCK_INSTALLER_STATE_UNKNOWN = "installer_owned_state_unknown"
 BLOCK_INSTALLER_SLUG_RESERVED = "installer_catalog_slug_reserved"
 
-PROMOTION_BLOCK_REASONS = frozenset(
-    {
-        BLOCK_ALREADY_CANONICAL,
-        BLOCK_INSTALLER_OWNED_PRISTINE,
-        BLOCK_INSTALLER_OWNED_EDITED,
-        BLOCK_INSTALLER_STATE_UNKNOWN,
-        BLOCK_INSTALLER_SLUG_RESERVED,
-    }
-)
-
 # The escape hatch we name in every installer-owned refusal. Deliberate friction
 # with an honest route, not a wall: an operator who genuinely wants their edits
 # shared authors the work as a package of their OWN (a distinct slug, outside a
@@ -119,9 +109,10 @@ _ESCAPE_HATCH = (
 
 @dataclass(frozen=True)
 class PromotionRefusal:
-    """Why the promotion door refuses a package. ``code`` is one of
-    :data:`PROMOTION_BLOCK_REASONS`; ``message`` is the operator-facing text
-    (never a bare bool forcing the UI to invent a generic string)."""
+    """Why the promotion door refuses a package. ``code`` is one of the
+    ``BLOCK_*`` constants above, each of which is used at the refusal site
+    that mints it; ``message`` is the operator-facing text (never a bare bool
+    forcing the UI to invent a generic string)."""
 
     code: str
     message: str

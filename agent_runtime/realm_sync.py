@@ -2128,7 +2128,7 @@ def apply_skill_inbox_pull(realm: Realm, subtree: Path) -> SkillSyncSummary:
                 converged.append(slug)
             elif plan.action == "hold_divergent":
                 held.append(slug)
-            else:  # refuse_invalid / refuse_ambiguous_source
+            else:  # refuse_invalid
                 refused.append(slug)
         except Exception:  # noqa: BLE001 — one bad package must not abort the pull
             logger.exception(

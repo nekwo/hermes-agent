@@ -409,7 +409,6 @@ class McpAdmissionOutcome:
 
     admitted: tuple[str, ...] = ()
     denied: tuple[McpAdmissionDenial, ...] = ()
-    registered_tool_names: tuple[str, ...] = ()
     duration_ms: int = 0
     attempted: bool = False
     #: The subset of ``denied`` that EXECUTION minted — busy / timeout /
@@ -646,10 +645,12 @@ def resolve_mcp_admission(
     config = admission_config(cfg)
     lane = str(lane or "").strip()
     permission_mode = str(permission_mode or "profile_default").strip() or "profile_default"
-    try:
-        role = str(role_from_persona(persona).value)
-    except Exception:  # pragma: no cover - defensive
-        role = str(getattr(persona, "role", "") or "")
+    # ``coerce_agent_role`` returns a plain ``str`` for anything outside the
+    # one-member ``AgentRole`` enum, whose only member (``pm``) is mothballed,
+    # so ``.value`` was the branch that could not be taken and the ``except``
+    # labelled "defensive" was the live path. ``str()`` covers both: a StrEnum
+    # stringifies to its own value.
+    role = str(role_from_persona(persona))
     requested = tuple(_requested_servers(persona))
     timeout = _positive_float(getattr(config, "connect_timeout_seconds", None)) or _DEFAULT_CONNECT_TIMEOUT_SECONDS
     # No "unlimited" spelling: a missing / zero / negative / unparseable value
@@ -1271,7 +1272,6 @@ def admit_mcp_servers(
     registered = registered_mcp_server_names()
     admitted = tuple(name for name in admission.server_names if name in registered)
     missed = tuple(name for name in admission.server_names if name not in registered)
-    tool_names = tuple(str(name) for name in (box.get("tools") or []))
     unregistered = tuple(
         McpAdmissionDenial(
             server=name,
@@ -1290,7 +1290,6 @@ def admit_mcp_servers(
     return McpAdmissionOutcome(
         attempted=True,
         admitted=admitted,
-        registered_tool_names=tool_names,
         duration_ms=duration_ms,
         denied=tuple(admission.denied) + unregistered,
         execution_denied=unregistered,

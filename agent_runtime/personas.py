@@ -5,12 +5,24 @@ from dataclasses import replace
 from enum import StrEnum
 
 from .models import AgentPersona
-from .persona_lifecycle import MOTHBALLED_PERSONA_IDS, MOTHBALLED_ROLE_TOKENS
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class AgentRole(StrEnum):
+    """RETIRED RESIDUE, deliberately kept. Read this before adding a member.
+
+    One member, and that member (``pm``) is mothballed — see
+    ``persona_lifecycle.MOTHBALLED_ROLE_TOKENS``, the set that actually
+    enforces it. So this is not a live taxonomy of roles: roles are DATA in
+    this runtime, S61/S64 made profile/persona declarations the sole capability
+    authority, and ``coerce_agent_role`` returns a plain ``str`` for every role
+    a persona really carries today. It survives because ``docs/agent-runtime-
+    harness/02-execution-engine.md`` still names it and because the legacy
+    ``pm`` spelling has to keep resolving on persisted rows — not because a
+    role belongs here.
+    """
+
     PM = "pm"
 
 
@@ -20,12 +32,12 @@ class AutonomyLevel(StrEnum):
     AUTONOMOUS = "autonomous"
 
 
-# Roles/personas retired from the product flow. A persona instance persisted under one
-# of these — historically the legacy ``pm`` slot, treated as legacy compatibility only —
-# must never render as a live product agent. The persona-instance reconciler prunes such
-# rows (archive, never delete). Single-sourced here so liveness/roster checks resolve a
-# mothballed role through this set instead of hand-rolling ``role == "pm"`` string tests.
-MOTHBALLED_ROLES: frozenset[AgentRole] = frozenset({AgentRole.PM})
+# Retired roles/personas are single-sourced in ``persona_lifecycle`` as
+# ``MOTHBALLED_ROLE_TOKENS`` / ``MOTHBALLED_PERSONA_IDS``, which
+# ``is_runtime_persona`` actually reads. A ``MOTHBALLED_ROLES`` frozenset lived
+# here too, saying it existed so nothing would hand-roll ``role == "pm"`` — with
+# zero readers, while the module IMPORTED the two live sets and used neither.
+# A third spelling of one fact does not prevent a fourth; the reader does.
 
 
 # Synthetic operator-channel personas built from a raw Hermes profile carry the

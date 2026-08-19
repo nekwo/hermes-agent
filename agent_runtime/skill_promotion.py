@@ -54,17 +54,6 @@ from .paths import safe_path_token
 
 logger = logging.getLogger(__name__)
 
-# Canonical action vocabularies. Pinned so callers (realm_sync C3, the harness
-# CLI C4) branch on stable strings rather than re-deriving them.
-PLAN_ACTIONS = frozenset(
-    {
-        "promote_new",
-        "noop_identical",
-        "hold_divergent",
-        "refuse_ambiguous_source",
-        "refuse_invalid",
-    }
-)
 _REALM_INBOX_DIRNAME = ".realm_inbox"
 _PROVENANCE_DIRNAME = ".provenance"
 _ARCHIVE_DIRNAME = ".archive"
@@ -113,10 +102,16 @@ def is_windows_reserved_component(component: str) -> bool:
 class PromotionPlan:
     """Pure classification of a candidate promotion — no side effects.
 
-    ``action`` is one of :data:`PLAN_ACTIONS`. ``classify_promotion`` emits
-    ``promote_new`` / ``noop_identical`` / ``hold_divergent`` / ``refuse_invalid``;
-    ``refuse_ambiguous_source`` is constructed by a caller (the CLI) that cannot
-    resolve a single source and is handled as a refusal by ``execute_promotion``.
+    ``action`` is exactly one of ``promote_new`` / ``noop_identical`` /
+    ``hold_divergent`` / ``refuse_invalid``, and ``classify_promotion`` is the
+    only producer: nothing outside this module constructs a ``PromotionPlan``,
+    and the CLI reaches the lane through ``classify_promotion`` alone.
+
+    There is deliberately no ``PLAN_ACTIONS`` constant. It named a fifth
+    action, ``refuse_ambiguous_source``, that nothing had ever constructed —
+    a set claiming to pin the vocabulary while listing a value outside it is
+    worse than no set at all. The vocabulary's authority is the four
+    ``PromotionPlan(...)`` construction sites below.
     """
 
     skill: str
@@ -135,7 +130,7 @@ class PromotionResult:
 
     ``reason_code`` is an optional MACHINE-readable companion to ``reason``:
     when the door refuses on installer-ownership policy it carries the matching
-    :data:`agent_runtime.skill_publishability.PROMOTION_BLOCK_REASONS` code so a
+    ``agent_runtime.skill_publishability`` ``BLOCK_*`` code so a
     UI can branch on the cause instead of pattern-matching prose. ``None`` for
     outcomes whose ``reason`` is already the whole story (promoted / noop / held
     / the structural refusals classified in :func:`classify_promotion`).
@@ -488,7 +483,7 @@ def execute_promotion(
 
     action = plan.action
 
-    if action in ("refuse_invalid", "refuse_ambiguous_source"):
+    if action == "refuse_invalid":
         return PromotionResult(
             skill=plan.skill,
             action="refused",

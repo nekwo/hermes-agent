@@ -13,12 +13,13 @@ the table behind fixtures.
 
 from __future__ import annotations
 
+import inspect
+
 import pytest
 
 from agent_runtime.dispatch_session_policy import (
     DEFAULT_DISPATCH_SESSION_POLICY,
     DISPATCH_SESSION_POLICIES,
-    DISPATCH_SESSION_REASONS,
     NEW_PER_DISPATCH,
     REASON_CLARIFY_TOKEN,
     REASON_EXPLICIT_NEW_SESSION,
@@ -162,10 +163,15 @@ def test_clarify_token_session_beats_every_other_input(policy, stated):
     assert decision.explicit is True
 
 
-def test_clarify_reason_is_in_the_vocabulary():
-    # The envelope's `reason` is a closed vocabulary a reader switches on; a
-    # value that never joined it is a value nothing downstream can name.
-    assert REASON_CLARIFY_TOKEN in DISPATCH_SESSION_REASONS
+def test_clarify_reason_is_the_one_the_handler_reads():
+    # This used to assert `REASON_CLARIFY_TOKEN in DISPATCH_SESSION_REASONS` —
+    # a set literally built from that constant, so it could not fail. The
+    # question worth asking is whether the value a decision carries is the one
+    # a reader downstream branches on, which is a fact about the handler.
+    from agent_runtime import dispatch_session_policy
+
+    source = inspect.getsource(dispatch_session_policy)
+    assert f'"{REASON_CLARIFY_TOKEN}"' in source
 
 
 def test_an_unresolved_clarify_token_leaves_precedence_untouched():

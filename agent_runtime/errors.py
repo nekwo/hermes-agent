@@ -108,8 +108,9 @@ class CardsUnreadable(ArchiveUnreadable):
     """Raised when a board's order-key allocation cannot see the WHOLE column.
 
     The board twin of :class:`ActorsUnreadable`, and the same defect reached
-    through a different guard. ``_list_active_cards`` drops a card file it
-    cannot decode, and every order-key decision is computed from that list: the
+    through a different guard. A card-directory scan drops a card file it
+    cannot decode, and every order-key decision is computed from that scan's
+    result (``_ordering_cards``, the one read that refuses): the
     neighbour keys an insert brackets between, and the keys a column rebalance
     rewrites wholesale. A card the platform would not open is therefore a card
     the allocator places on top of, and a rebalance reassigns every key in the
