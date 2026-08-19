@@ -194,17 +194,62 @@ def test_the_block_is_off_the_effective_config_summary():
 
 
 def test_the_snapshot_tasks_seed_is_gone():
-    builder = _function(snapshot, "_build_snapshot_uncoalesced")
+    """RE-AIMED 2026-08-19 (MCF-47). Both halves of this gate were VACUOUS.
+
+    It resolved ``_build_snapshot_uncoalesced`` and collected ``ast.Assign``
+    targets from it, then substring-checked that same function's source segment
+    for ``tasks=tasks``. That function became a two-statement WRAPPER when the
+    SessionDB acquisition moved to the build's outermost frame — one ``with
+    runtime_resolution_scope(), persona_session_db_scope() as session_db:`` and
+    one ``return _build_snapshot_in_runtime_scope(...)``. It holds no
+    assignments and no ``tasks=`` forwarding, so **both assertions were true for
+    a reason that had nothing to do with the seed**: re-seeding ``tasks = []``
+    in the body and forwarding it would have left this gate green forever.
+
+    Same class as ``test_status_no_longer_forwards_a_task_list_to_the_channel_
+    projection`` below, whose docstring already says it: assert the guarantee
+    where the guarantee lives, not in whichever function currently holds the
+    line. Re-aiming at ``_build_snapshot_in_runtime_scope`` would only move the
+    fault one refactor down the road, so the scope is the MODULE.
+
+    The forwarding half also stops being a substring scan. ``"tasks=tasks" not
+    in source`` cannot tell a call from a comment, and this module's retirement
+    comments name the seed on purpose — the exact grep lie
+    ``test_workspace_summary_no_longer_takes_or_publishes_goals`` next door was
+    written to avoid. It is now an AST keyword scan over every call in the
+    module, which also catches ``tasks=[]``, ``tasks=seeded`` and any other
+    spelling the substring could not see."""
+
+    module = ast.parse(inspect.getsource(snapshot))
+
     bound = {
         target.id
-        for statement in ast.walk(builder)
+        for statement in ast.walk(module)
         if isinstance(statement, ast.Assign)
         for target in statement.targets
         if isinstance(target, ast.Name)
     }
+    assert bound, (
+        "the binding walk over agent_runtime.snapshot resolved NO local at all "
+        "— it is walking nothing and this gate would pass vacuously"
+    )
     assert "tasks" not in bound
-    source = ast.get_source_segment(inspect.getsource(snapshot), builder) or ""
-    assert "tasks=tasks" not in source
+
+    calls = [node for node in ast.walk(module) if isinstance(node, ast.Call)]
+    assert calls, (
+        "the call walk over agent_runtime.snapshot resolved NO call — the "
+        "forwarding half would pass vacuously"
+    )
+    forwarding = [
+        call.lineno
+        for call in calls
+        for keyword in call.keywords
+        if keyword.arg == "tasks"
+    ]
+    assert forwarding == [], (
+        f"agent_runtime.snapshot forwards tasks= to a projection again at "
+        f"lines {forwarding}"
+    )
 
 
 def test_workspace_summary_no_longer_takes_or_publishes_goals():
