@@ -318,7 +318,31 @@ def test_both_lanes_refuse_the_same_unreadable_archive_naming_the_same_fault():
     assert cli_error["retryable"] is True, cli_error
     # And the hint names the FILE rather than the taxonomy's default "correct
     # your request", which is the one cure that cannot work here.
-    assert "archive" in cli_error["hint"], cli_error["hint"]
+    #
+    # STRENGTHENED 2026-08-19 (MCF-47(iii)). ``"archive" in hint`` was a bare
+    # token, and it passed for eleven months while the hint pointed at the WRONG
+    # DIRECTORY: ``store/office_archive/`` is the archived office SURFACE
+    # graveyard, a different tree that merely shares a near-identical name with
+    # the ``office/<ws>/archive/`` this refusal is raised from. The token
+    # ``archive`` cannot tell those two apart — it is satisfied by either — so
+    # the one assertion guarding the operator's cure could not see the defect it
+    # existed to prevent. Same class as MCF-53 and MCF-22: the token was never
+    # the unit of meaning.
+    #
+    # It is now DERIVED from the path this test itself staged and this refusal
+    # itself read, so the hint cannot drift from the raise site without reddening
+    # here, and cannot be "fixed" by naming any other plausible-looking tree.
+    relative = archived_path.parent.relative_to(paths.store_root()).as_posix()
+    segments = relative.split("/")
+    assert len(segments) == 3 and segments[0] == "office" and segments[2] == "archive", relative
+    named_directory = f"{segments[0]}/<workspace-id>/{segments[2]}/"
+    assert named_directory in cli_error["hint"], (
+        f"the hint must name {named_directory}, the directory this refusal was "
+        f"raised from (staged at {relative}); it says {cli_error['hint']!r}"
+    )
+    # The near name it must NOT say. ``store_root()/office_archive`` is written
+    # by ``harness office archive-surface`` and holds no actor copy at all.
+    assert "office_archive" not in cli_error["hint"], cli_error["hint"]
 
     # The fault itself, identical on both lanes: the same actor key, in the same
     # workspace, from the same undecodable copy.

@@ -318,7 +318,18 @@ def _error_hint(code: str) -> str:
         # same reason they are two codes (errors.py: the operator's cure must not
         # be mislabelled), because repairing the archive copy does nothing for an
         # undecodable live actor file and vice versa.
-        "archive_unreadable": "Repair or remove the undecodable archived actor copy under store/office_archive/, then retry the same command.",
+        #
+        # CORRECTED 2026-08-19 (MCF-47(iii)). This said ``store/office_archive/``
+        # and sent the operator to the WRONG TREE. ``store_root()/office_archive``
+        # is the archived office SURFACE graveyard written by ``harness office
+        # archive-surface``; the error is raised from reads of
+        # ``paths.office_archived_actor_path`` — ``office/<ws>/archive/<actor>.json``
+        # — which is a different directory reached by a near-identical name. An
+        # operator following the old hint would have repaired nothing and found
+        # nothing, on the one taxonomy row whose whole purpose is to name the file.
+        # ``core_cache.py``'s exclusion note already spells out that these two
+        # trees are distinct; this hint is where that distinction was lost.
+        "archive_unreadable": "Repair or remove the undecodable archived actor copy under office/<workspace-id>/archive/ in the runtime store, then retry the same command.",
         "actors_unreadable": "Repair or remove the undecodable actor file named in the message, or pass --persona-instance-id to place the instance, then retry.",
     }.get(code, "Inspect safe_details and retry after correcting the request.")
 
