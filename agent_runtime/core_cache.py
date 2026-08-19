@@ -179,6 +179,7 @@ same fact. There is exactly one: the snapshot's own ``parity`` envelope, which
 |---|---|---|
 | ``snapshot_core_cache fingerprint_refused`` (WARNING) | none | fields ``reason=entries_exceeded`` ``scope=store_root``/``skill_root`` ``bound=`` ``root=``. The scope is load-bearing: the two bounds are different numbers over different trees |
 | ``snapshot_core_cache never_converged`` (WARNING) | none | ``builds=`` then ``diff_scope=`` ``changed=`` ``diff=`` LAST (paths may contain spaces). **CENSUS RULE (C22(i)): read ``diff_scope=`` or the count over-reports.** ``every_pass`` = the inputs oscillate, i.e. self-perturbation, the A2 defect worth acting on; ``last_pair`` = a store that is simply moving, where the receipt is true (the cache IS buying nothing) but names no defect; ``none`` with ``diff=diff_unavailable`` and ``diff_reason=no_entries``/``digest_without_entry_delta`` = the diff could not be computed and says so in its own words |
+| ``snapshot_core_cache generation_residue`` (WARNING) | none | ``present=`` ``bound=`` ``live=`` ``leftover=`` then ``generations=`` LAST (a variable-length list, so nothing after it can be field-parsed). **CENSUS RULE (MCF-54(ii)/MCF-59): this line is NOT a failed write-back.** It rides a write-back that already logged ``ok=true``, and reports that the best-effort reap left superseded generation directories on disk - a reader holding one open, or a permission the writer lacks. ``present=`` counts the live generation too; ``leftover=`` does not, and the names in ``generations=`` are leftovers only, oldest first, capped at eight with the true total always in ``leftover=``. The same name across consecutive builds is a permanently held handle; a different name each time is transient contention, and only the first is worth acting on |
 | ``snapshot_core_cache core_source=cache`` (INFO) | the snapshot payload | ``parity.core_source == "cache"`` — SAME spelling, no split. The line also carries ``caller=`` ``inputs=`` ``fingerprint=`` ``offset=``, none of which reach the payload |
 | ``snapshot_core_cache core_source=cache stale=true`` (INFO) | the snapshot payload | ``parity.core_stale == true`` AND ``parity.freshness.state == "stale"`` — the field the launcher's ``MissionSnapshotEnvelope`` already maps to ``MissionSnapshotHealth.stale``. RESIDUAL SPLIT, named rather than fixed: the log says ``stale=true``, the payload says ``parity.core_stale``/``parity.freshness.state``, and the payload spelling is a consumer contract that predates this lane |
 | ``snapshot_core_cache core_source=rebuilt`` (INFO, ``_log_demote``) | the snapshot payload, PARTIALLY | ``parity.core_source == "rebuilt"`` carries THAT the cache was demoted; the ``reason=`` never leaves this logger, and ``CoreDecision.reason`` is read by no caller today. So a field census of WHY a cache demoted has exactly one source: this line. Reasons ``unreadable`` ``core_digest_mismatch`` ``fingerprint_unavailable`` ``fingerprint_mismatch`` ``build_stamp_unknown`` ``build_stamp_mismatch`` ``contract_mismatch`` ``runtime_root_mismatch`` ``home_mismatch``. **CENSUS RULE (MC-2): ``home_mismatch`` is not an ordinary miss.** The other reasons say the STORE moved, the install changed, or the pair is unbound — all facts about the thing being cached. This one says the persisted pair was keyed under a different Hermes home than the reading process resolved, i.e. the two runs asked different QUESTIONS, and it is emitted INSTEAD of ``fingerprint_mismatch`` so the distinction is countable rather than inferred. On a multi-home install (an operator who really does run two roots) it is ordinary. On a SINGLE-PROFILE operator boot it is evidence that a persona scope was live while a build stat'd — the capture in ``core_cache.resolved_fingerprint_home`` was taken too late — which is a defect to go fix, not noise to tune out. A pair carrying no ``sidecar.fingerprint_home`` at all (every one written before MC-2) is skipped rather than demoted, so this reason can never fire for an install that simply predates the field. ``absent`` is deliberately NOT logged (the ordinary cold start would print a line on every build in every process), so its only trace is the ABSENCE of a line and a census must not read "no demote line" as "no demote". **CENSUS RULE (MC-3): ``fingerprint_mismatch`` ALONE grows a tail**, and the tail is ``changed=`` then ``diff=`` LAST (paths may contain spaces, so nothing can be field-parsed after it; the tail is additive, so an existing ``reason=`` grep is unaffected). No other reason carries one, deliberately: a diff on a ``build_stamp_mismatch`` would name every file the operator's upgrade touched and read as store churn. **The scope is ``last_pair`` BY CONSTRUCTION and that caveat is the row's most important sentence:** a demote diff is the delta since the LAST WRITE-BACK, so on a busy store it legitimately names files that are simply moving, and the receipt is TRUE without naming a defect. It is self-perturbation evidence — the A1-b/A2 class worth acting on — ONLY when the named paths are ones the runtime itself writes (``dispatch_delivery_drain.json``, ``serve_socket.owner.json``, ``state.db-wal``, ``serve_socket.lock``); when they are store paths the operator's own writes touched, the miss is legitimate and the cache is working as designed. An arm that could not compute the diff says so in its own words rather than emitting an empty list, which would read as "we looked and nothing moved": ``diff_scope=none changed=0 diff_reason=`` ``no_entries`` (nothing persisted yet, or an install predating MC-3) / ``entries_unbound`` (the entries file in the live generation is not the one that write-back put there — MCF-21 made a torn trio unrepresentable, so this now reads as tampering or corruption rather than as a failed diagnostic write) / ``digest_without_entry_delta`` (the digests disagreed and no triple did), then ``diff=diff_unavailable`` |
@@ -317,6 +318,18 @@ DEMOTE_HOME_MISMATCH = "home_mismatch"
 #: which was silent by construction — the process just kept buying nothing).
 RECEIPT_FINGERPRINT_REFUSED = "fingerprint_refused"
 RECEIPT_NEVER_CONVERGED = "never_converged"
+
+#: MCF-54(ii), ruled by MCF-59. The generation reap is BEST EFFORT and stays
+#: that way - a reader holding files open on Windows makes a removal fail, and a
+#: landed write-back must never report failure because its housekeeping did not.
+#: What was missing was never strictness, it was ACCOUNTING: a store that kept
+#: failing to reap grew generations with nothing counting them, so the failure
+#: mode had no observable at all. This receipt is that observable, and per the
+#: operator refinement it NAMES the leftover directories rather than merely
+#: counting them - a count says a problem exists, the names say WHICH one, and
+#: whether it is the same directory every time (a permanently held handle) or a
+#: different one each time (transient contention).
+RECEIPT_GENERATION_RESIDUE = "generation_residue"
 
 #: The typed reason on a bound refusal, plus which walk refused. ``scope``
 #: matters because the two bounds are different numbers over different trees, and
@@ -1682,7 +1695,9 @@ def write_back(core: dict, *, fingerprint: CoreFingerprint | None = None) -> boo
         key.digest[:12],
         "unknown" if sidecar["event_offset"] is None else sidecar["event_offset"],
     )
-    _reap_superseded_generations(generation)
+    # AFTER the reap, and after the ok=true line above: housekeeping accounting
+    # on a write-back that has already landed and already reported success.
+    _receipt_generation_residue(_reap_superseded_generations(generation), generation)
     return True
 
 
@@ -1703,7 +1718,23 @@ def _entries_payload(key: CoreFingerprint, streak: int) -> dict:
     }
 
 
-def _reap_superseded_generations(live: str) -> None:
+#: How many generation directories may sit in the cache before the reap says so.
+#: THREE, counting the live one - so the healthy steady state (one live
+#: generation, plus at most a couple a concurrent reader briefly held open) is
+#: silent, and a store that is actually accumulating is not. Deliberately a
+#: bound on the OBSERVATION and not on the removal: nothing here deletes harder
+#: because the number is exceeded.
+GENERATION_RESIDUE_BOUND = 3
+
+#: How many leftover directories the receipt names. ``leftover=`` carries the
+#: full count beside them, so the cap can never make a large residue read as a
+#: small one. Oldest first: a generation name leads with a hex nanosecond stamp,
+#: so sorting is chronological, and the oldest survivor is the one that has been
+#: failing to reap the longest.
+_GENERATION_RESIDUE_NAMES = 8
+
+
+def _reap_superseded_generations(live: str) -> tuple[str, ...]:
     """Drop what the pointer no longer names. BEST EFFORT, and it must stay that way.
 
     Three things accumulate in :func:`_cache_dir` and all three are reaped by one
@@ -1716,12 +1747,23 @@ def _reap_superseded_generations(live: str) -> None:
       deliberately refuses to read. This is the only thing that ever removes it,
       and it is a one-time cleanup per store rather than a migration.
 
-    **Why failure is swallowed rather than receipted.** A reader in another
-    process can be mid-read of a generation this call is removing; on Windows that
-    makes the removal fail outright, which is exactly the right outcome and not an
-    event worth a line in a log an operator reads. The cost of losing a reap is one
-    directory that the next write-back tries again on. The cost of letting it raise
-    would be a landed write-back reporting failure.
+    **Why an individual failure is swallowed - and why the ACCUMULATION is not.**
+    A reader in another process can be mid-read of a generation this call is
+    removing; on Windows that makes the removal fail outright, which is exactly
+    the right outcome. The cost of losing one reap is one directory the next
+    write-back tries again on; the cost of letting it raise would be a landed
+    write-back reporting failure. So the failure stays swallowed and
+    ``ignore_errors`` stays on.
+
+    What did NOT follow from that, and used to be claimed here, is that the
+    outcome is not an event worth a line in a log an operator reads. A store that
+    keeps failing to reap accumulates generations with NOTHING counting them - a
+    silent drop with no accounting, which is the one thing this module refuses
+    everywhere else (MCF-54(ii), ruled by MCF-59). This function therefore
+    RETURNS what it left behind and :func:`write_back` hands that to
+    :func:`_receipt_generation_residue`. Counting is not enforcement: the return
+    value changes nothing about what was removed, and a write-back that has
+    landed still reports success.
 
     A file it does not recognise is LEFT ALONE — including ``atomic_json_write``'s
     own ``.tmp`` staging files, which live in this directory while the pointer is
@@ -1733,7 +1775,7 @@ def _reap_superseded_generations(live: str) -> None:
     try:
         names = os.listdir(cache_dir)
     except OSError:
-        return
+        return ()
     for name in names:
         if name == live:
             continue
@@ -1744,6 +1786,51 @@ def _reap_superseded_generations(live: str) -> None:
                 (cache_dir / name).unlink()
             except OSError:
                 pass
+    # RE-LISTED, not derived from the loop above: ``ignore_errors=True`` makes a
+    # removal that failed indistinguishable from one that worked, so the only
+    # honest survivor count is the one taken from disk AFTER the pass. A second
+    # listdir is the price of the answer being true.
+    try:
+        survivors = os.listdir(cache_dir)
+    except OSError:
+        return ()
+    return tuple(
+        sorted(name for name in survivors if _is_generation_name(name) and name != live)
+    )
+
+
+def _receipt_generation_residue(leftover: tuple[str, ...], live: str) -> None:
+    """Say, once per write-back, that the cache directory is not draining.
+
+    NAMES the directories (the operator refinement recorded at MCF-59): a count
+    sends them hunting, the names tell them exactly which directory to unlock or
+    remove, and reading the same name across two builds is what separates a
+    permanently held handle from transient contention.
+
+    ``generations=`` goes LAST, matching :func:`_receipt_never_converged`'s
+    ``diff=``, because it is a variable-length list and nothing after a
+    variable-length list can be field-parsed.
+
+    Reports, never enforces: this is accounting on a write-back that has already
+    landed and already logged ``ok=true``.
+    """
+
+    if len(leftover) + 1 <= GENERATION_RESIDUE_BOUND:
+        return
+    logger.warning(
+        "snapshot_core_cache %s present=%d bound=%d live=%s leftover=%d "
+        "generations=%s - the reap left superseded generations behind (a reader "
+        "holding one open, or a permission the writer does not have), so this "
+        "store is accumulating whole cached cores on disk. The write-back "
+        "itself SUCCEEDED and nothing was retracted. Unlock or remove the "
+        "directories named here under the cache dir - never the live one.",
+        RECEIPT_GENERATION_RESIDUE,
+        len(leftover) + 1,
+        GENERATION_RESIDUE_BOUND,
+        live,
+        len(leftover),
+        ",".join(leftover[:_GENERATION_RESIDUE_NAMES]),
+    )
 
 
 # --------------------------------------------------------------------------- #
