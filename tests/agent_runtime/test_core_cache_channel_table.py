@@ -214,6 +214,26 @@ def test_the_parsers_are_reading_something():
     assert _named_token("reason=entries_io") == "entries_io"
     assert _named_token("ok=false") is None, "a boolean field is not a vocabulary token"
     assert _named_token('parity.core_source == "cache"') is None
+    # A RENDERED LINE names its family AND its tail. Until the MCF-53 sweep the
+    # reverse direction skipped these spans whole, leaving four vocabulary
+    # tokens unresolvable by any row — see :func:`_tokens_named_by`.
+    assert _tokens_named_by("snapshot_core_cache never_converged") == {"never_converged"}
+    assert _tokens_named_by("snapshot_core_cache core_source=rebuilt") == {"rebuilt"}
+    assert _tokens_named_by("snapshot_core_cache core_source=cache stale=true") == {"cache"}
+    assert _tokens_named_by("snapshot_core_cache_write ok=true") == set(), (
+        "a boolean field on a rendered line is not a vocabulary token"
+    )
+    assert _tokens_named_by("snapshot_core_shadow adopt failed") == set(), (
+        "a three-part rendered line's tail is prose, not two tokens"
+    )
+    # And the reverse census must reach EVERY vocabulary token the table names,
+    # or a retirement can hide in whichever spelling it cannot read.
+    reachable = {token for span in _quoted_spans() for token in _tokens_named_by(span)}
+    unreachable = sorted(_vocabulary() - reachable - _families())
+    assert unreachable == [], (
+        f"the table names these emitted tokens in no form the reverse direction "
+        f"can resolve, so retiring one would leave its row standing: {unreachable}"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -239,6 +259,55 @@ def test_every_token_a_writer_can_emit_is_named_in_the_table():
     )
 
 
+def _tokens_named_by(span: str) -> set[str]:
+    """Every vocabulary token a table cell's ``…``-quoted span names.
+
+    A span is either a BARE token / ``field=token`` (handled by
+    :func:`_named_token`) or a RENDERED LINE, which leads with its family:
+    ``snapshot_core_cache core_source=rebuilt``.
+
+    The rendered-line arm is the reverse direction's SECOND hole, one layer
+    below the one H3 closed. The gate skipped every ``snapshot_``-prefixed span
+    outright, and measured on the clean tree that left **4 of 27** vocabulary
+    tokens — ``cache``, ``rebuilt``, ``fingerprint_refused``,
+    ``never_converged`` — named by the table ONLY inside a skipped span, and so
+    unresolvable by the reverse census at all. Retiring any of the four would
+    leave its row standing forever: "a census instruction that returns zero
+    forever", which is what this direction says it prevents. Exactly MCF-53's
+    finding, in the same file, in the direction the earlier fix did not reach.
+
+    The leading part is NEVER resolved here — it is the family, and
+    ``test_every_family_the_table_names_is_a_family_a_line_leads_with`` checks
+    those by set equality. Resolving them twice would make one drift red two
+    tests for two different reasons.
+
+    Beyond the family, a rendered line's tail is read conservatively:
+
+    * every ``field=token`` part, via :func:`_named_token` (so ``core_source=cache``
+      resolves and ``ok=true`` / ``stale=true`` stay excluded as booleans);
+    * a BARE tail part only when the line has exactly two parts. That is the
+      ``<family> <reason>`` shape — ``snapshot_core_cache never_converged`` — and
+      the width limit is what keeps ``snapshot_core_shadow adopt failed``, three
+      parts of PROSE, from being read as two vocabulary tokens.
+    """
+
+    if not span.startswith("snapshot_"):
+        token = _named_token(span)
+        return {token} if token is not None else set()
+
+    parts = span.split()
+    tokens: set[str] = set()
+    for part in parts[1:]:
+        field = _FIELD_TOKEN.match(part)
+        if field is not None:
+            named = _named_token(part)
+            if named is not None:
+                tokens.add(named)
+        elif len(parts) == 2 and _BARE_TOKEN.match(part):
+            tokens.add(part)
+    return tokens
+
+
 def test_every_token_the_table_names_is_one_a_writer_emits():
     """REVERSE. A row for a dead kind is a census instruction returning zero."""
 
@@ -250,9 +319,8 @@ def test_every_token_the_table_names_is_one_a_writer_emits():
         {
             token
             for span in _quoted_spans()
-            if not span.startswith("snapshot_")
-            for token in [_named_token(span)]
-            if token is not None and token not in vocabulary
+            for token in _tokens_named_by(span)
+            if token not in vocabulary
         }
     )
 
