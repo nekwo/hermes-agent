@@ -107,6 +107,7 @@ from __future__ import annotations
 import ast
 import inspect
 import io
+import textwrap
 import tokenize
 from pathlib import Path
 
@@ -222,40 +223,137 @@ def test_the_rebuild_command_still_reaches_the_projector():
     assert "apply_pending" not in source
 
 
+#: The three IDENTIFIER forms. Each survives the token-join in
+#: :func:`_code_without_prose` intact, because each is a single token.
+_IDENTIFIER_FORMS = ("ProjectorResult", "projector_lease", "LEASE_TTL_SECONDS")
+
+#: The retired entry point, by NAME. Read structurally below — never as text.
+_RETIRED_MEMBER = "apply_pending"
+
+_SCANNED_PACKAGES = ("agent_runtime", "hermes_cli", "agent", "tools", "scripts")
+
+
+def _structural_regrowth(tree: ast.AST) -> list[str]:
+    """The retired member re-grown as a DEFINITION or as a CALL.
+
+    Both were text forms — ``"def apply_pending"`` and ``".apply_pending()"`` —
+    and both were VACUOUS, which is this file's own diagnosis arriving one wave
+    late. :func:`_code_without_prose` joins surviving tokens with newlines, so
+    ``def apply_pending`` renders as two tokens on two lines and
+    ``.apply_pending()`` as four. Neither substring can ever appear in the
+    stripped text. S48's file docstring already records this
+    exact failure of the token-join helper — "so a dotted assertion can never
+    match and passes vacuously" — and S46 was never re-aimed.
+
+    They are also this file's UNIQUE contribution: the module header explains
+    that the bare name cannot be a registry CODE row, because
+    ``agent.agent_runtime_helpers.apply_pending_steer_to_tool_results`` is live
+    and a repo-wide row would be red against a correct tree. So the two vacuous
+    forms were the only thing this gate held that nothing else does.
+
+    AST answers both without the ambiguity that forced the text form in the
+    first place: ``node.name == "apply_pending"`` is EXACT, so the live
+    ``apply_pending_steer_to_tool_results`` — which the old raw prefilter
+    matched as a substring — is structurally not the same name.
+    """
+
+    offenders = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == _RETIRED_MEMBER:
+            offenders.append(f"def {_RETIRED_MEMBER}@{node.lineno}")
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == _RETIRED_MEMBER
+        ):
+            offenders.append(f".{_RETIRED_MEMBER}()@{node.lineno}")
+    return offenders
+
+
+def test_the_structural_detector_fires_and_stays_quiet():
+    """ANTI-VACUITY for :func:`_structural_regrowth`, on synthetic source.
+
+    The gate below asserts an EMPTY list — the shape that keeps passing once the
+    machinery under it stops working, which is exactly what happened to the two
+    text forms this replaces. It must name a planted definition and a planted
+    call, and it must NOT name the live lookalike.
+    """
+
+    regrown = ast.parse(
+        textwrap.dedent(
+            """
+            class P:
+                def apply_pending(self, events):
+                    return events
+
+            def run(p):
+                return p.apply_pending([])
+            """
+        )
+    )
+    assert [entry.split("@")[0] for entry in _structural_regrowth(regrown)] == [
+        "def apply_pending",
+        ".apply_pending()",
+    ]
+
+    lookalike = ast.parse(
+        textwrap.dedent(
+            """
+            def apply_pending_steer_to_tool_results(results):
+                return results
+
+            def run(h):
+                return h.apply_pending_steer_to_tool_results([])
+            """
+        )
+    )
+    assert _structural_regrowth(lookalike) == [], (
+        "the live steering helper is not the retired projector member; an exact "
+        "name match is what lets this gate exist at all"
+    )
+
+
 def test_no_surviving_module_re_grows_the_lane():
-    """Text gate over the production packages, on CODE only.
+    """Gate over the production packages, on CODE only.
 
     Docstrings and comments are stripped first: the projector's own class
     docstring records what S46 removed and by name, which is the point of a
     witness, and a gate that cannot tell that from a re-grown symbol fires on
     the record of its own cut.
+
+    Two lanes, because the forms are two different kinds of claim. The three
+    IDENTIFIER forms are single tokens and survive the strip, so they stay text.
+    The retired member is read STRUCTURALLY — see :func:`_structural_regrowth`
+    for why its two text forms could never match.
     """
 
-    forms = (
-        "def apply_pending",
-        ".apply_pending()",
-        "ProjectorResult",
-        "projector_lease",
-        "LEASE_TTL_SECONDS",
-    )
+    scanned = 0
     offenders = []
-    for package in ("agent_runtime", "hermes_cli", "agent", "tools", "scripts"):
+    for package in _SCANNED_PACKAGES:
         root = REPO_ROOT / package
-        if not root.is_dir():
-            continue
+        assert root.is_dir(), f"scan package {package} has moved; the scope is silently smaller"
         for path in root.rglob("*.py"):
             if "__pycache__" in path.parts:
                 continue
+            scanned += 1
             raw = path.read_text(encoding="utf-8", errors="replace")
-            if not any(form in raw for form in forms):
+            try:
+                tree = ast.parse(raw)
+            except SyntaxError:
+                tree = None
+            if tree is not None:
+                for entry in _structural_regrowth(tree):
+                    offenders.append(f"{path.relative_to(REPO_ROOT)}:{entry}")
+            if not any(form in raw for form in _IDENTIFIER_FORMS):
                 continue
             try:
                 source = _code_without_prose(raw)
             except (SyntaxError, tokenize.TokenError):
                 source = raw
-            for form in forms:
+            for form in _IDENTIFIER_FORMS:
                 if form in source:
                     offenders.append(f"{path.relative_to(REPO_ROOT)}:{form}")
+    assert scanned > 500, scanned
     assert offenders == []
 
 
