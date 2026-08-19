@@ -30,12 +30,8 @@ from agent_runtime.errors import (
     ArchiveUnreadable,
     DefaultScopeReconciliationRequired,
     EventPayloadTooLarge,
-    InvalidTransition,
     NotFound,
-    ProofMissing,
-    RuntimeRootMismatch,
     StaleRevision,
-    StaleRun,
     StoreCorrupt,
     SyncConflict,
     WorkspaceDeleteBlocked,
@@ -84,34 +80,23 @@ def harness_repo_root() -> Path:
 STAGE42_SCHEMA_VERSION = 1
 ERROR_EXIT_CODES = {
     "not_found": 3,
-    "realm_not_found": 3,
     "workspace_not_found": 3,
     # An office write named a workspace no RECORD resolves (OfficeStore
     # .ensure_surface refusing to author a surface for it). Family 3 beside
     # workspace_not_found on purpose: same operator cure, same exit, one
     # spelling per lane rather than a second vocabulary for one contract.
     "workspace_unresolved": 3,
-    "goal_not_found": 3,
     "run_not_found": 3,
-    "lane_not_found": 3,
-    "worker_not_found": 3,
     "persona_not_found": 3,
     "blueprint_not_found": 3,
     "invalid_request": 2,
     "invalid_payload": 2,
-    "blueprint_invalid": 2,
-    "repo_scope_invalid": 2,
-    "invalid_binding": 2,
-    "unbound_required_slot": 2,
     "invalid_isolation": 2,
     "duplicate_conflict": 4,
     "already_exists": 4,
     "stale_revision": 4,
     "agent_already_assigned": 4,
-    "lane_budget_exceeded": 4,
-    "repo_locked": 4,
     "spawn_scope_exhausted": 4,
-    "kill_scope_denied": 4,
     "sync_conflict": 4,
     "sync_behind": 4,
     "sync_secret_excluded": 4,
@@ -119,23 +104,15 @@ ERROR_EXIT_CODES = {
     "permission_denied": 5,
     "membership_denied": 5,
     "role_insufficient": 5,
-    "provider_auth_missing": 5,
     "provider_auth_expired": 5,
     "sync_auth_failed": 5,
     # State / precondition (6)
-    "goal_blocked": 6,
-    "goal_terminal": 6,
-    "invalid_transition": 6,
-    "stale_run": 6,
-    "planning_locked": 6,
     "proof_missing": 6,
-    "proof_gate_failed": 6,
     "needs_operator_confirm": 6,
     "default_scope_reconciliation_required": 6,
     # Skills / readiness (6)
     "skill_hash_mismatch": 6,
     "missing_skill": 6,
-    "skill_install_failed": 6,
     "profile_not_ready": 6,
     # `harness work cancel` refusals. Split on WHY, because the operator's next
     # move differs: `cancel_unsupported` means this kind of work has no
@@ -147,14 +124,8 @@ ERROR_EXIT_CODES = {
     "confirmation_required": 8,
     # Runtime / infra (7)
     "runtime_unavailable": 7,
-    "daemon_offline": 7,
     "wrong_runtime_root": 7,
-    "profile_mismatch": 7,
-    "snapshot_stale": 7,
-    "contract_version_mismatch": 7,
-    "context_bundle_too_large": 7,
     "budget_exhausted": 7,
-    "stagec_visual_failed": 7,
     "sync_remote_unreachable": 7,
     "install_clone_failed": 7,
     "install_venv_failed": 7,
@@ -259,15 +230,17 @@ def _error_code_for_exception(exc: BaseException) -> str:
     # condition — and no existing client branch has to learn a new exit.
     if isinstance(exc, WorkspaceUnresolved):
         return exc.code
-    # Typed AgentRuntimeError subclasses map to their precondition/integrity codes.
+    # Typed AgentRuntimeError subclasses map to their precondition/integrity
+    # codes. Four rows left this tuple on 2026-08-19 — InvalidTransition,
+    # StaleRun, ProofMissing and RuntimeRootMismatch — because an AST Raise
+    # walk over all thirteen production packages AND `tests/` found zero raise
+    # sites for any of them: each class existed to be mapped here and nowhere
+    # else. A mapping row for an exception nothing throws is not defensive, it
+    # is a claim about the runtime that is false.
     for exc_type, code in (
-        (InvalidTransition, "invalid_transition"),
-        (StaleRun, "stale_run"),
-        (ProofMissing, "proof_missing"),
         (StoreCorrupt, "store_corrupt"),
         (DefaultScopeReconciliationRequired, "default_scope_reconciliation_required"),
         (EventPayloadTooLarge, "event_payload_too_large"),
-        (RuntimeRootMismatch, "wrong_runtime_root"),
         (StaleRevision, "stale_revision"),
         (SyncConflict, "sync_conflict"),
     ):
@@ -303,9 +276,7 @@ def _error_hint(code: str) -> str:
     return {
         "confirmation_required": "Re-run with --yes after confirming the destructive operation.",
         "not_found": "Check the id with the matching list command.",
-        "goal_not_found": "Run `hermes harness goal list --json` and retry with a listed id.",
         "workspace_not_found": "Run `hermes harness workspace list --json` and retry with a listed id.",
-        "realm_not_found": "Run `hermes harness realm list --json` and retry with a listed id.",
         "default_scope_reconciliation_required": "Run `hermes harness realm default-scope --dry-run --json`; no identities will change without explicit approval.",
         "sync_conflict": "Resolve conflicts in the realm sync git repo, then retry.",
         "sync_behind": "Run `hermes harness realm sync pull <realm> --json` before publishing.",

@@ -3143,6 +3143,39 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "all_persona_profiles",
         scope=("hermes_cli",),
     ),
+    # -- S72 stage H-CLI-1b — exceptions that existed to be mapped. -------
+    # An AST `Raise` walk over all thirteen production packages AND `tests/`
+    # finds ZERO raise sites for any of these four. Each had exactly three
+    # references: its own `class` statement, one import in `harness_support`,
+    # and one row in `_error_code_for_exception`'s type->code tuple. They were
+    # alive solely to be translated by the thing that translates them.
+    #
+    # Their exit codes did NOT all go with them, and the split matters:
+    # `invalid_transition` and `stale_run` had no reader anywhere in either
+    # repo and went in H-CLI-1a; `proof_missing` and `wrong_runtime_root` STAY
+    # in ERROR_EXIT_CODES because the launcher spells those same words on a
+    # DIFFERENT lane (a snapshot-health value, a proof-gate state), and both
+    # remain spendable through the ValueError arm. Two lanes, one word — the
+    # reason a token was never the unit of meaning here.
+    #
+    # NOT touched, deliberately: `WorkspaceUnresolved`, added by MC-8/P10 in
+    # this same file, which HAS a real raise site (`office_store.py:442`).
+    # Conflating it with these four is the exact mistake this row exists to
+    # forestall.
+    *rows(
+        "s72",
+        "HEAD",
+        Form.ATTR,
+        "dead-code audit pass 2 H-CLI-1b — never-raised exception classes "
+        "kept alive by the one tuple that mapped them; an exception nothing "
+        "throws is not a defensive mapping, it is a false claim about which "
+        "states this runtime can reach",
+        "InvalidTransition",
+        "StaleRun",
+        "ProofMissing",
+        "RuntimeRootMismatch",
+        scope=("agent_runtime.errors",),
+    ),
 )
 
 

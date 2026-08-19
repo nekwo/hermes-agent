@@ -2,18 +2,6 @@ class AgentRuntimeError(Exception):
     """Base class for agent runtime harness errors."""
 
 
-class InvalidTransition(AgentRuntimeError):
-    """Raised when a task transition is not allowed by the transition table."""
-
-
-class ProofMissing(AgentRuntimeError):
-    """Raised when a proof gate cannot be satisfied."""
-
-
-class StaleRun(AgentRuntimeError):
-    """Raised when a run heartbeat is stale beyond its allowed TTL."""
-
-
 class StoreCorrupt(AgentRuntimeError):
     """Raised when persisted JSON cannot be decoded into the expected model."""
 
@@ -46,10 +34,6 @@ class AlreadyExists(AgentRuntimeError):
 
 class EventPayloadTooLarge(AgentRuntimeError):
     """Raised when an event payload exceeds the Stage 1 JSONL budget."""
-
-
-class RuntimeRootMismatch(AgentRuntimeError):
-    """Raised when resolved runtime root does not match a caller pin."""
 
 
 class StaleRevision(AgentRuntimeError):
@@ -195,8 +179,8 @@ class WorkspaceUnresolved(AgentRuntimeError):
     note. Refusing reads would break every projection of an orphan the operator
     is trying to clean up.
 
-    Homed here beside ``WorkspaceDeleteBlocked`` / ``StaleRevision`` /
-    ``RuntimeRootMismatch``, with the same ``code`` + ``safe_details`` shape, so
+    Homed here beside ``WorkspaceDeleteBlocked`` / ``StaleRevision``, with the
+    same ``code`` + ``safe_details`` shape, so
     CLI and RPC envelopes carry a machine reason verbatim through the mapping
     they already have. B23(v) is the recorded hazard this avoids: two exception
     vocabularies for one contract, noticed only when a third site copies the
