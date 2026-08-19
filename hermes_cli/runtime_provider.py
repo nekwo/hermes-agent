@@ -581,12 +581,12 @@ def _select_pool_entry(pool, *, persist_pool_rotation: bool):
     ``persist_pool_rotation`` is threaded from :func:`resolve_runtime_provider`
     down to every pool selection it can reach, so a caller cannot half-suppress
     the write by hitting a different branch of the resolver. It is True for real
-    runtime consumers — round-robin's cursor is persisted (since MCF-44, in its
-    own typed sidecar record rather than in the credential rows' order), and a
-    selection that does not write it leaves the next process at the same
-    position — and False only for the readiness/visibility probe, which is a
-    read that must not consume a rotation slot (see
-    :func:`probe_runtime_provider`).
+    runtime consumers — the pool's selection state is persisted (since MCF-44 /
+    MCF-45, in its own typed sidecar record rather than in the credential rows'
+    order and in-memory-only counters), and a selection that does not write it
+    leaves the next process at the same position — and False only for the
+    readiness/visibility probe, which is a read that must not consume a rotation
+    slot or charge a request nobody made (see :func:`probe_runtime_provider`).
     """
     if persist_pool_rotation:
         return pool.select()

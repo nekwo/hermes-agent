@@ -9,7 +9,7 @@ import threading
 import time
 import uuid
 import re
-from dataclasses import dataclass, fields, replace
+from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -583,33 +583,62 @@ def _write_through_provider_state_to_global_root(
 
 @dataclass(frozen=True)
 class PoolRotationCursor:
-    """Where a provider's round-robin selection stands — as a TYPED FIELD.
+    """Where a provider's selection stands — as TYPED FIELDS, not as row order.
 
-    MCF-44. The cursor used to have no field of its own: it WAS the order of
-    the persisted credential rows, so "advance by one" meant renumbering every
-    entry's ``priority`` and rewriting the whole credential store. That made a
-    READ impossible without a write, moved ``auth.json``'s bytes on a quiescent
-    store (MCF-16), and left ``priority`` meaning two different things at once.
+    MCF-44. The round-robin position used to have no field of its own: it WAS
+    the order of the persisted credential rows, so "advance by one" meant
+    renumbering every entry's ``priority`` and rewriting the whole credential
+    store. That made a READ impossible without a write, moved ``auth.json``'s
+    bytes on a quiescent store (MCF-16), and left ``priority`` meaning two
+    different things at once.
 
-    Here the position is one named field, persisted in its own sidecar record
-    beside ``auth.json`` (:func:`hermes_cli.auth.write_pool_rotation_state`).
-    Rotating writes this record and NOTHING else — no credential row moves, and
-    no token material is ever stored here: only ids the pool itself minted.
+    MCF-45. ``least_used``'s position is its USAGE VECTOR — the counts are
+    exactly what decides its next pick, the same role ``last_selected_id`` plays
+    for round-robin — and it had the opposite defect: it was incremented in
+    memory and persisted NOWHERE, while ``load_pool`` rebuilds from disk on
+    every call, so across processes the strategy always returned the same entry.
+    One record holds both because they are one question ("where is selection?")
+    asked by two strategies; a second record would be a second authority over
+    the same answer.
+
+    Persisted in its own sidecar beside ``auth.json``
+    (:func:`hermes_cli.auth.write_pool_rotation_state`). Selecting writes this
+    record and NOTHING else — no credential row moves, and no token material is
+    ever stored here: only ids the pool itself minted, and integers.
     """
 
     last_selected_id: Optional[str] = None
+    #: ``credential id -> requests this pool has handed out``. Monotonic, and
+    #: merged across processes by MAX rather than by last-writer-wins: two
+    #: processes incrementing concurrently must never let the slower writer
+    #: erase the faster one's usage, which would re-pin the strategy on the
+    #: busiest key.
+    request_counts: Dict[str, int] = field(default_factory=dict)
 
     @classmethod
     def from_state(cls, state: Any) -> "PoolRotationCursor":
         if not isinstance(state, dict):
             return cls()
         raw = state.get("last_selected_id")
-        return cls(last_selected_id=raw if isinstance(raw, str) and raw else None)
+        raw_counts = state.get("request_counts")
+        counts: Dict[str, int] = {}
+        if isinstance(raw_counts, dict):
+            for key, value in raw_counts.items():
+                # A hand-edited or partially-written sidecar must degrade to
+                # "no count for that id", never poison a min() with a string.
+                if isinstance(key, str) and isinstance(value, int) and value > 0:
+                    counts[key] = value
+        return cls(
+            last_selected_id=raw if isinstance(raw, str) and raw else None,
+            request_counts=counts,
+        )
 
     def to_state(self) -> Dict[str, Any]:
         state: Dict[str, Any] = {}
         if self.last_selected_id:
             state["last_selected_id"] = self.last_selected_id
+        if self.request_counts:
+            state["request_counts"] = dict(self.request_counts)
         return state
 
 
@@ -683,6 +712,49 @@ class CredentialPool:
         # so constructing a pool for a non-rotating provider (the common case)
         # costs no file read.
         self._rotation_cursor: Optional[PoolRotationCursor] = None
+        if self._strategy == STRATEGY_LEAST_USED:
+            # MCF-45: adopt the durable counts NOW rather than at first
+            # selection, so every reader of ``entries()`` — ``hermes auth``
+            # listings, the web server's pool view — sees the number the
+            # strategy actually decides on. One small sidecar read, and only
+            # for the pools configured to care.
+            self._sync_usage_counts_from_store()
+
+    def _usage_counts(self) -> Dict[str, int]:
+        """The usage vector as it stands in memory, pruned to live entries.
+
+        Built from ``self._entries`` rather than accumulated separately, so an
+        entry removed from the pool takes its counter with it and the sidecar
+        cannot grow without bound.
+        """
+        return {
+            entry.id: entry.request_count
+            for entry in self._entries
+            if entry.request_count
+        }
+
+    def _sync_usage_counts_from_store(self) -> None:
+        """Re-read the durable counts and merge them into memory by MAX (MCF-45).
+
+        Re-read on every ``least_used`` selection, not once per pool, because
+        the agent runtime holds ONE pool object per agent for the life of the
+        process (``agent._credential_pool``). A pool loaded once and never
+        refreshed would distribute perfectly within that process and be blind to
+        every sibling — which is the defect this is fixing, one layer in. The
+        cost is one read of a small JSON file per selection, against a selection
+        that is about to make a network inference call.
+
+        MAX rather than assignment in both directions: disk never lowers a live
+        in-memory count (this process's own increments may not have landed yet),
+        and memory never hides a higher count another process wrote.
+        """
+        durable = read_pool_rotation_cursor(self.provider)
+        base = self._rotation_cursor if self._rotation_cursor is not None else durable
+        for idx, entry in enumerate(self._entries):
+            seen = durable.request_counts.get(entry.id, 0)
+            if seen > entry.request_count:
+                self._entries[idx] = replace(entry, request_count=seen)
+        self._rotation_cursor = replace(base, request_counts=self._usage_counts())
 
     def _rotation_cursor_unlocked(self) -> PoolRotationCursor:
         if self._rotation_cursor is None:
@@ -1721,8 +1793,10 @@ class CredentialPool:
         a full credential-store rewrite. The entry point survives that fix for a
         reason that outlives it: a probe that persisted the cursor would CONSUME
         a rotation slot on behalf of a caller that never used the credential,
-        so the next real consumer would skip an entry. A read still writes
-        nothing. (Historically the write also moved ``auth.json`` on a quiescent
+        so the next real consumer would skip an entry. MCF-45 gave
+        ``least_used`` a durable counter on the same record, and the same
+        sentence applies to it — a probe that incremented a usage count would
+        charge a request nobody made. A read still writes nothing. (Historically the write also moved ``auth.json`` on a quiescent
         store — MCF-16 — because ``_save_auth_store`` stamps ``updated_at``
         unconditionally; that half is retired by the sidecar.)
 
@@ -1916,10 +1990,32 @@ class CredentialPool:
             return entry
 
         if self._strategy == STRATEGY_LEAST_USED and len(available) > 1:
+            # MCF-45: the counts this compares must come from DISK, not merely
+            # from this object. ``load_pool()`` rebuilds the pool on every call
+            # and nothing on this path used to persist, so the counter reached
+            # disk on no path at all and every process re-derived the same
+            # "least used" entry forever — a strategy that was inert across
+            # processes while looking correct inside one of them.
+            self._sync_usage_counts_from_store()
+            # Re-resolve through the (possibly replaced) pool entries: the sync
+            # above swaps objects in ``self._entries``, and comparing the stale
+            # ones would compare exactly the counts this call just refreshed.
+            synced = {e.id: e for e in self._entries}
+            available = [synced.get(e.id, e) for e in available]
             entry = min(available, key=lambda e: e.request_count)
             # Increment usage counter so subsequent selections distribute load
             updated = replace(entry, request_count=entry.request_count + 1)
             self._replace_entry(entry, updated)
+            # ...and land it, in the sidecar record rather than in the
+            # credential rows: the count is selection state, so persisting it
+            # must not rewrite a single credential (MCF-44). A probe passes
+            # ``persist_rotation=False`` and therefore does not consume usage on
+            # behalf of a caller that never made a request.
+            self._rotation_cursor = replace(
+                self._rotation_cursor_unlocked(), request_counts=self._usage_counts()
+            )
+            if persist_rotation:
+                write_pool_rotation_cursor(self.provider, self._rotation_cursor)
             self._current_id = entry.id
             return updated
 
