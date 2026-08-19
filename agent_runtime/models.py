@@ -228,12 +228,10 @@ class GoalRuntimeInstance:
     state: str
     created_at: datetime
     updated_at: datetime
-    started_by: str
     run_generation: int = 1
     active_run_ids: list[str] = field(default_factory=list)
     parked_reason: str | None = None
     lease_owner: str | None = None
-    lease_expires_at: datetime | None = None
     lane_kind: str = "production"
     priority: int = 5
     state_reason: str | None = None
@@ -291,7 +289,6 @@ class AgentRun:
     last_heartbeat_at: datetime
     finished_at: datetime | None = None
     iteration_budget: int = 90
-    iterations_used: int = 0
     max_wall_seconds: float | None = None
     max_api_calls: int | None = None
     max_total_tokens: int | None = None
@@ -392,7 +389,6 @@ class PersonaInstance:
     # dataclass fields and silently ignores unknown keys already on disk.
     skill_manifest_hash: str | None = None
     token_budget_used: int = 0
-    child_events_offset: int = 0
     last_heartbeat_at: datetime | None = None
     updated_at: datetime | None = None
     schema_version: int = 1

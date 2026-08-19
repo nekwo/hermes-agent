@@ -1211,7 +1211,10 @@ def test_the_tail_preview_is_bounded_and_the_bound_is_declared_by_design():
     # An undeclared drop trips the amber "lost data" pill; a deliberate bound
     # must not.
     assert "tail_truncated" in summary["by_design"]
-    assert accountant.dropped_by_design == accountant.dropped
+    assert (
+        sum(summary["reasons"][code] for code in summary["by_design"])
+        == summary["dropped"]
+    )
 
 
 def test_a_short_preview_records_no_drop():

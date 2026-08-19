@@ -2935,6 +2935,63 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "KNOWN_RISK_FLAGS",
         "PARAMETERIZED_RISK_FLAG_PREFIXES",
     ),
+    # -- S72 stage HA-3 — write-only fields on live dataclasses. -----------
+    # Each was declared, persisted and read by NOTHING: an AST `Name(Load)` /
+    # attribute walk over all thirteen production packages found the
+    # declaration and nothing else, the stream goldens carry none of them, and
+    # the launcher reads none. `child_events_offset` is the fifth field of the
+    # block S70 pruned four fields from — same block, same argument, missed.
+    #
+    # CLASS_ATTR and not CODE: the risk being fenced is the FIELD coming back
+    # on the dataclass, and `serde._coerce` builds kwargs from `fields()` and
+    # ignores unknown keys, so a persisted row that still carries one of these
+    # loads unchanged — which is why no contract bump was needed and why a
+    # producer-frame pin would have nothing to assert.
+    *rows(
+        "s72",
+        "HEAD",
+        Form.CLASS_ATTR,
+        "dead-code audit pass 2 HA-3 — declared-and-never-read dataclass "
+        "fields; none reached a wire, a golden or a launcher reader, and a "
+        "field nothing loads is a promise the frame does not keep",
+        "models.PersonaInstance.child_events_offset",
+        "models.GoalRuntimeInstance.started_by",
+        "models.GoalRuntimeInstance.lease_expires_at",
+        "models.AgentRun.iterations_used",
+        scope=_AR,
+    ),
+    *rows(
+        "s72",
+        "HEAD",
+        Form.CLASS_ATTR,
+        "dead-code audit pass 2 HA-3 — a SECOND authority for a number "
+        "`ProjectionAccountant.summary()` already carries as `reasons` + "
+        "`by_design`. Only tests ever asked it, and they now do the "
+        "subtraction a real reader has to do",
+        "parity.ProjectionAccountant.dropped_by_design",
+        scope=_AR,
+    ),
+    # `realm_sync._board_artifacts` / `._office_artifacts` were the pre-ML-8
+    # publish walks. Their callers moved to `_board_publish_scan` /
+    # `_office_publish_scan` — the single-walk chokepoints that exist BECAUSE
+    # two independent walks of the same directories decided "which offices
+    # travel" and "which persona definitions are pinned" and disagreed, so an
+    # undecodable actor file travelled and every peer archived that desk
+    # (MISSION_CONTROL_LEDGER_REFACTOR_PLAN §3, marked FIXED). Rowed even
+    # though they are private, because resurrection would restore exactly the
+    # second walk the fix removed — this is the "resurrection could bypass a
+    # public tombstone" case the registry reserves rows for.
+    *rows(
+        "s72",
+        "HEAD",
+        Form.CODE,
+        "dead-code audit pass 2 HA-3 — the pre-ML-8 second publish walk; the "
+        "typed single-scan chokepoints replaced them and a re-grown copy "
+        "would reinstate the two-walks-disagree defect",
+        "_board_artifacts",
+        "_office_artifacts",
+        scope=("agent_runtime.realm_sync",),
+    ),
 )
 
 

@@ -147,10 +147,6 @@ class ProjectionAccountant:
     def dropped(self) -> int:
         return sum(self._reasons.values())
 
-    @property
-    def dropped_by_design(self) -> int:
-        return sum(count for code, count in self._reasons.items() if code in self._by_design)
-
     def summary(self) -> dict[str, Any]:
         """The per-projection completeness row carried on the parity envelope.
 

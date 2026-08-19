@@ -144,7 +144,7 @@ def _intervention(
         "run_id": run_id,
         "summary": summary,
         "ask": summary,
-        "risk_if_ignored": _risk_if_ignored(kind, severity),
+        "risk_if_ignored": _risk_if_ignored(severity),
         "allowed_actions": _allowed_actions(kind, subject),
         "expires_at": expires_at,
         # S28: ``context_request_id`` / ``discovery_id`` were only ever supplied
@@ -166,7 +166,7 @@ def _intervention(
     return data
 
 
-def _risk_if_ignored(kind: str, severity: str) -> str:
+def _risk_if_ignored(severity: str) -> str:
     # S28: the context-request arm went with the task-sourced interventions that
     # were its only producers.
     if severity in {"critical", "high"}:

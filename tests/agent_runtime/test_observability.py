@@ -449,15 +449,12 @@ def test_health_is_healthy_with_no_interventions_and_names_its_execution_mode():
 
 
 def test_snapshot_embeds_observability_envelope():
-    ts = now()
-    task = Task(id="task_obs", title="Mission", description="d", state=TaskState.CREATED, created_at=ts, updated_at=ts, requested_by="human")
-
-    snapshot = build_snapshot(
-        task_store=Store([task]),
-        run_store=Store([]),
-        agent_store=EmptyAgentStore(),
-        incident_store=Store([]),
-    )
+    # The task/run/incident stores this used to inject are gone from
+    # ``build_snapshot``'s signature: they were pass-throughs that reached
+    # ``_build_snapshot_in_runtime_scope`` and were never loaded there, so
+    # passing them changed nothing about the frame — including the absence
+    # this test asserts.
+    snapshot = build_snapshot(agent_store=EmptyAgentStore())
 
     # S9 removed mission/run/incident observability from the snapshot wire.
     assert "observability" not in snapshot

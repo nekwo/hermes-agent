@@ -188,11 +188,11 @@ def test_custom_stores_bypass_coalescing(monkeypatch):
     monkeypatch.setattr(snapshot_mod, "_build_snapshot_uncoalesced", fake_build)
 
     sentinel = object()
-    snapshot_mod.build_snapshot(task_store=sentinel)
-    snapshot_mod.build_snapshot(task_store=sentinel)
+    snapshot_mod.build_snapshot(agent_store=sentinel)
+    snapshot_mod.build_snapshot(agent_store=sentinel)
 
     assert len(seen) == 2
-    assert all(call["task_store"] is sentinel for call in seen)
+    assert all(call["agent_store"] is sentinel for call in seen)
 
 
 def test_builder_exception_propagates_and_releases_the_gate(monkeypatch):

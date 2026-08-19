@@ -1453,7 +1453,7 @@ class PersonaInstanceStore:
         # S7-A producer: the retired row leaves the active frame, so the launcher
         # deletes the keyed row (never renders it as a live idle agent). Live
         # unless read_model.delta_patches is explicitly off (it ships on).
-        emit_persona_instance_remove(self.event_log, instance, reason=safe_reason)
+        emit_persona_instance_remove(self.event_log, instance)
         # Prune-lane hook (mirrors close_for_task / the janitor): a retired
         # instance must not leave a phantom office desk. Best-effort; office
         # archival never fails the retire.

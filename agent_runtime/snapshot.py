@@ -445,10 +445,7 @@ def _timed_section(sink: dict[str, int], key: str):
 
 
 def build_snapshot(
-    task_store=None,
-    run_store=None,
     agent_store=None,
-    incident_store=None,
     event_log=None,
     prompt_skills_catalogs=None,
     *,
@@ -491,16 +488,7 @@ def build_snapshot(
     """
 
     caller = _build_caller(build_info)
-    custom_stores = any(
-        value is not None
-        for value in (
-            task_store,
-            run_store,
-            agent_store,
-            incident_store,
-            event_log,
-        )
-    )
+    custom_stores = any(value is not None for value in (agent_store, event_log))
     if custom_stores or prompt_skills_catalogs is not None:
         # Injected stores (tests, doctors) must observe exactly their own
         # fixtures — never a coalesced result built from the default stores.
@@ -508,10 +496,7 @@ def build_snapshot(
         # transient bodies; the shared result intentionally contains hashes
         # only, so it cannot satisfy that internal projection request.
         injected = _build_snapshot_uncoalesced(
-            task_store=task_store,
-            run_store=run_store,
             agent_store=agent_store,
-            incident_store=incident_store,
             event_log=event_log,
             prompt_skills_catalogs=prompt_skills_catalogs,
         )
@@ -662,10 +647,7 @@ def build_snapshot(
 
 
 def _build_snapshot_uncoalesced(
-    task_store=None,
-    run_store=None,
     agent_store=None,
-    incident_store=None,
     event_log=None,
     prompt_skills_catalogs=None,
 ) -> dict:
@@ -676,10 +658,7 @@ def _build_snapshot_uncoalesced(
     # binding lived in the section below.
     with runtime_resolution_scope(), persona_session_db_scope() as session_db:
         return _build_snapshot_in_runtime_scope(
-            task_store=task_store,
-            run_store=run_store,
             agent_store=agent_store,
-            incident_store=incident_store,
             event_log=event_log,
             prompt_skills_catalogs=prompt_skills_catalogs,
             session_db=session_db,
@@ -687,10 +666,7 @@ def _build_snapshot_uncoalesced(
 
 
 def _build_snapshot_in_runtime_scope(
-    task_store=None,
-    run_store=None,
     agent_store=None,
-    incident_store=None,
     event_log=None,
     prompt_skills_catalogs=None,
     *,

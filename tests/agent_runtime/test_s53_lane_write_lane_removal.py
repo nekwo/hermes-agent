@@ -130,7 +130,6 @@ def seed_lane_row(
         state=state,
         created_at=ts,
         updated_at=ts,
-        started_by="test",
         lane_kind=lane_kind,
         priority=priority,
         **fields,

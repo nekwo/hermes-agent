@@ -760,11 +760,14 @@ def emit_persona_instance_remove(
     event_log: EventLog,
     instance: Any,
     *,
-    reason: str | None = None,
     config: AgentRuntimeConfig | None = None,
 ) -> bool:
     """Emit a persona-instance ``remove`` (the instance left the active frame —
-    a close / task-terminal fan-out). Dark unless the flag is on."""
+    a close / task-terminal fan-out). Dark unless the flag is on.
+
+    Takes no ``reason``: ``emit_state_patch`` has no field to carry one, so the
+    kwarg this used to accept was computed by its caller and discarded. The
+    WHY travels on the paired domain event, which does have a place for it."""
 
     if not delta_patches_enabled(config):
         return False

@@ -46,8 +46,11 @@ def test_projection_accountant_declares_by_design_reason_codes():
     assert summary["reasons"] == {"limit": 103, "session_not_in_db": 10}
     # Additive key: only the deliberate bound is declared by-design.
     assert summary["by_design"] == ["limit"]
-    assert acct.dropped_by_design == 103
     # A reader subtracts by-design reasons itself and is left with the anomaly.
+    # There is deliberately no ``dropped_by_design`` accessor to do it for
+    # them: it was a second authority for a number ``summary()`` already
+    # carries, and only tests ever asked it.
+    assert sum(summary["reasons"][code] for code in summary["by_design"]) == 103
     anomalous = summary["dropped"] - sum(
         summary["reasons"][code] for code in summary["by_design"]
     )

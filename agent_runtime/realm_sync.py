@@ -999,13 +999,6 @@ def _board_publish_scan(workspaces: list[Workspace]) -> BoardPublishScan:
     return BoardPublishScan(artifacts=artifacts, refused=refused)
 
 
-def _board_artifacts(workspaces: list[Workspace]) -> list[RealmSyncArtifact]:
-    """Thin view over :func:`_board_publish_scan` for callers that only want the
-    artifact rows."""
-
-    return _board_publish_scan(workspaces).artifacts
-
-
 def _board_store_drift(realm_id: str, workspaces: list[Workspace]) -> dict[str, int]:
     """Board content drift vs the never-synced baseline sidecar, for boards whose
     ``workspace_id`` belongs to this realm's workspaces.
@@ -1156,13 +1149,6 @@ def _office_publish_scan(workspaces: list[Workspace]) -> OfficePublishScan:
             if actor.persona_id and actor.persona_id not in persona_ids:
                 persona_ids.append(actor.persona_id)
     return OfficePublishScan(artifacts=artifacts, persona_ids=persona_ids, refused=refused)
-
-
-def _office_artifacts(workspaces: list[Workspace]) -> list[RealmSyncArtifact]:
-    """Thin view over :func:`_office_publish_scan` for callers that only want
-    the artifact rows."""
-
-    return _office_publish_scan(workspaces).artifacts
 
 
 def _office_wanted_persona_ids(workspaces: list[Workspace]) -> list[str]:

@@ -925,6 +925,13 @@ class OfficeStore:
         Archive-never-delete, like every other removal in this store: the
         directory is MOVED under ``paths.office_surface_archive_root()``, never
         unlinked, so a mistaken archive is recoverable by moving it back.
+
+        ``updated_by`` is on the domain event, not just the signature. It was
+        accepted and discarded until 2026-08-19 — the ONE verb in this store
+        that moves a whole surface was also the only one whose event could not
+        say who moved it, which is exactly backwards: the 2026-08-15 mass
+        archive is the precedent for wanting attribution most on the highest
+        blast radius.
         """
 
         wsid = safe_id(workspace_id)
@@ -979,6 +986,7 @@ class OfficeStore:
                 workspace_id=surface.workspace_id,
                 change="archived",
                 revision=surface.revision,
+                updated_by=_safe_actor_ref(updated_by),
             )
         return result
 
