@@ -154,6 +154,15 @@ class RealmMembershipProvider:
     """
 
     def authorize(self, realm: Realm, action: str) -> MembershipDecision:
+        # ``realm`` is unused BY THIS IMPLEMENTATION and stays in the signature
+        # deliberately: this is the authorization boundary, and the default
+        # provider being realm-agnostic is a property of the default, not of
+        # the contract. A real membership provider decides per realm, so
+        # dropping the parameter here would force every future implementation
+        # to widen the interface — and the 2026-08-19 dead-parameter sweep that
+        # cut `build_snapshot`'s three pass-through stores deliberately left
+        # this one, because "unused" and "not part of the question" are
+        # different findings.
         if action not in {"pull", "publish", "status"}:
             return MembershipDecision(False, "invalid_request", f"unsupported sync action: {action}")
         return MembershipDecision(True)

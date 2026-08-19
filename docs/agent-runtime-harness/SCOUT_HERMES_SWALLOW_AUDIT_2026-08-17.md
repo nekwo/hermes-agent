@@ -258,7 +258,12 @@ resync-first registration.
   is exactly those four, _detect_usage_candidates (:3462-3467) filters to that
   tuple. The fallback S1 routed around — now the only surviving route into the
   upstream swallow from this module, and nothing can reach it.
-* runtime.office.resolve_conflict NEVER LANDED. Registry holds exactly 7
+* runtime.office.resolve_conflict NEVER LANDED. **SUPERSEDED 2026-08-19: it
+  landed at `32a392364b`, four hours after this document was committed. The
+  registry holds EIGHT `@method` handlers, and 7 of the 8 have launcher
+  callers — `runtime.office.unsubscribe` has zero, which is a launcher wiring
+  gap and not a hermes deletion.** Original text follows.
+  Registry holds exactly 7
   methods (get :360, subscribe :485, unsubscribe :753, upsert :814, remove
   :1017, surface.update :1190, agent.create :1352). harness office
   resolve-conflict (harness.py:767-775 -> office.py:294 -> office_store:583)

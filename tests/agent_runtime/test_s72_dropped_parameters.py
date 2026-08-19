@@ -43,6 +43,7 @@ together, and that is what the third test below pins.
 
 from __future__ import annotations
 
+import ast
 import inspect
 
 import pytest
@@ -121,8 +122,21 @@ def test_persona_instance_remove_takes_no_reason_and_no_caller_passes_one():
         "emit_persona_instance_remove accepts `reason` again — `emit_state_patch` "
         "has no field to carry it, so it can only be computed and discarded"
     )
-    source = inspect.getsource(persona_assignments)
-    assert "emit_persona_instance_remove(self.event_log, instance)" in source, (
-        "the retire path's call site no longer matches the callee's signature"
-    )
-    assert "emit_persona_instance_remove(self.event_log, instance, reason=" not in source
+    # AST, not a source grep: the question is whether any CALL passes a
+    # `reason` keyword, and a text scan cannot tell a call from the comment
+    # explaining why the kwarg went.
+    tree = ast.parse(inspect.getsource(persona_assignments))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and (getattr(node.func, "id", None) or getattr(node.func, "attr", None))
+        == "emit_persona_instance_remove"
+    ]
+    assert calls, "no call site left — the retire path lost its remove patch"
+    for call in calls:
+        assert not any(kw.arg == "reason" for kw in call.keywords), (
+            "a caller passes `reason=` to emit_persona_instance_remove again. "
+            "The callee no longer accepts it, so this is a TypeError at the "
+            "moment a persona instance retires."
+        )

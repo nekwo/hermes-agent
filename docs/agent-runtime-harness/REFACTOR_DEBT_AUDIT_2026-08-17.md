@@ -143,7 +143,20 @@ reached #5. The brief's "22 fences and a 4 s backoff ladder" matches no tally on
 Substance confirmed; numbers not.
 
 **Correction 4 — two parity assumptions in circulating briefs are false.**
-`runtime.office.resolve_conflict` **never landed** — exactly seven RPC methods exist
+
+> **SUPERSEDED 2026-08-19 (dead-code audit pass 2, HA-4).** The first half of
+> this correction is itself wrong, and was wrong when written.
+> `runtime.office.resolve_conflict` **landed at `32a392364b`**, four hours
+> after this document was committed. `grep -c '^@method(' agent_runtime/serve_rpc.py`
+> returns **8**, not seven: `runtime.office.{get,subscribe,unsubscribe,upsert,remove,surface.update,resolve_conflict}`
+> and `runtime.agent.create`. **7 of the 8 have launcher callers** —
+> `runtime.office.unsubscribe` has zero (`lib` = 0; the subscribe lane's
+> `dispose()` never sends it), which is a launcher WIRING gap, not a hermes
+> deletion. The genuinely CLI-only office verb is `office.actor.restore`, as
+> the second half of this correction says. Do not re-derive the seven-methods
+> claim from here; re-run the `@method` sweep.
+
+`runtime.office.resolve_conflict` never landed — exactly seven RPC methods exist
 (RAN, `@method` sweep); the capability lane is not a fallback there but the unfinished
 main path (Plan E WV-H4/L6). And `office.actor.restore` is **not dead** — no UI submit
 site (SWEPT), but it is the sanctioned operator recovery lane (`serve_rpc.py:870`
@@ -285,8 +298,10 @@ one quiet session is not proof.
   cargo (Plan E A-1, unanswered — §6.1). Item 9's write-storm half stands.
 - Any brief still citing the absence-means-delete inference as extant — deleted
   outright at launcher `7623f99cf` (Plan E §0 Correction 1; re-verified).
-- Any parity claim that all four office write verbs ride RPC — `resolve_conflict`
-  never landed (Correction 4).
+- ~~Any parity claim that all four office write verbs ride RPC —
+  `resolve_conflict` never landed (Correction 4).~~ **SUPERSEDED 2026-08-19:**
+  `resolve_conflict` DID land (`32a392364b`); the registry holds eight methods.
+  See the superseded note on Correction 4.
 - `03-retirement-ledger.md` no longer exists (mission-lane removal wave, RAN git log);
   the living ledger is doc 19.
 

@@ -8,6 +8,51 @@
 >
 > **Standing rules for Phase 2:** fork boundary (`agent/` fork-added subdirs, `agent_runtime/`, `hermes_cli/harness*`, and files absent from `upstream/main` — `git cat-file -e upstream/main:<path>`); upstream files are never edited (fork-added blocks inside them are report-only); `tests/hermes_cli` runs ONLY via the per-file runner `scripts/run_tests.sh`; the full `agent_runtime` checkpoint `python -m pytest tests/agent_runtime/ -q` (~13–15 min, baseline **5669 / 1 skip / 0 fail**) is run by the PARENT in a background shell with the tail redirected to a file — for anything under `agent_runtime/`; explicit-path commits; `harness_parts/*.py` are exec'd, not imported (text grep, whole-scope); every removal gets a row in `tests/agent_runtime/test_tombstone_registry.py` (forms `MODULE` / `ATTR` / `CLASS_ATTR` / `IMPORT` / `EVENT` / `CODE` / `PATH`; the registry currently rows NONE of the names below); watch every deletion go RED first (restore the symbol → registry row red → re-delete).
 
+> ## EXECUTION STATUS — 2026-08-19
+>
+> Worked end to end on branch `dead-code-audit-pass2`. **Landed:** HB-1, HA-2,
+> HA-1, HA-3, HB-2, HB-3, HB-4, H-CLI-2, H-CLI-1a, H-CLI-1b, H-CLI-3 (2 of 3
+> verbs), H-P1, H-P2, H-P3, HA-4, HA-5, HB-4-`EXCL`, and readability rows R1,
+> R2, R3, R4, R6, R7, R8, R9, R10, R12, R13, R14, R16.
+>
+> **REFUSED, with evidence** (each recorded in the code, not only here):
+> **NEW-1** — the persona-chat append seam is a chokepoint between callers, not
+> an orphan; deleting it would delete five enforcement points and the relay
+> lane still drives it. Pinned instead by
+> `tests/hermes_cli/test_persona_chat_append_seam.py`.
+> **`harness contracts dump`** — cutting it while ruling 5 keeps
+> `contract_manifest` is incoherent; it is the constant's only reader and the
+> only door onto the contract registry.
+> **R11 (`F401`)** — the recommendation is insufficient as written: F401 cannot
+> model an `exec` namespace, and `hermes_cli/harness.py` imports ~100 names
+> *so the exec'd parts under `harness_parts/` can see them*. Turning it on with
+> only upstream per-file-ignores would fire on every one of those.
+> **H-CLI-5's store follow-ons** (`RealmStore.bind_server`,
+> `WorkspaceStore.add_agent`/`remove_agent`) — each has exactly one production
+> caller (its CLI verb). Cutting them is a write-once-at-create data-model
+> ruling an operator owns.
+>
+> **Corrections to this document, found by re-deriving rather than trusting:**
+> §1.3's `_add_stage42_global_args` call-site count is 58, not 37 (conclusion
+> unchanged and stronger). §1.1's HA-1 row says the
+> `emit_persona_instance_remove` caller edit could be deferred to an `EXCL`
+> stage — it could not; that is a `TypeError` on the retire path, and both
+> halves must land together. §1.4's H-P3 row says
+> `scripts/backend_postgres_proof.py` hard-codes a machine path as a committed
+> default — it does not, it already reads `ETERNIABACKEND_ROOT` with the path as
+> fallback. §1.1's HA-2 rows under-count: `_safe_token` had a FOURTH copy
+> (`persona_profile_binding._artifact_token`, whose docstring admits it) and
+> `_optional_text` a fourth (`workspace_scope._norm`), and two `_safe_token`
+> readers were FUNCTION-LOCAL imports invisible to any top-level scan.
+> H-CLI-1a's exit-code census regenerates to **25**, not 22+2 — and the two
+> wrong intermediate answers are recorded in that commit because each is a
+> gate-shaped mistake (see `tests/hermes_cli/test_error_exit_code_producers.py`).
+>
+> **Owed cross-stack, not doable from this repo:** refresh the launcher's
+> `test/features/mission_control/fixtures/hermes_cli_contract.json` (now stale
+> in both directions), the `provider_auth_expired` launcher assertion, and the
+> `runtime.office.unsubscribe` wiring gap (NEW-2).
+
 **Evidence tags:** `CONF` verifier-confirmed by its own grep/AST at `40b0f0c53a` · `EXCL` touches an exclusion-list file · `NEW` found in the verifier's deeper pass · `RULING` operator decision needed · `STAGE-STOP` alters a golden.
 
 ---

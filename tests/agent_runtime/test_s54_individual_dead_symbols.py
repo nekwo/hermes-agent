@@ -246,16 +246,38 @@ def test_the_delivery_directive_janitor_still_builds_real_worktrees(
 
 
 def test_the_kept_incident_constant_is_addressed_by_value_somewhere_live():
-    """``MODEL_INVALID_OUTPUT`` is KEPT despite zero name-references, because
-    its VALUE is live. This asserts the reason, so the keep cannot rot into an
-    unexplained exception."""
+    """``MODEL_INVALID_OUTPUT`` is KEPT because its VALUE is live.
 
-    import inspect
+    REWRITTEN 2026-08-19 (dead-code audit pass 2, HA-4). This used to assert
+    ``"model_invalid_output" in inspect.getsource(observability)`` — source-grep
+    debt line 65, an assertion that proves characters exist and nothing else.
+    It also described a situation that no longer holds: `observability` spelled
+    the value as a bare literal in a one-element set, so the constant had zero
+    NAME references and the pin existed to explain why that was tolerable. The
+    module now imports the constant, so the two-spellings problem is gone and
+    the honest pin is the BEHAVIOUR: an incident of this kind is severity
+    "high". Delete the constant or the arm and this goes red for the right
+    reason.
+    """
+
+    from datetime import datetime, timezone
 
     from agent_runtime import incidents, observability
+    from agent_runtime.models import Incident
 
     assert incidents.MODEL_INVALID_OUTPUT == "model_invalid_output"
-    assert "model_invalid_output" in inspect.getsource(observability)
+
+    now = datetime.now(timezone.utc)
+    incident = Incident(
+        id="inc_severity_pin",
+        task_id="task_severity_pin",
+        run_id=None,
+        kind=incidents.MODEL_INVALID_OUTPUT,
+        summary="model returned unparseable output",
+        detail_path=None,
+        opened_at=now,
+    )
+    assert observability._severity_for_incident(incident) == "high"
 
 
 def test_s54_moved_no_event_contract():

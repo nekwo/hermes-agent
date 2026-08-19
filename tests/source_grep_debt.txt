@@ -7,7 +7,7 @@
 # false-GREEN when a symbol is deleted but a mention of it survives, and
 # false-RED when a refactor moves the line to a neighbouring function.
 #
-# grandfathered violations: 79
+# grandfathered violations: 78
 #
 # THIS REGISTER IS CLOSED TO ADDITIONS. The gate does not offer a way to
 # ledger a new violation: a new positive source grep is a red build, not a
@@ -62,7 +62,6 @@ tests/agent_runtime/test_s48_cli_entity_row_consolidation.py::test_the_projectio
 tests/agent_runtime/test_s48_cli_entity_row_consolidation.py::test_the_projection_bounds_live_in_exactly_one_place::'actors_truncated' in office_row
 tests/agent_runtime/test_s48_cli_entity_row_consolidation.py::test_the_projection_bounds_live_in_exactly_one_place::'cards_truncated' in board_row
 tests/agent_runtime/test_s48_cli_entity_row_consolidation.py::test_the_row_delegates_to_its_builder::builder in _row_source(name)
-tests/agent_runtime/test_s54_individual_dead_symbols.py::test_the_kept_incident_constant_is_addressed_by_value_somewhere_live::'model_invalid_output' in inspect.getsource(observability)
 tests/agent_runtime/test_s57_unruled_config_debt_removal.py::test_the_surviving_scalar_is_still_there_and_still_read::SURVIVING_SCALAR in inspect.getsource(locks)
 tests/agent_runtime/test_s57_unruled_config_debt_removal.py::test_validation_still_has_a_real_arm_left::'schema_version' in src
 tests/agent_runtime/test_s57_unruled_config_debt_removal.py::test_validation_still_has_a_real_arm_left::SURVIVING_SCALAR in src

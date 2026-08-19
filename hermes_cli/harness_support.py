@@ -9,6 +9,22 @@ inheriting them from whatever harness.py happened to define, which is what
 makes the parts analysable at all (see
 ``tests/hermes_cli/test_harness_parts_namespace.py``).
 
+WHY EACH PART CARRIES AN EXPLICIT IMPORT HEADER
+-----------------------------------------------
+This paragraph lived, verbatim, at the top of all six parts until 2026-08-19.
+It is here once now, and each part points at it.
+
+The parts are still ``exec``'d into ``harness.py``'s globals by
+``_load_command_parts`` — that mechanism is unchanged — but they are no longer
+DEPENDENT on it. These names used to arrive implicitly from whatever
+``harness.py`` happened to import, so a wrong one surfaced as a ``NameError``
+only when an operator ran the one verb that touched it: a latent break with an
+arbitrarily long fuse, discovered in production by whoever reached for the
+least-used command. Re-importing a name ``harness.py`` also imports rebinds it
+to the identical object, so the explicit header costs nothing at runtime. Both
+halves — that the header is present, and that it rebinds identically — are
+checked by ``tests/hermes_cli/test_harness_parts_namespace.py``.
+
 Nothing here knows about argparse wiring or any specific command: harness.py
 keeps its 50 local command bodies and re-imports these names, so
 ``hermes_cli.harness.emit_harness_error`` (imported by ``harness_parts/serve.py``

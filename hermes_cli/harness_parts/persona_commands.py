@@ -1,12 +1,9 @@
 # Loaded by hermes_cli.harness via _load_command_parts(); executed in harness.py globals.
 # Keep command bodies here so parser registration stays separate from persona/chat behavior.
 
-# Explicit import header. Still exec'd into harness.py's globals by
-# _load_command_parts — that mechanism is unchanged — but no longer dependent
-# on it: these names used to arrive implicitly from whatever harness.py
-# imported, so a wrong one surfaced as a NameError only when an operator ran
-# the one verb that touched it. Re-importing a name harness.py also imports
-# rebinds it to the identical object; both halves are checked by
+# Explicit import header — its rationale lives ONCE, in
+# ``hermes_cli/harness_support.py``'s module docstring, and the pair of
+# guarantees it rests on are checked by
 # tests/hermes_cli/test_harness_parts_namespace.py.
 
 from __future__ import annotations

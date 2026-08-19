@@ -5,7 +5,7 @@ from typing import Any
 
 from hermes_time import now
 
-from .incidents import CRITICAL_INCIDENT_KINDS
+from .incidents import CRITICAL_INCIDENT_KINDS, MODEL_INVALID_OUTPUT
 from .models import Event, Incident
 from .states import RunState
 from .store import ACTIVE_RUN_STATES
@@ -194,7 +194,7 @@ def _severity_for_incident(incident: Incident) -> str:
         return "critical"
     if incident.kind in DELIVERY_EVIDENCE_INCIDENT_KINDS:
         return "high"
-    if incident.kind in {"model_invalid_output"}:
+    if incident.kind == MODEL_INVALID_OUTPUT:
         return "high"
     return "medium"
 

@@ -10,12 +10,9 @@
 # owner instance, and the map asserts only that owner's `owner -> child` edges;
 # non-owner edges are reported (ignored_non_owner_edges), never applied.
 
-# Explicit import header. Still exec'd into harness.py's globals by
-# _load_command_parts — that mechanism is unchanged — but no longer dependent
-# on it: these names used to arrive implicitly from whatever harness.py
-# imported, so a wrong one surfaced as a NameError only when an operator ran
-# the one verb that touched it. Re-importing a name harness.py also imports
-# rebinds it to the identical object; both halves are checked by
+# Explicit import header — its rationale lives ONCE, in
+# ``hermes_cli/harness_support.py``'s module docstring, and the pair of
+# guarantees it rests on are checked by
 # tests/hermes_cli/test_harness_parts_namespace.py.
 
 from __future__ import annotations
