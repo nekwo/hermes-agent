@@ -2942,6 +2942,22 @@ def _production_files(packages: tuple[str, ...]) -> list[Path]:
     purpose: recursing from the root would pull in ``tests/``, ``node_modules``,
     the venvs and the whole docs tree, and a gate whose scope is "everything"
     is a gate that will be narrowed by the first false positive.
+
+    A scope token resolves to a PACKAGE DIRECTORY **or to a single MODULE
+    FILE**, and that second arm is the fix for MCF-53's sweep. This walked
+    ``HERMES_ROOT / package.replace(".", "/")`` and required a *directory*, so
+    every scope naming a module — ``agent_runtime.status``,
+    ``agent_runtime.observability``, ``agent_runtime.stream`` and eight more —
+    resolved to a path that does not exist, contributed ZERO files, and left
+    **32 of 155 CODE rows scanning nothing at all**. Each of those rows has been
+    green since it was written for the same reason an empty ``for`` loop is:
+    there was nothing to look at. Measured, not argued — see
+    ``test_every_code_row_scope_resolves_to_something``.
+
+    Resolution FAILURE is not handled here, because a silent skip is exactly
+    what this function did wrong. :func:`_unresolvable_scope_tokens` reports it
+    and the gate above decides, under the same S66 covered-or-fail rule the ATTR
+    and CLASS_ATTR arms already use.
     """
 
     files: list[Path] = []
@@ -2949,14 +2965,41 @@ def _production_files(packages: tuple[str, ...]) -> list[Path]:
         if package == ".":
             files.extend(sorted(HERMES_ROOT.glob("*.py")))
             continue
-        root = HERMES_ROOT / package.replace(".", "/")
-        if not root.exists():
+        relative = package.replace(".", "/")
+        root = HERMES_ROOT / relative
+        if root.is_dir():
+            for path in sorted(root.rglob("*.py")):
+                if any(part in _SKIP_DIRS for part in path.parts):
+                    continue
+                files.append(path)
             continue
-        for path in sorted(root.rglob("*.py")):
-            if any(part in _SKIP_DIRS for part in path.parts):
-                continue
-            files.append(path)
+        module = HERMES_ROOT / f"{relative}.py"
+        if module.is_file():
+            files.append(module)
     return files
+
+
+def _unresolvable_scope_tokens(packages: tuple[str, ...]) -> list[str]:
+    """The scope tokens that name neither a package directory nor a module file.
+
+    Separated from :func:`_production_files` on purpose: a scan must not decide
+    what an unresolvable scope MEANS. It can mean the module was legitimately
+    retired by a later wave (a stronger absence) or that the scope is a typo, and
+    only the registry knows which — so the question is answered where the rest of
+    the covered-or-fail rule lives.
+    """
+
+    missing: list[str] = []
+    for package in packages:
+        if package == ".":
+            continue
+        relative = package.replace(".", "/")
+        if (HERMES_ROOT / relative).is_dir():
+            continue
+        if (HERMES_ROOT / f"{relative}.py").is_file():
+            continue
+        missing.append(package)
+    return missing
 
 
 #: This file, resolved ONCE. It used to be re-resolved inside the per-file loop
@@ -3273,6 +3316,24 @@ def test_the_scanner_is_not_vacuous():
     )
     assert code_offenders(survivor)
 
+    # MODULE-scoped rows, pinned separately because they were the hole. 32 of
+    # the 155 CODE rows scope to a module rather than a package, and until the
+    # sweep that fixed :func:`_production_files` every one of them scanned an
+    # EMPTY file set: the resolver required a directory, so `agent_runtime.status`
+    # named a path that does not exist. The two assertions above could not see
+    # that, because both canaries are package-scoped.
+    module_scope = ("agent_runtime.status",)
+    assert len(_scan_paths(module_scope)) == 1, _scan_paths(module_scope)
+    module_live = Tombstone(
+        "build_status",
+        Form.CODE,
+        "canary",
+        "n/a",
+        "LIVE — agent_runtime.status.build_status is the module's entry point",
+        module_scope,
+    )
+    assert code_offenders(module_live), "a module-scoped scan found no live reference"
+
 
 def test_no_production_file_failed_to_parse():
     """A file the scanner cannot render is a HOLE, not a pass."""
@@ -3427,6 +3488,46 @@ def test_tombstoned_event_type_is_deregistered(row: Tombstone):
 @pytest.mark.parametrize("row", PATH_ROWS, ids=lambda row: row.label)
 def test_tombstoned_path_does_not_exist(row: Tombstone):
     assert not (HERMES_ROOT / row.text).exists(), f"{row.label}: {row.reason}"
+
+
+@pytest.mark.parametrize("row", CODE_ROWS, ids=lambda row: row.label)
+def test_every_code_row_scope_resolves_to_something(row: Tombstone):
+    """The CODE arm of the S66 meta-invariant: an unresolvable scope must be
+    COVERED, never SKIPPED.
+
+    S66 closed this for ATTR and CLASS_ATTR — a scope module that ``find_spec``
+    cannot resolve fails unless a MODULE row declares the stronger absence. The
+    CODE arm kept the identical silent skip one layer down, in
+    :func:`_production_files`: it required the scope to be a *directory*, so
+    every module-scoped row resolved to a path that does not exist and scanned
+    an empty file set. **32 of 155 CODE rows were inert**, including every row
+    protecting ``agent_runtime.status``, ``agent_runtime.observability``,
+    ``agent_runtime.stream``, ``agent_runtime.persona_runtime`` and
+    ``agent_runtime.persona_assignments``. They asserted ``[] == []`` over
+    nothing at all, and they would have kept doing it through a deletion
+    campaign that treats a green row as a verified absence.
+
+    The scan itself deliberately does not decide what an unresolvable scope
+    MEANS — the same reasoning the ATTR arm records. A retired owner module is a
+    legitimate and STRICTLY STRONGER absence; a typo'd or renamed scope is a row
+    that can never fail again. Only the registry can tell those apart, so the
+    question is answered here, against the MODULE rows, and the failure names
+    what to add rather than decaying quietly."""
+
+    for dotted in _unresolvable_scope_tokens(row.scope):
+        assert _module_row_covers(dotted), (
+            f"{row.label}: scope {dotted!r} names neither a package directory "
+            f"nor a module file, so this row scans nothing and can never fail. "
+            f"Either add the MODULE tombstone for {dotted!r} (if it was deleted) "
+            f"or retarget the row's scope (if it was renamed). "
+            f"Original reason: {row.reason}"
+        )
+    # And the resolvable scopes must actually yield files. A scope that resolves
+    # to an EMPTY package directory is the same permanent pass by another route.
+    assert _scan_paths(row.scope), (
+        f"{row.label}: scope {row.scope} resolves but contains no production "
+        f"file, so this row scans nothing and can never fail"
+    )
 
 
 @pytest.mark.parametrize("row", CODE_ROWS, ids=lambda row: row.label)
