@@ -1163,10 +1163,11 @@ def test_held_profile_file_is_listed_and_resolvable_and_honors_dry_run(
     """
 
     from agent_runtime.profile_artifact_sync import entity_key
-    from agent_runtime.realm_sync import _safe_token, active_profile_name
+    from agent_runtime.paths import safe_path_token
+    from agent_runtime.realm_sync import active_profile_name
 
     realm, repo = _realm_with_repo(tmp_path)
-    profile = _safe_token(active_profile_name())
+    profile = safe_path_token(active_profile_name())
     _publish_profile_file(repo, realm.id, profile, "memories/MEMORY.md", "realm memories\n")
     local = get_hermes_home() / "memories" / "MEMORY.md"
     local.parent.mkdir(parents=True, exist_ok=True)

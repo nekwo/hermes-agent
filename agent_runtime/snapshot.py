@@ -59,7 +59,7 @@ from .prompt_observability import _SkillObservabilityResolver, snapshot_prompt_o
 from .realm_sync import read_realm_sync_sidecar
 from .repo_context import resolve_affected_repo_workdir
 from .running_work import build_running_work
-from .serde import to_jsonable
+from .serde import section_rows, to_jsonable
 from .store import AgentStore, RealmStore, WorkspaceStore
 from .tool_visibility import (
     _profile_readiness_for_visibility,
@@ -209,21 +209,6 @@ def _keyed(rows, id_key: str) -> dict:
             continue
         keyed[key] = row
     return keyed
-
-
-def _rows(value) -> list:
-    """Read a frame section that S4 emits as an id-keyed map as an ordered list
-    of rows (map values), for the snapshot's OWN parity/self-check readers.
-
-    The wire ships keyed maps; this is an internal convenience for the builder's
-    downstream self-checks, not a legacy-shape tolerance path — it also accepts
-    a plain list (sections not keyed by S4) and ``None`` (absent section)."""
-
-    if isinstance(value, dict):
-        return list(value.values())
-    if isinstance(value, list):
-        return list(value)
-    return []
 
 
 # Single-homed in ``agent_runtime.redaction`` — see the header there for the
@@ -1559,7 +1544,7 @@ def _boards_summary(board_store, workspaces) -> BoardsProjection:
 
 def _board_parity_warnings(data) -> list[dict]:
     warnings: list[dict] = []
-    for board in _rows(data.get("boards")):
+    for board in section_rows(data.get("boards")):
         if board.get("orphaned"):
             warnings.append(
                 {
@@ -1812,7 +1797,7 @@ _ORPHANED_OFFICE_DETAIL = {
 
 def _office_parity_warnings(data) -> list[dict]:
     warnings: list[dict] = []
-    for office in _rows(data.get("offices")):
+    for office in section_rows(data.get("offices")):
         if office.get("orphaned"):
             # The row decided BOTH ``orphaned`` and its reason, from one
             # workspace enumeration. A row from an older core (or a caller that
@@ -1873,7 +1858,7 @@ def _parity_warnings(data) -> list[dict]:
         )
         return warnings
 
-    instances = _rows(data.get("persona_instances"))
+    instances = section_rows(data.get("persona_instances"))
     for group in duplicate_persona_instance_groups(instances):
         warnings.append(
             {
@@ -2090,7 +2075,7 @@ def _parity_warnings(data) -> list[dict]:
             for row in instances
             if isinstance(row, dict) and row.get("persona_instance_id")
         }
-        for channel in _rows(channels):
+        for channel in section_rows(channels):
             if not isinstance(channel, dict):
                 continue
             fk_target = str(channel.get("persona_instance_id") or "").strip()

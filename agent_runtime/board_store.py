@@ -29,7 +29,7 @@ from .errors import AlreadyExists, CardsUnreadable, NotFound, StaleRevision, Syn
 from .events import EventLog
 from .locks import board_lock
 from .models import Board, BoardCard, BoardColumn, Event
-from .serde import from_jsonable, to_jsonable
+from .serde import from_jsonable, safe_id, to_jsonable
 
 # Bounded projection / ledger caps (honest accounting, never silent).
 ARCHIVED_LEDGER_CAP = 5000
@@ -65,14 +65,6 @@ class CardScan(NamedTuple):
     unreadable: int
 
 
-def _safe_id(value: Any) -> str | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    cleaned = "".join(ch if ch.isalnum() or ch in "_.:-" else "_" for ch in text)
-    return cleaned.strip("._:-")[:120] or None
-
-
 def _safe_text(value: Any, *, limit: int = 4000) -> str:
     return str(value or "").strip()[:limit]
 
@@ -82,7 +74,7 @@ def _safe_title(value: Any) -> str:
 
 
 def _safe_actor(value: Any, *, fallback: str = "operator") -> str:
-    return _safe_id(value) or fallback
+    return safe_id(value) or fallback
 
 
 def _safe_labels(values: Any) -> list[str]:
@@ -171,7 +163,7 @@ class BoardStore:
         return self.scan_all(include_archived=include_archived).boards
 
     def list_for_workspace(self, workspace_id: str, *, include_archived: bool = True) -> list[Board]:
-        wanted = _safe_id(workspace_id)
+        wanted = safe_id(workspace_id)
         return [b for b in self.list_all() if b.workspace_id == wanted]
 
     # --- board-level writes ----------------------------------------------
@@ -183,7 +175,7 @@ class BoardStore:
         event). Two machines calling this converge on identical semantic content
         (fixed column ids + timestamp-excluded content hash)."""
 
-        wsid = _safe_id(workspace_id)
+        wsid = safe_id(workspace_id)
         if not wsid:
             raise ValueError("invalid_request")
         board_id = board_models.default_board_id(wsid)
@@ -206,10 +198,10 @@ class BoardStore:
         columns: list[BoardColumn] | None = None,
         created_by: str = "operator",
     ) -> Board:
-        wsid = _safe_id(workspace_id)
+        wsid = safe_id(workspace_id)
         if not wsid:
             raise ValueError("invalid_request")
-        resolved_id = _safe_id(board_id) or f"board_{uuid.uuid4().hex[:10]}"
+        resolved_id = safe_id(board_id) or f"board_{uuid.uuid4().hex[:10]}"
         if self.exists(resolved_id):
             raise AlreadyExists(resolved_id)
         with board_lock(resolved_id):
@@ -332,7 +324,7 @@ class BoardStore:
                 description=_safe_text(description),
                 priority=board_models.normalize_priority(priority),
                 labels=_safe_labels(labels),
-                assignee=_safe_id(assignee),
+                assignee=safe_id(assignee),
                 checklist=_safe_checklist(checklist),
                 state="active",
                 created_by=actor,
@@ -394,7 +386,7 @@ class BoardStore:
                 card.assignee = None
                 fields.append("assignee")
             elif assignee is not None:
-                card.assignee = _safe_id(assignee)
+                card.assignee = safe_id(assignee)
                 fields.append("assignee")
             if checklist is not None:
                 card.checklist = _safe_checklist(checklist)
@@ -684,7 +676,7 @@ class BoardStore:
         root = paths.boards_root()
         if root.exists():
             for child in root.iterdir():
-                candidate = child / "cards" / f"{paths._safe_path_token(card_id)}.json"
+                candidate = child / "cards" / f"{paths.safe_path_token(card_id)}.json"
                 if candidate.exists():
                     return child.name, candidate
         if allow_missing:
@@ -695,7 +687,7 @@ class BoardStore:
         root = paths.boards_root()
         if not root.exists():
             return None
-        token = paths._safe_path_token(card_id)
+        token = paths.safe_path_token(card_id)
         for child in root.iterdir():
             if (child / "archive" / f"{token}.json").exists():
                 return child.name
@@ -705,7 +697,7 @@ class BoardStore:
         root = paths.boards_root()
         if not root.exists():
             return None
-        token = paths._safe_path_token(card_id)
+        token = paths.safe_path_token(card_id)
         for child in root.iterdir():
             if (child / "conflicts" / f"{token}.json").exists():
                 return child.name
@@ -781,7 +773,7 @@ def _archive_conflict_sidecar(board_id: str, card_id: str) -> None:
     except Exception:
         payload = {"card_id": card_id}
     payload["resolved_at"] = to_jsonable(now())
-    dest = paths.board_conflicts_dir(board_id) / f"{paths._safe_path_token(card_id)}.resolved.json"
+    dest = paths.board_conflicts_dir(board_id) / f"{paths.safe_path_token(card_id)}.resolved.json"
     atomic_json_write(dest, payload, indent=2, sort_keys=True)
     sidecar_path.unlink(missing_ok=True)
 

@@ -904,7 +904,7 @@ def office_actor_patch_id(workspace_id: Any, actor_key: Any) -> str:
     bare key on the wire would address whichever one the fold happened to find.
 
     ``/`` is the separator because it is the one character that CANNOT appear in
-    either half: ``office_store._safe_id`` and ``paths._safe_path_token`` both
+    either half: ``serde.safe_id`` and ``paths.safe_path_token`` both
     keep only ``alnum`` plus ``_.:-`` and rewrite everything else to ``_``. Note
     ``:`` survives that filter and so could not have been used. Split on the
     FIRST ``/`` — single authority, mirrored by the launcher's fold.

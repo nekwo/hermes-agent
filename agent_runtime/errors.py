@@ -177,7 +177,7 @@ class WorkspaceUnresolved(AgentRuntimeError):
     """Raised when an office write would AUTHOR a surface for an unresolvable id.
 
     ``OfficeStore.ensure_surface`` lazily created a default surface for ANY id
-    that passed ``_safe_id``, with no existence check at all. The measured
+    that passed ``serde.safe_id``, with no existence check at all. The measured
     consequence (2026-08-17 / EG-0.1): a leaked test context minted a whole live
     office in the operator's runtime root — one ``office.surface.created``, 67
     actor upserts and a ``revision 67`` actor file — for a workspace id no verb

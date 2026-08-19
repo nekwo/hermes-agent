@@ -50,6 +50,8 @@ from hermes_constants import get_shared_skills_dir
 from hermes_time import now
 from utils import atomic_json_write
 
+from .paths import safe_path_token
+
 logger = logging.getLogger(__name__)
 
 # Canonical action vocabularies. Pinned so callers (realm_sync C3, the harness
@@ -150,20 +152,6 @@ class PromotionResult:
 # ── Path helpers ───────────────────────────────────────────────────────────
 
 
-def _safe_token(value: str | None) -> str:
-    """Sanitize a realm id / token into a filesystem-safe inbox subdir name.
-
-    Byte-identical to ``agent_runtime.realm_sync._safe_token`` so an inbox
-    written by the pull pipeline (C3) and read back here address the same dir.
-    Idempotent for already-safe tokens.
-    """
-
-    text = "".join(
-        ch if ch.isalnum() or ch in "_.-" else "_" for ch in str(value or "").strip()
-    )
-    return text.strip("._")[:120] or "item"
-
-
 def realm_inbox_root() -> Path:
     """``shared/skills/.realm_inbox`` — resolver-invisible quarantine root."""
 
@@ -173,9 +161,9 @@ def realm_inbox_root() -> Path:
 def realm_inbox_dir(realm_token: str) -> Path:
     """``…/.realm_inbox/<token>`` for one realm. ``realm_token`` may be a raw
     realm id or an already-sanitized token; it is normalized via
-    :func:`_safe_token`."""
+    :func:`safe_path_token`."""
 
-    return realm_inbox_root() / _safe_token(realm_token)
+    return realm_inbox_root() / safe_path_token(realm_token)
 
 
 def _provenance_root() -> Path:
@@ -711,7 +699,7 @@ def list_inbox_packages(realm_token: str | None = None) -> list[dict]:
         return rows
 
     if realm_token is not None:
-        wanted = _safe_token(realm_token)
+        wanted = safe_path_token(realm_token)
         realm_dirs = [root / wanted] if (root / wanted).is_dir() else []
     else:
         realm_dirs = [

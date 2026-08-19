@@ -16,7 +16,7 @@ from .parity import events_watermark
 from .patch_coverage import batch_is_patch_coverable, normalize_fold_entities
 from .redaction import ENV_SECRET_ASSIGNMENT_RE
 from .request_control import request_cancelled
-from .serde import to_jsonable
+from .serde import optional_text, section_rows, to_jsonable
 from .snapshot import (
     BUILD_CALLER_UNKNOWN,
     BUILD_SECTIONS_WAIT_THRESHOLD_MS,
@@ -1184,40 +1184,29 @@ def _delta_op(event: Event) -> str:
     return "event.appended"
 
 
-def _rows(value: Any) -> list:
-    """A snapshot section S4 emits as an id-keyed map, read as an ordered list
-    of rows (map values). Also accepts a plain list / ``None``."""
-
-    if isinstance(value, dict):
-        return list(value.values())
-    if isinstance(value, list):
-        return list(value)
-    return []
-
-
 def _identity_map(snapshot: dict[str, Any]) -> dict[str, str]:
     identity: dict[str, str] = {}
-    for instance in _rows(snapshot.get("persona_instances")):
+    for instance in section_rows(snapshot.get("persona_instances")):
         if not isinstance(instance, dict):
             continue
         canonical = _first_text(instance, "persona_instance_id", "instance_id", "id")
         if not canonical:
             continue
         for key in ("persona_instance_id", "instance_id", "id", "agent_profile_id"):
-            alias = _text(instance.get(key))
+            alias = optional_text(instance.get(key))
             if alias:
                 identity[alias] = canonical
-        persona_id = _text(instance.get("persona_id"))
+        persona_id = optional_text(instance.get("persona_id"))
         if persona_id and persona_id.startswith("profile:"):
             identity[persona_id.replace(":", "_")] = persona_id
-    for channel in _rows(snapshot.get("operator_channels")):
+    for channel in section_rows(snapshot.get("operator_channels")):
         if not isinstance(channel, dict):
             continue
         canonical = _first_text(channel, "persona_instance_id", "channel_id", "id")
         if not canonical:
             continue
         for key in ("persona_instance_id", "channel_id", "id", "session_id"):
-            alias = _text(channel.get(key))
+            alias = optional_text(channel.get(key))
             if alias:
                 identity[alias] = canonical
     # The snapshot's legacy->canonical aliases (reconciler registry + live
@@ -1243,14 +1232,8 @@ def _redaction_safe_json(value: Any) -> Any:
 
 def _first_text(payload: dict[str, Any], *keys: str) -> str | None:
     for key in keys:
-        text = _text(payload.get(key))
+        text = optional_text(payload.get(key))
         if text:
             return text
     return None
 
-
-def _text(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None

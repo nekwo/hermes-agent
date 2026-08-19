@@ -56,6 +56,7 @@ from typing import Any, Iterable
 from .chat_lane_toolsets import DROP_KIND_TOOL, DROP_KIND_TOOLSET
 from .models import looks_like_persona_instance_id
 from .permission_modes import permission_mode_is_unbounded
+from .serde import optional_text
 from .terminal_envelope import ENVELOPE_DECISION_LOG
 
 # Bound the roster so a large level cannot bloat every chat turn. The operator's
@@ -522,25 +523,18 @@ def _clean(value: Any) -> bool:
     return value not in (None, "", [], {})
 
 
-def _text(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
 def _lane_block(instance: Any) -> dict[str, Any]:
     if instance is None:
         return {}
     lane = {
-        "display_name": _text(getattr(instance, "display_name", None)),
-        "persona_instance_id": _text(getattr(instance, "id", None)),
-        "persona_id": _text(getattr(instance, "persona_id", None)),
-        "role": _text(getattr(instance, "role", None)),
-        "mode": _text(getattr(instance, "mode", None)),
-        "state": _text(getattr(instance, "state", None)),
-        "goal_id": _text(getattr(instance, "goal_id", None)),
-        "current_task_id": _text(getattr(instance, "current_task_id", None)),
+        "display_name": optional_text(getattr(instance, "display_name", None)),
+        "persona_instance_id": optional_text(getattr(instance, "id", None)),
+        "persona_id": optional_text(getattr(instance, "persona_id", None)),
+        "role": optional_text(getattr(instance, "role", None)),
+        "mode": optional_text(getattr(instance, "mode", None)),
+        "state": optional_text(getattr(instance, "state", None)),
+        "goal_id": optional_text(getattr(instance, "goal_id", None)),
+        "current_task_id": optional_text(getattr(instance, "current_task_id", None)),
     }
     return {key: value for key, value in lane.items() if _clean(value)}
 
@@ -550,7 +544,7 @@ def _mission_block(
     *,
     roster: Iterable[Any],
 ) -> dict[str, Any]:
-    goal_id = _text(getattr(instance, "goal_id", None))
+    goal_id = optional_text(getattr(instance, "goal_id", None))
     if goal_id is None:
         return {}
     mission = {
@@ -565,7 +559,7 @@ def _thread_count(goal_id: str | None, roster: Iterable[Any]) -> int | None:
         return None
     count = 0
     for inst in roster or ():
-        if _text(getattr(inst, "goal_id", None)) == goal_id:
+        if optional_text(getattr(inst, "goal_id", None)) == goal_id:
             count += 1
     return count or None
 
@@ -573,11 +567,11 @@ def _thread_count(goal_id: str | None, roster: Iterable[Any]) -> int | None:
 def _roster_block(roster: Iterable[Any], *, self_id: str | None) -> list[dict[str, Any]]:
     entries: list[dict[str, Any]] = []
     for inst in roster or ():
-        instance_id = _text(getattr(inst, "id", None))
+        instance_id = optional_text(getattr(inst, "id", None))
         if instance_id is None:
             continue
         entry: dict[str, Any] = {
-            "display_name": _text(getattr(inst, "display_name", None)) or instance_id,
+            "display_name": optional_text(getattr(inst, "display_name", None)) or instance_id,
             "persona_instance_id": instance_id,
         }
         if self_id is not None and instance_id == self_id:
@@ -599,10 +593,10 @@ def _parent_refs(instance: Any) -> list[str]:
     are not instance-shaped (the operator) are dropped there, not here, so the
     intentional persona/role resolution is preserved."""
 
-    refs = [ref for ref in (_text(item) for item in (getattr(instance, "steered_by", None) or ())) if ref]
+    refs = [ref for ref in (optional_text(item) for item in (getattr(instance, "steered_by", None) or ())) if ref]
     if refs:
         return refs
-    spawned_by = _text(getattr(instance, "spawned_by", None))
+    spawned_by = optional_text(getattr(instance, "spawned_by", None))
     return [spawned_by] if spawned_by else []
 
 
@@ -614,11 +608,11 @@ def _resolve_parent_ref(ref: str, roster: Iterable[Any]) -> Any | None:
     by_persona = None
     by_role = None
     for inst in roster or ():
-        if _text(getattr(inst, "id", None)) == ref:
+        if optional_text(getattr(inst, "id", None)) == ref:
             return inst
-        if by_persona is None and _text(getattr(inst, "persona_id", None)) == ref:
+        if by_persona is None and optional_text(getattr(inst, "persona_id", None)) == ref:
             by_persona = inst
-        if by_role is None and _text(getattr(inst, "role", None)) == ref:
+        if by_role is None and optional_text(getattr(inst, "role", None)) == ref:
             by_role = inst
     return by_persona or by_role
 
@@ -646,22 +640,22 @@ def _steering_block(instance: Any, roster: Iterable[Any], *, self_id: str | None
             continue
         entry: dict[str, Any] = {"ref": ref}
         if parent is not None:
-            entry["persona_instance_id"] = _text(getattr(parent, "id", None))
-            entry["display_name"] = _text(getattr(parent, "display_name", None)) or ref
+            entry["persona_instance_id"] = optional_text(getattr(parent, "id", None))
+            entry["display_name"] = optional_text(getattr(parent, "display_name", None)) or ref
         steered_by.append(entry)
 
     steers: list[dict[str, Any]] = []
     for inst in roster:
-        instance_id = _text(getattr(inst, "id", None))
+        instance_id = optional_text(getattr(inst, "id", None))
         if instance_id is None or instance_id == self_id:
             continue
         for ref in _parent_refs(inst):
             parent = _resolve_parent_ref(ref, roster)
-            if parent is not None and _text(getattr(parent, "id", None)) == self_id:
+            if parent is not None and optional_text(getattr(parent, "id", None)) == self_id:
                 steers.append(
                     {
                         "persona_instance_id": instance_id,
-                        "display_name": _text(getattr(inst, "display_name", None)) or instance_id,
+                        "display_name": optional_text(getattr(inst, "display_name", None)) or instance_id,
                     }
                 )
                 break
@@ -700,13 +694,13 @@ def resolve_situational_hud(
         return {}
     roster = list(roster or ())
     identity_roster = roster if identity_roster is None else list(identity_roster)
-    self_id = _text(getattr(instance, "id", None))
+    self_id = optional_text(getattr(instance, "id", None))
 
     hud: dict[str, Any] = {"preview": True}
 
     scope = {
         key: value
-        for key, value in (("realm", _text(realm)), ("workspace", _text(workspace)))
+        for key, value in (("realm", optional_text(realm)), ("workspace", optional_text(workspace)))
         if _clean(value)
     }
     if scope:

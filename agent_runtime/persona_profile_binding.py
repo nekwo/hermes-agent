@@ -53,6 +53,7 @@ from typing import Any, Mapping
 
 from hermes_time import now
 
+from . import paths
 from .errors import AgentRuntimeError
 from .events import EventLog
 from .models import AgentPersona, Event
@@ -466,8 +467,8 @@ def _projected_artifact_delta(
 
     from .profile_artifact_sync import published_relative_path
 
-    old_prefix = published_relative_path(_artifact_token(old_profile), "") if old_profile else None
-    new_prefix = published_relative_path(_artifact_token(new_profile), "")
+    old_prefix = published_relative_path(paths.safe_path_token(old_profile), "") if old_profile else None
+    new_prefix = published_relative_path(paths.safe_path_token(new_profile), "")
     delta: list[dict[str, Any]] = []
     for row in before:
         disappears: list[str] = []
@@ -1000,13 +1001,6 @@ def _profile_relative(profile_home: Path | None, raw: str | None) -> Path | None
     if path.is_absolute() or ".." in path.parts:
         return None
     return profile_home / path
-
-
-def _artifact_token(value: str | None) -> str:
-    """Mirror of ``realm_sync._safe_token`` for matching published relative paths."""
-
-    text = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in str(value or "").strip())
-    return text.strip("._")[:120] or "item"
 
 
 def _safe_text(value: Any, *, limit: int = 320) -> str:

@@ -48,7 +48,7 @@ def persona_chat_mint_receipts_dir() -> Path:
 
 
 def persona_chat_mint_receipt_path(key_digest: str) -> Path:
-    return persona_chat_mint_receipts_dir() / f"{_safe_path_token(key_digest)}.json"
+    return persona_chat_mint_receipts_dir() / f"{safe_path_token(key_digest)}.json"
 
 
 def agent_create_reservations_dir() -> Path:
@@ -63,7 +63,7 @@ def agent_create_reservations_dir() -> Path:
 
 
 def agent_create_reservation_path(key_digest: str) -> Path:
-    return agent_create_reservations_dir() / f"{_safe_path_token(key_digest)}.json"
+    return agent_create_reservations_dir() / f"{safe_path_token(key_digest)}.json"
 
 
 def runtime_instances_dir() -> Path:
@@ -83,7 +83,7 @@ def boards_root() -> Path:
 
 
 def board_dir(board_id: str) -> Path:
-    return boards_root() / _safe_path_token(board_id)
+    return boards_root() / safe_path_token(board_id)
 
 
 def board_def_path(board_id: str) -> Path:
@@ -95,7 +95,7 @@ def board_cards_dir(board_id: str) -> Path:
 
 
 def board_card_path(board_id: str, card_id: str) -> Path:
-    return board_cards_dir(board_id) / f"{_safe_path_token(card_id)}.json"
+    return board_cards_dir(board_id) / f"{safe_path_token(card_id)}.json"
 
 
 def board_archive_dir(board_id: str) -> Path:
@@ -104,7 +104,7 @@ def board_archive_dir(board_id: str) -> Path:
 
 
 def board_archived_card_path(board_id: str, card_id: str) -> Path:
-    return board_archive_dir(board_id) / f"{_safe_path_token(card_id)}.json"
+    return board_archive_dir(board_id) / f"{safe_path_token(card_id)}.json"
 
 
 def board_conflicts_dir(board_id: str) -> Path:
@@ -113,7 +113,7 @@ def board_conflicts_dir(board_id: str) -> Path:
 
 
 def board_conflict_path(board_id: str, card_id: str) -> Path:
-    return board_conflicts_dir(board_id) / f"{_safe_path_token(card_id)}.json"
+    return board_conflicts_dir(board_id) / f"{safe_path_token(card_id)}.json"
 
 
 def board_idempotency_dir(board_id: str) -> Path:
@@ -121,12 +121,12 @@ def board_idempotency_dir(board_id: str) -> Path:
 
 
 def board_idempotency_path(board_id: str, key: str) -> Path:
-    return board_idempotency_dir(board_id) / f"{_safe_path_token(key)}.json"
+    return board_idempotency_dir(board_id) / f"{safe_path_token(key)}.json"
 
 
 def board_baseline_path(realm_id: str) -> Path:
     # realm-sync baseline sidecar; NEVER synced, NEVER published
-    return store_root() / "realm_sync" / _safe_path_token(realm_id) / "board_baseline.json"
+    return store_root() / "realm_sync" / safe_path_token(realm_id) / "board_baseline.json"
 
 
 def office_root() -> Path:
@@ -134,7 +134,7 @@ def office_root() -> Path:
 
 
 def office_dir(workspace_id: str) -> Path:
-    return office_root() / _safe_path_token(workspace_id)
+    return office_root() / safe_path_token(workspace_id)
 
 
 def office_surface_path(workspace_id: str) -> Path:
@@ -206,23 +206,23 @@ def office_surface_archive_root() -> Path:
 
 
 def office_archived_surface_dir(workspace_id: str) -> Path:
-    return office_surface_archive_root() / _safe_path_token(workspace_id)
+    return office_surface_archive_root() / safe_path_token(workspace_id)
 
 
 def office_baseline_path(realm_id: str) -> Path:
     # realm-sync baseline sidecar; NEVER synced, NEVER published
-    return store_root() / "realm_sync" / _safe_path_token(realm_id) / "office_baseline.json"
+    return store_root() / "realm_sync" / safe_path_token(realm_id) / "office_baseline.json"
 
 
 def persona_config_baseline_path(realm_id: str) -> Path:
     # realm-sync baseline sidecar; NEVER synced, NEVER published
-    return store_root() / "realm_sync" / _safe_path_token(realm_id) / "persona_config_baseline.json"
+    return store_root() / "realm_sync" / safe_path_token(realm_id) / "persona_config_baseline.json"
 
 
 def profile_artifact_baseline_path(realm_id: str) -> Path:
     # realm-sync baseline sidecar for the per-profile FILE family (MEMORY.md,
     # core-context files, persona prompts); NEVER synced, NEVER published.
-    return store_root() / "realm_sync" / _safe_path_token(realm_id) / "profile_artifact_baseline.json"
+    return store_root() / "realm_sync" / safe_path_token(realm_id) / "profile_artifact_baseline.json"
 
 
 def agents_dir() -> Path:
@@ -336,11 +336,11 @@ def prompt_observability_index_path() -> Path:
 
 
 def persona_instance_path(persona_instance_id: str) -> Path:
-    return persona_instances_dir() / f"{_safe_path_token(persona_instance_id)}.json"
+    return persona_instances_dir() / f"{safe_path_token(persona_instance_id)}.json"
 
 
 def persona_assignment_path(assignment_id: str) -> Path:
-    return persona_assignments_dir() / f"{_safe_path_token(assignment_id)}.json"
+    return persona_assignments_dir() / f"{safe_path_token(assignment_id)}.json"
 
 
 # S57 removed ``repo_bundle_path`` with ``RepoBundleStore.get``. Round 2 then
@@ -349,15 +349,15 @@ def persona_assignment_path(assignment_id: str) -> Path:
 
 
 def runtime_instance_path(instance_id: str) -> Path:
-    return runtime_instances_dir() / f"{_safe_path_token(instance_id)}.json"
+    return runtime_instances_dir() / f"{safe_path_token(instance_id)}.json"
 
 
 def workspace_path(workspace_id: str) -> Path:
-    return workspaces_dir() / f"{_safe_path_token(workspace_id)}.json"
+    return workspaces_dir() / f"{safe_path_token(workspace_id)}.json"
 
 
 def realm_path(realm_id: str) -> Path:
-    return realms_dir() / f"{_safe_path_token(realm_id)}.json"
+    return realms_dir() / f"{safe_path_token(realm_id)}.json"
 
 
 def active_workspace_path() -> Path:
@@ -380,6 +380,27 @@ def incident_path(incident_id: str) -> Path:
     return incidents_dir() / f"{incident_id}.json"
 
 
-def _safe_path_token(value: str) -> str:
+def safe_path_token(value: str | None) -> str:
+    """Sanitize an id/token into ONE filesystem-safe path segment.
+
+    Public because it is the single authority: realm_sync and
+    skill_promotion each carried a byte-identical private copy, and a
+    directory written by one and read by the other has to agree on the
+    spelling. Idempotent for already-safe tokens.
+    """
+
     text = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in str(value or "").strip())
     return text.strip("._")[:120] or "item"
+
+
+def unlink_quietly(path: Path) -> None:
+    """Best-effort delete. A file that is already gone is the goal state.
+
+    ONE authority: chat_live_log and mission_chat_steer each carried a
+    byte-identical private copy.
+    """
+
+    try:
+        path.unlink()
+    except OSError:
+        pass

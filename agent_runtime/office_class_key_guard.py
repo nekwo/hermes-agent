@@ -113,7 +113,8 @@ def class_key_collision(store: Any, workspace_id: str, payload: dict) -> dict | 
 
     # The store owns id normalization; re-deriving it here is exactly the drift
     # the office plan's "one derivation authority" rule exists to prevent.
-    from .office_store import _normalize_persona_id, _safe_id
+    from .office_store import _normalize_persona_id
+    from .serde import safe_id
 
     if not is_class_keyed_payload(payload):
         return None
@@ -134,7 +135,7 @@ def class_key_collision(store: Any, workspace_id: str, payload: dict) -> dict | 
     incoming_items = {
         item_id
         for item_id in (
-            _safe_id(raw.get("item_id")) if isinstance(raw, dict) else None
+            safe_id(raw.get("item_id")) if isinstance(raw, dict) else None
             for raw in (payload.get("items") or [])
         )
         if item_id

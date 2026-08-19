@@ -136,13 +136,14 @@ import json
 import os
 import secrets
 import socket
-import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+from .serde import write_json_atomic
 
 if os.name == "nt":  # pragma: no cover - platform split, both sides exercised in CI
     import msvcrt
@@ -381,7 +382,7 @@ class SocketOwnerLock:
         if not self._acquired:
             return
         try:
-            _write_json_atomic(self._owner_path, dict(record))
+            write_json_atomic(self._owner_path, dict(record))
         except Exception:
             pass
 
@@ -1639,30 +1640,6 @@ def _unlock_first_byte(handle) -> None:
         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
         return
     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
-
-def _write_json_atomic(path: Path, record: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(record, ensure_ascii=False, default=str, indent=2) + "\n"
-    handle = tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        newline="\n",
-        dir=str(path.parent),
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    )
-    try:
-        with handle:
-            handle.write(payload)
-        os.replace(handle.name, path)
-    except BaseException:
-        try:
-            os.unlink(handle.name)
-        except OSError:
-            pass
-        raise
 
 
 def _parse_object(line: str) -> dict[str, Any] | None:

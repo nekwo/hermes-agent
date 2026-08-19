@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .paths import unlink_quietly
+
 CAPABILITY_ID = "mission.chat.steer"
 _POLL_SECONDS = 0.05
 _ACK_TIMEOUT_SECONDS = 4.0
@@ -167,7 +169,7 @@ def _process_request(handle: MissionChatSteerHandle, path: Path) -> None:
                 ack_path,
                 _accepted(session_id=handle.session_id, client_message_id=client_message_id, duplicate=True),
             )
-        _unlink_quietly(path)
+        unlink_quietly(path)
         return
     message = str(request.get("message") or "").strip()
     if not message:
@@ -180,7 +182,7 @@ def _process_request(handle: MissionChatSteerHandle, path: Path) -> None:
                 error="message is required",
             ),
         )
-        _unlink_quietly(path)
+        unlink_quietly(path)
         return
     steer = getattr(handle.agent, "steer", None)
     if not callable(steer):
@@ -193,7 +195,7 @@ def _process_request(handle: MissionChatSteerHandle, path: Path) -> None:
                 error="The active agent does not expose AIAgent.steer(text).",
             ),
         )
-        _unlink_quietly(path)
+        unlink_quietly(path)
         return
     try:
         steer(message)
@@ -214,7 +216,7 @@ def _process_request(handle: MissionChatSteerHandle, path: Path) -> None:
             ),
         )
     finally:
-        _unlink_quietly(path)
+        unlink_quietly(path)
 
 
 def _mirror_steer_to_live_log(session_id: str, message: str, client_message_id: str) -> None:
@@ -353,13 +355,6 @@ def _read_json(path: Path) -> dict[str, Any] | None:
         return decoded if isinstance(decoded, dict) else None
     except Exception:
         return None
-
-
-def _unlink_quietly(path: Path) -> None:
-    try:
-        path.unlink()
-    except OSError:
-        pass
 
 
 def _require_text(value: str | None, name: str) -> str:

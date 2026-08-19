@@ -107,6 +107,7 @@ from typing import Any, Iterator
 
 from hermes_time import now
 
+from .paths import unlink_quietly
 from .redaction import TEXT_SECRET_ASSIGNMENT_RE
 
 logger = logging.getLogger(__name__)
@@ -440,7 +441,7 @@ def _with_claim(path: Path, work) -> Path | None:
             # the work over, exactly once, so one crash cannot strand this
             # session's mirror permanently.
             if attempt == 0 and _claim_is_stale(claim):
-                _unlink_quietly(claim)
+                unlink_quietly(claim)
                 continue
             return _wait_for_publication(path, claim)
         except OSError as exc:
@@ -452,7 +453,7 @@ def _with_claim(path: Path, work) -> Path | None:
     try:
         return work(claim)
     finally:
-        _unlink_quietly(claim)
+        unlink_quietly(claim)
 
 
 def _create_log(
@@ -795,13 +796,6 @@ def _exists(path: Path) -> bool:
         return path.exists()
     except OSError:  # pragma: no cover - defensive
         return False
-
-
-def _unlink_quietly(path: Path) -> None:
-    try:
-        path.unlink()
-    except OSError:
-        pass
 
 
 def _claim_is_stale(claim: Path) -> bool:

@@ -479,10 +479,10 @@ def _created_profile_tokens(profiles: list[str]) -> list[str]:
     """Profile homes this pull would MATERIALIZE (W-H4, plan §5.1): adoption is a
     typed row, never a silent side effect."""
 
-    from .realm_sync import _safe_token
+    from .paths import safe_path_token
     from .profile_context import active_profile_name
 
-    active = _safe_token(active_profile_name())
+    active = safe_path_token(active_profile_name())
     created: list[str] = []
     for token in profiles:
         if token == active:

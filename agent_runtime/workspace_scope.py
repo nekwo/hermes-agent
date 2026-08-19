@@ -69,17 +69,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Iterable
 
-
-def _norm(value: Any) -> str | None:
-    """Normalize a workspace id to a non-empty string, or ``None``.
-
-    Whitespace-only and empty ids collapse to ``None`` (runtime-global), so a
-    blank pointer is never mistaken for a distinct scene claim."""
-
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
+from .serde import optional_text
 
 
 def effective_workspace_id(
@@ -91,7 +81,7 @@ def effective_workspace_id(
     (no pointer) falls back to the ``active_workspace_id`` it is being viewed
     from. Returns ``None`` only when neither is set (no scene at all)."""
 
-    return _norm(getattr(instance, "workspace_id", None)) or _norm(active_workspace_id)
+    return optional_text(getattr(instance, "workspace_id", None)) or optional_text(active_workspace_id)
 
 
 def instance_in_scope(
@@ -104,10 +94,10 @@ def instance_in_scope(
     itself is ``None`` (no active workspace), everything is in scope so the
     resolver never hides the whole roster."""
 
-    scope = _norm(scope_workspace_id)
+    scope = optional_text(scope_workspace_id)
     if scope is None:
         return True
-    candidate = _norm(candidate_workspace_id)
+    candidate = optional_text(candidate_workspace_id)
     return candidate is None or candidate == scope
 
 
@@ -138,15 +128,15 @@ def exact_scoped_instance_ids(
     retired instances from the live directory.
     """
 
-    wanted = _norm(workspace_id)
+    wanted = optional_text(workspace_id)
     if wanted is None:
         return []
     return sorted(
         {
             instance_id
             for instance in (instances or ())
-            if _norm(getattr(instance, "workspace_id", None)) == wanted
-            and (instance_id := _norm(getattr(instance, "id", None))) is not None
+            if optional_text(getattr(instance, "workspace_id", None)) == wanted
+            and (instance_id := optional_text(getattr(instance, "id", None))) is not None
         }
     )
 
@@ -218,14 +208,14 @@ def exclude_global_canonicals(
     mutated — identity/steering resolution keeps the full roster.
     """
 
-    if _norm(scope_workspace_id) is None:
+    if optional_text(scope_workspace_id) is None:
         return list(instances or ())
     return [
         instance
         for instance in (instances or ())
         if not (
             is_canonical(instance)
-            and _norm(getattr(instance, "workspace_id", None)) is None
+            and optional_text(getattr(instance, "workspace_id", None)) is None
         )
     ]
 

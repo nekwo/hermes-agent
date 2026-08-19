@@ -13,18 +13,7 @@ from hermes_time import now
 from . import paths
 from .parity import events_watermark
 from .resolution import resolve_runtime
-from .serde import to_jsonable
-
-
-def _rows(value: Any) -> list:
-    """A snapshot section S4 emits as an id-keyed map, read as an ordered list
-    of rows (map values). Accepts a plain list / ``None`` too."""
-
-    if isinstance(value, dict):
-        return list(value.values())
-    if isinstance(value, list):
-        return list(value)
-    return []
+from .serde import optional_text, section_rows, to_jsonable
 
 
 # 2 -> 3 (B4, 2026-07-31): ``apply_full_rebuild`` used to write the whole frame
@@ -253,7 +242,7 @@ class ReadModel:
                         (
                             SNAPSHOT_PROJECTION,
                             int(normalized_watermark["event_offset"]),
-                            _optional_text(normalized_watermark.get("last_event_ts")),
+                            optional_text(normalized_watermark.get("last_event_ts")),
                             str(applied_at),
                         ),
                     )
@@ -262,8 +251,8 @@ class ReadModel:
                 # second copy of the same bytes, read by nothing that could not
                 # slice the blob — see ``read_projection``.
                 self._write_misc(conn, SNAPSHOT_PROJECTION, payload)
-                self._write_agent_instances(conn, _rows(payload.get("persona_instances")) or _rows(payload.get("agent_instances")))
-                self._write_operator_channels(conn, _rows(payload.get("operator_channels")))
+                self._write_agent_instances(conn, section_rows(payload.get("persona_instances")) or section_rows(payload.get("agent_instances")))
+                self._write_operator_channels(conn, section_rows(payload.get("operator_channels")))
             except Exception:
                 conn.rollback()
                 raise
@@ -418,7 +407,7 @@ class ReadModel:
                 """,
                 (
                     instance_id,
-                    _optional_text(instance.get("persona_id")),
+                    optional_text(instance.get("persona_id")),
                     _first_text(instance, "status", "state") or "unknown",
                     _json(instance),
                 ),
@@ -435,8 +424,8 @@ class ReadModel:
                 """,
                 (
                     channel_id,
-                    _optional_text(channel.get("persona_id")),
-                    _optional_text(channel.get("session_id")),
+                    optional_text(channel.get("persona_id")),
+                    optional_text(channel.get("session_id")),
                     _json(channel),
                 ),
             )
@@ -471,10 +460,3 @@ def _first_text(payload: dict[str, Any], *keys: str) -> str | None:
             if text:
                 return text
     return None
-
-
-def _optional_text(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None

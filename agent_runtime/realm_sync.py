@@ -255,7 +255,7 @@ def publish_realm_sync(
         return result
 
     subtree = _realm_subtree(repo, realm.id)
-    subtree_rel = f"realms/{_safe_token(realm.id)}"
+    subtree_rel = f"realms/{paths.safe_path_token(realm.id)}"
     # Canonicalize every published artifact to LF at this single write/copy
     # chokepoint (binary assets pass through untouched — see
     # ``_canonicalize_text_bytes``). The store lane writes CRLF on Windows while
@@ -764,7 +764,7 @@ def sync_artifacts_for_workspace_agent(workspace_id: str, persona_id: str) -> li
     if not workspace.realm_id:
         return []
     artifacts = resolve_realm_sync_artifacts(workspace.realm_id)
-    needle = f"/{_safe_token(persona_id)}/"
+    needle = f"/{paths.safe_path_token(persona_id)}/"
     # Explicit attribution first (the profile-file family publishes at a
     # destination-shaped path where the persona token no longer appears), path
     # substring second (skills and everything else that still encodes it).
@@ -876,7 +876,7 @@ def _append_skill_package_artifacts(
             },
         )
     skill_dir = selected.skill_dir or selected.skill_md.parent
-    safe_parts = [_safe_token(part) for part in slug.split("/")]
+    safe_parts = [paths.safe_path_token(part) for part in slug.split("/")]
     prefix = "/".join(safe_parts)
     dest_root = root.joinpath(*safe_parts)
     for source in sorted(skill_dir.rglob("*")):
@@ -903,7 +903,7 @@ def _workspace_realm_artifacts(realm: Realm, workspaces: list[Workspace]) -> lis
         RealmSyncArtifact(
             kind="realm",
             source=paths.realm_path(realm.id),
-            relative_path=f"store/realms/{_safe_token(realm.id)}.json",
+            relative_path=f"store/realms/{paths.safe_path_token(realm.id)}.json",
             destination=paths.realm_path(realm.id),
         )
     ]
@@ -912,7 +912,7 @@ def _workspace_realm_artifacts(realm: Realm, workspaces: list[Workspace]) -> lis
             RealmSyncArtifact(
                 kind="workspace",
                 source=paths.workspace_path(workspace.id),
-                relative_path=f"store/workspaces/{_safe_token(workspace.id)}.json",
+                relative_path=f"store/workspaces/{paths.safe_path_token(workspace.id)}.json",
                 destination=paths.workspace_path(workspace.id),
             )
         )
@@ -974,7 +974,7 @@ def _board_publish_scan(workspaces: list[Workspace]) -> BoardPublishScan:
                 }
             )
             continue
-        board_token = _safe_token(board.board_id)
+        board_token = paths.safe_path_token(board.board_id)
         def_path = paths.board_def_path(board.board_id)
         if def_path.exists():
             artifacts.append(
@@ -1130,7 +1130,7 @@ def _office_publish_scan(workspaces: list[Workspace]) -> OfficePublishScan:
         if refusal is not None:
             refused.append(refusal.as_dict())
             continue
-        ws_token = _safe_token(workspace_token)
+        ws_token = paths.safe_path_token(workspace_token)
         surface_path = paths.office_surface_path(workspace_token)
         if surface_path.exists():
             artifacts.append(
@@ -1268,7 +1268,7 @@ def _persona_artifacts(persona: AgentPersona) -> tuple[list[RealmSyncArtifact], 
 
     binding = resolve_persona_profile(persona)
     profile_home = binding.profile_home or get_hermes_home()
-    profile = _safe_token(binding.hermes_profile or active_profile_name() or "default")
+    profile = paths.safe_path_token(binding.hermes_profile or active_profile_name() or "default")
     artifacts: list[RealmSyncArtifact] = []
     withheld: list[dict[str, str]] = []
 
@@ -1610,7 +1610,7 @@ def _profile_home_for_token(token: str) -> Path | None:
         return None
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,120}", token):
         return None
-    if token == _safe_token(active_profile_name()):
+    if token == paths.safe_path_token(active_profile_name()):
         return get_hermes_home()
     try:
         from hermes_cli.profiles import get_profile_dir, normalize_profile_name
@@ -1760,12 +1760,12 @@ def _sync_repo_path(realm: Realm) -> Path:
     ref = str(realm.sync_manifest_ref or "").strip()
     if ref and not _looks_like_remote(ref):
         return Path(ref).expanduser()
-    key = _safe_token(realm.server_id or "local")
+    key = paths.safe_path_token(realm.server_id or "local")
     return paths.store_root() / "realm_sync" / key
 
 
 def _realm_subtree(repo: Path, realm_id: str) -> Path:
-    return repo / "realms" / _safe_token(realm_id)
+    return repo / "realms" / paths.safe_path_token(realm_id)
 
 
 def _git_state(repo: Path) -> dict[str, Any]:
@@ -1873,7 +1873,7 @@ def _notify_publish(realm: Realm, *, repo: Path, artifacts: list[RealmSyncArtifa
 
 
 def realm_sync_sidecar_path(realm_id: str) -> Path:
-    return paths.store_root() / "realm_sync_state" / f"{_safe_token(realm_id)}.json"
+    return paths.store_root() / "realm_sync_state" / f"{paths.safe_path_token(realm_id)}.json"
 
 
 def read_realm_sync_sidecar(realm_id: str) -> dict[str, Any] | None:
@@ -2022,7 +2022,7 @@ def _workspace_sync_statuses(realm: Realm, repo: Path) -> list[dict[str, str]]:
         if not realm.server_id:
             state = "local"
         else:
-            published = subtree / f"{_safe_token(workspace_id)}.json"
+            published = subtree / f"{paths.safe_path_token(workspace_id)}.json"
             try:
                 # Canonical compare: the published file is LF while the local
                 # store file is CRLF on Windows — byte-equality would falsely
@@ -2352,11 +2352,6 @@ def _dedupe_artifacts(artifacts: list[RealmSyncArtifact]) -> list[RealmSyncArtif
             continue
         deduped[rel] = artifact
     return [deduped[key] for key in sorted(deduped)]
-
-
-def _safe_token(value: str | None) -> str:
-    text = "".join(ch if ch.isalnum() or ch in "_.-" else "_" for ch in str(value or "").strip())
-    return text.strip("._")[:120] or "item"
 
 
 def _looks_like_remote(value: str) -> bool:

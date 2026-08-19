@@ -51,7 +51,7 @@ from .models import Event, OfficeActor, OfficeItem, OfficeSurface
 # dodging ``realm_sync``'s weight — the tell that ``realm_sync`` was the wrong
 # home for a constant four other modules needed.
 from .redaction import SECRET_ASSIGNMENT_RE
-from .serde import from_jsonable, to_jsonable
+from .serde import from_jsonable, safe_id, to_jsonable
 
 ARCHIVED_LEDGER_CAP = 5000
 MAX_ITEMS_PER_ACTOR = 32
@@ -79,22 +79,14 @@ class ActorScan(NamedTuple):
     unreadable: int
 
 
-def _safe_id(value: Any) -> str | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    cleaned = "".join(ch if ch.isalnum() or ch in "_.:-" else "_" for ch in text)
-    return cleaned.strip("._:-")[:120] or None
-
-
 def _safe_actor_ref(value: Any, *, fallback: str = "operator") -> str:
-    return _safe_id(value) or fallback
+    return safe_id(value) or fallback
 
 
 def _normalize_persona_id(value: Any) -> str | None:
     # Mirrors the launcher's OfficeAgentIdentity normalization: trim + lower.
     text = str(value or "").strip().lower()
-    return _safe_id(text)
+    return safe_id(text)
 
 
 def _safe_folder(value: Any) -> str:
@@ -131,7 +123,7 @@ def _canonical_actor_key(persona_id: str, persona_instance_id: str | None) -> st
 def _normalize_item(raw: Any, *, persona_id: str) -> OfficeItem:
     if not isinstance(raw, dict):
         raise ValueError("invalid_request: item must be an object")
-    item_id = _safe_id(raw.get("item_id"))
+    item_id = safe_id(raw.get("item_id"))
     if not item_id:
         raise ValueError("invalid_request: item_id required")
     item_persona = _normalize_persona_id(raw.get("persona_id")) or persona_id
@@ -155,7 +147,7 @@ def _normalize_item(raw: Any, *, persona_id: str) -> OfficeItem:
         position=[x, y],
         folder=_safe_folder(raw.get("folder")),
         display_name=display_name,
-        pet_slug=_safe_id(raw.get("pet_slug")),
+        pet_slug=safe_id(raw.get("pet_slug")),
         scale=office_models.normalize_scale(raw.get("scale", office_models.SCALE_DEFAULT)),
     )
 
@@ -407,7 +399,7 @@ class OfficeStore:
 
         REFUSES typed (:class:`~.errors.WorkspaceUnresolved`) when no workspace
         record resolves the id. Until MC-8 this authored a surface for ANY id
-        that passed ``_safe_id``, which is how a leaked test context minted a
+        that passed ``safe_id``, which is how a leaked test context minted a
         LIVE office — 135 events and a ``revision 67`` actor file — for a
         workspace that never existed. The parity warning could describe that
         afterwards; this is the door.
@@ -415,7 +407,7 @@ class OfficeStore:
         THE ORDER IS THE CONTRACT, and each step is placed against a specific
         failure:
 
-        1. ``_safe_id`` FIRST — an unusable id is a caller error, not a question
+        1. ``safe_id`` FIRST — an unusable id is a caller error, not a question
            about store state, and asking the store about it would be asking a
            question with no meaning.
         2. the ``surface_exists`` short-circuit SECOND, i.e. **the refusal guards
@@ -435,7 +427,7 @@ class OfficeStore:
            refused before doing anything" one statement here instead of two.
         """
 
-        wsid = _safe_id(workspace_id)
+        wsid = safe_id(workspace_id)
         if not wsid:
             raise ValueError("invalid_request")
         if self.surface_exists(wsid):
@@ -472,7 +464,7 @@ class OfficeStore:
         correlation_id: str | None = None,
         dry_run: bool = False,
     ) -> OfficeSurface:
-        wsid = _safe_id(workspace_id)
+        wsid = safe_id(workspace_id)
         if not wsid:
             raise ValueError("invalid_request")
         # Read BEFORE the ensure below, because the ensure is what makes the
@@ -602,7 +594,7 @@ class OfficeStore:
         ``serve_rpc._runtime_office_upsert``).
         """
 
-        wsid = _safe_id(workspace_id)
+        wsid = safe_id(workspace_id)
         if not wsid:
             raise ValueError("invalid_request")
         if not isinstance(payload, dict):
@@ -716,7 +708,7 @@ class OfficeStore:
         correlation_id: str | None = None,
         dry_run: bool = False,
     ) -> OfficeActor:
-        wsid = _safe_id(workspace_id)
+        wsid = safe_id(workspace_id)
         if not wsid:
             raise ValueError("invalid_request")
         with office_lock(wsid):
@@ -775,7 +767,7 @@ class OfficeStore:
         pointing at a dead end.
         """
 
-        wsid = _safe_id(workspace_id)
+        wsid = safe_id(workspace_id)
         if not wsid:
             raise ValueError("invalid_request")
         with office_lock(wsid):
@@ -829,7 +821,7 @@ class OfficeStore:
         take = str(take or "").strip().lower()
         if take not in {"local", "remote"}:
             raise ValueError("invalid_request")
-        wsid = _safe_id(workspace_id)
+        wsid = safe_id(workspace_id)
         if not wsid:
             raise ValueError("invalid_request")
         with office_lock(wsid):
@@ -896,7 +888,7 @@ class OfficeStore:
         would be data loss, not cleanup.
         """
 
-        wsid = _safe_id(workspace_id)
+        wsid = safe_id(workspace_id)
         if not wsid:
             return False
         from .store import WorkspaceStore
@@ -935,7 +927,7 @@ class OfficeStore:
         unlinked, so a mistaken archive is recoverable by moving it back.
         """
 
-        wsid = _safe_id(workspace_id)
+        wsid = safe_id(workspace_id)
         if not wsid:
             raise ValueError("invalid_request")
         if not self.surface_exists(wsid):

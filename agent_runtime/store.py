@@ -15,7 +15,7 @@ from . import paths
 from .errors import AlreadyExists, NotFound, WorkspaceDeleteBlocked
 from .events import EventLog
 from .models import AgentPersona, AgentRun, Event, Incident, Realm, Workspace
-from .serde import from_jsonable, to_jsonable
+from .serde import from_jsonable, safe_id, to_jsonable
 from .states import RunState
 
 T = TypeVar("T")
@@ -26,14 +26,6 @@ ACTIVE_RUN_STATES = frozenset({RunState.QUEUED, RunState.STARTING, RunState.RUNN
 # pulled the tombstone (the bounded-ledger idiom shared with the board/office
 # archived ledgers).
 DELETED_WORKSPACE_LEDGER_CAP = 500
-
-
-def _safe_model_id(value) -> str | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    cleaned = "".join(ch if ch.isalnum() or ch in "_.:-" else "_" for ch in text)
-    return cleaned.strip("._:-")[:120] or None
 
 
 def _safe_display_name(value) -> str:
@@ -48,7 +40,7 @@ def _slugify(value) -> str:
 def _dedupe_ids(values: list[str]) -> list[str]:
     result: list[str] = []
     for value in values:
-        clean = _safe_model_id(value)
+        clean = safe_id(value)
         if clean and clean not in result:
             result.append(clean)
     return result
@@ -128,7 +120,7 @@ def _resolve_activation_write(pointer_path: Path, key: str, value: str | None, i
         current = _read_json(pointer_path)
     except Exception:
         return "apply", None, basis
-    current_value = _safe_model_id(current.get(key))
+    current_value = safe_id(current.get(key))
     incoming = _parse_intent_basis(basis)
     stored = _parse_intent_basis(current.get("intent_issued_at"))
     if incoming is None or stored is None:
@@ -202,14 +194,14 @@ class WorkspaceStore:
         ts = now()
         slug = _slugify(clean_name)
         item = Workspace(
-            id=_safe_model_id(workspace_id) or f"ws_{slug}_{uuid.uuid4().hex[:6]}",
+            id=safe_id(workspace_id) or f"ws_{slug}_{uuid.uuid4().hex[:6]}",
             slug=slug,
             name=clean_name,
             agent_ids=_dedupe_ids(agent_ids or []),
-            default_blueprint_id=_safe_model_id(default_blueprint_id),
+            default_blueprint_id=safe_id(default_blueprint_id),
             isolation=clean_isolation,
             max_concurrent_lanes=max_concurrent_lanes if max_concurrent_lanes is None else max(1, int(max_concurrent_lanes)),
-            realm_id=_safe_model_id(realm_id),
+            realm_id=safe_id(realm_id),
             created_at=ts,
             updated_at=ts,
         )
@@ -247,7 +239,7 @@ class WorkspaceStore:
         return self.get(item.id)
 
     def set_active(self, workspace_id: str | None, *, issued_at: str | None = None) -> dict:
-        value = _safe_model_id(workspace_id)
+        value = safe_id(workspace_id)
         name = self.get(value).name if value else None
         decision, current_value, basis = _resolve_activation_write(
             paths.active_workspace_path(), "workspace_id", value, issued_at
@@ -269,11 +261,11 @@ class WorkspaceStore:
             raw = _read_json(paths.active_workspace_path())
         except Exception:
             return None
-        return _safe_model_id(raw.get("workspace_id"))
+        return safe_id(raw.get("workspace_id"))
 
     def add_agent(self, workspace_id: str, persona_id: str) -> Workspace:
         item = self.get(workspace_id)
-        persona = _safe_model_id(persona_id)
+        persona = safe_id(persona_id)
         if persona and persona not in item.agent_ids:
             item.agent_ids.append(persona)
         item = self.save(item, emit_event=False)
@@ -284,7 +276,7 @@ class WorkspaceStore:
 
     def remove_agent(self, workspace_id: str, persona_id: str) -> Workspace:
         item = self.get(workspace_id)
-        persona = _safe_model_id(persona_id)
+        persona = safe_id(persona_id)
         item.agent_ids = [value for value in item.agent_ids if value != persona]
         item = self.save(item, emit_event=False)
         _append_store_event(
@@ -420,7 +412,7 @@ def _normalize_skill_selection(selection: list[str] | None) -> list[str]:
     """Validate (shape only), dedupe, and sort skill selection slugs.
 
     Shape rules (per REALM_SKILL_SELECTION_DESIGN §2): non-empty, no leading
-    dot, no path separator, and identical to their ``_safe_token`` form — the
+    dot, no path separator, and identical to their ``safe_path_token`` form — the
     same tokenizer the realm publisher uses for skill directory names, so a
     valid slug round-trips to its published path. Every malformed slug is
     collected and reported in ONE ``ValueError`` (mapped to a typed
@@ -428,8 +420,7 @@ def _normalize_skill_selection(selection: list[str] | None) -> list[str]:
     instead of failing on the first. Slugs unknown to the local catalog are
     NOT filtered here — that is realm truth another member may own.
     """
-    # Function-local import breaks the module cycle (realm_sync imports store).
-    from agent_runtime.realm_sync import _safe_token
+    from agent_runtime.paths import safe_path_token
 
     cleaned: set[str] = set()
     rejected: list[str] = []
@@ -440,7 +431,7 @@ def _normalize_skill_selection(selection: list[str] | None) -> list[str]:
             or slug.startswith(".")
             or "/" in slug
             or "\\" in slug
-            or slug != _safe_token(slug)
+            or slug != safe_path_token(slug)
         ):
             rejected.append(slug or repr(raw))
             continue
@@ -465,7 +456,7 @@ def _normalize_agent_selection(selection: list[str] | None) -> list[str]:
     rejected: list[str] = []
     for raw in selection or []:
         value = str(raw).strip()
-        normalized = _safe_model_id(value)
+        normalized = safe_id(value)
         if not value or normalized is None or value != normalized:
             rejected.append(value or repr(raw))
             continue
@@ -498,11 +489,11 @@ class RealmStore:
         ts = now()
         slug = _slugify(clean_name)
         item = Realm(
-            id=_safe_model_id(realm_id) or f"realm_{slug}_{uuid.uuid4().hex[:6]}",
+            id=safe_id(realm_id) or f"realm_{slug}_{uuid.uuid4().hex[:6]}",
             slug=slug,
             name=clean_name,
-            server_id=_safe_model_id(server_id),
-            default_workspace_id=_safe_model_id(default_workspace_id),
+            server_id=safe_id(server_id),
+            default_workspace_id=safe_id(default_workspace_id),
             default_workspace_name=_safe_display_name(default_workspace_name) or "Default",
             default_workspace_version=max(0, int(default_workspace_version)),
             created_at=ts,
@@ -553,7 +544,7 @@ class RealmStore:
 
     def bind_server(self, realm_id: str, server_id: str) -> Realm:
         item = self.get(realm_id)
-        item.server_id = _safe_model_id(server_id)
+        item.server_id = safe_id(server_id)
         item = self.save(item, emit_event=False)
         _append_store_event(
             self.event_log, "realm.updated", realm_id=item.id, change="server_bound", server_id=item.server_id
@@ -572,7 +563,7 @@ class RealmStore:
         list means "publish none").
 
         Slugs are validated for shape only (non-empty, no leading dot, no path
-        separators, must equal their ``_safe_token`` form). Slugs unknown to
+        separators, must equal their ``safe_path_token`` form). Slugs unknown to
         this machine's catalog are NOT filtered here — another member may hold
         the skill locally, and dropping it on an unrelated save would corrupt
         realm truth; unknown slugs are reported (``missing``) by the CLI, never
@@ -631,7 +622,7 @@ class RealmStore:
         return item
 
     def set_active(self, realm_id: str | None, *, issued_at: str | None = None) -> dict:
-        value = _safe_model_id(realm_id)
+        value = safe_id(realm_id)
         name = self.get(value).name if value else None
         decision, current_value, basis = _resolve_activation_write(
             paths.active_realm_path(), "realm_id", value, issued_at
@@ -653,7 +644,7 @@ class RealmStore:
             raw = _read_json(paths.active_realm_path())
         except Exception:
             return None
-        return _safe_model_id(raw.get("realm_id"))
+        return safe_id(raw.get("realm_id"))
 
 
 class RunStore:

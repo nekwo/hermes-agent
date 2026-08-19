@@ -61,13 +61,14 @@ from __future__ import annotations
 import json
 import os
 import sys
-import tempfile
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
+
+from .serde import write_json_atomic
 
 __all__ = [
     "CLASSIFICATION_LIVE",
@@ -204,7 +205,7 @@ def register_serve_instance(
         "build": dict(build) if isinstance(build, dict) else None,
     }
     try:
-        _atomic_write_json(path, record)
+        write_json_atomic(path, record)
     except Exception as exc:
         return ServeInstanceRegistration(
             outcome=f"error:{type(exc).__name__}",
@@ -441,32 +442,6 @@ def _looks_like_serve(cmdline: str) -> bool:
 
 
 # ── file helpers ────────────────────────────────────────────────────────────
-
-
-def _atomic_write_json(path: Path, record: dict[str, Any]) -> None:
-    """tmp + rename, so a reader never sees a half-written record."""
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    payload = json.dumps(record, ensure_ascii=False, default=str, indent=2) + "\n"
-    handle = tempfile.NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        newline="\n",
-        dir=str(path.parent),
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    )
-    try:
-        with handle:
-            handle.write(payload)
-        os.replace(handle.name, path)
-    except BaseException:
-        try:
-            os.unlink(handle.name)
-        except OSError:
-            pass
-        raise
 
 
 def _read_json(path: Path) -> dict[str, Any] | None:
