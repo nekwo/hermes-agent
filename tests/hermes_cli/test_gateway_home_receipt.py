@@ -391,3 +391,64 @@ def test_wrapper_generator_allows_a_non_profile_home(tmp_path):
     from hermes_cli.gateway_windows import _assert_named_profile_wrapper_is_pinned
 
     _assert_named_profile_wrapper_is_pinned(str(tmp_path / "hermesroot"), "")
+
+
+
+# ---------------------------------------------------------------------------
+# The four resolution literals, on both sides of a seam nothing held together.
+#
+# `gateway_home_receipt` exports RESOLUTION_FLAG / _ENV_PROFILE_DIR /
+# _ACTIVE_PROFILE_MARKER / _DEFAULT and its comment said they existed so
+# "main.py and the tests agree on the spelling rather than each hard-coding a
+# string literal". main.py does not import them — it writes all four inline,
+# and always has. So the constants and the producer were two independent
+# copies of one wire vocabulary with nothing comparing them, and a rename on
+# either side would have gone unnoticed until a gateway read a rung name it
+# did not recognise at boot.
+#
+# main.py cannot simply import them: the pre-parse runs before any hermes
+# module is importable, which is the entire point of the pre-parse. So the
+# seam stays, and this is the thing that holds it.
+# ---------------------------------------------------------------------------
+
+
+def _main_py_source() -> str:
+    import pathlib
+
+    import hermes_cli
+
+    path = pathlib.Path(hermes_cli.__file__).with_name("main.py")
+    text = path.read_text(encoding="utf-8", errors="replace")
+    assert len(text) > 10_000, "main.py read came back too small - vacuous"
+    return text
+
+
+@pytest.mark.parametrize(
+    "constant",
+    [
+        "RESOLUTION_FLAG",
+        "RESOLUTION_ENV_PROFILE_DIR",
+        "RESOLUTION_ACTIVE_PROFILE_MARKER",
+        "RESOLUTION_DEFAULT",
+    ],
+)
+def test_each_resolution_rung_is_the_literal_main_py_writes(constant):
+    from hermes_cli import gateway_home_receipt
+
+    value = getattr(gateway_home_receipt, constant)
+    source = _main_py_source()
+    assert f'"{value}"' in source or f"'{value}'" in source, (
+        f"{constant} == {value!r}, and main.py writes no such literal. main.py "
+        "hard-codes the resolution rung it took into "
+        f"{gateway_home_receipt.RESOLUTION_ENV_VAR}; the gateway reads it back "
+        "through this constant. If one side was renamed, rename the other in "
+        "the same commit."
+    )
+
+
+def test_main_py_writes_the_resolution_env_var_this_module_names():
+    from hermes_cli import gateway_home_receipt
+
+    assert gateway_home_receipt.RESOLUTION_ENV_VAR in _main_py_source(), (
+        "main.py no longer writes the env var this module reads the rung from"
+    )

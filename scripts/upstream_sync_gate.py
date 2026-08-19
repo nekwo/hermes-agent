@@ -10,13 +10,30 @@ from pathlib import Path
 from typing import Iterable
 
 
-DEFAULT_LAUNCHER_ROOT = Path(r"X:\Unreal Engine\Engine\Launcher\EterniaLauncher")
+#: Overridable, because a committed absolute path is only correct on the one
+#: machine it was written on. `--launcher-root` still wins over both.
+DEFAULT_LAUNCHER_ROOT = Path(
+    os.environ.get(
+        "ETERNIALAUNCHER_ROOT",
+        r"X:\Unreal Engine\Engine\Launcher\EterniaLauncher",
+    )
+)
+
+#: Paths whose change means a sync touched the agent-tool surface and the
+#: LAUNCHER lane must be re-run. A seam missing from this tuple does not fail
+#: loudly — the gate simply reports PASS without running the lane, which is
+#: the always-green shape. Two fork-owned agent-tool modules were missing
+#: until 2026-08-19: `tools/board_tool.py` (the Mission Board tool surface,
+#: whose wire schemas the launcher renders) and `tools/agent_chat_dispatch.py`
+#: (the dispatch lane the launcher Activity drawer reads). Prefer `tools/` as
+#: a whole to naming files one at a time: the next agent tool then arrives
+#: covered instead of arriving invisible.
 AGENT_TOOL_SEAMS = (
     "agent/",
     "agent_runtime/",
     "hermes_cli/harness.py",
     "hermes_cli/harness_",
-    "tools/agent_chat_tool.py",
+    "tools/",
 )
 
 

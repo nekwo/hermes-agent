@@ -207,6 +207,18 @@ def _add_stage42_global_args(
     pins this — a new flag here must be read somewhere on the lane, or be
     declared satisfied-by-construction like ``--no-color``.
 
+    ``controls`` is the opt-in half: a flag listed here is registered only on
+    the verbs that ask for it. Only five tokens are ever asked for —
+    ``dry_run`` (29 call sites), ``yes`` (7), ``sort`` (7),
+    ``idempotency_key`` (3), ``limit`` (2), counted by walking the 58
+    ``_add_stage42_global_args(...)`` calls in this file's AST. Branches for
+    ``cursor`` and ``since`` also lived here and no call site had ever named
+    either, so ``--cursor`` / ``--since`` could not be registered on any verb
+    in the surface's history; they were removed 2026-08-19. (The neighbouring
+    ``read --since-offset`` is a different, live flag.) A control token with no
+    caller is the same defect as an unread flag, one level up: it advertises
+    that a verb COULD opt in, and none can.
+
     ``omit`` names flags a verb genuinely does not implement, so they are never
     advertised on it. This is the SAME ruling that removed ``--filter`` and
     ``--watch`` from the whole surface, applied per-verb instead of globally:
@@ -233,10 +245,6 @@ def _add_stage42_global_args(
         add("--sort", default=None)
     if "limit" in controls:
         add("--limit", type=int, default=None)
-    if "cursor" in controls:
-        add("--cursor", default=None)
-    if "since" in controls:
-        add("--since", default=None)
     if "dry_run" in controls:
         add("--dry-run", action="store_true")
     if "yes" in controls:
@@ -1343,7 +1351,6 @@ def build_parser(parent_subparsers) -> None:
 
     skills = subs.add_parser("install-harness-skills", help="Install versioned Harness skills into configured persona profiles")
     skills.add_argument("--active-profile-only", action="store_true", help="Install all Harness skills only into the active Hermes profile")
-    skills.add_argument("--all-persona-profiles", action="store_true", help="Compatibility flag; persona profiles are now the default")
     skills.add_argument("--json", action="store_true")
     skills.set_defaults(func=_cmd_install_harness_skills)
 

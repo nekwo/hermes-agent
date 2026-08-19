@@ -6,10 +6,12 @@ these tools; a mission runs identically with zero cards. They join the
 mission-chat tool surface (toolset ``board``) so an agent MAY add/list cards when it notices work worth
 tracking — exactly like a human teammate.
 
-Board resolution (§10): explicit ``board_id`` arg > the lane's bound goal's
-workspace default board (from ``task_id``) > the active workspace's default
-board; typed ``invalid_request`` when none resolves — never a silent
-cross-workspace write. Agent writes carry ``created_by=<persona_id>`` resolved
+Board resolution (§10): explicit ``board_id`` arg > the active workspace's
+default board; typed ``invalid_request`` when none resolves — never a silent
+cross-workspace write. §10's middle rung — the lane's bound goal's workspace
+default board — is GONE with the mission lane, so `task_id` no longer
+participates: `agent_runtime.store` exports `TaskStore` as `TaskStoreStub`,
+whose `.get()` always raises. Agent writes carry ``created_by=<persona_id>`` resolved
 from the chat session, so operator- and agent-authored cards render distinctly.
 
 Cards are planning state only and never start tracked work.
@@ -44,7 +46,7 @@ BOARD_CARD_ADD_SCHEMA = {
 BOARD_CARDS_SCHEMA = {
     "name": "board_cards",
     "description": (
-        "List active cards on the workspace Mission Board (title, column, priority, linked goal). Read-only -- check what is already tracked before adding a card."
+        "List active cards on the workspace Mission Board (title, column, priority). Read-only -- check what is already tracked before adding a card."
     ),
     "parameters": {
         "type": "object",
@@ -77,9 +79,9 @@ def _persona_for_session(session_id):
 def _resolve_board_target(args, task_id):
     """Return ``(board_id, workspace_id, error)`` per the §10 resolution rule."""
 
-    from agent_runtime import board_models, paths
+    from agent_runtime import board_models
     from agent_runtime.board_store import BoardStore
-    from agent_runtime.store import TaskStore, WorkspaceStore
+    from agent_runtime.store import WorkspaceStore
 
     explicit = str(args.get("board_id") or "").strip()
     if explicit:
@@ -87,21 +89,16 @@ def _resolve_board_target(args, task_id):
             return None, None, "invalid_request: board_id not found"
         return explicit, None, None
 
-    # the lane's bound goal → its workspace default board
-    if task_id:
-        try:
-            task = TaskStore().get(task_id)
-            workspace_id = str(getattr(task, "workspace_id", "") or "").strip()
-            if workspace_id and paths.workspace_path(workspace_id).exists():
-                return board_models.default_board_id(workspace_id), workspace_id, None
-        except Exception:  # noqa: BLE001 — fall through to active workspace
-            pass
-
+    # The bound-goal rung is GONE, not merely unused: `agent_runtime.store`
+    # exports `TaskStore` as `TaskStoreStub`, whose `.get()` is `-> NoReturn`
+    # and always raises `NotFound`. The branch reading it could only ever fall
+    # through to the line below, so `task_id` no longer participates in
+    # resolution at all and the docstring above says two rungs, not three.
     active = WorkspaceStore().active_id()
     if active:
         return board_models.default_board_id(active), active, None
 
-    return None, None, "invalid_request: no board_id, bound goal workspace, or active workspace to resolve a board"
+    return None, None, "invalid_request: no board_id or active workspace to resolve a board"
 
 
 def board_card_add(args, **kwargs):

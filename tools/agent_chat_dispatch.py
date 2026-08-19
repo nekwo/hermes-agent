@@ -79,10 +79,8 @@ __all__ = [
     "build_dispatch_argv",
     "child_environment",
     "dispatch_detached_turn",
-    "is_supervised_here",
     "supervised_dispatch_ids",
     "parse_child_payload",
-    "shutdown_dispatch_executor",
     "summarize_for_caller",
 ]
 
@@ -147,13 +145,6 @@ def _forget_supervised(dispatch_id: str) -> None:
         _supervised.discard(str(dispatch_id))
 
 
-def is_supervised_here(dispatch_id: str) -> bool:
-    """True while THIS process has a live supervisor for ``dispatch_id``."""
-
-    with _supervised_lock:
-        return str(dispatch_id) in _supervised
-
-
 def supervised_dispatch_ids() -> set[str]:
     """A snapshot of every dispatch this process is actively supervising.
 
@@ -195,17 +186,6 @@ def _get_executor(max_workers: int):
             )
             _executor_max_workers = max(1, int(max_workers))
         return _executor
-
-
-def shutdown_dispatch_executor() -> None:
-    """Drop the shared pool (tests; never on a live lane)."""
-
-    global _executor, _executor_max_workers
-    with _executor_lock:
-        if _executor is not None:
-            _executor.shutdown(wait=False)
-        _executor = None
-        _executor_max_workers = 0
 
 
 # --------------------------------------------------------------------------

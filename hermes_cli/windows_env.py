@@ -10,8 +10,13 @@ Everything here is a no-op (returning ``False`` / doing nothing) off Windows so
 callers don't need their own platform guards.
 
 The uninstall side of this contract lives in ``hermes_cli/uninstall.py``
-(``remove_path_from_windows_registry`` / ``remove_hermes_env_vars_windows``);
-keep the two in sync.
+(``remove_path_from_windows_registry`` / ``remove_hermes_env_vars_windows``).
+That file is UPSTREAM-owned and this one is fork-added, so "keep the two in
+sync" — which this docstring used to say — is an instruction the fork is not
+allowed to follow: editing ``uninstall.py`` is a fork-boundary violation.
+What the fork can do is route AROUND it. If the write side here ever grows a
+key the upstream remover does not know about, the correct move is a fork-owned
+removal path, not an edit to ``uninstall.py``.
 """
 
 from __future__ import annotations

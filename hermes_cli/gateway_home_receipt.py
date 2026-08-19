@@ -34,8 +34,19 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Iterable, Sequence
 
-# Which rung of main.py's ladder answered. Exported so main.py and the tests
-# agree on the spelling rather than each hard-coding a string literal.
+# Which rung of main.py's ladder answered.
+#
+# CORRECTED 2026-08-19. This used to say the constants existed "so main.py and
+# the tests agree on the spelling rather than each hard-coding a string
+# literal". main.py does not import them: it writes all four inline
+# (`main.py:665, 677, 679, 702`) and always has. Four wire literals in two
+# files with nothing holding them together is exactly the drift a comment
+# claiming otherwise makes invisible — so the fix is a GATE, not a nicer
+# comment. `tests/hermes_cli/test_gateway_home_receipt.py` now pins each
+# constant against the literal main.py actually writes; whichever side moves,
+# the other is named. Wiring main.py to import them is the better end state
+# and is blocked for a real reason: the pre-parse runs before any hermes
+# module is importable, which is the whole point of the pre-parse.
 RESOLUTION_FLAG = "flag"
 RESOLUTION_ENV_PROFILE_DIR = "env_profile_dir"
 RESOLUTION_ACTIVE_PROFILE_MARKER = "active_profile_marker"

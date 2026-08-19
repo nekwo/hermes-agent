@@ -851,7 +851,11 @@ def test_every_stage42_global_flag_is_honored():
     [
         ["harness", "workspace", "show", "ws_1", "--sort", "name"],
         ["harness", "board", "update", "board_1", "--yes"],
-        ["harness", "work", "list", "--cursor", "opaque"],
+        # `work list` asks for controls={limit, sort}; --dry-run is a REAL
+        # control it did not ask for. (This row used to be --cursor, which
+        # after 2026-08-19 no verb can carry at all — a flag refused
+        # everywhere proves nothing about per-verb ownership.)
+        ["harness", "work", "list", "--dry-run"],
         ["harness", "work", "peek", "terminal:one", "--limit", "1"],
     ],
 )

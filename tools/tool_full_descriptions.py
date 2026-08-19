@@ -120,7 +120,7 @@ FULL_TOOL_DESCRIPTIONS: Dict[str, Union[str, Callable[[], str]]] = {
         'Press a keyboard key. Useful for submitting forms (Enter), navigating (Tab), or keyboard shortcuts. Requires browser_navigate to be called first.'
     ),
     'board_cards': (
-        'List the active cards on the Mission Board for the current workspace (or an explicit board_id): title, column, priority, and any linked goal. Read-only. Use it to check what is already tracked before adding a card.'
+        'List the active cards on the Mission Board for the current workspace (or an explicit board_id): title, column, and priority. Read-only. Use it to check what is already tracked before adding a card.'
     ),
     'browser_back': (
         'Navigate back to the previous page in browser history. Requires browser_navigate to be called first.'

@@ -185,9 +185,9 @@ def test_harness_skill_cli_defaults_to_persona_profiles(monkeypatch, capsys):
     monkeypatch.setattr(harness, "install_harness_skills_for_personas", lambda _personas: calls.append("personas") or [result])
     monkeypatch.setattr(harness, "install_harness_skills", lambda: calls.append("active") or [result])
 
-    assert harness._cmd_install_harness_skills(SimpleNamespace(active_profile_only=False, all_persona_profiles=False, json=True)) == 0
+    assert harness._cmd_install_harness_skills(SimpleNamespace(active_profile_only=False, json=True)) == 0
     assert calls == ["personas"]
     assert '"ok": true' in capsys.readouterr().out
 
-    assert harness._cmd_install_harness_skills(SimpleNamespace(active_profile_only=True, all_persona_profiles=False, json=True)) == 0
+    assert harness._cmd_install_harness_skills(SimpleNamespace(active_profile_only=True, json=True)) == 0
     assert calls == ["personas", "active"]

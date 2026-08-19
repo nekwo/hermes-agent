@@ -3096,6 +3096,53 @@ TOMBSTONES: tuple[Tombstone, ...] = (
         "plan only `_parity_envelope` still exists",
         "agent_runtime/docs/snapshot_line_count_exception.md",
     ),
+    # -- S72 stages H-CLI-2 / H-P1 / H-P2 ---------------------------------
+    # `certification_ladder.py` drove `harness burn-in`, a verb S6 retired
+    # along with `scripts/cert_streak.py` — its twin, deleted then, pinned by
+    # `tests/scripts/test_cert_streak.py` ever since. That pin named ONE
+    # module, so the surviving driver was invisible to it for two months. The
+    # pin is now parameterized over BOTH names (a family, not a name), and this
+    # PATH row is the second half.
+    *rows(
+        "s72",
+        "HEAD",
+        Form.PATH,
+        "dead-code audit pass 2 H-P1 — the second driver of the retired "
+        "`harness burn-in` verb; its twin went at S6 and the single-name pin "
+        "guarding that removal could not see this one",
+        "scripts/certification_ladder.py",
+    ),
+    *rows(
+        "s72",
+        "HEAD",
+        Form.CODE,
+        "dead-code audit pass 2 H-P1 — two never-adopted exports on the "
+        "dispatch lane. `shutdown_dispatch_executor`'s own docstring said "
+        "'tests; never on a live lane' and no test called it; "
+        "`is_supervised_here` was born in the same commit as the live "
+        "`supervised_dispatch_ids` and never adopted, so the orphan sweep has "
+        "one way to ask its question, not two",
+        "shutdown_dispatch_executor",
+        "is_supervised_here",
+    ),
+    # `--all-persona-profiles` (a self-described "compatibility flag" whose
+    # dest no handler read) and the `cursor` / `since` control branches (no
+    # call site named either token, across all 58 `_add_stage42_global_args`
+    # sites, ever). Rowed as CODE because both are argparse STRINGS, which is
+    # the form `ast.unparse` preserves and an identifier scan would miss.
+    *rows(
+        "s72",
+        "HEAD",
+        Form.CODE,
+        "dead-code audit pass 2 H-CLI-2 — advertised and unreachable: a flag "
+        "with no reader and two control tokens no verb could ask for. The "
+        "reachability gate at tests/hermes_cli/"
+        "test_harness_flag_and_control_reachability.py is what keeps the "
+        "class retired; these rows keep the exact spellings out",
+        "--all-persona-profiles",
+        "all_persona_profiles",
+        scope=("hermes_cli",),
+    ),
 )
 
 
