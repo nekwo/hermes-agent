@@ -5958,6 +5958,38 @@ def _persist_persona_chat_row(
     (the runtime persists them with the turn — see
     ``profile_runner.stage_persona_chat_user_row_marker``), so it mirrors from
     its own two known points via ``_mirror_persona_chat_message``.
+
+    KEPT DELIBERATELY — do not re-propose this as dead code
+    -------------------------------------------------------
+    The 2026-08-18 dead-code audit (NEW-1) proposed reaping this function and
+    the two ``_append_*`` writers above it as a "test-only-alive island": zero
+    production callers, ~184 lines, ~250 test lines with them. The census is
+    RIGHT and the conclusion was REFUSED on 2026-08-19. Reasons, so the next
+    sweep does not spend the same hours:
+
+    * **Zero callers is a phase, not a verdict, for a chokepoint.** This is not
+      an orphan that lost its lane — it is the door the lane goes through, and
+      the lane is currently entering by another route (native continuity). The
+      explicit-append route is still reachable and still used: the relay lane
+      drives ``_append_persona_operator_turn(relay_marker=)``, whose wire
+      behaviour broke silently for eleven days once already.
+    * **Deleting it deletes five enforcement points, not one function.**
+      Redaction with the per-role limit, the assistant-row idempotency check,
+      the mirror binding, the typed ``PersonaChatPersistenceError`` reporting,
+      and the ``required=`` raise-or-degrade split. The next explicit append
+      would hand-roll all five — which is exactly the failure this seam's
+      SHAPE already records: the first cut hooked append sites by convention
+      and immediately missed one.
+    * **A seam whose only current exercise is a test is under-used, not dead.**
+      The honest fix is to give it an executable contract rather than to remove
+      it, which is what ``tests/hermes_cli/test_persona_chat_append_seam.py``
+      now does.
+
+    The real open question is an OPERATOR one, recorded rather than answered:
+    is the explicit-append lane coming back (relay / CLI sends), or should the
+    persona-chat write path be declared native-only? If the latter, this goes —
+    but deliberately, with its five guarantees re-homed, not as a line-count
+    reap.
     """
 
     from agent_runtime.chat_live_log import mirrored_persona_chat_append
